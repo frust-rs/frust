@@ -12,6 +12,8 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
+# The root `wgpu` row is backend-free: backends are added only in the per-target tables below, and every
+# crate naming `wgpu` depends on frust-gpu, so this is the single choke point (`cargo tree -i wgpu`).
 wgpu.workspace = true
 bytemuck.workspace = true
 kurbo.workspace = true
@@ -26,18 +28,13 @@ perf-trace = []
 [target.'cfg(target_os = "android")'.dependencies]
 android_system_properties.workspace = true
 
-# --- Per-target wgpu backend features ---
-# Backends are added HERE only (the root `wgpu` row is backend-free); every crate naming `wgpu` depends
-# on `frust-gpu` unconditionally, so this is the single choke point (verify with `cargo tree -i wgpu`).
-# Routing: apple -> metal; other unix (Linux, Android) -> vulkan; windows -> dx12 + vulkan; browser
-# wasm32 -> webgpu + webgl. `gles` is in no row: no shipping shell surfaces a GLES-only device.
-# wasm32-unknown-emscripten is both `unix` and `wasm32`, so Cargo would union both rows; the wasm row
-# excludes it, leaving only the inert vulkan feature there. wasm32-wasip1 is unverified.
-# Why per-target, and its measured size effect: docs/RENDER_DEVELOPMENT.md.
-
+# --- Per-target wgpu backends (why per-target, size effect: docs/RENDER_DEVELOPMENT.md) ---
+# `gles` is in no row: no shipping shell surfaces a GLES-only device.
 [target.'cfg(target_vendor = "apple")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }
 
+# Linux, Android -> vulkan. wasm32-unknown-emscripten is both `unix` and `wasm32`, so Cargo would union
+# this row with the wasm one, but the wasm row excludes emscripten: only the inert vulkan feature applies.
 [target.'cfg(all(unix, not(target_vendor = "apple")))'.dependencies]
 wgpu = { workspace = true, features = ["vulkan"] }
 
@@ -46,8 +43,8 @@ wgpu = { workspace = true, features = ["vulkan"] }
 [target.'cfg(windows)'.dependencies]
 wgpu = { workspace = true, features = ["dx12", "vulkan"] }
 
-# `fragile-send-sync-non-atomic-wasm`: `pipeline.rs`'s threaded warm-up needs `Send + Sync` handles. Sound
-# on wasm32-unknown-unknown (no threads; inert under `atomics`); a failed spawn falls back inline.
+# Browser wasm32 only (wasip1 unverified). `fragile-send-sync-...`: `pipeline.rs` warm-up needs `Send + Sync`
+# handles; sound on wasm32-unknown-unknown (no threads; inert under `atomics`); failed spawn falls back inline.
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))'.dependencies]
 wgpu = { workspace = true, features = ["webgpu", "webgl", "fragile-send-sync-non-atomic-wasm"] }
 
