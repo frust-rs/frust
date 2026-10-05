@@ -133,6 +133,20 @@
 //! the signal stops once the fling reaches rest. The first paint after the
 //! release seeds the fling clock from `frame_time` (a zero-delta frame), and each
 //! subsequent paint advances it by the inter-frame delta.
+//!
+//! # Programmatic scrolling
+//!
+//! A [`ScrollController`] attached with [`ScrollView::controller`] is the one
+//! external write seam: its recorded commands are drained at the start of the
+//! widget's next layout or paint ([`ScrollWidget::drain_controller`]), after
+//! the content has been measured, and every pass that moves the position
+//! publishes the new [`ScrollInfo`] back to the handle. A jump stops any fling,
+//! settle or ballistic simulation in flight; its `on_scroll` notification has
+//! no `EventCtx` to fire through, so — like a fling frame's — it is owed to the
+//! next event, and a paint that applied one raises
+//! [`frust_core::mark_pending_result_flush`] so that event is the very next
+//! frame's `Housekeeping` flush. See [`crate::scroll_controller`] for the
+//! handle's side of the contract.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -152,6 +166,7 @@ use crate::physics::{
     MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR, ScrollMetrics, ScrollPhysics, Simulation,
     default_overscroll_effect, default_physics,
 };
+use crate::scroll_controller::{ScrollBinding, ScrollCommand, ScrollController};
 
 /// iOS-style rubber-band resistance applied to the past-edge portion of a drag
 /// under [`RubberBand`](crate::RubberBand): the visible out-of-range
@@ -546,6 +561,9 @@ pub struct ScrollView<State: 'static> {
     /// [`ScrollWidget::effect`] on every build/rebuild. See
     /// [`ScrollView::overscroll_effect`].
     pub(crate) effect: OverscrollEffect,
+    /// The programmatic-scroll handle to attach, if any. See
+    /// [`ScrollView::controller`].
+    controller: Option<ScrollController>,
 }
 
 impl<State: 'static> ScrollView<State> {
@@ -557,6 +575,7 @@ impl<State: 'static> ScrollView<State> {
             on_refresh_release: None,
             physics: None,
             effect: default_overscroll_effect(),
+            controller: None,
         }
     }
 
@@ -639,6 +658,32 @@ impl<State: 'static> ScrollView<State> {
     /// ([`OverscrollEffect::Translate`]) everywhere else.
     pub fn overscroll_effect(mut self, effect: OverscrollEffect) -> Self {
         self.effect = effect;
+        self
+    }
+
+    /// Attach a [`ScrollController`] — the handle app code drives this surface
+    /// with ([`ScrollController::jump_to`]) and reads it through
+    /// ([`ScrollController::offset`]/[`ScrollController::max_offset`]/
+    /// [`ScrollController::on_change`]) from outside any dispatch.
+    ///
+    /// ```
+    /// use frust_widgets::{ScrollController, ScrollView, scroll_view, text};
+    /// let controller = ScrollController::new();
+    /// let view: ScrollView<()> = scroll_view(text("hi")).controller(controller.clone());
+    /// # let _ = view;
+    /// ```
+    ///
+    /// # Build/rebuild semantics
+    ///
+    /// A build binds the handle, taking it over from any other surface that
+    /// held it. A rebuild with the same handle keeps the binding — and, when
+    /// another surface has since taken the handle over, leaves it there rather
+    /// than taking it back, so two live views naming one handle never trade it
+    /// every frame (it re-binds only once the handle is unattached again). A
+    /// rebuild with a different handle binds that one; a rebuild with none
+    /// detaches. Dropping the widget detaches the handle it still holds.
+    pub fn controller(mut self, controller: ScrollController) -> Self {
+        self.controller = Some(controller);
         self
     }
 }
@@ -807,6 +852,18 @@ pub struct ScrollWidget {
     /// Last animation frame time for the paint-time fling pump; `None` seeds the
     /// clock (zero-delta) on the first paint after a release.
     last_anim: Option<FrameTime>,
+    /// This surface's claim on an attached [`ScrollController`], or `None`.
+    /// Dropping it (with the widget, or on a rebuild that names no handle)
+    /// detaches the handle when this surface still holds it.
+    controller: Option<ScrollBinding>,
+    /// Whether a layout has run, so the extent a controller command clamps
+    /// against (and the snapshot it publishes) is a measured one rather than
+    /// the pre-layout zero.
+    laid_out: bool,
+    /// Whether a controller jump moved the position since the last paint —
+    /// the paint that sees it requests the `Housekeeping` flush that delivers
+    /// the owed `on_scroll` (the module docs' *Programmatic scrolling*).
+    jump_notify_owed: bool,
 }
 
 impl ScrollWidget {
@@ -837,6 +894,9 @@ impl ScrollWidget {
             fling: None,
             last_frame_time: FrameTime::ZERO,
             last_anim: None,
+            controller: None,
+            laid_out: false,
+            jump_notify_owed: false,
         }
     }
 
@@ -1228,6 +1288,84 @@ impl ScrollWidget {
         }
     }
 
+    /// Reconcile the attached [`ScrollController`] with the one a view names
+    /// (see [`ScrollView::controller`]'s build/rebuild semantics), returning
+    /// whether the binding changed.
+    fn attach_controller(&mut self, requested: Option<&ScrollController>) -> bool {
+        match (requested, self.controller.as_ref()) {
+            (None, None) => false,
+            (None, Some(_)) => {
+                self.controller = None;
+                true
+            }
+            (Some(handle), Some(binding)) if binding.controller().same(handle) => {
+                if binding.is_current() || handle.is_attached() {
+                    false
+                } else {
+                    self.controller = Some(handle.bind());
+                    true
+                }
+            }
+            (Some(handle), _) => {
+                self.controller = Some(handle.bind());
+                true
+            }
+        }
+    }
+
+    /// Apply every command queued on the attached [`ScrollController`], in
+    /// recording order — once this surface has laid out (a command queued
+    /// earlier waits for the first measured extent) and only while it still
+    /// holds the handle.
+    fn drain_controller(&mut self) {
+        if !self.laid_out {
+            return;
+        }
+        let commands = match self.controller.as_ref() {
+            Some(binding) => binding.take_commands(),
+            None => return,
+        };
+        for command in commands {
+            match command {
+                ScrollCommand::JumpTo(target) => self.apply_jump(target),
+            }
+        }
+    }
+
+    /// Move straight to `target`, clamped to `[0, max_offset]`, ending any
+    /// fling, release-settle or ballistic simulation (and the pull it rode) in
+    /// flight. A live drag continues from the new position. `NaN` is ignored.
+    fn apply_jump(&mut self, target: f64) {
+        if target.is_nan() {
+            return;
+        }
+        let before = self.scroll_info();
+        let was_moving = self.is_flinging() || self.settling;
+        self.fling = None;
+        self.ballistic = None;
+        self.settling = false;
+        self.edge_pull = 0.0;
+        self.last_anim = None;
+        self.set_offset(target);
+        self.drag_position = self.offset;
+        self.sync_child_origin();
+        if was_moving || self.scroll_info() != before {
+            self.pending_scroll_notify = true;
+            self.jump_notify_owed = true;
+        }
+    }
+
+    /// Publish the current position to the attached [`ScrollController`] (a
+    /// no-op before the first layout, or once another surface took it over).
+    fn publish_to_controller(&self) {
+        if !self.laid_out {
+            return;
+        }
+        if let Some(binding) = self.controller.as_ref() {
+            binding.publish(self.scroll_info(), self.viewport.height);
+        }
+    }
+
     fn send_child_cancel(&mut self, ctx: &mut EventCtx, pos: Point) {
         let cancel = InputEvent::Pointer(PointerEvent {
             phase: PointerPhase::Cancel,
@@ -1237,9 +1375,18 @@ impl ScrollWidget {
         self.child.event_child(ctx, &cancel);
     }
 
-    /// The event body, parameterised on an explicit timestamp so velocity math
+    /// The event entry, parameterised on an explicit timestamp so velocity math
     /// is deterministic in tests; [`Widget::event`] supplies the real clock.
+    /// Routes the event, then publishes whatever position it left behind to an
+    /// attached [`ScrollController`].
     fn event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
+        let result = self.route_event_at(ctx, event, t_ms);
+        self.publish_to_controller();
+        result
+    }
+
+    /// The event body behind [`ScrollWidget::event_at`].
+    fn route_event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
         // A fling/settle notification recorded at paint time is delivered on the
         // next event — except a Cancel, which clears it without firing (below).
         if !matches!(
@@ -1518,6 +1665,7 @@ impl<State: 'static> View<State> for ScrollView<State> {
             widget.physics = physics;
         }
         widget.effect = self.effect;
+        widget.attach_controller(self.controller.as_ref());
         widget
     }
 
@@ -1546,7 +1694,20 @@ impl<State: 'static> View<State> for ScrollView<State> {
         // The visual effect is plain data the view owns and is always carried
         // down unconditionally.
         element.effect = self.effect;
-        crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+        let mut flags =
+            crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        // A new binding publishes, and a queued command applies, at the next
+        // layout or paint — make sure a frame-gated shell runs one.
+        let rebound = element.attach_controller(self.controller.as_ref());
+        if rebound
+            || element
+                .controller
+                .as_ref()
+                .is_some_and(ScrollBinding::has_pending)
+        {
+            flags |= ChangeFlags::PAINT;
+        }
+        flags
     }
 
     fn teardown(&self, element: &mut ScrollWidget, ctx: &mut BuildCtx<'_>) {
@@ -1591,7 +1752,12 @@ impl Widget for ScrollWidget {
         if !self.scrolling && !self.settling && self.ballistic.is_none() {
             self.set_offset(self.offset); // re-clamp against new content/viewport
         }
+        // A controller command clamps against the extent just measured, so a
+        // jump recorded alongside a content change lands in the new range.
+        self.laid_out = true;
+        self.drain_controller();
         self.sync_child_origin();
+        self.publish_to_controller();
         bc.constrain(self.viewport)
     }
 
@@ -1599,7 +1765,26 @@ impl Widget for ScrollWidget {
         // Record the shared frame clock so the between-frames event pass (which
         // carries no clock) has a timestamp for velocity tracking.
         self.last_frame_time = ctx.frame_time();
+        // A command recorded since layout (or with layout skipped this frame)
+        // applies before the pump, so a jump ends a fling before it advances.
+        self.drain_controller();
         self.pump_fling(ctx);
+        self.publish_to_controller();
+        if std::mem::take(&mut self.jump_notify_owed) && self.on_scroll.is_some() {
+            // Paint has no `&mut State`: owe the jump's `on_scroll` to the next
+            // frame's Housekeeping flush (the `pan_zoom` precedent).
+            frust_core::mark_pending_result_flush();
+            ctx.request_frame();
+        }
+        if self
+            .controller
+            .as_ref()
+            .is_some_and(ScrollBinding::has_pending)
+        {
+            // Recorded during this paint (a listener reacting to the publish
+            // above): the next frame applies it.
+            ctx.request_frame();
+        }
         scene.push_clip(ctx.origin(), ctx.size());
         self.sync_child_origin();
         // Publish this viewport as the paint-time visible rect (absolute coords),
@@ -4474,5 +4659,337 @@ mod contact_tests {
             viewport(&root).scrolling,
             "the viewport resumed scrolling once the pinch ended"
         );
+    }
+}
+
+#[cfg(test)]
+mod controller_tests {
+    //! The [`ScrollController`] seam: deferred application of recorded
+    //! commands, clamping, fling interruption, publishing, and the
+    //! one-surface-per-handle binding rules.
+
+    use std::any::Any;
+
+    use frust_core::{FrameTime, RenderRoot};
+
+    use super::*;
+    use crate::physics::parity::Bouncing;
+    use crate::physics::rubber_band::RubberBand;
+    use crate::test_support::{RecordingScene, leaf};
+
+    const VIEWPORT: Size = Size::new(200.0, 100.0);
+    const CONTENT_H: f64 = 1000.0;
+    const MAX: f64 = CONTENT_H - 100.0;
+
+    fn view(controller: &ScrollController) -> ScrollView<()> {
+        scroll_view(leaf(200.0, CONTENT_H)).controller(controller.clone())
+    }
+
+    fn build(view: &ScrollView<()>) -> ScrollWidget {
+        let mut counter = 0u64;
+        View::<()>::build(view, &mut BuildCtx::new(&mut counter))
+    }
+
+    fn rebuild(view: &ScrollView<()>, prev: &ScrollView<()>, w: &mut ScrollWidget) -> ChangeFlags {
+        let mut counter = 100u64;
+        View::<()>::rebuild(view, prev, w, &mut BuildCtx::new(&mut counter))
+    }
+
+    fn lay(w: &mut ScrollWidget) {
+        w.layout(&mut LayoutCtx::new(), &BoxConstraints::loose(VIEWPORT));
+    }
+
+    /// Paint once, returning whether the paint asked for another frame.
+    fn paint(w: &mut ScrollWidget) -> bool {
+        let mut ctx = PaintCtx::new(Point::ZERO, w.viewport);
+        w.paint(&mut ctx, &mut RecordingScene::default());
+        ctx.needs_frame()
+    }
+
+    fn send(w: &mut ScrollWidget, event: &InputEvent, t_ms: f64) {
+        let mut unit = ();
+        let state: &mut dyn Any = &mut unit;
+        let mut ctx = EventCtx::new(state, Point::ZERO, w.viewport);
+        w.event_at(&mut ctx, event, t_ms);
+    }
+
+    fn pointer(phase: PointerPhase, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(10.0, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    fn wheel(dy: f64) -> InputEvent {
+        InputEvent::Scroll {
+            position: Point::new(10.0, 50.0),
+            delta: ScrollDelta::Pixels(0.0, dy),
+        }
+    }
+
+    /// Drag up past the slop with enough speed that the release flings.
+    fn fling(w: &mut ScrollWidget) {
+        send(w, &pointer(PointerPhase::Down, 100.0), 0.0);
+        send(w, &pointer(PointerPhase::Move, 75.0), 16.0);
+        send(w, &pointer(PointerPhase::Move, 50.0), 32.0);
+        send(w, &pointer(PointerPhase::Up, 50.0), 32.0);
+    }
+
+    #[test]
+    fn a_jump_recorded_before_layout_applies_after_the_first_layout() {
+        let controller = ScrollController::new();
+        controller.jump_to(400.0);
+        let view = view(&controller);
+        let mut w = build(&view);
+        assert!(controller.is_attached());
+        assert_eq!(w.offset(), 0.0, "nothing applies before a measured extent");
+        // A paint before any layout must not clamp the jump against zero.
+        paint(&mut w);
+        assert_eq!(w.offset(), 0.0);
+        lay(&mut w);
+        assert_eq!(w.offset(), 400.0);
+        assert_eq!(controller.offset(), 400.0);
+        assert_eq!(controller.max_offset(), MAX);
+        assert_eq!(controller.viewport_extent(), VIEWPORT.height);
+    }
+
+    #[test]
+    fn a_jump_clamps_to_the_scroll_range() {
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        let mut jump = |target: f64| {
+            controller.jump_to(target);
+            paint(&mut w);
+            w.offset()
+        };
+        assert_eq!(jump(5000.0), MAX);
+        assert_eq!(jump(-50.0), 0.0);
+        assert_eq!(jump(f64::INFINITY), MAX);
+        assert_eq!(jump(f64::NAN), MAX, "NaN is ignored");
+        assert_eq!(jump(f64::NEG_INFINITY), 0.0);
+        assert_eq!(controller.offset(), 0.0);
+    }
+
+    #[test]
+    fn a_jump_during_a_fling_stops_it() {
+        // Both release paths: the legacy fling (`RubberBand`) and a
+        // physics-supplied ballistic simulation (the bouncing family).
+        let physics: [Rc<dyn ScrollPhysics>; 2] =
+            [Rc::new(RubberBand::new()), Rc::new(Bouncing::new())];
+        for physics in physics {
+            let controller = ScrollController::new();
+            let view = view(&controller);
+            let mut w = build(&view);
+            w.physics = physics;
+            lay(&mut w);
+            fling(&mut w);
+            assert!(w.is_flinging(), "the release starts post-release motion");
+            controller.jump_to(500.0);
+            let needs_frame = paint(&mut w);
+            assert!(!w.is_flinging(), "the jump ends the fling");
+            assert_eq!(w.offset(), 500.0);
+            assert!(!needs_frame, "nothing is left animating");
+            // Later frames leave the jumped-to position alone.
+            paint(&mut w);
+            assert!(!w.tick(16.0));
+            assert_eq!(w.offset(), 500.0);
+            assert_eq!(controller.offset(), 500.0);
+        }
+    }
+
+    #[test]
+    fn on_change_hears_user_scrolls_and_jumps() {
+        let controller = ScrollController::new();
+        let heard = Rc::new(RefCell::new(Vec::<ScrollInfo>::new()));
+        let sink = Rc::clone(&heard);
+        let _subscription = controller.on_change(move |info| sink.borrow_mut().push(info));
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        assert!(
+            heard.borrow().iter().all(|i| i.offset == 0.0),
+            "the first layout publishes only the resting extent"
+        );
+        heard.borrow_mut().clear();
+
+        send(&mut w, &wheel(30.0), 0.0);
+        let at = |offset: f64| ScrollInfo {
+            offset,
+            max_offset: MAX,
+            overscroll: 0.0,
+        };
+        assert_eq!(heard.borrow().as_slice(), &[at(30.0)]);
+
+        // A drag: takeover at the slop, then a 25 px move.
+        send(&mut w, &pointer(PointerPhase::Down, 100.0), 0.0);
+        send(&mut w, &pointer(PointerPhase::Move, 75.0), 16.0);
+        send(&mut w, &pointer(PointerPhase::Move, 50.0), 32.0);
+        assert_eq!(heard.borrow().last().copied(), Some(at(55.0)));
+        assert_eq!(controller.offset(), w.offset());
+        send(&mut w, &pointer(PointerPhase::Cancel, 50.0), 48.0);
+        heard.borrow_mut().clear();
+
+        controller.jump_to(600.0);
+        lay(&mut w);
+        assert_eq!(heard.borrow().as_slice(), &[at(600.0)]);
+        // Re-publishing an unchanged position stays silent.
+        paint(&mut w);
+        lay(&mut w);
+        assert_eq!(heard.borrow().len(), 1);
+    }
+
+    #[test]
+    fn dropping_a_subscription_unsubscribes_it() {
+        let controller = ScrollController::new();
+        let heard = Rc::new(Cell::new(0u32));
+        let sink = Rc::clone(&heard);
+        let subscription = controller.on_change(move |_| sink.set(sink.get() + 1));
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        controller.jump_to(10.0);
+        lay(&mut w);
+        let before = heard.get();
+        assert!(before > 0);
+        drop(subscription);
+        controller.jump_to(20.0);
+        lay(&mut w);
+        assert_eq!(heard.get(), before);
+    }
+
+    #[test]
+    fn a_jump_wakes_a_frame_gated_shell() {
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        frust_core::take_pending_result_flush();
+        controller.jump_to(42.0);
+        assert!(
+            frust_core::has_pending_result_flush(),
+            "recording owes a frame even from outside any input path"
+        );
+        let same = self::view(&controller);
+        assert!(rebuild(&same, &view, &mut w).needs_paint());
+        lay(&mut w);
+        assert_eq!(w.offset(), 42.0);
+        let same_again = self::view(&controller);
+        assert_eq!(rebuild(&same_again, &same, &mut w), ChangeFlags::NONE);
+    }
+
+    #[test]
+    fn on_scroll_hears_a_jump_through_the_next_frames_flush() {
+        let controller = ScrollController::new();
+        let log = Rc::new(RefCell::new(Vec::<ScrollInfo>::new()));
+        let (handle, sink) = (controller.clone(), Rc::clone(&log));
+        let mut logic = move |_: &mut ()| {
+            let sink = Rc::clone(&sink);
+            scroll_view(leaf(200.0, CONTENT_H))
+                .on_scroll(move |_: &mut (), info| sink.borrow_mut().push(info))
+                .controller(handle.clone())
+        };
+        let mut root: RenderRoot<(), ScrollView<()>> = RenderRoot::new();
+        let mut state = ();
+        let mut now = 0u64;
+        let mut frame = |root: &mut RenderRoot<(), ScrollView<()>>| {
+            root.rebuild(&mut logic, &mut state);
+            root.layout(VIEWPORT);
+            now += 16;
+            root.paint(
+                &mut RecordingScene::default(),
+                FrameTime::from_nanos(now * 1_000_000),
+            )
+        };
+        frame(&mut root);
+        controller.jump_to(250.0);
+        let outcome = frame(&mut root);
+        assert_eq!(
+            controller.offset(),
+            250.0,
+            "applied in the frame after the jump"
+        );
+        assert!(
+            outcome.needs_frame,
+            "the owed notification asks for a frame"
+        );
+        assert!(
+            log.borrow().is_empty(),
+            "paint has no state to notify through"
+        );
+        frame(&mut root);
+        assert_eq!(
+            log.borrow().as_slice(),
+            &[ScrollInfo {
+                offset: 250.0,
+                max_offset: MAX,
+                overscroll: 0.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn dropping_the_widget_detaches_the_handle() {
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        controller.jump_to(120.0);
+        lay(&mut w);
+        assert!(controller.is_attached());
+        drop(w);
+        assert!(!controller.is_attached());
+        assert_eq!(controller.offset(), 120.0, "the last published value stays");
+
+        // A rebuild that names no handle detaches too.
+        let mut w = build(&view);
+        assert!(controller.is_attached());
+        let bare: ScrollView<()> = scroll_view(leaf(200.0, CONTENT_H));
+        assert!(rebuild(&bare, &view, &mut w).needs_paint());
+        assert!(!controller.is_attached());
+    }
+
+    #[test]
+    fn a_second_scroll_view_takes_the_handle_over() {
+        let controller = ScrollController::new();
+        let first_view = view(&controller);
+        let mut first = build(&first_view);
+        lay(&mut first);
+        let second_view = view(&controller);
+        let mut second = build(&second_view);
+        lay(&mut second);
+
+        controller.jump_to(300.0);
+        lay(&mut first);
+        lay(&mut second);
+        assert_eq!(first.offset(), 0.0, "the displaced surface drains nothing");
+        assert_eq!(second.offset(), 300.0);
+
+        // The displaced surface neither publishes nor takes the handle back
+        // on a rebuild naming the same handle.
+        send(&mut first, &wheel(30.0), 0.0);
+        assert_eq!(first.offset(), 30.0);
+        assert_eq!(controller.offset(), 300.0);
+        let first_again = view(&controller);
+        rebuild(&first_again, &first_view, &mut first);
+        controller.jump_to(100.0);
+        lay(&mut first);
+        lay(&mut second);
+        assert_eq!((first.offset(), second.offset()), (30.0, 100.0));
+
+        // Dropping the displaced surface leaves the holder attached; once the
+        // holder goes too, the survivor's next rebuild binds the handle again.
+        let mut survivor = first;
+        drop(second);
+        assert!(!controller.is_attached());
+        let survivor_view = view(&controller);
+        assert!(rebuild(&survivor_view, &first_again, &mut survivor).needs_paint());
+        assert!(controller.is_attached());
+        lay(&mut survivor);
+        assert_eq!(controller.offset(), 30.0, "the new holder publishes itself");
+        drop(survivor);
+        assert!(!controller.is_attached());
     }
 }
