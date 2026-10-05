@@ -1281,6 +1281,39 @@ arm64 `.so` drops 8,837,776 → 6,809,224 B (−2,028,552 B, −22.9 %) with `db
 off, on top of everything the font/link-flag/opt-level/pin levers above
 already removed from both builds.
 
+### Template baseline — `flutter create` vs `frust create` counter, 2026-10-05
+
+The benchmark apps above carry the whole scenario suite; this one-off measures the floor
+instead: each framework's freshly generated counter app, unmodified, built for release. Both
+are a Material counter (app bar, centred count, increment FAB). Flutter 3.47.2 / Dart 3.13.2
+(`flutter create`, then `flutter build apk --release [--split-per-abi]` and `flutter build ipa
+--release`); frust 0.5.2 from crates.io (`frust create`, then `frust build apk --release
+[--split-per-abi]` and `frust build ipa --release --export-method app-store-connect`); Rust
+1.98.1, Xcode 27.0 (27A266a). Both IPAs are App Store exports signed with the same
+development team. The Frust APKs are signed with a throwaway keystore, because `frust build`
+refuses a debug-signed release; Flutter's template signs release with the debug key. Signing
+does not change the size class. Frust's universal APK figure comes from the build log,
+because the later `--split-per-abi` build replaced the file.
+
+| Axis | Frust | Flutter |
+|---|---|---|
+| Android universal release APK (3 ABIs) | **18.46 MiB** (19,354,835 B) | 42.06 MiB (44,103,448 B) |
+| Android arm64-v8a split APK | **6.47 MiB** (6,783,650 B) | 14.77 MiB (15,487,482 B) |
+| Android armeabi-v7a split APK | **4.87 MiB** (5,108,300 B) | 12.11 MiB (12,699,582 B) |
+| Android x86_64 split APK | **7.36 MiB** (7,722,039 B) | 16.14 MiB (16,922,108 B) |
+| in-APK arm64 native code | 6,639,704 B (`libfrust_counter.so`) | 14,960,032 B (`libflutter.so` 11,747,864 + `libapp.so` 3,212,168) |
+| iOS `.ipa` as exported | **3.78 MiB** (3,966,346 B) | 18.29 MiB (19,180,376 B) |
+| iOS `Payload/` only, re-zipped (`zip -9`) | **2.87 MiB** (3,004,371 B) | 5.90 MiB (6,191,031 B) |
+| iOS installed `.app` (`du -sk`) | **6.22 MiB** (6,368 KB) | 13.90 MiB (14,236 KB) |
+| iOS native code | 6,433,392 B (`Runner`) | 12,881,744 B (`Flutter.framework` 9,414,288 + `App.framework` 3,467,456) |
+
+The exported `.ipa` row overstates the gap. Both exports include a `Symbols/` directory for
+App Store crash symbolication, which is not delivered to devices: 4,564 KB for Frust and
+58,024 KB for Flutter. The `Payload/`-only and installed `.app` rows are the like-for-like
+figures. On Android and in the iOS `Payload/`, the Frust template is about 2.1–2.5× smaller.
+Flutter's floor is its engine (`libflutter.so` / `Flutter.framework`), plus 0.86 MB of ICU
+data and the bundled Cupertino icon font on iOS. Frust ships a single native binary.
+
 ## Renderer transition (vello → frust-engine) — regression check, 2026-09-05
 
 Recorded once, on the 2026-09-05 pass: `harness/compare.py` over two `summarize.py` JSON dumps, the retired vello series (git history, `git show f64be636:benchmarks/raw/…`) against that pass's raws; Δ negative = faster. The same-build-mode (`--profile`) vello rows were the renderer comparison proper, the 2026-07-21 release rows cross-methodology (PROTOCOL §2.5, tails only). The full per-device comparison tables were folded into this summary on 2026-09-06, when the post-optimization pass above replaced the device sections they were computed against; they remain in git history (`git show de265855:benchmarks/RESULTS.md`).
