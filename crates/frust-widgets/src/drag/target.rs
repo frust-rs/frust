@@ -507,18 +507,21 @@ mod tests {
     #[derive(Default)]
     struct App;
 
-    fn build<S: 'static>(view: &DragTargetView<S, u32>) -> DragTargetWidget<S, u32> {
+    fn build<S: 'static, T: 'static>(view: &DragTargetView<S, T>) -> DragTargetWidget<S, T> {
         let mut counter = 0u64;
         view.build(&mut BuildCtx::new(&mut counter))
     }
 
-    fn housekeeping<S: 'static>(w: &mut DragTargetWidget<S, u32>, state: &mut S) -> EventResult {
+    fn housekeeping<S: 'static, T: 'static>(
+        w: &mut DragTargetWidget<S, T>,
+        state: &mut S,
+    ) -> EventResult {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 100.0));
         w.event(&mut ctx, &InputEvent::Housekeeping)
     }
 
-    fn laid_out<S: 'static>(w: &mut DragTargetWidget<S, u32>, at: Point, size: Size) {
+    fn laid_out<S: 'static, T: 'static>(w: &mut DragTargetWidget<S, T>, at: Point, size: Size) {
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(size));
         let mut scene = crate::test_support::RecordingScene::default();
@@ -699,5 +702,60 @@ mod tests {
         coordinator.set_hovered(Some(w.id));
         laid_out(&mut w, Point::ZERO, Size::new(10.0, 10.0));
         assert_eq!(*seen.borrow(), vec![DragHighlight::Reject]);
+    }
+
+    #[test]
+    fn external_files_session_fires_callbacks_and_completes_drop() {
+        use std::path::PathBuf;
+
+        let coordinator = DragCoordinator::new();
+        let entered = Rc::new(RefCell::new(0u32));
+        let dropped = Rc::new(RefCell::new(Vec::new()));
+        let e2 = Rc::clone(&entered);
+        let d2 = Rc::clone(&dropped);
+
+        let view: DragTargetView<App, Vec<PathBuf>> =
+            drag_target(SizedBox::<App>(Some(10.0), Some(10.0)), coordinator.clone())
+                .on_enter(move |_s: &mut App| *e2.borrow_mut() += 1)
+                .on_drop(move |_s: &mut App, paths: Vec<PathBuf>| *d2.borrow_mut() = paths);
+
+        let mut counter = 0u64;
+        let mut w = view.build(&mut BuildCtx::new(&mut counter));
+        laid_out(&mut w, Point::ZERO, Size::new(10.0, 10.0));
+        let mut state = App;
+
+        let paths = vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")];
+        coordinator.begin_external(paths.clone(), Point::ZERO);
+        coordinator.set_hovered(Some(w.id));
+
+        housekeeping(&mut w, &mut state);
+        assert_eq!(
+            *entered.borrow(),
+            1,
+            "on_enter fires once for an external files session"
+        );
+        assert_eq!(
+            w.current_highlight(),
+            Some(DragHighlight::Hover),
+            "external files session shows Hover highlight when hovered"
+        );
+
+        coordinator.drop();
+        assert_eq!(
+            w.current_highlight(),
+            Some(DragHighlight::Accept),
+            "external files session shows Accept highlight during drop"
+        );
+        housekeeping(&mut w, &mut state);
+        assert_eq!(
+            *dropped.borrow(),
+            paths,
+            "on_drop receives exactly the external file paths"
+        );
+        assert_eq!(
+            coordinator.phase(),
+            DragPhase::Idle,
+            "phase returns to Idle after drop completes"
+        );
     }
 }
