@@ -57,7 +57,7 @@ use kurbo::{Affine, BezPath, Point, Rect};
 use peniko::color::palette::css::{BLUE, GREEN, RED};
 use peniko::{Blob, Brush, Color, FontData, Gradient, ImageAlphaType, ImageData, ImageFormat};
 use proptest::prelude::*;
-use proptest::test_runner::TestRunner;
+use proptest::test_runner::{RngSeed, TestRunner};
 use vello_common::strip::Strip;
 use vello_common::tile::Tile;
 
@@ -918,21 +918,98 @@ proptest! {
     /// A frame's allocation stays inside a bound linear in the command count.
     #[test]
     fn frame_allocation_stays_inside_a_linear_bound(ops in ops(), root in root()) {
-        let scene = scene_of(&ops);
-        let commands = scene.commands().len();
-        // Built outside the measured window: this is the retained scratch a
-        // caller creates once per surface, not part of a frame's cost.
-        let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+        allocation_stays_inside_the_bound(&ops, root)?;
+    }
+}
 
-        let (frame, allocated) = measure_allocation(|| compiler.compile(&scene, root, VIEWPORT));
-        prop_assume!(frame.is_ok());
+/// The allocation property for one generated scene: a frame that compiles
+/// allocates no more than [`allocation_bound`] of its command count.
+fn allocation_stays_inside_the_bound(ops: &[Op], root: Affine) -> Result<(), TestCaseError> {
+    let scene = scene_of(ops);
+    let commands = scene.commands().len();
+    // Built outside the measured window: this is the retained scratch a
+    // caller creates once per surface, not part of a frame's cost.
+    let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
 
-        let bound = allocation_bound(commands);
-        prop_assert!(
-            allocated <= bound,
-            "a {commands}-command frame allocated {allocated} bytes, past the {bound}-byte bound \
-             ({ALLOCATION_BASE_BYTES} + {commands} x {ALLOCATION_PER_COMMAND_BYTES})"
-        );
+    let (frame, allocated) = measure_allocation(|| compiler.compile(&scene, root, VIEWPORT));
+    if frame.is_err() {
+        return Err(TestCaseError::reject("the scene was refused"));
+    }
+
+    let bound = allocation_bound(commands);
+    prop_assert!(
+        allocated <= bound,
+        "a {commands}-command frame allocated {allocated} bytes, past the {bound}-byte bound \
+         ({ALLOCATION_BASE_BYTES} + {commands} x {ALLOCATION_PER_COMMAND_BYTES})"
+    );
+    Ok(())
+}
+
+/// A huge-scale snapshot followed by a rounded clip with subnormal and
+/// out-of-range radii compiles within the linear allocation bound. The clip's
+/// curves land far outside the viewport once transformed; flattening them
+/// unsplit allocated without bound.
+#[test]
+fn a_huge_snapshot_scale_under_a_rounded_clip_stays_inside_the_bound() {
+    let ops = [
+        Op::PushSnapshot {
+            key: 8_911_044_492_357_228_835,
+            rect: Rect::new(-101.33478495360569, 0.0, -179.3764606917167, -0.0),
+            alpha: -220.93674,
+            scale: -1e18,
+        },
+        Op::PushClipRounded {
+            rect: Rect::new(
+                -220.2258418192494,
+                -171.46486746527094,
+                -2.2250738585072014e-308,
+                -5e-324,
+            ),
+            radii: CornerRadii::new(
+                -248.23960240088505,
+                -10.913474362255617,
+                2.2250738585072014e-308,
+                165.66962993760865,
+            ),
+        },
+    ];
+    let root = Affine::new([
+        1.503408646466841,
+        0.0,
+        0.0,
+        1.503408646466841,
+        250.86279539669218,
+        12.615056205683404,
+    ]);
+
+    let scene = scene_of(&ops);
+    let commands = scene.commands().len();
+    let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+    let (frame, allocated) = measure_allocation(|| compiler.compile(&scene, root, VIEWPORT));
+    let _ = frame;
+
+    let bound = allocation_bound(commands);
+    assert!(
+        allocated <= bound,
+        "a {commands}-command frame allocated {allocated} bytes, past the {bound}-byte bound"
+    );
+}
+
+/// The allocation property replayed from fixed seeds that once failed to
+/// terminate, independent of `PROPTEST_RNG_SEED`.
+#[test]
+fn the_allocation_property_holds_for_the_seeds_that_once_hung() {
+    for seed in [100_u64, 107, 263, 386] {
+        let mut runner = TestRunner::new(ProptestConfig {
+            cases: ALLOCATION_CASES,
+            rng_seed: RngSeed::Fixed(seed),
+            ..ProptestConfig::default()
+        });
+        runner
+            .run(&(ops(), root()), |(ops, root)| {
+                allocation_stays_inside_the_bound(&ops, root)
+            })
+            .unwrap_or_else(|failure| panic!("seed {seed}: {failure}"));
     }
 }
 
