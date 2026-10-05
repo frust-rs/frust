@@ -5167,10 +5167,17 @@ anything.
 
 **Accepted because**: the inputs a refusal fires on are already erroneous
 (non-finite geometry describes nothing drawable); refusing loudly beats
-hanging or panicking in kurbo. A magnitude-based hang class (`f64::MAX`-scale
-finite coordinates driving proportional flattening work) remains open and is
-tracked as its own action item; the up-front check cannot refuse finite
-values.
+hanging or panicking in kurbo. The up-front check cannot refuse finite values,
+so magnitude is bounded downstream instead: compile cost for a fill, clip
+mask, glyph outline, rounded rect or stroke is bounded for every finite input
+(`compile/cull.rs`; pinned by `curve_carrying_commands_at_extreme_magnitudes_compile_within_bounds`
+and `nested_scales_reaching_extreme_magnitudes_compile_within_bounds`). Output
+is exact to the flattening tolerance up to the device extent `cull.rs` states
+(about 9.3e27 pixels for a fill; a stroke's device reach about 3e10 pixels);
+past it a depth-capped piece is drawn as its chord, with error confined to
+that piece, and near `f32`'s range cost stays bounded but drawing is no longer
+faithful. One case stays unbounded: a dash pattern is expanded into sub-paths
+before any culling, so a tiny dash period over a huge path never returns.
 
 **Trigger for removal**: a widget-visible need for a drawn-anyway fallback
 semantics for non-finite input appears (none identified today).

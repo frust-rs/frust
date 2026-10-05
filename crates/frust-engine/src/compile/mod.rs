@@ -42,6 +42,8 @@ pub mod clear;
 
 pub mod clip;
 
+pub(crate) mod cull;
+
 pub mod layers;
 
 pub mod paint;
@@ -61,7 +63,7 @@ use std::sync::Once;
 use std::time::Duration;
 
 use kurbo::{
-    Affine, BezPath, Cap, Join, Line, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
+    Affine, BezPath, Cap, Join, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
 };
 use peniko::{Brush, Color, Fill, ImageData};
 
@@ -84,6 +86,7 @@ use crate::cache::images::{
 };
 use crate::compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
 use crate::compile::clear::StagedPunch;
+use crate::compile::cull::{generate_fill, generate_stroke, rounded_rect_elements};
 use crate::compile::external::encode_scene_texture;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
 use crate::config;
@@ -994,11 +997,10 @@ impl SceneCompiler {
                     PaintSource::Brush(brush),
                     transform,
                     |generator, storage, clip| {
-                        generator.generate_filled_path(
-                            shape.path_elements(FLATTEN_TOLERANCE),
-                            Fill::NonZero,
+                        generate_fill(
+                            generator,
+                            rounded_rect_elements(&shape),
                             transform,
-                            None,
                             storage,
                             clip,
                         );
@@ -1013,7 +1015,9 @@ impl SceneCompiler {
                 transform,
             } => {
                 let transform = combined * *transform;
-                let line = Line::new(*p0, *p1);
+                // The two elements `kurbo::Line::path_elements` yields, spelled
+                // out so the stroke helper can walk them twice.
+                let line = [PathEl::MoveTo(*p0), PathEl::LineTo(*p1)];
                 let stroke = round_stroke(*width);
 
                 self.record(
@@ -1022,14 +1026,7 @@ impl SceneCompiler {
                     PaintSource::Brush(brush),
                     transform,
                     |generator, storage, clip| {
-                        generator.generate_stroked_path(
-                            line.path_elements(FLATTEN_TOLERANCE),
-                            &stroke,
-                            transform,
-                            None,
-                            storage,
-                            clip,
-                        );
+                        generate_stroke(generator, line, &stroke, transform, storage, clip);
                     },
                 );
             }
@@ -1049,14 +1046,7 @@ impl SceneCompiler {
                             PaintSource::Brush(brush),
                             transform,
                             |generator, storage, clip| {
-                                generator.generate_filled_path(
-                                    path.iter(),
-                                    Fill::NonZero,
-                                    transform,
-                                    None,
-                                    storage,
-                                    clip,
-                                );
+                                generate_fill(generator, path.iter(), transform, storage, clip);
                             },
                         );
                     }
@@ -1080,11 +1070,11 @@ impl SceneCompiler {
                                     PaintSource::Brush(brush),
                                     transform,
                                     |generator, storage, clip| {
-                                        generator.generate_stroked_path(
+                                        generate_stroke(
+                                            generator,
                                             dashed.iter(),
                                             &stroke,
                                             transform,
-                                            None,
                                             storage,
                                             clip,
                                         );
@@ -1098,11 +1088,11 @@ impl SceneCompiler {
                                     PaintSource::Brush(brush),
                                     transform,
                                     |generator, storage, clip| {
-                                        generator.generate_stroked_path(
+                                        generate_stroke(
+                                            generator,
                                             path.iter(),
                                             &stroke,
                                             transform,
-                                            None,
                                             storage,
                                             clip,
                                         );

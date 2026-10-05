@@ -53,6 +53,7 @@ use vello_common::strip::Strip;
 use vello_common::strip_generator::{StripGenerator, StripStorage};
 use vello_common::tile::Tile;
 
+use super::cull::{ViewportSplit, cull_viewport, rounded_rect_elements};
 use super::{FLATTEN_TOLERANCE, fast_rect};
 
 /// The scissor of a stack that clips nothing.
@@ -214,7 +215,7 @@ impl ClipStack {
             return;
         }
         let shape = RoundedRect::from_rect(rect, radii);
-        self.push_mask(shape.path_elements(FLATTEN_TOLERANCE), transform, generator);
+        self.push_mask(rounded_rect_elements(&shape), transform, generator);
     }
 
     /// Pop the most recent clip.
@@ -238,14 +239,27 @@ impl ClipStack {
         self.scissor_clips = self.scissor_clips.saturating_add(1);
     }
 
+    /// Rasterize `path` under `transform` into a mask nested in the current
+    /// one.
+    ///
+    /// The mask is generated against the enclosing mask, so it is culled
+    /// against that mask's bounds — or the generator's viewport when there is
+    /// none — and the path goes through the [`ViewportSplit`] pre-pass against
+    /// that same rectangle before it reaches the flattener.
     fn push_mask(
         &mut self,
         path: impl IntoIterator<Item = PathEl>,
         transform: Affine,
         generator: &mut StripGenerator,
     ) {
-        self.masks
-            .push_clip(path, generator, Fill::NonZero, transform, None);
+        let viewport = cull_viewport(generator, self.masks.get().as_ref());
+        self.masks.push_clip(
+            ViewportSplit::new(path, transform, viewport),
+            generator,
+            Fill::NonZero,
+            Affine::IDENTITY,
+            None,
+        );
         self.entries.push(Entry::Mask);
         self.mask_clips = self.mask_clips.saturating_add(1);
         self.mask_strips = self
