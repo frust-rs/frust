@@ -1,20 +1,10 @@
-# `frust-material`: the Material design-system catalog plugin (production
-# deps: frust facade + kurbo/peniko, pins mirrored exactly from
-# frust-widgets' own Cargo.toml, since this crate builds custom widgets over
-# frust::authoring the same way that crate's built-in catalogs did;
-# frust-widgets/frust-core via dev-dependency are the sanctioned test-fixture
-# route and ship nothing).
 [package]
 name = "frust-material"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-# NOTICE: see NOTICE for third-party attributions (vendored components,
-# material_new_shapes, Material Icons lineage, fonts pointer)
-# Not the workspace default (`MIT OR Apache-2.0`): this crate bundles
-# Apache-2.0-only ported code (material-color-utilities, androidx
-# graphics-shapes lineage, Material Icons path data) and OFL-1.1 font bytes,
-# so no MIT-only arm is offerable for the combined artifact. See NOTICE.
+# Not the workspace default: bundles Apache-2.0-only ported code and OFL-1.1 fonts, so no
+# MIT-only arm is offerable. Third-party attributions: see NOTICE.
 license = "Apache-2.0 AND OFL-1.1"
 description = "Material 3 (Expressive) design-system catalog for Frust: HCT seed-color tokens, shape morphing, icons, widgets and bundled Roboto fonts."
 repository.workspace = true
@@ -31,20 +21,12 @@ peniko = { workspace = true }
 
 [features]
 default = ["bundled-fonts"]
-# Roboto Flex + Roboto Mono, compiled in via `include_bytes!`. An app that
-# ships its own fonts or is content with the platform's system sans (Roboto
-# on Android, San Francisco on iOS, via fontique's system-font discovery) can
-# turn this off to drop the bundled bytes from its binary; `font_data()`
-# returns an empty slice and `install()`/`native_typefaces()` register
-# nothing, so the type scale's named families fall back to whatever fontique
-# resolves for them. Default on: unchanged out-of-the-box behavior.
+# Roboto Flex + Roboto Mono via `include_bytes!`; off drops them, `font_data()` is empty
+# and the type scale falls back to fontique.
 bundled-fonts = []
 
 [dev-dependencies]
 frust-widgets = { path = "../../crates/frust-widgets", version = "0.5.2", features = ["test-support"] }
-# `test-support` compiles `PaintCtx::for_test` (a `FrameTime`-seeded `PaintCtx`
-# constructor) into the test build, so a clock-dependent widget — the overlay
-# seam's enter/exit ramps — can be painted at a chosen time without a
-# `RenderRoot`; the same dev-dependency shape `frust-shadcn` carries. Test-only:
-# the feature ships in nothing.
+# `test-support` compiles `PaintCtx::for_test` so clock-dependent widgets paint at a
+# chosen time without a `RenderRoot`.
 frust-core = { path = "../../crates/frust-core", version = "0.5.2", features = ["test-support"] }

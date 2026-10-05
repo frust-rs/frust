@@ -1,13 +1,5 @@
-# `frust-beui`: the beUI design-system catalog plugin — the tier's second
-# external-origin design system (ported from beUI v2, not authored here;
-# upstream is MIT-licensed, © 2026 Saurabh Chauhan; the vendored licence text is
-# LICENSE-beui.md beside this manifest, and the attribution record lives in the
-# crate root's docs).
-# Production deps are the frust facade plus kurbo/peniko for the geometry/color
-# vocabulary its widgets paint with, the same pins frust-widgets carries and the
-# same shape frust-glyph/frust-material/frust-cupertino/frust-shadcn carry;
-# frust-widgets and frust-core are dev-dependencies only (the sanctioned
-# test-fixture/RenderRoot route, shipping nothing).
+# Ported from beUI v2; upstream MIT, © 2026 Saurabh Chauhan. Vendored licence text:
+# LICENSE-beui.md; attribution record in the crate root docs.
 [package]
 name = "frust-beui"
 version.workspace = true
@@ -29,22 +21,12 @@ peniko = { workspace = true }
 
 [dev-dependencies]
 frust-widgets = { path = "../../crates/frust-widgets", version = "0.5.2", features = ["test-support"] }
-# Test-only: the catalog's paint/event tests drive a real `RenderRoot` (which
-# the facade does not re-export), and `test-support` turns on the
-# `PaintCtx::for_test` clock seam — the same dev-dependency shape every other
-# design-system plugin carries.
+# Test-only: paint/event tests drive a real `RenderRoot` (not re-exported by the facade);
+# `test-support` enables the `PaintCtx::for_test` clock seam.
 frust-core = { path = "../../crates/frust-core", version = "0.5.2", features = ["test-support"] }
 
 [features]
 default = []
-# The GPU-effect substrate (`src/gpu_fx`): real perspective for the catalog's
-# 3D component variants, rendered through the facade's GPU seam
-# (`frust/gpu` -> `frust::gpu`) into an offscreen target the engine
-# composites. The substrate reaches `wgpu` only through `frust::gpu`'s
-# re-export, so this crate carries no `wgpu` edge of its own (the plugin
-# charter line docs/PLUGINS_CODE_STANDARDS.md records). Deliberately NOT
-# default — a default build carries no `gpu_fx` module and no behaviour
-# change whatsoever, and every
-# component that can use the substrate keeps its 2D path as the one it renders
-# when the feature is absent or the GPU is unreachable at runtime.
+# Not default: a default build carries no `gpu_fx` module. Reaches `wgpu` only through
+# `frust::gpu`, so no `wgpu` edge here (docs/PLUGINS_CODE_STANDARDS.md).
 gpu-effects = ["frust/gpu"]

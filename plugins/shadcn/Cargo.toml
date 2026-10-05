@@ -1,12 +1,5 @@
-# `frust-shadcn`: the shadcn/ui design-system catalog plugin — the tier's first
-# external-origin design system (ported from shadcn/ui v4, not authored here;
-# upstream is MIT-licensed, © 2023 shadcn — see LICENSE-shadcn-ui.md beside this
-# manifest for the vendored license text).
-# Production deps are the frust facade plus kurbo/peniko for the geometry/color
-# vocabulary its widgets paint with, the same pins frust-widgets carries and the
-# same shape frust-glyph/frust-material/frust-cupertino carry; frust-widgets and
-# frust-core are dev-dependencies only (the sanctioned test-fixture/RenderRoot
-# route, shipping nothing).
+# Ported from shadcn/ui v4; upstream MIT, © 2023 shadcn. Vendored licence text:
+# LICENSE-shadcn-ui.md.
 [package]
 name = "frust-shadcn"
 version.workspace = true
@@ -28,18 +21,12 @@ peniko = { workspace = true }
 
 [features]
 default = ["bundled-fonts"]
-# Inter + JetBrains Mono, compiled in via `include_bytes!`. An app that ships
-# its own fonts or is content with the platform's system sans can turn this
-# off to drop the bundled bytes from its binary; `font_data()` returns an
-# empty slice and `install()`/`native_typefaces()` register nothing, so the
-# type scale's named families fall back to whatever fontique resolves for
-# them. Default on: unchanged out-of-the-box behavior.
+# Inter + JetBrains Mono via `include_bytes!`; off drops them, `font_data()` is empty and
+# the type scale falls back to fontique.
 bundled-fonts = []
 
 [dev-dependencies]
 frust-widgets = { path = "../../crates/frust-widgets", version = "0.5.2", features = ["test-support"] }
-# Test-only: the catalog's paint/event tests drive a real `RenderRoot` (which
-# the facade does not re-export), and `test-support` turns on the
-# `PaintCtx::for_test` clock seam — the same dev-dependency shape every other
-# design-system plugin carries.
+# Test-only: paint/event tests drive a real `RenderRoot` (not re-exported by the facade);
+# `test-support` enables the `PaintCtx::for_test` clock seam.
 frust-core = { path = "../../crates/frust-core", version = "0.5.2", features = ["test-support"] }

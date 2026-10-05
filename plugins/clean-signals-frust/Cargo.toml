@@ -1,19 +1,6 @@
-# Standalone package: excluded from the root workspace (see the root
-# Cargo.toml's `[workspace] exclude` and docs/DEVELOPMENT.md) — the same
-# huddle pattern (`examples/huddle/Cargo.toml`). This `[workspace]` table
-# makes this directory its own workspace root with its own Cargo.lock; every
-# dependency below is therefore a literal spec rather than
-# `{ workspace = true }` (workspace inheritance isn't available outside the
-# root workspace), so the version/edition/license/repository fields are
-# duplicated from the root's `[workspace.package]` verbatim.
-#
-# Facade tier: this plugin is deliberately nothing more than a crate
-# depending on `frust` (+ `clean-signals`). It is published from this
-# repository as `clean-signals-frust`. `frust*` deps below resolve in-repo
-# (this plugin lives inside the `frust` checkout, unlike huddle's example);
-# `clean-signals` comes from crates.io with the same requirement huddle's own
-# `clean-signals` dependency declares, so the two resolve the identical crate
-# identity (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy).
+# Standalone workspace, excluded from the root graph (root `[workspace] exclude`,
+# docs/DEVELOPMENT.md) with its own Cargo.lock; deps are literal specs and the package
+# fields duplicate the root's `[workspace.package]`.
 [workspace]
 
 [package]
@@ -29,20 +16,15 @@ categories = ["gui"]
 description = "Frust integration for clean-signals: component-scoped controllers and failure listeners"
 
 [dependencies]
-# crates.io requirement — identical to huddle's own `clean-signals`
-# dependency, so both consumers build one `clean-signals` crate identity (type-identity rule). Never enable the `effects` feature
-# (see docs/DEVELOPMENT.md's Version-Pin Policy).
+# Lockstep: identical to the requirement at `examples/huddle` and
+# `crates/frust-drive/templates/app/Cargo.toml.clean-signals.tmpl`, so one crate identity
+# resolves (docs/DEVELOPMENT.md § Version-Pin Policy). Never enable `effects`.
 clean-signals = "0.1"
-# In-repo path plus the published version; the facade package is named
-# `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
+# Facade package is `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
 frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.2" }
 
-# Dev-only: the headless glue tests drive Frust's `RenderRoot` directly (the
-# desktop shell's own rebuild/layout/paint seam) and pump the reactive runtime's
-# UI-thread local task queue frame by frame — no GPU, no window. `test-fixtures`
-# pulls in clean-signals' shared fake failures/use cases (never duplicated here,
-# per CODE_STANDARDS). kurbo/peniko are pinned to Frust's rendering-stack
-# versions so the geometry/color types unify.
+# Headless tests drive `RenderRoot` directly. kurbo/peniko are pinned to Frust's
+# rendering-stack versions so geometry/color types unify.
 [dev-dependencies]
 clean-signals = { version = "0.1", features = ["test-fixtures"] }
 frust-core = { path = "../../crates/frust-core" }
@@ -52,9 +34,6 @@ frust-text = { path = "../../crates/frust-text" }
 reactive_graph = "0.2"
 kurbo = "0.13.1"
 peniko = "0.6.1"
-# Dev-only, for interval.rs's lifted `run_interval` unit test (`#[tokio::test]`
-# — the loop's `clean_signals::time::sleep` needs a tokio runtime with the
-# time driver enabled). Not a lib dependency: the crate's own production code
-# never spawns a tokio runtime directly (see docs/CODE_STANDARDS.md's "No
-# sleeps outside time::sleep").
+# Dev-only: `interval.rs`'s test needs a tokio runtime with the time driver; production
+# code never spawns one.
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }

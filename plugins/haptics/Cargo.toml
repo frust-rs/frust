@@ -12,47 +12,22 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-# HapticsError variants callers match on — thiserror per CODE_STANDARDS.
 thiserror = { workspace = true }
-# The Android platform-handle substrate this crate's Android backend calls
-# through (`frust_plugin::android::with_jni_env`); the only `frust-*`
-# dependency this crate is allowed (platform-plugin charter — see
-# `docs/ARCHITECTURE.md`'s Module Structure / `docs/CODE_STANDARDS.md`'s
-# Plugin Conventions). Unconditional like `frust-clipboard`'s own copy: the
-# crate is inert off Android, so declaring it target-gated would buy nothing.
+# Only `frust-*` dependency a platform plugin may carry (platform-plugin charter,
+# docs/ARCHITECTURE.md). Unconditional: the crate is inert off Android.
 frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
 
-# Android: `Vibrator`/`VibrationEffect` via plain JNI (no Kotlin/Gradle
-# module — see `src/android.rs`'s module doc for why one isn't needed).
-# Matches `frust-clipboard`'s Android arm: its own JNI signature calls don't
-# go through `frust-plugin`'s re-export alone, so this crate depends on `jni`
-# directly too.
+# `jni` directly: this crate's own JNI signature calls don't go through
+# `frust-plugin`'s re-export alone.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true }
 
-# iOS only — **not** `target_vendor = "apple"`. The three `UI*FeedbackGenerator`
-# classes are UIKit, which doesn't exist on macOS (no AppKit haptics backend
-# in v1 — see `src/desktop.rs`'s module doc); macOS instead shares the
-# `desktop` (unavailable) backend below. Matches `frust-clipboard`'s own
-# `target_os = "ios"` rationale.
+# iOS only, not `target_vendor = "apple"`: the `UI*FeedbackGenerator` classes are UIKit,
+# absent on macOS, which shares the unavailable `desktop` backend below.
 [target.'cfg(target_os = "ios")'.dependencies]
-# `MainThreadMarker`/`MainThreadOnly`: constructing any of the three
-# `MainThreadOnly` feedback-generator classes below needs both. Not
-# `default-features = false` here (unlike `objc2-ui-kit`/`dispatch2` below):
-# `objc2`'s own default feature set is already what `frust-secure-storage`/
-# `frust-camera`/`frust-native-widgets` build against unmodified via this
-# same `{ workspace = true }` edge, and this crate needs nothing narrower.
 objc2 = { workspace = true }
-# `UIFeedbackGenerator`: the shared base class (`prepare()`) every generator
-# subclass below is defined `#[cfg]`-gated on, in addition to its own
-# per-class feature (`objc2-ui-kit`'s own generated-code split — see
-# `src/apple.rs`'s module doc). `UISelectionFeedbackGenerator`/
-# `UIImpactFeedbackGenerator`/`UINotificationFeedbackGenerator`: the three
-# classes this crate's `HapticEffect` vocabulary maps onto. `default-features
-# = false` (not inherited — see `plugins/clipboard/Cargo.toml`'s comment for
-# why a plain version string like `objc2-ui-kit`'s workspace pin can't set
-# `default-features` on a member without repeating the version literal)
-# drops every other UIKit class this crate never touches.
+# `UIFeedbackGenerator` (shared base class) is required alongside each per-class feature.
+# `default-features = false` is not inherited (see `plugins/clipboard/Cargo.toml`).
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIFeedbackGenerator",
@@ -60,19 +35,13 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIImpactFeedbackGenerator",
     "UINotificationFeedbackGenerator",
 ] }
-# `DispatchQueue::main()`/`exec_async`: the async main-queue bounce every
-# feedback-generator call goes through (`src/apple.rs`'s module doc's
-# *Main-thread dispatch*) — the same three features `frust-camera` already
-# enables for its own serial capture queue, repeated here rather than
-# inherited for the same `default-features` reason as `objc2-ui-kit` above.
+# Main-queue bounce for every generator call (`src/apple.rs`); features repeated, not
+# inherited, for the same `default-features` reason as `objc2-ui-kit`.
 dispatch2 = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
     "objc2",
 ] }
 
-# Desktop (macOS, Linux, Windows): no dependency needed. Unlike
-# `frust-clipboard`, which shares a real desktop backend (`arboard`) across
-# these three targets, this crate has no desktop haptics implementation to
-# link against — `src/desktop.rs` is unavailable by design, unconditionally
-# (see its module doc).
+# Desktop: no dependency. Unlike `frust-clipboard`, there is no desktop haptics backend
+# to link; `src/desktop.rs` is unavailable by design.
