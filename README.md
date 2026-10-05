@@ -35,12 +35,23 @@ public `frust::authoring` toolkit, the same seam a third-party design system use
 entirely with Frust.
 
 <p align="center">
-  <img src="docs/assets/readme/muxr-connect.png" alt="muxr: connect to a server" width="180">
-  <img src="docs/assets/readme/muxr-sessions.png" alt="muxr: sessions list" width="180">
-  <img src="docs/assets/readme/muxr-terminal-htop.png" alt="muxr: terminal running htop" width="180">
-  <img src="docs/assets/readme/muxr-panes.png" alt="muxr: pane layout" width="180">
-  <img src="docs/assets/readme/muxr-zellij.png" alt="muxr: zellij session" width="180">
+  <img src="docs/assets/readme/muxr-zellij.png" alt="muxr: a zellij session with a file tree and two shell panes" width="320">
 </p>
+
+**Sample apps** from [`examples/`](examples/), running on an iPhone:
+
+<p align="center">
+  <img src="docs/assets/readme/app-material3-demo.png" alt="material3-demo: the Material 3 Expressive component catalog" width="24%">
+  <img src="docs/assets/readme/app-native-widgets-demo.png" alt="native-widgets-demo: a native action sheet anchored to its button" width="24%">
+  <img src="docs/assets/readme/app-shadertoy.png" alt="shadertoy: a fragment shader rendered at 60 fps" width="24%">
+  <img src="docs/assets/readme/app-glyph-catalog.png" alt="glyph-catalog: badges, tags, alerts and toasts" width="24%">
+</p>
+<p align="center"><em>
+  <a href="examples/material3-demo">material3-demo</a> ·
+  <a href="examples/native-widgets-demo">native-widgets-demo</a> ·
+  <a href="examples/shadertoy">shadertoy</a> ·
+  <a href="examples/glyph-catalog">glyph-catalog</a>
+</em></p>
 
 ### Fast
 
@@ -58,11 +69,17 @@ Bare `frust` opens `frust-tui`, a mouse-first terminal workbench, rather than dr
 bare CLI:
 
 <p align="center">
-  <img src="docs/assets/readme/tui-toolchain-wizard.png" alt="frust TUI: toolchain setup wizard" width="31%">
-  <img src="docs/assets/readme/tui-run-dialog.png" alt="frust TUI: run configuration dialog" width="31%">
-  <img src="docs/assets/readme/tui-devtools-inspector.png" alt="frust TUI: DevTools widget inspector" width="31%">
+  <img src="docs/assets/readme/tui-toolchain-wizard.png" alt="frust TUI: toolchain setup wizard" width="90%">
+  <br><em>Toolchain setup wizard</em>
 </p>
-<p align="center"><em>Toolchain setup wizard · run configuration · DevTools inspector</em></p>
+<p align="center">
+  <img src="docs/assets/readme/tui-run-dialog.png" alt="frust TUI: run configuration dialog" width="90%">
+  <br><em>Run configuration</em>
+</p>
+<p align="center">
+  <img src="docs/assets/readme/tui-devtools-inspector.png" alt="frust TUI: DevTools widget inspector" width="90%">
+  <br><em>DevTools inspector</em>
+</p>
 
 - A **toolchain setup wizard** checks Rust plus each platform area (Android, iOS, Desktop, Web)
   and offers a guided fix action per gap.
