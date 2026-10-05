@@ -2410,13 +2410,17 @@ impl ListViewWidget {
     /// arm resets (the drag/armed flags, the Down-time claim snapshot, the
     /// sticky defer decision and the live multi-contact veto cell), so the
     /// rest of the gesture's `Move`s take the unarmed row/hover path and its
-    /// `Up` the non-scrolling row-forward branch. A no-op when no gesture is
-    /// armed. Pointer capture is left alone (no [`EventCtx`] in layout,
-    /// paint or rebuild; the shell clears it on the physical `Up`/`Cancel`),
-    /// and the caller re-seeds [`ListViewWidget::drag_position`] from the
-    /// position it applies. Mirrors `ScrollWidget::end_live_drag`.
+    /// `Up` the non-scrolling row-forward branch. Only an *established* drag
+    /// ends here: a gesture armed but still inside [`TOUCH_SLOP`] is left as
+    /// it is (a pre-slop finger writes no offset, and the row under it holds
+    /// an uncancelled `Down` whose slop takeover and `Cancel` must still
+    /// happen), so a no-op when nothing is scrolling. Pointer capture is left
+    /// alone (no [`EventCtx`] in layout, paint or rebuild; the shell clears
+    /// it on the physical `Up`/`Cancel`), and the caller re-seeds
+    /// [`ListViewWidget::drag_position`] from the position it applies.
+    /// Mirrors `ScrollWidget::end_live_drag`.
     fn end_live_drag(&mut self) {
-        if !self.scrolling && !self.down_active {
+        if !self.scrolling {
             return;
         }
         self.scrolling = false;
@@ -2691,9 +2695,12 @@ impl ListViewWidget {
     /// [`ITEM_SETTLE_TOLERANCE_PX`]. The request ends once the row is
     /// materialized and in tolerance, when its key leaves the data, or after
     /// [`ITEM_SETTLE_MAX_FRAMES`] layouts. Waits, consuming nothing, while a
-    /// tween is still carrying the list there, and while a drag is live — a
-    /// correcting jump would otherwise fight the finger every layout — so the
-    /// request resumes once the drag ends.
+    /// tween is still carrying the list there. The `scrolling` guard below is
+    /// defensive only: a pending request never coexists with an established
+    /// drag in real event flow — applying the request ends the drag
+    /// ([`ListViewWidget::end_live_drag`]) and a later primary `Down`, wheel
+    /// or `Cancel` clears the request — so the guard documents the invariant
+    /// rather than a resume-after-drag path.
     fn settle_item_target(&mut self) {
         let Some(mut target) = self.item_target else {
             return;
@@ -8556,6 +8563,42 @@ mod controller_tests {
                 ms += 16.0;
                 assert!(ms < 10_000.0, "the release motion never settled");
             }
+        }
+    }
+
+    #[test]
+    fn a_command_during_the_pre_slop_hold_keeps_the_drag_startable() {
+        // Mirrors the ScrollView rule: a hold inside the slop writes no
+        // offset, so a command drained meanwhile leaves it armed and the
+        // finger's later travel still takes the gesture over and scrolls.
+        for physics in both_physics() {
+            let controller = ScrollController::new();
+            let mut w = standalone(&controller, Some(physics));
+            send(&mut w, &pointer(PointerPhase::Down, 150.0), 0.0);
+            send(
+                &mut w,
+                &pointer(PointerPhase::Move, 150.0 - TOUCH_SLOP / 2.0),
+                16.0,
+            );
+            assert!(w.down_active && !w.scrolling, "armed, not yet a drag");
+
+            controller.jump_to(20.0);
+            paint_at(&mut w, 32.0);
+            assert!(w.offset() > 0.0, "the jump applied");
+            assert!(w.down_active, "the hold stays armed");
+            assert!(!w.scrolling);
+
+            send(&mut w, &pointer(PointerPhase::Move, 110.0), 48.0);
+            assert!(w.scrolling, "the slop takeover still happens");
+            let after_takeover = w.offset();
+            send(&mut w, &pointer(PointerPhase::Move, 100.0), 64.0);
+            assert!(
+                w.offset() > after_takeover,
+                "the finger scrolls the content"
+            );
+
+            send(&mut w, &pointer(PointerPhase::Up, 100.0), 80.0);
+            assert!(!w.down_active && !w.scrolling);
         }
     }
 

@@ -137,12 +137,11 @@ pub use frust_widgets::{
     safe_area, scaffold, scroll_view, slider, text, text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
-// row at) is reachable from `frust_widgets`'s own crate root through the
-// facade above, but not nameable there: it lives in the
-// `frust_widgets::scroll_controller` module, which the flat re-export block
-// does not flatten into. Re-exported by its own path here so an app calling
-// `ScrollController::scroll_to_item` through this facade can name the
-// alignment argument without reaching past it into `frust-widgets` directly.
+// row at) is not in `frust_widgets`'s own flat re-export list, so the block
+// above cannot carry it; it is reachable only as
+// `frust_widgets::scroll_controller::ItemAlignment`. Re-exported by that path
+// here so an app calling `scroll_to_item` through this facade can name the
+// alignment argument without depending on `frust-widgets` directly.
 pub use frust_widgets::scroll_controller::ItemAlignment;
 
 /// The overlay portal's own vocabulary, flat-re-exported from `frust-core`:

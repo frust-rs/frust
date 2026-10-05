@@ -52,32 +52,35 @@
 //!   out (ignoring each with a debug-build log) and keeps the offset ones in
 //!   recording order, so `ScrollView` never sees — and never has to match
 //!   on — a variant it cannot act on.
-//! - **The queue is bounded, not an unbounded backlog.** A recorded offset
-//!   command coalesces into the immediately preceding one when both are the
-//!   same kind — a `jump_to` replacing a queued `jump_to`, an `animate_to`
-//!   replacing a queued `animate_to` — so a tight burst (a pointer-drag
-//!   thumb, say) leaves only the latest value queued. Coalescing never
-//!   crosses a kind boundary (a queued `jump_to` followed by an `animate_to`
-//!   keeps both, so the tween still starts from the jumped-to position) and
-//!   never crosses a [`ScrollController::scroll_to_item`] in between (an
+//! - **The queue is bounded, not an unbounded backlog.** Offset commands
+//!   are grouped into segments by the item commands between them, and
+//!   within a segment a `jump_to` supersedes every earlier offset command
+//!   (it cancels any tween and sets the position outright) while an
+//!   `animate_to` supersedes an earlier `animate_to` but keeps a preceding
+//!   `jump_to`, so the tween still starts from the jumped-to position. A
+//!   segment therefore holds at most one jump and one animate in whatever
+//!   order they were recorded — a tight burst (a pointer-drag thumb, say) or
+//!   an alternating jump/animate loop both leave at most two entries — and
+//!   superseding never crosses a [`ScrollController::scroll_to_item`] (an
 //!   offset/item interleaving stays in exact recording order). Item commands
 //!   keep their own ordered channel but are capped at
 //!   [`ITEM_COMMAND_CAP`] entries; recording one past the cap drops the
 //!   *oldest* queued item command (debug-build log) rather than growing
-//!   further. One behavioural consequence: an intermediate `jump_to` inside
-//!   a coalesced run that would, had it actually applied, transiently cross
-//!   a `ListView` near-start/near-end threshold never does — the edge
-//!   callbacks evaluate only the surviving (last) target in the run, not
-//!   every value a caller recorded.
+//!   further, so the whole queue never exceeds the cap plus two offset
+//!   entries per segment. One behavioural consequence: a superseded
+//!   `jump_to` that would, had it actually applied, transiently cross a
+//!   `ListView` near-start/near-end threshold never does — the edge
+//!   callbacks evaluate only the surviving target, not every value a caller
+//!   recorded.
 //! - **The pre-attach backlog survives a bind.** [`ScrollController::bind`]
 //!   does not clear the queue: a command recorded before any surface
 //!   attaches (or before the newly attached one has laid out) waits for that
 //!   surface's first layout, per the apply contract above. The hazard this
 //!   trades for: a handle driven in a loop while nothing is attached cannot
-//!   grow without bound either — coalescing and the item cap still apply —
-//!   but it does accumulate up to that bound (one offset command plus up to
-//!   [`ITEM_COMMAND_CAP`] item commands) rather than draining as it is
-//!   issued.
+//!   grow without bound either — superseding and the item cap still apply —
+//!   but it does accumulate up to that bound (at most one jump and one
+//!   animate per segment, up to [`ITEM_COMMAND_CAP`] item commands) rather
+//!   than draining as it is issued.
 //!
 //! See `docs/WIDGETS_ARCHITECTURE.md`'s *Scroll Physics* for the surface the
 //! handle drives.
@@ -258,6 +261,36 @@ impl fmt::Debug for ScrollController {
     }
 }
 
+/// Apply the superseding rule to the offset commands of one segment: the
+/// entries from `start` up to the next item command (or the end). Walking
+/// them in recording order, a `JumpTo` drops everything the segment held
+/// before it and an `AnimateTo` drops an earlier `AnimateTo`, so what
+/// survives is at most one jump followed by at most one animate. Called
+/// after every offset record and after an item drop merges two segments.
+fn supersede_segment(commands: &mut Vec<ControllerCommand>, start: usize) {
+    let end = commands[start..]
+        .iter()
+        .position(|command| matches!(command, ControllerCommand::ScrollToItem(_)))
+        .map_or(commands.len(), |index| start + index);
+    let mut jump = None;
+    let mut animate = None;
+    for command in commands.drain(start..end) {
+        match command {
+            ControllerCommand::Offset(ScrollCommand::JumpTo(_)) => {
+                jump = Some(command);
+                animate = None;
+            }
+            ControllerCommand::Offset(ScrollCommand::AnimateTo(..)) => animate = Some(command),
+            ControllerCommand::ScrollToItem(_) => {
+                unreachable!("the segment ends before the next item command")
+            }
+        }
+    }
+    for (offset, command) in [jump, animate].into_iter().flatten().enumerate() {
+        commands.insert(start + offset, command);
+    }
+}
+
 impl ScrollController {
     /// A controller attached to nothing yet, reading offset, extent and
     /// viewport `0.0`.
@@ -407,31 +440,27 @@ impl ScrollController {
     /// Queue `command` and raise [`frust_core::mark_pending_result_flush`] so a
     /// frame runs to apply it even when it came from outside any input path.
     ///
-    /// An offset command coalesces into an immediately preceding offset
-    /// command of the same kind instead of growing the queue; an item
-    /// command keeps its own ordered channel, capped at [`ITEM_COMMAND_CAP`]
-    /// (oldest dropped past the cap, debug-build log). See the
-    /// [module docs](self) for the policy this implements.
+    /// Within the current segment — the offset commands recorded since the
+    /// last item command — a `jump_to` supersedes every earlier offset
+    /// command (it cancels any tween and sets the position outright, so
+    /// nothing before it can still matter) and an `animate_to` supersedes an
+    /// earlier `animate_to` but keeps a preceding `jump_to`, its start
+    /// position. A segment therefore never holds more than one jump and one
+    /// animate, whatever order a caller records them in. An item command
+    /// keeps its own ordered channel, capped at [`ITEM_COMMAND_CAP`] (oldest
+    /// dropped past the cap, debug-build log). See the [module docs](self)
+    /// for the policy this implements.
     fn record(&self, command: ControllerCommand) {
         let mut shared = self.shared.borrow_mut();
         match command {
             ControllerCommand::Offset(offset) => {
-                let coalesce = matches!(
-                    (shared.commands.last(), &offset),
-                    (
-                        Some(ControllerCommand::Offset(ScrollCommand::JumpTo(_))),
-                        ScrollCommand::JumpTo(_)
-                    ) | (
-                        Some(ControllerCommand::Offset(ScrollCommand::AnimateTo(..))),
-                        ScrollCommand::AnimateTo(..)
-                    )
-                );
-                if coalesce {
-                    *shared.commands.last_mut().expect("matched Some(..) above") =
-                        ControllerCommand::Offset(offset);
-                } else {
-                    shared.commands.push(ControllerCommand::Offset(offset));
-                }
+                let segment_start = shared
+                    .commands
+                    .iter()
+                    .rposition(|command| matches!(command, ControllerCommand::ScrollToItem(_)))
+                    .map_or(0, |index| index + 1);
+                shared.commands.push(ControllerCommand::Offset(offset));
+                supersede_segment(&mut shared.commands, segment_start);
             }
             ControllerCommand::ScrollToItem(item) => {
                 shared.commands.push(ControllerCommand::ScrollToItem(item));
@@ -450,6 +479,10 @@ impl ScrollController {
                     {
                         drop_oldest_item_command(&dropped);
                     }
+                    // Dropping the oldest item merges the two segments around
+                    // it; re-apply the superseding rule so the merged segment
+                    // is bounded like every other one.
+                    supersede_segment(&mut shared.commands, 0);
                 }
             }
         }
@@ -764,11 +797,51 @@ mod tests {
         controller.jump_to(10.0);
         assert_eq!(
             binding.take_all_commands(),
+            vec![ControllerCommand::Offset(ScrollCommand::JumpTo(10.0))],
+            "a jump supersedes an earlier animate — it would have cancelled the tween anyway"
+        );
+    }
+
+    #[test]
+    fn alternating_offset_kinds_stay_bounded_to_one_jump_and_one_animate() {
+        let options = AnimateTo {
+            duration_ms: 200.0,
+            curve: Curve::Linear,
+        };
+        let controller = ScrollController::new();
+        let binding = controller.bind();
+        for round in 0..50 {
+            controller.jump_to(round as f64);
+            controller.animate_to(round as f64 + 0.5, options);
+        }
+        assert_eq!(
+            binding.take_all_commands(),
             vec![
-                ControllerCommand::Offset(ScrollCommand::AnimateTo(20.0, options)),
-                ControllerCommand::Offset(ScrollCommand::JumpTo(10.0)),
+                ControllerCommand::Offset(ScrollCommand::JumpTo(49.0)),
+                ControllerCommand::Offset(ScrollCommand::AnimateTo(49.5, options)),
             ],
-            "the reverse order keeps both too — coalescing never crosses a kind boundary"
+            "whatever order kinds alternate in, a segment keeps one jump and one animate"
+        );
+
+        // Item commands break segments, and each segment is bounded on its own.
+        let controller = ScrollController::new();
+        let binding = controller.bind();
+        for round in 0..50 {
+            controller.jump_to(round as f64);
+            controller.scroll_to_item(ChildKey::new(round as u64), ItemAlignment::Start, false);
+        }
+        let queued = binding.take_all_commands();
+        assert!(
+            queued.len() <= 2 * (ITEM_COMMAND_CAP + 1) + ITEM_COMMAND_CAP,
+            "the whole queue stays under the item cap plus two offsets per segment: {}",
+            queued.len()
+        );
+        assert_eq!(
+            queued
+                .iter()
+                .filter(|command| matches!(command, ControllerCommand::ScrollToItem(_)))
+                .count(),
+            ITEM_COMMAND_CAP
         );
     }
 

@@ -1274,7 +1274,17 @@ impl ScrollWidget {
     /// cell), so the rest of the gesture's `Move`s take the unarmed
     /// child/hover path and its `Up` the non-scrolling child-forward branch —
     /// the finger can no longer write the offset and the release
-    /// starts no fling or settle. A no-op when no gesture is armed.
+    /// starts no fling or settle.
+    ///
+    /// Only an *established* drag ends here. A gesture that is armed but has
+    /// not crossed [`TOUCH_SLOP`] yet is left exactly as it is: a pre-slop
+    /// finger does not write the offset, so there is nothing to race, and
+    /// the child under it already holds an uncancelled `Down` — disarming
+    /// now would skip the slop takeover (and the child `Cancel` it sends), so
+    /// the finger's later travel would never scroll and its lift would
+    /// activate the child. Flutter's `jumpTo` during a hold behaves the same
+    /// way: the drag is still startable at slop. A no-op when nothing is
+    /// scrolling.
     ///
     /// Pointer capture is deliberately left alone: the drain that calls this
     /// runs in layout/paint, which carry no [`EventCtx`], and the shell clears
@@ -1282,7 +1292,7 @@ impl ScrollWidget {
     /// caller re-seeds [`ScrollWidget::drag_position`] from the position it
     /// applies.
     fn end_live_drag(&mut self) {
-        if !self.scrolling && !self.down_active {
+        if !self.scrolling {
             return;
         }
         self.scrolling = false;
@@ -5625,6 +5635,55 @@ mod controller_tests {
                 assert!(ms < 10_000.0, "the release motion never settled");
             }
             assert_eq!(live_motions(&w), 0);
+        }
+    }
+
+    #[test]
+    fn a_command_during_the_pre_slop_hold_keeps_the_drag_startable() {
+        // A finger that is down but still inside the slop writes no offset,
+        // so a command drained meanwhile leaves the hold armed: the slop
+        // takeover (and the child `Cancel` it sends) still happens, the
+        // finger still scrolls, and the lift never activates the child.
+        for physics in both_physics() {
+            let controller = ScrollController::new();
+            let (mut w, log) = logged(&controller, physics);
+            send(&mut w, &pointer(PointerPhase::Down, 100.0), 0.0);
+            send(
+                &mut w,
+                &pointer(PointerPhase::Move, 100.0 - TOUCH_SLOP / 2.0),
+                16.0,
+            );
+            assert!(w.down_active && !w.scrolling, "armed, not yet a drag");
+            assert_eq!(log.borrow().first(), Some(&PointerPhase::Down));
+
+            controller.jump_to(20.0);
+            paint_at(&mut w, 32.0);
+            assert!(w.offset() > 0.0, "the jump applied");
+            assert!(w.down_active, "the hold stays armed");
+            assert!(!w.scrolling);
+
+            log.borrow_mut().clear();
+            send(&mut w, &pointer(PointerPhase::Move, 60.0), 48.0);
+            assert!(w.scrolling, "the slop takeover still happens");
+            assert_eq!(
+                log.borrow().as_slice(),
+                &[PointerPhase::Cancel],
+                "the child's press is cancelled at takeover"
+            );
+            let after_takeover = w.offset();
+            send(&mut w, &pointer(PointerPhase::Move, 50.0), 64.0);
+            assert!(
+                w.offset() > after_takeover,
+                "the finger scrolls the content"
+            );
+
+            send(&mut w, &pointer(PointerPhase::Up, 50.0), 80.0);
+            assert_eq!(
+                log.borrow().as_slice(),
+                &[PointerPhase::Cancel],
+                "no Up reaches the child"
+            );
+            assert!(!w.down_active && !w.scrolling);
         }
     }
 
