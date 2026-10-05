@@ -1,7 +1,5 @@
-# `frust-native-widgets`: native controls from pure Rust — Android (`jni`),
-# iOS (`objc2-ui-kit`) and macOS (`objc2-app-kit`, desktop Mode-A host; no
-# Mac Catalyst). Leaf platform plugin (`docs/CODE_STANDARDS.md` Plugin
-# Conventions): `frust-plugin` + FFI crates only, never another framework crate.
+# Leaf platform plugin (`docs/CODE_STANDARDS.md` Plugin Conventions): `frust-plugin`
+# + FFI crates only, never another framework crate. No Mac Catalyst arm.
 [package]
 name = "frust-native-widgets"
 version.workspace = true
@@ -21,13 +19,12 @@ thiserror = { workspace = true }
 # stdout/stderr the way `frust-drive` does.
 log = { workspace = true }
 
-# The `frust-api` facade glue — all optional and gated by that feature so
+# `frust-api` facade glue, all optional behind that feature so
 # `--no-default-features` keeps the charter line (none of these reach the graph).
-# `frust-core` beside `frust`: the builders hand-implement `View<Outer>`, whose
-# signatures need `BuildCtx`/`ChangeFlags`. Plugins name `frust-core` directly
-# rather than `frust::authoring` — a sanctioned, permanent exemption from the
-# app-tier facade-first rule (`docs/CODE_STANDARDS.md` Plugin Conventions).
 frust = { workspace = true, optional = true }
+# Kept beside `frust` under the same gate: builders implement `View<Outer>`, which
+# needs `BuildCtx`/`ChangeFlags`; a sanctioned plugin exemption from facade-first
+# (`docs/CODE_STANDARDS.md` Plugin Conventions).
 frust-core = { workspace = true, optional = true }
 # `ClipToSlot` hand-implements `Widget::layout`, which returns a bare `kurbo::Size`.
 kurbo = { workspace = true, optional = true }
@@ -43,18 +40,14 @@ frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true }
 
-# iOS only — NOT `target_vendor = "apple"`: this arm is UIKit, which does not
-# exist on macOS (AppKit arm below); gating on the vendor makes a macOS build
-# fail to link (`ld: framework 'UIKit' not found`).
-# objc2-family crates repeat the workspace pin literally with
-# `default-features = false`: Cargo forbids a member overriding
-# `default-features` unless the root entry sets it, and none does. `objc2`
-# keeps its (lighter) defaults like every other plugin's Apple arm.
+# iOS only, NOT `target_vendor = "apple"`: UIKit does not exist on macOS (AppKit
+# arm below), so a vendor gate fails the macOS link (`ld: framework 'UIKit' not found`).
 [target.'cfg(target_os = "ios")'.dependencies]
+# Keeps its (lighter) defaults, like every other plugin's Apple arm.
 objc2 = { workspace = true }
-# Features this crate names in its own source are requested explicitly even
-# when `objc2-ui-kit` enables them transitively. There is NO `NSDateComponents`
-# feature — that class is generated under `NSCalendar`.
+# objc2-family rows repeat the pin literally: Cargo forbids a member overriding
+# `default-features` unless the root entry sets it. Source-named features are listed
+# even when transitive; there is NO `NSDateComponents` feature (it is under `NSCalendar`).
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSObject",
@@ -68,14 +61,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSEnumerator",
     "NSNotification",
 ] }
-# Non-obvious gates: `objc2-core-foundation` is a type gate (`CGFloat`, needed
-# by every `CGFloat`-taking constructor); `UIInterface` gates
-# `overrideUserInterfaceStyle`; `objc2-core-text` gates the `UIFont`<->`CTFont`
-# toll-free bridge; `UIBarItem` gates every `UITabBarItem` member and the
-# `UITabBarDelegate` method; `UIDevice` tells iPad from iPhone (an unanchored
-# action sheet crashes on iPad); `block2` gates every block-taking member;
-# `NSLayoutAnchor`/`NSLayoutConstraint`/`UILayoutGuide` gate the sheet arm's
-# Auto Layout. `UITabBar*` is iOS-only (`crate::controls::IOS_ONLY_KINDS`).
+# Non-obvious gates: `objc2-core-foundation` (`CGFloat`), `UIInterface` (interface
+# style), `objc2-core-text` (`UIFont`<->`CTFont` bridge), `UIBarItem` (`UITabBarItem`
+# members), `block2` (block-taking members), `NSLayout*`/`UILayoutGuide` (sheet layout).
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "std",
     "UIView",
@@ -115,6 +103,7 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "NSLayoutAnchor",
     "NSLayoutConstraint",
     "UILayoutGuide",
+    # Tells iPad from iPhone: an unanchored action sheet crashes on iPad.
     "UIDevice",
     "block2",
     "objc2-core-foundation",
@@ -172,11 +161,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSNotification",
     "objc2-core-foundation",
 ] }
-# objc2-app-kit 0.3.2 gates by SUPERCLASS and by member, not by class name:
-# `NSButton` alone needs `NSView`/`NSResponder`/`NSControl`; `NSButtonCell`/
-# `NSCell` carry button type/bezel and `controlSize`. `NSAccessibilityProtocols`
-# gates `setAccessibilityLabel:`; `objc2-core-foundation` is the `CGFloat` gate.
-# `NSDatePickerCell` IS needed (style/mode enums); `NSStepperCell` is not.
+# objc2-app-kit 0.3.2 gates by SUPERCLASS and member: `NSButton` needs `NSView`/
+# `NSResponder`/`NSControl`; `*Cell` features carry bezel, `controlSize` and picker
+# enums (not `NSStepperCell`); `NSAccessibilityProtocols` gates `setAccessibilityLabel:`.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSView",
@@ -255,7 +242,7 @@ frust-scene = { workspace = true }
 [features]
 default = ["frust-api"]
 # Default-on app-facing builders. `--no-default-features` is the charter-line
-# gate (see the `[dependencies]` comment above `frust`/`frust-core`), checked
+# gate (see the `[dependencies]` comments above `frust`/`frust-core`), checked
 # with `cargo tree -p frust-native-widgets --no-default-features -e normal`.
 frust-api = ["dep:frust", "dep:frust-core", "dep:frust-theme", "dep:kurbo"]
 # The demo composite (`src/demo.rs`). Must stay NON-default: a demonstration,
