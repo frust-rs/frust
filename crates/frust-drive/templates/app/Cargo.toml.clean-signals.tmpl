@@ -4,137 +4,82 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 {%- if platform_windows %}
-# Windows-only resource embedding (taskbar/exe icon, FileVersion/
-# ProductVersion) — see `windows/build.rs`'s own doc comment for why this key
-# isn't itself platform-conditional (Cargo has no such thing) and stays a
-# no-op off Windows. Rendered only when the windows platform is selected —
-# mirrors the default `Cargo.toml.tmpl`'s conditional (see that file for the
-# full rationale).
+# Windows-only resource embedding (exe icon, version info). Rendered only when
+# the windows platform is selected: Cargo compiles `build` scripts for the host.
 build = "windows/build.rs"
 {%- endif %}
 
-# `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
-# bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
-# library for the desktop `main.rs` preview binary.
+# `cdylib`: Android JNI library; `staticlib`: iOS Xcode link target; `rlib`:
+# the desktop `main.rs` preview binary.
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-# The facade crate is published as `frust-ui` and imported as `frust`, because
-# crates.io `frust` is held by another project
-# (https://github.com/lloydmeta/frunk/issues/258). `frust create` emits the
-# crates.io release at the CLI's version; `--frust-path <checkout>` emits a
-# path dependency on a local checkout instead (framework development).
-#
-# `frust` itself carries no design-system catalog and its own `[features]`
-# default is `default = []` — there is nothing left to opt out of with
-# `default-features = false`, so this edge names no features at all (mirrors
-# the default `Cargo.toml.tmpl`'s comment).
+# Published as `frust-ui`, imported as `frust` (crates.io `frust` belongs to
+# another project). `--frust-path <checkout>` emits a path dependency instead.
 {{ frust_dep_line }}
 
-# Design system: Material 3, brought in as a sibling plugin crate
-# (`frust-material`) rather than a `frust` Cargo feature, and made the active
-# theme by `src/lib.rs`'s `frust::app!(..., setup = { frust_material::install(); })`
-# (every shell otherwise falls back to a neutral `Theme::neutral()`). To swap,
-# replace this dependency with the Glyph or Cupertino plugin crate and change
-# the setup call to match. Removing both leaves the app neutral-themed.
+# Material 3 is a sibling plugin crate, installed by `src/lib.rs`'s `app!` setup;
+# swap this dependency and that call to change design system.
 {%- if frust_plugin_version %}
 frust-material = "{{ frust_plugin_version }}"
 {%- else %}
 frust-material = { path = "{{ frust_path }}/../../plugins/material" }
 {%- endif %}
 
-# `--arch clean-signals` demo: the Frust
-# bridge for `clean-signals` (component-scoped controller lifecycle,
-# `async_view`, etc.) — an in-repo plugin, added like any other Frust
-# plugin (`frust_path` resolves to `crates/frust`, so
-# `../../plugins/clean-signals-frust` walks back up to the repo root and
-# down into the plugin's own directory — mirrors the `frust-material`
-# dependency line in the default `Cargo.toml.tmpl`).
+# `--arch clean-signals` demo: the Frust bridge for `clean-signals`
+# (component-scoped controllers, `async_view`), added like any Frust plugin.
 {%- if frust_plugin_version %}
 clean-signals-frust = "{{ frust_plugin_version }}"
 {%- else %}
 clean-signals-frust = { path = "{{ frust_path }}/../../plugins/clean-signals-frust" }
 {%- endif %}
 
-# `clean-signals` comes from crates.io with the exact same requirement
-# `clean-signals-frust`'s own `clean-signals` dependency declares, so Cargo
-# unifies both into one crate identity — the type-identity rule
-# `examples/huddle/Cargo.toml` documents at length. This builds on any
-# machine with no local `clean-signals-rs` checkout required.
+# Must keep the same requirement as `clean-signals-frust`'s own `clean-signals`
+# dependency (and `examples/huddle`) so Cargo unifies one crate identity
+# (`docs/DEVELOPMENT.md` § Version-Pin Policy).
 clean-signals = "0.1"
 
-# `log` facade dependency for the release-only `lean` feature below — mirrors
-# the default `Cargo.toml.tmpl`'s block verbatim (the `frust` CLI passes
-# `--features lean` for every `--release` build regardless of scaffold arch, so
-# this variant must declare the feature too or a release build fails on an
-# unknown feature). See `Cargo.toml.tmpl` for the full release-lean rationale.
+# Present so the release-only `lean` feature can cap the log level; the CLI
+# passes `--features lean` for every `--release` build, so declare it here too.
+# Never make the cap unconditional: `profile` builds keep `frust-perf` output.
 log = "0.4"
 {%- if platform_windows %}
 
-# `windows/build.rs`'s resource embedder. `winres` (the older, commonly
-# referenced crate for this) was last published 2021-09-28 — stale — so this
-# uses the actively maintained `winresource` fork instead. A
-# `[target.'cfg(windows)']`-scoped table so it (and everything it pulls in)
-# never touches a macOS/Linux build. Rendered only alongside the `build =
-# "windows/build.rs"` key above — mirrors the default `Cargo.toml.tmpl`'s
-# conditional.
+# Resource embedder for `windows/build.rs`; `winres` is stale, so the maintained
+# `winresource` fork. Rendered only alongside the `build` key above.
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 {%- endif %}
 
-# Browser (`wasm32-unknown-unknown`) row. `src/lib.rs`'s `frust::app!` binds
-# a fourth platform beside Android/iOS/desktop: on this target it expands to
-# `frust::web_app!`, whose generated entry point is annotated
-# `#[wasm_bindgen(start)]` — wasm-bindgen's own module-init hook, which the
-# browser calls once it has instantiated the compiled `.wasm`. The facade
-# routes the ATTRIBUTE itself through a hidden re-export
-# (`frust::__wasm_bindgen`), but the attribute macro then expands, inside
-# THIS crate, to glue that names `wasm_bindgen::` paths absolutely — so the
-# app crate needs its own dependency edge on the crate regardless. Nothing
-# else here is browser-only: every other dependency above compiles for
-# `wasm32` unchanged, `clean-signals` and `clean-signals-frust` included (the
-# controller lifecycle and `async_view` run on the browser's own single
-# threaded executor, which the reactive runtime already selects there).
-#
-# Version-Pin Policy (`docs/DEVELOPMENT.md`): this pin is EXACT and must
-# equal the `wasm-bindgen-cli` version that post-processes the build, a
-# schema-version contract stricter than semver — a mismatch fails the
-# `wasm-bindgen` step outright rather than degrading. `=0.2.128` is the
-# version Frust's own web crates and `examples/web-gallery` pin; upgrade the
-# CLI and every one of those rows together, never this row alone.
+# Browser row: the `wasm_bindgen(start)` glue that `app!` expands to names
+# `wasm_bindgen::` paths absolutely, so this crate needs its own edge.
+# Exact pin: must equal the `wasm-bindgen-cli` version used for the build (a
+# mismatch fails outright); move with Frust's web crates (`docs/DEVELOPMENT.md`
+# § Version-Pin Policy).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.128"
 
 [features]
-# Release-lean log ceiling (release-only opt-in — see `Cargo.toml.tmpl`).
+# Release-only log cap; the CLI passes `--features lean` for `--release`.
 lean = ["log/release_max_level_warn"]
 
-# `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution. Mirrors the default template's
-# `Cargo.toml.tmpl` block verbatim (not covered by the `profile_sync`
-# tripwire test, which only compares the root/default-template/huddle
-# manifests, but kept in sync by hand for a consistent scaffold).
+# Store-distribution release profile. Kept in sync with Frust's root
+# `Cargo.toml` and `examples/huddle/Cargo.toml`.
 [profile.release]
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
-# `--profile` mode: release performance with symbols + tracing kept for
-# on-device performance measurement. Artifacts land in
-# `target/<triple>/profile/` (custom-profile name, verified legal).
+# `--profile`: release performance with symbols kept, for on-device measurement.
 [profile.profile]
 inherits = "release"
 debug = true
 strip = "none"
 
-# `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# wgpu/naga's shader-pipeline
-# translation runs at `opt-level = 0` by default, which is slow enough on a
-# physical iOS device that the OS SIGKILLs a debug `frust run` before the
-# synchronous, main-thread launch-time shader compile finishes.
+# Shader-compile crates at `opt-level = 2`: unoptimized wgpu/naga translation is
+# slow enough that iOS kills a debug launch. Kept in sync with Frust's root.
 [profile.dev.package.wgpu]
 opt-level = 2
 
@@ -147,10 +92,7 @@ opt-level = 2
 [profile.dev.package.naga]
 opt-level = 2
 
-# Debug dep opt widening: non-workspace-member dependencies
-# build at `opt-level = 1` in debug; this app's own code stays at the fast
-# default dev opt-level, and the named shader-stack overrides above
-# (opt-level 2) still win over this wildcard since a named package override
-# takes precedence over `"*"`.
+# Debug dependencies at `opt-level = 1` (the named overrides above win).
+# Kept in sync with Frust's root `Cargo.toml` and `examples/huddle/Cargo.toml`.
 [profile.dev.package."*"]
 opt-level = 1

@@ -1,69 +1,19 @@
-# Rust build-output location for a scaffolded Frust app.
-# `crates/frust-drive::build_dirs::BuildLayout::rust_dir()` names `build/rust`
-# as the DEFAULT location cargo's own compiled artifacts land under; this
-# `[build]` table is what makes a bare `cargo build`/`cargo run` inside a
-# scaffolded project actually write there. The path is resolved relative to
-# THIS file's directory (the project root), per Cargo's own `[build]
-# target-dir` semantics — it is not present in the repo root's own
-# `.cargo/config.toml` on purpose, since this checkout's own `target/` is
-# referenced directly by docs and CI and must not move.
-#
-# A `CARGO_TARGET_DIR` environment variable or a `--target-dir` CLI flag both
-# still take precedence over this key and override it entirely, so pointing a
-# scaffolded app at a shared build cache keeps working unchanged. Every frust
-# tool that needs the REAL directory a build wrote to resolves it via `cargo
-# metadata`'s `target_directory` field rather than assuming `build/rust` —
-# so under an override, `build/rust` itself stays empty, which is expected,
-# not a bug.
+# Puts a bare `cargo build`/`cargo run` output under `build/rust` (the frust
+# default build layout). `CARGO_TARGET_DIR` or `--target-dir` override it; frust
+# tools read the real path from `cargo metadata`, so `build/rust` may stay empty.
 [build]
 target-dir = "build/rust"
 
-# Android link flags, applied at every Android target so `cargo`/`cargo ndk`
-# and Gradle's `cargoNdkBuild` task (which shells out to `cargo ndk` with this
-# checkout as its working directory) all pick them up without a Gradle-side
-# RUSTFLAGS injection:
+# Android link flags for every Android target, picked up by `cargo ndk` and
+# Gradle's `cargoNdkBuild` without RUSTFLAGS injection: packed dynamic
+# relocations (API 23+) and identical-code folding. `--icf=all` is safe because
+# Frust never compares function-pointer or vtable identity. `android+relr` is
+# not used: it needs API 28+, below the template's minSdk 26.
 #
-# - `-Wl,--pack-dyn-relocs=android`: rewrites `.rela.dyn` into the compact
-#   Android-packed relocation format the Bionic dynamic linker understands
-#   from API 23 onward. Measured on the lean `frust_bench` arm64 release
-#   `.so`: 9,424,544 -> 9,156,128 bytes, `.rela.dyn` 308 KB -> 40 KB.
-# - `-Wl,--icf=all`: identical-code folding, merging functions whose compiled
-#   bodies are byte-identical. Measured alone: 9,424,544 -> 9,256,576 bytes;
-#   combined with the relocation packing above: -436 KB total. Chosen over
-#   the more conservative `--icf=safe` (which excludes address-taken
-#   functions, since two functions merged under `safe` can still be told
-#   apart by pointer/vtable identity): measured on the lean arm64 release
-#   `.so` on top of both flags above, `all` -> `safe` costs +203,104 bytes
-#   (+109,088 in `.text` alone, ~2.5%). Risk class: `all` can make two
-#   distinct functions compare equal by pointer or observe identical vtable
-#   addresses if the codebase ever relies on function-pointer/vtable
-#   identity comparisons — Frust's own code does not (widgets/components are
-#   dispatched by type, not by comparing fn-pointer or vtable-pointer
-#   equality), so the fold is accepted as a pure win here.
-#
-# `android+relr` (the newer SHT_RELR relative-relocation format) is not used
-# here: it needs API 28+, and every Frust app/example/template target ships
-# `minSdk 26`, below that floor. `--pack-dyn-relocs=android` covers relative
-# relocations back to API 23, which the minSdk 26 floor comfortably clears.
-#
-# Cargo's config-file discovery walks every ancestor directory of the build
-# `cwd` and merges what it finds (concatenating array values such as
-# `rustflags`), so this single root-level file already governs every nested
-# workspace built in-tree — `benchmarks/frust_bench`, every `examples/*`
-# standalone workspace, and a `frust new` scaffold built from inside this
-# checkout — with no per-crate copy needed under `benchmarks/` or
-# `examples/`. The rule is about IN-TREE builds only: `crates/frust-drive/templates/app/`
-# carries its own byte-identical copy of this file on purpose, because a
-# `frust new` scaffold copies that directory tree out of this checkout
-# entirely — once it leaves, this root file no longer governs it, so the
-# template needs its own copy to keep shipping the same flags. The two
-# copies existing at once is accepted duplication, not an oversight: `lld`
-# tolerates the same `-C link-arg` repeated across a merged `rustflags`
-# array, and `crates/frust-cli/tests/profile_sync.rs` is the tripwire that
-# keeps them byte-identical.
-# A `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` environment variable set by the
-# caller takes precedence over this file's `rustflags` and replaces it
-# entirely, per Cargo's own precedence rules.
+# Only the `[target.*]` tables mirror the repo root's `.cargo/config.toml`
+# (compared by `crates/frust-cli/tests/profile_sync.rs`); this file is the copy
+# a scaffold ships once it leaves the checkout. A caller's `RUSTFLAGS` replaces
+# these flags entirely.
 
 [target.aarch64-linux-android]
 rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android", "-C", "link-arg=-Wl,--icf=all"]
