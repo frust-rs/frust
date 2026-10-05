@@ -92,9 +92,25 @@
 //! length, and drops or cancels on the gesture's `Up`/`Cancel`. A press that
 //! never becomes a drag reaches the wrapped child untouched. See the
 //! [`mod@draggable`] module docs for the initiation, ghost and feedback contract.
+//!
+//! # Targets
+//!
+//! [`drag_target()`] is the in-app drop target built on the coordinator's
+//! registry ([`DragCoordinator::register_target`]/
+//! [`DragCoordinator::set_target_bounds`]/[`DragCoordinator::target_at`]): it
+//! registers a fresh [`DragTargetId`] when its pod is built and unregisters it
+//! when the pod is dropped, reports its window-space bounds every paint so a
+//! per-frame resolution pass can find it under the ghost point, and at
+//! overlapping bounds [`DragCoordinator::target_at`] picks whichever
+//! registered target has the smallest area. It never subscribes; like
+//! [`draggable()`] it polls the coordinator's own state (here on the
+//! `Housekeeping` broadcast) and turns what it finds into typed
+//! enter/leave/hover/drop callbacks plus a themed highlight. See the
+//! [`mod@target`] module docs for the full notification and highlight contract.
 
 mod coordinator;
 pub mod draggable;
+pub mod target;
 
 pub use coordinator::{
     DragCoordinator, DragKind, DragPhase, DragSession, DragSourceId, DragState, DragStateChange,
@@ -103,4 +119,7 @@ pub use coordinator::{
 pub use draggable::{
     DRAG_THRESHOLD, DragPolicy, DraggableView, DraggableWidget, GHOST_OPACITY, SourceFeedback,
     draggable,
+};
+pub use target::{
+    DragHighlight, DragTargetView, DragTargetWidget, HIGHLIGHT_FALLBACK, drag_target,
 };
