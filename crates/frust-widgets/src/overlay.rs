@@ -29,8 +29,12 @@
 //!   it, the root hit-tests in it, and the payload of an
 //!   [`InputEvent::Overlay`] is in it. A widget only ever learns its own window
 //!   position in `paint`, from
-//!   [`PaintCtx::origin`](frust_core::PaintCtx::origin) — which is why the
-//!   placement is computed there and nowhere else.
+//!   [`PaintCtx::origin`](frust_core::PaintCtx::origin), which is why an
+//!   `Owner`/`Rect` placement is computed there and nowhere else — the one
+//!   exception is [`OverlayAnchor::Window`], which is already stated in this
+//!   space by its caller and is instead updated from `event` (see
+//!   [`OverlaySlot::set_window_anchor`]), because the pointer position a drag
+//!   ghost tracks is itself only ever known there.
 //! * **Owner-local space** — what the owner's own `event` sees: every container
 //!   between the root and the owner has already subtracted its origin. An
 //!   ordinary pointer event routed to the owner by a live capture arrives here,
@@ -114,7 +118,7 @@ use frust_core::{
     LayoutCtx, OutsideTap, OverlayBand, OverlayEntry, OverlayEventKind, OverlayInput, OverlayKey,
     PaintCtx, PaintScene, PointerEvent, SemanticsCtx, View, Widget, any,
 };
-use kurbo::{Point, Rect, Size};
+use kurbo::{Point, Rect, Size, Vec2};
 
 use crate::authoring::{ErasedCallback, erase_callback, releases_capture, route_event_single};
 
@@ -365,10 +369,12 @@ pub fn place(anchor: Rect, content: Size, area: Rect, placement: OverlayPlacemen
 
 /// What a slot places its surface against.
 ///
-/// Both variants resolve to a **window-space** rect in the owner's `paint`,
-/// where the owner's absolute origin is finally known; nothing is subscribed to
-/// and nothing is cached across frames, so an anchor follows its owner across
-/// scroll, relayout and animation for free.
+/// `Owner` and `Rect` resolve to a **window-space** rect in the owner's
+/// `paint`, where the owner's absolute origin is finally known; nothing is
+/// subscribed to and nothing is cached across frames, so an anchor follows
+/// its owner across scroll, relayout and animation for free. `Window` is
+/// already window-space and skips that resolution entirely — see its own
+/// docs for why it is updated from `event` instead.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum OverlayAnchor {
     /// The owner's own bounds — a trigger floating a menu under itself.
@@ -379,6 +385,31 @@ pub enum OverlayAnchor {
     /// origin, so a caller states it in the same coordinates its `layout` and
     /// `event` already speak.
     Rect(Rect),
+    /// An absolute **window-space** point the surface's top-left tracks
+    /// directly — a drag ghost following the pointer rather than an owner's
+    /// bounds.
+    ///
+    /// The placed rect is always `point + offset`, sized to the pod's own
+    /// content size: no side, alignment or collision flip applies, because
+    /// there is no anchor rect to place against, only a point — so none of
+    /// [`OverlayPlacement`]'s side/align/flip/clamp fields apply to it either
+    /// (`place` is never called for this variant). The rect is clamped into
+    /// the window area when [`OverlaySlot::set_clamp_to_window`] has turned
+    /// that on (default `false`, so the ghost may trail off the window's edge
+    /// with the pointer).
+    ///
+    /// Set once (with whatever `offset` the gesture's grab point needs) via
+    /// [`OverlaySlot::set_anchor`], then updated every pointer `Move`/`Down`
+    /// with [`OverlaySlot::set_window_anchor`], which keeps `offset` and only
+    /// moves `point` — see that method for why the update belongs in the
+    /// owner's `event` rather than waiting for the next `paint`.
+    Window {
+        /// The absolute window-space point the rect's top-left tracks.
+        point: Point,
+        /// A fixed offset from `point` to the rect's actual top-left — the
+        /// grab point within a dragged ghost, say.
+        offset: Vec2,
+    },
 }
 
 /// One floated surface an owner hosts: the pod, where it goes, and the routing
@@ -429,6 +460,11 @@ pub struct OverlaySlot<PodState: 'static> {
     outside_tap: OutsideTap,
     placement: OverlayPlacement,
     anchor: OverlayAnchor,
+    /// Whether an [`OverlayAnchor::Window`] rect is clamped back inside the
+    /// window area. No effect on any other anchor, which is placed (and, per
+    /// its own `clamp`, possibly shifted back) by [`place`] instead. See
+    /// [`set_clamp_to_window`](Self::set_clamp_to_window).
+    clamp_to_window: bool,
     /// The window size the last layout pass saw — the area the placement is
     /// computed against, recorded in `layout` because a paint context carries
     /// no window size of its own.
@@ -476,6 +512,7 @@ impl<PodState: 'static> OverlaySlot<PodState> {
             outside_tap: OutsideTap::Ignore,
             placement: OverlayPlacement::default(),
             anchor: OverlayAnchor::Owner,
+            clamp_to_window: false,
             window: Size::ZERO,
             window_rect: Rect::ZERO,
             owner_origin: Point::ZERO,
@@ -563,6 +600,43 @@ impl<PodState: 'static> OverlaySlot<PodState> {
     /// What the surface is placed against.
     pub fn set_anchor(&mut self, anchor: OverlayAnchor) {
         self.anchor = anchor;
+    }
+
+    /// Move an [`OverlayAnchor::Window`] anchor's point, keeping whatever
+    /// `offset` it already carries (or [`Vec2::ZERO`] if the slot was not
+    /// already `Window`-anchored) — the owner's call from its own `event`
+    /// handler on every pointer `Move`/`Down`, so a pointer-following pod (a
+    /// drag ghost) tracks the pointer without waiting for its own paint to
+    /// recompute a bounds-derived anchor the way [`Owner`](OverlayAnchor::Owner)
+    /// and [`Rect`](OverlayAnchor::Rect) do: both of those are only ever
+    /// re-derived from the owner's own `paint` (`ctx.origin()`, read there and
+    /// nowhere else), which is fine when the anchor only ever moves because
+    /// the owner itself moved or repainted for some unrelated reason, but a
+    /// ghost has to repaint at frame cadence as the pointer moves, which a
+    /// call from `event` is the only door onto.
+    ///
+    /// So, unlike [`set_anchor`](Self::set_anchor) (a plain field write the
+    /// next `paint` happens to pick up), this also requests a **repaint
+    /// only** ([`EventCtx::request_redraw`]) — never a relayout — of the
+    /// owner: `self.window` (the area) and the pod's own size are unaffected
+    /// by where the pointer now is, so the usual `ChangeFlags::LAYOUT` round
+    /// trip through `rebuild` would be wasted work the pointer cannot wait
+    /// for anyway.
+    pub fn set_window_anchor(&mut self, ctx: &mut EventCtx<'_>, point: Point) {
+        let offset = match self.anchor {
+            OverlayAnchor::Window { offset, .. } => offset,
+            _ => Vec2::ZERO,
+        };
+        self.anchor = OverlayAnchor::Window { point, offset };
+        ctx.request_redraw();
+    }
+
+    /// Whether an [`OverlayAnchor::Window`] rect is clamped back inside the
+    /// window area (default `false` — a drag ghost is allowed to trail off
+    /// the window's edge with the pointer). No effect on an `Owner`/`Rect`
+    /// anchor, whose own [`OverlayPlacement::clamp`] already governs it.
+    pub fn set_clamp_to_window(&mut self, clamp_to_window: bool) {
+        self.clamp_to_window = clamp_to_window;
     }
 
     /// Mount, reconcile or drop the floated view — the owner's `View::rebuild`
@@ -676,13 +750,30 @@ impl<PodState: 'static> OverlaySlot<PodState> {
             return;
         };
         self.owner_origin = ctx.origin();
-        let anchor = match self.anchor {
-            OverlayAnchor::Owner => Rect::from_origin_size(ctx.origin(), owner_size),
-            OverlayAnchor::Rect(local) => local + ctx.origin().to_vec2(),
-        };
         let area = Rect::from_origin_size(Point::ZERO, self.window);
         let content = pod.borrow().size();
-        self.window_rect = place(anchor, content, area, self.placement);
+        self.window_rect = match self.anchor {
+            OverlayAnchor::Owner => {
+                let anchor = Rect::from_origin_size(ctx.origin(), owner_size);
+                place(anchor, content, area, self.placement)
+            }
+            OverlayAnchor::Rect(local) => {
+                let anchor = local + ctx.origin().to_vec2();
+                place(anchor, content, area, self.placement)
+            }
+            // No side, alignment or collision flip applies to a single point:
+            // the rect is stated directly and only `self.clamp_to_window` — a
+            // separate knob from `place`'s own `self.placement.clamp` — may
+            // pull it back inside the (unpadded) window area.
+            OverlayAnchor::Window { point, offset } => {
+                let rect = Rect::from_origin_size(point + offset, content);
+                if self.clamp_to_window {
+                    clamp_into(rect, area)
+                } else {
+                    rect
+                }
+            }
+        };
         ctx.register_overlay(OverlayEntry {
             key: self.key,
             band: self.band,
@@ -2353,5 +2444,314 @@ mod tests {
         // Two slots never share an identity, which is the whole addressing rule.
         let other: OverlaySlot<()> = OverlaySlot::default();
         assert_ne!(slot.key(), other.key());
+    }
+
+    // -----------------------------------------------------------------------
+    // `OverlayAnchor::Window`: a pointer-following, absolute anchor
+    // -----------------------------------------------------------------------
+
+    /// A `()`-typed pod that paints a rect at its own absolute origin, so a
+    /// test can read the registered entry's placed rect back off the painted
+    /// scene rather than reaching into state no owner exposes.
+    struct GhostPod;
+
+    struct GhostPodWidget;
+
+    impl View<()> for GhostPod {
+        type Element = GhostPodWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> GhostPodWidget {
+            GhostPodWidget
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut GhostPodWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for GhostPodWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(80.0, 30.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+        }
+    }
+
+    /// A `()`-typed probe with a configurable tag, filling whatever room it is
+    /// offered — the "widget beneath" a `Transparent` surface must still
+    /// reach, wherever that surface is anchored.
+    struct TaggedProbe {
+        tag: &'static str,
+        log: Log,
+    }
+
+    struct TaggedProbeWidget {
+        tag: &'static str,
+        log: Log,
+    }
+
+    impl View<()> for TaggedProbe {
+        type Element = TaggedProbeWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> TaggedProbeWidget {
+            TaggedProbeWidget {
+                tag: self.tag,
+                log: Rc::clone(&self.log),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            element: &mut TaggedProbeWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            element.log = Rc::clone(&self.log);
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for TaggedProbeWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(bc.max())
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event {
+                self.log.borrow_mut().push(format!(
+                    "{}:{:?}@{},{}",
+                    self.tag, p.phase, p.position.x, p.position.y
+                ));
+                EventResult::Handled
+            } else {
+                EventResult::Ignored
+            }
+        }
+    }
+
+    /// An owner that fills the window and, on every pointer `Move`/`Down`,
+    /// moves its own `Window`-anchored, `Transparent`, `Tooltip`-band surface
+    /// to the event's position — the shape a full-window pointer-tracking
+    /// layer takes while a drag ghost is live. Never handles the event itself,
+    /// so whatever sits beneath it in the main tree still sees every press.
+    struct GhostOwner {
+        offset: Vec2,
+    }
+
+    struct GhostOwnerWidget {
+        slot: OverlaySlot<()>,
+    }
+
+    impl View<()> for GhostOwner {
+        type Element = GhostOwnerWidget;
+        fn build(&self, ctx: &mut BuildCtx<'_>) -> GhostOwnerWidget {
+            let mut slot = OverlaySlot::new();
+            slot.set_band(OverlayBand::Tooltip);
+            slot.set_input(OverlayInput::Transparent);
+            slot.set_anchor(OverlayAnchor::Window {
+                point: Point::ZERO,
+                offset: self.offset,
+            });
+            let view: AnyView<()> = any(GhostPod);
+            slot.rebuild(None, Some(&view), ctx);
+            GhostOwnerWidget { slot }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut GhostOwnerWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for GhostOwnerWidget {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.slot.layout(ctx);
+            bc.constrain(bc.max())
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            let size = ctx.size();
+            self.slot.paint(ctx, size);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = event
+                && matches!(p.phase, PointerPhase::Move | PointerPhase::Down)
+            {
+                self.slot.set_window_anchor(ctx, p.position);
+            }
+            EventResult::Ignored
+        }
+    }
+
+    /// A plain `Floating`, `Owner`-anchored, `Interactive` surface — the
+    /// counterpart `a_window_anchored_tooltip_still_paints_above_a_floating_surface`
+    /// checks the band sort against.
+    struct FloatingOwner;
+
+    struct FloatingOwnerWidget {
+        slot: OverlaySlot<()>,
+    }
+
+    impl View<()> for FloatingOwner {
+        type Element = FloatingOwnerWidget;
+        fn build(&self, ctx: &mut BuildCtx<'_>) -> FloatingOwnerWidget {
+            let mut slot = OverlaySlot::new();
+            slot.set_placement(corner());
+            let view: AnyView<()> = any(GhostPod);
+            slot.rebuild(None, Some(&view), ctx);
+            FloatingOwnerWidget { slot }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut FloatingOwnerWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for FloatingOwnerWidget {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.slot.layout(ctx);
+            bc.constrain(Size::new(100.0, 40.0))
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            let size = ctx.size();
+            self.slot.paint(ctx, size);
+        }
+    }
+
+    /// Drive a window-filling [`GhostOwner`] over a [`TaggedProbe`] floor
+    /// through a real root.
+    fn ghost_harness(offset: Vec2) -> (RenderRoot<(), StackView<()>>, Log) {
+        let beneath_log: Log = Rc::new(RefCell::new(Vec::new()));
+        let mut root: RenderRoot<(), StackView<()>> = RenderRoot::new();
+        let log = Rc::clone(&beneath_log);
+        let mut build = move |_: &mut ()| {
+            Stack(vec![
+                any(TaggedProbe {
+                    tag: "beneath",
+                    log: Rc::clone(&log),
+                }),
+                any(GhostOwner { offset }),
+            ])
+        };
+        let mut state = ();
+        root.rebuild(&mut build, &mut state);
+        root.layout(WINDOW);
+        root.paint(&mut RecordingScene::default(), FrameTime::from_nanos(0));
+        (root, beneath_log)
+    }
+
+    #[test]
+    fn a_window_anchor_paints_at_point_plus_offset() {
+        let offset = Vec2::new(5.0, 7.0);
+        let (mut root, _log) = ghost_harness(offset);
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::from_nanos(16_000_000));
+        assert_eq!(
+            rects(&scene).last().copied(),
+            Some(Rect::from_origin_size(
+                Point::ZERO + offset,
+                Size::new(80.0, 30.0)
+            )),
+            "a Window anchor's rect is point + offset, with no side/align geometry"
+        );
+    }
+
+    #[test]
+    fn moving_a_window_anchor_moves_the_paint_rect_on_the_next_paint() {
+        let offset = Vec2::new(5.0, 7.0);
+        let (mut root, _log) = ghost_harness(offset);
+        let mut state = ();
+        root.event(
+            &mut state,
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::new(100.0, 200.0),
+                button: PointerButton::Primary,
+            }),
+        );
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::from_nanos(16_000_000));
+        assert_eq!(
+            rects(&scene).last().copied(),
+            Some(Rect::from_origin_size(
+                Point::new(100.0, 200.0) + offset,
+                Size::new(80.0, 30.0)
+            )),
+            "the event handler's set_window_anchor call moved the surface to \
+             the pointer, picked up on the following paint"
+        );
+
+        root.event(
+            &mut state,
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Move,
+                position: Point::new(250.0, 40.0),
+                button: PointerButton::Primary,
+            }),
+        );
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::from_nanos(32_000_000));
+        assert_eq!(
+            rects(&scene).last().copied(),
+            Some(Rect::from_origin_size(
+                Point::new(250.0, 40.0) + offset,
+                Size::new(80.0, 30.0)
+            )),
+            "a further Move keeps tracking the pointer"
+        );
+    }
+
+    #[test]
+    fn a_window_anchored_transparent_surface_still_lets_a_press_through() {
+        let (mut root, log) = ghost_harness(Vec2::new(5.0, 7.0));
+        let mut state = ();
+        root.event(
+            &mut state,
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::new(100.0, 200.0),
+                button: PointerButton::Primary,
+            }),
+        );
+        assert_eq!(
+            log.borrow().clone(),
+            vec!["beneath:Down@100,200".to_string()],
+            "`Transparent` never hit-tests, Window anchor or not — the press \
+             reaches the widget the ghost is floating over"
+        );
+    }
+
+    #[test]
+    fn a_window_anchored_tooltip_still_paints_above_a_floating_surface() {
+        let offset = Vec2::new(5.0, 7.0);
+        let mut root: RenderRoot<(), StackView<()>> = RenderRoot::new();
+        // Registered Tooltip-first (`GhostOwner`), Floating-second
+        // (`FloatingOwner`): exactly the order the band sort has to survive,
+        // not merely happen to preserve.
+        let mut build =
+            move |_: &mut ()| Stack(vec![any(GhostOwner { offset }), any(FloatingOwner)]);
+        let mut state = ();
+        root.rebuild(&mut build, &mut state);
+        root.layout(WINDOW);
+        let mut scene = RecordingScene::default();
+        root.paint(&mut scene, FrameTime::from_nanos(0));
+        assert_eq!(
+            rects(&scene),
+            vec![
+                Rect::new(8.0, 40.0, 88.0, 70.0),
+                Rect::from_origin_size(Point::ZERO + offset, Size::new(80.0, 30.0)),
+            ],
+            "Floating still paints below Tooltip despite registering after it: \
+             {:?}",
+            rects(&scene)
+        );
     }
 }
