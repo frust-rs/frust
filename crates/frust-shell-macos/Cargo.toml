@@ -37,11 +37,9 @@ objc2-foundation = { workspace = true, features = [
     "NSGeometry",
     "objc2-core-foundation",
 ] }
-# Short explicit list, not the large default set: `NSApplication` (did-become-active name; winit 0.30 has no reopen event),
-# `NSResponder` (NSView's superclass gate), `NSView` (subview/frame/hidden/remove), `NSGraphics` (`NSWindowOrderingMode`,
-# the non-obvious one). `NSWindow` is absent: the host uses winit's raw-window-handle `NSView`.
-# Version literal repeated: Cargo forbids overriding a workspace dep's `default-features` unless the workspace entry sets it
-# (as `plugins/clipboard`'s `objc2-ui-kit`); keep in step with the root pin (Version-Pin Policy).
+# Short explicit list, not the large default set: `NSApplication` (did-become-active; winit 0.30 has no reopen event), `NSResponder`,
+# `NSView`, `NSGraphics` (`NSWindowOrderingMode`). `NSWindow` absent: the host uses winit's raw-window-handle `NSView`.
+# Version literal repeated: Cargo forbids overriding a workspace dep's `default-features` unless the workspace sets it; keep in step with the root pin.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSApplication",

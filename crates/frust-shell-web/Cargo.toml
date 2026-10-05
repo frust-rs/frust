@@ -12,10 +12,9 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
-# Browser shell tier. Unlike the per-OS desktop crates it does NOT depend on `frust-shell-desktop`: that crate's winit core is
-# entangled with `accesskit_winit`, `pollster::block_on` bring-up, a render thread and `frust-paths` cache I/O, none of which
-# exist on `wasm32-unknown-unknown`. The winit-generic halves are ported here, so this crate sits directly on
-# `frust-shell-common` like the mobile shells (docs/SHELLS_ARCHITECTURE.md).
+# Browser shell tier. Does NOT depend on `frust-shell-desktop`: its winit core is entangled with `accesskit_winit`, `pollster::block_on`,
+# a render thread and `frust-paths` cache I/O, none of which exist on `wasm32-unknown-unknown`. Winit-generic halves are ported here, so this
+# crate sits directly on `frust-shell-common` (docs/SHELLS_ARCHITECTURE.md).
 [dependencies]
 frust-core = { workspace = true }
 frust-theme = { workspace = true }
@@ -41,10 +40,9 @@ web-time = { workspace = true }
 
 # Browser-only rows, reached solely by the `wasm32` frame loop (`src/app_handler.rs`) and bring-up retry (`src/render.rs`).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# Imported by no `use`, yet not removable: it anchors the *whole graph's* `wasm-bindgen` identity. The crate and the
-# `wasm-bindgen-cli` must carry the identical schema version; this host's CLI is 0.2.128 while winit/web-sys alone resolve
-# 0.2.127. The workspace row is exact `=0.2.128`, and an exact pin only binds where something depends on it. `js-sys`/`web-sys`
-# 0.3.105 and `wasm-bindgen-futures` 0.4.78 are forced lockstep partners (each requires an exact `wasm-bindgen`).
+# Imported by no `use`, yet not removable: it anchors the whole graph's `wasm-bindgen` identity, which must match `wasm-bindgen-cli` (0.2.128;
+# winit/web-sys alone resolve 0.2.127). The exact workspace pin binds only where something depends on it. `js-sys`/`web-sys`/
+# `wasm-bindgen-futures` are lockstep partners (each requires an exact `wasm-bindgen`).
 wasm-bindgen = { workspace = true }
 # `spawn_local`: surface bring-up is `async` and a browser has no blocking executor; also the `JsFuture` for the retry wait.
 wasm-bindgen-futures = { workspace = true }

@@ -34,17 +34,12 @@ anyhow = { workspace = true }
 # The shell installs its own stderr `log::Log` sink (`logger.rs`) so `frust-shell-common::perf` lines are visible.
 log = { workspace = true }
 
-# Desktop clipboard route. `arboard` is held as ONE process-lifetime instance owned by the `frust-clipboard` worker thread
-# (`ClipboardWorker`, `src/app_handler.rs`): on X11/Wayland the content is served by whichever process last claimed the
-# selection, so a per-call instance would lose it on return when no clipboard manager runs. `default-features = false` drops
-# `image-data` (unused image deps; pin rationale in root Cargo.toml's Version-Pin Policy). `wayland-data-control` is NOT
-# enabled, matching `plugins/clipboard`: a Wayland session without XWayland may not reach the clipboard (deferred gap).
-# Tripwire: `cargo check -p frust-shell-desktop`.
+# `arboard`: ONE process-lifetime instance on the `frust-clipboard` worker thread (`ClipboardWorker`, `src/app_handler.rs`); a per-call
+# instance loses X11/Wayland content. `default-features = false` drops `image-data` (Version-Pin Policy); `wayland-data-control` is NOT
+# enabled, matching `plugins/clipboard` (deferred gap: Wayland without XWayland).
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
-# COEXISTENCE CONSTRAINT with `plugins/clipboard`: this worker-thread `arboard::Clipboard` and that backend's per-call instance
-# can be live on different threads at once, which `plugins/clipboard/src/desktop.rs` records as observed to crash (macOS
-# NSPasteboard). An app using a clipboard-capable widget with `frust-clipboard`'s API on desktop is unsupported until one
-# route gives way; not yet closed.
+# COEXISTENCE: this worker-thread instance and `plugins/clipboard`'s per-call one can be live on different threads, observed to
+# crash (macOS NSPasteboard; `plugins/clipboard/src/desktop.rs`). A clipboard widget plus `frust-clipboard`'s API on desktop is unsupported.
 arboard = { workspace = true }
 
 # DEV-ONLY (docs/ARCHITECTURE.md Layer Dependencies): `reactive_graph`'s Get/Set traits, which `frust-reactive` does not
