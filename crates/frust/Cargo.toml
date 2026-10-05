@@ -17,224 +17,95 @@ name = "frust"
 
 [dependencies]
 frust-core = { workspace = true }
-# The baseline widget set. No design-system catalog rides this edge: the three
-# built-in catalogs left the tree and ship as their own plugin crates
-# (`frust-glyph`/`frust-material`/`frust-cupertino`), which an app depends on
-# beside the facade — never inside it (docs/ARCHITECTURE.md's facade/plugin
-# boundary).
+# No design-system catalog rides this edge: catalogs ship as sibling plugin crates an app depends
+# on beside the facade, never inside it (docs/ARCHITECTURE.md's facade/plugin boundary).
 frust-widgets = { workspace = true }
 frust-reactive = { workspace = true }
-# Load-bearing: re-exported flat (Theme, ColorScheme, TypeScale, ShapeScale,
-# Elevation, MotionScheme, ...) as the facade's design-token vocabulary — see
-# lib.rs's re-exports and docs/ARCHITECTURE.md's Theme delivery.
+# Re-exported flat as the facade's design-token vocabulary (see lib.rs).
 frust-theme = { workspace = true }
-# Load-bearing: `peniko::Color` is re-exported flat (see lib.rs) so app code can
-# author its own color values (e.g. a custom accent palette composing onto a
-# baseline `ColorScheme`) without naming `peniko` directly. Already in the graph
-# transitively via frust-theme/-widgets; named here so the re-export resolves
-# in the library (not just the dev-dependency copy below).
+# Named directly (also transitive) so lib.rs's flat `Color` re-export resolves in the library.
 peniko = { workspace = true }
-# Named directly (not just through frust-reactive) for the facade's flat
-# re-export surface (`Memo`, `signal`, `spawn`/`spawn_local`) — see
-# `frust::run`/the reactive re-exports in `lib.rs`.
+# Named directly for lib.rs's flat reactive re-exports (`Memo`, `signal`, `spawn`/`spawn_local`).
 reactive_graph = { workspace = true }
 any_spawner = { workspace = true }
-# Load-bearing (task 6c-04): the app-facing theme override seam
-# (`set_app_theme`/`clear_app_theme`) re-exported flat below — see
-# `frust_shell_common::theme_override`'s module docs for the layering
-# rationale. Every shell already depends on this crate; the facade depends on
-# it directly (not just transitively) so the re-export doesn't rely on which
-# platform-shell dependency happens to be active.
+# Direct so the flat `set_app_theme`/`clear_app_theme` re-export never depends on which platform
+# shell is active (see `frust_shell_common::theme_override`).
 frust-shell-common = { workspace = true }
-# Load-bearing: re-exported through `authoring::scene` (see lib.rs) so a widget
-# painting below `PaintScene` can build its own `Scene`/`Command`s without
-# naming `frust-scene`. Already in the graph transitively via frust-widgets/
-# frust-core; named here (promoted from a former dev-dependency, see task
-# 01/facade-authoring-seam) so the re-export resolves in the library itself,
-# not just a test build.
+# Named directly so the `authoring::scene` re-export resolves in the library, not just in tests.
 frust-scene = { workspace = true }
-# The render abstraction layer: in the graph transitively via the shells, and
-# named here directly so the facade's own dependency list states the renderer
-# it is built on. There is no tier feature to forward any more — the
-# frust-engine render path is what `frust-render` unconditionally is, so an
-# app opts into nothing and this edge carries no feature of its own.
+# frust-engine is the only renderer: there is no render-tier feature to forward.
 frust-render = { workspace = true }
-# The GPU device/texture substrate `frust-render` itself builds on, named
-# directly (not just transitively) and optionally so the non-default `gpu`
-# feature can re-export it flat through `frust::gpu` (see lib.rs) — an app,
-# or a future 3D-rendering crate sitting beside the facade, reaching the
-# render engine's texture seam without a direct `frust-render`/`frust-gpu`
-# dependency of its own. This is the one sanctioned exception to "nothing
-# above RENDER depends on `frust-gpu`" (docs/ARCHITECTURE.md's GPU-substrate
-# layer boundary) — optional and off by default, so an ordinary app build
-# still carries none of it.
+# Optional, `gpu` only: the one sanctioned exception to "nothing above RENDER depends on
+# `frust-gpu`" (docs/ARCHITECTURE.md's GPU-substrate boundary), so an ordinary app carries none.
 frust-gpu = { workspace = true, optional = true }
-# The wgpu GPU graphics library, re-exported flat through `frust::gpu` under
-# the `gpu` feature so a plugin recording an ExternalPass needs no direct
-# wgpu edge. Optional and off by default; workspace-pinned to keep the
-# version in sync with the rest of the stack.
-#
-# Backend-free like every other wgpu row outside `frust-gpu`: the per-OS
-# backends are added per target by `crates/frust-gpu/Cargo.toml`'s
-# `[target.'cfg(...)'.dependencies]` tables. This row needs none — the `gpu`
-# feature below turns on `dep:frust-gpu` alongside `dep:wgpu` (and
-# `frust-render` pulls `frust-gpu` in unconditionally regardless), so the
-# re-exported `wgpu` is always the one carrying the target's backend.
+# Backend-free like every wgpu row outside `frust-gpu`: `gpu` enables `dep:frust-gpu` alongside, and
+# `crates/frust-gpu/Cargo.toml`'s per-target tables supply the backend.
 wgpu = { workspace = true, optional = true }
-# Load-bearing: re-exported through `authoring::text` (see lib.rs) so an app
-# can shape its own glyph runs without naming `frust-text`. Already in the
-# graph transitively via frust-widgets/frust-theme; named here (promoted from
-# a former dev-dependency) so the re-export resolves in the library itself,
-# not just a test build.
+# Named directly so the `authoring::text` re-export resolves in the library, not just in tests.
 frust-text = { workspace = true }
-# Load-bearing: `kurbo`'s geometry types are re-exported flat (`frust::kurbo`)
-# and by name through `authoring` (see lib.rs) so an app authoring a custom
-# widget can build paths/rects/affines without naming `kurbo` directly.
-# Already in the graph transitively via frust-widgets/frust-scene/frust-core;
-# named here (promoted from a former dev-dependency) so the re-export
-# resolves in the library itself, not just a test build.
+# Named directly so the flat `frust::kurbo` and `authoring` re-exports resolve in the library.
 kurbo = { workspace = true }
-# Depended on unconditionally so the re-exported `android_app!` macro is always
-# available; the crate compiles to (almost) nothing off-Android.
+# Unconditional so `android_app!` is always re-exported; the crate is inert off-Android.
 frust-shell-android = { workspace = true }
-# Likewise unconditional so the re-exported `ios_app!` macro is always available;
-# the crate compiles to (almost) nothing off-iOS.
+# Unconditional so `ios_app!` is always re-exported; the crate is inert off-iOS.
 frust-shell-ios = { workspace = true }
 anyhow = { workspace = true }
 
-# The shared desktop core (winit event loop + render stack), off both mobile
-# targets and off wasm32. Android was always excluded — winit pulls in
-# android-activity, which does not compile for an Android target and is dead
-# weight there anyway, since the app is driven by `android_app!`/JNI. iOS is
-# excluded for the same reason (its app is driven by `ios_app!`'s C-ABI entry
-# points, and winit's UIKit backend is never entered), which additionally
-# keeps winit, accesskit_winit and their transitive graph out of an iOS build
-# entirely. wasm32 is excluded for the analogous reason on the fourth host
-# tier: `frust-shell-desktop`'s `accesskit_winit` adapter, `pollster::block_on`
-# surface bring-up, render thread and `frust-paths` cache I/O do not compile
-# for `wasm32-unknown-unknown` (see `crates/frust-shell-web`'s own crate
-# docs) — the app is driven by `web_app!`'s wasm-bindgen start shim instead
-# (see lib.rs).
-#
-# Deliberately `not(mobile-or-wasm)` rather than a list of desktop targets: a
-# BSD-ish or other niche desktop host keeps the generic core (and, with no
-# per-OS table below matching it, the no-op `NoExtensions` — see `lib.rs`'s
-# `desktop_extensions`).
+# Off Android/iOS/wasm32 (driven by `android_app!`/`ios_app!`/`web_app!`; the winit graph fails to
+# build or is dead weight there). Negated, not a desktop list, so a niche host keeps the generic core.
 [target.'cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))'.dependencies]
 frust-shell-desktop = { workspace = true }
 
-# The three per-OS desktop shells, each wired into the run path by `lib.rs`'s
-# `desktop_extensions` under the identical `cfg` that gates its dependency here.
-# Each crate compiles inert off its own target (see their crate docs), but the
-# facade still gates them per-OS so a build only ever resolves the native
-# bindings (muda/objc2/windows-sys) of the host it is building for.
-#
-# No feature forwards below (`perf-trace`/`devtools`): none of the three
-# declares a feature of its own. Their shared `frust-shell-desktop` edge is one
-# package instance in the graph, so the existing `frust-shell-desktop/*`
-# forwards already reach the core underneath them.
+# Each gated by the same `cfg` as its `desktop_extensions` arm in lib.rs, so a build resolves only its
+# host's native bindings. No feature forwards: none declares one; `frust-shell-desktop/*` reaches them.
 [target.'cfg(target_os = "macos")'.dependencies]
 frust-shell-macos = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 frust-shell-windows = { workspace = true }
 
-# Linux only, not the wider "free unix" family `frust-shell-linux` itself gates
-# its winit Wayland/X11 extension usage on: a BSD would work, but nothing here
-# compile-gates one, so the wiring stays as narrow as the verification. Widening
-# it is one `cfg` here plus the matching arm in `lib.rs`'s `desktop_extensions`.
+# Linux only, as narrow as the verification; widening needs this `cfg` plus the matching
+# `desktop_extensions` arm in lib.rs.
 [target.'cfg(target_os = "linux")'.dependencies]
 frust-shell-linux = { workspace = true }
 
-# The fourth host tier: the browser shell, off both mobile targets and off
-# desktop (see the `frust-shell-desktop` table's doc comment above for why the
-# three don't overlap). `web_app!`'s generated wasm-bindgen start shim (see
-# lib.rs) is what `lib.rs`'s `desktop_extensions`/`App::run` are to the three
-# desktop tables above.
+# Browser tier, entered through `web_app!`'s wasm-bindgen start shim (lib.rs).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 frust-shell-web = { workspace = true }
-# `web_app!`'s own wasm-bindgen entry point (`#[wasm_bindgen(start)]`) plus the
-# browser panic/log boilerplate every wasm entry needs (routing a Rust panic to
-# `console.error` instead of an opaque `unreachable` trap, and the `log` facade
-# to `console.*` — see the Phase-0 spike, `examples/web-spike/src/main.rs`'s
-# `mod web::start`, for the proven shape). Named here (not just transitively
-# through `frust-shell-web`, which does not depend on any of these) and
-# re-exported hidden from `lib.rs` so a generated app never needs these in its
-# own `Cargo.toml` — mirroring `frust-shell-android`'s `__jni` re-export for
-# the identical reason.
+# Re-exported hidden from lib.rs so a generated app needs none of these in its own manifest
+# (the same reason as `frust-shell-android`'s `__jni` re-export).
 wasm-bindgen = { workspace = true }
 console_error_panic_hook = { workspace = true }
 console_log = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
-# Test-only: `router_glue`'s unit tests build GPU-free fixture widgets
-# (mirroring `frust-widgets::nav::router`'s own test fixtures) that
-# implement `frust_core::PaintScene`/`Widget` directly, whose signatures
-# name these geometry/brush types. Also used by the ported facade integration
-# tests below (`tests/interaction_basics.rs`/`tests/interaction_text_input.rs`).
-# `kurbo` is a real `[dependencies]` entry above (promoted for `authoring`),
-# so it is not repeated here — a crate cannot be named in both sections with
-# the same feature set.
+# `kurbo`, `frust-scene` and `frust-text` are normal dependencies above, so they are not repeated here.
 peniko = { workspace = true }
-# Test-only: the ported counter/notes headless interaction tests
-# (`tests/interaction_basics.rs`/`tests/interaction_text_input.rs`) drive the
-# framework's `RenderRoot` directly with synthetic `InputEvent`s — the same
-# event seam the desktop shell's `dispatch` uses — shaping text through a real
-# `TextContext` (no GPU, no window) and recording paint output. `frust-scene`
-# and `frust-text` are real `[dependencies]` entries above (promoted for
-# `authoring::scene`/`authoring::text`), so only `frust-core` is added here.
 frust-core = { workspace = true }
-# Test-only (`image_async` tests): encodes a tiny in-memory PNG fixture via
-# the `image` crate's own encoder, mirroring `frust-widgets::image`'s own
-# test fixture — no filesystem asset to keep in sync. Already pinned exact at
-# the workspace level (`image = "=0.25.10"`, see docs/DEVELOPMENT.md's
-# Version-Pin Policy); `frust-widgets` already depends on it non-dev, this
-# only adds the dev-only copy the facade's own tests need.
+# Exact workspace pin (docs/DEVELOPMENT.md § Version-Pin Policy); encodes the `image_async` PNG fixture.
 image = { workspace = true }
 
 [features]
-# No default features. The facade carries no design-system catalog: the three
-# built-in catalogs left the tree as their own plugin crates
-# (`frust-glyph`/`frust-material`/`frust-cupertino`), each depended on beside
-# `frust` and installed with its own `install()` call. `default-features =
-# false` on a `frust` edge is therefore no longer meaningful for catalog
-# opt-out — there is nothing to opt out of.
+# No default features and no design-system catalog: catalogs are sibling plugin crates, each
+# installed with its own `install()`.
 default = []
-# Opt-in perf-trace instrumentation: re-exports perf-trace from all three shells.
-# Empty by default (opt-in survives cargo's additive unification; the CLI is the
-# sole enabler). Cargo applies each shell's feature per target: desktop's feature
-# activates only on non-mobile targets; Android/iOS features activate only on
-# their respective targets.
+# Opt-in, never default (opt-in survives additive unification; the CLI is the sole enabler). Each
+# shell's forward activates only on that shell's own targets.
 perf-trace = [
     "frust-shell-desktop/perf-trace",
     "frust-shell-android/perf-trace",
     "frust-shell-ios/perf-trace",
 ]
-# Opt-in in-app devtools service: re-exports devtools from all three shells,
-# with the identical per-target forwarding shape `perf-trace` uses above
-# (desktop's feature activates only on non-mobile targets; Android/iOS's only
-# on their own). Empty by default — a release build carries no listener, no
-# discovery line and no protocol symbols, because the FEATURE is absent, not
-# because a runtime check is false. The CLI is the sole enabler
-# (`BuildMode::cargo_features` selects it for debug/profile alongside
-# `perf-trace`); an app can also turn it on by hand for a one-off inspection.
+# Opt-in, never default: a release build has no listener or protocol symbols because the feature is
+# absent. The CLI enables it for debug/profile (`BuildMode::cargo_features`).
 devtools = [
     "frust-shell-desktop/devtools",
     "frust-shell-android/devtools",
     "frust-shell-ios/devtools",
 ]
-# Opt-in GPU substrate seam: turns on the optional `frust-gpu` dependency
-# above and re-exports its device/texture/pipeline vocabulary flat through
-# `frust::gpu` (see lib.rs). Empty by default, same additive-unification
-# shape as `perf-trace`/`devtools`. The three shell forwards mirror those
-# two features' per-target shape. `frust-shell-common/gpu` is the process-wide
-# device-handle slot `frust::gpu::with_context` reads through (see
-# `frust_shell_common::gpu`'s module docs) — reachable here with no new
-# dependency edge since `frust-shell-common` is already a direct, unconditional
-# dependency above. The desktop shell's render executor installs into that slot
-# (`frust-shell-desktop/render.rs`); the Android/iOS shells forward the feature
-# but do not install yet — an accepted gap, see each shell's own crate docs.
+# Opt-in `frust::gpu` seam. `frust-shell-common/gpu` is the device slot `with_context` reads; only the
+# desktop shell installs into it yet (Android/iOS: accepted gap, see their crate docs).
 gpu = [
     "dep:frust-gpu",
     "dep:wgpu",

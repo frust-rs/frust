@@ -4,256 +4,90 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-# Dev-only test infrastructure (golden/oracle/fuzz support for the render
-# stack), never shipped in an app's dependency graph — every consumer takes
-# it as a [dev-dependencies] edge only (enforced by tests/deps.rs's guard).
+# Dev-only test infrastructure: every consumer takes it as a [dev-dependencies] edge only
+# (enforced by tests/deps.rs's guard), so it never ships in an app's graph.
 publish = false
 
-# The website's widget-preview generator (`src/bin/widget-snapshots.rs`): walks
-# `frust-gallery`'s case registry and writes a light/dark PNG pair plus a
-# `manifest.json`. It lives in THIS crate rather than its own because
-# everything it needs is this crate's own API — the pure-`View` frame recorder
-# (`src/frame.rs`), the GPU-free `CpuOracle`, `corpus::straighten_alpha`, and
-# the bundled deterministic fonts — and because it is dev tooling for exactly
-# the reason this crate is (`publish = false`, reachable only across a
-# `[dev-dependencies]` edge). Declared explicitly rather than left to
-# `src/bin/` auto-discovery, so the target is visible in the manifest that
-# carries its rationale.
+# The website's widget-preview generator: lives here because it needs only this crate's own API
+# (frame recorder, `CpuOracle`, bundled fonts). Declared explicitly so the target is visible.
 [[bin]]
 name = "widget-snapshots"
 path = "src/bin/widget-snapshots.rs"
 
 [dependencies]
-# The shared widget/page CASE REGISTRY the `widget-snapshots` bin renders
-# (`examples/gallery`). A root-workspace member, so this is an ordinary
-# intra-workspace path edge, declared the way the design-system plugins below
-# are (`workspace.dependencies` carries no entry for either). Dev-only in both
-# directions: `frust-gallery` is `publish = false` too, takes no
-# `frust-render`/`frust-gpu`/`wgpu`/`vello` edge of its own, and depends on
-# nothing in this crate — so there is no cycle and no production graph is
-# involved. A NORMAL rather than a dev dependency because `src/snapshot.rs`
-# names `Case`/`Variant` in this crate's own public API, and because a
-# `[[bin]]` target cannot see `[dev-dependencies]` at all.
+# The case registry `widget-snapshots` renders (dev-only, `publish = false`, no edge back). NORMAL,
+# not dev: `src/snapshot.rs` exposes `Case`/`Variant` and a `[[bin]]` cannot see `[dev-dependencies]`.
 frust-gallery = { path = "../../examples/gallery" }
-# Renderer-agnostic scene display list every `SceneRenderer` implementation
-# renders — the vocabulary both oracle arms decode, and the only render input
-# a golden case is allowed to record through (`corpus::unit`'s
-# `SceneBuilder`-only rule).
+# The only render input a golden case may record through (`corpus::unit`'s `SceneBuilder`-only rule).
 frust-scene = { workspace = true }
-# Backs `fonts::register_test_fonts` — registering the bundled test-only
-# fonts (`testing/fonts/`) into a `TextContext` so a golden/host test shapes
-# deterministically without any system font (docs/TESTING.md's Deterministic
-# Inputs). Also the one sanctioned way `corpus::unit`'s `unit-glyph-run` case
-# turns text into `frust_scene::GlyphRun`s: shaped against the bundled faces
-# only, never a host font.
+# `fonts::register_test_fonts`: bundled faces only, never a host font (docs/TESTING.md's Deterministic Inputs).
 frust-text = { workspace = true }
-# Named for the `FRUST_GOLDEN_EXPECT_ADAPTER`/`FRUST_GOLDEN_EXPECT_BACKEND`
-# variable names `oracle_engine` refuses a wrongly-resolved adapter against
-# (`GOLDEN_EXPECT_ADAPTER_ENV_VAR`/`GOLDEN_EXPECT_BACKEND_ENV_VAR`): the
-# operator knob is one contract across every GPU run in this repository, so it
-# is imported rather than a second spelling of the same two strings.
-# `features = []` keeps the default feature set, which is now empty: the tier
-# feature that used to head this list was retired with the tier selection it
-# named, leaving only the non-default `perf-trace` this crate does not want.
-# `frust-render`'s legacy `cpu-tier` feature (which would have dragged its own
-# `vello_cpu 0.0.9`/`glifo 0.1.1` identities into this crate's graph beside the
-# 0.2.0 oracle pin) was retired earlier; see tests/dup_identities.rs.
+# Imported for the `FRUST_GOLDEN_EXPECT_ADAPTER`/`_BACKEND` names `oracle_engine` enforces: one
+# operator contract across every GPU run, not a second spelling of the same strings.
 frust-render = { workspace = true, features = [] }
-# Backs `frame.rs` — the GPU-free widget-frame capture (`RenderRoot::rebuild`
-# -> `layout_with_text` -> `paint` into a `frust_scene::SceneBuilder`, which
-# THIS crate implements `PaintScene` for). `corpus::widget` and `corpus::page`
-# record their scenes through a real retained widget tree rather than by hand,
-# so the tree is an input to this crate, not merely a consumer of it.
+# Backs `frame.rs`'s GPU-free widget-frame capture through a real retained widget tree.
 frust-core = { workspace = true }
-# The baseline widget set `corpus::widget`'s cases are built from, with
-# `test-support` on for the `Leaf`/`SwapLeaf`/`Probe` fixtures — the same
-# non-default feature the design-system plugins already take as a
-# dev-dependency. A corpus case needs a leaf of known intrinsic size to pin a
-# container's geometry without dragging a content widget's own layout into the
-# picture.
+# `test-support` for the `Leaf`/`SwapLeaf`/`Probe` fixtures `corpus::widget` pins container geometry with.
 frust-widgets = { workspace = true, features = ["test-support"] }
-# `frame::pin_type_scale` rewrites every slot of a `Theme`'s type scale onto
-# the bundled test face, and every widget/page case installs the result on its
-# `RenderRoot`: the theme is a deterministic INPUT of a golden case
-# (docs/TESTING.md's Deterministic Inputs), pinned here rather than left to
-# whatever a shell would have seeded.
+# `frame::pin_type_scale`: the theme is a deterministic golden input (docs/TESTING.md's Deterministic Inputs).
 frust-theme = { workspace = true }
-# The four design-system catalogs `corpus::page` reconstructs its pages from.
-# Root-workspace members, so a path edge here is an ordinary intra-workspace
-# dependency — and the only way a page case can be a REAL catalog page instead
-# of a hand-drawn imitation of one. Declared by path, the way the plugins
-# declare each other (`workspace.dependencies` carries no plugin entry).
-# `examples/material3-demo` is deliberately absent: it is an EXCLUDED
-# workspace and cannot be imported from here at all, which is why it carries
-# its own `tests/page_goldens.rs` over a path dev-dependency on this crate.
+# Real catalog pages for `corpus::page`, by path (no plugin `workspace.dependencies` rows).
+# `examples/material3-demo` is an excluded workspace, so it runs its own `tests/page_goldens.rs`.
 frust-material = { path = "../../plugins/material" }
 frust-cupertino = { path = "../../plugins/cupertino" }
 frust-glyph = { path = "../../plugins/glyph" }
 frust-shadcn = { path = "../../plugins/shadcn" }
 kurbo = { workspace = true }
 peniko = { workspace = true }
-# Pinned exactly at the workspace level (docs/DEVELOPMENT.md's Version-Pin
-# Policy) — golden/oracle image encode-decode will consume this in a later
-# phase; declared now so every test-support crate in this plan resolves the
-# same pin rather than each pulling its own.
+# Exact workspace pin (docs/DEVELOPMENT.md's Version-Pin Policy).
 image = { workspace = true }
 log = { workspace = true }
 anyhow = { workspace = true }
-# Backs the per-golden JSON metadata contract (`meta::GoldenMeta`).
+# The per-golden JSON metadata contract (`meta::GoldenMeta`, `diff::DiffReport`), written by `golden.rs`.
 serde = { workspace = true }
-# `golden.rs` writes the promoted-baseline/failure-artifact JSON
-# (`GoldenMeta`, `diff::DiffReport`) this crate's own `serde` derives exist
-# for — moved out of [dev-dependencies] (where it only backed this crate's
-# unit tests before this comparator/golden-IO layer existed) since it is now
-# exercised by production (non-`#[cfg(test)]`) code.
 serde_json = { workspace = true }
-# The CPU oracle's rasterizer (`oracle_cpu::CpuOracle`) — vello_cpu 0.2.0,
-# renamed at the workspace level from the era when the retired `cpu-tier`
-# fallback's own `vello_cpu = "=0.0.9"` row also lived there (see the root
-# manifest's comment). A NORMAL dependency rather
-# than a dev one: `CpuOracle` is part of this crate's own API, and this whole
-# crate is `publish = false` and reachable only across a `[dev-dependencies]`
-# edge (tests/deps.rs's guard), so no production graph ever sees it. Not
-# `wgpu` — this arm of the oracle pair rasterizes on the CPU, so it runs on a
-# GPU-less machine even though the engine arm's edges are in the graph.
+# The CPU oracle arm (`vello_cpu` 0.2.0, renamed at the workspace level). NORMAL, not dev: `CpuOracle`
+# is public API. CPU-only, so it runs on a GPU-less machine.
 vello_cpu_oracle = { workspace = true }
-# Back `oracle_engine::EngineOracle` — the sparse-strip GPU arm of the oracle
-# pair, a `SceneRenderer` over `frust_engine::EngineRenderer` recording into a
-# `frust_gpu::HeadlessTarget`. This is the ONE place this crate's former
-# "GPU-free leaf" charter is relaxed, and it is relaxed deliberately: an
-# oracle PAIR needs both arms behind one trait, `corpus` hands the same case
-# to both, and this crate is `publish = false`, reachable only across a
-# `[dev-dependencies]` edge (tests/deps.rs's guard), so no production graph
-# ever sees the engine tier through here. NORMAL rather than dev dependencies
-# for the same reason `vello_cpu_oracle` is one: `EngineOracle` lives in
-# `src/` and is part of this crate's own API. `tests/pins_and_deps.rs`'s G7
-# layer boundary is untouched — it forbids an edge onto the engine/GPU layer
-# from `frust-core`/`frust-widgets`/`frust`/`plugins/*`, and this crate is
-# none of those.
+# `oracle_engine::EngineOracle`, the GPU arm (public API, so NORMAL). Allowed here: tests/pins_and_deps.rs's
+# G7 rule forbids engine/GPU edges only from `frust-core`/`frust-widgets`/`frust`/`plugins/*`.
 frust-engine = { workspace = true }
 frust-gpu = { workspace = true }
-# The engine's own filter vocabulary (`vello_common::filter_effects::{Filter,
-# FilterPrimitive}`) — the `filter: Option<Filter>` `corpus::filters`'
-# CPU-side reference hands straight to `vello_cpu_oracle::RenderContext::
-# push_layer`, so a filter case's CPU arm renders through vello_cpu's OWN
-# filter pipeline rather than a hand-rolled second one. Exactly the SAME
-# `=0.2.0` pin `vello_cpu_oracle` and `frust-engine` already resolve
-# transitively (`tests/dup_identities.rs`'s guard re-verifies no third
-# identity), so this is a direct edge onto an identity already in the graph,
-# not a new one.
+# vello_cpu's own filter vocabulary for `corpus::filters`' CPU arm: the same `=0.2.0` identity the
+# oracle and engine resolve (tests/dup_identities.rs guards against a third).
 vello_common = { workspace = true }
-# Named directly because the engine seam is spelled in wgpu's own vocabulary:
-# `EngineTarget` carries a `wgpu::TextureView`/`wgpu::TextureFormat` and
-# `EngineRenderer::encode` records into a `wgpu::CommandEncoder` the CALLER
-# owns, and neither engine-layer crate re-exports wgpu, so an adapter for that
-# seam has to name it. It stays confined to `oracle_engine`'s internals: no
-# `wgpu` type appears in this crate's public API, which speaks plain bytes,
-# `kurbo` and `peniko` exactly as before (`docs/CODE_STANDARDS.md`'s
-# "Leaking `vello`/`wgpu` types outside `frust-render`").
+# The engine seam is spelled in wgpu types; confined to `oracle_engine` internals, never public API
+# (docs/CODE_STANDARDS.md's "Leaking `vello`/`wgpu` types outside `frust-render`").
 wgpu = { workspace = true }
-# wgpu's adapter and device requests are futures while `SceneRenderer` is
-# sync, so `oracle_engine` drives them to completion with the same minimal
-# block-on executor `frust-engine`'s and `frust-render`'s own GPU tests use
-# (`tests/ios_sim.rs` and `tests/engine_goldens.rs` drive the engine directly
-# and need it too). A NORMAL dependency for the same reason
-# `vello_cpu_oracle` is one: `EngineOracle` is part of this crate's API.
+# Blocks on wgpu's adapter/device futures behind the sync `SceneRenderer`.
 pollster = { workspace = true }
-# `widget-snapshots`' argument parsing (`--out`/`--filter`/`--list`/`--check`/
-# `--gpu`), on the workspace's existing `clap 4.6 + derive` pin — the same one
-# `frust-cli` resolves, so this adds an edge onto an identity already in the
-# graph rather than a new one. A NORMAL dependency because Cargo does not
-# expose `[dev-dependencies]` to a `[[bin]]` target.
+# `widget-snapshots`' CLI on the workspace clap pin; NORMAL because a `[[bin]]` cannot see dev-deps.
 clap = { workspace = true }
-# The `sha256` field of every `manifest.json` row (`snapshot::sha256_hex`) — a
-# content hash of the PNG bytes, so the website can cache-bust a preview and a
-# reader can tell two runs apart without diffing images. NOT a
-# `workspace = true` row: `sha2` has no `[workspace.dependencies]` entry, and
-# `Cargo.lock` already resolves exactly 0.10.9 transitively, so it is pinned
-# here to that exact version — a caret pin could later float to a second
-# identity of a crate already in the graph, which the Version-Pin Policy exists
-# to prevent. Bump it only together with whatever transitively pulls it.
+# Exact pin to the 0.10.9 Cargo.lock already resolves transitively (no workspace row): a caret could fork
+# a second identity. Bump only with whatever pulls it (docs/DEVELOPMENT.md's Version-Pin Policy).
 sha2 = "=0.10.9"
 
 [dev-dependencies]
-# tests/deps.rs parses every crate/plugin manifest to enforce the
-# dev-dependency-only guard above.
 toml = { workspace = true }
 
-# Dev-dependencies that exist for the NATIVE test targets only.
-#
-# `cfg(not(target_arch = "wasm32"))` is true on every target this workspace
-# has ever built for bar the browser one, so the native dependency set is
-# byte-identical to what it was before this table existed — the rows moved,
-# nothing resolved differently.
-#
-# The move is forced rather than tidy: `proptest` reaches `getrandom` 0.3,
-# which fails to COMPILE on wasm32-unknown-unknown with a deliberate
-# `compile_error!` unless the `wasm_js` backend is selected through a
-# `--cfg` in RUSTFLAGS. Cargo builds a crate's whole dev-dependency graph for
-# the selected target no matter which test target is being built, so leaving
-# this row unconditional made every browser build of this crate fail inside a
-# crate the browser suite does not use, and the only fixes available at the
-# call site are a `.cargo/config` RUSTFLAGS entry (process-wide, and not this
-# crate's to set) or this table.
-#
-# The consequence to know: `tests/fuzz.rs` cannot be built for wasm32, so a
-# browser run must NAME its test targets (`--test wasm_goldens --test
-# wasm_binary_invariants`) rather than asking for all of them. Both browser
-# targets are listed in `tests/wasm_goldens.rs`'s own run line.
+# Native-only: `proptest` reaches getrandom 0.3, which fails to compile on wasm32-unknown-unknown, and
+# Cargo builds every dev-dep per target — so a browser run must name its `--test` targets.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-# tests/fuzz.rs — the cross-oracle differential: generated scenes rendered on
-# the engine and on `vello_cpu` and held to the same near-exact bar the engine
-# goldens use. A DEV dependency (unlike the oracle crates above): the generator
-# lives in the test target, not in this crate's own API.
+# tests/fuzz.rs's cross-oracle differential (the generator lives in the test target, hence dev).
 proptest = { workspace = true }
 
 # --- Browser (wasm32-unknown-unknown) test harness -----------------------------
-#
-# Consumed ONLY by `tests/wasm_goldens.rs` and `tests/wasm_binary_invariants.rs`,
-# both of which are `#![cfg(all(target_arch = "wasm32", feature = "webgl"))]`.
-# A `cfg(target_arch = "wasm32")` dev-dependency table cannot enter any native
-# graph at all, so none of these rows exists for the ordinary host gate — this
-# crate's native dependency set is byte-identical to what it was.
+# Only for `tests/wasm_goldens.rs`/`tests/wasm_binary_invariants.rs`, both `cfg(all(target_arch = "wasm32", feature = "webgl"))`.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-# The browser test harness itself: `wasm_bindgen_test_configure!(run_in_browser)`
-# plus the `#[wasm_bindgen_test]` attribute, driven by the host's
-# `wasm-bindgen-test-runner`. Pinned EXACTLY, and to this line specifically,
-# because it is one half of a two-part schema contract rather than an ordinary
-# semver dependency: `wasm-bindgen-test` 0.3.78 is the release paired with the
-# `wasm-bindgen` 0.2.128 the root `[workspace.dependencies]` already pins
-# exactly, and the host's `wasm-bindgen-test-runner` (shipped by that same
-# `wasm-bindgen-cli` 0.2.128) refuses a binary whose schema hash does not
-# match. A caret row here could float the pair apart on any later `cargo
-# update` and the failure would surface as an opaque runner refusal, not a
-# version error — the exact shape `docs/DEVELOPMENT.md`'s Version-Pin Policy
-# exists to prevent. Bump it only together with the root `wasm-bindgen` pin
-# AND the installed CLI, never on its own.
+# Exact: paired with the root `wasm-bindgen = "=0.2.128"` pin and the installed wasm-bindgen-cli, whose
+# test runner refuses a schema-hash mismatch. Bump all three together, never alone
+# (docs/DEVELOPMENT.md's Version-Pin Policy).
 wasm-bindgen-test = "=0.3.78"
-# The `JsCast` conversions the two test targets need (`dyn_into::<Response>`,
-# `dyn_into::<HtmlImageElement>`). Takes the root's exact `=0.2.128` pin rather
-# than restating it, so there is exactly one wasm-bindgen identity in the
-# browser graph.
+# Takes the root's exact pin: one wasm-bindgen identity in the browser graph.
 wasm-bindgen = { workspace = true }
-# `JsFuture` — awaiting `fetch`'s promise in `tests/wasm_binary_invariants.rs`,
-# which reads back the very module it is running inside to record its size.
 wasm-bindgen-futures = { workspace = true }
-# The DOM surface both browser test targets need, at exactly the feature set
-# those uses require and no wider:
-#
-#   * `HtmlCanvasElement` — the canvas wgpu's WebGL2 backend resolves its
-#     adapter against. On wasm32 the GL backend enumerates NO adapter without
-#     a canvas-backed `compatible_surface` (`wgpu_hal::gles::web`'s
-#     `enumerate_adapters` returns an empty vector for a `None` surface hint),
-#     so a browser run has to own one; see `tests/wasm_goldens.rs`.
-#   * `Document`/`Element`/`HtmlElement`/`Node`/`HtmlImageElement` — a failing
-#     golden appends its comparison triptych to the document as an `<img>`, so
-#     a headed run shows the disagreement instead of only printing numbers.
-#   * `Window`/`Response` — `tests/wasm_binary_invariants.rs` fetches the very
-#     module it is running inside to record that module's own byte size.
-#   * `console` — `println!` is a silent no-op on wasm32-unknown-unknown (std's
-#     stdout is the `unsupported` shim there), so every line this suite is read
-#     by — the resolved adapter, the downlevel profile, each case's measured
-#     delta — is written to `console.*` or it does not exist.
+# Exactly the features the two targets use. The canvas is required (wasm32 GL enumerates no adapter
+# without a canvas `compatible_surface`); `console` because `println!` is a no-op on wasm32.
 web-sys = { workspace = true, features = [
     "console",
     "Document",
@@ -267,19 +101,7 @@ web-sys = { workspace = true, features = [
 ] }
 
 [features]
-# Empty by default: the host golden/oracle surface every consumer takes across
-# its `[dev-dependencies]` edge is the whole crate, with nothing to opt into.
 default = []
-# The browser WebGL2 golden suite (`tests/wasm_goldens.rs`,
-# `tests/wasm_binary_invariants.rs`). NON-DEFAULT and inert on every native
-# target: both test targets carry
-# `#![cfg(all(target_arch = "wasm32", feature = "webgl"))]`, so the ordinary
-# host gate compiles them to nothing whether or not the feature is named.
-#
-# It switches on no wgpu backend of its own, deliberately.
-# `crates/frust-gpu/Cargo.toml`'s `cfg(target_arch = "wasm32")` row is the
-# single choke point that unions wgpu's `webgl` backend into every wasm build
-# in this workspace, and reaching around it from here would give the browser
-# suite a backend set the shell itself does not have. This feature's only job
-# is to opt the two browser test targets in.
+# Opts the two browser test targets in; inert natively. Adds NO wgpu backend: `crates/frust-gpu/Cargo.toml`'s
+# wasm32 row is the single choke point for wasm backends, so the suite matches the shell's backend set.
 webgl = []

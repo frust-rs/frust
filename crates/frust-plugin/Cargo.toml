@@ -12,18 +12,11 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-# Errors callers match on (PlatformHandleError, desktop::RegisterError) —
-# thiserror per CODE_STANDARDS. Unconditional so the crate (and its error
-# types) exist on every target, keeping it an always-on dependency for
-# plugins regardless of platform. The desktop view-factory registry
-# (src/desktop.rs) needs no dependency beyond this: it is built entirely on
-# std::sync/std::collections, so this crate stays a leaf.
+# Unconditional so the error types exist on every target; the desktop registry (src/desktop.rs) needs
+# only std, so this crate stays a leaf.
 thiserror = { workspace = true }
 
-# The JNI runtime and the ndk-context handle store are only ever compiled for an
-# Android target; on every other target `android` is an inert stub module, so
-# neither dep is pulled in off-Android (target-gated exactly like the Android
-# shell's own `jni` gating).
+# Android only: `android` is an inert stub module elsewhere (gated like the Android shell's own `jni`).
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true }
 ndk-context = { workspace = true }

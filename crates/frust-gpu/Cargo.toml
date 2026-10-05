@@ -26,74 +26,28 @@ perf-trace = []
 [target.'cfg(target_os = "android")'.dependencies]
 android_system_properties.workspace = true
 
-# --- Per-target wgpu backend features ------------------------------------
-#
-# `wgpu`'s workspace row (root `Cargo.toml`) carries only the
-# target-independent base (`std`/`parking_lot`/`wgsl`); the GPU backends are
-# added HERE, per target, and nowhere else. This crate is the single choke
-# point that makes that safe: every crate in the workspace that names `wgpu`
-# directly — `frust-engine`, `frust-render`, `frust-testing`, and `frust`
-# under its `gpu` feature — depends on `frust-gpu` unconditionally, so the
-# backend a target needs is unioned in through this manifest whatever the
-# build's entry point. Verify with `cargo tree -i wgpu` before assuming a new
-# wgpu edge is covered.
-#
-# Why per-target rather than the one unioned row this used to be: cargo
-# features are additive across a build graph, so a single row listing all
-# three backends compiled every backend's *feature* into every target, even
-# where `wgpu-hal` cfg-gates the backend code itself out. The feature is what
-# drags naga's shader writers in, and those are pure code size on a target
-# that can never run them. Measured on 30.0.1 with
-# `cargo tree -e features --target <triple>`, backends route through
-# platform-scoped shim crates (`wgpu-core-deps-apple`,
-# `wgpu-core-deps-windows-linux-android`), which makes the waste asymmetric:
-#
-#   * Android got `dx12` -> `wgpu-core-deps-windows-linux-android/dx12` ->
-#     `naga/hlsl-out`: an HLSL writer no Android device can ever use. (It did
-#     NOT get `msl-out` — `metal` routes through the apple shim, which is not
-#     a dependency on Android at all, so that feature was inert there.)
-#   * Linux got the same stray `hlsl-out`.
-#   * Apple targets got neither `spv-out` nor `hlsl-out` — `vulkan`/`dx12`
-#     route through the windows-linux-android shim, absent on apple — so the
-#     unioned row was already metal-only there by accident. These tables make
-#     that a property of the manifest instead of an accident of wgpu's
-#     internal shim layout, which is not part of wgpu's public contract.
-#
-# Windows deliberately keeps BOTH `dx12` and `vulkan`: the desktop shell
-# enumerates both there and `frust_gpu::RenderContext` asks for
-# `Backends::all()` at runtime (see `src/context.rs`) — these tables change
-# what is COMPILED IN, never what is requested. Do not "simplify" a target to
-# one backend to match its default adapter.
-#
-# wasm32-unknown-unknown routes to the wasm section below (webgpu+webgl).
-# wasm32-unknown-emscripten is `unix` (and `target_arch = "wasm32"`) but matches
-# the all(unix, not(apple)) row above to route to the vulkan arm, where the
-# feature is inert. wasip1 (wasm32-wasip1-unknown) currently unverified;
-# if verified, will match the wasm row; otherwise narrow to wasm32-unknown-unknown only.
+# --- Per-target wgpu backend features ---
+# Backends are added HERE only (the root `wgpu` row is backend-free); every crate naming `wgpu` depends
+# on `frust-gpu` unconditionally, so this is the single choke point (verify with `cargo tree -i wgpu`).
+# Routing: apple -> metal; other unix (Linux, Android) -> vulkan; windows -> dx12 + vulkan; browser
+# wasm32 -> webgpu + webgl. `gles` is in no row: no shipping shell surfaces a GLES-only device.
+# wasm32-unknown-emscripten is both `unix` and `wasm32`, so Cargo would union both rows; the wasm row
+# excludes it, leaving only the inert vulkan feature there. wasm32-wasip1 is unverified.
+# Why per-target, and its measured size effect: docs/RENDER_DEVELOPMENT.md.
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 wgpu = { workspace = true, features = ["metal"] }
 
-# Linux, Android and any other non-apple unix.
 [target.'cfg(all(unix, not(target_vendor = "apple")))'.dependencies]
 wgpu = { workspace = true, features = ["vulkan"] }
 
+# Both on purpose: these tables set what is COMPILED IN; `src/context.rs` still requests
+# `Backends::from_env()` (default: all) at runtime. Do not trim to the default adapter's backend.
 [target.'cfg(windows)'.dependencies]
 wgpu = { workspace = true, features = ["dx12", "vulkan"] }
 
-# wasm32 targets (browser only; emscripten routes through the unix/vulkan row
-# above): `webgl` is wgpu's wasm32 WebGL2 backend; `webgpu` routes the
-# web-gpu surface (desktop Chrome/Edge only, not mobile). `gles` is the
-# native/Emscripten backend (inert on wasm, not used here). `fragile-send-sync-non-atomic-wasm`:
-# wgpu's build.rs marks its handle types `Send`/`Sync` only on native, so
-# `pipeline.rs`'s threaded warm-up (`P: Send + Sync` bounds, a cloned `Device`
-# captured by the compiler closure) fails to type-check on wasm32 without it —
-# 91 E0277 errors, found by the web-shell Phase-0 spike (examples/web-spike/RESULTS.md).
-# The impls are sound on wasm32-unknown-unknown because nothing can cross a thread there,
-# and wgpu gates the feature on `not(target_feature = "atomics")` so it can never take
-# effect on a threads-enabled wasm build. Runtime: the warm-up spawn fails and falls back
-# to the inline path (pipeline.rs handles a failed `Builder::spawn`); cfg-gating the thread
-# off on wasm32 outright is the tracked structural follow-up.
+# `fragile-send-sync-non-atomic-wasm`: `pipeline.rs`'s threaded warm-up needs `Send + Sync` handles. Sound
+# on wasm32-unknown-unknown (no threads; inert under `atomics`); a failed spawn falls back inline.
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))'.dependencies]
 wgpu = { workspace = true, features = ["webgpu", "webgl", "fragile-send-sync-non-atomic-wasm"] }
 

@@ -10,11 +10,8 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
-# `benches/scenes.rs` is a module `benches/main.rs` pulls in (fixture
-# builders), not a bench target of its own — autodiscovery would otherwise
-# register it as a second libtest-harnessed target and `cargo bench`'s
-# trailing args (e.g. `--quick`) would fail against it the same way they
-# fail against the lib/integration tests below.
+# `benches/scenes.rs` is a module of `benches/main.rs`; autodiscovery would make it a libtest bench
+# target that rejects criterion's flags (e.g. `--quick`).
 autobenches = false
 
 [dependencies]
@@ -31,9 +28,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-# `tests/proptest_strips.rs` — the compiler's property suite: it never panics,
-# its allocation stays inside a bound in the command count, a re-compile is
-# byte-identical, and the strips it emits stay inside the viewport.
 proptest.workspace = true
 
 [features]
@@ -41,11 +35,8 @@ default = []
 perf-trace = ["frust-gpu/perf-trace"]
 full-scheduler = []
 
-# `bench = false` on the lib and every integration test below keeps `cargo
-# bench` from also running them through the default libtest harness, which
-# does not understand criterion's own CLI flags (e.g. `--quick`) and would
-# otherwise be the first target `cargo bench -p frust-engine -- --quick`
-# hits, before ever reaching the criterion bench itself.
+# `bench = false` on the lib and every test: otherwise `cargo bench -- --quick` hits a libtest
+# harness that rejects criterion's flags before reaching the criterion bench.
 [lib]
 bench = false
 
