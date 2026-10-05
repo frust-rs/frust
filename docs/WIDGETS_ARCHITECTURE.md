@@ -460,20 +460,26 @@ steals a handle another surface already holds — and dropping the attached widg
 `scroll_to_item` on a keyed list) is recorded, not applied immediately; the attached surface drains
 its queue at the start of its next layout or paint (a `ListView` also drains at rebuild, before it
 plans its window), so the clamp lands against the freshly measured extent rather than a stale one.
-The queue is bounded: a run of consecutive same-kind offset commands (all `jump_to`, or all
-`animate_to`) coalesces to the latest, never across a kind boundary or across a queued
-`scroll_to_item` — a jump followed by an animate keeps both, in order — and an intermediate jump
-inside a coalesced run no longer raises a transient near-start/near-end edge notification. Item
-commands keep their own ordered channel under a cap of 8; recording one past the cap drops the
-oldest (debug-build log). A command queued before any surface attaches still waits for that
-surface's first layout, so a handle driven with nothing attached accumulates at most that same
+The queue is bounded by superseding within a segment — the offset commands recorded since the last
+item command: a jump supersedes every earlier offset command in its segment (cancelling any tween
+and setting the position outright), and an animate supersedes an earlier animate but keeps a
+preceding jump, its start position — so a segment holds at most one jump and one animate in
+whatever order they were recorded; superseding never crosses a queued `scroll_to_item`. Item
+commands keep their own ordered channel under a cap of 8 — recording one past the cap drops the
+oldest (debug-build log), re-applying the rule when the drop merges two segments — so the whole
+queue never exceeds the cap plus two offset entries per segment. A superseded jump no longer raises
+a transient near-start/near-end edge notification. A command queued before any surface attaches
+still waits for that surface's first layout, so an unattached handle accumulates at most that same
 bound rather than growing further. Recording raises CORE's pending-result-flush flag
 (`frust_core::mark_pending_result_flush`, see CORE_ARCHITECTURE.md) so a frame-gated mobile shell
 runs the frame that applies it even when nothing else is dirty. `jump_to` clamps to `[0,
 max_offset]` and stops any fling or release-settle in flight; like `animate_to` and
-`scroll_to_item`, it also ends a live pointer gesture on the surface the same way a `Down` does —
-the rest of the gesture's `Move`s and its `Up` fall through to the child, and the release starts no
-fling or settle. `animate_to` eases there through a `TweenSimulation` driven by the same ballistic
+`scroll_to_item`, it also ends an *established* live drag on the surface the same way a `Down`
+does — the rest of the gesture's `Move`s and its `Up` fall through to the child, and the release
+starts no fling or settle. A hold still inside touch slop stays armed instead: the slop takeover
+and the child's `Cancel` still happen, and the finger can go on to start the drag afterward, the
+way Flutter's `jumpTo` during a hold behaves. `animate_to` eases there through a `TweenSimulation`
+driven by the same ballistic
 pump a release fling uses, so paint cadence and boundary physics are shared, not duplicated — a
 user `Down` or wheel interrupts it, a later command replaces it, and the theme's `reduce_motion`
 flag collapses it to a `jump_to`. Every post-release start — a fling, a release-settle, a
@@ -549,9 +555,9 @@ costs one `key_of` scan over the data in order (O(item count), not per frame). `
 its own placement offset so the controller's reads agree with what is actually painted. The jump or
 animation lands on the estimate first when rows ahead of it were never measured, then settle-and-
 correct re-resolves the aligned position each following layout and nudges to it, bounded to 4
-layouts or until within 0.5px of the target — waiting out a live drag rather than fighting the
-finger, and resuming within that same bound once the drag ends — so an animated request over
-never-measured rows can end with a small correction snap rather than retargeting mid-animation.
+layouts or until within 0.5px of the target — a pending request never coexists with an established
+drag (the settle loop's drag guard is defensive only) — so an animated request over never-measured
+rows can end with a small correction snap rather than retargeting mid-animation.
 An unknown key, or any key
 on a positional (non-keyed) list, is a no-op
 (debug-build log); a `ScrollView` holding the handle ignores an item command the same way.
