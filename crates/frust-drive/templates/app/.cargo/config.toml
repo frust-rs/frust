@@ -4,17 +4,11 @@
 [build]
 target-dir = "build/rust"
 
-# Android link flags for every Android target, picked up by `cargo ndk` and
-# Gradle's `cargoNdkBuild` without RUSTFLAGS injection: packed dynamic
-# relocations (API 23+) and identical-code folding. `--icf=all` is safe because
-# Frust never compares function-pointer or vtable identity. `android+relr` is
-# not used: it needs API 28+, below the template's minSdk 26.
-#
-# Only the `[target.*]` tables mirror the repo root's `.cargo/config.toml`
-# (compared by `crates/frust-cli/tests/profile_sync.rs`); this file is the copy
-# a scaffold ships once it leaves the checkout. A caller's `RUSTFLAGS` replaces
-# these flags entirely.
+# Android link flags (packed relocations, identical-code folding) read by `cargo ndk` and
+# Gradle without RUSTFLAGS injection; a caller's `RUSTFLAGS` replaces them. Not `android+relr`: needs API 28+.
 
+# Only the `[target.*]` tables are compared with the repo root's `.cargo/config.toml`
+# (`crates/frust-cli/tests/profile_sync.rs`); `[build]` above exists only here.
 [target.aarch64-linux-android]
 rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android", "-C", "link-arg=-Wl,--icf=all"]
 

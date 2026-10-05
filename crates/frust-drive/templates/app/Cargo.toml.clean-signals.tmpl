@@ -52,11 +52,9 @@ log = "0.4"
 winresource = "0.1"
 {%- endif %}
 
-# Browser row: the `wasm_bindgen(start)` glue that `app!` expands to names
-# `wasm_bindgen::` paths absolutely, so this crate needs its own edge.
-# Exact pin: must equal the `wasm-bindgen-cli` version used for the build (a
-# mismatch fails outright); move with Frust's web crates (`docs/DEVELOPMENT.md`
-# § Version-Pin Policy).
+# Browser row: `app!` glue names `wasm_bindgen::` paths absolutely, so this crate needs the edge.
+# Exact pin: must equal the `wasm-bindgen-cli` version of the build; moves with Frust's web
+# crates (`docs/DEVELOPMENT.md` § Version-Pin Policy).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.128"
 

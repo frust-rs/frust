@@ -3,13 +3,12 @@ name = "{{ project_name }}"
 org = "{{ org }}"
 description = "{{ description }}"
 
-# Desktop shell identity. The values were rendered into `macos/Info.plist`,
-# `windows/build.rs` and `linux/app.desktop` at scaffold time; editing them here
-# does not rewrite those files, and a build reports a mismatch with them.
-# `icon` is the source for every platform icon; it must be at least 512x512.
+# Desktop identity, rendered into `macos/Info.plist`, `windows/build.rs` and `linux/app.desktop`
+# at scaffold time; editing it here does not rewrite those files.
 [desktop]
 name = "{{ title_case_name }}"
 identifier = "{{ desktop_identifier }}"
+# Source for every platform icon; at least 512x512.
 icon = "assets/logo.png"
 
 # macOS-only. `minimum-system-version` only feeds a generated `Info.plist`; this
@@ -56,19 +55,9 @@ host = "{{ deeplink_host }}"
 # dev = { app-id-suffix = ".dev" }
 # prod = {}
 
-# Android release signing. Signing material lives in the gitignored
-# `android/key.properties` (keys below), falling back per value to the
-# `ANDROID_*` environment variables (a blank entry counts as unset):
-#   storePassword=  keyPassword=  keyAlias=  storeFile=<.jks path, relative to android/>
-#   ANDROID_STORE_FILE  ANDROID_STORE_PASSWORD  ANDROID_KEY_ALIAS  ANDROID_KEY_PASSWORD
-# Generate a keystore with:
-#   keytool -genkey -v -keystore ~/upload-keystore.jks -keyalg RSA \
-#     -storetype JKS -keysize 2048 -validity 10000 -alias upload
-# `frust build --release` checks the keystore exists and hands the resolved
-# values to Gradle via a transient `android/.frust-signing.properties`. A manual
-# `./gradlew assembleRelease` bypasses Frust and may debug-sign with a warning.
-#
-# Parsed by Frust. Set it when signing material is not at the defaults:
+# Android release signing reads gitignored `android/key.properties` (storePassword, keyPassword,
+# keyAlias, storeFile), falling back per value to `ANDROID_*` env vars; `frust build --release` checks it.
+# Parsed by Frust; set it when signing material is not at the defaults:
 # [signing]
 # # Properties file path, relative to `android/`. Default: "key.properties".
 # # Key prefix for a file holding several key sets. Default: none.
