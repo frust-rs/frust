@@ -1,19 +1,9 @@
-# Standalone package (own `[workspace]` root, own `Cargo.lock`) — a
-# throwaway spike, NOT a shipping example. The root `Cargo.toml`'s
-# `[workspace]` `exclude` list already carries `examples/web-spike` (added
-# alongside this task's own base commit), so the root `examples/*` glob never
-# absorbs it; precedent is `examples/huddle`'s identical standalone shape (see
-# that manifest's own header comment).
-#
-# web-shell plan Phase 0 (w0-02): probes whether the render-engine graph
-# (frust-scene + frust-text + frust-gpu + frust-engine + frust-render)
-# compiles for `wasm32-unknown-unknown` and records the exact flags/cfgs that
-# turned out to be needed in RESULTS.md. `frust-reactive` is NOT a native
-# dependency — its `tokio` multi-thread runtime init fails on wasm32 — but
-# w0-04 added a wasm32-only target-gated dependency (see RESULTS.md § 15).
-# No browser is driven from this crate; that is w0-03's job.
+# Standalone throwaway spike, not a shipping example (own `[workspace]` and `Cargo.lock`; in the
+# root `exclude` list), so its wasm32-only probe never enters the native workspace graph.
 [workspace]
 
+# Probes whether the render-engine graph (scene/text/gpu/engine/render) compiles and renders
+# for `wasm32-unknown-unknown`; the required flags/cfgs and findings live in RESULTS.md.
 [package]
 name = "web-spike"
 version = "0.1.0"
@@ -21,102 +11,35 @@ edition = "2024"
 publish = false
 
 [dependencies]
-# Path deps only, by design (Version-Pin Policy — root CLAUDE.md's Agent
-# Guardrails / docs/DEVELOPMENT.md's Version-Pin Policy): this manifest
-# declares no `wgpu`/`wasm-bindgen`/`web-sys`/`js-sys` row of its own. The
-# wasm32 arm of `wgpu` is reached ONLY transitively, through
-# `frust-gpu`'s target-gated
-# `[target.'cfg(target_arch = "wasm32")'.dependencies]` row (landed by w0-01:
-# `wgpu = { workspace = true, features = ["webgpu", "webgl"] }`), so the graph
-# carries a single `wgpu` identity end to end — see RESULTS.md's flags table
-# for the empirical trace confirming no second identity was introduced.
+# Engine rows are path deps only: `wgpu`'s wasm32 arm arrives solely through `frust-gpu`'s
+# target-gated table, so the graph keeps one `wgpu` identity (RESULTS.md's flags table).
 frust-scene = { path = "../../crates/frust-scene" }
 frust-text = { path = "../../crates/frust-text" }
 frust-gpu = { path = "../../crates/frust-gpu" }
 frust-engine = { path = "../../crates/frust-engine" }
 frust-render = { path = "../../crates/frust-render" }
-# `frust-scene`/`frust-text`'s public API surfaces (`Scene`/`SceneBuilder`,
-# `TextStyle`/`TextLayout`) are named directly by `src/main.rs` below (same
-# renderer-agnostic-seam pattern `examples/huddle`'s dev-dependencies and
-# `examples/shadertoy`/`examples/glyph-catalog` use), so this binary declares
-# the same two geometry/brush crates those crates are built on. Pinned to the
-# exact versions the root `[workspace.dependencies]` table pins (`kurbo`
-# 0.13.1, `peniko` 0.6.1) — precedent: `examples/huddle`'s identical
-# `kurbo = "0.13.1"` / `peniko = "0.6.1"` dev-dependency rows.
+# Named directly by `src/main.rs`; exactly the root `[workspace.dependencies]` pins.
 kurbo = "0.13.1"
 peniko = "0.6.1"
 
-# --- w0-03 browser-probe rows (wasm32 only) -------------------------------
-#
-# Target-gated so the native shape w0-02 established is untouched: a plain
-# `cargo check` of this spike still resolves nothing but the five path deps
-# plus kurbo/peniko, and every row below is reached only by the
-# `wasm32-unknown-unknown` build the browser probe actually ships.
-#
-# Version-Pin Policy (root CLAUDE.md's Agent Guardrails / docs/DEVELOPMENT.md
-# § Version-Pin Policy): each row is either copied verbatim from the root
-# `[workspace.dependencies]` table or pinned to the exact version this
-# spike's own committed `Cargo.lock` already resolved at w0-02. Nothing here
-# is a new *workspace* pin — this is a standalone workspace and the root
-# graph never sees it — and nothing in the root `Cargo.toml` or `crates/*`
-# was touched to add it.
+# --- browser-probe rows (wasm32 only) ---------------------------------------
+# A native `cargo check` resolves none of these. Each version is a root workspace pin or what
+# this spike's own `Cargo.lock` resolved (docs/DEVELOPMENT.md § Version-Pin Policy).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# Copied verbatim from the root `Cargo.toml`'s `winit = "0.30.13"` row, which
-# is what the desktop shell resolves; the web arm must not fork winit's
-# identity away from the shell tier it is a sibling of.
+# Equals the root `winit` row: the web arm must not fork winit away from the shell tier.
 winit = "0.30.13"
-# A DIRECT `wgpu` row, which w0-02 deliberately did not have — and it stays
-# feature-less on purpose. The probe needs the `wgpu::Backends` *type* to fill
-# `frust_gpu::ContextOptions::backends` (that is how the forced-WebGL2 arm is
-# selected — see `src/main.rs`'s `Arm::backends`), and neither `frust-gpu` nor
-# `frust-render` re-exports `wgpu` (only the `frust` facade does, under its
-# `gpu` feature, and pulling the facade in would drag `frust-reactive` into a
-# graph that deliberately excludes it — see this file's header). Version copied
-# verbatim from the root `[workspace.dependencies]` pin (30.0.1, LAW), and
-# `default-features = false` mirrors the root row, so this edge contributes NO
-# feature at all: the backend features still arrive from exactly one place,
-# `frust-gpu`'s target-gated table. Same version + same source = the same
-# single `wgpu` identity w0-02 measured, not a second one.
+# Feature-less on purpose: only the `wgpu::Backends` type is needed (forced-WebGL2 arm); backend
+# features still come solely from `frust-gpu`, keeping one `wgpu` identity. Version = root pin.
 wgpu = { version = "30.0.1", default-features = false }
-# `=0.2.128`, an EXACT pin rather than the caret `0.2.127` the graph resolved
-# on its own at w0-02. wasm-bindgen's crate/CLI contract is stricter than
-# semver — the CLI embeds a schema version that must equal the crate's, and a
-# mismatch fails at `wasm-bindgen` post-processing time, not at `cargo
-# check`. This host's `wasm-bindgen-cli` is 0.2.128 (w0-02's RESULTS.md § 6
-# flagged exactly this one-patch gap for this task), and no host tool may be
-# installed or upgraded here, so the crate moves to meet the CLI. The `=`
-# form (not `"0.2.128"`) is deliberate: it forces cargo to unify the entire
-# spike graph — wgpu's own `^0.2.127` edge included — onto ONE wasm-bindgen
-# identity, which is the property that makes the generated glue loadable.
+# Exact pin = the host `wasm-bindgen-cli`: the CLI's schema version must equal the crate's or
+# post-processing fails (not semver). `=` unifies the graph, wgpu's edge included, on one
+# identity. Lockstep with `examples/web-gallery/Cargo.toml`'s identical row.
 wasm-bindgen = "=0.2.128"
-# The async half: `SurfaceRenderer::on_surface_created` is `async` and the
-# browser has no blocking executor to `pollster::block_on` it with (the
-# desktop shell's move), so the surface bring-up is driven by `spawn_local`.
-#
-# 0.4.78 / 0.3.105 rather than w0-02's locked 0.4.77 / 0.3.104: these three
-# crates are not independently versioned, they move in lockstep with
-# `wasm-bindgen` by construction. `js-sys` 0.3.104's manifest reads
-# `wasm-bindgen = "=0.2.127"` and 0.3.105's reads `wasm-bindgen = "=0.2.128"`
-# — an EXACT `=` requirement in the dependency itself. So the `=0.2.128` pin
-# above does not merely permit this bump, it *forces* it; 0.3.104 and
-# `wasm-bindgen` 0.2.128 are not co-satisfiable at all. That is the whole
-# lock delta on this axis, and it is mechanical rather than a judgement call.
+# Forced by the pin above: `wasm-bindgen-futures` 0.4.78 and `js-sys`/`web-sys` 0.3.105 each
+# require `wasm-bindgen = "=0.2.128"` exactly; 0.3.104 is not co-satisfiable with it.
 wasm-bindgen-futures = "0.4.78"
-# Same lockstep family as the two rows above (its manifest also carries an
-# exact `wasm-bindgen` requirement), so it moves with them and forks nothing.
-# Needed for exactly one thing: the `Promise`/`setTimeout` pair behind
-# `src/main.rs`'s `sleep_ms`, which backs the adapter-acquisition retry — see
-# RESULTS.md's "first requestAdapter returns null" finding. There is no
-# `std::thread::sleep` on this target and no timer in `web-sys` that yields a
-# future on its own.
 js-sys = "0.3.105"
-# Feature list is exactly what `src/main.rs` names and nothing more: the
-# canvas element and its document/window ancestors, the `?arm=` query parse,
-# the `<pre id=log>` mirror, the console sink, and (w0-05) the
-# `window.performance().now()` clock the timing instrumentation reads —
-# `std::time::Instant` panics on `wasm32-unknown-unknown` (no clock syscall on
-# this target; see RESULTS.md's w0-05 section), so `Performance` is the only
-# clock this spike has.
+# Exactly the features `src/main.rs` names; `Performance` is the only clock (`Instant` panics here).
 web-sys = { version = "0.3.105", features = [
     "console",
     "Document",
@@ -128,80 +51,35 @@ web-sys = { version = "0.3.105", features = [
     "UrlSearchParams",
     "Window",
 ] }
-# `log` is pinned to the lockfile's version; the two `console_*` crates are
-# not in the lockfile at all (nothing in the engine graph pulls them), so
-# they take the latest release compatible with it — `console_log` (resolves
-# 1.1.0) and `console_error_panic_hook` 0.1.7, both `log 0.4`/`wasm-bindgen
-# 0.2` consumers that unify onto the pins above rather than forking either.
-#
-# These are diagnostic infrastructure, not decoration: `frust-render`,
-# `frust-gpu` and `wgpu` all report their failures through `log`, and a
-# browser probe whose acceptance criterion is "a concrete NO-GO writeup
-# naming the failing layer and error verbatim" must be able to see them.
-# `console_error_panic_hook` turns a wasm `unreachable` trap — which is all a
-# panic looks like from JS — back into the panic message and a Rust
-# backtrace.
+# Diagnostics, not decoration: `frust-render`/`frust-gpu`/`wgpu` report failures through `log`,
+# and the panic hook turns a wasm `unreachable` trap back into the panic message.
 log = "0.4.34"
 console_log = "1.0.0"
 console_error_panic_hook = "0.1.7"
 
-# --- w0-04 reactive-wasm proof row (wasm32 only) --------------------------
-#
-# Path dep, per this crate's own Version-Pin Policy shape above: the one
-# thing this task adds to the graph, so the `signal=timer` proof mode can
-# drive a real `frust_reactive::ReactiveRuntime`/`TrackedScope`/`RwSignal`
-# instead of a stand-in. `crates/frust-reactive/Cargo.toml`'s own wasm arm
-# (this task's other write-file) is what makes this path dep buildable for
-# `wasm32-unknown-unknown` at all — see that manifest and `runtime.rs`.
+# --- reactive-wasm proof rows (wasm32 only) ---------------------------------
+# Drives the `signal=timer` proof mode with a real `ReactiveRuntime`; buildable for wasm32 via
+# `crates/frust-reactive/Cargo.toml`'s target-gated `tokio` arm.
 frust-reactive = { path = "../../crates/frust-reactive" }
-# `reactive_graph`'s `Get`/`Set` traits: `frust-reactive` does not re-export
-# them (only the `RwSignal`/`Owner`/`TrackedScope` types), so reading/writing
-# the proof's counter signal needs this direct edge. Same unpinned `"0.2"`
-# range as the root workspace's own `[workspace.dependencies]` row
-# (`crates/frust-reactive/Cargo.toml` resolves `reactive_graph` through the
-# identical range via its path dep above), so this spike's own resolver
-# unifies onto one `reactive_graph` identity rather than forking a second.
+# For `Get`/`Set` (not re-exported by `frust-reactive`); the root row's `"0.2"` range, so it
+# unifies onto one `reactive_graph` identity.
 reactive_graph = "0.2"
 
-# --- w0-05 release profile (added beyond the spike's original scope) ------------------
-#
-# This spike is a STANDALONE workspace (its own `[workspace]` root at the
-# top of this file), so the root `Cargo.toml`'s own `[profile.release]`
-# (`docs/DEVELOPMENT.md`'s Version-Pin Policy / release-shape row) never
-# applies here — a plain `cargo build --release` in this directory falls
-# back to Cargo's own release defaults (no LTO, cgu=16, no strip, no
-# `panic=abort`), which would make the w0-05 release/wasm-opt size and
-# first-frame numbers unrepresentative of what a real Frust app ships.
-# Copied verbatim from the root `Cargo.toml`'s `[profile.release]` and from
-# `examples/huddle/Cargo.toml`'s identical hand-synced copy (both read-only
-# references for this task) — not a new choice, the same one re-applied to a
-# third manifest. See RESULTS.md's w0-05 section for exactly which of these
-# flags applied to which measured row (the debug row applies none of them).
+# --- release profile --------------------------------------------------------
+# Standalone, so the root `[profile.release]` never applies: a hand-synced copy, so RESULTS.md's
+# size and first-frame numbers reflect what a real Frust app ships.
 [profile.release]
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
-# --- w0-07 naga GLSL-ES lowering inspector (native dev-only) --------------
-#
-# `examples/lower_strip.rs` translates `frust-engine`'s shipped
-# `strip.wgsl` to the GLSL ES 3.00 fragment source wgpu's own GL backend
-# would hand the driver, so RESULTS.md § 17 can quote the lowered
-# `alphas_texture`/atlas reads verbatim instead of describing them. A
-# DEV-dependency, so the wasm32 browser artifact this spike ships is
-# byte-identical with and without it (dev-dependencies are not in a
-# `cargo build` graph), and native-only in effect for the same reason.
-#
-# Version-Pin Policy: `=30.0.1`, an EXACT pin to the naga version this
-# spike's own committed `Cargo.lock` already resolved transitively under
-# `wgpu` 30.0.1 (`Cargo.lock`'s `name = "naga" / version = "30.0.1"` row).
-# Naming it directly adds NO crate and moves NO version — it only turns an
-# already-resolved transitive node into a direct edge and turns on two
-# feature flags on it. `wgsl-in` is already on in the wasm graph (wgpu's
-# `wgsl` feature); `glsl-out` is the one this row adds, and it is a naga
-# feature, not a new dependency.
+# --- naga GLSL-ES lowering inspector (native dev-only) ----------------------
+# `examples/lower_strip.rs` lowers `strip.wgsl` to GLSL ES for RESULTS.md § 17; a dev-dependency,
+# so the shipped wasm artifact is unaffected.
 [dev-dependencies]
+# Exact pin = the naga `wgpu` 30.0.1 already resolves in `Cargo.lock` (moves with `wgpu`); it
+# adds no crate, only the `glsl-out` feature.
 naga = { version = "=30.0.1", features = ["wgsl-in", "glsl-out"] }
 
 [[example]]
