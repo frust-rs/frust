@@ -10,34 +10,24 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
-# The Kotlin embedding ships in `platform/`; keep Gradle build output out of the package.
+# The Kotlin embedding ships in `platform/`; keep Gradle output out of the package.
 exclude = ["platform/android/frust-embedding/build/", "platform/android/frust-embedding/.gradle/"]
 
 [dependencies]
-# Unconditional: the `android_app!` macro is defined on every target (it only
-# *expands* to real code where its call site is `#[cfg(target_os = "android")]`),
-# and the panic-guard helper is host-testable, so `log` builds everywhere.
+# Unconditional: `android_app!` is defined on every target and the panic guard is host-testable.
 log = { workspace = true }
-# Platform-agnostic atomic write and directory resolution.
 frust-paths = { workspace = true }
 
-# The JNI runtime and the whole render/text stack are only ever compiled for an
-# Android target; on the host this crate is (almost) empty but the macro and the
-# pure helpers still compile so `cargo test --workspace` stays green.
+# JNI runtime and render/text stack compile only for Android; the host build keeps the macro and pure helpers.
 [target.'cfg(target_os = "android")'.dependencies]
-# Platform-agnostic shell plumbing (AppTree erasure + guard/sanitize_scale/
-# logical_size). Android-gated because nothing off-Android references it: the
-# `android_app!` re-exports and the FFI runtime that consume it are all
-# `#[cfg(target_os = "android")]`.
+# Android-gated: only the FFI runtime and `android_app!` re-exports use it.
 frust-shell-common = { workspace = true }
 frust-core = { workspace = true }
 frust-scene = { workspace = true }
 frust-render = { workspace = true }
 frust-text = { workspace = true }
 frust-reactive = { workspace = true }
-# Load-bearing: `nativeSetAppearance` boxes the platform light/dark preference
-# into a Theme and pushes it through both delivery paths — see
-# docs/ARCHITECTURE.md's Android frame pipeline / Theme delivery.
+# Load-bearing: `nativeSetAppearance` pushes the platform brightness as a Theme (docs/ARCHITECTURE.md Theme delivery).
 frust-theme = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
@@ -46,52 +36,25 @@ anyhow = { workspace = true }
 jni = { workspace = true }
 ndk = { workspace = true }
 ndk-sys = { workspace = true }
-# Render-thread priority self-boost: the split's dedicated
-# render thread calls `setpriority(PRIO_PROCESS, gettid(), THREAD_PRIORITY_DISPLAY)`
-# at the top of its loop so a busy UI thread can't starve GPU submit. Confined to
-# the sanctioned-unsafe `jni_glue` zone; target-gated like the JNI/NDK deps above.
+# Render-thread priority boost (`setpriority`) in the sanctioned-unsafe `jni_glue` zone.
 libc = { workspace = true }
-# Plugin platform bridge: the shell
-# *writes* the captured `(JavaVM, application Context)` at `nativeInitPlatform`
-# via `frust_plugin::android::initialize`, which owns the `ndk-context` install
-# and arms the pre-init flag; plugins *read* them back through `frust-plugin`.
-# The shell now depends on `frust-plugin` (a real `frust-shell-android →
-# frust-plugin` edge — `frust-plugin` stays a leaf: no `frust-*` deps of its
-# own). `ndk-context` is no longer a direct dep here — every `ndk-context` call
-# lives in `frust-plugin` now. Target-gated like the JNI deps above.
+# The shell writes the JavaVM/Context via `frust_plugin::android::initialize`; plugins read them back. A shell -> leaf edge:
+# `frust-plugin` has no `frust-*` deps of its own.
 frust-plugin = { workspace = true }
 android_logger = { workspace = true }
-# Android accesskit adapter — target-gated
-# like the JNI deps above; nothing off-Android references it.
 accesskit_android = { workspace = true }
 
-# Only the macro-expansion smoke test (`jni_glue::macro_expansion`) needs a
-# concrete `View` to feed `android_app!`; the runtime itself stays widget-agnostic
-# (apps bring their own view types through the macro's generics).
+# Only the macro-expansion smoke test needs a concrete `View` for `android_app!`.
 [target.'cfg(target_os = "android")'.dev-dependencies]
 frust-widgets = { workspace = true }
 
 [features]
-# Opt-in perf-trace instrumentation: re-exports frust-shell-common/perf-trace
-# and frust-render/perf-trace. Empty by default (opt-in survives cargo's additive
-# unification; the CLI is the sole enabler).
+# Opt-in: re-exports shell-common and render `perf-trace`; the CLI is the sole enabler.
 perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
-# Opt-in in-app devtools service: re-exports frust-shell-common/devtools and
-# compiles this shell's service start + per-frame UI-thread drain in. Empty by
-# default, exactly like `perf-trace` above; like it, the frust-shell-common edge
-# this targets only exists in the Android-gated dependency block, so this is a
-# no-op off-Android.
+# Opt-in devtools service: re-exports shell-common `devtools`; a no-op off-Android (the edge is in the gated block).
 devtools = ["frust-shell-common/devtools"]
-# The facade's `gpu` feature (`frust::gpu`, see crates/frust/src/lib.rs)
-# forwards into this: `frust-render/gpu` re-exports `DeviceHandle`, and
-# `frust-shell-common/gpu` carries the process-wide slot a render executor
-# installs the live device into (see `frust-shell-desktop`'s `render.rs` for
-# the desktop half of that wiring). This shell's own `jni_glue`/`app`
-# render-thread install site is not wired to it yet — an accepted gap, see
-# the crate's `lib.rs` docs — so today this row only makes the two lower
-# features reachable, with nothing here yet calling `install_gpu_handle`.
+# Facade `gpu` forwards here. The `jni_glue` render-thread install site is not wired to it yet (accepted gap, see lib.rs docs).
 gpu = ["frust-shell-common/gpu", "frust-render/gpu"]
-
 
 [package.metadata.docs.rs]
 default-target = "aarch64-linux-android"

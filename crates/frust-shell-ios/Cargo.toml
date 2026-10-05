@@ -10,95 +10,51 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
-# The Swift embedding ships in `platform/`; keep SwiftPM build output out of the package.
+# The Swift embedding ships in `platform/`; keep SwiftPM output out of the package.
 exclude = ["platform/ios/FrustEmbedding/.build/"]
 
 [dependencies]
-# Unconditional: the `ios_app!` macro is defined on every target (its generated
-# `frust_*` exports are `#[cfg(target_os = "ios")]`, inert elsewhere), and the
-# crate's minimal stderr logger uses `log`, so `log` builds everywhere.
+# Unconditional: `ios_app!` is defined on every target (its exports are iOS-gated) and the stderr logger uses `log`.
 log = { workspace = true }
 
-# Unconditional: `ffi_support`'s pure, host-testable `should_recreate_surface`
-# predicate matches on `frust_render::SurfacePhase`, and `ffi_support` is the
-# one module compiled on every target (so its `cargo test --workspace` unit tests
-# stay green). `SurfacePhase` is a plain `Copy` enum — no vello/wgpu types leak
-# through it — and `frust-render` is already built by the workspace regardless.
+# Unconditional: host-testable `ffi_support::should_recreate_surface` matches on the plain `Copy` `SurfacePhase`.
 frust-render = { workspace = true }
 
-# Unconditional: `ffi_support::build_tree_update` (the pure `SemanticsUpdate` →
-# `accesskit::TreeUpdate` assembly the iOS accesskit adapter pushes) is
-# host-testable — it touches only the `accesskit` *core data crate*
-# (a data vocabulary crate that compiles on every target, already in the
-# workspace via frust-core). The iOS platform adapter (`accesskit_ios`) that
-# *consumes* the assembled update stays target-gated below.
+# Unconditional: host-testable `build_tree_update` uses the `accesskit` core data crate; the iOS adapter stays gated below.
 accesskit = { workspace = true }
 
-# The C-ABI runtime and the rest of the render/text stack are only ever compiled
-# for an iOS target; on the host this crate is (almost) empty but the macro and
-# the pure helpers still compile so `cargo test --workspace` stays green.
+# The C-ABI runtime and render/text stack compile only for iOS; the host build keeps the macro and pure helpers.
 [target.'cfg(target_os = "ios")'.dependencies]
-# Platform-agnostic shell plumbing (AppTree erasure + guard/sanitize_scale/
-# logical_size). iOS-gated because nothing off-iOS references it: the `ios_app!`
-# re-exports and the FFI runtime that consume it are all
-# `#[cfg(target_os = "ios")]`.
+# iOS-gated: only the `ios_app!` re-exports and the FFI runtime use it.
 frust-shell-common = { workspace = true }
 frust-core = { workspace = true }
 frust-scene = { workspace = true }
 frust-text = { workspace = true }
 frust-reactive = { workspace = true }
-# Load-bearing: `frust_set_appearance` boxes the platform light/dark
-# preference into a Theme and pushes it through both delivery paths — see
-# docs/ARCHITECTURE.md's iOS frame pipeline / Theme delivery.
+# Load-bearing: `frust_set_appearance` pushes the platform brightness as a Theme (docs/ARCHITECTURE.md Theme delivery).
 frust-theme = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 pollster = { workspace = true }
 anyhow = { workspace = true }
-# Load-bearing (render-thread split): the split's dedicated
-# render thread acquires the Metal drawable (`nextDrawable`) off the UIKit main
-# thread, which has no runloop-managed autorelease pool — so each frame's GPU
-# work in `app::render_scene` is wrapped in an explicit `objc2::rc::autoreleasepool`
-# drain, or autoreleased `CAMetalDrawable`s accumulate and exhaust the layer's
-# drawable pool (a hard stall). objc2 0.6 is already in the workspace graph (the
-# plugin crates, and transitively via accesskit_ios), so this adds no new crate —
-# only a dependency edge. Target-gated like the rest of the render/GPU stack.
+# The render thread acquires the drawable off the main thread, which has no autorelease pool; each frame's GPU work is wrapped
+# in `objc2::rc::autoreleasepool` or `CAMetalDrawable`s exhaust the layer's drawable pool (hard stall).
 objc2 = { workspace = true }
-# Render-thread QoS self-boost: the split's dedicated render
-# thread calls `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)` at
-# the top of its loop so the scheduler treats its GPU submit work at the UI tier.
-# Confined to the sanctioned-unsafe `ffi_glue` zone; target-gated like the rest
-# of the render/GPU stack.
+# Render-thread QoS boost (`pthread_set_qos_class_self_np`) in the sanctioned-unsafe `ffi_glue` zone.
 libc = { workspace = true }
-# iOS accesskit adapter (never compiled on this host — no macOS, see
-# docs/DEVELOPMENT.md). Target-gated like the rest of this block.
+# Never compiled on this host (no macOS, see docs/DEVELOPMENT.md).
 accesskit_ios = { workspace = true }
 
-# Only the macro-expansion smoke test (`ffi_glue::macro_expansion`) needs a
-# concrete `View` to feed `ios_app!`; the runtime itself stays widget-agnostic
-# (apps bring their own view types through the macro's generics).
+# Only the macro-expansion smoke test needs a concrete `View` for `ios_app!`.
 [target.'cfg(target_os = "ios")'.dev-dependencies]
 frust-widgets = { workspace = true }
 
 [features]
-# Opt-in perf-trace instrumentation: re-exports frust-shell-common/perf-trace
-# and frust-render/perf-trace. Empty by default (opt-in survives cargo's additive
-# unification; the CLI is the sole enabler).
+# Opt-in: re-exports shell-common and render `perf-trace`; the CLI is the sole enabler.
 perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
-# Opt-in in-app devtools service: re-exports frust-shell-common/devtools and
-# compiles this shell's service start + per-frame UI-thread drain in. Empty by
-# default, exactly like `perf-trace` above; like it, the frust-shell-common edge
-# this targets only exists in the iOS-gated dependency block, so this is a no-op
-# off-iOS.
+# Opt-in devtools service: re-exports shell-common `devtools`; a no-op off-iOS (the edge is in the gated block).
 devtools = ["frust-shell-common/devtools"]
-# The facade's `gpu` feature (`frust::gpu`, see crates/frust/src/lib.rs)
-# forwards into this: `frust-render/gpu` re-exports `DeviceHandle`, and
-# `frust-shell-common/gpu` carries the process-wide slot a render executor
-# installs the live device into (see `frust-shell-desktop`'s `render.rs` for
-# the desktop half of that wiring). This shell's own `ffi_glue`/`app`
-# render-thread install site is not wired to it yet — an accepted gap, see
-# the crate's `lib.rs` docs — so today this row only makes the two lower
-# features reachable, with nothing here yet calling `install_gpu_handle`.
+# Facade `gpu` forwards here. The `ffi_glue`/`app` render-thread install site is not wired to it yet (accepted gap, see lib.rs docs).
 gpu = ["frust-shell-common/gpu", "frust-render/gpu"]
 
 [package.metadata.docs.rs]

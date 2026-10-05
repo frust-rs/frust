@@ -3,8 +3,7 @@ name = "frust-shell-web"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-# Not the workspace expression: `src/fonts.rs` embeds `fonts/InterVariable.ttf`,
-# which is under the SIL Open Font License 1.1 (`fonts/OFL.txt`).
+# Not the workspace expression: `src/fonts.rs` embeds `fonts/InterVariable.ttf` (SIL OFL 1.1, `fonts/OFL.txt`).
 license = "(MIT OR Apache-2.0) AND OFL-1.1"
 description = "Browser shell for Frust: runs a Frust app on a canvas in the browser via winit and WebAssembly."
 repository.workspace = true
@@ -13,164 +12,78 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
-# The browser shell tier. Unlike the three per-OS desktop crates, this one does
-# NOT depend on `frust-shell-desktop`: that crate's winit core is entangled with
-# `accesskit_winit`, `pollster::block_on` surface bring-up, a render thread and
-# `frust-paths` cache I/O, none of which exist on `wasm32-unknown-unknown`. The
-# winit-GENERIC halves of it (input mapping, the reactive-owner event wrap, the
-# window-metrics publish, brightness-follow) are ported here instead, so this
-# crate sits directly on `frust-shell-common` the way the two mobile shells do.
-# See docs/SHELLS_ARCHITECTURE.md for the unit's shape.
+# Browser shell tier. Does NOT depend on `frust-shell-desktop`: its winit core is entangled with `accesskit_winit`, `pollster::block_on`,
+# a render thread and `frust-paths` cache I/O, none of which exist on `wasm32-unknown-unknown`. Winit-generic halves are ported here, so this
+# crate sits directly on `frust-shell-common` (docs/SHELLS_ARCHITECTURE.md).
 [dependencies]
-# The retained tree this shell drives: `RenderRoot`, the `InputEvent`
-# vocabulary every mapping below produces, `WindowInsets`, and the
-# `WindowMetrics` context type.
 frust-core = { workspace = true }
-# The shell owns the active `Theme` and boxes it into `RenderRoot`'s
-# type-erased slot, exactly as the other shells do — see
-# docs/SHELLS_ARCHITECTURE.md's Theme delivery.
 frust-theme = { workspace = true }
-# The reactive root `Owner` the event pass and both app-facing
-# `provide_context` publishes run under (`ReactiveRuntime::with_owner`). Its
-# own `wasm32` arm (`Executor::init_wasm_bindgen`) is what makes this edge
-# buildable for the browser at all — see that crate's `src/runtime.rs`.
+# Reactive root `Owner` for the event pass and context publishes; its `wasm32` arm (`Executor::init_wasm_bindgen`) is what
+# makes this buildable for the browser.
 frust-reactive = { workspace = true }
-# The platform-free plumbing this shell is built on: `WindowMetricsPublisher`
-# (the change-guarded window-shape publish), the app-facing theme override
-# watcher, and the seeded-default theme slot.
 frust-shell-common = { workspace = true }
-# The event source. winit 0.30 carries a first-class web backend (canvas-hosted
-# event loop, `requestAnimationFrame` redraws, `devicePixelRatio` scale factor,
-# `prefers-color-scheme` theme reporting), so this shell shares the desktop
-# tier's winit vocabulary rather than binding the DOM itself. Rides the single
-# workspace `winit` pin — a second winit identity between the two shell tiers
-# would be a resolution hazard, not a convenience.
+# winit 0.30 has a first-class web backend, so this shell shares the desktop winit vocabulary. Rides the single workspace
+# `winit` pin; a second winit identity between the shell tiers would be a resolution hazard.
 winit = { workspace = true }
-# `Point`, the logical-pixel pointer coordinate every mapping here produces.
 kurbo = { workspace = true }
-# The gap-reporting sink: the no-op seams below log at `debug` through the
-# `log` facade rather than failing silently, so a browser console (once a
-# `log` sink is installed) shows which host signal is unsupported.
+# No-op seams log at `debug` through `log`, so a browser console shows which host signal is unsupported.
 log = { workspace = true }
-# The frame path's payload and its consumer: the painted display list this
-# shell builds each frame (`Scene`/`SceneBuilder`) and the GPU backend that
-# encodes and presents it (`RenderContext`/`SurfaceRenderer` plus the
-# `EncodeOutcome`/`AcquireOutcome`/`FrameOutcome` vocabulary the loop branches
-# on). `frust-render` is buildable for `wasm32-unknown-unknown` through
-# `frust-gpu`'s own target-gated `wgpu` row (`webgpu` + `webgl`); nothing is
-# selected or overridden here — `frust-engine` is the only renderer this tier
-# contains.
+# `frust-render` builds for `wasm32-unknown-unknown` through `frust-gpu`'s target-gated `wgpu` row (`webgpu` + `webgl`);
+# nothing is selected here: `frust-engine` is the only renderer this tier contains.
 frust-scene = { workspace = true }
 frust-render = { workspace = true }
-# The shell-owned `TextContext` the layout pass shapes through, handed to
-# `RenderRoot::layout_with_text` type-erased.
 frust-text = { workspace = true }
-# `Color`: the live theme's surface colour, which rides with each frame as the
-# clear colour it was painted for.
 peniko = { workspace = true }
-# Every instant in this crate. `std::time::Instant::now()` PANICS on
-# `wasm32-unknown-unknown` (no clock syscall on that target), and `web-time` is
-# the drop-in winit 0.30 itself already uses internally — so on wasm this is
-# `performance.now()` and on every other target it is a plain re-export of
-# `std::time`, which is what lets the pacing arithmetic be unit-tested on the
-# build host. Using anything else here would also mistype
-# `ControlFlow::WaitUntil`, which winit declares over `web_time::Instant` on
-# this target.
+# Every instant in this crate: `std::time::Instant::now()` PANICS on `wasm32-unknown-unknown`; `web-time` is what winit 0.30
+# uses, and it re-exports `std::time` elsewhere (so pacing is host-testable) and matches `ControlFlow::WaitUntil`'s type.
 web-time = { workspace = true }
 
-# Browser-only rows: reached exclusively by the `target_arch = "wasm32"` frame
-# loop in `src/app_handler.rs` and the surface-bring-up retry in
-# `src/render.rs`, so a native build of this crate resolves none of them and
-# behaves identically with or without them.
+# Browser-only rows, reached solely by the `wasm32` frame loop (`src/app_handler.rs`) and bring-up retry (`src/render.rs`).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# Not imported by a single `use` in this crate, and not removable either: it is
-# the row that pins the *whole graph's* `wasm-bindgen` identity. The crate and
-# the `wasm-bindgen-cli` that post-processes the build must carry the identical
-# schema version — a stricter contract than semver, failing at glue-generation
-# time rather than at `cargo check` — and this host's CLI is 0.2.128 while the
-# version `winit`/`web-sys` resolve on their own is 0.2.127, which the CLI
-# refuses. The workspace row is an exact `=0.2.128` for exactly that reason,
-# and an exact pin only takes effect where something depends on it: this crate
-# is the browser tier's only entry point, so it is where the pin is anchored.
-# The three rows below then move to their lockstep partners (`js-sys`/`web-sys`
-# 0.3.105, `wasm-bindgen-futures` 0.4.78 — each declares an exact
-# `wasm-bindgen` requirement of its own, so this is forced, not chosen), which
-# the workspace's caret rows already permit.
+# Imported by no `use`, yet not removable: it anchors the whole graph's `wasm-bindgen` identity, which must match `wasm-bindgen-cli` (0.2.128;
+# winit/web-sys alone resolve 0.2.127). The exact workspace pin binds only where something depends on it. `js-sys`/`web-sys`/
+# `wasm-bindgen-futures` are lockstep partners (each requires an exact `wasm-bindgen`).
 wasm-bindgen = { workspace = true }
-# `spawn_local`: `SurfaceRenderer::on_surface_created` is `async` and a browser
-# has no blocking executor to drive it with (the desktop shell's
-# `pollster::block_on` is not an option on a thread that must not block), so
-# surface bring-up runs on the browser's own microtask queue. Also supplies the
-# `JsFuture` half of the bring-up retry's wait.
+# `spawn_local`: surface bring-up is `async` and a browser has no blocking executor; also the `JsFuture` for the retry wait.
 wasm-bindgen-futures = { workspace = true }
-# One type, one reason: `js_sys::Promise`, the object a `setTimeout` callback
-# resolves so the bring-up retry's wait is awaitable. There is no
-# `std::thread::sleep` on this target and nothing else in the graph carries a
-# timer future.
+# `js_sys::Promise` for the `setTimeout`-based bring-up retry wait (no `std::thread::sleep` on this target).
 js-sys = { workspace = true }
-# The two places this crate talks to the browser directly: `window.setTimeout`
-# (the bring-up retry's wait, `src/render.rs`) and the hidden-input IME overlay
-# (`src/ime.rs`), which winit has no seam for at all. The list names exactly
-# what those two call and nothing else — winit still owns the canvas, the
-# pointer/keyboard handlers and the animation-frame registration, and no
-# `console` row appears here because logging goes through `src/logging.rs`.
-#
-# Features only: the `web-sys` VERSION is untouched, and it stays the same
-# lockstep partner of the `=0.2.128` `wasm-bindgen` pin above that it already
-# was (see that row's derivation). Rows are one-per-line and grouped by what
-# needs them, since a bare alphabetical list says nothing about why any of
-# them is here.
+# Features cover exactly the two direct browser calls: `window.setTimeout` (`src/render.rs`) and the hidden-input IME overlay
+# (`src/ime.rs`); winit owns the canvas and input handlers. No `console` row: logging goes through `src/logging.rs`.
+# `web-sys` stays the lockstep partner of the `=0.2.128` `wasm-bindgen` pin above.
 web-sys = { workspace = true, features = [
-    # `window.setTimeout`, and `window.document()` for the overlay element.
+    # `Window`/`Document`/`Node` ladder: `setTimeout` and the overlay `<input>`.
     "Window",
-    # Creating the overlay `<input>`, reaching `<body>` to host it, and the
-    # `Node`/`Element`/`EventTarget`/`HtmlElement` ladder that append, attribute,
-    # style, focus and remove calls hang off.
     "Document",
     "Node",
     "Element",
     "EventTarget",
     "HtmlElement",
     "HtmlInputElement",
-    # The element's inline geometry (`position: fixed`, and the caret box
-    # written on every reposition).
+    # Inline geometry for the overlay.
     "CssStyleDeclaration",
-    # The canvas: its viewport origin (`getBoundingClientRect`) converts the
-    # widget's logical caret box into the overlay's CSS placement, and it is the
-    # element winit's own keyboard listeners sit on, so it is also where the
-    # overlay re-dispatches a keystroke it received.
+    # Canvas viewport origin maps the logical caret box to CSS; the overlay re-dispatches keystrokes onto it.
     "HtmlCanvasElement",
     "DomRect",
-    # The composition bridge itself: the base `Event` every listener takes, the
-    # composition/`input` events carrying the marked and committed text, and the
-    # keyboard event plus its init dictionary for that re-dispatch.
+    # Composition bridge: events carrying marked/committed text, and the keyboard re-dispatch.
     "Event",
     "CompositionEvent",
     "InputEvent",
     "KeyboardEvent",
     "KeyboardEventInit",
-    # The clipboard route, both halves. `ClipboardEvent` is what the overlay's
-    # `paste`/`copy`/`cut` listeners narrow their `Event` to, and `DataTransfer`
-    # is the payload hanging off it — `getData("text/plain")` for a paste,
-    # `setData` for the synchronous write a `copy`/`cut` callback must complete
-    # before it returns (Safari honours a clipboard write from nowhere else).
+    # Clipboard, DOM half: `paste`/`copy`/`cut` listeners; a copy/cut must write synchronously (Safari).
     "ClipboardEvent",
     "DataTransfer",
-    # The asynchronous half, for the two slots the tree fills with no DOM event
-    # behind them (a toolbar tap, an app-driven copy): `Navigator` is the
-    # `window.navigator` getter and `Clipboard` its `writeText`/`readText`.
+    # Clipboard, async half, for slots with no DOM event behind them (toolbar tap, app-driven copy).
     "Clipboard",
     "Navigator",
 ] }
-# stderr is a silent no-op in a browser: `console_log` routes the `log` facade
-# to `console.*` and `console_error_panic_hook` routes panics to
-# `console.error` (the facade's `web_app!` bootstrap installs both; the shell's
-# own `logging` module owns the sink's shape and level). Workspace rows.
+# stderr is a no-op in a browser: `console_log` routes `log` to `console.*` and `console_error_panic_hook` routes panics to
+# `console.error` (installed by the facade's `web_app!`; the `logging` module owns the sink's shape and level).
 console_log = { workspace = true }
 console_error_panic_hook = { workspace = true }
 
-# docs.rs builds on x86_64 Linux by default, where a target-specific crate
-# documents as empty; build the docs for the crate's own target instead.
+# docs.rs builds x86_64 Linux by default; a target-specific crate would document as empty.
 [package.metadata.docs.rs]
 default-target = "wasm32-unknown-unknown"
 targets = ["wasm32-unknown-unknown"]
