@@ -15,23 +15,10 @@ readme = "README.md"
 proc-macro = true
 
 [dependencies]
-# The proc-macro plumbing every `locales!` expansion needs: `proc-macro2`
-# for the crate's own `TokenStream` type (usable outside a `proc_macro`
-# context, e.g. in this crate's own tests), `quote` for building the
-# expanded output, `syn` for parsing the macro's string-literal argument
-# (and, once the real implementation lands, each discovered `.ftl` file's
-# surrounding Rust-adjacent tokens).
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
-# Parses each discovered locale directory's `.ftl` files at macro-expansion
-# time — a compile-time Fluent syntax check, so a malformed message fails
-# the build rather than surfacing only at runtime inside `frust-i18n`'s own
-# engine (`plugins/i18n/src/engine`).
+# Compile-time Fluent syntax check, so a malformed message fails the build.
 fluent-syntax = { workspace = true }
-# Validates each discovered locale-directory name as a well-formed BCP-47
-# identifier before it reaches the expanded table — the same
-# `unic_langid::LanguageIdentifier` parser `frust-i18n`'s own `Locale`
-# newtype wraps (`plugins/i18n/src/locale.rs`), so a directory name and the
-# `Locale` a caller looks it up by are validated identically.
+# Validates locale directory names with the same parser `frust-i18n`'s `Locale` wraps.
 unic-langid = { workspace = true }
