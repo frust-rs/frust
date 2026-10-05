@@ -21,7 +21,7 @@ readme = "README.md"
 # re-declared dependency, so the `Value`s built here are the same crate version
 # the protocol's own public API speaks (docs/CODE_STANDARDS.md's whole-crate
 # valve rule).
-frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.1" }
+frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.2" }
 # The workspace `tokio` pin is `default-features = false`; enable exactly what
 # the loopback service needs and nothing more:
 #   rt      — the small internal current-thread runtime the service owns, so a

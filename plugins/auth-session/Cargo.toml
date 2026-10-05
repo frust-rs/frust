@@ -23,7 +23,7 @@ thiserror = { workspace = true }
 # Plugin Conventions). Unconditional like `frust-clipboard`'s/
 # `frust-haptics`'s/`frust-url-launcher`'s own copy: the crate is inert off
 # Android, so declaring it target-gated would buy nothing.
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.1" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
 
 # Desktop (Linux, Windows, macOS): `LoopbackSession` opens the
 # authorization URL in the system browser through `frust-url-launcher`'s
@@ -34,7 +34,7 @@ frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.1" }
 # still holds. Target-gated to the three loopback targets — Android/iOS never
 # build the loopback listener, so they never link the launcher either.
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
-frust-url-launcher = { path = "../url-launcher", version = "0.5.1" }
+frust-url-launcher = { path = "../url-launcher", version = "0.5.2" }
 
 # Android: the plugin's own JNI exports the Android backend card defines
 # need `jni` directly — matching `frust-camera`'s/`frust-haptics`'s own

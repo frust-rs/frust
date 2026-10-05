@@ -53,8 +53,9 @@ Members with `publish = false` (`frust-testing`, the demo and gallery packages) 
 4. Check that everything packages and verifies, without uploading:
    `cargo publish --workspace --dry-run --locked`.
 5. Tag the bump commit: `git tag -a vX.Y.Z -m "Frust X.Y.Z"`, then `git push origin vX.Y.Z`.
-6. Publish (next section).
-7. Create the GitHub release from the tag, with notes for the changes since the previous tag.
+6. The tag runs `.github/workflows/release.yml`, which publishes and creates the GitHub release
+   (see "First release and Trusted Publishing"). Watch the run; re-run a failed `publish` job.
+7. Edit the GitHub release's generated notes into a summary of the changes since the previous tag.
 
 ## Publishing
 
@@ -99,8 +100,10 @@ exists. After a crate exists, its settings on crates.io name this repository, th
 `.github/workflows/release.yml`: `verify` checks that the tag names the workspace version, that
 the licence copies are in sync and that every package builds as published; `publish` exchanges
 the GitHub OIDC identity for a short-lived token (`rust-lang/crates-io-auth-action`, 30 minutes)
-and runs `scripts/ci/publish-remaining.sh --publish --no-verify`, so a run that stops on the rate
-limit is re-run and resumes; `github-release` then creates the release with generated notes.
+and runs `scripts/ci/publish-remaining.sh --publish --no-verify`, retrying a minute apart while it
+stops on the update rate limit (all 47 packages take about 20 minutes); a run that fails anyway —
+its token lapsed, say — is re-run and resumes. `github-release` then creates the release with
+generated notes.
 
 ### Ownership
 

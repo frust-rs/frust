@@ -20,7 +20,7 @@ thiserror = { workspace = true }
 # `docs/ARCHITECTURE.md`'s Module Structure / `docs/CODE_STANDARDS.md`'s
 # Plugin Conventions). Unconditional like `frust-haptics`'s own copy: the
 # crate is inert off Android, so declaring it target-gated would buy nothing.
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.1" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
 
 # Android: `Intent`/`Uri`/`startActivity` via plain JNI (no Kotlin/Gradle
 # module — see `src/android.rs`'s module doc for why one isn't needed).

@@ -23,7 +23,7 @@ log = { workspace = true }
 # ordinary items, so the split is mechanical, not a layering choice. This
 # crate re-exports it at its own root (`frust_i18n::locales`, see
 # `src/lib.rs`) so a caller never depends on the macros crate directly.
-frust-i18n-macros = { path = "macros", version = "0.5.1" }
+frust-i18n-macros = { path = "macros", version = "0.5.2" }
 # Fluent Project's message-bundle engine (`src/engine`) — parses/resolves
 # `.ftl` message files per requested locale. Direct dependency per plan D6:
 # `fluent-templates` is deliberately NOT used — this crate owns bundle
@@ -58,7 +58,7 @@ unic-langid = { workspace = true }
 # is nothing left to trim — the plain path edge stays for the override
 # freedom, not for a catalog opt-out.
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.1", optional = true }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.2", optional = true }
 
 # The `formatting` feature's ICU4X number/date/plural formatting stack
 # (`src/fmt`) — see root `Cargo.toml`'s comment for the pin rationale (the
@@ -135,7 +135,7 @@ formatting = [
 # unconditional dependency, keeps every non-Android host's dependency graph
 # free of it.
 [target.'cfg(target_os = "android")'.dependencies]
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.1" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
 jni = { workspace = true }
 
 # `target_vendor = "apple"` (iOS + macOS) — wider than `frust-clipboard`/

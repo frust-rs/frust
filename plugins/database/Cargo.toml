@@ -20,7 +20,7 @@ thiserror = { workspace = true }
 # it needs no JNI/platform handle, since both SQL engines (rusqlite/turso)
 # reach on-disk SQLite storage directly rather than through an OS capability
 # API — see this crate's `lib.rs` charter doc.
-frust-paths = { path = "../../crates/frust-paths", version = "0.5.1" }
+frust-paths = { path = "../../crates/frust-paths", version = "0.5.2" }
 # One `debug!` line: the macOS legacy-base read-through in `resolve_db_path`
 # names both candidate paths when it opens the legacy database instead of
 # the new-location one, so a surprising open location is diagnosable.

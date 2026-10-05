@@ -76,7 +76,7 @@ frust-theme = { workspace = true, optional = true }
 # `docs/CODE_STANDARDS.md`'s Plugin Conventions) — inert
 # (`NotInitialized`) on non-Android targets, so it stays an unconditional
 # dependency rather than target-gated.
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.1" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
 
 # Android: the plugin's own JNI exports (the generic
 # `Java_dev_frust_nativewidgets_FrustNativeControlFactory_native*` / `FrustNativeListener`
