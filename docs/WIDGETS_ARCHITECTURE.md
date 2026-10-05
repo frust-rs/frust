@@ -25,6 +25,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-widgets::motion` | Implicit-animation and transition-pattern vocabulary |
 | `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions — internally split across six `nav/*.rs` files (see below); single public path via `navigator.rs`'s re-exports |
 | `frust-widgets::physics` | Pluggable scroll-motion strategy (`ScrollPhysics` trait, `OverscrollEffect`, `Simulation` ports, platform-adaptive defaults) that `ScrollView`/`ListView` consult instead of hard-coding a feel — see *Scroll Physics* below |
+| `frust-widgets::scroll_controller` | `ScrollController` — a cloneable, reactive-free handle onto a `ScrollView` or `ListView`'s offset/item position — see *Scroll Physics* and *Virtualized ListView* below |
 | `frust-widgets::overlay` | The widget-author face of CORE's overlay portal: anchored placement geometry (`place`/`OverlayPlacement`), the `OverlaySlot` a widget hosting its own floated pod keeps, and the declarative `overlay_portal` wrapper |
 | `frust-widgets::platform_view` | Native-sibling compositing slot and input-shield wrapper for translucent surfaces |
 | `frust-theme` | `Theme` aggregate and its token tables (color, type, shape, elevation, motion, glass); carries no design-language token module of its own — only the neutral/language-free floor (`Theme::neutral()` and friends) |
@@ -268,6 +269,7 @@ build from.
 | authoring module (`build_child`/`rebuild_child`/`teardown_child`/`rebuild_children`, `route_event`, `VisitPods`/`visit_children!`) | The sanctioned seam for authoring any widget against `frust-core`, including child-introspection |
 | `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions |
 | `ButtonStyle`, `ScrollInfo`, `IconData`/`IconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set |
+| `ScrollController` / `ScrollSubscription` / `AnimateTo` / `ItemAlignment` | Programmatic-scroll handle for `ScrollView`/`ListView`, its `on_change` guard, the animate-to duration/curve, and the keyed-row landing alignment — see *Scroll Physics* and *Virtualized ListView* |
 | `ListView` / `ListViewWidget` | Baseline virtualized list: windowed rebuild-time materialization, positional or keyed (`ChildKey`) row identity, optional variable extents, refresh/overscroll parity with `ScrollView` |
 | `NavigatorController::transition()` / `TransitionState` / `PageVisibility` | Navigation state observation seams |
 | `RouteNavigator` / `NavRequest` | Off-thread-safe navigation handle (Arc-backed plain data, no reactive types) |
@@ -450,6 +452,52 @@ still suppresses the takeover (see *Pinch flow*/*Pan-zoom flow* above).
 `frust-glyph`'s `app_bar` scroll-collapse — are unaffected: the seam changes only what computes
 drag/post-release motion, never `ScrollInfo`'s contract.
 
+**Programmatic scroll (`scroll_controller.rs`).** `ScrollController` is a cloneable, reactive-free
+handle `ScrollView::controller`/`ListView::controller` attaches, reachable by app code as
+`frust::{ScrollController, ScrollSubscription, AnimateTo, ItemAlignment}` (the facade's
+re-export): one surface holds a handle at a time — the most recent attach wins, a rebuild never
+steals a handle another surface already holds — and dropping the attached widget detaches it. A write (`jump_to`/`animate_to`, plus
+`scroll_to_item` on a keyed list) is recorded, not applied immediately; the attached surface drains
+its queue at the start of its next layout or paint (a `ListView` also drains at rebuild, before it
+plans its window), so the clamp lands against the freshly measured extent rather than a stale one.
+The queue is bounded by superseding within a segment — the offset commands recorded since the last
+item command: a jump supersedes every earlier offset command in its segment (cancelling any tween
+and setting the position outright), and an animate supersedes an earlier animate but keeps a
+preceding jump, its start position — so a segment holds at most one jump and one animate in
+whatever order they were recorded; superseding never crosses a queued `scroll_to_item`. Item
+commands keep their own ordered channel under a cap of 8 — recording one past the cap drops the
+oldest (debug-build log), re-applying the rule when the drop merges two segments — so the whole
+queue never exceeds the cap plus two offset entries per segment. A superseded jump no longer raises
+a transient near-start/near-end edge notification. A command queued before any surface attaches
+still waits for that surface's first layout, so an unattached handle accumulates at most that same
+bound rather than growing further. Recording raises CORE's pending-result-flush flag
+(`frust_core::mark_pending_result_flush`, see CORE_ARCHITECTURE.md) so a frame-gated mobile shell
+runs the frame that applies it even when nothing else is dirty. `jump_to` clamps to `[0,
+max_offset]` and stops any fling or release-settle in flight; like `animate_to` and
+`scroll_to_item`, it also ends an *established* live drag on the surface the same way a `Down`
+does — the rest of the gesture's `Move`s and its `Up` fall through to the child, and the release
+starts no fling or settle. A hold still inside touch slop stays armed instead: the slop takeover
+and the child's `Cancel` still happen, and the finger can go on to start the drag afterward, the
+way Flutter's `jumpTo` during a hold behaves. `animate_to` eases there through a `TweenSimulation`
+driven by the same ballistic
+pump a release fling uses, so paint cadence and boundary physics are shared, not duplicated — a
+user `Down` or wheel interrupts it, a later command replaces it, and the theme's `reduce_motion`
+flag collapses it to a `jump_to`. Every post-release start — a fling, a release-settle, a
+controller tween — goes through that same single tear-down path first, so a fling, a settle and a
+tween are never live together. `is_animating` is true only while the *currently attached* surface
+has a live controller tween: a handle that is dropped, taken over by another surface, or swapped
+for a different handle mid-tween reports `false`, and the new handle reports the widget's own live
+state. Reads (`offset`/`max_offset`/`viewport_extent`) are the surface's last published snapshot;
+`on_change` fires only when the published `ScrollInfo` actually changes, after a layout, paint or
+event pass. `scroll_to_item(key, ItemAlignment, animated)` is list-only — a `ScrollView` holding
+the handle ignores it (debug-build log) — and is covered in *Virtualized ListView* below.
+`frust-shadcn`'s `scroll_area` takes `.controller()` too, and a primary-button drag on its thumb
+maps pointer travel through the same `jump_to`. A desktop shell does not consult the
+pending-result-flush flag the way the mobile frame gate does (see SHELLS_ARCHITECTURE.md's *Mobile
+frame path*), so a `jump_to`/`animate_to` issued from a handler that itself requests no redraw
+waits for the next desktop frame some other input wakes — the same gap `PanZoomController` already
+has.
+
 ### Virtualized ListView (baseline)
 `ListView`/`ListViewWidget`/`list_view()` live in `frust-widgets` proper (`list_view.rs`), not a
 design-system catalog — the facade re-exports them unconditionally regardless of which (if any)
@@ -499,6 +547,20 @@ Virtualization exists because eager materialization doesn't scale: an in-repo ho
 `ListView`'s rebuild+layout cost staying flat against item count while an eagerly-built
 `ScrollView`+`Column` scales roughly linearly, and a structural assertion beside it pins the
 windowed-materialization fact itself (not the timing) at `N = 10,000`.
+
+**Scroll-to-item.** A keyed list's `ScrollController::scroll_to_item(key, ItemAlignment, animated)`
+(`ItemAlignment`: `Start`/`Center`/`End`/`Nearest`) resolves `key` from the list's measured extents
+plus the variable-extent estimate for rows not yet laid out; a key outside the materialized window
+costs one `key_of` scan over the data in order (O(item count), not per frame). `ListView` publishes
+its own placement offset so the controller's reads agree with what is actually painted. The jump or
+animation lands on the estimate first when rows ahead of it were never measured, then settle-and-
+correct re-resolves the aligned position each following layout and nudges to it, bounded to 4
+layouts or until within 0.5px of the target — a pending request never coexists with an established
+drag (the settle loop's drag guard is defensive only) — so an animated request over never-measured
+rows can end with a small correction snap rather than retargeting mid-animation.
+An unknown key, or any key
+on a positional (non-keyed) list, is a no-op
+(debug-build log); a `ScrollView` holding the handle ignores an item command the same way.
 
 ### Recent Additions
 **Overlay and selection:** the `overlay` module (`place`/`OverlayPlacement`, `OverlaySlot`,

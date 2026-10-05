@@ -1,9 +1,10 @@
-//! The eleven playground sections, one module per section: `platform_views`,
+//! The twelve playground sections, one module per section: `platform_views`,
 //! `camera`, `responsive`, `terminal`, `keys`, `i18n`, `video_player`,
-//! `url_launcher`, `auth_session`, `database`, and `graph_canvas` — each one
-//! an OS-facing capability (or, for `graph_canvas`, a `CanvasView`/
-//! `PanZoomView` widget demo) exercised end to end rather than a widget
-//! gallery.
+//! `url_launcher`, `auth_session`, `database`, `graph_canvas`, and
+//! `scroll_control` — each one an OS-facing capability (or, for
+//! `graph_canvas`/`scroll_control`, a widget demo: `CanvasView`/`PanZoomView`
+//! for the former, a keyed `ListView` bound to a `ScrollController` for the
+//! latter) exercised end to end rather than a widget gallery.
 //!
 //! # Page-fn contract (fixed across every section)
 //!
@@ -42,6 +43,7 @@ pub mod i18n;
 pub mod keys;
 pub mod platform_views;
 pub mod responsive;
+pub mod scroll_control;
 pub mod terminal;
 pub mod url_launcher;
 pub mod video_player;
@@ -50,7 +52,7 @@ use frust::AnyView;
 
 use crate::PlaygroundState;
 
-/// The eleven section labels, in order. Indexed by `PlaygroundState::section`
+/// The twelve section labels, in order. Indexed by `PlaygroundState::section`
 /// and dispatched by [`current`].
 ///
 /// Kept short on purpose: at phone width the shell's narrow-width bottom nav
@@ -64,9 +66,9 @@ use crate::PlaygroundState;
 /// single line at that width. A page wanting a longer heading for itself
 /// (e.g. `platform_views`'s own on-page title) uses its own string literal
 /// rather than this array — see `pages/platform_views.rs`.
-pub const SECTION_LABELS: [&str; 11] = [
+pub const SECTION_LABELS: [&str; 12] = [
     "Platform", "Camera", "Layout", "Terminal", "Keys", "i18n", "Video", "URL", "Auth", "DB",
-    "Graph",
+    "Graph", "Scroll",
 ];
 
 /// How many of [`SECTION_LABELS`], in order, count as "primary" — shown
@@ -79,7 +81,7 @@ pub const SECTION_LABELS: [&str; 11] = [
 /// section off the shell, only off the bar's own direct row.
 pub const PRIMARY_NAV_COUNT: usize = 5;
 
-/// Dispatch to the section page for `section` (0..11), falling back to
+/// Dispatch to the section page for `section` (0..12), falling back to
 /// platform views for any out-of-range index (defensive — the navigation bar
 /// and side rail only ever yield a valid index).
 pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundState> {
@@ -95,6 +97,7 @@ pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundSta
         8 => auth_session::page(state),
         9 => database::page(state),
         10 => graph_canvas::page(state),
+        11 => scroll_control::page(state),
         _ => platform_views::page(state),
     }
 }

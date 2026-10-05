@@ -4242,38 +4242,42 @@ back press delivered mid-exit-ramp.
 
 ---
 
-### `scroll-view-no-external-offset-seam` — offset-derived scroll surfaces must re-implement scroll physics instead of composing over `ScrollView`
+### `scroll-view-no-external-offset-seam` — `message_scroller` (both ports) and beUI's `scroll_to` still re-implement scroll physics instead of composing over `ScrollController`
 
-**Observed**: the baseline scroll surface exposes neither an offset-write path usable outside event
-dispatch (needed to advance a fling/glide during *paint*, or to pin a live edge during *layout*) nor
-a wrapper-readable offset (needed to derive stickiness/distance-from-end state). `frust-shadcn`'s
-`message_scroller` and `frust-beui`'s `message_scroller` (same registry slug, ported independently,
-same seam rationale recorded in both module docs) therefore each own their own offset field,
-wheel/drag consumption, and fling/glide physics in parallel with `ScrollView`'s — three independent
-scroll-gesture implementations (baseline plus the two ports) whose feel (slop thresholds, wheel line
-height, decay curves) must be kept consistent by hand. `frust-beui`'s `scroll_to` hits the write half
-of the same gap from the other direction: it ports only upstream's *animation* (an eased offset
-ramp), publishing each frame's value into a caller-owned signal rather than applying it to a scroll
-surface directly, since there is no programmatic-scroll seam to apply it through.
+**Observed**: the baseline programmatic-scroll seam now exists (`ScrollController`: an
+offset-write path usable outside event dispatch, applied at the attached surface's next layout or
+paint, plus a published-snapshot read) and `frust-shadcn`'s `scroll_area` is already migrated onto
+it — its thumb drags through `jump_to` once a controller is attached. `frust-shadcn`'s
+`message_scroller` and `frust-beui`'s `message_scroller` (same registry slug, ported
+independently, same seam rationale recorded in both module docs) have not migrated: each still
+owns its own offset field, wheel/drag consumption, and fling/glide physics in parallel with
+`ScrollView`'s — two independent scroll-gesture implementations whose feel (slop thresholds, wheel
+line height, decay curves) must be kept consistent with the baseline by hand. `frust-beui`'s
+`scroll_to` is the same gap from the write side: it still ports only upstream's *animation* (an
+eased offset ramp), publishing each frame's value into a caller-owned signal rather than driving a
+`ScrollController`.
 
-**Applies to**: any "sticky bottom" or offset-derived-state scroll surface, in any catalog —
-`frust-shadcn`'s and `frust-beui`'s `message_scroller` today; `frust-beui`'s `scroll_to` for the
-read/apply half. A baseline `ScrollView` feel/physics tuning has no mechanism to propagate into a
-parallel copy and will silently drift. Neither `message_scroller` port gets overscroll rubber-band
-or pull-to-refresh either, for the same reason: a transcript's live edge is not `ScrollView`'s own
-rubber-band surface, and riding the baseline surface is what would have brought it.
+**Applies to**: `frust-shadcn`'s and `frust-beui`'s `message_scroller`; `frust-beui`'s `scroll_to`.
+A baseline `ScrollView` feel/physics tuning has no mechanism to propagate into either
+`message_scroller` copy and will silently drift. Neither port gets overscroll rubber-band or
+pull-to-refresh either, for the same reason: a transcript's live edge is not `ScrollView`'s own
+rubber-band surface, and riding the baseline surface through the controller is what would bring it.
 
-**Why accepted**: the missing seams are baseline `ScrollView` API design work, not something a
-facade-only plugin can add; each parallel implementation was the honest v1 route and is tested on
-its own terms. The remedy path is a baseline seam pair — an external offset-write valid outside a
-dispatch, and a read seam for wrappers — after which either `message_scroller` (and any successor,
-`scroll_to` included) can compose instead of re-implementing.
+**Why accepted**: migrating each is per-catalog follow-up work now that the seam exists and is
+proven (`scroll_area`'s thumb drag), not a missing framework capability; each parallel
+implementation was the honest v1 route and is tested on its own terms.
 
-**Evidence**: `plugins/shadcn/src/components/message_scroller.rs` and
-`plugins/beui/src/agents/message_scroller.rs` (each its own offset/fling/glide state machines and
-matching seam rationale in its module docs, the beUI one crediting the shadcn port's write-up);
-`plugins/beui/src/components/scroll_animation.rs` (`scroll_to`'s "animates an offset it cannot
-apply" degradation); `crates/frust-widgets/src/scroll.rs` (no external write/read offset surface).
+**Evidence**: `crates/frust-widgets/src/scroll_controller.rs` (`ScrollController`'s record/drain/
+publish contract); `plugins/shadcn/src/components/scroll_area.rs` (migrated: `.controller()` plus
+the thumb's `jump_to`-driven drag); `plugins/shadcn/src/components/message_scroller.rs` and
+`plugins/beui/src/agents/message_scroller.rs` (still their own offset/fling/glide state machines);
+`plugins/beui/src/components/scroll_animation.rs` (`scroll_to` still animates a signal it does not
+apply to a surface).
+
+**Note**: unrelated to this gap, a `ScrollController::scroll_to_item` animated onto a keyed row
+whose rows ahead were never measured can end with a small correction snap once the real extents are
+known — the settle-and-correct pass nudges to the re-resolved position rather than retargeting the
+animation mid-flight (see WIDGETS_ARCHITECTURE.md's *Virtualized ListView*).
 
 ---
 
