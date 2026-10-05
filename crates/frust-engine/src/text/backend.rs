@@ -109,10 +109,9 @@ use vello_common::strip_generator::{StripGenerator, StripStorage};
 
 use crate::cache::images::AtlasRegion;
 use crate::compile::clip::ClipStack;
+use crate::compile::cull::generate_fill;
 use crate::compile::paint::encode_brush;
-use crate::compile::{
-    CompiledFrame, DepthCounter, EngineDraw, FLATTEN_TOLERANCE, GlyphSlot, generate_fill,
-};
+use crate::compile::{CompiledFrame, DepthCounter, EngineDraw, FLATTEN_TOLERANCE, GlyphSlot};
 use crate::gpu::atlas::x_y_advances;
 use crate::text::color::{ColorGlyph, ColorLayer, LayerShape};
 

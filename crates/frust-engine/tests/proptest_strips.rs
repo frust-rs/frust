@@ -38,22 +38,24 @@
 //! them, or refuses the frame, and a line's own flattening is exact regardless
 //! of how far apart its ends are. Stroke widths, corner radii, path points and
 //! the linear part of a transform stop at `256`, because each of those scales
-//! the amount of geometry the *flattener and stroker* produce before any
-//! culling happens — a round cap of radius `1e18`, or a dash period of `0.1`
-//! over a path `1e18` long, is a generator that never returns, and no up-front
-//! finiteness check can refuse it because every number in it is finite. Those
-//! magnitudes still reach the compiler, through the unbounded pools above,
-//! where they cost nothing.
+//! the amount of geometry produced before any culling happens. Their huge
+//! finite magnitudes are pinned deterministically instead: the bounded-compile
+//! regressions below compile every curve-carrying command at `1e20` through
+//! `1e300` against a time and an allocation ceiling. One lowering stays out of
+//! that bound — a dash pattern is expanded into sub-paths before any culling,
+//! so a dash period of `0.1` over a path `1e18` long never returns, and the
+//! generator pairs dashes with arbitrary paths.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use frust_engine::{CompiledFrame, EngineError, SceneCompiler};
 use frust_scene::{
     CornerRadii, DashPattern, FontHandle, Glyph, GlyphRun, Scene, SceneBuilder, ShaderProgram,
 };
-use kurbo::{Affine, BezPath, Point, Rect};
+use kurbo::{Affine, BezPath, Circle, Point, Rect, Shape};
 use peniko::color::palette::css::{BLUE, GREEN, RED};
 use peniko::{Blob, Brush, Color, FontData, Gradient, ImageAlphaType, ImageData, ImageFormat};
 use proptest::prelude::*;
@@ -982,23 +984,17 @@ fn a_huge_snapshot_scale_under_a_rounded_clip_stays_inside_the_bound() {
         12.615056205683404,
     ]);
 
-    let scene = scene_of(&ops);
-    let commands = scene.commands().len();
-    let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
-    let (frame, allocated) = measure_allocation(|| compiler.compile(&scene, root, VIEWPORT));
-    let _ = frame;
-
-    let bound = allocation_bound(commands);
+    let outcome = allocation_stays_inside_the_bound(&ops, root);
     assert!(
-        allocated <= bound,
-        "a {commands}-command frame allocated {allocated} bytes, past the {bound}-byte bound"
+        outcome.is_ok(),
+        "the frame must compile inside the allocation bound: {outcome:?}"
     );
 }
 
-/// The allocation property replayed from fixed seeds that once failed to
-/// terminate, independent of `PROPTEST_RNG_SEED`.
+/// The allocation property over fixed seeds, independent of
+/// `PROPTEST_RNG_SEED`, so the cases they generate are checked on every run.
 #[test]
-fn the_allocation_property_holds_for_the_seeds_that_once_hung() {
+fn the_allocation_property_holds_for_the_pinned_seeds() {
     for seed in [100_u64, 107, 263, 386] {
         let mut runner = TestRunner::new(ProptestConfig {
             cases: ALLOCATION_CASES,
@@ -1010,6 +1006,172 @@ fn the_allocation_property_holds_for_the_seeds_that_once_hung() {
                 allocation_stays_inside_the_bound(&ops, root)
             })
             .unwrap_or_else(|failure| panic!("seed {seed}: {failure}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded compile at extreme finite magnitudes
+// ---------------------------------------------------------------------------
+
+/// Device magnitudes the bounded-compile regressions run at: past the depth
+/// the viewport split can halve away, past `f32`'s range, and near `f64`'s.
+const MAGNITUDES: [f64; 4] = [1e20, 1e40, 1e100, 1e300];
+
+/// Wall-time ceiling for one compile at an extreme magnitude. These scenes
+/// compile in milliseconds even unoptimized when every lowering is bounded;
+/// an unbounded lowering takes seconds at `1e40` and runs out of time or
+/// memory past it.
+const MAGNITUDE_TIME_LIMIT: Duration = Duration::from_millis(250);
+
+/// Compiles `ops` under `root`, asserting that the frame compiles — every
+/// number in these scenes is finite, so a refusal would be a wrong answer —
+/// within [`MAGNITUDE_TIME_LIMIT`], inside [`allocation_bound`] of its command
+/// count, and with well-packed strips.
+fn assert_compiles_within_bounds(case: &str, ops: &[Op], root: Affine) {
+    let scene = scene_of(ops);
+    let commands = scene.commands().len();
+    let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
+
+    let started = Instant::now();
+    let (compiled, allocated) = measure_allocation(|| compiler.compile(&scene, root, VIEWPORT));
+    let elapsed = started.elapsed();
+
+    let frame = compiled.unwrap_or_else(|error| panic!("{case}: refused with {error:?}"));
+    assert!(
+        elapsed < MAGNITUDE_TIME_LIMIT,
+        "{case}: compiled in {elapsed:?}, past the {MAGNITUDE_TIME_LIMIT:?} ceiling"
+    );
+    let bound = allocation_bound(commands);
+    assert!(
+        allocated <= bound,
+        "{case}: a {commands}-command frame allocated {allocated} bytes, past the \
+         {bound}-byte bound"
+    );
+    let failures = strip_packing_failures(&frame);
+    assert!(failures.is_empty(), "{case}: {}", failures.join("\n"));
+}
+
+/// The rectangle `(-size, 0) .. (size, 2 * size)`: under radii of `size` it
+/// is a circle of that radius whose top touches the viewport's top-left
+/// corner, so its curved edge straddles the viewport at any magnitude.
+fn straddling_rect(size: f64) -> Rect {
+    Rect::new(-size, 0.0, size, 2.0 * size)
+}
+
+/// A closed quadratic from `(-size, size)` to `(size, size)` that passes
+/// through the viewport's centre at its midpoint once drawn under `scale`.
+fn straddling_quad(size: f64, scale: f64) -> BezPath {
+    let edge = 64.0 / scale;
+    let mut path = BezPath::new();
+    path.move_to((-size, size));
+    path.quad_to((edge, edge - size), (size, size));
+    path.close_path();
+    path
+}
+
+/// The circle [`straddling_rect`] rounds to, as a path of four cubic arcs.
+fn straddling_circle(size: f64) -> BezPath {
+    Affine::new([size, 0.0, 0.0, size, 0.0, size]) * Circle::new((0.0, 0.0), 1.0).to_path(1e-3)
+}
+
+fn red() -> Brush {
+    Brush::Solid(RED)
+}
+
+/// The curve-carrying commands at user-space `size`, laid out to be drawn
+/// under a uniform `scale`: a rounded rect, a rounded clip over a
+/// viewport-sized fill, filled cubic and quadratic paths, and round-capped
+/// strokes of a line through the viewport's middle row and of a cubic path,
+/// each two device pixels wide and as wide as the geometry. Display-list
+/// strokes are round-joined and round-capped only; mitred and square-capped
+/// strokes are pinned where the stroke lowering lives, in the engine's `cull`
+/// unit tests.
+fn magnitude_cases(size: f64, scale: f64) -> Vec<(&'static str, Vec<Op>)> {
+    let thin = 2.0 / scale;
+    let line = |width| Op::Line {
+        p0: Point::new(-size, 32.0 / scale),
+        p1: Point::new(size, 32.0 / scale),
+        width,
+        brush: red(),
+    };
+    let stroked = |width| Op::StrokePath {
+        path: straddling_circle(size),
+        width,
+        dash: None,
+        brush: red(),
+    };
+    vec![
+        (
+            "rounded rect",
+            vec![Op::RoundedRect {
+                rect: straddling_rect(size),
+                radii: CornerRadii::uniform(size),
+                brush: red(),
+            }],
+        ),
+        (
+            "rounded clip",
+            vec![
+                Op::PushClipRounded {
+                    rect: straddling_rect(size),
+                    radii: CornerRadii::uniform(size),
+                },
+                Op::FillRect {
+                    rect: Rect::new(0.0, 0.0, 64.0 / scale, 64.0 / scale),
+                    brush: red(),
+                },
+                Op::PopClip,
+            ],
+        ),
+        (
+            "cubic fill",
+            vec![Op::FillPath {
+                path: straddling_circle(size),
+                brush: red(),
+            }],
+        ),
+        (
+            "quadratic fill",
+            vec![Op::FillPath {
+                path: straddling_quad(size, scale),
+                brush: red(),
+            }],
+        ),
+        ("thin stroked line", vec![line(thin)]),
+        ("wide stroked line", vec![line(size)]),
+        ("thin stroked cubic", vec![stroked(thin)]),
+        ("wide stroked cubic", vec![stroked(size)]),
+    ]
+}
+
+/// The counterexample class itself: every curve-carrying command, with its
+/// own coordinates at each of [`MAGNITUDES`], under the identity root.
+#[test]
+fn curve_carrying_commands_at_extreme_magnitudes_compile_within_bounds() {
+    for size in MAGNITUDES {
+        for (name, ops) in magnitude_cases(size, 1.0) {
+            assert_compiles_within_bounds(&format!("{name} at {size:e}"), &ops, Affine::IDENTITY);
+        }
+    }
+}
+
+/// The same magnitudes reached through nested `PushTransform` scales over
+/// ordinary geometry: each case at size `1` under a chain of `1e10` scales
+/// whose product is the magnitude.
+#[test]
+fn nested_scales_reaching_extreme_magnitudes_compile_within_bounds() {
+    for size in MAGNITUDES {
+        let depth = (size.log10() / 10.0).round() as usize;
+        for (name, ops) in magnitude_cases(1.0, size) {
+            let mut chain = vec![Op::PushTransform(Affine::scale(1e10)); depth];
+            chain.extend(ops);
+            chain.extend(vec![Op::PopTransform; depth]);
+            assert_compiles_within_bounds(
+                &format!("{name} under {depth} nested 1e10 scales"),
+                &chain,
+                Affine::IDENTITY,
+            );
+        }
     }
 }
 
