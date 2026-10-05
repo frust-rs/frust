@@ -226,8 +226,8 @@ fn scaffolded_clean_signals_project_builds_against_the_real_facade_and_plugin() 
 /// crates.io release, and the result builds and passes `frust doctor`.
 ///
 /// Needs network and the released crates (`frust-ui`, `frust-material`, ...) on
-/// crates.io at this workspace's version. The go-public plan's r5-06 is where
-/// it first runs for real; until 0.5.0 is published it is expected to fail.
+/// crates.io at this workspace's version: it fails between a version bump and
+/// that version's publish.
 /// Run explicitly:
 /// `cargo test -p frust-cli --test create_e2e -- --ignored scaffolded_project_builds_from_the_registry`
 #[test]

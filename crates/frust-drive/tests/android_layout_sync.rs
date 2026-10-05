@@ -150,7 +150,7 @@ fn app_build_gradle_jni_libs_dir_matches_build_layout_in_both_sites() {
 
 /// A plugin's Android library module — applied through the public
 /// `frust_drive::plugin::add_plugin` API, the same idempotent mutation
-/// `frust plugin add` performs — gets the identical
+/// plugin add (`plugin::add_plugin`) performs — gets the identical
 /// `<app>/build/android/<module>` redirect treatment as the built-in
 /// `:frust-embedding` module above, derived from
 /// `BuildLayout::android_module`. `camera`'s base contribution set includes

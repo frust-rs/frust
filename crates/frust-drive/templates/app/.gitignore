@@ -57,6 +57,6 @@ xcuserdata/
 # Machine-local symlinks to the local Swift packages the Xcode project
 # references by name — `FrustEmbedding` (the `frust-shell-ios` crate's) and
 # one per plugin package (`FrustIap`, `FrustCamera`, ...) — written by `frust
-# create` / `frust plugin add` and refreshed by `frust run` / `frust build`;
+# create` / the TUI's Add Plugin and refreshed by `frust run` / `frust build`;
 # each target is wherever cargo resolved that crate.
 /ios/Frust*

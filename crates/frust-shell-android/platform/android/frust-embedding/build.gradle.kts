@@ -4,12 +4,11 @@
 // out-of-tree:
 //
 //     include(":frust-embedding")
-//     project(":frust-embedding").projectDir =
-//         file(providers.gradleProperty("frust.embedding.dir").get())
+//     project(":frust-embedding").projectDir = frustLocalDir("frust.embedding.dir")
 //
-// plus a `gradle.lifecycle.beforeProject` build-directory redirect, so two apps
-// can share one frust checkout without either polluting it. The consuming app's
-// `frust.embedding.dir` must point at THIS directory, and it must be writable
+// plus a `gradle.lifecycle.beforeProject` build-directory redirect, so this crate's directory is
+// never written to. The consuming app's `frust.embedding.dir` (in its gitignored
+// `local.properties`) must point at THIS directory, and it must be writable
 // (Gradle 9 refuses a read-only `projectDir` — a hard configuration failure,
 // not a build-time one).
 //

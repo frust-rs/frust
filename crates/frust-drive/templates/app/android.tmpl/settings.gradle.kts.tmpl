@@ -17,9 +17,9 @@ rootProject.name = "{{ project_name }}"
 include(":app")
 
 // Machine-local directories — the `:frust-embedding` module below and every
-// plugin module `frust plugin add` includes — never live in this tracked
+// plugin module the TUI's Add Plugin includes — never live in this tracked
 // file. They sit in the gitignored `local.properties` beside it, written by
-// `frust create` / `frust plugin add` and refreshed by every `frust run` /
+// `frust create` / Add Plugin and refreshed by every `frust run` /
 // `frust build` from wherever cargo resolves each crate for this project, so
 // they follow a `cargo update` or a move to another machine. A key that is
 // missing fails here, naming the command that writes it.
@@ -41,7 +41,7 @@ fun frustLocalDir(key: String): java.io.File {
 // Frust's Android embedding (the Kotlin host: FrustActivity, FrustSurfaceView,
 // FrustViewHost, the accesskit delegate) is a `com.android.library` module
 // consumed by path out of the `frust-shell-android` crate cargo resolves for
-// this project. It becomes a published Maven coordinate later.
+// this project.
 include(":frust-embedding")
 project(":frust-embedding").projectDir = frustLocalDir("frust.embedding.dir")
 
@@ -75,7 +75,7 @@ gradle.lifecycle.beforeProject {
 }
 
 // frust:plugin-includes — plugin-contributed `include(...)` lines go below.
-// `frust plugin add` appends each plugin's Android library module here with
+// The TUI's Add Plugin appends each plugin's Android library module here with
 // the same include/projectDir/build-dir-redirect trio as `:frust-embedding`
 // above (its directory read through `frustLocalDir`, its key
 // `frust.plugin.<module>.dir`), so every module this project ever gains —

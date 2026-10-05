@@ -55,7 +55,7 @@
 //! plugin declaring a macOS `Info.plist` key, a macOS entitlement or a Linux
 //! desktop-entry key has it merged into the *assembled* bundle on every build
 //! — after assembly, before `codesign` — rather than written into a project
-//! file at `frust plugin add` time. See [`contributions`] for the merge rules
+//! file when the plugin is added. See [`contributions`] for the merge rules
 //! (an existing key always wins; an unappliable one is a hard refusal).
 //!
 //! **A missing or unusable icon never fails a build.** The bundle is assembled
