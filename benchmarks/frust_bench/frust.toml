@@ -1,7 +1,7 @@
 [app]
 name = "frustbench"
 org = "it.f0x"
-description = "Frust benchmark app (Phase 9.E scenario suite)"
+description = "Frust benchmark app (scenario suite)"
 
 # Informational (not parsed): to change the scheme, re-run `frust create --overwrite` or edit platform files.
 [deeplink]

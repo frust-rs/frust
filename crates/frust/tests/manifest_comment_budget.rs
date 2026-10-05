@@ -24,6 +24,15 @@
 //! - `frust.toml` and `frust.toml.tmpl`: measured maximum 3.25
 //!   (`examples/material3-demo/frust.toml`, P=13, N=4), so `FRUST_CEILING` is 3.3.
 //!
+//! # Block length
+//!
+//! A manifest comment states one constraint in at most `MAX_BLOCK_LINES`
+//! lines. A block is a run of consecutive prose comment lines; a blank line, a
+//! setting, a commented-out TOML line, or a `# BEGIN`/`# END` marker ends it.
+//! In a `frust.toml`, indented example lines (`#` then three or more spaces,
+//! e.g. a `keytool` command) are documentation of a command, not prose: they
+//! neither count toward nor end a block.
+//!
 //! # File set
 //!
 //! The same manifests the comment-residue scan reads: `Cargo.toml`,
@@ -44,6 +53,9 @@ const CARGO_CEILING: f64 = 0.9;
 
 /// Maximum prose-to-non-comment ratio above the floor for `frust.toml` files.
 const FRUST_CEILING: f64 = 3.3;
+
+/// Longest run of consecutive prose comment lines a manifest may carry.
+const MAX_BLOCK_LINES: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
@@ -195,6 +207,45 @@ fn over_budget(label: &str, contents: &str) -> Option<String> {
     })
 }
 
+/// True for an indented example line in a `frust.toml` (`#` then 3+ spaces).
+fn is_example_line(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix('#')
+        .is_some_and(|rest| rest.starts_with("   ") && !rest.trim().is_empty())
+}
+
+/// True for a `# BEGIN …` / `# END …` hand-synced block marker.
+fn is_marker(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix('#')
+        .map(str::trim_start)
+        .is_some_and(|rest| rest.starts_with("BEGIN ") || rest.starts_with("END "))
+}
+
+/// `(first line, length)` of every prose comment block longer than
+/// `MAX_BLOCK_LINES` — see the module doc's Block length §.
+fn oversized_blocks(label: &str, contents: &str) -> Vec<(usize, usize)> {
+    let name = label.rsplit('/').next().unwrap_or(label);
+    let frust = Kind::of(name) == Kind::Frust;
+    let mut out = Vec::new();
+    let mut run: Option<(usize, usize)> = None;
+    for (index, line) in contents.lines().enumerate() {
+        let trimmed = line.trim();
+        if frust && is_example_line(line) {
+            continue;
+        }
+        let prose = trimmed.starts_with('#') && !is_commented_out_toml(trimmed) && !is_marker(line);
+        if prose {
+            run = Some(run.map_or((index + 1, 1), |(start, len)| (start, len + 1)));
+        } else if let Some(block) = run.take() {
+            out.push(block);
+        }
+    }
+    out.extend(run);
+    out.retain(|&(_, len)| len > MAX_BLOCK_LINES);
+    out
+}
+
 #[test]
 fn manifests_stay_within_the_comment_budget() {
     let root = workspace_root();
@@ -219,6 +270,12 @@ fn manifests_stay_within_the_comment_budget() {
             .to_string_lossy()
             .replace('\\', "/");
         failures.extend(over_budget(&label, &contents));
+        failures.extend(oversized_blocks(&label, &contents).into_iter().map(|(line, len)| {
+            format!(
+                "{label}:{line}: a {len}-line comment block (max {MAX_BLOCK_LINES}) — condense it, \
+                 or move each fact above the setting it explains"
+            )
+        }));
     }
     assert!(
         failures.is_empty(),
@@ -292,6 +349,31 @@ fn the_floor_exempts_small_prose_blocks() {
         "exactly at the floor is never flagged however sparse the settings"
     );
     assert!(over_budget("big/Cargo.toml", &synthetic(PROSE_FLOOR + 1, 1)).is_some());
+}
+
+#[test]
+fn a_comment_block_over_three_lines_fails() {
+    let four = "# one\n# two\n# three\n# four\nkey = 1\n";
+    assert_eq!(oversized_blocks("x/Cargo.toml", four), vec![(1, 4)]);
+    let three = "# one\n# two\n# three\nkey = 1\n";
+    assert!(oversized_blocks("x/Cargo.toml", three).is_empty());
+}
+
+#[test]
+fn settings_markers_and_commented_out_toml_end_a_block() {
+    let contents =
+        "# a\n# b\n# c\n# serde = \"1\"\n# d\n# BEGIN synced block\n# e\n# f\nk = 1\n# g\n";
+    assert!(oversized_blocks("x/Cargo.toml", contents).is_empty());
+}
+
+#[test]
+fn frust_toml_example_lines_neither_count_nor_end_a_block() {
+    let contents = "# a\n# b\n#   keytool -genkey \\\n#     -alias upload\n# c\n[signing]\n";
+    assert!(oversized_blocks("x/frust.toml", contents).is_empty());
+    let four = "# a\n# b\n#   keytool -genkey\n# c\n# d\n";
+    assert_eq!(oversized_blocks("x/frust.toml", four), vec![(1, 4)]);
+    // Outside a frust.toml an indented comment is ordinary prose.
+    assert_eq!(oversized_blocks("x/Cargo.toml", four), vec![(1, 5)]);
 }
 
 #[test]

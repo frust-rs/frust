@@ -9,6 +9,7 @@ description = "Frust playground: plugin, native-widget, platform-view, and respo
 
 # Android release signing reads gitignored `android/key.properties` (keys below; create the keystore with the
 # keytool line), falling back per value to `ANDROID_*` env vars. Parsed by Frust; set only to change the defaults.
+# A manual `./gradlew assembleRelease` bypasses Frust's signing gate and may debug-sign with only a warning.
 #   storePassword=<keystore password>
 #   keyPassword=<key password>
 #   keyAlias=<key alias>

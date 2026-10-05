@@ -4,7 +4,7 @@ org = "it.f0x"
 description = "Frust native-widgets showcase: every native control beside its frust-drawn peer, one page per widget family"
 
 # Desktop identity, rendered into `macos/Info.plist`, `windows/build.rs` and `linux/app.desktop`
-# at scaffold time; editing it here does not rewrite those files.
+# at scaffold time; editing it here does not rewrite those files, and a build reports any disagreement.
 [desktop]
 name = "Native Widgets Demo"
 identifier = "it.f0x.native_widgets_demo"
@@ -52,6 +52,7 @@ scheme = "native-widgets-demo"
 
 # Android release signing reads gitignored `android/key.properties` (keys below; create the keystore with the
 # keytool line), falling back per value to `ANDROID_*` env vars. Parsed by Frust; set only to change the defaults.
+# A manual `./gradlew assembleRelease` bypasses Frust's signing gate and may debug-sign with only a warning.
 #   storePassword=<keystore password>
 #   keyPassword=<key password>
 #   keyAlias=<key alias>
