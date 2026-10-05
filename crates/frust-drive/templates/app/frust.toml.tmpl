@@ -54,10 +54,17 @@ host = "{{ deeplink_host }}"
 # dev = { app-id-suffix = ".dev" }
 # prod = {}
 
-# Android release signing reads gitignored `android/key.properties` (storePassword, keyPassword, keyAlias,
-# storeFile), falling back per value to `ANDROID_*` env vars. Parsed by Frust; set only to change the defaults.
+# Android release signing reads gitignored `android/key.properties` (keys below; create the keystore with the
+# keytool line), falling back per value to `ANDROID_*` env vars. Parsed by Frust; set only to change the defaults.
+#   storePassword=<keystore password>
+#   keyPassword=<key password>
+#   keyAlias=<key alias>
+#   storeFile=<path to .jks, relative to the android/ dir>
+#   keytool -genkey -v -keystore ~/upload-keystore.jks -keyalg RSA \
+#     -storetype JKS -keysize 2048 -validity 10000 -alias upload
 # [signing]
 # # Properties file path, relative to `android/`. Default: "key.properties".
+# key-properties = "app/keystores/key.properties"
 # # Key prefix for a file holding several key sets. Default: none.
 # prefix = "prod"
 # # Waives the gate when signing happens outside Frust; release builds then warn.
