@@ -147,6 +147,70 @@ pub(crate) const LONG_PRESS_MS: f64 = 500.0;
 /// is deferred there — see the [module docs](self)).
 pub(crate) const DOUBLE_TAP_MS: f64 = 300.0;
 
+/// The paint-clock hold timer behind a stationary long-press: the press epoch,
+/// the threshold it is measured against, and the two reads every hold consumer
+/// makes of them.
+///
+/// Time only enters a widget through [`PaintCtx::frame_time`], so the epoch is
+/// not the `Down` itself but the **first observation after it** — the first
+/// paint that asks [`progress`](Self::progress) or [`fired`](Self::fired)
+/// records it, and every later read differences against it (see the [module
+/// docs](self#long-press-firing-semantics)). [`cancel`](Self::cancel) forgets
+/// the epoch, so the next press re-anchors on its own first paint.
+///
+/// `Copy` and state-free beyond those two values, so a recogniser keeps one per
+/// widget and resets it on every arming `Down` rather than allocating per press.
+/// Shared by [`GestureDetectorWidget`] and [`crate::drag`]'s draggable, whose
+/// touch long-press initiation must hold for exactly as long as every
+/// `GestureDetector` around it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HoldTracker {
+    /// The first observed frame time of the current press; `None` before the
+    /// first observation (and after [`cancel`](Self::cancel)).
+    press_start: Option<FrameTime>,
+    /// The hold duration, in ms, after which [`fired`](Self::fired) reports
+    /// `true` and [`progress`](Self::progress) reaches `1.0`.
+    threshold_ms: f64,
+}
+
+impl HoldTracker {
+    /// A tracker with no press recorded, firing after `threshold_ms`.
+    pub(crate) const fn new(threshold_ms: f64) -> Self {
+        Self {
+            press_start: None,
+            threshold_ms,
+        }
+    }
+
+    /// Change the hold duration. Takes effect on the next read, so a threshold
+    /// changed mid-press is measured against the press's original epoch.
+    pub(crate) fn set_threshold_ms(&mut self, threshold_ms: f64) {
+        self.threshold_ms = threshold_ms;
+    }
+
+    /// Milliseconds held as of `now`, recording `now` as the epoch on the first
+    /// observation of a press.
+    fn elapsed_ms(&mut self, now: FrameTime) -> f64 {
+        let start = *self.press_start.get_or_insert(now);
+        now.saturating_sub(start).as_secs_f64() * 1000.0
+    }
+
+    /// Hold progress as of `now`: `elapsed / threshold`, clamped `0.0..=1.0`.
+    pub(crate) fn progress(&mut self, now: FrameTime) -> f64 {
+        (self.elapsed_ms(now) / self.threshold_ms).clamp(0.0, 1.0)
+    }
+
+    /// Whether the hold has reached the threshold as of `now`.
+    pub(crate) fn fired(&mut self, now: FrameTime) -> bool {
+        self.elapsed_ms(now) >= self.threshold_ms
+    }
+
+    /// Forget the current press: the next observation records a fresh epoch.
+    pub(crate) fn cancel(&mut self) {
+        self.press_start = None;
+    }
+}
+
 /// A view-held, typed gesture callback (erased on build). Shared by `on_tap`
 /// and `on_long_press` — both are `Fn(&mut State)`.
 type GestureCallback<State> = Rc<dyn Fn(&mut State)>;
@@ -235,8 +299,9 @@ enum Recognizer {
     /// No press in flight.
     Idle,
     /// A press is down and still within the slop (tap + long-press both viable).
-    /// `press_start` is recorded on the first paint after `Down`; `elapsed`
-    /// flips once a paint observes the hold exceeding the threshold — the same
+    /// The widget's [`HoldTracker`] records the press epoch on the first paint
+    /// after `Down`; `elapsed` flips once a paint observes the hold exceeding
+    /// the threshold — the same
     /// paint also latches a Housekeeping flush when `on_long_press` is wired
     /// (see the [module docs](self#long-press-firing-semantics)). `progress`
     /// is paint's latest `0.0..=1.0` hold-progress observation, delivered to
@@ -245,7 +310,6 @@ enum Recognizer {
     /// docs](self#hold-progress-observation)).
     Pressed {
         down_pos: Point,
-        press_start: Option<FrameTime>,
         elapsed: bool,
         progress: f64,
     },
@@ -266,10 +330,11 @@ pub struct GestureDetectorWidget {
     on_tap: Option<crate::authoring::ErasedCallback>,
     on_long_press: Option<crate::authoring::ErasedCallback>,
     on_hold_progress: Option<crate::authoring::ErasedArgCallback<f64>>,
-    /// Resolved hold threshold in ms — [`GestureDetectorView::hold_threshold_ms`]
-    /// if set, else [`LONG_PRESS_MS`]. Shared by the long-press timer and the
-    /// hold-progress computation.
-    threshold_ms: f64,
+    /// The press timer, firing at the resolved hold threshold —
+    /// [`GestureDetectorView::hold_threshold_ms`] if set, else
+    /// [`LONG_PRESS_MS`]. Shared by the long-press timer and the hold-progress
+    /// computation; reset on every arming `Down`.
+    hold: HoldTracker,
 }
 
 impl<State: 'static> View<State> for GestureDetectorView<State> {
@@ -292,10 +357,11 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
             // NaN through unchanged, so an unguarded `0.0 / 0.0` divisor in
             // paint's progress computation would poison every subsequent
             // observation. See `hold_threshold_ms`'s doc comment.
-            threshold_ms: self
-                .hold_threshold_ms
-                .map(|ms| ms.max(1) as f64)
-                .unwrap_or(LONG_PRESS_MS),
+            hold: HoldTracker::new(
+                self.hold_threshold_ms
+                    .map(|ms| ms.max(1) as f64)
+                    .unwrap_or(LONG_PRESS_MS),
+            ),
         }
     }
 
@@ -315,10 +381,11 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
             .as_ref()
             .map(crate::authoring::erase_callback_arg);
         // Same NaN guard as `build` above — see `hold_threshold_ms`'s doc comment.
-        element.threshold_ms = self
-            .hold_threshold_ms
-            .map(|ms| ms.max(1) as f64)
-            .unwrap_or(LONG_PRESS_MS);
+        element.hold.set_threshold_ms(
+            self.hold_threshold_ms
+                .map(|ms| ms.max(1) as f64)
+                .unwrap_or(LONG_PRESS_MS),
+        );
         crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
@@ -351,17 +418,13 @@ impl Widget for GestureDetectorWidget {
         // pointlessly during the hold — a small battery win.
         if (self.on_long_press.is_some() || self.on_hold_progress.is_some())
             && let Recognizer::Pressed {
-                press_start,
-                elapsed,
-                progress,
-                ..
+                elapsed, progress, ..
             } = &mut self.state
         {
-            let start = *press_start.get_or_insert(ctx.frame_time());
-            let elapsed_ms = ctx.frame_time().saturating_sub(start).as_secs_f64() * 1000.0;
-            *progress = (elapsed_ms / self.threshold_ms).clamp(0.0, 1.0);
+            let now = ctx.frame_time();
+            *progress = self.hold.progress(now);
             if !*elapsed {
-                if elapsed_ms >= self.threshold_ms {
+                if self.hold.fired(now) {
                     *elapsed = true;
                     // Threshold-time firing (see the module docs' "Long-press
                     // firing semantics"): paint can't call `on_long_press`
@@ -401,10 +464,10 @@ impl Widget for GestureDetectorWidget {
                     }
                     self.state = Recognizer::Pressed {
                         down_pos: p.position,
-                        press_start: None,
                         elapsed: false,
                         progress: 0.0,
                     };
+                    self.hold.cancel();
                     ctx.capture_pointer();
                     // Prompt a paint so the long-press/progress timer starts promptly.
                     ctx.request_redraw();
@@ -1319,5 +1382,37 @@ mod tests {
             state.long_presses, 1,
             "long-press fires almost immediately at the 1ms floor"
         );
+    }
+
+    // --- HoldTracker -------------------------------------------------------------
+
+    #[test]
+    fn a_hold_tracker_anchors_on_its_first_observation() {
+        let mut hold = HoldTracker::new(500.0);
+        // The first read records the epoch, whatever the clock says.
+        assert_eq!(hold.progress(ft(1_000.0)), 0.0);
+        assert!(!hold.fired(ft(1_000.0)));
+        assert_eq!(hold.progress(ft(1_250.0)), 0.5);
+        assert!(!hold.fired(ft(1_499.0)));
+        assert!(hold.fired(ft(1_500.0)), "fires at the threshold, inclusive");
+        assert_eq!(hold.progress(ft(9_000.0)), 1.0, "progress clamps at 1.0");
+    }
+
+    #[test]
+    fn cancelling_a_hold_tracker_re_anchors_the_next_press() {
+        let mut hold = HoldTracker::new(500.0);
+        assert!(!hold.fired(ft(0.0)));
+        assert!(hold.fired(ft(600.0)));
+        hold.cancel();
+        assert!(!hold.fired(ft(700.0)), "a fresh epoch, not the old one");
+        assert!(hold.fired(ft(1_200.0)));
+    }
+
+    #[test]
+    fn a_threshold_change_mid_hold_keeps_the_epoch() {
+        let mut hold = HoldTracker::new(500.0);
+        assert!(!hold.fired(ft(0.0)));
+        hold.set_threshold_ms(200.0);
+        assert!(hold.fired(ft(250.0)));
     }
 }
