@@ -12,51 +12,27 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-# The Android platform-handle substrate this crate's Android backend
-# calls through; the only `frust-*` dependency this crate is
-# allowed (platform-plugin charter — see `frust-plugin`'s crate doc).
+# Only `frust-*` dependency the Android backend needs for its platform handle
+# (platform-plugin charter, `frust-plugin` crate doc).
 frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
-# Shared data-dir resolution + atomic write for the `file` backend — a
-# second `frust-*` dependency accepted per the amended platform-plugin
-# charter (leaf substrate, no `frust-*` deps of its own, like
-# `frust-plugin`; see `docs/ARCHITECTURE.md`).
+# Second `frust-*` dependency, accepted by the amended platform-plugin charter
+# (leaf substrate; docs/ARCHITECTURE.md).
 frust-paths = { path = "../../crates/frust-paths", version = "0.5.2" }
-# PrefsError variants callers match on — thiserror per CODE_STANDARDS.
 thiserror = { workspace = true }
-# The file backend's on-disk JSON map encoding.
 serde_json = { workspace = true }
 
-# Android's real SharedPreferences backend calls through
-# frust-plugin::android::with_jni_env, which already carries the `jni` dep;
-# this crate depends on it directly too so its own JNI signature calls
-# (Context.getSharedPreferences, edit()/put*/apply()) don't need to go
-# through frust-plugin's re-export. Target-gated like frust-plugin's own dep.
+# `jni` directly: this crate's own JNI signature calls don't go through
+# `frust-plugin`'s re-export. Target-gated like `frust-plugin`'s own dep.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true }
 
-# The Apple NSUserDefaults backend — objc2/objc2-foundation with an
-# explicit, minimal feature list rather than objc2-foundation's large default
-# set. Declared up front so the real backend
-# only has to write source, not chase feature-resolution errors.
-#
-# `NSValue` gates `NSNumber` (the type lives in the generated `NSValue.rs`,
-# and `src/number.rs`'s safe helpers — `NSNumber::encoding`/`as_bool`/
-# `as_i64`/`as_f64` — are themselves `#[cfg(feature = "NSValue")]` in the
-# vendored objc2-foundation 0.3.2 source, contrary to an earlier note here).
-# The Apple backend reads `NSNumber::encoding()` to recover `bool`/`i64`/`f64`
-# from a stored number, so `NSValue` is required, not optional. `std` gates
-# the `alloc`-backed conversions (`NSString` `Display`/`ToString`) this
-# backend needs, and must be requested explicitly once `default-features =
-# false` turns objc2-foundation's (huge) default list off. `NSEnumerator`
-# backs `NSArray::iter`/`NSDictionary::keys` (element + key enumeration).
+# `NSValue` gates `NSNumber` (`encoding`/`as_bool`/`as_i64`/`as_f64` are
+# `cfg(feature = "NSValue")` in objc2-foundation 0.3.2); `std` must be explicit once
+# `default-features = false`.
 [target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
 objc2 = { workspace = true }
-# Not `{ workspace = true }`: Cargo's workspace-dependency inheritance
-# forbids a member from overriding `default-features` unless the
-# workspace-level entry already sets it explicitly, and
-# `[workspace.dependencies]`'s `objc2-foundation = "0.3"` doesn't (it's
-# unreferenced elsewhere — see its Cargo.toml comment). The version below is
-# kept in sync with that workspace pin by hand (Version-Pin Policy).
+# Not `{ workspace = true }`: inheritance can't override `default-features`. Version
+# hand-synced to the workspace `objc2-foundation` pin (docs/DEVELOPMENT.md § Version-Pin Policy).
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSUserDefaults",
