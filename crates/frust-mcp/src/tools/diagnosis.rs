@@ -19,7 +19,7 @@
 use frust_devtools_protocol::{Capability, FrameStats, WidgetNode, WidgetTreeDump};
 use frust_drive::process::ProcessRunner;
 use rmcp::handler::server::wrapper::Json;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
 
@@ -370,7 +370,7 @@ pub(crate) async fn screenshot(
     })?;
     // Both halves on purpose: the image content is what an agent UI renders,
     // the structured content is what a programmatic caller reads.
-    let mut result = CallToolResult::success(vec![Content::image(png_base64, "image/png")]);
+    let mut result = CallToolResult::success(vec![ContentBlock::image(png_base64, "image/png")]);
     result.structured_content = Some(structured);
     Ok(result)
 }
