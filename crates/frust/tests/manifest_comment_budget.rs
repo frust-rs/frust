@@ -12,8 +12,17 @@
 //! prose a larger file may wrap around its settings. There is no per-file
 //! allowlist: a failing file is trimmed, not exempted.
 //!
-//! `CEILING` is the maximum `P / N` measured over the swept manifests that
-//! exceed the floor, rounded up to the next tenth.
+//! The ceiling is per manifest kind, because the kinds differ in how much
+//! prose is legitimate: a `frust.toml` documents commented-out options and is
+//! naturally dense, a Cargo manifest is not. Each ceiling is the maximum
+//! `P / N` measured over the swept manifests of that kind that exceed the
+//! floor, rounded up to the next tenth:
+//!
+//! - Cargo manifests (`Cargo.toml`, `Cargo.toml*.tmpl`) and `.cargo/config.toml`:
+//!   measured maximum 0.83 (`examples/web-gallery/Cargo.toml`, P=19, N=23), so
+//!   `CARGO_CEILING` is 0.9. No `.cargo/config.toml` exceeds the floor.
+//! - `frust.toml` and `frust.toml.tmpl`: measured maximum 3.25
+//!   (`examples/material3-demo/frust.toml`, P=13, N=4), so `FRUST_CEILING` is 3.3.
 //!
 //! # File set
 //!
@@ -29,8 +38,35 @@ use std::path::{Path, PathBuf};
 /// A manifest with this many prose comment lines or fewer is never flagged.
 const PROSE_FLOOR: usize = 12;
 
-/// Maximum allowed prose-to-non-comment line ratio above the floor.
-const CEILING: f64 = 3.3;
+/// Maximum prose-to-non-comment ratio above the floor for Cargo manifests and
+/// `.cargo/config.toml`.
+const CARGO_CEILING: f64 = 0.9;
+
+/// Maximum prose-to-non-comment ratio above the floor for `frust.toml` files.
+const FRUST_CEILING: f64 = 3.3;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    Cargo,
+    Frust,
+}
+
+impl Kind {
+    fn of(name: &str) -> Kind {
+        if name.starts_with("frust.toml") {
+            Kind::Frust
+        } else {
+            Kind::Cargo
+        }
+    }
+
+    fn ceiling(self) -> f64 {
+        match self {
+            Kind::Cargo => CARGO_CEILING,
+            Kind::Frust => FRUST_CEILING,
+        }
+    }
+}
 
 const SCAN_ROOTS: &[&str] = &["crates", "plugins", "benchmarks", "examples"];
 const ROOT_MANIFESTS: &[&str] = &["Cargo.toml", ".cargo/config.toml"];
@@ -141,7 +177,10 @@ fn measure(contents: &str) -> (usize, usize) {
 }
 
 /// The failure message for a manifest over budget, or `None` when it passes.
-fn over_budget(label: &str, contents: &str, ceiling: f64) -> Option<String> {
+fn over_budget(label: &str, contents: &str) -> Option<String> {
+    let name = label.rsplit('/').next().unwrap_or(label);
+    let kind = Kind::of(name);
+    let ceiling = kind.ceiling();
     let (prose, code) = measure(contents);
     if prose <= PROSE_FLOOR {
         return None;
@@ -149,8 +188,8 @@ fn over_budget(label: &str, contents: &str, ceiling: f64) -> Option<String> {
     let ratio = prose as f64 / code.max(1) as f64;
     (ratio > ceiling).then(|| {
         format!(
-            "{label}: {prose} prose comment lines over {code} non-comment lines (ratio {ratio:.2} \
-             > ceiling {ceiling:.1}, floor {PROSE_FLOOR}) — trim the comments to the constraints \
+            "{label} ({kind:?} manifest): {prose} prose comment lines over {code} non-comment \
+             lines (ratio {ratio:.2} > ceiling {ceiling:.1}, floor {PROSE_FLOOR}) — trim the comments to the constraints \
              a reader cannot recover from the setting itself"
         )
     })
@@ -179,7 +218,7 @@ fn manifests_stay_within_the_comment_budget() {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        failures.extend(over_budget(&label, &contents, CEILING));
+        failures.extend(over_budget(&label, &contents));
     }
     assert!(
         failures.is_empty(),
@@ -203,36 +242,56 @@ fn synthetic(lines: usize, settings: usize) -> String {
 
 #[test]
 fn a_prose_heavy_manifest_fails_the_check() {
-    let message = over_budget("fixture/Cargo.toml", &synthetic(40, 4), CEILING)
+    let message = over_budget("fixture/Cargo.toml", &synthetic(40, 4))
         .expect("ratio 10 is far above the ceiling");
     assert!(message.contains("fixture/Cargo.toml"), "{message}");
+    assert!(message.contains("Cargo"), "{message}");
     assert!(message.contains("40 prose"), "{message}");
     assert!(message.contains("4 non-comment"), "{message}");
+    assert!(message.contains("ratio 10.00"), "{message}");
+    assert!(message.contains("ceiling 0.9"), "{message}");
 }
 
 #[test]
-fn a_manifest_just_under_the_ceiling_passes() {
-    // 33 / 10 = 3.3 sits exactly on the ceiling and is allowed; one more
-    // setting only lowers the ratio.
-    assert_eq!(
-        over_budget("ok/Cargo.toml", &synthetic(33, 10), CEILING),
-        None
-    );
-    assert_eq!(
-        over_budget("ok/Cargo.toml", &synthetic(33, 11), CEILING),
-        None
-    );
-    assert!(over_budget("bad/Cargo.toml", &synthetic(34, 10), CEILING).is_some());
+fn a_root_like_cargo_manifest_fails() {
+    // The pre-sweep root Cargo.toml: 665 prose lines over 190 settings (3.5).
+    assert!(over_budget("root/Cargo.toml", &synthetic(665, 190)).is_some());
+}
+
+#[test]
+fn a_cargo_manifest_at_ratio_one_fails() {
+    assert!(over_budget("one/Cargo.toml", &synthetic(20, 20)).is_some());
+    assert!(over_budget("one/Cargo.toml.tmpl", &synthetic(20, 20)).is_some());
+    assert!(over_budget("one/.cargo/config.toml", &synthetic(20, 20)).is_some());
+}
+
+#[test]
+fn a_cargo_manifest_just_under_its_ceiling_passes() {
+    // 17 / 20 = 0.85 passes; 19 / 20 = 0.95 does not.
+    assert_eq!(over_budget("ok/Cargo.toml", &synthetic(17, 20)), None);
+    assert!(over_budget("bad/Cargo.toml", &synthetic(19, 20)).is_some());
+}
+
+#[test]
+fn a_frust_toml_has_its_own_ceiling() {
+    // 13 / 4 = 3.25 passes, 17 / 5 = 3.4 fails.
+    assert_eq!(over_budget("ok/frust.toml", &synthetic(13, 4)), None);
+    assert_eq!(over_budget("ok/frust.toml.tmpl", &synthetic(13, 4)), None);
+    let message = over_budget("bad/frust.toml", &synthetic(17, 5)).expect("3.4 is over 3.3");
+    assert!(message.contains("Frust"), "{message}");
+    assert!(message.contains("ceiling 3.3"), "{message}");
+    // The same proportions in a Cargo manifest are over budget.
+    assert!(over_budget("bad/Cargo.toml", &synthetic(13, 4)).is_some());
 }
 
 #[test]
 fn the_floor_exempts_small_prose_blocks() {
     assert_eq!(
-        over_budget("small/Cargo.toml", &synthetic(PROSE_FLOOR, 1), CEILING),
+        over_budget("small/Cargo.toml", &synthetic(PROSE_FLOOR, 1)),
         None,
         "exactly at the floor is never flagged however sparse the settings"
     );
-    assert!(over_budget("big/Cargo.toml", &synthetic(PROSE_FLOOR + 1, 1), CEILING).is_some());
+    assert!(over_budget("big/Cargo.toml", &synthetic(PROSE_FLOOR + 1, 1)).is_some());
 }
 
 #[test]
