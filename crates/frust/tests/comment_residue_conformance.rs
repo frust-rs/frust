@@ -12,6 +12,13 @@
 //!
 //! Every `.rs` file under `crates/`, `plugins/`, `benchmarks/`, and
 //! `examples/` (resolved relative to the workspace root, [`SCAN_ROOTS`]),
+//! plus every TOML manifest under the same roots and the repo-root
+//! `Cargo.toml` and `.cargo/config.toml` ([`classify`], [`ROOT_MANIFESTS`]):
+//! `Cargo.toml`, `frust.toml`, `config.toml` inside a `.cargo/` directory, and
+//! `*.tmpl` files whose name contains `.toml`. Manifests use the `#` marker in
+//! place of `//`; the odd-quote string heuristic and the wrapped-citation join
+//! apply to them identically (no `#` occurs inside a TOML string in the
+//! scanned trees today),
 //! skipping any `target/` directory (build output, not source) and any
 //! `workflow/` directory (the private, gitignored nested repo — never
 //! reachable from these four roots today, but excluded on principle since a
@@ -23,8 +30,8 @@
 //! `plugins/native-widgets/tests/limitation_conformance.rs` both carried real
 //! hits during this test's own development).
 //!
-//! For each production line, the substring from the first `//` (covering
-//! `//`, `///`, `//!`) is checked against the banned patterns below; every
+//! For each production line, the substring from the first comment marker
+//! (`//` covering `///`/`//!`, or `#` in manifests) is checked against the banned patterns below; every
 //! banned match is a failure unless that *match's own byte span* sits inside
 //! a sanctioned citation (see Allowlist). A citation split across a comment
 //! line break is caught too — see "Wrapped citations" below.
@@ -263,9 +270,45 @@ fn is_excluded_dir_component(name: &str) -> bool {
     name == "target" || name == "workflow"
 }
 
-/// Recursively collects every `.rs` file under `dir` into `out`, skipping any
-/// `target`/`workflow` subdirectory at any depth.
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+/// Which comment syntax a scanned file uses.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Kind {
+    Rust,
+    Manifest,
+}
+
+impl Kind {
+    /// The comment marker for this kind of file.
+    fn marker(self) -> &'static str {
+        match self {
+            Kind::Rust => RUST,
+            Kind::Manifest => TOML,
+        }
+    }
+}
+
+/// Classifies `path` as a scanned file, or `None`: `.rs` sources, and TOML
+/// manifests — `Cargo.toml`, `frust.toml`, `config.toml` directly under a
+/// `.cargo/` directory, and `*.tmpl` templates whose name contains `.toml`.
+fn classify(path: &Path) -> Option<Kind> {
+    let name = path.file_name()?.to_str()?;
+    if path.extension().is_some_and(|ext| ext == "rs") {
+        return Some(Kind::Rust);
+    }
+    let in_cargo_dir = path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|dir| dir == ".cargo");
+    let manifest = name == "Cargo.toml"
+        || name == "frust.toml"
+        || (name == "config.toml" && in_cargo_dir)
+        || (name.ends_with(".tmpl") && name.contains(".toml"));
+    manifest.then_some(Kind::Manifest)
+}
+
+/// Recursively collects every scanned file under `dir` into `out`, skipping
+/// any `target`/`workflow` subdirectory at any depth.
+fn scanned_files(dir: &Path, out: &mut Vec<(PathBuf, Kind)>) {
     let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
     for entry in entries {
         let path = entry
@@ -279,18 +322,21 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
             if excluded {
                 continue;
             }
-            rust_files(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            out.push(path);
+            scanned_files(&path, out);
+        } else if let Some(kind) = classify(&path) {
+            out.push((path, kind));
         }
     }
 }
 
-/// Every `.rs` file across the four scan roots, minus this test's own file
-/// (see module doc), sorted for a stable failure order. Panics loudly rather
-/// than silently scanning zero files if a root is missing, matching
-/// `authoring_seam_conformance.rs`'s posture.
-fn scan_source_files() -> Vec<PathBuf> {
+/// The repo-root manifests no scan root can reach.
+const ROOT_MANIFESTS: &[&str] = &["Cargo.toml", ".cargo/config.toml"];
+
+/// Every scanned file across the scan roots plus the repo-root manifests,
+/// minus this test's own file (see module doc), sorted for a stable failure
+/// order. Panics loudly rather than silently scanning zero files if a root is
+/// missing, matching `authoring_seam_conformance.rs`'s posture.
+fn scan_source_files() -> Vec<(PathBuf, Kind)> {
     let root = workspace_root();
     let me = self_path();
     let mut out = Vec::new();
@@ -303,21 +349,42 @@ fn scan_source_files() -> Vec<PathBuf> {
             dir.display()
         );
         let before = out.len();
-        rust_files(&dir, &mut out);
+        scanned_files(&dir, &mut out);
+        let slice = &out[before..];
         assert!(
-            out.len() > before,
+            slice.iter().any(|(_, kind)| *kind == Kind::Rust),
             "expected at least one `.rs` file under {} — found none, which is exactly the \
              false-confidence failure mode this assertion exists to catch",
             dir.display()
         );
+        assert!(
+            slice.iter().any(|(_, kind)| *kind == Kind::Manifest),
+            "expected at least one manifest under {} — found none, so the `#`-comment scan \
+             would be vacuous there",
+            dir.display()
+        );
     }
-    out.retain(|p| p != &me);
+    for name in ROOT_MANIFESTS {
+        let path = root.join(name);
+        assert!(
+            path.is_file(),
+            "expected repo-root manifest {} to exist",
+            path.display()
+        );
+        out.push((path, Kind::Manifest));
+    }
+    out.retain(|(p, _)| p != &me);
     out.sort();
+    let rust = out.iter().filter(|(_, k)| *k == Kind::Rust).count();
     assert!(
-        out.len() > 400,
-        "expected well over 400 `.rs` files across crates/plugins/benchmarks/examples, found {} \
+        rust > 400,
+        "expected well over 400 `.rs` files across crates/plugins/benchmarks/examples, found {rust} \
          — the scan is probably looking in the wrong place",
-        out.len()
+    );
+    let root_manifest = root.join("Cargo.toml");
+    assert!(
+        out.iter().any(|(p, _)| p == &root_manifest),
+        "the repo-root Cargo.toml must be among the scanned files"
     );
     out
 }
@@ -331,11 +398,17 @@ fn rel(path: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// The comment-text substring of `line` (from its first `//` onward), or
-/// `None` if the line has no `//`, or its first `//` sits inside a string
-/// literal by the odd-quote heuristic (see module doc).
-fn comment_text(line: &str) -> Option<&str> {
-    let idx = line.find("//")?;
+/// The comment marker of Rust sources: `//`, covering `///` and `//!`.
+const RUST: &str = "//";
+
+/// The comment marker of TOML manifests.
+const TOML: &str = "#";
+
+/// The comment-text substring of `line` (from its first `marker` onward), or
+/// `None` if the line has no `marker`, or its first `marker` sits inside a
+/// string literal by the odd-quote heuristic (see module doc).
+fn comment_text<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    let idx = line.find(marker)?;
     let quotes_before = line[..idx].matches('"').count();
     if quotes_before % 2 == 1 {
         return None;
@@ -343,29 +416,33 @@ fn comment_text(line: &str) -> Option<&str> {
     Some(&line[idx..])
 }
 
-/// The prose body of a comment text: its `//`/`///`/`//!` marker stripped and
-/// the indentation after it trimmed — what a continuation line contributes to
-/// the logical comment (see the module doc's Wrapped citations §).
-fn comment_body(comment: &str) -> &str {
-    let rest = comment.strip_prefix("//").unwrap_or(comment);
-    let rest = rest
-        .strip_prefix('/')
-        .or_else(|| rest.strip_prefix('!'))
-        .unwrap_or(rest);
+/// The prose body of a comment text: its marker (and, for [`RUST`], the doc
+/// `/`/`!` after it) stripped and the indentation after it trimmed — what a
+/// continuation line contributes to the logical comment (see the module doc's
+/// Wrapped citations §).
+fn comment_body<'a>(comment: &'a str, marker: &str) -> &'a str {
+    let rest = comment.strip_prefix(marker).unwrap_or(comment);
+    let rest = if marker == RUST {
+        rest.strip_prefix('/')
+            .or_else(|| rest.strip_prefix('!'))
+            .unwrap_or(rest)
+    } else {
+        rest
+    };
     rest.trim_start()
 }
 
 /// `comment` (an already-extracted comment text) joined to the comment text
 /// of `next_line`, marker stripped — the logical comment a wrapped citation
 /// actually lives in. `None` when `next_line` does not continue the run: it
-/// must be a comment-ONLY line (code before the `//` ends the run) and both
-/// bodies must be non-empty (a blank line or a bare `//` spacer ends it too).
-fn continued_comment(comment: &str, next_line: &str) -> Option<String> {
-    if !next_line.trim_start().starts_with("//") {
+/// must be a comment-ONLY line (code before the marker ends the run) and both
+/// bodies must be non-empty (a blank line or a bare marker spacer ends it too).
+fn continued_comment(comment: &str, next_line: &str, marker: &str) -> Option<String> {
+    if !next_line.trim_start().starts_with(marker) {
         return None;
     }
-    let tail = comment_body(comment_text(next_line)?);
-    if comment_body(comment).is_empty() || tail.is_empty() {
+    let tail = comment_body(comment_text(next_line, marker)?, marker);
+    if comment_body(comment, marker).is_empty() || tail.is_empty() {
         return None;
     }
     Some(format!("{} {tail}", comment.trim_end()))
@@ -378,9 +455,10 @@ fn wrapped_violation(
     comment: &str,
     next_line: &str,
     limitation_ids: &[String],
+    marker: &str,
 ) -> Option<&'static str> {
-    let joined = continued_comment(comment, next_line)?;
-    if scan_comment(comment_text(next_line)?, limitation_ids).is_some() {
+    let joined = continued_comment(comment, next_line, marker)?;
+    if scan_comment(comment_text(next_line, marker)?, limitation_ids).is_some() {
         return None;
     }
     scan_comment(&joined, limitation_ids)
@@ -1093,11 +1171,16 @@ fn scan_comment(comment: &str, limitation_ids: &[String]) -> Option<&'static str
 /// Line: <text>` — matching `print_free_cores.rs`'s reporting style. A
 /// wrapped citation (module doc's Wrapped citations §) reports at the line it
 /// starts on and prints both lines.
-fn violations_in(path: &Path, contents: &str, limitation_ids: &[String]) -> Vec<String> {
+fn violations_in(
+    path: &Path,
+    contents: &str,
+    limitation_ids: &[String],
+    marker: &str,
+) -> Vec<String> {
     let lines: Vec<&str> = contents.lines().collect();
     let mut failures = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        let Some(comment) = comment_text(line) else {
+        let Some(comment) = comment_text(line, marker) else {
             continue;
         };
         let location = format!("{}:{}", rel(path), i + 1);
@@ -1111,7 +1194,7 @@ fn violations_in(path: &Path, contents: &str, limitation_ids: &[String]) -> Vec<
         let Some(next) = lines.get(i + 1) else {
             continue;
         };
-        if let Some(reason) = wrapped_violation(comment, next, limitation_ids) {
+        if let Some(reason) = wrapped_violation(comment, next, limitation_ids, marker) {
             failures.push(format!(
                 "{location}: {reason}, wrapped across the line break — see \
                  docs/CODE_STANDARDS.md § Comment Conventions. Lines: {} | {}",
@@ -1124,13 +1207,18 @@ fn violations_in(path: &Path, contents: &str, limitation_ids: &[String]) -> Vec<
 }
 
 #[test]
-fn production_and_test_sources_are_comment_residue_free() {
+fn sources_and_manifests_are_comment_residue_free() {
     let limitation_ids = limitations_ids();
     let mut failures = Vec::new();
-    for path in scan_source_files() {
+    for (path, kind) in scan_source_files() {
         let contents =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-        failures.extend(violations_in(&path, &contents, &limitation_ids));
+        failures.extend(violations_in(
+            &path,
+            &contents,
+            &limitation_ids,
+            kind.marker(),
+        ));
     }
     assert!(
         failures.is_empty(),
@@ -1631,27 +1719,30 @@ mod scan_behavior {
 
     #[test]
     fn comment_text_extraction_and_string_literal_heuristic() {
-        assert_eq!(comment_text("let x = 5;"), None, "no `//` at all");
-        assert_eq!(comment_text("// a real comment"), Some("// a real comment"));
+        assert_eq!(comment_text("let x = 5;", RUST), None, "no `//` at all");
         assert_eq!(
-            comment_text("    /// a doc comment"),
+            comment_text("// a real comment", RUST),
+            Some("// a real comment")
+        );
+        assert_eq!(
+            comment_text("    /// a doc comment", RUST),
             Some("/// a doc comment")
         );
         assert_eq!(
-            comment_text("    //! a module doc comment"),
+            comment_text("    //! a module doc comment", RUST),
             Some("//! a module doc comment")
         );
         assert_eq!(
-            comment_text("let url = \"https://example.com\";"),
+            comment_text("let url = \"https://example.com\";", RUST),
             None,
             "the first `//` sits inside a string literal (odd quote count before it)"
         );
         assert_eq!(
-            comment_text("let x = 5; // trailing comment"),
+            comment_text("let x = 5; // trailing comment", RUST),
             Some("// trailing comment")
         );
         assert_eq!(
-            comment_text("    caption(\"… the Phase-4 gate numbers.\"),"),
+            comment_text("    caption(\"… the Phase-4 gate numbers.\"),", RUST),
             None,
             "UI copy in a string literal is never comment text (glyph-catalog camera.rs)"
         );
@@ -1666,6 +1757,7 @@ mod scan_behavior {
                 "// The Arc<AtomicBool> handoff the render-thread split runs on (review",
                 "        // finding M1), driven here with FAKE installs",
                 &ids,
+                RUST,
             )
             .is_some(),
             "the parenthesized review-finding form, id on the next line"
@@ -1675,6 +1767,7 @@ mod scan_behavior {
                 "        /// The keep-alive contract task",
                 "        /// 10 pinned: a detached slot never closes the session.",
                 &ids,
+                RUST,
             )
             .is_some(),
             "a plan-task number wrapped away from its `task` lead-in"
@@ -1684,6 +1777,7 @@ mod scan_behavior {
                 "// The Keychain-backed arm, still unimplemented (Phase",
                 "// 3) — every call returns `Unsupported`.",
                 &ids,
+                RUST,
             )
             .is_some(),
             "a parenthesized plan-phase whose digit wrapped"
@@ -1693,6 +1787,7 @@ mod scan_behavior {
                 "//! The encode phase's decode budget, from the pacing table",
                 "//! (req 4): the frame must still land inside 16ms.",
                 &ids,
+                RUST,
             )
             .is_some(),
             "`req N` and the phase signal it is gated on, on opposite sides of the break"
@@ -1702,6 +1797,7 @@ mod scan_behavior {
                 "        // predicate rather than enumerating `Ime`/`EditCommand`: Phase 3 of",
                 "        // this plan adds another focus-routed-adjacent variant",
                 &ids,
+                RUST,
             )
             .is_some(),
             "the `of this plan` ownership phrase wrapped away from its bare \
@@ -1719,6 +1815,7 @@ mod scan_behavior {
                 "// The dot's own oscillator: at clock phase",
                 "// 0.0 it sits at the left edge, at 1.0 past the right one.",
                 &ids,
+                RUST,
             ),
             None,
             "a wrapped float phase is still the sanctioned animation idiom"
@@ -1728,6 +1825,7 @@ mod scan_behavior {
                 "// The forced-blit gap this works around is",
                 "// `desktop-single-window`, and the second window never opens.",
                 &ids,
+                RUST,
             ),
             None,
             "an allowlisted citation still reads as one across the break"
@@ -1737,6 +1835,7 @@ mod scan_behavior {
                 "// Phase",
                 "// 1 of the frame — the **encode** span, ending at submit.",
                 &ids,
+                RUST,
             ),
             None,
             "the renderer-span idiom is a KEEP class wrapped or not"
@@ -1746,6 +1845,7 @@ mod scan_behavior {
                 "// A comment whose next line carries the residue on its own:",
                 "// FINDINGS #43 is flagged at ITS line, not reported twice here.",
                 &ids,
+                RUST,
             ),
             None,
             "the following line already fails per-line — never double-reported"
@@ -1755,12 +1855,13 @@ mod scan_behavior {
                 "// The install path refuses a second claim (review",
                 "let finding = M1; // not a comment-only continuation",
                 &ids,
+                RUST,
             ),
             None,
             "code on the next line ends the comment run"
         );
         assert_eq!(
-            wrapped_violation("// the constants for task", "//", &ids),
+            wrapped_violation("// the constants for task", "//", &ids, RUST),
             None,
             "a bare `//` spacer ends the comment run"
         );
@@ -1777,7 +1878,7 @@ mod scan_behavior {
             "}\n",
         );
 
-        let failures = violations_in(Path::new("crates/x/src/lib.rs"), contents, &ids);
+        let failures = violations_in(Path::new("crates/x/src/lib.rs"), contents, &ids, RUST);
         assert_eq!(
             failures.len(),
             1,
@@ -1803,5 +1904,89 @@ mod scan_behavior {
         let comment = "// the round-1 fix — an em dash — and a → arrow, plus ✓ and ζ=0.6";
         assert!(scan_comment(comment, &ids).is_some());
         assert_eq!(scan_comment("// — → ✓ ζ", &ids), None);
+    }
+
+    #[test]
+    fn toml_comments_are_scanned_with_the_hash_marker() {
+        let ids = limitations_ids();
+        let path = Path::new("examples/x/Cargo.toml");
+
+        let hit = violations_in(
+            path,
+            "# the Phase 4 gate pinned this\nname = \"x\"\n",
+            &ids,
+            TOML,
+        );
+        assert_eq!(hit.len(), 1, "full-line plan-phase residue: {hit:?}");
+        assert!(hit[0].starts_with("examples/x/Cargo.toml:1:"), "{}", hit[0]);
+
+        let hit = violations_in(
+            path,
+            "[package]\nname = \"x\" # the Phase-4 gate\n",
+            &ids,
+            TOML,
+        );
+        assert_eq!(hit.len(), 1, "trailing TOML comment residue: {hit:?}");
+        assert!(hit[0].starts_with("examples/x/Cargo.toml:2:"), "{}", hit[0]);
+
+        let hit = violations_in(path, "# pinned for (Phase 9.B step 1)\n", &ids, TOML);
+        assert_eq!(hit.len(), 1, "full-line TOML residue: {hit:?}");
+    }
+
+    #[test]
+    fn a_wrapped_toml_citation_is_caught() {
+        let ids = limitations_ids();
+        let contents = "# kept for the render split (review\n# finding M1)\nname = \"x\"\n";
+        let hit = violations_in(Path::new("crates/x/Cargo.toml"), contents, &ids, TOML);
+        assert_eq!(hit.len(), 1, "{hit:?}");
+        assert!(hit[0].starts_with("crates/x/Cargo.toml:1:"), "{}", hit[0]);
+        assert!(hit[0].contains("finding M1)"), "{}", hit[0]);
+    }
+
+    #[test]
+    fn a_hash_inside_a_toml_string_is_not_a_comment() {
+        assert_eq!(
+            comment_text("url = \"https://x/#task-12\"", TOML),
+            None,
+            "odd quote count before the `#`"
+        );
+        assert_eq!(
+            comment_text("name = \"x\" # trailing", TOML),
+            Some("# trailing")
+        );
+        let ids = limitations_ids();
+        let hit = violations_in(
+            Path::new("a/Cargo.toml"),
+            "url = \"https://x/#task-12\"\n",
+            &ids,
+            TOML,
+        );
+        assert!(hit.is_empty(), "{hit:?}");
+    }
+
+    #[test]
+    fn a_clean_toml_comment_passes() {
+        let ids = limitations_ids();
+        let contents = "# Pinned: the lockfile resolver needs this feature.\n\
+                        # See `desktop-single-window`.\nname = \"x\"\n";
+        let hit = violations_in(Path::new("a/Cargo.toml"), contents, &ids, TOML);
+        assert!(hit.is_empty(), "{hit:?}");
+    }
+
+    #[test]
+    fn manifest_classification_covers_the_documented_names() {
+        let kind = |p: &str| classify(Path::new(p));
+        assert_eq!(kind("a/Cargo.toml"), Some(Kind::Manifest));
+        assert_eq!(kind("a/frust.toml"), Some(Kind::Manifest));
+        assert_eq!(kind("a/.cargo/config.toml"), Some(Kind::Manifest));
+        assert_eq!(kind("a/config.toml"), None, "only under a `.cargo/` dir");
+        assert_eq!(kind("a/Cargo.toml.tmpl"), Some(Kind::Manifest));
+        assert_eq!(
+            kind("a/Cargo.toml.clean-signals.tmpl"),
+            Some(Kind::Manifest)
+        );
+        assert_eq!(kind("a/frust.toml.tmpl"), Some(Kind::Manifest));
+        assert_eq!(kind("a/readme.tmpl"), None);
+        assert_eq!(kind("a/lib.rs"), Some(Kind::Rust));
     }
 }
