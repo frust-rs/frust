@@ -338,7 +338,11 @@
 //! the position publishes a [`ScrollInfo`], a jump/animate replaces whatever
 //! fling, settle or tween is in flight, and a user `Down`, wheel or `Cancel`
 //! ends a tween through the one tear-down path
-//! ([`ListViewWidget::stop_ballistic`]). Three things are local to this widget:
+//! ([`ListViewWidget::stop_ballistic`]). A command applied while a finger is
+//! down ends that drag ([`ListViewWidget::end_live_drag`], mirroring
+//! `ScrollWidget::end_live_drag`), and every post-release start tears the
+//! previous motion down through the same path first, so fling, settle and
+//! simulation are never live together. Three things are local to this widget:
 //!
 //! * **Drained at rebuild too.** Besides the start of layout and paint, the
 //!   queue is drained in [`View::rebuild`] once the anchor shift and measured
@@ -369,7 +373,9 @@
 //!   above it measure, so `Start` usually settles on the first layout and the
 //!   others within one more). Paint requests a layout frame while the loop is
 //!   live, and a user `Down`, wheel or `Cancel`, or any later controller
-//!   command, ends it.
+//!   command, ends it. A settle step never runs while a drag is live: the
+//!   request waits it out, consuming none of its bounded frames, and resumes
+//!   once the drag ends.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -2321,8 +2327,10 @@ impl ListViewWidget {
     /// eases [`ListViewWidget::overscroll`], which windowing never reads), so
     /// it needs the request purely to keep painting the animation.
     ///
-    /// The three are mutually exclusive by construction — a release picks one —
-    /// and under [`RubberBand`](crate::RubberBand) the simulation arm is never
+    /// The three are mutually exclusive by construction — a release picks one,
+    /// after tearing every one of them down through
+    /// [`ListViewWidget::stop_ballistic`], and a controller command ends the
+    /// drag a release would come from — and under [`RubberBand`](crate::RubberBand) the simulation arm is never
     /// taken at all.
     fn pump_fling(&mut self, ctx: &mut PaintCtx) {
         if self.fling.is_none() && !self.settling && self.ballistic.is_none() {
@@ -2373,8 +2381,13 @@ impl ListViewWidget {
     /// the animation stopped if it was one. The single tear-down path every
     /// site that ends ballistic motion takes (`Down`, wheel, `Cancel`, a
     /// controller jump/animate, and [`ListViewWidget::drive_ballistic`]'s own
-    /// completion), so [`ScrollController::is_animating`] can never go stale.
-    /// Mirrors `ScrollWidget::stop_ballistic`.
+    /// completion), **and every start goes through it too**: the `Up` release
+    /// clears the fling and settle and calls this before it starts a
+    /// simulation, settle or fling of its own, and a controller tween is only
+    /// installed by [`ListViewWidget::apply_animate_to`] after the same
+    /// tear-down — so fling, settle and simulation are never live at once and
+    /// [`ScrollController::is_animating`] cannot outlive the tween it
+    /// reports. Mirrors `ScrollWidget::stop_ballistic`.
     fn stop_ballistic(&mut self) {
         self.ballistic = None;
         if std::mem::take(&mut self.controller_animating)
@@ -2382,6 +2395,28 @@ impl ListViewWidget {
         {
             binding.set_animating(false);
         }
+    }
+
+    /// End a live drag because a controller command just took the position
+    /// over — a programmatic command replaces the user's drag rather than
+    /// running alongside it. Resets exactly the per-gesture state the `Down`
+    /// arm resets (the drag/armed flags, the Down-time claim snapshot, the
+    /// sticky defer decision and the live multi-contact veto cell), so the
+    /// rest of the gesture's `Move`s take the unarmed row/hover path and its
+    /// `Up` the non-scrolling row-forward branch. A no-op when no gesture is
+    /// armed. Pointer capture is left alone (no [`EventCtx`] in layout,
+    /// paint or rebuild; the shell clears it on the physical `Up`/`Cancel`),
+    /// and the caller re-seeds [`ListViewWidget::drag_position`] from the
+    /// position it applies. Mirrors `ScrollWidget::end_live_drag`.
+    fn end_live_drag(&mut self) {
+        if !self.scrolling && !self.down_active {
+            return;
+        }
+        self.scrolling = false;
+        self.down_active = false;
+        self.inner_at_down = InnerScrollState::default();
+        self.deferring = false;
+        self.live_veto = Rc::new(Cell::new(false));
     }
 
     /// Reconcile the attached [`ScrollController`] with the one a view names
@@ -2446,13 +2481,14 @@ impl ListViewWidget {
     /// simulation or overscroll in flight. Any uncommitted measured correction
     /// is dropped rather than committed — `target` already names where the
     /// content should sit, so the placement becomes exactly it. A live drag
-    /// continues from the new position. `NaN` is ignored. Mirrors
-    /// `ScrollWidget::apply_jump`; a near-start/near-end edge the jump crosses
-    /// is recorded for the next event, like a fling frame's.
+    /// ends here ([`ListViewWidget::end_live_drag`]). `NaN` is ignored.
+    /// Mirrors `ScrollWidget::apply_jump`; a near-start/near-end edge the jump
+    /// crosses is recorded for the next event, like a fling frame's.
     fn apply_jump(&mut self, target: f64) {
         if target.is_nan() {
             return;
         }
+        self.end_live_drag();
         self.fling = None;
         self.stop_ballistic();
         self.settling = false;
@@ -2481,12 +2517,14 @@ impl ListViewWidget {
     /// through. An uncommitted measured correction is committed first (the
     /// placement does not move), so the tween starts from where the content
     /// actually sits. `reduce_motion` (or a non-positive/non-finite
-    /// `duration_ms`) collapses this to [`ListViewWidget::apply_jump`]. `NaN`
-    /// is ignored. Mirrors `ScrollWidget::apply_animate_to`.
+    /// `duration_ms`) collapses this to [`ListViewWidget::apply_jump`]. A
+    /// live drag ends here ([`ListViewWidget::end_live_drag`]). `NaN` is
+    /// ignored. Mirrors `ScrollWidget::apply_animate_to`.
     fn apply_animate_to(&mut self, target: f64, options: AnimateTo, reduce_motion: bool) {
         if target.is_nan() {
             return;
         }
+        self.end_live_drag();
         self.fling = None;
         self.stop_ballistic();
         self.settling = false;
@@ -2636,12 +2674,17 @@ impl ListViewWidget {
     /// [`ITEM_SETTLE_TOLERANCE_PX`]. The request ends once the row is
     /// materialized and in tolerance, when its key leaves the data, or after
     /// [`ITEM_SETTLE_MAX_FRAMES`] layouts. Waits, consuming nothing, while a
-    /// tween is still carrying the list there.
+    /// tween is still carrying the list there, and while a drag is live — a
+    /// correcting jump would otherwise fight the finger every layout — so the
+    /// request resumes once the drag ends.
     fn settle_item_target(&mut self) {
         let Some(mut target) = self.item_target else {
             return;
         };
         if self.ballistic.is_some() {
+            return;
+        }
+        if self.scrolling {
             return;
         }
         let Some(index) = self.resolve_key(target.key) else {
@@ -2907,21 +2950,23 @@ impl ListViewWidget {
                         {
                             cb(ctx);
                         }
+                        // Whatever the release starts, it starts alone: tear
+                        // every motion down first, through the single
+                        // tear-down path (mirrors `ScrollWidget`'s release).
+                        self.fling = None;
+                        self.settling = false;
+                        self.stop_ballistic();
+                        self.last_anim = None;
                         // Ask the physics for post-release motion first: one
                         // that hands back a simulation owns the release
                         // outright, and one that does not (`RubberBand`) falls
                         // through to the legacy settle/fling below untouched.
                         if let Some(sim) = self.release_simulation() {
-                            self.fling = None;
-                            self.settling = false;
                             self.ballistic = Some(BallisticState { sim, start: None });
-                            self.last_anim = None;
                         } else if self.edge_pull != 0.0 {
                             // Released while overscrolled: settle back to the
                             // edge, never fling out of range.
-                            self.fling = None;
                             self.settling = true;
-                            self.last_anim = None;
                         } else {
                             // The legacy path keeps its own FLING_STOP threshold
                             // (the trait's min/max fling bounds govern the
@@ -2930,7 +2975,6 @@ impl ListViewWidget {
                             let finger_v = self.tracker.velocity();
                             if finger_v.abs() > FLING_STOP {
                                 self.fling = Some(self.fling_start_velocity(-finger_v));
-                                self.last_anim = None;
                             }
                         }
                     } else {
@@ -7923,6 +7967,8 @@ mod controller_tests {
     use frust_core::{Curve, PaintOutcome, RenderRoot, any};
 
     use super::*;
+    use crate::physics::parity::Bouncing;
+    use crate::physics::rubber_band::RubberBand;
     use crate::test_support::{RecordingScene, leaf};
 
     /// The list's viewport (the root window).
@@ -8332,5 +8378,245 @@ mod controller_tests {
         );
         let (top, _) = row_rect(w, 150).expect("materialized");
         assert_near(top, 0.0, "the heading is at the top of the viewport");
+    }
+
+    // --- A command applied mid-drag ends the drag (mirrors `ScrollView`'s
+    //     own tests of the same rule). ---
+
+    fn pointer(phase: PointerPhase, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(10.0, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    /// A standalone, laid-out uniform keyed list of 100 [`ROW`]-tall rows
+    /// running `physics`, with `controller` attached — driven directly rather
+    /// than through a [`RenderRoot`] so a test can reach into its state.
+    fn standalone(
+        controller: &ScrollController,
+        physics: Option<Rc<dyn ScrollPhysics>>,
+    ) -> ListViewWidget {
+        let view = uniform_logic(100, controller)(&mut ());
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+        if let Some(physics) = physics {
+            w.physics = physics;
+        }
+        w.layout(&mut LayoutCtx::new(), &BoxConstraints::tight(VIEWPORT));
+        w
+    }
+
+    fn send(w: &mut ListViewWidget, event: &InputEvent, t_ms: f64) {
+        let mut unit = ();
+        let state: &mut dyn Any = &mut unit;
+        let mut ctx = EventCtx::new(state, Point::ZERO, w.viewport);
+        w.event_at(&mut ctx, event, t_ms);
+    }
+
+    /// Paint at an explicit frame time, returning whether paint asked for
+    /// another frame.
+    fn paint_at(w: &mut ListViewWidget, ms: f64) -> bool {
+        let now = FrameTime::from_nanos((ms * 1_000_000.0) as u64);
+        let mut ctx = PaintCtx::for_test(Point::ZERO, w.viewport, now);
+        w.paint(&mut ctx, &mut RecordingScene::default());
+        ctx.needs_frame()
+    }
+
+    /// Down, then two moves upward — the first crosses the slop and takes
+    /// over, the second scrolls 30 px — leaving the drag live.
+    fn drag_without_release(w: &mut ListViewWidget) {
+        send(w, &pointer(PointerPhase::Down, 150.0), 0.0);
+        send(w, &pointer(PointerPhase::Move, 120.0), 16.0);
+        send(w, &pointer(PointerPhase::Move, 90.0), 32.0);
+        assert!(w.scrolling && w.down_active, "the drag is live");
+    }
+
+    /// How many of the three post-release motions are live at once.
+    fn live_motions(w: &ListViewWidget) -> usize {
+        usize::from(w.fling.is_some())
+            + usize::from(w.settling)
+            + usize::from(w.ballistic.is_some())
+    }
+
+    fn both_physics() -> [Rc<dyn ScrollPhysics>; 2] {
+        [Rc::new(RubberBand::new()), Rc::new(Bouncing::new())]
+    }
+
+    #[test]
+    fn an_animate_to_mid_drag_ends_the_drag_and_owns_the_offset() {
+        for physics in both_physics() {
+            let controller = ScrollController::new();
+            let mut w = standalone(&controller, Some(physics));
+            drag_without_release(&mut w);
+            let start = w.offset();
+            assert!(start > 0.0, "the drag moved the content");
+            let stale_veto = Rc::clone(&w.live_veto);
+
+            controller.animate_to(
+                start + 200.0,
+                AnimateTo {
+                    duration_ms: 200.0,
+                    curve: Curve::Linear,
+                },
+            );
+            assert!(paint_at(&mut w, 0.0), "the tween asks for frames");
+            assert!(!w.scrolling, "the command ended the drag");
+            assert!(!w.down_active, "and disarmed the gesture");
+            assert!(!w.deferring);
+            assert!(
+                !Rc::ptr_eq(&w.live_veto, &stale_veto),
+                "the gesture's veto cell is replaced, like on a Down"
+            );
+            assert!(controller.is_animating());
+
+            assert!(paint_at(&mut w, 100.0));
+            let mid = w.offset();
+            assert!(
+                (mid - (start + 100.0)).abs() < 1e-6,
+                "the offset tracks the tween, offset: {mid}"
+            );
+            send(&mut w, &pointer(PointerPhase::Move, 20.0), 116.0);
+            assert_eq!(w.offset(), mid, "a later Move does not move the content");
+            assert!(!w.scrolling, "and never re-arms the drag");
+
+            send(&mut w, &pointer(PointerPhase::Up, 20.0), 120.0);
+            assert!(w.fling.is_none(), "no stray fling");
+            assert!(!w.settling, "no stray settle");
+            assert_eq!(live_motions(&w), 1, "only the tween is live");
+            assert!(controller.is_animating(), "the tween runs on");
+
+            // (A standalone list keeps asking for the rebuild that would
+            // re-window it, so the pump's own state is what is asserted.)
+            paint_at(&mut w, 200.0);
+            assert_eq!(live_motions(&w), 0, "nothing is left animating");
+            assert_eq!(w.offset(), start + 200.0);
+            assert!(!controller.is_animating(), "completion resolves it");
+            assert_eq!(live_motions(&w), 0);
+        }
+    }
+
+    #[test]
+    fn a_release_tears_down_a_tween_before_starting_its_own_motion() {
+        // Defence in depth behind the rule above: a tween live under a
+        // still-armed drag is replaced by the release through the single
+        // tear-down path, on the legacy and the simulation release paths.
+        for physics in both_physics() {
+            let controller = ScrollController::new();
+            let mut w = standalone(&controller, Some(physics));
+            drag_without_release(&mut w);
+            controller.animate_to(
+                3000.0,
+                AnimateTo {
+                    duration_ms: 400.0,
+                    curve: Curve::Linear,
+                },
+            );
+            paint_at(&mut w, 0.0);
+            assert!(controller.is_animating());
+            // Force the drag back on, as if the command had not ended it.
+            w.scrolling = true;
+            w.down_active = true;
+
+            send(&mut w, &pointer(PointerPhase::Up, 90.0), 40.0);
+            assert!(
+                live_motions(&w) <= 1,
+                "fling, settle and simulation are never live together"
+            );
+            assert!(
+                !controller.is_animating(),
+                "the replaced tween no longer reports itself"
+            );
+            assert!(!w.controller_animating);
+            // Whatever the release started runs to rest on its own, never
+            // resurrecting the tween's flag.
+            let mut ms = 40.0;
+            while live_motions(&w) > 0 {
+                paint_at(&mut w, ms);
+                assert!(live_motions(&w) <= 1);
+                assert!(!controller.is_animating());
+                ms += 16.0;
+                assert!(ms < 10_000.0, "the release motion never settled");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pending_item_target_waits_out_a_live_drag() {
+        let controller = ScrollController::new();
+        let mut w = standalone(&controller, None);
+        assert!(w.laid_out);
+        w.item_target = Some(ItemTarget {
+            key: ChildKey::new(40u64),
+            alignment: ItemAlignment::Start,
+            frames_left: ITEM_SETTLE_MAX_FRAMES,
+        });
+        w.scrolling = true;
+        w.down_active = true;
+        let before = w.placement_offset();
+        w.settle_item_target();
+        assert_eq!(
+            w.placement_offset(),
+            before,
+            "no correcting jump fights the finger"
+        );
+        assert_eq!(
+            w.item_target.map(|t| t.frames_left),
+            Some(ITEM_SETTLE_MAX_FRAMES),
+            "and none of the bounded frames is spent waiting"
+        );
+        assert!(w.scrolling, "the drag itself is untouched");
+
+        // The drag ends: the very next settle step lands the row.
+        w.scrolling = false;
+        w.down_active = false;
+        w.settle_item_target();
+        assert_eq!(w.placement_offset(), 40.0 * ROW, "the target resumes");
+    }
+
+    #[test]
+    fn a_scroll_to_item_mid_drag_ends_the_drag_and_settles_after_the_release() {
+        for animated in [false, true] {
+            let controller = ScrollController::new();
+            let mut logic = variable_logic(300, &controller);
+            let mut root = converged(&mut logic);
+            root.event(&mut (), &pointer(PointerPhase::Down, 150.0));
+            root.event(&mut (), &pointer(PointerPhase::Move, 120.0));
+            root.event(&mut (), &pointer(PointerPhase::Move, 90.0));
+            assert!(list(&root).scrolling, "the drag is live");
+
+            let target = 250usize;
+            controller.scroll_to_item(ChildKey::new(target as u64), ItemAlignment::Start, animated);
+            frame(&mut root, &mut logic, 100.0);
+            let w = list(&root);
+            assert!(!w.scrolling && !w.down_active, "the command ended the drag");
+            assert_eq!(controller.is_animating(), animated);
+            let placed = w.placement_offset();
+            assert!(placed > 0.0, "the content sits off the top");
+
+            // The finger keeps going and lets go: neither touches the content.
+            root.event(&mut (), &pointer(PointerPhase::Move, 20.0));
+            assert_eq!(
+                list(&root).placement_offset(),
+                placed,
+                "a later Move does not move the content"
+            );
+            root.event(&mut (), &pointer(PointerPhase::Up, 20.0));
+            let w = list(&root);
+            assert!(
+                w.fling.is_none() && !w.settling,
+                "the release starts nothing"
+            );
+            assert_eq!(w.ballistic.is_some(), animated, "a tween runs on");
+
+            // The request settles after the drag, landing the row at the top.
+            settle(&mut root, &mut logic, 116.0, 40);
+            let w = list(&root);
+            assert!(w.item_target.is_none(), "the request finished settling");
+            assert!(!controller.is_animating());
+            let (top, _) = row_rect(w, target).expect("the target row is materialized");
+            assert_near(top, 0.0, "the row's top edge sits at the viewport top");
+        }
     }
 }

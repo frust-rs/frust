@@ -155,6 +155,20 @@
 //! ([`ScrollWidget::stop_ballistic`]), and the app's `motion.reduce_motion`
 //! theme flag collapses it to an immediate jump. See
 //! [`crate::scroll_controller`] for the handle's side of the contract.
+//!
+//! **A command ends a live drag** (Flutter's `animateTo`/`jumpTo` semantics):
+//! a jump or animate applied while a finger is down replaces the drag instead
+//! of running alongside it ([`ScrollWidget::end_live_drag`]). The rest of that
+//! gesture's `Move`s fall through to the child/hover path and its `Up` to the
+//! non-scrolling branch, so the finger can no longer write the offset the
+//! command now owns, and the release starts no fling or settle of its own.
+//! Pointer capture is not touched — the drain runs in layout/paint, which
+//! carry no `EventCtx`, and the shell releases capture on the physical
+//! `Up`/`Cancel` regardless. Every post-release start (`Up`'s simulation,
+//! settle or fling) tears the previous motion down through
+//! [`ScrollWidget::stop_ballistic`] first, so a fling, a settle and a
+//! simulation are never live together and `is_animating` cannot outlive a
+//! tween.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -1229,8 +1243,14 @@ impl ScrollWidget {
     /// interrupts motion (`Down`, wheel, `Cancel`, [`ScrollWidget::apply_jump`],
     /// [`ScrollWidget::apply_animate_to`], and [`ScrollWidget::drive_ballistic`]'s
     /// own completion all call this instead of assigning `self.ballistic =
-    /// None` directly), so [`ScrollController::is_animating`] can never go
-    /// stale.
+    /// None` directly). **Every start goes through it too**: the `Up` release
+    /// clears the fling and settle and calls this before it starts a
+    /// simulation, settle or fling of its own, and a controller tween is only
+    /// ever installed by [`ScrollWidget::apply_animate_to`] after the same
+    /// tear-down — so a fling, a settle and a simulation are never live at
+    /// once, and [`ScrollController::is_animating`] cannot outlive the tween
+    /// it reports. (A tween whose surface is dropped or displaced mid-flight
+    /// is the handle's side of the contract, not this widget's.)
     fn stop_ballistic(&mut self) {
         self.ballistic = None;
         if std::mem::take(&mut self.controller_animating)
@@ -1238,6 +1258,33 @@ impl ScrollWidget {
         {
             binding.set_animating(false);
         }
+    }
+
+    /// End a live drag because a controller command just took the position
+    /// over — Flutter's `animateTo`/`jumpTo` semantics, where a programmatic
+    /// command replaces the user's drag rather than running alongside it (the
+    /// module docs' *Programmatic scrolling*). Resets exactly the per-gesture
+    /// state the `Down` arm resets (the drag/armed flags, the Down-time claim
+    /// snapshot, the sticky defer decision and the live multi-contact veto
+    /// cell), so the rest of the gesture's `Move`s take the unarmed
+    /// child/hover path and its `Up` the non-scrolling child-forward branch —
+    /// the finger can no longer write the offset and the release
+    /// starts no fling or settle. A no-op when no gesture is armed.
+    ///
+    /// Pointer capture is deliberately left alone: the drain that calls this
+    /// runs in layout/paint, which carry no [`EventCtx`], and the shell clears
+    /// capture on the physical `Up`/`Cancel` whatever this flag says. The
+    /// caller re-seeds [`ScrollWidget::drag_position`] from the position it
+    /// applies.
+    fn end_live_drag(&mut self) {
+        if !self.scrolling && !self.down_active {
+            return;
+        }
+        self.scrolling = false;
+        self.down_active = false;
+        self.inner_at_down = InnerScrollState::default();
+        self.deferring = false;
+        self.live_veto = Rc::new(Cell::new(false));
     }
 
     /// Advance a physics-supplied [`Simulation`] to frame time `now`: the
@@ -1284,8 +1331,10 @@ impl ScrollWidget {
     /// a pending `on_scroll` notification delivered on the next event.
     ///
     /// The three are mutually exclusive at any one instant — a release picks
-    /// one — though a simulation ending against an edge hands the pull it left
-    /// behind to the settle for the frames after it
+    /// one, after tearing every one of them down through
+    /// [`ScrollWidget::stop_ballistic`], and a controller command ends the drag
+    /// a release would come from — though a simulation ending against an edge
+    /// hands the pull it left behind to the settle for the frames after it
     /// ([`ScrollWidget::settle_ballistic_residual`]). Under
     /// [`RubberBand`](crate::RubberBand) the simulation arm is never taken at
     /// all.
@@ -1374,11 +1423,13 @@ impl ScrollWidget {
 
     /// Move straight to `target`, clamped to `[0, max_offset]`, ending any
     /// fling, release-settle or ballistic simulation (and the pull it rode) in
-    /// flight. A live drag continues from the new position. `NaN` is ignored.
+    /// flight. A live drag ends here ([`ScrollWidget::end_live_drag`]) — the
+    /// rest of its gesture never moves the content. `NaN` is ignored.
     fn apply_jump(&mut self, target: f64) {
         if target.is_nan() {
             return;
         }
+        self.end_live_drag();
         let before = self.scroll_info();
         let was_moving = self.is_flinging() || self.settling;
         self.fling = None;
@@ -1404,11 +1455,15 @@ impl ScrollWidget {
     /// runs through, so paint cadence, `request_frame` and the installed
     /// physics' boundary handling are shared rather than duplicated.
     /// `reduce_motion` (or a non-positive/non-finite `duration_ms`) collapses
-    /// this to an immediate [`ScrollWidget::apply_jump`]. `NaN` is ignored.
+    /// this to an immediate [`ScrollWidget::apply_jump`]. A live drag ends
+    /// here ([`ScrollWidget::end_live_drag`]), so the tween is the only writer
+    /// of the offset until it finishes or user input interrupts it. `NaN` is
+    /// ignored.
     fn apply_animate_to(&mut self, target: f64, options: AnimateTo, reduce_motion: bool) {
         if target.is_nan() {
             return;
         }
+        self.end_live_drag();
         self.fling = None;
         self.stop_ballistic();
         self.settling = false;
@@ -1418,6 +1473,7 @@ impl ScrollWidget {
             self.apply_jump(target);
             return;
         }
+        self.drag_position = self.offset;
         let clamped = target.clamp(0.0, self.max_offset());
         let sim = TweenSimulation::new(
             self.offset,
@@ -1647,21 +1703,26 @@ impl ScrollWidget {
                         {
                             cb(ctx);
                         }
+                        // Whatever the release starts, it starts alone: tear
+                        // every motion down first, through the single
+                        // tear-down path, so no fling, settle or simulation
+                        // (a controller tween included) survives alongside the
+                        // one picked below and `is_animating` is never left
+                        // set by a tween this release replaced.
+                        self.fling = None;
+                        self.settling = false;
+                        self.stop_ballistic();
+                        self.last_anim = None;
                         // Ask the physics for post-release motion first: one that
                         // hands back a simulation owns the release outright, and
                         // one that does not (`RubberBand`) falls through to the
                         // legacy settle/fling below untouched.
                         if let Some(sim) = self.release_simulation() {
-                            self.fling = None;
-                            self.settling = false;
                             self.ballistic = Some(BallisticState { sim, start: None });
-                            self.last_anim = None;
                         } else if self.edge_pull != 0.0 {
                             // Released while overscrolled: settle back to the edge,
                             // never fling out of range.
-                            self.fling = None;
                             self.settling = true;
-                            self.last_anim = None;
                         } else {
                             // The legacy path keeps its own FLING_STOP threshold
                             // (the trait's min/max fling bounds govern the generic
@@ -1671,7 +1732,6 @@ impl ScrollWidget {
                             if finger_v.abs() > FLING_STOP {
                                 // Offset moves opposite the finger.
                                 self.fling = Some(self.fling_start_velocity(-finger_v));
-                                self.last_anim = None;
                             }
                         }
                         self.notify_scroll(ctx);
@@ -5346,5 +5406,224 @@ mod controller_tests {
         assert!(!paint_at(&mut w, 116.0));
         assert_eq!(w.offset(), 123.0, "NaN is ignored, nothing moves");
         assert!(!controller.is_animating());
+    }
+
+    // --- A command applied mid-drag ends the drag. ---
+
+    /// 1000 px of content logging every pointer phase that reaches it, so a
+    /// test can see where a `Move`/`Up` was routed once the surface stopped
+    /// scrolling. Logged through an `Rc` rather than `EventCtx::state_mut`
+    /// because a `Cancel` arm never touches state.
+    struct PhaseLog(Rc<RefCell<Vec<PointerPhase>>>);
+    /// Retained widget for [`PhaseLog`].
+    struct PhaseLogW(Rc<RefCell<Vec<PointerPhase>>>);
+
+    impl View<()> for PhaseLog {
+        type Element = PhaseLogW;
+        fn build(&self, _c: &mut BuildCtx<'_>) -> PhaseLogW {
+            PhaseLogW(Rc::clone(&self.0))
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut PhaseLogW, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for PhaseLogW {
+        fn layout(&mut self, _c: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(200.0, CONTENT_H))
+        }
+        fn paint(&mut self, _c: &mut PaintCtx, _s: &mut dyn PaintScene) {}
+        fn event(&mut self, _ctx: &mut EventCtx, e: &InputEvent) -> EventResult {
+            if let InputEvent::Pointer(p) = e {
+                self.0.borrow_mut().push(p.phase);
+            }
+            EventResult::Ignored
+        }
+    }
+
+    /// A laid-out surface over a [`PhaseLog`] child running `physics`, with
+    /// `controller` attached, plus the child's phase log.
+    fn logged(
+        controller: &ScrollController,
+        physics: Rc<dyn ScrollPhysics>,
+    ) -> (ScrollWidget, Rc<RefCell<Vec<PointerPhase>>>) {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let view = scroll_view(PhaseLog(Rc::clone(&log))).controller(controller.clone());
+        let mut w = build(&view);
+        w.physics = physics;
+        lay(&mut w);
+        (w, log)
+    }
+
+    /// Down, then two moves upward — the first crosses the slop and takes
+    /// over, the second scrolls 25 px — leaving the drag live.
+    fn drag_without_release(w: &mut ScrollWidget) {
+        send(w, &pointer(PointerPhase::Down, 100.0), 0.0);
+        send(w, &pointer(PointerPhase::Move, 75.0), 16.0);
+        send(w, &pointer(PointerPhase::Move, 50.0), 32.0);
+        assert!(w.scrolling && w.down_active, "the drag is live");
+    }
+
+    /// How many of the three post-release motions are live at once — the
+    /// invariant is that this never exceeds one.
+    fn live_motions(w: &ScrollWidget) -> usize {
+        usize::from(w.fling.is_some())
+            + usize::from(w.settling)
+            + usize::from(w.ballistic.is_some())
+    }
+
+    fn both_physics() -> [Rc<dyn ScrollPhysics>; 2] {
+        [Rc::new(RubberBand::new()), Rc::new(Bouncing::new())]
+    }
+
+    #[test]
+    fn an_animate_to_mid_drag_ends_the_drag_and_owns_the_offset() {
+        for physics in both_physics() {
+            let controller = ScrollController::new();
+            let (mut w, log) = logged(&controller, physics);
+            drag_without_release(&mut w);
+            let start = w.offset();
+            assert!(start > 0.0, "the drag moved the content");
+            let stale_veto = Rc::clone(&w.live_veto);
+
+            controller.animate_to(
+                start + 200.0,
+                AnimateTo {
+                    duration_ms: 200.0,
+                    curve: Curve::Linear,
+                },
+            );
+            assert!(paint_at(&mut w, 0.0), "the tween asks for frames");
+            assert!(!w.scrolling, "the command ended the drag");
+            assert!(!w.down_active, "and disarmed the gesture");
+            assert!(!w.deferring);
+            assert!(
+                !Rc::ptr_eq(&w.live_veto, &stale_veto),
+                "the gesture's veto cell is replaced, like on a Down"
+            );
+            assert!(controller.is_animating());
+
+            assert!(paint_at(&mut w, 100.0));
+            let mid = w.offset();
+            assert!(
+                (mid - (start + 100.0)).abs() < 1e-6,
+                "the offset tracks the tween, offset: {mid}"
+            );
+
+            // The finger keeps going: the move takes the unarmed path to the
+            // child and never touches the offset the tween owns.
+            log.borrow_mut().clear();
+            send(&mut w, &pointer(PointerPhase::Move, 20.0), 116.0);
+            assert_eq!(w.offset(), mid, "a later Move does not move the content");
+            assert_eq!(log.borrow().as_slice(), &[PointerPhase::Move]);
+            assert!(!w.scrolling, "and never re-arms the drag");
+
+            // The release takes the non-scrolling branch: forwarded to the
+            // child, starting no fling or settle of its own.
+            send(&mut w, &pointer(PointerPhase::Up, 20.0), 120.0);
+            assert_eq!(
+                log.borrow().as_slice(),
+                &[PointerPhase::Move, PointerPhase::Up]
+            );
+            assert!(w.fling.is_none(), "no stray fling");
+            assert!(!w.settling, "no stray settle");
+            assert_eq!(live_motions(&w), 1, "only the tween is live");
+            assert!(controller.is_animating(), "the tween runs on");
+
+            assert!(!paint_at(&mut w, 200.0), "nothing is left animating");
+            assert_eq!(w.offset(), start + 200.0);
+            assert!(!controller.is_animating(), "completion resolves it");
+            assert!(!w.is_flinging() && !w.settling);
+            assert!(!paint_at(&mut w, 216.0));
+            assert_eq!(w.offset(), start + 200.0);
+        }
+    }
+
+    #[test]
+    fn a_jump_mid_drag_ends_the_drag_and_its_release_starts_nothing() {
+        for physics in both_physics() {
+            let controller = ScrollController::new();
+            let (mut w, log) = logged(&controller, physics);
+            drag_without_release(&mut w);
+            controller.jump_to(500.0);
+            lay(&mut w);
+            assert_eq!(w.offset(), 500.0);
+            assert!(!w.scrolling && !w.down_active, "the jump ended the drag");
+
+            log.borrow_mut().clear();
+            send(&mut w, &pointer(PointerPhase::Move, 10.0), 48.0);
+            assert_eq!(w.offset(), 500.0, "the finger no longer drags");
+            // A fast upward flick that would have flung a live drag.
+            send(&mut w, &pointer(PointerPhase::Up, 10.0), 50.0);
+            assert_eq!(
+                log.borrow().as_slice(),
+                &[PointerPhase::Move, PointerPhase::Up],
+                "both reached the child through the unarmed path"
+            );
+            assert_eq!(live_motions(&w), 0, "the release starts nothing");
+            assert!(!controller.is_animating());
+            assert!(!paint_at(&mut w, 64.0), "nothing animates");
+            assert_eq!(w.offset(), 500.0);
+            assert_eq!(controller.offset(), 500.0);
+        }
+    }
+
+    #[test]
+    fn a_release_tears_down_a_tween_before_starting_its_own_motion() {
+        // Defence in depth behind the rule above: even with a tween somehow
+        // live under a still-armed drag, the release replaces it through the
+        // single tear-down path rather than writing over it — under the
+        // legacy fling/settle path (`RubberBand`) and the simulation path.
+        for physics in both_physics() {
+            let controller = ScrollController::new();
+            let (mut w, _log) = logged(&controller, physics);
+            drag_without_release(&mut w);
+            controller.animate_to(
+                800.0,
+                AnimateTo {
+                    duration_ms: 400.0,
+                    curve: Curve::Linear,
+                },
+            );
+            paint_at(&mut w, 0.0);
+            assert!(controller.is_animating());
+            // Force the drag back on, as if the command had not ended it.
+            w.scrolling = true;
+            w.down_active = true;
+
+            send(&mut w, &pointer(PointerPhase::Up, 50.0), 40.0);
+            assert!(
+                live_motions(&w) <= 1,
+                "fling, settle and simulation are never live together"
+            );
+            assert!(
+                !controller.is_animating(),
+                "the replaced tween no longer reports itself"
+            );
+            assert!(!w.controller_animating);
+            // Whatever the release started runs to rest on its own, never
+            // resurrecting the tween's flag.
+            let mut ms = 40.0;
+            while paint_at(&mut w, ms) {
+                assert!(live_motions(&w) <= 1);
+                assert!(!controller.is_animating());
+                ms += 16.0;
+                assert!(ms < 10_000.0, "the release motion never settled");
+            }
+            assert_eq!(live_motions(&w), 0);
+        }
+    }
+
+    #[test]
+    fn a_nan_command_mid_drag_leaves_the_drag_alone() {
+        let controller = ScrollController::new();
+        let (mut w, _log) = logged(&controller, Rc::new(Bouncing::new()));
+        drag_without_release(&mut w);
+        let before = w.offset();
+        controller.jump_to(f64::NAN);
+        lay(&mut w);
+        assert!(w.scrolling, "an ignored command does not end the drag");
+        send(&mut w, &pointer(PointerPhase::Move, 40.0), 48.0);
+        assert!(w.offset() > before, "the finger still drags");
     }
 }
