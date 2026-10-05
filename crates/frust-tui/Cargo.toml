@@ -11,60 +11,27 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
-# A library only, no standalone binary — consumed by `frust-cli`: both the
-# bare `frust` invocation and the `tui` subcommand call into it. Depends on no
-# framework crate (same isolation charter as `frust-cli`/`frust-drive` — see
-# docs/ARCHITECTURE.md).
+# Workbench library only; tooling-isolation charter (docs/ARCHITECTURE.md).
 [lib]
 name = "frust_tui"
 path = "src/lib.rs"
 
 [dependencies]
-# Shared drive pipelines (devices/doctor/run/build/scaffold) — project
-# detection and session supervision consume the same pipelines the `frust`
-# CLI does.
 frust-drive = { path = "../frust-drive", version = "0.5.2" }
-# The devtools wire types the DevTools mode speaks (`Discovery`, `FrameStats`,
-# `Capability`) — the protocol leaf is the one sanctioned crossing of the
-# tooling-isolation charter (docs/DEVTOOLS_ARCHITECTURE.md): it depends on
-# `serde`/`serde_json` only, so pulling it in never drags the framework side's
-# graph along. `frust-devtools` itself (the framework-side service) stays out
-# of this crate's graph entirely.
 frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.2" }
-# The embedded MCP server: `frust_mcp::serve_embedded` plus the
-# `SessionBackend` seam `supervise::mcp_backend` implements over this
-# workbench's own sessions, so an agent drives the SAME sessions the user
-# sees. Tooling→tooling only (both crates are under the same
-# tooling-isolation charter — docs/ARCHITECTURE.md); it drags in no framework
-# crate.
+# Embedded MCP server over shared session backend (tooling-only, docs/ARCHITECTURE.md).
 frust-mcp = { path = "../frust-mcp", version = "0.5.2" }
-# The embedded DAP server: `frust_dap::serve_embedded` over the *same*
-# `TuiSessionBackend` the MCP server is handed, so an IDE debugging through
-# DAP, an agent through MCP, and the user in the terminal all drive one
-# session world. The second tooling→tooling crossing (docs/ARCHITECTURE.md);
-# `frust-dap` itself depends on `frust-mcp` and no framework crate.
+# Embedded DAP server over same `TuiSessionBackend` (tooling-only, docs/ARCHITECTURE.md).
 frust-dap = { path = "../frust-dap", version = "0.5.2" }
 anyhow.workspace = true
-# `thiserror` backs the supervisor's matched `LaunchError` (CODE_STANDARDS'
-# "errors callers match on" rule); already a workspace dependency.
 thiserror.workspace = true
 ratatui.workspace = true
-# ANSI-aware log rendering for the session log view — parses a
-# process's ANSI/SGR output into styled ratatui `Text`. Pin lives in the root
-# manifest (Version-Pin Policy).
+# Log rendering; pin in root (Version-Pin Policy).
 ansi-to-tui.workspace = true
-# `event-stream` gives the async `EventStream` the tokio `select!` loop polls.
 crossterm = { workspace = true, features = ["event-stream"] }
-# Format-preserving recent-projects store (`~/.config/frust/tui.toml`, the
-# project switcher) — pin lives in the root manifest (Version-Pin Policy).
+# Projects store; pin in root (Version-Pin Policy).
 toml_edit.workspace = true
-# The workspace `tokio` pin is `default-features = false`; the TUI crate enables
-# exactly the features its async event loop needs (nothing reaches the
-# framework's `tokio` usage).
-# `net` is for the embedded MCP server: `frust_mcp::serve_embedded` binds its
-# loopback `TcpListener` on *this* crate's runtime, so the feature the code
-# path needs is declared here rather than inherited from another member's
-# unification.
+# Multiple features: rt-multi-thread (runtime), net (MCP), others for async loop.
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",
@@ -72,35 +39,15 @@ tokio = { workspace = true, features = [
     "time",
     "sync",
 ] }
-# The embedded MCP server's cancellation seam (`CancellationToken`), the same
-# handle `frust_mcp::serve_embedded` shuts down on. Pin lives in the root
-# manifest (Version-Pin Policy).
+# MCP cancellation; pin in root (Version-Pin Policy).
 tokio-util.workspace = true
-# `StreamExt::next` for the crossterm `EventStream` in the `select!` loop.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-# `crate::clipboard`'s `system`/`auto` `FRUST_TUI_CLIPBOARD` backend — the
-# third `arboard` consumer alongside `plugins/clipboard`'s desktop backend and
-# `frust-shell-desktop`'s clipboard worker (root `Cargo.toml`'s Version-Pin
-# Policy comment covers the pin and the `default-features = false` rationale;
-# workspace inheritance carries both here unchanged). Those two consumers
-# carry a documented COEXISTENCE CONSTRAINT: their `arboard::Clipboard`
-# instances can be live concurrently on different threads of the SAME
-# process, which is recorded as observed to crash arboard's macOS backend.
-# That hazard does not apply here — `frust-tui` is the terminal workbench, a
-# separate OS process from whatever app process a plugin or
-# `frust-shell-desktop` runs inside, so this crate's `arboard::Clipboard`
-# instance can never share an address space with either of theirs. No version
-# change from any consumer; the tripwire is `cargo check -p frust-tui`.
+# COEXISTENCE CONSTRAINT: macOS crashes if instances live concurrently on same thread;
+# this is a separate process (terminal workbench), so no hazard with plugins/shell.
 arboard = { workspace = true }
-# `supervise::watch`'s per-session "Watch: restart on save" source watcher —
-# the same filesystem-event crate `frust run --watch` uses (pin lives in the
-# root manifest, Version-Pin Policy; never bumped independently here).
+# Filesystem watcher for --watch; pin in root (Version-Pin Policy).
 notify.workspace = true
 
 [dev-dependencies]
-# TestBackend + insta snapshot harness for the render suite.
 insta.workspace = true
-# Enables `frust-drive`'s `test-util` feature (its scripted `FakeProcessRunner`)
-# for the supervisor suite — the fake stays out of the shipped build (feature is
-# off in the normal `[dependencies]` entry above; only `cargo test` unifies it in).
 frust-drive = { path = "../frust-drive", version = "0.5.2", features = ["test-util"] }

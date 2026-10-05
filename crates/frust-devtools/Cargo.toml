@@ -12,31 +12,10 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-# The wire contract, and the ONLY frust-* dependency this crate may ever have.
-# This is a framework-side crate: it must not depend on frust-core, a shell, or
-# any tooling crate, and no tooling crate may depend on it — the two sides meet
-# at the protocol crate and nowhere else (docs/ARCHITECTURE.md's Tooling
-# isolation rule). `serde_json` reaches this crate through the protocol crate's
-# whole-crate valve (`frust_devtools_protocol::serde_json`) rather than a
-# re-declared dependency, so the `Value`s built here are the same crate version
-# the protocol's own public API speaks (docs/CODE_STANDARDS.md's whole-crate
-# valve rule).
+# Wire contract only (tooling-isolation rule, docs/ARCHITECTURE.md).
 frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.2" }
-# The workspace `tokio` pin is `default-features = false`; enable exactly what
-# the loopback service needs and nothing more:
-#   rt      — the small internal current-thread runtime the service owns, so a
-#             shell embedding it needs no tokio knowledge of its own
-#   net     — `TcpListener`/`TcpStream` (also what satisfies `enable_io()`)
-#   io-util — `AsyncReadExt`/`AsyncWriteExt` for the NDJSON line framing
-#   sync    — `broadcast` (frame-stats fan-out), `mpsc`/`oneshot` (the backend
-#             hand-off), `watch` (shutdown), `Semaphore` (client cap)
-#   time    — the per-request backend timeout and the shutdown grace window
-#   macros  — `tokio::select!` in the accept/connection loops (proc-macro only:
-#             `tokio-macros`, compile-time weight, nothing at runtime). Without
-#             it a cancellable accept loop would need a sleep-poll or a
-#             self-connect wakeup trick, both worse than the macro.
-# Deliberately NOT enabled: `rt-multi-thread` (one IO-bound thread is enough,
-# and a shell should not pay for a worker pool), `fs`, `process`, `signal`.
+# Features: rt (internal runtime), net (TCP), io-util (NDJSON), sync, time, macros.
+# NOT: rt-multi-thread, fs, process, signal.
 tokio = { workspace = true, features = [
     "rt",
     "net",
@@ -45,6 +24,4 @@ tokio = { workspace = true, features = [
     "time",
     "macros",
 ] }
-# The discovery line (see `service`'s module doc) and diagnostics. A shell's
-# logger is the only output sink this crate has — it never prints.
 log = { workspace = true }
