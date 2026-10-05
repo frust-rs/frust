@@ -34,6 +34,7 @@ mod canvas;
 mod checkbox;
 mod container;
 mod divider;
+pub mod drag;
 mod flex;
 mod gesture;
 mod icon;
@@ -69,6 +70,10 @@ pub use canvas::{CanvasView, CanvasWidget, canvas};
 pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox};
 pub use container::{BorderStyle, ContainerView, ContainerWidget, colored_box, container};
 pub use divider::{DividerView, DividerWidget, divider};
+pub use drag::{
+    DragCoordinator, DragKind, DragPhase, DragSession, DragSourceId, DragState, DragStateChange,
+    DragSubscription, DragTargetId,
+};
 pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,
     flexible, inflexible, keyed,
