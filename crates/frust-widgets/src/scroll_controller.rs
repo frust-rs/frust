@@ -36,6 +36,32 @@
 //!   out (ignoring each with a debug-build log) and keeps the offset ones in
 //!   recording order, so `ScrollView` never sees — and never has to match
 //!   on — a variant it cannot act on.
+//! - **The queue is bounded, not an unbounded backlog.** A recorded offset
+//!   command coalesces into the immediately preceding one when both are the
+//!   same kind — a `jump_to` replacing a queued `jump_to`, an `animate_to`
+//!   replacing a queued `animate_to` — so a tight burst (a pointer-drag
+//!   thumb, say) leaves only the latest value queued. Coalescing never
+//!   crosses a kind boundary (a queued `jump_to` followed by an `animate_to`
+//!   keeps both, so the tween still starts from the jumped-to position) and
+//!   never crosses a [`ScrollController::scroll_to_item`] in between (an
+//!   offset/item interleaving stays in exact recording order). Item commands
+//!   keep their own ordered channel but are capped at
+//!   [`ITEM_COMMAND_CAP`] entries; recording one past the cap drops the
+//!   *oldest* queued item command (debug-build log) rather than growing
+//!   further. One behavioural consequence: an intermediate `jump_to` inside
+//!   a coalesced run that would, had it actually applied, transiently cross
+//!   a `ListView` near-start/near-end threshold never does — the edge
+//!   callbacks evaluate only the surviving (last) target in the run, not
+//!   every value a caller recorded.
+//! - **The pre-attach backlog survives a bind.** [`ScrollController::bind`]
+//!   does not clear the queue: a command recorded before any surface
+//!   attaches (or before the newly attached one has laid out) waits for that
+//!   surface's first layout, per the apply contract above. The hazard this
+//!   trades for: a handle driven in a loop while nothing is attached cannot
+//!   grow without bound either — coalescing and the item cap still apply —
+//!   but it does accumulate up to that bound (one offset command plus up to
+//!   [`ITEM_COMMAND_CAP`] item commands) rather than draining as it is
+//!   issued.
 //!
 //! See `docs/WIDGETS_ARCHITECTURE.md`'s *Scroll Physics* for the surface the
 //! handle drives.
@@ -122,6 +148,12 @@ pub struct AnimateTo {
     pub curve: Curve,
 }
 
+/// How many queued [`ControllerCommand::ScrollToItem`] entries
+/// [`ScrollController::scroll_to_item`] keeps at once. Recording one past
+/// this bound drops the oldest queued item command (debug-build log) — see
+/// the [module docs](self).
+const ITEM_COMMAND_CAP: usize = 8;
+
 /// A subscribed [`ScrollController::on_change`] listener.
 type Listener = Rc<dyn Fn(ScrollInfo)>;
 
@@ -136,7 +168,8 @@ struct Shared {
     attached: Option<u64>,
     /// The token the next [`ScrollController::bind`] hands out.
     next_token: u64,
-    /// Commands recorded and not yet drained, in recording order.
+    /// Commands recorded and not yet drained, in recording order. Bounded —
+    /// see [`ScrollController::record`] and the [module docs](self).
     commands: Vec<ControllerCommand>,
     /// Subscribed listeners, keyed by the id their guard removes them by.
     listeners: Vec<(u64, Listener)>,
@@ -349,8 +382,54 @@ impl ScrollController {
 
     /// Queue `command` and raise [`frust_core::mark_pending_result_flush`] so a
     /// frame runs to apply it even when it came from outside any input path.
+    ///
+    /// An offset command coalesces into an immediately preceding offset
+    /// command of the same kind instead of growing the queue; an item
+    /// command keeps its own ordered channel, capped at [`ITEM_COMMAND_CAP`]
+    /// (oldest dropped past the cap, debug-build log). See the
+    /// [module docs](self) for the policy this implements.
     fn record(&self, command: ControllerCommand) {
-        self.shared.borrow_mut().commands.push(command);
+        let mut shared = self.shared.borrow_mut();
+        match command {
+            ControllerCommand::Offset(offset) => {
+                let coalesce = matches!(
+                    (shared.commands.last(), &offset),
+                    (
+                        Some(ControllerCommand::Offset(ScrollCommand::JumpTo(_))),
+                        ScrollCommand::JumpTo(_)
+                    ) | (
+                        Some(ControllerCommand::Offset(ScrollCommand::AnimateTo(..))),
+                        ScrollCommand::AnimateTo(..)
+                    )
+                );
+                if coalesce {
+                    *shared.commands.last_mut().expect("matched Some(..) above") =
+                        ControllerCommand::Offset(offset);
+                } else {
+                    shared.commands.push(ControllerCommand::Offset(offset));
+                }
+            }
+            ControllerCommand::ScrollToItem(item) => {
+                shared.commands.push(ControllerCommand::ScrollToItem(item));
+                let item_count = shared
+                    .commands
+                    .iter()
+                    .filter(|command| matches!(command, ControllerCommand::ScrollToItem(_)))
+                    .count();
+                if item_count > ITEM_COMMAND_CAP {
+                    let oldest = shared
+                        .commands
+                        .iter()
+                        .position(|command| matches!(command, ControllerCommand::ScrollToItem(_)))
+                        .expect("item_count > 0 implies at least one ScrollToItem entry");
+                    if let ControllerCommand::ScrollToItem(dropped) = shared.commands.remove(oldest)
+                    {
+                        drop_oldest_item_command(&dropped);
+                    }
+                }
+            }
+        }
+        drop(shared);
         frust_core::mark_pending_result_flush();
     }
 
@@ -505,6 +584,19 @@ fn ignore_item_command(_item: &ScrollToItem) {
     );
 }
 
+/// Report an item command [`ScrollController::record`] dropped to stay within
+/// [`ITEM_COMMAND_CAP`] — a wiring gap (something recording `scroll_to_item`
+/// faster than the surface drains it) worth hearing about in a debug build,
+/// mirroring [`ignore_item_command`].
+fn drop_oldest_item_command(_item: &ScrollToItem) {
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "frust-widgets: ScrollController::scroll_to_item({:?}, {:?}) dropped: more than \
+         {ITEM_COMMAND_CAP} item commands were queued with nothing draining them",
+        _item.key, _item.alignment
+    );
+}
+
 impl Drop for ScrollBinding {
     fn drop(&mut self) {
         let mut shared = self.controller.shared.borrow_mut();
@@ -591,5 +683,103 @@ mod tests {
             "the offset command after it still applies"
         );
         assert_eq!(controller.offset(), 250.0);
+    }
+
+    #[test]
+    fn a_burst_of_jump_to_calls_coalesces_to_the_last_value() {
+        let controller = ScrollController::new();
+        let binding = controller.bind();
+        for offset in 0..50 {
+            controller.jump_to(offset as f64);
+        }
+        assert_eq!(
+            binding.take_all_commands(),
+            vec![ControllerCommand::Offset(ScrollCommand::JumpTo(49.0))],
+            "a run of same-kind offset commands leaves only the last one queued"
+        );
+    }
+
+    #[test]
+    fn jump_to_then_animate_to_keeps_both_in_either_order() {
+        let options = AnimateTo {
+            duration_ms: 200.0,
+            curve: Curve::Linear,
+        };
+
+        let controller = ScrollController::new();
+        let binding = controller.bind();
+        controller.jump_to(10.0);
+        controller.animate_to(20.0, options);
+        assert_eq!(
+            binding.take_all_commands(),
+            vec![
+                ControllerCommand::Offset(ScrollCommand::JumpTo(10.0)),
+                ControllerCommand::Offset(ScrollCommand::AnimateTo(20.0, options)),
+            ],
+            "a jump followed by an animate keeps both, so the tween starts from the jumped position"
+        );
+
+        let controller = ScrollController::new();
+        let binding = controller.bind();
+        controller.animate_to(20.0, options);
+        controller.jump_to(10.0);
+        assert_eq!(
+            binding.take_all_commands(),
+            vec![
+                ControllerCommand::Offset(ScrollCommand::AnimateTo(20.0, options)),
+                ControllerCommand::Offset(ScrollCommand::JumpTo(10.0)),
+            ],
+            "the reverse order keeps both too — coalescing never crosses a kind boundary"
+        );
+    }
+
+    #[test]
+    fn scroll_to_item_between_two_jump_to_calls_keeps_all_three_in_order() {
+        let controller = ScrollController::new();
+        let binding = controller.bind();
+        controller.jump_to(10.0);
+        controller.scroll_to_item(ChildKey::new(7u64), ItemAlignment::Center, false);
+        controller.jump_to(20.0);
+        assert_eq!(
+            binding.take_all_commands(),
+            vec![
+                ControllerCommand::Offset(ScrollCommand::JumpTo(10.0)),
+                ControllerCommand::ScrollToItem(ScrollToItem {
+                    key: ChildKey::new(7u64),
+                    alignment: ItemAlignment::Center,
+                    animated: false,
+                }),
+                ControllerCommand::Offset(ScrollCommand::JumpTo(20.0)),
+            ],
+            "an item command in between stops the surrounding jumps from coalescing"
+        );
+    }
+
+    #[test]
+    fn the_item_command_cap_drops_the_oldest_and_keeps_the_newest() {
+        let controller = ScrollController::new();
+        let binding = controller.bind();
+        for key in 0..(ITEM_COMMAND_CAP as u64 + 3) {
+            controller.scroll_to_item(ChildKey::new(key), ItemAlignment::Start, false);
+        }
+        let drained = binding.take_all_commands();
+        assert_eq!(
+            drained.len(),
+            ITEM_COMMAND_CAP,
+            "queuing past the cap drops the oldest rather than growing further"
+        );
+        let expected: Vec<ControllerCommand> = (3..(ITEM_COMMAND_CAP as u64 + 3))
+            .map(|key| {
+                ControllerCommand::ScrollToItem(ScrollToItem {
+                    key: ChildKey::new(key),
+                    alignment: ItemAlignment::Start,
+                    animated: false,
+                })
+            })
+            .collect();
+        assert_eq!(
+            drained, expected,
+            "the surviving entries are the newest ones, oldest-dropped-first, in recording order"
+        );
     }
 }
