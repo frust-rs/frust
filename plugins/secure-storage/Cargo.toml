@@ -29,6 +29,8 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFDictionary",
     "CFData",
     "CFError",
+    # `CFArray` types the `keys()` enumeration result; `CFNumber` provides `kCFBooleanTrue` for `SecItem*` flags.
+    "CFArray",
     "CFNumber",
 ] }
 objc2-security = { version = "0.3", default-features = false, features = [
