@@ -156,11 +156,11 @@ WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=<gpu> FRUST_GOLDEN_EXPECT_ADAPTER=<gpu> \
 cargo bench -p frust-engine -- --quick
 ```
 
-The host-only arm's `tests/proptest_strips.rs` has twice exhausted host memory on random inputs
-(2026-09-08 OOM at ~35 GB RSS; 2026-09-26 a 187 GB allocation abort) and is tracked as an open
-engine finding; on a host without tens of GB to spare, or when iterating, run it scoped instead —
-`cargo test -p frust-engine --test <file>` or `cargo test -p frust-engine --lib <path>` — which is
-how the `docs/learning` labs invoke it.
+`compile/cull.rs` bounds flattening work for every finite input (dash expansion excepted), so the host-only arm's
+`tests/proptest_strips.rs` allocation property is bounded; seeds 100/107/263/386 replay as pinned regressions
+(`the_allocation_property_holds_for_the_pinned_seeds`). Iterate with a scoped run —
+`cargo test -p frust-engine --test <file>` or `cargo test -p frust-engine --lib <path>` — which is also how the
+`docs/learning` labs invoke it.
 
 Engine-owned instrumentation — the `frust-perf img`/`frust-perf atlas`/`frust-perf enc` counter lines
 and the `EncodeTrace` type — compiles only under the `perf-trace` feature (an island, absent entirely
