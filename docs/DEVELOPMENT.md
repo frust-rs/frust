@@ -477,9 +477,10 @@ The rules below bind every pin, wherever its row lives:
   and `dx12`+`vulkan` (windows). Every wgpu user (`frust-engine`, `frust-render`, `frust-testing`,
   `frust`'s `gpu` feature) depends on `frust-gpu` unconditionally, so it is the single choke point —
   never add a backend back to the row (it re-unions across every target). Moving features between row
-  and tables is not a bump and leaves `Cargo.lock` untouched; verify with `cargo tree -e features
-  --target <triple> -p frust-gpu`.
+  and tables is not a bump, but target-only crates can still enter `Cargo.lock` (the wasm arm added
+  seven), so review the lock diff; verify with `cargo tree -e features --target <triple> -p frust-gpu`.
 - Use `cargo tree -d` after any manifest change, to catch duplicate/divergent versions of a crate.
+  Every workspace resolves with Cargo resolver 3: a fresh resolve prefers versions whose MSRV fits `rust-version`.
 - Android deps (`jni`, `ndk`, `ndk-sys`, `android_logger`) are target-gated (`--target
   *-linux-android`) but appear in `Cargo.lock` on all platforms (expected, not drift). `libc`
   (unpinned `0.2`) is the same two-platform shape; android's/ios's render-thread priority

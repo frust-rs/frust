@@ -584,17 +584,17 @@ shipped instance.
   comments state what the code can't show (a `# Safety` contract, a magic-number source).
 - **These conventions apply to TOML manifests too** (`Cargo.toml`, scaffold `*.tmpl`,
   `frust.toml`, `.cargo/config.toml`). A manifest comment states only what the TOML cannot
-  show: an exact/LAW pin and its lockstep site, a must-not-re-add feature or backend, a
-  non-obvious cfg/exclusion reason, or an advisory — at most 2–3 lines, pointing to the owning
-  doc (e.g. `docs/DEVELOPMENT.md` § Version-Pin Policy). Commented-out scaffold option keys
-  are documentation.
-- **Mechanically checked.** `crates/frust/tests/comment_residue_conformance.rs` catches
-  plan-phase (dotted `9.B`, parenthesized, `Phase-N`, "the Phase N"), plan-task (`task-NN`),
-  findings-ledger numbers, review-round (`re-review`, `cfix-N`, gated `round-N`),
-  plan-document (`PLAN <tag>`, a plan-directory path), phase-adjacent `req N`, and `review
-  finding <id>` refs, in source and manifest `#` comments alike; sanctioned citations exempt
-  only their match span. Bare PR numbers and plan tags (`T04`/`D6a` vs. `M3`/`R8`) stay
-  human-reviewed, still banned. `manifest_comment_budget.rs` caps manifest
-  prose density: with P prose `#` lines (commented-out TOML excluded) and N setting lines, a
-  manifest fails when P > 12 and P/N exceeds its kind's ceiling — 0.9 for Cargo manifests
-  and `.cargo/config.toml`, 3.3 for `frust.toml`; no per-file allowlist.
+  show — an exact/LAW pin and its lockstep site, a must-not-re-add feature or backend, a
+  non-obvious cfg/exclusion reason, an advisory — in at most 3 lines, pointing to the owning doc
+  (e.g. `docs/DEVELOPMENT.md` § Version-Pin Policy). Under the budget below, pin and constraint
+  comments are the last to cut. Commented-out scaffold option keys are documentation.
+- **Mechanically checked.** `crates/frust/tests/comment_residue_conformance.rs` scans source and
+  manifest `#` comments for plan-phase (dotted `9.B`, parenthesized, `Phase-N`, "the Phase N"),
+  plan-task (`task-NN`), findings-ledger, review-round (`re-review`, `cfix-N`, gated `round-N`),
+  plan-document (`PLAN <tag>`, a plan-directory path), phase-adjacent `req N` and
+  `review finding <id>` refs; sanctioned citations exempt only their match span. Bare PR numbers
+  and plan tags (`T04`/`D6a` vs. `M3`/`R8`) stay human-reviewed, still banned.
+  `manifest_comment_budget.rs` fails a manifest comment block over 3 lines, and a manifest whose
+  prose `#` lines P (commented-out TOML excluded) exceed 12 and whose ratio to setting lines N
+  tops its kind's ceiling: 0.9 for Cargo manifests and `.cargo/config.toml`, 3.3 for
+  `frust.toml`; no per-file allowlist.
