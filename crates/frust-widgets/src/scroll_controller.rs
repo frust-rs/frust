@@ -5,15 +5,16 @@
 //! [`ScrollView::controller`](crate::ScrollView::controller), and drives or
 //! reads the surface from anywhere on the UI thread, inside a dispatch or not:
 //!
-//! - **Writes are recorded, not applied.** [`ScrollController::jump_to`] queues
-//!   a command the attached widget drains at the start of its next layout or
-//!   paint (whichever runs first), so the clamp is always taken against the
-//!   freshly laid-out extent — a jump issued in the same handler that appended
-//!   content lands on the new bottom, not the old one. A command queued before
-//!   any surface attaches (or before the attached one has laid out) waits for
-//!   the first layout. Recording raises [`frust_core::mark_pending_result_flush`]
-//!   so a frame-gated shell runs the frame that applies it even when nothing
-//!   else changed (the `PanZoomController`/`NavigatorController` precedent).
+//! - **Writes are recorded, not applied.** [`ScrollController::jump_to`] and
+//!   [`ScrollController::animate_to`] queue a command the attached widget
+//!   drains at the start of its next layout or paint (whichever runs first),
+//!   so the clamp is always taken against the freshly laid-out extent — a
+//!   jump issued in the same handler that appended content lands on the new
+//!   bottom, not the old one. A command queued before any surface attaches
+//!   (or before the attached one has laid out) waits for the first layout.
+//!   Recording raises [`frust_core::mark_pending_result_flush`] so a
+//!   frame-gated shell runs the frame that applies it even when nothing else
+//!   changed (the `PanZoomController`/`NavigatorController` precedent).
 //! - **Reads are the last published snapshot.** [`ScrollController::offset`],
 //!   [`ScrollController::max_offset`] and [`ScrollController::viewport_extent`]
 //!   return what the attached surface last published — after every layout,
@@ -30,6 +31,8 @@ use std::cell::RefCell;
 use std::fmt;
 use std::rc::{Rc, Weak};
 
+use frust_core::Curve;
+
 use crate::scroll::ScrollInfo;
 
 /// A command recorded on a [`ScrollController`], drained by the attached
@@ -38,6 +41,25 @@ use crate::scroll::ScrollInfo;
 pub(crate) enum ScrollCommand {
     /// Move to this offset at once, clamped to `[0, max_offset]`.
     JumpTo(f64),
+    /// Ease to this offset over the paired [`AnimateTo`]'s duration/curve,
+    /// clamped to `[0, max_offset]`.
+    AnimateTo(f64, AnimateTo),
+}
+
+/// The duration/curve [`ScrollController::animate_to`] eases a programmatic
+/// scroll through. Both fields are required rather than defaulted — Flutter's
+/// `ScrollController.animateTo` keeps `duration`/`curve` required for the
+/// same reason: an app names the motion it wants rather than inheriting a
+/// guessed one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnimateTo {
+    /// How long the tween runs, in milliseconds. A non-positive or
+    /// non-finite value (`<= 0.0`, or `NaN`) behaves like
+    /// [`ScrollController::jump_to`] — an instant move, no animation —
+    /// matching how the app's `reduce_motion` theme flag collapses this call.
+    pub duration_ms: f64,
+    /// The easing curve the tween runs through.
+    pub curve: Curve,
 }
 
 /// A subscribed [`ScrollController::on_change`] listener.
@@ -60,6 +82,11 @@ struct Shared {
     listeners: Vec<(u64, Listener)>,
     /// The id the next [`ScrollController::on_change`] hands out.
     next_listener: u64,
+    /// Whether the attached surface is currently running a controller-driven
+    /// [`ScrollController::animate_to`] tween — [`ScrollController::is_animating`]'s
+    /// backing state, published under the same "last known state" contract
+    /// as `info`/`viewport_extent` rather than reset on detach.
+    animating: bool,
 }
 
 impl Default for Shared {
@@ -76,6 +103,7 @@ impl Default for Shared {
             commands: Vec::new(),
             listeners: Vec::new(),
             next_listener: 0,
+            animating: false,
         }
     }
 }
@@ -109,6 +137,7 @@ impl fmt::Debug for ScrollController {
             .field("attached", &shared.attached.is_some())
             .field("pending_commands", &shared.commands.len())
             .field("listeners", &shared.listeners.len())
+            .field("animating", &shared.animating)
             .finish()
     }
 }
@@ -130,6 +159,32 @@ impl ScrollController {
     /// the first layout of the next surface to attach.
     pub fn jump_to(&self, offset: f64) {
         self.record(ScrollCommand::JumpTo(offset));
+    }
+
+    /// Ease to `offset` over `options.duration_ms`/`options.curve`, clamped
+    /// to `[0, max_offset]`.
+    ///
+    /// Applied — like [`ScrollController::jump_to`] — at the attached
+    /// surface's next layout or paint, and runs through the same ballistic
+    /// driver a release fling does, so paint cadence, `request_frame` and the
+    /// installed physics' boundary handling are shared rather than
+    /// duplicated. A later `jump_to`/`animate_to` recorded before this one
+    /// finishes replaces it outright (drained in recording order, so the
+    /// later command's own reset always runs after this one's). Any user
+    /// pointer `Down` or wheel input on the surface cancels it too, leaving
+    /// the surface wherever it had eased to — user input always wins. The
+    /// app's `motion.reduce_motion` theme flag collapses this to an instant
+    /// jump. `NaN` is ignored.
+    pub fn animate_to(&self, offset: f64, options: AnimateTo) {
+        self.record(ScrollCommand::AnimateTo(offset, options));
+    }
+
+    /// Whether the attached surface is currently running an
+    /// [`animate_to`](Self::animate_to) tween — `false` once it completes, is
+    /// replaced by a later jump/animate, or is interrupted by user input, and
+    /// `false` before any surface has ever started one.
+    pub fn is_animating(&self) -> bool {
+        self.shared.borrow().animating
     }
 
     /// The clamped offset the attached surface last published (`0.0` until a
@@ -286,6 +341,19 @@ impl ScrollBinding {
         for listener in listeners {
             listener(info);
         }
+    }
+
+    /// Set whether a controller-driven [`ScrollController::animate_to`]
+    /// tween is live, if this binding is still current — a no-op once a
+    /// later attach took the handle over. Mirrors [`ScrollBinding::publish`]'s
+    /// current-binding guard but fires no listener: `is_animating` is a
+    /// plain poll, not an `on_change` event.
+    pub(crate) fn set_animating(&self, animating: bool) {
+        let mut shared = self.controller.shared.borrow_mut();
+        if shared.attached != Some(self.token) {
+            return;
+        }
+        shared.animating = animating;
     }
 }
 
