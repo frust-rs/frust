@@ -63,7 +63,8 @@ use std::sync::Once;
 use std::time::Duration;
 
 use kurbo::{
-    Affine, BezPath, Cap, Join, Line, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
+    Affine, BezPath, Cap, Join, PathEl, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
+    StrokeCtx, StrokeOpts,
 };
 use peniko::{Brush, Color, Fill, ImageData};
 
@@ -86,6 +87,7 @@ use crate::cache::images::{
 };
 use crate::compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
 use crate::compile::clear::StagedPunch;
+use crate::compile::cull::{SPLIT_EXTENT_VIEWPORTS, VIEWPORT_MARGIN, ViewportSplit};
 use crate::compile::external::encode_scene_texture;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
 use crate::config;
@@ -996,11 +998,10 @@ impl SceneCompiler {
                     PaintSource::Brush(brush),
                     transform,
                     |generator, storage, clip| {
-                        generator.generate_filled_path(
+                        generate_fill(
+                            generator,
                             shape.path_elements(FLATTEN_TOLERANCE),
-                            Fill::NonZero,
                             transform,
-                            None,
                             storage,
                             clip,
                         );
@@ -1015,7 +1016,9 @@ impl SceneCompiler {
                 transform,
             } => {
                 let transform = combined * *transform;
-                let line = Line::new(*p0, *p1);
+                // The two elements `kurbo::Line::path_elements` yields, spelled
+                // out so the stroke helper can walk them twice.
+                let line = [PathEl::MoveTo(*p0), PathEl::LineTo(*p1)];
                 let stroke = round_stroke(*width);
 
                 self.record(
@@ -1024,14 +1027,7 @@ impl SceneCompiler {
                     PaintSource::Brush(brush),
                     transform,
                     |generator, storage, clip| {
-                        generator.generate_stroked_path(
-                            line.path_elements(FLATTEN_TOLERANCE),
-                            &stroke,
-                            transform,
-                            None,
-                            storage,
-                            clip,
-                        );
+                        generate_stroke(generator, line, &stroke, transform, storage, clip);
                     },
                 );
             }
@@ -1051,14 +1047,7 @@ impl SceneCompiler {
                             PaintSource::Brush(brush),
                             transform,
                             |generator, storage, clip| {
-                                generator.generate_filled_path(
-                                    path.iter(),
-                                    Fill::NonZero,
-                                    transform,
-                                    None,
-                                    storage,
-                                    clip,
-                                );
+                                generate_fill(generator, path.iter(), transform, storage, clip);
                             },
                         );
                     }
@@ -1082,11 +1071,11 @@ impl SceneCompiler {
                                     PaintSource::Brush(brush),
                                     transform,
                                     |generator, storage, clip| {
-                                        generator.generate_stroked_path(
+                                        generate_stroke(
+                                            generator,
                                             dashed.iter(),
                                             &stroke,
                                             transform,
-                                            None,
                                             storage,
                                             clip,
                                         );
@@ -1100,11 +1089,11 @@ impl SceneCompiler {
                                     PaintSource::Brush(brush),
                                     transform,
                                     |generator, storage, clip| {
-                                        generator.generate_stroked_path(
+                                        generate_stroke(
+                                            generator,
                                             path.iter(),
                                             &stroke,
                                             transform,
-                                            None,
                                             storage,
                                             clip,
                                         );
@@ -2393,6 +2382,142 @@ fn round_stroke(width: f64) -> Stroke {
     Stroke::new(width)
         .with_caps(Cap::Round)
         .with_join(Join::Round)
+}
+
+/// The device-space tolerance `vello_common`'s stroker expands a stroke at,
+/// before dividing it by the transform's scale to work in user space.
+const STROKE_TOLERANCE: f64 = 0.25;
+
+/// The device rectangle the strip generator culls a path against: the active
+/// mask's bounds when a draw is generated under one, the generator's viewport
+/// otherwise.
+pub(crate) fn cull_viewport(generator: &StripGenerator, clip: Option<&PathDataRef<'_>>) -> Rect {
+    match clip {
+        Some(clip) => Rect::new(
+            f64::from(clip.bbox.x0),
+            f64::from(clip.bbox.y0),
+            f64::from(clip.bbox.x1),
+            f64::from(clip.bbox.y1),
+        ),
+        None => Rect::new(
+            0.0,
+            0.0,
+            f64::from(generator.width()),
+            f64::from(generator.height()),
+        ),
+    }
+}
+
+/// Generate the strips for `path` filled non-zero under `transform`, through
+/// the [`ViewportSplit`] pre-pass.
+///
+/// Every fill that can carry a curve reaches the generator this way, so no
+/// finite path under a finite transform can make the flattener subdivide
+/// without bound. The pre-pass hands back device-space elements, which the
+/// generator then flattens under the identity; a path with no curve large
+/// enough to split comes out as the same points the generator would have
+/// computed from `transform` itself.
+pub(crate) fn generate_fill(
+    generator: &mut StripGenerator,
+    path: impl IntoIterator<Item = PathEl>,
+    transform: Affine,
+    storage: &mut StripStorage,
+    clip: Option<PathDataRef<'_>>,
+) {
+    let viewport = cull_viewport(generator, clip.as_ref());
+    generator.generate_filled_path(
+        ViewportSplit::new(path, transform, viewport),
+        Fill::NonZero,
+        Affine::IDENTITY,
+        None,
+        storage,
+        clip,
+    );
+}
+
+/// Generate the strips for `path` stroked with `stroke` under `transform`.
+///
+/// A stroke whose device extent — the path's control box widened by half the
+/// stroke width, then transformed — stays within the
+/// [`SPLIT_EXTENT_VIEWPORTS`] regime goes to the generator's own stroker
+/// unchanged: its expansion flattens at on-screen cost already. A larger one
+/// is expanded here instead, in user space at the
+/// tolerance the generator's stroker would pick, and the expansion is filled
+/// through [`generate_fill`], so a huge stroke flattens at bounded cost too.
+pub(crate) fn generate_stroke<I>(
+    generator: &mut StripGenerator,
+    path: I,
+    stroke: &Stroke,
+    transform: Affine,
+    storage: &mut StripStorage,
+    clip: Option<PathDataRef<'_>>,
+) where
+    I: IntoIterator<Item = PathEl>,
+    I::IntoIter: Clone,
+{
+    let path = path.into_iter();
+    let viewport = cull_viewport(generator, clip.as_ref());
+    let bounds = viewport.abs().inflate(VIEWPORT_MARGIN, VIEWPORT_MARGIN);
+    let split_extent = SPLIT_EXTENT_VIEWPORTS * bounds.width().max(bounds.height());
+    let extent = stroke_device_extent(path.clone(), stroke, transform);
+
+    if extent <= split_extent || extent.is_nan() {
+        generator.generate_stroked_path(path, stroke, transform, None, storage, clip);
+        return;
+    }
+
+    let [a, _, _, d, _, _] = transform.as_coeffs();
+    let tolerance = STROKE_TOLERANCE / a.abs().max(d.abs()).max(1.0);
+    let mut expanded = StrokeCtx::default();
+    kurbo::stroke_with(
+        path,
+        stroke,
+        &StrokeOpts::default(),
+        tolerance,
+        &mut expanded,
+    );
+    generate_fill(
+        generator,
+        expanded.output().iter(),
+        transform,
+        storage,
+        clip,
+    );
+}
+
+/// The larger side of the device-space box bounding every curve a stroke of
+/// `path` can expand to: its control box widened by half the stroke width on
+/// every side, under `transform`. Zero for a path with no points.
+fn stroke_device_extent(
+    path: impl Iterator<Item = PathEl>,
+    stroke: &Stroke,
+    transform: Affine,
+) -> f64 {
+    let mut control: Option<Rect> = None;
+    let mut include = |p: Point| {
+        control = Some(control.map_or(Rect::from_points(p, p), |r| r.union_pt(p)));
+    };
+    for el in path {
+        match el {
+            PathEl::MoveTo(p) | PathEl::LineTo(p) => include(p),
+            PathEl::QuadTo(p1, p2) => {
+                include(p1);
+                include(p2);
+            }
+            PathEl::CurveTo(p1, p2, p3) => {
+                include(p1);
+                include(p2);
+                include(p3);
+            }
+            PathEl::ClosePath => {}
+        }
+    }
+    let Some(control) = control else {
+        return 0.0;
+    };
+    let half_width = 0.5 * stroke.width.abs();
+    let device = transform.transform_rect_bbox(control.inflate(half_width, half_width));
+    device.width().max(device.height())
 }
 
 /// `path` expanded into the sub-paths `dash` breaks it into.
