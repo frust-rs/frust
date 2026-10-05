@@ -3,90 +3,47 @@ name = "{{ project_name }}"
 org = "{{ org }}"
 description = "{{ description }}"
 
-# Desktop (macOS/Windows/Linux) shell identity. These values were rendered
-# into `macos/Info.plist`, `windows/build.rs`'s resource block and
-# `linux/app.desktop` at scaffold time; editing them here does NOT rewrite
-# those files. `frust build` copies each of them verbatim, so a hand edit
-# always wins. What `name`/`identifier` still drive at build time is the
-# NAMES the bundle is assembled under (the `.app` directory, the `.desktop`
-# file and its icon leaves, the generated `.icns`) plus the fallback
-# `Info.plist`/`app.desktop` generated for a project that ships neither.
-# Change an identity in both places: a build reports a disagreement rather
-# than reconciling it silently — an `Info.plist` `CFBundleExecutable` naming
-# a binary that isn't there fails the build, and identifier/`Exec=`/icon-name
-# drift comes back as a warning.
-#
-# `icon` is the single source image the icon pipeline derives every
-# platform's app icon from (`.icns`/`.ico`/`hicolor` PNGs). The bundled demo
-# logo is 1024x1024 — the pipeline needs at least 512x512, so keep any
-# replacement at or above that floor.
+# Desktop identity, rendered into `macos/Info.plist`, `windows/build.rs` and `linux/app.desktop`
+# at scaffold time; editing it here does not rewrite those files.
 [desktop]
 name = "{{ title_case_name }}"
 identifier = "{{ desktop_identifier }}"
+# Source for every platform icon; at least 512x512.
 icon = "assets/logo.png"
 
-# macOS-only overrides. `signing-identity` sets the identity `frust build
-# macos` codesigns the assembled `.app` with. `minimum-system-version` feeds
-# a GENERATED `Info.plist` only — this project ships its own
-# `macos/Info.plist` (copied verbatim), so change
-# `LSMinimumSystemVersion` there.
-# `notarize` opts an `--installer dmg` build into Apple notarization: the
-# packaging step then UPLOADS the signed app to Apple's notary service using
-# APPLE_* credentials from your environment (off by default — those variables
-# are removed from the packaging step's environment instead).
+# macOS-only. `minimum-system-version` only feeds a generated `Info.plist` (this project ships its
+# own: edit `LSMinimumSystemVersion` there); `notarize` uploads the signed app with APPLE_* env credentials.
 # [macos]
 # minimum-system-version = "{{ macos_minimum_system_version }}"
 # signing-identity = "Developer ID Application: Example Org (TEAMID1234)"
 # notarize = true
 
-# Windows-only overrides. The FileVersion/ProductVersion a compiled `.exe`
-# carries are set by this project's own `windows/build.rs` at app-build time
-# (defaults "1.0.0.0"/"1.0.0" — edit them there). `frust build` does not
-# apply the values below; it only reports that the `.exe`'s own build script
-# owns them.
+# Windows-only. Version info comes from `windows/build.rs`; `frust build` ignores these.
 # [windows]
 # file-version = "1.0.0.0"
 # product-version = "1.0.0"
 
-# Linux-only overrides. Uncomment to change the freedesktop `Categories=`
-# entry `linux/app.desktop` renders (default "Utility").
+# Linux-only: the `Categories=` entry of `linux/app.desktop`.
 # [linux]
 # categories = ["Utility"]
 
-# Browser-target build configuration, the fourth platform beside the three
-# desktop sections above. Every key below is optional and shown at its
-# default, so this whole section may stay commented out: a freshly scaffolded
-# project already has the layout these defaults describe (`web/` holds the
-# checked-in host page, `frust build web` assembles `build/web/` around the
-# wasm output). Unlike the desktop stubs above, this section IS parsed by
-# Frust — uncomment a key only to move away from its default.
+# Browser build. Every key is optional and shown at its default. Parsed by
+# Frust, unlike the platform-file-backed sections above.
 # [web]
-# # Directory holding the checked-in host-page sources (`index.html` +
-# # `frust_web.js`), relative to this file. This is what a build READS.
+# # Checked-in host-page sources, relative to this file (read by a build).
 # host-dir = "web"
-# # Directory the assembled site is WRITTEN to. Deliberately not `host-dir`:
-# # the host page is checked in and the assembled site is generated, so
-# # pointing one at the other would make a rebuild eat its own sources.
+# # Assembled site output; must differ from `host-dir`.
 # out-dir = "build/web"
-# # `wasm-bindgen --out-name`: the basename of the generated JS glue module
-# # (`<out-dir>/pkg/<out-name>.js`), which is also what the host page's
-# # `?module=` default resolves to. Defaults to `[app] name` above.
+# # `wasm-bindgen --out-name`: basename of the JS glue module. Default: `[app] name`.
 # out-name = "{{ project_name }}"
-# # Run `wasm-opt` over the generated `.wasm`. Absent follows the build mode
-# # (release optimizes, debug does not), so this key overrides in BOTH
-# # directions: `true` opts a debug build in, `false` opts a release build out.
+# # Run `wasm-opt`; absent follows the build mode (release on), `true`/`false` force it.
 # wasm-opt = true
-# # Port the local static preview server binds. Not 8080 — that port is in
-# # constant use by unrelated local services.
+# # Port of the local preview server.
 # port = 8000
 
 {% if deeplink_scheme -%}
-# Deep-link scheme registered in the generated Android manifest / iOS
-# Info.plist. Informational here — Frust tooling doesn't parse
-# this section; it documents what `frust create --deeplink-scheme` baked
-# into the platform templates. Editing it does NOT re-render the manifest/
-# Info.plist — re-run `frust create --overwrite` (or edit the platform
-# files directly) to change it after scaffolding.
+# Deep-link scheme baked into the Android manifest / iOS Info.plist by `frust
+# create --deeplink-scheme`. Not parsed; edit those files or re-run `--overwrite`.
 [deeplink]
 scheme = "{{ deeplink_scheme }}"
 {% if deeplink_host -%}
@@ -97,58 +54,23 @@ host = "{{ deeplink_host }}"
 # dev = { app-id-suffix = ".dev" }
 # prod = {}
 
-# Android release signing. By default the signing material lives in
-# `android/key.properties`, a Java properties file that must stay gitignored
-# (the generated .gitignore already excludes `key.properties` and `*.jks`) so
-# the keystore and passwords never enter version control. Keys:
+# Android release signing reads gitignored `android/key.properties` (keys below; create the keystore with the
+# keytool line), falling back per value to `ANDROID_*` env vars. Parsed by Frust; set only to change the defaults.
 #   storePassword=<keystore password>
 #   keyPassword=<key password>
 #   keyAlias=<key alias>
 #   storeFile=<path to .jks, relative to the android/ dir>
-# Generate an upload keystore with:
 #   keytool -genkey -v -keystore ~/upload-keystore.jks -keyalg RSA \
 #     -storetype JKS -keysize 2048 -validity 10000 -alias upload
-#
-# Each value also falls back to an environment variable when the properties
-# file doesn't supply it (a blank entry counts as not supplied) — the CI half
-# of the common "properties file locally, environment in CI" rig. The defaults
-# need no configuration at all:
-#   ANDROID_STORE_FILE  ANDROID_STORE_PASSWORD
-#   ANDROID_KEY_ALIAS   ANDROID_KEY_PASSWORD
-#
-# `frust build --release` / `frust run --release` resolve all four values,
-# check the keystore file really exists, and then write what they resolved to
-# `android/.frust-signing.properties` for the Gradle build to read — deleting
-# it again the moment Gradle returns. That file is the single source of truth:
-# Gradle signs with exactly what the gate verified, so a green build and a
-# release-signed artifact are the same fact. A stub `key.properties` can't buy
-# a green, debug-signed release. Running `./gradlew assembleRelease` by hand
-# (Android Studio) skips Frust entirely — Gradle then falls back to
-# `key.properties` + the four `ANDROID_*` variables, and Frust makes no promise
-# about that path; it debug-signs with a warning if nothing resolves.
-#
-# The section below IS parsed by Frust (unlike the deeplink/flavor sections
-# above, which only document what was baked into the platform templates).
-# Set it when your signing material lives somewhere other than the defaults —
-# Frust resolves whatever you describe here and hands Gradle the result, so
-# there is nothing to keep in sync on the Gradle side:
 # [signing]
 # # Properties file path, relative to `android/`. Default: "key.properties".
 # key-properties = "app/keystores/key.properties"
-# # Prefix on the property keys, for a file holding several key sets
-# # (`prod.storeFile`, `develop.storeFile`, ...). Default: none. Frust strips
-# # it before handing the values to Gradle.
+# # Key prefix for a file holding several key sets. Default: none.
 # prefix = "prod"
-# # Waives the gate when signing happens somewhere Frust can't inspect (a CI
-# # signing service, a Gradle signing plugin). Nothing is resolved or generated
-# # and every release build warns that Frust cannot promise the artifact is
-# # release-signed.
+# # Waives the gate when signing happens outside Frust; release builds then warn.
 # external = false
 #
-# Renames the environment variable behind any value, overriding the
-# `ANDROID_*` defaults above. Only the variable NAMES belong here, never the
-# values. No matching Gradle edit is needed — Frust resolves the variable and
-# passes the value on.
+# Renames the environment variable behind a value (names only, never values).
 # [signing.env]
 # store-file = "CI_STORE_FILE"
 # store-password = "CI_STORE_PASSWORD"
