@@ -120,7 +120,7 @@ pub use radio::{Radio, RadioView, RadioWidget, radio};
 pub use safe_area::{SafeAreaView, SafeAreaWidget, safe_area};
 pub use scaffold::{ScaffoldView, ScaffoldWidget, scaffold};
 pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};
-pub use scroll_controller::{ScrollController, ScrollSubscription};
+pub use scroll_controller::{AnimateTo, ScrollController, ScrollSubscription};
 pub use selection_toolbar::selection_toolbar;
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
