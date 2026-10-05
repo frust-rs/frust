@@ -15,7 +15,7 @@ reader.
 | Smallest real paint impl: `Icon` (scaled `BezPath` fill) | `crates/frust-widgets/src/icon.rs` | ≈321–342 |
 | Animation-driven repaint: `LoadingIndicator` | `plugins/material/src/loading_indicator.rs` | ≈402, 419, 458 |
 | Full custom canvas: the S1 bubble chart | `benchmarks/frust_bench/src/scenarios/s1_animation/chart.rs` | whole file |
-| Custom widgets in an *app* (escape hatch) | `examples/huddle/src/ui/{fill_box,swipeable,sheet,toast}.rs` | see `examples/huddle/Cargo.toml` ≈22–35 |
+| Custom widgets in an *app* (escape hatch) | `examples/huddle/src/ui/{fill_box,swipeable,sheet,toast}.rs` | see `examples/huddle/Cargo.toml` ≈17–19 |
 
 The signatures you implement:
 
@@ -94,7 +94,7 @@ widget: build it, `layout` it with tight constraints, `paint` it into a
 ### 2.3 — Write a widget from scratch
 
 Huddle documents the exact pattern for app-local custom widgets — read the
-escape-hatch comment in `examples/huddle/Cargo.toml` (≈22–35), then pick the
+escape-hatch comment in `examples/huddle/Cargo.toml` (≈17–19), then pick the
 smallest model: `examples/huddle/src/ui/fill_box.rs` (a rounded-rect
 `View`/`Widget` pair in ~200 lines).
 

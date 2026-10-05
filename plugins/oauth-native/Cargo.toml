@@ -11,22 +11,14 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
-# A pure-Rust protocol crate: no platform code, no HTTP client, no async, and
-# no `frust-*` dependency. The app owns the token endpoint's HTTP transport.
+# Pure-Rust protocol crate: no platform code, HTTP client, async or `frust-*` dependency;
+# the app owns the token endpoint's transport.
 [dependencies]
-# PkceError/CallbackError/TokenError variants callers match on — thiserror
-# per CODE_STANDARDS.
 thiserror = { workspace = true }
-# Token endpoint JSON response parsing.
 serde = { workspace = true }
 serde_json = { workspace = true }
-# PKCE verifier/challenge and `state` encoding (base64url, no padding).
 base64 = { workspace = true }
-# OS CSPRNG for the PKCE verifier and `state`.
 getrandom = { workspace = true }
-# SHA-256 for the S256 code challenge.
 sha2 = { workspace = true }
-# Constant-time `state` comparison.
 subtle = { workspace = true }
-# RFC 3986 component and form-urlencoded encoding.
 percent-encoding = { workspace = true }

@@ -11,42 +11,22 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
-# A library only, and an *embedded* one: the DAP server runs inside its host
-# (`frust-tui`), on the host's runtime and over the host's session backend —
-# there is no process entry point of its own. Charter
-# (docs/ARCHITECTURE.md's Tooling isolation rule, widened to this crate):
-# frust-dap depends on `frust-drive`/`frust-mcp` plus
-# tokio/serde/serde_json/log/thiserror only — never a framework crate, not
-# even as a dev-dependency.
+# Embedded DAP library (not a process); tooling-isolation charter (docs/ARCHITECTURE.md).
 [lib]
 name = "frust_dap"
 path = "src/lib.rs"
 
 [dependencies]
-# The device/build vocabulary a launch resolves into (`Device`, `BuildMode`,
-# the devtools-error classifiers) — the same library `frust-mcp`/`frust-tui`
-# build on.
 frust-drive = { path = "../frust-drive", version = "0.5.2" }
-# `SessionBackend` — the seam the embedded DAP server drives, so a DAP client
-# and an MCP client supervise the *same* sessions rather than each owning a
-# world of their own.
+# SessionBackend for same-world session supervision.
 frust-mcp = { path = "../frust-mcp", version = "0.5.2" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
-# The `CancellationToken` the embedder stops the server with: it breaks every
-# live session's read loop into the same `on_disconnect` teardown a clean
-# disconnect runs. Already the same workspace-pinned `0.7` `frust-mcp` wires
-# its graceful shutdown through — no new external package enters the graph.
+# CancellationToken for embedder shutdown.
 tokio-util = { workspace = true }
-# The workspace `tokio` pin is `default-features = false`; enable exactly
-# what this crate needs: rt (`spawn`/`spawn_blocking`/`JoinSet` — the runtime
-# itself belongs to the embedder, so `rt-multi-thread` is not among them),
-# io-util (`AsyncBufReadExt`/`AsyncReadExt`/`AsyncWriteExt` the codec runs
-# over), net (the loopback TCP listener), sync (the outgoing response/event
-# channel between the session and its writer task), macros
-# (`#[tokio::test]`, `select!`), time (the handshake/teardown timeouts).
+# Features: rt (spawn/JoinSet), io-util, net, sync, macros, time.
 tokio = { workspace = true, features = [
     "rt",
     "io-util",
@@ -57,9 +37,4 @@ tokio = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-# Enables `frust-drive`'s `test-util` feature (its scripted
-# `FakeProcessRunner`) for this crate's tests only — the same shape
-# `frust-mcp`/`frust-tui` use, so an adapter test never shells out for real.
-# A feature toggle on a dependency this crate already has: no new package
-# enters the graph and `Cargo.lock` is unchanged.
 frust-drive = { path = "../frust-drive", version = "0.5.2", features = ["test-util"] }

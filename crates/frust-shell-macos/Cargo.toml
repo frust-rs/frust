@@ -12,93 +12,34 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-# The DesktopExtensions trait this crate implements, plus the winit core it
-# plugs into. Unconditional (not target-gated): `frust-shell-desktop` itself
-# already compiles on every non-mobile host (it is this repo's desktop dev
-# preview too), so there is nothing macOS-specific about depending on it.
+# DesktopExtensions trait + winit core; unconditional since `frust-shell-desktop` compiles on every non-mobile host.
 frust-shell-desktop = { workspace = true }
-# `MacosExtensions::pump` reports menu activations through
-# `frust_reactive::push_menu_event` (see `DesktopExtensions::pump`'s docs).
+# `MacosExtensions::pump` reports menu activations via `push_menu_event`.
 frust-reactive = { workspace = true }
-# `ViewCommand` — the platform-view differ's command vocabulary, and the
-# payload of `DesktopExtensions::on_platform_view_commands`. Named directly
-# because that hook's signature names the type and `frust-shell-desktop`
-# re-exports nothing of it; unconditional because the signature exists on
-# every target, even where the AppKit body behind it does not.
+# Names `ViewCommand` (payload of `on_platform_view_commands`); unconditional since the hook signature exists on every target.
 frust-shell-common = { workspace = true }
-# The desktop platform-view factory registry (`lookup_view_factory`) plus the
-# `DesktopViewFactory`/`DesktopViewHandle` ownership vocabulary
-# `src/platform_view.rs` resolves a `view_type` through — the SECOND
-# shell -> frust-plugin edge in this workspace, after `frust-shell-android`'s
-# (see that crate's own manifest for the first). Same direction and same
-# reason: a shell depends on the leaf substrate crate so it can resolve a
-# plugin's factory without depending on any plugin, and `frust-plugin` itself
-# stays a leaf (`cargo tree -p frust-plugin -e normal`) — the edge only ever
-# points this way.
-#
-# Deliberately NOT target-gated, unlike the AppKit rows below: the OS-neutral
-# half of the host (slot bookkeeping, the warn-once miss log, and the retain
-# accounting) compiles and is unit-tested on every build host against a fake
-# factory, which is the only way that logic is testable at all — a
-# `winit::Window` cannot be constructed without a live event loop. This costs
-# nothing off macOS: `frust-plugin` is std-only on every target it supports
-# (see its `desktop` module docs).
+# Desktop platform-view factory registry. The second shell -> `frust-plugin` edge (first: `frust-shell-android`); `frust-plugin`
+# stays a leaf, so the edge only points this way. Not target-gated: the OS-neutral host logic is tested on every host
+# against a fake factory (a `winit::Window` needs a live event loop).
 frust-plugin = { workspace = true }
 winit = { workspace = true }
-# `kurbo::Rect` is what a `ViewCommand`'s rect/clip are expressed in; the
-# host's geometry mapping names the type.
 kurbo = { workspace = true }
 log = { workspace = true }
 
-# The AppKit-native half — the native menu bar (`muda`) and the app-activation
-# observer behind Dock-click reopen (`src/appkit_glue.rs`) — only ever compiles
-# for a macOS target; on every other host this crate builds none of it and
-# `MacosExtensions` still compiles, so `cargo check --workspace` stays green
-# (the `frust-shell-android` inert-off-target precedent — see its own
-# Cargo.toml).
+# AppKit half (`muda` menu bar, app-activation observer for Dock reopen) compiles only on macOS; elsewhere `MacosExtensions`
+# still compiles (the `frust-shell-android` inert-off-target precedent).
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { workspace = true }
-# `define_class!`/`msg_send!`/`MainThreadMarker` for the observer class.
 objc2 = { workspace = true }
-# `NSNotificationCenter`/`NSNotification`: the observer's registration and its
-# callback argument. Plus `NSRect`/`NSPoint`/`NSSize` for the platform-view
-# host's `setFrame:` call — those three aliases are gated behind BOTH
-# `NSGeometry` and `objc2-core-foundation` (they alias `CGRect`/`CGPoint`/
-# `CGSize`, which live in that crate). Both already ride in on this row's
-# default feature set, and `objc2-app-kit`'s own `NSView` feature turns both on
-# as well, so naming them here changes no resolved feature today — they are
-# spelled out so a future narrowing of either default set fails loudly here
-# rather than silently deleting the geometry types. Features are ADDED to the
-# workspace row rather than replacing it: `default-features` is what a member
-# may not override (see `objc2-app-kit` below), and the observer needs the
-# default set's `NSBundle`/`NSString` regardless.
+# `NSGeometry` + `objc2-core-foundation` gate `NSRect`/`NSPoint`/`NSSize`; both ride the default set today, spelled out so a
+# future narrowing fails loudly here. Features are added to the workspace row (default-features may not be overridden).
 objc2-foundation = { workspace = true, features = [
     "NSGeometry",
     "objc2-core-foundation",
 ] }
-# Read for the `NSApplicationDidBecomeActiveNotification` name AppKit posts on
-# a re-activation (winit 0.30 surfaces no reopen event of its own; see
-# `src/appkit_glue.rs`), and for the platform-view host's `NSView` messages
-# (`src/platform_view.rs`). Hence this explicit short list rather than the
-# crate's (large) default set:
-#
-# - `NSApplication` carries that notification-name static;
-# - `NSResponder` is the superclass gate `NSView`'s own module is declared
-#   behind;
-# - `NSView` carries `addSubview:positioned:relativeTo:`, `setFrame:`,
-#   `setHidden:` and `removeFromSuperview`;
-# - `NSGraphics` carries `NSWindowOrderingMode` — the `positioned:` argument,
-#   and the one non-obvious entry here: nothing about the name suggests it.
-#
-# `NSWindow` is deliberately absent: the host reaches the content view through
-# winit's raw-window-handle (an `NSView *`), never through the window object.
-#
-# The version literal is repeated instead of `{ workspace = true }` because
-# Cargo forbids a member from overriding a workspace dependency's
-# `default-features` when the workspace entry doesn't set it — the same
-# restriction, and the same workaround, as `plugins/clipboard`'s `objc2-ui-kit`
-# row. The pin itself still lives in the root manifest's
-# `workspace.dependencies` (Version-Pin Policy); keep the two in step.
+# Short explicit list, not the large default set: `NSApplication` (did-become-active; winit 0.30 has no reopen event), `NSResponder`,
+# `NSView`, `NSGraphics` (`NSWindowOrderingMode`). `NSWindow` absent: the host uses winit's raw-window-handle `NSView`.
+# Version literal repeated: Cargo forbids overriding a workspace dep's `default-features` unless the workspace sets it; keep in step with the root pin.
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSApplication",
@@ -107,8 +48,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSGraphics",
 ] }
 
-# docs.rs builds on x86_64 Linux by default, where a target-specific crate
-# documents as empty; build the docs for the crate's own target instead.
+# docs.rs builds x86_64 Linux by default; a target-specific crate would document as empty.
 [package.metadata.docs.rs]
 default-target = "aarch64-apple-darwin"
 targets = ["aarch64-apple-darwin"]

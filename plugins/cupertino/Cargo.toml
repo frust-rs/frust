@@ -1,9 +1,3 @@
-# `frust-cupertino`: the Cupertino design-system catalog plugin (production
-# deps: frust facade + kurbo/peniko, pins mirrored exactly from
-# frust-widgets' own Cargo.toml, since this crate builds custom widgets over
-# frust::authoring the same way that crate's built-in catalogs did;
-# frust-widgets/frust-core via dev-dependency are the sanctioned test-fixture
-# route and ship nothing).
 [package]
 name = "frust-cupertino"
 version.workspace = true
@@ -25,9 +19,6 @@ peniko = { workspace = true }
 
 [dev-dependencies]
 frust-widgets = { path = "../../crates/frust-widgets", version = "0.5.2", features = ["test-support"] }
-# Test-only: the catalog's paint/event tests drive a real `RenderRoot` (which
-# the facade does not re-export) — the same dev-dependency shape
-# `plugins/material` carries. No `test-support` feature: unlike
-# `plugins/glyph`, nothing in this catalog reads the `PaintCtx::for_test`
-# clock seam.
+# Test-only: paint/event tests drive a real `RenderRoot`. No `test-support`: nothing here
+# reads the `PaintCtx::for_test` clock seam.
 frust-core = { path = "../../crates/frust-core", version = "0.5.2" }

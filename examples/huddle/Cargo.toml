@@ -1,8 +1,5 @@
-# Standalone package: excluded from the root workspace (see root Cargo.toml's
-# `[workspace] exclude` and docs/DEVELOPMENT.md's Version-Pin Policy) so the
-# generated debug APK pipeline can be gated on its own, and this
-# example's own [workspace] root gets its own Cargo.lock rather than joining
-# the root workspace's.
+# Standalone workspace (in the root's `[workspace] exclude`): its own Cargo.lock and `build/rust` let its
+# platform pipelines gate on their own, and the `[profile.*]` blocks below only apply in a workspace root.
 [workspace]
 
 [package]
@@ -11,92 +8,33 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
-# bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
-# library for the desktop `main.rs` preview binary.
+# `cdylib`: Android JNI library; `staticlib`: iOS Xcode link target; `rlib`:
+# the desktop `main.rs` preview binary.
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-# NOTE: temporary path dependency pointing at the Frust repo checkout
-# that generated this project (the `frust_path` mechanism is
-# explicitly temporary). Once Frust crates are published, `frust
-# create` will emit a version dependency here instead. `frust` is the
-# ONLY framework line this app ships for widget authoring — every
-# hand-rolled `View`/`Widget` pair (`ui/swipeable.rs`'s horizontal
-# swipe-to-action row, `ui/sheet.rs`'s modal sheet, `ui/fill_box.rs`'s
-# arbitrary-color rounded-rect `fill_box` leaf and `filled_box`
-# single-child container, the Home screen's animated loading
-# `Shimmer`, and `ui/toast.rs`'s paint-driven `toast_entrance`
-# slide/fade wrapper) reaches the full trait vocabulary plus geometry
-# through `frust::authoring` (and `frust::kurbo`/`frust::peniko`, the
-# long-tail valve, where a type isn't lifted by name); no production
-# code names `frust-core`/`kurbo`/`peniko` directly any more.
-# The facade package is named `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
+# Escape hatch: app-local `View`/`Widget` pairs (`src/ui/`, the Home `Shimmer`) author via `frust::authoring`
+# (+ `frust::kurbo`/`frust::peniko`) only. `frust-ui` rename: https://github.com/lloydmeta/frunk/issues/258
 frust = { package = "frust-ui", path = "../../crates/frust" }
 
-# Design-system plugins: the flat Material/Cupertino/Glyph widget/theme
-# symbols this app's presentation layer names (`frust_material::AppBar`,
-# `frust_cupertino::CupertinoButton`, `frust_glyph::install`/`baseline`, ...)
-# live in these sibling plugin crates now, not behind an in-tree `frust`
-# cargo feature (the catalog feature graph was dissolved — see
-# docs/DEVELOPMENT.md's Version-Pin Policy). The app's settings/appearance
-# flow switches between all three design languages live, so it depends on
-# every one of them, unlike a single-design-language app.
+# All three design systems: the settings/appearance flow switches between them live.
 frust-material = { path = "../../plugins/material" }
 frust-cupertino = { path = "../../plugins/cupertino" }
 frust-glyph = { path = "../../plugins/glyph" }
 
-# clean-signals (the async/use-case/controller/retry substrate) resolves from
-# crates.io, so a scaffolded `--arch clean-signals` project builds on any
-# machine with no local checkout required. Both this crate and the in-repo
-# glue plugin (`plugins/clean-signals-frust`) MUST declare the identical
-# `clean-signals` requirement — a hard requirement, not a convenience: two
-# different resolution routes (e.g. one registry, one path) would build TWO
-# distinct crate identities for `clean-signals`, and the controller's
-# `AsyncState`/`ControllerCore`/`Failure` types would NOT unify with the glue
-# crate's `use_controller`/`async_view`/`use_failure_listener` bounds
-# (type-identity rule — see docs/DEVELOPMENT.md's Version-Pin Policy). Never
-# enable the `effects` feature (`clean-signals`'s own gate onto
-# `reactive_graph/effects`) — the frame path is a custom subscriber, not
-# `RenderEffect` (same rule as the workspace's own `reactive_graph` pin).
-# Change the requirement at every site together, never silently.
+# Lockstep: same requirement as `plugins/clean-signals-frust` and `Cargo.toml.clean-signals.tmpl`, or Cargo
+# builds two `clean-signals` identities that don't unify (`docs/DEVELOPMENT.md` § Version-Pin Policy).
+# Never enable its `effects` feature: the frame path is a custom subscriber, not `RenderEffect`.
 clean-signals = "0.1"
 clean-signals-frust = { path = "../../plugins/clean-signals-frust" }
 
-# `log` facade dependency, present only so the release-only `lean` feature
-# below can raise the compiled-in log ceiling (release-lean build mode).
-# `frust-perf` instrumentation rides `log::info!`, so the ceiling MUST be a
-# release-only opt-in and never an always-on `features = [...]` line:
-# `release_max_level_*` keys off `debug_assertions`, which the
-# `[profile.profile]` inherits-release profile has OFF, so an unconditional
-# ceiling would also silence PROFILE-mode perf output — exactly the mode that
-# must keep it. The `frust` CLI enables `--features lean` for `--release`
-# builds only (riding the same features plumbing that turns on
-# `frust/perf-trace` for debug/profile), so release strips stray info/debug
-# log lines while keeping warn/error crash diagnostics, and profile keeps its
-# `frust-perf` output. Mirrors `crates/frust-drive/templates/app/Cargo.toml.tmpl`'s block verbatim.
+# Present so the release-only `lean` feature can cap the log level. Never make
+# the cap unconditional: `profile` builds must keep `frust-perf` output.
 log = "0.4"
 
-# Test-harness-only, NOT an escape hatch: the headless screen tests
-# (`tests/*.rs`) drive Frust's `RenderRoot` directly (`tests/support/mod.rs:24`
-# — the desktop shell's own rebuild/layout/paint seam, no GPU, no window) and
-# pump the reactive runtime's UI-thread local task queue frame by frame.
-# `RenderRoot` is deliberately not in `frust::authoring` (it is shell-owned,
-# not something an app constructs), so the harness still names these crates
-# the long way; migrating headless test harnesses onto the facade is a
-# separate design question. Production code names none of `frust-core`/
-# `frust-scene`/`frust-text`/`kurbo`/`peniko` — the same shape
-# `examples/shadertoy`/`examples/glyph-catalog` and `benchmarks/frust_bench`
-# already carry. The harness (`tests/support/mod.rs`)
-# is lifted from `clean-signals-frust`'s own integration-test support module;
-# these deps mirror that crate's dev-deps so the geometry/color/signal/runtime
-# types unify. `tokio` is kept available for `#[tokio::test]`-style
-# controller/use-case unit tests (its time driver backs
-# `clean_signals::time::sleep`); the crate's own production code never spawns a
-# tokio runtime itself — the toast auto-dismiss timer runs on the reactive
-# runtime's background executor via `frust::spawn`.
+# Headless `tests/*.rs` harness only: `RenderRoot` is deliberately not in `frust::authoring`, so it names
+# these crates directly; specs mirror `clean-signals-frust`'s dev-deps so the types unify.
 [dev-dependencies]
 frust-core = { path = "../../crates/frust-core" }
 frust-reactive = { path = "../../crates/frust-reactive" }
@@ -105,40 +43,16 @@ frust-text = { path = "../../crates/frust-text" }
 kurbo = "0.13.1"
 peniko = "0.6.1"
 reactive_graph = "0.2"
+# `#[tokio::test]` controller tests (its time driver backs `clean_signals::time::sleep`); production code
+# never spawns a tokio runtime.
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "time"] }
 
 [features]
-# Release-lean log ceiling — see the `log` dependency above for why this is a
-# release-only opt-in rather than an unconditional manifest feature. The CLI
-# passes `--features lean` for `--release` builds; debug/profile builds omit
-# it (and enable `frust/perf-trace` instead). Mirrors
-# `crates/frust-drive/templates/app/Cargo.toml.tmpl`'s block verbatim.
+# Release-only log cap; the CLI passes `--features lean` for `--release`.
 lean = ["log/release_max_level_warn"]
 
-# `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution. `lto = "fat"` + `codegen-units = 1`
-# (measured 2026-07-18 against the now-deleted `catalog`
-# example's release arm64-v8a `.so` via `scripts/size-report.sh`;
-# this package's own arm64 `.so` could not be measured
-# directly in the worktree that produced this measurement, since the sibling
-# `clean-signals-rs` checkout `examples/huddle` requires wasn't present —
-# the now-deleted `catalog` example stood in for it instead): fat LTO +
-# cgu=1 alone (opt-level 3, the
-# default — no override needed) shrank the prior baseline (lto="thin", no
-# cgu override) from 8.46MB to 7.52MB unstripped, an 11.1% win taken
-# unconditionally. `opt-level` "s"/"z" were also measured, but only *with* a
-# shader/render-stack (wgpu*/naga) carve-out back to `opt-level = 3`
-# — the config that would actually ship, since sacrificing encode-path CPU
-# perf isn't acceptable — and under that carve-out "s" measured 7.36MB
-# (-2.1% vs the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%):
-# neither clears a >5%-meaningful-win bar once the carve-out
-# that protects render-path perf is in place, so `opt-level` stays at its
-# default (3) and no carve-out is needed. This block, its `[profile.profile]`
-# counterpart, and the `[profile.dev.package."*"]` wildcard below are
-# hand-synced across the root `Cargo.toml` and `crates/frust-drive/templates/app/
-# Cargo.toml.tmpl` (docs/DEVELOPMENT.md's Version-Pin Policy hand-sync rule;
-# the `catalog` and `inbox` examples this used to also be hand-synced
-# against were later deleted along with the examples themselves).
+# Store-distribution release profile. Kept in sync with Frust's root
+# `Cargo.toml` and `crates/frust-drive/templates/app/Cargo.toml.tmpl`.
 [profile.release]
 lto = "fat"
 codegen-units = 1
@@ -146,11 +60,8 @@ strip = "symbols"
 panic = "abort"
 
 # BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
-# Release cold-set `opt-level = "z"` — shrink crates that are cold on the
-# per-frame path (shader translation, one-shot parsing/decode) while every
-# per-frame crate stays at 3. Hand-synced byte-for-byte with Frust's own root
-# `Cargo.toml`; see it for the full measured rationale and the kept-at-3
-# list. `crates/frust-cli/tests/profile_sync.rs` is the tripwire.
+# Shrinks crates cold on the per-frame path; byte-synced with Frust's root
+# `Cargo.toml` (tripwire: `crates/frust-cli/tests/profile_sync.rs`).
 
 [profile.release.package.naga]
 opt-level = "z"
@@ -183,22 +94,14 @@ opt-level = "z"
 opt-level = "z"
 # END release cold-set opt-level overrides
 
-# `--profile` mode: release performance with symbols + tracing kept for
-# on-device performance measurement. Artifacts land in
-# `target/<triple>/profile/` (custom-profile name, verified legal).
+# `--profile`: release performance with symbols kept, for on-device measurement.
 [profile.profile]
 inherits = "release"
 debug = true
 strip = "none"
 
-# `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# wgpu/naga's shader-pipeline translation runs at `opt-level = 0` by
-# default, which is slow enough on a physical iOS device that the OS SIGKILLs
-# a debug `frust run` before the synchronous, main-thread launch-time
-# shader compile finishes — huddle is the iOS device vehicle,
-# so it needs this fix too. Identical values to the root `Cargo.toml`/
-# `crates/frust-drive/templates/app/Cargo.toml.tmpl` — hand-synced, `cargo test -p frust-cli
-# --test profile_sync` is the automated tripwire.
+# Shader-compile crates at `opt-level = 2`: unoptimized wgpu/naga translation is
+# slow enough that iOS kills a debug launch. Kept in sync with Frust's root.
 [profile.dev.package.wgpu]
 opt-level = 2
 
@@ -220,15 +123,7 @@ opt-level = 2
 [profile.dev.package.fearless_simd]
 opt-level = 2
 
-# Debug dep opt widening: non-workspace-member dependencies
-# build at `opt-level = 1` in debug (Cargo's `"*"` package selector excludes
-# workspace members and the profile's own package — verified against Cargo's
-# profile-override docs); this app's own code stays at the fast default dev
-# opt-level, and the named shader-stack overrides above (opt-level 2) still
-# win over this wildcard since a named package override takes precedence over
-# `"*"`. Hand-synced across the root `Cargo.toml` and `crates/frust-drive/templates/app/
-# Cargo.toml.tmpl` (the `catalog` and `inbox` examples this used to also be
-# hand-synced against were later deleted along with the examples
-# themselves).
+# Debug dependencies at `opt-level = 1` (the named overrides above win).
+# Kept in sync with Frust's root `Cargo.toml` and `crates/frust-drive/templates/app/Cargo.toml.tmpl`.
 [profile.dev.package."*"]
 opt-level = 1

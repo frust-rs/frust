@@ -15,9 +15,8 @@ readme = "README.md"
 frust-core = { workspace = true }
 frust-scene = { workspace = true }
 frust-text = { workspace = true }
-# Load-bearing: widgets resolve theme tokens (default colors/type/shape) at
-# layout/paint time via Theme::from_layout_ctx/from_paint_ctx — see
-# docs/CODE_STANDARDS.md's Theming & Animation Conventions.
+# Widgets resolve theme tokens at layout/paint time via `Theme::from_layout_ctx`/`from_paint_ctx`
+# (docs/CODE_STANDARDS.md's Theming & Animation Conventions).
 frust-theme = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
@@ -29,10 +28,6 @@ image = { workspace = true }
 frust-core = { workspace = true, features = ["test-support"] }
 
 [features]
-# Compiles the GPU-free container test fixtures (`test_support`) into the
-# library, so a design system authored against `frust_widgets::authoring`
-# outside this crate can test its own containers against the same fixtures
-# this crate's own container tests use. Off by default — a normal app ships
-# none of it; the module is always available inside this crate's own
-# `cfg(test)` build.
+# Compiles the GPU-free container fixtures (`test_support`) so an out-of-tree design system can
+# test its containers. Off by default; always on in this crate's own `cfg(test)` build.
 test-support = []

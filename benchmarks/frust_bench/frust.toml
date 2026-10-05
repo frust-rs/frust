@@ -3,12 +3,7 @@ name = "frustbench"
 org = "it.f0x"
 description = "Frust benchmark app (Phase 9.E scenario suite)"
 
-# Deep-link scheme registered in the generated Android manifest / iOS
-# Info.plist. Informational here — Frust tooling doesn't parse
-# this section; it documents what `frust create --deeplink-scheme` baked
-# into the platform templates. Editing it does NOT re-render the manifest/
-# Info.plist — re-run `frust create --overwrite` (or edit the platform
-# files directly) to change it after scaffolding.
+# Informational (not parsed): to change the scheme, re-run `frust create --overwrite` or edit platform files.
 [deeplink]
 scheme = "frustbench"
 
@@ -16,11 +11,7 @@ scheme = "frustbench"
 # dev = { app-id-suffix = ".dev" }
 # prod = {}
 
-# Android release signing is driven by `android/key.properties`, a Java
-# properties file the Gradle build reads (this file is NOT parsed by Frust).
-# It must be gitignored (the generated .gitignore already excludes
-# `key.properties` and `*.jks`) so the keystore/passwords never enter version
-# control. Keys:
+# Android release signing reads `android/key.properties` (Gradle; must stay gitignored). Keys:
 #   storePassword=<keystore password>
 #   keyPassword=<key password>
 #   keyAlias=<key alias>
@@ -28,12 +19,10 @@ scheme = "frustbench"
 # Generate an upload keystore with:
 #   keytool -genkey -v -keystore ~/upload-keystore.jks -keyalg RSA \
 #     -storetype JKS -keysize 2048 -validity 10000 -alias upload
-# Without key.properties, release builds fall back to debug signing (a Gradle
-# warning is logged); `frust build` makes a missing keystore a hard error.
+# Without it release builds fall back to debug signing; `frust build` makes that a hard error.
 # [signing]
 # keystore = "android/key.properties"
 
-# Override the derived iOS bundle identifier (defaults to
-# `org.camelCase(name)`, e.g. `it.f0x.frustbench`).
+# Overrides the derived iOS bundle identifier (default `org.camelCase(name)`).
 # [ios]
 # identifier = "it.f0x.frustbench"

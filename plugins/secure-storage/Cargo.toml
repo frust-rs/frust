@@ -12,32 +12,15 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-# SecureStorageError variants callers match on — thiserror per CODE_STANDARDS.
 thiserror = { workspace = true }
-# The file backend's on-disk JSON map encoding.
 serde_json = { workspace = true }
 
-# Every platform-FFI dependency the
-# real backends need is pinned here up front, target-gated exactly like
-# `frust-shared-preferences` (platform-plugin charter — see
-# `docs/ARCHITECTURE.md`'s Module Structure), so each platform backend can be
-# built out independently without contending on this file. Each arm compiles
-# today only against the matching `apple.rs`/`android.rs`/`desktop.rs` stub
-# (every op `NotAvailable(UnsupportedPlatform)`) — see `src/lib.rs`'s module
-# doc and `open_with`'s selection point.
+# Platform-FFI deps are target-gated like `frust-shared-preferences` (platform-plugin
+# charter, docs/ARCHITECTURE.md).
 
-# Apple Keychain — iOS, macOS,
-# tvOS, watchOS. Feature lists are minimal-but-forward: `SecItem`/`SecBase`
-# cover `kSecClassGenericPassword` CRUD, `SecAccessControl` covers
-# the biometric gate's `SecAccessControlCreateWithFlags` call;
-# `objc2-local-authentication`
-# covers the same gate's `LAContext.canEvaluatePolicy` probe + LAError taxonomy.
-# Not `{ workspace = true, features = [...] }`: Cargo's workspace-dependency
-# inheritance forbids a member from overriding `default-features` unless the
-# workspace-level entry already sets it explicitly (see
-# `objc2-foundation`'s comment below and in
-# `plugins/shared-preferences/Cargo.toml`), so every one of these repeats its
-# version literal instead of inheriting.
+# Not `{ workspace = true }`: inheritance can't override `default-features`, so the
+# objc2 crates repeat the version literal, hand-synced to `[workspace.dependencies]`
+# (docs/DEVELOPMENT.md § Version-Pin Policy).
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = { workspace = true }
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
@@ -46,12 +29,7 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFDictionary",
     "CFData",
     "CFError",
-    # Apple Keychain CRUD: `CFArray` types the `kSecMatchLimitAll`
-    # result `keys()` enumerates; `CFNumber` provides `CFBoolean`/
-    # `kCFBooleanTrue`, the value for `SecItem*` boolean query flags
-    # (`kSecReturnData`/`kSecReturnAttributes`). Apple-arm only — disjoint
-    # from the android/desktop sections, so this narrows nothing the other
-    # backends own.
+    # `CFArray` types the `keys()` enumeration result; `CFNumber` provides `kCFBooleanTrue` for `SecItem*` flags.
     "CFArray",
     "CFNumber",
 ] }
@@ -68,49 +46,27 @@ objc2-local-authentication = { version = "0.3", default-features = false, featur
     "LAContext",
     "LAError",
 ] }
-# The biometric gate: the `LAContext` probe and gated reads need
-# `NSString` (the prompt's `localizedReason`) and `NSError` (the
-# `canEvaluatePolicy` failure carries an `LAError` code as `NSError.code`).
-# Minimal feature list, `default-features = false` like the objc2 crates above
-# (same workspace-inheritance/`default-features` restriction — the version is
-# hand-synced to `[workspace.dependencies]`'s `objc2-foundation = "0.3"` per the
-# Version-Pin Policy). `objc2-foundation` is already compiled transitively by
-# `objc2-local-authentication`; this only makes its types nameable here.
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSString",
     "NSError",
 ] }
 
-# Android Keystore — matches
-# `frust-shared-preferences`' Android arm: `frust-plugin` is the only
-# `frust-*` dependency a platform plugin may carry (platform-plugin
-# charter), reached through directly (not just via `frust-plugin`'s
-# re-export) for this crate's own JNI signature calls
-# (`KeyGenParameterSpec`/`Cipher`/`BiometricPrompt`).
+# `frust-plugin` is the only `frust-*` dependency a platform plugin may carry; `jni`
+# is named directly for this crate's own JNI signature calls.
 [target.'cfg(target_os = "android")'.dependencies]
 frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
 jni = { workspace = true }
 
-# Desktop secret store (storage only — biometric gate stays
-# `NotAvailable` on linux/windows permanently). `keyring-core`
-# is the shared cross-platform API; the actual OS store is a separate
-# opt-in crate per `keyring` 4.x's re-architecture — Linux's
-# `zbus-secret-service-keyring-store` is pure-Rust (no
-# libdbus to vendor), Windows' `windows-native-keyring-store` wraps
-# Credential Manager. macOS desktop is NOT part of this arm — it shares
-# `apple.rs` with iOS via the `target_vendor = "apple"` arm above.
+# Storage only: the biometric gate stays `NotAvailable` here. `keyring-core` is the
+# shared API; each OS store is its own crate (Linux's is pure-Rust, no libdbus).
+# macOS shares the apple arm above.
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 keyring-core = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# `secret-service`/`zbus` are async internally; `rt-async-io-crypto-rust`
-# picks the `async-io`-based runtime (not tokio) + a pure-Rust crypto
-# backend, so this sync-API plugin pulls no tokio dependency of its own
-# (verified buildable: `cargo check` against a scratch crate).
-# Not `{ workspace = true, ... }`: same `default-features` override
-# restriction as the Apple deps above — the workspace-level entry is a
-# plain version string, so this repeats it literally instead.
+# `rt-async-io-crypto-rust`: async-io runtime + pure-Rust crypto, so no tokio. Not
+# `{ workspace = true }`: same `default-features` restriction as the Apple deps.
 zbus-secret-service-keyring-store = { version = "1.0", default-features = false, features = [
     "rt-async-io-crypto-rust",
 ] }

@@ -12,23 +12,13 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-# The DesktopExtensions trait this crate implements, plus the winit core it
-# plugs into. Unconditional (not target-gated): `frust-shell-desktop` itself
-# already compiles on every non-mobile host, and Linux has no native-menu
-# concept to gate behind a target table in the first place — the menu is
-# widget-drawn (see `DesktopConfig::menu_spec`'s docs).
+# `frust-shell-desktop` compiles on every non-mobile host; the menu is widget-drawn, so no target gate.
 frust-shell-desktop = { workspace = true }
 winit = { workspace = true }
 log = { workspace = true }
-# Deliberately thin: no GTK, no new pins. This crate's one hook (Wayland
-# `app_id`/X11 `WM_CLASS` via `WindowAttributesExtWayland`/`WindowAttributesExtX11`
-# `with_name`, plus a window icon via `winit::window::Icon::from_rgba`) reaches
-# only through `winit`'s own cross-platform API, so there is nothing here for
-# `muda`/GTK to do — unlike `frust-shell-macos`/`-windows`, this crate has no
-# `[target.'cfg(...)'.dependencies]` table at all.
+# Deliberately thin: no GTK, no `[target]` table; app_id/WM_CLASS/icon go through winit's own API.
 
-# docs.rs builds on x86_64 Linux by default, where a target-specific crate
-# documents as empty; build the docs for the crate's own target instead.
+# docs.rs builds x86_64 Linux by default; a target-specific crate would document as empty.
 [package.metadata.docs.rs]
 default-target = "x86_64-unknown-linux-gnu"
 targets = ["x86_64-unknown-linux-gnu"]

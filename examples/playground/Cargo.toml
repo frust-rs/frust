@@ -1,7 +1,5 @@
-# Standalone package: excluded from the root workspace (see root Cargo.toml's
-# `[workspace] exclude`) so the generated Android/iOS projects resolve a
-# project-local `target/` dir and the `[profile.*]` blocks below take effect
-# (they only apply in a workspace root) — the same shape as `examples/huddle`.
+# Standalone workspace (in the root's `[workspace] exclude`): the platform projects build from its own
+# `build/rust` and Cargo.lock, and the `[profile.*]` blocks below only take effect in a workspace root.
 [workspace]
 
 [package]
@@ -10,137 +8,48 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
-# bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
-# library for the desktop `main.rs` preview binary.
+# `cdylib`: Android JNI library; `staticlib`: iOS Xcode link target; `rlib`:
+# the desktop `main.rs` preview binary.
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-# NOTE: temporary path dependency pointing at the Frust repo checkout
-# that generated this project (the `frust_path` mechanism is
-# explicitly temporary). Once Frust crates are published, `frust
-# create` will emit a version dependency here instead. Default features are
-# left exactly as a scaffolded app gets them: playground is the plugin and
-# platform-capability testing ground, not a design-system showcase, so it
-# takes the framework's stock catalog set rather than curating one
-# (`examples/glyph-catalog` is the design-language app; `examples/no-catalogs`
-# is the catalog-free compile guard).
-# The facade package is named `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
+# Path dep on this checkout (`frust-ui`, imported as `frust`: https://github.com/lloydmeta/frunk/issues/258).
+# The only authoring line: custom widgets use `frust::authoring`, never `frust-core`/`kurbo`/`peniko` directly.
 frust = { package = "frust-ui", path = "../../crates/frust" }
 
-# frust-material: playground's home-page chrome (the [`app_bar`], the
-# section-switching [`navigation_bar`]) uses the Material widget catalog —
-# the flat symbols the in-tree catalog feature graph used to re-export
-# through `frust` directly (dissolved — see docs/DEVELOPMENT.md's
-# Version-Pin Policy). Playground is the plugin/capability testing ground,
-# not a design-system showcase, so it takes only Material (no Cupertino/Glyph
-# usage anywhere in this app).
+# Material only (the home-page `app_bar`/`navigation_bar`); this app uses no Cupertino/Glyph widget.
 frust-material = { path = "../../plugins/material" }
-# `frust` is the ONLY framework line this app ships for widget authoring.
-# `AppBackground` (`lib.rs`) and the `FrameTicker`/`GateFrameTicker` pair
-# (`pages/camera.rs`) — every hand-rolled `View`/`Widget` pair this app
-# needs — reach the full trait vocabulary plus geometry through
-# `frust::authoring` (and `frust::kurbo`/`frust::peniko`, the long-tail
-# valve, where a type isn't lifted by name); no production code names
-# `frust-core`/`kurbo`/`peniko` directly.
 
-# `vt100`: the terminal emulator the Terminal section
-# (`src/pages/terminal.rs`) replays the checked-in fixture bytes through.
-# A REAL emulator, deliberately — a hand-rolled five-escape parser would paint a
-# strawman grid and prove nothing about driving a real terminal from a frust app.
-#
-# Pinned to an EXACT patch: a parsing behaviour change between versions would
-# silently shift what the page rasterizes from identical fixture bytes, which is
-# the same comparability trap `fixtures/terminal/README.md` documents for the
-# fixtures themselves. Its whole tree is pure Rust — `vte` + `itoa` +
-# `unicode-width`; no tokio, no PTY, no `std::process` — and it type-checks for
-# `aarch64-linux-android`, `aarch64-apple-ios` and `aarch64-apple-ios-sim`,
-# which is what makes this section runnable on the devices playground exists for.
+# Exact pin: a parser change would shift what the Terminal page rasterizes from the same fixture bytes
+# (`fixtures/terminal/README.md`). Pure Rust (no PTY, no tokio), so it builds for Android and iOS.
 vt100 = "=0.16.2"
 
-# `log` facade dependency, present only so the release-only `lean` feature
-# below can raise the compiled-in log ceiling (release-lean build mode).
-# `frust-perf` instrumentation rides `log::info!`, so the ceiling MUST be a
-# release-only opt-in and never an always-on `features = [...]` line:
-# `release_max_level_*` keys off `debug_assertions`, which the
-# `[profile.profile]` inherits-release profile has OFF, so an unconditional
-# ceiling would also silence PROFILE-mode perf output — exactly the mode that
-# must keep it. The `frust` CLI enables `--features lean` for `--release`
-# builds only (riding the same features plumbing that turns on
-# `frust/perf-trace` for debug/profile), so release strips stray info/debug
-# log lines while keeping warn/error crash diagnostics, and profile keeps its
-# `frust-perf` output. Mirrors `examples/huddle/Cargo.toml`'s block.
+# Present so the release-only `lean` feature can cap the log level. Never make
+# the cap unconditional: `profile` builds must keep `frust-perf` output.
 log = "0.4"
 
-# frust-camera: playground is the device-gate vehicle for the whole camera
-# feature — see `src/pages/camera.rs`. Path dep out of this checkout, the
-# same in-repo shape `examples/huddle` uses for `clean-signals-frust`
-# (`docs/DEVELOPMENT.md`'s Version-Pin Policy) — not yet a `frust tui` Add
-# Plugin contribution, so hand-added exactly as the applier would add it.
+# Plugins under device test, one `src/pages/` section each, hand-added as path deps on this checkout.
 frust-camera = { path = "../../plugins/camera" }
 
-# frust-i18n: playground is the device-gate vehicle for the "i18n" section —
-# `src/pages/i18n.rs`. Same hand-added-path-dep shape as `frust-camera`
-# above (not yet a `frust tui` Add Plugin contribution). Default features
-# on: this app wants both `frust-api` (the reactive `I18n` handle/context
-# hooks) and `formatting` (the ICU4X decimal/currency/date/time formatters
-# the formatting-matrix section calls directly, and the `NUMBER`/`DATETIME`
-# Fluent placeables `locales/*/main.ftl` uses).
+# Default features required: the `frust-api` hooks and the ICU4X `formatting` that `locales/*/main.ftl` uses.
 frust-i18n = { path = "../../plugins/i18n" }
 
-# frust-video-player: playground is the device-gate vehicle for the "Video"
-# section — `src/pages/video_player.rs`. Same hand-added-path-dep shape as
-# `frust-camera`/`frust-i18n` above (not yet a `frust tui` Add Plugin
-# contribution). Default features on: this app wants the `frust-api`
-# builders (`VideoPlayerHandle`/`use_video_player`/`video_view`), not just
-# the bare platform plugin.
+# Default features required: the `frust-api` builders (`use_video_player`, `video_view`).
 frust-video-player = { path = "../../plugins/video-player" }
 
-# frust-url-launcher: playground is the device-gate vehicle for the "URL"
-# section — `src/pages/url_launcher.rs`. Same hand-added-path-dep shape as
-# `frust-camera`/`frust-i18n`/`frust-video-player` above (not yet a `frust
-# tui` Add Plugin contribution). Carries no features of its own —
-# `UrlLauncher::open_external` is the crate's whole public surface.
 frust-url-launcher = { path = "../../plugins/url-launcher" }
 
-# frust-auth-session: playground is the device-gate vehicle for the "Auth"
-# section — `src/pages/auth_session.rs`. Same hand-added-path-dep shape as
-# `frust-camera`/`frust-i18n`/`frust-video-player`/`frust-url-launcher`
-# above (not yet a `frust tui` Add Plugin contribution). Carries no
-# features of its own — `AuthSession::start` is the crate's whole public
-# surface.
 frust-auth-session = { path = "../../plugins/auth-session" }
 
-# frust-oauth-native: pairs with `frust-auth-session` above for the "Auth"
-# section's Desktop loopback block (`src/pages/auth_session.rs`) — PKCE,
-# `state`, the authorization URL and callback/token-grant builders behind
-# `LoopbackSession`. Same hand-added-path-dep shape as the plugins above
-# (not yet a `frust tui` Add Plugin contribution); a pure-Rust crate with no
-# features of its own (see its own README's charter).
+# PKCE and callback builders behind the Auth page's desktop `LoopbackSession`.
 frust-oauth-native = { path = "../../plugins/oauth-native" }
 
-# frust-database: playground is the device-gate vehicle for the "DB"
-# section — `src/pages/database.rs`. Same hand-added-path-dep shape as
-# `frust-camera`/`frust-i18n`/`frust-video-player`/`frust-url-launcher`/
-# `frust-auth-session` above (not yet a `frust tui` Add Plugin
-# contribution). The section exists to prove `frust_paths::data_dir()`
-# resolves on Android — the app process has neither `HOME` nor an XDG
-# variable, so `Database::open`'s standard-location resolution is only
-# provably correct once it has run inside a real app process. Default
-# features on (`engine-sqlite`): this app wants the bundled-SQLite backend
-# the smoke test runs against, not the opt-in `engine-turso` bridge.
+# Default `engine-sqlite` backend, not the opt-in `engine-turso` bridge.
 frust-database = { path = "../../plugins/database" }
 
-# Test-harness-only, NOT an escape hatch: the headless smoke test
-# (`tests/smoke.rs`) drives Frust's `RenderRoot` directly — the desktop
-# shell's own rebuild/layout/paint seam, no GPU, no window — the same harness
-# shape as `examples/huddle`'s own headless `tests/*.rs` and
-# `examples/shadertoy`'s identical `[dev-dependencies]` block. `RenderRoot` is deliberately not in `frust::authoring` (it is
-# shell-owned, not something an app constructs), so the harness still names
-# these crates the long way; migrating headless test harnesses onto the
-# facade is a separate design question. Production code names none of them.
+# Headless `tests/smoke.rs` harness only: `RenderRoot` is deliberately not in `frust::authoring`
+# (shell-owned), so it names these crates directly; production code names none of them.
 [dev-dependencies]
 frust-core = { path = "../../crates/frust-core" }
 kurbo = "0.13.1"
@@ -151,29 +60,10 @@ reactive_graph = "0.2"
 peniko = "0.6.1"
 
 [features]
-# Release-lean log ceiling — see the `log` dependency above for why this is a
-# release-only opt-in rather than an unconditional manifest feature. The CLI
-# passes `--features lean` for `--release` builds; debug/profile builds omit
-# it (and enable `frust/perf-trace` instead). Mirrors
-# `examples/huddle/Cargo.toml`'s block verbatim.
+# Release-only log cap; the CLI passes `--features lean` for `--release`.
 lean = ["log/release_max_level_warn"]
 
-# `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution. `lto = "fat"` + `codegen-units = 1`
-# (measured 2026-07-18 against the now-deleted `catalog`
-# example's release arm64-v8a `.so` via `scripts/size-report.sh` in the
-# Frust repo): fat LTO + cgu=1 alone (opt-level 3, the default —
-# no override needed) shrank the prior baseline (lto="thin", no cgu
-# override) from 8.46MB to 7.52MB unstripped, an 11.1% win taken
-# unconditionally. `opt-level` "s"/"z" were also measured, but only *with* a
-# shader/render-stack (wgpu*/naga) carve-out back to `opt-level = 3` —
-# the config that would actually ship, since sacrificing encode-path CPU
-# perf isn't acceptable — and under that carve-out "s" measured 7.36MB
-# (-2.1% vs the 7.52MB opt-3 config) and "z" measured 7.28MB (-3.2%):
-# neither clears a >5%-meaningful-win bar once the carve-out
-# that protects render-path perf is in place, so `opt-level` stays at its
-# default (3) and no carve-out is needed. This block and its
-# `[profile.profile]` counterpart are hand-synced with Frust's own root
+# Store-distribution release profile. Kept in sync with Frust's root
 # `Cargo.toml` and `examples/huddle/Cargo.toml`.
 [profile.release]
 lto = "fat"
@@ -182,11 +72,8 @@ strip = "symbols"
 panic = "abort"
 
 # BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
-# Release cold-set `opt-level = "z"` — shrink crates that are cold on the
-# per-frame path (shader translation, one-shot parsing/decode) while every
-# per-frame crate stays at 3. Hand-synced byte-for-byte with Frust's own root
-# `Cargo.toml`; see it for the full measured rationale and the kept-at-3
-# list. `crates/frust-cli/tests/profile_sync.rs` is the tripwire.
+# Shrinks crates cold on the per-frame path; byte-synced with Frust's root
+# `Cargo.toml` (tripwire: `crates/frust-cli/tests/profile_sync.rs`).
 
 [profile.release.package.naga]
 opt-level = "z"
@@ -219,24 +106,14 @@ opt-level = "z"
 opt-level = "z"
 # END release cold-set opt-level overrides
 
-# `--profile` mode: release performance with symbols + tracing kept for
-# on-device performance measurement. Artifacts land in
-# `target/<triple>/profile/` (custom-profile name, verified legal).
+# `--profile`: release performance with symbols kept, for on-device measurement.
 [profile.profile]
 inherits = "release"
 debug = true
 strip = "none"
 
-# `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# wgpu/naga's shader-pipeline
-# translation runs at `opt-level = 0` by default, which is slow enough on a
-# physical iOS device that the OS SIGKILLs a debug `frust run` before the
-# synchronous, main-thread launch-time shader compile finishes. This app's
-# own code stays at the default dev opt-level (fast incremental rebuilds) —
-# only these dependencies are bumped. Deps generally build at
-# `opt-level = 1` (see the wildcard override below); `opt-level = 2` is used here for the
-# shader-compile-heavy crates specifically (see frust's own root
-# `Cargo.toml` for the full rationale — the same override, kept in sync).
+# Shader-compile crates at `opt-level = 2`: unoptimized wgpu/naga translation is slow enough that
+# iOS kills a debug launch. Same values as Frust's root, which also lists the vello/glifo/simd crates.
 [profile.dev.package.wgpu]
 opt-level = 2
 
@@ -249,14 +126,7 @@ opt-level = 2
 [profile.dev.package.naga]
 opt-level = 2
 
-# Debug dep opt widening: non-workspace-member dependencies
-# build at `opt-level = 1` in debug (Cargo's `"*"` package selector excludes
-# workspace members and the profile's own package — verified against Cargo's
-# profile-override docs); this app's own code stays at the fast default dev
-# opt-level, and the named shader-stack overrides above (opt-level 2) still
-# win over this wildcard since a named package override takes precedence
-# over `"*"`. Targets emulator/debug first-frame cost — parley/swash/image/
-# kurbo compiled at `opt-level = 0` are part of that cost. Hand-synced with
-# Frust's own root `Cargo.toml` and `examples/huddle/Cargo.toml`.
+# Debug dependencies at `opt-level = 1` (the named overrides above win).
+# Kept in sync with Frust's root `Cargo.toml` and `examples/huddle/Cargo.toml`.
 [profile.dev.package."*"]
 opt-level = 1

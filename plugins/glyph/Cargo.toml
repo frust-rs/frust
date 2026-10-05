@@ -1,8 +1,3 @@
-# `frust-glyph`: the Glyph design-system catalog plugin (production deps: the
-# frust facade only, plus kurbo/peniko for the geometry/color vocabulary its
-# widgets paint with — the same pins frust-widgets carries. frust-widgets and
-# frust-core are dev-dependencies: the sanctioned test-fixture/RenderRoot route,
-# shipping nothing).
 [package]
 name = "frust-glyph"
 version.workspace = true
@@ -24,18 +19,12 @@ peniko = { workspace = true }
 
 [features]
 default = ["bundled-fonts"]
-# Space Mono + IBM Plex Mono (seven faces), compiled in via `include_bytes!`.
-# An app that ships its own fonts or is content with the platform's system
-# monospace can turn this off to drop the bundled bytes from its binary;
-# `font_data()` returns an empty slice and `install()`/`native_typefaces()`
-# register nothing, so the type scale's named families fall back to whatever
-# fontique resolves for them. Default on: unchanged out-of-the-box behavior.
+# Space Mono + IBM Plex Mono via `include_bytes!`; off drops them, `font_data()` is empty
+# and the type scale falls back to fontique.
 bundled-fonts = []
 
 [dev-dependencies]
 frust-widgets = { path = "../../crates/frust-widgets", version = "0.5.2", features = ["test-support"] }
-# Test-only: the catalog's paint/event tests drive a real `RenderRoot` (which
-# the facade does not re-export), and its `test-support` feature turns on the
-# `PaintCtx::for_test` clock seam — the only sanctioned way to paint at a chosen
-# `FrameTime` (the same dev-dependency shape `frust-widgets` carries).
+# Test-only: paint/event tests drive a real `RenderRoot` (not re-exported by the facade);
+# `test-support` enables the `PaintCtx::for_test` clock seam.
 frust-core = { path = "../../crates/frust-core", version = "0.5.2", features = ["test-support"] }

@@ -6,19 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-# The design system under test, and the facade. `default-features = false`
-# on the `frust` edge is inherited from the workspace manifest (Cargo
-# ignores it when written on an inherited dependency — see that file's
-# comment); it is now a no-op rather than an opt-out, since `frust` ships no
-# catalog cargo feature to turn off in the first place. `frust::material`/
-# `frust::cupertino`/`frust::glyph` and the bundled Glyph fonts left the
-# facade entirely — they are `frust-material`/`frust-cupertino`/
-# `frust-glyph`, ordinary sibling plugin crates now, and this app depends on
-# neither: `sample-design` is its only design system.
-#
-# Nothing is re-enabled. `frust`'s only remaining features are `perf-trace`
-# (frame instrumentation, enabled by the `frust` CLI for debug/profile builds)
-# and `devtools` (the in-app debug service) — both tooling opt-ins, neither
-# needed to render three widgets.
+# `default-features = false` on `frust` comes from the workspace entry (Cargo ignores it written on
+# an inherited edge); `sample-design` is this app's only design system.
 frust = { workspace = true }
 sample-design = { path = "../sample-design" }
