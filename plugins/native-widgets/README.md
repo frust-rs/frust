@@ -391,24 +391,23 @@ can drift.
 The TUI Add Plugin dialog (`frust tui` → Add Plugin → native-widgets) makes
 both edits below for you, idempotently. By hand:
 
-1. `android/settings.gradle.kts` — include the module by path, and redirect
-   its build directory so two apps can share one frust checkout:
+1. `android/settings.gradle.kts` — include the module, and redirect
+   its build directory under your app:
 
    ```kotlin
    include(":frust-native-widgets")
-   project(":frust-native-widgets").projectDir =
-       file("<frust checkout>/plugins/native-widgets/platform/android")
+   project(":frust-native-widgets").projectDir = frustLocalDir("frust.plugin.frust-native-widgets.dir")
 
    gradle.lifecycle.beforeProject {
        if (path == ":frust-native-widgets") {
-           layout.buildDirectory.set(rootDir.resolve("build/frust-native-widgets"))
+           layout.buildDirectory.set(rootDir.resolve("../build/android/frust-native-widgets"))
        }
    }
    ```
 
-   The path is derived the same way `gradle.properties`' `frust.embedding.dir`
-   is — one machine-specific line, replaced by a Maven coordinate once the
-   modules publish.
+   The module's directory is machine-local: its key sits in the gitignored
+   `android/local.properties`, written by `frust run`/`frust build` from the
+   crate cargo resolves, and read by the generated `frustLocalDir` helper.
 
 2. `android/app/build.gradle.kts` — depend on it:
 

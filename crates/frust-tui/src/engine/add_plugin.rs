@@ -284,7 +284,7 @@ impl AddPluginDialog {
 
 /// The disabled-reason shown on a sibling-gated card when the sibling checkout
 /// is absent (mirrors the create wizard's clean-signals gating).
-const SIBLING_ABSENT: &str = "needs a sibling checkout (dev-machine only)";
+const SIBLING_ABSENT: &str = "needs a sibling checkout";
 
 /// The pending disabled-reason on a sibling-gated card before the off-thread
 /// probe resolves.

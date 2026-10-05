@@ -6,15 +6,14 @@
 //
 //     // android/settings.gradle.kts
 //     include(":frust-video-player")
-//     project(":frust-video-player").projectDir =
-//         file("<frust checkout>/plugins/video-player/platform/android")
+//     project(":frust-video-player").projectDir = frustLocalDir("frust.plugin.frust-video-player.dir")
 //
 //     // android/app/build.gradle.kts
 //     implementation(project(":frust-video-player"))
 //
 // plus a `gradle.lifecycle.beforeProject` build-directory redirect so this
-// module's build output lands under the consuming app's tree — two apps can
-// share one frust checkout without either polluting it. That is exactly the
+// module's build output lands under the consuming app's tree — the crate cargo
+// resolved (or a shared frust checkout) is never written to. That is exactly the
 // shape `platform/android/frust-embedding`, `:frust-camera` and `:frust-iap`
 // use, and the module directory must be writable (Gradle 9 refuses a read-only
 // `projectDir`).

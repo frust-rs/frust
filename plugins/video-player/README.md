@@ -87,16 +87,15 @@ The TUI Add Plugin dialog makes both edits below for you, idempotently. By
 hand:
 
 1. `android/settings.gradle.kts` — include the module by path, and redirect its
-   build directory so two apps can share one frust checkout:
+   build directory under your app:
 
    ```kotlin
    include(":frust-video-player")
-   project(":frust-video-player").projectDir =
-       file("<frust checkout>/plugins/video-player/platform/android")
+   project(":frust-video-player").projectDir = frustLocalDir("frust.plugin.frust-video-player.dir")
 
    gradle.lifecycle.beforeProject {
        if (path == ":frust-video-player") {
-           layout.buildDirectory.set(rootDir.resolve("build/frust-video-player"))
+           layout.buildDirectory.set(rootDir.resolve("../build/android/frust-video-player"))
        }
    }
    ```

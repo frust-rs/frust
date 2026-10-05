@@ -960,7 +960,7 @@ mod tests {
         // The embedding module is wired in by path: an `include`, a
         // `projectDir` resolved through the machine-local-directory helper,
         // and the build-output redirect that keeps the shared checkout
-        // pristine. The helper is the very text `frust plugin add` inserts
+        // pristine. The helper is the very text plugin add (`plugin::add_plugin`) inserts
         // into a settings file that predates it.
         let settings = fs::read_to_string(dest.join("android/settings.gradle.kts")).unwrap();
         for needle in [

@@ -295,9 +295,8 @@ impl CreateWizard {
 }
 
 /// The disabled-reason shown on a sibling-gated card when the sibling checkout
-/// is absent (mirrors the CLI `--arch` flag's dev-machine-only caveat).
-const CLEAN_SIGNALS_ABSENT: &str =
-    "needs the ../clean-signals-rs sibling checkout (dev-machine only)";
+/// is absent. No card uses it today (this module's doc comment).
+const CLEAN_SIGNALS_ABSENT: &str = "needs the ../clean-signals-rs sibling checkout";
 
 /// The pending disabled-reason on a sibling-gated card before the off-thread
 /// probe resolves.

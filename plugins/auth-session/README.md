@@ -29,19 +29,20 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 frust-auth-session = "0.5"
 ```
 
-`<frust>` is the path to your frust checkout — derive it from the `frust = {
-path = "…" }` line the scaffold already wrote. The Android backend needs
-this plugin's own Gradle library module linked too (Chrome Custom Tabs,
-reached through `androidx.browser.customtabs`) — run
-`frust plugin add auth-session` to wire the Cargo dependency above and the
-Gradle module include together, or add the module by hand per
-[`platform/android/build.gradle.kts`](platform/android/build.gradle.kts)'s
-own header comment (a `settings.gradle.kts` module include plus an
-`implementation(project(":frust-auth-session"))` line in `android/app/`,
-the same shape `plugins/secure-storage/platform/android` uses).
+The Android backend needs this plugin's own Gradle library module linked too
+(Chrome Custom Tabs, reached through `androidx.browser.customtabs`). The frust
+TUI's **Add Plugin** action (`a`) wires the Cargo dependency above and the
+Gradle module include together. By hand: include the module in
+`android/settings.gradle.kts` the way a generated project includes
+`:frust-embedding` — `project(":frust-auth-session").projectDir =
+frustLocalDir("frust.plugin.frust-auth-session.dir")`, the key written into
+`android/local.properties` by `frust run`/`frust build` — and add
+`implementation(project(":frust-auth-session"))` to `android/app/`'s
+dependencies (see [`platform/android/build.gradle.kts`](platform/android/build.gradle.kts)'s
+header comment).
 
 On **iOS** the app target must also link `AuthenticationServices.framework`
-— `frust plugin add auth-session` does this (its `IosFramework` contribution
+— the TUI's Add Plugin does this (its `IosFramework` contribution
 appends `-framework AuthenticationServices` to every `OTHER_LDFLAGS` list in
 `ios/Runner.xcodeproj/project.pbxproj`); an app wired by hand adds the same
 flag itself. This crate's Rust code references the framework's

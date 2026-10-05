@@ -97,23 +97,22 @@ The TUI Add Plugin dialog (`frust tui` → Add Plugin → secure-storage →
 `biometric-gate`) makes both edits below for you, idempotently. By hand:
 
 1. `android/settings.gradle.kts` — include the module by path, and redirect its
-   build directory so two apps can share one frust checkout:
+   build directory under your app:
 
    ```kotlin
    include(":frust-secure-storage")
-   project(":frust-secure-storage").projectDir =
-       file("<frust checkout>/plugins/secure-storage/platform/android")
+   project(":frust-secure-storage").projectDir = frustLocalDir("frust.plugin.frust-secure-storage.dir")
 
    gradle.lifecycle.beforeProject {
        if (path == ":frust-secure-storage") {
-           layout.buildDirectory.set(rootDir.resolve("build/frust-secure-storage"))
+           layout.buildDirectory.set(rootDir.resolve("../build/android/frust-secure-storage"))
        }
    }
    ```
 
-   The path is derived the same way `gradle.properties`' `frust.embedding.dir`
-   is — one machine-specific line, replaced by a Maven coordinate once the
-   modules publish.
+   The module's directory is machine-local: its key sits in the gitignored
+   `android/local.properties`, written by `frust run`/`frust build` from the
+   crate cargo resolves, and read by the generated `frustLocalDir` helper.
 
 2. `android/app/build.gradle.kts` — depend on it:
 

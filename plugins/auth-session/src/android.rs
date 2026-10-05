@@ -295,8 +295,8 @@ fn load_host_class(
     if env.exception_check() {
         env.exception_clear();
         return Err(AuthSessionError::Platform(
-            "frust-auth-session Gradle module is not linked — add it with `frust plugin add \
-             auth-session`"
+            "frust-auth-session Gradle module is not linked — add the plugin from the frust TUI \
+             (Add Plugin), or include the module by hand (see the frust-auth-session README)"
                 .to_string(),
         ));
     }

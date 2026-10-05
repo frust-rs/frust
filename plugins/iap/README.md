@@ -54,12 +54,11 @@ frust plugin module uses:
 
    ```kotlin
    include(":frust-iap")
-   project(":frust-iap").projectDir =
-       file("<frust checkout>/plugins/iap/platform/android")
+   project(":frust-iap").projectDir = frustLocalDir("frust.plugin.frust-iap.dir")
 
    gradle.lifecycle.beforeProject {
        if (path == ":frust-iap") {
-           layout.buildDirectory.set(rootDir.resolve("build/frust-iap"))
+           layout.buildDirectory.set(rootDir.resolve("../build/android/frust-iap"))
        }
    }
    ```
@@ -93,7 +92,7 @@ move or rename it.
 ### 1c. iOS setup — add the plugin's local Swift package
 
 In Xcode: **File → Add Package Dependencies… → Add Local…**, select
-`<frust checkout>/plugins/iap/platform/ios/FrustIap`, and add the `FrustIap` product
+the project's `ios/FrustIap` symlink, and add the `FrustIap` product
 to the `Runner` target (alongside the existing `FrustEmbedding` package —
 SwiftPM dedupes the shared dependency rather than vendoring it twice).
 

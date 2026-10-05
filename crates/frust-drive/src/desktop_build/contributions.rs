@@ -1,6 +1,6 @@
 //! Plugin-declared desktop contributions, merged into the assembled bundle.
 //!
-//! `frust plugin add` never writes a desktop contribution into a project file
+//! Adding a plugin never writes a desktop contribution into a project file
 //! (see [`crate::plugin::Contribution::MacosPlistEntry`]'s doc comment): the
 //! three desktop variants are only *recorded* by the registry and applied
 //! here, fresh, on every `frust build macos|windows|linux`. Remove the plugin

@@ -11,15 +11,14 @@
 //
 //     // android/settings.gradle.kts
 //     include(":frust-native-widgets")
-//     project(":frust-native-widgets").projectDir =
-//         file("<frust checkout>/plugins/native-widgets/platform/android")
+//     project(":frust-native-widgets").projectDir = frustLocalDir("frust.plugin.frust-native-widgets.dir")
 //
 //     // android/app/build.gradle.kts
 //     implementation(project(":frust-native-widgets"))
 //
 // plus a `gradle.lifecycle.beforeProject` build-directory redirect so this
-// module's build output lands under the consuming app's tree — two apps can
-// share one frust checkout without either polluting it. That is exactly the
+// module's build output lands under the consuming app's tree — the crate cargo
+// resolved (or a shared frust checkout) is never written to. That is exactly the
 // shape `platform/android/frust-embedding` uses, and the module directory must
 // be writable (Gradle 9 refuses a read-only `projectDir`).
 //
