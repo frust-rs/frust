@@ -82,10 +82,25 @@
 //! rather than delivered nested. Every mutation that produces a change also
 //! raises [`frust_core::mark_pending_result_flush`] so a frame-gated shell
 //! runs the frame that repaints it.
+//!
+//! # Sources
+//!
+//! [`draggable()`] is the in-app source built on the coordinator: it arms on a
+//! primary press, begins the session once the press crosses its [`DragPolicy`]
+//! (a distance threshold for a mouse, a stationary long-press for a finger),
+//! floats a ghost through the overlay portal at the pointer for the session's
+//! length, and drops or cancels on the gesture's `Up`/`Cancel`. A press that
+//! never becomes a drag reaches the wrapped child untouched. See the
+//! [`mod@draggable`] module docs for the initiation, ghost and feedback contract.
 
 mod coordinator;
+pub mod draggable;
 
 pub use coordinator::{
     DragCoordinator, DragKind, DragPhase, DragSession, DragSourceId, DragState, DragStateChange,
     DragSubscription, DragTargetId,
+};
+pub use draggable::{
+    DRAG_THRESHOLD, DragPolicy, DraggableView, DraggableWidget, GHOST_OPACITY, SourceFeedback,
+    draggable,
 };
