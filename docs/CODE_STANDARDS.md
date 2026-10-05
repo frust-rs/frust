@@ -568,33 +568,33 @@ shipped instance.
 ## Comment Conventions
 
 - **A comment documents the code as it is — its contract, its rationale — never the
-  development process that produced it.** Banned in comments: plan/phase references
-  (`Phase 9.B step 1`, `(phase 5.5)`), plan-task references (`task-12`), workflow findings
-  ledger numbers (`FINDINGS #43`), review-round/fix-round references (`re-review round 1`,
-  `cfix-2`), plan requirement numbers (`req 4`), and internal PR numbers. Git history and the
-  private workflow ledger own that process context; a ledger number in a comment is a
-  dangling reference for every reader without that private repo.
+  development process that produced it.** Banned: plan/phase references (`Phase 9.B step 1`,
+  `(phase 5.5)`), plan-task references (`task-12`), findings-ledger numbers (`FINDINGS #43`),
+  review/fix-round references (`re-review round 1`, `cfix-2`), plan requirement numbers
+  (`req 4`), and internal PR numbers. Git history and the private workflow ledger own that
+  context; a ledger number dangles for readers without that repo.
 - **Sanctioned citations** stay fine: `docs/LIMITATIONS.md` stable ids (e.g.
-  `` `engine-metal-postmultiplied-truth-bug` ``) — the register's documented purpose; named semantic rules (`R23`,
-  `R44-back`) — they name behavior, not a ledger entry; pointers to doc sections; and commit
-  SHAs/version pins of *external* repos (e.g. clean-signals' `910f626`).
-- **Substance over ledger number.** When the process context carried real meaning, keep the
-  substance and drop the number: `// re-created finding #44` becomes `// re-created the
-  root-modal double-claim bug`. If a `docs/LIMITATIONS.md` entry covers it, cite its stable id
-  instead.
-- **Domain vocabulary is not residue.** A render lifecycle's encode/present phases, an
-  animation/oscillator's phase, a device name in a benchmark note, and a doc comment
-  referring to its own numbered steps are all legitimate — the ban targets
-  development-process phases/rounds, not the word itself.
+  `` `engine-metal-postmultiplied-truth-bug` ``), named semantic rules (`R23`, `R44-back`),
+  doc-section pointers, and commit SHAs/version pins of *external* repos (e.g. clean-signals'
+  `910f626`). Keep a ledger entry's meaning, drop its number (`// re-created finding #44` →
+  `// re-created the root-modal double-claim bug`). Domain vocabulary (render encode/present
+  phases, an oscillator's phase, a doc comment's own numbered steps) is not residue.
 - **Header budget scales with the module.** A simple module gets a 1–3 line header; a complex
-  module documents contract + rationale only — history lives in git, and content a unit spoke
-  doc already owns gets one pointer there, not a restatement. Inline comments state
-  constraints the code can't show on its own (a `# Safety` contract, a magic-number source).
+  one gives contract + rationale only, plus one pointer to the owning spoke doc. Inline
+  comments state what the code can't show (a `# Safety` contract, a magic-number source).
+- **These conventions apply to TOML manifests too** (`Cargo.toml`, scaffold `*.tmpl`,
+  `frust.toml`, `.cargo/config.toml`). A manifest comment states only what the TOML cannot
+  show: an exact/LAW pin and its lockstep site, a must-not-re-add feature or backend, a
+  non-obvious cfg/exclusion reason, or an advisory — at most 2–3 lines, pointing to the owning
+  doc (e.g. `docs/DEVELOPMENT.md` § Version-Pin Policy). Commented-out scaffold option keys
+  are documentation.
 - **Mechanically checked.** `crates/frust/tests/comment_residue_conformance.rs` catches
-  plan-phase (dotted `9.B`, parenthesized, hyphenated `Phase-N`, "the Phase N"), plan-task
-  (`task-NN`), findings-ledger numbers, review-round (`re-review`, `cfix-N`, gated `round-N`),
-  plan-document (`PLAN <tag>`, a plan-directory path), phase-adjacent `req N`, and `review finding
-  <id>` refs — sanctioned citations (LIMITATIONS ids, R-rules, external rev pins) exempt only
-  their match span, not the line. Bare internal PR numbers (vs. upstream wgpu's `#7057`) and
-  bare plan tags (`T04`/`D6a` vs. `M3`/`R8`) stay human-reviewed — still banned, swept on sight
-  when review finds them.
+  plan-phase (dotted `9.B`, parenthesized, `Phase-N`, "the Phase N"), plan-task (`task-NN`),
+  findings-ledger numbers, review-round (`re-review`, `cfix-N`, gated `round-N`),
+  plan-document (`PLAN <tag>`, a plan-directory path), phase-adjacent `req N`, and `review
+  finding <id>` refs, in source and manifest `#` comments alike; sanctioned citations exempt
+  only their match span. Bare PR numbers and plan tags (`T04`/`D6a` vs. `M3`/`R8`) stay
+  human-reviewed, still banned. `manifest_comment_budget.rs` caps manifest
+  prose density: with P prose `#` lines (commented-out TOML excluded) and N setting lines, a
+  manifest fails when P > 12 and P/N exceeds its kind's ceiling — 0.9 for Cargo manifests
+  and `.cargo/config.toml`, 3.3 for `frust.toml`; no per-file allowlist.
