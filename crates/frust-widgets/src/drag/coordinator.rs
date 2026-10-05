@@ -4,12 +4,12 @@
 
 use std::any::{Any, TypeId};
 use std::cell::{Ref, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
-use kurbo::{Point, Vec2};
+use kurbo::{Point, Rect, Vec2};
 
 /// Identity of a draggable source, allocated by
 /// [`DragCoordinator::new_source_id`] and unique within that coordinator.
@@ -254,6 +254,10 @@ struct Shared {
     /// the stack — a re-entrant mutation queues behind it instead of
     /// delivering nested.
     dispatching: bool,
+    /// Registered drop targets and their window-space bounds. An entry
+    /// exists if the target is registered; `None` means registered but
+    /// bounds not yet set.
+    targets: HashMap<DragTargetId, Option<Rect>>,
 }
 
 impl Default for Shared {
@@ -265,6 +269,7 @@ impl Default for Shared {
             next_listener: 0,
             queue: VecDeque::new(),
             dispatching: false,
+            targets: HashMap::new(),
         }
     }
 }
@@ -536,6 +541,90 @@ impl DragCoordinator {
                 }
             }
         });
+    }
+
+    /// Register a drop target for bounds tracking and resolution. Idempotent:
+    /// re-registering an already-registered target is a no-op.
+    pub fn register_target(&self, id: DragTargetId) {
+        let mut shared = self.shared.borrow_mut();
+        shared.targets.entry(id).or_insert(None);
+    }
+
+    /// Unregister a drop target. If the target is currently hovered or is the
+    /// unclaimed drop target, the hover is cleared (emitting `Leave` to
+    /// subscribers). A silent no-op for an unregistered target.
+    pub fn unregister_target(&self, id: DragTargetId) {
+        self.mutate(|shared, changes| {
+            shared.targets.remove(&id);
+            // If this target was hovered, clear the hover and emit Leave.
+            match &mut shared.machine {
+                Machine::Dragging(session) if session.hovered == Some(id) => {
+                    session.hovered = None;
+                    changes.push(DragStateChange::Leave { target: id });
+                }
+                Machine::Dropping {
+                    session,
+                    target: drop_target,
+                } if *drop_target == id => {
+                    // The drop target itself is being unregistered: clear hover and emit Leave.
+                    changes.push(DragStateChange::Leave { target: id });
+                }
+                _ => {}
+            }
+        });
+    }
+
+    /// Record the window-space bounds of a registered target. Updates persist
+    /// across drag sessions. Ignored (with a debug-build log) if the target
+    /// is not registered.
+    pub fn set_target_bounds(&self, id: DragTargetId, bounds: Rect) {
+        let mut shared = self.shared.borrow_mut();
+        match shared.targets.get_mut(&id) {
+            Some(entry) => {
+                *entry = Some(bounds);
+            }
+            None => {
+                log_ignored("set_target_bounds", "the target is not registered");
+            }
+        }
+    }
+
+    /// Query the window-space bounds of a registered target, or `None` if the
+    /// target is not registered or bounds have not been set.
+    pub fn target_bounds(&self, id: DragTargetId) -> Option<Rect> {
+        self.shared
+            .borrow()
+            .targets
+            .get(&id)
+            .and_then(|bounds| *bounds)
+    }
+
+    /// The registered target whose bounds contain `point`, picking the one
+    /// with the smallest area when multiple targets overlap. Returns `None`
+    /// if no registered target contains the point.
+    pub fn target_at(&self, point: Point) -> Option<DragTargetId> {
+        let shared = self.shared.borrow();
+        let mut best: Option<(DragTargetId, f64)> = None;
+        for (&id, bounds) in &shared.targets {
+            if let Some(rect) = bounds
+                && rect.contains(point)
+            {
+                let area = rect.area();
+                if let Some((_, best_area)) = best {
+                    if area < best_area {
+                        best = Some((id, area));
+                    }
+                } else {
+                    best = Some((id, area));
+                }
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    /// All registered drop targets.
+    pub fn registered_targets(&self) -> Vec<DragTargetId> {
+        self.shared.borrow().targets.keys().copied().collect()
     }
 
     /// Release the drag: over a hovered target, `Dragging → Dropping` (the
@@ -1626,5 +1715,160 @@ mod tests {
             1,
             "a clone's change reaches the original's subscriber"
         );
+    }
+
+    #[test]
+    fn register_and_unregister_targets() {
+        let f = Fixture::new();
+        assert_eq!(f.drag.registered_targets().len(), 0);
+        f.drag.register_target(f.first);
+        assert_eq!(f.drag.registered_targets().len(), 1);
+        assert!(f.drag.registered_targets().contains(&f.first));
+        // Re-registering is idempotent.
+        f.drag.register_target(f.first);
+        assert_eq!(f.drag.registered_targets().len(), 1);
+        f.drag.register_target(f.second);
+        assert_eq!(f.drag.registered_targets().len(), 2);
+        f.drag.unregister_target(f.first);
+        assert_eq!(f.drag.registered_targets().len(), 1);
+        assert!(!f.drag.registered_targets().contains(&f.first));
+        assert!(f.drag.registered_targets().contains(&f.second));
+    }
+
+    #[test]
+    fn unregister_while_hovered_emits_leave_and_clears_hover() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(7_i32);
+        f.drag.set_hovered(Some(f.first));
+        f.take_log();
+        // Unregistering the hovered target emits Leave.
+        f.drag.unregister_target(f.first);
+        let changes = f.take_log();
+        assert_eq!(
+            changes,
+            vec![DragStateChange::Leave { target: f.first }],
+            "unregister while hovered emits Leave"
+        );
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            None,
+            "hover is cleared after unregister"
+        );
+    }
+
+    #[test]
+    fn unregister_while_dropping_on_target_emits_leave() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(7_i32);
+        f.drag.set_hovered(Some(f.first));
+        f.drag.drop();
+        f.take_log();
+        // Unregistering the drop target emits Leave.
+        f.drag.unregister_target(f.first);
+        let changes = f.take_log();
+        assert_eq!(
+            changes,
+            vec![DragStateChange::Leave { target: f.first }],
+            "unregister while dropping emits Leave"
+        );
+    }
+
+    #[test]
+    fn set_and_query_target_bounds() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        assert_eq!(f.drag.target_bounds(f.first), None, "unset bounds are None");
+        let rect = Rect::from_origin_size(Point::new(10.0, 20.0), (100.0, 50.0));
+        f.drag.set_target_bounds(f.first, rect);
+        assert_eq!(f.drag.target_bounds(f.first), Some(rect));
+        let new_rect = Rect::from_origin_size(Point::new(5.0, 10.0), (200.0, 100.0));
+        f.drag.set_target_bounds(f.first, new_rect);
+        assert_eq!(f.drag.target_bounds(f.first), Some(new_rect));
+    }
+
+    #[test]
+    fn set_target_bounds_on_unknown_id_is_ignored() {
+        let f = Fixture::new();
+        let unregistered = f.drag.new_target_id();
+        let rect = Rect::from_origin_size(Point::new(10.0, 20.0), (100.0, 50.0));
+        // Should not panic, and should be logged in debug builds.
+        f.drag.set_target_bounds(unregistered, rect);
+        assert_eq!(f.drag.target_bounds(unregistered), None);
+    }
+
+    #[test]
+    fn target_at_finds_single_containing_target() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        let rect = Rect::from_origin_size(Point::new(10.0, 10.0), (100.0, 100.0));
+        f.drag.set_target_bounds(f.first, rect);
+        let point = Point::new(50.0, 50.0);
+        assert_eq!(
+            f.drag.target_at(point),
+            Some(f.first),
+            "point inside bounds returns the target"
+        );
+        let outside = Point::new(200.0, 200.0);
+        assert_eq!(
+            f.drag.target_at(outside),
+            None,
+            "point outside all bounds returns None"
+        );
+    }
+
+    #[test]
+    fn target_at_picks_smallest_area_when_overlapping() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        // First target: large rect
+        let large = Rect::from_origin_size(Point::new(0.0, 0.0), (200.0, 200.0));
+        f.drag.set_target_bounds(f.first, large);
+        // Second target: smaller rect, nested inside the first
+        let small = Rect::from_origin_size(Point::new(50.0, 50.0), (100.0, 100.0));
+        f.drag.set_target_bounds(f.second, small);
+        let point = Point::new(100.0, 100.0);
+        assert_eq!(
+            f.drag.target_at(point),
+            Some(f.second),
+            "picks the smallest area target when overlapping"
+        );
+    }
+
+    #[test]
+    fn target_at_ignores_targets_without_bounds() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        // Only set bounds for the second target.
+        let rect = Rect::from_origin_size(Point::new(0.0, 0.0), (100.0, 100.0));
+        f.drag.set_target_bounds(f.second, rect);
+        let point = Point::new(50.0, 50.0);
+        assert_eq!(
+            f.drag.target_at(point),
+            Some(f.second),
+            "ignores registered targets without bounds set"
+        );
+    }
+
+    #[test]
+    fn target_bounds_persist_across_drag_sessions() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        let rect = Rect::from_origin_size(Point::new(10.0, 10.0), (100.0, 100.0));
+        f.drag.set_target_bounds(f.first, rect);
+        // Start and complete a drag session.
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(7_i32);
+        f.drag.update_pointer(MOVED);
+        f.drag.drop();
+        f.drag.complete_drop();
+        // Bounds should still be there after the session.
+        assert_eq!(f.drag.target_bounds(f.first), Some(rect));
     }
 }
