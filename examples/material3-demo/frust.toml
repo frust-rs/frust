@@ -12,6 +12,7 @@ description = "Material 3 Expressive catalog gallery: every component, playgroun
 
 # Android release signing reads gitignored `android/key.properties` (keys below; create the keystore with the
 # keytool line), falling back per value to `ANDROID_*` env vars. Parsed by Frust; set only to change the defaults.
+# A manual `./gradlew assembleRelease` bypasses Frust's signing gate and may debug-sign with only a warning.
 #   storePassword=<keystore password>
 #   keyPassword=<key password>
 #   keyAlias=<key alias>
@@ -33,7 +34,6 @@ description = "Material 3 Expressive catalog gallery: every component, playgroun
 # key-alias = "CI_KEY_ALIAS"
 # key-password = "CI_KEY_PASSWORD"
 
-# Override the derived iOS bundle identifier (defaults to
-# `org.camelCase(name)`, e.g. `it.f0x.material3demo`).
+# Override the derived iOS bundle identifier (default `org.camelCase(name)`, here `it.f0x.material3demo`).
 # [ios]
 # identifier = "it.f0x.material3demo"
