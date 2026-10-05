@@ -26,31 +26,45 @@
 //! the platform-adaptive seam. [`ScrollAreaView::physics`] is the opt-out
 //! for a consumer that wants a different physics installed instead.
 //!
-//! # Two honest limits
+//! # The indicator, with and without a controller
 //!
-//! - **The indicator is controlled.** `ScrollWidget`'s position is readable only
-//!   through its own `on_scroll` callback (its offset accessors are on a type the
-//!   facade does not export), so this widget cannot ask the child where it is:
-//!   the app feeds the [`ScrollInfo`] it receives back through
-//!   [`position`](ScrollAreaView::position). That is why the callback is a
-//!   constructor argument rather than an optional builder — without it the thumb
-//!   could never move.
-//! - **The thumb is paint-only.** Nothing in the baseline's public surface sets a
-//!   scroll offset from outside, so there is no seam a thumb *drag* could write
-//!   to; dragging the thumb is therefore not implemented (a press there is an
-//!   ordinary drag on the surface underneath). Wheel, trackpad and touch drag all
-//!   work, because they are the child's.
+//! - **No controller: fed, paint-only.** Without [`ScrollAreaView::controller`],
+//!   `ScrollWidget`'s position is readable only through its own `on_scroll`
+//!   callback (its offset accessors are on a type the facade does not export),
+//!   so this widget cannot ask the child where it is: the app feeds the
+//!   [`ScrollInfo`] it receives back through
+//!   [`position`](ScrollAreaView::position) — why that callback is a
+//!   constructor argument rather than an optional builder, since without it the
+//!   thumb could never move. Nothing in that path sets a scroll offset from
+//!   outside either, so there is no seam a thumb *drag* could write to: dragging
+//!   the thumb does nothing (a press there is an ordinary drag on the surface
+//!   underneath). Wheel, trackpad and touch drag all work, because they are the
+//!   child's.
+//! - **A controller: read live, draggable.** [`ScrollAreaView::controller`]
+//!   attaches a [`frust::ScrollController`] to the wrapped surface (the same
+//!   handle an app can hold onto and drive from anywhere). With one set, the
+//!   thumb reads `offset`/`max_offset` straight off the handle every frame
+//!   instead — [`position`](ScrollAreaView::position) is accepted but ignored
+//!   in that case — and a primary-button press that lands on the thumb drags
+//!   it: pointer travel maps to the handle's `jump_to`, at the same
+//!   track-to-content ratio the thumb is painted at, and the press is consumed
+//!   rather than falling through to the surface underneath (the one behavioral
+//!   difference the controller path makes). Wheel, trackpad and touch drag on
+//!   the surface itself are unaffected either way.
 
 use std::cell::{Cell, OnceCell};
 
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget, any,
-    build_child, rebuild_child, route_event_single, teardown_child, visit_children,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, SemanticsCtx, Size, View,
+    Widget, any, build_child, rebuild_child, route_event_single, teardown_child, visit_children,
 };
-use frust::{RubberBand, ScrollInfo, ScrollPhysics, ScrollView, Theme, scroll_view};
+use frust::{
+    RubberBand, ScrollController, ScrollInfo, ScrollPhysics, ScrollView, Theme, scroll_view,
+};
 
 use crate::components::input::FALLBACK;
+use crate::hit::{inside, presses};
 
 /// Scrollbar gutter width: `w-2.5`.
 pub const SCROLLBAR_WIDTH: f64 = 10.0;
@@ -87,6 +101,10 @@ pub struct ScrollAreaView<State: 'static> {
     scroll: OnceCell<AnyView<State>>,
     offset: f64,
     max_offset: f64,
+    /// Set by [`ScrollAreaView::controller`]. With one attached, the thumb
+    /// reads its offset/max_offset live instead of the fields above, and
+    /// becomes draggable — see the [module docs](self).
+    controller: Option<ScrollController>,
 }
 
 /// Wrap `child` in a scroll area, reporting every scroll through
@@ -111,6 +129,7 @@ where
         scroll: OnceCell::new(),
         offset: 0.0,
         max_offset: 0.0,
+        controller: None,
     }
 }
 
@@ -151,6 +170,26 @@ impl<State: 'static> ScrollAreaView<State> {
         self.pending.set(Some(scroll.physics(physics)));
         self
     }
+
+    /// Attach `controller` to the wrapped surface, forwarding to
+    /// [`ScrollView::controller`] — the same handle an app can hold onto and
+    /// drive (`jump_to`/`animate_to`) from outside this view.
+    ///
+    /// With a controller set, the thumb reads its `offset`/`max_offset` live
+    /// every frame instead of the [`position`](Self::position)-fed fields
+    /// (which are then accepted but ignored), and a primary-button press on
+    /// the thumb drags it through the handle's `jump_to` — see the
+    /// [module docs](self).
+    pub fn controller(mut self, controller: ScrollController) -> Self {
+        let scroll = self
+            .pending
+            .take()
+            .expect("controller() runs before this view is ever erased for build/rebuild");
+        self.pending
+            .set(Some(scroll.controller(controller.clone())));
+        self.controller = Some(controller);
+        self
+    }
 }
 
 /// The retained widget for a [`ScrollAreaView`].
@@ -158,6 +197,12 @@ pub struct ScrollAreaWidget {
     scroll: ChildPod,
     offset: f64,
     max_offset: f64,
+    controller: Option<ScrollController>,
+    /// A thumb drag in progress: the pointer's `y` and the controller's
+    /// offset, both as of the `Down` that started it. `None` when not
+    /// dragging — always `None` with no controller attached, since that path
+    /// never starts one.
+    drag: Option<(f64, f64)>,
 }
 
 impl<State: 'static> View<State> for ScrollAreaView<State> {
@@ -168,6 +213,8 @@ impl<State: 'static> View<State> for ScrollAreaView<State> {
             scroll: build_child(self.erased(), ctx),
             offset: self.offset,
             max_offset: self.max_offset,
+            controller: self.controller.clone(),
+            drag: None,
         }
     }
 
@@ -183,6 +230,7 @@ impl<State: 'static> View<State> for ScrollAreaView<State> {
             element.max_offset = self.max_offset;
             flags |= ChangeFlags::PAINT;
         }
+        element.controller = self.controller.clone();
         flags
     }
 
@@ -191,25 +239,47 @@ impl<State: 'static> View<State> for ScrollAreaView<State> {
     }
 }
 
+/// `(thumb_height, travel)` for a `viewport_height`-tall gutter holding
+/// `max_offset` worth of scrollable overflow: the thumb is as tall a
+/// fraction of the track as the viewport is of the content (`content =
+/// viewport_height + max_offset`), and `travel` is how far its top edge can
+/// slide across the leftover track — the geometry a browser scrollbar has,
+/// which is what upstream inherits by using one.
+///
+/// Shared by [`ScrollAreaWidget::thumb`] (paint) and its thumb-drag mapping
+/// (event), so a drag's pointer-to-offset ratio always matches what is on
+/// screen.
+fn thumb_geometry(viewport_height: f64, max_offset: f64) -> (f64, f64) {
+    let track_height = (viewport_height - 2.0 * THUMB_INSET).max(0.0);
+    let content = viewport_height + max_offset;
+    let thumb_height = (track_height * (viewport_height / content))
+        .max(MIN_THUMB_HEIGHT.min(track_height))
+        .min(track_height);
+    let travel = (track_height - thumb_height).max(0.0);
+    (thumb_height, travel)
+}
+
 impl ScrollAreaWidget {
+    /// The `(offset, max_offset)` the thumb currently tracks: the attached
+    /// controller's last published snapshot when
+    /// [`ScrollAreaView::controller`] set one, otherwise whatever
+    /// [`position`](ScrollAreaView::position) last fed in.
+    fn live_offset_max(&self) -> (f64, f64) {
+        match &self.controller {
+            Some(controller) => (controller.offset(), controller.max_offset()),
+            None => (self.offset, self.max_offset),
+        }
+    }
+
     /// The thumb's `(origin, size)` for a `viewport`-sized surface, or `None`
     /// when there is nothing to scroll.
-    ///
-    /// The thumb is as tall a fraction of the track as the viewport is of the
-    /// content (`content = viewport + max_offset`), and slides across the leftover
-    /// track in step with the offset — the geometry a browser scrollbar has, which
-    /// is what upstream inherits by using one.
     fn thumb(&self, viewport: Size) -> Option<(Point, Size)> {
-        if self.max_offset <= 0.0 || viewport.height <= 0.0 {
+        let (offset, max_offset) = self.live_offset_max();
+        if max_offset <= 0.0 || viewport.height <= 0.0 {
             return None;
         }
-        let track_height = (viewport.height - 2.0 * THUMB_INSET).max(0.0);
-        let content = viewport.height + self.max_offset;
-        let thumb_height = (track_height * (viewport.height / content))
-            .max(MIN_THUMB_HEIGHT.min(track_height))
-            .min(track_height);
-        let travel = (track_height - thumb_height).max(0.0);
-        let progress = (self.offset / self.max_offset).clamp(0.0, 1.0);
+        let (thumb_height, travel) = thumb_geometry(viewport.height, max_offset);
+        let progress = (offset / max_offset).clamp(0.0, 1.0);
         let width = (SCROLLBAR_WIDTH - 2.0 * THUMB_INSET).max(0.0);
         Some((
             Point::new(
@@ -252,8 +322,58 @@ impl Widget for ScrollAreaWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // Everything goes to the scroll surface: the thumb is paint-only (see the
-        // module docs), so this widget consumes nothing of its own.
+        // With a controller attached, a primary-button press/drag on the thumb
+        // is this widget's own gesture — captured and consumed rather than
+        // forwarded to the scroll surface underneath (see the module docs).
+        // With no controller, the thumb is paint-only and this block never
+        // starts a drag, so every event still falls straight through below,
+        // byte-identical to the pre-controller behavior.
+        if let Some(controller) = self.controller.clone()
+            && let InputEvent::Pointer(p) = event
+        {
+            match p.phase {
+                PointerPhase::Down => {
+                    if presses(p) {
+                        let size = ctx.size();
+                        if let Some((thumb_origin, thumb_size)) = self.thumb(size) {
+                            let local = Point::new(
+                                p.position.x - thumb_origin.x,
+                                p.position.y - thumb_origin.y,
+                            );
+                            if inside(local, thumb_size) {
+                                let (offset, _) = self.live_offset_max();
+                                self.drag = Some((p.position.y, offset));
+                                ctx.capture_pointer();
+                                ctx.request_redraw();
+                                return EventResult::Handled;
+                            }
+                        }
+                    }
+                }
+                PointerPhase::Move => {
+                    if let Some((start_y, start_offset)) = self.drag {
+                        let size = ctx.size();
+                        let (_, max_offset) = self.live_offset_max();
+                        let (_, travel) = thumb_geometry(size.height, max_offset);
+                        let dy = p.position.y - start_y;
+                        let next_offset = if travel > 0.0 {
+                            start_offset + dy * max_offset / travel
+                        } else {
+                            start_offset
+                        };
+                        controller.jump_to(next_offset);
+                        ctx.request_redraw();
+                        return EventResult::Handled;
+                    }
+                }
+                PointerPhase::Up | PointerPhase::Cancel => {
+                    if self.drag.take().is_some() {
+                        ctx.request_redraw();
+                        return EventResult::Handled;
+                    }
+                }
+            }
+        }
         route_event_single(&mut self.scroll, ctx, event)
     }
 
@@ -527,6 +647,96 @@ mod tests {
         }
         let info = state.info.expect("the drag scrolled the surface");
         assert!(info.offset > 0.0, "{info:?}");
+    }
+
+    /// A view fed by a [`ScrollController`] instead of
+    /// [`ScrollAreaView::position`] — the counterpart to [`view`] above for
+    /// the controller-driven path.
+    fn controlled_view(controller: &ScrollController) -> ScrollAreaView<AppState> {
+        scroll_area(
+            Block(Size::new(VIEWPORT.width, CONTENT_H)),
+            |s: &mut AppState, info| s.info = Some(info),
+        )
+        .controller(controller.clone())
+    }
+
+    #[test]
+    fn a_thumb_drag_moves_the_surface_through_the_controller() {
+        let controller = ScrollController::new();
+        let mut w = build(&controlled_view(&controller));
+        let size = layout(&mut w);
+
+        let (thumb_origin, thumb_size) = w.thumb(size).expect("a thumb before any drag");
+        let x = VIEWPORT.width - SCROLLBAR_WIDTH / 2.0;
+        let press_y = thumb_origin.y + thumb_size.height / 2.0;
+
+        let mut app = ();
+        let outcome = w.event(
+            &mut EventCtx::new(&mut app as &mut dyn Any, Point::ZERO, size),
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::new(x, press_y),
+                button: PointerButton::Primary,
+            }),
+        );
+        assert_eq!(
+            outcome,
+            EventResult::Handled,
+            "the press on the thumb is captured, not forwarded"
+        );
+
+        w.event(
+            &mut EventCtx::new(&mut app as &mut dyn Any, Point::ZERO, size),
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Move,
+                position: Point::new(x, press_y + 40.0),
+                button: PointerButton::Primary,
+            }),
+        );
+
+        // The drag only records a jump_to; a layout drains it against the
+        // laid-out extent and publishes the result back onto the handle.
+        layout(&mut w);
+        assert!(
+            controller.offset() > 0.0,
+            "the drag moved the surface through the controller"
+        );
+
+        w.event(
+            &mut EventCtx::new(&mut app as &mut dyn Any, Point::ZERO, size),
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Up,
+                position: Point::new(x, press_y + 40.0),
+                button: PointerButton::Primary,
+            }),
+        );
+    }
+
+    #[test]
+    fn controller_driven_thumb_geometry_matches_the_position_fed_path_for_the_same_offsets() {
+        let max_offset = CONTENT_H - VIEWPORT.height;
+        let offset = max_offset / 3.0;
+
+        let positioned = {
+            let mut w = build(&view(offset, max_offset));
+            let size = layout(&mut w);
+            w.thumb(size)
+        };
+
+        let controller = ScrollController::new();
+        controller.jump_to(offset);
+        let via_controller = {
+            let mut w = build(&controlled_view(&controller));
+            let size = layout(&mut w);
+            w.thumb(size)
+        };
+
+        assert_eq!(controller.offset(), offset);
+        assert_eq!(controller.max_offset(), max_offset);
+        assert_eq!(
+            positioned, via_controller,
+            "the same offset/max_offset paint the same thumb rect either way"
+        );
     }
 
     #[test]

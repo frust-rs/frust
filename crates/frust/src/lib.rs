@@ -119,22 +119,31 @@ pub use frust_core::view::{AnyView, View, any};
 // `BackPolicy::DismissAnimated` + dismiss-signal example — an app-authored
 // modal staging its own exit on Android back instead of vanishing.
 pub use frust_widgets::{
-    Align, AlignView, Alignment, AlwaysScrollable, Axis, BackPolicy, BorderStyle, Bouncing, Button,
-    ButtonStyle, ButtonView, Checkbox, CheckboxView, ChildKey, Clamping, Column, ContainerView,
-    ContainerWidget, CrossAxisAlignment, DecelerationRate, DividerView, DividerWidget, EdgeInsets,
-    FlexChild, FlexView, GestureDetector, GestureDetectorView, HeroView, Icon, IconButton,
-    IconButtonView, IconData, IconSource, IconView, IconWidget, Image, ImageError, ImageFit,
-    ImageSource, ImageView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
-    MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
-    OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
-    PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
-    RadioView, RadioWidget, ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView,
-    ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollView, Simulation, SizedBox, SizedBoxView,
-    Slider, SliderView, SpringDescription, Stack, StackView, TextInput, TextInputView, TextView,
-    Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback, button, checkbox,
-    colored_box, container, divider, flexible, hero, icon, icon_button, inflexible, keyed,
-    list_view, overlay_portal, radio, safe_area, scaffold, scroll_view, slider, text, text_input,
+    Align, AlignView, Alignment, AlwaysScrollable, AnimateTo, Axis, BackPolicy, BorderStyle,
+    Bouncing, Button, ButtonStyle, ButtonView, Checkbox, CheckboxView, ChildKey, Clamping, Column,
+    ContainerView, ContainerWidget, CrossAxisAlignment, DecelerationRate, DividerView,
+    DividerWidget, EdgeInsets, FlexChild, FlexView, GestureDetector, GestureDetectorView, HeroView,
+    Icon, IconButton, IconButtonView, IconData, IconSource, IconView, IconWidget, Image,
+    ImageError, ImageFit, ImageSource, ImageView, ListView, ListViewWidget, MAX_FLING_VELOCITY,
+    MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView,
+    NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide,
+    OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult,
+    PushOptions, Radio, RadioView, RadioWidget, ResultCallback, Row, RubberBand, SafeAreaView,
+    ScaffoldView, ScrollController, ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollSubscription,
+    ScrollView, Simulation, SizedBox, SizedBoxView, Slider, SliderView, SpringDescription, Stack,
+    StackView, TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec,
+    TransitionState, VisibilityCallback, button, checkbox, colored_box, container, divider,
+    flexible, hero, icon, icon_button, inflexible, keyed, list_view, overlay_portal, radio,
+    safe_area, scaffold, scroll_view, slider, text, text_input,
 };
+// [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
+// row at) is reachable from `frust_widgets`'s own crate root through the
+// facade above, but not nameable there: it lives in the
+// `frust_widgets::scroll_controller` module, which the flat re-export block
+// does not flatten into. Re-exported by its own path here so an app calling
+// `ScrollController::scroll_to_item` through this facade can name the
+// alignment argument without reaching past it into `frust-widgets` directly.
+pub use frust_widgets::scroll_controller::ItemAlignment;
 
 /// The overlay portal's own vocabulary, flat-re-exported from `frust-core`:
 /// which z-band a floated surface sits in, whether the pointer reaches it, and
