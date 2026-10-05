@@ -12,9 +12,18 @@
 //! stated as the expression its source states it as (never a transcribed
 //! decimal) and pinned by a test in this file.
 //!
+//! [`TweenSimulation`] is frust's own, not a Flutter port: a plain eased
+//! interpolation between two positions over a fixed duration, built from this
+//! crate's own [`Curve`] vocabulary rather than Flutter's `Curve` class. It
+//! backs [`crate::scroll_controller::ScrollController::animate_to`], draining
+//! into the same ballistic driver a release fling runs through so paint
+//! cadence and boundary handling are shared rather than duplicated.
+//!
 //! Time is in **seconds** from each simulation's own start, per the
 //! [`Simulation`] contract; a simulation carries the [`Tolerance`] it settles
 //! within as a constructor argument rather than reading one per call.
+
+use frust_core::Curve;
 
 use super::{Simulation, SpringDescription, Tolerance};
 
@@ -666,6 +675,70 @@ impl Simulation for BouncingScrollSimulation {
     }
 }
 
+/// An eased tween from `start` to `end` over a fixed `duration` (seconds) —
+/// see the module docs. Not a port: frust's own, built from [`Curve`] rather
+/// than a Flutter source.
+#[derive(Debug, Clone, Copy)]
+pub struct TweenSimulation {
+    start: f64,
+    end: f64,
+    /// `<= 0.0` (including a non-finite input, floored by
+    /// [`TweenSimulation::new`]) means "immediately done at `end`" rather
+    /// than a division by zero.
+    duration: f64,
+    curve: Curve,
+}
+
+impl TweenSimulation {
+    /// A tween from `start` to `end` over `duration` seconds, eased by
+    /// `curve`. A non-positive or non-finite `duration` (`0.0`, negative, or
+    /// `NaN`, each a caller mistake this never panics on) collapses to a
+    /// simulation that is immediately [`TweenSimulation::is_done`] at `end` —
+    /// callers that actually want an instant move should prefer
+    /// [`crate::scroll_controller::ScrollController::jump_to`], which never
+    /// constructs a simulation at all.
+    pub fn new(start: f64, end: f64, duration: f64, curve: Curve) -> Self {
+        Self {
+            start,
+            end,
+            duration: if duration.is_finite() {
+                duration.max(0.0)
+            } else {
+                0.0
+            },
+            curve,
+        }
+    }
+}
+
+impl Simulation for TweenSimulation {
+    fn x(&self, time: f64) -> f64 {
+        if self.duration <= 0.0 {
+            return self.end;
+        }
+        let t = (time / self.duration).clamp(0.0, 1.0);
+        self.start + (self.end - self.start) * self.curve.transform(t)
+    }
+
+    fn dx(&self, time: f64) -> f64 {
+        if self.duration <= 0.0 || time < 0.0 || time >= self.duration {
+            return 0.0;
+        }
+        // A numeric derivative: cheap, and the only option for an arbitrary
+        // cubic-Bézier `Curve` with no closed-form velocity. Only
+        // `ScrollWidget::ballistic_is_pinned_outward`'s sign check and a
+        // carried-momentum read (if a fling starts mid-tween) ever read this,
+        // neither of which needs analytic precision.
+        const DT: f64 = 1e-4;
+        let clamped_time = time.min(self.duration - DT);
+        (self.x(clamped_time + DT) - self.x(clamped_time)) / DT
+    }
+
+    fn is_done(&self, time: f64) -> bool {
+        self.duration <= 0.0 || time >= self.duration
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,5 +1094,41 @@ mod tests {
             "the fling must arrive above the cap for the test to mean anything"
         );
         assert_close(fling.dx(handover), cap, 1e-9, "clamped handover seed");
+    }
+
+    #[test]
+    fn tween_reaches_the_target_exactly_at_its_duration() {
+        let tween = TweenSimulation::new(0.0, 100.0, 0.5, Curve::Linear);
+        assert_close(tween.x(0.0), 0.0, 1e-9, "starts at the source position");
+        assert_close(tween.x(0.25), 50.0, 1e-9, "linear curve, halfway in time");
+        assert!(!tween.is_done(0.25));
+        assert_close(tween.x(0.5), 100.0, 1e-9, "lands exactly on the target");
+        assert!(tween.is_done(0.5));
+        // Past its own duration the position holds at the target rather than
+        // extrapolating past it.
+        assert_close(tween.x(1.0), 100.0, 1e-9, "clamped past the duration");
+        assert!(tween.is_done(1.0));
+    }
+
+    #[test]
+    fn tween_velocity_is_positive_mid_flight_and_zero_once_done() {
+        let tween = TweenSimulation::new(0.0, 100.0, 1.0, Curve::EaseInOut);
+        assert!(
+            tween.dx(0.5) > 0.0,
+            "moving from start to end, mid-flight velocity is positive"
+        );
+        assert_eq!(tween.dx(1.0), 0.0, "settled — no velocity once done");
+        assert_eq!(tween.dx(-1.0), 0.0, "never queried before its own start");
+    }
+
+    #[test]
+    fn tween_non_positive_duration_is_immediately_done() {
+        // A `0.0`/negative/NaN duration never divides by zero — it is
+        // immediately done at `t = 0.0`, at the end position.
+        for duration in [0.0, -5.0, f64::NAN] {
+            let tween = TweenSimulation::new(10.0, 20.0, duration, Curve::Linear);
+            assert_close(tween.x(0.0), 20.0, 1e-9, "immediately at the target");
+            assert!(tween.is_done(0.0));
+        }
     }
 }

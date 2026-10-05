@@ -140,13 +140,21 @@
 //! external write seam: its recorded commands are drained at the start of the
 //! widget's next layout or paint ([`ScrollWidget::drain_controller`]), after
 //! the content has been measured, and every pass that moves the position
-//! publishes the new [`ScrollInfo`] back to the handle. A jump stops any fling,
-//! settle or ballistic simulation in flight; its `on_scroll` notification has
-//! no `EventCtx` to fire through, so — like a fling frame's — it is owed to the
-//! next event, and a paint that applied one raises
+//! publishes the new [`ScrollInfo`] back to the handle. A jump
+//! ([`ScrollWidget::apply_jump`]) stops any fling, settle or ballistic
+//! simulation in flight; its `on_scroll` notification has no `EventCtx` to
+//! fire through, so — like a fling frame's — it is owed to the next event,
+//! and a paint that applied one raises
 //! [`frust_core::mark_pending_result_flush`] so that event is the very next
-//! frame's `Housekeeping` flush. See [`crate::scroll_controller`] for the
-//! handle's side of the contract.
+//! frame's `Housekeeping` flush. `ScrollController::animate_to` eases to its
+//! target the same way, through a [`TweenSimulation`] driven by the same
+//! [`ScrollWidget::ballistic`] field and [`ScrollWidget::drive_ballistic`]
+//! pump a release fling runs through
+//! ([`ScrollWidget::apply_animate_to`]) — so a jump, a fresh animate, or any
+//! user pointer `Down`/wheel on the surface all end it the same way
+//! ([`ScrollWidget::stop_ballistic`]), and the app's `motion.reduce_motion`
+//! theme flag collapses it to an immediate jump. See
+//! [`crate::scroll_controller`] for the handle's side of the contract.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -158,15 +166,17 @@ use frust_core::{
     PointerPhase, ScrollDelta, SemanticsCtx, TOUCH_SLOP, VelocityTracker, View, WHEEL_LINE_PX,
     Widget, any, fling_decay, fling_displacement,
 };
+use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, Size};
 
 use crate::authoring::{ErasedArgCallback, ErasedCallback, presses};
 use crate::physics::effect::OverscrollEffect;
+use crate::physics::simulation::TweenSimulation;
 use crate::physics::{
     MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR, ScrollMetrics, ScrollPhysics, Simulation,
     default_overscroll_effect, default_physics,
 };
-use crate::scroll_controller::{ScrollBinding, ScrollCommand, ScrollController};
+use crate::scroll_controller::{AnimateTo, ScrollBinding, ScrollCommand, ScrollController};
 
 /// iOS-style rubber-band resistance applied to the past-edge portion of a drag
 /// under [`RubberBand`](crate::RubberBand): the visible out-of-range
@@ -864,6 +874,14 @@ pub struct ScrollWidget {
     /// the paint that sees it requests the `Housekeeping` flush that delivers
     /// the owed `on_scroll` (the module docs' *Programmatic scrolling*).
     jump_notify_owed: bool,
+    /// Whether [`ScrollWidget::ballistic`] is currently running a
+    /// controller-driven [`ScrollController::animate_to`] tween rather than a
+    /// release fling/spring — this surface's own mirror of the attached
+    /// [`ScrollController::is_animating`] flag, read back at every tear-down
+    /// site ([`ScrollWidget::stop_ballistic`]) so the controller is told the
+    /// instant it actually ends, and at [`ScrollWidget::drive_ballistic`]'s
+    /// own completion so a tween that finishes on its own is told too.
+    controller_animating: bool,
 }
 
 impl ScrollWidget {
@@ -897,6 +915,7 @@ impl ScrollWidget {
             controller: None,
             laid_out: false,
             jump_notify_owed: false,
+            controller_animating: false,
         }
     }
 
@@ -1203,6 +1222,24 @@ impl ScrollWidget {
         }
     }
 
+    /// End any live [`ScrollWidget::ballistic`] simulation — a release
+    /// fling/spring, or a controller [`ScrollController::animate_to`] tween —
+    /// telling the attached controller the animation stopped if it was one.
+    /// The single tear-down path for every place user input or a jump/animate
+    /// interrupts motion (`Down`, wheel, `Cancel`, [`ScrollWidget::apply_jump`],
+    /// [`ScrollWidget::apply_animate_to`], and [`ScrollWidget::drive_ballistic`]'s
+    /// own completion all call this instead of assigning `self.ballistic =
+    /// None` directly), so [`ScrollController::is_animating`] can never go
+    /// stale.
+    fn stop_ballistic(&mut self) {
+        self.ballistic = None;
+        if std::mem::take(&mut self.controller_animating)
+            && let Some(binding) = self.controller.as_ref()
+        {
+            binding.set_animating(false);
+        }
+    }
+
     /// Advance a physics-supplied [`Simulation`] to frame time `now`: the
     /// position it reports, minus whatever
     /// [`ScrollPhysics::apply_boundary_conditions`] rejects of it. Subtracting
@@ -1230,7 +1267,7 @@ impl ScrollWidget {
         self.edge_pull = self.displacement() + rejected;
         self.sync_child_origin();
         if done || self.ballistic_is_pinned_outward(proposed, rejected, velocity) {
-            self.ballistic = None;
+            self.stop_ballistic();
             self.settle_ballistic_residual();
         }
     }
@@ -1317,7 +1354,7 @@ impl ScrollWidget {
     /// recording order — once this surface has laid out (a command queued
     /// earlier waits for the first measured extent) and only while it still
     /// holds the handle.
-    fn drain_controller(&mut self) {
+    fn drain_controller(&mut self, reduce_motion: bool) {
         if !self.laid_out {
             return;
         }
@@ -1328,6 +1365,9 @@ impl ScrollWidget {
         for command in commands {
             match command {
                 ScrollCommand::JumpTo(target) => self.apply_jump(target),
+                ScrollCommand::AnimateTo(target, options) => {
+                    self.apply_animate_to(target, options, reduce_motion);
+                }
             }
         }
     }
@@ -1342,7 +1382,7 @@ impl ScrollWidget {
         let before = self.scroll_info();
         let was_moving = self.is_flinging() || self.settling;
         self.fling = None;
-        self.ballistic = None;
+        self.stop_ballistic();
         self.settling = false;
         self.edge_pull = 0.0;
         self.last_anim = None;
@@ -1352,6 +1392,46 @@ impl ScrollWidget {
         if was_moving || self.scroll_info() != before {
             self.pending_scroll_notify = true;
             self.jump_notify_owed = true;
+        }
+    }
+
+    /// Start (or replace) a controller-driven tween to `target`, clamped to
+    /// `[0, max_offset]`, ending any fling, release-settle or ballistic
+    /// simulation in flight first — the same replace semantics
+    /// [`ScrollWidget::apply_jump`] gives a jump. Drives the tween through a
+    /// [`TweenSimulation`] in [`ScrollWidget::ballistic`], the exact same
+    /// field and pump ([`ScrollWidget::drive_ballistic`]) a release fling
+    /// runs through, so paint cadence, `request_frame` and the installed
+    /// physics' boundary handling are shared rather than duplicated.
+    /// `reduce_motion` (or a non-positive/non-finite `duration_ms`) collapses
+    /// this to an immediate [`ScrollWidget::apply_jump`]. `NaN` is ignored.
+    fn apply_animate_to(&mut self, target: f64, options: AnimateTo, reduce_motion: bool) {
+        if target.is_nan() {
+            return;
+        }
+        self.fling = None;
+        self.stop_ballistic();
+        self.settling = false;
+        self.edge_pull = 0.0;
+        self.last_anim = None;
+        if reduce_motion || !options.duration_ms.is_finite() || options.duration_ms <= 0.0 {
+            self.apply_jump(target);
+            return;
+        }
+        let clamped = target.clamp(0.0, self.max_offset());
+        let sim = TweenSimulation::new(
+            self.offset,
+            clamped,
+            options.duration_ms / 1000.0,
+            options.curve,
+        );
+        self.ballistic = Some(BallisticState {
+            sim: Box::new(sim),
+            start: None,
+        });
+        self.controller_animating = true;
+        if let Some(binding) = self.controller.as_ref() {
+            binding.set_animating(true);
         }
     }
 
@@ -1428,7 +1508,7 @@ impl ScrollWidget {
                 // this arm is identical under every physics.
                 self.fling = None;
                 self.settling = false;
-                self.ballistic = None;
+                self.stop_ballistic();
                 self.edge_pull = 0.0;
                 self.set_offset(self.offset + dy);
                 self.sync_child_origin();
@@ -1460,7 +1540,7 @@ impl ScrollWidget {
                     self.carried_velocity = self.live_velocity();
                     self.fling = None;
                     self.settling = false;
-                    self.ballistic = None;
+                    self.stop_ballistic();
                     // A `Down` deliberately leaves a mid-bounce displacement on
                     // screen (the regrab continues from it), so the pull is
                     // re-seeded from that displacement rather than zeroed —
@@ -1620,7 +1700,7 @@ impl ScrollWidget {
                     // into range (no settle animation, no on_scroll/on_refresh) —
                     // including any live simulation and the pull it was riding.
                     self.settling = false;
-                    self.ballistic = None;
+                    self.stop_ballistic();
                     self.edge_pull = 0.0;
                     self.pending_scroll_notify = false;
                     self.set_offset(self.offset);
@@ -1755,7 +1835,10 @@ impl Widget for ScrollWidget {
         // A controller command clamps against the extent just measured, so a
         // jump recorded alongside a content change lands in the new range.
         self.laid_out = true;
-        self.drain_controller();
+        let reduce_motion = Theme::from_layout_ctx(ctx)
+            .map(|t| t.motion.reduce_motion)
+            .unwrap_or(false);
+        self.drain_controller(reduce_motion);
         self.sync_child_origin();
         self.publish_to_controller();
         bc.constrain(self.viewport)
@@ -1767,7 +1850,10 @@ impl Widget for ScrollWidget {
         self.last_frame_time = ctx.frame_time();
         // A command recorded since layout (or with layout skipped this frame)
         // applies before the pump, so a jump ends a fling before it advances.
-        self.drain_controller();
+        let reduce_motion = Theme::from_paint_ctx(ctx)
+            .map(|t| t.motion.reduce_motion)
+            .unwrap_or(false);
+        self.drain_controller(reduce_motion);
         self.pump_fling(ctx);
         self.publish_to_controller();
         if std::mem::take(&mut self.jump_notify_owed) && self.on_scroll.is_some() {
@@ -4670,7 +4756,7 @@ mod controller_tests {
 
     use std::any::Any;
 
-    use frust_core::{FrameTime, RenderRoot};
+    use frust_core::{Curve, FrameTime, RenderRoot};
 
     use super::*;
     use crate::physics::parity::Bouncing;
@@ -4734,6 +4820,30 @@ mod controller_tests {
         send(w, &pointer(PointerPhase::Move, 75.0), 16.0);
         send(w, &pointer(PointerPhase::Move, 50.0), 32.0);
         send(w, &pointer(PointerPhase::Up, 50.0), 32.0);
+    }
+
+    fn frame_time(ms: f64) -> FrameTime {
+        FrameTime::from_nanos((ms * 1_000_000.0) as u64)
+    }
+
+    /// Paint the full widget (not just the fling pump) at an explicit frame
+    /// time, so `drain_controller`/`apply_animate_to` and the ballistic pump
+    /// both see a real, advancing clock — what an `animate_to` tween needs to
+    /// progress across more than one frame. Returns whether the paint asked
+    /// for another one.
+    fn paint_at(w: &mut ScrollWidget, ms: f64) -> bool {
+        let mut ctx = PaintCtx::for_test(Point::ZERO, w.viewport, frame_time(ms));
+        w.paint(&mut ctx, &mut RecordingScene::default());
+        ctx.needs_frame()
+    }
+
+    /// A themed [`PaintCtx`] at `ms`, with `motion.reduce_motion` set —
+    /// `animate_to`'s collapse-to-jump path reads it the same way
+    /// [`button`](crate::button)'s loading spinner does.
+    fn paint_at_with_reduce_motion(w: &mut ScrollWidget, ms: f64, theme: &Theme) -> bool {
+        let mut ctx = PaintCtx::for_test(Point::ZERO, w.viewport, frame_time(ms)).with_theme(theme);
+        w.paint(&mut ctx, &mut RecordingScene::default());
+        ctx.needs_frame()
     }
 
     #[test]
@@ -4991,5 +5101,250 @@ mod controller_tests {
         assert_eq!(controller.offset(), 30.0, "the new holder publishes itself");
         drop(survivor);
         assert!(!controller.is_attached());
+    }
+
+    #[test]
+    fn an_animate_to_reaches_the_target_within_its_duration() {
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        assert!(!controller.is_animating(), "nothing is animating yet");
+
+        controller.animate_to(
+            400.0,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+        // The seeding frame: the command drains and starts the tween, but
+        // the zero-delta first pump moves nothing — the same convention a
+        // release fling's first paint takes.
+        assert!(paint_at(&mut w, 0.0), "a live tween asks for continuation");
+        assert!(controller.is_animating());
+        assert_eq!(w.offset(), 0.0, "the seeding frame moves nothing");
+
+        // Halfway through the duration, a linear curve is halfway to the
+        // target.
+        assert!(paint_at(&mut w, 100.0));
+        assert!((w.offset() - 200.0).abs() < 1e-6, "offset: {}", w.offset());
+        assert!(controller.is_animating());
+
+        // At its duration the tween lands exactly on the target and ends.
+        assert!(!paint_at(&mut w, 200.0), "nothing is left animating");
+        assert_eq!(w.offset(), 400.0);
+        assert_eq!(controller.offset(), 400.0, "the completion publishes it");
+        assert!(
+            !controller.is_animating(),
+            "completion resolves is_animating"
+        );
+
+        // A later frame leaves the arrived-at position alone.
+        assert!(!paint_at(&mut w, 216.0));
+        assert_eq!(w.offset(), 400.0);
+    }
+
+    #[test]
+    fn a_down_mid_animation_stops_it_at_the_current_offset() {
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        controller.animate_to(
+            400.0,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+        paint_at(&mut w, 0.0);
+        paint_at(&mut w, 100.0);
+        assert!((w.offset() - 200.0).abs() < 1e-6);
+        assert!(controller.is_animating());
+
+        // A Down lands mid-animation: it ends exactly where the tween had
+        // eased to, and the ordinary gesture machinery still arms normally —
+        // user input always wins.
+        send(&mut w, &pointer(PointerPhase::Down, 100.0), 116.0);
+        assert!(w.ballistic.is_none(), "the Down ends the tween");
+        assert!(!controller.is_animating());
+        assert!(
+            (w.offset() - 200.0).abs() < 1e-6,
+            "frozen at the eased-to offset, offset: {}",
+            w.offset()
+        );
+        assert!(w.down_active, "the Down still arms an ordinary gesture");
+
+        // A later frame moves nothing on its own — the tween is really gone,
+        // not just paused.
+        assert!(!paint_at(&mut w, 300.0));
+        assert!((w.offset() - 200.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_wheel_mid_animation_stops_it() {
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        controller.animate_to(
+            400.0,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+        paint_at(&mut w, 0.0);
+        paint_at(&mut w, 100.0);
+        assert!(controller.is_animating());
+
+        send(&mut w, &wheel(10.0), 116.0);
+        assert!(w.ballistic.is_none());
+        assert!(!controller.is_animating());
+        assert!(
+            (w.offset() - 210.0).abs() < 1e-6,
+            "the wheel delta still applies"
+        );
+    }
+
+    #[test]
+    fn a_later_animate_to_replaces_a_running_one() {
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        controller.animate_to(
+            400.0,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+        paint_at(&mut w, 0.0);
+        paint_at(&mut w, 100.0);
+        let mid = w.offset();
+        assert!((mid - 200.0).abs() < 1e-6);
+        assert!(controller.is_animating());
+
+        // A second `animate_to`, recorded before the first finishes, takes
+        // over outright: the new tween starts from wherever the first had
+        // eased to, not from the first's target.
+        controller.animate_to(
+            600.0,
+            AnimateTo {
+                duration_ms: 100.0,
+                curve: Curve::Linear,
+            },
+        );
+        assert!(paint_at(&mut w, 116.0), "the replacement keeps animating");
+        assert!(controller.is_animating());
+        assert_eq!(
+            w.offset(),
+            mid,
+            "the seeding frame of the new tween moves nothing"
+        );
+
+        assert!(
+            !paint_at(&mut w, 216.0),
+            "the replacement's own duration ends it"
+        );
+        assert_eq!(w.offset(), 600.0);
+        assert!(!controller.is_animating());
+    }
+
+    #[test]
+    fn a_jump_recorded_after_an_animate_to_replaces_it() {
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        controller.animate_to(
+            400.0,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+        paint_at(&mut w, 0.0);
+        paint_at(&mut w, 100.0);
+        assert!(controller.is_animating());
+
+        controller.jump_to(500.0);
+        assert!(
+            !paint_at(&mut w, 116.0),
+            "the jump leaves nothing animating"
+        );
+        assert_eq!(w.offset(), 500.0);
+        assert!(!controller.is_animating());
+    }
+
+    #[test]
+    fn reduce_motion_collapses_animate_to_into_an_immediate_jump() {
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        controller.animate_to(
+            400.0,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+
+        let mut theme = frust_theme::Theme::neutral();
+        theme.motion.reduce_motion = true;
+        assert!(!paint_at_with_reduce_motion(&mut w, 0.0, &theme));
+        assert_eq!(w.offset(), 400.0, "landed at once, no tween in flight");
+        assert_eq!(controller.offset(), 400.0);
+        assert!(!controller.is_animating(), "no animation ever started");
+        assert!(w.ballistic.is_none());
+    }
+
+    #[test]
+    fn an_animate_to_clamps_to_the_scroll_range() {
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+
+        let mut animate_and_run = |target: f64| -> f64 {
+            controller.animate_to(
+                target,
+                AnimateTo {
+                    duration_ms: 50.0,
+                    curve: Curve::Linear,
+                },
+            );
+            paint_at(&mut w, 0.0);
+            paint_at(&mut w, 116.0);
+            w.offset()
+        };
+        assert_eq!(animate_and_run(5000.0), MAX);
+        assert_eq!(animate_and_run(-50.0), 0.0);
+        assert_eq!(animate_and_run(f64::INFINITY), MAX);
+        assert_eq!(animate_and_run(f64::NEG_INFINITY), 0.0);
+    }
+
+    #[test]
+    fn an_animate_to_with_nan_offset_is_ignored() {
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        controller.jump_to(123.0);
+        paint_at(&mut w, 0.0);
+
+        controller.animate_to(
+            f64::NAN,
+            AnimateTo {
+                duration_ms: 100.0,
+                curve: Curve::Linear,
+            },
+        );
+        assert!(!paint_at(&mut w, 116.0));
+        assert_eq!(w.offset(), 123.0, "NaN is ignored, nothing moves");
+        assert!(!controller.is_animating());
     }
 }
