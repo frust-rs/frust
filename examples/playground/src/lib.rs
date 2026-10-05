@@ -11,7 +11,7 @@
 //! mark, the "playground" title, and the brightness/reduce-motion/animations
 //! toggles folded into its trailing actions — over a
 //! [`pattern_switcher`](frust::motion::switcher::pattern_switcher) hosting one
-//! of eleven section pages in a [`scroll_view`], the whole column inside one
+//! of twelve section pages in a [`scroll_view`], the whole column inside one
 //! [`safe_area`] and under a toast overlay), and the [`frust::app!`] entry
 //! binding all three platforms. The section pages themselves live in
 //! [`pages`] — each a `page(&PlaygroundState) -> AnyView<PlaygroundState>`
@@ -19,7 +19,7 @@
 //!
 //! # Responsive navigation
 //!
-//! [`pages::SECTION_LABELS`] carries eleven destinations now — too many for a
+//! [`pages::SECTION_LABELS`] carries twelve destinations now — too many for a
 //! single bottom nav bar to divide evenly without its labels wrapping (see
 //! that constant's own doc). [`home_page`] picks between two shapes, the same
 //! `use_context::<WindowMetrics>()` / named-breakpoint idiom
@@ -39,11 +39,11 @@
 //!
 //! [`bottom_nav_bar`] still rides the existing
 //! [`navigation_bar`](frust_material::navigation_bar)/[`nav_item`](frust_material::nav_item)
-//! chrome (neither needs an icon, so growing to 11 labels costs nothing
+//! chrome (neither needs an icon, so growing to 12 labels costs nothing
 //! there); [`side_rail`] and [`more_overlay`] are hand-rolled from baseline
 //! [`button`]s instead of `frust_material::navigation_rail`/
 //! `navigation_drawer` — those destinations carry a *mandatory* icon per
-//! entry, and playground names no icon set for its eleven sections (the
+//! entry, and playground names no icon set for its twelve sections (the
 //! module docs' design-neutral charter: "Nothing in this app demonstrates a
 //! design language"). [`pages::SECTION_LABELS`] stays the single source of
 //! truth every shape reads from.
@@ -97,9 +97,10 @@ use frust::motion::switcher::pattern_switcher;
 use frust::{
     Align, Alignment, AnyView, Axis, Brightness, ButtonStyle, Color, Component, DeepLink,
     EdgeInsets, FlexView, Get, GetUntracked, MotionScheme, NavigatorController, Padding,
-    PageTransition, PanZoomController, PanZoomTransform, RwSignal, Set, SizedBox, Stack, Theme,
-    TransitionSpec, Update, View, WindowMetrics, any, button, container, deep_links, flexible,
-    icon, icons, inflexible, navigator, safe_area, scroll_view, set_app_theme, text, use_context,
+    PageTransition, PanZoomController, PanZoomTransform, RwSignal, ScrollController, ScrollInfo,
+    ScrollSubscription, Set, SizedBox, Stack, Theme, TransitionSpec, Update, View, WindowMetrics,
+    any, button, container, deep_links, flexible, icon, icons, inflexible, navigator, safe_area,
+    scroll_view, set_app_theme, text, use_context,
 };
 use frust_material::{app_bar, nav_item, navigation_bar};
 
@@ -364,12 +365,39 @@ pub struct PlaygroundState {
     /// `NavigatorController`, not a reactive signal (a controller command is
     /// recorded, not tracked — see `frust::PanZoomController`'s own doc).
     pub graph_controller: PanZoomController,
+    /// The "Scroll" section's `ScrollController` handle, attached to its
+    /// keyed `ListView` — the same clone-shares-one-`Rc` shape
+    /// [`PlaygroundState::graph_controller`] uses, so the section's buttons
+    /// (built fresh every rebuild) still drive the one attached surface.
+    pub scroll_controller: ScrollController,
+    /// The "Scroll" section's live offset/max-offset readout, published by
+    /// [`PlaygroundState::scroll_controller`]'s `on_change` listener
+    /// (installed once in [`PlaygroundState::new`]) rather than read
+    /// directly in `build` — that listener runs with no `&mut State` (it may
+    /// fire during layout or paint), so it writes this signal instead of
+    /// mutating state directly, and the page's own readout just reads it
+    /// like any other signal.
+    pub scroll_readout: RwSignal<(f64, f64)>,
+    /// Keeps [`PlaygroundState::scroll_controller`]'s `on_change` listener
+    /// subscribed for the app's lifetime; dropping it would unsubscribe (see
+    /// [`ScrollSubscription`]'s own doc). `Rc`-wrapped, not bare, for the
+    /// same reason as [`PlaygroundState::auto_run_db_smoke`]:
+    /// [`PlaygroundState`] is cloned by value (`#[derive(Clone)]` above), and
+    /// a bare [`ScrollSubscription`] isn't `Clone` at all — `Rc` is what
+    /// lets every clone of the state share the one subscription without
+    /// requiring it to be.
+    pub scroll_subscription: Rc<ScrollSubscription>,
 }
 
 impl PlaygroundState {
     /// Construct the initial state: section 0, dark, motion on, an empty toast
     /// queue, and a fresh navigator controller.
     pub fn new() -> Self {
+        let scroll_controller = ScrollController::new();
+        let scroll_readout: RwSignal<(f64, f64)> = RwSignal::new((0.0, 0.0));
+        let scroll_subscription = Rc::new(scroll_controller.on_change(move |info: ScrollInfo| {
+            scroll_readout.set((info.offset, info.max_offset));
+        }));
         PlaygroundState {
             brightness: RwSignal::new(Brightness::Dark),
             reduce_motion: RwSignal::new(false),
@@ -384,6 +412,9 @@ impl PlaygroundState {
             graph_selected: RwSignal::new(None),
             graph_transform: RwSignal::new(PanZoomTransform::IDENTITY),
             graph_controller: PanZoomController::new(),
+            scroll_controller,
+            scroll_readout,
+            scroll_subscription,
         }
     }
 }

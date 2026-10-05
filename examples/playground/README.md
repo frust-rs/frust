@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between eleven sections
+`pattern_switcher`-hosted section body, selecting between twelve sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all eleven
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all twelve
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -109,6 +109,16 @@ The sections, in order:
     `on_pointer` rather than `on_tap`, since only the raw event carries the
     tap's position; a readout below shows the live scale/offset, and "Fit"
     drives the attached `PanZoomController` to frame the whole graph.
+12. **Scroll** — a `ScrollController` bound to a keyed, variable-extent
+    `ListView` (~300 rows, every 7th one taller than the rest): "Jump to 0" /
+    "Jump to end" move instantly, "Animate to 50%" eases to half of the
+    current max offset, and "Item #150 (Start)" / "Item #42 (Center)" /
+    "Animated #280 (End)" scroll straight to a named row by key (the last one
+    animated). A live offset/max-offset readout below the list updates on
+    every drag, fling, or programmatic move via `ScrollController::on_change`.
+    Dragging the list while an animated move is in flight interrupts it —
+    user input always wins; under reduce-motion (or with animations off)
+    every animated move collapses to an instant jump instead.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -169,6 +179,8 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Touch pinch zoom + drag pan | Pixel 5 (redfin), Android 14, 2026-10-02 | PASS (all legs below) |
 | Touch pinch zoom + drag pan, plus tap/scroll/focus regression | iPhone SE (iPhone12,8), iOS 26.7, 2026-10-02 | PASS (all legs below; human-run) |
 | Same legs, single contact only | iOS Simulator (iPhone 17), iOS 26.2, 2026-10-02 | PASS except pinch: NOT RUN |
+| Scroll: every button (Jump to 0 / Jump to end / Animate to 50% / #150 Start / #42 Center / Animated #280 End) | Linux (local) | OWED |
+| Scroll: a touch drag mid-`animate_to`/animated `scroll_to_item` interrupts the move | Android device | OWED |
 
 iOS legs (Phase A touch-ABI gate, build at `8a263d79`). The Simulator legs were
 driven by `idb` with screenshots. Pinch could not run there: Xcode 27 ships no
