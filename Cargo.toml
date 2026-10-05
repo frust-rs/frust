@@ -3,13 +3,9 @@ resolver = "3"
 # Members are `crates/*`, `examples/*` and the explicitly listed `plugins/*` crates: no glob reaches
 # `plugins/` (or nested `plugins/i18n/macros`), and `benchmarks/` sits outside every member glob.
 members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/oauth-native", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
-# Excluded standalone workspaces (own [workspace] + Cargo.lock; gate each from its own directory):
-# - huddle, plugins/clean-signals-frust: their crates.io `clean-signals` requirement must never
-#   enter the root graph (docs/DEVELOPMENT.md § Version-Pin Policy).
-# - shadertoy, glyph-catalog, playground, material3-demo, native-widgets-demo: full `frust create`
-#   scaffolds whose own [profile.*] blocks only take effect at a workspace root.
-# - design-system-sample proves an out-of-tree build against the facade alone (own `target/`);
-#   web-gallery and web-spike are wasm-only standalone apps.
+# Standalone workspaces (gate each from its dir). huddle, plugins/clean-signals-frust: keep crates.io clean-signals
+# out of the root graph (Version-Pin Policy). shadertoy, glyph-catalog, playground, material3-demo, native-widgets-demo:
+# `frust create` scaffolds ([profile.*] needs a root). design-system-sample: facade-only build. web-*: wasm-only.
 exclude = ["examples/huddle", "examples/shadertoy", "examples/web-spike", "examples/web-gallery", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "examples/native-widgets-demo", "plugins/clean-signals-frust"]
 
 [workspace.package]
@@ -23,7 +19,6 @@ keywords = ["gui", "ui", "mobile", "declarative", "wgpu"]
 categories = ["gui"]
 
 [workspace.dependencies]
-# rendering stack — pins are LAW (do not bump independently)
 # wgpu 30.0.1 is LAW (Version-Pin Policy; row owned by docs/RENDER_DEVELOPMENT.md). Per-OS backends are
 # added per target in crates/frust-gpu/Cargo.toml: never re-add vulkan/metal/dx12 here (re-unions them
 # on every target). gles/webgpu/webgl are deliberately absent from native graphs (RENDER_DEVELOPMENT.md).
@@ -258,12 +253,9 @@ strip = "symbols"
 panic = "abort"
 
 # BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
-# `opt-level = "z"` only for crates cold on the per-frame path (shader translation/GPU setup, one-shot
-# parsing/decode). Kept at 3 (per-frame): frust-engine, frust-gpu, frust-render, frust-text, harfrust,
-# skrifa, read-fonts, zune-jpeg, parley; wgpu-core/-types/-hal, tokio, accesskit* and jni are deliberate
-# exclusions, not oversights (docs/DEVELOPMENT.md "Release-profile hardening", benchmarks/RESULTS.md).
-# Hand-synced across the nine Android-building manifests crates/frust-cli/tests/profile_sync.rs lists
-# (wasm-only examples/web-gallery deliberately carries none). `[profile.profile]` inherits it.
+# "z" only for crates cold on the per-frame path (numbers: docs/DEVELOPMENT.md). Kept at 3 by design:
+# frust-{engine,gpu,render,text}, harfrust, skrifa, read-fonts, zune-jpeg, parley, wgpu-{core,types,hal},
+# tokio, accesskit*, jni. Hand-synced across the nine manifests crates/frust-cli/tests/profile_sync.rs lists.
 
 [profile.release.package.naga]
 opt-level = "z"

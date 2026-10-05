@@ -1,10 +1,6 @@
-# Android link flags on all four Android targets, picked up by cargo, cargo-ndk and Gradle's
-# cargoNdkBuild alike: `--pack-dyn-relocs=android` (API 23+; RELR would need API 28, above minSdk 26)
-# and `--icf=all` (safe because Frust never compares fn-pointer/vtable identity). Numbers:
-# docs/DEVELOPMENT.md "Android link flags". Cargo merges ancestor config files, so this one file
-# governs every nested workspace built in-tree. The app template keeps its own copy for scaffolds
-# that leave the checkout; crates/frust-cli/tests/profile_sync.rs compares its [target.*] tables with
-# these, and this root file must never gain the template's `[build]` table (target/ must not move).
+# Android link flags (cargo, cargo-ndk, Gradle): --pack-dyn-relocs=android (API 23+; RELR needs 28 > minSdk 26)
+# and --icf=all (Frust never compares fn-pointer/vtable identity). Numbers: docs/DEVELOPMENT.md "Android link flags".
+# Governs nested in-tree workspaces; crates/frust-cli/tests/profile_sync.rs diffs these with the template's; no [build].
 
 [target.aarch64-linux-android]
 rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android", "-C", "link-arg=-Wl,--icf=all"]
