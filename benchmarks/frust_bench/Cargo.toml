@@ -1,10 +1,5 @@
-# Standalone package: excluded from the root workspace (see root Cargo.toml's
-# `[workspace] exclude`) so the generated Android/iOS projects resolve a
-# project-local `target/` dir and the `[profile.*]` blocks below take effect
-# (they only apply in a workspace root) — the same shape as
-# `examples/huddle`. The root workspace's globs
-# (`crates/*`, `examples/*`, `plugins/shared-preferences`) never reach
-# `benchmarks/`, so no root-manifest `exclude` entry is required for it.
+# Standalone workspace root (outside the root workspace's member globs, so no `exclude` entry):
+# the generated Android/iOS projects get a project-local `target/` and the `[profile.*]` blocks apply.
 [workspace]
 
 [package]
@@ -13,91 +8,36 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# `cdylib` is the shared library Android's `System.loadLibrary` loads (the JNI
-# bridge); `staticlib` is the archive the iOS Xcode target links (the C-ABI
-# `frust_*` bridge); `rlib` keeps the crate usable as a normal Rust
-# library for the desktop `main.rs` preview binary.
+# `cdylib` for Android's `System.loadLibrary` (JNI bridge), `staticlib` for the iOS Xcode target
+# (C-ABI bridge), `rlib` for the desktop `main.rs` preview binary.
 [lib]
 name = "frustbench"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-# NOTE: temporary path dependencies pointing at the Frust repo checkout that
-# owns this benchmark (the `frust_path` mechanism is explicitly
-# temporary). Once Frust crates are published, these become version deps.
-#
-# `frust` is now the ONLY framework line this bench ships in production. Every
-# scenario's hand-rolled `View`/`Widget` pair (S1's `BubbleChart`, S2/S5's
-# scripted virtualized lists, S4/S6's paint-driven animators, ...) reaches
-# `BoxConstraints`/`LayoutCtx`/`PaintCtx`/`View`/`Widget`/... through
-# `frust::authoring`, text shaping through `frust::authoring::text` (the
-# `TextContext` the shell threads through `LayoutCtx`), and the handful of
-# geometry/color types `authoring` doesn't lift by name (e.g. S1's
-# `Circle`/`Gradient`/`DynamicColor`) through the `frust::kurbo`/`frust::peniko`
-# long-tail valves — nothing production pins a framework internal any more.
+# Path deps into the owning Frust checkout (the temporary `frust_path` mechanism).
 # The facade package is named `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
 frust = { package = "frust-ui", path = "../../crates/frust" }
 
-# frust-material: the one Material 3 dark baseline `BenchApp::init` forces
-# app-wide (matching S1's `0xFF0D1421` canvas) — no other Material/Cupertino/
-# Glyph widget is used anywhere in this bench. The catalog feature graph the
-# baseline used to reach through `frust` directly was dissolved (see
-# docs/DEVELOPMENT.md's Version-Pin Policy); the design-system plugin crates
-# carry it now.
+# Only for the Material 3 dark baseline `BenchApp::init` forces app-wide.
 frust-material = { path = "../../plugins/material" }
 
-# `frust-shell-common::perf`: the scenario-marker API
-# (`mark_scenario_start`/`mark_scenario_end`) the scenario driver brackets
-# each scenario window with (`docs/ARCHITECTURE.md`'s `FrameStats`/
-# `StartupSpans` row). The facade does not re-export `perf`, so this benchmark
-# depends on the shell-common crate directly — it is platform-agnostic
-# (core+scene+text+theme, no jni/ndk/winit) and compiles on every target, so
-# it is safe as an unconditional dependency here.
+# The scenario-marker API (`mark_scenario_start`/`_end`): the facade does not re-export `perf`,
+# and the crate is platform-agnostic, so it is safe unconditionally.
 frust-shell-common = { path = "../../crates/frust-shell-common" }
 
-# `frust-shared-preferences`: used by the S8 plugin-overhead scenario
-# (`s8_prefs.rs`) without needing any change to this manifest. A
-# platform plugin an app adds directly (the Flutter-pubspec model — the facade
-# never re-exports a plugin; see `docs/CODE_STANDARDS.md`'s Plugin
-# Conventions).
 frust-shared-preferences = { path = "../../plugins/shared-preferences" }
 
-# `frust-database`: used by the DB op-latency scenarios (`d1_db_write.rs`,
-# `d2_db_read.rs` — PROTOCOL.md §9). Same directly-added-plugin model as
-# `frust-shared-preferences` above; default features (`engine-sqlite`) are
-# enough today — the crate's own default-engine resolution is what lets a
-# future `engine-turso` column reach these scenarios with no scenario-code
-# change (see `plugins/database/src/lib.rs`'s module doc, *Engines*).
-#
-# Optional, behind the default-ON `db` feature below: it statically links a
-# bundled SQLite (~1 MB of C in the release `libfrustbench.so`) that only the
-# two `d*` scenarios ever call, so the S1–S8 frame-class matrix builds it out
-# with `--no-default-features`. Default-on keeps every existing invocation
-# (`frust run`, `frust build`, `cargo test`, the harness) unchanged.
+# Optional behind the default-ON `db` feature: its bundled SQLite serves only the `d1`/`d2`
+# scenarios (`benchmarks/PROTOCOL.md` §9); size cost: docs/RENDER_DEVELOPMENT.md.
 frust-database = { path = "../../plugins/database", optional = true }
 
-# `log` facade dependency, present only so the release-only `lean` feature
-# below can raise the compiled-in log ceiling (release-lean build mode).
-# `frust-perf` instrumentation rides `log::info!`, so the ceiling MUST be a
-# release-only opt-in and never an always-on `features = [...]` line:
-# `release_max_level_*` keys off `debug_assertions`, which the
-# `[profile.profile]` inherits-release profile has OFF, so an unconditional
-# ceiling would also silence PROFILE-mode perf output — exactly the mode that
-# must keep it. The `frust` CLI enables `--features lean` for `--release`
-# builds only (riding the same features plumbing that turns on
-# `frust/perf-trace` for debug/profile), so release strips stray info/debug
-# log lines while keeping warn/error crash diagnostics, and profile keeps its
-# `frust-perf` output. Mirrors `crates/frust-drive/templates/app/Cargo.toml.tmpl`'s block verbatim.
+# Present only for the `lean` feature's ceiling, which must stay release-only: `frust-perf` rides
+# `log::info!`, and an always-on ceiling would also silence profile-mode perf output.
 log = "0.4"
 
-# Test-harness-only, NOT an escape hatch: `tests/driver.rs`'s headless tests
-# drive Frust's `RenderRoot` directly — the desktop shell's own
-# rebuild/layout/paint seam, no GPU, no window, the same harness shape as
-# `examples/huddle`'s own headless `tests/*.rs`. `RenderRoot` is deliberately
-# not in `frust::authoring` (it is shell-owned, not something an app
-# constructs), so the harness still names `frust-core`/`frust-scene`/
-# `frust-text`/`kurbo`/`peniko` the long way. Production code (every
-# `src/scenarios/*.rs` file) names none of them any more.
+# Test harness only, NOT an escape hatch: `tests/driver.rs` drives the shell-owned `RenderRoot`
+# (not in `frust::authoring`), so it names these crates directly; production code names none.
 [dev-dependencies]
 frust-core = { path = "../../crates/frust-core" }
 frust-text = { path = "../../crates/frust-text" }
@@ -107,44 +47,21 @@ frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }
 reactive_graph = "0.2"
 
-# `--release` mode: fully optimized, stripped, single-panic-path binary for
-# store distribution. Hand-synced with Frust's own root
-# `Cargo.toml` and `examples/huddle/Cargo.toml` (see `docs/DEVELOPMENT.md`'s
-# Version-Pin Policy hand-sync rule) — see either of those manifests for the
-# full measured rationale behind `lto = "fat"` + `codegen-units = 1`.
 [features]
-# `db` ON by default so every existing invocation — `frust run`, `frust build
-# apk/ios`, `cargo test`, the benchmark harness — keeps building all ten
-# scenarios with no new flag. Only a deliberate `--no-default-features` build
-# drops it.
+# On by default so `frust run`/`frust build`/`cargo test`/the harness keep all ten scenarios.
 default = ["db"]
 
-# The DB op-latency class (`d1`/`d2`, PROTOCOL.md §9): the `frust-database`
-# dependency, its bundled SQLite, and the two scenario modules + their
-# `SCENARIOS` registry entries (`src/scenarios/mod.rs`).
-#
-# Turning it OFF yields the S1–S8 frame-class app used for the app-size
-# matrix. There is no CLI route to a no-`db` APK today: `frust build`'s
-# Gradle plumbing forwards `--features` only (`-Pfrust.cargoFeatures`,
-# base64) and has no `--no-default-features` knob, so build the S1–S8 arm
-# with cargo-ndk directly:
-#
-#   cd benchmarks/frust_bench
-#   cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs \
-#       build --release --no-default-features --features lean
-#
-# and, for a packaged APK, follow it with
-# `./android/gradlew -p android assembleRelease -x cargoNdkBuild`, which
-# packages the jniLibs that command just wrote instead of rebuilding them.
+# Off = the S1–S8 frame-class app-size arm. `frust build` cannot pass `--no-default-features`, so
+# from this dir: `cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build --release --no-default-features --features lean`,
+# then `./android/gradlew -p android assembleRelease -x cargoNdkBuild` packages an APK from it.
 db = ["dep:frust-database"]
 
-# Release-lean log ceiling — see the `log` dependency above for why this is a
-# release-only opt-in rather than an unconditional manifest feature. The CLI
-# passes `--features lean` for `--release` builds; debug/profile builds omit
-# it (and enable `frust/perf-trace` instead). Mirrors
+# Release-only log ceiling, passed by the CLI for `--release` (see the `log` dependency). Mirrors
 # `crates/frust-drive/templates/app/Cargo.toml.tmpl`'s block verbatim.
 lean = ["log/release_max_level_warn"]
 
+# Hand-synced with the root `Cargo.toml` (docs/DEVELOPMENT.md § Version-Pin Policy);
+# `crates/frust-cli/tests/profile_sync.rs` is the tripwire.
 [profile.release]
 lto = "fat"
 codegen-units = 1
@@ -152,11 +69,8 @@ strip = "symbols"
 panic = "abort"
 
 # BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
-# Release cold-set `opt-level = "z"` — shrink crates that are cold on the
-# per-frame path (shader translation, one-shot parsing/decode) while every
-# per-frame crate stays at 3. Hand-synced byte-for-byte with Frust's own root
-# `Cargo.toml`; see it for the full measured rationale and the kept-at-3
-# list. `crates/frust-cli/tests/profile_sync.rs` is the tripwire.
+# Release `opt-level = "z"` for crates cold on the per-frame path. Hand-synced with the root
+# `Cargo.toml` (rationale and kept-at-3 list there); profile_sync.rs is the tripwire.
 
 [profile.release.package.naga]
 opt-level = "z"
@@ -189,24 +103,15 @@ opt-level = "z"
 opt-level = "z"
 # END release cold-set opt-level overrides
 
-# `--profile` mode: release performance with symbols + tracing kept for
-# on-device performance measurement. Artifacts land in
-# `target/<triple>/profile/` (custom-profile name, verified legal). This is
-# the profile the benchmark harness builds each bench run with,
-# since `FRUST_TRACE`/`FRUST_TRACE_RAW`'s log lines must survive.
+# `--profile` mode: the harness builds every bench run with it, since `FRUST_TRACE`/
+# `FRUST_TRACE_RAW`'s log lines and symbols must survive.
 [profile.profile]
 inherits = "release"
 debug = true
 strip = "none"
 
-# `[profile.dev]` per-package overrides for the render/shader-compile stack:
-# wgpu/naga's shader-pipeline translation runs at
-# `opt-level = 0` by default, slow enough on a physical iOS device that the OS
-# SIGKILLs a debug `frust run` before the synchronous launch-time shader
-# compile finishes. This app's own code stays at the default dev opt-level
-# (fast incremental rebuilds) — only these dependencies are bumped. See
-# Frust's own root `Cargo.toml` for the full rationale (the same override,
-# kept in sync).
+# At dev `opt-level = 0` the shader-compile stack is slow enough that iOS SIGKILLs a debug
+# `frust run` at launch. Hand-synced with the root `Cargo.toml` (rationale there).
 [profile.dev.package.wgpu]
 opt-level = 2
 
@@ -219,11 +124,7 @@ opt-level = 2
 [profile.dev.package.naga]
 opt-level = 2
 
-# Debug dep opt widening: non-workspace-member dependencies
-# build at `opt-level = 1` in debug (Cargo's `"*"` package selector excludes
-# workspace members and the profile's own package); this app's own code stays
-# at the fast default dev opt-level, and the named shader-stack overrides
-# above (opt-level 2) still win over this wildcard. Hand-synced with Frust's
-# own root `Cargo.toml` (see it for the full rationale).
+# `"*"` excludes workspace members, and the named overrides above still win. Hand-synced
+# with the root `Cargo.toml` (rationale there).
 [profile.dev.package."*"]
 opt-level = 1

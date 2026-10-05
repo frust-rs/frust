@@ -1,20 +1,5 @@
-# Standalone package (own `[workspace]` root, own `Cargo.lock`) — the
-# Phase-1 gate vehicle for the web-shell plan (w1-06). The root `Cargo.toml`'s
-# `[workspace]` `exclude` list already carries `examples/web-gallery`
-# (present on this task's own base commit, alongside `examples/web-spike`),
-# so the root `examples/*` glob never absorbs it. Same shape as
-# `examples/web-spike`/`examples/huddle`: a `wasm32`-only browser app has no
-# business sharing the native workspace's lockfile or `target/` dir.
-#
-# Unlike `web-spike` (which depends on the render-engine crates directly,
-# bypassing the facade so it could probe `frust-gpu`'s seams one at a time),
-# this is an ordinary Frust APP: authored through the `frust` facade's
-# `web_app!` entry point (w1-05), the same vocabulary a desktop/Android/iOS
-# app author uses. It renders the shared widget/page case registry
-# (`frust-gallery`, `examples/gallery` — a ROOT-workspace member, reached here
-# as an ordinary path dependency) so the whole 107-case registry — including
-# the five design-system plugins — is proven end to end for `wasm32` in one
-# binary, not just the five render-engine crates `web-spike` checked.
+# Standalone wasm32-only workspace (own `[workspace]`, `Cargo.lock`, `target/`; in the root
+# `exclude` list): a browser app has no business in the native workspace's lockfile or target dir.
 [workspace]
 
 [package]
@@ -24,155 +9,39 @@ edition = "2024"
 publish = false
 
 [dependencies]
-# The facade: every widget/theme/reactive/app-entry vocabulary this crate
-# uses (`web_app!`, `Component`/`component`, the widget set, `RwSignal`,
-# `set_default_theme`, `spawn_local`, ...) comes from here, never from a
-# `frust-*` crate named directly — the same discipline every other Frust app
-# in this repo follows.
 # The facade package is named `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
 frust = { package = "frust-ui", path = "../../crates/frust" }
-# The shared case registry (`cases()`/`find(slug)`/`theme(design, variant)`)
-# this app renders. A ROOT-workspace member (see its own `Cargo.toml`
-# header), reached here the same way `examples/huddle`'s standalone workspace
-# reaches its own root-adjacent path deps: a plain relative path, no version
-# requirement to keep in lockstep. Its own `wasm32` compilability rides on
-# the same render-engine graph `web-spike` proved (`frust-gallery`'s
-# `Cargo.toml` header: "compiling the crate for wasm32 ... depends on that
-# graph being made wasm-clean" — w0-02 already established that; this crate
-# is the first thing to actually build `frust-gallery` itself for the
-# target).
 frust-gallery = { path = "../gallery" }
-# The three design-system plugins whose bundled faces this binary registers
-# at startup — see `src/main.rs`'s `register_design_system_fonts` for why all
-# three, unconditionally, and why the other two are missing here.
-#
-# These rows add NO crate: `frust-gallery` above already depends on all five
-# design systems, so all three are in this workspace's graph and lockfile
-# already (the lockfile diff that added them is three lines, no new
-# package). What a row buys is the ability to NAME the plugin here, since
-# Rust resolves `frust_glyph::font_data` only through a direct dependency
-# edge.
-#
-# The alternative — a second `include_bytes!` of the same TTFs, the shape
-# `LABEL_FONT_BYTES` uses — would NOT cost extra bytes, and an earlier pass
-# of this comment was wrong to claim it adds ~2.5 MB of duplicate payload.
-# Identical `include_bytes!` constants merge: `LABEL_FONT_BYTES` and
-# `plugins/shadcn`'s own copy of InterVariable.ttf are two sites and exactly
-# one copy in the artifact (byte-probed; see `src/main.rs`'s note in
-# `AppState::new`), so that route would land on the same ~1.22 MB the
-# registration itself costs, no worse. The reasons to prefer these rows are
-# not size: a plugin's `font_data()` IS the list of faces it bundles, so it
-# cannot drift out of step the way a hand-copied set of paths into another
-# crate's private `fonts/` directory would, and the licence/provenance each
-# plugin records stays with the crate that owns the bytes.
-#
-# The rows themselves cost no bytes either — but do not read that as the
-# whole registration being free. Reachability, not the manifest, decides
-# what the linker keeps: before `register_design_system_fonts` existed, only
-# the faces each plugin's `native_typefaces` names survived into the
-# artifact, and calling `font_data()` brings the other seven back at
-# +1,221,759 B (`wasm-opt` stage) / +560,157 B gzipped. README.md's `wasm32`
-# text section has the measured before/after.
-#
-# `frust-material` and `frust-cupertino` are deliberately absent, each for
-# its own reason. Material's type scale contains no `Monospace` slot
-# whatsoever (its one stack is `[Roboto Flex] + SansSerif`, which the web
-# shell's `install_default_fonts` already maps), so it is not exposed to the
-# defect this fixes — and it could not be registered even if it were:
-# `plugins/material/src/lib.rs`'s `mod tokens;` is private and the crate-root
-# re-export list omits `font_data`, so its bundled bytes have no public
-# accessor, unlike the three below. Cupertino DOES declare a font family —
-# `FontFamily::stack(["SF Pro Display" | "SF Pro Text", "SF Pro"])` on every
-# type role (`plugins/cupertino/src/tokens.rs`) — but bundles no font files
-# at all: no `fonts/` directory, no `include_bytes!`, no `font_data`. There
-# is nothing to register, and its unresolved named stack falls through to
-# parley's own fallback, so its cases render regardless.
+# Named so `src/main.rs`'s `register_design_system_fonts` can reach each `font_data()`; they add
+# no crate (`frust-gallery` already depends on them). Byte cost: README.md's `wasm32` section.
 frust-glyph = { path = "../../plugins/glyph" }
 frust-shadcn = { path = "../../plugins/shadcn" }
 frust-beui = { path = "../../plugins/beui" }
+# `frust-material` and `frust-cupertino` are deliberately absent: Material exposes no public
+# `font_data`, and Cupertino bundles no font files, so neither has faces to register.
 
 # --- wasm32-only rows -------------------------------------------------------
-#
-# Target-gated so a native `cargo check` of this crate (not part of any
-# verify gate here, but harmless to keep working) resolves nothing below.
-# Version-Pin Policy (root CLAUDE.md's Agent Guardrails / docs/DEVELOPMENT.md
-# § Version-Pin Policy): every row here is either the exact version
-# `examples/web-spike/Cargo.toml` already pinned and documented at w0-02/w0-03
-# (this host's `wasm-bindgen-cli` is 0.2.128, which forces the `=0.2.128`
-# crate pin and its lockstep `js-sys`/`web-sys` 0.3.105 / `wasm-bindgen-futures`
-# 0.4.78 partners — see that manifest's own comments for the mechanical
-# derivation) or a plain path dependency already declared above. Nothing here
-# is a new *workspace* pin — this is a standalone workspace and the root
-# graph never resolves it.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# `=0.2.128`, matching the host `wasm-bindgen-cli` exactly (a schema-version
-# contract stricter than semver — see `web-spike/Cargo.toml`'s identical row
-# for the full derivation). Reached indirectly already (through `frust` ->
-# `frust-shell-web`'s own wasm32 row), but declared directly here too because
-# this crate's own `src/main.rs` names `wasm_bindgen`-adjacent glue itself
-# (`web_sys`/`js_sys` calls run through `wasm-bindgen`'s ABI) and because a
-# direct dependency edge is what lets Cargo unify the whole graph onto one
-# identity rather than trusting a transitive default to land on it.
+# Exact pin = the host `wasm-bindgen-cli` (a schema contract, not semver); `web-sys`/`js-sys`
+# 0.3.105 and `wasm-bindgen-futures` 0.4.78 are forced by it. Lockstep with
+# `examples/web-spike/Cargo.toml`, which derives it (docs/DEVELOPMENT.md § Version-Pin Policy).
 wasm-bindgen = "=0.2.128"
-# The `?case=`/`?log=` query-string reader and the ticking-counter demo's
-# `setTimeout` wait both need `window.location` and a timer — feature list
-# trimmed to exactly those three DOM surfaces, mirroring
-# `web-spike/Cargo.toml`'s "name exactly what is called" discipline. No
-# `HtmlCanvasElement`/`Document`/`console`: this app never touches the canvas
-# directly (the shell adopts/creates it — see `crates/frust-shell-web`) and
-# never logs straight to `console` (logging goes through
-# `frust_shell_web::logging`, reached via the `frust-shell-web` row below).
+# Exactly the DOM surfaces `src/main.rs` reads; the shell owns the canvas and console logging.
 web-sys = { version = "0.3.105", features = ["Window", "Location", "UrlSearchParams"] }
-# `js_sys::Promise`, the object a `setTimeout` callback resolves — the same
-# single-purpose row `web-spike/Cargo.toml` carries, for the identical reason
-# (there is no `std::thread::sleep` on this target).
 js-sys = "0.3.105"
-# `JsFuture`: turns the `Promise` above into something `async`/`.await`-able,
-# for the ticking-counter demo's one-second wait loop (proves the
-# "signal-driven update with ZERO input events" Phase-1 milestone — a real
-# `frust::RwSignal` write on a timer, no pointer/key event involved). Version
-# copied verbatim from `web-spike/Cargo.toml`'s identical row (its own
-# comment derives why `wasm-bindgen-futures` 0.4.78, not the root
-# workspace's 0.4.77, is what a `=0.2.128` `wasm-bindgen` pin forces).
 wasm-bindgen-futures = "0.4.78"
-# The browser console log sink + `?log=` query-parameter parser
-# (`level_from_query`/`install`/`DEFAULT_LEVEL`) — a direct path edge to the
-# shell crate this app is otherwise reached through only via the facade's
-# hidden `__frust_shell_web` re-export, needed here because `web_app!`'s
-# generated bootstrap installs at a fixed `Warn` ceiling and this app raises
-# it explicitly from `?log=` before `run_app` starts (see `src/main.rs`'s
-# `raise_log_level_from_query`). Same crate + version the facade itself
-# resolves (`frust`'s own `wasm32` dependency row), so this is not a second
-# `frust-shell-web` identity.
+# Direct edge so `src/main.rs` can raise the log ceiling from `?log=` before `run_app`
+# (`web_app!` installs a fixed `Warn`); the same crate the facade resolves, not a second identity.
 frust-shell-web = { path = "../../crates/frust-shell-web" }
 
-# --- release profile (w0-05 precedent) --------------------------------------
-#
-# This crate is a STANDALONE workspace (its own `[workspace]` root above), so
-# the root `Cargo.toml`'s own `[profile.release]` never applies here — copied
-# verbatim from that root profile and from `examples/web-spike/Cargo.toml`'s
-# identical hand-synced copy (both read-only references for this task), not a
-# new choice. Without this a plain `cargo build --release` in this directory
-# falls back to Cargo's own defaults (no LTO, cgu=16, no strip), which would
-# make the shipped `.wasm`'s size unrepresentative of what a real Frust app
-# ships — the README records the measured size against exactly this profile.
+# --- release profile --------------------------------------------------------
+# Standalone, so the root `[profile.release]` never applies: a hand-synced copy of it, checked
+# by `crates/frust-cli/tests/profile_sync.rs`.
 [profile.release]
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
-# NO `[profile.release.package.*]` overrides here, deliberately. The eight
-# manifests that build an ANDROID artifact (Frust's root `Cargo.toml`,
-# `crates/frust-drive/templates/app/Cargo.toml.tmpl`, `examples/huddle`, `examples/glyph-catalog`,
-# `examples/material3-demo`, `examples/playground`, `examples/shadertoy` and
-# `benchmarks/frust_bench`) additionally carry a hand-synced cold-set
-# `opt-level = "z"` block — crates that do no per-frame work, shrunk for
-# footprint. That set was chosen against measured ARM64 device numbers; the
-# wasm target has no equivalent measurement, and a `.wasm`'s size/speed
-# tradeoff is not the same one (no ELF, a different codegen backend, and
-# browser-side streaming compilation). So this manifest mirrors
-# `[profile.release]` ONLY, and `crates/frust-cli/tests/profile_sync.rs`
-# asserts exactly that: web-gallery is in the release-block sync list and is
-# deliberately NOT in the Android package-override list. Measure before
-# copying the block here.
+# NO `[profile.release.package.*]` cold-set overrides, deliberately: that set was measured on ARM64
+# Android and wasm has no equivalent measurement. profile_sync.rs asserts the absence.
