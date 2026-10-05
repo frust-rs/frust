@@ -11,9 +11,8 @@ identifier = "{{ desktop_identifier }}"
 # Source for every platform icon; at least 512x512.
 icon = "assets/logo.png"
 
-# macOS-only. `minimum-system-version` only feeds a generated `Info.plist`; this
-# project ships its own, so edit `LSMinimumSystemVersion` there.
-# `notarize` uploads the signed app to Apple using APPLE_* env credentials.
+# macOS-only. `minimum-system-version` only feeds a generated `Info.plist` (this project ships its
+# own: edit `LSMinimumSystemVersion` there); `notarize` uploads the signed app with APPLE_* env credentials.
 # [macos]
 # minimum-system-version = "{{ macos_minimum_system_version }}"
 # signing-identity = "Developer ID Application: Example Org (TEAMID1234)"
@@ -55,9 +54,8 @@ host = "{{ deeplink_host }}"
 # dev = { app-id-suffix = ".dev" }
 # prod = {}
 
-# Android release signing reads gitignored `android/key.properties` (storePassword, keyPassword,
-# keyAlias, storeFile), falling back per value to `ANDROID_*` env vars; `frust build --release` checks it.
-# Parsed by Frust; set it when signing material is not at the defaults:
+# Android release signing reads gitignored `android/key.properties` (storePassword, keyPassword, keyAlias,
+# storeFile), falling back per value to `ANDROID_*` env vars. Parsed by Frust; set only to change the defaults.
 # [signing]
 # # Properties file path, relative to `android/`. Default: "key.properties".
 # # Key prefix for a file holding several key sets. Default: none.
