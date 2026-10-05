@@ -2387,7 +2387,14 @@ impl ListViewWidget {
     /// installed by [`ListViewWidget::apply_animate_to`] after the same
     /// tear-down — so fling, settle and simulation are never live at once and
     /// [`ScrollController::is_animating`] cannot outlive the tween it
-    /// reports. Mirrors `ScrollWidget::stop_ballistic`.
+    /// reports *while this widget stays current on the handle*. A tween
+    /// whose surface is dropped, taken over, or rebound to a different
+    /// handle mid-flight never calls this — that case is reconciled on the
+    /// handle's own side instead ([`ScrollController::bind`] and
+    /// `impl Drop for ScrollBinding` in `scroll_controller.rs`), since the
+    /// tween keeps running on `self.ballistic` regardless of which binding,
+    /// if any, is still current to report it. Mirrors
+    /// `ScrollWidget::stop_ballistic`.
     fn stop_ballistic(&mut self) {
         self.ballistic = None;
         if std::mem::take(&mut self.controller_animating)
@@ -2421,7 +2428,13 @@ impl ListViewWidget {
 
     /// Reconcile the attached [`ScrollController`] with the one a view names
     /// (see [`ListView::controller`]'s build/rebuild semantics), returning
-    /// whether the binding changed. Mirrors `ScrollWidget::attach_controller`.
+    /// whether the binding changed. Every fresh [`ScrollController::bind`]
+    /// resets the handle's `is_animating` to `false`; a tween that is
+    /// genuinely still running (`self.controller_animating`) belongs to this
+    /// widget, not the handle, so it is republished onto the new binding
+    /// right after bind() rather than stopped — the tween keeps running
+    /// either way, only the handle reporting it changes. Mirrors
+    /// `ScrollWidget::attach_controller`.
     fn attach_controller(&mut self, requested: Option<&ScrollController>) -> bool {
         match (requested, self.controller.as_ref()) {
             (None, None) => false,
@@ -2433,12 +2446,16 @@ impl ListViewWidget {
                 if binding.is_current() || handle.is_attached() {
                     false
                 } else {
-                    self.controller = Some(handle.bind());
+                    let binding = handle.bind();
+                    binding.set_animating(self.controller_animating);
+                    self.controller = Some(binding);
                     true
                 }
             }
             (Some(handle), _) => {
-                self.controller = Some(handle.bind());
+                let binding = handle.bind();
+                binding.set_animating(self.controller_animating);
+                self.controller = Some(binding);
                 true
             }
         }
@@ -8618,5 +8635,125 @@ mod controller_tests {
             let (top, _) = row_rect(w, target).expect("the target row is materialized");
             assert_near(top, 0.0, "the row's top edge sits at the viewport top");
         }
+    }
+
+    #[test]
+    fn dropping_the_widget_mid_tween_resolves_is_animating() {
+        let controller = ScrollController::new();
+        let mut w = standalone(&controller, None);
+        controller.animate_to(
+            400.0,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+        paint_at(&mut w, 0.0);
+        assert!(controller.is_animating(), "the tween is running");
+        assert!(controller.is_attached());
+
+        drop(w);
+        assert!(
+            !controller.is_animating(),
+            "the dropped surface's tween no longer reports itself"
+        );
+        assert!(!controller.is_attached());
+    }
+
+    #[test]
+    fn a_second_surface_attaching_mid_tween_reports_not_animating() {
+        let controller = ScrollController::new();
+        let mut first = standalone(&controller, None);
+        controller.animate_to(
+            400.0,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+        paint_at(&mut first, 0.0);
+        assert!(controller.is_animating(), "the first surface's tween runs");
+
+        // A second surface takes the handle over mid-tween — it has never
+        // started a tween of its own, so the handle it now holds reports
+        // not animating at once, not the first surface's stale `true`.
+        let second = standalone(&controller, None);
+        assert!(
+            !controller.is_animating(),
+            "the new holder has no tween of its own"
+        );
+
+        // The displaced first surface's tween keeps running on its own
+        // widget state regardless, but it no longer has a current binding
+        // to publish through.
+        assert!(
+            paint_at(&mut first, 100.0),
+            "the orphaned tween still pumps"
+        );
+        assert!(
+            !controller.is_animating(),
+            "the orphaned tween cannot resurrect the handle's flag"
+        );
+        drop(second);
+        drop(first);
+    }
+
+    #[test]
+    fn rebinding_to_a_different_handle_mid_tween_moves_the_live_flag() {
+        let old_controller = ScrollController::new();
+        let old_view = uniform_logic(100, &old_controller)(&mut ());
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&old_view, &mut BuildCtx::new(&mut counter));
+        w.layout(&mut LayoutCtx::new(), &BoxConstraints::tight(VIEWPORT));
+
+        old_controller.animate_to(
+            400.0,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+        paint_at(&mut w, 0.0);
+        assert!(
+            old_controller.is_animating(),
+            "the tween runs on the old handle"
+        );
+
+        // A rebuild rebinds the same widget to a different handle while the
+        // tween is still live — the widget's own tween survives the rebind
+        // (it belongs to the widget, not the handle), so the new handle
+        // reports it live and the old one is released.
+        let new_controller = ScrollController::new();
+        let new_view = uniform_logic(100, &new_controller)(&mut ());
+        let mut counter2 = 100u64;
+        let flags = View::<()>::rebuild(
+            &new_view,
+            &old_view,
+            &mut w,
+            &mut BuildCtx::new(&mut counter2),
+        );
+        assert!(flags.needs_paint());
+
+        assert!(
+            !old_controller.is_animating(),
+            "the superseded handle no longer reports the tween"
+        );
+        assert!(!old_controller.is_attached());
+        assert!(
+            new_controller.is_animating(),
+            "the freshly bound handle publishes the still-running tween"
+        );
+
+        // Running the tween to completion resolves it on the new handle. A
+        // list's paint can still ask for one more frame purely to re-window
+        // around the landed offset (unrelated to the tween itself), so the
+        // assertion that matters is on `is_animating`, not paint's own
+        // continuation request.
+        paint_at(&mut w, 200.0);
+        assert_eq!(w.offset(), 400.0, "the tween reached its target");
+        assert!(
+            !new_controller.is_animating(),
+            "completion resolves is_animating on the current handle"
+        );
     }
 }
