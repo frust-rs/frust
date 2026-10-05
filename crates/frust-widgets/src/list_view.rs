@@ -328,6 +328,48 @@
 //! takeover site a registered inner that can consume the drag's direction makes
 //! this list defer instead of cancelling its rows. A list with no nested
 //! scrollable in the window behaves exactly as it always has.
+//!
+//! # Programmatic scrolling
+//!
+//! [`ListView::controller`] attaches the same [`ScrollController`] handle a
+//! [`crate::ScrollView`] takes, with the same contract (`scroll.rs`'s
+//! *Programmatic scrolling*, and [`crate::scroll_controller`] for the handle's
+//! side): `jump_to`/`animate_to` apply on the next pass, every pass that moves
+//! the position publishes a [`ScrollInfo`], a jump/animate replaces whatever
+//! fling, settle or tween is in flight, and a user `Down`, wheel or `Cancel`
+//! ends a tween through the one tear-down path
+//! ([`ListViewWidget::stop_ballistic`]). Three things are local to this widget:
+//!
+//! * **Drained at rebuild too.** Besides the start of layout and paint, the
+//!   queue is drained in [`View::rebuild`] once the anchor shift and measured
+//!   correction have been committed and *before* the window is planned, so the
+//!   frame a jump lands on already materializes the rows it lands among
+//!   instead of painting one frame of the old window. Rebuild has no theme, so
+//!   it uses the motion tokens the last layout/paint resolved.
+//! * **Content-space offsets.** The published offset — and the offset a jump
+//!   writes — is [`ListViewWidget::placement_offset`], where the content
+//!   actually sits; a jump or animate folds any uncommitted measured
+//!   correction in first, so the position an app reads back is the position
+//!   it asked for.
+//! * **`scroll_to_item`.** A keyed list resolves
+//!   [`ScrollController::scroll_to_item`]'s key by scanning `key_of` over the
+//!   items (O(item count), checked against the window's own key map first —
+//!   there is no full reverse map, by design), places the row from the
+//!   measured-or-estimated extents ahead of it (walking from the prefix
+//!   anchor, the same walk the window plans with, so the two agree exactly),
+//!   aligns it, and jumps or tweens there. **Settle and correct:** the
+//!   estimate is only a guess for rows never laid out, so after the jump lands
+//!   (or the tween finishes) each following layout — which has just measured
+//!   the rows now on screen — re-resolves the row's aligned position and
+//!   jumps to it when it is off by more than [`ITEM_SETTLE_TOLERANCE_PX`]. The
+//!   loop ends as soon as the row is materialized and within tolerance, and
+//!   is **bounded to [`ITEM_SETTLE_MAX_FRAMES`] layouts** whatever happens
+//!   (each correction costs one frame to re-window and re-measure; the
+//!   measured anchor correction already holds a row's top in place as rows
+//!   above it measure, so `Start` usually settles on the first layout and the
+//!   others within one more). Paint requests a layout frame while the loop is
+//!   live, and a user `Down`, wheel or `Cancel`, or any later controller
+//!   command, ends it.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -340,19 +382,25 @@ use frust_core::{
     PointerPhase, ScrollDelta, SemanticsCtx, TOUCH_SLOP, VelocityTracker, View, WHEEL_LINE_PX,
     Widget, fling_decay, fling_displacement,
 };
+use frust_theme::{MotionScheme, Theme};
 use kurbo::{Point, Size};
 
 use crate::ChildKey;
 use crate::authoring::{ErasedCallback, presses};
 use crate::physics::effect::OverscrollEffect;
+use crate::physics::simulation::TweenSimulation;
 use crate::physics::{
     MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR, ScrollMetrics, ScrollPhysics, Simulation,
     default_overscroll_effect, default_physics,
 };
 use crate::scroll::{
     BallisticState, InnerScrollState, METRICS_FALLBACK_DPR, SETTLE_DECAY, SETTLE_STOP_PX,
-    ambient_scroll_claim, crossed_refresh_trigger, inner_claim_state, stretch_about_edge,
-    with_scroll_claim, with_scroll_veto,
+    ScrollInfo, ambient_scroll_claim, crossed_refresh_trigger, inner_claim_state,
+    stretch_about_edge, with_scroll_claim, with_scroll_veto,
+};
+use crate::scroll_controller::{
+    AnimateTo, ControllerCommand, ItemAlignment, ScrollBinding, ScrollCommand, ScrollController,
+    ScrollToItem,
 };
 
 /// Extra items materialized above and below the visible window, so a small
@@ -386,6 +434,21 @@ const ESTIMATE_NEEDS_KEYS_MSG: &str = "ListView::estimated_item_extent requires 
 /// result re-pins the anchor, so the very next frame is short again.
 const MAX_PREFIX_STEP: usize = 512;
 
+/// How many layouts a [`ScrollController::scroll_to_item`] request may spend
+/// settling — re-resolving the row's aligned position against freshly
+/// measured extents and correcting to it — before it stops correcting and
+/// leaves the list where it stands. Counted from the layout the jump lands on
+/// (or the first one after the tween finishes); each correction costs one
+/// frame to re-window and re-measure, and three corrections cover a target
+/// whose own extent and the extents above it were all estimates. See the
+/// [module docs](self)' *Programmatic scrolling* section.
+const ITEM_SETTLE_MAX_FRAMES: u8 = 4;
+
+/// How far (logical px) a settling [`ScrollController::scroll_to_item`] row
+/// may sit from its aligned position and still count as landed — half a
+/// pixel, below anything a correction jump could visibly improve.
+const ITEM_SETTLE_TOLERANCE_PX: f64 = 0.5;
+
 /// A view-held near-start "load older" callback (erased to [`ErasedCallback`] on
 /// build).
 type OnNearStart<State> = Rc<dyn Fn(&mut State)>;
@@ -415,6 +478,48 @@ struct Measured {
     index: usize,
     /// The row's laid-out height (logical px).
     extent: f64,
+}
+
+/// The motion tokens a controller command is applied with, resolved from the
+/// theme at every layout and paint and cached on the widget so the
+/// rebuild-time drain (whose `BuildCtx` threads no theme) applies a command
+/// with the same tokens the surrounding passes would.
+#[derive(Clone, Copy, Debug)]
+struct ControllerMotion {
+    /// The theme's `motion.reduce_motion`: collapses every tween to a jump.
+    reduce_motion: bool,
+    /// The tween an `animated` [`ScrollController::scroll_to_item`] runs:
+    /// `motion.durations.slow` eased by `motion.easing.spatial` — a spatial
+    /// move across possibly many rows, so the slow spatial pair rather than a
+    /// hand-rolled duration.
+    item_animation: AnimateTo,
+}
+
+impl ControllerMotion {
+    /// The tokens `theme` carries, or [`MotionScheme::neutral`]'s when no
+    /// theme is threaded (the unthemed fallback, rather than a local constant).
+    fn from_theme(theme: Option<&Theme>) -> Self {
+        let motion = theme.map_or(MotionScheme::neutral(), |theme| theme.motion);
+        Self {
+            reduce_motion: motion.reduce_motion,
+            item_animation: AnimateTo {
+                duration_ms: motion.durations.slow,
+                curve: motion.easing.spatial,
+            },
+        }
+    }
+}
+
+/// A [`ScrollController::scroll_to_item`] request still settling: the row's
+/// key (re-resolved every settle frame, so a mutation mid-settle follows the
+/// row), the concrete alignment it resolved to (`Nearest` already decided),
+/// and the layouts it has left. See the [module docs](self)' *Programmatic
+/// scrolling* section.
+#[derive(Clone, Copy, Debug)]
+struct ItemTarget {
+    key: ChildKey,
+    alignment: ItemAlignment,
+    frames_left: u8,
 }
 
 /// The window one frame should materialize: the `[start, end)` slot range plus
@@ -480,6 +585,9 @@ pub struct ListView<State: 'static> {
     /// [`ListView::overscroll_effect`] (mirrors [`crate::ScrollView`]'s field
     /// of the same name).
     pub(crate) effect: OverscrollEffect,
+    /// The programmatic-scroll handle to attach, if any. See
+    /// [`ListView::controller`].
+    controller: Option<ScrollController>,
 }
 
 impl<State: 'static> ListView<State> {
@@ -524,6 +632,7 @@ impl<State: 'static> ListView<State> {
             on_refresh_release: None,
             physics: None,
             effect: default_overscroll_effect(),
+            controller: None,
         }
     }
 
@@ -582,6 +691,7 @@ impl<State: 'static> ListView<State> {
             on_refresh_release: None,
             physics: None,
             effect: default_overscroll_effect(),
+            controller: None,
         }
     }
 
@@ -745,6 +855,43 @@ impl<State: 'static> ListView<State> {
     /// ([`OverscrollEffect::Translate`]) everywhere else.
     pub fn overscroll_effect(mut self, effect: OverscrollEffect) -> Self {
         self.effect = effect;
+        self
+    }
+
+    /// Attach a [`ScrollController`] — the same handle
+    /// [`crate::ScrollView::controller`] takes, driving this list with
+    /// [`ScrollController::jump_to`]/[`ScrollController::animate_to`] and, on a
+    /// [`ListView::builder_keyed`] list,
+    /// [`ScrollController::scroll_to_item`]; read back through
+    /// [`ScrollController::offset`]/[`ScrollController::max_offset`]/
+    /// [`ScrollController::on_change`] from outside any dispatch.
+    ///
+    /// ```
+    /// use frust_widgets::{ChildKey, ListView, ScrollController, text};
+    /// use frust_widgets::scroll_controller::ItemAlignment;
+    /// let controller = ScrollController::new();
+    /// let view: ListView<()> = ListView::builder_keyed(
+    ///     100,
+    ///     40.0,
+    ///     |i| ChildKey::new(i),
+    ///     |i| frust_core::any::<(), _>(text(i.to_string())),
+    /// )
+    /// .controller(controller.clone());
+    /// controller.scroll_to_item(ChildKey::new(42usize), ItemAlignment::Start, false);
+    /// # let _ = view;
+    /// ```
+    ///
+    /// # Build/rebuild semantics
+    ///
+    /// Identical to [`crate::ScrollView::controller`]: a build binds the
+    /// handle (taking it over from any other surface); a rebuild with the same
+    /// handle keeps the binding and never takes it back from a surface that
+    /// has since taken it over; a rebuild with a different handle binds that
+    /// one; a rebuild with none detaches; dropping the widget detaches the
+    /// handle it still holds. See the [module docs](self)' *Programmatic
+    /// scrolling* section for what is local to a list.
+    pub fn controller(mut self, controller: ScrollController) -> Self {
+        self.controller = Some(controller);
         self
     }
 }
@@ -1291,6 +1438,31 @@ pub struct ListViewWidget {
     pending_near_end: bool,
     /// The pull-to-refresh release callback (`None` if the view set none).
     on_refresh_release: Option<ErasedCallback>,
+    /// This surface's claim on an attached [`ScrollController`], or `None`.
+    /// Dropping it (with the widget, or on a rebuild that names no handle)
+    /// detaches the handle when this surface still holds it.
+    controller: Option<ScrollBinding>,
+    /// Whether a layout has run, so the viewport and extent a controller
+    /// command resolves against (and the snapshot it publishes) are measured
+    /// ones rather than the pre-layout zero.
+    laid_out: bool,
+    /// Whether [`ListViewWidget::ballistic`] is running a controller-driven
+    /// tween rather than a release fling/spring — this surface's mirror of
+    /// [`ScrollController::is_animating`], cleared at the one tear-down site
+    /// ([`ListViewWidget::stop_ballistic`]). Mirrors
+    /// `ScrollWidget::controller_animating`.
+    controller_animating: bool,
+    /// The motion tokens the last layout/paint resolved, for the rebuild-time
+    /// drain (see [`ControllerMotion`]).
+    motion: ControllerMotion,
+    /// A [`ScrollController::scroll_to_item`] request still settling, or
+    /// `None`. See the [module docs](self)' *Programmatic scrolling* section.
+    item_target: Option<ItemTarget>,
+    /// Whether a controller jump recorded a near-start/near-end fire since the
+    /// last paint — the paint that sees it requests the `Housekeeping` flush
+    /// that delivers it (the fire has no `EventCtx` to go through when the
+    /// jump lands). Mirrors `ScrollWidget::jump_notify_owed`.
+    jump_notify_owed: bool,
 }
 
 impl ListViewWidget {
@@ -1340,6 +1512,12 @@ impl ListViewWidget {
             near_end_armed: true,
             pending_near_end: false,
             on_refresh_release: None,
+            controller: None,
+            laid_out: false,
+            controller_animating: false,
+            motion: ControllerMotion::from_theme(None),
+            item_target: None,
+            jump_notify_owed: false,
         }
     }
 
@@ -2100,7 +2278,7 @@ impl ListViewWidget {
         self.edge_pull = self.overscroll + rejected;
         self.sync_child_origins();
         if done || self.ballistic_is_pinned_outward(proposed, rejected, velocity) {
-            self.ballistic = None;
+            self.stop_ballistic();
             self.settle_ballistic_residual();
         }
     }
@@ -2187,6 +2365,325 @@ impl ListViewWidget {
         }
     }
 
+    // --- Programmatic scrolling (the attached `ScrollController`). See the
+    //     module docs' *Programmatic scrolling* section. ---
+
+    /// End any live [`ListViewWidget::ballistic`] simulation — a release
+    /// fling/spring, or a controller tween — telling the attached controller
+    /// the animation stopped if it was one. The single tear-down path every
+    /// site that ends ballistic motion takes (`Down`, wheel, `Cancel`, a
+    /// controller jump/animate, and [`ListViewWidget::drive_ballistic`]'s own
+    /// completion), so [`ScrollController::is_animating`] can never go stale.
+    /// Mirrors `ScrollWidget::stop_ballistic`.
+    fn stop_ballistic(&mut self) {
+        self.ballistic = None;
+        if std::mem::take(&mut self.controller_animating)
+            && let Some(binding) = self.controller.as_ref()
+        {
+            binding.set_animating(false);
+        }
+    }
+
+    /// Reconcile the attached [`ScrollController`] with the one a view names
+    /// (see [`ListView::controller`]'s build/rebuild semantics), returning
+    /// whether the binding changed. Mirrors `ScrollWidget::attach_controller`.
+    fn attach_controller(&mut self, requested: Option<&ScrollController>) -> bool {
+        match (requested, self.controller.as_ref()) {
+            (None, None) => false,
+            (None, Some(_)) => {
+                self.controller = None;
+                true
+            }
+            (Some(handle), Some(binding)) if binding.controller().same(handle) => {
+                if binding.is_current() || handle.is_attached() {
+                    false
+                } else {
+                    self.controller = Some(handle.bind());
+                    true
+                }
+            }
+            (Some(handle), _) => {
+                self.controller = Some(handle.bind());
+                true
+            }
+        }
+    }
+
+    /// Apply every command queued on the attached [`ScrollController`], in
+    /// recording order — once this surface has laid out (a command queued
+    /// earlier waits for the first measured viewport) and only while it still
+    /// holds the handle. Returns whether any command was drained.
+    fn drain_controller(&mut self) -> bool {
+        if !self.laid_out {
+            return false;
+        }
+        let commands = match self.controller.as_ref() {
+            Some(binding) => binding.take_all_commands(),
+            None => return false,
+        };
+        let drained = !commands.is_empty();
+        for command in commands {
+            match command {
+                ControllerCommand::Offset(command) => {
+                    // A later offset command replaces a settling item request
+                    // outright, like it replaces a tween.
+                    self.item_target = None;
+                    match command {
+                        ScrollCommand::JumpTo(target) => self.apply_jump(target),
+                        ScrollCommand::AnimateTo(target, options) => {
+                            self.apply_animate_to(target, options, self.motion.reduce_motion);
+                        }
+                    }
+                }
+                ControllerCommand::ScrollToItem(request) => self.apply_scroll_to_item(request),
+            }
+        }
+        drained
+    }
+
+    /// Move straight to the content-space offset `target`, clamped to
+    /// `[0, max_offset]`, ending any fling, release-settle, ballistic
+    /// simulation or overscroll in flight. Any uncommitted measured correction
+    /// is dropped rather than committed — `target` already names where the
+    /// content should sit, so the placement becomes exactly it. A live drag
+    /// continues from the new position. `NaN` is ignored. Mirrors
+    /// `ScrollWidget::apply_jump`; a near-start/near-end edge the jump crosses
+    /// is recorded for the next event, like a fling frame's.
+    fn apply_jump(&mut self, target: f64) {
+        if target.is_nan() {
+            return;
+        }
+        self.fling = None;
+        self.stop_ballistic();
+        self.settling = false;
+        self.overscroll = 0.0;
+        self.edge_pull = 0.0;
+        self.last_anim = None;
+        self.pending_correction = 0.0;
+        self.set_offset(target);
+        self.drag_position = self.offset;
+        self.sync_child_origins();
+        if self.evaluate_near_start() {
+            self.pending_near_start = true;
+            self.jump_notify_owed = true;
+        }
+        if self.evaluate_near_end() {
+            self.pending_near_end = true;
+            self.jump_notify_owed = true;
+        }
+    }
+
+    /// Start (or replace) a controller-driven tween to the content-space
+    /// offset `target`, clamped to `[0, max_offset]`, ending any fling,
+    /// release-settle or ballistic simulation first. Runs through a
+    /// [`TweenSimulation`] in [`ListViewWidget::ballistic`] — the field and
+    /// pump ([`ListViewWidget::drive_ballistic`]) a release fling runs
+    /// through. An uncommitted measured correction is committed first (the
+    /// placement does not move), so the tween starts from where the content
+    /// actually sits. `reduce_motion` (or a non-positive/non-finite
+    /// `duration_ms`) collapses this to [`ListViewWidget::apply_jump`]. `NaN`
+    /// is ignored. Mirrors `ScrollWidget::apply_animate_to`.
+    fn apply_animate_to(&mut self, target: f64, options: AnimateTo, reduce_motion: bool) {
+        if target.is_nan() {
+            return;
+        }
+        self.fling = None;
+        self.stop_ballistic();
+        self.settling = false;
+        self.overscroll = 0.0;
+        self.edge_pull = 0.0;
+        self.last_anim = None;
+        if reduce_motion || !options.duration_ms.is_finite() || options.duration_ms <= 0.0 {
+            self.apply_jump(target);
+            return;
+        }
+        self.offset = self.placement_offset();
+        self.pending_correction = 0.0;
+        self.drag_position = self.offset;
+        let clamped = target.clamp(0.0, self.max_offset());
+        let sim = TweenSimulation::new(
+            self.offset,
+            clamped,
+            options.duration_ms / 1000.0,
+            options.curve,
+        );
+        self.ballistic = Some(BallisticState {
+            sim: Box::new(sim),
+            start: None,
+        });
+        self.controller_animating = true;
+        if let Some(binding) = self.controller.as_ref() {
+            binding.set_animating(true);
+        }
+    }
+
+    /// Apply a [`ScrollController::scroll_to_item`] request: resolve the key,
+    /// decide `Nearest`, jump or tween to the aligned offset, and leave an
+    /// [`ItemTarget`] for the settle loop ([`ListViewWidget::settle_item_target`]).
+    /// An unknown key (or any key on a positional list) is a no-op with a
+    /// debug-build log; `Nearest` on a fully visible row is a no-op too.
+    fn apply_scroll_to_item(&mut self, request: ScrollToItem) {
+        let Some(index) = self.resolve_key(request.key) else {
+            unknown_item_key(&request, self.key_of.is_some());
+            return;
+        };
+        let alignment = match request.alignment {
+            ItemAlignment::Nearest => match self.nearest_alignment(index) {
+                Some(alignment) => alignment,
+                None => return,
+            },
+            alignment => alignment,
+        };
+        let target = self.aligned_offset(index, alignment);
+        if request.animated {
+            let motion = self.motion;
+            self.apply_animate_to(target, motion.item_animation, motion.reduce_motion);
+        } else {
+            self.apply_jump(target);
+        }
+        self.item_target = Some(ItemTarget {
+            key: request.key,
+            alignment,
+            frames_left: ITEM_SETTLE_MAX_FRAMES,
+        });
+    }
+
+    /// The item index currently carrying `key`, or `None` (an unknown key, or
+    /// a positional list, which has no keys). The window's own `key -> index`
+    /// map is tried first — verified against the current keying, since a
+    /// rebuild-time drain runs before this frame's reconciliation refreshes
+    /// it — and only a miss scans `key_of` over every item: O(item count),
+    /// once per request or settle frame, never per frame otherwise.
+    fn resolve_key(&self, key: ChildKey) -> Option<usize> {
+        let key_of = self.key_of.as_ref()?;
+        if let Some(&index) = self.key_index.get(&key)
+            && index < self.item_count
+            && key_of(index) == key
+        {
+            return Some(index);
+        }
+        (0..self.item_count).find(|&index| key_of(index) == key)
+    }
+
+    /// Item `index`'s content-space top and extent: closed form on the
+    /// uniform path; in variable-extent mode, walked from the prefix anchor
+    /// over measured-or-estimated extents — the same walk, from the same
+    /// anchor, that plans the window, so a jump to this top lands the window
+    /// exactly on the row. O(distance from the anchor).
+    fn item_span(&self, index: usize) -> (f64, f64) {
+        let Some(estimate) = self.variable_estimate() else {
+            return (index as f64 * self.item_extent, self.item_extent);
+        };
+        let anchor = self.anchor_index.min(self.item_count.saturating_sub(1));
+        let mut y = if anchor == 0 { 0.0 } else { self.anchor_y };
+        if index >= anchor {
+            for i in anchor..index {
+                y += self.extent_at(i, estimate);
+            }
+        } else {
+            for i in index..anchor {
+                y -= self.extent_at(i, estimate);
+            }
+        }
+        let top = if index == 0 { 0.0 } else { y.max(0.0) };
+        (top, self.extent_at(index, estimate))
+    }
+
+    /// The offset that puts item `index` at `alignment` (never `Nearest`, which
+    /// [`ListViewWidget::nearest_alignment`] resolves first), clamped to
+    /// `[0, max_offset]`.
+    fn aligned_offset(&self, index: usize, alignment: ItemAlignment) -> f64 {
+        let (top, extent) = self.item_span(index);
+        let viewport = self.viewport.height;
+        let raw = match alignment {
+            ItemAlignment::Start | ItemAlignment::Nearest => top,
+            ItemAlignment::Center => top + (extent - viewport) / 2.0,
+            ItemAlignment::End => top + extent - viewport,
+        };
+        raw.clamp(0.0, self.max_offset())
+    }
+
+    /// What [`ItemAlignment::Nearest`] means for item `index` right now:
+    /// `None` when the row is already fully inside the viewport,
+    /// [`ItemAlignment::Start`] when it sits above it or is taller than it,
+    /// [`ItemAlignment::End`] when it sits below.
+    fn nearest_alignment(&self, index: usize) -> Option<ItemAlignment> {
+        let (top, extent) = self.item_span(index);
+        let viewport = self.viewport.height;
+        let position = self.placement_offset();
+        let tolerance = ITEM_SETTLE_TOLERANCE_PX;
+        if top >= position - tolerance && top + extent <= position + viewport + tolerance {
+            None
+        } else if top < position || extent > viewport {
+            Some(ItemAlignment::Start)
+        } else {
+            Some(ItemAlignment::End)
+        }
+    }
+
+    /// Whether item `index` is in the materialized window (and so, after a
+    /// layout, measured).
+    fn window_holds(&self, index: usize) -> bool {
+        match (self.keys.first(), self.keys.last()) {
+            (Some(&first), Some(&last)) => first <= index && index <= last,
+            _ => false,
+        }
+    }
+
+    /// One settle step for a pending [`ItemTarget`], run at the end of every
+    /// layout (the rows on screen were just measured): re-resolve the row's
+    /// aligned offset and jump to it if the placement is off by more than
+    /// [`ITEM_SETTLE_TOLERANCE_PX`]. The request ends once the row is
+    /// materialized and in tolerance, when its key leaves the data, or after
+    /// [`ITEM_SETTLE_MAX_FRAMES`] layouts. Waits, consuming nothing, while a
+    /// tween is still carrying the list there.
+    fn settle_item_target(&mut self) {
+        let Some(mut target) = self.item_target else {
+            return;
+        };
+        if self.ballistic.is_some() {
+            return;
+        }
+        let Some(index) = self.resolve_key(target.key) else {
+            self.item_target = None;
+            return;
+        };
+        target.frames_left = target.frames_left.saturating_sub(1);
+        let desired = self.aligned_offset(index, target.alignment);
+        let off = (desired - self.placement_offset()).abs() > ITEM_SETTLE_TOLERANCE_PX;
+        if off {
+            self.apply_jump(desired);
+        }
+        let landed = !off && self.window_holds(index);
+        self.item_target = if landed || target.frames_left == 0 {
+            None
+        } else {
+            Some(target)
+        };
+    }
+
+    /// This surface's position as a [`ScrollInfo`]: the content-space
+    /// placement (what an app reads back after a jump), the converging
+    /// `max_offset`, and the signed overscroll.
+    fn scroll_info(&self) -> ScrollInfo {
+        ScrollInfo {
+            offset: self.placement_offset(),
+            max_offset: self.max_offset(),
+            overscroll: self.overscroll,
+        }
+    }
+
+    /// Publish the current position to the attached [`ScrollController`] (a
+    /// no-op before the first layout, or once another surface took it over).
+    fn publish_to_controller(&self) {
+        if !self.laid_out {
+            return;
+        }
+        if let Some(binding) = self.controller.as_ref() {
+            binding.publish(self.scroll_info(), self.viewport.height);
+        }
+    }
+
     /// Deliver a synthetic `Cancel` to whichever child holds the capture path,
     /// disarming an armed `ListItem` press when the scroll drag takes over.
     fn cancel_children(&mut self, ctx: &mut EventCtx, pos: Point) {
@@ -2207,11 +2704,20 @@ impl ListViewWidget {
         }
     }
 
-    /// The event body, parameterised on an explicit timestamp so velocity math
+    /// The event entry, parameterised on an explicit timestamp so velocity math
     /// is deterministic in tests; [`Widget::event`] supplies the real clock.
-    /// Adapted from [`crate::ScrollWidget`], routing to the *window* of children
-    /// via [`crate::authoring::route_event`] rather than a single child.
+    /// Routes the event, then publishes whatever position it left behind to an
+    /// attached [`ScrollController`] (mirrors `ScrollWidget::event_at`).
     fn event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
+        let result = self.route_event_at(ctx, event, t_ms);
+        self.publish_to_controller();
+        result
+    }
+
+    /// The event body behind [`ListViewWidget::event_at`]. Adapted from
+    /// [`crate::ScrollWidget`], routing to the *window* of children via
+    /// [`crate::authoring::route_event`] rather than a single child.
+    fn route_event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
         // A fling-driven near-start fire recorded at paint time is delivered on
         // the next event — except a Cancel, which clears it without firing.
         if !matches!(
@@ -2248,7 +2754,9 @@ impl ListViewWidget {
                 // physics.
                 self.fling = None;
                 self.settling = false;
-                self.ballistic = None;
+                self.stop_ballistic();
+                // User input wins over a settling `scroll_to_item` too.
+                self.item_target = None;
                 self.overscroll = 0.0;
                 self.edge_pull = 0.0;
                 self.set_offset(self.offset + dy);
@@ -2282,7 +2790,9 @@ impl ListViewWidget {
                     self.carried_velocity = self.live_velocity();
                     self.fling = None;
                     self.settling = false;
-                    self.ballistic = None;
+                    self.stop_ballistic();
+                    // User input wins over a settling `scroll_to_item` too.
+                    self.item_target = None;
                     // A `Down` deliberately leaves a mid-bounce displacement on
                     // screen (the regrab continues from it), so the pull is
                     // re-seeded from that displacement rather than zeroed —
@@ -2448,7 +2958,8 @@ impl ListViewWidget {
                     self.pending_near_start = false;
                     self.pending_near_end = false;
                     self.settling = false;
-                    self.ballistic = None;
+                    self.stop_ballistic();
+                    self.item_target = None;
                     self.overscroll = 0.0;
                     self.edge_pull = 0.0;
                     self.sync_child_origins();
@@ -2461,6 +2972,27 @@ impl ListViewWidget {
             // other to its children exactly like the broadcast arm.
             _ => crate::authoring::route_event(&mut self.children, ctx, event),
         }
+    }
+}
+
+/// Report a [`ScrollController::scroll_to_item`] request no row answered — an
+/// app bug worth hearing about in a debug build, but a no-op either way (a
+/// recorded command has no caller left to return a `Result` to).
+fn unknown_item_key(_request: &ScrollToItem, _keyed: bool) {
+    #[cfg(debug_assertions)]
+    if _keyed {
+        eprintln!(
+            "frust-widgets: ScrollController::scroll_to_item({:?}) ignored: no row of the \
+             attached ListView carries that key",
+            _request.key
+        );
+    } else {
+        eprintln!(
+            "frust-widgets: ScrollController::scroll_to_item({:?}) ignored: the attached \
+             ListView is positional (ListView::builder) and has no row keys; build it with \
+             ListView::builder_keyed",
+            _request.key
+        );
     }
 }
 
@@ -2487,6 +3019,7 @@ impl<State: 'static> View<State> for ListView<State> {
             widget.physics = physics;
         }
         widget.effect = self.effect;
+        widget.attach_controller(self.controller.as_ref());
         // The key function and the unmeasured-row estimate are widget state (the
         // window math and layout's measurement both run without the view in
         // scope), and must be installed before the first window is planned.
@@ -2680,6 +3213,26 @@ impl<State: 'static> View<State> for ListView<State> {
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
 
+        // Programmatic scrolling: (re)bind the handle, then apply whatever it
+        // queued now — after the anchor shift and the measured-correction
+        // commit, *before* the window is planned — so the frame a jump lands
+        // on materializes the rows it lands among (see the module docs'
+        // *Programmatic scrolling* section). Anything it cannot apply yet (no
+        // layout has measured a viewport) still owes a frame, and a settling
+        // `scroll_to_item` owes the layout its next correction runs in.
+        let rebound = element.attach_controller(self.controller.as_ref());
+        if element.drain_controller() || element.item_target.is_some() {
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        if rebound
+            || element
+                .controller
+                .as_ref()
+                .is_some_and(ScrollBinding::has_pending)
+        {
+            flags |= ChangeFlags::PAINT;
+        }
+
         let plan = element.desired_window();
         let delta = self.item_count as isize - old_item_count as isize;
         flags |= match self.key_of.as_ref() {
@@ -2732,13 +3285,47 @@ impl Widget for ListViewWidget {
                 pod.layout_child(ctx, &child_bc);
             }
         }
+        // A controller command resolves against the viewport and extents just
+        // measured; a settling `scroll_to_item` re-resolves against them too.
+        self.laid_out = true;
+        self.motion = ControllerMotion::from_theme(Theme::from_layout_ctx(ctx));
+        self.drain_controller();
+        self.settle_item_target();
         self.sync_child_origins();
+        self.publish_to_controller();
         bc.constrain(self.viewport)
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         self.last_frame_time = ctx.frame_time();
+        // A command recorded since layout (or with layout skipped this frame)
+        // applies before the pump, so a jump ends a fling before it advances.
+        self.motion = ControllerMotion::from_theme(Theme::from_paint_ctx(ctx));
+        self.drain_controller();
         self.pump_fling(ctx);
+        self.publish_to_controller();
+        if std::mem::take(&mut self.jump_notify_owed)
+            && (self.pending_near_start || self.pending_near_end)
+        {
+            // Paint has no `&mut State`: owe the jump's edge fire to the next
+            // frame's Housekeeping flush (the `ScrollWidget` precedent).
+            frust_core::mark_pending_result_flush();
+            ctx.request_frame();
+        }
+        if self
+            .controller
+            .as_ref()
+            .is_some_and(ScrollBinding::has_pending)
+        {
+            // Recorded during this paint (a listener reacting to the publish
+            // above): the next frame applies it.
+            ctx.request_frame();
+        }
+        if self.item_target.is_some() {
+            // A settling `scroll_to_item` corrects at layout: make sure the
+            // next frame lays out even under the mobile intra-frame skip.
+            ctx.request_layout();
+        }
         scene.push_clip(ctx.origin(), ctx.size());
         self.sync_child_origins();
         // The stretch is PAINT-ONLY, and load-bearingly so: no layout pass
@@ -7320,5 +7907,430 @@ mod contact_tests {
             viewport(&root).scrolling,
             "the list resumed scrolling once the pinch ended"
         );
+    }
+}
+
+#[cfg(test)]
+mod controller_tests {
+    //! The [`ScrollController`] seam on a list: offset commands mirrored from
+    //! `ScrollView`, and `scroll_to_item`'s resolve → jump/tween →
+    //! settle-and-correct loop over measured-or-estimated extents.
+
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use frust_core::{Curve, PaintOutcome, RenderRoot, any};
+
+    use super::*;
+    use crate::test_support::{RecordingScene, leaf};
+
+    /// The list's viewport (the root window).
+    const VIEWPORT: Size = Size::new(200.0, 200.0);
+    /// The estimate every variable-extent fixture declares — unequal to every
+    /// true row height, so an estimated region is visibly estimated.
+    const ESTIMATE: f64 = 60.0;
+    /// The uniform fixture's row extent.
+    const ROW: f64 = 50.0;
+
+    /// Deterministic self-sized row height by id: 40/60/80/100/120, cycling.
+    fn height_of(id: u64) -> f64 {
+        40.0 + (id % 5) as f64 * 20.0
+    }
+
+    type Logic = Box<dyn FnMut(&mut ()) -> ListView<()>>;
+
+    /// A keyed, variable-extent list of `count` rows keyed by their id (the
+    /// item index) and sized by [`height_of`], with `controller` attached.
+    fn variable_logic(count: usize, controller: &ScrollController) -> Logic {
+        let controller = controller.clone();
+        Box::new(move |_: &mut ()| {
+            ListView::builder_keyed(
+                count,
+                ESTIMATE,
+                |i| ChildKey::new(i as u64),
+                |i| any::<(), _>(leaf(VIEWPORT.width, height_of(i as u64))),
+            )
+            .estimated_item_extent(ESTIMATE)
+            .controller(controller.clone())
+        })
+    }
+
+    /// A keyed, uniform-extent list of `count` [`ROW`]-tall rows.
+    fn uniform_logic(count: usize, controller: &ScrollController) -> Logic {
+        let controller = controller.clone();
+        Box::new(move |_: &mut ()| {
+            ListView::builder_keyed(
+                count,
+                ROW,
+                |i| ChildKey::new(i as u64),
+                |_| any::<(), _>(leaf(VIEWPORT.width, ROW)),
+            )
+            .controller(controller.clone())
+        })
+    }
+
+    fn list(root: &RenderRoot<(), ListView<()>>) -> &ListViewWidget {
+        let id = root.root_id().expect("root built");
+        (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
+            .downcast_ref::<ListViewWidget>()
+            .expect("root is a ListViewWidget")
+    }
+
+    /// One rebuild → layout → paint frame at `ms`.
+    fn frame(root: &mut RenderRoot<(), ListView<()>>, logic: &mut Logic, ms: f64) -> PaintOutcome {
+        root.rebuild(logic, &mut ());
+        root.layout(VIEWPORT);
+        root.paint(
+            &mut RecordingScene::default(),
+            FrameTime::from_nanos((ms * 1_000_000.0) as u64),
+        )
+    }
+
+    /// Drive frames from `start_ms` until paint asks for neither another frame
+    /// nor a layout, returning how many it took; panics past `limit`.
+    fn settle(
+        root: &mut RenderRoot<(), ListView<()>>,
+        logic: &mut Logic,
+        start_ms: f64,
+        limit: usize,
+    ) -> usize {
+        for n in 0..limit {
+            let outcome = frame(root, logic, start_ms + 16.0 * n as f64);
+            if !outcome.needs_frame && !outcome.needs_layout {
+                return n + 1;
+            }
+        }
+        panic!("the list did not settle within {limit} frames");
+    }
+
+    fn converged(logic: &mut Logic) -> RenderRoot<(), ListView<()>> {
+        let mut root = RenderRoot::new();
+        settle(&mut root, logic, 0.0, 8);
+        root
+    }
+
+    /// Item `index`'s painted top and height in viewport coordinates, if it is
+    /// materialized.
+    fn row_rect(w: &ListViewWidget, index: usize) -> Option<(f64, f64)> {
+        let slot = w.keys.iter().position(|&i| i == index)?;
+        let pod = &w.children[slot];
+        Some((pod.origin().y, pod.size().height))
+    }
+
+    fn assert_near(actual: f64, expected: f64, what: &str) {
+        assert!(
+            (actual - expected).abs() <= ITEM_SETTLE_TOLERANCE_PX,
+            "{what}: expected {expected}, got {actual}"
+        );
+    }
+
+    fn down(y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(10.0, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    #[test]
+    fn jump_to_and_animate_to_drive_a_list_like_a_scroll_view() {
+        let controller = ScrollController::new();
+        let mut logic = uniform_logic(100, &controller);
+        let mut root = converged(&mut logic);
+        assert!(controller.is_attached());
+        assert_eq!(controller.max_offset(), 100.0 * ROW - VIEWPORT.height);
+        assert_eq!(controller.viewport_extent(), VIEWPORT.height);
+
+        controller.jump_to(1234.0);
+        settle(&mut root, &mut logic, 100.0, 4);
+        assert_eq!(list(&root).offset(), 1234.0);
+        assert_eq!(controller.offset(), 1234.0);
+        let (top, _) = row_rect(list(&root), 24).expect("the landing row is materialized");
+        assert_eq!(top, 24.0 * ROW - 1234.0, "the window re-materialized there");
+
+        controller.animate_to(
+            234.0,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+        frame(&mut root, &mut logic, 1000.0);
+        assert!(controller.is_animating());
+        frame(&mut root, &mut logic, 1100.0);
+        assert_near(controller.offset(), 734.0, "halfway through a linear tween");
+        settle(&mut root, &mut logic, 1200.0, 6);
+        assert_eq!(controller.offset(), 234.0);
+        assert!(!controller.is_animating());
+    }
+
+    #[test]
+    fn scroll_to_item_on_a_uniform_list_lands_exactly() {
+        let controller = ScrollController::new();
+        let mut logic = uniform_logic(100, &controller);
+        let mut root = converged(&mut logic);
+        controller.scroll_to_item(ChildKey::new(40u64), ItemAlignment::Start, false);
+        let frames = settle(&mut root, &mut logic, 100.0, 4);
+        assert!(
+            frames <= 2,
+            "a closed-form position needs no correction ({frames} frames)"
+        );
+        assert_eq!(controller.offset(), 40.0 * ROW);
+        assert_eq!(row_rect(list(&root), 40).map(|r| r.0), Some(0.0));
+        assert!(list(&root).item_target.is_none());
+    }
+
+    #[test]
+    fn scroll_to_item_lands_an_unmeasured_row_at_start_after_settling() {
+        let controller = ScrollController::new();
+        let mut logic = variable_logic(300, &controller);
+        let mut root = converged(&mut logic);
+        let target = 250usize;
+        assert!(
+            !list(&root).measured.contains_key(&ChildKey::new(240u64)),
+            "the rows ahead of the target were never measured"
+        );
+
+        controller.scroll_to_item(ChildKey::new(target as u64), ItemAlignment::Start, false);
+        let frames = settle(&mut root, &mut logic, 100.0, 8);
+        assert!(
+            frames <= usize::from(ITEM_SETTLE_MAX_FRAMES) + 1,
+            "the settle loop is bounded ({frames} frames)"
+        );
+        let w = list(&root);
+        assert!(w.item_target.is_none(), "the request finished settling");
+        let (top, height) = row_rect(w, target).expect("the target row is materialized");
+        assert_eq!(
+            height,
+            height_of(target as u64),
+            "and measured at its own height"
+        );
+        assert_near(top, 0.0, "the row's top edge sits at the viewport top");
+        assert_near(
+            controller.offset(),
+            w.placement_offset(),
+            "the published offset",
+        );
+    }
+
+    #[test]
+    fn scroll_to_item_center_and_end_alignments_correct_the_estimated_extent() {
+        let controller = ScrollController::new();
+        let mut logic = variable_logic(300, &controller);
+        let mut root = converged(&mut logic);
+
+        // Row 154 is 120px tall against the 60px estimate, so both alignments
+        // are wrong until the row itself has been measured.
+        let target = 154usize;
+        assert_eq!(height_of(target as u64), 120.0);
+        controller.scroll_to_item(ChildKey::new(target as u64), ItemAlignment::Center, false);
+        settle(&mut root, &mut logic, 100.0, 8);
+        let (top, height) = row_rect(list(&root), target).expect("materialized");
+        assert_near(
+            top + height / 2.0,
+            VIEWPORT.height / 2.0,
+            "the row's center at the viewport center",
+        );
+
+        let target = 209usize;
+        assert_eq!(height_of(target as u64), 120.0);
+        controller.scroll_to_item(ChildKey::new(target as u64), ItemAlignment::End, false);
+        settle(&mut root, &mut logic, 400.0, 8);
+        let (top, height) = row_rect(list(&root), target).expect("materialized");
+        assert_near(
+            top + height,
+            VIEWPORT.height,
+            "the row's bottom at the viewport bottom",
+        );
+        assert!(list(&root).item_target.is_none());
+    }
+
+    #[test]
+    fn nearest_does_nothing_for_a_visible_row_and_the_least_otherwise() {
+        let controller = ScrollController::new();
+        let mut logic = variable_logic(300, &controller);
+        let mut root = converged(&mut logic);
+        // Rows 0..=3 are 40+60+80+100 = 280px; row 1 spans [40, 100), visible.
+        controller.scroll_to_item(ChildKey::new(1u64), ItemAlignment::Nearest, false);
+        settle(&mut root, &mut logic, 100.0, 4);
+        assert_eq!(
+            controller.offset(),
+            0.0,
+            "a fully visible row moves nothing"
+        );
+        assert!(list(&root).item_target.is_none());
+
+        // A row below the viewport aligns its bottom edge (`End`).
+        controller.scroll_to_item(ChildKey::new(12u64), ItemAlignment::Nearest, false);
+        settle(&mut root, &mut logic, 300.0, 8);
+        let (top, height) = row_rect(list(&root), 12).expect("materialized");
+        assert_near(
+            top + height,
+            VIEWPORT.height,
+            "a row below lands at the bottom",
+        );
+
+        // A row above the viewport aligns its top edge (`Start`).
+        controller.scroll_to_item(ChildKey::new(3u64), ItemAlignment::Nearest, false);
+        settle(&mut root, &mut logic, 600.0, 8);
+        let (top, _) = row_rect(list(&root), 3).expect("materialized");
+        assert_near(top, 0.0, "a row above lands at the top");
+    }
+
+    #[test]
+    fn an_animated_scroll_to_item_eases_there_and_a_down_interrupts_it() {
+        let controller = ScrollController::new();
+        let mut logic = variable_logic(300, &controller);
+        let mut root = converged(&mut logic);
+
+        controller.scroll_to_item(ChildKey::new(120u64), ItemAlignment::Start, true);
+        frame(&mut root, &mut logic, 100.0); // drains and seeds the tween
+        assert!(controller.is_animating());
+        frame(&mut root, &mut logic, 200.0);
+        let mid = controller.offset();
+        assert!(mid > 0.0, "the tween is under way (offset {mid})");
+        assert!(controller.is_animating());
+
+        root.event(&mut (), &down(50.0));
+        assert!(!controller.is_animating(), "the Down ends the tween");
+        assert!(list(&root).item_target.is_none(), "and the settle loop");
+        assert!(list(&root).ballistic.is_none(), "the tween is really gone");
+        // The first frame after the Down re-windows around where the tween
+        // stopped and measures those rows (the measured anchor correction may
+        // re-express the placement then, holding the on-screen rows still);
+        // from there on nothing moves the content — the tween is not paused,
+        // and no settle correction is left to run.
+        frame(&mut root, &mut logic, 216.0);
+        let frozen = list(&root).placement_offset();
+        frame(&mut root, &mut logic, 600.0);
+        frame(&mut root, &mut logic, 616.0);
+        assert_near(
+            list(&root).placement_offset(),
+            frozen,
+            "nothing moves the content afterwards",
+        );
+        assert!(!controller.is_animating());
+    }
+
+    #[test]
+    fn an_animated_scroll_to_item_lands_aligned_when_left_alone() {
+        let controller = ScrollController::new();
+        let mut logic = variable_logic(300, &controller);
+        let mut root = converged(&mut logic);
+        controller.scroll_to_item(ChildKey::new(120u64), ItemAlignment::Start, true);
+        // The neutral theme's slow duration is 400ms; settle runs past it.
+        settle(&mut root, &mut logic, 100.0, 40);
+        assert!(!controller.is_animating());
+        let (top, _) = row_rect(list(&root), 120).expect("materialized");
+        assert_near(top, 0.0, "the row ends at the top after the tween + settle");
+    }
+
+    #[test]
+    fn on_change_publishes_the_settled_scroll_info() {
+        let controller = ScrollController::new();
+        let seen = Rc::new(RefCell::new(Vec::<ScrollInfo>::new()));
+        let sink = Rc::clone(&seen);
+        let _subscription = controller.on_change(move |info| sink.borrow_mut().push(info));
+        let mut logic = variable_logic(300, &controller);
+        let mut root = converged(&mut logic);
+        seen.borrow_mut().clear();
+
+        controller.scroll_to_item(ChildKey::new(200u64), ItemAlignment::Start, false);
+        settle(&mut root, &mut logic, 100.0, 8);
+        let w = list(&root);
+        let last = *seen.borrow().last().expect("the jump published");
+        assert_eq!(
+            last,
+            ScrollInfo {
+                offset: w.placement_offset(),
+                max_offset: w.max_offset(),
+                overscroll: 0.0,
+            },
+            "the last published info is the settled position"
+        );
+        assert_eq!(controller.offset(), last.offset);
+        let (top, _) = row_rect(w, 200).expect("materialized");
+        assert_near(top, 0.0, "and it is the position the row landed at");
+    }
+
+    #[test]
+    fn an_unknown_key_is_a_no_op() {
+        let controller = ScrollController::new();
+        let mut logic = variable_logic(50, &controller);
+        let mut root = converged(&mut logic);
+        controller.jump_to(300.0);
+        settle(&mut root, &mut logic, 100.0, 6);
+        let before = controller.offset();
+
+        controller.scroll_to_item("no-such-row", ItemAlignment::Start, false);
+        settle(&mut root, &mut logic, 300.0, 4);
+        assert_eq!(controller.offset(), before);
+        assert!(list(&root).item_target.is_none());
+
+        // A positional list has no keys at all: every key is unknown.
+        let positional = ScrollController::new();
+        let handle = positional.clone();
+        let mut logic: Logic = Box::new(move |_: &mut ()| {
+            list_view(50, ROW, |_| any::<(), _>(leaf(VIEWPORT.width, ROW)))
+                .controller(handle.clone())
+        });
+        let mut root = converged(&mut logic);
+        positional.scroll_to_item(ChildKey::new(10u64), ItemAlignment::Start, false);
+        settle(&mut root, &mut logic, 100.0, 4);
+        assert_eq!(positional.offset(), 0.0);
+        assert!(list(&root).item_target.is_none());
+    }
+
+    /// The anchor jump a rendered Markdown document makes: 200 keyed
+    /// heading/paragraph rows of self-sized, mostly unmeasured heights, a jump
+    /// to the heading keyed `h-150`, and the heading at the top afterwards.
+    #[test]
+    fn a_markdown_style_anchor_jump_puts_the_heading_at_the_top() {
+        fn key(i: usize) -> String {
+            if i.is_multiple_of(2) {
+                format!("h-{i}")
+            } else {
+                format!("p-{i}")
+            }
+        }
+        fn height(i: usize) -> f64 {
+            if i.is_multiple_of(2) {
+                32.0
+            } else {
+                48.0 + (i * 37 % 120) as f64
+            }
+        }
+        let controller = ScrollController::new();
+        let handle = controller.clone();
+        let mut logic: Logic = Box::new(move |_: &mut ()| {
+            ListView::builder_keyed(
+                200,
+                56.0,
+                |i| ChildKey::new(key(i)),
+                |i| any::<(), _>(leaf(VIEWPORT.width, height(i))),
+            )
+            .estimated_item_extent(56.0)
+            .controller(handle.clone())
+        });
+        let mut root = converged(&mut logic);
+
+        controller.scroll_to_item("h-150", ItemAlignment::Start, false);
+        settle(&mut root, &mut logic, 100.0, 8);
+        let offset = controller.offset();
+        let w = list(&root);
+        let slot = w
+            .keys
+            .iter()
+            .position(|&i| i == 150)
+            .expect("h-150 materialized");
+        assert_eq!(w.slot_keys[slot], ChildKey::new("h-150"));
+        assert_near(
+            w.slot_y[slot],
+            offset,
+            "the heading's content top is the offset",
+        );
+        let (top, _) = row_rect(w, 150).expect("materialized");
+        assert_near(top, 0.0, "the heading is at the top of the viewport");
     }
 }
