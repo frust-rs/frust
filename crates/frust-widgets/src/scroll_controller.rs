@@ -1,28 +1,41 @@
 //! [`ScrollController`]: a cloneable, reactive-free handle onto a
-//! [`ScrollView`](crate::ScrollView) — the programmatic-scroll seam.
+//! [`ScrollView`](crate::ScrollView) or a [`ListView`](crate::ListView) — the
+//! programmatic-scroll seam.
 //!
 //! App code keeps a handle in its state, attaches it with
-//! [`ScrollView::controller`](crate::ScrollView::controller), and drives or
-//! reads the surface from anywhere on the UI thread, inside a dispatch or not:
+//! [`ScrollView::controller`](crate::ScrollView::controller) or
+//! [`ListView::controller`](crate::ListView::controller), and drives or reads
+//! the surface from anywhere on the UI thread, inside a dispatch or not:
 //!
-//! - **Writes are recorded, not applied.** [`ScrollController::jump_to`] and
-//!   [`ScrollController::animate_to`] queue a command the attached widget
-//!   drains at the start of its next layout or paint (whichever runs first),
-//!   so the clamp is always taken against the freshly laid-out extent — a
-//!   jump issued in the same handler that appended content lands on the new
-//!   bottom, not the old one. A command queued before any surface attaches
-//!   (or before the attached one has laid out) waits for the first layout.
-//!   Recording raises [`frust_core::mark_pending_result_flush`] so a
-//!   frame-gated shell runs the frame that applies it even when nothing else
-//!   changed (the `PanZoomController`/`NavigatorController` precedent).
+//! - **Writes are recorded, not applied.** [`ScrollController::jump_to`],
+//!   [`ScrollController::animate_to`] and [`ScrollController::scroll_to_item`]
+//!   queue a command the attached widget drains at the start of its next
+//!   layout or paint (whichever runs first — a `ListView` also drains at its
+//!   next rebuild, before it plans the window, so the jump's frame already
+//!   materializes the rows it lands on), so the clamp is always taken against
+//!   the freshly laid-out extent — a jump issued in the same handler that
+//!   appended content lands on the new bottom, not the old one. A command
+//!   queued before any surface attaches (or before the attached one has laid
+//!   out) waits for the first layout. Recording raises
+//!   [`frust_core::mark_pending_result_flush`] so a frame-gated shell runs the
+//!   frame that applies it even when nothing else changed (the
+//!   `PanZoomController`/`NavigatorController` precedent).
 //! - **Reads are the last published snapshot.** [`ScrollController::offset`],
 //!   [`ScrollController::max_offset`] and [`ScrollController::viewport_extent`]
 //!   return what the attached surface last published — after every layout,
 //!   paint and event pass that changed it — and [`ScrollController::on_change`]
 //!   listeners hear each new [`ScrollInfo`] as it is published.
 //! - **One surface per handle.** The most recent attach wins: a second
-//!   `ScrollView` attaching the same handle takes it over and the first stops
+//!   surface attaching the same handle takes it over and the first stops
 //!   draining or publishing; dropping the attached widget detaches it.
+//! - **Item commands are list-only.** [`ScrollController::scroll_to_item`]
+//!   names a row by its [`ChildKey`], which only a keyed
+//!   [`ListView`](crate::ListView) can resolve. The queue therefore holds a
+//!   wider crate-internal command type than the offset-only `ScrollCommand`
+//!   a `ScrollView` matches on: the `ScrollView` drain filters item commands
+//!   out (ignoring each with a debug-build log) and keeps the offset ones in
+//!   recording order, so `ScrollView` never sees — and never has to match
+//!   on — a variant it cannot act on.
 //!
 //! See `docs/WIDGETS_ARCHITECTURE.md`'s *Scroll Physics* for the surface the
 //! handle drives.
@@ -33,6 +46,7 @@ use std::rc::{Rc, Weak};
 
 use frust_core::Curve;
 
+use crate::ChildKey;
 use crate::scroll::ScrollInfo;
 
 /// A command recorded on a [`ScrollController`], drained by the attached
@@ -44,6 +58,52 @@ pub(crate) enum ScrollCommand {
     /// Ease to this offset over the paired [`AnimateTo`]'s duration/curve,
     /// clamped to `[0, max_offset]`.
     AnimateTo(f64, AnimateTo),
+}
+
+/// Every command a [`ScrollController`] queues: an offset command any
+/// surface applies, or an item command only a keyed
+/// [`ListView`](crate::ListView) can resolve. Kept apart from
+/// [`ScrollCommand`] so the `ScrollView` drain — which matches exhaustively on
+/// that offset-only enum — never has to grow an arm for a key it has no
+/// rows to resolve against (see the [module docs](self)).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ControllerCommand {
+    /// A jump/animate to an offset, applied by every surface.
+    Offset(ScrollCommand),
+    /// Bring a keyed row into view — applied by a keyed `ListView`, ignored
+    /// (with a debug-build log) by a `ScrollView`.
+    ScrollToItem(ScrollToItem),
+}
+
+/// A recorded [`ScrollController::scroll_to_item`] request.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ScrollToItem {
+    /// The row's stable identity, as the list's `key_of` produces it.
+    pub(crate) key: ChildKey,
+    /// Where in the viewport the row should land.
+    pub(crate) alignment: ItemAlignment,
+    /// Ease there (through the same tween `animate_to` runs) rather than jump.
+    pub(crate) animated: bool,
+}
+
+/// Where [`ScrollController::scroll_to_item`] lands a row in the viewport.
+///
+/// Every alignment is clamped to the list's `[0, max_offset]` range, so a row
+/// too near either end of the content to reach the requested position stops
+/// at the edge instead (the first row can never be centered).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ItemAlignment {
+    /// The row's top edge at the viewport's top edge.
+    #[default]
+    Start,
+    /// The row's center at the viewport's center.
+    Center,
+    /// The row's bottom edge at the viewport's bottom edge.
+    End,
+    /// The least movement that shows the whole row: nothing at all when it is
+    /// already fully visible, [`ItemAlignment::Start`] when it sits above the
+    /// viewport (or is taller than it), [`ItemAlignment::End`] when below.
+    Nearest,
 }
 
 /// The duration/curve [`ScrollController::animate_to`] eases a programmatic
@@ -76,8 +136,8 @@ struct Shared {
     attached: Option<u64>,
     /// The token the next [`ScrollController::bind`] hands out.
     next_token: u64,
-    /// Commands recorded and not yet drained.
-    commands: Vec<ScrollCommand>,
+    /// Commands recorded and not yet drained, in recording order.
+    commands: Vec<ControllerCommand>,
     /// Subscribed listeners, keyed by the id their guard removes them by.
     listeners: Vec<(u64, Listener)>,
     /// The id the next [`ScrollController::on_change`] hands out.
@@ -108,8 +168,10 @@ impl Default for Shared {
     }
 }
 
-/// A cloneable handle onto a [`ScrollView`](crate::ScrollView): drive it with
-/// [`jump_to`](Self::jump_to), read where it stands with
+/// A cloneable handle onto a [`ScrollView`](crate::ScrollView) or a
+/// [`ListView`](crate::ListView): drive it with [`jump_to`](Self::jump_to)/
+/// [`animate_to`](Self::animate_to) (and, on a keyed list,
+/// [`scroll_to_item`](Self::scroll_to_item)), read where it stands with
 /// [`offset`](Self::offset)/[`max_offset`](Self::max_offset)/
 /// [`viewport_extent`](Self::viewport_extent), and observe it with
 /// [`on_change`](Self::on_change). Every clone shares one state, so the handle
@@ -158,7 +220,7 @@ impl ScrollController {
     /// is attached (or before the attached surface has laid out), it waits for
     /// the first layout of the next surface to attach.
     pub fn jump_to(&self, offset: f64) {
-        self.record(ScrollCommand::JumpTo(offset));
+        self.record(ControllerCommand::Offset(ScrollCommand::JumpTo(offset)));
     }
 
     /// Ease to `offset` over `options.duration_ms`/`options.curve`, clamped
@@ -176,7 +238,62 @@ impl ScrollController {
     /// app's `motion.reduce_motion` theme flag collapses this to an instant
     /// jump. `NaN` is ignored.
     pub fn animate_to(&self, offset: f64, options: AnimateTo) {
-        self.record(ScrollCommand::AnimateTo(offset, options));
+        self.record(ControllerCommand::Offset(ScrollCommand::AnimateTo(
+            offset, options,
+        )));
+    }
+
+    /// Scroll a keyed [`ListView`](crate::ListView) so the row whose key is
+    /// `key` lands at `alignment` in the viewport — jumping there, or easing
+    /// there when `animated` is `true`.
+    ///
+    /// `key` is the same identity the list's
+    /// [`builder_keyed`](crate::ListView::builder_keyed) `key_of` returns for
+    /// the row (anything that converts into a [`ChildKey`]: an id, a name, a
+    /// `ChildKey` itself). Applied like [`ScrollController::jump_to`] — at the
+    /// attached list's next rebuild, layout or paint, replacing any jump or
+    /// animation in flight — and resolved then against the list's current
+    /// data:
+    ///
+    /// - **Resolution is O(item count) at worst.** The list keeps no
+    ///   key-to-index map beyond its materialized window, so a key outside the
+    ///   window is found by calling `key_of` over the items in order. One scan
+    ///   per request (and per settle frame for a row that left the window),
+    ///   never per frame.
+    /// - **Estimated, then corrected.** In variable-extent mode
+    ///   ([`ListView::estimated_item_extent`](crate::ListView::estimated_item_extent))
+    ///   the row's position is computed from the heights measured so far and
+    ///   the estimate for every row not yet laid out. Once the jump lands (or
+    ///   the animation finishes), each following layout measures the rows now
+    ///   on screen, re-resolves the row's aligned position and corrects to it,
+    ///   for at most a few frames (the list's own docs state the bound) — so
+    ///   the row ends aligned even when the rows ahead of it were never
+    ///   measured. A user `Down`, wheel or `Cancel` ends the request at once.
+    /// - **An unknown key is a no-op.** A key no row carries — or any key on a
+    ///   positional [`ListView::builder`](crate::ListView::builder) list, which
+    ///   has no keys — leaves the list where it is and reports itself only
+    ///   through a debug-build log, since a recorded command has no caller left
+    ///   to return a `Result` to.
+    /// - **Lists only.** A [`ScrollView`](crate::ScrollView) holding this handle
+    ///   ignores the request (debug-build log); its offset commands are
+    ///   unaffected.
+    ///
+    /// `animated` eases through the same tween [`ScrollController::animate_to`]
+    /// runs, timed from the theme's motion tokens (`motion.durations.slow` and
+    /// `motion.easing.spatial`, the neutral scheme's values when no theme is
+    /// threaded); the theme's `motion.reduce_motion` flag collapses it to a
+    /// jump.
+    pub fn scroll_to_item(
+        &self,
+        key: impl Into<ChildKey>,
+        alignment: ItemAlignment,
+        animated: bool,
+    ) {
+        self.record(ControllerCommand::ScrollToItem(ScrollToItem {
+            key: key.into(),
+            alignment,
+            animated,
+        }));
     }
 
     /// Whether the attached surface is currently running an
@@ -232,7 +349,7 @@ impl ScrollController {
 
     /// Queue `command` and raise [`frust_core::mark_pending_result_flush`] so a
     /// frame runs to apply it even when it came from outside any input path.
-    fn record(&self, command: ScrollCommand) {
+    fn record(&self, command: ControllerCommand) {
         self.shared.borrow_mut().commands.push(command);
         frust_core::mark_pending_result_flush();
     }
@@ -307,9 +424,27 @@ impl ScrollBinding {
         shared.attached == Some(self.token) && !shared.commands.is_empty()
     }
 
-    /// Take every queued command, in recording order — empty unless this
-    /// binding is current.
+    /// Take every queued **offset** command, in recording order — empty unless
+    /// this binding is current. The `ScrollView` drain: an item command
+    /// ([`ScrollController::scroll_to_item`]) has no rows to resolve against
+    /// here, so it is dropped with a debug-build log while the offset commands
+    /// around it keep their order.
     pub(crate) fn take_commands(&self) -> Vec<ScrollCommand> {
+        self.take_all_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                ControllerCommand::Offset(command) => Some(command),
+                ControllerCommand::ScrollToItem(item) => {
+                    ignore_item_command(&item);
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Take every queued command, item commands included, in recording order
+    /// — empty unless this binding is current. The `ListView` drain.
+    pub(crate) fn take_all_commands(&self) -> Vec<ControllerCommand> {
         let mut shared = self.controller.shared.borrow_mut();
         if shared.attached != Some(self.token) {
             return Vec::new();
@@ -357,11 +492,104 @@ impl ScrollBinding {
     }
 }
 
+/// Report an item command a surface with no keyed rows dropped — a wiring gap
+/// worth hearing about in a debug build, not an error a release build can act
+/// on (the `selection_toolbar` precedent).
+fn ignore_item_command(_item: &ScrollToItem) {
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "frust-widgets: ScrollController::scroll_to_item({:?}, {:?}) ignored: the attached \
+         surface is a ScrollView, which has no keyed rows (attach the handle to a keyed \
+         ListView instead)",
+        _item.key, _item.alignment
+    );
+}
+
 impl Drop for ScrollBinding {
     fn drop(&mut self) {
         let mut shared = self.controller.shared.borrow_mut();
         if shared.attached == Some(self.token) {
             shared.attached = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use frust_core::{BoxConstraints, BuildCtx, LayoutCtx, View, Widget};
+    use kurbo::Size;
+
+    use super::*;
+    use crate::test_support::leaf;
+    use crate::{ScrollView, scroll_view};
+
+    #[test]
+    fn the_scroll_view_drain_drops_item_commands_and_keeps_offset_order() {
+        let controller = ScrollController::new();
+        let binding = controller.bind();
+        controller.jump_to(10.0);
+        controller.scroll_to_item(ChildKey::new(7u64), ItemAlignment::Center, true);
+        controller.jump_to(20.0);
+        assert!(binding.has_pending());
+        assert_eq!(
+            binding.take_commands(),
+            vec![ScrollCommand::JumpTo(10.0), ScrollCommand::JumpTo(20.0)],
+            "the item command is filtered out, the offset ones keep their order"
+        );
+        assert!(
+            !binding.has_pending(),
+            "the item command was drained, not left queued"
+        );
+    }
+
+    #[test]
+    fn the_list_drain_keeps_every_command_in_recording_order() {
+        let controller = ScrollController::new();
+        let binding = controller.bind();
+        controller.scroll_to_item("row", ItemAlignment::Nearest, false);
+        controller.jump_to(5.0);
+        assert_eq!(
+            binding.take_all_commands(),
+            vec![
+                ControllerCommand::ScrollToItem(ScrollToItem {
+                    key: ChildKey::new("row"),
+                    alignment: ItemAlignment::Nearest,
+                    animated: false,
+                }),
+                ControllerCommand::Offset(ScrollCommand::JumpTo(5.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scroll_view_ignores_scroll_to_item() {
+        let controller = ScrollController::new();
+        let view: ScrollView<()> = scroll_view(leaf(200.0, 1000.0)).controller(controller.clone());
+        let mut counter = 0u64;
+        let mut widget = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
+        let viewport = BoxConstraints::loose(Size::new(200.0, 100.0));
+
+        controller.scroll_to_item(ChildKey::new(3u64), ItemAlignment::Start, false);
+        widget.layout(&mut LayoutCtx::new(), &viewport);
+        assert_eq!(
+            controller.offset(),
+            0.0,
+            "an item command moves a ScrollView nowhere"
+        );
+        assert_eq!(
+            controller.max_offset(),
+            900.0,
+            "but the surface still publishes"
+        );
+
+        controller.scroll_to_item(ChildKey::new(3u64), ItemAlignment::Start, false);
+        controller.jump_to(250.0);
+        widget.layout(&mut LayoutCtx::new(), &viewport);
+        assert_eq!(
+            widget.offset(),
+            250.0,
+            "the offset command after it still applies"
+        );
+        assert_eq!(controller.offset(), 250.0);
     }
 }
