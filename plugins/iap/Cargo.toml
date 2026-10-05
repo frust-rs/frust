@@ -31,7 +31,7 @@ serde_json = { workspace = true }
 # Plugin Conventions). Unconditional like `frust-clipboard`'s/
 # `frust-haptics`'s own copy: the crate is inert off Android, so declaring
 # it target-gated would buy nothing.
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.1" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
 # The Android nativeOn* export stubs and the Apple backend's own diagnostics
 # both log rather than print (platform plugins never own stdout/stderr the
 # way `frust-drive` does) — a leaf, framework-free dependency, matching

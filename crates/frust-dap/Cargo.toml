@@ -26,11 +26,11 @@ path = "src/lib.rs"
 # The device/build vocabulary a launch resolves into (`Device`, `BuildMode`,
 # the devtools-error classifiers) — the same library `frust-mcp`/`frust-tui`
 # build on.
-frust-drive = { path = "../frust-drive", version = "0.5.1" }
+frust-drive = { path = "../frust-drive", version = "0.5.2" }
 # `SessionBackend` — the seam the embedded DAP server drives, so a DAP client
 # and an MCP client supervise the *same* sessions rather than each owning a
 # world of their own.
-frust-mcp = { path = "../frust-mcp", version = "0.5.1" }
+frust-mcp = { path = "../frust-mcp", version = "0.5.2" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
@@ -62,4 +62,4 @@ tokio = { workspace = true, features = [
 # `frust-mcp`/`frust-tui` use, so an adapter test never shells out for real.
 # A feature toggle on a dependency this crate already has: no new package
 # enters the graph and `Cargo.lock` is unchanged.
-frust-drive = { path = "../frust-drive", version = "0.5.1", features = ["test-util"] }
+frust-drive = { path = "../frust-drive", version = "0.5.2", features = ["test-util"] }

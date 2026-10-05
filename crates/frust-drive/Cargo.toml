@@ -24,7 +24,7 @@ test-util = []
 # crossing between the in-app debug service and the tooling side — and
 # nothing else framework-adjacent). Path dep, like every other in-workspace
 # crate this crate consumes.
-frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.1" }
+frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.2" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
