@@ -613,9 +613,11 @@ tokio = { version = "1", default-features = false }
 # never uses; `server` + `transport-streamable-http-server` are the
 # transport it runs; `macros` pulls in the `#[tool_router]`/`#[tool]`/
 # `#[tool_handler]` attribute macros the crate's tools are built from.
-# Pinned to the 1.7 minor per the Version-Pin Policy; the lockfile resolves
-# 1.8.0. Tripwire: `cargo test -p frust-mcp`.
-rmcp = { version = "1.7", default-features = false, features = [
+# Pinned to the 2.2 minor per the Version-Pin Policy: 2.0.0 is the first
+# release fixing the Streamable-HTTP session-table leak (GHSA-9pj6-vhgr-3mwh)
+# this server's default `LocalSessionManager` was exposed to; 3.x is the
+# sessionless 2026-07-28 protocol rewrite. Tripwire: `cargo test -p frust-mcp`.
+rmcp = { version = "2.2", default-features = false, features = [
     "server",
     "transport-streamable-http-server",
     "macros",
