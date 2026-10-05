@@ -28,6 +28,22 @@
 //! - **One surface per handle.** The most recent attach wins: a second
 //!   surface attaching the same handle takes it over and the first stops
 //!   draining or publishing; dropping the attached widget detaches it.
+//! - **`is_animating` tracks the current binding, never a stale one.**
+//!   [`ScrollController::is_animating`] is true only while the *currently
+//!   attached* binding's surface has a live controller-driven
+//!   [`ScrollController::animate_to`] tween running — never a snapshot of
+//!   whatever the handle last happened to report. Both places current-ness
+//!   changes reconcile it so a detached or superseded binding can never
+//!   leave it stuck true: [`ScrollController::bind`] resets it for the newly
+//!   attached binding, and dropping the binding that was still current
+//!   clears it (`impl Drop for ScrollBinding`) even when the widget itself
+//!   never got to call [`ScrollController::is_animating`]'s setter —
+//!   covering a tween whose surface is dropped, taken over, or rebound
+//!   mid-flight. A widget whose tween genuinely survives a rebind to a
+//!   different handle (the tween belongs to the widget, not the handle)
+//!   republishes its live state onto the freshly bound handle right after
+//!   binding, so a real in-flight tween is still reported, just under the
+//!   new current binding instead of the old one.
 //! - **Item commands are list-only.** [`ScrollController::scroll_to_item`]
 //!   names a row by its [`ChildKey`], which only a keyed
 //!   [`ListView`](crate::ListView) can resolve. The queue therefore holds a
@@ -175,10 +191,15 @@ struct Shared {
     listeners: Vec<(u64, Listener)>,
     /// The id the next [`ScrollController::on_change`] hands out.
     next_listener: u64,
-    /// Whether the attached surface is currently running a controller-driven
-    /// [`ScrollController::animate_to`] tween — [`ScrollController::is_animating`]'s
-    /// backing state, published under the same "last known state" contract
-    /// as `info`/`viewport_extent` rather than reset on detach.
+    /// Whether the *currently attached* binding's surface is running a
+    /// controller-driven [`ScrollController::animate_to`] tween —
+    /// [`ScrollController::is_animating`]'s backing state. Unlike
+    /// `info`/`viewport_extent`, this is a liveness flag, not a last-known
+    /// snapshot: it is true only while the current binding has a live tween,
+    /// and is reconciled back to `false` whenever current-ness changes
+    /// without the widget itself clearing it first — [`ScrollController::bind`]
+    /// resets it for the newly attached binding, and dropping the binding
+    /// that was current clears it too (see `impl Drop for ScrollBinding`).
     animating: bool,
 }
 
@@ -329,10 +350,13 @@ impl ScrollController {
         }));
     }
 
-    /// Whether the attached surface is currently running an
+    /// Whether the *currently attached* surface is running an
     /// [`animate_to`](Self::animate_to) tween — `false` once it completes, is
-    /// replaced by a later jump/animate, or is interrupted by user input, and
-    /// `false` before any surface has ever started one.
+    /// replaced by a later jump/animate, or is interrupted by user input;
+    /// `false` before any surface has ever started one; and `false` once the
+    /// surface that was running one is dropped, taken over, or rebinds to a
+    /// different handle (see the [module docs](self) for the reconciliation
+    /// that guarantees this).
     pub fn is_animating(&self) -> bool {
         self.shared.borrow().animating
     }
@@ -439,11 +463,17 @@ impl ScrollController {
     }
 
     /// Attach a surface, taking the handle over from whichever one held it.
+    /// Resets `animating` to `false` for the new binding — a stale tween
+    /// reported by whichever surface held the handle before never leaks
+    /// into the new attach; a widget whose tween genuinely survives the
+    /// rebind (see `ScrollWidget`/`ListViewWidget::attach_controller`)
+    /// republishes its live state on the freshly bound handle right after.
     pub(crate) fn bind(&self) -> ScrollBinding {
         let mut shared = self.shared.borrow_mut();
         let token = shared.next_token;
         shared.next_token += 1;
         shared.attached = Some(token);
+        shared.animating = false;
         ScrollBinding {
             controller: self.clone(),
             token,
@@ -597,11 +627,20 @@ fn drop_oldest_item_command(_item: &ScrollToItem) {
     );
 }
 
+/// Detaches the handle when the dropped binding is still current, clearing
+/// both `attached` and `animating` in the same branch — a binding taken over
+/// by a later [`ScrollController::bind`] is already stale (its drop touches
+/// neither field, since `attached` no longer names its token and `animating`
+/// already belongs to whichever binding took over). This is what keeps
+/// [`ScrollController::is_animating`] from reporting a tween that ended only
+/// because its surface was dropped mid-flight — the widget's own
+/// `stop_ballistic` never runs in that case, so nothing else would clear it.
 impl Drop for ScrollBinding {
     fn drop(&mut self) {
         let mut shared = self.controller.shared.borrow_mut();
         if shared.attached == Some(self.token) {
             shared.attached = None;
+            shared.animating = false;
         }
     }
 }
@@ -781,5 +820,46 @@ mod tests {
             drained, expected,
             "the surviving entries are the newest ones, oldest-dropped-first, in recording order"
         );
+    }
+
+    #[test]
+    fn bind_resets_animating_and_drop_clears_it_only_for_the_current_binding() {
+        let controller = ScrollController::new();
+        let first = controller.bind();
+        first.set_animating(true);
+        assert!(controller.is_animating(), "the current binding set it");
+
+        // A fresh bind resets the flag, even though the just-bound-over
+        // first binding never ran its own tear-down.
+        let second = controller.bind();
+        assert!(
+            !controller.is_animating(),
+            "bind() resets animating for the newly attached binding"
+        );
+
+        // The second binding can still set its own live state independently
+        // of the first's stale `true`.
+        second.set_animating(true);
+        assert!(controller.is_animating());
+
+        // Dropping the stale, taken-over first binding must not touch the
+        // current holder's flag.
+        drop(first);
+        assert!(
+            controller.is_animating(),
+            "dropping a non-current binding leaves the current holder's flag alone"
+        );
+        assert!(
+            controller.is_attached(),
+            "dropping a non-current binding does not detach the handle"
+        );
+
+        // Dropping the current binding clears it.
+        drop(second);
+        assert!(
+            !controller.is_animating(),
+            "dropping the current binding clears animating"
+        );
+        assert!(!controller.is_attached());
     }
 }
