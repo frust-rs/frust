@@ -22,7 +22,7 @@ decides — once per run, per frame — whether its glyphs are *sampled from the
 | `CompileSpans` (`glyphs` is a subset of `walk`) | `crates/frust-engine/src/compile/mod.rs` | ≈207 |
 | `ENCODE_TRACE_COLUMNS` — the `frust-perf enc` line's fields | `crates/frust-engine/src/renderer.rs` | ≈374 |
 | `atlas_disabled` — reads `FRUST_ENGINE_NO_ATLAS` once per process | `crates/frust-engine/src/config.rs` | ≈74 |
-| The glifo pin: `glifo = { version = "=0.3.0", … }` | `Cargo.toml` (workspace) | ≈298 |
+| The glifo pin: `glifo = { version = "=0.3.0", … }` | `Cargo.toml` (workspace) | ≈104 |
 
 
 ## The four ideas
