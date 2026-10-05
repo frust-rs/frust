@@ -12,7 +12,7 @@
 //! ([`DragCoordinator::register_target`]); [`DragTargetView::teardown`]
 //! unregisters it. Every paint reports the widget's window-space bounds
 //! ([`DragCoordinator::set_target_bounds`]) so cross-container resolution
-//! ([`mod@super`]'s `c-05`) can find this target under the ghost point without
+//! (the per-frame resolution a later layer runs over the registry) can find this target under the ghost point without
 //! hit-testing through the ghost's own `Transparent` pod — `paint`, not layout,
 //! because [`frust_core::LayoutCtx`] carries no window-space origin (only
 //! [`frust_core::PaintCtx::origin`] does; see [`mod@super::draggable`]'s
@@ -53,7 +53,7 @@
 //!   ends without a drop.
 //!
 //! A test driving [`DragCoordinator::set_hovered`]/[`DragCoordinator::drop`]
-//! directly (simulating `c-05`'s per-frame resolution) sees exactly the same
+//! directly (simulating the per-frame hover resolution) sees exactly the same
 //! callbacks a real resolution pass would produce, once its
 //! `InputEvent::Housekeeping` is delivered.
 //!
