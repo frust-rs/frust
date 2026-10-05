@@ -17,100 +17,46 @@ frust-scene = { workspace = true }
 frust-render = { workspace = true }
 frust-text = { workspace = true }
 frust-reactive = { workspace = true }
-# Shared platform-dir resolution + atomic write (frust-paths substrate) —
-# cache.rs delegates cache-dir/app-stem/atomic-write to this leaf crate
-# instead of hand-rolling its own copy (see cache.rs's module doc).
+# Shared cache-dir resolution and atomic write; `cache.rs` delegates to it.
 frust-paths = { workspace = true }
-# Load-bearing: the shell owns the active Theme, boxes it into RenderRoot's
-# type-erased slot, and re-pushes it on WindowEvent::ThemeChanged — see
-# docs/ARCHITECTURE.md's Theme delivery.
+# Load-bearing: the shell owns the active Theme and re-pushes it on ThemeChanged (docs/ARCHITECTURE.md Theme delivery).
 frust-theme = { workspace = true }
-# Load-bearing: the app-facing theme override watcher
-# (`ThemeOverrideWatcher`/`effective_brightness_for_platform_change`) this
-# shell polls once per frame — see `frust_shell_common::theme_override`'s
-# module docs.
+# Load-bearing: `ThemeOverrideWatcher`, polled once per frame (see `frust_shell_common::theme_override`).
 frust-shell-common = { workspace = true }
 winit = { workspace = true }
-# Desktop accesskit adapter — winit
-# event-loop integration for the semantics tree; compiles unconditionally
-# like `winit` above (this crate is only ever included in the dependency
-# graph for non-Android builds, via `frust`'s
-# `cfg(not(target_os = "android"))` gate — see docs/ARCHITECTURE.md).
+# Compiles unconditionally; this crate is in the graph only for non-Android builds, via `frust`'s
+# `cfg(not(target_os = "android"))` gate (docs/ARCHITECTURE.md).
 accesskit_winit = { workspace = true }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 pollster = { workspace = true }
 anyhow = { workspace = true }
-# Perf instrumentation: the desktop shell installs its own stderr
-# `log::Log` sink (see `logger.rs`) so `frust-shell-common::perf`'s
-# `log::info!` startup-span/frame-stats lines are actually visible — mirrors
-# `frust-shell-ios`'s own `StderrLogger` (zero new transitive deps, `log`
-# is already pulled in via `frust-shell-common`).
+# The shell installs its own stderr `log::Log` sink (`logger.rs`) so `frust-shell-common::perf` lines are visible.
 log = { workspace = true }
 
-# Desktop clipboard route (macOS, Linux, Windows) — `arboard`, the same sync
-# clipboard crate `plugins/clipboard`'s desktop backend uses, but held here as
-# ONE process-lifetime instance owned by the `frust-clipboard` WORKER THREAD
-# rather than constructed per call the way that backend does (see
-# `src/app_handler.rs`'s `ClipboardWorker` doc; the instance moved off the UI
-# thread when a paste stopped blocking the event loop, superseding the plan's
-# decision D11 — it is emphatically NOT `ShellHandler`-owned any more, whatever
-# an older comment may say): on X11/Wayland the clipboard's content is served
-# live by
-# whichever process last claimed the selection, so a per-call instance would
-# drop that ownership — and so the content this process just copied — the
-# moment `set_text` returned, on any desktop with no clipboard manager
-# running. `default-features = false` drops arboard's default `image-data`
-# feature (image get/set, pulling in `image`/`objc2-core-graphics`/
-# `windows-sys` Gdi bindings this shell never uses) — see root `Cargo.toml`'s
-# Version-Pin Policy comment for the pin rationale. `wayland-data-control`
-# (native Wayland selection support via `wl-clipboard-rs`) is deliberately
-# NOT enabled, matching `plugins/clipboard`'s own choice — a Wayland session
-# without XWayland compatibility may be unable to reach the clipboard at all,
-# a documented, deliberately-deferred gap, not this shell's to close.
+# Desktop clipboard route. `arboard` is held as ONE process-lifetime instance owned by the `frust-clipboard` worker thread
+# (`ClipboardWorker`, `src/app_handler.rs`): on X11/Wayland the content is served by whichever process last claimed the
+# selection, so a per-call instance would lose it on return when no clipboard manager runs. `default-features = false` drops
+# `image-data` (unused image deps; pin rationale in root Cargo.toml's Version-Pin Policy). `wayland-data-control` is NOT
+# enabled, matching `plugins/clipboard`: a Wayland session without XWayland may not reach the clipboard (deferred gap).
 # Tripwire: `cargo check -p frust-shell-desktop`.
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
-# COEXISTENCE CONSTRAINT with `plugins/clipboard` (recorded 2026-09-11).
-# This shell now holds its `arboard::Clipboard` open on a background
-# thread for the process lifetime, while `plugins/clipboard`'s desktop backend
-# constructs a fresh one per call on whatever thread the app calls from. Those
-# two instances can therefore be live on DIFFERENT threads at the same instant,
-# which `plugins/clipboard/src/desktop.rs` records as having been observed to
-# crash (`arboard`'s macOS `NSPasteboard` backend is not documented safe for
-# concurrent access from independent `Clipboard` instances). Before the worker
-# thread existed both paths ran on the UI thread and were serialised by
-# construction, so this is a NEW constraint, not a pre-existing one. An app that
-# uses a clipboard-capable widget (`TextInput`, the OTP widgets) together with
-# `frust-clipboard`'s own API on desktop is therefore in unsupported territory
-# until one of the two routes gives way. Not yet closed — deliberately recorded
-# rather than silently carried.
+# COEXISTENCE CONSTRAINT with `plugins/clipboard`: this worker-thread `arboard::Clipboard` and that backend's per-call instance
+# can be live on different threads at once, which `plugins/clipboard/src/desktop.rs` records as observed to crash (macOS
+# NSPasteboard). An app using a clipboard-capable widget with `frust-clipboard`'s API on desktop is unsupported until one
+# route gives way; not yet closed.
 arboard = { workspace = true }
 
-# DEV-ONLY: the shipped crate reaches the reactive substrate exclusively through
-# `frust-reactive` (see docs/ARCHITECTURE.md's Layer Dependencies) — this entry
-# is a dev-dependency ONLY and never enters a consumer's dependency graph. It
-# exists for the event-dispatch owner-wrap regression test, which needs
-# `reactive_graph`'s `Get`/`Set` signal traits (`frust-reactive` re-exports
-# `RwSignal` but not the traits) to prove the wrap installs an `Owner` and NOT a
-# `TrackedScope`. Same shape and rationale as `frust-shell-common`'s dev-only
-# reactive entries.
+# DEV-ONLY (docs/ARCHITECTURE.md Layer Dependencies): `reactive_graph`'s Get/Set traits, which `frust-reactive` does not
+# re-export, for the owner-wrap regression test proving the wrap installs an Owner, not a TrackedScope.
 [dev-dependencies]
 reactive_graph = { workspace = true }
 
 [features]
-# Opt-in perf-trace instrumentation: re-exports frust-shell-common/perf-trace
-# and frust-render/perf-trace. Empty by default (opt-in survives cargo's additive
-# unification; the CLI is the sole enabler).
+# Opt-in: re-exports frust-shell-common/perf-trace and frust-render/perf-trace; the CLI is the sole enabler.
 perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
-# Opt-in in-app devtools service: re-exports frust-shell-common/devtools and
-# compiles this shell's service start + UI-thread hop in. Empty by default,
-# exactly like `perf-trace` above (the CLI is the sole enabler, for debug and
-# profile builds only).
+# Opt-in in-app devtools service: re-exports frust-shell-common/devtools; the CLI enables it for debug/profile builds only.
 devtools = ["frust-shell-common/devtools"]
-# The facade's `gpu` feature (`frust::gpu`, see crates/frust/src/lib.rs)
-# forwards into this: `frust-render/gpu` re-exports `DeviceHandle`, and
-# `frust-shell-common/gpu` carries the process-wide slot `render.rs` installs
-# the live device into once a surface (and so a device) exists. Empty
-# otherwise (no new dependency, just two features on already-unconditional
-# deps), the same additive-unification shape as `perf-trace`/`devtools`.
+# Facade `gpu` forwards here: `frust-render/gpu` re-exports `DeviceHandle`; `frust-shell-common/gpu` holds the slot
+# `render.rs` installs the live device into.
 gpu = ["frust-shell-common/gpu", "frust-render/gpu"]

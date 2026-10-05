@@ -12,46 +12,26 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-# The DesktopExtensions trait this crate implements, plus the winit core it
-# plugs into. Unconditional (not target-gated): `frust-shell-desktop` itself
-# already compiles on every non-mobile host.
+# DesktopExtensions trait + winit core; unconditional since `frust-shell-desktop` compiles on every non-mobile host.
 frust-shell-desktop = { workspace = true }
-# `WindowsExtensions`'s hooks will report menu activations through
-# `frust_reactive::push_menu_event` once native menu handling lands (see
-# `DesktopExtensions::pump`'s docs) — carried now so that follow-on task
-# never touches this manifest.
+# Carried ahead of native menu handling (`push_menu_event`) so that work never touches this manifest.
 frust-reactive = { workspace = true }
-# `DesktopExtensions::on_theme_brightness_changed` is typed in
-# `frust_theme::Brightness`, which `frust-shell-desktop` carries but does not
-# re-export — naming the hook's parameter type means naming this crate. Same
-# `{ workspace = true }` shape as `frust-shell-desktop`'s own edge.
+# `on_theme_brightness_changed` is typed in `frust_theme::Brightness`, which `frust-shell-desktop` does not re-export.
 frust-theme = { workspace = true }
 winit = { workspace = true }
 log = { workspace = true }
 
-# The Win32-native half — a native menu bar (`muda`), and the
-# `EventLoopBuilderExtWindows::with_msg_hook` menu-accelerator wiring a
-# follow-on task adds — only ever compiles for a Windows target; on every
-# other host this crate is (almost) empty but the `WindowsExtensions` stub
-# above still compiles, so `cargo check --workspace` stays green (the
-# `frust-shell-android` inert-off-target precedent — see its own Cargo.toml).
+# Win32-native half (`muda` menu bar, accelerator hook); inert off Windows so `cargo check --workspace` stays green.
 [target.'cfg(target_os = "windows")'.dependencies]
 muda = { workspace = true }
-# This crate's own feature ask, kept to exactly what `win32_glue` calls (the
-# Version-Pin Policy's "declare no features at the workspace level" contract
-# for this pin — see the root Cargo.toml's `windows-sys` row):
-#   - `Win32_UI_Shell` — `SetCurrentProcessExplicitAppUserModelID` (taskbar
-#     identity/grouping from `DesktopConfig::app_id`).
-#   - `Win32_UI_WindowsAndMessaging` — `MSG`/`HACCEL`/`TranslateAcceleratorW`
-#     for the menu-accelerator message hook.
-# Both pull `Win32_Foundation` (`HWND`) transitively via `Win32_UI` -> `Win32`.
+# Features are exactly what `win32_glue` calls (Version-Pin Policy: no workspace-level features, see root `windows-sys` row):
+# `Win32_UI_Shell` for AppUserModelID, `Win32_UI_WindowsAndMessaging` for MSG/HACCEL/TranslateAcceleratorW.
 windows-sys = { workspace = true, features = [
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
 
-# docs.rs builds on x86_64 Linux by default, where a target-specific crate
-# documents as empty; build the docs for the crate's own target instead.
+# docs.rs builds x86_64 Linux by default; a target-specific crate would document as empty.
 [package.metadata.docs.rs]
 default-target = "x86_64-pc-windows-msvc"
 targets = ["x86_64-pc-windows-msvc"]

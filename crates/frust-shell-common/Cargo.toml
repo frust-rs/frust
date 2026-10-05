@@ -12,80 +12,34 @@ categories.workspace = true
 readme = "README.md"
 
 [features]
-# Opt-in perf instrumentation (release-lean plan, Flutter-mode parity). When
-# ON, the `perf` module's `frust-perf`/`bench-scenario` emission compiles in and
-# the `FRUST_TRACE`/`FRUST_TRACE_RAW` runtime switches are live; when OFF (the
-# default), `enabled()`/`raw_enabled()` collapse to inlinable `false` constants
-# and every `frust-perf` string literal + its `log::info!` call is `#[cfg]`-ed
-# out, so a release build carries neither the code nor the strings. The public
-# `perf` API is identical in both configurations (shells need no call-site
-# changes) — the CLI turns this on for debug/profile builds and omits it for
-# release. Additive: nothing in a release invocation enables it, so cargo's
-# feature unification keeps it off unless a build explicitly opts in.
+# Opt-in perf instrumentation: on, the `perf` module's `frust-perf` emission and `FRUST_TRACE*` switches compile in; off, they
+# collapse to `false` constants and the strings are cfg'd out. The CLI enables it for debug/profile builds.
 perf-trace = []
-# Opt-in in-app devtools service (the debug-build-only inspector/driver seam).
-# When ON, the `devtools` module compiles in: the `frust-devtools` loopback
-# service, the shell-side `DevtoolsBackend` implementation, the UI-thread hop
-# queue, and the per-frame stats publish inside `perf::FrameStats::record`. When
-# OFF (the default) the module, both `frust-devtools*` dependencies, and every
-# protocol symbol are absent from the build entirely — a release artifact
-# carries no listener, no discovery-line bytes, and no `input_*` surface. The
-# gate is the FEATURE, never a `debug_assertions` runtime check. Additive, so
-# cargo's feature unification keeps it off unless a build explicitly opts in
-# (the CLI turns it on for debug/profile builds — `BuildMode::cargo_features`).
+# Opt-in in-app devtools service (loopback server, `DevtoolsBackend`, UI-thread hop). Off, the module and both `frust-devtools*`
+# deps are absent entirely; the gate is the feature, never a `debug_assertions` check (CLI enables for debug/profile builds).
 devtools = ["dep:frust-devtools", "dep:frust-devtools-protocol"]
-# Opt-in process-wide GPU-device slot (`gpu` module: `install_gpu_handle`/
-# `gpu_handle`). Adds NO dependency of its own — the slot is type-erased
-# (`Box<dyn Any + Send + Sync>`), so gating it costs nothing but the module's
-# own compilation; a concrete shell forwards its own `gpu` feature here and
-# installs its real device handle through the generic. Empty by default, the
-# same additive-unification shape as `perf-trace`/`devtools` above.
+# Opt-in process-wide GPU-device slot (`install_gpu_handle`/`gpu_handle`); type-erased, so it adds no dependency.
 gpu = []
 
 [dependencies]
-# Platform-agnostic shell plumbing: no jni/ndk/winit here, so the whole crate
-# compiles on every target (host and `*-linux-android`/iOS) with no cfg
-# gymnastics — it contains no FFI. `AppTree` drives a `RenderRoot` and paints
-# into a `PaintScene` (both `frust-core`), threading text/scene resources
-# through type-erased seams; `frust-scene`/`frust-text` are the layers a
-# concrete shell composes on top of this, kept as deps so the shared erasure and
-# the shells that consume it agree on the same versioned types.
+# No jni/ndk/winit and no FFI, so the crate compiles on every target. `frust-scene`/`frust-text` stay deps so the shells and the
+# erasure agree on the same versioned types.
 frust-core = { workspace = true }
 frust-scene = { workspace = true }
 frust-text = { workspace = true }
-# Load-bearing (task 6c-04): the app-facing theme override slot
-# (`theme_override`) holds/hands back a `frust_theme::Theme`. A narrow,
-# deliberate addition — see `theme_override`'s module docs' Layering choice —
-# not a general theme dependency creeping into every shared-plumbing crate.
+# Load-bearing: the `theme_override` slot holds a `frust_theme::Theme` (see its module docs' Layering choice).
 frust-theme = { workspace = true }
 kurbo = { workspace = true }
-# `guard` logs a caught panic through the `log` facade only (no android_logger),
-# so it stays platform-free and host-testable.
+# `guard` logs caught panics through the `log` facade only, keeping the crate platform-free.
 log = { workspace = true }
-# OPTIONAL, `devtools`-only (see the feature's comment): the in-app debug
-# service and its wire types. Path deps rather than workspace edges, matching
-# `frust-drive`'s own `frust-devtools-protocol` edge — these two crates are
-# consumed from exactly two places in the repo and neither is version-shared
-# with anything else. `frust-devtools` itself depends on no framework crate, so
-# this edge adds no layering cycle: the shell hands it a backend, nothing more.
+# Optional, `devtools`-only. Path deps like `frust-drive`'s protocol edge; `frust-devtools` depends on no framework crate,
+# so there is no layering cycle.
 frust-devtools = { path = "../frust-devtools", version = "0.5.2", optional = true }
 frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.2", optional = true }
 
-# DEV-ONLY: the shipped crate stays reactive-free (see docs/ARCHITECTURE.md's
-# Layer Dependencies). Both entries below are dev-dependencies ONLY — they never
-# enter the crate's own dependency graph for consumers.
-#
-# `reactive_graph` drives the root-owner regression test — a root `Component`
-# under an `Owner::with` (the way the shells wrap `new_boxed_app_with`) asserting
-# a root-provided context resolves in a nested component.
-#
-# `frust-reactive` drives the mobile tracked-rebuild regression test
-# (device-parity task 09b): it exercises the exact `rt.with_owner(|| scope.track(||
-# app.rebuild()))` wrap the Android/iOS shells now use over the `AppTree` seam,
-# proving a post-rebuild tracked write trips `signals_dirty` (and that a bare,
-# untracked rebuild does not — the task-09 device-only stall). The mobile `app`
-# modules are themselves target-gated and never host-compiled, so this shared
-# seam is where the wrap gets host-testable coverage.
+# DEV-ONLY (the shipped crate stays reactive-free, docs/ARCHITECTURE.md Layer Dependencies). `reactive_graph` drives the
+# root-owner test; `frust-reactive` drives the tracked-rebuild test of the `rt.with_owner(|| scope.track(|| app.rebuild()))`
+# wrap the Android/iOS shells use over `AppTree` (their `app` modules are never host-compiled).
 [dev-dependencies]
 reactive_graph = { workspace = true }
 frust-reactive = { workspace = true }
