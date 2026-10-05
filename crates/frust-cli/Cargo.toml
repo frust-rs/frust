@@ -18,37 +18,17 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 anyhow.workspace = true
-# The shared drive logic (process/devices/doctor/build_info/scaffold +
-# android/ios run/build pipelines) now lives in `frust-drive`; `frust-cli`
-# is the thin clap front-end over it. All non-clap CLI deps (serde, toml,
-# minijinja, include_dir, ctrlc, thiserror) followed their modules there.
+# Shared drive logic; thin clap front-end over it.
 frust-drive = { path = "../frust-drive", version = "0.5.2" }
 frust-tui = { path = "../frust-tui", version = "0.5.2" }
-# Tokio runtime for executing `frust tui`'s async entry point; rt-multi-thread required for Runtime::new().
+# Tokio runtime for frust tui async entry point.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-# Targeted exception, direct precedent `ctrlc` (frust-drive's Cargo.toml):
-# `frust run --watch`'s desktop rebuild-relaunch loop needs a filesystem
-# watcher to detect source changes, and that loop lives in this crate's
-# `commands::run` (not `frust-drive`) since it's CLI-loop orchestration
-# over `frust-drive`'s existing `spawn_streaming` seam, not a new drive
-# pipeline of its own.
+# Watch loop filesystem detection; CLI-orchestration over spawn_streaming seam.
 notify.workspace = true
-# `frust run --watch` moves the streamed `cargo run` child into its own
-# process group (so a kill reaches the compiled preview binary it forks — the
-# orphaned-preview fix in `frust-drive::process`), which also takes it out of
-# this terminal's foreground group. A Ctrl-C handler in `commands::run`'s watch
-# loop must therefore group-kill the live child explicitly before exiting,
-# rather than relying on the default SIGINT reaching it (direct precedent:
-# `frust-drive`'s own `ctrlc` use for the device-side log-stream path).
+# Ctrl-C handler for watch loop group-kill (child process management).
 ctrlc.workspace = true
 
 [dev-dependencies]
-# The command-handler tests drive their `run_in` cores with
-# `frust_drive::process::FakeProcessRunner`, exposed behind frust-drive's
-# `test-util` feature (off in the shipped binary).
 frust-drive = { path = "../frust-drive", version = "0.5.2", features = ["test-util"] }
-# `tests/profile_sync.rs` parses `.cargo/config.toml` (root and template)
-# structurally to compare their `[target.*]`/`[build]` tables — frust-cli
-# itself has no runtime need for TOML (all non-clap deps live in
-# frust-drive, see the comment above), so this is test-only, workspace-pinned.
+# Test-only TOML parsing for profile_sync.rs.
 toml.workspace = true

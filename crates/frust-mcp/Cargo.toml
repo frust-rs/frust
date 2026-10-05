@@ -11,62 +11,29 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
-# A library only, no standalone binary — a future CLI subcommand (outside
-# this task's scope) provides the `frust mcp` entry point over
-# `frust_mcp::run`. Charter (docs/ARCHITECTURE.md's Tooling isolation rule,
-# widened to this crate): frust-mcp depends on `frust-drive`/
-# `frust-devtools-protocol` (wired in by the session engine) plus
-# rmcp/axum/tokio/tokio-util/base64/serde/serde_json/log only — never
-# `frust-devtools`, never a framework crate, not even as a dev-dependency.
+# MCP library only; tooling-isolation charter (docs/ARCHITECTURE.md).
 [lib]
 name = "frust_mcp"
 path = "src/lib.rs"
 
 [dependencies]
-# `default-features = false` trims rmcp's client/reqwest/auth/elicitation
-# surface this tool-only, loopback-bound server never uses. `server` +
-# `transport-streamable-http-server` are the transport this crate runs;
-# `macros` pulls in the `#[tool_router]`/`#[tool]`/`#[tool_handler]`
-# attribute macros the `ping` tool (handler.rs) is built from — task 02's
-# acceptance criteria requires proving that macro plumbing end to end, which
-# the `server`/`transport-streamable-http-server` features alone do not
-# enable (verified: neither feature depends on `rmcp-macros`).
+# default-features = false; server + transport-streamable-http-server + macros.
 rmcp = { workspace = true }
-# The HTTP layer rmcp's `StreamableHttpService` nests into.
+# HTTP layer for rmcp's StreamableHttpService.
 axum = { workspace = true }
-# The session engine's whole substance: process spawning through the injected
-# `ProcessRunner`, the desktop/Android/iOS run pipelines, device discovery,
-# the blocking devtools client + `adb forward` helpers, and the metrics
-# sampler. Sync/blocking by charter, so every call from async code goes
-# through `tokio::task::spawn_blocking` (see `engine`'s module doc).
+# Session engine: process spawning, run pipelines, device discovery (blocking).
 frust-drive = { path = "../frust-drive", version = "0.5.2" }
-# The sanctioned wire-protocol leaf — `parse_discovery_line`/
-# `parse_failure_line` for log scanning plus the `FrameStats`/`Capability`/
-# `HandshakeInfo` types the engine retains. NEVER `frust-devtools` itself
-# (`docs/ARCHITECTURE.md`'s tooling-isolation charter).
+# Devtools wire-protocol leaf (tooling-isolation charter, docs/ARCHITECTURE.md).
 frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.2" }
 anyhow = { workspace = true }
 serde = { workspace = true }
-# `SessionBackend::fetch_widget_tree` speaks `serde_json::Value`: the backend
-# seam an embedder implements must not require naming rmcp's re-export of it.
-# Already in this crate's charter list, and already in the graph (rmcp and
-# `frust-drive` both carry it) — no new package enters `Cargo.lock`.
 serde_json = { workspace = true }
 log = { workspace = true }
-# The `screenshot` tool's payload check: decode the base64 PNG (from the
-# devtools service, or encoded on-device by `adb exec-out … | base64`) far
-# enough to confirm it really is a PNG and report its size, so a captured
-# shell error can never reach an agent labelled as an image.
+# PNG decode for screenshot tool payload check.
 base64 = { workspace = true }
-# The graceful-shutdown seam: a `CancellationToken` wired to ctrl-c in `run`,
-# and to the streamable-HTTP transport/`axum::serve` so a cancel unwinds the
-# whole server cleanly.
+# Graceful shutdown via CancellationToken.
 tokio-util = { workspace = true }
-# The workspace `tokio` pin is `default-features = false`; enable exactly
-# what this crate needs: rt-multi-thread (the binary embedding `run` drives
-# its own runtime; also what `#[tokio::test]` needs below), macros
-# (`#[tokio::test]`), net (`TcpListener`), signal (`ctrl_c` in `run`), sync
-# (the `oneshot`/cancellation plumbing), time (test timeouts).
+# Multiple features: rt-multi-thread (runtime), net (TcpListener), signal (ctrl_c).
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",
@@ -77,9 +44,5 @@ tokio = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-# The smoke test's raw-HTTP round trip reads/writes a `TcpStream` directly.
 tokio = { workspace = true, features = ["io-util"] }
-# Enables `frust-drive`'s `test-util` feature (its scripted
-# `FakeProcessRunner`) for this crate's tests only — the same shape
-# `frust-tui` uses, so an engine lifecycle test never shells out for real.
 frust-drive = { path = "../frust-drive", version = "0.5.2", features = ["test-util"] }

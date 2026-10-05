@@ -1,17 +1,5 @@
-# `beui-demo`: the beUI design-system plugin's desktop gallery — a
-# root-workspace member (covered by the root `Cargo.toml`'s `examples/*`
-# glob, and deliberately not added to that manifest's `exclude` list) rather
-# than a standalone workspace like `examples/huddle`/`playground`: it is
-# desktop-only, scaffolds no per-project Android/iOS build output that would
-# need its own `target/` dir, and carries no out-of-tree git+rev dependency —
-# none of the three reasons the standalone examples give for excluding
-# themselves apply here. Riding the root workspace also means `cargo test
-# --workspace`/`cargo clippy --workspace --all-targets -- -D warnings` covers
-# it automatically, with no separate per-example gate to remember.
-#
-# Single-crate, desktop-only shape (no `lib.rs`/`android`/`ios`/`cdylib`),
-# mirroring `examples/shadcn-demo` — the closest existing precedent for a
-# design-system gallery riding the root workspace.
+# Root-workspace member: desktop-only, no Android/iOS/git+rev, covered by workspace gates.
+# Single-crate (no lib.rs/android/ios/cdylib), desktop-only (referenced in main.rs:2, nav.rs:9).
 [package]
 name = "beui-demo"
 version.workspace = true
@@ -24,11 +12,5 @@ frust = { workspace = true }
 frust-beui = { path = "../../plugins/beui" }
 
 [features]
-# Off by default — a default build carries none of `frust_beui::gpu_fx` and
-# every true-3D component variant in the gallery renders exactly its 2D
-# path. Turns on the catalog's own `gpu-effects` feature (see
-# `plugins/beui/Cargo.toml`), which reaches `wgpu` only through the facade's
-# `frust/gpu` re-export. How to run: `cargo run -p beui-demo --features
-# gpu-effects` — see the `pages::gpu_effects` page and `README.md`'s GPU
-# Effects section for what to expect.
+# Off by default; enables frust-beui/gpu-effects (accessed via frust/gpu facade).
 gpu-effects = ["frust-beui/gpu-effects"]

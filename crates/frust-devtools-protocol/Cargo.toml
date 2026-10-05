@@ -12,9 +12,6 @@ categories.workspace = true
 readme = "README.md"
 
 [dependencies]
-# Leaf-crate charter (docs/ARCHITECTURE.md's Tooling isolation rule): this is
-# the ONE sanctioned crossing between the in-app debug service and the
-# frust-drive/frust-tui tooling side. serde + serde_json ONLY — no tokio, no
-# other frust-* crate, no framework crate, ever.
+# Leaf crate: ONE sanctioned crossing (tooling-isolation rule, docs/ARCHITECTURE.md).
 serde = { workspace = true }
 serde_json = { workspace = true }
