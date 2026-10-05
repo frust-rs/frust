@@ -474,12 +474,12 @@ fn graph_page_paints_nodes_edges_and_labels() {
 }
 
 /// At or past the shell's wide-nav breakpoint, `playground`'s home page shows
-/// its side rail's full eleven-destination column instead of the narrow
+/// its side rail's full twelve-destination column instead of the narrow
 /// bottom nav bar's six-item (five primary + "More") bar — a `WindowMetrics`
 /// context is how an app publishes window shape (`pages::responsive`'s own
 /// convention), so providing one at a wide size before mounting is what flips
 /// the home page onto that path. Asserted by nav-destination TEXT RUN COUNT:
-/// eleven side-rail labels paint strictly more nav-destination text than the
+/// twelve side-rail labels paint strictly more nav-destination text than the
 /// narrow bar's six.
 #[test]
 fn wide_width_shows_every_section_in_the_side_rail() {
@@ -516,7 +516,44 @@ fn wide_width_shows_every_section_in_the_side_rail() {
 
     assert!(
         wide_runs > narrow_runs,
-        "the wide-width side rail (11 destinations) must paint more text runs than the narrow \
+        "the wide-width side rail (12 destinations) must paint more text runs than the narrow \
          bottom bar (6 destinations): narrow {narrow_runs}, wide {wide_runs}",
+    );
+}
+
+/// The "Scroll" section's `ListView`/`ScrollController` pairing actually
+/// drives the attached surface end to end, headless: mounts the page, issues
+/// a `jump_to` straight through [`PlaygroundState::scroll_controller`] (the
+/// same handle the page's own buttons drive), runs a frame to apply it, and
+/// asserts the controller's published offset moved off zero — proving the
+/// list attached, laid out, and drained the command, beyond the generic
+/// per-section paint sweep above.
+#[test]
+fn scroll_page_jump_moves_the_controller_offset() {
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+    let scroll_index = pages::section_index_for("scroll").expect("scroll is a known section");
+
+    let mut root: RenderRoot<PlaygroundState, AnyView<PlaygroundState>> = RenderRoot::new();
+    let mut state = PlaygroundState::new();
+    let mut logic = |s: &mut PlaygroundState| pages::current(scroll_index, s);
+    let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    assert!(scene.text_runs > 0, "the Scroll page must paint text");
+    assert_eq!(
+        state.scroll_controller.offset(),
+        0.0,
+        "the list starts at the top"
+    );
+
+    state.scroll_controller.jump_to(400.0);
+    let (scene2, _outcome2) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 16);
+    assert!(
+        scene2.text_runs > 0,
+        "the Scroll page must still paint text after the jump"
+    );
+    assert!(
+        state.scroll_controller.offset() > 0.0,
+        "jump_to(400.0) must move the controller's published offset, got {}",
+        state.scroll_controller.offset(),
     );
 }
