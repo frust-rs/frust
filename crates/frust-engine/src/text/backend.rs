@@ -110,7 +110,9 @@ use vello_common::strip_generator::{StripGenerator, StripStorage};
 use crate::cache::images::AtlasRegion;
 use crate::compile::clip::ClipStack;
 use crate::compile::paint::encode_brush;
-use crate::compile::{CompiledFrame, DepthCounter, EngineDraw, FLATTEN_TOLERANCE, GlyphSlot};
+use crate::compile::{
+    CompiledFrame, DepthCounter, EngineDraw, FLATTEN_TOLERANCE, GlyphSlot, generate_fill,
+};
 use crate::gpu::atlas::x_y_advances;
 use crate::text::color::{ColorGlyph, ColorLayer, LayerShape};
 
@@ -471,14 +473,7 @@ impl<'a> EngineGlyphSink<'a> {
             }
             LayerShape::Path(path) => {
                 self.record_draw(encoding.paint, |generator, storage, clip| {
-                    generator.generate_filled_path(
-                        path.iter(),
-                        Fill::NonZero,
-                        transform,
-                        None,
-                        storage,
-                        clip,
-                    );
+                    generate_fill(generator, path.iter(), transform, storage, clip);
                 })
             }
         };
@@ -520,14 +515,7 @@ impl DrawSink for EngineGlyphSink<'_> {
 
         let transform = self.state.transform;
         self.record(|generator, storage, clip| {
-            generator.generate_filled_path(
-                path.iter(),
-                Fill::NonZero,
-                transform,
-                None,
-                storage,
-                clip,
-            );
+            generate_fill(generator, path.iter(), transform, storage, clip);
         });
     }
 
