@@ -14,7 +14,10 @@
 //! [`DragCoordinator::move_to_previous_target`] — cycling the registered
 //! targets in registration ("tree") order, wrapping at either end, and
 //! starting at the first (next) or last (previous) target when nothing is
-//! hovered yet. Both raise the same `Leave`/`Enter` notification pair
+//! hovered yet. Cycling skips exactly what pointer resolution skips: a
+//! target that accepts a different payload type, and one that did not
+//! report visible bounds in the latest paint pass (see the [module
+//! docs](super) on *Target resolution*). Both raise the same `Leave`/`Enter` notification pair
 //! pointer resolution does, so a target subscriber (or poller — see
 //! [`mod@super::target`]) sees identical callbacks regardless of which drove
 //! the session. [`DragCoordinator::drop`]/[`DragCoordinator::cancel`] are
@@ -35,6 +38,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
+use frust_core::FrameTime;
 use kurbo::{Point, Rect, Vec2};
 
 /// Identity of a draggable source, allocated by
@@ -301,6 +305,12 @@ struct Shared {
     targets: HashMap<DragTargetId, TargetEntry>,
     /// The registration stamp the next newly registered target takes.
     next_registration: u64,
+    /// The paint pass the latest bounds report belongs to — only targets
+    /// stamped with it are resolvable (see the [module docs](super)).
+    pass: u64,
+    /// The frame time that opened `pass`, when a clocked report
+    /// ([`DragCoordinator::report_target_bounds`]) opened it.
+    pass_frame: Option<FrameTime>,
 }
 
 /// One registered drop target's resolution record.
@@ -309,8 +319,15 @@ struct TargetEntry {
     /// When it registered, relative to every other target: a later stamp wins
     /// an overlap in [`DragCoordinator::target_at`].
     registration: u64,
-    /// Its window-space bounds; `None` until the target first reports them.
+    /// The payload type it accepts, or `None` for a target registered untyped
+    /// ([`DragCoordinator::register_target`]), which accepts any.
+    accepts: Option<TypeId>,
+    /// Its visible window-space bounds as of its latest report; `None` until
+    /// the target first reports them, or when that report was clipped to
+    /// nothing.
     bounds: Option<Rect>,
+    /// The paint pass of its latest report; `None` until it first reports.
+    reported: Option<u64>,
 }
 
 impl Default for Shared {
@@ -324,6 +341,8 @@ impl Default for Shared {
             dispatching: false,
             targets: HashMap::new(),
             next_registration: 0,
+            pass: 0,
+            pass_frame: None,
         }
     }
 }
@@ -355,14 +374,71 @@ impl Shared {
         session
     }
 
-    /// The registered target whose bounds contain `point` — the latest
+    /// The payload type of the session in flight, if any — what a target's
+    /// accepted type is gated against.
+    fn live_payload_type(&self) -> Option<TypeId> {
+        self.machine.session().map(|session| session.payload_type)
+    }
+
+    /// `entry`'s bounds if it may take part in resolution or cycling right
+    /// now: reported in the latest paint pass, visible (not clipped to
+    /// nothing), and — while a session is in flight — accepting its payload
+    /// type (an untyped entry accepts any).
+    fn resolvable(&self, entry: &TargetEntry, payload: Option<TypeId>) -> Option<Rect> {
+        if entry.reported != Some(self.pass) {
+            return None;
+        }
+        if let (Some(accepts), Some(payload)) = (entry.accepts, payload)
+            && accepts != payload
+        {
+            return None;
+        }
+        entry.bounds
+    }
+
+    /// The resolvable target whose bounds contain `point` — the latest
     /// registered among overlapping ones (see the [module docs](super)).
     fn target_at(&self, point: Point) -> Option<DragTargetId> {
+        let payload = self.live_payload_type();
         self.targets
             .iter()
-            .filter(|(_, entry)| entry.bounds.is_some_and(|rect| rect.contains(point)))
+            .filter(|(_, entry)| {
+                self.resolvable(entry, payload)
+                    .is_some_and(|rect| rect.contains(point))
+            })
             .max_by_key(|(_, entry)| entry.registration)
             .map(|(&id, _)| id)
+    }
+
+    /// Record a bounds report for `id`, stamped with the paint pass it
+    /// belongs to. A clocked report (`frame` is `Some`) opens a new pass when
+    /// its frame time differs from the one that opened the current pass; an
+    /// unclocked one opens a new pass when this target already reported in
+    /// the current one (it is painting again, so a new pass has begun).
+    /// Returns whether `id` is registered.
+    fn record_bounds(
+        &mut self,
+        id: DragTargetId,
+        bounds: Option<Rect>,
+        frame: Option<FrameTime>,
+    ) -> bool {
+        let Some(reported) = self.targets.get(&id).map(|entry| entry.reported) else {
+            return false;
+        };
+        let opens = match frame {
+            Some(frame) => self.pass_frame != Some(frame),
+            None => reported == Some(self.pass),
+        };
+        if opens {
+            self.pass += 1;
+            self.pass_frame = frame;
+        }
+        let pass = self.pass;
+        if let Some(entry) = self.targets.get_mut(&id) {
+            entry.bounds = bounds;
+            entry.reported = Some(pass);
+        }
+        true
     }
 
     /// While `Dragging`, make `target` the hovered one: the old one (if any)
@@ -418,22 +494,25 @@ impl Shared {
         });
     }
 
-    /// Cycle the hovered target by `step` (`1`/`-1`) through the registered
-    /// targets in registration ("tree") order — the
-    /// [`DragCoordinator::move_to_next_target`]/
+    /// Cycle the hovered target by `step` (`1`/`-1`) through the resolvable
+    /// targets ([`Shared::resolvable`]: visible in the latest paint pass and
+    /// accepting the session's payload type) in registration ("tree") order —
+    /// the [`DragCoordinator::move_to_next_target`]/
     /// [`DragCoordinator::move_to_previous_target`] drive. Starts at the
-    /// first (`step > 0`) or last (`step < 0`) target when nothing is
-    /// hovered yet, and wraps around at either end. Raises the same
-    /// `Leave`/`Enter` pair pointer resolution does
+    /// first (`step > 0`) or last (`step < 0`) target when nothing (or a
+    /// target no longer resolvable) is hovered, and wraps around at either
+    /// end. Raises the same `Leave`/`Enter` pair pointer resolution does
     /// ([`Shared::set_hovered`]). A no-op outside `Dragging` or with no
-    /// registered targets.
+    /// resolvable targets.
     fn move_target(&mut self, step: i64, changes: &mut Vec<DragStateChange>) {
         let Machine::Dragging(session) = &self.machine else {
             return;
         };
+        let payload = Some(session.payload_type);
         let mut ordered: Vec<(u64, DragTargetId)> = self
             .targets
             .iter()
+            .filter(|(_, entry)| self.resolvable(entry, payload).is_some())
             .map(|(&id, entry)| (entry.registration, id))
             .collect();
         if ordered.is_empty() {
@@ -591,9 +670,11 @@ impl DragCoordinator {
     /// Move the hovered target to the next one registered after it
     /// (registration/tree order, wrapping to the first) — the keyboard
     /// `ArrowRight`/`ArrowDown` drive for a [`lift`](Self::lift)ed session.
-    /// Starts at the first registered target when nothing is hovered yet.
+    /// Only targets pointer resolution would consider take part: those
+    /// accepting the session's payload type and visible in the latest paint
+    /// pass. Starts at the first of them when nothing is hovered yet.
     /// Raises the same `Leave`/`Enter` pair pointer resolution does. A
-    /// no-op outside `Dragging` or with no registered targets — see the
+    /// no-op outside `Dragging` or with no such targets — see the
     /// [module docs](self#keyboard-sessions).
     pub fn move_to_next_target(&self) {
         self.mutate(|shared, changes| shared.move_target(1, changes));
@@ -601,7 +682,7 @@ impl DragCoordinator {
 
     /// The mirror of
     /// [`move_to_next_target`](Self::move_to_next_target) — the keyboard
-    /// `ArrowLeft`/`ArrowUp` drive, wrapping to the last registered target.
+    /// `ArrowLeft`/`ArrowUp` drive, wrapping to the last eligible target.
     pub fn move_to_previous_target(&self) {
         self.mutate(|shared, changes| shared.move_target(-1, changes));
     }
@@ -789,11 +870,33 @@ impl DragCoordinator {
         self.mutate(|shared, changes| shared.set_hovered(target, changes));
     }
 
-    /// Register a drop target for bounds tracking and resolution, stamped
-    /// after every target already registered — a later registration wins an
-    /// overlap in [`target_at`](Self::target_at). Idempotent: re-registering
-    /// an already-registered target is a no-op and keeps its original stamp.
+    /// Register an untyped drop target for bounds tracking and resolution:
+    /// it accepts a session of any payload type. A target that accepts one
+    /// payload type registers with
+    /// [`register_target_for`](Self::register_target_for) instead, so
+    /// resolution and keyboard cycling skip it for every other type.
+    ///
+    /// The target is stamped after every target already registered — a later
+    /// registration wins an overlap in [`target_at`](Self::target_at).
+    /// Idempotent: re-registering an already-registered target is a no-op and
+    /// keeps its original stamp and accepted type.
     pub fn register_target(&self, id: DragTargetId) {
+        self.register(id, None);
+    }
+
+    /// Register a drop target that accepts payloads of type `T` only:
+    /// [`target_at`](Self::target_at), pointer resolution and
+    /// [`move_to_next_target`](Self::move_to_next_target)/
+    /// [`move_to_previous_target`](Self::move_to_previous_target) consider it
+    /// only while the session in flight carries a `T` (an
+    /// [`DragKind::ExternalFiles`] session carries a `Vec<PathBuf>`).
+    /// Otherwise exactly [`register_target`](Self::register_target), same
+    /// stamping and idempotence.
+    pub fn register_target_for<T: Any>(&self, id: DragTargetId) {
+        self.register(id, Some(TypeId::of::<T>()));
+    }
+
+    fn register(&self, id: DragTargetId, accepts: Option<TypeId>) {
         let mut shared = self.shared.borrow_mut();
         if shared.targets.contains_key(&id) {
             return;
@@ -804,52 +907,73 @@ impl DragCoordinator {
             id,
             TargetEntry {
                 registration,
+                accepts,
                 bounds: None,
+                reported: None,
             },
         );
     }
 
-    /// Unregister a drop target. If the target is currently hovered or is the
-    /// unclaimed drop target, the hover is cleared (emitting `Leave` to
-    /// subscribers). A silent no-op for an unregistered target.
+    /// Unregister a drop target. A hovered target is un-hovered and hears
+    /// `Leave`; the pending target of an unclaimed drop ends the session
+    /// instead — exactly a [`cancel`](Self::cancel): one `Leave`, then
+    /// `Dropping → Cancelled → Idle`, the payload discarded — since no one is
+    /// left to claim it. A silent no-op for an unregistered target.
     pub fn unregister_target(&self, id: DragTargetId) {
         self.mutate(|shared, changes| {
             shared.targets.remove(&id);
-            // If this target was hovered, clear the hover and emit Leave.
             match &mut shared.machine {
                 Machine::Dragging(session) if session.hovered == Some(id) => {
                     session.hovered = None;
                     changes.push(DragStateChange::Leave { target: id });
                 }
-                Machine::Dropping {
-                    session,
-                    target: drop_target,
-                } if *drop_target == id => {
-                    // The drop target itself is being unregistered: clear hover and emit Leave.
-                    changes.push(DragStateChange::Leave { target: id });
+                Machine::Dropping { target, .. } if *target == id => {
+                    shared.cancel(changes);
                 }
                 _ => {}
             }
         });
     }
 
-    /// Record the window-space bounds of a registered target. Updates persist
-    /// across drag sessions. Ignored (with a debug-build log) if the target
-    /// is not registered.
+    /// Record the window-space bounds of a registered target, unclocked —
+    /// see [`report_target_bounds`](Self::report_target_bounds), which a
+    /// painted target uses instead. The report is stamped into the current
+    /// paint pass, opening a new one when this target already reported in
+    /// the current pass. Updates persist across drag sessions. Ignored (with
+    /// a debug-build log) if the target is not registered.
     pub fn set_target_bounds(&self, id: DragTargetId, bounds: Rect) {
-        let mut shared = self.shared.borrow_mut();
-        match shared.targets.get_mut(&id) {
-            Some(entry) => {
-                entry.bounds = Some(bounds);
-            }
-            None => {
-                log_ignored("set_target_bounds", "the target is not registered");
-            }
+        if !self
+            .shared
+            .borrow_mut()
+            .record_bounds(id, Some(bounds), None)
+        {
+            log_ignored("set_target_bounds", "the target is not registered");
         }
     }
 
-    /// Query the window-space bounds of a registered target, or `None` if the
-    /// target is not registered or bounds have not been set.
+    /// Record what a registered target painted at frame `frame`: its visible
+    /// window-space `bounds`, already clipped to its ancestors' visible
+    /// region — `None` when clipped to nothing, which leaves it resolvable
+    /// nowhere. Every report is stamped with a paint pass: a report whose
+    /// `frame` differs from the one that opened the current pass opens a new
+    /// pass, and only targets that reported in the latest pass resolve or
+    /// cycle, so a target that stopped painting (culled, or scrolled out of a
+    /// culling container) cannot resolve against stale bounds. A
+    /// [`FrameTime::ZERO`] `frame` (no shell clock) falls back to
+    /// [`set_target_bounds`](Self::set_target_bounds)'s unclocked stamping.
+    /// See the [module docs](super) for the pass contract and its limit.
+    /// Ignored (with a debug-build log) if the target is not registered.
+    pub fn report_target_bounds(&self, id: DragTargetId, bounds: Option<Rect>, frame: FrameTime) {
+        let frame = (frame != FrameTime::ZERO).then_some(frame);
+        if !self.shared.borrow_mut().record_bounds(id, bounds, frame) {
+            log_ignored("report_target_bounds", "the target is not registered");
+        }
+    }
+
+    /// Query the latest reported window-space bounds of a registered target,
+    /// or `None` if the target is not registered, has not reported yet, or
+    /// last reported itself clipped to nothing. Reads the record as-is: it
+    /// does not check that the report belongs to the latest paint pass.
     pub fn target_bounds(&self, id: DragTargetId) -> Option<Rect> {
         self.shared
             .borrow()
@@ -861,10 +985,22 @@ impl DragCoordinator {
     /// The registered target whose reported bounds contain `point` (window
     /// space); where several overlap, the one registered **last** wins — see
     /// the [module docs](super) for why registration order stands in for
-    /// paint order. Targets that have not reported bounds yet are skipped.
-    /// Returns `None` if no registered target contains the point.
+    /// paint order. Only targets that reported visible bounds in the latest
+    /// paint pass are considered, and — while a session is in flight — only
+    /// those accepting its payload type ([`register_target_for`](Self::register_target_for)).
+    /// Returns `None` if no such target contains the point.
     pub fn target_at(&self, point: Point) -> Option<DragTargetId> {
         self.shared.borrow().target_at(point)
+    }
+
+    /// Whether the session in flight (`Dragging`/`Dropping`) is an OS file
+    /// drag ([`DragKind::ExternalFiles`]). `false` with no session in flight.
+    pub fn is_external(&self) -> bool {
+        self.shared
+            .borrow()
+            .machine
+            .session()
+            .is_some_and(|session| matches!(session.kind, DragKind::ExternalFiles(_)))
     }
 
     /// All registered drop targets, in registration order.
@@ -2062,7 +2198,7 @@ mod tests {
     }
 
     #[test]
-    fn unregister_while_dropping_on_target_emits_leave() {
+    fn unregistering_the_pending_drop_target_ends_the_session() {
         let f = Fixture::new();
         f.drag.register_target(f.first);
         f.drag.arm(f.source, PRESS);
@@ -2070,14 +2206,46 @@ mod tests {
         f.drag.set_hovered(Some(f.first));
         f.drag.drop();
         f.take_log();
-        // Unregistering the drop target emits Leave.
         f.drag.unregister_target(f.first);
-        let changes = f.take_log();
         assert_eq!(
-            changes,
-            vec![DragStateChange::Leave { target: f.first }],
-            "unregister while dropping emits Leave"
+            f.take_log(),
+            vec![
+                DragStateChange::Leave { target: f.first },
+                DragStateChange::Phase {
+                    previous: DragPhase::Dropping,
+                    next: DragPhase::Cancelled,
+                },
+                DragStateChange::Phase {
+                    previous: DragPhase::Cancelled,
+                    next: DragPhase::Idle,
+                },
+            ],
+            "one Leave, then the session is cancelled"
         );
+        assert_eq!(f.drag.state(), DragState::Idle);
+        assert!(
+            !f.drag.payload_is::<i32>(),
+            "the unclaimed payload is discarded"
+        );
+        // Nothing is left to leave a second time.
+        f.drag.complete_drop();
+        f.drag.cancel();
+        assert!(f.take_log().is_empty());
+    }
+
+    #[test]
+    fn unregistering_another_target_while_dropping_changes_nothing() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(7_i32);
+        f.drag.set_hovered(Some(f.first));
+        f.drag.drop();
+        f.take_log();
+        f.drag.unregister_target(f.second);
+        assert!(f.take_log().is_empty());
+        assert_eq!(f.drag.phase(), DragPhase::Dropping);
     }
 
     #[test]
@@ -2374,6 +2542,10 @@ mod tests {
         f.drag.register_target(f.first);
         f.drag.register_target(f.second);
         f.drag.register_target(third);
+        for id in [f.first, f.second, third] {
+            f.drag
+                .set_target_bounds(id, Rect::new(0.0, 0.0, 10.0, 10.0));
+        }
         f.drag.lift(f.source);
         f.drag.begin(1_u8);
         f.take_log();
@@ -2426,6 +2598,10 @@ mod tests {
         let f = Fixture::new();
         f.drag.register_target(f.first);
         f.drag.register_target(f.second);
+        f.drag
+            .set_target_bounds(f.first, Rect::new(0.0, 0.0, 10.0, 10.0));
+        f.drag
+            .set_target_bounds(f.second, Rect::new(0.0, 0.0, 10.0, 10.0));
         f.drag.lift(f.source);
         f.drag.begin(1_u8);
         f.drag.move_to_previous_target();
@@ -2463,5 +2639,269 @@ mod tests {
             f.drag.state().session().and_then(|s| s.source),
             Some(f.source)
         );
+    }
+
+    /// A frame time for a clocked bounds report in pass `n`.
+    fn frame(n: u64) -> FrameTime {
+        FrameTime::from_nanos(n * 16_000_000)
+    }
+
+    #[test]
+    fn resolution_skips_a_later_registered_target_of_another_payload_type() {
+        let f = Fixture::new();
+        let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        f.drag.register_target_for::<u8>(f.first);
+        f.drag.register_target_for::<u32>(f.second);
+        f.drag.set_target_bounds(f.first, rect);
+        f.drag.set_target_bounds(f.second, rect);
+        let inside = Point::new(50.0, 50.0);
+        assert_eq!(
+            f.drag.target_at(inside),
+            Some(f.second),
+            "with no session, the later registration wins as before"
+        );
+
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(3_u8);
+        assert_eq!(f.drag.target_at(inside), Some(f.first));
+        f.take_log();
+        f.drag.update_pointer(inside);
+        assert_eq!(
+            f.take_log(),
+            vec![
+                DragStateChange::Enter { target: f.first },
+                DragStateChange::Move { pointer: inside },
+            ],
+            "the u8 session resolves onto the u8 target under the u32 one"
+        );
+        f.drag.resolve_hover();
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.first)
+        );
+    }
+
+    #[test]
+    fn resolution_finds_nothing_when_only_other_types_are_under_the_pointer() {
+        let f = Fixture::new();
+        f.drag.register_target_for::<u32>(f.first);
+        f.drag
+            .set_target_bounds(f.first, Rect::new(0.0, 0.0, 100.0, 100.0));
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin("text");
+        f.drag.update_pointer(Point::new(50.0, 50.0));
+        assert_eq!(f.drag.state().session().and_then(|s| s.hovered), None);
+        assert_eq!(f.drag.drop(), None, "released over nothing: a cancel");
+        assert_eq!(f.drag.phase(), DragPhase::Idle);
+    }
+
+    #[test]
+    fn an_external_session_resolves_only_path_list_targets() {
+        let f = Fixture::new();
+        let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        f.drag.register_target_for::<Vec<PathBuf>>(f.first);
+        f.drag.register_target_for::<u32>(f.second);
+        f.drag.set_target_bounds(f.first, rect);
+        f.drag.set_target_bounds(f.second, rect);
+        f.drag
+            .begin_external(vec![PathBuf::from("/tmp/a.txt")], FILE_ENTRY);
+        f.drag.update_pointer(Point::new(50.0, 50.0));
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.first)
+        );
+    }
+
+    #[test]
+    fn keyboard_cycling_skips_targets_of_another_payload_type() {
+        let f = Fixture::new();
+        let third = f.drag.new_target_id();
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        f.drag.register_target_for::<u32>(f.first);
+        f.drag.register_target_for::<u8>(f.second);
+        f.drag.register_target(third);
+        for id in [f.first, f.second, third] {
+            f.drag.set_target_bounds(id, rect);
+        }
+        f.drag.lift(f.source);
+        f.drag.begin(1_u8);
+        let hovered = || f.drag.state().session().and_then(|s| s.hovered);
+        f.drag.move_to_next_target();
+        assert_eq!(hovered(), Some(f.second), "the u32 target is skipped");
+        f.drag.move_to_next_target();
+        assert_eq!(hovered(), Some(third), "an untyped target accepts any");
+        f.drag.move_to_next_target();
+        assert_eq!(hovered(), Some(f.second), "wraps past the u32 target again");
+        f.drag.move_to_previous_target();
+        assert_eq!(hovered(), Some(third));
+    }
+
+    #[test]
+    fn a_target_clipped_to_nothing_is_not_resolved_or_cycled() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        f.drag
+            .report_target_bounds(f.first, Some(Rect::new(0.0, 0.0, 100.0, 100.0)), frame(1));
+        f.drag.report_target_bounds(f.second, None, frame(1));
+        assert_eq!(f.drag.target_bounds(f.second), None);
+        assert_eq!(f.drag.target_at(Point::new(50.0, 50.0)), Some(f.first));
+
+        f.drag.lift(f.source);
+        f.drag.begin(1_u8);
+        f.drag.move_to_next_target();
+        f.drag.move_to_next_target();
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.first),
+            "the clipped target is never cycled to"
+        );
+    }
+
+    #[test]
+    fn a_target_that_stopped_reporting_is_not_resolved() {
+        let f = Fixture::new();
+        let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let inside = Point::new(50.0, 50.0);
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        f.drag.report_target_bounds(f.first, Some(rect), frame(1));
+        f.drag.report_target_bounds(
+            f.second,
+            Some(Rect::new(200.0, 0.0, 300.0, 100.0)),
+            frame(1),
+        );
+        assert_eq!(f.drag.target_at(inside), Some(f.first));
+
+        // The next frame paints only the second target: the first keeps its
+        // old bounds on record but no longer resolves.
+        f.drag.report_target_bounds(
+            f.second,
+            Some(Rect::new(200.0, 0.0, 300.0, 100.0)),
+            frame(2),
+        );
+        assert_eq!(f.drag.target_bounds(f.first), Some(rect));
+        assert_eq!(f.drag.target_at(inside), None);
+
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(1_u8);
+        f.drag.update_pointer(inside);
+        assert_eq!(f.drag.state().session().and_then(|s| s.hovered), None);
+
+        // Painting again restores it.
+        f.drag.report_target_bounds(f.first, Some(rect), frame(3));
+        f.drag.resolve_hover();
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.first)
+        );
+    }
+
+    #[test]
+    fn a_stale_target_is_not_cycled_to() {
+        let f = Fixture::new();
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        f.drag.report_target_bounds(f.first, Some(rect), frame(1));
+        f.drag.report_target_bounds(f.second, Some(rect), frame(1));
+        f.drag.report_target_bounds(f.second, Some(rect), frame(2));
+        f.drag.lift(f.source);
+        f.drag.begin(1_u8);
+        f.drag.move_to_next_target();
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.second)
+        );
+        f.drag.move_to_next_target();
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.second),
+            "only the target painted in the latest pass is cycled"
+        );
+    }
+
+    #[test]
+    fn painting_twice_in_one_frame_keeps_the_pass_open() {
+        let f = Fixture::new();
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        f.drag.report_target_bounds(f.first, Some(rect), frame(1));
+        f.drag.report_target_bounds(f.second, Some(rect), frame(1));
+        f.drag.report_target_bounds(f.second, Some(rect), frame(1));
+        assert_eq!(
+            f.drag.target_at(Point::new(5.0, 5.0)),
+            Some(f.second),
+            "same frame time, same pass: both still resolve"
+        );
+        f.drag.unregister_target(f.second);
+        assert_eq!(f.drag.target_at(Point::new(5.0, 5.0)), Some(f.first));
+    }
+
+    #[test]
+    fn an_unclocked_repeat_report_opens_the_next_pass() {
+        let f = Fixture::new();
+        let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let inside = Point::new(50.0, 50.0);
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        f.drag.set_target_bounds(f.first, rect);
+        f.drag
+            .set_target_bounds(f.second, Rect::new(200.0, 0.0, 300.0, 100.0));
+        assert_eq!(f.drag.target_at(inside), Some(f.first));
+        // The second reports again: a new pass, which the first missed.
+        f.drag
+            .set_target_bounds(f.second, Rect::new(200.0, 0.0, 300.0, 100.0));
+        assert_eq!(f.drag.target_at(inside), None);
+        // A zero frame time counts as unclocked.
+        f.drag
+            .report_target_bounds(f.first, Some(rect), FrameTime::ZERO);
+        assert_eq!(f.drag.target_at(inside), Some(f.first));
+    }
+
+    #[test]
+    fn later_registration_still_wins_among_visible_type_matching_overlaps() {
+        let f = Fixture::new();
+        let third = f.drag.new_target_id();
+        let fourth = f.drag.new_target_id();
+        let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let inside = Point::new(50.0, 50.0);
+        f.drag.register_target_for::<u8>(f.first);
+        f.drag.register_target_for::<u8>(f.second);
+        // Registered later still, but stale and of another type respectively.
+        f.drag.register_target_for::<u8>(third);
+        f.drag.register_target_for::<u32>(fourth);
+        f.drag.report_target_bounds(third, Some(rect), frame(1));
+        for id in [f.first, f.second, fourth] {
+            f.drag.report_target_bounds(id, Some(rect), frame(2));
+        }
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(1_u8);
+        f.drag.update_pointer(inside);
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.second)
+        );
+    }
+
+    #[test]
+    fn is_external_reports_the_kind_of_the_session_in_flight() {
+        let f = Fixture::new();
+        assert!(!f.drag.is_external());
+        f.drag.arm(f.source, PRESS);
+        assert!(!f.drag.is_external());
+        f.drag.begin(1_u8);
+        assert!(!f.drag.is_external());
+        f.drag.cancel();
+        f.drag.register_target(f.first);
+        f.drag
+            .begin_external(vec![PathBuf::from("/tmp/a.txt")], FILE_ENTRY);
+        assert!(f.drag.is_external());
+        f.drag.set_hovered(Some(f.first));
+        f.drag.drop();
+        assert!(f.drag.is_external(), "still external while Dropping");
+        f.drag.complete_drop();
+        assert!(!f.drag.is_external());
     }
 }
