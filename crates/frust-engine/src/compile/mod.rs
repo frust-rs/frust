@@ -134,7 +134,7 @@ static SHADER_EFFECTS_DISABLED_WARNING: Once = Once::new();
 /// [`std::time::Instant`]; without it the type is zero-sized, [`Self::lap`]
 /// answers [`Duration::ZERO`] and no clock is read at all — the "zero clock
 /// reads in a disabled build" terms `docs/RENDER_DEVELOPMENT.md`'s perf-trace
-/// convention and `docs/DEVELOPMENT.md`'s Release-lean section set for an
+/// convention and `docs/PERFORMANCE_BASELINES.md`'s Release-lean note set for an
 /// FFI-sensitive path, met at compile time rather than by a runtime branch.
 ///
 /// Laps are cumulative by construction: each one both reports the span since

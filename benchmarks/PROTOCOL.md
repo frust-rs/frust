@@ -1150,7 +1150,7 @@ benchmarks/harness/size_attribute.py <path to the unstripped .so>
 invocation above is the route to an unstripped lean release `.so`; the
 release profile's own `strip = "symbols"` is what the shipped, distributed
 artifact uses instead — the unstripped build is a measurement artifact only,
-never distributed, the same rule `docs/DEVELOPMENT.md` states for the no-`db`
+never distributed, the same rule `docs/PERFORMANCE_BASELINES.md` states for the no-`db`
 size-matrix APK.) The script shells out to the Android NDK's `llvm-readelf`
 and `llvm-nm` (located via `ANDROID_NDK_HOME`, an `ANDROID_HOME`/
 `ANDROID_SDK_ROOT` `ndk/` probe, or an explicit `--nm-dir`) to report:

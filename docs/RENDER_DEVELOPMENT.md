@@ -32,8 +32,8 @@ unused naga shader writers the old unioned row dragged in were already dead-stri
 The real, measured size lever lives in `frust_bench` instead: its `db` feature (default-on)
 shrinks arm64 release `libfrustbench.so` from 11,352,488 to 9,405,976 B (-17.1 %) under `--no-default-features --features lean`
 (build recipe in `benchmarks/frust_bench/Cargo.toml`'s `db` feature comment; the resulting APK is
-a debug-signed measurement artifact only — [DEVELOPMENT.md](DEVELOPMENT.md)'s Release Builds
-section).
+a debug-signed measurement artifact only — [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md)'s
+Release artifacts section).
 
 ## Engine
 

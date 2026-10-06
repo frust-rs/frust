@@ -5787,7 +5787,7 @@ registering and driving a real `ExternalPass` through its own frame loop.
 ### `external-pass-panic-isolation-dev-only` — a panicking `ExternalPass` is only isolated in a build that unwinds
 
 **Observed** (evidence: root `Cargo.toml`'s `[profile.release]` sets `panic = "abort"` (also recorded
-in `docs/DEVELOPMENT.md`'s Release-profile hardening); `crates/frust-render/src/external_pass.rs`'s
+in `docs/PERFORMANCE_BASELINES.md`'s Release-profile hardening); `crates/frust-render/src/external_pass.rs`'s
 `run_external_passes` wraps each pass's `record` call in `catch_unwind`, reporting the first panic of
 an id at `warn!` and every later one at `debug!`, retiring the pass and queuing its binding for
 unbind): `catch_unwind` keeps a panicking pass from taking the frame's encoder — and every sibling

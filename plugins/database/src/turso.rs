@@ -18,7 +18,7 @@
 //! `Runtime::block_on` panics ("Cannot start a runtime from within a runtime")
 //! when the calling thread is already driving one, and a panic is not an
 //! outcome this seam may produce — release builds are `panic = "abort"`
-//! (`docs/DEVELOPMENT.md`'s release-profile hardening), so it would take the
+//! (`docs/PERFORMANCE_BASELINES.md`'s release-profile hardening), so it would take the
 //! process down. Off-thread execution also means a call from an async context
 //! can never deadlock: the bridge runtime is independent of the caller's, so
 //! the work always completes and the (mis-parked) caller always wakes.

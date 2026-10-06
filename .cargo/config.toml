@@ -1,5 +1,5 @@
 # Android link flags (cargo, cargo-ndk, Gradle): --pack-dyn-relocs=android (API 23+; RELR needs 28 > minSdk 26)
-# and --icf=all (Frust never compares fn-pointer/vtable identity). Numbers: docs/DEVELOPMENT.md "Android link flags".
+# and --icf=all (Frust never compares fn-pointer/vtable identity). Numbers: docs/PERFORMANCE_BASELINES.md "Android link flags".
 # Governs nested in-tree workspaces; crates/frust-cli/tests/profile_sync.rs diffs these with the template's; no [build].
 
 [target.aarch64-linux-android]
