@@ -254,10 +254,21 @@ struct Shared {
     /// the stack — a re-entrant mutation queues behind it instead of
     /// delivering nested.
     dispatching: bool,
-    /// Registered drop targets and their window-space bounds. An entry
-    /// exists if the target is registered; `None` means registered but
-    /// bounds not yet set.
-    targets: HashMap<DragTargetId, Option<Rect>>,
+    /// Registered drop targets, keyed by id. An entry exists while the
+    /// target is registered.
+    targets: HashMap<DragTargetId, TargetEntry>,
+    /// The registration stamp the next newly registered target takes.
+    next_registration: u64,
+}
+
+/// One registered drop target's resolution record.
+#[derive(Clone, Copy, Debug)]
+struct TargetEntry {
+    /// When it registered, relative to every other target: a later stamp wins
+    /// an overlap in [`DragCoordinator::target_at`].
+    registration: u64,
+    /// Its window-space bounds; `None` until the target first reports them.
+    bounds: Option<Rect>,
 }
 
 impl Default for Shared {
@@ -270,6 +281,7 @@ impl Default for Shared {
             queue: VecDeque::new(),
             dispatching: false,
             targets: HashMap::new(),
+            next_registration: 0,
         }
     }
 }
@@ -301,6 +313,43 @@ impl Shared {
         session
     }
 
+    /// The registered target whose bounds contain `point` — the latest
+    /// registered among overlapping ones (see the [module docs](super)).
+    fn target_at(&self, point: Point) -> Option<DragTargetId> {
+        self.targets
+            .iter()
+            .filter(|(_, entry)| entry.bounds.is_some_and(|rect| rect.contains(point)))
+            .max_by_key(|(_, entry)| entry.registration)
+            .map(|(&id, _)| id)
+    }
+
+    /// While `Dragging`, make `target` the hovered one: the old one (if any)
+    /// hears `Leave`, then the new one (if any) `Enter`. Nothing when
+    /// unchanged or not `Dragging`.
+    fn set_hovered(&mut self, target: Option<DragTargetId>, changes: &mut Vec<DragStateChange>) {
+        if let Machine::Dragging(session) = &mut self.machine
+            && session.hovered != target
+        {
+            if let Some(old) = session.hovered {
+                changes.push(DragStateChange::Leave { target: old });
+            }
+            session.hovered = target;
+            if let Some(target) = target {
+                changes.push(DragStateChange::Enter { target });
+            }
+        }
+    }
+
+    /// While `Dragging`, re-resolve the hovered target under the session's
+    /// current pointer against the registry's current bounds.
+    fn resolve_hover(&mut self, changes: &mut Vec<DragStateChange>) {
+        let Machine::Dragging(session) = &self.machine else {
+            return;
+        };
+        let target = self.target_at(session.pointer);
+        self.set_hovered(target, changes);
+    }
+
     /// `Idle → Armed`. The caller has already left `Idle` reachable.
     fn arm_from_idle(
         &mut self,
@@ -318,25 +367,29 @@ impl Shared {
 }
 
 /// A cloneable handle onto one drag scope's session state: sources
-/// [`arm`](Self::arm)/[`begin`](Self::begin) a drag, resolution
-/// [`update_pointer`](Self::update_pointer)/[`set_hovered`](Self::set_hovered)
-/// it, and it ends in [`drop`](Self::drop) +
+/// [`arm`](Self::arm)/[`begin`](Self::begin) a drag and report its pointer
+/// with [`update_pointer`](Self::update_pointer), which resolves the hovered
+/// target against the registry ([`set_hovered`](Self::set_hovered) overrides
+/// it), and it ends in [`drop`](Self::drop) +
 /// [`complete_drop`](Self::complete_drop) or [`cancel`](Self::cancel). Every
 /// clone shares one state. See the [module docs](super) for the transition
 /// rules.
 ///
 /// ```
 /// use frust_widgets::drag::{DragCoordinator, DragPhase};
-/// use kurbo::Point;
+/// use kurbo::{Point, Rect};
 ///
 /// let drag = DragCoordinator::new();
 /// let source = drag.new_source_id();
 /// let target = drag.new_target_id();
+/// drag.register_target(target);
+/// drag.set_target_bounds(target, Rect::new(50.0, 0.0, 150.0, 100.0));
 ///
 /// drag.arm(source, Point::new(10.0, 10.0));
 /// drag.begin(42_u32);
+/// // Resolution: the pointer is inside the target's reported bounds.
 /// drag.update_pointer(Point::new(80.0, 40.0));
-/// drag.set_hovered(Some(target));
+/// assert_eq!(drag.state().session().and_then(|s| s.hovered), Some(target));
 /// assert_eq!(drag.drop(), Some(target));
 ///
 /// // The target claims the payload, then completes the drop.
@@ -501,17 +554,43 @@ impl DragCoordinator {
         });
     }
 
-    /// The dragged pointer moved to `pointer` (a [`DragStateChange::Move`]
-    /// when it changed). A silent no-op unless `Dragging`.
+    /// The dragged pointer is at `pointer` (window space): record it, then
+    /// resolve the hovered target under it — the latest-registered target
+    /// whose reported bounds contain it ([`target_at`](Self::target_at)), or
+    /// none. A hover change is reported as `Leave` (the old target) then
+    /// `Enter` (the new one), and a changed pointer then as a
+    /// [`DragStateChange::Move`], so a newly entered target's first `Move` is
+    /// already inside it. Called with an unchanged pointer it still
+    /// re-resolves, which is how bounds that moved under a stationary pointer
+    /// are picked up (see also [`resolve_hover`](Self::resolve_hover)). A
+    /// silent no-op unless `Dragging`.
+    ///
+    /// Resolution reads the registry only: it never hit-tests the widget tree
+    /// (the ghost floats in a transparent overlay pod above it), and a hover
+    /// set explicitly with [`set_hovered`](Self::set_hovered) stands only
+    /// until the next call.
     pub fn update_pointer(&self, pointer: Point) {
         self.mutate(|shared, changes| {
-            if let Machine::Dragging(session) = &mut shared.machine
-                && session.pointer != pointer
-            {
-                session.pointer = pointer;
+            let Machine::Dragging(session) = &mut shared.machine else {
+                return;
+            };
+            let moved = session.pointer != pointer;
+            session.pointer = pointer;
+            shared.resolve_hover(changes);
+            if moved {
                 changes.push(DragStateChange::Move { pointer });
             }
         });
+    }
+
+    /// Re-resolve the hovered target under the current pointer against the
+    /// registry's current bounds, without moving the pointer — for a pass
+    /// that moved targets under a stationary pointer (an auto-scrolled list
+    /// re-reporting its rows' bounds). Raises the same `Leave`/`Enter` pair
+    /// [`update_pointer`](Self::update_pointer) does, and nothing when the
+    /// hover is unchanged. A silent no-op unless `Dragging`.
+    pub fn resolve_hover(&self) {
+        self.mutate(|shared, changes| shared.resolve_hover(changes));
     }
 
     /// Set where the ghost's origin sits relative to the pointer (see
@@ -524,30 +603,34 @@ impl DragCoordinator {
         }
     }
 
-    /// The target under the pointer is now `target`: the old one (if any)
-    /// hears `Leave`, then the new one (if any) hears `Enter`. Nothing when
-    /// unchanged; a silent no-op unless `Dragging`.
+    /// Override the hovered target with `target`, bypassing resolution: the
+    /// old one (if any) hears `Leave`, then the new one (if any) hears
+    /// `Enter`. Nothing when unchanged; a silent no-op unless `Dragging`. The
+    /// override stands until the next [`update_pointer`](Self::update_pointer)
+    /// or [`resolve_hover`](Self::resolve_hover) re-resolves against the
+    /// registry.
     pub fn set_hovered(&self, target: Option<DragTargetId>) {
-        self.mutate(|shared, changes| {
-            if let Machine::Dragging(session) = &mut shared.machine
-                && session.hovered != target
-            {
-                if let Some(old) = session.hovered {
-                    changes.push(DragStateChange::Leave { target: old });
-                }
-                session.hovered = target;
-                if let Some(target) = target {
-                    changes.push(DragStateChange::Enter { target });
-                }
-            }
-        });
+        self.mutate(|shared, changes| shared.set_hovered(target, changes));
     }
 
-    /// Register a drop target for bounds tracking and resolution. Idempotent:
-    /// re-registering an already-registered target is a no-op.
+    /// Register a drop target for bounds tracking and resolution, stamped
+    /// after every target already registered — a later registration wins an
+    /// overlap in [`target_at`](Self::target_at). Idempotent: re-registering
+    /// an already-registered target is a no-op and keeps its original stamp.
     pub fn register_target(&self, id: DragTargetId) {
         let mut shared = self.shared.borrow_mut();
-        shared.targets.entry(id).or_insert(None);
+        if shared.targets.contains_key(&id) {
+            return;
+        }
+        let registration = shared.next_registration;
+        shared.next_registration += 1;
+        shared.targets.insert(
+            id,
+            TargetEntry {
+                registration,
+                bounds: None,
+            },
+        );
     }
 
     /// Unregister a drop target. If the target is currently hovered or is the
@@ -581,7 +664,7 @@ impl DragCoordinator {
         let mut shared = self.shared.borrow_mut();
         match shared.targets.get_mut(&id) {
             Some(entry) => {
-                *entry = Some(bounds);
+                entry.bounds = Some(bounds);
             }
             None => {
                 log_ignored("set_target_bounds", "the target is not registered");
@@ -596,35 +679,28 @@ impl DragCoordinator {
             .borrow()
             .targets
             .get(&id)
-            .and_then(|bounds| *bounds)
+            .and_then(|entry| entry.bounds)
     }
 
-    /// The registered target whose bounds contain `point`, picking the one
-    /// with the smallest area when multiple targets overlap. Returns `None`
-    /// if no registered target contains the point.
+    /// The registered target whose reported bounds contain `point` (window
+    /// space); where several overlap, the one registered **last** wins — see
+    /// the [module docs](super) for why registration order stands in for
+    /// paint order. Targets that have not reported bounds yet are skipped.
+    /// Returns `None` if no registered target contains the point.
     pub fn target_at(&self, point: Point) -> Option<DragTargetId> {
-        let shared = self.shared.borrow();
-        let mut best: Option<(DragTargetId, f64)> = None;
-        for (&id, bounds) in &shared.targets {
-            if let Some(rect) = bounds
-                && rect.contains(point)
-            {
-                let area = rect.area();
-                if let Some((_, best_area)) = best {
-                    if area < best_area {
-                        best = Some((id, area));
-                    }
-                } else {
-                    best = Some((id, area));
-                }
-            }
-        }
-        best.map(|(id, _)| id)
+        self.shared.borrow().target_at(point)
     }
 
-    /// All registered drop targets.
+    /// All registered drop targets, in registration order.
     pub fn registered_targets(&self) -> Vec<DragTargetId> {
-        self.shared.borrow().targets.keys().copied().collect()
+        let shared = self.shared.borrow();
+        let mut targets: Vec<(u64, DragTargetId)> = shared
+            .targets
+            .iter()
+            .map(|(&id, entry)| (entry.registration, id))
+            .collect();
+        targets.sort_unstable();
+        targets.into_iter().map(|(_, id)| id).collect()
     }
 
     /// Release the drag: over a hovered target, `Dragging → Dropping` (the
@@ -1113,7 +1189,9 @@ mod tests {
                     &[Phase(Idle, Dragging)],
                 ]),
             ),
-            (Start::Hovering, Op::Move, Dragging, vec![Moved]),
+            // The first target was hovered by override and never registered,
+            // so resolving under the moved pointer finds nothing.
+            (Start::Hovering, Op::Move, Dragging, vec![LeaveFirst, Moved]),
             (
                 Start::Hovering,
                 Op::HoverSecond,
@@ -1677,6 +1755,9 @@ mod tests {
     #[test]
     fn unchanged_pointer_and_hover_notify_nothing() {
         let f = Fixture::new();
+        f.drag.register_target(f.first);
+        f.drag
+            .set_target_bounds(f.first, Rect::from_center_size(PRESS, (20.0, 20.0)));
         Start::Hovering.reach(&f);
         f.take_log();
         f.drag.update_pointer(PRESS);
@@ -1822,22 +1903,182 @@ mod tests {
     }
 
     #[test]
-    fn target_at_picks_smallest_area_when_overlapping() {
+    fn a_nested_target_registered_after_its_container_wins() {
         let f = Fixture::new();
         f.drag.register_target(f.first);
         f.drag.register_target(f.second);
-        // First target: large rect
+        // The container, registered first.
         let large = Rect::from_origin_size(Point::new(0.0, 0.0), (200.0, 200.0));
         f.drag.set_target_bounds(f.first, large);
-        // Second target: smaller rect, nested inside the first
+        // A target nested inside it, registered after it.
         let small = Rect::from_origin_size(Point::new(50.0, 50.0), (100.0, 100.0));
         f.drag.set_target_bounds(f.second, small);
-        let point = Point::new(100.0, 100.0);
+        assert_eq!(f.drag.target_at(Point::new(100.0, 100.0)), Some(f.second));
         assert_eq!(
-            f.drag.target_at(point),
-            Some(f.second),
-            "picks the smallest area target when overlapping"
+            f.drag.target_at(Point::new(10.0, 10.0)),
+            Some(f.first),
+            "outside the nested target the container still resolves"
         );
+    }
+
+    #[test]
+    fn two_overlapping_targets_resolve_to_the_later_registration() {
+        let f = Fixture::new();
+        // Registered in the opposite order to their ids, and the later one is
+        // the larger: registration order alone decides, not id or area.
+        f.drag.register_target(f.second);
+        f.drag.register_target(f.first);
+        f.drag
+            .set_target_bounds(f.second, Rect::new(0.0, 0.0, 100.0, 100.0));
+        f.drag
+            .set_target_bounds(f.first, Rect::new(50.0, 50.0, 300.0, 300.0));
+        let overlap = Point::new(75.0, 75.0);
+        assert_eq!(f.drag.target_at(overlap), Some(f.first));
+        assert_eq!(f.drag.registered_targets(), vec![f.second, f.first]);
+
+        // A drag resolves the same way.
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(1_u8);
+        f.take_log();
+        f.drag.update_pointer(overlap);
+        assert_eq!(
+            f.take_log(),
+            vec![
+                DragStateChange::Enter { target: f.first },
+                DragStateChange::Move { pointer: overlap },
+            ]
+        );
+
+        // Re-registering keeps the original stamp; registering anew after an
+        // unregister moves the target to the end.
+        f.drag.register_target(f.second);
+        assert_eq!(f.drag.target_at(overlap), Some(f.first));
+        f.drag.unregister_target(f.second);
+        f.drag.register_target(f.second);
+        f.drag
+            .set_target_bounds(f.second, Rect::new(0.0, 0.0, 100.0, 100.0));
+        assert_eq!(f.drag.target_at(overlap), Some(f.second));
+    }
+
+    #[test]
+    fn moving_across_three_targets_enters_and_leaves_each_in_turn() {
+        let f = Fixture::new();
+        let third = f.drag.new_target_id();
+        // Three side-by-side columns with a gap between the second and third.
+        let columns = [
+            (f.first, Rect::new(0.0, 0.0, 100.0, 300.0)),
+            (f.second, Rect::new(100.0, 0.0, 200.0, 300.0)),
+            (third, Rect::new(220.0, 0.0, 320.0, 300.0)),
+        ];
+        for (id, rect) in columns {
+            f.drag.register_target(id);
+            f.drag.set_target_bounds(id, rect);
+        }
+        f.drag.arm(f.source, Point::new(50.0, 10.0));
+        f.drag.begin(1_u8);
+        f.take_log();
+
+        let path = [
+            Point::new(50.0, 50.0),   // first
+            Point::new(60.0, 60.0),   // still first
+            Point::new(150.0, 60.0),  // second
+            Point::new(210.0, 60.0),  // the gap
+            Point::new(250.0, 60.0),  // third
+            Point::new(250.0, 400.0), // below everything
+        ];
+        for point in path {
+            f.drag.update_pointer(point);
+        }
+        let mv = |pointer: Point| DragStateChange::Move { pointer };
+        assert_eq!(
+            f.take_log(),
+            vec![
+                DragStateChange::Enter { target: f.first },
+                mv(path[0]),
+                mv(path[1]),
+                DragStateChange::Leave { target: f.first },
+                DragStateChange::Enter { target: f.second },
+                mv(path[2]),
+                DragStateChange::Leave { target: f.second },
+                mv(path[3]),
+                DragStateChange::Enter { target: third },
+                mv(path[4]),
+                DragStateChange::Leave { target: third },
+                mv(path[5]),
+            ]
+        );
+        assert_eq!(
+            f.drag.drop(),
+            None,
+            "released outside every target: a cancel"
+        );
+        assert_eq!(f.drag.phase(), Idle);
+    }
+
+    #[test]
+    fn an_explicit_hover_stands_until_the_next_resolution() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        f.drag
+            .set_target_bounds(f.first, Rect::new(0.0, 0.0, 100.0, 100.0));
+        Start::Dragging.reach(&f);
+        f.drag.set_hovered(Some(f.second));
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.second),
+            "the override applies at once"
+        );
+        f.take_log();
+        f.drag.update_pointer(Point::new(40.0, 40.0));
+        assert_eq!(
+            f.take_log(),
+            vec![
+                DragStateChange::Leave { target: f.second },
+                DragStateChange::Enter { target: f.first },
+                DragStateChange::Move {
+                    pointer: Point::new(40.0, 40.0)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_hover_follows_bounds_that_move_under_a_still_pointer() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        f.drag
+            .set_target_bounds(f.first, Rect::new(0.0, 0.0, 100.0, 50.0));
+        f.drag
+            .set_target_bounds(f.second, Rect::new(0.0, 50.0, 100.0, 100.0));
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(1_u8);
+        f.drag.update_pointer(Point::new(10.0, 40.0));
+        f.take_log();
+
+        // The list scrolls up by 20 px: the second row now sits under the
+        // pointer, which has not moved.
+        f.drag
+            .set_target_bounds(f.first, Rect::new(0.0, -20.0, 100.0, 30.0));
+        f.drag
+            .set_target_bounds(f.second, Rect::new(0.0, 30.0, 100.0, 80.0));
+        assert!(f.take_log().is_empty(), "reporting bounds notifies nothing");
+        f.drag.resolve_hover();
+        assert_eq!(
+            f.take_log(),
+            vec![
+                DragStateChange::Leave { target: f.first },
+                DragStateChange::Enter { target: f.second },
+            ]
+        );
+        f.drag.resolve_hover();
+        assert!(f.take_log().is_empty(), "an unchanged hover is silent");
+
+        // Outside `Dragging` it is a no-op.
+        f.drag.drop();
+        f.take_log();
+        f.drag.resolve_hover();
+        assert!(f.take_log().is_empty());
     }
 
     #[test]

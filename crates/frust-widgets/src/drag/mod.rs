@@ -55,10 +55,39 @@
 //!   [`DragCoordinator::state`] already reads `Idle` by the time any
 //!   subscriber hears either.
 //!
-//! Pointer moves ([`DragCoordinator::update_pointer`]) and hover changes
+//! Pointer moves ([`DragCoordinator::update_pointer`]), hover resolution
+//! ([`DragCoordinator::resolve_hover`]) and hover overrides
 //! ([`DragCoordinator::set_hovered`]) apply only while `Dragging` and are
-//! silent no-ops otherwise, so a per-frame resolution pass may call them
+//! silent no-ops otherwise, so a per-frame pass may call them
 //! unconditionally.
+//!
+//! # Target resolution
+//!
+//! The coordinator resolves which target is under the pointer itself, from a
+//! registry rather than a hit test — the ghost floats in a transparent overlay
+//! pod above everything, and targets in different containers (two kanban
+//! columns, a list and a trash bin) must resolve against one another:
+//!
+//! - **Registry.** A target registers its id
+//!   ([`DragCoordinator::register_target`]) and reports its window-space
+//!   bounds every paint ([`DragCoordinator::set_target_bounds`]).
+//! - **Every pointer report resolves.** [`DragCoordinator::update_pointer`]
+//!   records the pointer and re-picks the hovered target as
+//!   [`DragCoordinator::target_at`] of it, reporting a change as `Leave` (old)
+//!   then `Enter` (new), then the `Move`.
+//!   [`DragCoordinator::resolve_hover`] re-picks without moving the pointer,
+//!   for bounds that moved under it (auto-scroll calls it after each step).
+//! - **Later registration wins an overlap.** Of several targets whose bounds
+//!   contain the point, the one registered last is picked. A target
+//!   registers when its pod is built, before its child is, so a target nested
+//!   inside another registers after its container and wins inside it; siblings
+//!   register in tree order, which is paint order, so the one painted on top
+//!   wins. A target rebuilt later (a fresh pod under a new key) re-registers
+//!   at the end and wins any overlap with targets that kept their pods.
+//! - **Overrides.** [`DragCoordinator::set_hovered`] sets the hover directly
+//!   and stands only until the next resolution.
+//! - **Release.** A [`DragCoordinator::drop`] with nothing hovered — released
+//!   outside every target — is a cancel.
 //!
 //! # Payload
 //!
@@ -89,9 +118,11 @@
 //! primary press, begins the session once the press crosses its [`DragPolicy`]
 //! (a distance threshold for a mouse, a stationary long-press for a finger),
 //! floats a ghost through the overlay portal at the pointer for the session's
-//! length, and drops or cancels on the gesture's `Up`/`Cancel`. A press that
-//! never becomes a drag reaches the wrapped child untouched. See the
-//! [`mod@draggable`] module docs for the initiation, ghost and feedback contract.
+//! length, and drops or cancels on the gesture's `Up`/`Cancel` — or cancels on
+//! `Escape`, for which it holds the keyboard focus for the length of the press.
+//! A press that never becomes a drag reaches the wrapped child untouched. See
+//! the [`mod@draggable`] module docs for the initiation, ghost, feedback and
+//! cancel contract.
 //!
 //! # Targets
 //!
@@ -100,18 +131,32 @@
 //! [`DragCoordinator::set_target_bounds`]/[`DragCoordinator::target_at`]): it
 //! registers a fresh [`DragTargetId`] when its pod is built and unregisters it
 //! when the pod is dropped, reports its window-space bounds every paint so a
-//! per-frame resolution pass can find it under the ghost point, and at
-//! overlapping bounds [`DragCoordinator::target_at`] picks whichever
-//! registered target has the smallest area. It never subscribes; like
+//! pointer report can resolve it under the ghost point (see *Target
+//! resolution* above for how overlaps are decided). It never subscribes; like
 //! [`draggable()`] it polls the coordinator's own state (here on the
 //! `Housekeeping` broadcast) and turns what it finds into typed
 //! enter/leave/hover/drop callbacks plus a themed highlight. See the
 //! [`mod@target`] module docs for the full notification and highlight contract.
+//!
+//! # Edge auto-scroll
+//!
+//! [`auto_scroll_zone()`] wraps a scroll surface and, while a session's pointer
+//! sits within [`AutoScroll::edge_px`] of its top or bottom edge, jumps the
+//! surface's [`ScrollController`](crate::ScrollController) toward that edge
+//! every frame at a speed proportional to the depth into the band (up to
+//! [`AutoScroll::max_px_per_s`]), stopping at the scroll limits, when the
+//! pointer leaves the band, or when the session ends. See the
+//! [`mod@auto_scroll`] module docs.
 
+pub mod auto_scroll;
 mod coordinator;
 pub mod draggable;
 pub mod target;
 
+pub use auto_scroll::{
+    AUTO_SCROLL_EDGE_PX, AUTO_SCROLL_MAX_PX_PER_S, AutoScroll, AutoScrollZone,
+    AutoScrollZoneWidget, auto_scroll_zone,
+};
 pub use coordinator::{
     DragCoordinator, DragKind, DragPhase, DragSession, DragSourceId, DragState, DragStateChange,
     DragSubscription, DragTargetId,
