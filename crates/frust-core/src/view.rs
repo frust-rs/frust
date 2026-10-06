@@ -305,6 +305,8 @@ impl<State: 'static> AnyView<State> {
     /// returned unchanged — `any(any(v))` and `AnyView::new(any_view)` do not box
     /// twice.
     pub fn new<V: View<State>>(view: V) -> Self {
+        // Slot holds the value so it can be moved out through `&mut dyn Any`'s borrow.
+        // `take()` extracts it after the downcast_mut succeeds, or the original is boxed.
         let mut slot = Some(view);
         if let Some(erased) =
             (&mut slot as &mut dyn core::any::Any).downcast_mut::<Option<AnyView<State>>>()
