@@ -1153,7 +1153,6 @@ impl ProjectFolderWidget {
 mod tests {
     use super::*;
     use crate::components::popover::tests::{Recorder, ft_ms, light, pointer, reduced};
-    use frust::authoring::any;
     use frust::authoring::text::TextContext;
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -1348,7 +1347,7 @@ mod tests {
                 {
                     card = card.gpu_fan(s.gpu);
                 }
-                frust::Stack(vec![any(card)])
+                frust::stack().child(card)
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1589,15 +1588,17 @@ mod tests {
     /// A three-sheet folder, fanned `open` or at rest.
     fn probe_logic(open: bool) -> impl FnMut(&mut ()) -> frust::StackView<()> {
         move |_: &mut ()| {
-            frust::Stack(vec![any(project_folder::<()>(
-                "Brand kit",
-                vec![
-                    folder_preview("Logo"),
-                    folder_preview("Type"),
-                    folder_preview("Colour"),
-                ],
+            frust::stack().child(
+                project_folder::<()>(
+                    "Brand kit",
+                    vec![
+                        folder_preview("Logo"),
+                        folder_preview("Type"),
+                        folder_preview("Colour"),
+                    ],
+                )
+                .open(open),
             )
-            .open(open))])
         }
     }
 

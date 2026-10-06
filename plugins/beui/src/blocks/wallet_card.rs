@@ -2135,7 +2135,6 @@ fn draw_action_mark(
 mod tests {
     use super::*;
     use crate::components::popover::tests::{Recorder, ft_ms, light, pointer, reduced};
-    use frust::authoring::any;
     use frust::authoring::text::TextContext;
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -2278,7 +2277,7 @@ mod tests {
                 if let Some(change) = s.change {
                     card = card.change(change);
                 }
-                frust::Stack(vec![any(card)])
+                frust::stack().child(card)
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -2733,9 +2732,11 @@ mod tests {
 
     /// The card with a balance change and one recent search term.
     fn probe_view(_: &mut ()) -> frust::StackView<()> {
-        frust::Stack(vec![any(wallet_card::<()>(accounts(), 12_345.67)
-            .change(2.5)
-            .search_recent(vec!["ethereum".to_string()]))])
+        frust::stack().child(
+            wallet_card::<()>(accounts(), 12_345.67)
+                .change(2.5)
+                .search_recent(vec!["ethereum".to_string()]),
+        )
     }
 
     /// The account trigger's centre, in window space.

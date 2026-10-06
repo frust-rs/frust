@@ -1753,7 +1753,6 @@ fn paint_amount_row(
 mod tests {
     use super::*;
     use crate::components::popover::tests::{Recorder, ft_ms, light, pointer, reduced};
-    use frust::authoring::any;
     use frust::authoring::text::TextContext;
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -1973,7 +1972,7 @@ mod tests {
                     })
                     .on_trade(|s: &mut App| s.trades += 1)
                     .on_sign_in(|s: &mut App| s.sign_ins += 1);
-                frust::Stack(vec![any(ticket)])
+                frust::stack().child(ticket)
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -2215,10 +2214,10 @@ mod tests {
     /// A two-outcome ticket: modes, order type, amount, chips, outcomes, the
     /// quote line and the action, plus the payout ticker `number` paints.
     fn probe_view(_: &mut ()) -> frust::StackView<()> {
-        frust::Stack(vec![any(prediction_market::<()>(vec![
+        frust::stack().child(prediction_market::<()>(vec![
             market_outcome("yes", "Yes", 0.55),
             market_outcome("no", "No", 0.45),
-        ]))])
+        ]))
     }
 
     #[test]

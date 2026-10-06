@@ -1378,7 +1378,6 @@ const TERMINAL_CARET_WIDTH: f64 = 7.0;
 mod tests {
     use super::*;
     use crate::components::popover::tests::{Recorder, ft_ms, light, pointer, reduced};
-    use frust::authoring::any;
     use frust::authoring::text::TextContext;
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -1556,9 +1555,11 @@ mod tests {
         fn step(&mut self, ms: f64) -> Recorder {
             self.clock += ms;
             let mut logic = move |s: &mut App| {
-                frust::Stack(vec![any(not_found()
-                    .style(s.style)
-                    .on_action(|s: &mut App, action| s.actions.push(action)))])
+                frust::stack().child(
+                    not_found()
+                        .style(s.style)
+                        .on_action(|s: &mut App, action| s.actions.push(action)),
+                )
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root

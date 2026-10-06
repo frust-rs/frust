@@ -1093,7 +1093,7 @@ mod tests {
                 if let Some(expanded) = s.controlled {
                     bar = bar.expanded(expanded);
                 }
-                frust::Stack(vec![any(bar)])
+                frust::stack().child(bar)
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1390,14 +1390,16 @@ mod tests {
     /// The expanded bar with glyph-free icons, two labels and an ASCII
     /// shortcut.
     fn probe_view(_: &mut ()) -> frust::StackView<()> {
-        frust::Stack(vec![any(expandable_action_bar::<(), _>(
-            vec![
-                action_bar_item(icon::<()>(), "Reply"),
-                action_bar_item(icon::<()>(), "Forward").shortcut("Ctrl F"),
-            ],
-            |_: &mut (), _| {},
+        frust::stack().child(
+            expandable_action_bar::<(), _>(
+                vec![
+                    action_bar_item(icon::<()>(), "Reply"),
+                    action_bar_item(icon::<()>(), "Forward").shortcut("Ctrl F"),
+                ],
+                |_: &mut (), _| {},
+            )
+            .expanded(true),
         )
-        .expanded(true))])
     }
 
     #[test]
