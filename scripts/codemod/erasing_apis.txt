@@ -1,0 +1,102 @@
+# Erasing-API name list for scripts/codemod/frust_any_codemod.py.
+#
+# One entry per whitespace-separated word, grouped under a [section] header;
+# `#` starts a comment. Extend a section when a later change widens another
+# API — the tool needs no code change.
+#
+# Entry spellings:
+#   .name        a method call `recv.name(..)`
+#   name         a free-fn call `name(..)`, bare or module-qualified
+#                (`frust_shadcn::card(..)`); a `Type::name(..)` call never
+#                matches a free-fn entry
+#   Type::name   an associated-fn call `Type::name(..)` (optionally
+#                path-qualified in front of `Type`), e.g. `Route::new`,
+#                `ListView::builder`
+#
+# [slot]    (T1) single-view `impl View<State>` / `V: View<State>` and
+#           `Option<V>` parameters. T1 fires only when an argument is a bare
+#           erasure call — `any(X)`, `frust..::any(X)`, `AnyView::new(X)` — or
+#           `Some(<erasure call>)`; it then drops the erasure. Any other
+#           argument, including a `vec![..]` list, is never touched, so a name
+#           that is a single slot in one crate and a list in another (`card`,
+#           `drawer`, `message`, `side_sheet`, `.leading`, `.trailing`) is safe
+#           here: the list form simply never matches. The argument position is
+#           not checked, which is sound because no listed API takes a
+#           non-generic `AnyView<State>` parameter (verified against the
+#           signatures at the time of writing; re-check when adding a name).
+# [builder] (T4) builder-closure parameters `impl Fn(..) -> V`: a closure
+#           argument whose body is exactly one erasure call (optionally in a
+#           `{ }` block) loses the erasure.
+# [exclude] path suffixes of same-named APIs whose closure or slot is NOT
+#           generic, matched against the call's qualifier or, for an
+#           unqualified call, against the `use` that imports it.
+# [list]    informational only — list parameters (`Vec<V>`,
+#           `impl IntoIterator<Item = impl View<State>>`). The tool never
+#           rewrites them: `vec![any(a), any(b)]` may be a mixed-type list, so
+#           the compile-driven hand pass in each apply card owns them.
+#
+# Derived from the merged signatures of crates/frust-widgets, crates/frust,
+# crates/frust-core and plugins/{material,glyph,cupertino,beui,shadcn}.
+# Deliberately absent: `breadcrumb_item` (returns its argument's type `V`, so
+# dropping the erasure would change the result type), `.children` (a list —
+# see [list]), and `.ghost` (a closure — see [builder]).
+
+[slot]
+# Methods.
+.action .addon .app_bar .app_bar_opt .bottom_bar .bottom_bar_opt .checked_icon
+.child .content .content_keyed .custom .desc .fab .flex .footer .header .icon
+.keyed .leading .media .overlay .selected_icon .suggestions .title .title_view
+.trailing
+
+# Free functions.
+Align AnimatedOpacity AnimatedScale FabMenu GestureDetector GlyphSheet
+GlyphSideSheet IconButton Padding PatternSwitcher Tooltip
+accordion accordion_item action_bar_item alert_dialog_action alert_dialog_cancel
+anchor anchored anchored_overlay animated_opacity animated_scale aspect_ratio
+attachment_media auto_scroll_zone badge bloom_menu_item bottom_sheet
+bounce_sidebar_item bouncy_accordion_item button_with_icon card card_action
+card_content card_header_with_action center_morph_modal chat_app collapsible
+container context_menu_trigger dismissible dock_item drag_target draggable
+drawer drawer_destination dynamic_island dynamic_island_slot elevated_card
+empty_media expandable_item expandable_tabs_item fab fab_menu fab_menu_item
+field filled_card filled_icon_button flexible full_screen_dialog glyph_sheet
+glyph_side_sheet hero hover_card hover_card_trigger icon_button inflexible
+input_group item_media keyed large_config message message_avatar message_bubble
+message_scroller_item modal morphing_modal morphing_tabs_item outlined_card
+outlined_icon_button overlay_anchor overlay_modal overlay_portal pan_zoom
+panel parallax pattern_switcher pinch_detector popover popover_trigger
+preview_rail_item pull_to_refresh rail_destination refresh_indicator
+resizable_panel safe_area scaffold scroll_area scroll_reveal scroll_to
+scroll_view selection_app_bar shield side_sheet sidebar sidebar_group_action
+sidebar_item sidebar_menu_action snackbar_host swipe_action tabs_tab tilt_card
+tonal_icon_button tool_result tooltip tooltip_layer tooltip_trigger
+
+# Associated functions.
+ScrollView::new
+
+[builder]
+.error_builder .ghost .push .push_for_result .push_transparent
+.push_transparent_for_result .push_with .push_with_options .replace
+.replace_with .replace_with_options
+list_view navigator overlay_host shell_route
+ListView::builder ListView::builder_keyed Route::new
+
+[exclude]
+# frust-material's `list_view` wrapper takes `impl Fn(usize) -> AnyView<State>`.
+frust_material::list_view
+
+[list]
+.actions .center .children .leading .trailing
+Column KbdGroup Row Stack
+alert alert_dialog alert_dialog_footer alert_dialog_header attachment
+attachment_actions attachment_content attachment_group avatar_group breadcrumb
+breadcrumb_list bubble_group button_group card card_footer card_header
+card_header_with_action card_list carousel contained_carousel cylinder_carousel
+dialog dialog_footer dialog_header drawer drawer_footer drawer_header empty
+empty_content empty_header glyph_reveal hero_carousel item item_actions
+item_content item_footer item_header kbd_group marquee message
+message_bubble_group message_content message_group message_scroller
+reorderable_list selection_host shared_layout_bg sheet sheet_footer
+sheet_header side_sheet sidebar_content sidebar_footer sidebar_group
+sidebar_header sidebar_inset sidebar_menu sidebar_menu_item sidebar_menu_sub
+sidebar_menu_sub_item stack_slots trailing_row uncontained_carousel
