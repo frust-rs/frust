@@ -401,8 +401,8 @@ fn demo_bar(state: &DemoState, show_select_all: bool) -> AnyView<DemoState> {
     .safe_area(false)
     .show_select_all(show_select_all)
     .actions(vec![
-        any(icon_button(icon(icons::ARCHIVE), |_: &mut DemoState| {}).semantic_label("Archive")),
-        any(icon_button(icon(icons::DELETE), |_: &mut DemoState| {}).semantic_label("Delete")),
+        icon_button(icon(icons::ARCHIVE), |_: &mut DemoState| {}).semantic_label("Archive"),
+        icon_button(icon(icons::DELETE), |_: &mut DemoState| {}).semantic_label("Delete"),
     ])
     .on_all_selected(|state: &mut DemoState, all: bool| {
         state.selected = if all {
