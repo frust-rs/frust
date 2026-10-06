@@ -662,8 +662,9 @@ review fixes.
 
 **Evidence**: source inspection of `crates/frust-core/src/view.rs` (AnyView's
 idempotent `new`), `crates/frust-widgets/src/drag/reorderable.rs` (the only
-in-tree wrapper; line 202 defines the field type), and
-`crates/frust-widgets/src/authoring.rs` (swap detection in `rebuild_child_tracked`).
+in-tree wrapper; line 106 the field `inner: AnyView<State>`, line 203 `type Element = Box<dyn Widget>`),
+`crates/frust-widgets/tests/double_erasure_swap.rs` (tripwire test
+`wrapper_view_erasure_swap_blind`), and `crates/frust-widgets/src/authoring.rs` (swap detection).
 
 ---
 

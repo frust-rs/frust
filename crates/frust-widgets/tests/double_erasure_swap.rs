@@ -20,7 +20,7 @@ impl<State: 'static> View<State> for WrapperView<State> {
     type Element = Box<dyn frust_core::widget::Widget>;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
-        Box::new(self.inner.build(ctx))
+        self.inner.build(ctx)
     }
 
     fn rebuild(
@@ -138,6 +138,49 @@ fn double_erased_then_single_erased_different_type_detected_as_swap() {
         flags,
         ChangeFlags::LAYOUT | ChangeFlags::PAINT,
         "swap should report full rebuild flags"
+    );
+}
+
+#[test]
+fn wrapper_view_same_type_rebuild_no_panic() {
+    // Verify that a same-type inner rebuild through the wrapper does not panic
+    // and preserves the pod's focused flag. With the fixture now correctly
+    // returning self.inner.build(ctx) (not double-boxed), AnyView's idempotent
+    // erasure closes the double-erasure case, so the rebuild succeeds.
+    let mut counter = 0u64;
+
+    // Wrapper containing Text.
+    let prev: AnyView<()> = any(WrapperView {
+        inner: any(text("hello")),
+    });
+
+    // Wrapper containing Text with different content — same inner type, so no swap.
+    let next: AnyView<()> = any(WrapperView {
+        inner: any(text("goodbye")),
+    });
+
+    let mut ctx = BuildCtx::new(&mut counter);
+    let mut pod = build_child(&prev, &mut ctx);
+
+    // Mark the pod as focused to test that it persists on a same-type rebuild.
+    pod.set_focused(true);
+    assert!(pod.is_focused(), "pod should be focused before rebuild");
+
+    // Call rebuild_child through the production funnel. This should not panic
+    // (the fixture's element is no longer double-boxed, so AnyView can correctly
+    // detect the same concrete type and update in place).
+    let flags = rebuild_child(&prev, &next, &mut pod, &mut ctx);
+
+    // Same concrete type: no swap detected, so focused flag should persist.
+    assert!(
+        pod.is_focused(),
+        "same-type rebuild through wrapper should not clear the focused flag"
+    );
+
+    // Text content change typically results in PAINT flags only.
+    assert!(
+        flags.needs_paint(),
+        "text content change should require repaint"
     );
 }
 
