@@ -22,7 +22,7 @@
 use std::any::Any;
 
 use frust::{
-    AnyView, Button, Checkbox, Column, Component, Row, SizedBox, Slider, any, component,
+    AnyView, Button, Checkbox, Column, Component, SizedBox, Slider, any, component, row,
     scroll_view, text,
 };
 use frust_core::{
@@ -135,11 +135,10 @@ impl Component for CounterApp {
         let mut children: Vec<AnyView<AppState>> = Vec::with_capacity(rows + 5);
 
         children.push(any(text(format!("Count: {count}")).size(32.0)));
-        children.push(any(Row(vec![
-            any(Button("-", |s: &mut AppState| s.count -= 1)),
-            any(SizedBox(Some(16.0), None)),
-            any(Button("+", |s: &mut AppState| s.count += 1)),
-        ])));
+        children.push(any(row()
+            .child(Button("-", |s: &mut AppState| s.count -= 1))
+            .child(SizedBox(Some(16.0), None))
+            .child(Button("+", |s: &mut AppState| s.count += 1))));
         children.push(any(Checkbox(
             extra,
             "Extra rows",

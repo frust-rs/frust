@@ -38,9 +38,9 @@ use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
 use frust::{
-    AnyView, BackPolicy, Column, NavigatorController, NavigatorView, PushOptions, Route,
-    RouteObserver, RouteParams, Router, any, handles_back, navigator, overlay_host,
-    push_back_press, shell_route, text,
+    AnyView, BackPolicy, NavigatorController, NavigatorView, PushOptions, Route, RouteObserver,
+    RouteParams, Router, any, column, handles_back, navigator, overlay_host, push_back_press,
+    shell_route, text,
 };
 use frust_core::RenderRoot;
 use frust_reactive::{ReactiveRuntime, clear_can_pop_provider};
@@ -144,7 +144,7 @@ impl HostHarness {
             let inner_c = inner.clone();
             Box::new(move |_: &mut ()| {
                 let inner_for_host = inner_c.clone();
-                overlay_host(&host_c, move || any(navigator(&inner_for_host, page)))
+                overlay_host(&host_c, move || navigator(&inner_for_host, page))
             })
         };
         let mut harness = Self {
@@ -233,7 +233,7 @@ impl ShellHarness {
             let outer_c = outer.clone();
             Box::new(move |_: &mut ()| {
                 let outer_for_host = outer_c.clone();
-                overlay_host(&host_c, move || any(navigator(&outer_for_host, page)))
+                overlay_host(&host_c, move || navigator(&outer_for_host, page))
             })
         };
         let mut harness = Self {
@@ -256,7 +256,7 @@ impl ShellHarness {
     /// a nested-navigator binding produces one level down.
     fn push_shell_page(&mut self) {
         let inner = self.inner.clone();
-        self.outer.push(move || any(navigator(&inner, page)));
+        self.outer.push(move || navigator(&inner, page));
         self.rebuild();
     }
 }
@@ -486,14 +486,11 @@ impl RouterShellHarness {
                 let inner = inner.clone();
                 let builds = builds.clone();
                 let root_builds = root_builds.clone();
-                any(Column(vec![
-                    any(BuildCounter { builds }),
-                    any(navigator(&inner, move || {
-                        any(BuildCounter {
-                            builds: root_builds.clone(),
-                        })
-                    })),
-                ]))
+                any(column()
+                    .child(BuildCounter { builds })
+                    .child(navigator(&inner, move || BuildCounter {
+                        builds: root_builds.clone(),
+                    })))
             }
         };
         let router = Router::with_controller(

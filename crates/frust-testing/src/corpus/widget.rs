@@ -471,21 +471,24 @@ fn scaffold_chrome() -> CorpusCase {
             };
             any(frust_widgets::scaffold::<(), _>(frust_widgets::Padding(
                 frust_widgets::EdgeInsets::all(GUTTER),
-                frust_widgets::Column(vec![
-                    any(label(family, SAMPLE_TEXT_LONG, 16.0)),
-                    gap(),
-                    any(frust_widgets::colored_box::<()>()
-                        .fill(PANEL)
-                        .size(200.0, 120.0)
-                        .radius(16.0)),
-                ]),
+                frust_widgets::column()
+                    .child(label(family, SAMPLE_TEXT_LONG, 16.0))
+                    .child(gap())
+                    .child(
+                        frust_widgets::colored_box::<()>()
+                            .fill(PANEL)
+                            .size(200.0, 120.0)
+                            .radius(16.0),
+                    ),
             ))
             .app_bar(bar(PANEL, 64.0, family))
             .bottom_bar(bar(PANEL_ALT, 72.0, family))
-            .fab(any(frust_widgets::colored_box::<()>()
-                .fill(HAIRLINE)
-                .size(56.0, 56.0)
-                .radius(28.0)))
+            .fab(
+                frust_widgets::colored_box::<()>()
+                    .fill(HAIRLINE)
+                    .size(56.0, 56.0)
+                    .radius(28.0),
+            )
             .background(Color::WHITE))
         });
     }
@@ -515,26 +518,21 @@ fn flex_layout() -> CorpusCase {
             };
             let stretchy = |fill: Color| frust_widgets::colored_box::<()>().fill(fill);
             let shares = |a: u32, b: u32| {
-                any(
-                    frust_widgets::container::<(), _>(frust_widgets::FlexView::new(
-                        frust_widgets::Axis::Horizontal,
-                        vec![
-                            frust_widgets::inflexible(tile(56.0, 40.0, PANEL)),
-                            frust_widgets::flexible(a, stretchy(HAIRLINE)),
-                            frust_widgets::flexible(b, stretchy(PANEL_ALT)),
-                        ],
-                    ))
-                    .size(320.0, 40.0),
+                any(frust_widgets::container::<(), _>(
+                    frust_widgets::row()
+                        .child(tile(56.0, 40.0, PANEL))
+                        .flex(a, stretchy(HAIRLINE))
+                        .flex(b, stretchy(PANEL_ALT)),
                 )
+                .size(320.0, 40.0))
             };
             let cross = |alignment: frust_widgets::CrossAxisAlignment| {
                 any(frust_widgets::container::<(), _>(
-                    frust_widgets::Row(vec![
-                        any(frust_widgets::test_support::leaf(40.0, 24.0)),
-                        any(tile(40.0, 48.0, PANEL)),
-                        any(tile(40.0, 72.0, PANEL_ALT)),
-                    ])
-                    .cross_axis(alignment),
+                    frust_widgets::row()
+                        .child(frust_widgets::test_support::leaf(40.0, 24.0))
+                        .child(tile(40.0, 48.0, PANEL))
+                        .child(tile(40.0, 72.0, PANEL_ALT))
+                        .cross_axis(alignment),
                 )
                 .size(320.0, 88.0)
                 .border(HAIRLINE, 1.0))
@@ -582,12 +580,13 @@ fn stack_align() -> CorpusCase {
             body(vec![
                 any(label(family, SAMPLE_TEXT, 20.0)),
                 gap(),
-                any(frust_widgets::container::<(), _>(frust_widgets::Stack(vec![
-                    any(frust_widgets::colored_box::<()>().fill(PANEL_ALT).expand()),
-                    pip(-1.0, -1.0, PANEL),
-                    pip(0.0, 0.0, HAIRLINE),
-                    pip(1.0, 1.0, INK),
-                ]))
+                any(frust_widgets::container::<(), _>(
+                    frust_widgets::stack()
+                        .child(frust_widgets::colored_box::<()>().fill(PANEL_ALT).expand())
+                        .child(pip(-1.0, -1.0, PANEL))
+                        .child(pip(0.0, 0.0, HAIRLINE))
+                        .child(pip(1.0, 1.0, INK)),
+                )
                 .size(320.0, 320.0)
                 .radius(24.0)
                 .border(HAIRLINE, 3.0)),

@@ -7,7 +7,7 @@
 
 mod home_page;
 
-use frust::{Component, View, any, component};
+use frust::{Component, View, component};
 
 /// The root component: stateless config that hosts the home page.
 #[derive(Default)]
@@ -19,9 +19,9 @@ impl Component for {{ title_case_name | replace(" ", "") }}App {
     fn init(&self) {}
 
     fn build(&self, _state: &mut ()) -> impl View<()> {
-        any(component(home_page::HomePage {
+        component(home_page::HomePage {
             title: "{{ title_case_name }}".into(),
-        }))
+        })
     }
 }
 

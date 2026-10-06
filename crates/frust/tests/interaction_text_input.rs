@@ -30,8 +30,8 @@ use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use frust::{
-    Axis, Button, Column, Component, FlexView, Image, ImageFit, ImageSource, Row, SizedBox,
-    TextInputView, any, keyed, scroll_view, text, text_input,
+    Axis, Button, Column, Component, FlexView, Image, ImageFit, ImageSource, SizedBox,
+    TextInputView, any, keyed, row, scroll_view, text, text_input,
 };
 use frust_core::{
     AnyView, FrameTime, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, PaintScene,
@@ -153,13 +153,12 @@ impl Component for NotesApp {
                 let id = *id;
                 keyed(
                     id,
-                    Row(vec![
-                        any(text(note.clone()).size(20.0)),
-                        any(SizedBox(Some(12.0), None)),
-                        any(Button("Delete", move |s: &mut AppState| {
+                    row()
+                        .child(text(note.clone()).size(20.0))
+                        .child(SizedBox(Some(12.0), None))
+                        .child(Button("Delete", move |s: &mut AppState| {
                             s.notes.retain(|(nid, _)| *nid != id);
                         })),
-                    ]),
                 )
             })
             .collect();
