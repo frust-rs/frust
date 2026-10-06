@@ -370,7 +370,7 @@ impl Component for CatalogApp {
         CatalogState::new()
     }
 
-    fn build(&self, state: &mut CatalogState) -> AnyView<CatalogState> {
+    fn build(&self, state: &mut CatalogState) -> impl View<CatalogState> {
         // Clone the reactive handle into the navigator's stateless home-page
         // builder; the controller is shared so overlay pages push onto this
         // same stack. Glyph page transitions for any pushed overlay.

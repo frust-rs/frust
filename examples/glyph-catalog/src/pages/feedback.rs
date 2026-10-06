@@ -28,7 +28,7 @@
 
 use frust::{
     AnyView, Axis, Column, Component, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get,
-    Padding, Row, RwSignal, SizedBox, Update, any, button, component, keyed, text,
+    Padding, Row, RwSignal, SizedBox, Update, View, any, button, component, keyed, text,
 };
 // Re-anchored onto `frust_glyph` under the old `glyph` local name (this
 // file's own dense `glyph::` call-site prefix predates the plugin split) —
@@ -75,7 +75,7 @@ impl Component for FeedbackPage {
         }
     }
 
-    fn build(&self, state: &mut FeedbackState) -> AnyView<FeedbackState> {
+    fn build(&self, state: &mut FeedbackState) -> impl View<FeedbackState> {
         let column = Column(vec![
             section_title("Badges"),
             v_gap(10.0),
