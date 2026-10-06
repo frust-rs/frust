@@ -65,15 +65,16 @@ pub fn activity_screen() -> AnyView<HuddleState> {
     };
 
     let mark_all_read_ctrl = Arc::clone(&controller);
-    let bar = app_bar::<HuddleState>("Activity").actions(vec![any(GestureDetector(
-        icon(icons::DONE_ALL).size(24.0).label("Mark all read"),
-    )
-    .on_tap(move |_s: &mut HuddleState| {
-        let handle = Arc::clone(&mark_all_read_ctrl);
-        frust::spawn_local(async move {
-            handle.mark_all_read().await;
-        });
-    }))]);
+    let bar = app_bar::<HuddleState>("Activity").actions(vec![
+        GestureDetector(icon(icons::DONE_ALL).size(24.0).label("Mark all read")).on_tap(
+            move |_s: &mut HuddleState| {
+                let handle = Arc::clone(&mark_all_read_ctrl);
+                frust::spawn_local(async move {
+                    handle.mark_all_read().await;
+                });
+            },
+        ),
+    ]);
 
     any(column()
         .child(bar)

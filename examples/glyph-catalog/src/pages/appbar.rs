@@ -404,12 +404,14 @@ fn demo_anatomy() -> FlexChild<CatalogState> {
     let bar = app_bar::<CatalogState>("dev · session")
         .subtitle("9 panes · running")
         .leading(brand_mark())
-        .actions(vec![any(button(
-            if starred { "★" } else { "☆" },
-            move |_: &mut CatalogState| starred_sig.set(!starred_sig.get_untracked()),
-        )
-        .style(ButtonStyle::Icon)
-        .small())]);
+        .actions(vec![
+            button(
+                if starred { "★" } else { "☆" },
+                move |_: &mut CatalogState| starred_sig.set(!starred_sig.get_untracked()),
+            )
+            .style(ButtonStyle::Icon)
+            .small(),
+        ]);
 
     block(vec![
         inflexible(label("01 Anatomy")),
@@ -750,11 +752,13 @@ fn variation_selection(nav: NavigatorController<CatalogState>) -> AnyView<Catalo
         selection_bar(count, move |_: &mut CatalogState| {
             sig.set([false; 3]);
         })
-        .actions(vec![any(button("Delete", move |_: &mut CatalogState| {
-            sig.set([false; 3]);
-        })
-        .style(ButtonStyle::Danger)
-        .small())])
+        .actions(vec![
+            button("Delete", move |_: &mut CatalogState| {
+                sig.set([false; 3]);
+            })
+            .style(ButtonStyle::Danger)
+            .small(),
+        ])
     });
 
     let bar = app_bar::<CatalogState>("Sessions")
