@@ -53,8 +53,7 @@ use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
 use frust::{
-    AnyView, Axis, Component, EdgeInsets, FlexView, Padding, SizedBox, Stack, any, component,
-    flexible, inflexible, list_view, text,
+    AnyView, Component, EdgeInsets, Padding, SizedBox, any, component, list_view, row, stack, text,
 };
 
 use super::{BenchState, Scenario};
@@ -195,24 +194,20 @@ impl Component for S3Table {
         let count = rows.len();
 
         let table = list_view(count, ROW_EXTENT, move |i| {
-            let row = &rows[i];
+            let item = &rows[i];
             any(Padding(
                 EdgeInsets::symmetric(12.0, 4.0),
-                FlexView::new(
-                    Axis::Horizontal,
-                    vec![
-                        inflexible(text(row.id.to_string()).size(14.0)),
-                        inflexible(SizedBox(Some(12.0), None)),
-                        flexible(1, text(row.label.clone()).size(14.0)),
-                    ],
-                ),
+                row()
+                    .child(text(item.id.to_string()).size(14.0))
+                    .child(SizedBox(Some(12.0), None))
+                    .flex(1, text(item.label.clone()).size(14.0)),
             ))
         });
 
         // The script cycles continuously for the whole capture window (see
         // the module doc), so the ticker stays active forever — it never
         // goes idle the way a run-once script would.
-        any(Stack(vec![any(table), any(Ticker { active: true })]))
+        any(stack().child(table).child(Ticker { active: true }))
     }
 }
 

@@ -54,8 +54,8 @@ use frust::authoring::{
     Widget,
 };
 use frust::{
-    Align, Alignment, AnimationController, AnyView, AsyncValue, Color, Component, Get, Stack,
-    UseTask, any, component, spawn_blocking, text, use_task,
+    Align, Alignment, AnimationController, AnyView, AsyncValue, Color, Component, Get, UseTask,
+    any, component, spawn_blocking, stack, text, use_task,
 };
 
 use super::{BenchState, Scenario};
@@ -439,11 +439,10 @@ impl Component for S4Heavy {
             AsyncValue::Error(_) => "parse failed".to_string(),
         };
 
-        any(Stack(vec![
+        any(stack()
             // The animation runs the whole time, independent of the parse.
-            any(SpinBox::new()),
-            any(Align(Alignment::new(0.0, 0.0), text(status).size(18.0))),
-        ]))
+            .child(SpinBox::new())
+            .child(Align(Alignment::new(0.0, 0.0), text(status).size(18.0))))
     }
 }
 

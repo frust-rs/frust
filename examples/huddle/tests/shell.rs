@@ -190,7 +190,7 @@ fn modal_round_trip_delivers_its_result() {
     let sink = Arc::clone(&delivered);
     let controller = state.nav.router().controller().clone();
     controller.push_transparent_for_result(
-        || frust::any(frust::text("probe dialog")),
+        || frust::text("probe dialog"),
         TransitionSpec::NONE,
         move |_s: &mut HuddleState, result: PopResult| {
             *sink.lock().unwrap() = result.take::<String>();

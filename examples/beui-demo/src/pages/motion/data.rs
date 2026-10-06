@@ -18,8 +18,8 @@
 use std::rc::Rc;
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Stack, View, any, column,
-    component, row, text,
+    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, column, component,
+    row, stack, text,
 };
 use frust_beui::components::animated_toast_stack::{
     AnimatedToastStackEntry, AnimatedToastStackPosition, AnimatedToastStackStatus, animated_toast,
@@ -313,7 +313,7 @@ fn toasts(state: &State) -> AnyView<State> {
         .child(caption(format!("Queued: {}", state.toasts.len())))
         .cross_axis(CrossAxisAlignment::Start));
 
-    let stack = any(
+    let toast_stack = any(
         animated_toast_stack(state.toasts.clone(), |s: &mut State, id| {
             s.toasts.retain(|toast| toast.id() != id);
             s.toast_status = format!("Dismissed id {id}.");
@@ -336,7 +336,7 @@ fn toasts(state: &State) -> AnyView<State> {
          dismiss it \u{2014} the velocity arm is not ported, a PointerEvent carries \
          none \u{2014} and no ramp blurs.",
         vec![any(
-            SizedBox(Some(620.0), Some(380.0)).child(Stack(vec![panel, stack]))
+            SizedBox(Some(620.0), Some(380.0)).child(stack().child(panel).child(toast_stack))
         )],
     )
 }
@@ -413,8 +413,8 @@ fn tables(state: &State) -> AnyView<State> {
         vec![
             any(SizedBox(Some(720.0), None).child(view)),
             gap(12.0),
-            any(Row(vec![
-                any(caption(format!(
+            any(row()
+                .child(caption(format!(
                     "{} rows \u{b7} {} selected \u{b7} {} extra page(s) loaded \u{b7} sort: {}",
                     state.row_count,
                     state.selected.len(),
@@ -430,25 +430,24 @@ fn tables(state: &State) -> AnyView<State> {
                             }
                         ),
                     }
-                ))),
-                hgap(16.0),
-                knob("Clear selection", |s: &mut State| {
+                )))
+                .child(hgap(16.0))
+                .child(knob("Clear selection", |s: &mut State| {
                     s.selected = Rc::new(Vec::new())
-                }),
-                hgap(8.0),
-                knob("Sort by commits", |s: &mut State| {
+                }))
+                .child(hgap(8.0))
+                .child(knob("Sort by commits", |s: &mut State| {
                     let sort = table_next_sort(s.sort, 3);
                     s.sort = sort;
                     s.order = sorted_order(s.row_count, sort);
-                }),
-                hgap(8.0),
-                knob("Reset rows", |s: &mut State| {
+                }))
+                .child(hgap(8.0))
+                .child(knob("Reset rows", |s: &mut State| {
                     s.row_count = INITIAL_ROWS;
                     s.pages_loaded = 0;
                     s.order = sorted_order(s.row_count, s.sort);
-                }),
-            ])
-            .cross_axis(CrossAxisAlignment::Center)),
+                }))
+                .cross_axis(CrossAxisAlignment::Center)),
         ],
     )
 }
