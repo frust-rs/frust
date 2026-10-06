@@ -221,25 +221,27 @@ build from.
 - Drag-and-drop flow: an ambient, Rc-shared `DragCoordinator` (one per scope, cloneable like
   `ScrollController`) is the single source of truth for a session — idle/armed/dragging/dropping/
   cancelled — and its typed `Box<dyn Any>` payload, so several targets type-gate against one
-  handle. `draggable()` arms on a primary press and begins once a `DragPolicy` is crossed (a mouse
-  travels past a distance threshold, a touch press holds through a long-press — `Auto` picks per
-  press from the pointer source), floating a ghost through the overlay portal anchored at
-  `OverlayAnchor::Window` (see CORE_ARCHITECTURE.md's Overlay Portal) and cancelling on Escape or a
-  release with nothing hovered. `drag_target()` resolves against bounds the coordinator's registry
-  collects at paint — never a hit test — so later registration wins an overlap and a drop can land
-  across containers (two kanban columns, a list and a trash bin). Keyboard lift/cycle/drop
-  (`move_to_next_target`/`move_to_previous_target`, Enter/Space/arrows, Escape to cancel) is the
-  assistive-technology path through the whole walk, driving the same coordinator from the source's
-  own focus; semantics advertise a `Role::Button` source and a `Role::Group` target, each supporting
-  `Action::Click`, but not identically: the target's `Click` drops a live, accepting session onto
-  it, while the source's `Click` drops (or cancels) its own live keyboard session and is a plain
-  tap otherwise (see `drag-ghost-pod-no-semantics` in [LIMITATIONS.md](LIMITATIONS.md)).
-  `auto_scroll_zone()` drives an attached `ScrollController` toward whichever edge the dragged
-  pointer sits inside (`AutoScroll::edge_px`/`max_px_per_s`).
-  `reorderable_list()` composes both primitives over keyed rows with `N + 1` gap targets, firing
-  `on_reorder(state, from, to)` on an actual move. A desktop `InputEvent::FileDrop` opens an
-  `ExternalFiles` session so a `drag_target::<Vec<PathBuf>>` accepts an OS file drop the same way a
-  widget-originated session would (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)).
+  handle. `draggable()` arms on a primary press and begins once a `DragPolicy` is crossed (a
+  mouse travels past a distance threshold, a touch press holds through a long-press — `Auto`
+  picks per press from the pointer source), floating a ghost through the overlay portal anchored
+  at `OverlayAnchor::Window` (see CORE_ARCHITECTURE.md's Overlay Portal) and cancelling on Escape
+  or a release with nothing hovered. A begun drag vetoes the takeover of every enclosing scroll
+  surface, not only the nearest, for as long as the session runs. `drag_target()` resolves
+  against bounds the coordinator's registry collects at paint — never a hit test — so later
+  registration wins an overlap and a drop can land across containers (two kanban columns, a list
+  and a trash bin). Keyboard lift/cycle/drop (`move_to_next_target`/`move_to_previous_target`,
+  Enter/Space/arrows, Escape to cancel) is the assistive-technology path through the whole walk,
+  driving the same coordinator from the source's own focus; semantics advertise a `Role::Button`
+  source and a `Role::Group` target, each supporting `Action::Click`, but not identically: the
+  target's `Click` drops a live, accepting session onto it, while the source's `Click` drops (or
+  cancels) its own live keyboard session and is a plain tap otherwise (see
+  `drag-ghost-pod-no-semantics` in [LIMITATIONS.md](LIMITATIONS.md)). `auto_scroll_zone()` drives
+  an attached `ScrollController` toward whichever edge the dragged pointer sits inside
+  (`AutoScroll::edge_px`/`max_px_per_s`). `reorderable_list()` composes both primitives over
+  keyed rows with `N + 1` gap targets, firing `on_reorder(state, from, to)` on an actual move. A
+  desktop `InputEvent::FileDrop` opens an `ExternalFiles` session so a
+  `drag_target::<Vec<PathBuf>>` accepts an OS file drop the same way a widget-originated session
+  would (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)).
 - Platform-view flow: `platform_view()`/`shield()` publish native-compositing slots and input-shield
   rects each frame for the shell layer to reconcile against native views.
 - Canvas flow: `canvas(paint)` takes `Fn(&mut dyn PaintScene, Size, &PaintCtx)`; the widget

@@ -497,6 +497,20 @@ pub(crate) fn ambient_scroll_veto() -> Option<Rc<Cell<bool>>> {
     MULTI_CONTACT_VETO.with(|stack| stack.borrow().last().cloned())
 }
 
+/// Every veto cell on [`MULTI_CONTACT_VETO`] right now, nearest first — the
+/// whole chain of scroll surfaces currently forwarding this `Down`, not only
+/// the nearest enclosing one [`ambient_scroll_veto`] hands back.
+///
+/// A recognizer that owns its gesture outright once begun (`draggable()`'s
+/// drag session, not a live-tracked multi-contact opt-in) must raise every
+/// cell here, not only the top one: dispatch is parent-first, so each
+/// surface's own slop/takeover check runs against its own cell, and a
+/// grandparent surface whose cell was never raised still takes the gesture
+/// over at its own slop even while the nearest surface correctly defers.
+pub(crate) fn ambient_scroll_vetoes() -> Vec<Rc<Cell<bool>>> {
+    MULTI_CONTACT_VETO.with(|stack| stack.borrow().iter().rev().cloned().collect())
+}
+
 /// What a surface sitting at `metrics` under `physics` claims it could do with
 /// a drag starting now — the value a nested scrollable writes into its host's
 /// claim cell.
