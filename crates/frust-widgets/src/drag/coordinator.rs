@@ -1,6 +1,32 @@
 //! [`DragCoordinator`]: the shared drag-session state machine. See the
 //! [module docs](super) for the session model, transition rules and
 //! notification contract.
+//!
+//! # Keyboard sessions
+//!
+//! [`DragCoordinator::lift`] begins a session the same way
+//! [`DragCoordinator::arm`] + [`DragCoordinator::begin`] do, but with no
+//! pointer driving it: [`DragSession::keyboard`] marks the result, and
+//! [`DragCoordinator::update_pointer`]/[`DragCoordinator::resolve_hover`]
+//! both no-op for one rather than resolving a registry point that was never
+//! reported. Hover instead advances explicitly, through
+//! [`DragCoordinator::move_to_next_target`]/
+//! [`DragCoordinator::move_to_previous_target`] — cycling the registered
+//! targets in registration ("tree") order, wrapping at either end, and
+//! starting at the first (next) or last (previous) target when nothing is
+//! hovered yet. Both raise the same `Leave`/`Enter` notification pair
+//! pointer resolution does, so a target subscriber (or poller — see
+//! [`mod@super::target`]) sees identical callbacks regardless of which drove
+//! the session. [`DragCoordinator::drop`]/[`DragCoordinator::cancel`] are
+//! unchanged: a keyboard session drops on whatever
+//! [`move_to_next_target`](DragCoordinator::move_to_next_target)/
+//! [`move_to_previous_target`](DragCoordinator::move_to_previous_target)
+//! left hovered (or cancels, with nothing hovered) exactly like a pointer
+//! release does. The ghost's placement for a keyboard session — anchored at
+//! the source's own bounds on [`lift`](DragCoordinator::lift), then at the
+//! hovered target's bounds on every `Enter` — is
+//! [`mod@super::draggable`]'s concern, not the coordinator's; see its
+//! module docs.
 
 use std::any::{Any, TypeId};
 use std::cell::{Ref, RefCell};
@@ -88,6 +114,15 @@ pub struct DragSession {
     /// The payload's type, while the payload is still held — `None` once a
     /// target has moved it out with [`DragCoordinator::take_payload`].
     pub payload_type: Option<TypeId>,
+    /// Whether this session was begun by [`DragCoordinator::lift`] rather
+    /// than [`DragCoordinator::begin`]/[`DragCoordinator::begin_external`] —
+    /// a keyboard session, with no pointer driving it.
+    /// [`DragCoordinator::update_pointer`]/[`DragCoordinator::resolve_hover`]
+    /// no-op for one; hover instead advances only through
+    /// [`DragCoordinator::move_to_next_target`]/
+    /// [`DragCoordinator::move_to_previous_target`] (see the [module
+    /// docs](self#keyboard-sessions)).
+    pub keyboard: bool,
 }
 
 impl DragSession {
@@ -108,6 +143,9 @@ pub enum DragState {
         source: DragSourceId,
         /// Where it was pressed.
         press: Point,
+        /// Whether this arm came from [`DragCoordinator::lift`] rather than
+        /// [`DragCoordinator::arm`] — see [`DragSession::keyboard`].
+        keyboard: bool,
     },
     /// A drag is in flight.
     Dragging(DragSession),
@@ -183,6 +221,8 @@ struct Session {
     /// Recorded at `begin` rather than read back off the box, where
     /// `type_id()` would resolve on `Box<dyn Any>` itself.
     payload_type: TypeId,
+    /// See [`DragSession::keyboard`].
+    keyboard: bool,
 }
 
 impl Session {
@@ -195,6 +235,7 @@ impl Session {
             ghost_offset: self.ghost_offset,
             hovered: self.hovered,
             payload_type: self.payload.as_ref().map(|_| self.payload_type),
+            keyboard: self.keyboard,
         }
     }
 }
@@ -205,6 +246,7 @@ enum Machine {
     Armed {
         source: DragSourceId,
         press: Point,
+        keyboard: bool,
     },
     Dragging(Session),
     Dropping {
@@ -341,11 +383,17 @@ impl Shared {
     }
 
     /// While `Dragging`, re-resolve the hovered target under the session's
-    /// current pointer against the registry's current bounds.
+    /// current pointer against the registry's current bounds. A no-op for a
+    /// keyboard session ([`DragSession::keyboard`]) — there is no pointer to
+    /// resolve against, so this never overrides what
+    /// [`Shared::move_target`] last set.
     fn resolve_hover(&mut self, changes: &mut Vec<DragStateChange>) {
         let Machine::Dragging(session) = &self.machine else {
             return;
         };
+        if session.keyboard {
+            return;
+        }
         let target = self.target_at(session.pointer);
         self.set_hovered(target, changes);
     }
@@ -355,14 +403,54 @@ impl Shared {
         &mut self,
         source: DragSourceId,
         press: Point,
+        keyboard: bool,
         changes: &mut Vec<DragStateChange>,
     ) {
         debug_assert!(matches!(self.machine, Machine::Idle));
-        self.machine = Machine::Armed { source, press };
+        self.machine = Machine::Armed {
+            source,
+            press,
+            keyboard,
+        };
         changes.push(DragStateChange::Phase {
             previous: DragPhase::Idle,
             next: DragPhase::Armed,
         });
+    }
+
+    /// Cycle the hovered target by `step` (`1`/`-1`) through the registered
+    /// targets in registration ("tree") order — the
+    /// [`DragCoordinator::move_to_next_target`]/
+    /// [`DragCoordinator::move_to_previous_target`] drive. Starts at the
+    /// first (`step > 0`) or last (`step < 0`) target when nothing is
+    /// hovered yet, and wraps around at either end. Raises the same
+    /// `Leave`/`Enter` pair pointer resolution does
+    /// ([`Shared::set_hovered`]). A no-op outside `Dragging` or with no
+    /// registered targets.
+    fn move_target(&mut self, step: i64, changes: &mut Vec<DragStateChange>) {
+        let Machine::Dragging(session) = &self.machine else {
+            return;
+        };
+        let mut ordered: Vec<(u64, DragTargetId)> = self
+            .targets
+            .iter()
+            .map(|(&id, entry)| (entry.registration, id))
+            .collect();
+        if ordered.is_empty() {
+            return;
+        }
+        ordered.sort_unstable();
+        let ids: Vec<DragTargetId> = ordered.into_iter().map(|(_, id)| id).collect();
+        let len = ids.len() as i64;
+        let next = match session
+            .hovered
+            .and_then(|current| ids.iter().position(|&id| id == current))
+        {
+            Some(index) => ids[(index as i64 + step).rem_euclid(len) as usize],
+            None if step >= 0 => ids[0],
+            None => ids[ids.len() - 1],
+        };
+        self.set_hovered(Some(next), changes);
     }
 }
 
@@ -439,9 +527,14 @@ impl DragCoordinator {
     pub fn state(&self) -> DragState {
         match &self.shared.borrow().machine {
             Machine::Idle => DragState::Idle,
-            Machine::Armed { source, press } => DragState::Armed {
+            Machine::Armed {
+                source,
+                press,
+                keyboard,
+            } => DragState::Armed {
                 source: *source,
                 press: *press,
+                keyboard: *keyboard,
             },
             Machine::Dragging(session) => DragState::Dragging(session.snapshot()),
             Machine::Dropping { session, target } => DragState::Dropping {
@@ -470,9 +563,47 @@ impl DragCoordinator {
                 return false;
             }
             shared.cancel(changes);
-            shared.arm_from_idle(source, press, changes);
+            shared.arm_from_idle(source, press, false, changes);
             true
         })
+    }
+
+    /// `source` is lifted by keyboard, with no pointer: `Idle → Armed`,
+    /// marked as a keyboard session so the [`begin`](Self::begin) that
+    /// follows carries [`DragSession::keyboard`] into `Dragging` — see the
+    /// [module docs](self#keyboard-sessions). Same re-arm/ignore rules as
+    /// [`arm`](Self::arm): re-arming while `Armed` (or while an unclaimed
+    /// drop is still `Dropping`) cancels that first; lifting while
+    /// `Dragging` is ignored (debug-build log). Returns whether the
+    /// coordinator is now armed by this call.
+    pub fn lift(&self, source: DragSourceId) -> bool {
+        self.mutate(|shared, changes| {
+            if matches!(shared.machine, Machine::Dragging(_)) {
+                log_ignored("lift", "a drag is already in flight");
+                return false;
+            }
+            shared.cancel(changes);
+            shared.arm_from_idle(source, Point::ZERO, true, changes);
+            true
+        })
+    }
+
+    /// Move the hovered target to the next one registered after it
+    /// (registration/tree order, wrapping to the first) — the keyboard
+    /// `ArrowRight`/`ArrowDown` drive for a [`lift`](Self::lift)ed session.
+    /// Starts at the first registered target when nothing is hovered yet.
+    /// Raises the same `Leave`/`Enter` pair pointer resolution does. A
+    /// no-op outside `Dragging` or with no registered targets — see the
+    /// [module docs](self#keyboard-sessions).
+    pub fn move_to_next_target(&self) {
+        self.mutate(|shared, changes| shared.move_target(1, changes));
+    }
+
+    /// The mirror of
+    /// [`move_to_next_target`](Self::move_to_next_target) — the keyboard
+    /// `ArrowLeft`/`ArrowUp` drive, wrapping to the last registered target.
+    pub fn move_to_previous_target(&self) {
+        self.mutate(|shared, changes| shared.move_target(-1, changes));
     }
 
     /// The armed source starts dragging `payload`: `Armed → Dragging`, with
@@ -490,7 +621,7 @@ impl DragCoordinator {
     /// payload.
     pub fn begin<T: Any>(&self, payload: T) -> bool {
         self.mutate(|shared, changes| {
-            let (source, press, pointer, ghost_offset) = match &shared.machine {
+            let (source, press, pointer, ghost_offset, keyboard) = match &shared.machine {
                 Machine::Idle => {
                     log_ignored("begin", "nothing is armed");
                     return false;
@@ -499,7 +630,11 @@ impl DragCoordinator {
                     log_ignored("begin", "a drop is still being completed");
                     return false;
                 }
-                Machine::Armed { source, press } => (*source, *press, *press, Vec2::ZERO),
+                Machine::Armed {
+                    source,
+                    press,
+                    keyboard,
+                } => (*source, *press, *press, Vec2::ZERO, *keyboard),
                 Machine::Dragging(_) => {
                     let first = shared
                         .cancel(changes)
@@ -508,8 +643,14 @@ impl DragCoordinator {
                         log_ignored("begin", "the cancelled session had no source to restart");
                         return false;
                     };
-                    shared.arm_from_idle(source, first.press, changes);
-                    (source, first.press, first.pointer, first.ghost_offset)
+                    shared.arm_from_idle(source, first.press, first.keyboard, changes);
+                    (
+                        source,
+                        first.press,
+                        first.pointer,
+                        first.ghost_offset,
+                        first.keyboard,
+                    )
                 }
             };
             shared.machine = Machine::Dragging(Session {
@@ -521,6 +662,7 @@ impl DragCoordinator {
                 hovered: None,
                 payload: Some(Box::new(payload)),
                 payload_type: TypeId::of::<T>(),
+                keyboard,
             });
             changes.push(DragStateChange::Phase {
                 previous: DragPhase::Armed,
@@ -546,6 +688,7 @@ impl DragCoordinator {
                 hovered: None,
                 payload: Some(Box::new(paths)),
                 payload_type: TypeId::of::<Vec<PathBuf>>(),
+                keyboard: false,
             });
             changes.push(DragStateChange::Phase {
                 previous: DragPhase::Idle,
@@ -569,11 +712,20 @@ impl DragCoordinator {
     /// (the ghost floats in a transparent overlay pod above it), and a hover
     /// set explicitly with [`set_hovered`](Self::set_hovered) stands only
     /// until the next call.
+    ///
+    /// A silent no-op for a keyboard session ([`DragSession::keyboard`]) —
+    /// nothing drives a real pointer during one, and a stray call must not
+    /// fight the hover [`move_to_next_target`](Self::move_to_next_target)/
+    /// [`move_to_previous_target`](Self::move_to_previous_target) last set
+    /// (see the [module docs](self#keyboard-sessions)).
     pub fn update_pointer(&self, pointer: Point) {
         self.mutate(|shared, changes| {
             let Machine::Dragging(session) = &mut shared.machine else {
                 return;
             };
+            if session.keyboard {
+                return;
+            }
             let moved = session.pointer != pointer;
             session.pointer = pointer;
             shared.resolve_hover(changes);
@@ -1352,7 +1504,8 @@ mod tests {
             f.drag.state(),
             DragState::Armed {
                 source: f.source,
-                press: PRESS
+                press: PRESS,
+                keyboard: false,
             }
         );
         f.drag.begin(7_i32);
@@ -2111,5 +2264,136 @@ mod tests {
         f.drag.complete_drop();
         // Bounds should still be there after the session.
         assert_eq!(f.drag.target_bounds(f.first), Some(rect));
+    }
+
+    #[test]
+    fn lift_begins_a_keyboard_session_with_no_pointer_resolution() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        f.drag
+            .set_target_bounds(f.first, Rect::new(0.0, 0.0, 100.0, 100.0));
+        assert!(f.drag.lift(f.source));
+        assert_eq!(
+            f.drag.state(),
+            DragState::Armed {
+                source: f.source,
+                press: Point::ZERO,
+                keyboard: true,
+            }
+        );
+        assert!(f.drag.begin(9_u8));
+        let DragState::Dragging(session) = f.drag.state() else {
+            panic!("expected Dragging");
+        };
+        assert!(session.keyboard, "begin carries the keyboard flag over");
+        assert_eq!(session.hovered, None);
+
+        // A stray pointer report never fights the keyboard session: it
+        // resolves nothing even though the pointer lands inside a
+        // registered target's bounds.
+        f.take_log();
+        f.drag.update_pointer(Point::new(50.0, 50.0));
+        assert!(f.take_log().is_empty());
+        assert_eq!(f.drag.state().session().and_then(|s| s.hovered), None);
+        f.drag.resolve_hover();
+        assert!(f.take_log().is_empty());
+    }
+
+    #[test]
+    fn move_to_next_and_previous_target_cycle_in_registration_order_and_wrap() {
+        let f = Fixture::new();
+        let third = f.drag.new_target_id();
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        f.drag.register_target(third);
+        f.drag.lift(f.source);
+        f.drag.begin(1_u8);
+        f.take_log();
+
+        f.drag.move_to_next_target();
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.first),
+            "starts at the first registered target"
+        );
+        f.drag.move_to_next_target();
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.second)
+        );
+        f.drag.move_to_next_target();
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(third)
+        );
+        f.drag.move_to_next_target();
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.first),
+            "wraps back to the first"
+        );
+        assert_eq!(
+            f.take_log(),
+            vec![
+                DragStateChange::Enter { target: f.first },
+                DragStateChange::Leave { target: f.first },
+                DragStateChange::Enter { target: f.second },
+                DragStateChange::Leave { target: f.second },
+                DragStateChange::Enter { target: third },
+                DragStateChange::Leave { target: third },
+                DragStateChange::Enter { target: f.first },
+            ]
+        );
+
+        f.drag.move_to_previous_target();
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(third),
+            "wraps back to the last going the other way"
+        );
+    }
+
+    #[test]
+    fn move_to_previous_target_starts_at_the_last_when_nothing_is_hovered() {
+        let f = Fixture::new();
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        f.drag.lift(f.source);
+        f.drag.begin(1_u8);
+        f.drag.move_to_previous_target();
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.second)
+        );
+    }
+
+    #[test]
+    fn move_target_is_a_no_op_outside_dragging_or_with_no_targets() {
+        let f = Fixture::new();
+        f.drag.move_to_next_target();
+        assert_eq!(f.drag.phase(), DragPhase::Idle);
+        f.drag.lift(f.source);
+        f.take_log();
+        f.drag.move_to_next_target();
+        assert!(
+            f.take_log().is_empty(),
+            "Armed is not Dragging yet — still a no-op"
+        );
+        f.drag.begin(1_u8);
+        f.take_log();
+        f.drag.move_to_next_target();
+        assert!(f.take_log().is_empty(), "no registered targets to cycle");
+    }
+
+    #[test]
+    fn lift_while_dragging_is_ignored() {
+        let f = Fixture::new();
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(1_u8);
+        assert!(!f.drag.lift(f.other_source));
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.source),
+            Some(f.source)
+        );
     }
 }
