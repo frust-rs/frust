@@ -55,6 +55,10 @@
 # consuming app references the package. None of it is shared configuration.
 .swiftpm/
 
+# Python bytecode caches (scripts/codemod tests)
+__pycache__/
+*.py[cod]
+
 .zabinenv
 
 .build
