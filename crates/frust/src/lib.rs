@@ -204,12 +204,13 @@ pub use frust_core::{OutsideTap, OverlayBand, OverlayInput};
 /// that text, since a paste payload can be a password or a token.
 pub use frust_core::EditCommand;
 
-/// The file-drop vocabulary for handling file drops from the OS —
-/// [`InputEvent::FileDrop`] carries one of these phases (`Hover`, `Drop`,
-/// or `HoveredFileCancelled`). A widget handling drops uses [`EventCtx`] to
-/// determine whether the drop succeeded. Lifted flat for the same reason
-/// [`EditCommand`] is: an app's file-drop handler names these types in its
-/// public API without being a widget author.
+/// The file-drop vocabulary for handling file drops from the OS.
+/// [`InputEvent::FileDrop`] carries a [`FileDropEvent`], which embeds a
+/// [`FileDropPhase`] (`Hover`, `Drop`, or `Cancel`) and the dropped file paths
+/// (only on `Drop`). A widget handling drops is hit-tested and bubbles like
+/// [`InputEvent::Scroll`]. Lifted flat for the same reason [`EditCommand`] is:
+/// an app's file-drop handler names these types in its public API without being
+/// a widget author.
 pub use frust_core::event::{FileDropEvent, FileDropPhase};
 
 /// The selection-toolbar seam: the request a text field publishes when it
@@ -681,11 +682,12 @@ pub mod authoring {
     /// authoring a widget.
     pub use frust_core::EditCommand;
 
-    /// The file-drop vocabulary for handling file drops from the OS —
-    /// [`InputEvent::FileDrop`] carries one of these phases (`Hover`, `Drop`,
-    /// or `HoveredFileCancelled`). A widget handling drops uses [`EventCtx`] to
-    /// determine whether the drop succeeded. Also re-exported flat as
-    /// [`frust::FileDropEvent`] and [`frust::FileDropPhase`].
+    /// The file-drop vocabulary for handling file drops from the OS.
+    /// [`InputEvent::FileDrop`] carries a [`FileDropEvent`], which embeds a
+    /// [`FileDropPhase`] (`Hover`, `Drop`, or `Cancel`) and the dropped file paths
+    /// (only on `Drop`). A widget handling drops is hit-tested and bubbles like
+    /// [`InputEvent::Scroll`]. Also re-exported flat as [`frust::FileDropEvent`]
+    /// and [`frust::FileDropPhase`].
     pub use frust_core::event::{FileDropEvent, FileDropPhase};
 
     /// The paint vocabulary [`PaintScene`]'s per-corner and dashed methods name
