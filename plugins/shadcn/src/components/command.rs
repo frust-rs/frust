@@ -1517,12 +1517,11 @@ mod tests {
     /// family to opt into (see `CommandView::input`).
     #[cfg(feature = "bundled-fonts")]
     fn palette_rows(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            heading_view("Suggestions"),
-            item_view(&command_item("Calendar").shortcut("Ctrl+K")),
-            item_view(&command_item("Search emoji").disabled(true)),
-            empty_view("No results found."),
-        ])
+        frust::column()
+            .child(heading_view("Suggestions"))
+            .child(item_view(&command_item("Calendar").shortcut("Ctrl+K")))
+            .child(item_view(&command_item("Search emoji").disabled(true)))
+            .child(empty_view("No results found."))
     }
 
     #[cfg(feature = "bundled-fonts")]

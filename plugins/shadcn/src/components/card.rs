@@ -33,9 +33,7 @@ use frust::authoring::{
     visit_children,
 };
 use frust::authoring::{ThemeTextColor, ThemeTextType};
-use frust::{
-    Column, CrossAxisAlignment, EdgeInsets, Padding, Row, Theme, flexible, inflexible, text,
-};
+use frust::{Column, CrossAxisAlignment, EdgeInsets, Padding, Row, Theme, text};
 
 use crate::style::{BORDER_WIDTH, PATH_TOLERANCE, SHADOW_SM, TEXT_SM, draw_shadow};
 use crate::tokens::ShadcnTokens;
@@ -109,10 +107,7 @@ pub fn card_header_with_action<State: 'static, V: View<State>>(
 ) -> AnyView<State> {
     let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     let stacked = interleave(children, HEADER_GAP);
-    let row = frust::FlexView::new(
-        frust::Axis::Horizontal,
-        vec![flexible(1, Column(stacked)), inflexible(action)],
-    );
+    let row = frust::row().flex(1, Column(stacked)).child(action);
     any(Padding(EdgeInsets::symmetric(SLOT_PAD_X, 0.0), row))
 }
 

@@ -151,8 +151,7 @@ mod tests {
     use frust::authoring::text::TextContext;
     use frust::authoring::{
         BoxConstraints, EventCtx, EventResult, InputEvent, LayoutCtx, OverlayPlacement, PaintCtx,
-        PaintScene, Point, PointerPhase, Rect, SemanticsCtx, Size, Widget, any, place,
-        visit_children,
+        PaintScene, Point, PointerPhase, Rect, SemanticsCtx, Size, Widget, place, visit_children,
     };
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -189,17 +188,18 @@ mod tests {
         fn frame(&mut self, ms: f64) {
             let hover = self.hover.clone();
             let mut logic = move |_s: &mut AppState| {
-                frust::Stack(vec![
-                    any(hover_card_trigger(
-                        &hover,
-                        SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
+                frust::stack()
+                    .child(
+                        hover_card_trigger(
+                            &hover,
+                            SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
+                        )
+                        .on_open_change(|s: &mut AppState, open| s.opens.push(open)),
                     )
-                    .on_open_change(|s: &mut AppState, open| s.opens.push(open))),
-                    any(hover_card(
+                    .child(hover_card(
                         &hover,
                         SizedBox(Some(CONTENT.width), Some(CONTENT.height)),
-                    )),
-                ])
+                    ))
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -377,13 +377,12 @@ mod tests {
                        ms: f64| {
             let hover = hover.clone();
             let mut logic = move |_s: &mut AppState| {
-                frust::Stack(vec![
-                    any(hover_card_trigger(
+                frust::stack()
+                    .child(hover_card_trigger(
                         &hover,
                         SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
-                    )),
-                    any(hover_card(&hover, LinkProbe)),
-                ])
+                    ))
+                    .child(hover_card(&hover, LinkProbe))
             };
             root.rebuild(&mut logic, state);
             root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);

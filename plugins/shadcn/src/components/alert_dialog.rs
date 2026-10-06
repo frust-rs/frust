@@ -235,7 +235,7 @@ mod tests {
     use frust::FrameTime;
     use frust::authoring::{
         BoxConstraints, EventCtx, InputEvent, LayoutCtx, PaintCtx, Point, PointerPhase, Role, Size,
-        Widget, any, text::TextContext,
+        Widget, text::TextContext,
     };
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -253,8 +253,8 @@ mod tests {
                 alert_dialog_description("This cannot be undone."),
             ]),
             alert_dialog_footer(vec![
-                alert_dialog_cancel(any(Block(Size::new(80.0, 36.0)))),
-                alert_dialog_action(any(Block(Size::new(80.0, 36.0)))),
+                alert_dialog_cancel(Block(Size::new(80.0, 36.0))),
+                alert_dialog_action(Block(Size::new(80.0, 36.0))),
             ]),
         ])
         .on_dismiss(|s: &mut Flags| s.dismissed += 1)

@@ -1709,12 +1709,12 @@ mod tests {
             let anchor = self.anchor.clone();
             let open = self.open;
             let mut logic = move |_s: &mut AppState| {
-                frust::Stack(vec![any(dropdown_menu(items(), |s: &mut AppState, i| {
-                    s.selected.push(i)
-                })
-                .anchor(&anchor)
-                .open(open)
-                .on_open_change(|s: &mut AppState, o| s.opens.push(o)))])
+                frust::stack().child(
+                    dropdown_menu(items(), |s: &mut AppState, i| s.selected.push(i))
+                        .anchor(&anchor)
+                        .open(open)
+                        .on_open_change(|s: &mut AppState, o| s.opens.push(o)),
+                )
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1812,11 +1812,11 @@ mod tests {
         let mut state = AppState::default();
         root.set_theme(Box::new(light()));
         let mut logic = move |_s: &mut AppState| {
-            frust::Stack(vec![any(dropdown_menu(items(), |s: &mut AppState, i| {
-                s.selected.push(i)
-            })
-            .anchor(&a)
-            .on_open_change(|s: &mut AppState, open| s.opens.push(open)))])
+            frust::stack().child(
+                dropdown_menu(items(), |s: &mut AppState, i| s.selected.push(i))
+                    .anchor(&a)
+                    .on_open_change(|s: &mut AppState, open| s.opens.push(open)),
+            )
         };
         root.rebuild(&mut logic, &mut state);
         let mut tcx = TextContext::new();
@@ -1834,16 +1834,19 @@ mod tests {
     #[cfg(feature = "bundled-fonts")]
     fn menu_rows(_: &mut ()) -> frust::FlexView<()> {
         let insets = EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y);
-        frust::Column(vec![
-            label_view("My Account", insets, false),
-            label_view("Theme", insets, true),
-            item_view(
+        frust::column()
+            .child(label_view("My Account", insets, false))
+            .child(label_view("Theme", insets, true))
+            .child(item_view(
                 &dropdown_menu_item("Profile").shortcut("Ctrl+P"),
                 insets,
                 false,
-            ),
-            item_view(&dropdown_menu_item("Billing").disabled(true), insets, true),
-        ])
+            ))
+            .child(item_view(
+                &dropdown_menu_item("Billing").disabled(true),
+                insets,
+                true,
+            ))
     }
 
     #[cfg(feature = "bundled-fonts")]

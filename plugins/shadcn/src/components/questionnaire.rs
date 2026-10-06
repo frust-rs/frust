@@ -101,9 +101,7 @@ use frust::authoring::{
     Widget, any, build_child, erase_callback, erase_callback_arg, rebuild_children,
     route_event_single, teardown_child, visit_children,
 };
-use frust::{
-    Axis, ColorScheme, CrossAxisAlignment, FlexView, SizedBox, Theme, inflexible, text, text_input,
-};
+use frust::{ColorScheme, CrossAxisAlignment, SizedBox, Theme, column, text, text_input};
 
 use crate::hit::presses;
 use crate::style::{self, PATH_TOLERANCE};
@@ -746,20 +744,16 @@ fn choice_content<State: 'static>(choice: &QuestionnaireChoice) -> AnyView<State
     let Some(description) = &choice.description else {
         return any(label);
     };
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(label),
-            inflexible(SizedBox(None, Some(style::spacing(0.5)))),
-            inflexible(
-                text(description.clone())
-                    .size(style::TEXT_SM as f32)
-                    .themed_family(ThemeTextType::BodyMedium)
-                    .themed_role(ThemeTextColor::OnSurfaceVariant),
-            ),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Start))
+    any(column()
+        .child(label)
+        .child(SizedBox(None, Some(style::spacing(0.5))))
+        .child(
+            text(description.clone())
+                .size(style::TEXT_SM as f32)
+                .themed_family(ThemeTextType::BodyMedium)
+                .themed_role(ThemeTextColor::OnSurfaceVariant),
+        )
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 /// The badge label for each choice of `item`, `None` where the mode assigns

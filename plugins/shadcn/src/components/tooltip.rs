@@ -1188,15 +1188,16 @@ mod tests {
             let hover = self.hover.clone();
             let controlled = self.controlled;
             let mut logic = move |_s: &mut AppState| {
-                frust::Stack(vec![
-                    any(tooltip_trigger(
-                        &hover,
-                        SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
+                frust::stack()
+                    .child(
+                        tooltip_trigger(
+                            &hover,
+                            SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
+                        )
+                        .open(controlled)
+                        .on_open_change(|s: &mut AppState, open| s.opens.push(open)),
                     )
-                    .open(controlled)
-                    .on_open_change(|s: &mut AppState, open| s.opens.push(open))),
-                    any(tooltip(&hover, "Add to library")),
-                ])
+                    .child(tooltip(&hover, "Add to library"))
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1483,14 +1484,13 @@ mod tests {
         fn logic(hover: &TooltipHover) -> impl FnMut(&mut AppState) -> frust::StackView<AppState> {
             let hover = hover.clone();
             move |_s: &mut AppState| {
-                frust::Stack(vec![
-                    any(PageButton),
-                    any(tooltip_trigger(
+                frust::stack()
+                    .child(PageButton)
+                    .child(tooltip_trigger(
                         &hover,
                         SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
-                    )),
-                    any(tooltip(&hover, "Add to library")),
-                ])
+                    ))
+                    .child(tooltip(&hover, "Add to library"))
             }
         }
 
@@ -1549,13 +1549,12 @@ mod tests {
         let mut tcx = TextContext::new();
         let latch = hover.clone();
         let mut logic = move |_s: &mut AppState| {
-            frust::Stack(vec![
-                any(tooltip_trigger(
+            frust::stack()
+                .child(tooltip_trigger(
                     &latch,
                     SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
-                )),
-                any(tooltip(&latch, "Add to library")),
-            ])
+                ))
+                .child(tooltip(&latch, "Add to library"))
         };
         root.rebuild(&mut logic, &mut state);
         root.layout_with_text(Size::ZERO, &mut tcx as &mut dyn Any);
@@ -1611,13 +1610,12 @@ mod tests {
         let mut logic = move |_s: &mut AppState| {
             any(frust::Padding(
                 frust::EdgeInsets::all(INSET),
-                frust::Stack(vec![
-                    any(tooltip_trigger(
+                frust::stack()
+                    .child(tooltip_trigger(
                         &latch,
                         SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
-                    )),
-                    any(tooltip(&latch, "Add to library")),
-                ]),
+                    ))
+                    .child(tooltip(&latch, "Add to library")),
             ))
         };
         // Two frames: the trigger publishes its rect on the first paint, and the

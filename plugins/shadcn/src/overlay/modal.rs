@@ -2950,10 +2950,9 @@ pub(crate) mod tests {
     /// header is built from, at the dialog family's `text-lg` title size.
     #[cfg(feature = "bundled-fonts")]
     fn header(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            panel_title("Edit profile", 18.0),
-            panel_description("Make changes to your profile here."),
-        ])
+        frust::column()
+            .child(panel_title("Edit profile", 18.0))
+            .child(panel_description("Make changes to your profile here."))
     }
 
     #[cfg(feature = "bundled-fonts")]

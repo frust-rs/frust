@@ -2656,6 +2656,7 @@ mod tests {
     use frust::authoring::{
         KeyEvent, Modifiers, PointerButton, PointerEvent, Rect, scene::GlyphRun,
     };
+    use frust::column;
     use frust::{Brightness, CursorIcon, FrameTime};
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -3749,7 +3750,7 @@ mod tests {
     /// shapes itself.
     #[cfg(feature = "bundled-fonts")]
     fn nav(_: &mut ()) -> FlexView<()> {
-        Column(vec![sidebar_group(vec![
+        column().child(sidebar_group(vec![
             any(sidebar_group_label("Platform")),
             sidebar_menu(vec![
                 any(sidebar_menu_item(vec![
@@ -3764,7 +3765,7 @@ mod tests {
                     any(sidebar_menu_sub_button("Starred", |_: &mut ()| {})),
                 ]))])),
             ]),
-        ])])
+        ]))
     }
 
     #[cfg(feature = "bundled-fonts")]
