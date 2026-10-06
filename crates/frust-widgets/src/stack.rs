@@ -8,7 +8,7 @@
 
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
 };
 use kurbo::{Point, Size};
 
@@ -21,6 +21,44 @@ pub struct StackView<State: 'static> {
 #[allow(non_snake_case)]
 pub fn Stack<State: 'static>(children: Vec<AnyView<State>>) -> StackView<State> {
     StackView { children }
+}
+
+/// An empty z-order stack, ready for fluent children: no `any()` needed.
+pub fn stack<State: 'static>() -> StackView<State> {
+    StackView {
+        children: Vec::new(),
+    }
+}
+
+impl<State: 'static> StackView<State> {
+    /// Append a child on top of the existing ones. Accepts any [`View`].
+    pub fn child<V: View<State>>(mut self, view: V) -> Self {
+        self.children.push(any(view));
+        self
+    }
+
+    /// Append every item of `iter` as a child, in order.
+    pub fn children<I, V>(mut self, iter: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: View<State>,
+    {
+        self.children.extend(iter.into_iter().map(any));
+        self
+    }
+
+    /// Apply `f` to the builder only when `cond` is true.
+    pub fn when(self, cond: bool, f: impl FnOnce(Self) -> Self) -> Self {
+        if cond { f(self) } else { self }
+    }
+
+    /// Apply `f` with the contained value when `opt` is `Some`.
+    pub fn when_some<T>(self, opt: Option<T>, f: impl FnOnce(Self, T) -> Self) -> Self {
+        match opt {
+            Some(value) => f(self, value),
+            None => self,
+        }
+    }
 }
 
 /// The retained widget for a [`StackView`].

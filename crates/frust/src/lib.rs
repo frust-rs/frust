@@ -91,6 +91,23 @@
 //! }
 //! # let _ = Layouts;
 //! ```
+//!
+//! The fluent builders erase internally, so no `any()` is written for
+//! container children:
+//!
+//! ```
+//! use frust::{column, row, stack, text};
+//!
+//! # fn demo(cond: bool) -> frust::FlexView<()> {
+//! let _overlay = stack::<()>().child(text("base")).child(text("badge"));
+//! let _line = row::<()>().children(["a", "b"].map(text));
+//! column()
+//!     .child(text("a"))
+//!     .flex(1, text("b"))
+//!     .when(cond, |c| c.child(text("c")))
+//! # }
+//! # let _ = demo(true);
+//! ```
 
 pub use frust_core::component::{Component, ComponentView, component};
 pub use frust_core::view::{AnyView, View, any};
@@ -137,9 +154,10 @@ pub use frust_widgets::{
     ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox, SizedBoxView, Slider,
     SliderView, SourceFeedback, SpringDescription, Stack, StackView, TextInput, TextInputView,
     TextView, Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback,
-    auto_scroll_zone, button, checkbox, colored_box, container, divider, drag_target, draggable,
-    flexible, hero, icon, icon_button, inflexible, keyed, list_view, overlay_portal, radio,
-    reorderable_list, safe_area, scaffold, scroll_view, slider, text, text_input,
+    auto_scroll_zone, button, checkbox, colored_box, column, container, divider, drag_target,
+    draggable, flexible, hero, icon, icon_button, inflexible, keyed, list_view, overlay_portal,
+    radio, reorderable_list, row, safe_area, scaffold, scroll_view, slider, stack, text,
+    text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
