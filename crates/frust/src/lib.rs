@@ -207,7 +207,7 @@ pub use frust_core::EditCommand;
 /// The file-drop vocabulary for handling file drops from the OS.
 /// [`InputEvent::FileDrop`] carries a [`FileDropEvent`], which embeds a
 /// [`FileDropPhase`] (`Hover`, `Drop`, `Cancel`, or the broadcast-only `Ended`
-/// that follows a `Drop`/`Cancel` nothing handled) and the dropped file paths
+/// that follows every `Drop`/`Cancel`) and the dropped file paths
 /// (only on `Drop`). A widget handling drops is hit-tested and bubbles like
 /// [`InputEvent::Scroll`]. Lifted flat for the same reason [`EditCommand`] is:
 /// an app's file-drop handler names these types in its public API without being
@@ -686,7 +686,7 @@ pub mod authoring {
     /// The file-drop vocabulary for handling file drops from the OS.
     /// [`InputEvent::FileDrop`] carries a [`FileDropEvent`], which embeds a
     /// [`FileDropPhase`] (`Hover`, `Drop`, `Cancel`, or the broadcast-only `Ended`
-    /// that follows a `Drop`/`Cancel` nothing handled) and the dropped file paths
+    /// that follows every `Drop`/`Cancel`) and the dropped file paths
     /// (only on `Drop`). A widget handling drops is hit-tested and bubbles like
     /// [`InputEvent::Scroll`]. Also re-exported flat as [`frust::FileDropEvent`]
     /// and [`frust::FileDropPhase`].

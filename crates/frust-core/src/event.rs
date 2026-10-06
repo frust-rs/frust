@@ -596,8 +596,8 @@ pub enum OverlayEventKind {
 /// or leaving the window — see [`InputEvent::FileDrop`].
 ///
 /// A shell publishes only the first three. [`Ended`](FileDropPhase::Ended) is
-/// the root's own broadcast follow-up to a `Drop`/`Cancel` nothing handled —
-/// see [`FileDropEvent`]'s *Broadcast follow-up* section.
+/// the root's own broadcast follow-up to every `Drop`/`Cancel`, handled or
+/// not — see [`FileDropEvent`]'s *Broadcast follow-up* section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileDropPhase {
     /// The drag is hovering the window — it just entered, or moved while
@@ -609,12 +609,14 @@ pub enum FileDropPhase {
     /// drop. Carries no paths.
     Cancel,
     /// **Broadcast-only, never sent by a shell**: the OS drag is over — a
-    /// `Drop` or `Cancel` was just dispatched hit-tested and no widget
-    /// handled it — so [`crate::app::RenderRoot::event`] re-dispatches this
-    /// phase to every widget. Carries no paths and no meaningful position
-    /// ([`Point::ZERO`], never translated). A widget holding state the drag
-    /// opened (a drop target's external drag session) ends it here, so a
-    /// release over a region nothing handles still ends the drag.
+    /// `Drop` or `Cancel` was just dispatched hit-tested, whether or not a
+    /// widget handled it — so [`crate::app::RenderRoot::event`] re-dispatches
+    /// this phase to every widget. Carries no paths and no meaningful
+    /// position ([`Point::ZERO`], never translated). A widget holding state
+    /// the drag opened (a drop target's external drag session) ends whatever
+    /// of it is still open here, so a release over a region nothing handles —
+    /// or over a widget other than the one whose state the drag opened —
+    /// still ends the drag everywhere.
     Ended,
 }
 
@@ -639,13 +641,17 @@ pub enum FileDropPhase {
 /// A shell resolves a `Drop` or `Cancel` at the last cursor position it
 /// knows, which can sit over a region no widget handles a file drop in — and
 /// on a platform that sends no cursor motion during an OS drag, that is the
-/// last in-window position before the drag began, not the release point. So
-/// whenever the hit-tested dispatch of a `Drop` or `Cancel` comes back
+/// last in-window position before the drag began, not the release point.
+/// Even a `Drop` or `Cancel` some widget handles reaches only that one
+/// widget, while the drag may have opened state in others along the way
+/// (two independent drop-target groups, each hovered in turn). So after the
+/// hit-tested dispatch of **every** `Drop` or `Cancel`, handled or
 /// [`EventResult::Ignored`], [`crate::app::RenderRoot::event`] immediately
 /// dispatches a second event in the same call: this struct with
 /// [`FileDropPhase::Ended`], which [`InputEvent::is_broadcast`] reports as a
-/// broadcast, so every container forwards it to every child. A drag the
-/// hit-tested event ended (it came back `Handled`) gets no follow-up.
+/// broadcast, so every container forwards it to every child. A widget that
+/// already finished the drag on the hit-tested event finds nothing left to
+/// end in it, so answering `Ended` must be idempotent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileDropEvent {
     /// The gesture phase.
@@ -866,10 +872,9 @@ pub enum InputEvent {
     ///
     /// One phase travels differently: [`FileDropPhase::Ended`] is a
     /// **broadcast** ([`InputEvent::is_broadcast`]), the root's own follow-up
-    /// to a `Drop`/`Cancel` whose hit-tested dispatch nothing handled, so a
-    /// widget holding state the drag opened hears that the drag is over even
-    /// when the release missed it (see [`FileDropEvent`]'s *Broadcast
-    /// follow-up*). It carries no position and is never translated, like the
+    /// to every `Drop`/`Cancel`, handled or not, so a widget holding state
+    /// the drag opened hears that the drag is over even when the release
+    /// missed it (see [`FileDropEvent`]'s *Broadcast follow-up*). It carries no position and is never translated, like the
     /// other broadcasts.
     ///
     /// Deliberately **not** routed through the overlay pre-pass
