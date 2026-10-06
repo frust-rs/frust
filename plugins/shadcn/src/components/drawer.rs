@@ -163,9 +163,12 @@ fn config(side: DrawerSide) -> ModalConfig {
 /// decides the panel's content inset (a `bottom` drawer reserves the handle
 /// strip), which is baked into the composed children — vaul takes `direction`
 /// on the root for the same reason.
-pub fn drawer<State: 'static>(
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn drawer<State: 'static, V: View<State>>(
     side: DrawerSide,
-    children: Vec<AnyView<State>>,
+    children: impl IntoIterator<Item = V>,
 ) -> DrawerView<State> {
     DrawerView {
         inner: modal(
@@ -176,7 +179,12 @@ pub fn drawer<State: 'static>(
 }
 
 /// A header slot: a `p-4 gap-1.5` stack (title, description).
-pub fn drawer_header<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn drawer_header<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
     stack_slots(children, HEADER_GAP, EdgeInsets::all(SLOT_PAD))
 }
 
@@ -192,7 +200,12 @@ pub fn drawer_description<State: 'static>(description: impl Into<String>) -> Any
 
 /// A footer slot: a stretched `p-4 gap-2` column (upstream's `mt-auto` is not
 /// modelled — see [`crate::sheet`]'s note).
-pub fn drawer_footer<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn drawer_footer<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
     stack_slots(children, FOOTER_GAP, EdgeInsets::all(SLOT_PAD))
 }
 

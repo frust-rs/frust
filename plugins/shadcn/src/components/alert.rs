@@ -111,14 +111,17 @@ pub struct AlertView<State: 'static> {
 
 /// Create an alert of `variant` wrapping `children` (typically
 /// [`alert_title`]/[`alert_description`] rows).
-pub fn alert<State: 'static>(
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn alert<State: 'static, V: View<State>>(
     variant: AlertVariant,
-    children: Vec<AnyView<State>>,
+    children: impl IntoIterator<Item = V>,
 ) -> AlertView<State> {
     AlertView {
         variant,
         icon: None,
-        children,
+        children: children.into_iter().map(AnyView::new).collect(),
     }
 }
 
@@ -354,7 +357,7 @@ mod tests {
     }
 
     fn build_alert(variant: AlertVariant) -> AlertView<()> {
-        alert::<()>(
+        alert::<(), _>(
             variant,
             vec![
                 alert_title("Heads up", variant),

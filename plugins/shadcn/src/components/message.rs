@@ -128,7 +128,13 @@ pub struct MessageGroupView<State: 'static> {
 }
 
 /// Stack `children` (typically [`message`] rows) in a `gap-2` column.
-pub fn message_group<State: 'static>(children: Vec<AnyView<State>>) -> MessageGroupView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn message_group<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> MessageGroupView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     MessageGroupView { children }
 }
 
@@ -209,7 +215,13 @@ pub struct MessageView<State: 'static> {
 
 /// A message row over `children` — typically an avatar box and a content
 /// column, in that (measurement) order.
-pub fn message<State: 'static>(children: Vec<AnyView<State>>) -> MessageView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn message<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> MessageView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     MessageView {
         children,
         align: MessageAlign::default(),
@@ -465,7 +477,13 @@ pub struct MessageContentView<State: 'static> {
 /// [`MessageAlign::End`] — resolves the source's
 /// `group-data-[align=end]/message:*:self-end` itself rather than being placed
 /// by this column.
-pub fn message_content<State: 'static>(children: Vec<AnyView<State>>) -> MessageContentView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn message_content<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> MessageContentView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     MessageContentView { children }
 }
 

@@ -485,7 +485,7 @@ fn sidebar_case() -> AnyView<()> {
                             .icon(icon(icons::FORUM).size(16.0))
                             .active(index == 0))]))
                         })
-                        .collect(),
+                        .collect::<Vec<_>>(),
                 ),
             ])]))
             .header(sidebar_header(vec![any(

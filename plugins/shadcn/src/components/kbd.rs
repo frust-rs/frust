@@ -153,7 +153,13 @@ pub struct KbdGroupView<State: 'static> {
 
 /// Wrap `children` (typically [`kbd`] views and inline separator glyphs) in a
 /// `gap-1` row.
-pub fn kbd_group<State: 'static>(children: Vec<AnyView<State>>) -> KbdGroupView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn kbd_group<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> KbdGroupView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     KbdGroupView { children }
 }
 
@@ -238,7 +244,10 @@ impl Widget for KbdGroupWidget {
 /// PascalCase alias for [`kbd_group`], for symmetry with the source's
 /// `KbdGroup`.
 #[allow(non_snake_case)]
-pub fn KbdGroup<State: 'static>(children: Vec<AnyView<State>>) -> KbdGroupView<State> {
+pub fn KbdGroup<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> KbdGroupView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     kbd_group(children)
 }
 

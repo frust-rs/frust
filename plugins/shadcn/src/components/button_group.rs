@@ -49,7 +49,13 @@ pub struct ButtonGroupView<State: 'static> {
 
 /// Group `children` (buttons, inputs, a select — any widget) flush together,
 /// horizontally by default.
-pub fn button_group<State: 'static>(children: Vec<AnyView<State>>) -> ButtonGroupView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn button_group<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> ButtonGroupView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     ButtonGroupView {
         children,
         orientation: ButtonGroupOrientation::default(),

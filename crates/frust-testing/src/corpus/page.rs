@@ -526,10 +526,10 @@ fn shadcn_form() -> CorpusCase {
                 gap(),
                 any(frust_shadcn::progress(0.55)),
             ]);
-            let card = frust_shadcn::card::<()>(vec![
+            let card = frust_shadcn::card::<(), _>(vec![
                 frust_shadcn::card_content::<()>(content),
                 any(frust_shadcn::separator()),
-                frust_shadcn::card_footer::<()>(vec![
+                frust_shadcn::card_footer::<(), _>(vec![
                     any(frust_shadcn::button::<()>("", |_: &mut ()| {})),
                     hgap(),
                     any(frust_shadcn::button::<()>("", |_: &mut ()| {})

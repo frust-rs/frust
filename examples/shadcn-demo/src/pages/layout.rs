@@ -177,7 +177,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                                 .icon(icon(icons::FORUM).size(16.0))
                                 .active(index == mini_item))]))
                             })
-                            .collect(),
+                            .collect::<Vec<_>>(),
                     ),
                 ])]))
                 .header(sidebar_header(vec![any(text("Floating").size(14.0))]))
