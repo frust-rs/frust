@@ -758,7 +758,7 @@ impl<State: 'static> SelectionAppBarView<State> {
 /// `dialog.rs`'s `close_view` helper of the same shape.
 fn close_view<State: 'static>(on_clear: OnClear<State>) -> AnyView<State> {
     any(
-        icon_button(any(icon(crate::icons::CLOSE)), move |state: &mut State| {
+        icon_button(icon(crate::icons::CLOSE), move |state: &mut State| {
             (on_clear)(state);
         })
         .semantic_label(CLEAR_SELECTION_LABEL),
@@ -1587,7 +1587,7 @@ mod tests {
             .leading(leaf_any(48.0, 48.0))
             .actions(vec![leaf_any(48.0, 48.0)])
             .safe_area(safe_area);
-        selection_app_bar(any(idle), selected, 3, |_: &mut ()| {})
+        selection_app_bar(idle, selected, 3, |_: &mut ()| {})
             .show_select_all(false)
             .actions(vec![leaf_any(48.0, 48.0)])
             .safe_area(safe_area)

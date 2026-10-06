@@ -1103,7 +1103,7 @@ mod tests {
         use frust::FrameTime;
         use frust::authoring::{
             InputEvent, Key, KeyEvent, Modifiers, NamedKey, Point, PointerButton, PointerEvent,
-            PointerPhase, Size, any, text::TextContext,
+            PointerPhase, Size, text::TextContext,
         };
         use frust_core::RenderRoot;
         use std::any::Any;
@@ -1136,15 +1136,17 @@ mod tests {
             let selected = state.selected.clone();
             let open = state.open;
             let query = state.query.clone();
-            frust::Stack(vec![
-                any(dropdown_field::<AppState>(items())
-                    .anchor(anchor)
-                    .multi(multi)
-                    .selected(selected.clone())
-                    .open(open)
-                    .on_open(|s: &mut AppState, next| s.open = next)
-                    .on_change(|s: &mut AppState, values| s.selected = values)),
-                any(
+            frust::stack()
+                .child(
+                    dropdown_field::<AppState>(items())
+                        .anchor(anchor)
+                        .multi(multi)
+                        .selected(selected.clone())
+                        .open(open)
+                        .on_open(|s: &mut AppState, next| s.open = next)
+                        .on_change(|s: &mut AppState, values| s.selected = values),
+                )
+                .child(
                     dropdown(items(), |s: &mut AppState, values| s.selected = values)
                         .anchor(anchor)
                         .multi(multi)
@@ -1154,8 +1156,7 @@ mod tests {
                         .query(query)
                         .on_query(|s: &mut AppState, text| s.query = text)
                         .on_open(|s: &mut AppState, next| s.open = next),
-                ),
-            ])
+                )
         }
 
         struct Harness {

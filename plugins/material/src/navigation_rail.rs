@@ -1109,14 +1109,11 @@ impl<State: 'static> NavigationRailView<State> {
         } else {
             (crate::icons::MENU, "Expand")
         };
-        Some(any(icon_button(
-            any(icon(source)),
-            move |state: &mut State| {
-                if let Some(callback) = &callback {
-                    callback(state, next);
-                }
-            },
-        )
+        Some(any(icon_button(icon(source), move |state: &mut State| {
+            if let Some(callback) = &callback {
+                callback(state, next);
+            }
+        })
         .semantic_label(label)))
     }
 
@@ -1132,14 +1129,14 @@ impl<State: 'static> NavigationRailView<State> {
                     on_press(state);
                 },
             )
-            .icon(any(icon(slot.icon)))
+            .icon(icon(slot.icon))
             .color(slot.color)))
         } else {
             let label = slot
                 .semantic_label
                 .clone()
                 .unwrap_or_else(|| slot.label.clone());
-            Some(any(fab(any(icon(slot.icon)), move |state: &mut State| {
+            Some(any(fab(icon(slot.icon), move |state: &mut State| {
                 on_press(state);
             })
             .color(slot.color)
@@ -2201,7 +2198,7 @@ mod tests {
     const AREA: Size = Size::new(400.0, 600.0);
 
     fn dest<State: 'static>(label: &str) -> RailDestination<State> {
-        rail_destination(any(icon(crate::icons::HOME)), label)
+        rail_destination(icon(crate::icons::HOME), label)
     }
 
     fn one_section<State: 'static>() -> Vec<RailSection<State>> {
@@ -2396,7 +2393,7 @@ mod tests {
     fn trailing_pins_to_the_bottom_edge_by_default_and_follows_the_items_otherwise() {
         let bottom: NavigationRailView<()> = rail()
             .rail_type(NavigationRailType::Expanded)
-            .trailing(any(icon(crate::icons::SEARCH)));
+            .trailing(icon(crate::icons::SEARCH));
         let mut w = build(&bottom);
         layout(&mut w);
         let pod = w.trailing.as_ref().expect("a trailing slot");
@@ -2407,7 +2404,7 @@ mod tests {
 
         let inline: NavigationRailView<()> = rail()
             .rail_type(NavigationRailType::Expanded)
-            .trailing(any(icon(crate::icons::SEARCH)))
+            .trailing(icon(crate::icons::SEARCH))
             .trailing_at_bottom(false);
         let mut w = build(&inline);
         layout(&mut w);
