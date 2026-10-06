@@ -6,11 +6,8 @@ off this index — read this plus the one that covers what you are touching:
 | Unit | Spoke | Holds |
 |------|-------|-------|
 | PLUGINS + NATIVE_WIDGETS | [PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md) | Plugin Conventions — backend gating, JNI attach scope, the platform/facade charter lines, theme-token folding, idempotent project mutation |
-| WIDGETS | [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md) | Widget Authoring Conventions — erasure at the API boundary, the builder idiom, keyed-list uniqueness, the `frust::authoring` seam; Theming & Animation Conventions — token resolution/precedence, animation pacing, design-system installation |
+| WIDGETS | [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md) | Child Lists — keyed-list uniqueness; Theming & Animation Conventions — token resolution/precedence (including `ThemeExtensions`), animation pacing, design-system installation |
 | TUI | [TUI_CODE_STANDARDS.md](TUI_CODE_STANDARDS.md) | TUI Conventions — render/update layering, keyboard parity, the single command registry |
-
-Widget-authoring rules — erasure at the API boundary, the builder idiom, keyed-list uniqueness, the
-`frust::authoring` seam — live in [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md).
 
 ## Language Idioms
 
@@ -126,6 +123,12 @@ Widget-authoring rules — erasure at the API boundary, the builder idiom, keyed
   lower layer threads a resource owned by a higher layer, pass it as `&mut dyn Any` and
   recover it at the one call site that knows the concrete type via a documented,
   panic-on-mismatch `downcast_mut::<T>()`.
+- **Erase at the API boundary, not at call sites.** Prefer the `column()`/`row()`/`stack()`
+  builders and `-> impl View<S>` helper returns (`+ use<>` when the helper borrows an
+  argument). Write `any()` only where branches of different concrete types must unify (if/else,
+  match arms, `async_view` arms); never wrap an argument of an API that already takes
+  `V: View`. A driver closure returning a `Component::build` result erases it:
+  `move |s| AnyView::new(root.build(s))`. Never add `#[allow(refining_impl_trait)]`.
 - **Edition-2024 `-> impl Trait` return types capture all in-scope lifetimes by default.**
   When a function returns an `impl Trait` that borrows nothing from its parameters (e.g.
   a widget fn returning `impl View<State>`, where views are `'static`), opt out
@@ -519,6 +522,18 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   in that path never subscribes, so a later write flips no dirty flag and the shell may
   never repaint — reserve `*_untracked` for genuine non-rendering reads, never a value a
   `build` return depends on.
+- **An app authors a custom `View`/`Widget` pair through `frust::authoring`, never a direct
+  `frust-core`/`frust-scene`/`frust-text`/`accesskit`/`kurbo`/`peniko` dependency.**
+  `frust::authoring` (plus its `text`/`scene` submodules) re-exports the full trait
+  lifecycle, child/event/callback plumbing, semantics, and geometry/paint types a custom
+  widget needs, so an `examples/*`/app crate's `Cargo.toml` depends on `frust` plus plugin
+  crates only. For the long tail, reach through the whole-crate valves `frust::kurbo`,
+  `frust::peniko`, `frust::accesskit` rather than re-declaring the dependency — each of
+  those crates is version-pinned in exactly one place (`docs/DEVELOPMENT.md` §
+  Version-Pin Policy). Mechanically enforced across `benchmarks/frust_bench` and the five
+  in-repo example apps — `huddle`, `shadertoy`, `glyph-catalog`, `playground`, and
+  `examples/native-widgets-demo` — by `crates/frust/tests/authoring_seam_conformance.rs`;
+  the plugin tier is exempt ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
 
 ## Theming & Animation Conventions
 
