@@ -3226,9 +3226,11 @@ surface those nodes would ideally advertise (`accesskit::Action::CustomAction` f
 `perform_accessibility_action` matches only `Action::Click`/`Action::Focus` and drops a custom
 action's id (the same gap `selection-verbs-advertised-not-invocable` records for `TextInput`).
 Both nodes' `Click` are genuine drop verbs, not mere activations: the target's own primary `Up`
-handler drops on a live, accepting session, and the source answers a primary `Down` while it
-drags its own keyboard session exactly the way Enter/Space would — drop onto whatever is hovered,
-cancel when nothing is — whether that `Down` is a real press or the synthesized half of
+handler drops a live, accepting *keyboard* session (a pointer session's `Up` belongs to the
+source that captured it and passes through every ancestor target untouched), and the source
+answers a primary `Down` while it drags its own keyboard session exactly the way Enter/Space
+would — drop onto whatever is hovered, cancel when nothing is — whether that `Down` is a real
+press or the synthesized half of
 `perform_accessibility_action`'s `Down`+`Up` pair; no synthetic-origin marker is needed for either
 reading, since a real press on the lifted item is just as honest a "put it down". Idle, the same
 `Click` reaches the source as a plain tap instead, same as any other control. The keyboard chord
