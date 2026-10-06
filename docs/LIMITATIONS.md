@@ -3210,6 +3210,72 @@ floated-surface owner per field and a magnifier able to sample the painted scene
 
 ---
 
+### `drag-ghost-pod-no-semantics` — a drag ghost publishes no accessibility node and is invisible to `inspect()`
+
+**Observed**: `frust_widgets::drag::draggable()` floats its ghost through the overlay portal
+(`OverlayAnchor::Window`, band `Tooltip`, input `Transparent`), which is v1's floated-pod scope
+exactly: no semantics are published for a registered pod and it is not reached by
+`RenderRoot::inspect()`/`WidgetTree::inspect()` unless its owner visits it (see
+`overlay-portal-v1-scope`'s item 4 above). The drag's actual semantics live on the in-tree
+`Draggable`/`DragTarget` nodes instead — `Role::Button`-equivalent, labelled `"Drag"`/`"Drop"` on
+the source, `"accepts drop"`/`"drop target"` on the target — so an assistive-technology user never
+reaches the ghost itself, only the source and target it moves between. The richer per-verb surface
+those nodes would ideally advertise (`accesskit::Action::CustomAction` for `lift`/`drop`/`cancel`
+individually) is not wired to anything either: `frust-core`'s `perform_accessibility_action`
+matches only `Action::Click`/`Action::Focus` and drops a custom action's id (the same gap
+`selection-verbs-advertised-not-invocable` records for `TextInput`), so both widgets advertise
+`Action::Click` as a lift/drop toggle instead.
+
+**Applies to**: every `frust_widgets::drag::draggable()`/`drag_target()` consumer, including
+`reorderable_list()` (built on both) — every platform, since the gap is in the shared overlay and
+accessibility-action seams, not a per-shell one.
+
+**Why accepted**: the ghost is a visual affordance only; the session's real state already has an
+accessible home on the source/target nodes, so publishing a second, floated accessibility node for
+the ghost would be a duplicate read rather than new information. Wiring a richer custom-action set
+needs the same framework-wide accessibility-action seam change `selection-verbs-advertised-not-
+invocable` is waiting on, not a drag-specific fix.
+
+**Evidence**: `crates/frust-widgets/src/drag/draggable.rs`'s "Semantics" and "Ghost and source
+feedback" module-doc sections; `crates/frust-widgets/src/drag/target.rs`'s "Click-to-drop and
+semantics" section; `crates/frust-core/src/overlay.rs`'s per-pass registry contract (no semantics,
+no `inspect()` visibility for any registered pod).
+
+**Trigger for removal**: the same accessibility-action seam widening `selection-verbs-advertised-
+not-invocable` names, after which a custom `lift`/`drop`/`cancel` action could reach these nodes
+too.
+
+---
+
+### `file-drop-desktop-only` — mobile and web shells publish no OS file-drop signal, and an unregistered region never opens a session
+
+**Observed**: `InputEvent::FileDrop` is published only by `frust-shell-desktop`, which maps
+winit's `HoveredFile`/`DroppedFile`/`HoveredFileCancelled` window events onto it (see
+SHELLS_ARCHITECTURE.md); Android, iOS and web surface no equivalent OS signal, so
+`frust_widgets::drag::drag_target::<Vec<PathBuf>>` never engages on those hosts. On desktop, a file
+drag hovering a window region with no `DragTargetWidget` anywhere in its hit-test path never opens
+(or updates) an `ExternalFiles` session, since nothing calls `handle_file_drop` for it; a session
+already open over one target stays latched on that target's last known position if the drag
+wanders into such a region before dropping or being cancelled there too. The reported hover
+position is always the shell's last known cursor position, not a position winit's `HoveredFile`
+itself carries (it has none).
+
+**Applies to**: every `frust_widgets::drag::drag_target()` typed over `Vec<PathBuf>`, on every
+platform for the mobile/web gap, and on desktop for the unregistered-region gap.
+
+**Why accepted**: mobile and web is a platform-signal gap, not a framework omission — neither OS
+embedding surfaces a drag-and-drop event to this framework today. The unregistered-region gap is
+the coordinator's own registry-not-hit-test design working as specified: resolution reads the
+registry a target reports at paint, and a region with nothing registered has nothing to resolve
+against.
+
+**Evidence**: `crates/frust-core/src/event.rs`'s `FileDropEvent` "Source" doc section;
+`crates/frust-widgets/src/drag/target.rs`'s "OS file drops" module-doc section ("Known limit");
+`crates/frust-shell-desktop/src/app_handler.rs`'s `FileDropAccumulator` and the
+`WindowEvent::HoveredFile`/`DroppedFile`/`HoveredFileCancelled` arms.
+
+---
+
 ### `selection-toolbar-labels-english-v1` — the baseline toolbar's four labels are English, always
 
 **Observed**: the framework-drawn toolbar reads its labels from one fixed table — "Cut", "Copy",

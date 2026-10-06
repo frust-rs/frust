@@ -131,6 +131,14 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   (`ScalePhase::Begin`/`Update`/`End`) is hit-tested and bubbles exactly like `Scroll`;
   `OverlayEventKind::Scale` is its floated-surface mirror, and `InputEvent::position`/`translated`/
   `transformed` cover both new variants alongside the existing ones.
+- **Desktop file drop.** `InputEvent::FileDrop(FileDropEvent { phase, position, paths })`
+  (`FileDropPhase::Hover`/`Drop`/`Cancel`) is hit-tested and bubbles by `position` exactly like
+  `Scroll`, so a container routes it with no change of its own. It is deliberately **not** routed
+  through the overlay pre-pass: a native OS drag is a window-level signal with no floated-surface
+  concept on the platform side, so it is hit-tested straight against the main tree — a drop target
+  living inside a popover is a gap this does not close (see `file-drop-desktop-only` in
+  [LIMITATIONS.md](LIMITATIONS.md)). Only `frust-shell-desktop` publishes it today (see
+  [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)); Android, iOS and web publish nothing.
 - **Transformed pods.** `ChildPod::set_transform(Option<kurbo::Affine>)` places a child under an
   arbitrary affine, opt-in and unset by default. While set, `ChildPod::contains`/`event_child` map a
   point or a positioned event (`InputEvent::transformed`) through the inverse before hit-testing or
@@ -309,6 +317,15 @@ recomputing the rect each paint is what makes an anchored surface follow its own
 subscription of any kind. Overlay paint outcomes merge into the frame's own, so an animating surface
 keeps frames coming exactly like an animating widget in the tree.
 
+An entry's rect need not derive from the owner's own paint origin, either: `OverlayAnchor::Window`
+states it directly in window space — a point a caller updates from its own `event` pass rather than
+waiting for the next `paint`, for content (a dragged ghost) whose position is itself only ever known
+there. A pod registered `Transparent`/`Tooltip` this way is painted last but never hit-tested, so the
+pointer riding under it still reaches whatever drop target or widget the main tree has underneath;
+`frust-widgets`' drag ghost rides exactly this combination, keeping its session's real semantics on
+the in-tree source/target nodes rather than the floated pod (see `drag-ghost-pod-no-semantics` in
+[LIMITATIONS.md](LIMITATIONS.md)).
+
 **Root-routed.** Hit testing is bounds-gated, so the root tests the registered rects **first**,
 topmost band first, and on a hit dispatches `InputEvent::Overlay` as a broadcast in place of the
 original event. The broadcast quotes the owner's `OverlayKey`; the owner alone consumes it and
@@ -357,6 +374,7 @@ one binary cannot fight over it and an app's explicit choice survives a catalog 
 | `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including both broadcast variants (`Housekeeping`, `Overlay`) and the focus-routed `EditCommand` (see Data Flow), opt-in hover claiming (`claim_hover`/`is_hovered`), the multi-contact pair (`pointer_id`/`capture_contacts`), and the per-pass request channels (`set_cursor`, `write_clipboard`, `request_paste`, `dispatch_edit_command`) |
 | `PointerId` / `PointerSource` | A pointer contact's identity (device plus slot), riding beside a `PointerEvent` and read via `EventCtx::pointer_id()` — see Data Flow's Multi-contact pointer routing |
 | `ScaleEvent` / `ScalePhase` | A pinch/zoom gesture event, hit-tested and bubbling like `Scroll` — see Data Flow's Scale gestures |
+| `FileDropEvent` / `FileDropPhase` | A desktop OS file-drag event (`Hover`/`Drop`/`Cancel`), hit-tested and bubbling like `Scroll`, bypassing the overlay pre-pass — see Data Flow's Desktop file drop |
 | `frust_core::hit::point_in_transformed_rect` / `checked_inverse` | Hit-testing helpers for content drawn under an arbitrary `Affine` — what `ChildPod::set_transform` uses internally, exposed for a canvas hit closure or pan/zoom container |
 | `EditCommand` | The four clipboard/selection verbs a shell or a floated toolbar hands the focused editable: `Copy`/`Cut` carry nothing (the widget owns the selection and answers into the clipboard slot), `Paste(text)` carries text already read by the shell, `SelectAll` is pure selection. `Debug` redacts the paste payload |
 | `OverlayEntry` / `OverlayKey` / `OverlayBand` / `OverlayInput` / `OutsideTap` | One floated surface's registration and the four rules the root reads back from it — owner identity, z-band, whether it hit-tests at all, and what a press outside every surface delivers (see Overlay Portal) |
