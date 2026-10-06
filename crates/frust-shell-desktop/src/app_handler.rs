@@ -1688,13 +1688,18 @@ impl FileDropAccumulator {
 /// `WindowEvent::HoveredFile`; later files of the same drag arrive as more of
 /// them) and the repeated `Hover` on every `CursorMoved` while it stands.
 ///
-/// It is cleared by everything that ends a hover: `HoveredFileCancelled`
-/// (which then dispatches `Cancel`), `DroppedFile` (whose batch dispatches
-/// `Drop`), and — without dispatching anything — `CursorLeft` and any real
-/// pointer button event. Those last two mean the OS drag is no longer over
-/// the window even though no `HoveredFileCancelled` said so, and a latch
-/// left standing past them would keep turning ordinary cursor motion into
-/// `Hover` dispatches for a drag that is gone.
+/// It is cleared by everything that ends a hover, and every one of those
+/// tells the tree: `DroppedFile` (whose batch dispatches `Drop`), and
+/// `HoveredFileCancelled`, `CursorLeft` and any real pointer button event,
+/// each of which dispatches `Cancel` if the latch was standing (see
+/// [`cancel_at`](Self::cancel_at)). The last two mean the OS drag is no
+/// longer over the window even though no `HoveredFileCancelled` said so: a
+/// latch left standing past them would keep turning ordinary cursor motion
+/// into `Hover` dispatches for a drag that is gone, and a hover that ended
+/// silently would leave the session its first `Hover` opened in the tree
+/// with nothing to end it — a `HoveredFileCancelled` arriving afterwards
+/// finds the latch down and dispatches nothing. Whichever of the three comes
+/// first sends the one `Cancel`; the rest find nothing to cancel.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct FileHoverLatch {
     hovering: bool,
@@ -1713,14 +1718,27 @@ impl FileHoverLatch {
         self.hovering
     }
 
-    /// `WindowEvent::HoveredFileCancelled`: unlatch, and report whether a
-    /// hover stood (the only case that dispatches `Cancel`).
+    /// The hover ended without a drop: unlatch, and report whether a hover
+    /// stood (the only case that dispatches `Cancel`).
     fn cancelled(&mut self) -> bool {
         std::mem::take(&mut self.hovering)
     }
 
-    /// The hover ended some other way — `DroppedFile`, `CursorLeft`, or a
-    /// real pointer button event: unlatch without dispatching anything.
+    /// The hover ended without a drop — `HoveredFileCancelled`,
+    /// `CursorLeft`, or a real pointer button event: unlatch, and return the
+    /// `Cancel` to dispatch at `position` (the last known cursor) if a hover
+    /// stood, or `None` if there is nothing to end (no drag entered, or an
+    /// earlier one of these already sent the `Cancel`).
+    fn cancel_at(&mut self, position: Point) -> Option<FileDropEvent> {
+        self.cancelled().then(|| FileDropEvent {
+            phase: FileDropPhase::Cancel,
+            position,
+            paths: Vec::new(),
+        })
+    }
+
+    /// `DroppedFile`: the hover ended in a drop, whose coalesced batch
+    /// dispatches `Drop` — unlatch without dispatching anything here.
     fn clear(&mut self) {
         self.hovering = false;
     }
@@ -2861,8 +2879,13 @@ where
             // `mouse_button_should_dispatch` for both invariants.
             WindowEvent::MouseInput { state, button, .. } => {
                 // A real button event means no OS file drag is over the window
-                // any more, whether or not `HoveredFileCancelled` said so.
-                self.file_hover.clear();
+                // any more, whether or not `HoveredFileCancelled` said so: if a
+                // hover stood, tell the tree the drag ended (`Cancel`) before
+                // the button's own `Down`/`Up`, so the session the hover opened
+                // is over by the time the press or release is routed.
+                if let Some(cancel) = self.file_hover.cancel_at(self.cursor) {
+                    self.dispatch(&window, InputEvent::FileDrop(cancel));
+                }
                 let phase = match state {
                     ElementState::Pressed => PointerPhase::Down,
                     ElementState::Released => PointerPhase::Up,
@@ -2975,11 +2998,14 @@ where
             }
 
             // The cursor left the window: a file drag hovering it is no longer
-            // over it either, so stop re-dispatching `Hover` on motion. Nothing
-            // is dispatched — `HoveredFileCancelled` (or a drop) is what tells
-            // the tree the drag itself ended.
+            // over it either, so stop re-dispatching `Hover` on motion and tell
+            // the tree the drag ended (`Cancel`), exactly as
+            // `HoveredFileCancelled` would — one arriving afterwards finds the
+            // latch down and dispatches nothing more.
             WindowEvent::CursorLeft { .. } => {
-                self.file_hover.clear();
+                if let Some(cancel) = self.file_hover.cancel_at(self.cursor) {
+                    self.dispatch(&window, InputEvent::FileDrop(cancel));
+                }
             }
 
             // winit delivers one `HoveredFile` per file in the drag, with no
@@ -3005,17 +3031,12 @@ where
             // without a drop. Any drop batch a same-pass `DroppedFile` run had
             // queued was already flushed — dispatched as its own `Drop` — by
             // the top-of-method guard before this arm ran, so this `Cancel`
-            // always follows it and never mixes with it.
+            // always follows it and never mixes with it. A `CursorLeft` or
+            // button event that already ended the hover already sent the
+            // `Cancel`, so this one then dispatches nothing.
             WindowEvent::HoveredFileCancelled => {
-                if self.file_hover.cancelled() {
-                    self.dispatch(
-                        &window,
-                        InputEvent::FileDrop(FileDropEvent {
-                            phase: FileDropPhase::Cancel,
-                            position: self.cursor,
-                            paths: Vec::new(),
-                        }),
-                    );
+                if let Some(cancel) = self.file_hover.cancel_at(self.cursor) {
+                    self.dispatch(&window, InputEvent::FileDrop(cancel));
                 }
             }
 
@@ -5469,6 +5490,7 @@ mod tests {
     }
     mod file_drop {
         use super::*;
+        use frust_core::event::{FileDropEvent, FileDropPhase};
 
         #[test]
         fn take_is_none_with_nothing_pushed() {
@@ -5524,15 +5546,61 @@ mod tests {
         }
 
         #[test]
-        fn a_hover_ended_without_a_cancel_stops_re_dispatching() {
-            // `clear` is what `CursorLeft`, a real pointer button event and
-            // `DroppedFile` all call.
+        fn a_drop_stops_re_dispatching_and_leaves_nothing_to_cancel() {
+            // `clear` is what `DroppedFile` calls; its batch dispatches `Drop`.
             let mut latch = FileHoverLatch::default();
             latch.hovered_file();
             latch.clear();
             assert!(!latch.is_hovering(), "cursor motion no longer re-hovers");
-            assert!(!latch.cancelled(), "and a late cancel dispatches nothing");
+            assert_eq!(
+                latch.cancel_at(Point::new(5.0, 5.0)),
+                None,
+                "and a late cancel dispatches nothing"
+            );
             assert!(latch.hovered_file(), "the next drag enters afresh");
+        }
+
+        /// The shell half of an OS file drag that ends with `CursorLeft` or
+        /// a real button event instead of a drop, driven through the latch
+        /// in the order the arms call it: the first `HoveredFile` dispatches
+        /// `Hover`, the early end dispatches the one `Cancel` (at the last
+        /// known cursor, carrying no paths), and the `HoveredFileCancelled`
+        /// that may still follow dispatches nothing. The tree half — those
+        /// exact `Hover` then `Cancel` events ending the drop target's
+        /// session — is `frust-widgets`' drag target tests.
+        #[test]
+        fn a_hover_ended_by_cursor_left_or_a_button_dispatches_one_cancel() {
+            // `CursorLeft` and `MouseInput` both end the hover through
+            // `cancel_at`, as `HoveredFileCancelled` does.
+            let cursor = Point::new(30.0, 40.0);
+            let mut latch = FileHoverLatch::default();
+            assert!(latch.hovered_file(), "HoveredFile dispatches Hover");
+            assert_eq!(
+                latch.cancel_at(cursor),
+                Some(FileDropEvent {
+                    phase: FileDropPhase::Cancel,
+                    position: cursor,
+                    paths: Vec::new(),
+                }),
+                "the early end tells the tree the drag is over"
+            );
+            assert!(!latch.is_hovering(), "cursor motion no longer re-hovers");
+            assert_eq!(
+                latch.cancel_at(cursor),
+                None,
+                "a later HoveredFileCancelled has nothing left to send"
+            );
+            assert!(latch.hovered_file(), "the next drag enters afresh");
+        }
+
+        #[test]
+        fn nothing_is_cancelled_without_a_standing_hover() {
+            let mut latch = FileHoverLatch::default();
+            assert_eq!(
+                latch.cancel_at(Point::ZERO),
+                None,
+                "a CursorLeft or button event with no OS drag dispatches nothing"
+            );
         }
     }
 }

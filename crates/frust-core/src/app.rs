@@ -2166,13 +2166,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     ///
     /// # File-drag follow-up
     ///
-    /// An [`InputEvent::FileDrop`] whose phase is
-    /// [`FileDropPhase::Drop`] or [`FileDropPhase::Cancel`] and whose
-    /// hit-tested dispatch nothing handled is followed, within this same
-    /// call, by a [`FileDropPhase::Ended`] broadcast to the whole tree; the
-    /// returned outcome folds both. A handled `Drop`/`Cancel`, a `Hover`, and
-    /// an `Ended` dispatched directly get no follow-up. See
-    /// [`FileDropEvent`]'s *Broadcast follow-up* for why.
+    /// Every [`InputEvent::FileDrop`] whose phase is [`FileDropPhase::Drop`]
+    /// or [`FileDropPhase::Cancel`] is followed, within this same call and
+    /// whether or not its hit-tested dispatch was handled, by a
+    /// [`FileDropPhase::Ended`] broadcast to the whole tree; the returned
+    /// outcome folds both. A `Hover` and an `Ended` dispatched directly get
+    /// no follow-up. See [`FileDropEvent`]'s *Broadcast follow-up* for why.
     pub fn event(&mut self, state: &mut State, event: &InputEvent) -> EventOutcome {
         let Some(root_id) = self.root_id else {
             return EventOutcome::default();
@@ -2782,17 +2781,18 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             needs_redraw: needs_redraw || carried.needs_redraw,
         };
 
-        // An OS file drag that just ended (`Drop`/`Cancel`) with nothing on the
-        // hit-tested path handling it is followed by the broadcast form, so a
-        // widget holding state the drag opened — a drop target's external
-        // session — hears the drag is over even though the release resolved
-        // over a region with no drop target in it (see `FileDropEvent`'s
-        // *Broadcast follow-up*). Re-entered through the front door for the
-        // reason `route_overlay` re-enters: the follow-up gets the same request
-        // bracket and outcome folding as any dispatch. Shallow by construction:
-        // `Ended` is not one of the two phases that trigger it.
-        if !handled
-            && let InputEvent::FileDrop(drop) = event
+        // An OS file drag that just ended (`Drop`/`Cancel`) is followed by the
+        // broadcast form, handled or not, so every widget holding state the
+        // drag opened — a drop target's external session — hears the drag is
+        // over: one whose release resolved over a region with no drop target
+        // in it, and one whose release a *different* widget handled (two
+        // independent drop-target groups the drag hovered in turn). See
+        // `FileDropEvent`'s *Broadcast follow-up*. Re-entered through the
+        // front door for the reason `route_overlay` re-enters: the follow-up
+        // gets the same request bracket and outcome folding as any dispatch.
+        // Shallow by construction: `Ended` is not one of the two phases that
+        // trigger it.
+        if let InputEvent::FileDrop(drop) = event
             && matches!(drop.phase, FileDropPhase::Drop | FileDropPhase::Cancel)
         {
             let ended = InputEvent::FileDrop(FileDropEvent {
@@ -9957,8 +9957,8 @@ mod scale_tests {
     }
 }
 
-/// The [`RenderRoot::event`] file-drag follow-up: an unhandled `Drop`/`Cancel`
-/// is re-broadcast as `Ended`.
+/// The [`RenderRoot::event`] file-drag follow-up: every `Drop`/`Cancel`,
+/// handled or not, is followed by an `Ended` broadcast.
 #[cfg(test)]
 mod file_drop_tests {
     use super::*;
@@ -10070,8 +10070,8 @@ mod file_drop_tests {
                 "the {phase:?} that missed the leaf is followed by an Ended broadcast it hears"
             );
 
-            // Over the leaf but ignored by it: still unhandled, so still
-            // followed — the leaf hears the hit-tested phase, then Ended.
+            // Over the leaf but ignored by it: the leaf hears the hit-tested
+            // phase, then Ended.
             log.seen.clear();
             root.event(&mut log, &file_drop(phase, 10.0, 10.0));
             assert_eq!(log.seen, vec![('L', phase), ('L', FileDropPhase::Ended)]);
@@ -10079,15 +10079,22 @@ mod file_drop_tests {
     }
 
     #[test]
-    fn a_handled_file_drop_end_a_hover_and_a_direct_ended_get_no_follow_up() {
+    fn a_handled_file_drop_end_is_still_re_broadcast_to_the_whole_tree() {
         let (mut root, mut log) = drop_root(true);
         for phase in [FileDropPhase::Drop, FileDropPhase::Cancel] {
             log.seen.clear();
             let outcome = root.event(&mut log, &file_drop(phase, 10.0, 10.0));
-            assert!(outcome.handled);
-            assert_eq!(log.seen, vec![('L', phase)], "{phase:?} was handled");
+            assert!(outcome.handled, "the hit-tested {phase:?} was handled");
+            assert_eq!(
+                log.seen,
+                vec![('L', phase), ('L', FileDropPhase::Ended)],
+                "and is still followed by the Ended broadcast"
+            );
         }
+    }
 
+    #[test]
+    fn a_hover_and_a_direct_ended_get_no_follow_up() {
         let (mut root, mut log) = drop_root(false);
         root.event(&mut log, &file_drop(FileDropPhase::Hover, 150.0, 150.0));
         assert!(log.seen.is_empty(), "a Hover is never re-broadcast");
