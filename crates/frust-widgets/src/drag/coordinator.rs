@@ -697,6 +697,30 @@ impl DragCoordinator {
         });
     }
 
+    /// Replace the held `Vec<PathBuf>` payload of an in-flight
+    /// [`DragKind::ExternalFiles`] session with `paths`.
+    ///
+    /// A hover-phase file-drag notification carries no paths of its own (the
+    /// platform source delivers one file per hover with no "this is
+    /// everything" signal), so a caller that opens the session on hover via
+    /// [`begin_external`](Self::begin_external) starts it with an empty list
+    /// and calls this once the real list is known — typically right before
+    /// [`drop`](Self::drop), when the platform's drop notification finally
+    /// carries every path. Notifies nothing: this replaces payload data, not
+    /// phase or hover state, so no subscriber needs telling, and the target
+    /// that eventually [`take_payload`](Self::take_payload)s it sees exactly
+    /// `paths`. A silent no-op unless `Dragging` with `DragKind::ExternalFiles`
+    /// — in particular, never while `Dropping` (too late: the target may have
+    /// already taken the old payload).
+    pub fn set_external_payload(&self, paths: Vec<PathBuf>) {
+        if let Machine::Dragging(session) = &mut self.shared.borrow_mut().machine
+            && matches!(session.kind, DragKind::ExternalFiles(_))
+        {
+            session.kind = DragKind::ExternalFiles(paths.clone());
+            session.payload = Some(Box::new(paths));
+        }
+    }
+
     /// The dragged pointer is at `pointer` (window space): record it, then
     /// resolve the hovered target under it — the latest-registered target
     /// whose reported bounds contain it ([`target_at`](Self::target_at)), or
@@ -1494,6 +1518,50 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn set_external_payload_replaces_the_held_paths_and_notifies_nothing() {
+        let f = Fixture::new();
+        f.drag.begin_external(Vec::new(), FILE_ENTRY);
+        f.take_log();
+
+        let real_paths = vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")];
+        f.drag.set_external_payload(real_paths.clone());
+        assert_eq!(
+            f.take_log(),
+            Vec::<DragStateChange>::new(),
+            "replacing the payload notifies no subscriber"
+        );
+        assert_eq!(
+            f.drag.with_payload::<Vec<PathBuf>, _>(Clone::clone),
+            Some(real_paths.clone())
+        );
+
+        f.drag.set_hovered(Some(f.first));
+        f.take_log();
+        assert_eq!(f.drag.drop(), Some(f.first));
+        assert_eq!(
+            f.drag.take_payload::<Vec<PathBuf>>().map(|b| *b),
+            Some(real_paths),
+            "the drop target receives the replaced paths, not the empty hover list"
+        );
+    }
+
+    #[test]
+    fn set_external_payload_is_a_no_op_outside_an_external_dragging_session() {
+        let f = Fixture::new();
+        // Idle: no session at all.
+        f.drag
+            .set_external_payload(vec![PathBuf::from("/tmp/a.txt")]);
+        assert_eq!(f.drag.phase(), DragPhase::Idle);
+
+        // An internal session's payload must never be mistaken for a file list.
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(7_i32);
+        f.drag
+            .set_external_payload(vec![PathBuf::from("/tmp/a.txt")]);
+        assert_eq!(f.drag.with_payload::<i32, _>(|v| *v), Some(7));
     }
 
     #[test]
