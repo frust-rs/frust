@@ -874,8 +874,8 @@ pub enum InputEvent {
     /// **broadcast** ([`InputEvent::is_broadcast`]), the root's own follow-up
     /// to every `Drop`/`Cancel`, handled or not, so a widget holding state
     /// the drag opened hears that the drag is over even when the release
-    /// missed it (see [`FileDropEvent`]'s *Broadcast follow-up*). It carries no position and is never translated, like the
-    /// other broadcasts.
+    /// missed it (see [`FileDropEvent`]'s *Broadcast follow-up*). It carries
+    /// no position and is never translated, like the other broadcasts.
     ///
     /// Deliberately **not** routed through the overlay pre-pass
     /// ([`crate::app::RenderRoot::event`]'s `route_overlay`): a native OS

@@ -144,8 +144,8 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   handled by one widget while the drag opened state in another — is followed by
   `RenderRoot::event` in the same call with `FileDropPhase::Ended`, a positionless broadcast
   (`is_broadcast()`), so all state the drag opened (`frust-widgets`' external drag sessions, one
-  per coordinator) ends; answering it must be idempotent. Dropped `paths` arrive verbatim from the OS drag source and are
-  untrusted input.
+  per coordinator) ends; answering it must be idempotent. Dropped `paths` arrive verbatim from the
+  OS drag source and are untrusted input.
 - **Transformed pods.** `ChildPod::set_transform(Option<kurbo::Affine>)` places a child under an
   arbitrary affine, opt-in and unset by default. While set, `ChildPod::contains`/`event_child` map a
   point or a positioned event (`InputEvent::transformed`) through the inverse before hit-testing or
