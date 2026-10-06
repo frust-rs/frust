@@ -93,10 +93,12 @@
 //! reconciled only by its next `Down` (the root adjusts its focus bookkeeping
 //! on `Down` and keyboard passes, not on a release).
 //!
-//! While a pointer drags, the enclosing scroll surface's live takeover veto
+//! While a pointer drags, every enclosing scroll surface's live takeover veto
 //! (the one a pinch raises, see `crate::scroll`'s *Multi-contact veto*) is
-//! held raised, so a drag inside a `ScrollView`/`ListView` is not stolen once
-//! the finger travels past the scroll's own slop. A keyboard drag has no
+//! held raised — not only the nearest, since each surface checks its own
+//! cell at its own slop — so a drag inside a `ScrollView`/`ListView`, however
+//! deeply nested, is not stolen once the finger travels past any enclosing
+//! scroll's own slop. A keyboard drag has no
 //! finger to steal from, so this does not apply to it.
 //!
 //! ## Lift, cycle, drop
@@ -223,7 +225,7 @@ use super::coordinator::{DragCoordinator, DragPhase, DragSourceId, DragState};
 use crate::authoring::presses;
 use crate::gesture::{HoldTracker, LONG_PRESS_MS};
 use crate::overlay::{OverlayAnchor, OverlaySlot};
-use crate::scroll::ambient_scroll_veto;
+use crate::scroll::ambient_scroll_vetoes;
 
 /// How far, in logical px, a press under the distance policy travels before
 /// it becomes a drag ([`DraggableView::threshold`] overrides it).
@@ -458,9 +460,10 @@ pub struct DraggableWidget<State: 'static, T: 'static> {
     /// This widget's absolute paint origin as of the last paint: what an
     /// owner-local pointer position is lifted into window space with.
     window_origin: Point,
-    /// The enclosing scroll surface's live takeover veto, captured on the
-    /// arming `Down` and held raised while dragging.
-    scroll_veto: Option<Rc<Cell<bool>>>,
+    /// Every enclosing scroll surface's live takeover veto — the whole chain,
+    /// not only the nearest — captured on the arming `Down` and held raised
+    /// while dragging.
+    scroll_vetoes: Vec<Rc<Cell<bool>>>,
     /// Whether the current press requested keyboard focus for this source (so
     /// `Escape` reaches it) and has not released it yet.
     focus_claimed: bool,
@@ -500,7 +503,7 @@ impl<State: 'static, T: 'static> View<State> for DraggableView<State, T> {
                 live: false,
             },
             window_origin: Point::ZERO,
-            scroll_veto: None,
+            scroll_vetoes: Vec::new(),
             focus_claimed: false,
             keyboard_drag: false,
         }
@@ -587,14 +590,14 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
     }
 
     fn set_scroll_veto(&self, raised: bool) {
-        if let Some(veto) = &self.scroll_veto {
+        for veto in &self.scroll_vetoes {
             veto.set(raised);
         }
     }
 
     fn release_scroll_veto(&mut self) {
         self.set_scroll_veto(false);
-        self.scroll_veto = None;
+        self.scroll_vetoes.clear();
     }
 
     /// A [`Gesture::Dragging`] session noticed to have ended out from under
@@ -668,9 +671,9 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
             elapsed: false,
         };
         self.hold.cancel();
-        // Captured now, while the enclosing scroll surface's `Down` forward is
-        // still on the stack (see the module docs' *The session*).
-        self.scroll_veto = ambient_scroll_veto();
+        // Captured now, while every enclosing scroll surface's `Down` forward
+        // is still on the stack (see the module docs' *The session*).
+        self.scroll_vetoes = ambient_scroll_vetoes();
         ctx.capture_pointer();
         // Start the hold clock on the next paint.
         ctx.request_redraw();
@@ -1353,6 +1356,10 @@ mod tests {
         custom_ghost: bool,
         /// Host the source inside a tall `ScrollView`.
         in_scroll: bool,
+        /// Host the source inside a `ScrollView`-with-capacity nested inside
+        /// another `ScrollView`-with-capacity — two enclosing scroll surfaces,
+        /// not one.
+        in_nested_scroll: bool,
         /// The child requests keyboard focus on its own primary `Down`.
         focusable_child: bool,
     }
@@ -1364,6 +1371,7 @@ mod tests {
                 feedback: SourceFeedback::Dim,
                 custom_ghost: false,
                 in_scroll: false,
+                in_nested_scroll: false,
                 focusable_child: false,
             }
         }
@@ -1482,6 +1490,19 @@ mod tests {
             return Stack(vec![any(crate::scroll_view(Stack(vec![
                 any(crate::SizedBox(Some(WINDOW.width), Some(2_000.0))),
                 placed,
+            ])))]);
+        }
+        if cfg.in_nested_scroll {
+            // A page scroll surface (the window's own height, 2_000 px of
+            // content, so it has real scroll capacity) wrapping a column
+            // scroll surface whose own content fits its own viewport exactly
+            // — a column with nothing of its own to scroll, same as a short
+            // kanban column, which still forwards every `Down` and still has
+            // a touch-slop takeover of its own to fire.
+            let inner = any(crate::scroll_view(Stack(vec![placed])));
+            return Stack(vec![any(crate::scroll_view(Stack(vec![
+                any(crate::SizedBox(Some(WINDOW.width), Some(2_000.0))),
+                inner,
             ])))]);
         }
         Stack(vec![placed])
@@ -1720,6 +1741,62 @@ mod tests {
         );
         h.touch(PointerPhase::Up, 30.0, 320.0);
         assert_eq!(h.phase(), DragPhase::Idle);
+    }
+
+    #[test]
+    fn a_drag_vetoes_every_enclosing_scroll_surface_not_only_the_nearest() {
+        // Two scroll surfaces, the way a scrollable page hosts a scrollable
+        // column: the outer has real capacity (2_000 px of content against
+        // the window's own height) while the inner's content fits its own
+        // viewport exactly — a column with nothing of its own to scroll,
+        // which still forwards the `Down` and still has a slop to fire at.
+        // Dispatch is parent-first, so the *outer* surface's own takeover
+        // check runs before the inner's ever does — raising only the nearest
+        // cell (the pre-fix behaviour) leaves the outer free to cancel the
+        // child right there, before the inner even gets a say.
+        let mut h = Harness::new(Cfg {
+            in_nested_scroll: true,
+            ..Cfg::default()
+        });
+        let target = h.target(Rect::new(0.0, 300.0, WINDOW.width, WINDOW.height));
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        assert_eq!(h.phase(), DragPhase::Armed, "a primary press arms");
+        // Past the 6 px mouse drag threshold: the session begins and every
+        // enclosing surface's veto is raised.
+        h.mouse(PointerPhase::Move, 37.0, 120.0);
+        assert_eq!(h.phase(), DragPhase::Dragging, "7 px crosses it");
+        // Past both surfaces' 18 px touch slop (they share the same
+        // `down_start`) and into the target registered below the inner
+        // surface's own bounds.
+        h.mouse(PointerPhase::Move, 30.0, 320.0);
+        assert_eq!(
+            h.phase(),
+            DragPhase::Dragging,
+            "neither enclosing scroll surface took the gesture over at its own slop"
+        );
+        assert_eq!(
+            h.state
+                .coordinator
+                .state()
+                .session()
+                .and_then(|s| s.hovered),
+            Some(target),
+            "the drag reached a target the inner surface doesn't even cover"
+        );
+        let scene = h.frame();
+        assert_eq!(
+            rects(&scene).first(),
+            Some(&rest()),
+            "neither surface scrolled its content under the drag"
+        );
+        h.mouse(PointerPhase::Up, 30.0, 320.0);
+        assert_eq!(
+            h.phase(),
+            DragPhase::Dropping,
+            "the coordinator reached Dropping on the target outside the inner surface"
+        );
+        h.state.coordinator.complete_drop();
+        assert_eq!(h.phase(), DragPhase::Idle, "the drop completed");
     }
 
     #[test]
