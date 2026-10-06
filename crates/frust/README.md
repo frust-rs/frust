@@ -31,7 +31,7 @@ The package is named `frust-ui` and imported as `frust`, because the crates.io n
 A counter-style component, as shown in the crate-level documentation:
 
 ```rust
-use frust::{Component, View, AnyView, any, text};
+use frust::{Component, View, any, text};
 
 struct Counter;
 
@@ -42,7 +42,7 @@ impl Component for Counter {
         0
     }
 
-    fn build(&self, state: &mut i32) -> AnyView<i32> {
+    fn build(&self, state: &mut i32) -> impl View<i32> {
         any(text(format!("count: {state}")).size(32.0))
     }
 }

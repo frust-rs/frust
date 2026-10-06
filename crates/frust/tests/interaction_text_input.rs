@@ -139,7 +139,7 @@ impl Component for NotesApp {
     /// Pure view function: renders `AppState` into the notes screen.
     /// Re-run every frame, so it is cheap by construction — the only non-trivial
     /// resource, the decoded logo, is an `Arc` clone, never a re-decode.
-    fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+    fn build(&self, state: &mut AppState) -> impl View<AppState> {
         let logo = state.logo.clone();
         let draft = state.draft.clone();
 
@@ -309,7 +309,7 @@ fn add_notes<V: View<AppState>>(
 #[test]
 fn renders_logo_and_placeholder_and_decodes_once() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(NotesApp.build(s));
     let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
@@ -347,7 +347,7 @@ fn renders_logo_and_placeholder_and_decodes_once() {
 #[test]
 fn typing_fires_on_change_per_keystroke() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(NotesApp.build(s));
     let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
@@ -374,7 +374,7 @@ fn typing_fires_on_change_per_keystroke() {
 #[test]
 fn enter_submits_keyed_note_and_clears_draft() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(NotesApp.build(s));
     let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
@@ -392,7 +392,7 @@ fn enter_submits_keyed_note_and_clears_draft() {
 #[test]
 fn blank_submit_is_dropped() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(NotesApp.build(s));
     let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
@@ -414,7 +414,7 @@ fn blank_submit_is_dropped() {
 #[test]
 fn select_all_then_type_replaces_the_field() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(NotesApp.build(s));
     let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
@@ -450,7 +450,7 @@ fn select_all_then_type_replaces_the_field() {
 #[test]
 fn arrow_and_backspace_editing_matrix() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(NotesApp.build(s));
     let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
@@ -489,7 +489,7 @@ fn arrow_and_backspace_editing_matrix() {
 #[test]
 fn ime_compose_then_commit_inserts_composed_text() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(NotesApp.build(s));
     let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
@@ -523,7 +523,7 @@ fn ime_compose_then_commit_inserts_composed_text() {
 #[test]
 fn keyed_delete_removes_the_correct_middle_row() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| NotesApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(NotesApp.build(s));
     let mut state = NotesApp.init();
     let mut tcx = TextContext::new();
 
