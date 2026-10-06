@@ -57,8 +57,8 @@ use frust::authoring::{
     route_event_single, teardown_child, visit_children,
 };
 use frust::{
-    AnyView, Axis, Column, Component, CrossAxisAlignment, FlexView, IconSource, SizedBox, Stack,
-    TextView, any, component, icon, icons, inflexible, text,
+    AnyView, Axis, Component, CrossAxisAlignment, FlexView, IconSource, SizedBox, Stack, TextView,
+    any, column, component, icon, icons, inflexible, text,
 };
 use frust_beui::blocks::bloom_menu::{bloom_menu, bloom_menu_item};
 use frust_beui::blocks::command_palette::{
@@ -222,30 +222,30 @@ fn palette_block(state: &State) -> AnyView<State> {
     // their two group headings rather than clipping them.
     let mounting_note = any(caption("The palette mounts over this box."));
 
-    any(Column(vec![
-        any(section("command_palette")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("command_palette"))
+        .child(gap(6.0))
+        .child(caption(
             "Grouped commands behind a fuzzy filter. The panel intercepts \u{2191}/\u{2193}/Enter \
              before the field sees them; Escape is left to the modal host so it can play the \
              exit. The global shortcut is the app's binding, not the block's — this page's own \
              key scope supplies it. There is no focus-on-appear hook in the framework, so the \
              panel takes focus on the first press that lands on it; that press is what makes its \
              own arrows and Enter reachable.",
-        )),
-        gap(10.0),
-        controls(vec![
+        ))
+        .child(gap(10.0))
+        .child(controls(vec![
             any(button("Open command palette", |s: &mut State| {
                 s.palette.open();
             })),
             any(caption(
                 "\u{2026} or press Ctrl / \u{2318} + K after clicking the page",
             )),
-        ]),
-        gap(8.0),
-        any(caption(format!("Last command: {}", state.palette_log))),
-        gap(10.0),
-        stage(
+        ]))
+        .child(gap(8.0))
+        .child(caption(format!("Last command: {}", state.palette_log)))
+        .child(gap(10.0))
+        .child(stage(
             560.0,
             vec![
                 mounting_note,
@@ -272,8 +272,7 @@ fn palette_block(state: &State) -> AnyView<State> {
                     }
                 })),
             ],
-        ),
-    ]))
+        )))
 }
 
 // ---- The morphing search ---------------------------------------------------
@@ -309,7 +308,7 @@ fn search_block(state: &State) -> AnyView<State> {
     // The trigger sits at the stage's own top edge: the panel's top lands on
     // the trigger's, so anything above it inside the stage would be painted
     // over. The block's prose stays outside the stage for the same reason.
-    let body = any(Column(vec![controls(vec![
+    let body = any(column().child(controls(vec![
         any(morphing_search_trigger::<State>(&state.search_anchor)
             .placeholder("Find components")
             .shortcut(Some("F"))
@@ -326,18 +325,18 @@ fn search_block(state: &State) -> AnyView<State> {
         )
         .tone(ButtonTone::Secondary)
         .size(ButtonSize::Sm)),
-    ])]));
+    ])));
 
-    any(Column(vec![
-        any(section("morphing_search")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("morphing_search"))
+        .child(gap(6.0))
+        .child(caption(
             "A field-shaped trigger that morphs into its own results panel, anchored to the rect \
              the trigger publishes. The shape toggle below switches the same trigger between the \
              full field and the compact icon square.",
-        )),
-        gap(10.0),
-        stage(
+        ))
+        .child(gap(10.0))
+        .child(stage(
             400.0,
             vec![
                 body,
@@ -363,10 +362,9 @@ fn search_block(state: &State) -> AnyView<State> {
                     }
                 })),
             ],
-        ),
-        gap(8.0),
-        any(caption(format!("Last opened: {}", state.search_log))),
-    ]))
+        ))
+        .child(gap(8.0))
+        .child(caption(format!("Last opened: {}", state.search_log))))
 }
 
 // ---- The expandable action bar ---------------------------------------------
@@ -399,15 +397,15 @@ fn action_bar_block(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(Column(vec![
-        any(section("expandable_action_bar")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("expandable_action_bar"))
+        .child(gap(6.0))
+        .child(caption(
             "Icon-only until hovered or focused, when every item springs open to its label and \
              shortcut. The expansion is taken over here so the toggle below drives it directly.",
-        )),
-        gap(10.0),
-        any(
+        ))
+        .child(gap(10.0))
+        .child(
             expandable_action_bar(items, move |s: &mut State, index: usize| {
                 s.bar_active = index;
                 s.bar_log = labels
@@ -417,9 +415,9 @@ fn action_bar_block(state: &State) -> AnyView<State> {
             })
             .expanded(state.bar_expanded)
             .on_expanded_change(|s: &mut State, expanded: bool| s.bar_expanded = expanded),
-        ),
-        gap(10.0),
-        controls(vec![
+        )
+        .child(gap(10.0))
+        .child(controls(vec![
             any(button(
                 if state.bar_expanded {
                     "Collapse"
@@ -431,8 +429,7 @@ fn action_bar_block(state: &State) -> AnyView<State> {
             .tone(ButtonTone::Secondary)
             .size(ButtonSize::Sm)),
             any(caption(format!("Last action: {}", state.bar_log))),
-        ]),
-    ]))
+        ])))
 }
 
 // ---- The overflow rail -----------------------------------------------------
@@ -470,35 +467,36 @@ fn overflow_block(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(Column(vec![
-        any(section("overflow_actions")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("overflow_actions"))
+        .child(gap(6.0))
+        .child(caption(
             "The rail keeps as many primary actions on screen as the width allows and files the \
              rest behind the toggle. `on_action` addresses one concatenated list, so an action \
              pushed into the overflow group keeps its own index — the split is layout, never a \
              renumbering.",
-        )),
-        gap(10.0),
-        controls(width_buttons),
-        gap(10.0),
-        any(SizedBox(Some(state.rail_width), None).child(
-            overflow_actions(primary, overflow, move |s: &mut State, index: usize| {
-                s.overflow_log = labels
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_else(|| format!("index {index}"));
-            })
-            .expanded(state.overflow_expanded)
-            .collapse_on_action(true)
-            .on_expanded_change(|s: &mut State, expanded: bool| s.overflow_expanded = expanded),
-        )),
-        gap(8.0),
-        any(caption(format!(
+        ))
+        .child(gap(10.0))
+        .child(controls(width_buttons))
+        .child(gap(10.0))
+        .child(
+            SizedBox(Some(state.rail_width), None).child(
+                overflow_actions(primary, overflow, move |s: &mut State, index: usize| {
+                    s.overflow_log = labels
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| format!("index {index}"));
+                })
+                .expanded(state.overflow_expanded)
+                .collapse_on_action(true)
+                .on_expanded_change(|s: &mut State, expanded: bool| s.overflow_expanded = expanded),
+            ),
+        )
+        .child(gap(8.0))
+        .child(caption(format!(
             "Container {:.0}px \u{b7} last action: {}",
             state.rail_width, state.overflow_log
-        ))),
-    ]))
+        ))))
 }
 
 // ---- The bloom menu --------------------------------------------------------
@@ -520,28 +518,29 @@ fn bloom_block(state: &State) -> AnyView<State> {
         .map(|(label, glyph)| bloom_menu_item(icon(*glyph).size(20.0), *label))
         .collect();
 
-    any(Column(vec![
-        any(section("bloom_menu")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("bloom_menu"))
+        .child(gap(6.0))
+        .child(caption(
             "The trigger morphs into a panel and the grid blooms out of its centre, each cell \
              delayed by its radial distance. The block reserves its own centring box, so opening \
              it never reflows the page.",
-        )),
-        gap(10.0),
-        any(bloom_menu(items, move |s: &mut State, index: usize| {
-            s.bloom_log = labels
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| format!("index {index}"));
-        })
-        .open(state.bloom_open)
-        .trigger_label("Create")
-        .heading("Create")
-        .on_open_change(|s: &mut State, open: bool| s.bloom_open = open)),
-        gap(8.0),
-        any(caption(format!("Last created: {}", state.bloom_log))),
-    ]))
+        ))
+        .child(gap(10.0))
+        .child(
+            bloom_menu(items, move |s: &mut State, index: usize| {
+                s.bloom_log = labels
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("index {index}"));
+            })
+            .open(state.bloom_open)
+            .trigger_label("Create")
+            .heading("Create")
+            .on_open_change(|s: &mut State, open: bool| s.bloom_open = open),
+        )
+        .child(gap(8.0))
+        .child(caption(format!("Last created: {}", state.bloom_log))))
 }
 
 // ---- The page --------------------------------------------------------------
@@ -559,24 +558,23 @@ impl Component for CommandPage {
 
     fn build(&self, state: &mut State) -> impl View<State> {
         any(key_scope(
-            Column(vec![
-                any(heading("Blocks \u{b7} Command")),
-                gap(8.0),
-                any(caption(
+            column()
+                .child(heading("Blocks \u{b7} Command"))
+                .child(gap(8.0))
+                .child(caption(
                     "Five command surfaces. Click anywhere on this page once to arm the \
                      Ctrl / \u{2318} + K binding — see this module's docs for the route it takes.",
-                )),
-                gap(24.0),
-                palette_block(state),
-                gap(24.0),
-                search_block(state),
-                gap(24.0),
-                action_bar_block(state),
-                gap(24.0),
-                overflow_block(state),
-                gap(24.0),
-                bloom_block(state),
-            ]),
+                ))
+                .child(gap(24.0))
+                .child(palette_block(state))
+                .child(gap(24.0))
+                .child(search_block(state))
+                .child(gap(24.0))
+                .child(action_bar_block(state))
+                .child(gap(24.0))
+                .child(overflow_block(state))
+                .child(gap(24.0))
+                .child(bloom_block(state)),
             |s: &mut State| {
                 s.palette.toggle();
             },

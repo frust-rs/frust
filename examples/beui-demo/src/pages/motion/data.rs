@@ -18,8 +18,8 @@
 use std::rc::Rc;
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Stack, View, any, component,
-    text,
+    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Stack, View, any, column,
+    component, row, text,
 };
 use frust_beui::components::animated_toast_stack::{
     AnimatedToastStackEntry, AnimatedToastStackPosition, AnimatedToastStackStatus, animated_toast,
@@ -286,32 +286,32 @@ fn toasts(state: &State) -> AnyView<State> {
         any(Row(row).cross_axis(CrossAxisAlignment::Center))
     };
 
-    let panel = any(Column(vec![
-        any(text("Raise a toast").size(15.0)),
-        gap(8.0),
-        any(Row(triggers).cross_axis(CrossAxisAlignment::Center)),
-        gap(12.0),
-        any(Row(vec![
-            knob("Dismiss oldest", |s: &mut State| {
-                if !s.toasts.is_empty() {
-                    s.toasts.remove(0);
-                }
-            }),
-            hgap(8.0),
-            knob("Dismiss all", |s: &mut State| s.toasts.clear()),
-        ])),
-        gap(12.0),
-        any(caption("Position")),
-        gap(6.0),
-        position_row(0, 3),
-        gap(6.0),
-        position_row(3, 6),
-        gap(12.0),
-        any(caption(state.toast_status.clone())),
-        gap(4.0),
-        any(caption(format!("Queued: {}", state.toasts.len()))),
-    ])
-    .cross_axis(CrossAxisAlignment::Start));
+    let panel = any(column()
+        .child(text("Raise a toast").size(15.0))
+        .child(gap(8.0))
+        .child(Row(triggers).cross_axis(CrossAxisAlignment::Center))
+        .child(gap(12.0))
+        .child(
+            row()
+                .child(knob("Dismiss oldest", |s: &mut State| {
+                    if !s.toasts.is_empty() {
+                        s.toasts.remove(0);
+                    }
+                }))
+                .child(hgap(8.0))
+                .child(knob("Dismiss all", |s: &mut State| s.toasts.clear())),
+        )
+        .child(gap(12.0))
+        .child(caption("Position"))
+        .child(gap(6.0))
+        .child(position_row(0, 3))
+        .child(gap(6.0))
+        .child(position_row(3, 6))
+        .child(gap(12.0))
+        .child(caption(state.toast_status.clone()))
+        .child(gap(4.0))
+        .child(caption(format!("Queued: {}", state.toasts.len())))
+        .cross_axis(CrossAxisAlignment::Start));
 
     let stack = any(
         animated_toast_stack(state.toasts.clone(), |s: &mut State, id| {
@@ -464,24 +464,26 @@ impl Component for DataPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(Column(vec![toasts(state), tables(state)]).cross_axis(CrossAxisAlignment::Start))
+        any(column()
+            .child(toasts(state))
+            .child(tables(state))
+            .cross_axis(CrossAxisAlignment::Start))
     }
 }
 
 pub fn page() -> AnyView<AppState> {
-    any(Column(vec![
-        any(heading("Motion \u{b7} Data")),
-        any(SizedBox(None, Some(8.0))),
-        any(caption(
+    any(column()
+        .child(heading("Motion \u{b7} Data"))
+        .child(SizedBox(None, Some(8.0)))
+        .child(caption(
             "The two data surfaces: the toast stack, with a trigger per status \
              and every anchor corner, and the virtualized table over a \
              1,000-row synthetic dataset that grows to 5,000 as you reach its \
              end.",
-        )),
-        any(SizedBox(None, Some(24.0))),
-        any(component(DataPage)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+        ))
+        .child(SizedBox(None, Some(24.0)))
+        .child(component(DataPage))
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 #[cfg(test)]

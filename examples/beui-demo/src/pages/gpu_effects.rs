@@ -37,7 +37,8 @@
 //! calling the opt-in.
 
 use frust::{
-    AnyView, Column, CrossAxisAlignment, Row, SizedBox, Theme, any, container, text, use_context,
+    AnyView, CrossAxisAlignment, Row, SizedBox, Theme, any, column, container, row, text,
+    use_context,
 };
 use frust_beui::blocks::project_folder::{folder_preview, project_folder};
 use frust_beui::blocks::wallet_card::{wallet_account, wallet_card};
@@ -81,12 +82,13 @@ fn muted(body: impl Into<String>) -> AnyView<AppState> {
 /// still reads as a pair.
 #[cfg(not(feature = "gpu-effects"))]
 fn build_flag_placeholder(width: f64, height: f64, component: &str) -> AnyView<AppState> {
-    any(container(any(Column(vec![
-        any(text(format!("{component} \u{b7} 3D")).size(13.0)),
-        gap(6.0),
-        muted(format!("Rebuild with `{BUILD_FLAG_HINT}`.")),
-    ])
-    .cross_axis(CrossAxisAlignment::Center)))
+    any(container(
+        column()
+            .child(text(format!("{component} \u{b7} 3D")).size(13.0))
+            .child(gap(6.0))
+            .child(muted(format!("Rebuild with `{BUILD_FLAG_HINT}`.")))
+            .cross_axis(CrossAxisAlignment::Center),
+    )
     .size_centered(width, height)
     .radius(12.0)
     .border(theme().scheme().outline, 1.0))
@@ -100,26 +102,32 @@ fn pair(
     two_d: AnyView<AppState>,
     three_d: AnyView<AppState>,
 ) -> AnyView<AppState> {
-    any(Column(vec![
-        any(text(title.to_string()).size(16.0)),
-        gap(4.0),
-        muted(note.to_string()),
-        gap(12.0),
-        any(Row(vec![
-            any(Column(vec![any(caption("2D")), gap(8.0), two_d])
-                .cross_axis(CrossAxisAlignment::Start)),
-            hgap(40.0),
-            any(Column(vec![
-                any(caption("3D \u{b7} gpu-effects")),
-                gap(8.0),
-                three_d,
-            ])
-            .cross_axis(CrossAxisAlignment::Start)),
-        ])
-        .cross_axis(CrossAxisAlignment::Start)),
-        gap(32.0),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+    any(column()
+        .child(text(title.to_string()).size(16.0))
+        .child(gap(4.0))
+        .child(muted(note.to_string()))
+        .child(gap(12.0))
+        .child(
+            row()
+                .child(
+                    column()
+                        .child(caption("2D"))
+                        .child(gap(8.0))
+                        .child(two_d)
+                        .cross_axis(CrossAxisAlignment::Start),
+                )
+                .child(hgap(40.0))
+                .child(
+                    column()
+                        .child(caption("3D \u{b7} gpu-effects"))
+                        .child(gap(8.0))
+                        .child(three_d)
+                        .cross_axis(CrossAxisAlignment::Start),
+                )
+                .cross_axis(CrossAxisAlignment::Start),
+        )
+        .child(gap(32.0))
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 // ---- tilt_card --------------------------------------------------------
@@ -127,13 +135,12 @@ fn pair(
 /// The tilt card's static body: it needs no state, only a pointer.
 fn tilt_body(label: &str) -> AnyView<AppState> {
     any(SizedBox(Some(220.0), Some(140.0)).child(
-        Column(vec![
-            gap(16.0),
-            any(text(label.to_string()).size(15.0)),
-            gap(8.0),
-            muted("Hover to lean."),
-        ])
-        .cross_axis(CrossAxisAlignment::Start),
+        column()
+            .child(gap(16.0))
+            .child(text(label.to_string()).size(15.0))
+            .child(gap(8.0))
+            .child(muted("Hover to lean."))
+            .cross_axis(CrossAxisAlignment::Start),
     ))
 }
 
@@ -220,7 +227,8 @@ fn carousel_items() -> Vec<AnyView<AppState>> {
     CAROUSEL_ITEMS
         .iter()
         .map(|label| {
-            any(Column(vec![any(text(label.to_string()).size(14.0))])
+            any(column()
+                .child(text(label.to_string()).size(14.0))
                 .cross_axis(CrossAxisAlignment::Center))
         })
         .collect()
@@ -370,29 +378,27 @@ fn shader_showcase() -> AnyView<AppState> {
         if index > 0 {
             row.push(hgap(16.0));
         }
-        row.push(any(Column(vec![
-            shader_tile(variant, over_card),
-            gap(6.0),
-            any(caption(variant.label())),
-        ])
-        .cross_axis(CrossAxisAlignment::Start)));
+        row.push(any(column()
+            .child(shader_tile(variant, over_card))
+            .child(gap(6.0))
+            .child(caption(variant.label()))
+            .cross_axis(CrossAxisAlignment::Start)));
     }
 
-    any(Column(vec![
-        any(text("shader_background").size(16.0)),
-        gap(4.0),
-        muted(
+    any(column()
+        .child(text("shader_background").size(16.0))
+        .child(gap(4.0))
+        .child(muted(
             "Not behind `gpu-effects` at all — every tile here is a \
                  Command::ShaderQuad the engine renders unconditionally. Two of \
                  the three carry a clock (mesh-gradient, waves); the third \
                  (dot-grid) is a static, transparent-backdrop pattern shown here \
                  over a tinted card to demonstrate the premultiplied composite. \
                  The full five-variant contact sheet lives on Motion \u{b7} Shader.",
-        ),
-        gap(12.0),
-        any(Row(row).cross_axis(CrossAxisAlignment::Start)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+        ))
+        .child(gap(12.0))
+        .child(Row(row).cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 // ---- availability ----------------------------------------------------
@@ -425,26 +431,25 @@ fn availability_note() -> String {
 
 /// The GPU Effects page.
 pub fn page() -> AnyView<AppState> {
-    any(Column(vec![
-        any(heading("GPU Effects")),
-        gap(8.0),
-        muted(
+    any(column()
+        .child(heading("GPU Effects"))
+        .child(gap(8.0))
+        .child(muted(
             "Five components carry an opt-in true-3D surface behind the \
                  non-default `gpu-effects` cargo feature \u{2014} real perspective \
                  through an offscreen render the engine composites, rather than \
                  the scene's affine transform. Each pair below is the same \
                  component twice: its ordinary 2D path, and the 3D opt-in.",
-        ),
-        gap(6.0),
-        muted(availability_note()),
-        gap(28.0),
-        tilt_pair(),
-        wheel_pair(),
-        carousel_pair(),
-        folder_pair(),
-        wallet_pair(),
-        gap(4.0),
-        shader_showcase(),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+        ))
+        .child(gap(6.0))
+        .child(muted(availability_note()))
+        .child(gap(28.0))
+        .child(tilt_pair())
+        .child(wheel_pair())
+        .child(carousel_pair())
+        .child(folder_pair())
+        .child(wallet_pair())
+        .child(gap(4.0))
+        .child(shader_showcase())
+        .cross_axis(CrossAxisAlignment::Start))
 }

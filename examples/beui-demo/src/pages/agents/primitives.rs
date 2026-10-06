@@ -38,7 +38,8 @@ use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, FrameTime, Row, SizedBox, any, component, text,
+    AnyView, Column, Component, CrossAxisAlignment, FrameTime, SizedBox, any, column, component,
+    row, text,
 };
 use frust_beui::agents::loading_states::{LoadingStatesVariant, loading_states};
 use frust_beui::agents::message::{MessageFrom, message, message_marker};
@@ -348,19 +349,20 @@ fn bubble_name(variant: MessageBubbleVariant) -> &'static str {
 
 /// One labelled bubble specimen.
 fn bubble_sample(variant: MessageBubbleVariant) -> AnyView<State> {
-    any(Column(vec![
-        any(caption(bubble_name(variant))),
-        any(SizedBox(None, Some(6.0))),
-        any(message_bubble::<State, _>(
-            text(format!(
-                "{} \u{2014} the surface a message is painted on.",
-                bubble_name(variant)
-            ))
-            .size(14.0),
-        )
-        .variant(variant)
-        .align(MessageBubbleAlign::Start)),
-    ]))
+    any(column()
+        .child(caption(bubble_name(variant)))
+        .child(SizedBox(None, Some(6.0)))
+        .child(
+            message_bubble::<State, _>(
+                text(format!(
+                    "{} \u{2014} the surface a message is painted on.",
+                    bubble_name(variant)
+                ))
+                .size(14.0),
+            )
+            .variant(variant)
+            .align(MessageBubbleAlign::Start),
+        ))
 }
 
 /// `message_bubble`: every variant, both alignments, and the two group
@@ -415,19 +417,18 @@ fn bubbles() -> AnyView<State> {
 /// `message`: the row a bubble sits in — avatar, sender metadata, content
 /// slot, footer — plus the centred marker.
 fn message_rows() -> AnyView<State> {
-    any(Column(vec![
-        any(sub_heading("message")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    any(column()
+        .child(sub_heading("message"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "The row, not the surface: an avatar (initials, not an image slot), \
              a name/timestamp header, any content, and a footer. A user row is \
              mirrored and anchors its entrance to the trailing edge.",
-        )),
-        any(SizedBox(None, Some(12.0))),
-        any(message_marker("Today")),
-        any(SizedBox(None, Some(12.0))),
-        any(
-            message::<State, _>(
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .child(message_marker("Today"))
+        .child(SizedBox(None, Some(12.0)))
+        .child(message::<State, _>(
                 MessageFrom::Assistant,
                 message_bubble::<State, _>(
                     text("The row hands its content slot whatever you give it \u{2014} a bubble here, a tool card elsewhere.")
@@ -436,11 +437,9 @@ fn message_rows() -> AnyView<State> {
             )
             .avatar("AI")
             .name("beUI Agent")
-            .timestamp("10:24"),
-        ),
-        any(SizedBox(None, Some(12.0))),
-        any(
-            message::<State, _>(
+            .timestamp("10:24"))
+        .child(SizedBox(None, Some(12.0)))
+        .child(message::<State, _>(
                 MessageFrom::User,
                 message_bubble::<State, _>(text("And a sent row mirrors itself.").size(14.0))
                     .variant(MessageBubbleVariant::Solid)
@@ -449,20 +448,16 @@ fn message_rows() -> AnyView<State> {
             .avatar("You")
             .name("You")
             .timestamp("10:25")
-            .footer("Sent"),
-        ),
-        any(SizedBox(None, Some(12.0))),
-        any(
-            message::<State, _>(
+            .footer("Sent"))
+        .child(SizedBox(None, Some(12.0)))
+        .child(message::<State, _>(
                 MessageFrom::Assistant,
                 message_bubble::<State, _>(
                     text("A placeholder avatar keeps a follow-up row aligned with the one above it.")
                         .size(14.0),
                 ),
             )
-            .avatar_placeholder(true),
-        ),
-    ]))
+            .avatar_placeholder(true)))
 }
 
 /// `message_scroller`: the pin-to-the-live-edge viewport, in a box with a
@@ -489,18 +484,18 @@ fn scroller(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(Column(vec![
-        any(sub_heading("message_scroller")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    any(column()
+        .child(sub_heading("message_scroller"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "The scroller owns its own offset \u{2014} the baseline scroll view \
              publishes neither an offset read nor a write seam, and pinning has \
              to act on a rebuild, which dispatches no event. It needs a bounded \
              height to have anything to scroll, and the gallery's page slot is \
              itself a scroll view, so the demo pins it to 300px here.",
-        )),
-        any(SizedBox(None, Some(10.0))),
-        any(caption(format!(
+        ))
+        .child(SizedBox(None, Some(10.0)))
+        .child(caption(format!(
             "{} rows \u{2014} {}. Scroll away from the end to unpin: arrivals \
              then preserve your place and the jump button appears. Press it, or \
              scroll back inside the 56px band, to re-pin.",
@@ -510,25 +505,26 @@ fn scroller(state: &State) -> AnyView<State> {
             } else {
                 "unpinned"
             }
-        ))),
-        any(SizedBox(None, Some(12.0))),
-        any(
+        )))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
             SizedBox(None, Some(300.0)).child(message_scroller::<State>(rows).on_pin_change(
                 |s: &mut State, pinned| {
                     s.pinned = pinned;
                 },
             )),
-        ),
-        any(SizedBox(None, Some(12.0))),
-        any(button("Simulate incoming", |s: &mut State| {
-            let index = s.arrivals % ARRIVALS.len();
-            s.arrivals += 1;
-            s.transcript
-                .push((MessageFrom::Assistant, ARRIVALS[index].to_string()));
-        })
-        .tone(ButtonTone::Outline)
-        .size(ButtonSize::Sm)),
-    ]))
+        )
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            button("Simulate incoming", |s: &mut State| {
+                let index = s.arrivals % ARRIVALS.len();
+                s.arrivals += 1;
+                s.transcript
+                    .push((MessageFrom::Assistant, ARRIVALS[index].to_string()));
+            })
+            .tone(ButtonTone::Outline)
+            .size(ButtonSize::Sm),
+        ))
 }
 
 /// `prompt_input`: the composer, controlled, with a live send state and a
@@ -540,18 +536,18 @@ fn composer(state: &State) -> AnyView<State> {
         None => "Nothing submitted yet.".to_string(),
     };
 
-    any(Column(vec![
-        any(sub_heading("prompt_input")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    any(column()
+        .child(sub_heading("prompt_input"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "Controlled: the widget never owns the text. Submitting starts a \
              900ms mock send, during which the send affordance becomes a stop \
              button. Upstream's model selector and prompt-actions popover are \
              not folded in \u{2014} they are shipped components a caller composes \
              beside the composer.",
-        )),
-        any(SizedBox(None, Some(12.0))),
-        any(
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
             prompt_input::<State, _>(state.draft.clone(), |s: &mut State, value| {
                 s.draft = value;
             })
@@ -568,14 +564,13 @@ fn composer(state: &State) -> AnyView<State> {
             .on_stop(|s: &mut State| {
                 s.sending = false;
             }),
-        ),
-        any(SizedBox(None, Some(10.0))),
-        any(caption(format!(
+        )
+        .child(SizedBox(None, Some(10.0)))
+        .child(caption(format!(
             "Send state: {}. {sent}",
             send_state.label()
-        ))),
-        any(state.clock.pump(state.sending)),
-    ]))
+        )))
+        .child(state.clock.pump(state.sending)))
 }
 
 /// `streaming_response`: the replay, plus a settled and a failed instance.
@@ -587,92 +582,101 @@ fn streaming(state: &State) -> AnyView<State> {
         StreamingResponseStatus::Complete
     };
 
-    any(Column(vec![
-        any(sub_heading("streaming_response")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    any(column()
+        .child(sub_heading("streaming_response"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "Append-driven, not per-character: the whole answer is one wrapped \
              run and only the glyphs past the settled prefix fade in, so an \
              append never re-animates what is already on screen. The block \
              cursor is the port's own still-streaming affordance; markdown is \
              the caller's.",
-        )),
-        any(SizedBox(None, Some(12.0))),
-        any(streaming_response(revealed).status(status).size(14.0)),
-        any(SizedBox(None, Some(12.0))),
-        any(Row(vec![
-            any(button("Replay", |s: &mut State| {
-                s.streaming = true;
-                s.stream_elapsed = Duration::ZERO;
-            })
-            .tone(ButtonTone::Outline)
-            .size(ButtonSize::Sm)),
-            any(SizedBox(Some(8.0), None)),
-            any(button("Stop", |s: &mut State| {
-                s.streaming = false;
-            })
-            .tone(ButtonTone::Ghost)
-            .size(ButtonSize::Sm)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center)),
-        any(SizedBox(None, Some(16.0))),
-        any(caption(
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .child(streaming_response(revealed).status(status).size(14.0))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            row()
+                .child(
+                    button("Replay", |s: &mut State| {
+                        s.streaming = true;
+                        s.stream_elapsed = Duration::ZERO;
+                    })
+                    .tone(ButtonTone::Outline)
+                    .size(ButtonSize::Sm),
+                )
+                .child(SizedBox(Some(8.0), None))
+                .child(
+                    button("Stop", |s: &mut State| {
+                        s.streaming = false;
+                    })
+                    .tone(ButtonTone::Ghost)
+                    .size(ButtonSize::Sm),
+                )
+                .cross_axis(CrossAxisAlignment::Center),
+        )
+        .child(SizedBox(None, Some(16.0)))
+        .child(caption(
             "Error status \u{2014} the body paints in the destructive ink.",
-        )),
-        any(SizedBox(None, Some(6.0))),
-        any(
+        ))
+        .child(SizedBox(None, Some(6.0)))
+        .child(
             streaming_response("The stream ended before the answer did.")
                 .status(StreamingResponseStatus::Error)
                 .size(14.0),
-        ),
-        any(state.clock.pump(state.streaming)),
-    ]))
+        )
+        .child(state.clock.pump(state.streaming)))
 }
 
 /// `loading_states`: all four variants, running.
 fn loading() -> AnyView<State> {
-    any(Column(vec![
-        any(sub_heading("loading_states")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    any(column()
+        .child(sub_heading("loading_states"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "Four indicators in one leaf. Reasoning leads with the dot row \
              rather than upstream's ASCII loader and ships the swap transition \
              only \u{2014} the cascade and scramble variants already exist, \
              better, as text_animation. The Progress timer counts from the frame \
              it first painted, since framework-tier code reads no wall clock.",
-        )),
-        any(SizedBox(None, Some(12.0))),
-        any(caption("Dots \u{2014} the typing indicator")),
-        any(SizedBox(None, Some(6.0))),
-        any(loading_states().variant(LoadingStatesVariant::Dots)),
-        any(SizedBox(None, Some(14.0))),
-        any(caption("Shimmer \u{2014} thinking-shimmer")),
-        any(SizedBox(None, Some(6.0))),
-        any(loading_states()
-            .variant(LoadingStatesVariant::Shimmer)
-            .label("Thinking\u{2026}")),
-        any(SizedBox(None, Some(14.0))),
-        any(caption(
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .child(caption("Dots \u{2014} the typing indicator"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(loading_states().variant(LoadingStatesVariant::Dots))
+        .child(SizedBox(None, Some(14.0)))
+        .child(caption("Shimmer \u{2014} thinking-shimmer"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(
+            loading_states()
+                .variant(LoadingStatesVariant::Shimmer)
+                .label("Thinking\u{2026}"),
+        )
+        .child(SizedBox(None, Some(14.0)))
+        .child(caption(
             "Progress \u{2014} activity glyph, verb and live timer",
-        )),
-        any(SizedBox(None, Some(6.0))),
-        any(loading_states()
-            .variant(LoadingStatesVariant::Progress)
-            .label("Reviewing the checkout flow")),
-        any(SizedBox(None, Some(14.0))),
-        any(caption(
+        ))
+        .child(SizedBox(None, Some(6.0)))
+        .child(
+            loading_states()
+                .variant(LoadingStatesVariant::Progress)
+                .label("Reviewing the checkout flow"),
+        )
+        .child(SizedBox(None, Some(14.0)))
+        .child(caption(
             "Reasoning \u{2014} phrases swapping on an interval",
-        )),
-        any(SizedBox(None, Some(6.0))),
-        any(loading_states()
-            .variant(LoadingStatesVariant::Reasoning)
-            .phrases([
-                "Thinking",
-                "Reading the request",
-                "Working through the details",
-                "Preparing the answer",
-            ])),
-    ]))
+        ))
+        .child(SizedBox(None, Some(6.0)))
+        .child(
+            loading_states()
+                .variant(LoadingStatesVariant::Reasoning)
+                .phrases([
+                    "Thinking",
+                    "Reading the request",
+                    "Working through the details",
+                    "Preparing the answer",
+                ]),
+        ))
 }
 
 // ---- The page --------------------------------------------------------------
@@ -695,27 +699,26 @@ impl Component for Primitives {
         let delta = state.clock.tick();
         state.advance(delta);
 
-        any(Column(vec![
-            any(heading("Agents \u{b7} Primitives")),
-            any(SizedBox(None, Some(8.0))),
-            any(caption(
+        any(column()
+            .child(heading("Agents \u{b7} Primitives"))
+            .child(SizedBox(None, Some(8.0)))
+            .child(caption(
                 "The parts a transcript is assembled from. Agent-supplied text \
                  is neutralised on ingestion, so a caption or a bubble body \
                  cannot smuggle control characters into the surface.",
-            )),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            bubbles(),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            message_rows(),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            scroller(state),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            composer(state),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            streaming(state),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            loading(),
-        ]))
+            ))
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(bubbles())
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(message_rows())
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(scroller(state))
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(composer(state))
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(streaming(state))
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(loading()))
     }
 }
 

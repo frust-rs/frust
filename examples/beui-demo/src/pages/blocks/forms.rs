@@ -46,7 +46,7 @@ use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 
 use frust::{
     AnyView, Axis, Column, Component, CrossAxisAlignment, FlexView, SizedBox, TextView, View, any,
-    component, inflexible, text,
+    column, component, inflexible, text,
 };
 
 use crate::AppState;
@@ -191,17 +191,17 @@ fn minor(label: impl Into<String>, on_press: impl Fn(&mut State) + 'static) -> A
 /// The OTP block: six slots, typed entry, and the error state the wrong code
 /// puts it in.
 fn otp_block(state: &State) -> AnyView<State> {
-    any(Column(vec![
-        any(section("otp_input")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("otp_input"))
+        .child(gap(6.0))
+        .child(caption(
             "Six slots that fill as digits are typed, the caret walking forward and Backspace \
              walking back. Typed entry only — there is no paste or platform autofill path behind \
              this block. Enter the hinted code for the success state, anything else for the error \
              one.",
-        )),
-        gap(10.0),
-        any(
+        ))
+        .child(gap(10.0))
+        .child(
             otp_input(state.otp_value.clone(), |s: &mut State, code: String| {
                 s.otp_value = code;
                 s.otp_status = OtpStatus::Idle;
@@ -218,13 +218,12 @@ fn otp_block(state: &State) -> AnyView<State> {
                     OtpStatus::Error
                 };
             }),
-        ),
-        gap(10.0),
-        controls(vec![minor("Clear", |s: &mut State| {
+        )
+        .child(gap(10.0))
+        .child(controls(vec![minor("Clear", |s: &mut State| {
             s.otp_value.clear();
             s.otp_status = OtpStatus::Idle;
-        })]),
-    ]))
+        })])))
 }
 
 // ---- The sign-up form ------------------------------------------------------
@@ -232,24 +231,23 @@ fn otp_block(state: &State) -> AnyView<State> {
 /// The sign-up block: the five fields, the strength meter, and the rejection
 /// upstream's own preview wires up.
 fn signup_block(state: &State) -> AnyView<State> {
-    any(Column(vec![
-        any(section("signup_form")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("signup_form"))
+        .child(gap(6.0))
+        .child(caption(
             "Five controlled fields under the block's own rule set — required names, an address \
              shape, a password floor, a confirmation match and the terms box — each error \
              appearing and clearing on its own ramp. Sign up with taken@example.com to see the \
              failure state.",
-        )),
-        gap(10.0),
-        signup_view(state),
-        gap(10.0),
-        controls(vec![minor("Reset form", |s: &mut State| {
+        ))
+        .child(gap(10.0))
+        .child(signup_view(state))
+        .child(gap(10.0))
+        .child(controls(vec![minor("Reset form", |s: &mut State| {
             s.signup_values = SignupValues::default();
             s.signup_status = SignupStatus::Idle;
             s.signup_error = None;
-        })]),
-    ]))
+        })])))
 }
 
 /// The form itself. `error_message` is only chained when there *is* one — the
@@ -311,51 +309,53 @@ fn upload_block(state: &State) -> AnyView<State> {
     })
     .collect();
 
-    any(Column(vec![
-        any(section("file_upload")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("file_upload"))
+        .child(gap(6.0))
+        .child(caption(
             "A dropzone over a queue: one row per file with its own progress track, status glyph, \
              retry and remove. The block is programmatic — frust publishes no file-drop signal, so \
              the dropzone reports a press through `on_browse` and files arrive through \
              `add_files`, while `dragging` stays a prop for an app that has a drag signal of its \
              own. Under reduce_motion a removed row vanishes at once rather than playing its exit.",
-        )),
-        gap(10.0),
-        controls(variant_buttons),
-        gap(10.0),
-        any(file_upload(state.upload_items.clone(), |s: &mut State| {
-            // What a host's file dialog would hand back. `add_files` is the
-            // block's own slot arithmetic, so the cap below is enforced here
-            // exactly as it would be for real files.
-            s.upload_seq += 1;
-            let index = s.upload_seq;
-            let incoming = vec![
-                file_upload_item(
-                    format!("picked-{index}"),
-                    format!("capture-{index:02}.png"),
-                    1_240_000 + (index as u64) * 90_000,
-                )
-                .mime("image/png"),
-            ];
-            add_files(&mut s.upload_items, incoming, true, Some(6));
-        })
-        .variant(state.upload_variant)
-        .title("Drop files here")
-        .description("Add files to the upload queue")
-        .browse_label("Browse")
-        .max_files(6)
-        .dragging(state.upload_dragging)
-        .on_remove(|s: &mut State, id: String| s.upload_items.retain(|item| item.id != id))
-        .on_retry(|s: &mut State, id: String| {
-            for item in &mut s.upload_items {
-                if item.id == id {
-                    *item = item.clone().retrying();
+        ))
+        .child(gap(10.0))
+        .child(controls(variant_buttons))
+        .child(gap(10.0))
+        .child(
+            file_upload(state.upload_items.clone(), |s: &mut State| {
+                // What a host's file dialog would hand back. `add_files` is the
+                // block's own slot arithmetic, so the cap below is enforced here
+                // exactly as it would be for real files.
+                s.upload_seq += 1;
+                let index = s.upload_seq;
+                let incoming = vec![
+                    file_upload_item(
+                        format!("picked-{index}"),
+                        format!("capture-{index:02}.png"),
+                        1_240_000 + (index as u64) * 90_000,
+                    )
+                    .mime("image/png"),
+                ];
+                add_files(&mut s.upload_items, incoming, true, Some(6));
+            })
+            .variant(state.upload_variant)
+            .title("Drop files here")
+            .description("Add files to the upload queue")
+            .browse_label("Browse")
+            .max_files(6)
+            .dragging(state.upload_dragging)
+            .on_remove(|s: &mut State, id: String| s.upload_items.retain(|item| item.id != id))
+            .on_retry(|s: &mut State, id: String| {
+                for item in &mut s.upload_items {
+                    if item.id == id {
+                        *item = item.clone().retrying();
+                    }
                 }
-            }
-        })),
-        gap(10.0),
-        controls(vec![
+            }),
+        )
+        .child(gap(10.0))
+        .child(controls(vec![
             minor("Advance uploads", |s: &mut State| {
                 // The stand-in for a transfer: a real app steps progress from
                 // its own timer or IO completion, not from a button.
@@ -381,56 +381,56 @@ fn upload_block(state: &State) -> AnyView<State> {
                 s.upload_items = seed_uploads();
                 s.upload_seq = 0;
             }),
-        ]),
-        gap(8.0),
-        any(caption(format!(
+        ]))
+        .child(gap(8.0))
+        .child(caption(format!(
             "{} of 6 slots used",
             state.upload_items.len()
-        ))),
-    ]))
+        ))))
 }
 
 // ---- The feedback widget ---------------------------------------------------
 
 /// The feedback block: the corner trigger and its four panel states.
 fn feedback_block(state: &State) -> AnyView<State> {
-    any(Column(vec![
-        any(section("feedback_widget")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("feedback_widget"))
+        .child(gap(6.0))
+        .child(caption(
             "A corner trigger that morphs open into a message panel and back, carrying its own \
              sending, thanks and failure views. The first submission here fails so the retry view \
              is reachable; the second succeeds.",
-        )),
-        gap(10.0),
-        any(feedback_widget(
-            state.feedback_status,
-            state.feedback_message.clone(),
-            |s: &mut State, status: FeedbackStatus| s.feedback_status = status,
-            |s: &mut State, message: String| s.feedback_message = message,
+        ))
+        .child(gap(10.0))
+        .child(
+            feedback_widget(
+                state.feedback_status,
+                state.feedback_message.clone(),
+                |s: &mut State, status: FeedbackStatus| s.feedback_status = status,
+                |s: &mut State, message: String| s.feedback_message = message,
+            )
+            .position(FeedbackPosition::BottomRight)
+            .title("Help us improve")
+            .placeholder("Share an idea or report a bug")
+            .on_submit(|s: &mut State, message: String| {
+                s.feedback_attempts += 1;
+                s.feedback_message = message;
+                // The send is synchronous here; a real app would sit in
+                // `Sending` until its request answered.
+                s.feedback_status = if s.feedback_attempts == 1 {
+                    FeedbackStatus::Error
+                } else {
+                    s.feedback_message.clear();
+                    FeedbackStatus::Sent
+                };
+            }),
         )
-        .position(FeedbackPosition::BottomRight)
-        .title("Help us improve")
-        .placeholder("Share an idea or report a bug")
-        .on_submit(|s: &mut State, message: String| {
-            s.feedback_attempts += 1;
-            s.feedback_message = message;
-            // The send is synchronous here; a real app would sit in
-            // `Sending` until its request answered.
-            s.feedback_status = if s.feedback_attempts == 1 {
-                FeedbackStatus::Error
-            } else {
-                s.feedback_message.clear();
-                FeedbackStatus::Sent
-            };
-        })),
-        gap(10.0),
-        controls(vec![minor("Reset attempts", |s: &mut State| {
+        .child(gap(10.0))
+        .child(controls(vec![minor("Reset attempts", |s: &mut State| {
             s.feedback_attempts = 0;
             s.feedback_message.clear();
             s.feedback_status = FeedbackStatus::Idle;
-        })]),
-    ]))
+        })])))
 }
 
 // ---- The availability scheduler --------------------------------------------
@@ -572,18 +572,20 @@ fn copy_panel(state: &State) -> Option<AnyView<State>> {
         })
         .collect();
 
-    Some(any(Column(vec![
-        any(caption(format!(
+    Some(any(column()
+        .child(caption(format!(
             "Copy {}\u{2019}s hours to\u{2026}",
             from.label()
-        ))),
-        gap(8.0),
-        controls(targets),
-        gap(6.0),
-        controls(vec![minor("Cancel copy", |s: &mut State| {
-            s.copy_source = None;
-        })]),
-    ])))
+        )))
+        .child(gap(8.0))
+        .child(controls(targets))
+        .child(gap(6.0))
+        .child(controls(vec![minor(
+            "Cancel copy",
+            |s: &mut State| {
+                s.copy_source = None;
+            },
+        )]))))
 }
 
 /// How many hours the week currently holds, for the readout under the block.
@@ -693,25 +695,24 @@ impl Component for FormsPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(Column(vec![
-            any(heading("Blocks \u{b7} Forms")),
-            gap(8.0),
-            any(caption(
+        any(column()
+            .child(heading("Blocks \u{b7} Forms"))
+            .child(gap(8.0))
+            .child(caption(
                 "Five data-entry blocks, every one of them controlled: the value, the status and \
                  the open panel are the caller\u{2019}s, and each block reports what it would like \
                  to happen instead of doing it.",
-            )),
-            gap(24.0),
-            otp_block(state),
-            gap(24.0),
-            signup_block(state),
-            gap(24.0),
-            upload_block(state),
-            gap(24.0),
-            feedback_block(state),
-            gap(24.0),
-            scheduler_block(state),
-        ]))
+            ))
+            .child(gap(24.0))
+            .child(otp_block(state))
+            .child(gap(24.0))
+            .child(signup_block(state))
+            .child(gap(24.0))
+            .child(upload_block(state))
+            .child(gap(24.0))
+            .child(feedback_block(state))
+            .child(gap(24.0))
+            .child(scheduler_block(state)))
     }
 }
 

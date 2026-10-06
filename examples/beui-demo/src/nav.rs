@@ -25,8 +25,8 @@
 //! what is on when the feature is off.
 
 use frust::{
-    AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, IconSource, Padding, SizedBox, View,
-    any, flexible, icon, icons, inflexible, scroll_view, text,
+    AnyView, CrossAxisAlignment, EdgeInsets, IconSource, Padding, SizedBox, View, any, column,
+    icon, icons, row, scroll_view, text,
 };
 use frust_beui::components::animated_sidebar::{
     AnimatedSidebarView, SidebarItem, animated_sidebar, sidebar_item,
@@ -195,22 +195,20 @@ pub fn shell_sidebar(state: &AppState) -> AnimatedSidebarView<AppState> {
 /// a persistent [`theme_toggle`] — the scheme switch reachable from every
 /// page, not just [`crate::pages::theming`]'s own copy.
 pub fn top_bar(page: Page, open: bool) -> impl View<AppState> + use<> {
-    let bar = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(any(button(
+    let bar = row()
+        .child(
+            button(
                 if open { "Collapse" } else { "Expand" },
                 |s: &mut AppState| s.sidebar_open = !s.sidebar_open,
             )
             .tone(ButtonTone::Ghost)
-            .size(ButtonSize::Sm))),
-            inflexible(any(SizedBox(Some(12.0), None))),
-            inflexible(any(text(page.title()).size(16.0))),
-            inflexible(any(SizedBox(Some(12.0), None))),
-            inflexible(any(theme_toggle::<AppState>())),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center);
+            .size(ButtonSize::Sm),
+        )
+        .child(SizedBox(Some(12.0), None))
+        .child(text(page.title()).size(16.0))
+        .child(SizedBox(Some(12.0), None))
+        .child(theme_toggle::<AppState>())
+        .cross_axis(CrossAxisAlignment::Center);
 
     Padding(
         EdgeInsets {
@@ -236,11 +234,10 @@ pub fn shell_inset(
     open: bool,
     content: AnyView<AppState>,
 ) -> impl View<AppState> + use<> {
-    FlexView::new(
-        Axis::Vertical,
-        vec![inflexible(any(top_bar(page, open))), flexible(1, content)],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch)
+    column()
+        .child(top_bar(page, open))
+        .flex(1, content)
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// A section heading used atop every gallery page.

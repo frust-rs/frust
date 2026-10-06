@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, component, text,
+    AnyView, Component, CrossAxisAlignment, SizedBox, View, any, column, component, row, text,
 };
 use frust_beui::agents::approval_card::{ApprovalCardAction, ApprovalCardStatus, approval_card};
 use frust_beui::agents::citations::{
@@ -354,31 +354,32 @@ fn code_panel(state: &State) -> AnyView<State> {
         CodeBlockStatus::Complete
     };
 
-    any(Column(vec![
-        any(sub_heading("code_block")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    any(column()
+        .child(sub_heading("code_block"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "Nothing infers syntax here \u{2014} the colours are the caller's own \
              CodeSpan list, one per line, and an unsupplied line stays \
              monochrome. There is no scroll container: a long line is clipped at \
              the right edge and the height cap is a clip, so `follow` pins the \
              window to the last lines instead of scrolling to them. Copy reports \
              the press; the app owns the clipboard.",
-        )),
-        any(SizedBox(None, Some(12.0))),
-        any(code_block::<State>(code)
-            .colored(colored)
-            .language("typescript")
-            .filename("summarize.ts")
-            .status(status)
-            .highlight_lines(vec![4, 5, 6, 7])
-            .max_height(224.0)
-            .follow(true)
-            .collapsed(state.code_collapsed)
-            .on_collapse_change(|s: &mut State, collapsed| s.code_collapsed = collapsed)
-            .on_copy(|s: &mut State| s.copied = Some("code_block"))),
-        any(state.clock.pump(state.replaying)),
-    ]))
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            code_block::<State>(code)
+                .colored(colored)
+                .language("typescript")
+                .filename("summarize.ts")
+                .status(status)
+                .highlight_lines(vec![4, 5, 6, 7])
+                .max_height(224.0)
+                .follow(true)
+                .collapsed(state.code_collapsed)
+                .on_collapse_change(|s: &mut State, collapsed| s.code_collapsed = collapsed)
+                .on_copy(|s: &mut State| s.copied = Some("code_block")),
+        )
+        .child(state.clock.pump(state.replaying)))
 }
 
 /// `file_diff`: a synthetic diff model, streamed row by row.
@@ -401,34 +402,35 @@ fn diff_panel(state: &State) -> AnyView<State> {
         visible
     );
 
-    any(Column(vec![
-        any(sub_heading("file_diff")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    any(column()
+        .child(sub_heading("file_diff"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "The panel takes a parsed model, never a patch string \u{2014} nothing \
              here parses unified diff. Rows are monochrome unless the caller \
              colours them, the disclosure is controlled end to end (the panel \
              never opens or closes itself on a status change), and the copy \
              affordance sits in the header so it stays reachable while the file \
              is collapsed.",
-        )),
-        any(SizedBox(None, Some(12.0))),
-        any(file_diff::<State>(model)
-            .status(status)
-            .open(state.diff_open)
-            .open_hunks(state.diff_hunks.clone())
-            .max_height(150.0)
-            .on_open_change(|s: &mut State, open| s.diff_open = open)
-            .on_hunk_toggle(|s: &mut State, index| {
-                if let Some(slot) = s.diff_hunks.get_mut(index) {
-                    *slot = !*slot;
-                }
-            })
-            .on_copy(|s: &mut State| s.copied = Some("file_diff"))),
-        any(SizedBox(None, Some(8.0))),
-        any(caption(counts)),
-        any(state.clock.pump(state.replaying)),
-    ]))
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            file_diff::<State>(model)
+                .status(status)
+                .open(state.diff_open)
+                .open_hunks(state.diff_hunks.clone())
+                .max_height(150.0)
+                .on_open_change(|s: &mut State, open| s.diff_open = open)
+                .on_hunk_toggle(|s: &mut State, index| {
+                    if let Some(slot) = s.diff_hunks.get_mut(index) {
+                        *slot = !*slot;
+                    }
+                })
+                .on_copy(|s: &mut State| s.copied = Some("file_diff")),
+        )
+        .child(SizedBox(None, Some(8.0)))
+        .child(caption(counts))
+        .child(state.clock.pump(state.replaying)))
 }
 
 /// A monospace payload block, the shape every tool result's output takes.
@@ -469,21 +471,20 @@ fn result_panels(state: &State) -> AnyView<State> {
         live.duration(Duration::from_millis(2900))
     };
 
-    any(Column(vec![
-        any(sub_heading("tool_result")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    any(column()
+        .child(sub_heading("tool_result"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "Running, success, error and cancelled. Only the status glyph morphs \
              \u{2014} upstream rolls every label through its swap cell, which a leaf \
              panel shaping its own runs cannot reach. There is no scroll \
              container, so a payload past the height cap is clipped, and the \
              disclosure is the caller's.",
-        )),
-        any(SizedBox(None, Some(12.0))),
-        any(live),
-        any(SizedBox(None, Some(12.0))),
-        any(
-            tool_result::<State, _>(
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .child(live)
+        .child(SizedBox(None, Some(12.0)))
+        .child(tool_result::<State, _>(
                 "http.request",
                 "Request failed",
                 output("{\n  \"error\": \"rate_limit_exceeded\",\n  \"retryAfter\": 30,\n  \"requestId\": \"req_8f21\"\n}"),
@@ -492,21 +493,17 @@ fn result_panels(state: &State) -> AnyView<State> {
             .status(ToolResultStatus::Error)
             .meta("429")
             .max_height(150.0)
-            .on_retry(|s: &mut State| s.replay()),
-        ),
-        any(SizedBox(None, Some(12.0))),
-        any(
-            tool_result::<State, _>(
+            .on_retry(|s: &mut State| s.replay()))
+        .child(SizedBox(None, Some(12.0)))
+        .child(tool_result::<State, _>(
                 "terminal.run",
                 "Checkout checks were not run",
                 output("Permission was not granted. No command was run."),
             )
             .kind(ToolResultKind::Terminal)
             .status(ToolResultStatus::Cancelled)
-            .max_height(150.0),
-        ),
-        any(state.clock.pump(state.replaying)),
-    ]))
+            .max_height(150.0))
+        .child(state.clock.pump(state.replaying)))
 }
 
 /// `tool_approval`: the real consent surface, reporting its identity.
@@ -516,10 +513,10 @@ fn approval_panel(state: &State) -> AnyView<State> {
         None => "No decision yet.".to_string(),
     };
 
-    any(Column(vec![
-        any(sub_heading("tool_approval")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    any(column()
+        .child(sub_heading("tool_approval"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "One decision per consent episode: a press latches until the status, \
              the head text, the offered buttons or the id change. The decision \
              is reported with the identity of the card that carried it \u{2014} \
@@ -528,66 +525,70 @@ fn approval_panel(state: &State) -> AnyView<State> {
              is not an identity. Parameter values are wrapped mono runs, not \
              code blocks, and an overflowing one paints a trailing ellipsis \
              rather than eliding consent-bearing text silently.",
-        )),
-        any(SizedBox(None, Some(12.0))),
-        any(tool_approval::<State>("terminal.run")
-            .title(if state.approval.is_pending() {
-                "Run focused checkout checks?"
-            } else {
-                "Terminal access"
-            })
-            .description(
-                "The agent needs permission to run the validation and \
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            tool_approval::<State>("terminal.run")
+                .title(if state.approval.is_pending() {
+                    "Run focused checkout checks?"
+                } else {
+                    "Terminal access"
+                })
+                .description(
+                    "The agent needs permission to run the validation and \
                      accessibility suites in the current workspace.",
-            )
-            .parameters(vec![
-                tool_approval_parameter("Command", "bun test checkout --coverage"),
-                tool_approval_parameter("Scope", "Current workspace"),
-            ])
-            .status(state.approval)
-            .open(state.approval_open)
-            .always_allow(true)
-            .id("approval-terminal-run")
-            .on_open_change(|s: &mut State, open| s.approval_open = open)
-            .on_decision_with_id(
-                |s: &mut State, decision: ToolApprovalDecision, id: Option<String>| {
-                    s.decision = Some(format!(
-                        "{} \u{2014} reported by {}",
-                        decision.label(),
-                        id.unwrap_or_else(|| "an unidentified card".to_string())
-                    ));
-                    match decision {
-                        ToolApprovalDecision::Deny => {
-                            s.approval = ToolApprovalStatus::Denied;
-                            s.approval_running = false;
+                )
+                .parameters(vec![
+                    tool_approval_parameter("Command", "bun test checkout --coverage"),
+                    tool_approval_parameter("Scope", "Current workspace"),
+                ])
+                .status(state.approval)
+                .open(state.approval_open)
+                .always_allow(true)
+                .id("approval-terminal-run")
+                .on_open_change(|s: &mut State, open| s.approval_open = open)
+                .on_decision_with_id(
+                    |s: &mut State, decision: ToolApprovalDecision, id: Option<String>| {
+                        s.decision = Some(format!(
+                            "{} \u{2014} reported by {}",
+                            decision.label(),
+                            id.unwrap_or_else(|| "an unidentified card".to_string())
+                        ));
+                        match decision {
+                            ToolApprovalDecision::Deny => {
+                                s.approval = ToolApprovalStatus::Denied;
+                                s.approval_running = false;
+                            }
+                            _ => {
+                                s.approval = ToolApprovalStatus::Approving;
+                                s.approval_elapsed = Duration::ZERO;
+                                s.approval_running = true;
+                            }
                         }
-                        _ => {
-                            s.approval = ToolApprovalStatus::Approving;
-                            s.approval_elapsed = Duration::ZERO;
-                            s.approval_running = true;
-                        }
-                    }
-                },
-            )),
-        any(SizedBox(None, Some(10.0))),
-        any(Row(vec![
-            any(caption(format!(
-                "{decision} Status: {}.",
-                state.approval.label()
-            ))),
-            any(SizedBox(Some(12.0), None)),
-            any(button("Reset", |s: &mut State| {
-                s.approval = ToolApprovalStatus::Pending;
-                s.approval_running = false;
-                s.approval_elapsed = Duration::ZERO;
-                s.decision = None;
-            })
-            .tone(ButtonTone::Ghost)
-            .size(ButtonSize::Sm)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center)),
-        any(state.clock.pump(state.approval_running)),
-    ]))
+                    },
+                ),
+        )
+        .child(SizedBox(None, Some(10.0)))
+        .child(
+            row()
+                .child(caption(format!(
+                    "{decision} Status: {}.",
+                    state.approval.label()
+                )))
+                .child(SizedBox(Some(12.0), None))
+                .child(
+                    button("Reset", |s: &mut State| {
+                        s.approval = ToolApprovalStatus::Pending;
+                        s.approval_running = false;
+                        s.approval_elapsed = Duration::ZERO;
+                        s.decision = None;
+                    })
+                    .tone(ButtonTone::Ghost)
+                    .size(ButtonSize::Sm),
+                )
+                .cross_axis(CrossAxisAlignment::Center),
+        )
+        .child(state.clock.pump(state.approval_running)))
 }
 
 /// `approval_card`: the review surface, with the keyed detail block that is
@@ -597,18 +598,17 @@ fn card_panel(state: &State) -> AnyView<State> {
         Some(line) => line.clone(),
         None => "No action yet.".to_string(),
     };
-    let detail = Column(vec![
-        any(caption("Release  \u{b7}  approval-card")),
-        any(SizedBox::<State>(None, Some(4.0))),
-        any(caption("Checks   \u{b7}  4 passed")),
-        any(SizedBox::<State>(None, Some(4.0))),
-        any(caption("Visibility  \u{b7}  Public registry")),
-    ]);
+    let detail = column()
+        .child(caption("Release  \u{b7}  approval-card"))
+        .child(SizedBox::<State>(None, Some(4.0)))
+        .child(caption("Checks   \u{b7}  4 passed"))
+        .child(SizedBox::<State>(None, Some(4.0)))
+        .child(caption("Visibility  \u{b7}  Public registry"));
 
-    any(Column(vec![
-        any(sub_heading("approval_card")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    any(column()
+        .child(sub_heading("approval_card"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "The review variant; upstream's question wizard is a multi-step form \
              over the catalog's own controls and is deliberately not ported. The \
              detail block is passed through content_keyed \u{2014} a bare .content \
@@ -617,58 +617,61 @@ fn card_panel(state: &State) -> AnyView<State> {
              to changed. Answering collapses the card into its recorded result; \
              Dismiss is never latched and is offered in every status, so it \
              resets this demo rather than answering it.",
-        )),
-        any(SizedBox(None, Some(12.0))),
-        any(approval_card::<State>()
-            .title("Publish the component update?")
-            .description(
-                "The agent has prepared the release and is waiting for your \
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            approval_card::<State>()
+                .title("Publish the component update?")
+                .description(
+                    "The agent has prepared the release and is waiting for your \
                      decision.",
-            )
-            .content_keyed("release-2026-09-03", detail)
-            .status(state.card)
-            .request_changes(true)
-            .reject(true)
-            .dismissible(true)
-            .id("approval-card-release")
-            .result(match state.card {
-                ApprovalCardStatus::Approved => "Publishing was approved.",
-                ApprovalCardStatus::ChangesRequested => "The agent will wait for revision notes.",
-                ApprovalCardStatus::Rejected => "Publishing was declined.",
-                _ => "Waiting on the release decision.",
-            })
-            .on_action_with_id(
-                |s: &mut State, action: ApprovalCardAction, id: Option<String>| {
-                    s.card_note = Some(format!(
-                        "{} \u{2014} reported by {}",
-                        action.label(),
-                        id.unwrap_or_else(|| "an unidentified review".to_string())
-                    ));
-                    let resolved = match action {
-                        ApprovalCardAction::Approve => Some(ApprovalCardStatus::Approved),
-                        ApprovalCardAction::RequestChanges => {
-                            Some(ApprovalCardStatus::ChangesRequested)
-                        }
-                        ApprovalCardAction::Reject => Some(ApprovalCardStatus::Rejected),
-                        ApprovalCardAction::Dismiss => None,
-                    };
-                    match resolved {
-                        Some(status) => {
-                            s.card = ApprovalCardStatus::Submitting;
-                            s.card_pending = Some(status);
-                            s.card_elapsed = Duration::ZERO;
-                        }
-                        None => {
-                            s.card = ApprovalCardStatus::Pending;
-                            s.card_pending = None;
-                        }
+                )
+                .content_keyed("release-2026-09-03", detail)
+                .status(state.card)
+                .request_changes(true)
+                .reject(true)
+                .dismissible(true)
+                .id("approval-card-release")
+                .result(match state.card {
+                    ApprovalCardStatus::Approved => "Publishing was approved.",
+                    ApprovalCardStatus::ChangesRequested => {
+                        "The agent will wait for revision notes."
                     }
-                },
-            )),
-        any(SizedBox(None, Some(10.0))),
-        any(caption(format!("{note} Status: {}.", state.card.label()))),
-        any(state.clock.pump(state.card_pending.is_some())),
-    ]))
+                    ApprovalCardStatus::Rejected => "Publishing was declined.",
+                    _ => "Waiting on the release decision.",
+                })
+                .on_action_with_id(
+                    |s: &mut State, action: ApprovalCardAction, id: Option<String>| {
+                        s.card_note = Some(format!(
+                            "{} \u{2014} reported by {}",
+                            action.label(),
+                            id.unwrap_or_else(|| "an unidentified review".to_string())
+                        ));
+                        let resolved = match action {
+                            ApprovalCardAction::Approve => Some(ApprovalCardStatus::Approved),
+                            ApprovalCardAction::RequestChanges => {
+                                Some(ApprovalCardStatus::ChangesRequested)
+                            }
+                            ApprovalCardAction::Reject => Some(ApprovalCardStatus::Rejected),
+                            ApprovalCardAction::Dismiss => None,
+                        };
+                        match resolved {
+                            Some(status) => {
+                                s.card = ApprovalCardStatus::Submitting;
+                                s.card_pending = Some(status);
+                                s.card_elapsed = Duration::ZERO;
+                            }
+                            None => {
+                                s.card = ApprovalCardStatus::Pending;
+                                s.card_pending = None;
+                            }
+                        }
+                    },
+                ),
+        )
+        .child(SizedBox(None, Some(10.0)))
+        .child(caption(format!("{note} Status: {}.", state.card.label())))
+        .child(state.clock.pump(state.card_pending.is_some())))
 }
 
 /// `citations`: the numbered chip row, its preview, and the reference list.
@@ -687,10 +690,10 @@ fn citation_panel(state: &State) -> AnyView<State> {
         None => "Nothing pressed yet.".to_string(),
     };
 
-    any(Column(vec![
-        any(sub_heading("citations")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    any(column()
+        .child(sub_heading("citations"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "Numbered chips, not stacked favicons \u{2014} a plugin-tier widget has \
              no network to fetch one with. The chip row publishes the hovered \
              chip's window rect for the catalog's anchored overlay host, but that \
@@ -699,28 +702,33 @@ fn citation_panel(state: &State) -> AnyView<State> {
              hover through on_hover_change and mounts the same preview panel \
              inline instead. A press reports its index and the app decides what \
              to do with it \u{2014} there is no document here to jump into.",
-        )),
-        any(SizedBox(None, Some(12.0))),
-        any(text(
-            "Use layout-aware motion for newly appended results, and preserve \
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            text(
+                "Use layout-aware motion for newly appended results, and preserve \
                  accessible disclosure behaviour as the list grows.",
+            )
+            .size(14.0),
         )
-        .size(14.0)),
-        any(SizedBox(None, Some(8.0))),
-        any(citations::<State>(items.clone())
-            .on_hover_change(|s: &mut State, index| s.hovered = index)
-            .on_activate(|s: &mut State, index| s.activated = Some(index + 1))),
-        any(SizedBox(None, Some(12.0))),
-        preview,
-        any(SizedBox(None, Some(12.0))),
-        any(citation_list::<State>(items)
-            .title("Sources")
-            .open(state.sources_open)
-            .on_open_change(|s: &mut State, open| s.sources_open = open)
-            .on_activate(|s: &mut State, index| s.activated = Some(index + 1))),
-        any(SizedBox(None, Some(8.0))),
-        any(caption(activated)),
-    ]))
+        .child(SizedBox(None, Some(8.0)))
+        .child(
+            citations::<State>(items.clone())
+                .on_hover_change(|s: &mut State, index| s.hovered = index)
+                .on_activate(|s: &mut State, index| s.activated = Some(index + 1)),
+        )
+        .child(SizedBox(None, Some(12.0)))
+        .child(preview)
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            citation_list::<State>(items)
+                .title("Sources")
+                .open(state.sources_open)
+                .on_open_change(|s: &mut State, open| s.sources_open = open)
+                .on_activate(|s: &mut State, index| s.activated = Some(index + 1)),
+        )
+        .child(SizedBox(None, Some(8.0)))
+        .child(caption(activated)))
 }
 
 // ---- The page --------------------------------------------------------------
@@ -745,36 +753,38 @@ impl Component for Panels {
             None => "No copy affordance pressed yet.".to_string(),
         };
 
-        any(Column(vec![
-            any(heading("Agents \u{b7} Panels")),
-            any(SizedBox(None, Some(8.0))),
-            any(caption(
+        any(column()
+            .child(heading("Agents \u{b7} Panels"))
+            .child(SizedBox(None, Some(8.0)))
+            .child(caption(
                 "The cards an agent shows its work in. The three streaming \
                  panels replay off one clock; the two consent surfaces run their \
                  real state machines against this page's state.",
-            )),
-            any(SizedBox(None, Some(12.0))),
-            any(Row(vec![
-                any(button("Replay the stream", |s: &mut State| s.replay())
-                    .tone(ButtonTone::Outline)
-                    .size(ButtonSize::Sm)),
-                any(SizedBox(Some(12.0), None)),
-                any(caption(copied)),
-            ])
-            .cross_axis(CrossAxisAlignment::Center)),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            code_panel(state),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            diff_panel(state),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            result_panels(state),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            approval_panel(state),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            card_panel(state),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            citation_panel(state),
-        ]))
+            ))
+            .child(SizedBox(None, Some(12.0)))
+            .child(
+                row()
+                    .child(
+                        button("Replay the stream", |s: &mut State| s.replay())
+                            .tone(ButtonTone::Outline)
+                            .size(ButtonSize::Sm),
+                    )
+                    .child(SizedBox(Some(12.0), None))
+                    .child(caption(copied))
+                    .cross_axis(CrossAxisAlignment::Center),
+            )
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(code_panel(state))
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(diff_panel(state))
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(result_panels(state))
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(approval_panel(state))
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(card_panel(state))
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(citation_panel(state)))
     }
 }
 
