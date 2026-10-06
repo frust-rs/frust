@@ -629,6 +629,43 @@ fix, see its commit message); no device or simulator run has occurred.
 
 ---
 
+### `focus-wrapper-erasure-swap-blind` — a type swap inside a wrapper view with `Element = Box<dyn Widget>` is invisible to the reconciler
+
+**Observed**: `any(Wrap(any(view)))` — where `Wrap` is a custom view type with
+`type Element = Box<dyn Widget>` that forwards `build`/`rebuild`/`teardown` to
+an inner `AnyView` — produces a `ChildPod` whose recorded element has the
+concrete type `Box<dyn Widget>` regardless of the inner view. When the inner
+view swaps concrete type (e.g. `Text` → `Padding`), the swap-detection funnel
+in `authoring::rebuild_child_tracked` compares the erased element's `TypeId`
+before/after the rebuild and reports `swapped == false`: both are
+`Box<dyn Widget>`, though the inner rebuild succeeded. The pod's `active` and
+`focused` flags are neither cleared nor reported, and any live focus session
+routed into the replaced inner widget continues routing into a fresh widget
+that never claimed focus — exactly the failure the swap-detection arms exist to
+prevent.
+
+**Applies to**: any `ChildPod` built from a wrapper view that re-boxes an inner
+`AnyView` under its own `Element = Box<dyn Widget>`. Pre-existing and in-tree
+only: `ReorderableListView` (crates/frust-widgets/src/drag/reorderable.rs:202-220,
+`self.inner: AnyView<State>`). The single-erasure case — `any(Wrap(concrete_view))`
+and every in-crate container's own child list — detects swaps correctly and is
+unaffected. `any(any(view))` is CLOSED by idempotent erasure (`AnyView::new`
+unwraps an `AnyView` argument), so the residual is only wrapper views.
+
+**Why not fixed**: closing it needs shared `TypeId` reporting through
+`ErasedView` so nesting composes. Each reconciler today probes whatever boxed
+element it holds; `ErasedView` would need to report the element's concrete
+`TypeId` through the erasure boundary so `Wrap`'s element type is transparent to
+the swap check. That is a `frust-core` trait-surface change landing on every
+reconciler at once, and was deliberately not attempted during the focus/IME
+review fixes.
+
+**Evidence**: source inspection of `crates/frust-core/src/view.rs` (AnyView's
+idempotent `new`), `crates/frust-widgets/src/drag/reorderable.rs` (the only
+in-tree wrapper; line 202 defines the field type), and
+`crates/frust-widgets/src/authoring.rs` (swap detection in `rebuild_child_tracked`).
+
+---
 
 ### `focus-navbar-item-truncation-unmarked` — a truncated navbar/tabbar item drops its focus link silently
 
