@@ -385,7 +385,20 @@ impl Shared {
     /// nothing), and — while a session is in flight — accepting its payload
     /// type (an untyped entry accepts any).
     fn resolvable(&self, entry: &TargetEntry, payload: Option<TypeId>) -> Option<Rect> {
-        if entry.reported != Some(self.pass) {
+        self.resolvable_as_of(entry, payload, self.pass)
+    }
+
+    /// [`Shared::resolvable`], against pass number `pass` rather than
+    /// always the current one — the building block
+    /// [`Shared::target_at_mid_pass`] uses to also admit the pass
+    /// immediately before the current one.
+    fn resolvable_as_of(
+        &self,
+        entry: &TargetEntry,
+        payload: Option<TypeId>,
+        pass: u64,
+    ) -> Option<Rect> {
+        if entry.reported != Some(pass) {
             return None;
         }
         if let (Some(accepts), Some(payload)) = (entry.accepts, payload)
@@ -404,6 +417,36 @@ impl Shared {
             .iter()
             .filter(|(_, entry)| {
                 self.resolvable(entry, payload)
+                    .is_some_and(|rect| rect.contains(point))
+            })
+            .max_by_key(|(_, entry)| entry.registration)
+            .map(|(&id, _)| id)
+    }
+
+    /// [`Shared::target_at`], but also admitting a target stamped with the
+    /// pass immediately before the current one — for
+    /// [`Shared::resolve_hover_mid_pass`], called mid-paint before every
+    /// target sharing the coordinator has necessarily repainted the frame
+    /// in progress, so a later-painting sibling that simply has not
+    /// reported *yet* this pass is not mistaken for one that stopped
+    /// reporting altogether. One pass of tolerance only: a target silent
+    /// for a whole pass on top of that is excluded exactly as
+    /// [`Shared::target_at`] excludes it. The overlap tie-break is
+    /// unchanged — later registration still wins regardless of which of
+    /// the two passes a candidate's bounds last came from — so a
+    /// later-registered target that simply has not repainted yet this pass
+    /// still outranks an earlier-registered one that already has, exactly
+    /// as it would once both catch up.
+    fn target_at_mid_pass(&self, point: Point) -> Option<DragTargetId> {
+        let payload = self.live_payload_type();
+        let previous = self.pass.checked_sub(1);
+        self.targets
+            .iter()
+            .filter(|(_, entry)| {
+                self.resolvable_as_of(entry, payload, self.pass)
+                    .or_else(|| {
+                        previous.and_then(|pass| self.resolvable_as_of(entry, payload, pass))
+                    })
                     .is_some_and(|rect| rect.contains(point))
             })
             .max_by_key(|(_, entry)| entry.registration)
@@ -474,6 +517,23 @@ impl Shared {
         self.set_hovered(target, changes);
     }
 
+    /// [`Shared::resolve_hover`]'s twin for a caller mid-paint, before
+    /// every target sharing the coordinator has necessarily repainted the
+    /// frame in progress — see [`DragCoordinator::resolve_hover`]'s doc for
+    /// why that matters and [`Shared::target_at_mid_pass`] for the
+    /// tolerance itself. Otherwise identical: a no-op for a keyboard
+    /// session or outside `Dragging`.
+    fn resolve_hover_mid_pass(&mut self, changes: &mut Vec<DragStateChange>) {
+        let Machine::Dragging(session) = &self.machine else {
+            return;
+        };
+        if session.keyboard {
+            return;
+        }
+        let target = self.target_at_mid_pass(session.pointer);
+        self.set_hovered(target, changes);
+    }
+
     /// `Idle → Armed`. The caller has already left `Idle` reachable.
     fn arm_from_idle(
         &mut self,
@@ -504,6 +564,12 @@ impl Shared {
     /// end. Raises the same `Leave`/`Enter` pair pointer resolution does
     /// ([`Shared::set_hovered`]). A no-op outside `Dragging` or with no
     /// resolvable targets.
+    ///
+    /// Nothing here scrolls an off-screen target into view: only a target
+    /// visible in the latest paint pass is resolvable at all, so a list
+    /// taller than its viewport is only ever cycled across its currently
+    /// visible rows (`drag-keyboard-cycle-visible-targets-only`,
+    /// `docs/LIMITATIONS.md`).
     fn move_target(&mut self, step: i64, changes: &mut Vec<DragStateChange>) {
         let Machine::Dragging(session) = &self.machine else {
             return;
@@ -676,6 +742,12 @@ impl DragCoordinator {
     /// Raises the same `Leave`/`Enter` pair pointer resolution does. A
     /// no-op outside `Dragging` or with no such targets — see the
     /// [module docs](self#keyboard-sessions).
+    ///
+    /// Reaches only a target visible in the latest paint pass, and nothing
+    /// scrolls an off-screen one into view on the keyboard's behalf — a
+    /// list taller than its viewport cycles only across its currently
+    /// visible rows (`drag-keyboard-cycle-visible-targets-only`,
+    /// `docs/LIMITATIONS.md`).
     pub fn move_to_next_target(&self) {
         self.mutate(|shared, changes| shared.move_target(1, changes));
     }
@@ -683,6 +755,7 @@ impl DragCoordinator {
     /// The mirror of
     /// [`move_to_next_target`](Self::move_to_next_target) — the keyboard
     /// `ArrowLeft`/`ArrowUp` drive, wrapping to the last eligible target.
+    /// Carries the same visible-targets-only reach.
     pub fn move_to_previous_target(&self) {
         self.mutate(|shared, changes| shared.move_target(-1, changes));
     }
@@ -846,8 +919,23 @@ impl DragCoordinator {
     /// re-reporting its rows' bounds). Raises the same `Leave`/`Enter` pair
     /// [`update_pointer`](Self::update_pointer) does, and nothing when the
     /// hover is unchanged. A silent no-op unless `Dragging`.
+    ///
+    /// Unlike [`update_pointer`](Self::update_pointer), this one tolerates
+    /// a target stamped with the pass immediately before the current one:
+    /// [`mod@super::auto_scroll`]'s zone calls it right after its own child
+    /// paints, which can be *before* a later sibling sharing this
+    /// coordinator gets its own turn to repaint in the same frame (a later
+    /// column, a `Stack` layer above, an overlay). Without that one-pass
+    /// tolerance, the sibling's still-current bounds would read as culled
+    /// for the moment between the two, flipping the hover away and back
+    /// for no visible reason. A target silent for a whole pass on top of
+    /// that one is excluded exactly as `update_pointer` excludes it — the
+    /// tolerance never masks a target that has genuinely stopped painting.
+    /// `update_pointer`/[`target_at`](Self::target_at) and keyboard cycling
+    /// stay strict to the latest pass; a pointer or keyboard event is never
+    /// dispatched mid-paint, so they never race a sibling's own turn.
     pub fn resolve_hover(&self) {
-        self.mutate(|shared, changes| shared.resolve_hover(changes));
+        self.mutate(|shared, changes| shared.resolve_hover_mid_pass(changes));
     }
 
     /// Set where the ghost's origin sits relative to the pointer (see
@@ -2818,6 +2906,58 @@ mod tests {
         assert_eq!(
             f.drag.state().session().and_then(|s| s.hovered),
             Some(f.first)
+        );
+    }
+
+    #[test]
+    fn resolve_hover_tolerates_a_target_one_pass_behind_but_not_two() {
+        let f = Fixture::new();
+        let hovered_rect = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let elsewhere = Rect::new(200.0, 0.0, 300.0, 100.0);
+        let point = Point::new(50.0, 50.0);
+        f.drag.register_target(f.first);
+        f.drag.register_target(f.second);
+        f.drag
+            .report_target_bounds(f.first, Some(elsewhere), frame(1));
+        f.drag
+            .report_target_bounds(f.second, Some(hovered_rect), frame(1));
+        f.drag.arm(f.source, PRESS);
+        f.drag.begin(1_u8);
+        f.drag.update_pointer(point);
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.second)
+        );
+        f.take_log();
+
+        // The next pass: only the first has repainted so far, as if an
+        // auto-scroll zone enclosing it called `resolve_hover` right after
+        // its own child painted, before a later sibling got its own turn.
+        // The second's bounds are one pass behind, not stale, so the hover
+        // does not flicker.
+        f.drag
+            .report_target_bounds(f.first, Some(elsewhere), frame(2));
+        f.drag.resolve_hover();
+        assert!(
+            f.take_log().is_empty(),
+            "a target one pass behind is tolerated, not treated as culled"
+        );
+        assert_eq!(
+            f.drag.state().session().and_then(|s| s.hovered),
+            Some(f.second)
+        );
+
+        // A further pass with the second still silent: it is now two full
+        // passes behind — genuinely stale, the tolerance window has
+        // expired, and the culled-target guarantee holds exactly as
+        // before.
+        f.drag
+            .report_target_bounds(f.first, Some(elsewhere), frame(3));
+        f.drag.resolve_hover();
+        assert_eq!(
+            f.take_log(),
+            vec![DragStateChange::Leave { target: f.second }],
+            "two full passes without repainting is culled, not tolerated"
         );
     }
 
