@@ -1683,43 +1683,6 @@ impl FileDropAccumulator {
     }
 }
 
-#[cfg(test)]
-mod file_drop_accumulator_tests {
-    use super::FileDropAccumulator;
-    use std::path::PathBuf;
-
-    #[test]
-    fn take_is_none_with_nothing_pushed() {
-        let mut acc = FileDropAccumulator::default();
-        assert_eq!(acc.take(), None);
-    }
-
-    #[test]
-    fn take_coalesces_every_pushed_path_and_clears() {
-        let mut acc = FileDropAccumulator::default();
-        acc.push(PathBuf::from("/tmp/a.txt"));
-        acc.push(PathBuf::from("/tmp/b.txt"));
-        assert_eq!(
-            acc.take(),
-            Some(vec![
-                PathBuf::from("/tmp/a.txt"),
-                PathBuf::from("/tmp/b.txt")
-            ])
-        );
-        // Cleared: a second take with nothing new pushed finds nothing.
-        assert_eq!(acc.take(), None);
-    }
-
-    #[test]
-    fn a_batch_after_a_flushed_one_starts_clean() {
-        let mut acc = FileDropAccumulator::default();
-        acc.push(PathBuf::from("/tmp/a.txt"));
-        acc.take();
-        acc.push(PathBuf::from("/tmp/b.txt"));
-        assert_eq!(acc.take(), Some(vec![PathBuf::from("/tmp/b.txt")]));
-    }
-}
-
 /// Cached view of what we last told winit about the platform IME, so
 /// [`ShellHandler::sync_ime`] only calls
 /// `set_ime_allowed`/`set_ime_cursor_area`/`set_ime_purpose` on an actual
@@ -3283,10 +3246,10 @@ where
 mod tests {
     use super::{
         ClipboardAccess, ClipboardError, ClipboardFailure, ClipboardRequest, ClipboardWarnings,
-        ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync, LogicalSize,
-        MouseScrollDelta, NoExtensions, PasteText, ShellUserEvent, Tree, TreeId,
-        WHEEL_SCALE_RATE_PER_LINE, WindowKnobSource, WinitCursorIcon, WinitKey, WinitNamedKey,
-        WinitTheme, apply_window_size, base_theme, brightness_change_to_notify,
+        ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, FileDropAccumulator, Ime,
+        ImeSync, LogicalSize, MouseScrollDelta, NoExtensions, PasteText, ShellUserEvent, Tree,
+        TreeId, WHEEL_SCALE_RATE_PER_LINE, WindowKnobSource, WinitCursorIcon, WinitKey,
+        WinitNamedKey, WinitTheme, apply_window_size, base_theme, brightness_change_to_notify,
         brightness_from_winit, build_tree_update, clipboard_loop, clipboard_warning,
         cursor_change_to_apply, default_theme, finish, follow_platform_brightness, ime_purpose_for,
         map_gesture_phase, map_key_event, map_modifiers, map_mouse_button, map_named_key,
@@ -3299,6 +3262,7 @@ mod tests {
     use frust_core::accesskit::{
         Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role,
     };
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     // `InputEvent` is deliberately absent: the event-dispatch section further
@@ -5453,5 +5417,39 @@ mod tests {
             brightness_change_to_notify(Some(Brightness::Dark), Brightness::Light),
             Some(Brightness::Light)
         );
+    }
+    mod file_drop {
+        use super::*;
+
+        #[test]
+        fn take_is_none_with_nothing_pushed() {
+            let mut acc = FileDropAccumulator::default();
+            assert_eq!(acc.take(), None);
+        }
+
+        #[test]
+        fn take_coalesces_every_pushed_path_and_clears() {
+            let mut acc = FileDropAccumulator::default();
+            acc.push(PathBuf::from("/tmp/a.txt"));
+            acc.push(PathBuf::from("/tmp/b.txt"));
+            assert_eq!(
+                acc.take(),
+                Some(vec![
+                    PathBuf::from("/tmp/a.txt"),
+                    PathBuf::from("/tmp/b.txt")
+                ])
+            );
+            // Cleared: a second take with nothing new pushed finds nothing.
+            assert_eq!(acc.take(), None);
+        }
+
+        #[test]
+        fn a_batch_after_a_flushed_one_starts_clean() {
+            let mut acc = FileDropAccumulator::default();
+            acc.push(PathBuf::from("/tmp/a.txt"));
+            acc.take();
+            acc.push(PathBuf::from("/tmp/b.txt"));
+            assert_eq!(acc.take(), Some(vec![PathBuf::from("/tmp/b.txt")]));
+        }
     }
 }
