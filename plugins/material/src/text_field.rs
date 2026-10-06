@@ -298,15 +298,15 @@ impl<State: 'static> TextFieldView<State> {
     /// Mount a leading view in a `ICON_SIZE` slot at the field's start edge.
     /// The slot's content owns its own ink and size; the field only reserves
     /// and positions the slot.
-    pub fn leading(mut self, view: AnyView<State>) -> Self {
-        self.leading = Some(view);
+    pub fn leading(mut self, view: impl View<State>) -> Self {
+        self.leading = Some(AnyView::new(view));
         self
     }
 
     /// Mount a trailing view in a `ICON_SIZE` slot at the field's end edge —
     /// see [`leading`](Self::leading).
-    pub fn trailing(mut self, view: AnyView<State>) -> Self {
-        self.trailing = Some(view);
+    pub fn trailing(mut self, view: impl View<State>) -> Self {
+        self.trailing = Some(AnyView::new(view));
         self
     }
 

@@ -41,7 +41,7 @@
 //! other point in the `View` lifecycle to do it) cannot move the accumulated
 //! `Vec<AnyView<State>>` out of a shared reference. Each action is wrapped in
 //! an `Rc` on `.action()`/`.actions()` (transparent to callers — the public
-//! signature is still plain `AnyView<State>`), so recomposing per pass is a
+//! signature takes any `impl View<State>`), so recomposing per pass is a
 //! cheap refcount-bump clone rather than a deep one. No other field needs
 //! this: titles/labels are `String` (`Clone`), the selection list's rows are
 //! rebuilt fresh from primitive `Vec<String>`/`Rc<dyn Fn>` data each pass, and
@@ -602,14 +602,17 @@ impl<State: 'static> DialogView<State> {
 
     /// Replace the trailing action row with `actions` (app-provided buttons,
     /// in reading order — the last one sits closest to the trailing edge).
-    pub fn actions(mut self, actions: Vec<AnyView<State>>) -> Self {
-        self.actions = actions.into_iter().map(Rc::new).collect();
+    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
+        self.actions = actions
+            .into_iter()
+            .map(|a| Rc::new(AnyView::new(a)))
+            .collect();
         self
     }
 
     /// Append one action button to the trailing action row.
-    pub fn action(mut self, action: AnyView<State>) -> Self {
-        self.actions.push(Rc::new(action));
+    pub fn action(mut self, action: impl View<State>) -> Self {
+        self.actions.push(Rc::new(AnyView::new(action)));
         self
     }
 
@@ -1208,8 +1211,8 @@ pub fn full_screen_dialog<State: 'static, V: View<State>>(
 impl<State: 'static> FullScreenDialogView<State> {
     /// Set the header's trailing action (e.g. a "Save" button) — the
     /// reference's `action`.
-    pub fn action(mut self, action: AnyView<State>) -> Self {
-        self.action = Some(Rc::new(action));
+    pub fn action(mut self, action: impl View<State>) -> Self {
+        self.action = Some(Rc::new(AnyView::new(action)));
         self
     }
 

@@ -35,7 +35,7 @@
 //!
 //! # Children
 //!
-//! [`card_list`] takes arbitrary [`frust::authoring::AnyView`] children, the
+//! [`card_list`] takes arbitrary view children (erased internally), the
 //! way upstream's `itemBuilder` does. [`card_list_items`] is the typed
 //! convenience for the common case — a list of [`super::list_item::ListItem`]
 //! rows, erased for you.
@@ -213,10 +213,10 @@ pub struct CardListView<State: 'static> {
 /// surface at its position's radii (upstream's arbitrary `itemBuilder`
 /// children).
 pub fn card_list<State: 'static>(
-    items: impl IntoIterator<Item = AnyView<State>>,
+    items: impl IntoIterator<Item = impl View<State>>,
 ) -> CardListView<State> {
     CardListView {
-        items: items.into_iter().collect(),
+        items: items.into_iter().map(AnyView::new).collect(),
         outer_radius: CARD_LIST_OUTER_RADIUS,
         inner_radius: CARD_LIST_INNER_RADIUS,
         gap: CARD_LIST_GAP,
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn an_empty_stack_lays_out_and_paints_nothing() {
-        let view: CardListView<()> = card_list(Vec::new());
+        let view: CardListView<()> = card_list(Vec::<AnyView<()>>::new());
         let mut w = build(&view);
         let size = layout(&mut w);
         assert_eq!(size.height, 0.0);

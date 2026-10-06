@@ -551,12 +551,12 @@ pub struct FabMenuItem<State: 'static> {
 /// `on_select` when tapped (followed by the menu's own `on_toggle`, requesting
 /// a close — see [`fab_menu`]'s docs).
 pub fn fab_menu_item<State: 'static, F: Fn(&mut State) + 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     label: impl Into<String>,
     on_select: F,
 ) -> FabMenuItem<State> {
     FabMenuItem {
-        icon,
+        icon: AnyView::new(icon),
         label: label.into(),
         on_select: std::rc::Rc::new(on_select),
     }
@@ -580,13 +580,13 @@ pub struct FabMenuView<State: 'static> {
 /// [`FabMenuView::label`] to set the trigger's accessible name (defaults to
 /// `"Menu"`).
 pub fn fab_menu<State: 'static, F: Fn(&mut State) + 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     open: bool,
     items: Vec<FabMenuItem<State>>,
     on_toggle: F,
 ) -> FabMenuView<State> {
     FabMenuView {
-        icon,
+        icon: AnyView::new(icon),
         open,
         items,
         label: None,
@@ -598,7 +598,7 @@ pub fn fab_menu<State: 'static, F: Fn(&mut State) + 'static>(
 /// vocabulary.
 #[allow(non_snake_case)]
 pub fn FabMenu<State: 'static, F: Fn(&mut State) + 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     open: bool,
     items: Vec<FabMenuItem<State>>,
     on_toggle: F,

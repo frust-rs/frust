@@ -477,13 +477,13 @@ pub struct FabView<State: 'static> {
 /// name (recommended — an icon-only FAB has no visible text a screen reader
 /// can read).
 pub fn fab<State: 'static, F: Fn(&mut State) + 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     on_press: F,
 ) -> FabView<State> {
     FabView {
         size: FabSize::Medium,
         color: FabColor::Primary,
-        icon: Some(icon),
+        icon: Some(AnyView::new(icon)),
         label: None,
         is_extended: false,
         label_shown: true,
@@ -528,8 +528,8 @@ impl<State: 'static> FabView<State> {
 
     /// Attach a leading icon (usable on [`extended_fab`]; [`fab`] already
     /// requires one at construction).
-    pub fn icon(mut self, icon: AnyView<State>) -> Self {
-        self.icon = Some(icon);
+    pub fn icon(mut self, icon: impl View<State>) -> Self {
+        self.icon = Some(AnyView::new(icon));
         self
     }
 

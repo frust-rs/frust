@@ -535,11 +535,11 @@ pub struct RailDestination<State: 'static> {
 /// Tint is the supplied icon view's own responsibility, the same stance
 /// [`crate::navbar`]'s and [`crate::appbar`]'s icon slots take.
 pub fn rail_destination<State: 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     label: impl Into<String>,
 ) -> RailDestination<State> {
     RailDestination {
-        icon,
+        icon: AnyView::new(icon),
         selected_icon: None,
         label: label.into(),
         badge_count: None,
@@ -550,8 +550,8 @@ pub fn rail_destination<State: 'static>(
 impl<State: 'static> RailDestination<State> {
     /// A distinct icon to show while this destination is selected (falls back
     /// to the base icon).
-    pub fn selected_icon(mut self, icon: AnyView<State>) -> Self {
-        self.selected_icon = Some(icon);
+    pub fn selected_icon(mut self, icon: impl View<State>) -> Self {
+        self.selected_icon = Some(AnyView::new(icon));
         self
     }
 
@@ -1052,8 +1052,8 @@ impl<State: 'static> NavigationRailView<State> {
     }
 
     /// A trailing slot below the destinations (a settings button, an avatar).
-    pub fn trailing(mut self, trailing: AnyView<State>) -> Self {
-        self.trailing = Some(trailing);
+    pub fn trailing(mut self, trailing: impl View<State>) -> Self {
+        self.trailing = Some(AnyView::new(trailing));
         self
     }
 

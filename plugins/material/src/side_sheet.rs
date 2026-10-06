@@ -426,19 +426,19 @@ pub struct SideSheetView<State: 'static>(OverlayModalView<State>);
 /// side_sheet(
 ///     "Settings",
 ///     settings_body(),
-///     vec![any(text_button("Close").on_press(|s: &mut State| { .. }))],
+///     [text_button("Close").on_press(|s: &mut State| { .. })],
 /// )
 /// ```
 pub fn side_sheet<State: 'static, V: View<State>>(
     title: impl Into<String>,
     body: V,
-    actions: Vec<AnyView<State>>,
+    actions: impl IntoIterator<Item = impl View<State>>,
 ) -> SideSheetView<State> {
     let title = title.into();
     let content = SideSheetContentView {
         title: title.clone(),
         body: any(body),
-        actions,
+        actions: actions.into_iter().map(AnyView::new).collect(),
     };
     SideSheetView(overlay_modal(content, side_sheet_config()).label(title))
 }
@@ -473,8 +473,8 @@ impl<State: 'static> SideSheetView<State> {
     /// ```ignore
     /// let dismiss = ModalDismiss::new();
     /// let apply = dismiss.clone();
-    /// side_sheet(title, body, vec![
-    ///     any(filled_button("Apply", move |_: &mut State| apply.dismiss())),
+    /// side_sheet(title, body, [
+    ///     filled_button("Apply", move |_: &mut State| apply.dismiss()),
     /// ])
     /// .dismiss_handle(dismiss.clone())
     /// ```
@@ -533,7 +533,7 @@ impl<State: 'static> OverlayModalContent<State> for SideSheetView<State> {
 /// ```ignore
 /// show_side_sheet(
 ///     &state.nav,
-///     || side_sheet("Settings", settings_body(), Vec::new()),
+///     || side_sheet("Settings", settings_body(), Vec::<AnyView<State>>::new()),
 ///     |state: &mut State, result: PopResult| { /* ... */ },
 /// );
 /// ```
@@ -765,7 +765,8 @@ mod tests {
 
     #[test]
     fn the_real_constructor_starts_off_screen_and_slides_to_the_trailing_edge() {
-        let view: SideSheetView<()> = side_sheet("Filters", leaf_any(100.0, 100.0), Vec::new());
+        let view: SideSheetView<()> =
+            side_sheet("Filters", leaf_any(100.0, 100.0), Vec::<AnyView<()>>::new());
         let mut w = build(&view);
         layout(&mut w);
         assert_eq!(
@@ -916,7 +917,13 @@ mod tests {
 
         show_side_sheet(
             &controller,
-            || side_sheet("Filters", bg_page(100.0, 100.0), Vec::new()),
+            || {
+                side_sheet(
+                    "Filters",
+                    bg_page(100.0, 100.0),
+                    Vec::<AnyView<NavState>>::new(),
+                )
+            },
             |state: &mut NavState, result: PopResult| {
                 state.results.push(result.take::<i32>());
             },
@@ -979,7 +986,13 @@ mod tests {
 
         show_side_sheet(
             &controller,
-            || side_sheet("Filters", bg_page(100.0, 100.0), Vec::new()),
+            || {
+                side_sheet(
+                    "Filters",
+                    bg_page(100.0, 100.0),
+                    Vec::<AnyView<NavState>>::new(),
+                )
+            },
             |state: &mut NavState, result: PopResult| {
                 state.results.push(result.take::<i32>());
             },
@@ -1055,8 +1068,12 @@ mod tests {
         show_side_sheet(
             &controller,
             move || {
-                side_sheet("Filters", bg_page(100.0, 100.0), Vec::new())
-                    .dismiss_handle(installed.clone())
+                side_sheet(
+                    "Filters",
+                    bg_page(100.0, 100.0),
+                    Vec::<AnyView<NavState>>::new(),
+                )
+                .dismiss_handle(installed.clone())
             },
             |state: &mut NavState, result: PopResult| {
                 state.results.push(result.take::<i32>());
