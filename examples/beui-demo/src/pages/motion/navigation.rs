@@ -18,8 +18,8 @@
 //! documentation rail.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, component, icon,
-    icons, text,
+    AnyView, Column, Component, CrossAxisAlignment, SizedBox, View, any, column, component, icon,
+    icons, row, text,
 };
 use frust_beui::components::animated_sidebar::{animated_sidebar, sidebar_item};
 use frust_beui::components::bounce_sidebar::{bounce_sidebar, bounce_sidebar_item};
@@ -170,10 +170,11 @@ fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> AnyView<State> {
 
 /// A labelled specimen: the caption above the live component.
 fn labelled(label: &str, body: AnyView<State>) -> AnyView<State> {
-    any(
-        Column(vec![any(caption(label.to_string())), gap(8.0), body])
-            .cross_axis(CrossAxisAlignment::Start),
-    )
+    any(column()
+        .child(caption(label.to_string()))
+        .child(gap(8.0))
+        .child(body)
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 /// A small outline button — this page's knobs.
@@ -232,17 +233,22 @@ fn tab_sets(state: &State) -> AnyView<State> {
          that overshoot is this component's character. Arrow keys move focus \
          and activate; the disabled tab is a catalog convention upstream has \
          no equivalent for.",
-        vec![any(Row(vec![
-            labelled("Pill", any(SizedBox(Some(240.0), None).child(pill))),
-            hgap(20.0),
-            labelled("Segment", any(SizedBox(Some(220.0), None).child(segment))),
-            hgap(20.0),
-            labelled(
+        vec![any(row()
+            .child(labelled(
+                "Pill",
+                any(SizedBox(Some(240.0), None).child(pill)),
+            ))
+            .child(hgap(20.0))
+            .child(labelled(
+                "Segment",
+                any(SizedBox(Some(220.0), None).child(segment)),
+            ))
+            .child(hgap(20.0))
+            .child(labelled(
                 "Underline \u{b7} last tab disabled",
                 any(SizedBox(Some(250.0), None).child(underline)),
-            ),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))],
+            ))
+            .cross_axis(CrossAxisAlignment::Start))],
     )
 }
 
@@ -302,12 +308,11 @@ fn docks(state: &State) -> AnyView<State> {
          and the whole effect is paint-only: a cursor sweep costs repaints, \
          not relayouts.",
         vec![
-            any(Row(vec![
-                labelled("Magnifying \u{b7} 44px items", magnifying),
-                hgap(32.0),
-                labelled("magnify: off \u{b7} 36px items", plain),
-            ])
-            .cross_axis(CrossAxisAlignment::Start)),
+            any(row()
+                .child(labelled("Magnifying \u{b7} 44px items", magnifying))
+                .child(hgap(32.0))
+                .child(labelled("magnify: off \u{b7} 36px items", plain))
+                .cross_axis(CrossAxisAlignment::Start)),
             gap(14.0),
             knob(
                 if state.dock_magnify {
@@ -372,12 +377,14 @@ fn sidebars(state: &State) -> AnyView<State> {
          no motion at all, and the bounce is the dot's own bowed arc between \
          rows, softened as the jump grows.",
         vec![
-            any(Row(vec![
-                labelled("Rail \u{b7} collapsible, badge, disabled row", rail),
-                hgap(48.0),
-                labelled("Bounce \u{b7} the dot arcs between rows", bounce),
-            ])
-            .cross_axis(CrossAxisAlignment::Start)),
+            any(row()
+                .child(labelled(
+                    "Rail \u{b7} collapsible, badge, disabled row",
+                    rail,
+                ))
+                .child(hgap(48.0))
+                .child(labelled("Bounce \u{b7} the dot arcs between rows", bounce))
+                .cross_axis(CrossAxisAlignment::Start)),
             gap(14.0),
             knob(
                 if state.sidebar_open {
@@ -460,12 +467,14 @@ fn disclosure(state: &State) -> AnyView<State> {
          accordion's springs are Motion's perceptual {duration, bounce} form \
          converted once so each settles in upstream's stated time with \
          upstream's overshoot.",
-        vec![any(Row(vec![
-            labelled("Project tree \u{b7} vendor/ disabled", tree),
-            hgap(48.0),
-            labelled("Release queue \u{b7} last panel disabled", accordion),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))],
+        vec![any(row()
+            .child(labelled("Project tree \u{b7} vendor/ disabled", tree))
+            .child(hgap(48.0))
+            .child(labelled(
+                "Release queue \u{b7} last panel disabled",
+                accordion,
+            ))
+            .cross_axis(CrossAxisAlignment::Start))],
     )
 }
 
@@ -502,12 +511,14 @@ fn rails(state: &State) -> AnyView<State> {
          move between two ladders. The card's entrance drops its blur, an \
          outgoing card gets no exit (a swap replays the entrance), and a press \
          pins a card with a second press un-pinning it.",
-        vec![any(Row(vec![
-            labelled("Vertical \u{b7} active tick highlighted", vertical),
-            hgap(48.0),
-            labelled("Horizontal", horizontal),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))],
+        vec![any(row()
+            .child(labelled(
+                "Vertical \u{b7} active tick highlighted",
+                vertical,
+            ))
+            .child(hgap(48.0))
+            .child(labelled("Horizontal", horizontal))
+            .cross_axis(CrossAxisAlignment::Start))],
     )
 }
 
@@ -522,28 +533,26 @@ impl Component for NavigationPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(Column(vec![
-            tab_sets(state),
-            docks(state),
-            sidebars(state),
-            disclosure(state),
-            rails(state),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))
+        any(column()
+            .child(tab_sets(state))
+            .child(docks(state))
+            .child(sidebars(state))
+            .child(disclosure(state))
+            .child(rails(state))
+            .cross_axis(CrossAxisAlignment::Start))
     }
 }
 
 pub fn page() -> AnyView<AppState> {
-    any(Column(vec![
-        any(heading("Motion \u{b7} Navigation")),
-        any(SizedBox(None, Some(8.0))),
-        any(caption(
+    any(column()
+        .child(heading("Motion \u{b7} Navigation"))
+        .child(SizedBox(None, Some(8.0)))
+        .child(caption(
             "Destination surfaces: the three tab strips, the magnifying dock, \
              both sidebars, the file tree, the bouncy accordion, and the \
              preview rail in both orientations.",
-        )),
-        any(SizedBox(None, Some(24.0))),
-        any(component(NavigationPage)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+        ))
+        .child(SizedBox(None, Some(24.0)))
+        .child(component(NavigationPage))
+        .cross_axis(CrossAxisAlignment::Start))
 }

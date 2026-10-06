@@ -23,7 +23,7 @@
 
 use frust::{
     AnyView, Column, Component, CrossAxisAlignment, MainAxisAlignment, Row, SizedBox, View, any,
-    component, text,
+    column, component, row, text,
 };
 use frust_beui::components::animated_badge::{
     AnimatedBadgeSize, AnimatedBadgeStatus, animated_badge,
@@ -150,10 +150,11 @@ fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> AnyView<State> {
 
 /// A labelled specimen: the live component over its caption.
 fn specimen(label: &str, body: AnyView<State>) -> AnyView<State> {
-    any(
-        Column(vec![body, gap(6.0), any(caption(label.to_string()))])
-            .cross_axis(CrossAxisAlignment::Center),
-    )
+    any(column()
+        .child(body)
+        .child(gap(6.0))
+        .child(caption(label.to_string()))
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// Lay `items` out in rows of `per_row`, `gap`px apart — this workspace has no
@@ -207,11 +208,10 @@ fn text_effects(state: &State) -> AnyView<State> {
     let rows: Vec<AnyView<State>> = variants
         .iter()
         .map(|(variant, label)| {
-            any(Row(vec![
-                any(SizedBox(Some(96.0), None).child(caption(label.to_string()))),
-                any(text_animation::<State>(phrase).variant(*variant).size(22.0)),
-            ])
-            .cross_axis(CrossAxisAlignment::Center))
+            any(row()
+                .child(SizedBox(Some(96.0), None).child(caption(label.to_string())))
+                .child(text_animation::<State>(phrase).variant(*variant).size(22.0))
+                .cross_axis(CrossAxisAlignment::Center))
         })
         .collect();
 
@@ -267,20 +267,24 @@ fn numbers(state: &State) -> AnyView<State> {
          ASCII (en-US), not locale-aware; the ticker's optional blur is not \
          ported; both arm from first paint rather than on a viewport gate.",
         vec![
-            any(Row(vec![roll, hgap(48.0), count_up, hgap(48.0), padded])
+            any(row()
+                .child(roll)
+                .child(hgap(48.0))
+                .child(count_up)
+                .child(hgap(48.0))
+                .child(padded)
                 .cross_axis(CrossAxisAlignment::Start)),
             gap(14.0),
-            any(Row(vec![
-                knob("+137", |s: &mut State| s.value += 137.0),
-                hgap(8.0),
-                knob("+2,480", |s: &mut State| s.value += 2_480.0),
-                hgap(8.0),
-                knob("\u{2212}1,000", |s: &mut State| {
+            any(row()
+                .child(knob("+137", |s: &mut State| s.value += 137.0))
+                .child(hgap(8.0))
+                .child(knob("+2,480", |s: &mut State| s.value += 2_480.0))
+                .child(hgap(8.0))
+                .child(knob("\u{2212}1,000", |s: &mut State| {
                     s.value = (s.value - 1_000.0).max(0.0)
-                }),
-                hgap(8.0),
-                knob("Reset", |s: &mut State| s.value = 48_273.0),
-            ])),
+                }))
+                .child(hgap(8.0))
+                .child(knob("Reset", |s: &mut State| s.value = 48_273.0))),
         ],
     )
 }
@@ -290,35 +294,41 @@ fn numbers(state: &State) -> AnyView<State> {
 fn badges(state: &State) -> AnyView<State> {
     let (status, label) = BADGE_STATES[state.badge % BADGE_STATES.len()];
 
-    let live = any(Row(vec![
-        any(animated_badge::<State>(label)
-            .status(status)
-            .size(AnimatedBadgeSize::Md)),
-        hgap(16.0),
-        knob("Advance status", |s: &mut State| {
+    let live = any(row()
+        .child(
+            animated_badge::<State>(label)
+                .status(status)
+                .size(AnimatedBadgeSize::Md),
+        )
+        .child(hgap(16.0))
+        .child(knob("Advance status", |s: &mut State| {
             s.badge = (s.badge + 1) % BADGE_STATES.len();
-        }),
-    ])
-    .cross_axis(CrossAxisAlignment::Center));
+        }))
+        .cross_axis(CrossAxisAlignment::Center));
 
     let tones: Vec<AnyView<State>> = BADGE_STATUSES
         .iter()
         .map(|(status, label)| {
-            any(Column(vec![
-                any(animated_badge::<State>(*label)
-                    .status(*status)
-                    .size(AnimatedBadgeSize::Md)),
-                gap(6.0),
-                any(animated_badge::<State>(*label)
-                    .status(*status)
-                    .size(AnimatedBadgeSize::Sm)),
-                gap(6.0),
-                any(animated_badge::<State>(*label)
-                    .status(*status)
-                    .size(AnimatedBadgeSize::Md)
-                    .show_icon(false)),
-            ])
-            .cross_axis(CrossAxisAlignment::Start))
+            any(column()
+                .child(
+                    animated_badge::<State>(*label)
+                        .status(*status)
+                        .size(AnimatedBadgeSize::Md),
+                )
+                .child(gap(6.0))
+                .child(
+                    animated_badge::<State>(*label)
+                        .status(*status)
+                        .size(AnimatedBadgeSize::Sm),
+                )
+                .child(gap(6.0))
+                .child(
+                    animated_badge::<State>(*label)
+                        .status(*status)
+                        .size(AnimatedBadgeSize::Md)
+                        .show_icon(false),
+                )
+                .cross_axis(CrossAxisAlignment::Start))
         })
         .collect();
 
@@ -356,16 +366,15 @@ fn loaders(state: &State) -> AnyView<State> {
         vec![
             grid(cells, 6, 16.0),
             gap(16.0),
-            any(Row(vec![
-                any(caption("Size")),
-                hgap(10.0),
-                knob("24", |s: &mut State| s.loader_size = 24.0),
-                hgap(8.0),
-                knob("36", |s: &mut State| s.loader_size = 36.0),
-                hgap(8.0),
-                knob("48", |s: &mut State| s.loader_size = 48.0),
-            ])
-            .cross_axis(CrossAxisAlignment::Center)),
+            any(row()
+                .child(caption("Size"))
+                .child(hgap(10.0))
+                .child(knob("24", |s: &mut State| s.loader_size = 24.0))
+                .child(hgap(8.0))
+                .child(knob("36", |s: &mut State| s.loader_size = 36.0))
+                .child(hgap(8.0))
+                .child(knob("48", |s: &mut State| s.loader_size = 48.0))
+                .cross_axis(CrossAxisAlignment::Center)),
         ],
     )
 }
@@ -412,31 +421,30 @@ fn marquee_demo(state: &State) -> AnyView<State> {
             .fade(fade),
     ));
 
-    let direction_knobs = any(Row(vec![
-        any(caption("Direction")),
-        hgap(10.0),
-        knob("Left", |s: &mut State| {
+    let direction_knobs = any(row()
+        .child(caption("Direction"))
+        .child(hgap(10.0))
+        .child(knob("Left", |s: &mut State| {
             s.marquee_direction = MarqueeDirection::Left
-        }),
-        hgap(8.0),
-        knob("Right", |s: &mut State| {
+        }))
+        .child(hgap(8.0))
+        .child(knob("Right", |s: &mut State| {
             s.marquee_direction = MarqueeDirection::Right
-        }),
-        hgap(8.0),
-        knob("Up", |s: &mut State| {
+        }))
+        .child(hgap(8.0))
+        .child(knob("Up", |s: &mut State| {
             s.marquee_direction = MarqueeDirection::Up
-        }),
-        hgap(8.0),
-        knob("Down", |s: &mut State| {
+        }))
+        .child(hgap(8.0))
+        .child(knob("Down", |s: &mut State| {
             s.marquee_direction = MarqueeDirection::Down
-        }),
-        hgap(16.0),
-        knob(
+        }))
+        .child(hgap(16.0))
+        .child(knob(
             if fade { "Fade: on" } else { "Fade: off" },
             |s: &mut State| s.marquee_fade = !s.marquee_fade,
-        ),
-    ])
-    .cross_axis(CrossAxisAlignment::Center));
+        ))
+        .cross_axis(CrossAxisAlignment::Center));
 
     demo(
         "marquee",
@@ -476,14 +484,13 @@ fn theme_toggles(state: &State) -> AnyView<State> {
         vec![
             any(Row(toggles).cross_axis(CrossAxisAlignment::Start)),
             gap(14.0),
-            any(Row(vec![
-                any(caption(format!("Start \u{b7} {start_label}"))),
-                hgap(10.0),
-                knob("Next start", |s: &mut State| {
+            any(row()
+                .child(caption(format!("Start \u{b7} {start_label}")))
+                .child(hgap(10.0))
+                .child(knob("Next start", |s: &mut State| {
                     s.toggle_start = (s.toggle_start + 1) % TOGGLE_STARTS.len();
-                }),
-            ])
-            .cross_axis(CrossAxisAlignment::Center)),
+                }))
+                .cross_axis(CrossAxisAlignment::Center)),
         ],
     )
 }
@@ -500,30 +507,28 @@ impl Component for TextPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(Column(vec![
-            text_effects(state),
-            numbers(state),
-            badges(state),
-            loaders(state),
-            marquee_demo(state),
-            theme_toggles(state),
-        ])
-        .cross_axis(CrossAxisAlignment::Start)
-        .main_axis(MainAxisAlignment::Start))
+        any(column()
+            .child(text_effects(state))
+            .child(numbers(state))
+            .child(badges(state))
+            .child(loaders(state))
+            .child(marquee_demo(state))
+            .child(theme_toggles(state))
+            .cross_axis(CrossAxisAlignment::Start)
+            .main_axis(MainAxisAlignment::Start))
     }
 }
 
 pub fn page() -> AnyView<AppState> {
-    any(Column(vec![
-        any(heading("Motion \u{b7} Text")),
-        any(SizedBox(None, Some(8.0))),
-        any(caption(
+    any(column()
+        .child(heading("Motion \u{b7} Text"))
+        .child(SizedBox(None, Some(8.0)))
+        .child(caption(
             "Text effects, animated numbers, status badges, loaders, the \
              ticker, and the theme toggle \u{2014} beUI's text-and-status motion \
              set, with every registry variant shown.",
-        )),
-        any(SizedBox(None, Some(24.0))),
-        any(component(TextPage)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+        ))
+        .child(SizedBox(None, Some(24.0)))
+        .child(component(TextPage))
+        .cross_axis(CrossAxisAlignment::Start))
 }

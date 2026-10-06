@@ -27,8 +27,8 @@ mod pages;
 use frust::motion::patterns::FadeThrough;
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, DesktopConfig, FlexView, MenuItemSpec, MenuRole,
-    MenuSpec, View, any, flexible, inflexible,
+    AnyView, Component, CrossAxisAlignment, DesktopConfig, MenuItemSpec, MenuRole, MenuSpec, View,
+    any, row,
 };
 
 use nav::Page;
@@ -103,14 +103,10 @@ impl Component for BeuiDemoApp {
 
         let sidebar = any(nav::shell_sidebar(state));
 
-        any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(sidebar),
-                flexible(1, any(nav::shell_inset(page, open, content))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch))
+        any(row()
+            .child(sidebar)
+            .flex(1, nav::shell_inset(page, open, content))
+            .cross_axis(CrossAxisAlignment::Stretch))
     }
 }
 

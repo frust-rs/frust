@@ -232,57 +232,57 @@ fn contact_sheet() -> AnyView<AppState> {
         if index > 0 {
             row.push(any(SizedBox(Some(12.0), None)));
         }
-        row.push(any(frust::Column(vec![
-            tile(variant, false, 0.0, THUMB_SIZE, false),
-            gap(6.0),
-            any(text(variant.label().to_string()).size(12.0)),
-            muted(variant.slug().to_string()),
-        ])));
+        row.push(any(frust::column()
+            .child(tile(variant, false, 0.0, THUMB_SIZE, false))
+            .child(gap(6.0))
+            .child(text(variant.label().to_string()).size(12.0))
+            .child(muted(variant.slug().to_string()))));
     }
     any(Row(row).cross_axis(CrossAxisAlignment::Start))
 }
 
 /// The Shader page.
 pub fn page() -> AnyView<AppState> {
-    any(frust::Column(vec![
-        any(heading("Motion \u{b7} Shader")),
-        gap(8.0),
-        muted(
+    any(frust::column()
+        .child(heading("Motion \u{b7} Shader"))
+        .child(gap(8.0))
+        .child(muted(
             "shader_background \u{2014} beUI's `shader-background`, ported as hand-written WGSL. \
              Each tile is one Command::ShaderQuad: the engine compiles the fragment program once, \
              renders it into an offscreen target and composites it premultiplied, so a variant \
              with a translucent backdrop shows what is behind it.",
-        ),
-        gap(20.0),
-        featured(),
-        gap(14.0),
-        controls(),
-        gap(10.0),
-        muted(
+        ))
+        .child(gap(20.0))
+        .child(featured())
+        .child(gap(14.0))
+        .child(controls())
+        .child(gap(10.0))
+        .child(muted(
             "A static variant never references the shader clock and never asks for a frame; an \
              animating one asks for a paced cosmetic-loop frame, and reduced motion freezes it at \
              t = 0 (upstream's own speed: 0 rule).",
-        ),
-        gap(28.0),
-        any(text("All five variants").size(16.0)),
-        gap(4.0),
-        muted("Frozen thumbnails \u{2014} the page animates one shader at a time, not six."),
-        gap(12.0),
-        contact_sheet(),
-        gap(28.0),
-        any(text("Deferred variants").size(16.0)),
-        gap(4.0),
-        muted(format!(
+        ))
+        .child(gap(28.0))
+        .child(text("All five variants").size(16.0))
+        .child(gap(4.0))
+        .child(muted(
+            "Frozen thumbnails \u{2014} the page animates one shader at a time, not six.",
+        ))
+        .child(gap(12.0))
+        .child(contact_sheet())
+        .child(gap(28.0))
+        .child(text("Deferred variants").size(16.0))
+        .child(gap(4.0))
+        .child(muted(format!(
             "Upstream ships 21 variants; five are ported. The remaining sixteen are each a \
              distinct shader needing its own WGSL and its own GPU verification, and are not \
              ported: {}.",
             DEFERRED_VARIANTS.join(", ")
-        )),
-        gap(10.0),
-        muted(format!(
+        )))
+        .child(gap(10.0))
+        .child(muted(format!(
             "Escape hatch: {SHADER_EFFECTS_KILL_SWITCH}=1 turns the engine's shader-effect path \
              off entirely; every tile above then degrades to a flat fill of its own backdrop \
              token (and to nothing at all where that backdrop is transparent).",
-        )),
-    ]))
+        ))))
 }
