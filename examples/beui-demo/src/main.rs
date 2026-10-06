@@ -28,7 +28,7 @@ use frust::motion::patterns::FadeThrough;
 use frust::motion::switcher::pattern_switcher;
 use frust::{
     AnyView, Axis, Component, CrossAxisAlignment, DesktopConfig, FlexView, MenuItemSpec, MenuRole,
-    MenuSpec, any, flexible, inflexible,
+    MenuSpec, View, any, flexible, inflexible,
 };
 
 use nav::Page;
@@ -90,7 +90,7 @@ impl Component for BeuiDemoApp {
         AppState::default()
     }
 
-    fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+    fn build(&self, state: &mut AppState) -> impl View<AppState> {
         let page = state.page;
         let open = state.sidebar_open;
 

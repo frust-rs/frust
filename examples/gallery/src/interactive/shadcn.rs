@@ -69,7 +69,7 @@
 //! Nothing here is a `Case::build`, so none of it reaches the snapshot oracle
 //! and no poster moves.
 
-use frust_core::{AnyView, Component, any, component};
+use frust_core::{AnyView, Component, View, any, component};
 use frust_shadcn::overlay::{OverlayAlign, OverlayAnchor, anchor};
 use frust_shadcn::{
     ButtonVariant, DrawerSide, QuestionnaireAnswer, QuestionnaireAnswerEvent,
@@ -174,7 +174,7 @@ impl Component for FormControlsCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             FORM_FRAME,
             Column(vec![
@@ -276,7 +276,7 @@ impl Component for InputCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let invalid = state.required_invalid;
         let mut required = field(
             input(state.required.clone(), |state: &mut InputState, value| {
@@ -338,7 +338,7 @@ impl Component for TabsCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(tabs(
             state.active.clone(),
             vec![
@@ -389,7 +389,7 @@ impl Component for TableCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let count = state.selected.iter().filter(|selected| **selected).count();
         let total = TABLE_ROWS.len();
         // The seed renders "1 of 2 row(s) selected — page 1 of 1", the recorded
@@ -460,7 +460,7 @@ impl Component for QuestionnaireCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             QUESTIONNAIRE,
             questionnaire(
@@ -545,7 +545,7 @@ impl Component for SelectCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let handle = state.anchor.clone();
         let open = state.open;
         let selected = state.selected;
@@ -630,7 +630,7 @@ impl Component for DropdownMenuCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let handle = state.anchor.clone();
         let open = state.open;
         framed_in(
@@ -733,7 +733,7 @@ impl Component for TooltipCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let hover = state.hover.clone();
         framed(Stack(vec![
             any(tooltip_trigger::<TooltipState, _>(
@@ -791,7 +791,7 @@ impl Component for SidebarCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let active = state.active;
         framed_in(
             SIDEBAR_WIDE,
@@ -898,7 +898,7 @@ impl Component for DialogCase {
         ModalState { open: true }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let panel = if state.open {
             any(dialog(vec![
                 dialog_header(vec![
@@ -946,7 +946,7 @@ impl Component for DrawerCase {
         ModalState { open: true }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let panel = if state.open {
             any(drawer(
                 DrawerSide::Bottom,
@@ -1010,7 +1010,7 @@ impl Component for SheetCase {
         ModalState { open: true }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let panel = if state.open {
             any(sheet(vec![
                 sheet_header(vec![

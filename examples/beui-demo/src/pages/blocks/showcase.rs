@@ -36,7 +36,7 @@ use frust_beui::blocks::wallet_card::{WalletAction, wallet_account, wallet_card}
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 
 use frust::{
-    AnyView, Axis, Column, Component, CrossAxisAlignment, FlexView, SizedBox, TextView, any,
+    AnyView, Axis, Column, Component, CrossAxisAlignment, FlexView, SizedBox, TextView, View, any,
     component, inflexible, text,
 };
 
@@ -713,7 +713,7 @@ impl Component for ShowcasePage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(Column(vec![
             any(heading("Blocks \u{b7} Showcase")),
             gap(8.0),

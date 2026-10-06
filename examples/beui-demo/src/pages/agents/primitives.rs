@@ -688,7 +688,7 @@ impl Component for Primitives {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         // The desktop shell re-runs `build` on every frame it schedules, and
         // the pump below is what keeps those frames coming while a demo runs,
         // so this is the page's frame loop.

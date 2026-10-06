@@ -13,7 +13,9 @@
 //! `action-swap*`): "Continue", "Hover me", "Save changes", "Book a demo",
 //! "Slide to continue", the Copy/Copied swap pair.
 
-use frust::{AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, any, component, text};
+use frust::{
+    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, component, text,
+};
 use frust_beui::components::action_swap::{
     ActionSwapItem, ActionSwapSize, ActionSwapTransition, action_swap,
 };
@@ -419,7 +421,7 @@ impl Component for ButtonsPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(Column(vec![
             buttons(state),
             call_to_action(state),

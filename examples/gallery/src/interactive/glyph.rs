@@ -55,7 +55,7 @@
 //! Nothing here is a `Case::build`, so none of it reaches the snapshot oracle
 //! and no poster moves.
 
-use frust_core::{AnyView, Component, any, component};
+use frust_core::{AnyView, Component, View, any, component};
 use frust_glyph::{
     BadgeVariant, PaletteItem, accordion, badge, command_palette, dots_loader, glyph_dialog,
     glyph_nav_bar, glyph_nav_item, progress, segmented_control, skeleton, tabs, tag, toggle,
@@ -118,7 +118,7 @@ impl Component for AccordionCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(FlexView::new(
             Axis::Vertical,
             vec![
@@ -188,7 +188,7 @@ impl Component for BadgeAndTagCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let mut tags = vec![inflexible(tag::<TagState>("stable"))];
         for version in &state.versions {
             let label = version.clone();
@@ -301,7 +301,7 @@ impl Component for CommandPaletteCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
             command_palette(
                 matching(&state.query),
@@ -357,7 +357,7 @@ impl Component for DialogCase {
         DialogState { open: true }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         if !state.open {
             return framed(
                 button("Revoke observer-token", |state: &mut DialogState| {
@@ -435,7 +435,7 @@ impl Component for LoadersCase {
         LoadersState { value: 0.65 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
             FlexView::new(
                 Axis::Vertical,
@@ -482,7 +482,7 @@ impl Component for NavBarCase {
         NavBarState { selected: 0 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(glyph_nav_bar(
             vec![
                 glyph_nav_item("┌", "frame"),
@@ -524,7 +524,7 @@ impl Component for TabsCase {
         TabsState { tab: 0, segment: 1 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(FlexView::new(
             Axis::Vertical,
             vec![
@@ -584,7 +584,7 @@ impl Component for ToggleCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(FlexView::new(
             Axis::Vertical,
             vec![

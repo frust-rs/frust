@@ -109,7 +109,7 @@ impl Component for ShadcnDemoApp {
         AppState::default()
     }
 
-    fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+    fn build(&self, state: &mut AppState) -> impl View<AppState> {
         let page = state.page;
         let open = state.sidebar_open;
 

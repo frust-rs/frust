@@ -18,8 +18,8 @@
 //! documentation rail.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, any, component, icon, icons,
-    text,
+    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, component, icon,
+    icons, text,
 };
 use frust_beui::components::animated_sidebar::{animated_sidebar, sidebar_item};
 use frust_beui::components::bounce_sidebar::{bounce_sidebar, bounce_sidebar_item};
@@ -521,7 +521,7 @@ impl Component for NavigationPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(Column(vec![
             tab_sets(state),
             docks(state),

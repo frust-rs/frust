@@ -12,7 +12,9 @@
 //! terms/updates checkboxes, the four-plan radio group, the email/password
 //! form, the five slider readouts, and the month/day/year date drum.
 
-use frust::{AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, any, component, text};
+use frust::{
+    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, component, text,
+};
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 use frust_beui::components::checkbox::checkbox;
 use frust_beui::components::input::input;
@@ -486,7 +488,7 @@ impl Component for ControlsPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(Column(vec![
             toggles(state),
             inputs(state),

@@ -5,7 +5,7 @@
 //! The full data-table recipe (sorting, filtering, paging, selection, column
 //! visibility) lives on its own page; the table here is the plain component.
 
-use frust::{AnyView, Column, Component, Row, ScrollInfo, SizedBox, View, any, component, text};
+use frust::{Column, Component, Row, ScrollInfo, SizedBox, View, any, component, text};
 use frust_shadcn::{
     AttachmentSize, AttachmentState, BubbleAlign, BubbleVariant, FieldOrientation, InputOtpMode,
     attachment, attachment_actions, attachment_content, attachment_description, attachment_media,
@@ -225,7 +225,7 @@ impl Component for Bubbles {
 
     fn init(&self) -> Self::State {}
 
-    fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
         any(Column(vec![
             any(bubble("Hey, is the design ready?").align(BubbleAlign::Start)),
             any(SizedBox(None, Some(8.0))),

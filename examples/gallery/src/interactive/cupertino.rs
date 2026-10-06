@@ -65,7 +65,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use frust_core::{AnyView, Component, any, component};
+use frust_core::{AnyView, Component, View, any, component};
 use frust_cupertino::{
     CupertinoActionStyle, action, cupertino_activity_indicator, cupertino_button, cupertino_switch,
     cupertino_tab_bar, show_action_sheet, show_cupertino_alert, tab_item,
@@ -129,7 +129,7 @@ impl Component for SwitchCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
             FlexView::new(
                 Axis::Vertical,
@@ -200,7 +200,7 @@ impl Component for TabBarCase {
         TabBarState { selected: 0 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let caption = format!("Tab bar (selected: {})", state.selected);
         framed(
             FlexView::new(
@@ -293,7 +293,7 @@ impl Component for AlertDialogCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let controller = state.controller.clone();
         let root_controller = controller.clone();
         let root_readout = state.readout.clone();
@@ -378,7 +378,7 @@ impl Component for ActionSheetCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let controller = state.controller.clone();
         let root_controller = controller.clone();
         let root_readout = state.readout.clone();

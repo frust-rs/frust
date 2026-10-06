@@ -18,7 +18,8 @@
 use std::rc::Rc;
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Stack, any, component, text,
+    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Stack, View, any, component,
+    text,
 };
 use frust_beui::components::animated_toast_stack::{
     AnimatedToastStackEntry, AnimatedToastStackPosition, AnimatedToastStackStatus, animated_toast,
@@ -462,7 +463,7 @@ impl Component for DataPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(Column(vec![toasts(state), tables(state)]).cross_axis(CrossAxisAlignment::Start))
     }
 }

@@ -45,7 +45,7 @@ use frust_beui::blocks::signup_form::{SignupStatus, SignupValues, default_valida
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 
 use frust::{
-    AnyView, Axis, Column, Component, CrossAxisAlignment, FlexView, SizedBox, TextView, any,
+    AnyView, Axis, Column, Component, CrossAxisAlignment, FlexView, SizedBox, TextView, View, any,
     component, inflexible, text,
 };
 
@@ -692,7 +692,7 @@ impl Component for FormsPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(Column(vec![
             any(heading("Blocks \u{b7} Forms")),
             gap(8.0),

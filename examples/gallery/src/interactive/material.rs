@@ -179,7 +179,7 @@ impl Component for ButtonGroupCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             STRIP,
             Column(vec![
@@ -244,7 +244,7 @@ impl Component for ChipsCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         // The seeded single contact renders chip + gap + suggestion — the
         // recorded row, member for member.
         let mut second_row: Vec<AnyView<ChipsState>> = Vec::new();
@@ -315,7 +315,7 @@ impl Component for DatePickerCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             PICKER,
             calendar_date_picker(
@@ -379,7 +379,7 @@ impl Component for DropdownCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let mut column: Vec<AnyView<DropdownState>> = vec![bleed(
             dropdown_field(dropdown_items())
                 .selected(state.selected.clone())
@@ -445,7 +445,7 @@ impl Component for IconButtonCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
             Row(vec![
                 any(
@@ -513,7 +513,7 @@ impl Component for ListCase {
         ListState { selected: 2 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             STRIP,
             Column(vec![
@@ -577,7 +577,7 @@ impl Component for MenuCase {
         MenuState { last: None }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let readout = match &state.last {
             Some(label) => format!("chose {label}"),
             None => String::new(),
@@ -646,7 +646,7 @@ impl Component for NavigationBarCase {
         NavigationBarState { selected: 0 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             BAR,
             bleed(
@@ -697,7 +697,7 @@ impl Component for NavigationDrawerCase {
         NavigationDrawerState { selected: 0 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             SURFACE,
             navigation_drawer_content(
@@ -745,7 +745,7 @@ impl Component for NavigationRailCase {
         NavigationRailState { selected: 1 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             RAIL,
             SizedBox(Some(RAIL_W), Some(440.0)).child(
@@ -819,7 +819,7 @@ impl Component for SelectionControlsCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
             Column(vec![
                 any(Row(vec![
@@ -906,7 +906,7 @@ impl Component for SliderCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
             Column(vec![
                 any(SizedBox(Some(280.0), None)
@@ -978,7 +978,7 @@ impl Component for SnackbarCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let headline = if state.undone {
             "Archive undone"
         } else {
@@ -1037,7 +1037,7 @@ impl Component for TabsCase {
         TabsState { selected: 1 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let specs: Vec<Tab> = vec![
             tab().label("Overview").icon(icons::SPACE_DASHBOARD),
             tab().label("Activity").icon(icons::SCHEDULE),
@@ -1106,7 +1106,7 @@ impl Component for TextFieldCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let mut password = text_field(
             state.password.clone(),
             |state: &mut TextFieldState, value| state.password = value,
@@ -1172,7 +1172,7 @@ impl Component for TimePickerCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             PICKER,
             time_dial(state.value, |state: &mut TimePickerState, value| {

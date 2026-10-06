@@ -67,7 +67,7 @@
 //! `on_change` reported — see [`InputCase`]'s own note for why normalising it
 //! would cost an IME composition, not merely a caret.
 
-use frust_core::{AnyView, Component, any, component};
+use frust_core::{AnyView, Component, View, any, component};
 use frust_widgets::{Align, Alignment, Column, GestureDetector, Row, SizedBox, Stack, text};
 use kurbo::Size;
 use peniko::Color;
@@ -222,7 +222,7 @@ impl Component for ChatCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             CHAT,
             SizedBox(Some(376.0), None).child(
@@ -338,7 +338,7 @@ impl Component for CommandPaletteCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let items = PALETTE_COMMANDS
             .iter()
             .map(|(label, group, hint)| {
@@ -443,7 +443,7 @@ impl Component for DynamicIslandCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let compact = GestureDetector(Column(vec![any(text("9:41").size(13.0).color(ISLAND_INK))]))
             .on_tap(|state: &mut DynamicIslandState| state.advance());
         let slots = vec![
@@ -534,7 +534,7 @@ impl Component for FormControlsCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             FORM_CONTROLS,
             Column(vec![
@@ -687,7 +687,7 @@ impl Component for InputCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let mut handle = input(state.handle.clone(), |state: &mut InputState, value| {
             state.handle = value;
         })
@@ -782,7 +782,7 @@ impl Component for OtpInputCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             OTP,
             otp_input(state.code.clone(), |state: &mut OtpState, value| {
@@ -848,7 +848,7 @@ impl Component for PromptInputCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             PROMPT_INPUT,
             SizedBox(Some(320.0), None).child(
@@ -907,7 +907,7 @@ impl Component for TabsCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             TABS,
             SizedBox(Some(340.0), None).child(
@@ -977,7 +977,7 @@ impl Component for WalletCardCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let accounts = vec![
             wallet_account(
                 "main",
