@@ -52,9 +52,10 @@
 
 use frust::{
     AnyView, Column, Component, CrossAxisAlignment, EdgeInsets, Get, GetUntracked,
-    NavigatorController, Padding, PopResult, Row, RwSignal, Set, SizedBox, any, component,
+    NavigatorController, Padding, PopResult, Row, RwSignal, Set, SizedBox, View, any, component,
     navigator, text,
 };
+
 use frust_material::{
     MaterialSpacing, ModalDismiss, dialog, filled_button, full_screen_dialog, selection_dialog,
     show_dialog, show_full_screen_dialog, show_selection_dialog, text_button, tonal_button,
@@ -110,7 +111,7 @@ impl Component for DialogsPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let snapshot = state.clone();
         any(navigator(&state.nav, move || content(&snapshot)))
     }

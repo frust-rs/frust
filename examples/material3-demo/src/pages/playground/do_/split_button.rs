@@ -125,7 +125,7 @@
 
 use frust::{
     AnyView, Component, Get, GetUntracked, NavigatorController, PopResult, RwSignal, Set, Stack,
-    any, component, icon, navigator,
+    View, any, component, icon, navigator,
 };
 use frust_material::{
     BottomSheetView, MenuNode, MenuSelection, ModalDismiss, OverlayAnchor, SplitButtonItem,
@@ -525,7 +525,7 @@ impl Component for SplitButtonPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let snapshot = state.clone();
         any(navigator(&state.nav, move || content(&snapshot)))
     }

@@ -36,7 +36,7 @@
 
 use std::rc::Rc;
 
-use frust::{AnyView, Color, Column, Component, SizedBox, Stack, any, component, icon};
+use frust::{AnyView, Color, Column, Component, SizedBox, Stack, View, any, component, icon};
 use frust_material::{
     ButtonDecoration, ButtonShape, ButtonSize, ButtonVariant, GradientButtonDecoration,
     LinearGradientSpec, OverlayAnchor, button, button_with_icon, constant_gradient, icons,
@@ -372,7 +372,7 @@ impl Component for ButtonsPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

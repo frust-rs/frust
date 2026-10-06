@@ -10,8 +10,8 @@
 //! leaves a radio disabled (dimmed ring/dot, ignores every pointer event).
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, EdgeInsets, Get, Padding, RwSignal, Set, any,
-    component,
+    AnyView, Column, Component, CrossAxisAlignment, EdgeInsets, Get, Padding, RwSignal, Set, View,
+    any, component,
 };
 use frust_material::radio;
 
@@ -56,7 +56,7 @@ impl Component for RadioPlayground {
         }
     }
 
-    fn build(&self, state: &mut RadioPlaygroundState) -> AnyView<RadioPlaygroundState> {
+    fn build(&self, state: &mut RadioPlaygroundState) -> impl View<RadioPlaygroundState> {
         let plan = state.plan.get();
         let error = state.error.get();
         let enabled = state.enabled.get();

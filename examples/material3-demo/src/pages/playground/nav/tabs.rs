@@ -5,7 +5,7 @@
 //! out as an equal-share `Expanded` unconditionally); this page mirrors that
 //! faithfully rather than inventing one.
 
-use frust::{AnyView, Component, any, component};
+use frust::{AnyView, Component, View, any, component};
 use frust_material::{Tab, TabsVariant, icons, tab, tabs};
 
 use crate::AppState;
@@ -50,7 +50,7 @@ impl Component for TabsPlayground {
         }
     }
 
-    fn build(&self, state: &mut TabsState) -> AnyView<TabsState> {
+    fn build(&self, state: &mut TabsState) -> impl View<TabsState> {
         body(state)
     }
 }

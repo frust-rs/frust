@@ -97,7 +97,7 @@ impl Component for NavigationBarPlayground {
         }
     }
 
-    fn build(&self, state: &mut NavBarState) -> AnyView<NavBarState> {
+    fn build(&self, state: &mut NavBarState) -> impl View<NavBarState> {
         body(state)
     }
 }

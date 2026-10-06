@@ -16,7 +16,7 @@
 //! switches, so — unlike the button-family pages in this section — this page
 //! needs no [`frust_material::OverlayAnchor`]/outer `frust::Stack` at all.
 
-use frust::{AnyView, Component, any, component};
+use frust::{AnyView, Component, View, any, component};
 use frust_material::{Segment, icons, segment, segmented_button};
 
 use crate::AppState;
@@ -133,7 +133,7 @@ impl Component for SegmentedButtonPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

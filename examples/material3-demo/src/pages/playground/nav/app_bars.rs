@@ -149,7 +149,7 @@ impl Component for AppBarsPlayground {
         }
     }
 
-    fn build(&self, state: &mut AppBarsState) -> AnyView<AppBarsState> {
+    fn build(&self, state: &mut AppBarsState) -> impl View<AppBarsState> {
         body(state)
     }
 }

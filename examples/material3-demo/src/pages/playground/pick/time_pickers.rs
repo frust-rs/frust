@@ -77,8 +77,9 @@
 
 use frust::{
     AnyView, Column, Component, CrossAxisAlignment, Get, NavigatorController, PopResult, RwSignal,
-    Set, SizedBox, Stack, any, component, navigator, text,
+    Set, SizedBox, Stack, View, any, component, navigator, text,
 };
+
 use frust_material::{
     ModalDismiss, OverlayAnchor, TimeOfDay, TimePickerEntryMode, TimePickerView, show_time_picker,
     time_dial, time_picker, tonal_button,
@@ -372,7 +373,7 @@ impl Component for TimePickersPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let nav = state.nav.clone();
         let time = state.time;
         let entry_mode = state.entry_mode;

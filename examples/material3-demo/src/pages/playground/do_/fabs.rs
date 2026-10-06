@@ -18,7 +18,7 @@
 //! menu is needed, so unlike `buttons.rs`/`icon_buttons.rs` this page mounts
 //! no outer [`frust::Stack`].
 
-use frust::{AnyView, Component, any, component, icon};
+use frust::{AnyView, Component, View, any, component, icon};
 use frust_material::{FabColor, FabSize, extended_fab, fab, icons};
 
 use crate::AppState;
@@ -175,7 +175,7 @@ impl Component for FabsPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

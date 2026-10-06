@@ -29,7 +29,7 @@
 //! [`FabMenuPlayground`] `Component` (never [`AppState`]) per the page
 //! contract in [`crate::pages::playground`].
 
-use frust::{AnyView, Component, SizedBox, any, component, icon};
+use frust::{AnyView, Component, SizedBox, View, any, component, icon};
 use frust_material::{fab_menu, fab_menu_item, icons};
 
 use crate::AppState;
@@ -96,7 +96,7 @@ impl Component for FabMenuPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

@@ -21,7 +21,7 @@
 //! panels mounted at this page's own outer [`Stack`]); `Shape` fits a plain
 //! [`play_enum_segmented`] since it is a 2-way choice.
 
-use frust::{AnyView, Component, Stack, any, component, icon};
+use frust::{AnyView, Component, Stack, View, any, component, icon};
 use frust_material::{
     BadgeValue, IconButtonShape, IconButtonSize, IconButtonVariant, IconButtonWidth, OverlayAnchor,
     icon_button, icons,
@@ -310,7 +310,7 @@ impl Component for IconButtonsPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

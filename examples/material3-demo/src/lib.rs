@@ -57,9 +57,10 @@ mod widgets;
 // point — the idiom `app!`'s own docs prescribe for desktop-only types.
 use frust::{
     AnyView, Brightness, Component, NavigatorController, PageTransition, Route, RouteObserver,
-    RouteParams, Router, SizedBox, Theme, TransitionSpec, any, icon, navigator, provide_context,
-    safe_area, scaffold, shell_route, use_context,
+    RouteParams, Router, SizedBox, Theme, TransitionSpec, View, any, icon, navigator,
+    provide_context, safe_area, scaffold, shell_route, use_context,
 };
+
 use frust_material::{app_bar, icon_button, icons, nav_item, navigation_bar};
 
 use catalog::DemoSection;
@@ -218,7 +219,7 @@ impl Component for Material3Demo {
         }
     }
 
-    fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+    fn build(&self, state: &mut AppState) -> impl View<AppState> {
         // Parent→child navigation (a playground or `/theme` pushed over the
         // gallery shell): M3's shared-axis-X pattern. Pop reversal, including
         // the edge-swipe gesture, comes free — the navigator reverses the
