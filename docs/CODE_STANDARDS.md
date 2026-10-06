@@ -352,10 +352,10 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   `PatternSwitcher`'s): an inactive publish *is* a session release, so raise it only for an
   outgoing/covered subtree that was itself on the live chain — on a push the outgoing pod is the
   page being **covered**. Two severing paths are known to be **uncovered** and are registered rather
-  than fixed: a type swap through a doubly-erased pod, which no reconciler can observe
-  (`focus-double-erasure-swap-blind`), and the hand-rolled navbar/tabbar item lists, which never
-  clear or mark a truncated item's own focus link (`focus-navbar-item-truncation-unmarked`). See
-  `docs/LIMITATIONS.md`.
+  than fixed: a type swap inside a wrapper view that re-boxes an `AnyView` under its own
+  `Box<dyn Widget>` element, which no reconciler can observe (`focus-wrapper-erasure-swap-blind`),
+  and the hand-rolled navbar/tabbar item lists, which never clear or mark a truncated item's own
+  focus link (`focus-navbar-item-truncation-unmarked`). See `docs/LIMITATIONS.md`.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key, view)` marks a
   `Flex` child list for identity-based reconciliation; a mixed or duplicate key set
