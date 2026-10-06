@@ -22,7 +22,7 @@
 //! the same logo ticker.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, MainAxisAlignment, Row, SizedBox, any,
+    AnyView, Column, Component, CrossAxisAlignment, MainAxisAlignment, Row, SizedBox, View, any,
     component, text,
 };
 use frust_beui::components::animated_badge::{
@@ -499,7 +499,7 @@ impl Component for TextPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(Column(vec![
             text_effects(state),
             numbers(state),

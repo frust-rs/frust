@@ -557,7 +557,7 @@ impl Component for CommandPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(key_scope(
             Column(vec![
                 any(heading("Blocks \u{b7} Command")),

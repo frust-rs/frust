@@ -20,8 +20,8 @@
 
 use frust::Row;
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, RwSignal, ScrollInfo, SizedBox, any, component,
-    scroll_view, text,
+    AnyView, Column, Component, CrossAxisAlignment, RwSignal, ScrollInfo, SizedBox, View, any,
+    component, scroll_view, text,
 };
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 use frust_beui::components::cylinder_carousel::{CylinderCarouselVariant, cylinder_carousel};
@@ -492,7 +492,7 @@ impl Component for SurfacesPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(Column(vec![
             tilt_cards(state),
             shared_layout(state),

@@ -20,7 +20,8 @@
 
 use frust::{
     AnyView, Axis, Column, Component, CrossAxisAlignment, EdgeInsets, FlexView, IconSource,
-    Padding, SizedBox, TextView, Theme, any, component, icon, icons, inflexible, text, use_context,
+    Padding, SizedBox, TextView, Theme, View, any, component, icon, icons, inflexible, text,
+    use_context,
 };
 use frust_beui::blocks::dynamic_island::{dynamic_island, dynamic_island_slot};
 use frust_beui::blocks::expandable_tabs::{expandable_tabs, expandable_tabs_item};
@@ -539,7 +540,7 @@ impl Component for MorphPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(Column(vec![
             any(heading("Blocks \u{b7} Morph")),
             gap(8.0),

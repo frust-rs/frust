@@ -124,7 +124,7 @@ impl Component for Pill {
 
     fn init(&self) -> Self::State {}
 
-    fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
         any(bubble(self.body.clone())
             .variant(self.variant)
             .align(self.align))

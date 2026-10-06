@@ -17,7 +17,7 @@
 //! Nothing here is a `Case::build`, so none of it reaches the snapshot oracle
 //! and no poster moves.
 
-use frust_core::{AnyView, Component, any, component};
+use frust_core::{AnyView, Component, View, any, component};
 use frust_widgets::{
     Align, Alignment, Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector, Padding,
     PlatformViewView, SizedBox, Stack, button, checkbox, container, inflexible, platform_view,
@@ -83,7 +83,7 @@ impl Component for CheckboxCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
             FlexView::new(
                 Axis::Horizontal,
@@ -139,7 +139,7 @@ impl Component for RadioCase {
         RadioState { selected: 0 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
             FlexView::new(
                 Axis::Horizontal,
@@ -194,7 +194,7 @@ impl Component for SliderCase {
         SliderState { value: 0.4 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         // The seed renders "40%" — the recorded caption's literal, character
         // for character — so the poster-to-live handoff is silent.
         let percent = (state.value * 100.0).round();
@@ -267,7 +267,7 @@ impl Component for TextInputCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
             FlexView::new(
                 Axis::Vertical,
@@ -326,7 +326,7 @@ impl Component for GestureDetectorCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let caption = format!("{} taps, {} long-presses", state.taps, state.long_presses);
         framed(
             FlexView::new(
@@ -399,7 +399,7 @@ impl Component for ShieldCase {
         ShieldState { taps: 0 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let taps = state.taps;
         let unit = if taps == 1 { "time" } else { "times" };
         any(Stack(vec![

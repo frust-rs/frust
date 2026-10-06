@@ -157,7 +157,7 @@ with `frust create my_app --frust-path <checkout>`.
 
 ```rust
 // crates/frust/src/lib.rs (doctest)
-use frust::{Component, View, AnyView, any, text};
+use frust::{Component, View, any, text};
 
 struct Counter;
 
@@ -168,7 +168,7 @@ impl Component for Counter {
         0
     }
 
-    fn build(&self, state: &mut i32) -> AnyView<i32> {
+    fn build(&self, state: &mut i32) -> impl View<i32> {
         any(text(format!("count: {state}")).size(32.0))
     }
 }

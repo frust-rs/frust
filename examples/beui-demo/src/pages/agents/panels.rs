@@ -10,7 +10,9 @@
 
 use std::time::Duration;
 
-use frust::{AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, any, component, text};
+use frust::{
+    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, component, text,
+};
 use frust_beui::agents::approval_card::{ApprovalCardAction, ApprovalCardStatus, approval_card};
 use frust_beui::agents::citations::{
     Citation, citation, citation_list, citation_preview, citations,
@@ -734,7 +736,7 @@ impl Component for Panels {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         let delta = state.clock.tick();
         state.advance(delta);
 

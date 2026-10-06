@@ -25,7 +25,8 @@
 //! combobox, the team multi-select, and the guest stepper.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Stack, any, component, text,
+    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Stack, View, any, component,
+    text,
 };
 use frust_beui::components::adaptive_stepper::adaptive_stepper;
 use frust_beui::components::combobox::{
@@ -409,7 +410,7 @@ impl Component for SelectionPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(Column(vec![
             selects(state),
             comboboxes(state),

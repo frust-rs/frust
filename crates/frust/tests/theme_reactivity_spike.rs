@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use frust::{Brightness, Theme, provide_context, use_context};
 use frust_core::component::{Component, component};
 use frust_core::layout::BoxConstraints;
-use frust_core::view::{AnyView, BuildCtx, ChangeFlags, View, any};
+use frust_core::view::{BuildCtx, ChangeFlags, View, any};
 use frust_core::widget::{LayoutCtx, PaintCtx, PaintScene, Widget};
 use frust_reactive::Owner;
 use frust_shell_common::ThemeOverrideWatcher;
@@ -67,7 +67,7 @@ struct ThemeProbe {
 impl Component for ThemeProbe {
     type State = ();
     fn init(&self) -> Self::State {}
-    fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
         let brightness = use_context::<Theme>().map(|t| t.brightness);
         self.seen
             .lock()

@@ -535,8 +535,8 @@ impl<State: 'static> BackHandler<State> {
 ///
 /// ```no_run
 /// use frust::{
-///     AnyView, BackHandler, Component, NavigatorController, any, attach_back_handler,
-///     navigator, text,
+///     BackHandler, Component, NavigatorController, View, any, attach_back_handler, navigator,
+///     text,
 /// };
 ///
 /// #[derive(Default)]
@@ -556,7 +556,7 @@ impl<State: 'static> BackHandler<State> {
 ///         }
 ///     }
 ///
-///     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+///     fn build(&self, state: &mut AppState) -> impl View<AppState> {
 ///         // Called every rebuild: consumes a new back press (via `request_back`)
 ///         // and keeps the framework's handles-back interest in sync. The
 ///         // `frust::navigator` call auto-wires the SAME controller — one press

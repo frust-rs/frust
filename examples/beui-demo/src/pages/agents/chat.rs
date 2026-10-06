@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use frust::{
-    AnyView, Color, Column, Component, CrossAxisAlignment, Row, SizedBox, any, colored_box,
+    AnyView, Color, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, colored_box,
     component, text,
 };
 use frust_beui::agents::agent_activity::{
@@ -342,7 +342,7 @@ impl Component for Chat {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         let delta = state.clock.tick();
         state.advance(delta);
 

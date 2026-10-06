@@ -22,8 +22,8 @@
 //! `crate::pages::motion::text`).
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, EdgeInsets, Padding, Row, SizedBox, Stack, any,
-    component, text,
+    AnyView, Column, Component, CrossAxisAlignment, EdgeInsets, Padding, Row, SizedBox, Stack,
+    View, any, component, text,
 };
 use frust_beui::components::bottom_sheet::bottom_sheet;
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
@@ -636,7 +636,7 @@ impl Component for OverlaysPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         any(Column(vec![
             tooltips(state),
             popovers(state),
