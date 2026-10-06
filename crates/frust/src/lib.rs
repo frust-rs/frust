@@ -54,10 +54,9 @@
 //!     greeting: String,
 //! }
 //!
-//! let build = |state: &mut AppState| -> frust::AnyView<AppState> {
-//!     // The build closure returns the type-erased `AnyView`, so erase once here.
-//!     frust::any(frust::text(state.greeting.clone()).size(32.0))
-//! };
+//! // The build closure is generic over its return (`impl View<State>`), so it
+//! // returns the concrete view directly, with no erasure.
+//! let build = |state: &mut AppState| frust::text(state.greeting.clone()).size(32.0);
 //!
 //! frust::App::new(AppState { greeting: "Hello from Frust".into() }, build)
 //!     .run()
@@ -1470,17 +1469,15 @@ pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 /// [`Router`]) is a separate opt-in, not automatic here.
 ///
 /// ```no_run
-/// use frust::{AnyView, Route, Router, View, any, deep_links, text};
+/// use frust::{Route, Router, View, deep_links, text};
 ///
 /// struct AppState;
 ///
 /// struct NavDemo;
 ///
 /// fn build_router() -> Router<AppState> {
-///     // A route builder is declared to return `AnyView`, so it erases once here.
-///     Router::new(vec![Route::new("/", |_params| -> AnyView<AppState> {
-///         any(text("home"))
-///     })])
+///     // A route builder returns any `View`, so it needs no erasure.
+///     Router::new(vec![Route::new("/", |_params| text("home"))])
 /// }
 ///
 /// impl frust::Component for NavDemo {
