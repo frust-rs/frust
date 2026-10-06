@@ -492,8 +492,8 @@ impl Widget for ShieldWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Axis, EdgeInsets, FlexView, Padding, PaddingView, Row, SizedBox, keyed};
-    use frust_core::{BuildCtx, ChildPod, any};
+    use crate::{EdgeInsets, FlexView, Padding, PaddingView, SizedBox, row};
+    use frust_core::{BuildCtx, ChildPod};
     use kurbo::Point;
 
     fn build(view: &PlatformViewView) -> PlatformViewWidget {
@@ -565,10 +565,9 @@ mod tests {
     fn publishes_absolute_rect_under_padding_flex_nesting_and_scroll_offset() {
         let mut counter = 0u64;
         let insets = EdgeInsets::all(10.0);
-        let row: FlexView<()> = Row(vec![
-            any(SizedBox::<()>(Some(50.0), Some(30.0))),
-            any(platform_view("dev.frust.MapFactory").size(80.0, 60.0)),
-        ]);
+        let row: FlexView<()> = row()
+            .child(SizedBox::<()>(Some(50.0), Some(30.0)))
+            .child(platform_view("dev.frust.MapFactory").size(80.0, 60.0));
         let padded: PaddingView<()> = Padding(insets, row);
 
         let widget = padded.build(&mut BuildCtx::new(&mut counter));
@@ -661,9 +660,7 @@ mod tests {
     #[test]
     fn parent_culling_of_the_whole_subtree_yields_no_frame_at_all() {
         let mut counter = 0u64;
-        let row: FlexView<()> = Row(vec![any(
-            platform_view("dev.frust.MapFactory").size(50.0, 50.0)
-        )]);
+        let row: FlexView<()> = row().child(platform_view("dev.frust.MapFactory").size(50.0, 50.0));
         let mut widget = row.build(&mut BuildCtx::new(&mut counter));
         let mut lctx = LayoutCtx::new();
         widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(1000.0, 1000.0)));
@@ -882,13 +879,9 @@ mod tests {
         // that by keying two slots, swapping their positions across a
         // rebuild, and checking each keeps its original slot_id.
         let mut counter = 0u64;
-        let a: FlexView<()> = FlexView::new(
-            Axis::Horizontal,
-            vec![
-                keyed(1u64, platform_view("dev.frust.A")),
-                keyed(2u64, platform_view("dev.frust.B")),
-            ],
-        );
+        let a: FlexView<()> = row()
+            .keyed(1u64, platform_view("dev.frust.A"))
+            .keyed(2u64, platform_view("dev.frust.B"));
         let mut widget = a.build(&mut BuildCtx::new(&mut counter));
         let mut lctx = LayoutCtx::new();
         widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(1000.0, 1000.0)));
@@ -902,13 +895,9 @@ mod tests {
         assert_ne!(id_a, id_b);
 
         // Rebuild with the two keyed children swapped in position.
-        let b: FlexView<()> = FlexView::new(
-            Axis::Horizontal,
-            vec![
-                keyed(2u64, platform_view("dev.frust.B")),
-                keyed(1u64, platform_view("dev.frust.A")),
-            ],
-        );
+        let b: FlexView<()> = row()
+            .keyed(2u64, platform_view("dev.frust.B"))
+            .keyed(1u64, platform_view("dev.frust.A"));
         b.rebuild(&a, &mut widget, &mut BuildCtx::new(&mut counter));
         widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(1000.0, 1000.0)));
 
@@ -930,10 +919,9 @@ mod tests {
         // painted into (absolute window coordinates, the same space
         // `PlatformViewFrame::rect` uses), and must not alter the child's paint.
         let mut counter = 0u64;
-        let row: FlexView<()> = Row(vec![
-            any(SizedBox::<()>(Some(50.0), Some(30.0))),
-            any(shield(crate::test_support::leaf(80.0, 60.0))),
-        ]);
+        let row: FlexView<()> = row()
+            .child(SizedBox::<()>(Some(50.0), Some(30.0)))
+            .child(shield(crate::test_support::leaf(80.0, 60.0)));
         let padded: PaddingView<()> = Padding(EdgeInsets::all(10.0), row);
 
         let mut widget = padded.build(&mut BuildCtx::new(&mut counter));
@@ -962,10 +950,9 @@ mod tests {
         // The `Vec`-extend discipline end to end (an overwrite-shaped channel
         // would leave only the last one).
         let mut counter = 0u64;
-        let row: FlexView<()> = Row(vec![
-            any(shield(crate::test_support::leaf(20.0, 20.0))),
-            any(shield(crate::test_support::leaf(30.0, 30.0))),
-        ]);
+        let row: FlexView<()> = row()
+            .child(shield(crate::test_support::leaf(20.0, 20.0)))
+            .child(shield(crate::test_support::leaf(30.0, 30.0)));
         let mut widget = row.build(&mut BuildCtx::new(&mut counter));
         let mut lctx = LayoutCtx::new();
         widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(1000.0, 1000.0)));
@@ -1026,7 +1013,7 @@ mod tests {
         // The real removal path: an `AnyView` concrete-type swap inside a Flex
         // child, which runs `teardown_child` -> `PlatformViewView::teardown`.
         let mut counter = 0u64;
-        let prev: FlexView<()> = Row(vec![any(platform_view("dev.frust.MapFactory"))]);
+        let prev: FlexView<()> = row().child(platform_view("dev.frust.MapFactory"));
         let mut widget = prev.build(&mut BuildCtx::new(&mut counter));
 
         let mut scene = NullScene::default();
@@ -1040,7 +1027,7 @@ mod tests {
             "a live slot reports no retire while it keeps painting"
         );
 
-        let next: FlexView<()> = Row(vec![any(SizedBox::<()>(Some(10.0), Some(10.0)))]);
+        let next: FlexView<()> = row().child(SizedBox::<()>(Some(10.0), Some(10.0)));
         next.rebuild(&prev, &mut widget, &mut BuildCtx::new(&mut counter));
 
         assert_eq!(
@@ -1060,9 +1047,7 @@ mod tests {
         let _ = drain_retired();
 
         let mut counter = 0u64;
-        let row: FlexView<()> = Row(vec![any(
-            platform_view("dev.frust.MapFactory").size(50.0, 50.0)
-        )]);
+        let row: FlexView<()> = row().child(platform_view("dev.frust.MapFactory").size(50.0, 50.0));
         let mut widget = row.build(&mut BuildCtx::new(&mut counter));
         let mut lctx = LayoutCtx::new();
         widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(1000.0, 1000.0)));

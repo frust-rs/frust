@@ -27,8 +27,8 @@ use frust_core::{
 };
 use frust_text::TextContext;
 use frust_widgets::{
-    Column, EdgeInsets, NavigatorController, NavigatorView, Padding, PaddingView, PageTransition,
-    PushOptions, Timing, TransitionSpec, button, checkbox, navigator, text,
+    EdgeInsets, NavigatorController, NavigatorView, Padding, PaddingView, PageTransition,
+    PushOptions, Timing, TransitionSpec, button, checkbox, column, navigator, text,
 };
 use kurbo::{Point, Size};
 
@@ -63,12 +63,11 @@ impl View<()> for BlankView {
 fn logic(_state: &mut ()) -> PaddingView<()> {
     Padding(
         EdgeInsets::all(20.0),
-        Column(vec![
-            any::<(), _>(text("Hello")),
-            any::<(), _>(BlankView),
-            any::<(), _>(button::<(), _>("Go", |_| {})),
-            any::<(), _>(checkbox::<(), _>(true, "Agree", |_, _| {})),
-        ]),
+        column()
+            .child(any::<(), _>(text("Hello")))
+            .child(any::<(), _>(BlankView))
+            .child(any::<(), _>(button::<(), _>("Go", |_| {})))
+            .child(any::<(), _>(checkbox::<(), _>(true, "Agree", |_, _| {}))),
     )
 }
 

@@ -1257,7 +1257,7 @@ impl<State: 'static> Widget for OverlayPortalWidget<State> {
 mod tests {
     use super::*;
     use crate::test_support::RecordingScene;
-    use crate::{Column, SizedBox, Stack, StackView, scroll_view};
+    use crate::{SizedBox, StackView, column, scroll_view, stack};
     use frust_core::{
         EditCommand, FrameTime, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerPhase,
         RenderRoot, ScrollDelta,
@@ -1676,36 +1676,37 @@ mod tests {
             portal = portal.outside_tap(policy);
         }
         match cfg.shape {
-            Shape::Plain => Stack(vec![
-                any(portal),
+            Shape::Plain => stack()
+                .child(portal)
                 // Painted after the portal and covering it, so "the pod paints
                 // above a later sibling" is a real question. It handles nothing,
                 // so a press falls through to the portal's own child.
-                any(Probe {
+                .child(Probe {
                     tag: "sib",
                     size: None,
                     reaction: Reaction::Nothing,
                     handles: false,
                     log,
                 }),
-            ]),
-            Shape::Scrolled => Stack(vec![any(scroll_view(Column(vec![
-                any(SizedBox(Some(400.0), Some(200.0))),
-                any(portal),
-                any(SizedBox(Some(400.0), Some(1000.0))),
-            ])))]),
+            Shape::Scrolled => stack().child(scroll_view(
+                column()
+                    .child(SizedBox(Some(400.0), Some(200.0)))
+                    .child(portal)
+                    .child(SizedBox(Some(400.0), Some(1000.0))),
+            )),
             // The field first, the portal second: a focus-routed event walking
             // the children in order meets the field's link before the portal's.
-            Shape::Sibling => Stack(vec![any(Column(vec![
-                any(Probe {
-                    tag: "field",
-                    size: Some(Size::new(400.0, 50.0)),
-                    reaction: Reaction::Focus,
-                    handles: true,
-                    log,
-                }),
-                any(portal),
-            ]))]),
+            Shape::Sibling => stack().child(
+                column()
+                    .child(Probe {
+                        tag: "field",
+                        size: Some(Size::new(400.0, 50.0)),
+                        reaction: Reaction::Focus,
+                        handles: true,
+                        log,
+                    })
+                    .child(portal),
+            ),
         }
     }
 
@@ -2635,13 +2636,12 @@ mod tests {
         let mut root: RenderRoot<(), StackView<()>> = RenderRoot::new();
         let log = Rc::clone(&beneath_log);
         let mut build = move |_: &mut ()| {
-            Stack(vec![
-                any(TaggedProbe {
+            stack()
+                .child(TaggedProbe {
                     tag: "beneath",
                     log: Rc::clone(&log),
-                }),
-                any(GhostOwner { offset }),
-            ])
+                })
+                .child(GhostOwner { offset })
         };
         let mut state = ();
         root.rebuild(&mut build, &mut state);
@@ -2738,8 +2738,7 @@ mod tests {
         // Registered Tooltip-first (`GhostOwner`), Floating-second
         // (`FloatingOwner`): exactly the order the band sort has to survive,
         // not merely happen to preserve.
-        let mut build =
-            move |_: &mut ()| Stack(vec![any(GhostOwner { offset }), any(FloatingOwner)]);
+        let mut build = move |_: &mut ()| stack().child(GhostOwner { offset }).child(FloatingOwner);
         let mut state = ();
         root.rebuild(&mut build, &mut state);
         root.layout(WINDOW);

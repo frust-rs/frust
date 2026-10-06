@@ -4,8 +4,8 @@
 
 use super::super::*;
 use super::support::*;
-use crate::Stack;
 use crate::nav::transition::{PageTransition, Timing, TransitionSpec};
+use crate::stack;
 use frust_core::Curve;
 use frust_core::{FrameTime, RenderRoot, any};
 use frust_theme::{MotionSpring, Theme};
@@ -1661,13 +1661,12 @@ fn transition_state_is_frame_exact_for_chrome_painted_after_the_navigator() {
         let ctrl = controller.clone();
         let log = log.clone();
         move |_: &mut ()| {
-            any(Stack(vec![
-                any(navigator(&ctrl, || sized_page(100.0, 100.0))),
-                any(ProbeView {
+            any(stack()
+                .child(navigator(&ctrl, || sized_page(100.0, 100.0)))
+                .child(ProbeView {
                     controller: ctrl.clone(),
                     log: log.clone(),
-                }),
-            ]))
+                }))
         }
     };
     let mut state = ();

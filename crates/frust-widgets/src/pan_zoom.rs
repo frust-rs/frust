@@ -1496,7 +1496,7 @@ mod tests {
     //     seam when it is about to pan. See `begin_gesture` and the module
     //     docs' *Pan* bullet. ---
 
-    use crate::flex::Column;
+    use crate::flex::column;
     use crate::scroll::{ScrollView, scroll_view};
     use crate::sized::SizedBox;
 
@@ -1527,21 +1527,24 @@ mod tests {
             let controller = PanZoomController::new();
             let (child_log, child_controller) = (log, controller.clone());
             let logic: NestLogic = Box::new(move |_: &mut App| {
-                scroll_view(Column(vec![
-                    any(SizedBox(None, Some(PAN_H)).child(
-                        pan_zoom(Content {
+                scroll_view(
+                    column()
+                        .child(
+                            SizedBox(None, Some(PAN_H)).child(
+                                pan_zoom(Content {
+                                    log: child_log.clone(),
+                                    scrolls: false,
+                                    size: Some(Size::new(400.0, PAN_H)),
+                                })
+                                .controller(child_controller.clone()),
+                            ),
+                        )
+                        .child(SizedBox(None, Some(SIBLING_H)).child(Content {
                             log: child_log.clone(),
                             scrolls: false,
-                            size: Some(Size::new(400.0, PAN_H)),
-                        })
-                        .controller(child_controller.clone()),
-                    )),
-                    any(SizedBox(None, Some(SIBLING_H)).child(Content {
-                        log: child_log.clone(),
-                        scrolls: false,
-                        size: Some(Size::new(400.0, SIBLING_H)),
-                    })),
-                ]))
+                            size: Some(Size::new(400.0, SIBLING_H)),
+                        })),
+                )
                 .on_scroll(|s: &mut App, info| s.scroll_offsets.push(info.offset))
             });
             let mut fixture = NestFixture {

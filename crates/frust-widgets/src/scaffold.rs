@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn app_bar_offsets_the_body_by_its_own_height() {
-        let view: ScaffoldView<()> = scaffold(leaf(50.0, 50.0)).app_bar(any(leaf(0.0, 56.0)));
+        let view: ScaffoldView<()> = scaffold(leaf(50.0, 50.0)).app_bar(leaf(0.0, 56.0));
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(Size::new(300.0, 400.0)));
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn body_behind_app_bar_gives_the_body_full_height() {
         let view: ScaffoldView<()> = scaffold(leaf(50.0, 50.0))
-            .app_bar(any(leaf(0.0, 56.0)))
+            .app_bar(leaf(0.0, 56.0))
             .body_behind_app_bar(true);
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn bottom_bar_sits_at_the_bottom_edge_and_body_stops_above_it() {
-        let view: ScaffoldView<()> = scaffold(leaf(50.0, 50.0)).bottom_bar(any(leaf(0.0, 48.0)));
+        let view: ScaffoldView<()> = scaffold(leaf(50.0, 50.0)).bottom_bar(leaf(0.0, 48.0));
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(Size::new(300.0, 400.0)));
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn fab_defaults_to_bottom_right_inset_by_margin() {
-        let view: ScaffoldView<()> = scaffold(leaf(50.0, 50.0)).fab(any(leaf(56.0, 56.0)));
+        let view: ScaffoldView<()> = scaffold(leaf(50.0, 50.0)).fab(leaf(56.0, 56.0));
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(Size::new(300.0, 400.0)));
@@ -593,8 +593,8 @@ mod tests {
     #[test]
     fn fab_floats_above_a_present_bottom_bar_with_no_double_inset() {
         let view: ScaffoldView<()> = scaffold(leaf(50.0, 50.0))
-            .bottom_bar(any(leaf(0.0, 48.0)))
-            .fab(any(leaf(56.0, 56.0)));
+            .bottom_bar(leaf(0.0, 48.0))
+            .fab(leaf(56.0, 56.0));
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(Size::new(300.0, 400.0)));
@@ -610,9 +610,9 @@ mod tests {
     #[test]
     fn all_four_slots_together() {
         let view: ScaffoldView<()> = scaffold(leaf(50.0, 50.0))
-            .app_bar(any(leaf(0.0, 56.0)))
-            .bottom_bar(any(leaf(0.0, 48.0)))
-            .fab(any(leaf(56.0, 56.0)));
+            .app_bar(leaf(0.0, 56.0))
+            .bottom_bar(leaf(0.0, 48.0))
+            .fab(leaf(56.0, 56.0));
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(Size::new(300.0, 400.0)));

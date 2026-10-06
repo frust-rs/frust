@@ -4369,16 +4369,14 @@ mod tests {
     }
 
     fn nested_logic(state: &mut NestedState) -> crate::FlexView<NestedState> {
-        use frust_core::any;
-        crate::Column(vec![
-            any(text_input(
+        crate::column()
+            .child(text_input(
                 state.value.clone(),
                 |s: &mut NestedState, v: String| {
                     s.value = v;
                 },
-            )),
-            any(crate::button("ok", |_s: &mut NestedState| {})),
-        ])
+            ))
+            .child(crate::button("ok", |_s: &mut NestedState| {}))
     }
 
     #[test]
@@ -4439,16 +4437,14 @@ mod tests {
     /// stale, which is exactly the case `paint_child`'s ancestor-composed
     /// `has_focus` seeding must cover.
     fn deep_nested_logic(state: &mut NestedState) -> crate::FlexView<NestedState> {
-        use frust_core::any;
-        crate::Column(vec![
-            any(crate::Column(vec![any(text_input(
+        crate::column()
+            .child(crate::column().child(text_input(
                 state.value.clone(),
                 |s: &mut NestedState, v: String| {
                     s.value = v;
                 },
-            ))])),
-            any(crate::button("ok", |_s: &mut NestedState| {})),
-        ])
+            )))
+            .child(crate::button("ok", |_s: &mut NestedState| {}))
     }
 
     #[test]
@@ -4673,13 +4669,10 @@ mod tests {
                 crate::text(state.row.clone()),
             ))
         };
-        crate::Column(vec![
-            slot,
-            any(text_input(
-                state.composer.clone(),
-                |s: &mut WrapState, v: String| s.composer = v,
-            )),
-        ])
+        crate::column().child(slot).child(text_input(
+            state.composer.clone(),
+            |s: &mut WrapState, v: String| s.composer = v,
+        ))
     }
 
     /// Build the fixture and focus the **wrapped** field, leaving it (and the

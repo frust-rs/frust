@@ -177,7 +177,9 @@ mod tests {
 
     #[test]
     fn sizes_to_largest_child() {
-        let view: StackView<()> = Stack(vec![leaf_any(30.0, 60.0), leaf_any(80.0, 20.0)]);
+        let view: StackView<()> = stack()
+            .child(leaf_any(30.0, 60.0))
+            .child(leaf_any(80.0, 20.0));
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         // Widest child is 80 (child 1); tallest is 60 (child 0).
@@ -191,7 +193,9 @@ mod tests {
     #[test]
     fn hit_test_prefers_topmost_child() {
         // Two fully-overlapping probes; the last (topmost) must consume the event.
-        let view: StackView<Vec<u32>> = Stack(vec![probe(0).into_any(), probe(1).into_any()]);
+        let view: StackView<Vec<u32>> = stack()
+            .child(probe(0).into_any())
+            .child(probe(1).into_any());
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 100.0)));

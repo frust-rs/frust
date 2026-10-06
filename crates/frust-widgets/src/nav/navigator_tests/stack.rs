@@ -6,7 +6,7 @@ use super::super::*;
 use super::support::*;
 use crate::nav::transition::TransitionSpec;
 use crate::test_support::RecordingScene;
-use crate::{Column, FlexView};
+use crate::{FlexView, column};
 use frust_core::{FrameTime, PointerPhase, RenderRoot, any};
 use kurbo::Rect;
 use std::cell::Cell;
@@ -226,10 +226,8 @@ fn pop_result_reaches_callback_with_state() {
     let mut app = {
         let ctrl = controller.clone();
         move |_: &mut ResultState| {
-            navigator(&ctrl, || {
-                any(SizedLeaf {
-                    size: Size::new(10.0, 10.0),
-                })
+            navigator(&ctrl, || SizedLeaf {
+                size: Size::new(10.0, 10.0),
             })
         }
     };
@@ -240,10 +238,8 @@ fn pop_result_reaches_callback_with_state() {
 
     // Push B, registering a result callback that records into app state.
     controller.push_for_result(
-        || {
-            any(SizedLeaf {
-                size: Size::new(10.0, 10.0),
-            })
+        || SizedLeaf {
+            size: Size::new(10.0, 10.0),
         },
         |state: &mut ResultState, result: PopResult| {
             state.received = result.take::<i32>();
@@ -782,10 +778,8 @@ fn push_cancels_captured_drag_on_outgoing_top() {
         let flag = cancelled.clone();
         move |_: &mut ()| {
             let flag = flag.clone();
-            navigator(&ctrl, move || {
-                any(CaptureLeaf {
-                    cancelled: flag.clone(),
-                })
+            navigator(&ctrl, move || CaptureLeaf {
+                cancelled: flag.clone(),
             })
         }
     };
@@ -800,10 +794,8 @@ fn push_cancels_captured_drag_on_outgoing_top() {
 
     // Push B → A's in-flight capture is cancelled (synthetic Cancel, no state
     // access) as it becomes the covered page.
-    controller.push(|| {
-        any(SizedLeaf {
-            size: Size::new(10.0, 10.0),
-        })
+    controller.push(|| SizedLeaf {
+        size: Size::new(10.0, 10.0),
     });
     root.rebuild(&mut app, &mut state);
     assert!(
@@ -865,7 +857,7 @@ fn push_clears_focused_field_ime_surface() {
     let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
     let mut app = {
         let ctrl = controller.clone();
-        move |_: &mut ()| navigator(&ctrl, || any(EditableLeaf))
+        move |_: &mut ()| navigator(&ctrl, || EditableLeaf)
     };
     let mut state = ();
     root.rebuild(&mut app, &mut state);
@@ -882,10 +874,8 @@ fn push_clears_focused_field_ime_surface() {
 
     // Push B programmatically (no blurring tap): the navigator's own switch
     // handling must clear the stale IME surface deterministically at paint.
-    controller.push(|| {
-        any(SizedLeaf {
-            size: Size::new(10.0, 10.0),
-        })
+    controller.push(|| SizedLeaf {
+        size: Size::new(10.0, 10.0),
     });
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
@@ -920,10 +910,8 @@ fn pop_releases_the_focused_field_session() {
     let mut app = {
         let ctrl = controller.clone();
         move |_: &mut ()| {
-            navigator(&ctrl, || {
-                any(SizedLeaf {
-                    size: Size::new(10.0, 10.0),
-                })
+            navigator(&ctrl, || SizedLeaf {
+                size: Size::new(10.0, 10.0),
             })
         }
     };
@@ -932,7 +920,7 @@ fn pop_releases_the_focused_field_session() {
     root.layout(Size::new(100.0, 100.0));
 
     // Push the editable page and focus its field.
-    controller.push(|| any(EditableLeaf));
+    controller.push(|| EditableLeaf);
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
     root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
@@ -1048,12 +1036,11 @@ fn field_above_navigator_app(
 ) -> impl FnMut(&mut ()) -> FlexView<()> + use<> {
     let ctrl = controller.clone();
     move |_: &mut ()| {
-        Column(vec![
-            any(PersistentField {
+        column()
+            .child(PersistentField {
                 size: Size::new(100.0, 40.0),
-            }),
-            any(navigator(&ctrl, || sized_page(100.0, 40.0))),
-        ])
+            })
+            .child(navigator(&ctrl, || sized_page(100.0, 40.0)))
     }
 }
 

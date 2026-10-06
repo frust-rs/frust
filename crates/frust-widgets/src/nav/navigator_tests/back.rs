@@ -158,7 +158,7 @@ impl NestedHarness {
             Box::new(move |_: &mut ()| {
                 let nested = nested.clone();
                 navigator(&outer, move || {
-                    any(navigator(&nested, || sized_page(10.0, 10.0)))
+                    navigator(&nested, || sized_page(10.0, 10.0))
                 })
                 .cull_covered_builds(cull)
             })
@@ -316,7 +316,7 @@ fn back_reach_composes_through_three_nesting_levels() {
             navigator(&outer, move || {
                 let inner = inner.clone();
                 any(navigator(&middle, move || {
-                    any(navigator(&inner, || sized_page(10.0, 10.0)))
+                    navigator(&inner, || sized_page(10.0, 10.0))
                 }))
             })
         }
