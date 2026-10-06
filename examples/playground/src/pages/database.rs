@@ -28,8 +28,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Padding,
-    RwSignal, Set, SizedBox, Theme, Update, any, button, inflexible, spawn_blocking, spawn_local,
-    text, use_context,
+    RwSignal, Set, SizedBox, Theme, Update, any, button, inflexible, row, spawn_blocking,
+    spawn_local, text, use_context,
 };
 use frust_database::{Database, DatabaseError, Value};
 
@@ -200,19 +200,17 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
         .size(11.0)
         .color(muted())),
         any(SizedBox(None, Some(12.0))),
-        any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(button(
-                    "Open + insert",
-                    |state: &mut PlaygroundState| {
-                        spawn_smoke(status_sig(), state.toasts);
-                    },
-                )
+        any(row()
+            .child(
+                button("Open + insert", |state: &mut PlaygroundState| {
+                    spawn_smoke(status_sig(), state.toasts);
+                })
                 .style(ButtonStyle::Primary)
-                .small())),
-                gap_h(8.0),
-                inflexible(any(button("Clear", |state: &mut PlaygroundState| {
+                .small(),
+            )
+            .push(gap_h(8.0))
+            .child(
+                button("Clear", |state: &mut PlaygroundState| {
                     let toasts = state.toasts;
                     spawn_local(async move {
                         let message = match spawn_blocking(run_clear).await {
@@ -225,9 +223,8 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
                     });
                 })
                 .style(ButtonStyle::Secondary)
-                .small())),
-            ],
-        )),
+                .small(),
+            )),
         any(SizedBox(None, Some(8.0))),
         any(text(status_line).size(12.0)),
     ];

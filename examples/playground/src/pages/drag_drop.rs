@@ -48,8 +48,8 @@ use std::path::PathBuf;
 use frust::{
     AnyView, Axis, ChildKey, Color, DragCoordinator, EdgeInsets, FlexChild, FlexView, Get,
     GetUntracked, Padding, RwSignal, ScrollController, Set, SizedBox, SourceFeedback, Theme,
-    Update, any, auto_scroll_zone, container, drag_target, draggable, inflexible, reorderable_list,
-    scroll_view, text, use_context,
+    Update, any, auto_scroll_zone, column, container, drag_target, draggable, inflexible,
+    reorderable_list, scroll_view, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -266,14 +266,10 @@ fn kanban_column(
             move_card(state, moved.id, to_column);
         });
     let zoned = auto_scroll_zone(target, coordinator, controller);
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(text(label).size(12.0).color(colors.muted)),
-            inflexible(SizedBox::<PlaygroundState>(None, Some(4.0))),
-            inflexible(zoned),
-        ],
-    ))
+    any(column()
+        .child(text(label).size(12.0).color(colors.muted))
+        .child(SizedBox::<PlaygroundState>(None, Some(4.0)))
+        .child(zoned))
 }
 
 /// One reorder row's content: its id-derived label, fixed to
@@ -379,36 +375,32 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
 
     any(Padding(
         EdgeInsets::all(16.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(text("Drag").size(13.0).color(accent)),
-                inflexible(
-                    text(
-                        "Three drag-and-drop demos sharing one coordinator: a kanban board \
+        column()
+            .child(text("Drag").size(13.0).color(accent))
+            .child(
+                text(
+                    "Three drag-and-drop demos sharing one coordinator: a kanban board \
                          (pointer drag or long-press on touch, edge auto-scroll, Esc cancels), \
                          a keyboard-reorderable list (Enter/Space lifts, arrow keys cycle, \
                          Enter/Space drops), and a desktop OS file-drop zone.",
-                    )
-                    .size(11.0)
-                    .color(muted),
-                ),
-                inflexible(SizedBox::<PlaygroundState>(None, Some(12.0))),
-                inflexible(kanban_row),
-                inflexible(SizedBox::<PlaygroundState>(None, Some(16.0))),
-                inflexible(text("Reorder").size(12.0).color(muted)),
-                inflexible(SizedBox::<PlaygroundState>(None, Some(4.0))),
-                inflexible(reorder_list),
-                inflexible(SizedBox::<PlaygroundState>(None, Some(8.0))),
-                inflexible(text(reorder_readout).size(12.0).color(muted)),
-                inflexible(SizedBox::<PlaygroundState>(None, Some(16.0))),
-                inflexible(text("File drop").size(12.0).color(muted)),
-                inflexible(SizedBox::<PlaygroundState>(None, Some(4.0))),
-                inflexible(file_target),
-                inflexible(SizedBox::<PlaygroundState>(None, Some(8.0))),
-                inflexible(FlexView::new(Axis::Vertical, dropped_lines)),
-            ],
-        ),
+                )
+                .size(11.0)
+                .color(muted),
+            )
+            .child(SizedBox::<PlaygroundState>(None, Some(12.0)))
+            .child(kanban_row)
+            .child(SizedBox::<PlaygroundState>(None, Some(16.0)))
+            .child(text("Reorder").size(12.0).color(muted))
+            .child(SizedBox::<PlaygroundState>(None, Some(4.0)))
+            .child(reorder_list)
+            .child(SizedBox::<PlaygroundState>(None, Some(8.0)))
+            .child(text(reorder_readout).size(12.0).color(muted))
+            .child(SizedBox::<PlaygroundState>(None, Some(16.0)))
+            .child(text("File drop").size(12.0).color(muted))
+            .child(SizedBox::<PlaygroundState>(None, Some(4.0)))
+            .child(file_target)
+            .child(SizedBox::<PlaygroundState>(None, Some(8.0)))
+            .child(FlexView::new(Axis::Vertical, dropped_lines)),
     ))
 }
 

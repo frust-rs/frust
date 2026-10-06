@@ -50,8 +50,8 @@
 use frust::motion::AnimatedOpacity;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, Padding, PlatformViewView, RwSignal, Set, SizedBox, Stack, Theme, any, button,
-    inflexible, platform_view, text, use_context,
+    GetUntracked, Padding, PlatformViewView, RwSignal, Set, SizedBox, Theme, any, button,
+    inflexible, platform_view, row, stack, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -235,11 +235,10 @@ fn mode_b_slot(bump: u32) -> AnyView<PlaygroundState> {
             .small(),
     );
 
-    any(Stack(vec![
-        any(slot),
-        any(Align(Alignment::TOP_LEFT, opaque_btn)),
-        any(Align(Alignment::BOTTOM_RIGHT, alpha_btn)),
-    ]))
+    any(stack()
+        .child(slot)
+        .child(Align(Alignment::TOP_LEFT, opaque_btn))
+        .child(Align(Alignment::BOTTOM_RIGHT, alpha_btn)))
 }
 
 /// The second, independent slot (multi-slot stress toggle) — smaller, no
@@ -283,48 +282,52 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
     let toggles = block(vec![
         inflexible(label("Stress toggles")),
         gap(6.0),
-        inflexible(any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(button(
-                    if slot_visible {
-                        "Hide slot"
-                    } else {
-                        "Show slot"
-                    },
-                    |_: &mut PlaygroundState| {
-                        let sig = slot_visible_sig();
-                        sig.set(!sig.get_untracked());
-                    },
+        inflexible(
+            row()
+                .child(
+                    button(
+                        if slot_visible {
+                            "Hide slot"
+                        } else {
+                            "Show slot"
+                        },
+                        |_: &mut PlaygroundState| {
+                            let sig = slot_visible_sig();
+                            sig.set(!sig.get_untracked());
+                        },
+                    )
+                    .style(ButtonStyle::Secondary)
+                    .small(),
                 )
-                .style(ButtonStyle::Secondary)
-                .small())),
-                gap_h(8.0),
-                inflexible(any(button(
-                    format!("Bump params ({bump})"),
-                    |_: &mut PlaygroundState| {
-                        let sig = params_bump_sig();
-                        sig.set(sig.get_untracked() + 1);
-                    },
+                .push(gap_h(8.0))
+                .child(
+                    button(
+                        format!("Bump params ({bump})"),
+                        |_: &mut PlaygroundState| {
+                            let sig = params_bump_sig();
+                            sig.set(sig.get_untracked() + 1);
+                        },
+                    )
+                    .style(ButtonStyle::Secondary)
+                    .small(),
                 )
-                .style(ButtonStyle::Secondary)
-                .small())),
-                gap_h(8.0),
-                inflexible(any(button(
-                    if second_visible {
-                        "2nd slot: on"
-                    } else {
-                        "2nd slot: off"
-                    },
-                    |_: &mut PlaygroundState| {
-                        let sig = second_slot_visible_sig();
-                        sig.set(!sig.get_untracked());
-                    },
-                )
-                .style(ButtonStyle::Secondary)
-                .small())),
-            ],
-        ))),
+                .push(gap_h(8.0))
+                .child(
+                    button(
+                        if second_visible {
+                            "2nd slot: on"
+                        } else {
+                            "2nd slot: off"
+                        },
+                        |_: &mut PlaygroundState| {
+                            let sig = second_slot_visible_sig();
+                            sig.set(!sig.get_untracked());
+                        },
+                    )
+                    .style(ButtonStyle::Secondary)
+                    .small(),
+                ),
+        ),
     ]);
 
     // Show/hide is a real dispose/create cycle: the widget is conditionally
@@ -334,9 +337,9 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
     let slot_area = block(vec![if slot_visible {
         inflexible(mode_b_slot(bump))
     } else {
-        inflexible(any(SizedBox(Some(SLOT_W), Some(80.0)).child(caption(
+        inflexible(SizedBox(Some(SLOT_W), Some(80.0)).child(caption(
             "slot disposed \u{2014} tap \u{201c}Show slot\u{201d} to recreate",
-        ))))
+        )))
     }]);
 
     let proof_strip = block(vec![

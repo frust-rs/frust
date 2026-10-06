@@ -501,11 +501,13 @@ fn permission_block(
     block(vec![
         inflexible(label("Permission")),
         gap(6.0),
-        inflexible(any(text(message).size(12.0).color(color))),
+        inflexible(text(message).size(12.0).color(color)),
         gap(6.0),
-        inflexible(any(button("Retry permission", retry_permission_handler)
-            .style(ButtonStyle::Secondary)
-            .small())),
+        inflexible(
+            button("Retry permission", retry_permission_handler)
+                .style(ButtonStyle::Secondary)
+                .small(),
+        ),
     ])
 }
 
@@ -612,9 +614,11 @@ fn lens_block(state: &CameraPageState, has_session: bool) -> FlexChild<CameraPag
         gap(6.0),
         inflexible(caption(format!("Current: {current}."))),
         gap(6.0),
-        inflexible(any(button(switch_label, switch_lens_handler)
-            .style(ButtonStyle::Secondary)
-            .small())),
+        inflexible(
+            button(switch_label, switch_lens_handler)
+                .style(ButtonStyle::Secondary)
+                .small(),
+        ),
         gap(6.0),
         inflexible(caption(if has_session {
             "Closes the current session and reopens it on the other lens."
@@ -670,7 +674,7 @@ fn preview_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
     block(vec![
         inflexible(label("Preview")),
         gap(6.0),
-        inflexible(any(slot)),
+        inflexible(slot),
     ])
 }
 
@@ -713,11 +717,13 @@ fn capture_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
     block(vec![
         inflexible(label("Still capture")),
         gap(6.0),
-        inflexible(any(button("Take picture", take_picture_handler)
-            .style(ButtonStyle::Primary)
-            .small())),
+        inflexible(
+            button("Take picture", take_picture_handler)
+                .style(ButtonStyle::Primary)
+                .small(),
+        ),
         gap(6.0),
-        inflexible(any(text(status).size(11.0).color(muted()))),
+        inflexible(text(status).size(11.0).color(muted())),
     ])
 }
 
@@ -816,11 +822,13 @@ fn stream_block(state: &CameraPageState) -> FlexChild<CameraPageState> {
     block(vec![
         inflexible(label("Image stream")),
         gap(6.0),
-        inflexible(any(button(button_label, toggle_stream_handler)
-            .style(ButtonStyle::Secondary)
-            .small())),
+        inflexible(
+            button(button_label, toggle_stream_handler)
+                .style(ButtonStyle::Secondary)
+                .small(),
+        ),
         gap(6.0),
-        inflexible(any(text(readout).size(11.0).color(muted()))),
+        inflexible(text(readout).size(11.0).color(muted())),
     ])
 }
 
@@ -1172,13 +1180,17 @@ fn scan_block(state: &CameraPageState, torch_available: bool) -> FlexChild<Camer
              measurement numbers.",
         )),
         gap(6.0),
-        inflexible(any(button(mode_label, mode_toggle_handler)
-            .style(ButtonStyle::Secondary)
-            .small())),
+        inflexible(
+            button(mode_label, mode_toggle_handler)
+                .style(ButtonStyle::Secondary)
+                .small(),
+        ),
         gap(6.0),
-        inflexible(any(button(toggle_label, toggle_scan_handler)
-            .style(ButtonStyle::Primary)
-            .small())),
+        inflexible(
+            button(toggle_label, toggle_scan_handler)
+                .style(ButtonStyle::Primary)
+                .small(),
+        ),
         gap(6.0),
     ];
 
@@ -1188,9 +1200,11 @@ fn scan_block(state: &CameraPageState, torch_available: bool) -> FlexChild<Camer
         } else {
             "Torch: off (tap to turn on)"
         };
-        rows.push(inflexible(any(button(torch_label, torch_toggle_handler)
-            .style(ButtonStyle::Secondary)
-            .small())));
+        rows.push(inflexible(
+            button(torch_label, torch_toggle_handler)
+                .style(ButtonStyle::Secondary)
+                .small(),
+        ));
     } else {
         rows.push(inflexible(caption(
             "Torch unavailable \u{2014} no controllable flash on this lens/device.",
@@ -1199,9 +1213,11 @@ fn scan_block(state: &CameraPageState, torch_available: bool) -> FlexChild<Camer
     rows.push(gap(6.0));
 
     if let Some(err) = &state.torch_error {
-        rows.push(inflexible(any(text(format!("torch error: {err}"))
-            .size(11.0)
-            .color(error_ink()))));
+        rows.push(inflexible(
+            text(format!("torch error: {err}"))
+                .size(11.0)
+                .color(error_ink()),
+        ));
         rows.push(gap(6.0));
     }
 
@@ -1209,7 +1225,7 @@ fn scan_block(state: &CameraPageState, torch_available: bool) -> FlexChild<Camer
         ScanMode::Policy => policy_readout(state),
         ScanMode::Timing => timing_readout(state),
     };
-    rows.push(inflexible(any(text(readout).size(11.0).color(muted()))));
+    rows.push(inflexible(text(readout).size(11.0).color(muted())));
 
     block(rows)
 }

@@ -19,7 +19,7 @@
 
 use std::time::Duration;
 
-use frust::{AnyView, Get, Set, Theme, any, button, inflexible};
+use frust::{AnyView, Get, Set, Theme, button, inflexible};
 use frust_native_widgets::{
     ActionRole, Detent, PresentError, SheetContent, SheetOutcome, SheetSpec, show_native_sheet_into,
 };
@@ -110,7 +110,7 @@ fn trigger(
         gap(4.0),
         inflexible(caption(note)),
         gap(6.0),
-        inflexible(any(button(button_label, handler))),
+        inflexible(button(button_label, handler)),
     ])
 }
 
