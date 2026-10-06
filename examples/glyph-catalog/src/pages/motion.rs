@@ -19,7 +19,7 @@ use frust::motion::switcher::pattern_switcher;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
     GetUntracked, MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme,
-    TransitionSpec, Update, any, button, inflexible, keyed, text, use_context,
+    TransitionSpec, Update, any, button, column, inflexible, row, text, use_context,
 };
 use frust_glyph::TermLine;
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
@@ -263,18 +263,12 @@ fn demo_sheet() -> FlexChild<CatalogState> {
                 || {
                     sheet_scaffold(any(Padding(
                         EdgeInsets::all(20.0),
-                        FlexView::new(
-                            Axis::Vertical,
-                            vec![
-                                inflexible(text("Bottom sheet").size(15.0).color(amber())),
-                                gap(8.0),
-                                inflexible(
-                                    text("Slides up at 340ms; slides back at 150ms.").size(12.0),
-                                ),
-                                gap(12.0),
-                                inflexible(button("Close", |s: &mut CatalogState| s.nav.pop())),
-                            ],
-                        ),
+                        column()
+                            .child(text("Bottom sheet").size(15.0).color(amber()))
+                            .push(gap(8.0))
+                            .child(text("Slides up at 340ms; slides back at 150ms.").size(12.0))
+                            .push(gap(12.0))
+                            .child(button("Close", |s: &mut CatalogState| s.nav.pop())),
                     )))
                 },
                 TransitionSpec::duration(PageTransition::SlideUp),
@@ -356,10 +350,7 @@ fn demo_log() -> FlexChild<CatalogState> {
         inflexible(label("09 Staggered log reveal")),
         inflexible(caption("per-line 150ms effects, ~90ms stagger")),
         gap(6.0),
-        inflexible(FlexView::new(
-            Axis::Vertical,
-            vec![keyed(n, term_block(log_lines()).staggered(true))],
-        )),
+        inflexible(column().keyed(n, term_block(log_lines()).staggered(true))),
         gap(6.0),
         inflexible(
             button("Replay", move |_s: &mut CatalogState| {
@@ -421,23 +412,21 @@ fn demo_screen() -> FlexChild<CatalogState> {
         gap(6.0),
         inflexible(switcher),
         gap(6.0),
-        inflexible(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(
+        inflexible(
+            row()
+                .child(
                     button("Back", move |_s: &mut CatalogState| {
                         back.set(true);
                         card.update(|v| *v = (*v + 2) % 3);
                     })
                     .style(ButtonStyle::Secondary),
-                ),
-                inflexible(SizedBox(Some(8.0), None)),
-                inflexible(button("Next", move |_s: &mut CatalogState| {
+                )
+                .child(SizedBox(Some(8.0), None))
+                .child(button("Next", move |_s: &mut CatalogState| {
                     back.set(false);
                     card.update(|v| *v = (*v + 1) % 3);
                 })),
-            ],
-        )),
+        ),
     ])
 }
 
@@ -466,10 +455,7 @@ fn demo_boot() -> FlexChild<CatalogState> {
             "term_block stagger is fixed at 90ms/line — custom 260ms/line not exposed; standard cascade shown",
         )),
         gap(6.0),
-        inflexible(FlexView::new(
-            Axis::Vertical,
-            vec![keyed(n, term_block(boot_lines()).staggered(true))],
-        )),
+        inflexible(column().keyed(n, term_block(boot_lines()).staggered(true))),
         gap(6.0),
         inflexible(
             button("Replay", move |_s: &mut CatalogState| {
@@ -487,34 +473,30 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
     // never these token values).
     let motion = frust_glyph::baseline().motion;
 
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            token_table(&motion),
-            gap(8.0),
-            reduced_motion_note(state),
-            gap(8.0),
-            demo_press(),
-            gap(8.0),
-            demo_toggle(),
-            gap(8.0),
-            demo_tabs(),
-            gap(8.0),
-            demo_accordion(),
-            gap(8.0),
-            demo_modal(),
-            gap(8.0),
-            demo_sheet(),
-            gap(8.0),
-            demo_palette(),
-            gap(8.0),
-            demo_toast(),
-            gap(8.0),
-            demo_log(),
-            gap(8.0),
-            demo_screen(),
-            gap(8.0),
-            demo_boot(),
-        ],
-    ))
+    any(column()
+        .push(token_table(&motion))
+        .push(gap(8.0))
+        .push(reduced_motion_note(state))
+        .push(gap(8.0))
+        .push(demo_press())
+        .push(gap(8.0))
+        .push(demo_toggle())
+        .push(gap(8.0))
+        .push(demo_tabs())
+        .push(gap(8.0))
+        .push(demo_accordion())
+        .push(gap(8.0))
+        .push(demo_modal())
+        .push(gap(8.0))
+        .push(demo_sheet())
+        .push(gap(8.0))
+        .push(demo_palette())
+        .push(gap(8.0))
+        .push(demo_toast())
+        .push(gap(8.0))
+        .push(demo_log())
+        .push(gap(8.0))
+        .push(demo_screen())
+        .push(gap(8.0))
+        .push(demo_boot()))
 }
