@@ -8,15 +8,28 @@
 //! # Lifecycle
 //!
 //! [`DragTargetView::build`] allocates a fresh [`DragTargetId`]
-//! ([`DragCoordinator::new_target_id`]) and registers it
-//! ([`DragCoordinator::register_target`]); [`DragTargetView::teardown`]
-//! unregisters it. Every paint reports the widget's window-space bounds
-//! ([`DragCoordinator::set_target_bounds`]) so cross-container resolution
-//! (the per-frame resolution a later layer runs over the registry) can find this target under the ghost point without
-//! hit-testing through the ghost's own `Transparent` pod — `paint`, not layout,
-//! because [`frust_core::LayoutCtx`] carries no window-space origin (only
+//! ([`DragCoordinator::new_target_id`]) and registers it as accepting `T`
+//! ([`DragCoordinator::register_target_for`]), so the coordinator's
+//! resolution and keyboard cycling never pick it for a session carrying any
+//! other payload type; [`DragTargetView::teardown`] unregisters it. Every
+//! paint reports the widget's window-space bounds
+//! ([`DragCoordinator::report_target_bounds`], stamped with the paint's
+//! [`frust_core::PaintCtx::frame_time`]) so cross-container resolution can
+//! find this target under the ghost point without hit-testing through the
+//! ghost's own `Transparent` pod — `paint`, not layout, because
+//! [`frust_core::LayoutCtx`] carries no window-space origin (only
 //! [`frust_core::PaintCtx::origin`] does; see [`mod@super::draggable`]'s
 //! `window_origin`, recorded the same way).
+//!
+//! The reported bounds are clipped to the visible region the ancestors
+//! threaded down ([`frust_core::PaintCtx::visible_rect`] — the viewport a
+//! scroll surface publishes, narrowed by every nested one), and a target
+//! clipped to nothing reports no bounds at all, so it resolves nowhere. That
+//! threaded rect is the only clip a paint context exposes: a container that
+//! merely clips its scene ([`frust_core::PaintScene::push_clip`]) without
+//! publishing a visible rect does not narrow what this target reports. A
+//! target that does not paint in a pass (culled by its container) misses
+//! that pass's stamp and stops resolving until it paints again.
 //!
 //! # Driving callbacks from notifications
 //!
@@ -33,14 +46,17 @@
 //!
 //! * **Enter**: hovered, and the held payload is a `T`
 //!   ([`DragCoordinator::payload_is`]) — fires [`DragTargetView::on_enter`].
-//!   A session whose payload is not `T` is never offered: no callback, no
-//!   highlight, regardless of [`DragTargetView::accepts`].
+//!   A session whose payload is not `T` is never offered: the coordinator
+//!   does not resolve or cycle to this target for it, and should anything
+//!   hover it anyway ([`DragCoordinator::set_hovered`]) it gets no callback
+//!   and no highlight, regardless of [`DragTargetView::accepts`].
 //! * **Hover**: while entered, the latest pointer position
 //!   ([`DragSession::pointer`]) converted to this widget's local space — fires
 //!   [`DragTargetView::on_hover`] once per distinct position.
 //! * **Leave**: entered and no longer hovered (the pointer moved elsewhere, or
 //!   the session ended without dropping here) — fires
-//!   [`DragTargetView::on_leave`].
+//!   [`DragTargetView::on_leave`]. Only ever for a target that fired
+//!   `on_enter`: every `on_leave` closes exactly one `on_enter`.
 //! * **Drop**: [`DragCoordinator::drop`] released over this target
 //!   ([`DragState::Dropping`]). [`DragTargetView::accepts`] (default: accept
 //!   every `T`) is evaluated against the held payload; accepted,
@@ -49,8 +65,9 @@
 //!   `on_leave` (the coordinator's own contract: the drop target hears no
 //!   `Leave`, it is the drop target). Rejected (wrong type, or `accepts`
 //!   false), this target calls [`DragCoordinator::cancel`] itself instead —
-//!   `on_drop` never fires — and reports `on_leave` once, since the engagement
-//!   ends without a drop.
+//!   `on_drop` never fires — and, if it had fired `on_enter` for this
+//!   session, reports the matching `on_leave` once, since the engagement ends
+//!   without a drop.
 //!
 //! A test driving [`DragCoordinator::set_hovered`]/[`DragCoordinator::drop`]
 //! directly (simulating the per-frame hover resolution) sees exactly the same
@@ -160,10 +177,11 @@ pub enum DragHighlight {
     /// The pointer was released here and the payload is accepted — shown for
     /// the drop itself, the instant before `on_drop` runs.
     Accept,
-    /// Hovered (or dropped) by a session [`DragTargetView::accepts`] rejects.
-    /// A session whose payload is not `T` at all never reaches the highlight
-    /// seam — this variant is for a *type-matching* payload the predicate
-    /// still turns down.
+    /// Hovered (or dropped) by a session whose payload is a `T` that
+    /// [`DragTargetView::accepts`] rejects. A session whose payload is not `T`
+    /// at all never reaches the highlight seam, hovered or dropped — this
+    /// variant is only for a *type-matching* payload the predicate turns
+    /// down.
     Reject,
 }
 
@@ -293,7 +311,7 @@ impl<State: 'static, T: 'static> View<State> for DragTargetView<State, T> {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
         let id = self.coordinator.new_target_id();
-        self.coordinator.register_target(id);
+        self.coordinator.register_target_for::<T>(id);
         DragTargetWidget {
             child: crate::authoring::build_child(&self.child, ctx),
             coordinator: self.coordinator.clone(),
@@ -367,8 +385,10 @@ impl<State: 'static, T: 'static> DragTargetWidget<State, T> {
             DragState::Dropping { target, .. } if target == self.id => {
                 if self.payload_accepted() {
                     Some(DragHighlight::Accept)
-                } else {
+                } else if self.coordinator.payload_is::<T>() {
                     Some(DragHighlight::Reject)
+                } else {
+                    None
                 }
             }
             _ => None,
@@ -442,7 +462,7 @@ impl<State: 'static, T: 'static> DragTargetWidget<State, T> {
                 }
             }
             DragState::Dropping { target, .. } if target == self.id => {
-                self.engaged = false;
+                let was_engaged = std::mem::replace(&mut self.engaged, false);
                 self.last_hover_pointer = None;
                 if self.payload_accepted() {
                     if let Some(payload) = self.coordinator.take_payload::<T>() {
@@ -457,7 +477,7 @@ impl<State: 'static, T: 'static> DragTargetWidget<State, T> {
                     }
                 } else {
                     self.coordinator.cancel();
-                    if let Some(cb) = self.on_leave.as_mut() {
+                    if was_engaged && let Some(cb) = self.on_leave.as_mut() {
                         cb(ctx);
                     }
                 }
@@ -534,6 +554,18 @@ impl<State: 'static, T: 'static> DragTargetWidget<State, T> {
     }
 }
 
+/// This widget's window-space bounds clipped to the visible region its
+/// ancestors threaded down ([`PaintCtx::visible_rect`]), or `None` when that
+/// clip leaves nothing of it — see the [module docs](self#lifecycle).
+fn visible_bounds(ctx: &PaintCtx) -> Option<Rect> {
+    let bounds = Rect::from_origin_size(ctx.origin(), ctx.size());
+    let visible = match ctx.visible_rect() {
+        Some(clip) => bounds.intersect(clip),
+        None => bounds,
+    };
+    (visible.width() > 0.0 && visible.height() > 0.0).then_some(visible)
+}
+
 /// The highlight seam's default: a 2px rounded inset stroke in the theme's
 /// primary color, or [`HIGHLIGHT_FALLBACK`] unthemed. Paints nothing for
 /// [`DragHighlight::Reject`] — see the [module docs](self#highlight).
@@ -577,7 +609,7 @@ impl<State: 'static, T: 'static> Widget for DragTargetWidget<State, T> {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         self.window_origin = ctx.origin();
         self.coordinator
-            .set_target_bounds(self.id, Rect::from_origin_size(ctx.origin(), ctx.size()));
+            .report_target_bounds(self.id, visible_bounds(ctx), ctx.frame_time());
         self.child.paint_child(ctx, scene);
         if let Some(state) = self.current_highlight() {
             self.paint_highlight(ctx, scene, state);
@@ -1132,5 +1164,234 @@ mod tests {
             node.supports_action(Action::Click),
             "accepting: Click is offered"
         );
+    }
+
+    /// Lay `w` out at `size` and paint it at window-space `at` in a paint
+    /// context carrying `frame` and (optionally) an ancestor's visible rect.
+    fn painted_at<S: 'static, T: 'static>(
+        w: &mut DragTargetWidget<S, T>,
+        at: Point,
+        size: Size,
+        frame: frust_core::FrameTime,
+        visible: Option<Rect>,
+    ) {
+        let mut lctx = LayoutCtx::new();
+        w.layout(&mut lctx, &BoxConstraints::tight(size));
+        let mut scene = crate::test_support::RecordingScene::default();
+        let mut pctx = PaintCtx::for_test(at, size, frame);
+        if let Some(visible) = visible {
+            pctx.constrain_visible_rect(visible);
+        }
+        w.paint(&mut pctx, &mut scene);
+    }
+
+    fn frame(n: u64) -> frust_core::FrameTime {
+        frust_core::FrameTime::from_nanos(n * 16_000_000)
+    }
+
+    #[test]
+    fn paint_reports_bounds_clipped_to_the_visible_rect() {
+        let coordinator = DragCoordinator::new();
+        let view: DragTargetView<App, u32> = drag_target(
+            SizedBox::<App>(Some(100.0), Some(100.0)),
+            coordinator.clone(),
+        );
+        let mut w = build(&view);
+        painted_at(
+            &mut w,
+            Point::new(0.0, 0.0),
+            Size::new(100.0, 100.0),
+            frame(1),
+            Some(Rect::new(0.0, 60.0, 400.0, 400.0)),
+        );
+        assert_eq!(
+            coordinator.target_bounds(w.id),
+            Some(Rect::new(0.0, 60.0, 100.0, 100.0)),
+            "only the part inside the ancestor's visible rect is reported"
+        );
+        assert_eq!(
+            coordinator.target_at(Point::new(50.0, 30.0)),
+            None,
+            "the clipped-away part does not resolve"
+        );
+        assert_eq!(coordinator.target_at(Point::new(50.0, 80.0)), Some(w.id));
+    }
+
+    #[test]
+    fn a_target_clipped_to_nothing_reports_no_bounds_and_is_not_resolved() {
+        let coordinator = DragCoordinator::new();
+        let view: DragTargetView<App, u32> = drag_target(
+            SizedBox::<App>(Some(100.0), Some(100.0)),
+            coordinator.clone(),
+        );
+        let mut w = build(&view);
+        painted_at(&mut w, Point::ZERO, Size::new(100.0, 100.0), frame(1), None);
+        assert!(coordinator.target_bounds(w.id).is_some());
+
+        // Scrolled entirely out of its scroll ancestor's viewport.
+        painted_at(
+            &mut w,
+            Point::ZERO,
+            Size::new(100.0, 100.0),
+            frame(2),
+            Some(Rect::new(0.0, 200.0, 400.0, 400.0)),
+        );
+        assert_eq!(coordinator.target_bounds(w.id), None);
+        let source = coordinator.new_source_id();
+        coordinator.arm(source, Point::ZERO);
+        coordinator.begin(1u32);
+        coordinator.update_pointer(Point::new(50.0, 50.0));
+        assert_eq!(coordinator.state().session().and_then(|s| s.hovered), None);
+    }
+
+    #[test]
+    fn a_target_that_did_not_paint_this_frame_is_not_resolved() {
+        let coordinator = DragCoordinator::new();
+        let first_view: DragTargetView<App, u32> = drag_target(
+            SizedBox::<App>(Some(100.0), Some(100.0)),
+            coordinator.clone(),
+        );
+        let second_view: DragTargetView<App, u32> = drag_target(
+            SizedBox::<App>(Some(100.0), Some(100.0)),
+            coordinator.clone(),
+        );
+        let mut first = build(&first_view);
+        let mut second = build(&second_view);
+        let size = Size::new(100.0, 100.0);
+        painted_at(&mut first, Point::ZERO, size, frame(1), None);
+        painted_at(&mut second, Point::new(200.0, 0.0), size, frame(1), None);
+        assert_eq!(
+            coordinator.target_at(Point::new(50.0, 50.0)),
+            Some(first.id)
+        );
+
+        // Frame 2 culls the first target: only the second paints.
+        painted_at(&mut second, Point::new(200.0, 0.0), size, frame(2), None);
+        assert_eq!(coordinator.target_at(Point::new(50.0, 50.0)), None);
+        assert_eq!(
+            coordinator.target_at(Point::new(250.0, 50.0)),
+            Some(second.id)
+        );
+    }
+
+    #[test]
+    fn overlapping_targets_of_different_types_resolve_by_the_payload_type() {
+        let coordinator = DragCoordinator::new();
+        let numbers: DragTargetView<App, u32> = drag_target(
+            SizedBox::<App>(Some(100.0), Some(100.0)),
+            coordinator.clone(),
+        );
+        let words: DragTargetView<App, String> = drag_target(
+            SizedBox::<App>(Some(100.0), Some(100.0)),
+            coordinator.clone(),
+        );
+        let mut numbers = build(&numbers);
+        // Built (registered) later: it would win the overlap on order alone.
+        let mut words = build(&words);
+        let size = Size::new(100.0, 100.0);
+        painted_at(&mut numbers, Point::ZERO, size, frame(1), None);
+        painted_at(&mut words, Point::ZERO, size, frame(1), None);
+
+        let source = coordinator.new_source_id();
+        coordinator.arm(source, Point::ZERO);
+        coordinator.begin(5u32);
+        coordinator.update_pointer(Point::new(50.0, 50.0));
+        assert_eq!(
+            coordinator.state().session().and_then(|s| s.hovered),
+            Some(numbers.id)
+        );
+        coordinator.cancel();
+
+        coordinator.lift(source);
+        coordinator.begin(String::from("word"));
+        coordinator.move_to_next_target();
+        coordinator.move_to_next_target();
+        assert_eq!(
+            coordinator.state().session().and_then(|s| s.hovered),
+            Some(words.id),
+            "keyboard cycling only ever lands on the String target"
+        );
+    }
+
+    #[test]
+    fn a_rejected_drop_on_a_never_entered_target_fires_no_leave() {
+        let coordinator = DragCoordinator::new();
+        let left = Rc::new(RefCell::new(0u32));
+        let l2 = Rc::clone(&left);
+        let view: DragTargetView<App, u32> =
+            drag_target(SizedBox::<App>(Some(10.0), Some(10.0)), coordinator.clone())
+                .accepts(|v: &u32| *v < 10)
+                .on_leave(move |_s: &mut App| *l2.borrow_mut() += 1);
+        let mut w = build(&view);
+        laid_out(&mut w, Point::ZERO, Size::new(10.0, 10.0));
+        let mut state = App;
+
+        let source = coordinator.new_source_id();
+        coordinator.arm(source, Point::ZERO);
+        coordinator.begin(99u32);
+        // Hovered and dropped before any poll saw the hover: never entered.
+        coordinator.set_hovered(Some(w.id));
+        coordinator.drop();
+        housekeeping(&mut w, &mut state);
+        assert_eq!(coordinator.phase(), DragPhase::Idle, "the drop is refused");
+        assert_eq!(*left.borrow(), 0, "no on_leave without an on_enter");
+    }
+
+    #[test]
+    fn a_rejected_drop_on_an_entered_target_fires_exactly_one_leave() {
+        let coordinator = DragCoordinator::new();
+        let entered = Rc::new(RefCell::new(0u32));
+        let left = Rc::new(RefCell::new(0u32));
+        let e2 = Rc::clone(&entered);
+        let l2 = Rc::clone(&left);
+        let view: DragTargetView<App, u32> =
+            drag_target(SizedBox::<App>(Some(10.0), Some(10.0)), coordinator.clone())
+                .accepts(|v: &u32| *v < 10)
+                .on_enter(move |_s: &mut App| *e2.borrow_mut() += 1)
+                .on_leave(move |_s: &mut App| *l2.borrow_mut() += 1);
+        let mut w = build(&view);
+        laid_out(&mut w, Point::ZERO, Size::new(10.0, 10.0));
+        let mut state = App;
+
+        let source = coordinator.new_source_id();
+        coordinator.arm(source, Point::ZERO);
+        coordinator.begin(99u32);
+        coordinator.set_hovered(Some(w.id));
+        housekeeping(&mut w, &mut state);
+        assert_eq!(*entered.borrow(), 1);
+        coordinator.drop();
+        housekeeping(&mut w, &mut state);
+        housekeeping(&mut w, &mut state);
+        assert_eq!(coordinator.phase(), DragPhase::Idle);
+        assert_eq!(*left.borrow(), 1, "one on_leave closes the one on_enter");
+    }
+
+    #[test]
+    fn a_non_t_payload_dropped_here_shows_no_reject_and_fires_no_leave() {
+        let coordinator = DragCoordinator::new();
+        let left = Rc::new(RefCell::new(0u32));
+        let l2 = Rc::clone(&left);
+        let view: DragTargetView<App, u32> =
+            drag_target(SizedBox::<App>(Some(10.0), Some(10.0)), coordinator.clone())
+                .on_leave(move |_s: &mut App| *l2.borrow_mut() += 1);
+        let mut w = build(&view);
+        laid_out(&mut w, Point::ZERO, Size::new(10.0, 10.0));
+        let mut state = App;
+
+        let source = coordinator.new_source_id();
+        coordinator.arm(source, Point::ZERO);
+        coordinator.begin("not-a-u32");
+        // Only an explicit override can put a non-`u32` session here.
+        coordinator.set_hovered(Some(w.id));
+        housekeeping(&mut w, &mut state);
+        coordinator.drop();
+        assert_eq!(
+            w.current_highlight(),
+            None,
+            "a non-T payload never reaches the highlight seam, dropped or not"
+        );
+        housekeeping(&mut w, &mut state);
+        assert_eq!(coordinator.phase(), DragPhase::Idle);
+        assert_eq!(*left.borrow(), 0);
     }
 }

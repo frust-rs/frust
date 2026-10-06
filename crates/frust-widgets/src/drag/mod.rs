@@ -46,7 +46,8 @@
 //!   hovered target. The session stays `Dropping` — payload still held —
 //!   until the target claims it with [`DragCoordinator::take_payload`] and
 //!   calls [`DragCoordinator::complete_drop`] (→ `Idle`). A drop with nothing
-//!   hovered behaves exactly as a cancel.
+//!   hovered behaves exactly as a cancel, and so does unregistering the
+//!   pending drop target before it claims the payload.
 //! - **→ Cancelled → Idle** ([`DragCoordinator::cancel`]): legal from every
 //!   non-`Idle` phase and always lands on `Idle`; a target still hovered (or
 //!   the target of an unclaimed drop) hears a `Leave` first. `Cancelled` is a
@@ -68,17 +69,40 @@
 //! pod above everything, and targets in different containers (two kanban
 //! columns, a list and a trash bin) must resolve against one another:
 //!
-//! - **Registry.** A target registers its id
-//!   ([`DragCoordinator::register_target`]) and reports its window-space
-//!   bounds every paint ([`DragCoordinator::set_target_bounds`]).
+//! - **Registry.** A target registers its id together with the payload type
+//!   it accepts ([`DragCoordinator::register_target_for`]; an untyped
+//!   [`DragCoordinator::register_target`] accepts any) and reports its
+//!   visible window-space bounds every paint
+//!   ([`DragCoordinator::report_target_bounds`]).
+//! - **Type gating is enforced at resolution.** Pointer resolution,
+//!   [`DragCoordinator::target_at`] and keyboard cycling consider only
+//!   targets whose accepted type is the live session's payload type (an
+//!   [`DragKind::ExternalFiles`] session's is `Vec<PathBuf>`), so targets of
+//!   different payload types can share one coordinator — and overlap — without
+//!   a session ever resolving onto, or cycling through, a target that would
+//!   refuse it.
+//! - **Only what is visible now resolves.** A target reports its bounds
+//!   clipped to the visible region its ancestors threaded down (a scroll
+//!   surface's viewport); clipped to nothing, it reports no bounds. Each
+//!   report is stamped with the paint pass it belongs to: a report carrying a
+//!   different frame time from the one that opened the current pass opens a
+//!   new pass, and only targets stamped with the latest pass resolve or cycle,
+//!   so a target that did not paint this frame (culled, scrolled away) cannot
+//!   resolve against stale bounds. Without a shell clock
+//!   ([`frust_core::FrameTime::ZERO`], or the unclocked
+//!   [`DragCoordinator::set_target_bounds`]) a target reporting a second time
+//!   is what opens the next pass. **Limit:** a pass is only ever opened by a
+//!   report, so a frame in which *no* target of a coordinator paints leaves the
+//!   previous pass standing until one does.
 //! - **Every pointer report resolves.** [`DragCoordinator::update_pointer`]
 //!   records the pointer and re-picks the hovered target as
 //!   [`DragCoordinator::target_at`] of it, reporting a change as `Leave` (old)
 //!   then `Enter` (new), then the `Move`.
 //!   [`DragCoordinator::resolve_hover`] re-picks without moving the pointer,
 //!   for bounds that moved under it (auto-scroll calls it after each step).
-//! - **Later registration wins an overlap.** Of several targets whose bounds
-//!   contain the point, the one registered last is picked. A target
+//! - **Later registration wins an overlap.** Of several visible,
+//!   type-matching targets whose bounds contain the point, the one registered
+//!   last is picked. A target
 //!   registers when its pod is built, before its child is, so a target nested
 //!   inside another registers after its container and wins inside it; siblings
 //!   register in tree order, which is paint order, so the one painted on top
@@ -127,10 +151,12 @@
 //! # Targets
 //!
 //! [`drag_target()`] is the in-app drop target built on the coordinator's
-//! registry ([`DragCoordinator::register_target`]/
-//! [`DragCoordinator::set_target_bounds`]/[`DragCoordinator::target_at`]): it
-//! registers a fresh [`DragTargetId`] when its pod is built and unregisters it
-//! when the pod is dropped, reports its window-space bounds every paint so a
+//! registry ([`DragCoordinator::register_target_for`]/
+//! [`DragCoordinator::report_target_bounds`]/[`DragCoordinator::target_at`]): it
+//! registers a fresh [`DragTargetId`] for its payload type when its pod is
+//! built and unregisters it when the pod is dropped (ending the session if it
+//! was the pending drop target), reports its clipped window-space bounds every
+//! paint so a
 //! pointer report can resolve it under the ghost point (see *Target
 //! resolution* above for how overlaps are decided). It never subscribes; like
 //! [`draggable()`] it polls the coordinator's own state (here on the
@@ -157,7 +183,9 @@
 //! the source and destination indices when a drop actually moves something
 //! (dropping back on the source's own slot reports nothing). Keyboard
 //! lift/cycle/drop is inherited from [`draggable()`] unchanged — the gaps are
-//! this list's only registered targets, cycled in the same visual order they
+//! the only targets this list's sessions resolve or cycle to (type gating is
+//! enforced at resolution, so other targets sharing the coordinator under a
+//! different payload type are skipped), cycled in the same visual order they
 //! are built in. See the [`mod@reorderable`] module docs for the full index
 //! convention and limits.
 
