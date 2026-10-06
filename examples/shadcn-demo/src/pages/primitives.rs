@@ -3,7 +3,7 @@
 //! an empty state, a marker, and the button/button-group family with a
 //! disabled example (the `NotAllowed` cursor check).
 
-use frust::{Column, Row, SizedBox, View, any, text};
+use frust::{Row, SizedBox, View, any, column, text};
 use frust_shadcn::{
     AlertVariant, AvatarSize, BadgeVariant, ButtonGroupOrientation, ButtonSize, ButtonVariant,
     EmptyMediaVariant, ItemVariant, MarkerVariant, alert, alert_description, alert_title,
@@ -31,11 +31,11 @@ fn gap() -> frust::AnyView<AppState> {
 }
 
 pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
-    Column(vec![
-        any(crate::nav::heading("Primitives")),
-        any(SizedBox(None, Some(16.0))),
+    column()
+        .child(crate::nav::heading("Primitives"))
+        .child(SizedBox(None, Some(16.0)))
         // --- Badges, avatars, kbd, labels ---
-        any(row(vec![
+        .child(row(vec![
             any(badge("Default")),
             gap(),
             any(badge("Secondary").variant(BadgeVariant::Secondary)),
@@ -51,18 +51,18 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
             any(kbd("Ctrl")),
             any(SizedBox(Some(4.0), None)),
             any(kbd_group(vec![any(kbd("Shift")), any(kbd("P"))])),
-        ])),
-        any(SizedBox(None, Some(16.0))),
-        any(row(vec![
+        ]))
+        .child(SizedBox(None, Some(16.0)))
+        .child(row(vec![
             any(label("A plain label")),
             gap(),
             any(label("Disabled").disabled(true)),
-        ])),
-        any(SizedBox(None, Some(16.0))),
-        any(separator()),
-        any(SizedBox(None, Some(16.0))),
+        ]))
+        .child(SizedBox(None, Some(16.0)))
+        .child(separator())
+        .child(SizedBox(None, Some(16.0)))
         // --- Progress / spinner / skeleton / marker ---
-        any(row(vec![
+        .child(row(vec![
             any(progress(0.65)),
             gap(),
             any(spinner()),
@@ -72,16 +72,16 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
             any(marker("1")),
             gap(),
             any(marker("Section").variant(MarkerVariant::Separator)),
-        ])),
-        any(SizedBox(None, Some(16.0))),
+        ]))
+        .child(SizedBox(None, Some(16.0)))
         // --- Aspect ratio ---
-        any(aspect_ratio(
+        .child(aspect_ratio(
             16.0 / 9.0,
             any::<AppState, _>(skeleton(240.0, 0.0).radius(8.0)),
-        )),
-        any(SizedBox(None, Some(16.0))),
+        ))
+        .child(SizedBox(None, Some(16.0)))
         // --- Breadcrumb ---
-        any(breadcrumb_list(vec![
+        .child(breadcrumb_list(vec![
             any(breadcrumb_item(
                 breadcrumb_link("Home").on_click(|_: &mut AppState| {}),
             )),
@@ -93,27 +93,27 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
             any(breadcrumb_item::<AppState, _>(breadcrumb_page(
                 "Primitives",
             ))),
-        ])),
-        any(SizedBox(None, Some(16.0))),
+        ]))
+        .child(SizedBox(None, Some(16.0)))
         // --- Alert ---
-        any(alert(
+        .child(alert(
             AlertVariant::Default,
             vec![
                 alert_title("Heads up", AlertVariant::Default),
                 alert_description("This is a default alert.", AlertVariant::Default),
             ],
-        )),
-        any(SizedBox(None, Some(8.0))),
-        any(alert(
+        ))
+        .child(SizedBox(None, Some(8.0)))
+        .child(alert(
             AlertVariant::Destructive,
             vec![
                 alert_title("Error", AlertVariant::Destructive),
                 alert_description("Something went wrong.", AlertVariant::Destructive),
             ],
-        )),
-        any(SizedBox(None, Some(16.0))),
+        ))
+        .child(SizedBox(None, Some(16.0)))
         // --- Card ---
-        any(card(vec![
+        .child(card(vec![
             card_header(vec![
                 card_title("Card title"),
                 card_description("A short supporting line."),
@@ -123,27 +123,29 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
                 any(button("Cancel", |_: &mut AppState| {}).variant(ButtonVariant::Ghost)),
                 any(button("Save", |_: &mut AppState| {})),
             ]),
-        ])),
-        any(SizedBox(None, Some(16.0))),
+        ]))
+        .child(SizedBox(None, Some(16.0)))
         // --- Item ---
-        any(item(vec![
-            any(item_media(any::<AppState, _>(
-                avatar::<AppState>().fallback("IT"),
-            ))),
-            any(item_content(vec![
-                any(item_title("Item title")),
-                any(item_description("A trailing detail.")),
-            ])),
-            any(item_actions(vec![any(button(
-                "Open",
-                |_: &mut AppState| {},
-            )
-            .size(ButtonSize::Sm))])),
-        ])
-        .variant(ItemVariant::Outline)),
-        any(SizedBox(None, Some(16.0))),
+        .child(
+            item(vec![
+                any(item_media(any::<AppState, _>(
+                    avatar::<AppState>().fallback("IT"),
+                ))),
+                any(item_content(vec![
+                    any(item_title("Item title")),
+                    any(item_description("A trailing detail.")),
+                ])),
+                any(item_actions(vec![any(button(
+                    "Open",
+                    |_: &mut AppState| {},
+                )
+                .size(ButtonSize::Sm))])),
+            ])
+            .variant(ItemVariant::Outline),
+        )
+        .child(SizedBox(None, Some(16.0)))
         // --- Empty state ---
-        any(empty(vec![
+        .child(empty(vec![
             any(empty_header(vec![
                 any(
                     empty_media(any::<AppState, _>(text("\u{1F4ED}").size(28.0)))
@@ -158,12 +160,12 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
                 "Add data",
                 |_: &mut AppState| {},
             ))])),
-        ])),
-        any(SizedBox(None, Some(16.0))),
-        any(separator()),
-        any(SizedBox(None, Some(16.0))),
+        ]))
+        .child(SizedBox(None, Some(16.0)))
+        .child(separator())
+        .child(SizedBox(None, Some(16.0)))
         // --- Buttons, sizes, disabled ---
-        any(row(vec![
+        .child(row(vec![
             any(button("Default", |_: &mut AppState| {})),
             gap(),
             any(button("Secondary", |_: &mut AppState| {}).variant(ButtonVariant::Secondary)),
@@ -175,13 +177,14 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
             any(button("Link", |_: &mut AppState| {}).variant(ButtonVariant::Link)),
             gap(),
             any(button("Disabled", |_: &mut AppState| {}).disabled(true)),
-        ])),
-        any(SizedBox(None, Some(12.0))),
-        any(button_group(vec![
-            any(button("Left", |_: &mut AppState| {}).size(ButtonSize::Sm)),
-            any(button("Middle", |_: &mut AppState| {}).size(ButtonSize::Sm)),
-            any(button("Right", |_: &mut AppState| {}).size(ButtonSize::Sm)),
-        ])
-        .orientation(ButtonGroupOrientation::Horizontal)),
-    ])
+        ]))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            button_group(vec![
+                any(button("Left", |_: &mut AppState| {}).size(ButtonSize::Sm)),
+                any(button("Middle", |_: &mut AppState| {}).size(ButtonSize::Sm)),
+                any(button("Right", |_: &mut AppState| {}).size(ButtonSize::Sm)),
+            ])
+            .orientation(ButtonGroupOrientation::Horizontal),
+        )
 }

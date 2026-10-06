@@ -14,8 +14,7 @@
 //! chord first — which is why the top bar says so on screen.
 
 use frust::{
-    Axis, CrossAxisAlignment, EdgeInsets, FlexView, IconSource, Padding, Row, SizedBox, any,
-    flexible, icon, icons, inflexible, text,
+    CrossAxisAlignment, EdgeInsets, IconSource, Padding, SizedBox, any, icon, icons, row, text,
 };
 use frust_shadcn::{
     SidebarCollapsible, SidebarMenuButtonSize, SidebarView, separator, sidebar, sidebar_content,
@@ -186,27 +185,17 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
 /// The inset's top bar: the trigger, the active page's title, and the shortcut
 /// hint, over a hairline.
 pub fn top_bar(page: Page, open: bool) -> impl frust::View<AppState> + use<> {
-    let bar = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(any(sidebar_trigger(
-                open,
-                |s: &mut AppState, next: bool| {
-                    s.sidebar_open = next;
-                },
-            ))),
-            inflexible(any(SizedBox::<AppState>(Some(12.0), None))),
-            flexible(1, any(text(page.title().to_string()).size(16.0))),
-            inflexible(any(text(
-                "Ctrl/Cmd+B toggles the panel \u{2014} or drag its rail",
-            )
-            .size(12.0))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center);
+    let bar = row()
+        .child(sidebar_trigger(open, |s: &mut AppState, next: bool| {
+            s.sidebar_open = next;
+        }))
+        .child(SizedBox::<AppState>(Some(12.0), None))
+        .flex(1, text(page.title().to_string()).size(16.0))
+        .child(text("Ctrl/Cmd+B toggles the panel \u{2014} or drag its rail").size(12.0))
+        .cross_axis(CrossAxisAlignment::Center);
 
-    frust::Column(vec![
-        any(Padding(
+    frust::column()
+        .child(Padding(
             EdgeInsets {
                 left: 16.0,
                 top: 10.0,
@@ -214,14 +203,13 @@ pub fn top_bar(page: Page, open: bool) -> impl frust::View<AppState> + use<> {
                 bottom: 10.0,
             },
             bar,
-        )),
-        any(separator()),
-    ])
+        ))
+        .child(separator())
 }
 
 /// A section heading used at the top of every gallery page.
 pub fn heading(title: &str) -> impl frust::View<AppState> + use<> {
-    Row(vec![any(text(title.to_string()).size(24.0))])
+    row().child(text(title.to_string()).size(24.0))
 }
 
 /// A page's small print: the caption style every gallery section explains

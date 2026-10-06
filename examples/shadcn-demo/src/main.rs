@@ -32,8 +32,8 @@ mod nav;
 mod pages;
 
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, DesktopConfig, EdgeInsets, FlexView,
-    MenuItemSpec, MenuRole, MenuSpec, Padding, View, any, flexible, inflexible, scroll_view,
+    AnyView, Component, CrossAxisAlignment, DesktopConfig, EdgeInsets, MenuItemSpec, MenuRole,
+    MenuSpec, Padding, View, any, column, scroll_view,
 };
 use frust_shadcn::{sidebar_inset, sidebar_provider};
 
@@ -89,14 +89,10 @@ pub fn scroll_slot(content: AnyView<AppState>) -> AnyView<AppState> {
 /// **finite** height `sidebar_inset` hands this `FlexView` (see the module
 /// docs' constraint chain).
 fn shell_body(page: Page, open: bool, content: AnyView<AppState>) -> impl View<AppState> + use<> {
-    FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(any(nav::top_bar(page, open))),
-            flexible(1, content),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch)
+    column()
+        .child(nav::top_bar(page, open))
+        .flex(1, content)
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 #[derive(Default)]
