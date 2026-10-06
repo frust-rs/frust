@@ -395,15 +395,17 @@ mod tests {
             let side = self.side;
             let dismissable = self.dismissable;
             let mut logic = move |s: &mut App| {
-                frust::Stack(vec![any(drawer(SizedBox(None, None))
-                    .side(side)
-                    .open(s.open)
-                    .label("Filters")
-                    .dismissable(dismissable)
-                    .on_open_change(|s: &mut App, open| {
-                        s.open = open;
-                        s.opens.push(open);
-                    }))])
+                frust::stack().child(
+                    drawer(SizedBox(None, None))
+                        .side(side)
+                        .open(s.open)
+                        .label("Filters")
+                        .dismissable(dismissable)
+                        .on_open_change(|s: &mut App, open| {
+                            s.open = open;
+                            s.opens.push(open);
+                        }),
+                )
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root

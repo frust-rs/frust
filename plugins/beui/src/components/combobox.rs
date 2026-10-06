@@ -1536,10 +1536,9 @@ mod tests {
     /// An unfiltered panel, which paints its rows, over one whose query keeps
     /// nothing, which paints the empty state.
     fn probe_view(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            frust::any(probe_panel("")),
-            frust::any(probe_panel("zzz")),
-        ])
+        frust::column()
+            .child(probe_panel(""))
+            .child(probe_panel("zzz"))
     }
 
     #[test]

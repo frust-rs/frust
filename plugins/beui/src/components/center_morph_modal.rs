@@ -668,18 +668,17 @@ mod tests {
             let backdrop = self.backdrop;
             let close_button = self.close_button;
             let mut logic = move |s: &mut App| {
-                frust::Stack(vec![any(center_morph_modal(SizedBox(
-                    Some(300.0),
-                    Some(200.0),
-                ))
-                .backdrop(backdrop)
-                .close_button(close_button)
-                .open(s.open)
-                .label("Details")
-                .on_open_change(|s: &mut App, open| {
-                    s.open = open;
-                    s.opens.push(open);
-                }))])
+                frust::stack().child(
+                    center_morph_modal(SizedBox(Some(300.0), Some(200.0)))
+                        .backdrop(backdrop)
+                        .close_button(close_button)
+                        .open(s.open)
+                        .label("Details")
+                        .on_open_change(|s: &mut App, open| {
+                            s.open = open;
+                            s.opens.push(open);
+                        }),
+                )
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root

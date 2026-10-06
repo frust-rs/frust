@@ -1513,7 +1513,7 @@ mod tests {
                         .on_dismiss(on_dismiss)
                         .on_exited(on_exited))
                 };
-                frust::Stack(vec![view])
+                frust::stack().child(view)
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1830,9 +1830,11 @@ mod tests {
                         state: &mut AppState| {
             let anchor = anchor.clone();
             let mut logic = move |s: &mut AppState| {
-                frust::Stack(vec![any(anchored(DecliningPanel(CONTENT))
-                    .anchor(&anchor)
-                    .open(s.open))])
+                frust::stack().child(
+                    anchored(DecliningPanel(CONTENT))
+                        .anchor(&anchor)
+                        .open(s.open),
+                )
             };
             root.rebuild(&mut logic, state);
             root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
@@ -1885,9 +1887,11 @@ mod tests {
                         state: &mut AppState| {
             let anchor = anchor.clone();
             let mut logic = move |s: &mut AppState| {
-                frust::Stack(vec![any(anchored(CapturingPanel(CONTENT))
-                    .anchor(&anchor)
-                    .open(s.open))])
+                frust::stack().child(
+                    anchored(CapturingPanel(CONTENT))
+                        .anchor(&anchor)
+                        .open(s.open),
+                )
             };
             root.rebuild(&mut logic, state);
             root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);

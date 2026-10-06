@@ -801,19 +801,21 @@ mod tests {
 
         fn frame(&mut self, ms: f64) {
             let mut logic = move |s: &mut App| {
-                frust::Stack(vec![any(bottom_sheet(SizedBox(None, None))
-                    .title("Share")
-                    .description("Pick a destination")
-                    .snap(s.snap)
-                    .open(s.open)
-                    .on_open_change(|s: &mut App, open| {
-                        s.open = open;
-                        s.opens.push(open);
-                    })
-                    .on_snap_change(|s: &mut App, index| {
-                        s.snap = index;
-                        s.snaps.push(index);
-                    }))])
+                frust::stack().child(
+                    bottom_sheet(SizedBox(None, None))
+                        .title("Share")
+                        .description("Pick a destination")
+                        .snap(s.snap)
+                        .open(s.open)
+                        .on_open_change(|s: &mut App, open| {
+                            s.open = open;
+                            s.opens.push(open);
+                        })
+                        .on_snap_change(|s: &mut App, index| {
+                            s.snap = index;
+                            s.snaps.push(index);
+                        }),
+                )
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1094,10 +1096,12 @@ mod tests {
 
     /// An open sheet with both header runs over glyph-free content.
     fn probe_view(_: &mut ()) -> frust::StackView<()> {
-        frust::Stack(vec![any(bottom_sheet::<(), _>(SizedBox(None, None))
-            .title("Share")
-            .description("Pick a destination")
-            .open(true))])
+        frust::stack().child(
+            bottom_sheet::<(), _>(SizedBox(None, None))
+                .title("Share")
+                .description("Pick a destination")
+                .open(true),
+        )
     }
 
     #[test]

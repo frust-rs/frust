@@ -1125,19 +1125,22 @@ mod tests {
             let side = self.side;
             let arrow = self.arrow;
             let mut logic = move |_s: &mut App| {
-                frust::Stack(vec![
-                    any(PageButton),
-                    any(tooltip_trigger(
-                        &hover,
-                        SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
+                frust::stack()
+                    .child(PageButton)
+                    .child(
+                        tooltip_trigger(
+                            &hover,
+                            SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
+                        )
+                        .open(controlled)
+                        .on_open_change(|s: &mut App, open| s.opens.push(open)),
                     )
-                    .open(controlled)
-                    .on_open_change(|s: &mut App, open| s.opens.push(open))),
-                    any(tooltip(&hover, "Add to library")
-                        .side(side)
-                        .arrow(arrow)
-                        .on_open_change(|s: &mut App, open| s.opens.push(open))),
-                ])
+                    .child(
+                        tooltip(&hover, "Add to library")
+                            .side(side)
+                            .arrow(arrow)
+                            .on_open_change(|s: &mut App, open| s.opens.push(open)),
+                    )
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1428,13 +1431,12 @@ mod tests {
     fn open_probe() -> Probe<frust::StackView<()>, impl FnMut(&mut ()) -> frust::StackView<()>> {
         let hover = TooltipHover::new();
         let logic = move |_: &mut ()| {
-            frust::Stack(vec![
-                any(
+            frust::stack()
+                .child(
                     tooltip_trigger(&hover, SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)))
                         .open(Some(true)),
-                ),
-                any(tooltip::<()>(&hover, "Add to library")),
-            ])
+                )
+                .child(tooltip::<()>(&hover, "Add to library"))
         };
         let mut probe = Probe::new(logic, WINDOW, crate::theme());
         probe.frame();

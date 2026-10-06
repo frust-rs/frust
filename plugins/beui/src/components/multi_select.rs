@@ -1889,17 +1889,16 @@ mod tests {
     /// baseline field has no themed-family opt-in, so its text would paint the
     /// system face and is not what these tests pin.
     fn probe_view(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            frust::any(multi_select_trigger::<(), _>(
+        frust::column()
+            .child(multi_select_trigger::<(), _>(
                 &OverlayAnchor::new(),
                 options(),
                 vec![0, 1],
                 "",
                 |_: &mut (), _| {},
-            )),
-            frust::any(probe_panel("")),
-            frust::any(probe_panel("zzz")),
-        ])
+            ))
+            .child(probe_panel(""))
+            .child(probe_panel("zzz"))
     }
 
     #[test]
