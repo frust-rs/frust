@@ -48,7 +48,7 @@
 //! it here directly.
 
 use frust::authoring::text::FontFamily;
-use frust::{AnyView, Color, CrossAxisAlignment, any};
+use frust::{AnyView, Color, CrossAxisAlignment, View, any};
 use frust_material as m3;
 use frust_testing::case::Tolerance;
 use frust_testing::corpus::CorpusCase;
@@ -129,19 +129,18 @@ fn gallery_shell() -> CorpusCase {
         record_page(scene, |family| {
             any(frust::scaffold::<(), _>(frust::Padding(
                 frust::EdgeInsets::all(GUTTER),
-                frust::Column(vec![
-                    row(family),
-                    gap(),
-                    row(family),
-                    gap(),
-                    row(family),
-                    gap(),
-                    row(family),
-                ])
-                .cross_axis(CrossAxisAlignment::Stretch),
+                frust::column()
+                    .child(row(family))
+                    .child(gap())
+                    .child(row(family))
+                    .child(gap())
+                    .child(row(family))
+                    .child(gap())
+                    .child(row(family))
+                    .cross_axis(CrossAxisAlignment::Stretch),
             ))
-            .app_bar(any(m3::app_bar::<()>("")))
-            .bottom_bar(any(m3::navigation_bar::<(), _>(
+            .app_bar(m3::app_bar::<()>(""))
+            .bottom_bar(m3::navigation_bar::<(), _>(
                 vec![
                     m3::nav_item::<()>(""),
                     m3::nav_item::<()>(""),
@@ -151,7 +150,7 @@ fn gallery_shell() -> CorpusCase {
                 ],
                 0,
                 |_: &mut (), _: usize| {},
-            ))))
+            )))
         });
     }
     CorpusCase {
@@ -175,28 +174,29 @@ fn buttons() -> CorpusCase {
         record_page(scene, |family| {
             any(frust::container::<(), _>(frust::Padding(
                 frust::EdgeInsets::all(GUTTER),
-                frust::Column(vec![
-                    label(family, SAMPLE_TEXT, 22.0),
-                    gap(),
-                    any(frust::Row(vec![
-                        any(m3::filled_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {})),
-                        hgap(),
-                        any(m3::tonal_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {})),
-                    ])),
-                    gap(),
-                    any(frust::Row(vec![
-                        any(m3::elevated_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {})),
-                        hgap(),
-                        any(m3::outlined_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {})),
-                    ])),
-                    gap(),
-                    any(m3::text_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {})),
-                    gap(),
-                    any(m3::filled_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {}).enabled(false)),
-                    gap(),
-                    any(m3::divider()),
-                ])
-                .cross_axis(CrossAxisAlignment::Stretch),
+                frust::column()
+                    .child(label(family, SAMPLE_TEXT, 22.0))
+                    .child(gap())
+                    .child(
+                        frust::row()
+                            .child(m3::filled_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {}))
+                            .child(hgap())
+                            .child(m3::tonal_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {})),
+                    )
+                    .child(gap())
+                    .child(
+                        frust::row()
+                            .child(m3::elevated_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {}))
+                            .child(hgap())
+                            .child(m3::outlined_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {})),
+                    )
+                    .child(gap())
+                    .child(m3::text_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {}))
+                    .child(gap())
+                    .child(m3::filled_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {}).enabled(false))
+                    .child(gap())
+                    .child(m3::divider())
+                    .cross_axis(CrossAxisAlignment::Stretch),
             ))
             .fill(Color::WHITE)
             .expand())
@@ -224,28 +224,29 @@ fn selection() -> CorpusCase {
         record_page(scene, |family| {
             any(frust::container::<(), _>(frust::Padding(
                 frust::EdgeInsets::all(GUTTER),
-                frust::Column(vec![
-                    label(family, SAMPLE_TEXT, 22.0),
-                    gap(),
-                    any(frust::Row(vec![
-                        any(m3::switch::<(), _>(true, |_: &mut (), _: bool| {})),
-                        hgap(),
-                        any(m3::switch::<(), _>(false, |_: &mut (), _: bool| {})),
-                    ])),
-                    gap(),
-                    any(frust::Row(vec![
-                        any(m3::checkbox::<(), _>(true, |_: &mut (), _: bool| {})),
-                        hgap(),
-                        any(m3::checkbox::<(), _>(false, |_: &mut (), _: bool| {})),
-                    ])),
-                    gap(),
-                    any(m3::slider::<(), _>(0.35, |_: &mut (), _: f64| {})),
-                    gap(),
-                    any(m3::slider::<(), _>(0.8, |_: &mut (), _: f64| {})),
-                    gap(),
-                    label(family, SAMPLE_TEXT_LONG, 13.0),
-                ])
-                .cross_axis(CrossAxisAlignment::Stretch),
+                frust::column()
+                    .child(label(family, SAMPLE_TEXT, 22.0))
+                    .child(gap())
+                    .child(
+                        frust::row()
+                            .child(m3::switch::<(), _>(true, |_: &mut (), _: bool| {}))
+                            .child(hgap())
+                            .child(m3::switch::<(), _>(false, |_: &mut (), _: bool| {})),
+                    )
+                    .child(gap())
+                    .child(
+                        frust::row()
+                            .child(m3::checkbox::<(), _>(true, |_: &mut (), _: bool| {}))
+                            .child(hgap())
+                            .child(m3::checkbox::<(), _>(false, |_: &mut (), _: bool| {})),
+                    )
+                    .child(gap())
+                    .child(m3::slider::<(), _>(0.35, |_: &mut (), _: f64| {}))
+                    .child(gap())
+                    .child(m3::slider::<(), _>(0.8, |_: &mut (), _: f64| {}))
+                    .child(gap())
+                    .child(label(family, SAMPLE_TEXT_LONG, 13.0))
+                    .cross_axis(CrossAxisAlignment::Stretch),
             ))
             .fill(Color::WHITE)
             .expand())
@@ -266,35 +267,31 @@ fn selection() -> CorpusCase {
 fn progress_and_cards() -> CorpusCase {
     fn record(scene: &mut Scene) {
         record_page(scene, |family| {
-            let card = |view: AnyView<()>| {
-                any(m3::outlined_card::<(), _>(frust::Padding(
-                    frust::EdgeInsets::all(16.0),
-                    view,
-                )))
-            };
+            fn card(view: impl View<()>) -> impl View<()> {
+                m3::outlined_card::<(), _>(frust::Padding(frust::EdgeInsets::all(16.0), view))
+            }
             any(frust::container::<(), _>(frust::Padding(
                 frust::EdgeInsets::all(GUTTER),
-                frust::Column(vec![
-                    label(family, SAMPLE_TEXT, 22.0),
-                    gap(),
-                    card(any(m3::linear_progress(m3::ProgressValue::Determinate(
+                frust::column()
+                    .child(label(family, SAMPLE_TEXT, 22.0))
+                    .child(gap())
+                    .child(card(m3::linear_progress(m3::ProgressValue::Determinate(
                         0.25,
-                    )))),
-                    gap(),
-                    card(any(m3::linear_progress(m3::ProgressValue::Determinate(
+                    ))))
+                    .child(gap())
+                    .child(card(m3::linear_progress(m3::ProgressValue::Determinate(
                         0.75,
-                    )))),
-                    gap(),
-                    card(any(m3::circular_progress(m3::ProgressValue::Determinate(
+                    ))))
+                    .child(gap())
+                    .child(card(m3::circular_progress(m3::ProgressValue::Determinate(
                         0.4,
-                    )))),
-                    gap(),
-                    any(m3::elevated_card::<(), _>(frust::Padding(
+                    ))))
+                    .child(gap())
+                    .child(m3::elevated_card::<(), _>(frust::Padding(
                         frust::EdgeInsets::all(16.0),
                         label(family, SAMPLE_TEXT, 16.0),
-                    ))),
-                ])
-                .cross_axis(CrossAxisAlignment::Stretch),
+                    )))
+                    .cross_axis(CrossAxisAlignment::Stretch),
             ))
             .fill(Color::WHITE)
             .expand())

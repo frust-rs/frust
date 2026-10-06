@@ -84,9 +84,9 @@ fn shell_page(_params: &RouteParams) -> AnyView<St> {
         0,
         |_: &mut St, _: usize| {},
     );
-    any(scaffold(any(SizedBox::<St>(None, None)))
-        .app_bar(any(bar))
-        .bottom_bar(any(safe_area(nav_bar).top(false))))
+    any(scaffold(SizedBox::<St>(None, None))
+        .app_bar(bar)
+        .bottom_bar(safe_area(nav_bar).top(false)))
 }
 
 /// One section's list content — a single-row card list, mirroring
@@ -101,7 +101,7 @@ fn section_content(_params: &RouteParams) -> AnyView<St> {
 /// keyed by the matched `:id`).
 fn playground_route(params: &RouteParams) -> AnyView<St> {
     let id = params.get("id").map(String::as_str).unwrap_or("");
-    any(scaffold(any(text(id.to_string()))))
+    any(scaffold(text(id.to_string())))
 }
 
 /// The route table this file reproduces: the playground route declared

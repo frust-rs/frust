@@ -1,9 +1,6 @@
 //! Boolean control row using a switch — the reference's `PlaySwitch`.
 
-use frust::{
-    AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexView, Padding, any, flexible, inflexible,
-    text,
-};
+use frust::{AnyView, CrossAxisAlignment, EdgeInsets, Padding, any, row, text};
 use frust_material::{MaterialSpacing, switch};
 
 use crate::widgets::playground::ambient_theme;
@@ -25,14 +22,10 @@ pub fn play_switch<State: 'static>(
             right: 0.0,
             bottom: MaterialSpacing::SM,
         },
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                flexible(1, text(label.into()).style(body)),
-                inflexible(switch(value, on_changed)),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .flex(1, text(label.into()).style(body))
+            .child(switch(value, on_changed))
+            .cross_axis(CrossAxisAlignment::Center),
     ))
 }
 
