@@ -79,8 +79,8 @@ use std::time::Duration;
 use frust::{Align, Alignment, Stack, container};
 use frust::{
     AnyView, Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, Padding, PlatformViewView, SizedBox, Theme, any, button, component, inflexible,
-    slider, text, use_context,
+    GetUntracked, Padding, PlatformViewView, SizedBox, Theme, View, any, button, component,
+    inflexible, slider, text, use_context,
 };
 use frust_video_player::api::{VideoPlayerHandle, video_view};
 use frust_video_player::{
@@ -211,7 +211,7 @@ impl Component for VideoPlayerPage {
         }
     }
 
-    fn build(&self, state: &mut VideoPageState) -> AnyView<VideoPageState> {
+    fn build(&self, state: &mut VideoPageState) -> impl View<VideoPageState> {
         let mut children: Vec<FlexChild<VideoPageState>> = vec![
             block(vec![
                 inflexible(label("Video")),

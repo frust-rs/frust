@@ -25,7 +25,7 @@ use std::sync::Arc;
 use frust::{
     Align, Alignment, AnyView, Axis, Brightness, Button, Color, Column, CrossAxisAlignment,
     DesignLanguage, EdgeInsets, FlexView, Get, Image, ImageFit, Padding, Row, Set, SizedBox, Stack,
-    Theme, any, component, flexible, inflexible, scroll_view, slider, text, use_context,
+    Theme, View, any, component, flexible, inflexible, scroll_view, slider, text, use_context,
 };
 use frust_cupertino::{cupertino_button, cupertino_switch};
 use frust_material::{CardVariant, Switch, app_bar, button_group, card};
@@ -74,7 +74,7 @@ impl frust::Component for AppearanceScreen {
         AppearanceState { controller }
     }
 
-    fn build(&self, state: &mut AppearanceState) -> AnyView<AppearanceState> {
+    fn build(&self, state: &mut AppearanceState) -> impl View<AppearanceState> {
         // Tracked reads: a later `apply`/veil write wakes the frame.
         let design_choice = state.controller.design.get();
         let brightness_choice = state.controller.brightness.get();

@@ -22,7 +22,7 @@ fn warm_deep_link_to_a_parameterized_route_resolves_and_builds() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
 
     root.rebuild(&mut logic, &mut state);
     assert!(root.root_id().is_some(), "the shell builds at \"/\"");

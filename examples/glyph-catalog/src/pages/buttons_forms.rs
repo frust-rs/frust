@@ -74,8 +74,8 @@
 
 use frust::{
     Alignment, AnyView, Axis, ButtonStyle, Column, Component, CrossAxisAlignment, EdgeInsets,
-    FlexView, Get, Padding, RwSignal, Set, SizedBox, any, button, checkbox, component, inflexible,
-    radio, slider, text, text_input,
+    FlexView, Get, Padding, RwSignal, Set, SizedBox, View, any, button, checkbox, component,
+    inflexible, radio, slider, text, text_input,
 };
 // The Glyph catalog's own authored toggle — not a baseline `frust`/
 // `frust-widgets` item, and not a themed stand-in for one either.
@@ -143,7 +143,7 @@ impl Component for ButtonsFormsScreen {
         }
     }
 
-    fn build(&self, state: &mut ButtonsFormsState) -> AnyView<ButtonsFormsState> {
+    fn build(&self, state: &mut ButtonsFormsState) -> impl View<ButtonsFormsState> {
         // Tracked reads: a later write from any control below wakes this
         // component's own rebuild (never the outer CatalogState tree).
         let loading = state.loading.get();

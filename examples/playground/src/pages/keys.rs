@@ -985,7 +985,7 @@ impl Component for KeysPage {
         }
     }
 
-    fn build(&self, state: &mut KeysPageState) -> AnyView<KeysPageState> {
+    fn build(&self, state: &mut KeysPageState) -> impl View<KeysPageState> {
         // Tracked read: a probe event's signal write wakes this rebuild, and
         // nothing else does.
         let generation = state.generation.get();

@@ -17,7 +17,7 @@ use clean_signals::{
     AsyncState, ControllerCore, Failure, NoParams, RetryPolicy, RunOptions, async_state_signal,
 };
 use clean_signals_frust::{async_view, use_controller};
-use frust::{AnyView, Column, Component, RwSignal, any, component, text};
+use frust::{AnyView, Column, Component, RwSignal, View, any, component, text};
 use frust_core::RenderRoot;
 use frust_text::TextContext;
 use reactive_graph::traits::{Get, GetUntracked};
@@ -207,7 +207,7 @@ impl Component for RetryScreen {
         controller
     }
 
-    fn build(&self, state: &mut Arc<RetryController>) -> AnyView<Arc<RetryController>> {
+    fn build(&self, state: &mut Arc<RetryController>) -> impl View<Arc<RetryController>> {
         // Tracked read: the shell's frame-tracking scope re-renders when
         // `run_into` writes the next state.
         let snapshot = state.value.get();

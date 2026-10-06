@@ -512,7 +512,7 @@ mod app {
 
         fn init(&self) -> Self::State {}
 
-        fn build(&self, _state: &mut Self::State) -> frust::AnyView<Self::State> {
+        fn build(&self, _state: &mut Self::State) -> impl frust::View<Self::State> {
             (self.0)()
         }
     }

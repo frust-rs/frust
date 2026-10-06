@@ -48,7 +48,8 @@
 
 use frust::{
     AnyView, Axis, ButtonStyle, Color, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    Padding, RwSignal, Set, SizedBox, Theme, any, button, component, inflexible, text, use_context,
+    Padding, RwSignal, Set, SizedBox, Theme, View, any, button, component, inflexible, text,
+    use_context,
 };
 use frust_i18n::fmt::{self, CivilDate, CivilTime, DateLength};
 use frust_i18n::{I18n, Locale, use_i18n};
@@ -128,7 +129,7 @@ impl Component for I18nDemoPage {
         }
     }
 
-    fn build(&self, state: &mut I18nDemoPageState) -> AnyView<I18nDemoPageState> {
+    fn build(&self, state: &mut I18nDemoPageState) -> impl View<I18nDemoPageState> {
         // Provided by `crate::setup_i18n` under the real shell
         // (`PlaygroundApp::init`); [`resolve_i18n`] degrades rather than
         // panics when it is absent (a headless harness driving this page

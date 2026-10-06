@@ -26,7 +26,7 @@
 //! # impl frust::Component for App {
 //! #     type State = ();
 //! #     fn init(&self) -> Self::State {}
-//! #     fn build(&self, _s: &mut Self::State) -> frust::AnyView<Self::State> {
+//! #     fn build(&self, _s: &mut Self::State) -> impl frust::View<Self::State> {
 //! #         frust::any(frust::text("hi"))
 //! #     }
 //! # }

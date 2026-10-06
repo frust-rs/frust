@@ -576,7 +576,7 @@ impl Component for NativeWidgetsDemoApp {
         state
     }
 
-    fn build(&self, state: &mut NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState> {
+    fn build(&self, state: &mut NativeWidgetsDemoState) -> impl View<NativeWidgetsDemoState> {
         // `frust::navigator` auto-wires Android/gesture back handling for
         // `state.nav`, so back-dismiss works with zero app-side back code.
         let handles = state.clone();

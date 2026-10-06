@@ -861,7 +861,7 @@ impl Component for TerminalPage {
         }
     }
 
-    fn build(&self, state: &mut TerminalPageState) -> AnyView<TerminalPageState> {
+    fn build(&self, state: &mut TerminalPageState) -> impl View<TerminalPageState> {
         // Tracked read: the feed loop's generation write wakes this rebuild, and
         // nothing else does.
         let generation = state.generation.get();

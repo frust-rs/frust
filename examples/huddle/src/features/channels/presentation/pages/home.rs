@@ -358,7 +358,7 @@ impl frust::Component for HomeScreen {
         }
     }
 
-    fn build(&self, state: &mut HomeState) -> AnyView<HomeState> {
+    fn build(&self, state: &mut HomeState) -> impl View<HomeState> {
         let async_state = state.controller.data.get(); // tracked
 
         let body: AnyView<HomeState> = if let Some(data) = async_state.value() {

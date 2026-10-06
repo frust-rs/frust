@@ -820,7 +820,7 @@ impl Component for PlaygroundApp {
         PlaygroundState::new()
     }
 
-    fn build(&self, state: &mut PlaygroundState) -> AnyView<PlaygroundState> {
+    fn build(&self, state: &mut PlaygroundState) -> impl View<PlaygroundState> {
         // Clone the reactive handle into the navigator's stateless home-page
         // builder; the controller is shared so overlay pages push onto this
         // same stack.
