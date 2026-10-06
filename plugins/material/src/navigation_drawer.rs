@@ -1434,7 +1434,7 @@ mod tests {
     const WINDOW: Size = Size::new(400.0, 600.0);
 
     fn sample_destination<State: 'static>(label: &str) -> DrawerDestination<State> {
-        drawer_destination(any(icon(crate::icons::HOME)), label)
+        drawer_destination(icon(crate::icons::HOME), label)
     }
 
     fn one_section<State: 'static>(labels: &[&str]) -> Vec<DrawerSection<State>> {
@@ -1777,17 +1777,16 @@ mod tests {
     #[test]
     fn a_badge_label_paints_trailing_text_and_a_dot_badge_paints_when_no_label_is_set() {
         let with_text: DrawerDestination<()> =
-            drawer_destination(any(icon(crate::icons::HOME)), "Search").badge_label("3");
+            drawer_destination(icon(crate::icons::HOME), "Search").badge_label("3");
         assert!(!badge_dot_would_paint(&with_text));
 
         let with_dot: DrawerDestination<()> =
-            drawer_destination(any(icon(crate::icons::HOME)), "Search").show_badge(true);
+            drawer_destination(icon(crate::icons::HOME), "Search").show_badge(true);
         assert!(badge_dot_would_paint(&with_dot));
 
-        let both: DrawerDestination<()> =
-            drawer_destination(any(icon(crate::icons::HOME)), "Search")
-                .badge_label("3")
-                .show_badge(true);
+        let both: DrawerDestination<()> = drawer_destination(icon(crate::icons::HOME), "Search")
+            .badge_label("3")
+            .show_badge(true);
         assert!(
             !badge_dot_would_paint(&both),
             "a badge_label wins over show_badge"

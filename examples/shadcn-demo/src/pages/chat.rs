@@ -13,8 +13,8 @@
 //! any ambient state tree.
 
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Padding, SizedBox, View,
-    any, column, component, flexible, inflexible,
+    AnyView, Component, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, View, any, column,
+    component, row,
 };
 use frust_shadcn::{
     BubbleAlign, BubbleVariant, ButtonVariant, MessageAlign, avatar, bubble, button, input,
@@ -133,7 +133,7 @@ impl Component for Pill {
 
 /// One transcript row: an avatar plus a headed bubble for the other party, a
 /// trailing-aligned bubble with a footer for the local user.
-fn row(entry: &Message) -> AnyView<AppState> {
+fn transcript_row(entry: &Message) -> AnyView<AppState> {
     if entry.mine {
         any(message_scroller_item(
             message(vec![any(message_content(vec![
@@ -166,7 +166,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     let draft = state.draft.clone();
     let count = state.messages.len();
 
-    let items: Vec<AnyView<AppState>> = state.messages.iter().map(row).collect();
+    let items: Vec<AnyView<AppState>> = state.messages.iter().map(transcript_row).collect();
 
     let header = frust::column()
         .child(crate::nav::heading("Chat"))
@@ -192,33 +192,29 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             s.chat.stuck = stuck;
         });
 
-    let composer = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(
-                1,
-                input(draft, |s: &mut AppState, v: String| {
-                    s.chat.draft = v;
-                })
-                .placeholder("Write a message\u{2026}")
-                .on_submit(|s: &mut AppState, _v: String| send(s)),
-            ),
-            inflexible(SizedBox::<AppState>(Some(8.0), None)),
-            inflexible(button("Send", |s: &mut AppState| send(s))),
-            inflexible(SizedBox::<AppState>(Some(8.0), None)),
-            inflexible(
-                button("Simulate incoming", |s: &mut AppState| {
-                    let index = s.chat.arrivals % ARRIVALS.len();
-                    s.chat.arrivals += 1;
-                    s.chat
-                        .messages
-                        .push(Message::theirs("Robin", ARRIVALS[index]));
-                })
-                .variant(ButtonVariant::Outline),
-            ),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center);
+    let composer = row()
+        .flex(
+            1,
+            input(draft, |s: &mut AppState, v: String| {
+                s.chat.draft = v;
+            })
+            .placeholder("Write a message\u{2026}")
+            .on_submit(|s: &mut AppState, _v: String| send(s)),
+        )
+        .child(SizedBox::<AppState>(Some(8.0), None))
+        .child(button("Send", |s: &mut AppState| send(s)))
+        .child(SizedBox::<AppState>(Some(8.0), None))
+        .child(
+            button("Simulate incoming", |s: &mut AppState| {
+                let index = s.chat.arrivals % ARRIVALS.len();
+                s.chat.arrivals += 1;
+                s.chat
+                    .messages
+                    .push(Message::theirs("Robin", ARRIVALS[index]));
+            })
+            .variant(ButtonVariant::Outline),
+        )
+        .cross_axis(CrossAxisAlignment::Center);
 
     Padding(
         EdgeInsets::all(24.0),
