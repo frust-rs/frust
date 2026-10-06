@@ -24,11 +24,15 @@ The repo-root `.cargo/config.toml` adds two linker flags on all four Android tar
 | Date | Ref | Host | App | Stripped .so | Unstripped .so | Clean release rebuild (median of 3) |
 |------|-----|------|-----|--------------|----------------|-------------------------------------|
 | 2026-10-06 | 0.6 erasure-at-the-API-boundary migration (main f79b739c) | i5-12600 Linux | huddle | 9,069,848 B | 9,070,176 B | frust-gallery 13.6 s (+0.12 % size / +3.4 % build time vs main 79686b68; bars ≤ 2 % / ≤ 10 %) |
-| _pending (d1-03)_ | main f79b739c vs 79686b68 | i5-12600 Linux | material3-demo | _pending (d1-03)_ | _pending (d1-03)_ | – |
-| _pending (d1-03)_ | main f79b739c vs 79686b68 | i5-12600 Linux | frust-gallery + material3-demo (`cargo build --timings`) | – | – | _pending (d1-03)_ |
+| 2026-10-06 | main 79686b68 → f79b739c | i5-12600 Linux | material3-demo | 14,593,400 B → 14,642,912 B (+49,512 B = +0.34 %; bar ≤ 2 %) | 14,593,728 B → 14,643,240 B | – |
+| 2026-10-06 | main 79686b68 → f79b739c | i5-12600 Linux | frust-gallery + material3demo (lib + bin, `cargo build --timings`) | – | – | frust-gallery 13.71 s → 13.94 s (+1.6 %; runs 13.793 / 13.713 / 13.479 s → 14.488 / 13.936 / 13.740 s; unit 13.51 s → 13.73 s); material3demo 127.86 s → 124.18 s (−2.9 %; runs 125.669 / 127.858 / 128.037 s → 124.101 / 124.269 / 124.183 s; unit 127.65 s (lib ≈ 45.5 s + bin ≈ 82 s) → 123.97 s); bar ≤ 10 % |
 
 The unstripped figure is within 328 B of the stripped one because `strip = "symbols"` already strips
-the release profile. Each pending row is filled when d1-03 measures it.
+the release profile. Each side was built in its own detached worktree and target dir (rustc 1.98.1,
+cargo-ndk 4.1.2, NDK 28.2.13676358; wall time by bash `time`, unit time from the `--timings` report).
+Method deviations: the base-side material3demo runs 2 and 3 overlapped a ~40 s unrelated test build
+and the head-side frust-gallery run 1 a short formatting check; medians are reported, so neither
+changes the figure.
 
 ## Dev loop
 
