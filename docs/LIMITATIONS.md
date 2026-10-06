@@ -3223,8 +3223,16 @@ reaches the ghost itself, only the source and target it moves between. The riche
 those nodes would ideally advertise (`accesskit::Action::CustomAction` for `lift`/`drop`/`cancel`
 individually) is not wired to anything either: `frust-core`'s `perform_accessibility_action`
 matches only `Action::Click`/`Action::Focus` and drops a custom action's id (the same gap
-`selection-verbs-advertised-not-invocable` records for `TextInput`), so both widgets advertise
-`Action::Click` as a lift/drop toggle instead.
+`selection-verbs-advertised-not-invocable` records for `TextInput`). The target's own `Click` is a
+genuine drop verb regardless — its primary `Up` handler drops on a live, accepting session whether
+the `Up` is a real press or the synthesized half of `perform_accessibility_action`'s `Down`+`Up`
+pair. The source's `Click` is not: `PointerEvent`/`EventCtx` carry no marker distinguishing that
+synthesized pair from a real press, and the source always treats an unrelated press arriving while
+it drags as an interruption that cancels the session, so an honest lift-on-idle/drop-on-live-session
+reading is not reachable off `Click` alone. The source therefore advertises `Action::Click` as a
+plain activation only, never a lift/drop toggle; the keyboard chord (Enter/Space to lift and drop,
+the arrows to cycle, Escape to cancel) is the assistive-technology path through the whole walk on
+the source side.
 
 **Applies to**: every `frust_widgets::drag::draggable()`/`drag_target()` consumer, including
 `reorderable_list()` (built on both) — every platform, since the gap is in the shared overlay and
