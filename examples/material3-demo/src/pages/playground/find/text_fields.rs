@@ -95,7 +95,7 @@ fn body(state: &mut Knobs) -> AnyView<Knobs> {
         field.supporting_text(state.supporting.clone())
     };
     if state.show_leading {
-        field = field.leading(any(icon(icons::EDIT)));
+        field = field.leading(icon(icons::EDIT));
     }
     let preview = play_preview_card("Text field", field);
     let snippet = play_snippet("Text field", snippet_code(state));

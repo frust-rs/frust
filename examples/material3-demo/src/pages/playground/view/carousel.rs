@@ -42,9 +42,9 @@
 
 use frust::authoring::text::{FontWeight, TextAlign};
 use frust::{
-    AnyView, AsyncValue, Axis, Color, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    Image, ImageDecodeError, ImageFit, ImageSource, Padding, SizedBox, Stack, UseTask, View, any,
-    component, container, decode_image_async, flexible, inflexible, text, use_task,
+    AnyView, AsyncValue, Color, Component, CrossAxisAlignment, EdgeInsets, Get, Image,
+    ImageDecodeError, ImageFit, ImageSource, Padding, SizedBox, UseTask, View, any, column,
+    component, container, decode_image_async, stack, text, use_task,
 };
 use frust_material::{
     CarouselAxis, CarouselChange, CarouselLayout, HeroAlignment, OverlayAnchor, carousel,
@@ -231,11 +231,10 @@ fn content(knobs: &Knobs, images: &[ImageSource], status: Option<&str>) -> AnyVi
         vec![snippet(knobs)],
         vec![controls(knobs)],
     );
-    any(Stack(vec![
-        body,
-        layout_menu_panel(knobs),
-        alignment_menu_panel(knobs),
-    ]))
+    any(stack()
+        .child(body)
+        .child(layout_menu_panel(knobs))
+        .child(alignment_menu_panel(knobs)))
 }
 
 /// The decode's non-ready state, shown in the preview card's slot.
@@ -292,7 +291,7 @@ fn carousel_item(source: ImageSource, title: &str, show_title: bool) -> AnyView<
     if !show_title {
         return image;
     }
-    any(Stack(vec![image, title_band(title)]))
+    any(stack().child(image).child(title_band(title)))
 }
 
 /// The bottom-pinned title band — see the module docs' scrim divergence.
@@ -310,14 +309,10 @@ fn title_band(title: &str) -> AnyView<PageState> {
     ))
     .fill(TITLE_SCRIM);
 
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            flexible(1, SizedBox::<PageState>(None, None)),
-            inflexible(band),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch))
+    any(column()
+        .flex(1, SizedBox::<PageState>(None, None))
+        .child(band)
+        .cross_axis(CrossAxisAlignment::Stretch))
 }
 
 fn controls(knobs: &Knobs) -> AnyView<PageState> {

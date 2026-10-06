@@ -12,7 +12,7 @@
 
 use frust::{
     AnyView, Color, Column, CrossAxisAlignment, EdgeInsets, GestureDetector, Padding, Row,
-    SizedBox, Theme, any, container, scroll_view, text, use_context,
+    SizedBox, Theme, any, column, container, scroll_view, text, use_context,
 };
 use frust_material::{card_list_items, list_item, segment, segmented_button, switch};
 
@@ -65,13 +65,12 @@ pub fn theme_config_page() -> AnyView<AppState> {
 fn body(theme: &Theme, settings: ThemeSettings) -> AnyView<AppState> {
     any(scroll_view(Padding(
         EdgeInsets::all(16.0),
-        Column(vec![
-            toggles(theme, settings),
-            any(SizedBox::<AppState>(None, Some(24.0))),
-            seeds(theme, settings),
-            any(SizedBox::<AppState>(None, Some(24.0))),
-            type_section(theme, settings),
-        ]),
+        column()
+            .child(toggles(theme, settings))
+            .child(SizedBox::<AppState>(None, Some(24.0)))
+            .child(seeds(theme, settings))
+            .child(SizedBox::<AppState>(None, Some(24.0)))
+            .child(type_section(theme, settings)),
     )))
 }
 
@@ -127,13 +126,12 @@ fn seeds(theme: &Theme, settings: ThemeSettings) -> AnyView<AppState> {
         })
         .collect();
 
-    any(Column(vec![
-        any(text("Seed color").style(title_style)),
-        any(SizedBox::<AppState>(None, Some(4.0))),
-        any(text("Generates the scheme for both brightnesses.").style(detail_style)),
-        any(SizedBox::<AppState>(None, Some(16.0))),
-        swatch_grid(swatches),
-    ]))
+    any(column()
+        .child(text("Seed color").style(title_style))
+        .child(SizedBox::<AppState>(None, Some(4.0)))
+        .child(text("Generates the scheme for both brightnesses.").style(detail_style))
+        .child(SizedBox::<AppState>(None, Some(16.0)))
+        .child(swatch_grid(swatches)))
 }
 
 /// One seed color choice: a circular swatch, ringed when selected — the
@@ -163,16 +161,17 @@ fn seed_swatch<F: Fn(&mut AppState) + 'static>(
     };
 
     any(GestureDetector(
-        Column(vec![
-            any(container(SizedBox::<AppState>(None, None))
-                .size_centered(SEED_SWATCH_SIZE, SEED_SWATCH_SIZE)
-                .fill(color)
-                .radius(SEED_SWATCH_SIZE / 2.0)
-                .border(border_color, border_width)),
-            any(SizedBox::<AppState>(None, Some(8.0))),
-            any(text(label).style(label_style)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(
+                container(SizedBox::<AppState>(None, None))
+                    .size_centered(SEED_SWATCH_SIZE, SEED_SWATCH_SIZE)
+                    .fill(color)
+                    .radius(SEED_SWATCH_SIZE / 2.0)
+                    .border(border_color, border_width),
+            )
+            .child(SizedBox::<AppState>(None, Some(8.0)))
+            .child(text(label).style(label_style))
+            .cross_axis(CrossAxisAlignment::Center),
     )
     .on_tap(on_tap))
 }
@@ -216,19 +215,18 @@ fn type_section(theme: &Theme, settings: ThemeSettings) -> AnyView<AppState> {
         },
     ));
 
-    any(Column(vec![
-        any(text("Type").style(title_style)),
-        any(SizedBox::<AppState>(None, Some(4.0))),
-        any(text("Family applies to every role.").style(detail_style.clone())),
-        any(SizedBox::<AppState>(None, Some(16.0))),
-        font_picker,
-        any(SizedBox::<AppState>(None, Some(24.0))),
-        any(text("Style").style(small_title_style)),
-        any(SizedBox::<AppState>(None, Some(4.0))),
-        any(text("Regular, or the M3 Expressive emphasized scale.").style(detail_style)),
-        any(SizedBox::<AppState>(None, Some(16.0))),
-        style_picker,
-    ]))
+    any(column()
+        .child(text("Type").style(title_style))
+        .child(SizedBox::<AppState>(None, Some(4.0)))
+        .child(text("Family applies to every role.").style(detail_style.clone()))
+        .child(SizedBox::<AppState>(None, Some(16.0)))
+        .child(font_picker)
+        .child(SizedBox::<AppState>(None, Some(24.0)))
+        .child(text("Style").style(small_title_style))
+        .child(SizedBox::<AppState>(None, Some(4.0)))
+        .child(text("Regular, or the M3 Expressive emphasized scale.").style(detail_style))
+        .child(SizedBox::<AppState>(None, Some(16.0)))
+        .child(style_picker))
 }
 
 /// Chunk `items` into [`SEED_ROW_COLUMNS`]-wide rows, `SEED_GAP`px apart in

@@ -18,7 +18,7 @@
 //! own docs — this page drives no knob for any of the three, since none is
 //! exposed as a prop upstream either.
 
-use frust::{AnyView, Component, Stack, View, any, component, icon};
+use frust::{AnyView, Component, View, any, component, icon, stack};
 use frust_material::{
     IconButtonVariant, TooltipHover, icon_button, icons, rich_tooltip, tooltip, tooltip_action,
     tooltip_trigger,
@@ -72,7 +72,7 @@ fn snippet_code(state: &Knobs) -> String {
 /// The preview card: the icon-button trigger, wired to the shared hover.
 fn preview_trigger(state: &Knobs) -> AnyView<Knobs> {
     let button =
-        icon_button(any(icon(icons::EDIT)), |_: &mut Knobs| {}).variant(IconButtonVariant::Tonal);
+        icon_button(icon(icons::EDIT), |_: &mut Knobs| {}).variant(IconButtonVariant::Tonal);
     let label = if state.rich {
         "Rich tooltip"
     } else {
@@ -133,7 +133,7 @@ fn body(state: &mut Knobs) -> AnyView<Knobs> {
     let controls = control_panel("Content", rows);
 
     let content = playground_body(vec![preview], vec![snippet], vec![controls]);
-    any(Stack(vec![content, panel(state)]))
+    any(stack().child(content).child(panel(state)))
 }
 
 /// The nested [`Component`] this page owns its knobs in. See the page

@@ -65,8 +65,8 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, Get, RwSignal, Set, SizedBox, Stack, Update, View, any, component,
-    container, icon, spawn_local,
+    AnyView, Component, Get, RwSignal, Set, SizedBox, Update, View, any, component, container,
+    icon, spawn_local, stack,
 };
 
 use frust_material::{
@@ -272,7 +272,7 @@ fn body(state: &mut Knobs) -> AnyView<Knobs> {
         |s: &mut Knobs, next: RefreshKind| s.kind = next,
     );
 
-    any(Stack(vec![content, panel]))
+    any(stack().child(content).child(panel))
 }
 
 /// The nested [`Component`] this page owns its knobs in. See the page

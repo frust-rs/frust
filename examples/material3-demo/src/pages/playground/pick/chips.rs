@@ -64,7 +64,7 @@
 //! `Wrap(spacing: 8, runSpacing: 8)`.
 
 use frust::{
-    AnyView, Column, Component, Get, RwSignal, Set, SizedBox, Stack, View, any, component,
+    AnyView, Column, Component, Get, RwSignal, Set, SizedBox, View, any, component, stack,
 };
 use frust_material::{OverlayAnchor, assist_chip, filter_chip, input_chip, suggestion_chip};
 
@@ -232,7 +232,7 @@ impl Component for ChipsPlayground {
             |s: &mut ChipsPlaygroundState, next: ChipKind| s.kind.set(next),
         );
 
-        any(Stack(vec![body, panel]))
+        any(stack().child(body).child(panel))
     }
 }
 
