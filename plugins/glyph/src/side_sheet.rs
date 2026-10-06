@@ -531,11 +531,11 @@ impl<State: 'static> GlyphSideSheetView<State> {
     /// the body. Absent by default; the body takes the whole space below the
     /// header without one.
     ///
-    /// Takes an already-erased [`AnyView`] (the shape `frust_material`'s own
-    /// side-sheet actions take) rather than re-erasing a generic view, so a
-    /// caller composing its footer elsewhere does not pay a second erasure.
-    pub fn footer(mut self, footer: AnyView<State>) -> Self {
-        self.footer = Some(footer);
+    /// Takes any view and erases it here. Erasure is idempotent, so a caller
+    /// composing its footer elsewhere as an [`AnyView`] does not pay a second
+    /// erasure.
+    pub fn footer(mut self, footer: impl View<State>) -> Self {
+        self.footer = Some(AnyView::new(footer));
         self
     }
 
