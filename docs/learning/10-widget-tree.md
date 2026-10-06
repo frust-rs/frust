@@ -192,7 +192,7 @@ afterwards), then run `cargo test -p frust-widgets --test lab10_scratch`:
 
 ```rust
 use frust_core::RenderRoot;
-use frust_widgets::{column, SizedBox};
+use frust_widgets::{SizedBox, column};
 use kurbo::Size;
 
 #[test]
