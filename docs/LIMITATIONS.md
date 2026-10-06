@@ -697,7 +697,7 @@ typestate on the builder or a release-mode diagnostic channel, neither of
 which is in scope. The codemod's skipped sites are reported (exit status 2) and
 fixed by hand, and its one silent-risk case is compiler-caught.
 
-**Evidence**: `docs/CODE_STANDARDS.md` (keyed-list rule),
+**Evidence**: `docs/WIDGETS_CODE_STANDARDS.md` (keyed-list rule),
 `crates/frust-widgets/src/authoring.rs` (`rebuild_children`'s `debug_assert`), and the Phase 3
 review round of the any-erasure plan (its keyed-equivalence and codemod
 findings).

@@ -30,7 +30,7 @@
 //! result rows) as the query changes; every child inside it — including the
 //! single hint/no-results placeholder — carries a stable key via
 //! [`keyed`], so a query transition never mixes keyed and unkeyed siblings
-//! in the same list (see `docs/CODE_STANDARDS.md`'s keyed-list contract:
+//! in the same list (see `docs/WIDGETS_CODE_STANDARDS.md`'s keyed-list contract:
 //! keys are all-or-nothing per list).
 //!
 //! [`search_field`] applies the identical "stable shape, swap content
@@ -93,7 +93,7 @@ pub fn search_screen() -> AnyView<HuddleState> {
 /// view, and the keyed section rows as the query changes (see the module
 /// docs). Every branch keys its child(ren) so a transition between branches
 /// never mixes keyed and unkeyed siblings in the same list (all-or-nothing
-/// per `docs/CODE_STANDARDS.md`'s keyed-list contract).
+/// per `docs/WIDGETS_CODE_STANDARDS.md`'s keyed-list contract).
 fn results_container(
     query: &str,
     results: SearchResults,
