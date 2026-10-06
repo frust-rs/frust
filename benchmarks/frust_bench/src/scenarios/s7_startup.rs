@@ -27,9 +27,7 @@
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
-use frust::{
-    AnyView, Axis, Color, EdgeInsets, FlexView, FrameTime, Padding, any, inflexible, text,
-};
+use frust::{AnyView, Color, EdgeInsets, FrameTime, Padding, any, column, text};
 
 use super::{BenchState, Scenario};
 
@@ -55,31 +53,24 @@ impl Scenario for S7 {
     fn build(&self, _state: &mut BenchState) -> AnyView<BenchState> {
         let body = Padding(
             EdgeInsets::all(24.0),
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(text("S7 — Cold start + idle").size(24.0)),
-                    inflexible(
-                        text(
-                            "Launch-to-first-frame is measured from the shell's own \
+            column()
+                .child(text("S7 — Cold start + idle").size(24.0))
+                .child(
+                    text(
+                        "Launch-to-first-frame is measured from the shell's own \
                              StartupSpans (FRUST_TRACE=1 emits a `frust-perf startup` line \
                              on the first presented frame) plus the platform launch timer. \
                              After this frame the app requests no more frames — the frame \
                              gate goes idle for the 60s idle-CPU/memory window.",
-                        )
-                        .size(14.0)
-                        .color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xB3)),
-                    ),
-                ],
-            ),
+                    )
+                    .size(14.0)
+                    .color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xB3)),
+                ),
         );
 
         // The sentinel opens the idle-window marker on the first frame and then
         // stays silent (requests no frames), so the whole screen goes idle.
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![inflexible(any(idle_sentinel())), inflexible(any(body))],
-        ))
+        any(column().child(idle_sentinel()).child(body))
     }
 }
 

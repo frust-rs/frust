@@ -33,8 +33,7 @@ pub mod chart;
 pub mod physics;
 
 use frust::{
-    AnyView, Axis, Color, EdgeInsets, FlexView, Get, Padding, SizedBox, Stack, any, button,
-    flexible, inflexible, text,
+    AnyView, Color, EdgeInsets, Get, Padding, SizedBox, any, button, column, row, stack, text,
 };
 
 use super::{BenchState, Scenario};
@@ -71,19 +70,15 @@ impl Scenario for S1 {
             Color::from_rgb8(0x66, 0xBB, 0x6A)
         };
 
-        let top_row = FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(text(fps_label).size(18.0).color(fps_color)),
-                flexible(1, SizedBox(None, None)),
-                inflexible(button(
-                    if state.running { "Pause" } else { "Play" },
-                    |state: &mut BenchState| state.running = !state.running,
-                )),
-                inflexible(SizedBox(Some(8.0), None)),
-                inflexible(button("Reset", |state: &mut BenchState| state.epoch += 1)),
-            ],
-        );
+        let top_row = row()
+            .child(text(fps_label).size(18.0).color(fps_color))
+            .flex(1, SizedBox(None, None))
+            .child(button(
+                if state.running { "Pause" } else { "Play" },
+                |state: &mut BenchState| state.running = !state.running,
+            ))
+            .child(SizedBox(Some(8.0), None))
+            .child(button("Reset", |state: &mut BenchState| state.epoch += 1));
 
         let info = text(
             "S1 Animation storm — physics-driven bubbles (count derived per \
@@ -96,19 +91,14 @@ impl Scenario for S1 {
 
         let hud = Padding(
             EdgeInsets::all(16.0),
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(top_row),
-                    flexible(1, SizedBox(None, None)),
-                    inflexible(info),
-                ],
-            ),
+            column()
+                .child(top_row)
+                .flex(1, SizedBox(None, None))
+                .child(info),
         );
 
-        any(Stack(vec![
-            any(bubble_chart(state.running, state.epoch, state.fps)),
-            any(hud),
-        ]))
+        any(stack()
+            .child(bubble_chart(state.running, state.epoch, state.fps))
+            .child(hud))
     }
 }
