@@ -231,10 +231,11 @@ build from.
   (`move_to_next_target`/`move_to_previous_target`, Enter/Space/arrows, Escape to cancel) is the
   assistive-technology path through the whole walk, driving the same coordinator from the source's
   own focus; semantics advertise a `Role::Button` source and a `Role::Group` target, each supporting
-  `Action::Click` as a plain activation only, never a lift/drop toggle (see
-  `drag-ghost-pod-no-semantics` in [LIMITATIONS.md](LIMITATIONS.md)). `auto_scroll_zone()` drives an
-  attached `ScrollController` toward whichever edge the dragged pointer sits inside
-  (`AutoScroll::edge_px`/`max_px_per_s`).
+  `Action::Click`, but not identically: the target's `Click` drops a live, accepting session onto
+  it, while the source's `Click` drops (or cancels) its own live keyboard session and is a plain
+  tap otherwise (see `drag-ghost-pod-no-semantics` in [LIMITATIONS.md](LIMITATIONS.md)).
+  `auto_scroll_zone()` drives an attached `ScrollController` toward whichever edge the dragged
+  pointer sits inside (`AutoScroll::edge_px`/`max_px_per_s`).
   `reorderable_list()` composes both primitives over keyed rows with `N + 1` gap targets, firing
   `on_reorder(state, from, to)` on an actual move. A desktop `InputEvent::FileDrop` opens an
   `ExternalFiles` session so a `drag_target::<Vec<PathBuf>>` accepts an OS file drop the same way a

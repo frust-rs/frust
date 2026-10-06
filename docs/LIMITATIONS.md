@@ -3217,22 +3217,24 @@ floated-surface owner per field and a magnifier able to sample the painted scene
 exactly: no semantics are published for a registered pod and it is not reached by
 `RenderRoot::inspect()`/`WidgetTree::inspect()` unless its owner visits it (see
 `overlay-portal-v1-scope`'s item 4 above). The drag's actual semantics live on the in-tree
-`Draggable`/`DragTarget` nodes instead — a `Role::Button` source labelled `"Drag"`/`"Drop"`, a
-`Role::Group` target labelled `"accepts drop"`/`"drop target"` — so an assistive-technology user never
-reaches the ghost itself, only the source and target it moves between. The richer per-verb surface
-those nodes would ideally advertise (`accesskit::Action::CustomAction` for `lift`/`drop`/`cancel`
-individually) is not wired to anything either: `frust-core`'s `perform_accessibility_action`
-matches only `Action::Click`/`Action::Focus` and drops a custom action's id (the same gap
-`selection-verbs-advertised-not-invocable` records for `TextInput`). The target's own `Click` is a
-genuine drop verb regardless — its primary `Up` handler drops on a live, accepting session whether
-the `Up` is a real press or the synthesized half of `perform_accessibility_action`'s `Down`+`Up`
-pair. The source's `Click` is not: `PointerEvent`/`EventCtx` carry no marker distinguishing that
-synthesized pair from a real press, and the source always treats an unrelated press arriving while
-it drags as an interruption that cancels the session, so an honest lift-on-idle/drop-on-live-session
-reading is not reachable off `Click` alone. The source therefore advertises `Action::Click` as a
-plain activation only, never a lift/drop toggle; the keyboard chord (Enter/Space to lift and drop,
-the arrows to cycle, Escape to cancel) is the assistive-technology path through the whole walk on
-the source side.
+`Draggable`/`DragTarget` nodes instead — a `Role::Button` source labelled `"Draggable"` idle,
+`"Dragging"` while a pointer session is live and `"Drop"` while its own keyboard session is, a
+`Role::Group` target labelled `"accepts drop"`/`"drop target"` — so an assistive-technology user
+never reaches the ghost itself, only the source and target it moves between. The richer per-verb
+surface those nodes would ideally advertise (`accesskit::Action::CustomAction` for
+`lift`/`drop`/`cancel` individually) is not wired to anything either: `frust-core`'s
+`perform_accessibility_action` matches only `Action::Click`/`Action::Focus` and drops a custom
+action's id (the same gap `selection-verbs-advertised-not-invocable` records for `TextInput`).
+Both nodes' `Click` are genuine drop verbs, not mere activations: the target's own primary `Up`
+handler drops on a live, accepting session, and the source answers a primary `Down` while it
+drags its own keyboard session exactly the way Enter/Space would — drop onto whatever is hovered,
+cancel when nothing is — whether that `Down` is a real press or the synthesized half of
+`perform_accessibility_action`'s `Down`+`Up` pair; no synthetic-origin marker is needed for either
+reading, since a real press on the lifted item is just as honest a "put it down". Idle, the same
+`Click` reaches the source as a plain tap instead, same as any other control. The keyboard chord
+(Enter/Space to lift and drop, the arrows to cycle, Escape to cancel) remains the primary
+assistive-technology path through the whole walk; `Click` on the source now reuses its drop/cancel
+half rather than only ever cancelling.
 
 **Applies to**: every `frust_widgets::drag::draggable()`/`drag_target()` consumer, including
 `reorderable_list()` (built on both) — every platform, since the gap is in the shared overlay and
@@ -3252,6 +3254,33 @@ no `inspect()` visibility for any registered pod).
 **Trigger for removal**: the same accessibility-action seam widening `selection-verbs-advertised-
 not-invocable` names, after which a custom `lift`/`drop`/`cancel` action could reach these nodes
 too.
+
+---
+
+### `drag-keyboard-cycle-visible-targets-only` — keyboard cycling only reaches a target visible in the latest paint pass
+
+**Observed**: `DragCoordinator::move_to_next_target`/`move_to_previous_target` — the
+`ArrowRight`/`ArrowDown`/`ArrowLeft`/`ArrowUp` half of `draggable()`'s keyboard chord — cycle
+through the registry a `drag_target()` populates with its own bounds each paint, so a target a
+`ListView`/`ScrollView` has scrolled out of view that frame is simply absent from the cycle; no
+step scrolls an off-screen target into view to make it reachable. A keyboard user can therefore
+move a lifted item only between whichever targets of a list taller than its viewport are
+currently on screen.
+
+**Applies to**: every `frust_widgets::drag::draggable()`/`drag_target()` consumer whose targets
+sit inside a scrollable container taller than its viewport — `reorderable_list()` included.
+
+**Why accepted**: resolving a keyboard-cycled hover is already gated on visibility to avoid
+dropping onto a target whose bounds are stale or hidden; widening that to scroll a hidden target
+into view is a separate, larger feature (an auto-scroll driven by the keyboard cycle rather than
+the pointer) that this round does not add.
+
+**Evidence**: `crates/frust-widgets/src/drag/draggable.rs`'s "Lift, cycle, drop" module-doc
+section; `crates/frust-widgets/src/drag/coordinator.rs`'s target registry, rebuilt from visible
+bounds each paint.
+
+**Trigger for removal**: a scroll-into-view hook on keyboard cycling, so a step that would land on
+a registered-but-off-screen target scrolls it into view first.
 
 ---
 

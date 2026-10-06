@@ -117,7 +117,11 @@
 //! does not exist. `Enter`/Space while lifted **drops**
 //! ([`DragCoordinator::drop`]) on whatever is currently hovered, exactly like
 //! a pointer's `Up` — released with nothing hovered, a cancel, like the
-//! pointer case. `Escape` cancels from either phase (above).
+//! pointer case. `Escape` cancels from either phase (above). A primary
+//! `Down` while lifted answers the same way — see *Semantics*, below, for
+//! why a real press on the lifted item (and the accessibility seam's
+//! synthesized one) reads as the same drop-or-cancel chord rather than a
+//! stray press.
 //!
 //! A key this source does not otherwise react to — including every key while
 //! its own focus claim is the child's instead — falls through to the child
@@ -144,34 +148,43 @@
 //!
 //! [`Widget::semantics`] pushes a `Role::Button`-equivalent node — accesskit
 //! names no drag-specific role — wrapping the child as its one accesskit
-//! child, labelled `"Drag"`/`"Drop"` for the two states a session can be in.
-//! The richer surface the lift/cycle/drop verbs above would ideally advertise
-//! — `accesskit::Action::CustomAction` for `lift`/`drop`/`cancel` individually
-//! — is not wired to anything: `frust-core`'s `perform_accessibility_action`
-//! (the one seam a shell's `ActionRequest` reaches a widget through) matches
-//! only `Action::Click`/`Action::Focus`, dropping every other action and the
-//! `ActionRequest::data` a custom action's id would ride in (the same gap
-//! `TextInput`'s own advertised-but-uninvocable custom actions document — see
-//! `docs/CODE_STANDARDS.md`'s *Text Selection and the Clipboard*). The node
-//! still advertises `Action::Click`, as any `Role::Button` does, but it is
-//! **a plain activation here, not a lift/drop toggle**: `Action::Click`
+//! child. The label names a noun this source *is*, never a verb `Click`
+//! might not perform: `"Draggable"` while idle, with a short description
+//! (`"Press Enter to lift"`) naming the keyboard chord; `"Dragging"` while a
+//! *pointer* session is in flight; `"Drop"` while this source's own
+//! *keyboard* session is live — the one state in which `Click` really does
+//! drop it. The richer surface the lift/cycle/drop verbs above would ideally
+//! advertise — `accesskit::Action::CustomAction` for `lift`/`drop`/`cancel`
+//! individually — is not wired to anything: `frust-core`'s
+//! `perform_accessibility_action` (the one seam a shell's `ActionRequest`
+//! reaches a widget through) matches only `Action::Click`/`Action::Focus`,
+//! dropping every other action and the `ActionRequest::data` a custom
+//! action's id would ride in (the same gap `TextInput`'s own
+//! advertised-but-uninvocable custom actions document — see
+//! `docs/CODE_STANDARDS.md`'s *Text Selection and the Clipboard*). `Click`
 //! reaches this widget as a synthesized `Down`+`Up` pair at the node's own
 //! bounds center, routed through the normal [`event`] path exactly like a
 //! real press, with no marker distinguishing it from one — [`PointerEvent`]
-//! and [`EventCtx`] carry no synthetic-origin field to key an honest
-//! lift-on-idle/drop-on-live-session reading off (see
-//! `perform_accessibility_action`'s doc comment in `frust-core`'s `app.rs`).
-//! Routed through that path, the synthesized press-and-release is simply too
-//! short to cross the drag threshold — a tap — on an idle source, which
-//! reaches the child and (per *Keyboard*, above) leaves the source focused,
-//! same as any other plain tap. Arriving while this source drags, either by
-//! pointer or by keyboard, it is indistinguishable from an unrelated stray
-//! press and so is handled exactly the same way every other press interrupts
-//! a session in flight: it cancels the session rather than committing a
-//! drop. The keyboard chord — `Enter`/Space to lift and drop,
-//! `ArrowRight`/`ArrowDown`/`ArrowLeft`/`ArrowUp` to cycle the hovered
-//! target, `Escape` to cancel — is the assistive-technology path through the
-//! whole lift-cycle-drop walk; `Action::Click` only ever activates.
+//! and [`EventCtx`] carry no synthetic-origin field, and none is needed: on
+//! an idle source the synthesized press-and-release is simply too short to
+//! cross the drag threshold — a tap — which reaches the child and (per
+//! *Keyboard*, above) leaves the source focused, same as any other plain
+//! tap. Arriving while this source drags its own *keyboard* session, a
+//! `Down` answers exactly the chord Enter/Space would
+//! ([`keyboard_drop`](DraggableWidget::keyboard_drop)) — drop onto whatever
+//! [`move_to_next_target`](DragCoordinator::move_to_next_target)/
+//! [`move_to_previous_target`](DragCoordinator::move_to_previous_target) left
+//! hovered, or cancel when nothing is — an honest reading for a real mouse
+//! press too (pressing the lifted item puts it down), so no synthetic marker
+//! is needed there either; the matching `Up` is swallowed rather than
+//! reaching the child as a stray tap. Arriving during a *pointer* session
+//! instead, it is indistinguishable from an unrelated stray press and so is
+//! handled exactly the same way every other press interrupts one: it cancels
+//! the session rather than committing a drop. The keyboard chord —
+//! `Enter`/Space to lift and drop, `ArrowRight`/`ArrowDown`/`ArrowLeft`/
+//! `ArrowUp` to cycle the hovered target, `Escape` to cancel — is the
+//! assistive-technology path through the whole lift-cycle-drop walk; `Click`
+//! reuses its drop/cancel half rather than duplicating it.
 //!
 //! # Limits
 //!
@@ -776,6 +789,21 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
     ) -> EventResult {
         match (p.phase, self.gesture) {
             (PointerPhase::Down, _) => {
+                // A primary press while this source drags its own keyboard
+                // session is an honest "put it down": reuse the same
+                // drop-on-hovered/cancel-on-none chord Enter/Space answers
+                // (`keyboard_drop`) rather than treating it as just another
+                // stray press that cancels — a real mouse press on the
+                // lifted item reads the same way, and so does the
+                // accessibility seam's synthesized `Down`. The matching `Up`
+                // is swallowed rather than reaching the child, the same
+                // `Gesture::Ended` wait a stray press during a *pointer*
+                // session already uses.
+                if presses(p) && self.is_keyboard_dragging() {
+                    self.keyboard_drop(ctx);
+                    self.gesture = Gesture::Ended;
+                    return EventResult::Handled;
+                }
                 // A gesture the shell never ended: abandon it before the new
                 // press, rather than leave a session nobody will drop.
                 if !matches!(self.gesture, Gesture::Idle | Gesture::Declined) {
@@ -1155,13 +1183,25 @@ impl<State: 'static, T: 'static> Widget for DraggableWidget<State, T> {
         // No accesskit role names a drag source; `Role::Button` is the
         // closest activatable analog (see the module docs' *Semantics*
         // section for why `Click` — not a custom `lift`/`drop`/`cancel`
-        // action — is what this node advertises).
+        // action — is what this node advertises, and why the label never
+        // names a verb `Click` does not perform in the current state).
+        let keyboard_dragging = self.is_keyboard_dragging();
         let dragging = self.is_dragging();
+        let label = if keyboard_dragging {
+            "Drop"
+        } else if dragging {
+            "Dragging"
+        } else {
+            "Draggable"
+        };
         ctx.push_container(
             Role::Button,
             |node| {
                 node.add_action(Action::Click);
-                node.set_label(if dragging { "Drop" } else { "Drag" });
+                node.set_label(label);
+                if !dragging {
+                    node.set_description("Press Enter to lift");
+                }
             },
             |ctx| self.child.borrow().semantics_child(ctx),
         );
@@ -2226,7 +2266,7 @@ mod tests {
     }
 
     #[test]
-    fn semantics_reports_a_button_role_with_click_and_toggles_its_label() {
+    fn semantics_reports_a_button_role_with_click_and_a_label_for_each_state() {
         let mut h = Harness::new(Cfg::default());
         let update = h.root.semantics();
         let (_, node) = update
@@ -2234,7 +2274,12 @@ mod tests {
             .iter()
             .find(|(_, n)| n.role() == Role::Button)
             .expect("a Role::Button node was pushed");
-        assert_eq!(node.label(), Some("Drag"));
+        assert_eq!(
+            node.label(),
+            Some("Draggable"),
+            "idle names no verb Click does not perform"
+        );
+        assert_eq!(node.description(), Some("Press Enter to lift"));
         assert!(node.supports_action(Action::Click));
 
         h.mouse_drag();
@@ -2245,7 +2290,27 @@ mod tests {
             .iter()
             .find(|(_, n)| n.role() == Role::Button)
             .expect("a Role::Button node was pushed");
-        assert_eq!(node.label(), Some("Drop"), "dragging flips the label");
+        assert_eq!(
+            node.label(),
+            Some("Dragging"),
+            "a pointer session flips the label, but Click still only cancels it"
+        );
+
+        h.mouse(PointerPhase::Up, 60.0, 150.0);
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        h.key(Key::Named(NamedKey::Enter));
+        let update = h.root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Button)
+            .expect("a Role::Button node was pushed");
+        assert_eq!(
+            node.label(),
+            Some("Drop"),
+            "a live keyboard session labels Click honestly: it drops"
+        );
     }
 
     /// Where `perform_accessibility_action`'s `Action::Click` synthesizes its
@@ -2276,7 +2341,7 @@ mod tests {
     }
 
     #[test]
-    fn an_accessibility_click_during_a_live_keyboard_session_cancels_it_not_a_drop() {
+    fn an_accessibility_click_during_a_live_keyboard_session_with_nothing_hovered_cancels_it() {
         let mut h = Harness::new(Cfg::default());
         h.mouse(PointerPhase::Down, 30.0, 120.0);
         h.mouse(PointerPhase::Up, 30.0, 120.0);
@@ -2286,17 +2351,25 @@ mod tests {
             DragPhase::Dragging,
             "Enter lifts a keyboard session"
         );
+        assert_eq!(
+            h.state.taps, 1,
+            "the earlier focusing tap reached the child"
+        );
+        h.state.log.borrow_mut().clear();
 
         // `Action::Click` arriving mid-session: the same synthesized `Down`
-        // then `Up` at the node's own center. Click is a plain activation
-        // (see the module docs), not the drop verb, so an unrelated press
-        // arriving here cancels the live session exactly as any other stray
-        // press would, rather than committing a drop.
+        // then `Up` at the node's own center. With nothing hovered this
+        // performs exactly what Enter/Space would — a cancel, not a drop —
+        // reusing that chord rather than treating the `Down` as a stray
+        // press; the matching `Up` is swallowed, never reaching the child
+        // as a second tap.
         let center = node_center();
         h.mouse(PointerPhase::Down, center.x, center.y);
         h.mouse(PointerPhase::Up, center.x, center.y);
 
         assert_eq!(h.phase(), DragPhase::Idle, "the session ended, not dropped");
+        assert_eq!(h.state.taps, 1, "the matching Up never reached the child");
+        assert!(h.log().is_empty(), "the Down/Up never reached the child");
         assert!(
             h.changes.borrow().iter().any(|c| matches!(
                 c,
@@ -2319,6 +2392,47 @@ mod tests {
             "never a drop: {:?}",
             h.changes.borrow()
         );
+    }
+
+    #[test]
+    fn an_accessibility_click_during_a_live_keyboard_session_drops_onto_the_hovered_target() {
+        let mut h = Harness::new(Cfg::default());
+        let target = h.target(Rect::new(0.0, 0.0, 400.0, 600.0));
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        h.key(Key::Named(NamedKey::Enter));
+        h.key(Key::Named(NamedKey::ArrowRight));
+        assert_eq!(
+            h.state
+                .coordinator
+                .state()
+                .session()
+                .and_then(|s| s.hovered),
+            Some(target),
+            "cycling landed on the only registered target"
+        );
+        h.state.log.borrow_mut().clear();
+
+        // The same synthesized `Down`+`Up` as above, but with a target
+        // hovered: it drops onto it, exactly like Enter/Space would, and
+        // the matching `Up` still never reaches the child.
+        let center = node_center();
+        h.mouse(PointerPhase::Down, center.x, center.y);
+        h.mouse(PointerPhase::Up, center.x, center.y);
+
+        assert_eq!(
+            h.phase(),
+            DragPhase::Dropping,
+            "the coordinator reached Dropping on the hovered target"
+        );
+        match h.state.coordinator.state() {
+            DragState::Dropping { target: on, .. } => assert_eq!(on, target),
+            other => panic!("expected Dropping, got {other:?}"),
+        }
+        assert!(h.log().is_empty(), "the Down/Up never reached the child");
+
+        h.state.coordinator.complete_drop();
+        assert_eq!(h.phase(), DragPhase::Idle);
     }
 
     #[test]
