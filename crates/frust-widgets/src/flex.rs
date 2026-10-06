@@ -171,6 +171,57 @@ impl<State: 'static> FlexView<State> {
         }
     }
 
+    /// Append an inflexible child. Accepts any [`View`]; erasure happens
+    /// internally, so no `any()` is needed.
+    pub fn child<V: View<State>>(mut self, view: V) -> Self {
+        self.children.push(inflexible(view));
+        self
+    }
+
+    /// Append a flexible child taking `flex` proportional shares of the free
+    /// main-axis space.
+    pub fn flex<V: View<State>>(mut self, flex: u32, view: V) -> Self {
+        self.children.push(flexible(flex, view));
+        self
+    }
+
+    /// Append an inflexible child tagged with a stable [`ChildKey`] (see
+    /// [`keyed`] for the reconciliation semantics).
+    pub fn keyed<V: View<State>>(mut self, key: impl Into<ChildKey>, view: V) -> Self {
+        self.children.push(keyed(key, view));
+        self
+    }
+
+    /// Append every item of `iter` as an inflexible child.
+    pub fn children<I, V>(mut self, iter: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: View<State>,
+    {
+        self.children.extend(iter.into_iter().map(inflexible));
+        self
+    }
+
+    /// Append a pre-built [`FlexChild`] (escape hatch for [`flexible`] /
+    /// [`inflexible`] / [`keyed`] values built elsewhere).
+    pub fn push(mut self, child: FlexChild<State>) -> Self {
+        self.children.push(child);
+        self
+    }
+
+    /// Apply `f` to the builder only when `cond` is true.
+    pub fn when(self, cond: bool, f: impl FnOnce(Self) -> Self) -> Self {
+        if cond { f(self) } else { self }
+    }
+
+    /// Apply `f` with the contained value when `opt` is `Some`.
+    pub fn when_some<T>(self, opt: Option<T>, f: impl FnOnce(Self, T) -> Self) -> Self {
+        match opt {
+            Some(value) => f(self, value),
+            None => self,
+        }
+    }
+
     /// Set the cross-axis alignment.
     pub fn cross_axis(mut self, cross: CrossAxisAlignment) -> Self {
         self.cross = cross;
@@ -182,6 +233,27 @@ impl<State: 'static> FlexView<State> {
         self.main = main;
         self
     }
+}
+
+/// An empty vertical flex, ready for fluent children: no `any()` needed.
+///
+/// ```
+/// use frust_widgets::{FlexView, column, text};
+/// # fn demo(cond: bool) -> FlexView<()> {
+/// column()
+///     .child(text("a"))
+///     .flex(1, text("b"))
+///     .when(cond, |c| c.child(text("c")))
+/// # }
+/// # let _ = demo(true);
+/// ```
+pub fn column<State: 'static>() -> FlexView<State> {
+    FlexView::new(Axis::Vertical, Vec::new())
+}
+
+/// An empty horizontal flex, ready for fluent children. See [`column`].
+pub fn row<State: 'static>() -> FlexView<State> {
+    FlexView::new(Axis::Horizontal, Vec::new())
 }
 
 /// A horizontal flex (`Axis::Horizontal`) of inflexible children — the common
