@@ -90,24 +90,31 @@
 //!
 //! # Click-to-drop and semantics
 //!
-//! A primary `Up` landing on this target while a session is live and this
-//! target [`DragTargetView::accepts`] the held payload sets it hovered
+//! A primary `Up` landing on this target while a KEYBOARD session is live and
+//! this target [`DragTargetView::accepts`] the held payload sets it hovered
 //! ([`DragCoordinator::set_hovered`]) and drops
 //! ([`DragCoordinator::drop`]) on the spot, ahead of the usual forward to the
 //! child — the one way a target itself answers a press, where every other
 //! phase stays the transparent wrapper the [module docs](super) describe.
+//! A *pointer* session's `Up` is excluded on purpose: it belongs to whichever
+//! source captured the gesture, and it still travels through every ancestor
+//! on the capture chain — including an ancestor that is itself a drop target
+//! (a kanban column wrapping its own draggable cards) — so answering it here
+//! would let that ancestor claim a drop meant for its child. A keyboard
+//! session never captures a pointer gesture, so it carries no such risk.
 //! This is what makes [`Widget::semantics`]'s `Action::Click` meaningful
 //! without a widget-side change to `frust-core`'s accessibility-action
 //! routing: a shell's `ActionRequest(node_id, Action::Click)` already
 //! synthesizes exactly a `Down` then an `Up` at this node's own bounds
 //! center (see [`mod@super::draggable`]'s *Semantics* module docs for why a
 //! richer per-target action is not wired to anything today), so an
-//! assistive-technology user who lifted a session elsewhere can activate a
-//! target directly to drop on it, with no pointer travel at all. The node's
-//! label states acceptance — `"accepts drop"` while a live session's payload
-//! type-matches and [`DragTargetView::accepts`] it, `"drop target"`
-//! otherwise — and `Click` is advertised only in the accepting case, so an
-//! adapter never offers an action that would be a no-op.
+//! assistive-technology user who lifted a keyboard session elsewhere can
+//! activate a target directly to drop on it, with no pointer travel at all.
+//! The node's label states acceptance — `"accepts drop"` while a live
+//! keyboard session's payload type-matches and [`DragTargetView::accepts`]
+//! it, `"drop target"` otherwise — and `Click` is advertised only in the
+//! accepting case, so an adapter never offers an action that would be a
+//! no-op.
 //!
 //! # OS file drops
 //!
@@ -451,8 +458,20 @@ impl<State: 'static, T: 'static> DragTargetWidget<State, T> {
     /// Whether a session is live and this target would accept it right now —
     /// the gate [`Widget::event`]'s click-to-drop and [`Widget::semantics`]'s
     /// label/action both read (see the [module docs](self#click-to-drop-and-semantics)).
+    ///
+    /// Admits only a *keyboard* session. A pointer session's `Up` belongs to
+    /// whichever source captured the gesture — the coordinator resolves hover
+    /// from the pointer position, not the tree — and that captured `Up` still
+    /// travels through every ancestor on the capture chain, including an
+    /// ancestor that is itself a [`DragTargetWidget`] (a drop target wrapping
+    /// its own draggable children, as a kanban column wraps its cards). Were
+    /// this gate open for a pointer session, that ancestor would answer the
+    /// child's own `Up` before the child ever saw it, re-hovering and
+    /// dropping on itself. A keyboard session never captures a pointer
+    /// gesture, so no ancestor's `Up` can collide with it this way.
     fn accepts_click_drop(&self) -> bool {
-        matches!(self.coordinator.state(), DragState::Dragging(_)) && self.payload_accepted()
+        matches!(self.coordinator.state(), DragState::Dragging(session) if session.keyboard)
+            && self.payload_accepted()
     }
 
     /// Poll the coordinator for this target's id and fire whatever callbacks
@@ -1206,7 +1225,7 @@ mod tests {
         );
 
         let source = coordinator.new_source_id();
-        coordinator.arm(source, Point::ZERO);
+        coordinator.lift(source);
         coordinator.begin(7u32);
         root.rebuild(&mut logic, &mut state);
         root.layout(Size::new(100.0, 100.0));
@@ -1804,5 +1823,185 @@ mod tests {
             let source = coordinator.new_source_id();
             assert!(coordinator.arm(source, Point::new(10.0, 10.0)));
         }
+    }
+
+    /// A kanban-shaped tree on one coordinator: drop target `a` wraps a
+    /// column holding one draggable card, and a sibling drop target `b` sits
+    /// beside it — the shape that exposed a drop target's click-to-drop gate
+    /// admitting a *pointer* session (see [`DragTargetWidget::accepts_click_drop`]):
+    /// the dragged card's own captured `Up` travels through `a`, its
+    /// wrapping ancestor, on its way to the card, and `a` must let it pass
+    /// through rather than answering it itself.
+    struct Kanban {
+        coordinator: DragCoordinator,
+        a_entered: u32,
+        a_dropped: Option<u32>,
+        b_entered: u32,
+        b_dropped: Option<u32>,
+    }
+
+    fn kanban_logic(state: &mut Kanban) -> crate::StackView<Kanban> {
+        let card = super::super::draggable::draggable(
+            SizedBox::<Kanban>(Some(80.0), Some(40.0)),
+            state.coordinator.clone(),
+            |_: &Kanban| 7u32,
+        );
+        let a = drag_target::<u32, Kanban, _>(
+            SizedBox::<Kanban>(Some(100.0), Some(100.0)).child(crate::Column(vec![any(card)])),
+            state.coordinator.clone(),
+        )
+        .on_enter(|s: &mut Kanban| s.a_entered += 1)
+        .on_drop(|s: &mut Kanban, v: u32| s.a_dropped = Some(v));
+        let b = drag_target::<u32, Kanban, _>(
+            SizedBox::<Kanban>(Some(100.0), Some(100.0)),
+            state.coordinator.clone(),
+        )
+        .on_enter(|s: &mut Kanban| s.b_entered += 1)
+        .on_drop(|s: &mut Kanban, v: u32| s.b_dropped = Some(v));
+        crate::Stack(vec![
+            any(SizedBox::<Kanban>(Some(400.0), Some(400.0))),
+            any(crate::Row(vec![any(a), any(b)])),
+        ])
+    }
+
+    /// Drives [`kanban_logic`] through a real [`frust_core::RenderRoot`];
+    /// `frame` is the rebuild/layout/paint a shell runs between events,
+    /// which is what dispatches the `Housekeeping` broadcast a completed
+    /// drop needs to fire `on_drop` (mirrors `reorderable`'s own test
+    /// harness).
+    struct KanbanHarness {
+        root: frust_core::RenderRoot<Kanban, crate::StackView<Kanban>>,
+        state: Kanban,
+        clock_ms: f64,
+    }
+
+    impl KanbanHarness {
+        fn new() -> Self {
+            let mut h = KanbanHarness {
+                root: frust_core::RenderRoot::new(),
+                state: Kanban {
+                    coordinator: DragCoordinator::new(),
+                    a_entered: 0,
+                    a_dropped: None,
+                    b_entered: 0,
+                    b_dropped: None,
+                },
+                clock_ms: 0.0,
+            };
+            h.frame();
+            h
+        }
+
+        fn frame(&mut self) {
+            let mut build: fn(&mut Kanban) -> crate::StackView<Kanban> = kanban_logic;
+            self.root.rebuild(&mut build, &mut self.state);
+            self.root.layout(Size::new(400.0, 400.0));
+            self.clock_ms += 16.0;
+            let mut scene = crate::test_support::RecordingScene::default();
+            self.root.paint(
+                &mut scene,
+                frust_core::FrameTime::from_nanos((self.clock_ms * 1_000_000.0) as u64),
+            );
+        }
+
+        fn mouse(&mut self, phase: PointerPhase, x: f64, y: f64) {
+            self.root
+                .event(&mut self.state, &primary(phase, Point::new(x, y)));
+        }
+
+        fn touch(&mut self, phase: PointerPhase, x: f64, y: f64) {
+            use frust_core::event::PointerId;
+            self.root.event(
+                &mut self.state,
+                &InputEvent::PointerContact {
+                    pointer_id: PointerId::touch(0),
+                    event: frust_core::PointerEvent {
+                        phase,
+                        position: Point::new(x, y),
+                        button: frust_core::PointerButton::Primary,
+                    },
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn a_mouse_drag_dropped_on_the_sibling_column_fires_only_its_on_drop() {
+        let mut h = KanbanHarness::new();
+        // Press the card, inside column `a` (window 0..100, 0..100).
+        h.mouse(PointerPhase::Down, 20.0, 20.0);
+        // Cross the distance threshold without leaving `a`.
+        h.mouse(PointerPhase::Move, 30.0, 20.0);
+        assert_eq!(h.state.coordinator.phase(), DragPhase::Dragging);
+        // Into column `b` (window 100..200, 0..100).
+        h.mouse(PointerPhase::Move, 150.0, 50.0);
+        let a_entered_before_release = h.state.a_entered;
+        h.mouse(PointerPhase::Up, 150.0, 50.0);
+        h.frame();
+        assert_eq!(
+            h.state.coordinator.phase(),
+            DragPhase::Idle,
+            "b claimed the drop"
+        );
+        assert_eq!(h.state.b_dropped, Some(7), "b's on_drop fired exactly once");
+        assert_eq!(
+            h.state.a_dropped, None,
+            "a's on_drop never fires — the card left it before release"
+        );
+        assert_eq!(
+            h.state.a_entered, a_entered_before_release,
+            "the Up must not re-enter the source column (the old click-to-drop bug)"
+        );
+    }
+
+    #[test]
+    fn a_touch_long_press_dropped_on_the_sibling_column_fires_only_its_on_drop() {
+        let mut h = KanbanHarness::new();
+        h.touch(PointerPhase::Down, 20.0, 20.0);
+        let mut frames = 0;
+        while h.state.coordinator.phase() != DragPhase::Dragging {
+            h.frame();
+            frames += 1;
+            assert!(frames < 60, "the hold never began a drag");
+        }
+        h.touch(PointerPhase::Move, 150.0, 50.0);
+        h.frame();
+        let a_entered_before_release = h.state.a_entered;
+        h.touch(PointerPhase::Up, 150.0, 50.0);
+        h.frame();
+        assert_eq!(
+            h.state.coordinator.phase(),
+            DragPhase::Idle,
+            "b claimed the drop"
+        );
+        assert_eq!(h.state.b_dropped, Some(7), "b's on_drop fired exactly once");
+        assert_eq!(
+            h.state.a_dropped, None,
+            "a's on_drop never fires — the card left it before release"
+        );
+        assert_eq!(
+            h.state.a_entered, a_entered_before_release,
+            "the Up must not re-enter the source column (the old click-to-drop bug)"
+        );
+    }
+
+    #[test]
+    fn a_keyboard_sessions_click_to_drop_still_drops_on_the_cycled_target() {
+        let mut h = KanbanHarness::new();
+        let source = h.state.coordinator.new_source_id();
+        h.state.coordinator.lift(source);
+        h.state.coordinator.begin(7u32);
+        // Cycle from nothing hovered onto `a`, then onto `b`.
+        h.state.coordinator.move_to_next_target();
+        h.state.coordinator.move_to_next_target();
+        h.frame();
+        assert_eq!(h.state.b_entered, 1, "cycling landed the hover on b");
+
+        // A synthesized click lands on `b` directly — the same `Down`-then-`Up`
+        // a shell's `ActionRequest(Action::Click)` delivers — and still drops,
+        // because `b`'s click-to-drop gate stays open for a keyboard session.
+        h.mouse(PointerPhase::Up, 150.0, 50.0);
+        assert_eq!(h.state.b_dropped, Some(7), "the click delivered the drop");
+        assert_eq!(h.state.coordinator.phase(), DragPhase::Idle);
     }
 }
