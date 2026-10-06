@@ -11,9 +11,11 @@
 # To fix a failure: run
 #   python3 -I scripts/codemod/frust_any_codemod.py --write --t5 <paths>
 # then `cargo fmt`; for a shadow skip, rename the local binding/fn named
-# column/row/stack that shadows the builder, then rerun this script. Keep
-# any() only where the elements genuinely differ in type — such a list is not
-# homogeneous and the tool does not flag it.
+# column/row/stack that shadows the builder, then rerun this script. T5 judges
+# heads, not types: when a same-head list has elements of different types
+# (e.g. `component(A{..})` vs `component(B{..})`), keep any() and mark the
+# `vec![` line with `// erasure: keep <why>`; the alternatives are to bind the
+# vec to a local or to use the fluent builder.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
