@@ -204,6 +204,14 @@ pub use frust_core::{OutsideTap, OverlayBand, OverlayInput};
 /// that text, since a paste payload can be a password or a token.
 pub use frust_core::EditCommand;
 
+/// The file-drop vocabulary for handling file drops from the OS —
+/// [`InputEvent::FileDrop`] carries one of these phases (`Hover`, `Drop`,
+/// or `HoveredFileCancelled`). A widget handling drops uses [`EventCtx`] to
+/// determine whether the drop succeeded. Lifted flat for the same reason
+/// [`EditCommand`] is: an app's file-drop handler names these types in its
+/// public API without being a widget author.
+pub use frust_core::event::{FileDropEvent, FileDropPhase};
+
 /// The selection-toolbar seam: the request a text field publishes when it
 /// has a selection ([`SelectionToolbarRequest`]/[`SelectionToolbarActions`]),
 /// and the knobs that decide who draws it.
@@ -672,6 +680,13 @@ pub mod authoring {
     /// [`CursorIcon`] is: a design system's public API can name a verb without
     /// authoring a widget.
     pub use frust_core::EditCommand;
+
+    /// The file-drop vocabulary for handling file drops from the OS —
+    /// [`InputEvent::FileDrop`] carries one of these phases (`Hover`, `Drop`,
+    /// or `HoveredFileCancelled`). A widget handling drops uses [`EventCtx`] to
+    /// determine whether the drop succeeded. Also re-exported flat as
+    /// [`frust::FileDropEvent`] and [`frust::FileDropPhase`].
+    pub use frust_core::event::{FileDropEvent, FileDropPhase};
 
     /// The paint vocabulary [`PaintScene`]'s per-corner and dashed methods name
     /// — `fill_rounded_rect_radii`/`push_clip_rounded_radii` take a
@@ -3035,8 +3050,8 @@ mod selection_toolbar_bootstrap {
 mod drag_reexport {
     #[allow(unused_imports)]
     use crate::{
-        DragCoordinator, DragKind, DragPolicy, SourceFeedback, auto_scroll_zone, drag_target,
-        draggable, reorderable_list,
+        DragCoordinator, DragKind, DragPolicy, FileDropEvent, FileDropPhase, SourceFeedback,
+        authoring::Point, auto_scroll_zone, drag_target, draggable, reorderable_list,
     };
 
     // A build-time proof the types name-resolve through the facade, flat.
@@ -3059,7 +3074,12 @@ mod drag_reexport {
         let _: crate::drag::DragHighlight = crate::drag::DragHighlight::Hover;
         let _: crate::drag::AutoScroll = crate::drag::AutoScroll::default();
 
-        // File drop types are reachable through frust_core::event.
-        let _: frust_core::event::FileDropPhase = frust_core::event::FileDropPhase::Hover;
+        // File drop types are re-exported at the facade root.
+        let _: FileDropPhase = FileDropPhase::Hover;
+        let _: FileDropEvent = FileDropEvent {
+            phase: FileDropPhase::Hover,
+            position: Point::new(0.0, 0.0),
+            paths: vec![],
+        };
     }
 }
