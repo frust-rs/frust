@@ -306,7 +306,7 @@ impl Component for CameraPage {
         }
     }
 
-    fn build(&self, state: &mut CameraPageState) -> AnyView<CameraPageState> {
+    fn build(&self, state: &mut CameraPageState) -> impl View<CameraPageState> {
         let permission = state.permission.signal().get();
 
         // Open the session exactly once per grant (idempotent via
