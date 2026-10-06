@@ -86,7 +86,7 @@ impl Component for S6Text {
         }
     }
 
-    fn build(&self, state: &mut S6State) -> AnyView<S6State> {
+    fn build(&self, state: &mut S6State) -> impl View<S6State> {
         // Tracked read: a `WidthPulse` write wakes this rebuild each frame.
         let frac = state.frac.get();
 

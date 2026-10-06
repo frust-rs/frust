@@ -33,7 +33,7 @@ pub mod scenarios;
 
 use frust::{
     AnyView, Axis, Brightness, Component, EdgeInsets, FlexChild, FlexView, Get, Padding, Set,
-    SizedBox, Stack, any, button, flexible, inflexible, safe_area, set_app_theme,
+    SizedBox, Stack, View, any, button, flexible, inflexible, safe_area, set_app_theme,
 };
 
 use scenarios::{BenchState, SCENARIOS};
@@ -60,7 +60,7 @@ impl Component for BenchApp {
         state
     }
 
-    fn build(&self, state: &mut BenchState) -> AnyView<BenchState> {
+    fn build(&self, state: &mut BenchState) -> impl View<BenchState> {
         // Log the deferred env-var unknown-id diagnostic (if any), now that
         // logger installation has completed on all platforms.
         if let Some(unknown_id) = state.pending_unknown_env_id.take() {
