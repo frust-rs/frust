@@ -70,19 +70,41 @@
 //! pattern `crate::slider` uses), or [`HIGHLIGHT_FALLBACK`] unthemed; a
 //! [`DragHighlight::Reject`] paints nothing by default — a design system that
 //! wants a reject treatment supplies its own closure.
+//!
+//! # Click-to-drop and semantics
+//!
+//! A primary `Up` landing on this target while a session is live and this
+//! target [`DragTargetView::accepts`] the held payload sets it hovered
+//! ([`DragCoordinator::set_hovered`]) and drops
+//! ([`DragCoordinator::drop`]) on the spot, ahead of the usual forward to the
+//! child — the one way a target itself answers a press, where every other
+//! phase stays the transparent wrapper the [module docs](super) describe.
+//! This is what makes [`Widget::semantics`]'s `Action::Click` meaningful
+//! without a widget-side change to `frust-core`'s accessibility-action
+//! routing: a shell's `ActionRequest(node_id, Action::Click)` already
+//! synthesizes exactly a `Down` then an `Up` at this node's own bounds
+//! center (see [`mod@super::draggable`]'s *Semantics* module docs for why a
+//! richer per-target action is not wired to anything today), so an
+//! assistive-technology user who lifted a session elsewhere can activate a
+//! target directly to drop on it, with no pointer travel at all. The node's
+//! label states acceptance — `"accepts drop"` while a live session's payload
+//! type-matches and [`DragTargetView::accepts`] it, `"drop target"`
+//! otherwise — and `Click` is advertised only in the accepting case, so an
+//! adapter never offers an action that would be a no-op.
 
 use std::rc::Rc;
 
+use frust_core::accesskit::{Action, Role};
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
 };
 use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
 use super::coordinator::{DragCoordinator, DragState, DragTargetId};
-use crate::authoring::{ErasedArgCallback, ErasedCallback, TypedArgCallback};
+use crate::authoring::{ErasedArgCallback, ErasedCallback, TypedArgCallback, presses};
 
 /// Flattening tolerance for the highlight's rounded-rect stroke path (mirrors
 /// `crate::container`'s/`crate::button`'s identical precedent).
@@ -343,6 +365,13 @@ impl<State: 'static, T: 'static> DragTargetWidget<State, T> {
         window - self.window_origin.to_vec2()
     }
 
+    /// Whether a session is live and this target would accept it right now —
+    /// the gate [`Widget::event`]'s click-to-drop and [`Widget::semantics`]'s
+    /// label/action both read (see the [module docs](self#click-to-drop-and-semantics)).
+    fn accepts_click_drop(&self) -> bool {
+        matches!(self.coordinator.state(), DragState::Dragging(_)) && self.payload_accepted()
+    }
+
     /// Poll the coordinator for this target's id and fire whatever callbacks
     /// its notifications imply since the last poll — see the [module
     /// docs](self#driving-callbacks-from-notifications).
@@ -483,13 +512,45 @@ impl<State: 'static, T: 'static> Widget for DragTargetWidget<State, T> {
         if event.is_broadcast() {
             self.poll(ctx);
         }
+        if let InputEvent::Pointer(p) = event
+            && p.phase == PointerPhase::Up
+            && presses(p)
+            && self.accepts_click_drop()
+        {
+            self.coordinator.set_hovered(Some(self.id));
+            self.coordinator.drop();
+            // `drop` only moves the coordinator to `Dropping`; the usual
+            // `Housekeeping` poll is what claims the payload and fires
+            // `on_drop` — run it inline rather than waiting for the next
+            // broadcast, so the click resolves within the event that caused
+            // it.
+            self.poll(ctx);
+            ctx.request_redraw();
+            return EventResult::Handled;
+        }
         crate::authoring::route_event_single(&mut self.child, ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // Transparent wrapper: forward to the single child. The highlight is
-        // decorative chrome, not semantic content.
-        self.child.semantics_child(ctx);
+        // No accesskit role names a drop zone; `Role::Group` is the nearest
+        // region-equivalent. See the [module docs](self#click-to-drop-and-semantics)
+        // for why `Click` is advertised only while this target would accept
+        // the live session.
+        let accepting = self.accepts_click_drop();
+        ctx.push_container(
+            Role::Group,
+            |node| {
+                node.set_label(if accepting {
+                    "accepts drop"
+                } else {
+                    "drop target"
+                });
+                if accepting {
+                    node.add_action(Action::Click);
+                }
+            },
+            |ctx| self.child.semantics_child(ctx),
+        );
     }
 
     crate::authoring::visit_children!(child);
@@ -519,6 +580,19 @@ mod tests {
         let state_any: &mut dyn Any = state;
         let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 100.0));
         w.event(&mut ctx, &InputEvent::Housekeeping)
+    }
+
+    /// A primary `Up` at the target's own local origin — the click-to-drop
+    /// route a shell's `ActionRequest(Action::Click)` would synthesize.
+    fn click<S: 'static, T: 'static>(w: &mut DragTargetWidget<S, T>, state: &mut S) -> EventResult {
+        let state_any: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 100.0));
+        let event = InputEvent::Pointer(frust_core::PointerEvent {
+            phase: PointerPhase::Up,
+            position: Point::ZERO,
+            button: frust_core::PointerButton::Primary,
+        });
+        w.event(&mut ctx, &event)
     }
 
     fn laid_out<S: 'static, T: 'static>(w: &mut DragTargetWidget<S, T>, at: Point, size: Size) {
@@ -756,6 +830,111 @@ mod tests {
             coordinator.phase(),
             DragPhase::Idle,
             "phase returns to Idle after drop completes"
+        );
+    }
+
+    #[test]
+    fn a_click_drops_an_accepted_session_with_no_pointer_travel() {
+        let coordinator = DragCoordinator::new();
+        let dropped = Rc::new(RefCell::new(Vec::new()));
+        let d2 = Rc::clone(&dropped);
+        let view: DragTargetView<App, u32> =
+            drag_target(SizedBox::<App>(Some(10.0), Some(10.0)), coordinator.clone())
+                .on_drop(move |_s: &mut App, v: u32| d2.borrow_mut().push(v));
+        let mut w = build(&view);
+        laid_out(&mut w, Point::ZERO, Size::new(10.0, 10.0));
+        let mut state = App;
+
+        // Lifted elsewhere (a keyboard session, say); never moved near this
+        // target's bounds.
+        let source = coordinator.new_source_id();
+        coordinator.lift(source);
+        coordinator.begin(7u32);
+
+        let result = click(&mut w, &mut state);
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(*dropped.borrow(), vec![7], "the click delivered the drop");
+        assert_eq!(coordinator.phase(), DragPhase::Idle);
+    }
+
+    #[test]
+    fn a_click_with_no_live_session_falls_through_to_the_child() {
+        let coordinator = DragCoordinator::new();
+        let view: DragTargetView<App, u32> =
+            drag_target(SizedBox::<App>(Some(10.0), Some(10.0)), coordinator.clone());
+        let mut w = build(&view);
+        laid_out(&mut w, Point::ZERO, Size::new(10.0, 10.0));
+        let mut state = App;
+        assert_eq!(click(&mut w, &mut state), EventResult::Ignored);
+    }
+
+    #[test]
+    fn a_click_with_a_rejected_payload_does_not_drop() {
+        let coordinator = DragCoordinator::new();
+        let view: DragTargetView<App, u32> =
+            drag_target(SizedBox::<App>(Some(10.0), Some(10.0)), coordinator.clone())
+                .accepts(|v: &u32| *v < 10);
+        let mut w = build(&view);
+        laid_out(&mut w, Point::ZERO, Size::new(10.0, 10.0));
+        let mut state = App;
+
+        let source = coordinator.new_source_id();
+        coordinator.arm(source, Point::ZERO);
+        coordinator.begin(99u32);
+
+        click(&mut w, &mut state);
+        assert_eq!(
+            coordinator.phase(),
+            DragPhase::Dragging,
+            "a rejected click leaves the session exactly as it was"
+        );
+    }
+
+    #[test]
+    fn semantics_label_and_action_track_acceptance() {
+        use frust_core::accesskit::{Action, Role};
+
+        let coordinator = DragCoordinator::new();
+        let logic_coordinator = coordinator.clone();
+        let mut logic = move |_s: &mut App| {
+            drag_target::<u32, App, _>(
+                SizedBox::<App>(Some(10.0), Some(10.0)),
+                logic_coordinator.clone(),
+            )
+        };
+        let mut root: frust_core::RenderRoot<App, DragTargetView<App, u32>> =
+            frust_core::RenderRoot::new();
+        let mut state = App;
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Group)
+            .expect("a Group node was pushed");
+        assert_eq!(node.label(), Some("drop target"));
+        assert!(
+            !node.supports_action(Action::Click),
+            "no session: no action"
+        );
+
+        let source = coordinator.new_source_id();
+        coordinator.arm(source, Point::ZERO);
+        coordinator.begin(7u32);
+        root.rebuild(&mut logic, &mut state);
+        root.layout(Size::new(100.0, 100.0));
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Group)
+            .expect("a Group node was pushed");
+        assert_eq!(node.label(), Some("accepts drop"));
+        assert!(
+            node.supports_action(Action::Click),
+            "accepting: Click is offered"
         );
     }
 }

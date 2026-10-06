@@ -56,12 +56,15 @@
 //! superseded by an OS file drag) is noticed on the next event or rebuild and
 //! torn down the same way, the rest of the gesture swallowed.
 //!
-//! # Escape
+//! # Keyboard
 //!
-//! `Escape` ([`NamedKey::Escape`]) while this source drags cancels the
-//! session ([`DragCoordinator::cancel`]) and runs the same teardown; the
-//! pointer is still down, so the rest of the gesture — its `Move`s and its
-//! `Up` — is swallowed, never reaching the child as a stray release.
+//! `Escape` ([`NamedKey::Escape`]) while this source drags — by pointer or by
+//! keyboard — cancels the session ([`DragCoordinator::cancel`]) and runs the
+//! same teardown; for a pointer drag the pointer is still down, so the rest of
+//! the gesture — its `Move`s and its `Up` — is swallowed, never reaching the
+//! child as a stray release. For a keyboard drag (below) there is no pending
+//! gesture to swallow, so the widget lands back on its idle state at once,
+//! ready for another lift.
 //!
 //! Key events are focus-routed, never routed to a pointer captor, so the source
 //! holds the keyboard focus for the length of each press: the arming `Down`
@@ -72,17 +75,45 @@
 //! a `Move` or a housekeeping broadcast, too late to take it then. Whatever
 //! held focus elsewhere before the press is not displaced by this: a `Down`
 //! that claims nothing blurs the tree anyway. The claim is released
-//! ([`EventCtx::release_focus`]) when the press ends — by drop, cancel, Escape
-//! or a plain tap — restoring the unfocused state the press would otherwise
-//! have left. Escape ends the focus session outright; an `Up`/`Cancel`
-//! release clears the recorded focus path at once, but the root's own focus
-//! flag is reconciled only by its next `Down` (the root adjusts its focus
-//! bookkeeping on `Down` and keyboard passes, not on a release).
+//! ([`EventCtx::release_focus`]) when a drag ends — by drop, cancel or Escape —
+//! restoring the unfocused state the press would otherwise have left; **a
+//! plain tap that never became a drag instead keeps the claim**, the one
+//! deliberate exception, so a mouse/touch user can click an item and then
+//! reach for the keyboard to lift it — the same "click focuses, Space/Enter
+//! activates" contract an HTML control honours. An `Up`/`Cancel` release
+//! clears the recorded focus path at once, but the root's own focus flag is
+//! reconciled only by its next `Down` (the root adjusts its focus bookkeeping
+//! on `Down` and keyboard passes, not on a release).
 //!
-//! While dragging, the enclosing scroll surface's live takeover veto (the one
-//! a pinch raises, see `crate::scroll`'s *Multi-contact veto*) is held raised,
-//! so a drag inside a `ScrollView`/`ListView` is not stolen once the finger
-//! travels past the scroll's own slop.
+//! While a pointer drags, the enclosing scroll surface's live takeover veto
+//! (the one a pinch raises, see `crate::scroll`'s *Multi-contact veto*) is
+//! held raised, so a drag inside a `ScrollView`/`ListView` is not stolen once
+//! the finger travels past the scroll's own slop. A keyboard drag has no
+//! finger to steal from, so this does not apply to it.
+//!
+//! ## Lift, cycle, drop
+//!
+//! While this source holds its own focus (not a descendant's —
+//! [`ChildPod::holds_live_focus`] on the child reads `false`) and no gesture
+//! is in flight, `Enter` or Space (`Key::Character(" ")`, there being no
+//! [`NamedKey`] for it) **lifts**: [`DragCoordinator::lift`] then
+//! [`DragCoordinator::begin`] with the same payload a pointer press would
+//! hand over, the ghost anchored at this source's own window-space bounds
+//! (there is no pointer to anchor it to yet). Once lifted, `ArrowRight`/
+//! `ArrowDown` and `ArrowLeft`/`ArrowUp` cycle the hovered target forward and
+//! backward through [`DragCoordinator::move_to_next_target`]/
+//! [`DragCoordinator::move_to_previous_target`], and the ghost's
+//! [`OverlayAnchor::Window`] point follows: every `Enter` the cycle raises
+//! repositions it to the newly hovered target's own bounds
+//! ([`DragCoordinator::target_bounds`]) rather than a pointer position that
+//! does not exist. `Enter`/Space while lifted **drops**
+//! ([`DragCoordinator::drop`]) on whatever is currently hovered, exactly like
+//! a pointer's `Up` — released with nothing hovered, a cancel, like the
+//! pointer case. `Escape` cancels from either phase (above).
+//!
+//! A key this source does not otherwise react to — including every key while
+//! its own focus claim is the child's instead — falls through to the child
+//! untouched, the same pass-through every other phase gives it.
 //!
 //! # Ghost and source feedback
 //!
@@ -101,6 +132,32 @@
 //!
 //! [`SourceFeedback`] decides what the child looks like in place meanwhile.
 //!
+//! # Semantics
+//!
+//! [`Widget::semantics`] pushes a `Role::Button`-equivalent node — accesskit
+//! names no drag-specific role — wrapping the child as its one accesskit
+//! child, labelled `"Drag"`/`"Drop"` for the two states a session can be in.
+//! The richer surface the lift/cycle/drop verbs above would ideally advertise
+//! — `accesskit::Action::CustomAction` for `lift`/`drop`/`cancel` individually
+//! — is not wired to anything: `frust-core`'s `perform_accessibility_action`
+//! (the one seam a shell's `ActionRequest` reaches a widget through) matches
+//! only `Action::Click`/`Action::Focus`, dropping every other action and the
+//! `ActionRequest::data` a custom action's id would ride in (the same gap
+//! `TextInput`'s own advertised-but-uninvocable custom actions document — see
+//! `docs/CODE_STANDARDS.md`'s *Text Selection and the Clipboard*). So this
+//! widget advertises **`Action::Click` as a lift/drop toggle** instead: the
+//! synthesized `Down`+`Up` pair `perform_accessibility_action` already gives
+//! `Action::Click`, at this node's own bounds center, reaches [`event`]
+//! exactly like a real press — on an idle source that is a press-and-release
+//! too short to cross the drag threshold, i.e. a tap, which (per *Keyboard*,
+//! above) leaves the source focused; a following activation reads as the
+//! source now holding its own focus with nothing dragging, i.e. a lift chord.
+//! A drop needs the hovered target to already be the one wanted — reachable
+//! today only by cycling with a real keyboard, since there is no
+//! accesskit-level "next target" action either — so this toggle alone does
+//! not yet give an assistive-technology user the whole lift-cycle-drop walk
+//! single-handed; it is one documented step, not the final word.
+//!
 //! # Limits
 //!
 //! * Window-space positions are the child's paint origin plus an owner-local
@@ -115,21 +172,23 @@
 //!   [`ghost`](DraggableView::ghost) of its own.
 //! * Nested draggables are unsupported: both arm on the same `Down` and the
 //!   outer arm cancels the inner one.
-//! * Every press takes keyboard focus for its length (see *Escape*), so a
-//!   press on a source that never becomes a drag still moves focus there until
-//!   the release.
+//! * Every press takes keyboard focus for its length (see *Keyboard*), and a
+//!   plain tap that never became a drag keeps it afterward rather than
+//!   releasing it.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use frust_core::accesskit::{Action, Role};
 use frust_core::event::PointerSource;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx, EventResult,
-    InputEvent, Key, LayoutCtx, NamedKey, OverlayBand, OverlayInput, PaintCtx, PaintScene,
-    PointerButton, PointerEvent, PointerPhase, SemanticsCtx, TOUCH_SLOP, View, Widget, any,
+    InputEvent, Key, KeyEvent, LayoutCtx, NamedKey, OverlayBand, OverlayInput, PaintCtx,
+    PaintScene, PointerButton, PointerEvent, PointerPhase, SemanticsCtx, TOUCH_SLOP, View, Widget,
+    any,
 };
 use frust_theme::Theme;
-use kurbo::{Point, Size};
+use kurbo::{Point, Size, Vec2};
 use peniko::Color;
 
 use super::coordinator::{DragCoordinator, DragPhase, DragSourceId, DragState};
@@ -640,17 +699,22 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
     }
 
     /// The local teardown every end of a session runs, whichever way it ended
-    /// (an `Up`'s drop, a `Cancel`, an `Escape`, or a session ended
-    /// elsewhere): the gesture resets, the ghost stops registering at once and
-    /// is unmounted by the next rebuild, the scroll veto drops, and the press's
-    /// focus claim is released. The coordinator call that ended the session,
-    /// if any, is the caller's.
-    fn on_session_end(&mut self, ctx: &mut EventCtx<'_>) {
+    /// (an `Up`'s drop, a `Cancel`, an `Escape`, a keyboard drop/cancel, or a
+    /// session ended elsewhere): the gesture resets, the ghost stops
+    /// registering at once and is unmounted by the next rebuild, and the
+    /// scroll veto drops. `release_focus` is the caller's call on whether the
+    /// press's focus claim goes with it — every ending but a plain tap's
+    /// releases it (see the module docs' *Keyboard* section for the one
+    /// exception). The coordinator call that ended the session, if any, is
+    /// the caller's.
+    fn on_session_end(&mut self, ctx: &mut EventCtx<'_>, release_focus: bool) {
         self.gesture = Gesture::Idle;
         self.source = None;
         self.hold.cancel();
         self.release_scroll_veto();
-        self.release_focus_claim(ctx);
+        if release_focus {
+            self.release_focus_claim(ctx);
+        }
         if self.ghost.live || self.ghost.mounted.is_some() {
             self.ghost.live = false;
             frust_core::mark_pending_result_flush();
@@ -672,7 +736,7 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
                     if self.owns_session() {
                         self.coordinator.cancel();
                     }
-                    self.on_session_end(ctx);
+                    self.on_session_end(ctx, true);
                 }
                 self.gesture = Gesture::Idle;
                 if !presses(p) {
@@ -732,7 +796,10 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
                     child.event_child(ctx, &pointer_event(phase, p.position));
                     child.set_active(false);
                 }
-                self.on_session_end(ctx);
+                // A genuine tap (not a hold that almost began) keeps the
+                // focus claim, so a following keyboard chord can lift it
+                // (the module docs' *Keyboard* section).
+                self.on_session_end(ctx, elapsed);
                 EventResult::Handled
             }
             (PointerPhase::Cancel, Gesture::Pressed { .. }) => {
@@ -744,7 +811,7 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
                     child.event_child(ctx, event);
                     child.set_active(false);
                 }
-                self.on_session_end(ctx);
+                self.on_session_end(ctx, true);
                 EventResult::Handled
             }
             (PointerPhase::Up, Gesture::Dragging) => {
@@ -752,18 +819,18 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
                     self.coordinator.update_pointer(self.to_window(p.position));
                     self.coordinator.drop();
                 }
-                self.on_session_end(ctx);
+                self.on_session_end(ctx, true);
                 EventResult::Handled
             }
             (PointerPhase::Cancel, Gesture::Dragging) => {
                 if self.owns_session() {
                     self.coordinator.cancel();
                 }
-                self.on_session_end(ctx);
+                self.on_session_end(ctx, true);
                 EventResult::Handled
             }
             (PointerPhase::Up | PointerPhase::Cancel, Gesture::Ended) => {
-                self.on_session_end(ctx);
+                self.on_session_end(ctx, true);
                 EventResult::Handled
             }
             (PointerPhase::Move, Gesture::Ended) => EventResult::Handled,
@@ -777,17 +844,146 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
         }
     }
 
-    /// `Escape` while this source drags: cancel the session and tear it down,
-    /// swallowing the rest of the still-pressed gesture.
+    /// `Escape` while a *pointer* drags this source: cancel the session and
+    /// tear it down, swallowing the rest of the still-pressed gesture.
     fn escape(&mut self, ctx: &mut EventCtx<'_>) -> EventResult {
         if self.owns_session() {
             self.coordinator.cancel();
         }
-        self.on_session_end(ctx);
+        self.on_session_end(ctx, true);
         // The pointer is still down: its `Move`s and `Up` are this gesture's
         // and must not reach the child as a fresh one.
         self.gesture = Gesture::Ended;
         EventResult::Handled
+    }
+
+    /// Whether this source currently drags a session it began by keyboard
+    /// ([`keyboard_lift`](Self::keyboard_lift)) — the gate the lift/cycle/
+    /// drop/cancel chords below use to tell a keyboard drag from a pointer
+    /// one in flight.
+    fn is_keyboard_dragging(&self) -> bool {
+        matches!(self.gesture, Gesture::Dragging)
+            && self.owns_session()
+            && matches!(self.coordinator.state(), DragState::Dragging(session) if session.keyboard)
+    }
+
+    /// `Escape` while a *keyboard* drag is live: cancel and tear down. Unlike
+    /// [`escape`](Self::escape) there is no still-pressed pointer gesture to
+    /// swallow, so the widget lands directly back on `Idle`, ready for
+    /// another lift.
+    fn keyboard_cancel(&mut self, ctx: &mut EventCtx<'_>) -> EventResult {
+        if self.owns_session() {
+            self.coordinator.cancel();
+        }
+        self.on_session_end(ctx, true);
+        EventResult::Handled
+    }
+
+    /// `Enter`/Space while a keyboard drag is live: drop on whatever
+    /// [`move_to_next_target`](DragCoordinator::move_to_next_target)/
+    /// [`move_to_previous_target`](DragCoordinator::move_to_previous_target)
+    /// left hovered — a cancel if nothing is, exactly like a pointer's `Up`.
+    fn keyboard_drop(&mut self, ctx: &mut EventCtx<'_>) -> EventResult {
+        if self.owns_session() {
+            self.coordinator.drop();
+        }
+        self.on_session_end(ctx, true);
+        EventResult::Handled
+    }
+
+    /// `Enter`/Space while this source holds its own focus and nothing is in
+    /// flight: lift it (see the module docs' *Lift, cycle, drop*). Returns
+    /// `Ignored` without effect when a session is already in flight
+    /// elsewhere (nothing here claims it).
+    fn keyboard_lift(&mut self, ctx: &mut EventCtx<'_>) -> EventResult {
+        let source = self.coordinator.new_source_id();
+        if !self.coordinator.lift(source) {
+            return EventResult::Ignored;
+        }
+        self.source = Some(source);
+        let (payload, custom) = {
+            let state: &State = ctx.state_mut::<State>();
+            (
+                (self.payload)(state),
+                self.ghost_builder.as_ref().map(|build| build(state)),
+            )
+        };
+        if !self.coordinator.begin(payload) {
+            self.source = None;
+            return EventResult::Ignored;
+        }
+        let content = custom.unwrap_or_else(|| {
+            any(SnapshotView {
+                source: Rc::clone(&self.child),
+            })
+        });
+        self.ghost.pending = Some(any(GhostFrame {
+            content,
+            opacity: self.ghost_opacity,
+        }));
+        self.ghost.live = true;
+        // No pointer yet: the ghost starts over this source's own bounds.
+        self.slot.set_anchor(OverlayAnchor::Window {
+            point: self.window_origin,
+            offset: Vec2::ZERO,
+        });
+        self.gesture = Gesture::Dragging;
+        ctx.request_focus();
+        self.focus_claimed = true;
+        ctx.request_redraw();
+        EventResult::Handled
+    }
+
+    /// Reposition the ghost over whatever is now hovered, after a keyboard
+    /// cycle step — the keyboard counterpart of [`drag_move`](Self::drag_move)
+    /// moving it to the pointer. A no-op with nothing hovered (every target
+    /// cycled past, or none registered).
+    fn follow_hovered_target(&mut self, ctx: &mut EventCtx<'_>) {
+        let DragState::Dragging(session) = self.coordinator.state() else {
+            return;
+        };
+        let Some(target) = session.hovered else {
+            return;
+        };
+        let Some(bounds) = self.coordinator.target_bounds(target) else {
+            return;
+        };
+        self.slot.set_window_anchor(ctx, bounds.origin());
+    }
+
+    /// The lift/cycle/drop chord this source answers while it — not a
+    /// descendant — holds the live focus (see the module docs' *Lift, cycle,
+    /// drop*). `None` falls through to the child: not our chord, a session
+    /// (pointer or keyboard) owned elsewhere, or the child's own focus claim
+    /// takes keys first.
+    fn keyboard_chord(&mut self, ctx: &mut EventCtx<'_>, key: &KeyEvent) -> Option<EventResult> {
+        if !ctx.has_focus() || self.child.borrow().holds_live_focus() {
+            return None;
+        }
+        let activates = key.key == Key::Named(NamedKey::Enter)
+            || matches!(&key.key, Key::Character(s) if s == " ");
+        if matches!(self.gesture, Gesture::Idle) {
+            return activates.then(|| self.keyboard_lift(ctx));
+        }
+        if !self.is_keyboard_dragging() {
+            return None;
+        }
+        match &key.key {
+            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::ArrowDown) => {
+                self.coordinator.move_to_next_target();
+                self.follow_hovered_target(ctx);
+                ctx.request_redraw();
+                Some(EventResult::Handled)
+            }
+            Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowUp) => {
+                self.coordinator.move_to_previous_target();
+                self.follow_hovered_target(ctx);
+                ctx.request_redraw();
+                Some(EventResult::Handled)
+            }
+            _ if activates => Some(self.keyboard_drop(ctx)),
+            _ => None,
+        }
     }
 
     /// A `Move` while this source drags: report it and move the ghost.
@@ -894,17 +1090,36 @@ impl<State: 'static, T: 'static> Widget for DraggableWidget<State, T> {
         if let InputEvent::Pointer(p) = event {
             return self.pointer(ctx, event, p);
         }
-        if let InputEvent::Key(key) = event
-            && key.key == Key::Named(NamedKey::Escape)
-            && matches!(self.gesture, Gesture::Dragging)
-        {
-            return self.escape(ctx);
+        if let InputEvent::Key(key) = event {
+            if key.key == Key::Named(NamedKey::Escape) && matches!(self.gesture, Gesture::Dragging)
+            {
+                return if self.is_keyboard_dragging() {
+                    self.keyboard_cancel(ctx)
+                } else {
+                    self.escape(ctx)
+                };
+            }
+            if let Some(result) = self.keyboard_chord(ctx, key) {
+                return result;
+            }
         }
         crate::authoring::route_event_single(&mut self.child.borrow_mut(), ctx, event)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        self.child.borrow().semantics_child(ctx);
+        // No accesskit role names a drag source; `Role::Button` is the
+        // closest activatable analog (see the module docs' *Semantics*
+        // section for why `Click` — not a custom `lift`/`drop`/`cancel`
+        // action — is what this node advertises).
+        let dragging = self.is_dragging();
+        ctx.push_container(
+            Role::Button,
+            |node| {
+                node.add_action(Action::Click);
+                node.set_label(if dragging { "Drop" } else { "Drag" });
+            },
+            |ctx| self.child.borrow().semantics_child(ctx),
+        );
     }
 
     fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
@@ -1035,7 +1250,7 @@ mod tests {
     use crate::{EdgeInsets, Padding, Stack, StackView};
     use frust_core::event::PointerId;
     use frust_core::{FrameTime, RenderRoot};
-    use kurbo::{Rect, Vec2};
+    use kurbo::Rect;
 
     use crate::drag::{DragStateChange, DragTargetId};
 
@@ -1813,5 +2028,178 @@ mod tests {
         );
         assert_eq!(h.phase(), DragPhase::Idle);
         assert_eq!(h.log(), vec!["Down@20,20"], "it still reaches the child");
+    }
+
+    #[test]
+    fn a_plain_tap_leaves_the_source_focused_for_a_later_keyboard_lift() {
+        let mut h = Harness::new(Cfg::default());
+        assert!(!h.root.is_focus_active(), "nothing focused yet");
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        assert_eq!(h.state.taps, 1, "the tap still reaches the child");
+        assert!(
+            h.root.is_focus_active(),
+            "a plain tap keeps the focus claim, unlike a drag's end"
+        );
+    }
+
+    #[test]
+    fn keyboard_lift_cycle_and_drop_deliver_the_payload_to_the_hovered_target() {
+        let mut h = Harness::new(Cfg::default());
+        let first = h.target(Rect::new(0.0, 0.0, 100.0, 100.0));
+        let second = h.target(Rect::new(100.0, 0.0, 200.0, 100.0));
+
+        // Focus the source with a plain tap — no drag, no pointer capture.
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        assert!(h.root.is_focus_active());
+
+        h.key(Key::Named(NamedKey::Enter));
+        assert_eq!(h.phase(), DragPhase::Dragging, "Enter lifts");
+        assert_eq!(
+            h.state.coordinator.with_payload(|item: &u32| *item),
+            Some(7),
+            "the payload builder ran against the state"
+        );
+        assert_eq!(
+            h.state
+                .coordinator
+                .state()
+                .session()
+                .and_then(|s| s.hovered),
+            None,
+            "nothing hovered until a cycle step"
+        );
+
+        h.key(Key::Named(NamedKey::ArrowRight));
+        assert_eq!(
+            h.state
+                .coordinator
+                .state()
+                .session()
+                .and_then(|s| s.hovered),
+            Some(first),
+            "the first registered target is hovered after one step"
+        );
+
+        h.key(Key::Named(NamedKey::ArrowRight));
+        assert_eq!(
+            h.state
+                .coordinator
+                .state()
+                .session()
+                .and_then(|s| s.hovered),
+            Some(second)
+        );
+
+        h.key(Key::Named(NamedKey::Enter));
+        assert_eq!(
+            h.phase(),
+            DragPhase::Dropping,
+            "Enter drops on the hovered target"
+        );
+        match h.state.coordinator.state() {
+            DragState::Dropping { target, .. } => assert_eq!(target, second),
+            other => panic!("expected Dropping, got {other:?}"),
+        }
+        assert_eq!(
+            h.state.coordinator.take_payload::<u32>().map(|p| *p),
+            Some(7),
+            "the payload the lift carried reaches the dropped-on target"
+        );
+        h.state.coordinator.complete_drop();
+        assert_eq!(h.phase(), DragPhase::Idle);
+        assert!(
+            !h.root.is_focus_active(),
+            "a completed drop releases focus, like a pointer drop"
+        );
+    }
+
+    #[test]
+    fn keyboard_drop_with_nothing_hovered_cancels() {
+        let mut h = Harness::new(Cfg::default());
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        h.key(Key::Named(NamedKey::Enter));
+        assert_eq!(h.phase(), DragPhase::Dragging);
+        h.key(Key::Named(NamedKey::Enter));
+        assert_eq!(h.phase(), DragPhase::Idle, "dropping on nothing cancels");
+    }
+
+    #[test]
+    fn escape_cancels_a_keyboard_lift_and_a_later_lift_still_works() {
+        let mut h = Harness::new(Cfg::default());
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        h.key(Key::Named(NamedKey::Enter));
+        assert_eq!(h.phase(), DragPhase::Dragging);
+        h.escape();
+        assert_eq!(h.phase(), DragPhase::Idle);
+        assert!(
+            !h.root.is_focus_active(),
+            "Escape ends the focus session outright, even for a keyboard lift"
+        );
+
+        // Not stuck in a swallowing state: another tap, then another lift.
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        h.key(Key::Named(NamedKey::Enter));
+        assert_eq!(h.phase(), DragPhase::Dragging, "a later lift still works");
+    }
+
+    #[test]
+    fn space_also_lifts_and_drops() {
+        let mut h = Harness::new(Cfg::default());
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        h.key(Key::Character(" ".into()));
+        assert_eq!(h.phase(), DragPhase::Dragging, "Space lifts");
+        h.key(Key::Character(" ".into()));
+        assert_eq!(
+            h.phase(),
+            DragPhase::Idle,
+            "Space drops (on nothing: a cancel)"
+        );
+    }
+
+    #[test]
+    fn a_focused_child_keeps_its_own_keys_the_lift_chord_included() {
+        let mut h = Harness::new(Cfg {
+            focusable_child: true,
+            ..Cfg::default()
+        });
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        assert!(h.root.is_focus_active(), "the child holds its own focus");
+        h.key(Key::Named(NamedKey::Enter));
+        assert_eq!(
+            h.phase(),
+            DragPhase::Idle,
+            "the child's own focus claim takes the key first — no lift"
+        );
+        assert_eq!(h.log().last().map(String::as_str), Some("Key Named(Enter)"));
+    }
+
+    #[test]
+    fn semantics_reports_a_button_role_with_click_and_toggles_its_label() {
+        let mut h = Harness::new(Cfg::default());
+        let update = h.root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Button)
+            .expect("a Role::Button node was pushed");
+        assert_eq!(node.label(), Some("Drag"));
+        assert!(node.supports_action(Action::Click));
+
+        h.mouse_drag();
+        h.frame();
+        let update = h.root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Button)
+            .expect("a Role::Button node was pushed");
+        assert_eq!(node.label(), Some("Drop"), "dragging flips the label");
     }
 }
