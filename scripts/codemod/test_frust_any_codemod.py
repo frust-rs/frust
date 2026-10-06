@@ -415,7 +415,7 @@ class ImportTest(unittest.TestCase):
         self.assertEqual(run(src), "use frust::*;\nfn f() -> V { column().child(a) }\n")
 
 
-class DriverTest(unittest.TestCase):
+class DriverFixture:
     FIXTURE = textwrap.dedent("""\
         use frust::{Column, any, text};
 
@@ -447,6 +447,8 @@ class DriverTest(unittest.TestCase):
             code = cm.main(list(argv))
         return code, out.getvalue()
 
+
+class DriverTest(DriverFixture, unittest.TestCase):
     def test_check_exit_codes_and_idempotence(self):
         code, out = self.main("--check", self.dir.name)
         self.assertEqual(code, 1)
@@ -518,6 +520,150 @@ class DriverTest(unittest.TestCase):
         once = cm.rewrite(src, APIS).text
         self.assertEqual(cm.rewrite(once, APIS).text, once)
         self.assertNotIn("any(", once)
+
+
+class HygieneTest(DriverFixture, unittest.TestCase):
+    """Driver hygiene: atomic write, symlinks, --exclude, --strict (reuses DriverTest's fixture)."""
+
+    SHADOWED = textwrap.dedent("""\
+        use frust::{Column, text};
+
+        fn f() -> V {
+            let column = 1;
+            Column(vec![text("a")])
+        }
+        """)
+
+    def test_write_is_complete_and_keeps_mode(self):
+        os.chmod(self.path, 0o640)
+        code, _ = self.main("--write", self.dir.name)
+        self.assertEqual(code, 0)
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o640)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), cm.rewrite(self.FIXTURE, APIS).text)
+        leftovers = [f for f in os.listdir(os.path.dirname(self.path)) if f.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+    def test_directory_walk_skips_symlinks(self):
+        os.symlink(self.path, os.path.join(self.dir.name, "link.rs"))
+        code, out = self.main("--check", self.dir.name)
+        self.assertNotIn("link.rs", out)
+        self.assertEqual(out.count("T2"), 1)
+        code, _ = self.main("--write", self.dir.name)
+        self.assertTrue(os.path.islink(os.path.join(self.dir.name, "link.rs")))
+
+    def test_explicit_symlink_refused_and_never_written(self):
+        link = os.path.join(self.dir.name, "link.rs")
+        os.symlink(self.path, link)
+        code, _ = self.main("--write", link)
+        self.assertEqual(code, 2)
+        self.assertTrue(os.path.islink(link))
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), self.FIXTURE)
+
+    def test_exclude_matches_whole_components(self):
+        sibling = os.path.join(self.dir.name, "src2")
+        os.makedirs(sibling)
+        with open(os.path.join(sibling, "lib.rs"), "w", encoding="utf-8") as fh:
+            fh.write(self.FIXTURE)
+        code, out = self.main("--check", self.dir.name, "--exclude", os.path.join(self.dir.name, "src"))
+        self.assertEqual(code, 1)
+        self.assertIn("src2", out)
+        self.assertNotIn(os.path.join("src", "lib.rs"), out)
+
+    def write_shadowed(self):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(self.SHADOWED)
+
+    def test_shadow_count_always_reported_and_strict_exits_2(self):
+        self.write_shadowed()
+        code, out = self.main("--check", self.dir.name)
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 shadow skip(s)", out)
+        self.assertTrue(out.rstrip().endswith("no candidates"))
+        code, out = self.main("--check", "--strict", self.dir.name)
+        self.assertEqual(code, 2, out)
+
+    def test_strict_clean_tree_exits_0_and_candidates_win(self):
+        code, out = self.main("--check", "--strict", self.dir.name)
+        self.assertEqual(code, 1, out)          # candidate beats strict
+        self.main("--write", self.dir.name)
+        code, out = self.main("--check", "--strict", self.dir.name)
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 shadow skip(s)", out)
+        self.write_shadowed()
+        with open(os.path.join(self.dir.name, "src", "b.rs"), "w", encoding="utf-8") as fh:
+            fh.write(self.FIXTURE)
+        code, _ = self.main("--check", "--strict", self.dir.name)
+        self.assertEqual(code, 1)
+
+
+class CommentGapTest(unittest.TestCase):
+    def assert_skipped(self, src):
+        text = GLOB + textwrap.dedent(src)
+        res = cm.rewrite(text, APIS)
+        self.assertEqual(res.text, text)
+        self.assertTrue(any("comment inside the call head" in n for _, n in res.notes), res.notes)
+
+    def test_t2_comment_in_head_skipped(self):
+        self.assert_skipped("fn f() -> V { Column /*c*/ (vec![text(1)]) }\n")
+
+    def test_t1_comment_in_erasure_gap_skipped(self):
+        self.assert_skipped("fn f() -> V { column().child(any /*c*/ (x)) }\n")
+
+    def test_comment_inside_argument_survives(self):
+        out = run_g("fn f() -> V { column().child(any(x /*c*/)) }\n")
+        self.assertIn("/*c*/", out)
+        self.assertNotIn("any(", out)
+
+    def test_t4_comment_in_gap_skipped(self):
+        self.assert_skipped("fn f() -> V { Route::new(|| any /*c*/ (x)) }\n")
+
+
+class CoverageGapTest(unittest.TestCase):
+    def test_closure_param_annotated_anyview_is_known_blind_spot(self):
+        # Documented blind spot: the tool rewrites; the compiler rejects the result.
+        out = run_g("fn f() { let g = |v: AnyView<S>| column().child(any(v)); }\n")
+        self.assertIn(".child(v)", out)
+
+    def test_multiline_flexview_new(self):
+        out = run_g("""\
+            fn f() -> V {
+                FlexView::new(
+                    Axis::Vertical,
+                    vec![
+                        inflexible(any(a)),
+                        flexible(1, any(b)),
+                    ],
+                )
+            }
+            """)
+        self.assertIn("column()", out)
+        self.assertIn(".child(a)", out)
+        self.assertIn(".flex(1, b)", out)
+        self.assertNotIn("FlexView", out)
+
+    def test_entry_before_any_section_rejected(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write("foo\n[slot]\nbar\n")
+        try:
+            with self.assertRaises(ValueError):
+                cm.load_apis(fh.name)
+        finally:
+            os.unlink(fh.name)
+
+    def test_list_section_is_informational(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write("[list]\nlist_api\n[slot]\nslot_api\n")
+        try:
+            apis = cm.load_apis(fh.name)
+        finally:
+            os.unlink(fh.name)
+        self.assertEqual(apis.lists, {"list_api"})
+        self.assertEqual(apis.slot, {"slot_api"})
+        self.assertNotIn("list_api", apis.slot | apis.builder)
+        res = cm.rewrite("fn f() { list_api(any(x)); }\n", apis)
+        self.assertEqual(res.candidates, [])
 
 
 if __name__ == "__main__":
