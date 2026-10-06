@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use clean_signals::async_state::AsyncState;
 use frust::{
-    Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, FlexView, GestureDetector, Get,
-    SizedBox, any, flexible, hero, icon, icons, inflexible, scroll_view, text, use_context,
+    Align, Alignment, AnyView, Column, CrossAxisAlignment, GestureDetector, Get, SizedBox, any,
+    column, hero, icon, icons, scroll_view, text, use_context,
 };
 use frust_material::{app_bar, filled_card, filter_chip, list_item};
 
@@ -75,11 +75,10 @@ pub fn activity_screen() -> AnyView<HuddleState> {
         });
     }))]);
 
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![inflexible(any(bar)), flexible(1, any(scroll_view(body)))],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch))
+    any(column()
+        .child(bar)
+        .flex(1, scroll_view(body))
+        .cross_axis(CrossAxisAlignment::Stretch))
 }
 
 /// Loading skeletons: three blank placeholder rows at the feed's normal row
@@ -96,10 +95,9 @@ fn skeleton_body() -> AnyView<HuddleState> {
 /// The "nothing to see" empty state, shown when the feed resolved with zero
 /// items.
 fn empty_body() -> AnyView<HuddleState> {
-    any(Column(vec![
-        any(icon(icons::CHECK).size(48.0)),
-        any(text("You're all caught up").size(16.0)),
-    ]))
+    any(column()
+        .child(icon(icons::CHECK).size(48.0))
+        .child(text("You're all caught up").size(16.0)))
 }
 
 /// The loaded feed: one row per [`ActivityRow`].
@@ -155,7 +153,7 @@ fn row_view(
         format!("avatar-{}", item.author_id),
         SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(filled_card(Align(
             Alignment::CENTER,
-            any(text(initials.to_string()).size(14.0)),
+            text(initials.to_string()).size(14.0),
         ))),
     );
 

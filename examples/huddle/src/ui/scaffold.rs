@@ -7,31 +7,23 @@
 //! `profile::presentation::pages::profile`), not owned by a single screen —
 //! mirrors [`crate::ui::fill_box`]'s promotion precedent.
 
-use frust::{
-    Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, FlexView, any, flexible,
-    inflexible, text,
-};
+use frust::{Align, Alignment, AnyView, CrossAxisAlignment, View, any, column, text};
 use frust_material::app_bar;
 
 use crate::HuddleState;
 
 /// A titled screen scaffold: the screen's own [`app_bar`](frust_material::app_bar) at
 /// the top and a centered `body` filling the rest.
-pub fn scaffold(title: &str, body: AnyView<HuddleState>) -> AnyView<HuddleState> {
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(any(app_bar::<HuddleState>(title))),
-            flexible(1, any(Align(Alignment::CENTER, body))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch))
+pub fn scaffold(title: &str, body: impl View<HuddleState>) -> AnyView<HuddleState> {
+    any(column()
+        .child(app_bar::<HuddleState>(title))
+        .flex(1, Align(Alignment::CENTER, body))
+        .cross_axis(CrossAxisAlignment::Stretch))
 }
 
 /// A placeholder body: a big "…" plus a note.
 pub fn placeholder_body(note: &str) -> AnyView<HuddleState> {
-    any(Column(vec![
-        any(text("\u{2026}").size(48.0)),
-        any(text(note).size(14.0)),
-    ]))
+    any(column()
+        .child(text("\u{2026}").size(48.0))
+        .child(text(note).size(14.0)))
 }

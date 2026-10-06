@@ -56,8 +56,8 @@ use std::sync::Arc;
 
 use frust::{
     Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView,
-    GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, Stack, any, hero, icon,
-    icons, inflexible, keyed, kurbo::Size, scroll_view, text, text_input, use_context,
+    GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, any, column, hero, icon,
+    icons, inflexible, keyed, kurbo::Size, row, scroll_view, stack, text, text_input, use_context,
 };
 use frust_material::app_bar;
 
@@ -218,7 +218,7 @@ pub fn thread_screen(thread_id: String) -> AnyView<HuddleState> {
     // The message-action sheet mounts in the screen's own `Stack` top layer
     // (see `crate::ui::sheet`); inert (zero-size) when nothing is open.
     let overlay = thread_sheet(&controller, root_id, sheet_sig);
-    any(Stack(vec![screen, overlay]))
+    any(stack().child(screen).child(overlay))
 }
 
 /// The open message-action sheet as a `Stack` overlay layer, or an inert
@@ -301,7 +301,7 @@ fn thread_title(repo: &Arc<dyn MessageRepository + Send + Sync>, channel_id: &st
 fn thread_app_bar(title: String) -> AnyView<HuddleState> {
     let back = GestureDetector(icon(icons::ARROW_BACK).size(24.0))
         .on_tap(|s: &mut HuddleState| s.nav.router().pop());
-    any(app_bar::<HuddleState>(title).leading(any(Padding(EdgeInsets::symmetric(4.0, 0.0), back))))
+    any(app_bar::<HuddleState>(title).leading(Padding(EdgeInsets::symmetric(4.0, 0.0), back)))
 }
 
 /// Assembles the app bar, scrollable `content`, and an optional `composer`
@@ -390,17 +390,11 @@ fn root_bubble(
         .map(|u| u.name)
         .unwrap_or("Someone");
 
-    let header = any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(avatar(controller, root.author_id)),
-            inflexible(any(SizedBox(Some(8.0), None))),
-            inflexible(any(
-                text(format!("{author}  \u{b7}  {PLACEHOLDER_TIME}")).size(13.0)
-            )),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center));
+    let header = any(row()
+        .child(avatar(controller, root.author_id))
+        .child(SizedBox(Some(8.0), None))
+        .child(text(format!("{author}  \u{b7}  {PLACEHOLDER_TIME}")).size(13.0))
+        .cross_axis(CrossAxisAlignment::Center));
 
     let mut lines: Vec<AnyView<HuddleState>> = vec![
         header,
@@ -444,21 +438,15 @@ fn root_body(body: &FeedBody) -> AnyView<HuddleState> {
         FeedBody::Link { url, title } => any(filled_box(
             Padding(
                 EdgeInsets::all(10.0),
-                FlexView::new(
-                    Axis::Vertical,
-                    vec![
-                        inflexible(any(FlexView::new(
-                            Axis::Horizontal,
-                            vec![
-                                inflexible(any(icon(icons::LINK).size(16.0))),
-                                inflexible(any(SizedBox(Some(6.0), None))),
-                                inflexible(any(text(title.clone()).size(14.0))),
-                            ],
-                        ))),
-                        inflexible(any(text(url.clone()).size(12.0))),
-                    ],
-                )
-                .cross_axis(CrossAxisAlignment::Start),
+                column()
+                    .child(
+                        row()
+                            .child(icon(icons::LINK).size(16.0))
+                            .child(SizedBox(Some(6.0), None))
+                            .child(text(title.clone()).size(14.0)),
+                    )
+                    .child(text(url.clone()).size(12.0))
+                    .cross_axis(CrossAxisAlignment::Start),
             ),
             TILE_FILL,
             8.0,
@@ -466,22 +454,16 @@ fn root_body(body: &FeedBody) -> AnyView<HuddleState> {
         FeedBody::File { name, size } => any(filled_box(
             Padding(
                 EdgeInsets::all(10.0),
-                FlexView::new(
-                    Axis::Horizontal,
-                    vec![
-                        inflexible(any(icon(icons::DESCRIPTION).size(24.0))),
-                        inflexible(any(SizedBox(Some(8.0), None))),
-                        inflexible(any(FlexView::new(
-                            Axis::Vertical,
-                            vec![
-                                inflexible(any(text(name.clone()).size(14.0))),
-                                inflexible(any(text(size.clone()).size(12.0))),
-                            ],
-                        )
-                        .cross_axis(CrossAxisAlignment::Start))),
-                    ],
-                )
-                .cross_axis(CrossAxisAlignment::Center),
+                row()
+                    .child(icon(icons::DESCRIPTION).size(24.0))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(
+                        column()
+                            .child(text(name.clone()).size(14.0))
+                            .child(text(size.clone()).size(12.0))
+                            .cross_axis(CrossAxisAlignment::Start),
+                    )
+                    .cross_axis(CrossAxisAlignment::Center),
             ),
             TILE_FILL,
             8.0,
@@ -503,14 +485,12 @@ fn reaction_chips(
         let emoji = reaction.emoji.clone();
         let ctrl = Arc::clone(controller);
         let id = root.id;
-        chips.push(inflexible(any(
-            frust_material::filter_chip::<HuddleState, _>(
-                label,
-                reaction.mine,
-                move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
-            ),
+        chips.push(inflexible(frust_material::filter_chip::<HuddleState, _>(
+            label,
+            reaction.mine,
+            move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
         )));
-        chips.push(inflexible(any(SizedBox(Some(6.0), None))));
+        chips.push(inflexible(SizedBox(Some(6.0), None)));
     }
 
     if chips.is_empty() {
@@ -535,19 +515,20 @@ fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> AnyView<Huddl
         .user(author_id)
         .map(|u| u.initials)
         .unwrap_or("?");
-    let tile = any(Stack(vec![
-        any(fill_box(
+    let tile = any(stack()
+        .child(fill_box(
             Size::new(AVATAR_SIZE, AVATAR_SIZE),
             avatar_color(author_id),
             AVATAR_RADIUS,
-        )),
-        any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
-            Alignment::CENTER,
-            text(initials.to_string())
-                .size(AVATAR_MONOGRAM_SIZE)
-                .color(Color::WHITE),
-        ))),
-    ]));
+        ))
+        .child(
+            SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
+                Alignment::CENTER,
+                text(initials.to_string())
+                    .size(AVATAR_MONOGRAM_SIZE)
+                    .color(Color::WHITE),
+            )),
+        ));
     any(
         GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
             move |st: &mut HuddleState| {
@@ -594,14 +575,10 @@ fn reply_bubble(
         .unwrap_or("Someone");
     let inner = Padding(
         EdgeInsets::symmetric(12.0, 6.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(text(author.to_string()).size(12.0))),
-                inflexible(any(text(reply.text.clone()).size(14.0))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Start),
+        column()
+            .child(text(author.to_string()).size(12.0))
+            .child(text(reply.text.clone()).size(14.0))
+            .cross_axis(CrossAxisAlignment::Start),
     );
     // Long-press opens a Copy/Delete menu (replies carry no reaction model, so
     // no React row — `Menu(None)`).
@@ -651,15 +628,11 @@ fn composer_bar(
 
     any(Padding(
         EdgeInsets::all(8.0),
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                frust::flexible(1, any(field)),
-                inflexible(any(SizedBox(Some(8.0), None))),
-                inflexible(any(Padding(EdgeInsets::symmetric(0.0, 6.0), send_btn))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .flex(1, field)
+            .child(SizedBox(Some(8.0), None))
+            .child(Padding(EdgeInsets::symmetric(0.0, 6.0), send_btn))
+            .cross_axis(CrossAxisAlignment::Center),
     ))
 }
 

@@ -10,9 +10,9 @@
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexView,
-    Image, ImageFit, NavigatorController, Padding, SizedBox, Stack, Theme, any, flexible, hero,
-    icon, icons, inflexible, scroll_view, text, use_context,
+    Align, Alignment, AnyView, Color, CrossAxisAlignment, EdgeInsets, Image, ImageFit,
+    NavigatorController, Padding, SizedBox, Theme, any, column, hero, icon, icons, scroll_view,
+    stack, text, use_context,
 };
 use frust_material::{app_bar, list_item};
 
@@ -87,23 +87,18 @@ pub fn you_screen(controller: NavigatorController<HuddleState>) -> AnyView<Huddl
 
     let body = any(scroll_view(Padding(
         EdgeInsets::all(12.0),
-        Column(vec![
-            any(user_card),
-            any(SizedBox(None, Some(16.0))),
-            any(settings_row),
-            any(saved_row),
-            any(prefs_row),
-        ]),
+        column()
+            .child(user_card)
+            .child(SizedBox(None, Some(16.0)))
+            .child(settings_row)
+            .child(saved_row)
+            .child(prefs_row),
     )));
 
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(any(app_bar::<HuddleState>("You"))),
-            flexible(1, body),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch))
+    any(column()
+        .child(app_bar::<HuddleState>("You"))
+        .flex(1, body)
+        .cross_axis(CrossAxisAlignment::Stretch))
 }
 
 /// A square avatar block: a solid `primary`-filled 56×56 tile with the user's
@@ -119,7 +114,7 @@ fn avatar_block(initials: String, fill: Color, on_fill: Color) -> AnyView<Huddle
         Alignment::CENTER,
         text(initials).size(20.0).color(on_fill),
     )));
-    any(Stack(vec![tile, label]))
+    any(stack().child(tile).child(label))
 }
 
 /// Derive an `@handle` from a display name — the first name, lowercased.

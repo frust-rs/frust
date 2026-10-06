@@ -66,7 +66,7 @@ use frust::authoring::{
 use frust::{
     AnimationController, Axis, CrossAxisAlignment, Curve, EdgeInsets, FlexView, FrameTime,
     GestureDetector, IconSource, Padding, SizedBox, Theme, flexible, icon, inflexible,
-    input::TOUCH_SLOP, text,
+    input::TOUCH_SLOP, row, text,
 };
 use frust_material::filled_card;
 use std::time::Duration;
@@ -575,15 +575,11 @@ where
     // Icon default 24, label bodyLarge 16 — Material sizing
     // reference; the 16/14 row insets keep the row's touch height in the
     // 48–56 band.
-    let row = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(any(icon(leading).size(24.0))),
-            inflexible(any(SizedBox(Some(16.0), None))),
-            inflexible(any(text(label.into()).size(16.0))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center);
+    let row = row()
+        .child(icon(leading).size(24.0))
+        .child(SizedBox(Some(16.0), None))
+        .child(text(label.into()).size(16.0))
+        .cross_axis(CrossAxisAlignment::Center);
 
     any(GestureDetector(Padding(
         EdgeInsets::symmetric(ROW_H_PAD, ROW_V_PAD),
@@ -620,15 +616,15 @@ where
                 ))
                 .on_tap(move |st: &mut State| pick(st, emoji)),
             );
-            cells.push(flexible(1, any(cell)));
+            cells.push(flexible(1, cell));
         }
         // Pad a short final row so its cells keep the same column width.
         while cells.len() < EMOJI_COLS {
-            cells.push(flexible(1, any(SizedBox(None, None))));
+            cells.push(flexible(1, SizedBox(None, None)));
         }
-        rows.push(inflexible(any(
-            FlexView::new(Axis::Horizontal, cells).cross_axis(CrossAxisAlignment::Center)
-        )));
+        rows.push(inflexible(
+            FlexView::new(Axis::Horizontal, cells).cross_axis(CrossAxisAlignment::Center),
+        ));
     }
     any(Padding(
         EdgeInsets::symmetric(0.0, 8.0),

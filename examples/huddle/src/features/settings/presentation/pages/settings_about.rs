@@ -7,9 +7,8 @@
 //! link-style row that raises a toast (no real browser — a showcase non-goal).
 
 use frust::{
-    Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexView,
-    Image, ImageFit, ImageSource, Padding, SizedBox, Stack, Theme, any, flexible, inflexible,
-    scroll_view, text, use_context,
+    Align, Alignment, AnyView, Color, CrossAxisAlignment, EdgeInsets, Image, ImageFit, ImageSource,
+    Padding, SizedBox, Theme, any, column, scroll_view, stack, text, use_context,
 };
 use frust_material::{app_bar, filled_card, outlined_card};
 
@@ -32,28 +31,26 @@ pub fn about_screen() -> AnyView<HuddleState> {
         Err(_) => initials_block("H", scheme.primary, scheme.on_primary),
     };
 
-    let header = any(Column(vec![
-        any(Align(Alignment::CENTER, icon_block)),
-        any(SizedBox(None, Some(12.0))),
-        any(Align(Alignment::CENTER, text("Huddle").size(24.0))),
-        any(Align(
+    let header = any(column()
+        .child(Align(Alignment::CENTER, icon_block))
+        .child(SizedBox(None, Some(12.0)))
+        .child(Align(Alignment::CENTER, text("Huddle").size(24.0)))
+        .child(Align(
             Alignment::CENTER,
             text(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(13.0),
-        )),
-        any(Align(
+        ))
+        .child(Align(
             Alignment::CENTER,
             text("The Frust showcase app").size(13.0),
-        )),
-    ]));
+        )));
 
     let licenses = any(Padding(
         EdgeInsets::symmetric(0.0, 6.0),
         filled_card(Padding(
             EdgeInsets::all(16.0),
-            Column(vec![
-                any(text("Open-source licenses").size(15.0)),
-                any(text("Material Symbols · Parley · Vello").size(12.0)),
-            ]),
+            column()
+                .child(text("Open-source licenses").size(15.0))
+                .child(text("Material Symbols · Parley · Vello").size(12.0)),
         )),
     ));
 
@@ -62,10 +59,9 @@ pub fn about_screen() -> AnyView<HuddleState> {
         EdgeInsets::symmetric(0.0, 6.0),
         outlined_card(Padding(
             EdgeInsets::all(16.0),
-            Column(vec![
-                any(text("Frust").size(15.0)),
-                any(text("frust.dev").size(12.0)),
-            ]),
+            column()
+                .child(text("Frust").size(15.0))
+                .child(text("frust.dev").size(12.0)),
         ))
         .on_press(|s: &mut HuddleState| {
             s.toasts.show("Opens frust.dev");
@@ -74,22 +70,17 @@ pub fn about_screen() -> AnyView<HuddleState> {
 
     let body = any(scroll_view(Padding(
         EdgeInsets::all(20.0),
-        Column(vec![
-            header,
-            any(SizedBox(None, Some(24.0))),
-            licenses,
-            frust_link,
-        ]),
+        column()
+            .child(header)
+            .child(SizedBox(None, Some(24.0)))
+            .child(licenses)
+            .child(frust_link),
     )));
 
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(any(app_bar::<HuddleState>("About"))),
-            flexible(1, body),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch))
+    any(column()
+        .child(app_bar::<HuddleState>("About"))
+        .flex(1, body)
+        .cross_axis(CrossAxisAlignment::Stretch))
 }
 
 /// A 72×72 solid-`fill` tile with a centered initial in `on_fill` — the app-icon
@@ -105,5 +96,5 @@ fn initials_block(initial: &str, fill: Color, on_fill: Color) -> AnyView<HuddleS
         Alignment::CENTER,
         text(initial.to_string()).size(32.0).color(on_fill),
     )));
-    any(Stack(vec![tile, label]))
+    any(stack().child(tile).child(label))
 }

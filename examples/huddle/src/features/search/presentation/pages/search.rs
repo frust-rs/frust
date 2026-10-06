@@ -46,8 +46,8 @@ use std::sync::Arc;
 
 use frust::{
     Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, GestureDetector, Get, Padding, Set, SizedBox, TextInput, any, flexible, hero, icon,
-    icons, inflexible, keyed, scroll_view, text, use_context,
+    FlexView, GestureDetector, Get, Padding, Set, SizedBox, TextInput, any, column, hero, icon,
+    icons, keyed, row, scroll_view, text, use_context,
 };
 use frust_material::{filled_card, list_item};
 
@@ -85,7 +85,7 @@ pub fn search_screen() -> AnyView<HuddleState> {
         results_container(&query, results, &repo),
     ];
 
-    scaffold("Search", any(scroll_view(Column(children))))
+    scaffold("Search", scroll_view(Column(children)))
 }
 
 /// The single stable child of the outer `Column` (always index 1): its own
@@ -146,22 +146,18 @@ fn search_field(controller: SearchController, query: &str) -> AnyView<HuddleStat
         clear_icon = clear_icon.color(Color::TRANSPARENT);
     }
 
-    let row: AnyView<HuddleState> = any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(1, any(field)),
-            inflexible(any(GestureDetector(clear_icon).on_tap(
-                move |_s: &mut HuddleState| {
-                    // No-op while the query is already empty — the placeholder
-                    // is inert, not just invisible.
-                    if has_query {
-                        controller.query.set(String::new());
-                    }
-                },
-            ))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center));
+    let row: AnyView<HuddleState> = any(row()
+        .flex(1, field)
+        .child(
+            GestureDetector(clear_icon).on_tap(move |_s: &mut HuddleState| {
+                // No-op while the query is already empty — the placeholder
+                // is inert, not just invisible.
+                if has_query {
+                    controller.query.set(String::new());
+                }
+            }),
+        )
+        .cross_axis(CrossAxisAlignment::Center));
 
     any(SizedBox::<HuddleState>(None, Some(FIELD_HEIGHT))
         .child(Padding(EdgeInsets::symmetric(16.0, 0.0), row)))
@@ -171,11 +167,10 @@ fn search_field(controller: SearchController, query: &str) -> AnyView<HuddleStat
 fn hint_view() -> AnyView<HuddleState> {
     any(Padding(
         EdgeInsets::all(32.0),
-        Column(vec![
-            any(Align(Alignment::CENTER, icon(icons::SEARCH).size(48.0))),
-            any(SizedBox::<HuddleState>(None, Some(12.0))),
-            any(text("Search channels, people, messages").size(14.0)),
-        ]),
+        column()
+            .child(Align(Alignment::CENTER, icon(icons::SEARCH).size(48.0)))
+            .child(SizedBox::<HuddleState>(None, Some(12.0)))
+            .child(text("Search channels, people, messages").size(14.0)),
     ))
 }
 
@@ -285,6 +280,6 @@ fn message_row(
 fn avatar_badge(initials: &str) -> impl frust::View<HuddleState> {
     SizedBox::<HuddleState>(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(filled_card(Align(
         Alignment::CENTER,
-        any(text(initials.to_string()).size(14.0)),
+        text(initials.to_string()).size(14.0),
     )))
 }
