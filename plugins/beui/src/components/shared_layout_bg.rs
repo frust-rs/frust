@@ -146,10 +146,10 @@ type OnActiveChange<State> = Rc<dyn Fn(&mut State, Option<usize>)>;
 /// # Example
 ///
 /// ```
-/// use frust::{any, text};
+/// use frust::text;
 /// use frust_beui::components::shared_layout_bg::{SharedLayoutBgKind, shared_layout_bg};
 ///
-/// let menu = shared_layout_bg::<()>(vec![any(text("one")), any(text("two"))])
+/// let menu = shared_layout_bg::<()>(vec![text("one"), text("two")])
 ///     .kind(SharedLayoutBgKind::List)
 ///     .inset(12.0);
 /// ```
@@ -164,9 +164,11 @@ pub struct SharedLayoutBgView<State: 'static> {
 
 /// Stack `rows` in a column under one gliding highlight pill, with upstream's
 /// own defaults.
-pub fn shared_layout_bg<State: 'static>(rows: Vec<AnyView<State>>) -> SharedLayoutBgView<State> {
+pub fn shared_layout_bg<State: 'static>(
+    rows: impl IntoIterator<Item = impl View<State>>,
+) -> SharedLayoutBgView<State> {
     SharedLayoutBgView {
-        rows,
+        rows: rows.into_iter().map(AnyView::new).collect(),
         kind: SharedLayoutBgKind::default(),
         inset: DEFAULT_INSET,
         radius: style::RADIUS_2XL,
@@ -813,7 +815,7 @@ mod tests {
     /// An empty list highlights nothing, paints nothing and asks for nothing.
     #[test]
     fn an_empty_list_is_inert() {
-        let mut widget = laid_out(&shared_layout_bg::<()>(Vec::new()));
+        let mut widget = laid_out(&shared_layout_bg::<()>(Vec::<AnyView<()>>::new()));
         assert!(!send(&mut widget, PointerPhase::Move, 10.0, 10.0));
         assert_eq!(widget.active(), None);
         let (recorder, needs_frame) = painted(&mut widget, 0, None);

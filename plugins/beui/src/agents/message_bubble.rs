@@ -576,10 +576,10 @@ pub struct MessageBubbleGroupView<State: 'static> {
 /// Stack `bubbles` in a column, [`Compact`](MessageBubbleSpacing::Compact)
 /// apart — the spacing consecutive messages from one sender wear.
 pub fn message_bubble_group<State: 'static>(
-    bubbles: Vec<AnyView<State>>,
+    bubbles: impl IntoIterator<Item = impl View<State>>,
 ) -> MessageBubbleGroupView<State> {
     MessageBubbleGroupView {
-        bubbles,
+        bubbles: bubbles.into_iter().map(AnyView::new).collect(),
         spacing: MessageBubbleSpacing::default(),
     }
 }

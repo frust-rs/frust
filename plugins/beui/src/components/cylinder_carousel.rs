@@ -406,12 +406,12 @@ type OnIndexChange<State> = Rc<dyn Fn(&mut State, usize)>;
 /// # Example
 ///
 /// ```
-/// use frust::{any, text};
+/// use frust::text;
 /// use frust_beui::components::cylinder_carousel::{
 ///     CylinderCarouselVariant, cylinder_carousel,
 /// };
 ///
-/// let rail = cylinder_carousel::<()>(vec![any(text("a")), any(text("b"))])
+/// let rail = cylinder_carousel::<()>(vec![text("a"), text("b")])
 ///     .variant(CylinderCarouselVariant::Convex)
 ///     .snap(false);
 /// ```
@@ -435,10 +435,10 @@ pub struct CylinderCarouselView<State: 'static> {
 
 /// Line `items` on the inside of a cylinder, with upstream's own defaults.
 pub fn cylinder_carousel<State: 'static>(
-    items: Vec<AnyView<State>>,
+    items: impl IntoIterator<Item = impl View<State>>,
 ) -> CylinderCarouselView<State> {
     CylinderCarouselView {
-        items,
+        items: items.into_iter().map(AnyView::new).collect(),
         item_size: DEFAULT_ITEM_SIZE,
         visible_items: DEFAULT_VISIBLE_ITEMS,
         variant: CylinderCarouselVariant::default(),
@@ -1886,7 +1886,9 @@ mod tests {
     /// An empty carousel is inert rather than a division by zero.
     #[test]
     fn an_empty_carousel_is_inert() {
-        let mut widget = laid_out(&cylinder_carousel::<Landings>(Vec::new()));
+        let mut widget = laid_out(&cylinder_carousel::<Landings>(
+            Vec::<AnyView<Landings>>::new(),
+        ));
         let mut state = Landings::default();
         assert_eq!(widget.count(), 0);
         assert_eq!(widget.index(), 0);
