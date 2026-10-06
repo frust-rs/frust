@@ -1289,8 +1289,8 @@ mod tests {
 
         let view: TextFieldView<String> = text_field("", |_s: &mut String, _t| {})
             .label("Email")
-            .leading(any(frust::SizedBox(Some(20.0), Some(20.0))))
-            .trailing(any(frust::SizedBox(Some(20.0), Some(20.0))));
+            .leading(frust::SizedBox(Some(20.0), Some(20.0)))
+            .trailing(frust::SizedBox(Some(20.0), Some(20.0)));
         assert_eq!(view.text_left(), HPAD + ICON_SIZE + ICON_GAP);
         assert_eq!(view.text_top(), TEXT_TOP_WITH_LABEL);
 
@@ -1668,8 +1668,8 @@ mod tests {
         assert_eq!(seen, 1, "the wrapped field alone");
 
         let slotted: TextFieldView<String> = text_field("", |_s: &mut String, _t| {})
-            .leading(any(frust::SizedBox(Some(20.0), Some(20.0))))
-            .trailing(any(frust::SizedBox(Some(20.0), Some(20.0))));
+            .leading(frust::SizedBox(Some(20.0), Some(20.0)))
+            .trailing(frust::SizedBox(Some(20.0), Some(20.0)));
         let w = build(&slotted);
         let mut seen = 0usize;
         Widget::visit_children(&w, &mut |_pod| seen += 1);
@@ -1712,7 +1712,7 @@ mod tests {
         let mut logic = |with_slot: &mut bool| {
             let view: TextFieldView<bool> = text_field("", |_s: &mut bool, _t| {});
             if *with_slot {
-                view.leading(any(frust::SizedBox(Some(20.0), Some(20.0))))
+                view.leading(frust::SizedBox(Some(20.0), Some(20.0)))
             } else {
                 view
             }

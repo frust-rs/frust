@@ -1101,9 +1101,11 @@ mod tests {
         fn pass(&mut self) {
             let anchor = self.anchor.clone();
             let mut logic = move |_s: &mut AppState| {
-                frust::Stack(vec![any(anchored_overlay(Panel(CONTENT))
-                    .anchor(&anchor)
-                    .on_dismiss(|s: &mut AppState| s.dismissed += 1))])
+                frust::stack().child(
+                    anchored_overlay(Panel(CONTENT))
+                        .anchor(&anchor)
+                        .on_dismiss(|s: &mut AppState| s.dismissed += 1),
+                )
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root

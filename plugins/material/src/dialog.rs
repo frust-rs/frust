@@ -1348,7 +1348,7 @@ struct FullScreenPanelWidget {
 /// docs' *Deliberate v1 scope cuts*).
 fn close_view<State: 'static>(on_dismiss: Option<OnDismiss<State>>) -> AnyView<State> {
     any(
-        icon_button(any(icon(crate::icons::CLOSE)), move |state: &mut State| {
+        icon_button(icon(crate::icons::CLOSE), move |state: &mut State| {
             if let Some(on_dismiss) = &on_dismiss {
                 on_dismiss(state);
             }
@@ -1800,7 +1800,7 @@ mod tests {
                 dialog()
                     .title("Confirm")
                     .body("Are you sure?")
-                    .action(any(text_button("OK", |_s: &mut NavState| {})))
+                    .action(text_button("OK", |_s: &mut NavState| {}))
             },
             |state: &mut NavState, result: PopResult| {
                 state.results.push(result.take::<bool>());
@@ -2046,7 +2046,7 @@ mod tests {
                 dialog()
                     .title("Invite people")
                     .body("Send invites to this workspace? (mock)")
-                    .action(any(text_button("Send", |_s: &mut NavState| {})))
+                    .action(text_button("Send", |_s: &mut NavState| {}))
             },
             |state: &mut NavState, result: PopResult| {
                 state.results.push(result.take::<bool>());

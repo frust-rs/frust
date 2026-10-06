@@ -2773,7 +2773,7 @@ mod tests {
             // Indices 4 and 5 are the ones `on_overflow` would have reported
             // hidden; mounted separately as the popup's own two-piece shape
             // documents.
-            frust::Stack(vec![group.overflow_menu(4, true)])
+            frust::stack().child(group.overflow_menu(4, true))
         };
         root.rebuild(&mut logic, &mut state);
         let mut tcx = TextContext::new();
@@ -2825,7 +2825,7 @@ mod tests {
                 .overflow_anchor(&cell)
                 .selected_index(s.selected)
                 .on_selected_index_changed(|s: &mut OverflowMenuState, i| s.selected = i);
-            frust::Stack(vec![group.overflow_menu(5, true)])
+            frust::stack().child(group.overflow_menu(5, true))
         };
         root.rebuild(&mut logic, &mut state);
         let mut tcx = TextContext::new();
