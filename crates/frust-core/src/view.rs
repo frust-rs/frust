@@ -300,15 +300,29 @@ pub struct AnyView<State: 'static> {
 
 impl<State: 'static> AnyView<State> {
     /// Erase `view` into an `AnyView`.
+    ///
+    /// Erasure is idempotent: if `view` is already an `AnyView<State>`, it is
+    /// returned unchanged — `any(any(v))` and `AnyView::new(any_view)` do not box
+    /// twice.
     pub fn new<V: View<State>>(view: V) -> Self {
+        let mut slot = Some(view);
+        if let Some(erased) =
+            (&mut slot as &mut dyn core::any::Any).downcast_mut::<Option<AnyView<State>>>()
+        {
+            return erased.take().expect("slot is Some");
+        }
         Self {
-            inner: Box::new(view),
+            inner: Box::new(slot.expect("slot is Some")),
         }
     }
 }
 
 /// Erase `view` into an [`AnyView`] — the free-function spelling of
 /// [`AnyView::new`], mirroring the `text(..)`/`button(..)` view-fn vocabulary.
+///
+/// Erasure is idempotent: `any(any(v))` returns the inner `AnyView` unchanged,
+/// not a doubly-boxed wrapper. This makes double erasure safe for swap detection
+/// in containers like `inflexible(any(x))`.
 pub fn any<State: 'static, V: View<State>>(view: V) -> AnyView<State> {
     AnyView::new(view)
 }
@@ -499,6 +513,44 @@ mod tests {
         f |= ChangeFlags::PAINT;
         assert!(f.contains(ChangeFlags::PAINT));
         assert!(!f.contains(ChangeFlags::LAYOUT));
+    }
+
+    #[test]
+    fn double_erasure_is_idempotent() {
+        // Criterion: `any(any(view))` returns the inner `AnyView` unchanged,
+        // not a doubly-boxed wrapper. The element's TypeId matches the inner
+        // view's concrete type, not `Box<dyn Widget>`.
+        let torn = Rc::new(Cell::new(0));
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+
+        let double_erased = any(any(ViewA {
+            n: 5,
+            torn: torn.clone(),
+        }));
+        let mut element = double_erased.build(&mut ctx);
+
+        // The element should downcast directly to WidgetA, not to Box<dyn Widget>
+        // as it would if double-erased.
+        let a = (*element)
+            .downcast_mut::<WidgetA>()
+            .expect("double-erased any(any(ViewA)) should have WidgetA element directly");
+        assert_eq!(a.n, 5);
+
+        // Single-erasure behavior unchanged: rebuild with same type reports no swap
+        let double_erased_2 = any(any(ViewA {
+            n: 10,
+            torn: torn.clone(),
+        }));
+        let flags = double_erased_2.rebuild(&double_erased, &mut element, &mut ctx);
+
+        // Same concrete type → typed in-place rebuild, no teardown.
+        assert_eq!(flags, ChangeFlags::PAINT);
+        assert_eq!(torn.get(), 0, "no teardown on same-type rebuild");
+        let a = (*element)
+            .downcast_mut::<WidgetA>()
+            .expect("still a WidgetA after rebuild");
+        assert_eq!(a.n, 10);
     }
 
     #[test]
