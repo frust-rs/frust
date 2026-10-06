@@ -1070,6 +1070,30 @@ impl DragCoordinator {
         });
     }
 
+    /// The OS file drag is over: end a [`DragKind::ExternalFiles`] session
+    /// still `Dragging`, exactly as [`cancel`](Self::cancel) would (a hovered
+    /// target hears `Leave`, then `→ Cancelled → Idle`), and report whether
+    /// one was ended.
+    ///
+    /// Idempotent and narrow, so every drop target can call it on the same
+    /// end-of-drag broadcast and exactly one call does anything: a no-op
+    /// (`false`) from `Idle`, from `Armed`, for any internal session (pointer
+    /// or keyboard — an OS drag ending says nothing about it), and for an
+    /// external session already `Dropping` — that one belongs to the target
+    /// it was released over, which claims or cancels it on its own poll.
+    pub fn end_external(&self) -> bool {
+        self.mutate(|shared, changes| {
+            let ends = matches!(
+                &shared.machine,
+                Machine::Dragging(session) if matches!(session.kind, DragKind::ExternalFiles(_))
+            );
+            if ends {
+                shared.cancel(changes);
+            }
+            ends
+        })
+    }
+
     /// Whether a payload of type `T` is held (`Dragging`/`Dropping`, not yet
     /// taken).
     pub fn payload_is<T: Any>(&self) -> bool {
@@ -2903,5 +2927,70 @@ mod tests {
         assert!(f.drag.is_external(), "still external while Dropping");
         f.drag.complete_drop();
         assert!(!f.drag.is_external());
+    }
+
+    #[test]
+    fn end_external_ends_a_hovering_external_session_once() {
+        let f = Fixture::new();
+        f.drag
+            .begin_external(vec![PathBuf::from("/tmp/a.txt")], FILE_ENTRY);
+        f.drag.set_hovered(Some(f.first));
+        f.take_log();
+
+        assert!(f.drag.end_external(), "the first call ends it");
+        assert_eq!(
+            f.take_log(),
+            vec![
+                DragStateChange::Leave { target: f.first },
+                DragStateChange::Phase {
+                    previous: Dragging,
+                    next: Cancelled
+                },
+                DragStateChange::Phase {
+                    previous: Cancelled,
+                    next: Idle
+                },
+            ]
+        );
+        assert_eq!(f.drag.state(), DragState::Idle);
+
+        assert!(!f.drag.end_external(), "every later call is a no-op");
+        assert!(f.take_log().is_empty());
+    }
+
+    #[test]
+    fn end_external_leaves_internal_armed_and_dropping_sessions_alone() {
+        let f = Fixture::new();
+        assert!(!f.drag.end_external(), "nothing in flight");
+
+        f.drag.arm(f.source, PRESS);
+        assert!(!f.drag.end_external());
+        assert_eq!(f.drag.phase(), DragPhase::Armed);
+
+        f.drag.begin(1_u8);
+        assert!(!f.drag.end_external());
+        assert_eq!(f.drag.phase(), DragPhase::Dragging);
+        f.drag.cancel();
+
+        assert!(f.drag.lift(f.source), "a keyboard session");
+        f.drag.begin(2_u8);
+        assert!(!f.drag.end_external());
+        assert!(
+            f.drag.payload_is::<u8>(),
+            "the keyboard session is untouched"
+        );
+        f.drag.cancel();
+
+        f.drag
+            .begin_external(vec![PathBuf::from("/tmp/a.txt")], FILE_ENTRY);
+        f.drag.set_hovered(Some(f.first));
+        assert_eq!(f.drag.drop(), Some(f.first));
+        f.take_log();
+        assert!(
+            !f.drag.end_external(),
+            "a released drop is its target's to claim"
+        );
+        assert!(f.take_log().is_empty());
+        assert_eq!(f.drag.phase(), DragPhase::Dropping);
     }
 }

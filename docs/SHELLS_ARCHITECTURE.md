@@ -375,7 +375,12 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   empty `paths`); `DroppedFile` arrives once per file too, so a `FileDropAccumulator` batches every
   file in one drop into a single coalesced `Drop` carrying every path, flushed at the next other
   window event or at `about_to_wait`. Every dispatch reports `position` as the shell's last known
-  cursor position, since none of the three winit events carries one of its own.
+  in-window cursor position, since none of the three winit events carries one of its own: a
+  `FileHoverLatch` bool re-dispatches `Hover` on each `CursorMoved` while a drag hovers, but on a
+  platform that sends no `CursorMoved` during an OS drag, `Hover` and `Drop` resolve wherever the
+  cursor was last seen in the window, not at the release point. The latch clears on `HoveredFileCancelled`, `DroppedFile`,
+  `CursorLeft` and any real mouse button event. A `Drop`/`Cancel` that reaches no target is
+  followed by core's `FileDropPhase::Ended` broadcast (see CORE_ARCHITECTURE.md's Data Flow).
 - **Window metrics** (logical size, scale, derived orientation, insets snapshot) are published
   from the points where the window's shape actually changes, guarded by the shared
   `WindowMetricsPublisher` against per-frame churn (see
