@@ -188,7 +188,7 @@ impl Component for S3Table {
         }
     }
 
-    fn build(&self, state: &mut S3State) -> AnyView<S3State> {
+    fn build(&self, state: &mut S3State) -> impl View<S3State> {
         state.advance_script();
 
         let rows = state.rows.clone();

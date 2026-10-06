@@ -59,7 +59,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use frust::{
-    Align, Alignment, AnyView, AsyncValue, Component, Get, UseTask, any, component, text, use_task,
+    Align, Alignment, AnyView, AsyncValue, Component, Get, UseTask, View, any, component, text,
+    use_task,
 };
 use frust_database::{Database, DatabaseError, Value};
 
@@ -233,7 +234,7 @@ impl Component for D1Write {
         D1State { task }
     }
 
-    fn build(&self, state: &mut D1State) -> AnyView<D1State> {
+    fn build(&self, state: &mut D1State) -> impl View<D1State> {
         let status = match state.task.signal().get() {
             AsyncValue::Idle | AsyncValue::Loading(_) => format!(
                 "running D1 write bench ({BATCH_REPS} batch reps × {BATCH_N} rows, \

@@ -43,8 +43,8 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use frust::{
-    Align, Alignment, AnyView, AsyncValue, Component, Get, Stack, UseTask, any, component, text,
-    use_task,
+    Align, Alignment, AnyView, AsyncValue, Component, Get, Stack, UseTask, View, any, component,
+    text, use_task,
 };
 use frust_shared_preferences::SharedPreferences;
 
@@ -201,7 +201,7 @@ impl Component for S8Prefs {
         S8State { task, burst }
     }
 
-    fn build(&self, state: &mut S8State) -> AnyView<S8State> {
+    fn build(&self, state: &mut S8State) -> impl View<S8State> {
         let status = match state.task.signal().get() {
             AsyncValue::Idle | AsyncValue::Loading(_) => {
                 format!("running plugin write/read loops ({KEYS_PER_TYPE} keys × 5 types)…")

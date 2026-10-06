@@ -19,7 +19,8 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use frust::{
-    Align, Alignment, AnyView, AsyncValue, Component, Get, UseTask, any, component, text, use_task,
+    Align, Alignment, AnyView, AsyncValue, Component, Get, UseTask, View, any, component, text,
+    use_task,
 };
 use frust_database::{Database, Row, Value};
 
@@ -128,7 +129,7 @@ impl Component for D2Read {
         D2State { task }
     }
 
-    fn build(&self, state: &mut D2State) -> AnyView<D2State> {
+    fn build(&self, state: &mut D2State) -> impl View<D2State> {
         let status = match state.task.signal().get() {
             AsyncValue::Idle | AsyncValue::Loading(_) => format!(
                 "seeding {SEED_ROWS} rows then running D2 read bench \

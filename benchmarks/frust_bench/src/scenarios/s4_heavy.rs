@@ -418,7 +418,7 @@ impl Component for S4Heavy {
         }
     }
 
-    fn build(&self, state: &mut S4State) -> AnyView<S4State> {
+    fn build(&self, state: &mut S4State) -> impl View<S4State> {
         let value = state.task.signal().get();
         // Close the `s4-parse` window on the first build that observes the
         // `spawn_blocking` result reach `Ready` — see `S4State::end_marked`.
