@@ -809,24 +809,23 @@ impl Component for SidebarCase {
                             .iter()
                             .enumerate()
                             .map(|(index, label)| {
-                                any(sidebar_menu_item(vec![any(sidebar_menu_button(
-                                    *label,
-                                    move |state: &mut SidebarState| {
+                                any(sidebar_menu_item(vec![
+                                    sidebar_menu_button(*label, move |state: &mut SidebarState| {
                                         state.active = index;
-                                    },
-                                )
-                                .icon(icon(icons::FORUM).size(16.0))
-                                .active(index == active))]))
+                                    })
+                                    .icon(icon(icons::FORUM).size(16.0))
+                                    .active(index == active),
+                                ]))
                             })
                             .collect::<Vec<_>>(),
                     ),
                 ])]))
-                .header(sidebar_header(vec![any(text("Floating").size(14.0))]))
+                .header(sidebar_header(vec![text("Floating").size(14.0)]))
                 .side(SidebarSide::Right)
                 .variant(SidebarVariant::Floating)
                 .collapsible(SidebarCollapsible::Icon)
                 .rail(true),
-                sidebar_inset(vec![any(text("Main content").size(14.0))]),
+                sidebar_inset(vec![text("Main content").size(14.0)]),
                 state.open,
                 |state: &mut SidebarState, open: bool| state.open = open,
             ),
@@ -911,10 +910,10 @@ impl Component for DialogCase {
                     dialog_title("Delete project?"),
                     dialog_description("This action cannot be undone."),
                 ]),
-                dialog_footer(vec![any(button("Cancel", |state: &mut ModalState| {
-                    state.open = false
-                })
-                .variant(ButtonVariant::Outline))]),
+                dialog_footer(vec![
+                    button("Cancel", |state: &mut ModalState| state.open = false)
+                        .variant(ButtonVariant::Outline),
+                ]),
             ])
             .label("Delete project?")
             .on_dismiss(|state: &mut ModalState| state.open = false))
@@ -1026,7 +1025,7 @@ impl Component for SheetCase {
                              from before the page pops.",
                     ),
                 ]),
-                sheet_footer(vec![any(text("Escape, the scrim, or the X."))]),
+                sheet_footer(vec![text("Escape, the scrim, or the X.")]),
             ])
             .side(SheetSide::Right)
             .label("Right sheet")

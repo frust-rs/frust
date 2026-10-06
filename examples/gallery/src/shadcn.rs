@@ -227,9 +227,9 @@ fn dialog_case() -> AnyView<()> {
                 dialog_title("Delete project?"),
                 dialog_description("This action cannot be undone."),
             ]),
-            dialog_footer(vec![any(
-                button("Cancel", |_: &mut ()| {}).variant(ButtonVariant::Outline)
-            )]),
+            dialog_footer(vec![
+                button("Cancel", |_: &mut ()| {}).variant(ButtonVariant::Outline),
+            ]),
         ]),
     )
 }
@@ -353,15 +353,15 @@ fn message_case() -> AnyView<()> {
     framed_in(
         DROPDOWN,
         message_scroller(vec![
-            any(message(vec![any(message_content(vec![any(bubble(
+            any(message(vec![message_content(vec![bubble(
                 "Hey — got a minute to review the PR?",
-            ))]))])),
-            any(
-                message(vec![any(message_content(vec![any(bubble("On it now.")
+            )])])),
+            any(message(vec![message_content(vec![
+                bubble("On it now.")
                     .variant(BubbleVariant::Secondary)
-                    .align(BubbleAlign::End))]))])
-                .align(frust_shadcn::MessageAlign::End),
-            ),
+                    .align(BubbleAlign::End),
+            ])])
+            .align(frust_shadcn::MessageAlign::End)),
         ]),
     )
 }
@@ -438,9 +438,7 @@ fn sheet_case() -> AnyView<()> {
                              from before the page pops.",
                         ),
                     ]),
-                    sheet_footer(vec![any(frust_widgets::text(
-                        "Escape, the scrim, or the X.",
-                    ))]),
+                    sheet_footer(vec![frust_widgets::text("Escape, the scrim, or the X.")]),
                 ],
                 16.0,
                 EdgeInsets::all(0.0),
@@ -469,24 +467,23 @@ fn sidebar_case() -> AnyView<()> {
                         .iter()
                         .enumerate()
                         .map(|(index, label)| {
-                            any(sidebar_menu_item(vec![any(sidebar_menu_button(
-                                *label,
-                                |_: &mut ()| {},
-                            )
-                            .icon(icon(icons::FORUM).size(16.0))
-                            .active(index == 0))]))
+                            any(sidebar_menu_item(vec![
+                                sidebar_menu_button(*label, |_: &mut ()| {})
+                                    .icon(icon(icons::FORUM).size(16.0))
+                                    .active(index == 0),
+                            ]))
                         })
                         .collect::<Vec<_>>(),
                 ),
             ])]))
-            .header(sidebar_header(vec![any(
-                frust_widgets::text("Floating").size(14.0)
-            )]))
+            .header(sidebar_header(vec![
+                frust_widgets::text("Floating").size(14.0),
+            ]))
             .side(SidebarSide::Right)
             .variant(SidebarVariant::Floating)
             .collapsible(SidebarCollapsible::Icon)
             .rail(true),
-            sidebar_inset(vec![any(frust_widgets::text("Main content").size(14.0))]),
+            sidebar_inset(vec![frust_widgets::text("Main content").size(14.0)]),
             true,
             |_: &mut (), _: bool| {},
         ),

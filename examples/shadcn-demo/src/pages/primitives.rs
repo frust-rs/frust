@@ -50,7 +50,7 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
             gap(),
             any(kbd("Ctrl")),
             any(SizedBox(Some(4.0), None)),
-            any(kbd_group(vec![any(kbd("Shift")), any(kbd("P"))])),
+            any(kbd_group(vec![kbd("Shift"), kbd("P")])),
         ]))
         .child(SizedBox(None, Some(16.0)))
         .child(row(vec![
@@ -135,11 +135,9 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
                     any(item_title("Item title")),
                     any(item_description("A trailing detail.")),
                 ])),
-                any(item_actions(vec![any(button(
-                    "Open",
-                    |_: &mut AppState| {},
-                )
-                .size(ButtonSize::Sm))])),
+                any(item_actions(vec![
+                    button("Open", |_: &mut AppState| {}).size(ButtonSize::Sm),
+                ])),
             ])
             .variant(ItemVariant::Outline),
         )
@@ -156,10 +154,10 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
                     "Once you add data it shows up in this space.",
                 )),
             ])),
-            any(empty_content(vec![any(button(
+            any(empty_content(vec![button(
                 "Add data",
                 |_: &mut AppState| {},
-            ))])),
+            )])),
         ]))
         .child(SizedBox(None, Some(16.0)))
         .child(separator())
@@ -181,9 +179,9 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
         .child(SizedBox(None, Some(12.0)))
         .child(
             button_group(vec![
-                any(button("Left", |_: &mut AppState| {}).size(ButtonSize::Sm)),
-                any(button("Middle", |_: &mut AppState| {}).size(ButtonSize::Sm)),
-                any(button("Right", |_: &mut AppState| {}).size(ButtonSize::Sm)),
+                button("Left", |_: &mut AppState| {}).size(ButtonSize::Sm),
+                button("Middle", |_: &mut AppState| {}).size(ButtonSize::Sm),
+                button("Right", |_: &mut AppState| {}).size(ButtonSize::Sm),
             ])
             .orientation(ButtonGroupOrientation::Horizontal),
         )

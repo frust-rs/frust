@@ -173,24 +173,23 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                             .iter()
                             .enumerate()
                             .map(|(index, label)| {
-                                any(sidebar_menu_item(vec![any(sidebar_menu_button(
-                                    *label,
-                                    move |s: &mut AppState| {
+                                any(sidebar_menu_item(vec![
+                                    sidebar_menu_button(*label, move |s: &mut AppState| {
                                         s.layout.mini_item = index;
-                                    },
-                                )
-                                .icon(icon(icons::FORUM).size(16.0))
-                                .active(index == mini_item))]))
+                                    })
+                                    .icon(icon(icons::FORUM).size(16.0))
+                                    .active(index == mini_item),
+                                ]))
                             })
                             .collect::<Vec<_>>(),
                     ),
                 ])]))
-                .header(sidebar_header(vec![any(text("Floating").size(14.0))]))
+                .header(sidebar_header(vec![text("Floating").size(14.0)]))
                 .side(SidebarSide::Right)
                 .variant(SidebarVariant::Floating)
                 .collapsible(SidebarCollapsible::Icon)
                 .rail(true),
-                sidebar_inset(vec![any(Padding(
+                sidebar_inset(vec![Padding(
                     EdgeInsets::all(16.0),
                     column()
                         .child(sidebar_trigger(
@@ -208,7 +207,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                             })
                             .variant(ButtonVariant::Outline),
                         ),
-                ))]),
+                )]),
                 mini_open,
                 |s: &mut AppState, next: bool| {
                     s.layout.mini_open = next;

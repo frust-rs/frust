@@ -210,8 +210,8 @@ fn app_bar_case() -> AnyView<()> {
                 app_bar("Inbox")
                     .leading(icon_button(glyph(icons::MENU), |_: &mut ()| {}))
                     .actions(vec![
-                        any(icon_button(glyph(icons::SEARCH), |_: &mut ()| {})),
-                        any(icon_button(glyph(icons::MORE_VERT), |_: &mut ()| {})),
+                        icon_button(glyph(icons::SEARCH), |_: &mut ()| {}),
+                        icon_button(glyph(icons::MORE_VERT), |_: &mut ()| {}),
                     ])
                     .density(AppBarDensity::Regular)
                     .safe_area(false),
@@ -220,9 +220,9 @@ fn app_bar_case() -> AnyView<()> {
             .child(bleed(
                 bottom_app_bar()
                     .actions(vec![
-                        any(icon_button(glyph(icons::MENU), |_: &mut ()| {})),
-                        any(icon_button(glyph(icons::SEARCH), |_: &mut ()| {})),
-                        any(icon_button(glyph(icons::EDIT), |_: &mut ()| {})),
+                        icon_button(glyph(icons::MENU), |_: &mut ()| {}),
+                        icon_button(glyph(icons::SEARCH), |_: &mut ()| {}),
+                        icon_button(glyph(icons::EDIT), |_: &mut ()| {}),
                     ])
                     .fab(fab(glyph(icons::ADD), |_: &mut ()| {}).size(FabSize::Small)),
             ))
