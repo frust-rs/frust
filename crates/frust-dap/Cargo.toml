@@ -17,9 +17,9 @@ name = "frust_dap"
 path = "src/lib.rs"
 
 [dependencies]
-frust-drive = { path = "../frust-drive", version = "0.5.2" }
+frust-drive = { path = "../frust-drive", version = "0.6.0" }
 # SessionBackend for same-world session supervision.
-frust-mcp = { path = "../frust-mcp", version = "0.5.2" }
+frust-mcp = { path = "../frust-mcp", version = "0.6.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
@@ -37,4 +37,4 @@ tokio = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
-frust-drive = { path = "../frust-drive", version = "0.5.2", features = ["test-util"] }
+frust-drive = { path = "../frust-drive", version = "0.6.0", features = ["test-util"] }

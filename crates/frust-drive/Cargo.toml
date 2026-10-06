@@ -17,7 +17,7 @@ test-util = []
 
 [dependencies]
 # Devtools wire-protocol leaf (tooling-isolation charter, docs/ARCHITECTURE.md).
-frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.2" }
+frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.6.0" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

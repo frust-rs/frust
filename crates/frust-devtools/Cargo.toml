@@ -13,7 +13,7 @@ readme = "README.md"
 
 [dependencies]
 # Wire contract only (tooling-isolation rule, docs/ARCHITECTURE.md).
-frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.2" }
+frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.6.0" }
 # Features: rt (internal runtime), net (TCP), io-util (NDJSON), sync, time, macros.
 # NOT: rt-multi-thread, fs, process, signal.
 tokio = { workspace = true, features = [

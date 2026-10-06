@@ -17,12 +17,12 @@ exclude = ["gate"]
 thiserror = { workspace = true }
 # Android JNI substrate; the only `frust-*` dependency a platform plugin may have (see
 # docs/CODE_STANDARDS.md Plugin Conventions). Unconditional: inert off Android.
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.0" }
 
 # Loopback opens the system browser via `frust-url-launcher`: a plugin-to-plugin edge,
 # allowed because it is a platform plugin, not a framework crate. Android/iOS never link it.
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
-frust-url-launcher = { path = "../url-launcher", version = "0.5.2" }
+frust-url-launcher = { path = "../url-launcher", version = "0.6.0" }
 
 # Depends on `jni` directly for the backend's own JNI exports, like the other Android plugins.
 [target.'cfg(target_os = "android")'.dependencies]

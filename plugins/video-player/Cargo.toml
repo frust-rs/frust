@@ -25,12 +25,12 @@ log = { workspace = true }
 
 # Android JNI substrate; the only `frust-*` dependency a platform plugin may have (see
 # docs/CODE_STANDARDS.md Plugin Conventions).
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.0" }
 
 # Literal `path`, not `workspace = true`: the root `frust` entry sets no `default-features`, so a
 # member cannot override it (same note in plugins/i18n/Cargo.toml).
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.2", default-features = false, optional = true }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.0", default-features = false, optional = true }
 
 # Direct `jni` for the plugin's own exports and Rust->Kotlin player calls.
 [target.'cfg(target_os = "android")'.dependencies]

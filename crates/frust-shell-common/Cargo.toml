@@ -34,8 +34,8 @@ kurbo = { workspace = true }
 log = { workspace = true }
 # Optional, `devtools`-only. Path deps like `frust-drive`'s protocol edge; `frust-devtools` depends on no framework crate,
 # so there is no layering cycle.
-frust-devtools = { path = "../frust-devtools", version = "0.5.2", optional = true }
-frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.2", optional = true }
+frust-devtools = { path = "../frust-devtools", version = "0.6.0", optional = true }
+frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.6.0", optional = true }
 
 # DEV-ONLY (the shipped crate stays reactive-free, docs/ARCHITECTURE.md Layer Dependencies). `reactive_graph` drives the
 # root-owner test; `frust-reactive` drives the tracked-rebuild test of the `rt.with_owner(|| scope.track(|| app.rebuild()))`

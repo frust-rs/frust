@@ -5,7 +5,7 @@
 
 [package]
 name = "clean-signals-frust"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/frust-rs/frust"
@@ -21,7 +21,7 @@ description = "Frust integration for clean-signals: component-scoped controllers
 # resolves (docs/DEVELOPMENT.md § Version-Pin Policy). Never enable `effects`.
 clean-signals = "0.1"
 # Facade package is `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.2" }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.0" }
 
 # Headless tests drive `RenderRoot` directly. kurbo/peniko are pinned to Frust's
 # rendering-stack versions so geometry/color types unify.
