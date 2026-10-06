@@ -119,22 +119,27 @@ pub use frust_core::view::{AnyView, View, any};
 // `BackPolicy::DismissAnimated` + dismiss-signal example — an app-authored
 // modal staging its own exit on Android back instead of vanishing.
 pub use frust_widgets::{
-    Align, AlignView, Alignment, AlwaysScrollable, AnimateTo, Axis, BackPolicy, BorderStyle,
+    AUTO_SCROLL_EDGE_PX, AUTO_SCROLL_MAX_PX_PER_S, Align, AlignView, Alignment, AlwaysScrollable,
+    AnimateTo, AutoScroll, AutoScrollZone, AutoScrollZoneWidget, Axis, BackPolicy, BorderStyle,
     Bouncing, Button, ButtonStyle, ButtonView, Checkbox, CheckboxView, ChildKey, Clamping, Column,
-    ContainerView, ContainerWidget, CrossAxisAlignment, DecelerationRate, DividerView,
-    DividerWidget, EdgeInsets, FlexChild, FlexView, GestureDetector, GestureDetectorView, HeroView,
+    ContainerView, ContainerWidget, CrossAxisAlignment, DRAG_THRESHOLD, DecelerationRate,
+    DividerView, DividerWidget, DragCoordinator, DragHighlight, DragKind, DragPhase, DragPolicy,
+    DragSession, DragSourceId, DragState, DragStateChange, DragSubscription, DragTargetId,
+    DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, EdgeInsets, FlexChild,
+    FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, HIGHLIGHT_FALLBACK, HeroView,
     Icon, IconButton, IconButtonView, IconData, IconSource, IconView, IconWidget, Image,
     ImageError, ImageFit, ImageSource, ImageView, ListView, ListViewWidget, MAX_FLING_VELOCITY,
     MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView,
     NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide,
     OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult,
-    PushOptions, Radio, RadioView, RadioWidget, ResultCallback, Row, RubberBand, SafeAreaView,
-    ScaffoldView, ScrollController, ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollSubscription,
-    ScrollView, Simulation, SizedBox, SizedBoxView, Slider, SliderView, SpringDescription, Stack,
-    StackView, TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec,
-    TransitionState, VisibilityCallback, button, checkbox, colored_box, container, divider,
+    PushOptions, Radio, RadioView, RadioWidget, ReorderableListView, ResultCallback, Row,
+    RubberBand, SafeAreaView, ScaffoldView, ScrollController, ScrollInfo, ScrollMetrics,
+    ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox, SizedBoxView, Slider,
+    SliderView, SourceFeedback, SpringDescription, Stack, StackView, TextInput, TextInputView,
+    TextView, Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback,
+    auto_scroll_zone, button, checkbox, colored_box, container, divider, drag_target, draggable,
     flexible, hero, icon, icon_button, inflexible, keyed, list_view, overlay_portal, radio,
-    safe_area, scaffold, scroll_view, slider, text, text_input,
+    reorderable_list, safe_area, scaffold, scroll_view, slider, text, text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -486,6 +491,21 @@ pub use frust_widgets::{
 /// assert!(matches!(driver, TransitionDriver::Auto(_)));
 /// ```
 pub use frust_widgets::nav::transition::{TransitionDriver, make_driver, resolve_spec};
+
+/// The `drag` module: drop targets, draggable sources, auto-scroll zones,
+/// and reorderable lists, all coordinated through a single ambient
+/// [`DragCoordinator`]. Re-exported **wholesale**
+/// (`pub use frust_widgets::drag;`), mirroring `frust_widgets::icons`'s and
+/// `motion`'s existing wholesale-module precedent, so later types under
+/// `frust_widgets::drag` ride along under `frust::drag::*` with no further
+/// facade edits.
+///
+/// ```
+/// use frust::drag::{DragCoordinator, draggable, drag_target, auto_scroll_zone};
+///
+/// let _coordinator = DragCoordinator::new();
+/// ```
+pub use frust_widgets::drag;
 
 /// The `motion` module: declarative
 /// implicit-animation wrappers (`AnimatedOpacity`/`AnimatedScale` today;
@@ -3002,5 +3022,44 @@ mod selection_toolbar_bootstrap {
             Arc::ptr_eq(&after, &marker),
             "a prior explicit set_selection_toolbar_builder must survive the bootstrap install"
         );
+    }
+}
+
+/// Facade-level check that the drag-and-drop vocabulary
+/// ([`DragCoordinator`], [`draggable`], [`drag_target`], [`auto_scroll_zone`],
+/// [`reorderable_list`], [`AutoScroll`], [`DragPolicy`],
+/// [`DragHighlight`], [`SourceFeedback`]) resolves through the `frust` facade —
+/// both flat and via the `drag::` module path. File-drop types (from `frust_core::event`)
+/// are also reachable for event handling.
+#[cfg(test)]
+mod drag_reexport {
+    #[allow(unused_imports)]
+    use crate::{
+        DragCoordinator, DragKind, DragPolicy, SourceFeedback, auto_scroll_zone, drag_target,
+        draggable, reorderable_list,
+    };
+
+    // A build-time proof the types name-resolve through the facade, flat.
+    #[allow(dead_code)]
+    fn _uses_drag_types(
+        _coord: &DragCoordinator,
+        _kind: DragKind,
+        _feed: SourceFeedback,
+        _policy: DragPolicy,
+    ) {
+    }
+
+    #[test]
+    fn drag_types_resolve_through_facade() {
+        // Flat access to the coordinator handle.
+        let _coordinator = DragCoordinator::new();
+
+        // Module-path access via `frust::drag::*`.
+        let _: crate::drag::DragCoordinator = crate::drag::DragCoordinator::new();
+        let _: crate::drag::DragHighlight = crate::drag::DragHighlight::Hover;
+        let _: crate::drag::AutoScroll = crate::drag::AutoScroll::default();
+
+        // File drop types are reachable through frust_core::event.
+        let _: frust_core::event::FileDropPhase = frust_core::event::FileDropPhase::Hover;
     }
 }
