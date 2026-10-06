@@ -14,7 +14,10 @@
 use std::any::Any;
 
 use frust::authoring::WindowInsets;
-use frust::{AnyView, Brightness, Theme, WindowMetrics, any, component, provide_context};
+use frust::{
+    AnyView, Brightness, GetUntracked, Theme, Update, WindowMetrics, any, component,
+    provide_context,
+};
 use frust_core::FrameTime;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
 use frust_reactive::ReactiveRuntime;
@@ -474,12 +477,12 @@ fn graph_page_paints_nodes_edges_and_labels() {
 }
 
 /// At or past the shell's wide-nav breakpoint, `playground`'s home page shows
-/// its side rail's full twelve-destination column instead of the narrow
+/// its side rail's full thirteen-destination column instead of the narrow
 /// bottom nav bar's six-item (five primary + "More") bar — a `WindowMetrics`
 /// context is how an app publishes window shape (`pages::responsive`'s own
 /// convention), so providing one at a wide size before mounting is what flips
 /// the home page onto that path. Asserted by nav-destination TEXT RUN COUNT:
-/// twelve side-rail labels paint strictly more nav-destination text than the
+/// thirteen side-rail labels paint strictly more nav-destination text than the
 /// narrow bar's six.
 #[test]
 fn wide_width_shows_every_section_in_the_side_rail() {
@@ -555,5 +558,62 @@ fn scroll_page_jump_moves_the_controller_offset() {
         state.scroll_controller.offset() > 0.0,
         "jump_to(400.0) must move the controller's published offset, got {}",
         state.scroll_controller.offset(),
+    );
+}
+
+/// The "Drag" section's kanban board actually reads live state end to end,
+/// headless: mounts the page, moves a card between columns straight through
+/// [`PlaygroundState::kanban_columns`] (the same public field the board's own
+/// drop callback mutates), runs a frame to pick the change up, and asserts
+/// the move landed — proving the board attached to that field and the page
+/// re-paints after it changes, beyond the generic per-section paint sweep
+/// above. The reorder list and the file-drop zone are covered by that
+/// generic sweep only — see `pages::drag_drop`'s own module docs for why
+/// (the file-drop zone is "untestable headlessly beyond construction").
+#[test]
+fn drag_page_paints_and_kanban_columns_move_cards() {
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+    let drag_index = pages::section_index_for("drag").expect("drag is a known section");
+
+    let mut root: RenderRoot<PlaygroundState, AnyView<PlaygroundState>> = RenderRoot::new();
+    let mut state = PlaygroundState::new();
+    let mut logic = |s: &mut PlaygroundState| pages::current(drag_index, s);
+    let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
+    assert!(
+        scene.text_runs > 0,
+        "the Drag page must paint the kanban board, reorder list, and file-drop zone's text"
+    );
+    assert!(
+        scene.rounded > 0,
+        "the kanban cards and the file-drop zone must each paint a themed fill"
+    );
+
+    let before = state.kanban_columns.get_untracked();
+    assert!(
+        before[0].iter().any(|card| card.id == 0),
+        "card 0 starts in column 0"
+    );
+
+    // Move card 0 into column 2 — the same mutation the kanban target's own
+    // `on_drop` callback (`pages::drag_drop::move_card`) performs on a real
+    // drop.
+    state.kanban_columns.update(|columns| {
+        let card = columns[0].remove(0);
+        columns[2].push(card);
+    });
+    let (scene2, _outcome2) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 16);
+    assert!(
+        scene2.text_runs > 0,
+        "the Drag page must still paint text after the card moves"
+    );
+    let after = state.kanban_columns.get_untracked();
+    assert!(
+        !after[0].iter().any(|card| card.id == 0),
+        "card 0 must have left column 0"
+    );
+    assert!(
+        after[2].iter().any(|card| card.id == 0),
+        "card 0 must have landed in column 2"
     );
 }
