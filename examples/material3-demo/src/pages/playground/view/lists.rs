@@ -31,8 +31,8 @@
 use std::collections::BTreeSet;
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Stack, View, any, component, icon,
-    text,
+    AnyView, Column, Component, CrossAxisAlignment, SizedBox, View, any, column, component, icon,
+    stack, text,
 };
 use frust_material::{
     DismissDirection, ExpandMode, MaterialSpacing, MaterialTokens, OverlayAnchor, card_list_items,
@@ -151,7 +151,7 @@ fn body(state: &Knobs) -> AnyView<Knobs> {
         vec![snippet(state)],
         vec![controls(state)],
     );
-    any(Stack(vec![content, kind_menu_panel(state)]))
+    any(stack().child(content).child(kind_menu_panel(state)))
 }
 
 /// The preview for the selected [`ListKind`] — the reference's own `switch`.
@@ -261,12 +261,11 @@ fn expandable_preview(state: &Knobs) -> AnyView<Knobs> {
         second_header = second_header.leading(icon(icons::SYSTEM_UPDATE));
     }
 
-    let first_body = Column(vec![
-        any(text(EXPANDED_BODY).style(body_style.clone())),
-        any(SizedBox::<Knobs>(None, Some(MaterialSpacing::SM))),
-        any(tonal_button("Action", |_: &mut Knobs| {})),
-    ])
-    .cross_axis(CrossAxisAlignment::Start);
+    let first_body = column()
+        .child(text(EXPANDED_BODY).style(body_style.clone()))
+        .child(SizedBox::<Knobs>(None, Some(MaterialSpacing::SM)))
+        .child(tonal_button("Action", |_: &mut Knobs| {}))
+        .cross_axis(CrossAxisAlignment::Start);
 
     any(expandable_list(vec![
         expandable_item(first_header, first_body),

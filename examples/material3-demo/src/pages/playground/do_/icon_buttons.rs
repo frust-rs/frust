@@ -21,7 +21,7 @@
 //! panels mounted at this page's own outer [`Stack`]); `Shape` fits a plain
 //! [`play_enum_segmented`] since it is a 2-way choice.
 
-use frust::{AnyView, Component, Stack, View, any, component, icon};
+use frust::{AnyView, Component, View, any, component, icon, stack};
 use frust_material::{
     BadgeValue, IconButtonShape, IconButtonSize, IconButtonVariant, IconButtonWidth, OverlayAnchor,
     icon_button, icons,
@@ -148,8 +148,8 @@ fn width_label(width: IconButtonWidth) -> &'static str {
 /// The "Icon button" preview: always a toggle (a `selected_icon` is always
 /// supplied, mirroring the reference always passing `selectedIcon`).
 fn preview(state: &Knobs) -> AnyView<Knobs> {
-    let mut view = icon_button(any(icon(icons::FAVORITE)), |_: &mut Knobs| {})
-        .selected_icon(any(icon(icons::FAVORITE)))
+    let mut view = icon_button(icon(icons::FAVORITE), |_: &mut Knobs| {})
+        .selected_icon(icon(icons::FAVORITE))
         .variant(state.variant)
         .size(state.size)
         .shape(state.shape)
@@ -292,12 +292,11 @@ fn body(state: &Knobs) -> AnyView<Knobs> {
         vec![snippet(state)],
         vec![appearance_panel(state), state_panel(state)],
     );
-    any(Stack(vec![
-        content,
-        variant_menu_panel(state),
-        size_menu_panel(state),
-        width_menu_panel(state),
-    ]))
+    any(stack()
+        .child(content)
+        .child(variant_menu_panel(state))
+        .child(size_menu_panel(state))
+        .child(width_menu_panel(state)))
 }
 
 /// This page's knob component — see the [module docs](self).

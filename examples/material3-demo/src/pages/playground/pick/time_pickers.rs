@@ -76,8 +76,8 @@
 //! [`dialog_view`] performs — stands in for it in this file's tests.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Get, NavigatorController, PopResult, RwSignal,
-    Set, SizedBox, Stack, View, any, component, navigator, text,
+    AnyView, Component, CrossAxisAlignment, Get, NavigatorController, PopResult, RwSignal, Set,
+    SizedBox, View, any, column, component, navigator, stack, text,
 };
 
 use frust_material::{
@@ -211,12 +211,11 @@ fn dialog_preview(
         );
     });
 
-    any(Column(vec![
-        any(trigger),
-        any(SizedBox::<Knobs>(None, Some(12.0))),
-        any(text(format!("Time: {time_label}")).style(body_style)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+    any(column()
+        .child(trigger)
+        .child(SizedBox::<Knobs>(None, Some(12.0)))
+        .child(text(format!("Time: {time_label}")).style(body_style))
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 /// The paste-ready "Dial" snippet for the current knob state.
@@ -358,10 +357,11 @@ fn content(
             entry_mode_open,
         )],
     );
-    any(Stack(vec![
-        playground,
-        entry_mode_menu_panel(entry_mode_value, entry_mode_anchor, entry_mode_open),
-    ]))
+    any(stack().child(playground).child(entry_mode_menu_panel(
+        entry_mode_value,
+        entry_mode_anchor,
+        entry_mode_open,
+    )))
 }
 
 struct TimePickersPlayground;

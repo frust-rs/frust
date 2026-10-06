@@ -29,7 +29,7 @@
 //! [`play_enum_menu_field`]: crate::widgets::playground::play_enum_menu_field
 //! [`play_enum_menu_panel`]: crate::widgets::playground::play_enum_menu_panel
 
-use frust::{AnyView, Column, Component, Stack, View, any, component};
+use frust::{AnyView, Column, Component, View, any, component, stack};
 use frust_material::{OverlayAnchor, list_item, overlay_anchor, search_bar, search_view};
 
 use crate::AppState;
@@ -185,7 +185,7 @@ fn body(state: &mut Knobs) -> AnyView<Knobs> {
 
     let content = playground_body(vec![preview_view], vec![snippet], vec![controls]);
     if state.use_anchor {
-        any(Stack(vec![content, docked_panel(state)]))
+        any(stack().child(content).child(docked_panel(state)))
     } else {
         content
     }

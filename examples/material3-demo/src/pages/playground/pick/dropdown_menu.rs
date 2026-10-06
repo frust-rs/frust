@@ -23,7 +23,7 @@
 //! faked.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Stack, View, any, component, text,
+    AnyView, Column, Component, CrossAxisAlignment, SizedBox, View, any, component, stack, text,
 };
 use frust_material::{
     DropdownItem, OverlayAnchor, OverlaySide, dropdown, dropdown_field, dropdown_item,
@@ -296,11 +296,10 @@ fn body(state: &Knobs) -> AnyView<Knobs> {
         vec![snippet(state)],
         vec![controls_panel(state)],
     );
-    any(Stack(vec![
-        content,
-        preview_panel(state),
-        expand_menu_panel(state),
-    ]))
+    any(stack()
+        .child(content)
+        .child(preview_panel(state))
+        .child(expand_menu_panel(state)))
 }
 
 /// This page's knob component — see the [module docs](self).

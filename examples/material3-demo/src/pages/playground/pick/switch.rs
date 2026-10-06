@@ -9,8 +9,8 @@
 //! straight through it.
 
 use frust::{
-    AnyView, Component, CrossAxisAlignment, Get, Row, RwSignal, Set, SizedBox, View, any,
-    component, text,
+    AnyView, Component, CrossAxisAlignment, Get, RwSignal, Set, SizedBox, View, any, component,
+    row, text,
 };
 
 use frust_material::{icons, switch};
@@ -134,12 +134,11 @@ fn preview_row(
             .unselected_icon(icons::CLOSE);
     }
 
-    any(Row(vec![
-        any(control),
-        any(SizedBox::<SwitchPlaygroundState>(Some(16.0), None)),
-        any(text(if value { "On" } else { "Off" }).style(body)),
-    ])
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(control)
+        .child(SizedBox::<SwitchPlaygroundState>(Some(16.0), None))
+        .child(text(if value { "On" } else { "Off" }).style(body))
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// The paste-ready Frust equivalent of the current preview state.

@@ -20,8 +20,8 @@ use frust::authoring::{
     PaintScene, Shape as PathShape, Size, Vec2, View, Widget,
 };
 use frust::{
-    Align, Alignment, AnyView, Column, CrossAxisAlignment, Row, SizedBox, Stack, Theme, any, icon,
-    text,
+    Align, Alignment, AnyView, Column, CrossAxisAlignment, Row, SizedBox, Theme, any, column, icon,
+    stack, text,
 };
 use frust_material::icons;
 use frust_material::shapes::ShapeKind;
@@ -101,20 +101,21 @@ fn catalog_tile(theme: &Theme, kind: ShapeKind) -> AnyView<AppState> {
     let scheme = theme.scheme();
     let mut label_style = theme.type_scale.label_small.clone();
     label_style.color = scheme.on_surface_variant;
-    any(Column(vec![
-        any(shape_tile(
+    any(column()
+        .child(shape_tile(
             kind,
             CATALOG_TILE_SIZE,
             scheme.primary_container,
-        )),
-        any(SizedBox::<AppState>(None, Some(6.0))),
-        any(SizedBox::<AppState>(Some(CATALOG_TILE_SIZE), None).child(
-            text(shape_label(kind))
-                .style(label_style)
-                .align(TextAlign::Center),
-        )),
-    ])
-    .cross_axis(CrossAxisAlignment::Center))
+        ))
+        .child(SizedBox::<AppState>(None, Some(6.0)))
+        .child(
+            SizedBox::<AppState>(Some(CATALOG_TILE_SIZE), None).child(
+                text(shape_label(kind))
+                    .style(label_style)
+                    .align(TextAlign::Center),
+            ),
+        )
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// A shape's catalog label — the reference's own `kind.name` (its enum's
@@ -130,18 +131,18 @@ fn shape_label(kind: ShapeKind) -> String {
 /// for why this overlays rather than clips.
 fn clipped_child_preview(theme: &Theme) -> AnyView<AppState> {
     let scheme = theme.scheme();
-    let tile =
-        SizedBox::<AppState>(Some(CLIPPED_TILE_SIZE), Some(CLIPPED_TILE_SIZE)).child(Stack(vec![
-            any(shape_tile(
+    let tile = SizedBox::<AppState>(Some(CLIPPED_TILE_SIZE), Some(CLIPPED_TILE_SIZE)).child(
+        stack()
+            .child(shape_tile(
                 ShapeKind::Cookie4Sided,
                 CLIPPED_TILE_SIZE,
                 scheme.tertiary_container,
-            )),
-            any(Align(
+            ))
+            .child(Align(
                 Alignment::CENTER,
                 icon(icons::FAVORITE).color(scheme.on_tertiary_container),
             )),
-        ]));
+    );
     any(play_preview_card("Clipped child", tile))
 }
 

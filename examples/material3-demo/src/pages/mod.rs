@@ -37,7 +37,7 @@ pub fn brightness_action(brightness: Brightness) -> AnyView<AppState> {
         Brightness::Dark => icons::LIGHT_MODE,
         Brightness::Light => icons::DARK_MODE,
     };
-    any(icon_button(any(icon(glyph)), move |state: &mut AppState| {
+    any(icon_button(icon(glyph), move |state: &mut AppState| {
         state.settings.toggle_brightness(brightness)
     })
     .semantic_label("Toggle theme"))

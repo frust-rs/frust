@@ -17,8 +17,8 @@
 //! omitted here rather than faking a functional-only no-op.
 
 use frust::{
-    AnyView, Component, CrossAxisAlignment, Get, Row, RwSignal, Set, SizedBox, View, any,
-    component, text,
+    AnyView, Component, CrossAxisAlignment, Get, RwSignal, Set, SizedBox, View, any, component,
+    row, text,
 };
 use frust_material::{checkbox, tristate_checkbox};
 
@@ -130,12 +130,11 @@ fn preview_row(
         .error(error))
     };
 
-    any(Row(vec![
-        control,
-        any(SizedBox::<CheckboxPlaygroundState>(Some(12.0), None)),
-        any(text(label).style(body)),
-    ])
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(control)
+        .child(SizedBox::<CheckboxPlaygroundState>(Some(12.0), None))
+        .child(text(label).style(body))
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// The paste-ready Frust equivalent of the current preview state.

@@ -141,7 +141,7 @@ fn fab_view(state: &ToolbarState) -> AnyView<ToolbarState> {
     } else {
         (icons::ADD, "Expand")
     };
-    any(fab(any(icon(source)), |s: &mut ToolbarState| {
+    any(fab(icon(source), |s: &mut ToolbarState| {
         s.expanded = !s.expanded;
     })
     .size(FabSize::Medium)

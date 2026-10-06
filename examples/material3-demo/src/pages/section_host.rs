@@ -12,8 +12,8 @@
 //! window.
 
 use frust::{
-    AnyView, Axis, CrossAxisAlignment, FlexView, Get, RwSignal, SizedBox, Theme, WindowMetrics,
-    any, flexible, inflexible, use_context,
+    AnyView, CrossAxisAlignment, Get, RwSignal, SizedBox, Theme, WindowMetrics, any, row,
+    use_context,
 };
 use frust_material::divider;
 
@@ -73,17 +73,11 @@ pub fn section_host(section: DemoSection, selection: SectionSelection) -> AnyVie
         None => any(SizedBox::<AppState>(None, None)),
     };
 
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(SizedBox::<AppState>(Some(LIST_PANE_WIDTH), None).child(list)),
-            inflexible(any(divider()
-                .vertical()
-                .color(theme.scheme().outline_variant))),
-            flexible(1, detail),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch))
+    any(row()
+        .child(SizedBox::<AppState>(Some(LIST_PANE_WIDTH), None).child(list))
+        .child(divider().vertical().color(theme.scheme().outline_variant))
+        .flex(1, detail)
+        .cross_axis(CrossAxisAlignment::Stretch))
 }
 
 /// The entry the split layout shows: the selected one, else the section's
