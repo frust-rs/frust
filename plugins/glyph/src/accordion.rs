@@ -920,17 +920,22 @@ mod tests {
         }
 
         fn view(s: &mut S) -> AnyView<S> {
-            any(frust::Column(vec![
-                any(accordion("A", body_s())
-                    .open(s.open[0])
-                    .on_toggle(|s: &mut S| s.open[0] = !s.open[0])),
-                any(accordion("B", body_s())
-                    .open(s.open[1])
-                    .on_toggle(|s: &mut S| s.open[1] = !s.open[1])),
-                any(accordion("C", body_s())
-                    .open(s.open[2])
-                    .on_toggle(|s: &mut S| s.open[2] = !s.open[2])),
-            ]))
+            any(frust::column()
+                .child(
+                    accordion("A", body_s())
+                        .open(s.open[0])
+                        .on_toggle(|s: &mut S| s.open[0] = !s.open[0]),
+                )
+                .child(
+                    accordion("B", body_s())
+                        .open(s.open[1])
+                        .on_toggle(|s: &mut S| s.open[1] = !s.open[1]),
+                )
+                .child(
+                    accordion("C", body_s())
+                        .open(s.open[2])
+                        .on_toggle(|s: &mut S| s.open[2] = !s.open[2]),
+                ))
         }
 
         let mut state = S::default();

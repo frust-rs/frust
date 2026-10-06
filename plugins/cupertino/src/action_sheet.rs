@@ -581,7 +581,7 @@ mod tests {
     use super::*;
     use frust::FrameTime;
     use frust::NavigatorView;
-    use frust::authoring::{KeyEvent, Modifiers, PointerButton, PointerEvent, any};
+    use frust::authoring::{KeyEvent, Modifiers, PointerButton, PointerEvent};
     use frust_core::RenderRoot;
     use frust_widgets::navigator;
     use std::any::Any;
@@ -816,7 +816,7 @@ mod tests {
 
         fn app(&self) -> impl FnMut(&mut SheetState) -> NavigatorView<SheetState> + use<> {
             let ctrl = self.controller.clone();
-            move |_: &mut SheetState| navigator(&ctrl, || any(frust::text("base").size(17.0)))
+            move |_: &mut SheetState| navigator(&ctrl, || frust::text("base").size(17.0))
         }
 
         fn rebuild_layout(&mut self) {
