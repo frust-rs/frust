@@ -11,7 +11,7 @@
 //! mark, the "playground" title, and the brightness/reduce-motion/animations
 //! toggles folded into its trailing actions — over a
 //! [`pattern_switcher`](frust::motion::switcher::pattern_switcher) hosting one
-//! of twelve section pages in a [`scroll_view`], the whole column inside one
+//! of thirteen section pages in a [`scroll_view`], the whole column inside one
 //! [`safe_area`] and under a toast overlay), and the [`frust::app!`] entry
 //! binding all three platforms. The section pages themselves live in
 //! [`pages`] — each a `page(&PlaygroundState) -> AnyView<PlaygroundState>`
@@ -19,7 +19,7 @@
 //!
 //! # Responsive navigation
 //!
-//! [`pages::SECTION_LABELS`] carries twelve destinations now — too many for a
+//! [`pages::SECTION_LABELS`] carries thirteen destinations now — too many for a
 //! single bottom nav bar to divide evenly without its labels wrapping (see
 //! that constant's own doc). [`home_page`] picks between two shapes, the same
 //! `use_context::<WindowMetrics>()` / named-breakpoint idiom
@@ -39,11 +39,11 @@
 //!
 //! [`bottom_nav_bar`] still rides the existing
 //! [`navigation_bar`](frust_material::navigation_bar)/[`nav_item`](frust_material::nav_item)
-//! chrome (neither needs an icon, so growing to 12 labels costs nothing
+//! chrome (neither needs an icon, so growing to 13 labels costs nothing
 //! there); [`side_rail`] and [`more_overlay`] are hand-rolled from baseline
 //! [`button`]s instead of `frust_material::navigation_rail`/
 //! `navigation_drawer` — those destinations carry a *mandatory* icon per
-//! entry, and playground names no icon set for its twelve sections (the
+//! entry, and playground names no icon set for its thirteen sections (the
 //! module docs' design-neutral charter: "Nothing in this app demonstrates a
 //! design language"). [`pages::SECTION_LABELS`] stays the single source of
 //! truth every shape reads from.
@@ -96,11 +96,11 @@ use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
 use frust::{
     Align, Alignment, AnyView, Axis, Brightness, ButtonStyle, Color, Component, DeepLink,
-    EdgeInsets, FlexView, Get, GetUntracked, MotionScheme, NavigatorController, Padding,
-    PageTransition, PanZoomController, PanZoomTransform, RwSignal, ScrollController, ScrollInfo,
-    ScrollSubscription, Set, SizedBox, Stack, Theme, TransitionSpec, Update, View, WindowMetrics,
-    any, button, container, deep_links, flexible, icon, icons, inflexible, navigator, safe_area,
-    scroll_view, set_app_theme, text, use_context,
+    DragCoordinator, EdgeInsets, FlexView, Get, GetUntracked, MotionScheme, NavigatorController,
+    Padding, PageTransition, PanZoomController, PanZoomTransform, RwSignal, ScrollController,
+    ScrollInfo, ScrollSubscription, Set, SizedBox, Stack, Theme, TransitionSpec, Update, View,
+    WindowMetrics, any, button, container, deep_links, flexible, icon, icons, inflexible,
+    navigator, safe_area, scroll_view, set_app_theme, text, use_context,
 };
 use frust_material::{app_bar, nav_item, navigation_bar};
 
@@ -387,6 +387,28 @@ pub struct PlaygroundState {
     /// lets every clone of the state share the one subscription without
     /// requiring it to be.
     pub scroll_subscription: Rc<ScrollSubscription>,
+    /// The "Drag" section's shared [`DragCoordinator`], ambient over all
+    /// three of that section's demos (kanban board, reorderable list,
+    /// desktop file drop) — type-gating on each target's own payload keeps
+    /// the three sessions from ever being offered to each other (see
+    /// `pages::drag_drop`'s module docs). Lives here, not behind that page's
+    /// own `local_sig!` signals, for the same clone-shares-one-handle reason
+    /// [`PlaygroundState::scroll_controller`] does.
+    pub drag_coordinator: DragCoordinator,
+    /// The "Drag" section's kanban board: three columns of cards, in column
+    /// order (`0` = Todo, `1` = Doing, `2` = Done — see
+    /// `pages::drag_drop`'s own `COLUMN_LABELS`). Lives here rather than a
+    /// page-local signal because a drop actually *moves* a card between
+    /// containers; everything else that page needs (the reorder order, the
+    /// dropped-file list) is read-mostly and stays page-local.
+    pub kanban_columns: RwSignal<Vec<Vec<pages::drag_drop::KanbanCard>>>,
+    /// One [`ScrollController`] per kanban column (index-aligned with
+    /// [`PlaygroundState::kanban_columns`]), each attached to that column's
+    /// own scroll surface and driven by its [`frust::auto_scroll_zone`] —
+    /// the same clone-shares-one-handle shape
+    /// [`PlaygroundState::scroll_controller`] uses, just three of them
+    /// instead of one.
+    pub kanban_scroll_controllers: Vec<ScrollController>,
 }
 
 impl PlaygroundState {
@@ -415,6 +437,13 @@ impl PlaygroundState {
             scroll_controller,
             scroll_readout,
             scroll_subscription,
+            drag_coordinator: DragCoordinator::new(),
+            kanban_columns: RwSignal::new(pages::drag_drop::initial_kanban_columns()),
+            kanban_scroll_controllers: vec![
+                ScrollController::new(),
+                ScrollController::new(),
+                ScrollController::new(),
+            ],
         }
     }
 }

@@ -3210,6 +3210,116 @@ floated-surface owner per field and a magnifier able to sample the painted scene
 
 ---
 
+### `drag-ghost-pod-no-semantics` — a drag ghost publishes no accessibility node and is invisible to `inspect()`
+
+**Observed**: `frust_widgets::drag::draggable()` floats its ghost through the overlay portal
+(`OverlayAnchor::Window`, band `Tooltip`, input `Transparent`), which is v1's floated-pod scope
+exactly: no semantics are published for a registered pod and it is not reached by
+`RenderRoot::inspect()`/`WidgetTree::inspect()` unless its owner visits it (see
+`overlay-portal-v1-scope`'s item 4 above). The drag's actual semantics live on the in-tree
+`Draggable`/`DragTarget` nodes instead — a `Role::Button` source labelled `"Draggable"` idle,
+`"Dragging"` while a pointer session is live and `"Drop"` while its own keyboard session is, a
+`Role::Group` target labelled `"accepts drop"`/`"drop target"` — so an assistive-technology user
+never reaches the ghost itself, only the source and target it moves between. The richer per-verb
+surface those nodes would ideally advertise (`accesskit::Action::CustomAction` for
+`lift`/`drop`/`cancel` individually) is not wired to anything either: `frust-core`'s
+`perform_accessibility_action` matches only `Action::Click`/`Action::Focus` and drops a custom
+action's id (the same gap `selection-verbs-advertised-not-invocable` records for `TextInput`).
+Both nodes' `Click` are genuine drop verbs, not mere activations: the target's own primary `Up`
+handler drops a live, accepting *keyboard* session (a pointer session's `Up` belongs to the
+source that captured it and passes through every ancestor target untouched), and the source
+answers a primary `Down` while it drags its own keyboard session exactly the way Enter/Space
+would — drop onto whatever is hovered, cancel when nothing is — whether that `Down` is a real
+press or the synthesized half of
+`perform_accessibility_action`'s `Down`+`Up` pair; no synthetic-origin marker is needed for either
+reading, since a real press on the lifted item is just as honest a "put it down". Idle, the same
+`Click` reaches the source as a plain tap instead, same as any other control. The keyboard chord
+(Enter/Space to lift and drop, the arrows to cycle, Escape to cancel) remains the primary
+assistive-technology path through the whole walk; `Click` on the source now reuses its drop/cancel
+half rather than only ever cancelling.
+
+**Applies to**: every `frust_widgets::drag::draggable()`/`drag_target()` consumer, including
+`reorderable_list()` (built on both) — every platform, since the gap is in the shared overlay and
+accessibility-action seams, not a per-shell one.
+
+**Why accepted**: the ghost is a visual affordance only; the session's real state already has an
+accessible home on the source/target nodes, so publishing a second, floated accessibility node for
+the ghost would be a duplicate read rather than new information. Wiring a richer custom-action set
+needs the same framework-wide accessibility-action seam change `selection-verbs-advertised-not-
+invocable` is waiting on, not a drag-specific fix.
+
+**Evidence**: `crates/frust-widgets/src/drag/draggable.rs`'s "Semantics" and "Ghost and source
+feedback" module-doc sections; `crates/frust-widgets/src/drag/target.rs`'s "Click-to-drop and
+semantics" section; `crates/frust-core/src/overlay.rs`'s per-pass registry contract (no semantics,
+no `inspect()` visibility for any registered pod).
+
+**Trigger for removal**: the same accessibility-action seam widening `selection-verbs-advertised-
+not-invocable` names, after which a custom `lift`/`drop`/`cancel` action could reach these nodes
+too.
+
+---
+
+### `drag-keyboard-cycle-visible-targets-only` — keyboard cycling only reaches a target visible in the latest paint pass
+
+**Observed**: `DragCoordinator::move_to_next_target`/`move_to_previous_target` — the
+`ArrowRight`/`ArrowDown`/`ArrowLeft`/`ArrowUp` half of `draggable()`'s keyboard chord — cycle
+through the registry a `drag_target()` populates with its own bounds each paint, so a target a
+`ListView`/`ScrollView` has scrolled out of view that frame is simply absent from the cycle; no
+step scrolls an off-screen target into view to make it reachable. A keyboard user can therefore
+move a lifted item only between whichever targets of a list taller than its viewport are
+currently on screen.
+
+**Applies to**: every `frust_widgets::drag::draggable()`/`drag_target()` consumer whose targets
+sit inside a scrollable container taller than its viewport — `reorderable_list()` included.
+
+**Why accepted**: resolving a keyboard-cycled hover is already gated on visibility to avoid
+dropping onto a target whose bounds are stale or hidden; widening that to scroll a hidden target
+into view is a separate, larger feature (an auto-scroll driven by the keyboard cycle rather than
+the pointer) that this round does not add.
+
+**Evidence**: `crates/frust-widgets/src/drag/draggable.rs`'s "Lift, cycle, drop" module-doc
+section; `crates/frust-widgets/src/drag/coordinator.rs`'s target registry, rebuilt from visible
+bounds each paint.
+
+**Trigger for removal**: a scroll-into-view hook on keyboard cycling, so a step that would land on
+a registered-but-off-screen target scrolls it into view first.
+
+---
+
+### `file-drop-desktop-only` — mobile and web shells publish no OS file-drop signal, and an unregistered region never opens a session
+
+**Observed**: `InputEvent::FileDrop` is published only by `frust-shell-desktop`, which maps
+winit's `HoveredFile`/`DroppedFile`/`HoveredFileCancelled` window events onto it (see
+SHELLS_ARCHITECTURE.md); Android, iOS and web surface no equivalent OS signal, so
+`frust_widgets::drag::drag_target::<Vec<PathBuf>>` never engages on those hosts. On desktop, a file
+drag hovering a window region with no `DragTargetWidget` anywhere in its hit-test path never opens
+(or updates) an `ExternalFiles` session, since nothing calls `handle_file_drop` for it; a session
+already open over one target keeps that target's last resolved hover while the drag crosses such a
+region. The drag still always ends: a `Drop` or `Cancel` that reaches no target is followed by the
+root's `FileDropPhase::Ended` broadcast, which ends the session (a `Drop` there cancels — nothing
+accepts it), so in-app drags are never left blocked behind a finished OS drag. Every `Hover`, `Drop`
+and `Cancel` is resolved at the shell's last in-window cursor position, never a position winit's
+file events carry (they have none) — and on a platform that sends no `CursorMoved` during an OS drag
+that is wherever the cursor was last seen in the window before the drag, not the point the files
+were released over.
+
+**Applies to**: every `frust_widgets::drag::drag_target()` typed over `Vec<PathBuf>`, on every
+platform for the mobile/web gap, and on desktop for the unregistered-region gap.
+
+**Why accepted**: mobile and web is a platform-signal gap, not a framework omission — neither OS
+embedding surfaces a drag-and-drop event to this framework today. The unregistered-region gap is
+the coordinator's own registry-not-hit-test design working as specified: resolution reads the
+registry a target reports at paint, and a region with nothing registered has nothing to resolve
+against.
+
+**Evidence**: `crates/frust-core/src/event.rs`'s `FileDropEvent` "Source" and "Broadcast follow-up"
+doc sections; `crates/frust-widgets/src/drag/target.rs`'s "OS file drops" module-doc section ("The
+drag always ends", "Known limit"); `crates/frust-shell-desktop/src/app_handler.rs`'s
+`FileDropAccumulator`, `FileHoverLatch` and the
+`WindowEvent::HoveredFile`/`DroppedFile`/`HoveredFileCancelled` arms.
+
+---
+
 ### `selection-toolbar-labels-english-v1` — the baseline toolbar's four labels are English, always
 
 **Observed**: the framework-drawn toolbar reads its labels from one fixed table — "Cut", "Copy",

@@ -37,6 +37,7 @@
 //! — safe to construct in a headless/no-AT-client CI environment.
 
 use std::any::Any;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, OnceLock};
@@ -51,9 +52,9 @@ use frust_core::RenderRoot;
 use frust_core::SemanticsUpdate;
 use frust_core::accesskit::{Tree, TreeId, TreeUpdate};
 use frust_core::event::{
-    CursorIcon, EditCommand, EventOutcome, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent,
-    Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase, ScaleEvent, ScalePhase,
-    ScrollDelta,
+    CursorIcon, EditCommand, EventOutcome, FileDropEvent, FileDropPhase, ImeContentType, ImeEvent,
+    InputEvent, Key, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, PointerPhase,
+    ScaleEvent, ScalePhase, ScrollDelta,
 };
 use frust_core::input::WHEEL_LINE_PX;
 use frust_core::insets::WindowInsets;
@@ -946,6 +947,8 @@ where
         scene: Scene::new(),
         platform_views: DesktopPlatformViews::new(),
         cursor: Point::ZERO,
+        file_hover: FileHoverLatch::default(),
+        pending_dropped_files: FileDropAccumulator::default(),
         modifiers: Modifiers::default(),
         secondary_down_delivered: false,
         compose: ComposeLatch::default(),
@@ -1635,6 +1638,112 @@ fn cursor_change_to_apply(last: CursorIcon, current: CursorIcon) -> Option<Winit
     (last != current).then(|| winit_cursor_for(current))
 }
 
+/// Coalesces winit's per-file drag-and-drop stream into the batched
+/// [`FileDropEvent`] the framework model expects.
+///
+/// # Coalescing heuristic
+///
+/// winit reports a file drag three ways, none of which batch on their own:
+/// `HoveredFile(path)` once per file as the drag enters (or continues to
+/// hover) the window, `DroppedFile(path)` once per file when it releases, and
+/// `HoveredFileCancelled` with no path at all. `HoveredFile`/
+/// `HoveredFileCancelled` need no accumulation — each maps straight to one
+/// `Hover`/`Cancel` dispatch, always with an empty `paths`
+/// ([`FileDropEvent::paths`]'s documented contract), since a single
+/// `HoveredFile` carries no "this is everything" signal either.
+///
+/// `DroppedFile` is the one that batches: every file in one drop arrives as
+/// its own `WindowEvent::DroppedFile`, back-to-back in the same event-loop
+/// pass with nothing else in between, so each call just [`push`](Self::push)es
+/// onto `pending`. The caller is responsible for flushing — calling
+/// [`take`](Self::take) — the moment it sees *any other* event: a sibling
+/// `WindowEvent` reached first (`ShellHandler::window_event`'s own entry, before
+/// its match), or the pass ending with none (`ShellHandler::about_to_wait`).
+/// Either flush point dispatches one `FileDropPhase::Drop` carrying every
+/// path collected since the last one.
+#[derive(Debug, Default)]
+struct FileDropAccumulator {
+    pending: Vec<PathBuf>,
+}
+
+impl FileDropAccumulator {
+    /// Record one more file from a `WindowEvent::DroppedFile`.
+    fn push(&mut self, path: PathBuf) {
+        self.pending.push(path);
+    }
+
+    /// Take the accumulated batch (and clear it), or `None` if nothing is
+    /// pending — the flush [`push`](Self::push)ed files are waiting for.
+    fn take(&mut self) -> Option<Vec<PathBuf>> {
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.pending))
+        }
+    }
+}
+
+/// Whether an OS file drag is hovering the window — the one bit of hover state
+/// the shell keeps, gating the first `Hover` dispatch (a drag's first
+/// `WindowEvent::HoveredFile`; later files of the same drag arrive as more of
+/// them) and the repeated `Hover` on every `CursorMoved` while it stands.
+///
+/// It is cleared by everything that ends a hover, and every one of those
+/// tells the tree: `DroppedFile` (whose batch dispatches `Drop`), and
+/// `HoveredFileCancelled`, `CursorLeft` and any real pointer button event,
+/// each of which dispatches `Cancel` if the latch was standing (see
+/// [`cancel_at`](Self::cancel_at)). The last two mean the OS drag is no
+/// longer over the window even though no `HoveredFileCancelled` said so: a
+/// latch left standing past them would keep turning ordinary cursor motion
+/// into `Hover` dispatches for a drag that is gone, and a hover that ended
+/// silently would leave the session its first `Hover` opened in the tree
+/// with nothing to end it — a `HoveredFileCancelled` arriving afterwards
+/// finds the latch down and dispatches nothing. Whichever of the three comes
+/// first sends the one `Cancel`; the rest find nothing to cancel.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct FileHoverLatch {
+    hovering: bool,
+}
+
+impl FileHoverLatch {
+    /// A `WindowEvent::HoveredFile` arrived: latch, and report whether this
+    /// is the drag's first (the one that dispatches `Hover`).
+    fn hovered_file(&mut self) -> bool {
+        !std::mem::replace(&mut self.hovering, true)
+    }
+
+    /// Whether a drag is hovering — a `CursorMoved` re-dispatches `Hover`
+    /// while this holds.
+    fn is_hovering(self) -> bool {
+        self.hovering
+    }
+
+    /// The hover ended without a drop: unlatch, and report whether a hover
+    /// stood (the only case that dispatches `Cancel`).
+    fn cancelled(&mut self) -> bool {
+        std::mem::take(&mut self.hovering)
+    }
+
+    /// The hover ended without a drop — `HoveredFileCancelled`,
+    /// `CursorLeft`, or a real pointer button event: unlatch, and return the
+    /// `Cancel` to dispatch at `position` (the last known cursor) if a hover
+    /// stood, or `None` if there is nothing to end (no drag entered, or an
+    /// earlier one of these already sent the `Cancel`).
+    fn cancel_at(&mut self, position: Point) -> Option<FileDropEvent> {
+        self.cancelled().then(|| FileDropEvent {
+            phase: FileDropPhase::Cancel,
+            position,
+            paths: Vec::new(),
+        })
+    }
+
+    /// `DroppedFile`: the hover ended in a drop, whose coalesced batch
+    /// dispatches `Drop` — unlatch without dispatching anything here.
+    fn clear(&mut self) {
+        self.hovering = false;
+    }
+}
+
 /// Cached view of what we last told winit about the platform IME, so
 /// [`ShellHandler::sync_ime`] only calls
 /// `set_ime_allowed`/`set_ime_cursor_area`/`set_ime_purpose` on an actual
@@ -1695,6 +1804,14 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// `CursorMoved`. `MouseInput` (button press/release) carries no position of
     /// its own, so it reuses this — mirroring how winit models the two events.
     cursor: Point,
+    /// Whether an OS file drag is currently hovering the window — see
+    /// [`FileHoverLatch`] for what sets and clears it. Holds no paths: a
+    /// dispatched hover always carries an empty list (see
+    /// [`FileDropEvent::paths`]'s contract).
+    file_hover: FileHoverLatch,
+    /// Accumulates `WindowEvent::DroppedFile` paths within one drop batch —
+    /// see [`FileDropAccumulator`]'s coalescing heuristic.
+    pending_dropped_files: FileDropAccumulator,
     /// Current modifier chord, updated by `ModifiersChanged` — which winit
     /// delivers *before* the `KeyboardInput` that uses it, so this is always
     /// current by the time a key event is mapped.
@@ -2571,6 +2688,24 @@ where
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // The other flush point for a coalesced file-drop batch (see
+        // `FileDropAccumulator`'s module docs and `window_event`'s own flush
+        // at its top): a `DroppedFile` run that was the last thing winit
+        // delivered this pass has no following event to flush it, so this
+        // catches it before the loop parks.
+        if let Some(paths) = self.pending_dropped_files.take()
+            && let Some(window) = self.window.clone()
+        {
+            self.dispatch(
+                &window,
+                InputEvent::FileDrop(FileDropEvent {
+                    phase: FileDropPhase::Drop,
+                    position: self.cursor,
+                    paths,
+                }),
+            );
+        }
+
         // Drain any UI-thread local tasks that became runnable while dispatching
         // this batch of events, before the loop parks on `Wait`. Cheap no-op
         // when the queue is empty; a task that writes a signal here re-dirties a
@@ -2615,6 +2750,24 @@ where
         // what the match below does with the same event.
         if let Some(adapter) = self.adapter.as_mut() {
             adapter.process_event(&window, &event);
+        }
+
+        // Flush a coalesced file-drop batch the moment any OTHER event
+        // reaches here — see `FileDropAccumulator`'s module docs for why
+        // `DroppedFile` itself must not trigger this (it is still being
+        // accumulated) and `about_to_wait` is the other flush point, for a
+        // batch that is the last thing winit delivers this pass.
+        if !matches!(event, WindowEvent::DroppedFile(_))
+            && let Some(paths) = self.pending_dropped_files.take()
+        {
+            self.dispatch(
+                &window,
+                InputEvent::FileDrop(FileDropEvent {
+                    phase: FileDropPhase::Drop,
+                    position: self.cursor,
+                    paths,
+                }),
+            );
         }
 
         match event {
@@ -2696,6 +2849,25 @@ where
                         button: PointerButton::Primary,
                     }),
                 );
+                // An OS file drag still moving over the window: winit does not
+                // consistently withhold `CursorMoved` while one is in flight
+                // (platform-dependent), so re-dispatch `Hover` at the new
+                // position whenever it does arrive, keeping the coordinator's
+                // resolution tracking the pointer rather than standing at
+                // wherever the drag first entered. Where it is withheld, every
+                // `Hover` and the eventual `Drop`/`Cancel` resolve at the last
+                // in-window cursor position the shell saw, not the release
+                // point.
+                if self.file_hover.is_hovering() {
+                    self.dispatch(
+                        &window,
+                        InputEvent::FileDrop(FileDropEvent {
+                            phase: FileDropPhase::Hover,
+                            position: self.cursor,
+                            paths: Vec::new(),
+                        }),
+                    );
+                }
             }
 
             // Primary (left) and secondary (right) buttons; Middle/Back/Forward
@@ -2706,6 +2878,14 @@ where
             // whatever happened to its press — see
             // `mouse_button_should_dispatch` for both invariants.
             WindowEvent::MouseInput { state, button, .. } => {
+                // A real button event means no OS file drag is over the window
+                // any more, whether or not `HoveredFileCancelled` said so: if a
+                // hover stood, tell the tree the drag ended (`Cancel`) before
+                // the button's own `Down`/`Up`, so the session the hover opened
+                // is over by the time the press or release is routed.
+                if let Some(cancel) = self.file_hover.cancel_at(self.cursor) {
+                    self.dispatch(&window, InputEvent::FileDrop(cancel));
+                }
                 let phase = match state {
                     ElementState::Pressed => PointerPhase::Down,
                     ElementState::Released => PointerPhase::Up,
@@ -2815,6 +2995,58 @@ where
             WindowEvent::Ime(ime) => {
                 let mapped = self.compose.observe(&ime);
                 self.dispatch(&window, InputEvent::Ime(mapped));
+            }
+
+            // The cursor left the window: a file drag hovering it is no longer
+            // over it either, so stop re-dispatching `Hover` on motion and tell
+            // the tree the drag ended (`Cancel`), exactly as
+            // `HoveredFileCancelled` would — one arriving afterwards finds the
+            // latch down and dispatches nothing more.
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(cancel) = self.file_hover.cancel_at(self.cursor) {
+                    self.dispatch(&window, InputEvent::FileDrop(cancel));
+                }
+            }
+
+            // winit delivers one `HoveredFile` per file in the drag, with no
+            // position of its own — the last known cursor stands in, exactly
+            // like `MouseInput` above. Only the first arrival of a hover
+            // dispatches (see `FileHoverLatch`); a later file joining the same
+            // drag (or the cursor moving, handled in the `CursorMoved` arm
+            // above) is not a fresh entry.
+            WindowEvent::HoveredFile(_) => {
+                if self.file_hover.hovered_file() {
+                    self.dispatch(
+                        &window,
+                        InputEvent::FileDrop(FileDropEvent {
+                            phase: FileDropPhase::Hover,
+                            position: self.cursor,
+                            paths: Vec::new(),
+                        }),
+                    );
+                }
+            }
+
+            // The drag left the window (or the OS otherwise called it off)
+            // without a drop. Any drop batch a same-pass `DroppedFile` run had
+            // queued was already flushed — dispatched as its own `Drop` — by
+            // the top-of-method guard before this arm ran, so this `Cancel`
+            // always follows it and never mixes with it. A `CursorLeft` or
+            // button event that already ended the hover already sent the
+            // `Cancel`, so this one then dispatches nothing.
+            WindowEvent::HoveredFileCancelled => {
+                if let Some(cancel) = self.file_hover.cancel_at(self.cursor) {
+                    self.dispatch(&window, InputEvent::FileDrop(cancel));
+                }
+            }
+
+            // One file of the drop; see `FileDropAccumulator`'s module docs
+            // for why this never dispatches directly — the coalesced `Drop`
+            // flushes from the top of this method (or `about_to_wait`) once
+            // the whole batch has arrived.
+            WindowEvent::DroppedFile(path) => {
+                self.file_hover.clear();
+                self.pending_dropped_files.push(path);
             }
 
             WindowEvent::RedrawRequested => {
@@ -3084,22 +3316,23 @@ where
 mod tests {
     use super::{
         ClipboardAccess, ClipboardError, ClipboardFailure, ClipboardRequest, ClipboardWarnings,
-        ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, Ime, ImeSync, LogicalSize,
-        MouseScrollDelta, NoExtensions, PasteText, ShellUserEvent, Tree, TreeId,
-        WHEEL_SCALE_RATE_PER_LINE, WindowKnobSource, WinitCursorIcon, WinitKey, WinitNamedKey,
-        WinitTheme, apply_window_size, base_theme, brightness_change_to_notify,
-        brightness_from_winit, build_tree_update, clipboard_loop, clipboard_warning,
-        cursor_change_to_apply, default_theme, finish, follow_platform_brightness, ime_purpose_for,
-        map_gesture_phase, map_key_event, map_modifiers, map_mouse_button, map_named_key,
-        map_scroll_delta, map_wheel_scale_delta, mouse_button_should_dispatch,
-        parse_window_maximized, parse_window_size, paste_answer_dispatch, paste_input_event,
-        physical_to_logical, resolved_window_knob, theme_after_override_poll,
-        wheel_zoom_chord_held, window_attributes, winit_cursor_for,
+        ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, FileDropAccumulator,
+        FileHoverLatch, Ime, ImeSync, LogicalSize, MouseScrollDelta, NoExtensions, PasteText,
+        ShellUserEvent, Tree, TreeId, WHEEL_SCALE_RATE_PER_LINE, WindowKnobSource, WinitCursorIcon,
+        WinitKey, WinitNamedKey, WinitTheme, apply_window_size, base_theme,
+        brightness_change_to_notify, brightness_from_winit, build_tree_update, clipboard_loop,
+        clipboard_warning, cursor_change_to_apply, default_theme, finish,
+        follow_platform_brightness, ime_purpose_for, map_gesture_phase, map_key_event,
+        map_modifiers, map_mouse_button, map_named_key, map_scroll_delta, map_wheel_scale_delta,
+        mouse_button_should_dispatch, parse_window_maximized, parse_window_size,
+        paste_answer_dispatch, paste_input_event, physical_to_logical, resolved_window_knob,
+        theme_after_override_poll, wheel_zoom_chord_held, window_attributes, winit_cursor_for,
     };
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{
         Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role,
     };
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     // `InputEvent` is deliberately absent: the event-dispatch section further
@@ -5254,5 +5487,120 @@ mod tests {
             brightness_change_to_notify(Some(Brightness::Dark), Brightness::Light),
             Some(Brightness::Light)
         );
+    }
+    mod file_drop {
+        use super::*;
+        use frust_core::event::{FileDropEvent, FileDropPhase};
+
+        #[test]
+        fn take_is_none_with_nothing_pushed() {
+            let mut acc = FileDropAccumulator::default();
+            assert_eq!(acc.take(), None);
+        }
+
+        #[test]
+        fn take_coalesces_every_pushed_path_and_clears() {
+            let mut acc = FileDropAccumulator::default();
+            acc.push(PathBuf::from("/tmp/a.txt"));
+            acc.push(PathBuf::from("/tmp/b.txt"));
+            assert_eq!(
+                acc.take(),
+                Some(vec![
+                    PathBuf::from("/tmp/a.txt"),
+                    PathBuf::from("/tmp/b.txt")
+                ])
+            );
+            // Cleared: a second take with nothing new pushed finds nothing.
+            assert_eq!(acc.take(), None);
+        }
+
+        #[test]
+        fn a_batch_after_a_flushed_one_starts_clean() {
+            let mut acc = FileDropAccumulator::default();
+            acc.push(PathBuf::from("/tmp/a.txt"));
+            acc.take();
+            acc.push(PathBuf::from("/tmp/b.txt"));
+            assert_eq!(acc.take(), Some(vec![PathBuf::from("/tmp/b.txt")]));
+        }
+
+        #[test]
+        fn only_a_drags_first_hovered_file_dispatches() {
+            let mut latch = FileHoverLatch::default();
+            assert!(!latch.is_hovering());
+            assert!(latch.hovered_file(), "the first file enters");
+            assert!(
+                !latch.hovered_file(),
+                "a second file of the same drag does not"
+            );
+            assert!(latch.is_hovering());
+        }
+
+        #[test]
+        fn a_cancel_dispatches_only_while_hovering() {
+            let mut latch = FileHoverLatch::default();
+            assert!(!latch.cancelled(), "no hover stood");
+            latch.hovered_file();
+            assert!(latch.cancelled());
+            assert!(!latch.is_hovering());
+            assert!(!latch.cancelled(), "a repeat finds nothing to cancel");
+        }
+
+        #[test]
+        fn a_drop_stops_re_dispatching_and_leaves_nothing_to_cancel() {
+            // `clear` is what `DroppedFile` calls; its batch dispatches `Drop`.
+            let mut latch = FileHoverLatch::default();
+            latch.hovered_file();
+            latch.clear();
+            assert!(!latch.is_hovering(), "cursor motion no longer re-hovers");
+            assert_eq!(
+                latch.cancel_at(Point::new(5.0, 5.0)),
+                None,
+                "and a late cancel dispatches nothing"
+            );
+            assert!(latch.hovered_file(), "the next drag enters afresh");
+        }
+
+        /// The shell half of an OS file drag that ends with `CursorLeft` or
+        /// a real button event instead of a drop, driven through the latch
+        /// in the order the arms call it: the first `HoveredFile` dispatches
+        /// `Hover`, the early end dispatches the one `Cancel` (at the last
+        /// known cursor, carrying no paths), and the `HoveredFileCancelled`
+        /// that may still follow dispatches nothing. The tree half — those
+        /// exact `Hover` then `Cancel` events ending the drop target's
+        /// session — is `frust-widgets`' drag target tests.
+        #[test]
+        fn a_hover_ended_by_cursor_left_or_a_button_dispatches_one_cancel() {
+            // `CursorLeft` and `MouseInput` both end the hover through
+            // `cancel_at`, as `HoveredFileCancelled` does.
+            let cursor = Point::new(30.0, 40.0);
+            let mut latch = FileHoverLatch::default();
+            assert!(latch.hovered_file(), "HoveredFile dispatches Hover");
+            assert_eq!(
+                latch.cancel_at(cursor),
+                Some(FileDropEvent {
+                    phase: FileDropPhase::Cancel,
+                    position: cursor,
+                    paths: Vec::new(),
+                }),
+                "the early end tells the tree the drag is over"
+            );
+            assert!(!latch.is_hovering(), "cursor motion no longer re-hovers");
+            assert_eq!(
+                latch.cancel_at(cursor),
+                None,
+                "a later HoveredFileCancelled has nothing left to send"
+            );
+            assert!(latch.hovered_file(), "the next drag enters afresh");
+        }
+
+        #[test]
+        fn nothing_is_cancelled_without_a_standing_hover() {
+            let mut latch = FileHoverLatch::default();
+            assert_eq!(
+                latch.cancel_at(Point::ZERO),
+                None,
+                "a CursorLeft or button event with no OS drag dispatches nothing"
+            );
+        }
     }
 }

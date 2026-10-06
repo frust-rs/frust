@@ -369,6 +369,21 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   maps to the same `Scale` stream with `scale_delta = 1.0 + delta` and `ScalePhase`
   Begin/Update/End taken from winit's gesture-bracket phase; see `desktop-pinch-linux-windows-unavailable`
   in [LIMITATIONS.md](LIMITATIONS.md).
+- **Desktop file drop:** winit's `HoveredFile`/`DroppedFile`/`HoveredFileCancelled` window events
+  map onto `InputEvent::FileDrop`'s three `FileDropPhase`s. `HoveredFile` arrives once per file
+  with no "that's everything" signal, so only the first arrival of a hover dispatches (`Hover`,
+  empty `paths`); `DroppedFile` arrives once per file too, so a `FileDropAccumulator` batches every
+  file in one drop into a single coalesced `Drop` carrying every path, flushed at the next other
+  window event or at `about_to_wait`. Every dispatch reports `position` as the shell's last known
+  in-window cursor position, since none of the three winit events carries one of its own: a
+  `FileHoverLatch` bool re-dispatches `Hover` on each `CursorMoved` while a drag hovers, but on a
+  platform that sends no `CursorMoved` during an OS drag, `Hover` and `Drop` resolve wherever the
+  cursor was last seen in the window, not at the release point. Every way a hover ends tells the
+  tree: `DroppedFile` unlatches and its batch dispatches `Drop`; `HoveredFileCancelled`,
+  `CursorLeft` and any real mouse button event each unlatch and, if the latch stood, dispatch
+  `Cancel` (a button event's ahead of its own `Down`/`Up`), so whichever comes first sends the one
+  `Cancel` and a later `HoveredFileCancelled` sends nothing. Core follows every `Drop`/`Cancel`
+  with its `FileDropPhase::Ended` broadcast (see CORE_ARCHITECTURE.md's Data Flow).
 - **Window metrics** (logical size, scale, derived orientation, insets snapshot) are published
   from the points where the window's shape actually changes, guarded by the shared
   `WindowMetricsPublisher` against per-frame churn (see

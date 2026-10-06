@@ -22,7 +22,12 @@
 //!   carries an absolute [`OverlayEntry::window_rect`] the owner computed from
 //!   its own [`PaintCtx::origin`](crate::widget::PaintCtx::origin), an anchor
 //!   follows the owner for free: the owner re-registers every frame from
-//!   wherever it now paints.
+//!   wherever it now paints. `window_rect` is just a rect either way, so
+//!   nothing here cares whether the owner derived it from its own bounds or
+//!   from an absolute window-space point it is tracking instead (a drag
+//!   ghost following the pointer, in `frust-widgets`' `OverlaySlot`) — the
+//!   mechanism is the same registration, repainted on whatever cadence the
+//!   owner now needs.
 //! * **Root-routed.** Painting last is not enough, because hit testing is
 //!   bounds-gated: a pointer over the floated pod lands on whatever the *main*
 //!   tree has at that position. So the root hit-tests the registered rects

@@ -73,6 +73,7 @@
 use std::any::Any;
 use std::cell::Cell;
 use std::fmt;
+use std::path::PathBuf;
 use std::thread::LocalKey;
 
 use kurbo::{Affine, Point, Rect, Size, Vec2};
@@ -591,13 +592,99 @@ pub enum OverlayEventKind {
     OutsideDown,
 }
 
+/// The phase of a desktop OS file drag entering, hovering over, dropping on,
+/// or leaving the window — see [`InputEvent::FileDrop`].
+///
+/// A shell publishes only the first three. [`Ended`](FileDropPhase::Ended) is
+/// the root's own broadcast follow-up to every `Drop`/`Cancel`, handled or
+/// not — see [`FileDropEvent`]'s *Broadcast follow-up* section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileDropPhase {
+    /// The drag is hovering the window — it just entered, or moved while
+    /// still over it. Carries no paths; see [`FileDropEvent::paths`].
+    Hover,
+    /// The files were released over the window. Carries every dropped path.
+    Drop,
+    /// The drag left the window, or the OS otherwise called it off, without a
+    /// drop. Carries no paths.
+    Cancel,
+    /// **Broadcast-only, never sent by a shell**: the OS drag is over — a
+    /// `Drop` or `Cancel` was just dispatched hit-tested, whether or not a
+    /// widget handled it — so [`crate::app::RenderRoot::event`] re-dispatches
+    /// this phase to every widget. Carries no paths and no meaningful
+    /// position ([`Point::ZERO`], never translated). A widget holding state
+    /// the drag opened (a drop target's external drag session) ends whatever
+    /// of it is still open here, so a release over a region nothing handles —
+    /// or over a widget other than the one whose state the drag opened —
+    /// still ends the drag everywhere.
+    Ended,
+}
+
+/// A desktop OS file drag/drop event — hit-tested and bubbling exactly like
+/// [`InputEvent::Scroll`], by `position`, so a [`crate::widget::ChildPod`]
+/// container routes it with no change of its own (see
+/// [`InputEvent::translated`]/[`InputEvent::transformed`]).
+///
+/// # Source
+///
+/// Only a desktop shell publishes this today: `frust-shell-desktop` maps
+/// winit's `HoveredFile`/`DroppedFile`/`HoveredFileCancelled` window events
+/// onto the three [`FileDropPhase`]s (see that crate's `app_handler` module
+/// for the exact mapping, including why `Drop`'s `paths` is a coalesced
+/// batch rather than one event per file). Android, iOS and web publish
+/// nothing — none of those embeddings surfaces an OS file-drag signal to this
+/// framework, so a `frust-widgets` drop target never engages on those hosts
+/// (see `docs/LIMITATIONS.md`).
+///
+/// # Broadcast follow-up
+///
+/// A shell resolves a `Drop` or `Cancel` at the last cursor position it
+/// knows, which can sit over a region no widget handles a file drop in — and
+/// on a platform that sends no cursor motion during an OS drag, that is the
+/// last in-window position before the drag began, not the release point.
+/// Even a `Drop` or `Cancel` some widget handles reaches only that one
+/// widget, while the drag may have opened state in others along the way
+/// (two independent drop-target groups, each hovered in turn). So after the
+/// hit-tested dispatch of **every** `Drop` or `Cancel`, handled or
+/// [`EventResult::Ignored`], [`crate::app::RenderRoot::event`] immediately
+/// dispatches a second event in the same call: this struct with
+/// [`FileDropPhase::Ended`], which [`InputEvent::is_broadcast`] reports as a
+/// broadcast, so every container forwards it to every child. A widget that
+/// already finished the drag on the hit-tested event finds nothing left to
+/// end in it, so answering `Ended` must be idempotent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileDropEvent {
+    /// The gesture phase.
+    pub phase: FileDropPhase,
+    /// Where the drag is, in the receiving widget's local logical space —
+    /// translated like [`InputEvent::Scroll`]'s `position` by the container
+    /// chain that routes it.
+    pub position: Point,
+    /// The dropped files — populated only for [`FileDropPhase::Drop`].
+    /// [`FileDropPhase::Hover`]/[`FileDropPhase::Cancel`]/
+    /// [`FileDropPhase::Ended`] always carry an empty list: the platform
+    /// source delivers one file per hover notification with no "this is the
+    /// complete set" signal, so the full list is only ever knowable once
+    /// files are actually released.
+    ///
+    /// **Untrusted input.** The paths arrive verbatim from the OS drag
+    /// source — whatever application the user dragged from — and nothing
+    /// between it and the receiving widget validates them: a path may be a
+    /// symlink to somewhere else, a directory, a device node, a file of any
+    /// size, or carry a name built to mislead when displayed. A consumer must
+    /// treat them as untrusted: resolve symlinks (and re-check where they
+    /// lead) before opening, check the type and size before reading, and
+    /// sanitise a file name before showing it.
+    pub paths: Vec<PathBuf>,
+}
+
 /// An input event delivered to the widget tree.
 ///
-/// Pointer gestures, scroll, and scale are **hit-tested** (routed by position);
-/// keyboard, IME, and edit-command events are **focus-routed** — delivered
-/// straight down the recorded focus chain with no hit test and no meaningful
-/// position (see [`crate::widget::ChildPod`]'s focus bookkeeping and
-/// `frust-widgets`' `route_event`). [`InputEvent::Housekeeping`] and
+/// Pointer gestures, scroll, scale, and a file drop are **hit-tested** (routed
+/// by position); keyboard, IME, and edit-command events are **focus-routed**
+/// — delivered straight down the recorded focus chain with no hit test and no
+/// meaningful position (see [`crate::widget::ChildPod`]'s focus bookkeeping
+/// and `frust-widgets`' `route_event`). [`InputEvent::Housekeeping`] and
 /// [`InputEvent::Overlay`] are neither: they are **broadcasts** that reach
 /// every child unconditionally.
 #[derive(Clone, Debug, PartialEq)]
@@ -777,17 +864,40 @@ pub enum InputEvent {
     /// from inside the surface is honoured (see
     /// [`crate::app::RenderRoot::event`]).
     Overlay(OverlayEvent),
+    /// A desktop OS file drag entering, hovering over, dropping on, or
+    /// leaving the window — hit-tested and bubbling exactly like
+    /// [`InputEvent::Scroll`], by [`FileDropEvent::position`]. See
+    /// [`FileDropEvent`] for the phase/path contract and which shells
+    /// publish it.
+    ///
+    /// One phase travels differently: [`FileDropPhase::Ended`] is a
+    /// **broadcast** ([`InputEvent::is_broadcast`]), the root's own follow-up
+    /// to every `Drop`/`Cancel`, handled or not, so a widget holding state
+    /// the drag opened hears that the drag is over even when the release
+    /// missed it (see [`FileDropEvent`]'s *Broadcast follow-up*). It carries
+    /// no position and is never translated, like the other broadcasts.
+    ///
+    /// Deliberately **not** routed through the overlay pre-pass
+    /// ([`crate::app::RenderRoot::event`]'s `route_overlay`): a native OS
+    /// drag is a window-level signal with no floated-surface concept on the
+    /// platform side, so it is hit-tested straight against the main tree —
+    /// a drop target living inside a popover is a gap this variant does not
+    /// close (see `docs/LIMITATIONS.md`).
+    FileDrop(FileDropEvent),
 }
 
 impl InputEvent {
     /// The event's location, in the receiving widget's local coordinate space.
     ///
     /// [`InputEvent::Scale`] reports its [`ScaleEvent::focal`] point here, the
-    /// same way [`InputEvent::Scroll`] reports `position`. Focus-routed events
+    /// same way [`InputEvent::Scroll`] reports `position`, and
+    /// [`InputEvent::FileDrop`] reports its own [`FileDropEvent::position`]
+    /// identically. Focus-routed events
     /// ([`InputEvent::Key`]/[`InputEvent::Ime`]/
-    /// [`InputEvent::EditCommand`]) and the two broadcasts
-    /// ([`Housekeeping`](InputEvent::Housekeeping) and
-    /// [`Overlay`](InputEvent::Overlay)) have no spatial position — they are
+    /// [`InputEvent::EditCommand`]) and the broadcasts
+    /// ([`Housekeeping`](InputEvent::Housekeeping),
+    /// [`Overlay`](InputEvent::Overlay), and a file drop's
+    /// [`FileDropPhase::Ended`] follow-up) have no spatial position — they are
     /// delivered down the focus chain, or to every child, not hit-tested — so
     /// this reports [`Point::ZERO`] for them; callers must never hit-test on it
     /// (routing helpers early-return both classes). An overlay event's *payload*
@@ -799,6 +909,8 @@ impl InputEvent {
             InputEvent::Pointer(p) | InputEvent::PointerContact { event: p, .. } => p.position,
             InputEvent::Scroll { position, .. } => *position,
             InputEvent::Scale(scale) => scale.focal,
+            InputEvent::FileDrop(drop) if drop.phase == FileDropPhase::Ended => Point::ZERO,
+            InputEvent::FileDrop(drop) => drop.position,
             InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
@@ -813,7 +925,9 @@ impl InputEvent {
     /// from their own coordinate space into a child's local space before
     /// forwarding it — see [`crate::widget::ChildPod::event_child`].
     /// [`InputEvent::Scale`] shifts its [`ScaleEvent::focal`] point the same way
-    /// [`InputEvent::Scroll`] shifts its `position`. Focus-routed
+    /// [`InputEvent::Scroll`] shifts its `position`, and
+    /// [`InputEvent::FileDrop`] shifts [`FileDropEvent::position`] identically.
+    /// Focus-routed
     /// events ([`InputEvent::Key`]/[`InputEvent::Ime`]/
     /// [`InputEvent::EditCommand`]) and the
     /// [`Housekeeping`](InputEvent::Housekeeping) broadcast carry no position, so
@@ -844,6 +958,12 @@ impl InputEvent {
                 focal: scale.focal + offset,
                 ..*scale
             }),
+            InputEvent::FileDrop(drop) if drop.phase == FileDropPhase::Ended => self.clone(),
+            InputEvent::FileDrop(drop) => InputEvent::FileDrop(FileDropEvent {
+                position: drop.position + offset,
+                phase: drop.phase,
+                paths: drop.paths.clone(),
+            }),
             InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
@@ -859,8 +979,9 @@ impl InputEvent {
     ///
     /// Maps exactly the positions `translated` shifts, and leaves alone exactly
     /// what it leaves alone: [`InputEvent::Pointer`]'s position, the inner event
-    /// of an [`InputEvent::PointerContact`], [`InputEvent::Scroll`]'s `position`
-    /// and [`InputEvent::Scale`]'s [`ScaleEvent::focal`] are mapped; the
+    /// of an [`InputEvent::PointerContact`], [`InputEvent::Scroll`]'s `position`,
+    /// [`InputEvent::Scale`]'s [`ScaleEvent::focal`], and
+    /// [`InputEvent::FileDrop`]'s [`FileDropEvent::position`] are mapped; the
     /// focus-routed events, the [`Housekeeping`](InputEvent::Housekeeping)
     /// broadcast and the window-space [`Overlay`](InputEvent::Overlay) payload are
     /// returned unchanged (cloned), for the reasons `translated` gives.
@@ -894,6 +1015,12 @@ impl InputEvent {
                 focal: *affine * scale.focal,
                 ..*scale
             }),
+            InputEvent::FileDrop(drop) if drop.phase == FileDropPhase::Ended => self.clone(),
+            InputEvent::FileDrop(drop) => InputEvent::FileDrop(FileDropEvent {
+                position: *affine * drop.position,
+                phase: drop.phase,
+                paths: drop.paths.clone(),
+            }),
             InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
@@ -917,18 +1044,28 @@ impl InputEvent {
 
     /// Whether this event is a broadcast: forwarded to **every** child
     /// unconditionally, with no hit test, no capture fast-path, and no focus
-    /// routing — [`InputEvent::Housekeeping`] and [`InputEvent::Overlay`].
+    /// routing — [`InputEvent::Housekeeping`], [`InputEvent::Overlay`], and an
+    /// [`InputEvent::FileDrop`] in its [`FileDropPhase::Ended`] phase.
     ///
     /// Every routing helper branches on this **first**, before its capture,
     /// focus, and hit-test branches (`frust-widgets`'
     /// `route_event`/`route_event_single`, and this crate's own
     /// [`crate::component`] mirror), so a broadcast can never be swallowed by a
     /// captured child or a `contains()` miss. That existing branch is exactly
-    /// what carries an overlay event to its owner with no router change: the two
-    /// variants differ in what they *mean* (a deferred callback flush vs one
-    /// floated surface's own input), not in how they travel.
+    /// what carries an overlay event to its owner, and a file drag's `Ended`
+    /// follow-up to every drop target, with no router change: the three differ
+    /// in what they *mean* (a deferred callback flush, one floated surface's
+    /// own input, an OS drag that is over), not in how they travel.
     pub fn is_broadcast(&self) -> bool {
-        matches!(self, InputEvent::Housekeeping | InputEvent::Overlay(_))
+        matches!(
+            self,
+            InputEvent::Housekeeping
+                | InputEvent::Overlay(_)
+                | InputEvent::FileDrop(FileDropEvent {
+                    phase: FileDropPhase::Ended,
+                    ..
+                })
+        )
     }
 }
 
@@ -3034,11 +3171,73 @@ mod tests {
                 delta: ScrollDelta::Pixels(3.0, 4.0),
             },
             InputEvent::Scale(scale),
+            InputEvent::FileDrop(FileDropEvent {
+                phase: FileDropPhase::Hover,
+                position: Point::new(20.0, 30.0),
+                paths: Vec::new(),
+            }),
             InputEvent::Housekeeping,
         ];
         for event in &events {
             assert_eq!(event.transformed(&affine), event.translated(offset));
         }
+    }
+
+    #[test]
+    fn file_drop_is_hit_tested_and_translates_its_position_only() {
+        let drop = InputEvent::FileDrop(FileDropEvent {
+            phase: FileDropPhase::Drop,
+            position: Point::new(20.0, 30.0),
+            paths: vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")],
+        });
+        assert_eq!(drop.position(), Point::new(20.0, 30.0));
+        assert!(!drop.is_broadcast());
+        assert!(!drop.is_focus_routed());
+
+        let local = drop.translated(-Vec2::new(5.0, 7.0));
+        let InputEvent::FileDrop(local_drop) = &local else {
+            panic!("expected FileDrop");
+        };
+        assert_eq!(local_drop.position, Point::new(15.0, 23.0));
+        assert_eq!(local_drop.phase, FileDropPhase::Drop);
+        assert_eq!(
+            local_drop.paths,
+            vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")],
+            "translating must not disturb the dropped paths"
+        );
+        // The original is untouched.
+        assert_eq!(drop.position(), Point::new(20.0, 30.0));
+    }
+
+    #[test]
+    fn only_the_ended_file_drop_phase_is_a_positionless_broadcast() {
+        for phase in [
+            FileDropPhase::Hover,
+            FileDropPhase::Drop,
+            FileDropPhase::Cancel,
+        ] {
+            let event = InputEvent::FileDrop(FileDropEvent {
+                phase,
+                position: Point::new(20.0, 30.0),
+                paths: Vec::new(),
+            });
+            assert!(!event.is_broadcast(), "{phase:?} is hit-tested");
+        }
+
+        let ended = InputEvent::FileDrop(FileDropEvent {
+            phase: FileDropPhase::Ended,
+            position: Point::ZERO,
+            paths: Vec::new(),
+        });
+        assert!(ended.is_broadcast(), "the follow-up reaches every widget");
+        assert!(!ended.is_focus_routed());
+        assert_eq!(ended.position(), Point::ZERO);
+        assert_eq!(
+            ended.translated(Vec2::new(5.0, 7.0)),
+            ended,
+            "a broadcast is never re-based by a container"
+        );
+        assert_eq!(ended.transformed(&Affine::scale(2.0)), ended);
     }
 
     #[test]
@@ -3630,6 +3829,8 @@ mod tests {
             "and not down the focus chain — the surface's owner need not be focused"
         );
         assert!(InputEvent::Housekeeping.is_broadcast());
+        // (A file drop's `Ended` follow-up is the third; see
+        // `only_the_ended_file_drop_phase_is_a_positionless_broadcast`.)
 
         // ...and nothing else is. Spelled as an exhaustive walk rather than three
         // spot checks, so a variant added later has to state its own answer here.

@@ -27,6 +27,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-widgets::physics` | Pluggable scroll-motion strategy (`ScrollPhysics` trait, `OverscrollEffect`, `Simulation` ports, platform-adaptive defaults) that `ScrollView`/`ListView` consult instead of hard-coding a feel — see *Scroll Physics* below |
 | `frust-widgets::scroll_controller` | `ScrollController` — a cloneable, reactive-free handle onto a `ScrollView` or `ListView`'s offset/item position — see *Scroll Physics* and *Virtualized ListView* below |
 | `frust-widgets::overlay` | The widget-author face of CORE's overlay portal: anchored placement geometry (`place`/`OverlayPlacement`), the `OverlaySlot` a widget hosting its own floated pod keeps, and the declarative `overlay_portal` wrapper |
+| `frust-widgets::drag` | Drag-and-drop session model: `DragCoordinator`, `draggable()` source, `drag_target()` target, `auto_scroll_zone()`, `reorderable_list()` — single public path `drag`, re-exported flat from the crate root and the `frust` facade |
 | `frust-widgets::platform_view` | Native-sibling compositing slot and input-shield wrapper for translucent surfaces |
 | `frust-theme` | `Theme` aggregate and its token tables (color, type, shape, elevation, motion, glass); carries no design-language token module of its own — only the neutral/language-free floor (`Theme::neutral()` and friends) |
 
@@ -217,6 +218,31 @@ build from.
   content can actually be pressed); the design-system catalogs' own `overlay::anchored` hosts still
   carry their plugin-local copies of the pattern. See CORE_ARCHITECTURE.md's Overlay Portal for the
   mechanism itself.
+- Drag-and-drop flow: an ambient, Rc-shared `DragCoordinator` (one per scope, cloneable like
+  `ScrollController`) is the single source of truth for a session — idle/armed/dragging/dropping/
+  cancelled — and its typed `Box<dyn Any>` payload, so several targets type-gate against one
+  handle. `draggable()` arms on a primary press and begins once a `DragPolicy` is crossed (a mouse
+  travels past a distance threshold, a touch press holds through a long-press — `Auto` picks per
+  press from the pointer source), floating a ghost through the overlay portal anchored at
+  `OverlayAnchor::Window` (see CORE_ARCHITECTURE.md's Overlay Portal) and cancelling on Escape or a
+  release with nothing hovered. A begun drag vetoes the takeover of every enclosing scroll surface,
+  not only the nearest, for as long as the session runs. `drag_target()` resolves against bounds
+  the coordinator's registry collects at paint — never a hit test — so later registration wins an
+  overlap and a drop can land across containers (two kanban columns, a list and a trash bin).
+  Keyboard lift/cycle/drop (`move_to_next_target`/`move_to_previous_target`, Enter/Space/arrows,
+  Escape to cancel) is the assistive-technology path through the whole walk, driving the same
+  coordinator from the source's own focus; semantics advertise a `Role::Button` source and a
+  `Role::Group` target, each supporting `Action::Click`, but not identically: the target's `Click`
+  drops a live, accepting KEYBOARD session onto it (a pointer session's `Up` belongs to its source
+  and must pass through every ancestor target on the capture chain), while the source's `Click`
+  drops (or cancels) its own live keyboard session and is a plain tap otherwise (see
+  `drag-ghost-pod-no-semantics` in [LIMITATIONS.md](LIMITATIONS.md)). `auto_scroll_zone()` drives
+  an attached `ScrollController` toward whichever edge the dragged pointer sits inside
+  (`AutoScroll::edge_px`/`max_px_per_s`). `reorderable_list()` composes both primitives over keyed
+  rows with `N + 1` gap targets, firing `on_reorder(state, from, to)` on an actual move. A desktop
+  `InputEvent::FileDrop` opens an `ExternalFiles` session so a `drag_target::<Vec<PathBuf>>`
+  accepts an OS file drop the same way a widget-originated session would (see
+  [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)).
 - Platform-view flow: `platform_view()`/`shield()` publish native-compositing slots and input-shield
   rects each frame for the shell layer to reconcile against native views.
 - Canvas flow: `canvas(paint)` takes `Fn(&mut dyn PaintScene, Size, &PaintCtx)`; the widget
@@ -563,13 +589,11 @@ on a positional (non-keyed) list, is a no-op
 (debug-build log); a `ScrollView` holding the handle ignores an item command the same way.
 
 ### Recent Additions
-**Overlay and selection:** the `overlay` module (`place`/`OverlayPlacement`, `OverlaySlot`,
-`overlay_portal`) and `TextInput`'s selection gestures, clipboard chords, accesskit verbs and hosted
-`selection_toolbar()` — see *Overlay flow* and *Text Selection and the Clipboard*.
-**Navigator observation:** `TransitionState` and `PageVisibility` seams; `overlay_host()`
-constructor; R23 semantics forwarding. **Routing:** route params merge query under path captures,
-and `RouteNavigator` allows off-thread navigation. **Text:** `TextInput` read-only mode and
-`content_type` IME hints; `TextView` alignment control, `.max_lines` and `.overflow(TextOverflow)`
-(measure-and-truncate, see RENDER_ARCHITECTURE.md). **Baseline primitives:**
-`container()`/`colored_box()` (fill, per-corner radius, solid/dashed border, glow, expand, sizing),
-`divider()` and `icon_button()`.
+**Overlay, selection and drag-and-drop:** the `overlay` module and `TextInput`'s hosted
+`selection_toolbar()` (see *Overlay flow*, *Text Selection and the Clipboard*); the `drag` module —
+coordinator, draggable source, drop target, auto-scroll, reorderable list (see *Drag-and-drop
+flow*). **Navigator observation:** `TransitionState`/`PageVisibility`; `overlay_host()`; route
+params merge query under path captures; `RouteNavigator` off-thread navigation. **Text:**
+`TextInput` read-only mode and `content_type` IME hints; `TextView` alignment, `.max_lines`,
+`.overflow(TextOverflow)` (see RENDER_ARCHITECTURE.md). **Baseline primitives:**
+`container()`/`colored_box()`, `divider()`, `icon_button()`.

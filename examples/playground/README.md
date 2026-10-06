@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between twelve sections
+`pattern_switcher`-hosted section body, selecting between thirteen sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all twelve
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all thirteen
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -119,6 +119,15 @@ The sections, in order:
     Dragging the list while an animated move is in flight interrupts it —
     user input always wins; under reduce-motion (or with animations off)
     every animated move collapses to an instant jump instead.
+13. **Drag** — three demos sharing one `DragCoordinator` (`frust::drag`):
+    a three-column kanban board (`Todo` / `Doing` / `Done`) whose columns
+    are scrollable drop targets with edge auto-scroll near the top/bottom
+    and a visible highlight while hovered, cards dragged by pointer
+    (desktop) or long-press (touch), `Escape` cancels; a ten-row
+    keyboard-reorderable list (`Enter`/Space lifts a focused row, arrow
+    keys cycle the drop gap, `Enter`/Space drops) with a live
+    `from -> to` readout; and a desktop-only OS file-drop zone listing
+    dropped files by name (never their contents).
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -181,6 +190,19 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Same legs, single contact only | iOS Simulator (iPhone 17), iOS 26.2, 2026-10-02 | PASS except pinch: NOT RUN |
 | Scroll: every button (Jump to 0 / Jump to end / Animate to 50% / #150 Start / #42 Center / Animated #280 End) | Linux (local) | OWED |
 | Scroll: a touch drag mid-`animate_to`/animated `scroll_to_item` interrupts the move | Android device | OWED |
+| Drag: desktop pointer drag (kanban card between columns, edge auto-scroll, highlight) | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (card lands in Doing/Done incl. a drag with a vertical leg; ghost, source dim, column highlight; edge auto-scroll not exercisable — the demo columns never overflow) |
+| Drag: Escape cancels a live pointer drag | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (ghost + highlight clear with the button still held) |
+| Drag: keyboard reorder (lift/cycle/drop) on the reorderable list | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (Enter / ArrowDown ×4 / Enter → "Last move: 0 → 2") |
+| Drag: OS file drop onto the file-drop zone | Linux desktop (X11, NVIDIA T400), 2026-10-06 | PASS (XDND v5 source; hover highlight, two names listed, hover+leave clears) |
+| Drag: desktop pointer drag / Esc cancel / keyboard reorder / OS file drop | macOS | OWED |
+| Drag: desktop pointer drag / Esc cancel / keyboard reorder / OS file drop | Windows | OWED (binary builds and launches on the Windows 11 rig; the leg needs an interactive desktop session) |
+| Drag: long-press drag (kanban card between columns) | Pixel 5 (redfin), Android 14, 2026-10-06 | PASS (long-press lift, ghost, column highlight; drop lands both directions incl. a ~300 px vertical leg; reorder onto a gap → "Last move: 0 -> 2"; short tap / quick swipe unaffected) |
+
+### Drag gate notes
+
+- **Android injection**: `adb shell input motionevent DOWN x y`, hold ≥ 0.9 s, `MOVE` steps, `UP`; `input draganddrop` needs ≥ 15 s so the 500 ms long-press arms before the slop is crossed; the Done column is off-screen at 1080 px (known layout limit).
+- **Linux**: the playground runs on the host and presents on the container desktop, so dropped files must exist on the HOST filesystem; a drop aimed at a reorder row rather than its 8 px gap cancels by design.
+- **winit 0.30 on X11**: silently discards a whole drop whose uri-list contains a path that does not canonicalize on the app's filesystem while still answering XdndStatus/XdndFinished accepted — the app sees no event at all.
 
 iOS legs (Phase A touch-ABI gate, build at `8a263d79`). The Simulator legs were
 driven by `idb` with screenshots. Pinch could not run there: Xcode 27 ships no
