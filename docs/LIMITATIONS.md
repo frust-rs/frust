@@ -3217,8 +3217,8 @@ floated-surface owner per field and a magnifier able to sample the painted scene
 exactly: no semantics are published for a registered pod and it is not reached by
 `RenderRoot::inspect()`/`WidgetTree::inspect()` unless its owner visits it (see
 `overlay-portal-v1-scope`'s item 4 above). The drag's actual semantics live on the in-tree
-`Draggable`/`DragTarget` nodes instead — `Role::Button`-equivalent, labelled `"Drag"`/`"Drop"` on
-the source, `"accepts drop"`/`"drop target"` on the target — so an assistive-technology user never
+`Draggable`/`DragTarget` nodes instead — a `Role::Button` source labelled `"Drag"`/`"Drop"`, a
+`Role::Group` target labelled `"accepts drop"`/`"drop target"` — so an assistive-technology user never
 reaches the ghost itself, only the source and target it moves between. The richer per-verb surface
 those nodes would ideally advertise (`accesskit::Action::CustomAction` for `lift`/`drop`/`cancel`
 individually) is not wired to anything either: `frust-core`'s `perform_accessibility_action`

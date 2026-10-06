@@ -229,8 +229,8 @@ build from.
   collects at paint — never a hit test — so later registration wins an overlap and a drop can land
   across containers (two kanban columns, a list and a trash bin). Keyboard lift/cycle/drop
   (`move_to_next_target`/`move_to_previous_target`, Enter/Space/arrows) drives the same coordinator
-  from the source's own focus; semantics advertise `Role::Button` on the source and target with
-  `Action::Click` wired as a lift/drop toggle only (see `drag-ghost-pod-no-semantics` in
+  from the source's own focus; semantics advertise a `Role::Button` source and a `Role::Group`
+  target, each with `Action::Click` as its lift/drop verb (see `drag-ghost-pod-no-semantics` in
   [LIMITATIONS.md](LIMITATIONS.md)). `auto_scroll_zone()` drives an attached `ScrollController`
   toward whichever edge the dragged pointer sits inside (`AutoScroll::edge_px`/`max_px_per_s`).
   `reorderable_list()` composes both primitives over keyed rows with `N + 1` gap targets, firing
