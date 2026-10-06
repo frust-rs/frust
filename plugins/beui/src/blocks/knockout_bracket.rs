@@ -1523,7 +1523,6 @@ fn draw_marker(scene: &mut dyn PaintScene, centre: Point, color: Color) {
 mod tests {
     use super::*;
     use crate::components::popover::tests::{Recorder, ft_ms, light, pointer, reduced};
-    use frust::authoring::any;
     use frust::authoring::text::TextContext;
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -1913,7 +1912,7 @@ mod tests {
                         bracket_side(bracket_team("Morocco")).score(1),
                     ));
                 }
-                frust::Stack(vec![any(bracket)])
+                frust::stack().child(bracket)
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -2109,10 +2108,12 @@ mod tests {
                 vec![bracket_match("f", team("Spain"), bracket_tbd())],
             ),
         ];
-        frust::Stack(vec![any(knockout_bracket::<()>(rounds).third_place(
-            bracket_match("third", team("Croatia").score(2), team("Morocco").score(1))
-                .winner(BracketWinner::Home),
-        ))])
+        frust::stack().child(
+            knockout_bracket::<()>(rounds).third_place(
+                bracket_match("third", team("Croatia").score(2), team("Morocco").score(1))
+                    .winner(BracketWinner::Home),
+            ),
+        )
     }
 
     #[test]

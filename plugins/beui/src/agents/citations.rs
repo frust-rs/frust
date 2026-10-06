@@ -1951,11 +1951,10 @@ mod tests {
     /// this module shapes. The preview carries no URL: that run is mono on
     /// purpose, and `the_preview_url_stays_in_geist_mono` pins it.
     fn probe_view(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            frust::any(citations::<()>(probe_sources())),
-            frust::any(citation_preview(probe_sources()[0].clone(), 1)),
-            frust::any(citation_list::<()>(probe_sources()).open(true)),
-        ])
+        frust::column()
+            .child(citations::<()>(probe_sources()))
+            .child(citation_preview(probe_sources()[0].clone(), 1))
+            .child(citation_list::<()>(probe_sources()).open(true))
     }
 
     #[test]
@@ -1973,10 +1972,10 @@ mod tests {
     #[test]
     fn the_preview_url_stays_in_geist_mono() {
         let logic = |_: &mut ()| {
-            frust::Column(vec![frust::any(citation_preview(
+            frust::column().child(citation_preview(
                 citation("a", "Rust reference").url("https://doc.rust-lang.org"),
                 1,
-            ))])
+            ))
         };
         let faces = Probe::new(logic, PROBE_WINDOW, crate::theme()).frame();
         let mono = faces.iter().filter(|f| **f == Face::GeistMono).count();

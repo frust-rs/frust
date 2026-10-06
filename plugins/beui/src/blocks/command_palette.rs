@@ -1448,15 +1448,17 @@ mod tests {
             self.clock += ms;
             let controller = self.controller.clone();
             let mut logic = move |s: &mut App| {
-                frust::Stack(vec![any(command_palette(
-                    items(),
-                    s.query.clone(),
-                    |s: &mut App, text| s.query = text,
-                    |s: &mut App, index| s.selected.push(index),
+                frust::stack().child(
+                    command_palette(
+                        items(),
+                        s.query.clone(),
+                        |s: &mut App, text| s.query = text,
+                        |s: &mut App, index| s.selected.push(index),
+                    )
+                    .controller(&controller)
+                    .label("Command palette")
+                    .on_open_change(|s: &mut App, open| s.opens.push(open)),
                 )
-                .controller(&controller)
-                .label("Command palette")
-                .on_open_change(|s: &mut App, open| s.opens.push(open)))])
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1931,18 +1933,20 @@ mod tests {
     /// no themed-family opt-in, so its own text would paint the system face and
     /// is not what these tests pin.
     fn probe_view(_: &mut ()) -> frust::StackView<()> {
-        frust::Stack(vec![any(command_palette::<(), _, _>(
-            vec![
-                command_palette_item("Open File")
-                    .group("File")
-                    .hint("Ctrl O"),
-                command_palette_item("Zoom In").group("View"),
-            ],
-            "",
-            |_: &mut (), _| {},
-            |_: &mut (), _| {},
+        frust::stack().child(
+            command_palette::<(), _, _>(
+                vec![
+                    command_palette_item("Open File")
+                        .group("File")
+                        .hint("Ctrl O"),
+                    command_palette_item("Zoom In").group("View"),
+                ],
+                "",
+                |_: &mut (), _| {},
+                |_: &mut (), _| {},
+            )
+            .placeholder(""),
         )
-        .placeholder(""))])
     }
 
     #[test]

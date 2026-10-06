@@ -1301,7 +1301,6 @@ impl MasonryWidget {
 mod tests {
     use super::*;
     use crate::components::popover::tests::{Recorder, ft_ms, light, pointer, reduced};
-    use frust::authoring::any;
     use frust::authoring::text::TextContext;
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -1642,7 +1641,7 @@ mod tests {
                 if let Some(error) = s.error.clone() {
                     feed = feed.error(error);
                 }
-                frust::Stack(vec![any(feed)])
+                frust::stack().child(feed)
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root

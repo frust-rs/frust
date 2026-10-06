@@ -956,7 +956,7 @@ mod tests {
     use super::*;
     use crate::components::popover::tests::{Recorder, ft_ms, light, pointer, reduced};
     use frust::authoring::text::TextContext;
-    use frust::authoring::{Key, KeyEvent, Modifiers, NamedKey, any};
+    use frust::authoring::{Key, KeyEvent, Modifiers, NamedKey};
     use frust_core::RenderRoot;
     use std::any::Any;
 
@@ -1028,10 +1028,10 @@ mod tests {
                 // A `Padding` is how the harness hands the rail a synthetic
                 // available width: the inset comes straight off the max
                 // constraint the rail measures against.
-                frust::Stack(vec![any(frust::Padding(
+                frust::stack().child(frust::Padding(
                     frust::EdgeInsets::symmetric(s.squeeze, 0.0),
                     rail,
-                ))])
+                ))
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1068,10 +1068,10 @@ mod tests {
                 if let Some(expanded) = s.controlled {
                     rail = rail.expanded(expanded);
                 }
-                frust::Stack(vec![any(frust::Padding(
+                frust::stack().child(frust::Padding(
                     frust::EdgeInsets::symmetric(s.squeeze, 0.0),
                     rail,
-                ))])
+                ))
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1395,12 +1395,14 @@ mod tests {
 
     /// Two primary actions with the overflow group expanded onto the rail.
     fn probe_view(_: &mut ()) -> frust::StackView<()> {
-        frust::Stack(vec![any(overflow_actions::<(), _>(
-            vec![overflow_action("Edit"), overflow_action("Share")],
-            vec![overflow_action("Archive")],
-            |_: &mut (), _| {},
+        frust::stack().child(
+            overflow_actions::<(), _>(
+                vec![overflow_action("Edit"), overflow_action("Share")],
+                vec![overflow_action("Archive")],
+                |_: &mut (), _| {},
+            )
+            .expanded(true),
         )
-        .expanded(true))])
     }
 
     #[test]

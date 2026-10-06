@@ -1592,8 +1592,8 @@ mod tests {
             self.clock += ms;
             let anchor = self.anchor.clone();
             let mut logic = move |s: &mut App| {
-                frust::Stack(vec![
-                    any(frust::Padding(
+                frust::stack()
+                    .child(frust::Padding(
                         frust::EdgeInsets::all(INSET),
                         morphing_search_trigger(&anchor)
                             .icon_only(s.icon_only)
@@ -1602,20 +1602,21 @@ mod tests {
                                 s.open = open;
                                 s.opens.push(open);
                             }),
-                    )),
-                    any(morphing_search(
-                        items(),
-                        s.query.clone(),
-                        |s: &mut App, text| s.query = text,
-                        |s: &mut App, index| s.selected.push(index),
+                    ))
+                    .child(
+                        morphing_search(
+                            items(),
+                            s.query.clone(),
+                            |s: &mut App, text| s.query = text,
+                            |s: &mut App, index| s.selected.push(index),
+                        )
+                        .anchor(&anchor)
+                        .open(s.open)
+                        .on_open_change(|s: &mut App, open| {
+                            s.open = open;
+                            s.opens.push(open);
+                        }),
                     )
-                    .anchor(&anchor)
-                    .open(s.open)
-                    .on_open_change(|s: &mut App, open| {
-                        s.open = open;
-                        s.opens.push(open);
-                    })),
-                ])
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -2066,24 +2067,25 @@ mod tests {
     fn probe_logic(open: bool) -> impl FnMut(&mut ()) -> frust::StackView<()> {
         let anchor = OverlayAnchor::new();
         move |_: &mut ()| {
-            frust::Stack(vec![
-                any(frust::Padding(
+            frust::stack()
+                .child(frust::Padding(
                     frust::EdgeInsets::all(INSET),
                     morphing_search_trigger::<()>(&anchor).open(open),
-                )),
-                any(morphing_search::<(), _, _>(
-                    vec![
-                        morphing_search_item("Overview").description("Dashboard and metrics"),
-                        morphing_search_item("Members"),
-                    ],
-                    "",
-                    |_: &mut (), _| {},
-                    |_: &mut (), _| {},
+                ))
+                .child(
+                    morphing_search::<(), _, _>(
+                        vec![
+                            morphing_search_item("Overview").description("Dashboard and metrics"),
+                            morphing_search_item("Members"),
+                        ],
+                        "",
+                        |_: &mut (), _| {},
+                        |_: &mut (), _| {},
+                    )
+                    .anchor(&anchor)
+                    .open(open)
+                    .placeholder(""),
                 )
-                .anchor(&anchor)
-                .open(open)
-                .placeholder("")),
-            ])
         }
     }
 
