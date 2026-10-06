@@ -108,7 +108,13 @@ pub struct AttachmentView<State: 'static> {
 
 /// Create an attachment card from `children` (typically
 /// [`attachment_media`]?, [`attachment_content`], [`attachment_actions`]?).
-pub fn attachment<State: 'static>(children: Vec<AnyView<State>>) -> AttachmentView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn attachment<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AttachmentView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     AttachmentView {
         children,
         size: AttachmentSize::default(),
@@ -435,9 +441,13 @@ pub struct AttachmentContentView<State: 'static> {
 
 /// Stack `children` (typically [`attachment_title`]/
 /// [`attachment_description`]) in a left-aligned column.
-pub fn attachment_content<State: 'static>(
-    children: Vec<AnyView<State>>,
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn attachment_content<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
 ) -> AttachmentContentView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     AttachmentContentView { children }
 }
 
@@ -553,9 +563,13 @@ pub struct AttachmentRowView<State: 'static> {
 
 /// `AttachmentActions`: a row of controls (no fixed gap in the source beyond
 /// the parent's own `gap`; this port uses `gap-2`, 8px).
-pub fn attachment_actions<State: 'static>(
-    children: Vec<AnyView<State>>,
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn attachment_actions<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
 ) -> AttachmentRowView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     AttachmentRowView {
         children,
         gap: style::SPACING_UNIT * 2.0,
@@ -564,7 +578,13 @@ pub fn attachment_actions<State: 'static>(
 
 /// `AttachmentGroup`: a row of attachments, `gap-3` (12px). See the module
 /// docs for the scroll-affordance deviation.
-pub fn attachment_group<State: 'static>(children: Vec<AnyView<State>>) -> AttachmentRowView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn attachment_group<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AttachmentRowView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     AttachmentRowView {
         children,
         gap: style::SPACING_UNIT * 3.0,

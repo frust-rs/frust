@@ -82,7 +82,12 @@ fn config(size: AlertDialogSize) -> ModalConfig {
 
 /// Create an alert dialog whose panel stacks `children` `gap-4` apart inside
 /// `p-6`.
-pub fn alert_dialog<State: 'static>(children: Vec<AnyView<State>>) -> AlertDialogView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn alert_dialog<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AlertDialogView<State> {
     AlertDialogView {
         inner: modal(
             stack_slots(children, SLOT_GAP, EdgeInsets::all(PANEL_PAD)),
@@ -93,7 +98,12 @@ pub fn alert_dialog<State: 'static>(children: Vec<AnyView<State>>) -> AlertDialo
 }
 
 /// A header slot: a `gap-1.5` stack (title, description).
-pub fn alert_dialog_header<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn alert_dialog_header<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
     stack_slots(children, HEADER_GAP, EdgeInsets::all(0.0))
 }
 
@@ -113,22 +123,27 @@ pub fn alert_dialog_description<State: 'static>(description: impl Into<String>) 
 /// The source's `sm` size lays its footer out as a two-column grid; this port
 /// keeps the row at every size — a documented simplification, since the row
 /// already trails both buttons together.
-pub fn alert_dialog_footer<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn alert_dialog_footer<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
     trailing_row(children, FOOTER_GAP, EdgeInsets::all(0.0))
 }
 
 /// The confirming action, for [`alert_dialog_footer`]'s trailing slot — a
 /// pass-through that names the convention (upstream: a `default`-variant
 /// [`crate::button`]).
-pub fn alert_dialog_action<State: 'static>(action: AnyView<State>) -> AnyView<State> {
-    action
+pub fn alert_dialog_action<State: 'static>(action: impl View<State>) -> AnyView<State> {
+    AnyView::new(action)
 }
 
 /// The dismissing action, for [`alert_dialog_footer`]'s leading slot — a
 /// pass-through that names the convention (upstream: an `outline`-variant
 /// [`crate::button`]).
-pub fn alert_dialog_cancel<State: 'static>(cancel: AnyView<State>) -> AnyView<State> {
-    cancel
+pub fn alert_dialog_cancel<State: 'static>(cancel: impl View<State>) -> AnyView<State> {
+    AnyView::new(cancel)
 }
 
 /// A declarative shadcn alert dialog. See the [module docs](self).

@@ -311,7 +311,13 @@ pub struct AvatarGroupView<State: 'static> {
 
 /// Create an overlapping avatar row from `children` (typically [`avatar`]
 /// views).
-pub fn avatar_group<State: 'static>(children: Vec<AnyView<State>>) -> AvatarGroupView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn avatar_group<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AvatarGroupView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     AvatarGroupView { children }
 }
 

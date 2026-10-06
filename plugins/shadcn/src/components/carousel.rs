@@ -136,7 +136,13 @@ pub struct CarouselView<State: 'static> {
 /// Page through `items` one viewport-wide slide at a time, horizontally by
 /// default — **uncontrolled** unless [`CarouselView::selected`] says otherwise
 /// (see the [module docs](self)).
-pub fn carousel<State: 'static>(items: Vec<AnyView<State>>) -> CarouselView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn carousel<State: 'static, V: View<State>>(
+    items: impl IntoIterator<Item = V>,
+) -> CarouselView<State> {
+    let items: Vec<AnyView<State>> = items.into_iter().map(AnyView::new).collect();
     CarouselView {
         items,
         orientation: CarouselOrientation::default(),
