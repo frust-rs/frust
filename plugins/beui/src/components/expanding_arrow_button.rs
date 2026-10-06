@@ -2044,11 +2044,10 @@ mod tests {
 
     /// All three CTAs at rest, each painting its idle label.
     fn probe_view(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            frust::any(expanding_arrow_button::<()>("Continue", |_| {})),
-            frust::any(hold_action_button::<()>("Delete", |_| {})),
-            frust::any(slide_action_button::<()>("Slide", |_| {})),
-        ])
+        frust::column()
+            .child(expanding_arrow_button::<()>("Continue", |_| {}))
+            .child(hold_action_button::<()>("Delete", |_| {}))
+            .child(slide_action_button::<()>("Slide", |_| {}))
     }
 
     #[test]
@@ -2066,11 +2065,11 @@ mod tests {
     fn completed_slider() -> Probe<frust::FlexView<()>, impl FnMut(&mut ()) -> frust::FlexView<()>>
     {
         let logic = |_: &mut ()| {
-            frust::Column(vec![frust::any(
+            frust::column().child(
                 slide_action_button::<()>("Slide", |_| {})
                     .complete_label("Complete")
                     .reset_delay(Duration::from_secs(3_600)),
-            )])
+            )
         };
         let mut probe = Probe::new(logic, PROBE_WINDOW, crate::theme());
         probe.frame();

@@ -1241,10 +1241,9 @@ mod tests {
     /// A blur swap, which paints the whole run, over a cascade, which paints
     /// the per-grapheme cells.
     fn probe_view(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            frust::any(action_swap::<()>(items())),
-            frust::any(action_swap::<()>(items()).transition(ActionSwapTransition::Cascade)),
-        ])
+        frust::column()
+            .child(action_swap::<()>(items()))
+            .child(action_swap::<()>(items()).transition(ActionSwapTransition::Cascade))
     }
 
     #[test]

@@ -2110,14 +2110,13 @@ mod tests {
     /// A trigger showing a selection, a default panel and a morph panel —
     /// every run this module shapes.
     fn probe_view(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            frust::any(select_trigger::<()>(
+        frust::column()
+            .child(select_trigger::<()>(
                 &OverlayAnchor::new(),
                 Some(String::from("Apple")),
-            )),
-            frust::any(probe_panel(SelectVariant::Default)),
-            frust::any(probe_panel(SelectVariant::Morph)),
-        ])
+            ))
+            .child(probe_panel(SelectVariant::Default))
+            .child(probe_panel(SelectVariant::Morph))
     }
 
     #[test]

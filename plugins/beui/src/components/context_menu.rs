@@ -1255,8 +1255,8 @@ mod tests {
         fn frame(&mut self, ms: f64) {
             let anchor = self.anchor.clone();
             let mut logic = move |s: &mut App| {
-                frust::Stack(vec![
-                    any(frust::Padding(
+                frust::stack()
+                    .child(frust::Padding(
                         frust::EdgeInsets::all(INSET),
                         context_menu_trigger(
                             &anchor,
@@ -1266,8 +1266,8 @@ mod tests {
                             s.open = open;
                             s.opens.push(open);
                         }),
-                    )),
-                    any(
+                    ))
+                    .child(
                         context_menu(s_items(s), |s: &mut App, index| s.selected.push(index))
                             .anchor(&anchor)
                             .open(s.open)
@@ -1275,8 +1275,7 @@ mod tests {
                                 s.open = open;
                                 s.opens.push(open);
                             }),
-                    ),
-                ])
+                    )
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1782,24 +1781,25 @@ mod tests {
     /// shortcut is ASCII so every glyph is one Geist carries.
     fn probe_logic(anchor: OverlayAnchor) -> impl FnMut(&mut ()) -> frust::StackView<()> {
         move |_: &mut ()| {
-            frust::Stack(vec![
-                any(frust::Padding(
+            frust::stack()
+                .child(frust::Padding(
                     frust::EdgeInsets::all(INSET),
                     context_menu_trigger(
                         &anchor,
                         SizedBox(Some(REGION.width), Some(REGION.height)),
                     ),
-                )),
-                any(context_menu(
-                    vec![
-                        context_menu_label("Actions"),
-                        context_menu_item("Reload").shortcut("Ctrl R"),
-                    ],
-                    |_: &mut (), _| {},
+                ))
+                .child(
+                    context_menu(
+                        vec![
+                            context_menu_label("Actions"),
+                            context_menu_item("Reload").shortcut("Ctrl R"),
+                        ],
+                        |_: &mut (), _| {},
+                    )
+                    .anchor(&anchor)
+                    .open(true),
                 )
-                .anchor(&anchor)
-                .open(true)),
-            ])
         }
     }
 

@@ -1317,10 +1317,9 @@ mod tests {
     /// label, the chip's label and action icon. The icon strings are ASCII so
     /// every glyph is one Geist carries.
     fn probe_view(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            frust::any(expandable_button::<()>("+", "Add item", |_, _| {}).expanded(true)),
-            frust::any(expandable_chip::<()>("Draft", "x", "Discard draft").expanded(true)),
-        ])
+        frust::column()
+            .child(expandable_button::<()>("+", "Add item", |_, _| {}).expanded(true))
+            .child(expandable_chip::<()>("Draft", "x", "Discard draft").expanded(true))
     }
 
     #[test]
