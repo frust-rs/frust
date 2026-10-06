@@ -630,8 +630,8 @@ pub fn nav_item<State: 'static>(label: impl Into<String>) -> NavItem<State> {
 impl<State: 'static> NavItem<State> {
     /// Attach a leading icon, erased as an [`AnyView`]. Tint is the supplied
     /// view's own responsibility — see the [module docs](self).
-    pub fn icon(mut self, icon: AnyView<State>) -> Self {
-        self.icon = Some(icon);
+    pub fn icon(mut self, icon: impl View<State>) -> Self {
+        self.icon = Some(AnyView::new(icon));
         self
     }
 

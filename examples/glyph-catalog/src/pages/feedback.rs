@@ -27,8 +27,8 @@
 //! framework-API gap, not a bug in this page.
 
 use frust::{
-    AnyView, Axis, Column, Component, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get,
-    Padding, Row, RwSignal, SizedBox, Update, any, button, component, keyed, text,
+    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get, Padding,
+    RwSignal, SizedBox, Update, View, any, button, column, component, keyed, row, text,
 };
 // Re-anchored onto `frust_glyph` under the old `glyph` local name (this
 // file's own dense `glyph::` call-site prefix predates the plugin split) —
@@ -75,29 +75,28 @@ impl Component for FeedbackPage {
         }
     }
 
-    fn build(&self, state: &mut FeedbackState) -> AnyView<FeedbackState> {
-        let column = Column(vec![
-            section_title("Badges"),
-            v_gap(10.0),
-            badges_row(),
-            v_gap(28.0),
-            section_title("Tags"),
-            v_gap(10.0),
-            tags_row(state),
-            v_gap(28.0),
-            section_title("Alerts"),
-            v_gap(10.0),
-            alerts_column(),
-            v_gap(28.0),
-            section_title("Toasts"),
-            v_gap(10.0),
-            toasts_row(state),
-            v_gap(28.0),
-            section_title("Loaders"),
-            v_gap(10.0),
-            loaders_column(),
-        ])
-        .cross_axis(CrossAxisAlignment::Start);
+    fn build(&self, state: &mut FeedbackState) -> impl View<FeedbackState> {
+        let column = column()
+            .child(section_title("Badges"))
+            .child(v_gap(10.0))
+            .child(badges_row())
+            .child(v_gap(28.0))
+            .child(section_title("Tags"))
+            .child(v_gap(10.0))
+            .child(tags_row(state))
+            .child(v_gap(28.0))
+            .child(section_title("Alerts"))
+            .child(v_gap(10.0))
+            .child(alerts_column())
+            .child(v_gap(28.0))
+            .child(section_title("Toasts"))
+            .child(v_gap(10.0))
+            .child(toasts_row(state))
+            .child(v_gap(28.0))
+            .child(section_title("Loaders"))
+            .child(v_gap(10.0))
+            .child(loaders_column())
+            .cross_axis(CrossAxisAlignment::Start);
 
         any(Padding(EdgeInsets::all(16.0), column))
     }
@@ -123,19 +122,18 @@ fn h_gap<State: 'static>(width: f64) -> AnyView<State> {
 // ---------------------------------------------------------------------
 
 fn badges_row<State: 'static>() -> AnyView<State> {
-    any(Row(vec![
-        any(glyph::badge("connected", glyph::BadgeVariant::Success).dot(true)),
-        h_gap(8.0),
-        any(glyph::badge("degraded", glyph::BadgeVariant::Warning).dot(true)),
-        h_gap(8.0),
-        any(glyph::badge("offline", glyph::BadgeVariant::Error).dot(true)),
-        h_gap(8.0),
-        any(glyph::badge("active", glyph::BadgeVariant::Info)),
-        h_gap(8.0),
-        any(glyph::badge("read-only", glyph::BadgeVariant::Neutral)),
-        h_gap(8.0),
-        any(glyph::badge("v0.44.1", glyph::BadgeVariant::Accent)),
-    ]))
+    any(row()
+        .child(glyph::badge("connected", glyph::BadgeVariant::Success).dot(true))
+        .child(h_gap(8.0))
+        .child(glyph::badge("degraded", glyph::BadgeVariant::Warning).dot(true))
+        .child(h_gap(8.0))
+        .child(glyph::badge("offline", glyph::BadgeVariant::Error).dot(true))
+        .child(h_gap(8.0))
+        .child(glyph::badge("active", glyph::BadgeVariant::Info))
+        .child(h_gap(8.0))
+        .child(glyph::badge("read-only", glyph::BadgeVariant::Neutral))
+        .child(h_gap(8.0))
+        .child(glyph::badge("v0.44.1", glyph::BadgeVariant::Accent)))
 }
 
 // ---------------------------------------------------------------------
@@ -179,31 +177,30 @@ fn tags_row(state: &FeedbackState) -> AnyView<FeedbackState> {
 // ---------------------------------------------------------------------
 
 fn alerts_column<State: 'static>() -> AnyView<State> {
-    any(Column(vec![
-        any(glyph::alert(
+    any(column()
+        .child(glyph::alert(
             glyph::AlertVariant::Info,
             "Heads up",
             "A new workspace layout is available in settings.",
-        )),
-        v_gap(8.0),
-        any(glyph::alert(
+        ))
+        .child(v_gap(8.0))
+        .child(glyph::alert(
             glyph::AlertVariant::Success,
             "Saved",
             "Your changes have been saved.",
-        )),
-        v_gap(8.0),
-        any(glyph::alert(
+        ))
+        .child(v_gap(8.0))
+        .child(glyph::alert(
             glyph::AlertVariant::Warning,
             "Low disk space",
             "Free up space soon to avoid interruptions.",
-        )),
-        v_gap(8.0),
-        any(glyph::alert(
+        ))
+        .child(v_gap(8.0))
+        .child(glyph::alert(
             glyph::AlertVariant::Error,
             "Sync failed",
             "Check your connection and try again.",
-        )),
-    ]))
+        )))
 }
 
 // ---------------------------------------------------------------------
@@ -220,22 +217,22 @@ fn toasts_row(state: &FeedbackState) -> AnyView<FeedbackState> {
         }
     };
 
-    any(Column(vec![
-        any(Row(vec![
-            any(button("Plain", trigger("Plain notification"))),
-            h_gap(8.0),
-            any(button("Info", trigger("Info: sync started"))),
-            h_gap(8.0),
-            any(button("Success", trigger("Success: export complete"))),
-            h_gap(8.0),
-            any(button("Warning", trigger("Warning: approaching quota"))),
-            h_gap(8.0),
-            any(button("Error", trigger("Error: upload failed"))),
-        ])
-        .cross_axis(CrossAxisAlignment::Center)),
-        v_gap(8.0),
-        any(text("Toasts play one at a time (FIFO) and auto-dismiss after 2.4s.").size(11.0)),
-    ]))
+    any(column()
+        .child(
+            row()
+                .child(button("Plain", trigger("Plain notification")))
+                .child(h_gap(8.0))
+                .child(button("Info", trigger("Info: sync started")))
+                .child(h_gap(8.0))
+                .child(button("Success", trigger("Success: export complete")))
+                .child(h_gap(8.0))
+                .child(button("Warning", trigger("Warning: approaching quota")))
+                .child(h_gap(8.0))
+                .child(button("Error", trigger("Error: upload failed")))
+                .cross_axis(CrossAxisAlignment::Center),
+        )
+        .child(v_gap(8.0))
+        .child(text("Toasts play one at a time (FIFO) and auto-dismiss after 2.4s.").size(11.0)))
 }
 
 // ---------------------------------------------------------------------
@@ -243,17 +240,16 @@ fn toasts_row(state: &FeedbackState) -> AnyView<FeedbackState> {
 // ---------------------------------------------------------------------
 
 fn loaders_column<State: 'static>() -> AnyView<State> {
-    any(Column(vec![
-        any(text("Progress (65%)".to_string()).size(12.0)),
-        v_gap(6.0),
-        any(glyph::progress(0.65)),
-        v_gap(20.0),
-        any(text("Skeleton".to_string()).size(12.0)),
-        v_gap(6.0),
-        any(glyph::skeleton(220.0, 16.0)),
-        v_gap(20.0),
-        any(text("Dots loader".to_string()).size(12.0)),
-        v_gap(6.0),
-        any(glyph::dots_loader()),
-    ]))
+    any(column()
+        .child(text("Progress (65%)".to_string()).size(12.0))
+        .child(v_gap(6.0))
+        .child(glyph::progress(0.65))
+        .child(v_gap(20.0))
+        .child(text("Skeleton".to_string()).size(12.0))
+        .child(v_gap(6.0))
+        .child(glyph::skeleton(220.0, 16.0))
+        .child(v_gap(20.0))
+        .child(text("Dots loader".to_string()).size(12.0))
+        .child(v_gap(6.0))
+        .child(glyph::dots_loader()))
 }

@@ -364,7 +364,7 @@ impl Component for ImageStreamPage {
         }
     }
 
-    fn build(&self, state: &mut ImageStreamState) -> AnyView<ImageStreamState> {
+    fn build(&self, state: &mut ImageStreamState) -> impl View<ImageStreamState> {
         let visible = state.visible_ids.get();
         for &id in &visible {
             state.tasks.entry(id).or_insert_with(|| {

@@ -328,11 +328,11 @@ pub fn page(state: &S) -> AnyView<S> {
              be a re-entrant echo.",
         )),
         gap(6.0),
-        inflexible(any(checkbox(
+        inflexible(checkbox(
             rejecting,
             "REJECT write-back",
             |_: &mut S, on: bool| reject_writeback_sig().set(on),
-        ))),
+        )),
         gap(4.0),
         inflexible(readout(format!(
             "Write-back: {} \u{2014} refused so far: {switch_refused} switch, {slider_refused} \

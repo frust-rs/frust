@@ -60,7 +60,7 @@ impl Component for NavigationDrawerPlayground {
         }
     }
 
-    fn build(&self, state: &mut DrawerState) -> AnyView<DrawerState> {
+    fn build(&self, state: &mut DrawerState) -> impl View<DrawerState> {
         body(state)
     }
 }
@@ -94,19 +94,19 @@ fn framed(theme: &Theme, child: impl View<DrawerState>) -> AnyView<DrawerState> 
 /// getter, plus the optional headline (the reference's own `headline`,
 /// `null` when the field is empty).
 fn section(state: &DrawerState) -> DrawerSection<DrawerState> {
-    let mut search = drawer_destination(any(icon(icons::SEARCH)), "Search");
+    let mut search = drawer_destination(icon(icons::SEARCH), "Search");
     if state.badges {
         search = search.show_badge(true);
     }
-    let mut agenda = drawer_destination(any(icon(icons::CALENDAR_TODAY)), "Agenda");
+    let mut agenda = drawer_destination(icon(icons::CALENDAR_TODAY), "Agenda");
     if state.badges {
         agenda = agenda.badge_label("3");
     }
     let mut section = drawer_section(vec![
-        drawer_destination(any(icon(icons::HOME)), "Home"),
+        drawer_destination(icon(icons::HOME), "Home"),
         search,
         agenda,
-        drawer_destination(any(icon(icons::EDIT)), "Drafts"),
+        drawer_destination(icon(icons::EDIT), "Drafts"),
     ]);
     if !state.headline.is_empty() {
         section = section.header(state.headline.clone());

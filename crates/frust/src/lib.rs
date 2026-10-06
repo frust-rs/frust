@@ -6,7 +6,7 @@
 //! shape reads exactly as the spec promises:
 //!
 //! ```no_run
-//! use frust::{AnyView, Column, Component, View, any, text};
+//! use frust::{Component, View, column, text};
 //!
 //! // A small stateless widget: a plain fn, generic over the state of
 //! // whichever component places it.
@@ -25,11 +25,10 @@
 //!
 //!     // The whole UI lives in `build`; split it into widget fns like
 //!     // `greeting` rather than nesting ever deeper inside it.
-//!     fn build(&self, state: &mut i32) -> AnyView<i32> {
-//!         any(Column(vec![
-//!             any(greeting("Hello from Frust")),
-//!             any(text(format!("count: {state}")).size(32.0)),
-//!         ]))
+//!     fn build(&self, state: &mut i32) -> impl View<i32> {
+//!         column()
+//!             .child(greeting("Hello from Frust"))
+//!             .child(text(format!("count: {state}")).size(32.0))
 //!     }
 //! }
 //!
@@ -44,7 +43,7 @@
 //! ## Low-level escape hatch: `App::new`
 //!
 //! [`App`] is the low-level primitive [`run`] and [`app!`] expand into
-//! (`App::new(state, move |state| root.build(state))`): a single ambient
+//! (`App::new(state, move |state| AnyView::new(root.build(state)))`): a single ambient
 //! `State` and a build closure, with no [`Component`] state-boundary or
 //! retained local state. Ordinary apps use a [`Component`] with [`run`] or
 //! [`app!`]; reach for `App::new` directly only when you need that raw
@@ -55,9 +54,9 @@
 //!     greeting: String,
 //! }
 //!
-//! let build = |state: &mut AppState| -> frust::AnyView<AppState> {
-//!     frust::any(frust::text(state.greeting.clone()).size(32.0))
-//! };
+//! // The build closure is generic over its return (`impl View<State>`), so it
+//! // returns the concrete view directly, with no erasure.
+//! let build = |state: &mut AppState| frust::text(state.greeting.clone()).size(32.0);
 //!
 //! frust::App::new(AppState { greeting: "Hello from Frust".into() }, build)
 //!     .run()
@@ -66,11 +65,14 @@
 //!
 //! ## Layout containers
 //!
-//! The primitive containers compose heterogeneous children through
-//! [`any`] (type erasure) into the declarative call shape:
+//! The fluent `column()` / `row()` builders take each child as-is (they erase
+//! internally); the tuple-style primitives compose with [`any`], which is
+//! only needed because a `Vec` holds one element type:
 //!
 //! ```
-//! use frust::{Align, Alignment, Column, EdgeInsets, Padding, Row, SizedBox, any, text};
+//! use frust::{
+//!     Align, Alignment, Column, EdgeInsets, Padding, Row, SizedBox, any, text,
+//! };
 //!
 //! struct Layouts;
 //!
@@ -79,17 +81,35 @@
 //!
 //!     fn init(&self) {}
 //!
-//!     fn build(&self, _state: &mut ()) -> frust::AnyView<()> {
-//!         any(Column(vec![
+//!     fn build(&self, _state: &mut ()) -> impl frust::View<()> {
+//!         // `any` is needed inside these `vec![..]`s: the children are different view types.
+//!         Column(vec![
 //!             any(text("title").size(24.0)),
 //!             any(Row(vec![any(text("left")), any(text("right"))])),
 //!             any(Padding(EdgeInsets::all(8.0), text("padded"))),
 //!             any(Align(Alignment::CENTER, text("centered"))),
 //!             any(SizedBox(Some(0.0), Some(12.0))),
-//!         ]))
+//!         ])
 //!     }
 //! }
 //! # let _ = Layouts;
+//! ```
+//!
+//! The fluent builders erase internally, so no `any()` is written for
+//! container children:
+//!
+//! ```
+//! use frust::{column, row, stack, text};
+//!
+//! # fn demo(cond: bool) -> frust::FlexView<()> {
+//! let _overlay = stack::<()>().child(text("base")).child(text("badge"));
+//! let _line = row::<()>().children(["a", "b"].map(text));
+//! column()
+//!     .child(text("a"))
+//!     .flex(1, text("b"))
+//!     .when(cond, |c| c.child(text("c")))
+//! # }
+//! # let _ = demo(true);
 //! ```
 
 pub use frust_core::component::{Component, ComponentView, component};
@@ -137,9 +157,10 @@ pub use frust_widgets::{
     ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox, SizedBoxView, Slider,
     SliderView, SourceFeedback, SpringDescription, Stack, StackView, TextInput, TextInputView,
     TextView, Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback,
-    auto_scroll_zone, button, checkbox, colored_box, container, divider, drag_target, draggable,
-    flexible, hero, icon, icon_button, inflexible, keyed, list_view, overlay_portal, radio,
-    reorderable_list, safe_area, scaffold, scroll_view, slider, text, text_input,
+    auto_scroll_zone, button, checkbox, colored_box, column, container, divider, drag_target,
+    draggable, flexible, hero, icon, icon_button, inflexible, keyed, list_view, overlay_portal,
+    radio, reorderable_list, row, safe_area, scaffold, scroll_view, slider, stack, text,
+    text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -166,7 +187,7 @@ pub use frust_widgets::scroll_controller::ItemAlignment;
 ///
 /// ```
 /// use frust::{
-///     OverlayBand, OverlayInput, OverlayPlacement, OverlaySide, View, any, overlay_portal, text,
+///     OverlayBand, OverlayInput, OverlayPlacement, OverlaySide, View, overlay_portal, text,
 /// };
 ///
 /// struct App {
@@ -177,7 +198,7 @@ pub use frust_widgets::scroll_controller::ItemAlignment;
 /// // pointer so hovering the trigger is never interrupted by its own tip.
 /// fn trigger(state: &mut App) -> impl View<App> + use<> {
 ///     overlay_portal(text("Save"))
-///         .overlay(state.hovering.then(|| any(text("Save the document"))))
+///         .overlay(state.hovering.then(|| text("Save the document")))
 ///         .placement(OverlayPlacement::on(OverlaySide::Top))
 ///         .band(OverlayBand::Tooltip)
 ///         .input(OverlayInput::Transparent)
@@ -287,7 +308,7 @@ pub use frust_core::{
 /// the sole route into Mode B.
 ///
 /// ```no_run
-/// use frust::{AnyView, Column, Component, any, platform_view, text};
+/// use frust::{Component, View, column, platform_view, text};
 ///
 /// #[derive(Default)]
 /// struct MapDemo;
@@ -297,13 +318,14 @@ pub use frust_core::{
 ///
 ///     fn init(&self) -> Self::State {}
 ///
-///     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
-///         any(Column(vec![
-///             any(text("map below")),
-///             any(platform_view("dev.frust.MapFactory")
-///                 .params_json(r#"{"style":"dark"}"#)
-///                 .size(320.0, 240.0)),
-///         ]))
+///     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
+///         column()
+///             .child(text("map below"))
+///             .child(
+///                 platform_view("dev.frust.MapFactory")
+///                     .params_json(r#"{"style":"dark"}"#)
+///                     .size(320.0, 240.0),
+///             )
 ///     }
 /// }
 ///
@@ -333,7 +355,7 @@ pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 ///
 /// ```no_run
 /// use frust::authoring::{PaintCtx, PaintScene};
-/// use frust::{AnyView, Component, any, canvas};
+/// use frust::{Component, View, canvas};
 /// use kurbo::{Point, Size};
 /// use peniko::Color;
 ///
@@ -347,13 +369,13 @@ pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 ///         0
 ///     }
 ///
-///     fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+///     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
 ///         let ticks = *state;
-///         any(canvas(move |scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
+///         canvas(move |scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
 ///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x10, 0x10, 0x10));
 ///         })
 ///         .expand()
-///         .repaint_key(ticks))
+///         .repaint_key(ticks)
 ///     }
 /// }
 ///
@@ -377,7 +399,7 @@ pub use frust_widgets::{CanvasView, CanvasWidget, canvas};
 ///
 /// ```no_run
 /// use frust::authoring::{PaintCtx, PaintScene};
-/// use frust::{AnyView, Component, PanZoomController, PanZoomTransform, any, canvas, pan_zoom};
+/// use frust::{Component, PanZoomController, PanZoomTransform, View, canvas, pan_zoom};
 /// use kurbo::{Point, Size};
 /// use peniko::Color;
 ///
@@ -399,16 +421,16 @@ pub use frust_widgets::{CanvasView, CanvasWidget, canvas};
 ///         }
 ///     }
 ///
-///     fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+///     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
 ///         let board = canvas(|scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
 ///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x20, 0x20, 0x20));
 ///         })
 ///         .size(Size::new(2000.0, 1500.0));
-///         any(pan_zoom(board)
+///         pan_zoom(board)
 ///             .max_scale(4.0)
 ///             .inertia(true)
 ///             .controller(state.zoom.clone())
-///             .on_transform(|state: &mut BoardState, t| state.transform = t))
+///             .on_transform(|state: &mut BoardState, t| state.transform = t)
 ///     }
 /// }
 ///
@@ -1075,7 +1097,7 @@ pub use back_glue::{BackHandler, attach_back_handler};
 /// consume/dedupe and timing contracts.
 ///
 /// ```no_run
-/// use frust::{AnyView, Component, NavigatorController, any, navigator, text};
+/// use frust::{Component, NavigatorController, View, navigator, text};
 ///
 /// #[derive(Default)]
 /// struct App;
@@ -1091,9 +1113,9 @@ pub use back_glue::{BackHandler, attach_back_handler};
 ///         AppState { nav: NavigatorController::new() }
 ///     }
 ///
-///     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+///     fn build(&self, state: &mut AppState) -> impl View<AppState> {
 ///         // Back handling is automatic — no BackHandler needed.
-///         any(navigator(&state.nav, || any(text("home"))))
+///         navigator(&state.nav, || text("home"))
 ///     }
 /// }
 ///
@@ -1108,9 +1130,12 @@ pub use back_glue::{BackHandler, attach_back_handler};
 /// app-side wiring. An app can still override it per navigator
 /// ([`NavigatorView::pop_swipe`]) or per page
 /// ([`frust_widgets::PushOptions::pop_swipe`]).
-pub fn navigator<State: 'static>(
+///
+/// `initial` may return any [`View`]; it is erased inside
+/// [`frust_widgets::navigator`].
+pub fn navigator<State: 'static, V: View<State>>(
     controller: &NavigatorController<State>,
-    initial: impl Fn() -> AnyView<State> + 'static,
+    initial: impl Fn() -> V + 'static,
 ) -> NavigatorView<State> {
     back_glue::auto_wire(controller);
     frust_widgets::navigator(controller, initial).platform_pop_swipe(cfg!(target_os = "ios"))
@@ -1137,9 +1162,7 @@ pub fn navigator<State: 'static>(
 /// for the arbitration contract.
 ///
 /// ```no_run
-/// use frust::{
-///     AnyView, Component, NavigatorController, Stack, any, navigator, overlay_host, text,
-/// };
+/// use frust::{Component, NavigatorController, View, navigator, overlay_host, stack, text};
 ///
 /// #[derive(Default)]
 /// struct App;
@@ -1159,16 +1182,15 @@ pub fn navigator<State: 'static>(
 ///         }
 ///     }
 ///
-///     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+///     fn build(&self, state: &mut AppState) -> impl View<AppState> {
 ///         let nav = state.nav.clone();
 ///         // The former root view moves INSIDE the host's page builder — which
 ///         // is also what puts the inner navigator's wiring after the host's.
-///         any(overlay_host(&state.overlays, move || {
-///             any(Stack(vec![
-///                 any(navigator(&nav, || any(text("home")))),
-///                 any(text("persistent chrome")),
-///             ]))
-///         }))
+///         overlay_host(&state.overlays, move || {
+///             stack()
+///                 .child(navigator(&nav, || text("home")))
+///                 .child(text("persistent chrome"))
+///         })
 ///     }
 /// }
 ///
@@ -1181,9 +1203,12 @@ pub fn navigator<State: 'static>(
 /// pins an *explicit* [`NavigatorView::pop_swipe(false)`](NavigatorView::pop_swipe)
 /// (an edge swipe must never dismiss an overlay), which outranks the platform
 /// slot by construction.
-pub fn overlay_host<State: 'static>(
+///
+/// `app` may return any [`View`]; it is erased inside
+/// [`frust_widgets::overlay_host`].
+pub fn overlay_host<State: 'static, V: View<State>>(
     controller: &NavigatorController<State>,
-    app: impl Fn() -> AnyView<State> + 'static,
+    app: impl Fn() -> V + 'static,
 ) -> NavigatorView<State> {
     back_glue::auto_wire_overlay_host(controller);
     frust_widgets::overlay_host(controller, app).platform_pop_swipe(cfg!(target_os = "ios"))
@@ -1444,16 +1469,15 @@ pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 /// [`Router`]) is a separate opt-in, not automatic here.
 ///
 /// ```no_run
-/// use frust::{AnyView, Route, Router, any, deep_links, text};
+/// use frust::{Route, Router, View, deep_links, text};
 ///
 /// struct AppState;
 ///
 /// struct NavDemo;
 ///
 /// fn build_router() -> Router<AppState> {
-///     Router::new(vec![Route::new("/", |_params| -> AnyView<AppState> {
-///         any(text("home"))
-///     })])
+///     // A route builder returns any `View`, so it needs no erasure.
+///     Router::new(vec![Route::new("/", |_params| text("home"))])
 /// }
 ///
 /// impl frust::Component for NavDemo {
@@ -1463,14 +1487,14 @@ pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 ///         AppState
 ///     }
 ///
-///     fn build(&self, _state: &mut AppState) -> AnyView<AppState> {
+///     fn build(&self, _state: &mut AppState) -> impl View<AppState> {
 ///         let _router = build_router();
 ///         // A late-subscribed read: `initial` sees a cold-start link (if any);
 ///         // `latest` is the live signal a rebuild tracks for warm links.
 ///         let links = deep_links();
 ///         let _ = links.initial;
 ///         let _ = links.latest;
-///         any(text("nav demo"))
+///         text("nav demo")
 ///     }
 /// }
 /// # let _ = NavDemo;
@@ -1504,7 +1528,7 @@ pub use frust_reactive::{
 /// the same item twice reads as two activations rather than one stale value.
 ///
 /// ```no_run
-/// use frust::{AnyView, Component, Get, any, menu_events, text};
+/// use frust::{Component, Get, View, menu_events, text};
 ///
 /// #[derive(Default)]
 /// struct MenuDemo;
@@ -1514,13 +1538,13 @@ pub use frust_reactive::{
 ///
 ///     fn init(&self) -> Self::State {}
 ///
-///     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
+///     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
 ///         // A tracked read: this rebuild re-runs when an item is activated.
 ///         let label = match menu_events().latest.get() {
 ///             Some(event) => format!("chose {}", event.id),
 ///             None => "nothing chosen yet".to_string(),
 ///         };
-///         any(text(label))
+///         text(label)
 ///     }
 /// }
 /// ```
@@ -1810,7 +1834,7 @@ pub use frust_shell_desktop::{
 /// to a view tree.
 ///
 /// This is the low-level primitive. [`app!`] and [`run`] expand into
-/// `App::new(state, move |state| root.build(state))` (see
+/// `App::new(state, move |state| AnyView::new(root.build(state)))` (see
 /// [`run_with_setup_and_config`]); ordinary apps write a [`Component`] and
 /// start it with those instead of constructing an `App` by hand.
 ///
@@ -1990,9 +2014,12 @@ fn desktop_extensions(
 /// Run a root [`Component`] in the desktop preview shell until the window
 /// closes — the canonical `runApp` equivalent for the Component model.
 ///
-/// `root.init()` seeds the component's retained `State` once; the resulting
-/// `AnyView<C::State>` is then driven through the same desktop preview loop
-/// [`App::run`] uses, rebuilding from `root.build(state)` every frame.
+/// `root.init()` seeds the component's retained `State` once; the view
+/// `root.build(state)` returns is erased into an `AnyView<C::State>` and driven
+/// through the same desktop preview loop [`App::run`] uses, rebuilding every
+/// frame. The erasure is required, not cosmetic: `build`'s `impl View` return
+/// type captures the `&self`/`&mut State` borrows, so a closure handing it out
+/// unerased would let them escape.
 ///
 /// Initializes the process-wide [`frust_reactive::ReactiveRuntime`] with a
 /// no-op waker *before* `root.init()` runs, since a signal or context created
@@ -2048,13 +2075,13 @@ pub fn run_with_setup<C: Component>(root: C, setup: impl FnOnce()) -> anyhow::Re
 /// `setup = { .. }` block accompanies it.
 ///
 /// ```no_run
-/// # use frust::{AnyView, Component, any, text};
+/// # use frust::{Component, View, text};
 /// # #[derive(Default)]
 /// # struct MyApp;
 /// # impl Component for MyApp {
 /// #     type State = ();
 /// #     fn init(&self) -> Self::State {}
-/// #     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> { any(text("hi")) }
+/// #     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> { text("hi") }
 /// # }
 /// frust::run_desktop_config(
 ///     MyApp,
@@ -2091,16 +2118,18 @@ pub fn run_with_setup_and_config<C: Component>(
         setup();
         root.init()
     });
-    App::new(state, move |state: &mut C::State| root.build(state))
-        .desktop(config)
-        .run()
+    App::new(state, move |state: &mut C::State| {
+        AnyView::new(root.build(state))
+    })
+    .desktop(config)
+    .run()
 }
 
 /// The canonical app entry point: one line binds a root
 /// [`Component`] to all three platforms.
 ///
 /// ```no_run
-/// use frust::{AnyView, Component, any, text};
+/// use frust::{Component, View, text};
 ///
 /// #[derive(Default)]
 /// struct App;
@@ -2112,8 +2141,8 @@ pub fn run_with_setup_and_config<C: Component>(
 ///         0
 ///     }
 ///
-///     fn build(&self, state: &mut i32) -> AnyView<i32> {
-///         any(text(format!("count: {state}")).size(32.0))
+///     fn build(&self, state: &mut i32) -> impl View<i32> {
+///         text(format!("count: {state}")).size(32.0)
 ///     }
 /// }
 ///
@@ -2158,13 +2187,13 @@ pub fn run_with_setup_and_config<C: Component>(
 /// of each platform's entry, before the shell is constructed:
 ///
 /// ```no_run
-/// # use frust::{AnyView, Component, any, text};
+/// # use frust::{Component, View, text};
 /// # #[derive(Default)]
 /// # struct MyApp;
 /// # impl Component for MyApp {
 /// #     type State = ();
 /// #     fn init(&self) -> Self::State {}
-/// #     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> { any(text("hi")) }
+/// #     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> { text("hi") }
 /// # }
 /// frust::app!(MyApp, setup = { my_design_system::install(); });
 /// # mod my_design_system {
@@ -2202,13 +2231,13 @@ pub fn run_with_setup_and_config<C: Component>(
 /// (name, reverse-DNS id, window icon, native menu bar, close policy):
 ///
 /// ```no_run
-/// # use frust::{AnyView, Component, any, text};
+/// # use frust::{Component, View, text};
 /// # #[derive(Default)]
 /// # struct MyApp;
 /// # impl Component for MyApp {
 /// #     type State = ();
 /// #     fn init(&self) -> Self::State {}
-/// #     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> { any(text("hi")) }
+/// #     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> { text("hi") }
 /// # }
 /// frust::app!(MyApp, desktop = {
 ///     frust::DesktopConfig::new()
@@ -2262,7 +2291,7 @@ macro_rules! app {
             {
                 let __frust_root = <$root as ::core::default::Default>::default();
                 move |state: &mut <$root as $crate::Component>::State| {
-                    $crate::Component::build(&__frust_root, state)
+                    $crate::AnyView::new($crate::Component::build(&__frust_root, state))
                 }
             }
         );
@@ -2277,7 +2306,7 @@ macro_rules! app {
             {
                 let __frust_root = <$root as ::core::default::Default>::default();
                 move |state: &mut <$root as $crate::Component>::State| {
-                    $crate::Component::build(&__frust_root, state)
+                    $crate::AnyView::new($crate::Component::build(&__frust_root, state))
                 }
             }
         );
@@ -2300,7 +2329,7 @@ macro_rules! app {
             {
                 let __frust_root = <$root as ::core::default::Default>::default();
                 move |state: &mut <$root as $crate::Component>::State| {
-                    $crate::Component::build(&__frust_root, state)
+                    $crate::AnyView::new($crate::Component::build(&__frust_root, state))
                 }
             }
         );
@@ -2435,7 +2464,7 @@ mod macro_expansion {
             0
         }
 
-        fn build(&self, state: &mut u32) -> crate::AnyView<u32> {
+        fn build(&self, state: &mut u32) -> impl crate::View<u32> {
             *state += 1;
             crate::any(crate::text(format!("{state}")))
         }
@@ -2469,7 +2498,7 @@ mod macro_expansion_no_setup {
             0
         }
 
-        fn build(&self, state: &mut u32) -> crate::AnyView<u32> {
+        fn build(&self, state: &mut u32) -> impl crate::View<u32> {
             *state += 1;
             crate::any(crate::text(format!("{state}")))
         }
@@ -2508,7 +2537,7 @@ mod macro_expansion_desktop_config {
             0
         }
 
-        fn build(&self, state: &mut u32) -> crate::AnyView<u32> {
+        fn build(&self, state: &mut u32) -> impl crate::View<u32> {
             *state += 1;
             crate::any(crate::text(format!("{state}")))
         }
@@ -2634,7 +2663,7 @@ mod root_owner_wrap {
             provide_context(RunCtxMarker(7));
             0
         }
-        fn build(&self, _state: &mut u32) -> crate::AnyView<u32> {
+        fn build(&self, _state: &mut u32) -> impl crate::View<u32> {
             crate::any(crate::text(String::new()))
         }
     }

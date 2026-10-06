@@ -92,7 +92,7 @@ fn mount_feed(
 ) {
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     let mut tcx = TextContext::new();
 
     root.rebuild(&mut logic, &mut state);
@@ -264,7 +264,7 @@ fn drawer_entrance_survives_a_disposed_owner() {
         let ambient = setup();
         let mut root: Root = RenderRoot::new();
         let mut state = HuddleApp.init();
-        let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+        let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
         let mut tcx = TextContext::new();
 
         root.rebuild(&mut logic, &mut state);
@@ -286,7 +286,7 @@ fn drawer_entrance_survives_a_disposed_owner() {
         let ambient = setup();
         let mut root: Root = RenderRoot::new();
         let mut state = HuddleApp.init();
-        let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+        let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
         let mut tcx = TextContext::new();
 
         root.rebuild(&mut logic, &mut state);
@@ -321,7 +321,7 @@ fn drawer_entrance_only_advances_on_the_ui_thread_pump() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
 
     scope.track(|| root.rebuild(&mut logic, &mut state));
     state.nav.router().push("/workspace-switcher");

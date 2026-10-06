@@ -13,7 +13,10 @@
 //! `action-swap*`): "Continue", "Hover me", "Save changes", "Book a demo",
 //! "Slide to continue", the Copy/Copied swap pair.
 
-use frust::{AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, any, component, text};
+use frust::{
+    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, column, component,
+    text,
+};
 use frust_beui::components::action_swap::{
     ActionSwapItem, ActionSwapSize, ActionSwapTransition, action_swap,
 };
@@ -115,10 +118,11 @@ fn row(items: Vec<AnyView<State>>, spacing: f64) -> AnyView<State> {
 
 /// A labelled specimen: the live component over its caption.
 fn specimen(label: &str, body: AnyView<State>) -> AnyView<State> {
-    any(
-        Column(vec![body, gap(6.0), any(caption(label.to_string()))])
-            .cross_axis(CrossAxisAlignment::Start),
-    )
+    any(column()
+        .child(body)
+        .child(gap(6.0))
+        .child(caption(label.to_string()))
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 /// The next state in the demo's own idle → loading → outcome → idle cycle.
@@ -419,28 +423,26 @@ impl Component for ButtonsPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
-        any(Column(vec![
-            buttons(state),
-            call_to_action(state),
-            expandables(state),
-            action_swaps(state),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))
+    fn build(&self, state: &mut State) -> impl View<State> {
+        any(column()
+            .child(buttons(state))
+            .child(call_to_action(state))
+            .child(expandables(state))
+            .child(action_swaps(state))
+            .cross_axis(CrossAxisAlignment::Start))
     }
 }
 
 pub fn page() -> AnyView<AppState> {
-    any(Column(vec![
-        any(heading("Motion \u{b7} Buttons")),
-        any(SizedBox(None, Some(8.0))),
-        any(caption(
+    any(column()
+        .child(heading("Motion \u{b7} Buttons"))
+        .child(SizedBox(None, Some(8.0)))
+        .child(caption(
             "Press surfaces: the four button behaviours across every tone and \
              size, the three call-to-action buttons, the two expandable \
              controls, and the four action-swap treatments.",
-        )),
-        any(SizedBox(None, Some(24.0))),
-        any(component(ButtonsPage)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+        ))
+        .child(SizedBox(None, Some(24.0)))
+        .child(component(ButtonsPage))
+        .cross_axis(CrossAxisAlignment::Start))
 }

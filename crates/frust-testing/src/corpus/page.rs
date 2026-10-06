@@ -62,7 +62,7 @@ use frust_scene::Scene;
 use frust_text::FontFamily;
 use frust_theme::Theme;
 use frust_widgets::{
-    Column, CrossAxisAlignment, EdgeInsets, Padding, Row, SizedBox, colored_box, container, text,
+    Column, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, colored_box, column, container, text,
 };
 use peniko::Color;
 
@@ -214,49 +214,50 @@ fn material_home() -> CorpusCase {
     }
     fn record(scene: &mut Scene) {
         record_page(scene, frust_material::baseline, |family| {
-            let content = Column(vec![
-                any(frust_material::elevated_card::<(), _>(card_body(family))),
-                gap(),
-                any(frust_material::filled_card::<(), _>(card_body(family))),
-                gap(),
-                any(frust_material::outlined_card::<(), _>(card_body(family))),
-                gap(),
-                any(Row(vec![
-                    any(frust_material::filled_button::<(), _>(
-                        SAMPLE_TEXT,
-                        |_: &mut ()| {},
-                    )),
-                    hgap(),
-                    any(frust_material::tonal_button::<(), _>(
-                        SAMPLE_TEXT,
-                        |_: &mut ()| {},
-                    )),
-                ])),
-                gap(),
-                any(Row(vec![
-                    any(frust_material::outlined_button::<(), _>(
-                        SAMPLE_TEXT,
-                        |_: &mut ()| {},
-                    )),
-                    hgap(),
-                    any(frust_material::text_button::<(), _>(
-                        SAMPLE_TEXT,
-                        |_: &mut ()| {},
-                    )),
-                ])),
-                gap(),
-                any(frust_material::divider()),
-                gap(),
-                any(frust_material::linear_progress(
+            let content = column()
+                .child(frust_material::elevated_card::<(), _>(card_body(family)))
+                .child(gap())
+                .child(frust_material::filled_card::<(), _>(card_body(family)))
+                .child(gap())
+                .child(frust_material::outlined_card::<(), _>(card_body(family)))
+                .child(gap())
+                .child(
+                    frust_widgets::row()
+                        .child(frust_material::filled_button::<(), _>(
+                            SAMPLE_TEXT,
+                            |_: &mut ()| {},
+                        ))
+                        .child(hgap())
+                        .child(frust_material::tonal_button::<(), _>(
+                            SAMPLE_TEXT,
+                            |_: &mut ()| {},
+                        )),
+                )
+                .child(gap())
+                .child(
+                    frust_widgets::row()
+                        .child(frust_material::outlined_button::<(), _>(
+                            SAMPLE_TEXT,
+                            |_: &mut ()| {},
+                        ))
+                        .child(hgap())
+                        .child(frust_material::text_button::<(), _>(
+                            SAMPLE_TEXT,
+                            |_: &mut ()| {},
+                        )),
+                )
+                .child(gap())
+                .child(frust_material::divider())
+                .child(gap())
+                .child(frust_material::linear_progress(
                     frust_material::ProgressValue::Determinate(0.62),
-                )),
-            ])
-            .cross_axis(CrossAxisAlignment::Stretch);
+                ))
+                .cross_axis(CrossAxisAlignment::Stretch);
             any(
                 frust_widgets::scaffold::<(), _>(Padding(EdgeInsets::all(GUTTER), content))
                     // Scaffold app_bar is docked at the window top by design; consumes insets as default
-                    .app_bar(any(frust_material::app_bar::<()>("")))
-                    .bottom_bar(any(frust_material::navigation_bar::<(), _>(
+                    .app_bar(frust_material::app_bar::<()>(""))
+                    .bottom_bar(frust_material::navigation_bar::<(), _>(
                         vec![
                             frust_material::nav_item::<()>(""),
                             frust_material::nav_item::<()>(""),
@@ -264,11 +265,11 @@ fn material_home() -> CorpusCase {
                         ],
                         1,
                         |_: &mut (), _: usize| {},
-                    )))
-                    .fab(any(frust_material::fab::<(), _>(
+                    ))
+                    .fab(frust_material::fab::<(), _>(
                         swatch(24.0, Color::WHITE),
                         |_: &mut ()| {},
-                    ))),
+                    )),
             )
         });
     }
@@ -331,14 +332,13 @@ fn cupertino_settings() -> CorpusCase {
     fn row(family: &FontFamily, checked: bool) -> AnyView<()> {
         any(container::<(), _>(Padding(
             EdgeInsets::symmetric(16.0, 12.0),
-            Row(vec![
-                any(dark_on_light(family, SAMPLE_TEXT, 17.0)),
-                any(SizedBox::<()>(Some(120.0), None)),
-                any(frust_cupertino::cupertino_switch::<(), _>(
+            frust_widgets::row()
+                .child(dark_on_light(family, SAMPLE_TEXT, 17.0))
+                .child(SizedBox::<()>(Some(120.0), None))
+                .child(frust_cupertino::cupertino_switch::<(), _>(
                     checked,
                     |_: &mut (), _: bool| {},
                 )),
-            ]),
         ))
         .fill(Color::WHITE))
     }
@@ -346,23 +346,25 @@ fn cupertino_settings() -> CorpusCase {
         record_page(scene, frust_cupertino::baseline, |family| {
             any(frust_widgets::scaffold::<(), _>(Padding(
                 EdgeInsets::all(GUTTER),
-                Column(vec![
-                    any(dark_on_light(family, SAMPLE_TEXT, 13.0)),
-                    gap(),
-                    any(container::<(), _>(Column(vec![
-                        row(family, true),
-                        any(frust_widgets::divider(IOS_SEPARATOR)),
-                        row(family, false),
-                        any(frust_widgets::divider(IOS_SEPARATOR)),
-                        row(family, true),
-                    ]))
-                    .radius(10.0)),
-                    gap(),
-                    any(frust_cupertino::cupertino_activity_indicator()),
-                ]),
+                column()
+                    .child(dark_on_light(family, SAMPLE_TEXT, 13.0))
+                    .child(gap())
+                    .child(
+                        container::<(), _>(
+                            column()
+                                .child(row(family, true))
+                                .child(frust_widgets::divider(IOS_SEPARATOR))
+                                .child(row(family, false))
+                                .child(frust_widgets::divider(IOS_SEPARATOR))
+                                .child(row(family, true)),
+                        )
+                        .radius(10.0),
+                    )
+                    .child(gap())
+                    .child(frust_cupertino::cupertino_activity_indicator()),
             ))
-            .app_bar(any(frust_cupertino::cupertino_nav_bar::<()>("")))
-            .bottom_bar(any(frust_cupertino::cupertino_tab_bar::<(), _>(
+            .app_bar(frust_cupertino::cupertino_nav_bar::<()>(""))
+            .bottom_bar(frust_cupertino::cupertino_tab_bar::<(), _>(
                 vec![
                     frust_cupertino::tab_item::<()>(""),
                     frust_cupertino::tab_item::<()>(""),
@@ -370,7 +372,7 @@ fn cupertino_settings() -> CorpusCase {
                 ],
                 0,
                 |_: &mut (), _: usize| {},
-            )))
+            ))
             .background(IOS_GROUPED_BG))
         });
     }
@@ -406,17 +408,16 @@ fn cupertino_controls() -> CorpusCase {
                     gap(),
                     styled(Glass),
                     gap(),
-                    any(Row(vec![
-                        any(frust_cupertino::cupertino_switch::<(), _>(
+                    any(frust_widgets::row()
+                        .child(frust_cupertino::cupertino_switch::<(), _>(
                             true,
                             |_: &mut (), _: bool| {},
-                        )),
-                        hgap(),
-                        any(frust_cupertino::cupertino_switch::<(), _>(
+                        ))
+                        .child(hgap())
+                        .child(frust_cupertino::cupertino_switch::<(), _>(
                             false,
                             |_: &mut (), _: bool| {},
-                        )),
-                    ])),
+                        ))),
                     gap(),
                     any(frust_cupertino::cupertino_activity_indicator()),
                 ],
@@ -520,16 +521,15 @@ fn glyph_surfaces() -> CorpusCase {
 fn shadcn_form() -> CorpusCase {
     fn record(scene: &mut Scene) {
         record_page(scene, frust_shadcn::theme, |family| {
-            let content = Column(vec![
-                any(dark_on_light(family, SAMPLE_TEXT, 18.0)),
-                any(dark_on_light(family, SAMPLE_TEXT_LONG, 13.0)),
-                gap(),
-                any(frust_shadcn::progress(0.55)),
-            ]);
-            let card = frust_shadcn::card::<()>(vec![
+            let content = column()
+                .child(dark_on_light(family, SAMPLE_TEXT, 18.0))
+                .child(dark_on_light(family, SAMPLE_TEXT_LONG, 13.0))
+                .child(gap())
+                .child(frust_shadcn::progress(0.55));
+            let card = frust_shadcn::card::<(), _>(vec![
                 frust_shadcn::card_content::<()>(content),
                 any(frust_shadcn::separator()),
-                frust_shadcn::card_footer::<()>(vec![
+                frust_shadcn::card_footer::<(), _>(vec![
                     any(frust_shadcn::button::<()>("", |_: &mut ()| {})),
                     hgap(),
                     any(frust_shadcn::button::<()>("", |_: &mut ()| {})
@@ -567,29 +567,27 @@ fn shadcn_controls() -> CorpusCase {
                 vec![
                     any(dark_on_light(family, SAMPLE_TEXT, 20.0)),
                     gap(),
-                    any(Row(vec![
-                        any(frust_shadcn::switch::<(), _>(
+                    any(frust_widgets::row()
+                        .child(frust_shadcn::switch::<(), _>(
                             true,
                             |_: &mut (), _: bool| {},
-                        )),
-                        hgap(),
-                        any(frust_shadcn::switch::<(), _>(
+                        ))
+                        .child(hgap())
+                        .child(frust_shadcn::switch::<(), _>(
                             false,
                             |_: &mut (), _: bool| {},
-                        )),
-                    ])),
+                        ))),
                     gap(),
-                    any(Row(vec![
-                        any(frust_shadcn::checkbox::<(), _>(
+                    any(frust_widgets::row()
+                        .child(frust_shadcn::checkbox::<(), _>(
                             true,
                             |_: &mut (), _: bool| {},
-                        )),
-                        hgap(),
-                        any(frust_shadcn::checkbox::<(), _>(
+                        ))
+                        .child(hgap())
+                        .child(frust_shadcn::checkbox::<(), _>(
                             false,
                             |_: &mut (), _: bool| {},
-                        )),
-                    ])),
+                        ))),
                     gap(),
                     any(frust_shadcn::separator()),
                     gap(),

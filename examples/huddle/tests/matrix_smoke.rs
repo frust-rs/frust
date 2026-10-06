@@ -68,7 +68,7 @@ fn every_route_builds_under_both_design_languages_and_brightness_states() {
         // compounding across routes × combos.
         let mut root: Root = RenderRoot::new();
         let mut state = HuddleApp.init();
-        let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+        let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
 
         root.rebuild(&mut logic, &mut state);
         assert!(

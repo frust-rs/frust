@@ -599,11 +599,11 @@ pub struct DrawerDestination<State: 'static> {
 /// Tint is the supplied icon view's own responsibility, the same stance
 /// [`crate::navbar`]'s and [`crate::navigation_rail`]'s icon slots take.
 pub fn drawer_destination<State: 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     label: impl Into<String>,
 ) -> DrawerDestination<State> {
     DrawerDestination {
-        icon,
+        icon: AnyView::new(icon),
         selected_icon: None,
         label: label.into(),
         badge_label: None,
@@ -615,8 +615,8 @@ pub fn drawer_destination<State: 'static>(
 impl<State: 'static> DrawerDestination<State> {
     /// A distinct icon to show while this destination is selected (falls back
     /// to the base icon).
-    pub fn selected_icon(mut self, icon: AnyView<State>) -> Self {
-        self.selected_icon = Some(icon);
+    pub fn selected_icon(mut self, icon: impl View<State>) -> Self {
+        self.selected_icon = Some(AnyView::new(icon));
         self
     }
 
@@ -1434,7 +1434,7 @@ mod tests {
     const WINDOW: Size = Size::new(400.0, 600.0);
 
     fn sample_destination<State: 'static>(label: &str) -> DrawerDestination<State> {
-        drawer_destination(any(icon(crate::icons::HOME)), label)
+        drawer_destination(icon(crate::icons::HOME), label)
     }
 
     fn one_section<State: 'static>(labels: &[&str]) -> Vec<DrawerSection<State>> {
@@ -1777,17 +1777,16 @@ mod tests {
     #[test]
     fn a_badge_label_paints_trailing_text_and_a_dot_badge_paints_when_no_label_is_set() {
         let with_text: DrawerDestination<()> =
-            drawer_destination(any(icon(crate::icons::HOME)), "Search").badge_label("3");
+            drawer_destination(icon(crate::icons::HOME), "Search").badge_label("3");
         assert!(!badge_dot_would_paint(&with_text));
 
         let with_dot: DrawerDestination<()> =
-            drawer_destination(any(icon(crate::icons::HOME)), "Search").show_badge(true);
+            drawer_destination(icon(crate::icons::HOME), "Search").show_badge(true);
         assert!(badge_dot_would_paint(&with_dot));
 
-        let both: DrawerDestination<()> =
-            drawer_destination(any(icon(crate::icons::HOME)), "Search")
-                .badge_label("3")
-                .show_badge(true);
+        let both: DrawerDestination<()> = drawer_destination(icon(crate::icons::HOME), "Search")
+            .badge_label("3")
+            .show_badge(true);
         assert!(
             !badge_dot_would_paint(&both),
             "a badge_label wins over show_badge"

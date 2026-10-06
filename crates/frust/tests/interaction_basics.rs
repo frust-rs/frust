@@ -22,7 +22,7 @@
 use std::any::Any;
 
 use frust::{
-    AnyView, Button, Checkbox, Column, Component, Row, SizedBox, Slider, any, component,
+    AnyView, Button, Checkbox, Column, Component, SizedBox, Slider, any, component, row,
     scroll_view, text,
 };
 use frust_core::{
@@ -96,7 +96,7 @@ impl Component for CollapsibleSection {
         false
     }
 
-    fn build(&self, state: &mut bool) -> AnyView<bool> {
+    fn build(&self, state: &mut bool) -> impl View<bool> {
         let expanded = *state;
         let mut children: Vec<AnyView<bool>> = Vec::with_capacity(3);
         children.push(any(Button(
@@ -126,7 +126,7 @@ impl Component for CounterApp {
 
     /// Pure view function: renders `AppState` into a scrollable counter
     /// screen. Re-run every frame, so it is cheap by construction.
-    fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+    fn build(&self, state: &mut AppState) -> impl View<AppState> {
         let count = state.count;
         let extra = state.extra_rows;
         let slider_value = state.slider;
@@ -135,11 +135,10 @@ impl Component for CounterApp {
         let mut children: Vec<AnyView<AppState>> = Vec::with_capacity(rows + 5);
 
         children.push(any(text(format!("Count: {count}")).size(32.0)));
-        children.push(any(Row(vec![
-            any(Button("-", |s: &mut AppState| s.count -= 1)),
-            any(SizedBox(Some(16.0), None)),
-            any(Button("+", |s: &mut AppState| s.count += 1)),
-        ])));
+        children.push(any(row()
+            .child(Button("-", |s: &mut AppState| s.count -= 1))
+            .child(SizedBox(Some(16.0), None))
+            .child(Button("+", |s: &mut AppState| s.count += 1))));
         children.push(any(Checkbox(
             extra,
             "Extra rows",
@@ -270,7 +269,7 @@ fn slider_track(scene: &RecScene) -> (Point, Size) {
 #[test]
 fn plus_and_minus_buttons_change_count() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(CounterApp.build(s));
     let mut state = CounterApp.init();
     let mut tcx = TextContext::new();
 
@@ -295,7 +294,7 @@ fn plus_and_minus_buttons_change_count() {
 #[test]
 fn checkbox_toggle_grows_the_filler_list() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(CounterApp.build(s));
     let mut state = CounterApp.init();
     let mut tcx = TextContext::new();
 
@@ -329,7 +328,7 @@ fn checkbox_toggle_grows_the_filler_list() {
 #[test]
 fn slider_drag_updates_value() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(CounterApp.build(s));
     let mut state = CounterApp.init();
     let mut tcx = TextContext::new();
 
@@ -356,7 +355,7 @@ fn slider_drag_updates_value() {
 #[test]
 fn wheel_scroll_shifts_content() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(CounterApp.build(s));
     let mut state = CounterApp.init();
     let mut tcx = TextContext::new();
 
@@ -385,7 +384,7 @@ fn wheel_scroll_shifts_content() {
 #[test]
 fn drag_starting_on_a_button_scrolls_instead_of_firing() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(CounterApp.build(s));
     let mut state = CounterApp.init();
     let mut tcx = TextContext::new();
 
@@ -440,7 +439,7 @@ fn collapsible_toggle(scene: &RecScene) -> (Point, Size) {
 #[test]
 fn local_section_state_survives_parent_rebuilds() {
     let mut root = RenderRoot::new();
-    let mut logic = |s: &mut AppState| CounterApp.build(s);
+    let mut logic = |s: &mut AppState| AnyView::new(CounterApp.build(s));
     let mut state = CounterApp.init();
     let mut tcx = TextContext::new();
 

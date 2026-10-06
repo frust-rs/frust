@@ -20,7 +20,8 @@
 
 use frust::{
     AnyView, Axis, Column, Component, CrossAxisAlignment, EdgeInsets, FlexView, IconSource,
-    Padding, SizedBox, TextView, Theme, any, component, icon, icons, inflexible, text, use_context,
+    Padding, SizedBox, TextView, Theme, View, any, column, component, icon, icons, inflexible,
+    text, use_context,
 };
 use frust_beui::blocks::dynamic_island::{dynamic_island, dynamic_island_slot};
 use frust_beui::blocks::expandable_tabs::{expandable_tabs, expandable_tabs_item};
@@ -183,26 +184,25 @@ fn expandable_tabs_block(state: &State) -> AnyView<State> {
         ),
     ];
 
-    any(Column(vec![
-        any(section("expandable_tabs")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("expandable_tabs"))
+        .child(gap(6.0))
+        .child(caption(
             "An icon bar whose active tab expands to a labelled pill, with the panel above \
              morphing its height and sliding its content direction-aware on a switch. Pressing \
              the open tab again closes the shell back to the bar.",
-        )),
-        gap(10.0),
-        any(expandable_tabs(
+        ))
+        .child(gap(10.0))
+        .child(expandable_tabs(
             state.tabs_value.clone(),
             items,
             |s: &mut State, value: Option<String>| s.tabs_value = value,
-        )),
-        gap(8.0),
-        any(caption(format!(
+        ))
+        .child(gap(8.0))
+        .child(caption(format!(
             "Open tab: {}",
             state.tabs_value.as_deref().unwrap_or("(closed)")
-        ))),
-    ]))
+        ))))
 }
 
 // ---- The morphing tabs -----------------------------------------------------
@@ -239,15 +239,14 @@ fn room_panel(eyebrow: &str, title: &str, detail: &str) -> AnyView<State> {
             right: 28.0,
             bottom: 32.0,
         },
-        Column(vec![
-            any(text(eyebrow.to_string()).size(11.0)),
-            gap(10.0),
-            any(text(title.to_string()).size(32.0)),
-            gap(12.0),
-            any(SizedBox(Some(360.0), None).child(text(detail.to_string()).size(14.0))),
-            gap(20.0),
-            any(text("drag any room to reorder").size(12.0)),
-        ]),
+        column()
+            .child(text(eyebrow.to_string()).size(11.0))
+            .child(gap(10.0))
+            .child(text(title.to_string()).size(32.0))
+            .child(gap(12.0))
+            .child(SizedBox(Some(360.0), None).child(text(detail.to_string()).size(14.0)))
+            .child(gap(20.0))
+            .child(text("drag any room to reorder").size(12.0)),
     ))
 }
 
@@ -266,37 +265,39 @@ fn morphing_tabs_block(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(Column(vec![
-        any(section("morphing_tabs")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("morphing_tabs"))
+        .child(gap(6.0))
+        .child(caption(
             "The selected tab grows into the room's own surface and the active shape glides as \
              tabs move. Reordering by pointer drag is part of the block (Alt + \u{2190}/\u{2192} \
              does the same from the keyboard); the order is uncontrolled inside it, so the page \
              mirrors what it reports.",
-        )),
-        gap(10.0),
-        any(morphing_tabs(
-            state.morph_value.clone(),
-            items,
-            |s: &mut State, value: String| {
-                s.morph_log = format!("opened {value}");
-                s.morph_value = Some(value);
-            },
+        ))
+        .child(gap(10.0))
+        .child(
+            morphing_tabs(
+                state.morph_value.clone(),
+                items,
+                |s: &mut State, value: String| {
+                    s.morph_log = format!("opened {value}");
+                    s.morph_value = Some(value);
+                },
+            )
+            .on_order_change(|s: &mut State, order: Vec<String>| {
+                s.morph_log = format!("order: {}", order.join(", "));
+                s.morph_order = order;
+            })
+            .on_close(|s: &mut State, id: String| {
+                s.morph_order.retain(|room| room != &id);
+                if s.morph_value.as_deref() == Some(id.as_str()) {
+                    s.morph_value = s.morph_order.first().cloned();
+                }
+                s.morph_log = format!("closed {id}");
+            }),
         )
-        .on_order_change(|s: &mut State, order: Vec<String>| {
-            s.morph_log = format!("order: {}", order.join(", "));
-            s.morph_order = order;
-        })
-        .on_close(|s: &mut State, id: String| {
-            s.morph_order.retain(|room| room != &id);
-            if s.morph_value.as_deref() == Some(id.as_str()) {
-                s.morph_value = s.morph_order.first().cloned();
-            }
-            s.morph_log = format!("closed {id}");
-        })),
-        gap(10.0),
-        controls(vec![
+        .child(gap(10.0))
+        .child(controls(vec![
             any(button("Reset rooms", |s: &mut State| {
                 s.morph_order = ROOMS.iter().map(|(id, ..)| id.to_string()).collect();
                 s.morph_value = Some(ROOMS[0].0.to_string());
@@ -305,8 +306,7 @@ fn morphing_tabs_block(state: &State) -> AnyView<State> {
             .tone(ButtonTone::Secondary)
             .size(ButtonSize::Sm)),
             any(caption(state.morph_log.clone())),
-        ]),
-    ]))
+        ])))
 }
 
 // ---- The notification stack ------------------------------------------------
@@ -326,35 +326,36 @@ fn notification_block(state: &State) -> AnyView<State> {
             .trailing("new"),
     ];
 
-    any(Column(vec![
-        any(section("notification_stack")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("notification_stack"))
+        .child(gap(6.0))
+        .child(caption(
             "Compact cards that spring from a stacked summary into a readable list on hover, \
              focus or press, the stack animating its own height as it goes. There is no per-card \
              dismiss and no grouping in this block: it expands and collapses, and a second press \
              on the open stack reports \u{201c}view all\u{201d} rather than closing it.",
-        )),
-        gap(10.0),
-        any(notification_stack(
-            items,
-            state.notifications_expanded,
-            |s: &mut State, expanded: bool| {
-                s.notifications_expanded = expanded;
-                s.notifications_log = if expanded {
-                    "expanded".to_string()
-                } else {
-                    "(collapsed)".to_string()
-                };
-            },
+        ))
+        .child(gap(10.0))
+        .child(
+            notification_stack(
+                items,
+                state.notifications_expanded,
+                |s: &mut State, expanded: bool| {
+                    s.notifications_expanded = expanded;
+                    s.notifications_log = if expanded {
+                        "expanded".to_string()
+                    } else {
+                        "(collapsed)".to_string()
+                    };
+                },
+            )
+            .max_visible(3)
+            .collapsed_label("Notifications")
+            .expanded_label("View all")
+            .on_view_all(|s: &mut State| s.notifications_log = "view all pressed".to_string()),
         )
-        .max_visible(3)
-        .collapsed_label("Notifications")
-        .expanded_label("View all")
-        .on_view_all(|s: &mut State| s.notifications_log = "view all pressed".to_string())),
-        gap(8.0),
-        any(caption(format!("Stack: {}", state.notifications_log))),
-    ]))
+        .child(gap(8.0))
+        .child(caption(format!("Stack: {}", state.notifications_log))))
 }
 
 // ---- The dynamic island ----------------------------------------------------
@@ -372,33 +373,32 @@ fn island_block(state: &State) -> AnyView<State> {
         .scheme()
         .surface;
 
-    let compact = Column(vec![any(text("9:41").size(13.0).color(ink))]);
+    let compact = column().child(text("9:41").size(13.0).color(ink));
     let slots = vec![
         dynamic_island_slot(
             "call",
-            Column(vec![
-                any(text("INCOMING CALL").size(10.0).color(ink)),
-                gap(4.0),
-                any(text("Saurabh").size(14.0).color(ink)),
-            ]),
+            column()
+                .child(text("INCOMING CALL").size(10.0).color(ink))
+                .child(gap(4.0))
+                .child(text("Saurabh").size(14.0).color(ink)),
         ),
         dynamic_island_slot(
             "timer",
-            Column(vec![
-                any(text("TIMER").size(10.0).color(ink)),
-                gap(4.0),
-                any(text("2:34").size(20.0).color(ink)),
-            ]),
+            column()
+                .child(text("TIMER").size(10.0).color(ink))
+                .child(gap(4.0))
+                .child(text("2:34").size(20.0).color(ink)),
         ),
         dynamic_island_slot(
             "music",
-            Column(vec![
-                any(text("NOW PLAYING").size(10.0).color(ink)),
-                gap(4.0),
-                any(text("Weightless \u{b7} Marconi Union")
-                    .size(13.0)
-                    .color(ink)),
-            ]),
+            column()
+                .child(text("NOW PLAYING").size(10.0).color(ink))
+                .child(gap(4.0))
+                .child(
+                    text("Weightless \u{b7} Marconi Union")
+                        .size(13.0)
+                        .color(ink),
+                ),
         ),
     ];
 
@@ -424,20 +424,19 @@ fn island_block(state: &State) -> AnyView<State> {
         .size(ButtonSize::Sm)));
     }
 
-    any(Column(vec![
-        any(section("dynamic_island")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("dynamic_island"))
+        .child(gap(6.0))
+        .child(caption(
             "An iOS-style pill that morphs between live-activity views, its shell springing to \
              each one's size while the content crossfades. The state set is supplied by the \
              caller — the three below are this page's demo data — and the corner radius is a \
              constant the paint clamps to half the shorter edge, never an animated lane.",
-        )),
-        gap(10.0),
-        any(dynamic_island(state.island_view.clone(), compact, slots).label("Live activity")),
-        gap(10.0),
-        controls(buttons),
-    ]))
+        ))
+        .child(gap(10.0))
+        .child(dynamic_island(state.island_view.clone(), compact, slots).label("Live activity"))
+        .child(gap(10.0))
+        .child(controls(buttons)))
 }
 
 // ---- The swipeable list ----------------------------------------------------
@@ -503,27 +502,28 @@ fn swipeable_block(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(Column(vec![
-        any(section("swipeable_list")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("swipeable_list"))
+        .child(gap(6.0))
+        .child(caption(
             "Drag a row left or right to reveal its rail. A row is open-left, open-right or \
              closed — there is no full-swipe dismiss in this block, and the open/close decision \
              is a distance threshold, not a fling. Opening one row closes the other, and pressing \
              an action closes the row it belongs to.",
-        )),
-        gap(10.0),
-        any(swipeable_list(
-            items,
-            state.swipe_value.clone(),
-            |s: &mut State, value: Option<SwipeableListValue>| s.swipe_value = value,
+        ))
+        .child(gap(10.0))
+        .child(
+            swipeable_list(
+                items,
+                state.swipe_value.clone(),
+                |s: &mut State, value: Option<SwipeableListValue>| s.swipe_value = value,
+            )
+            .on_action(|s: &mut State, event: SwipeActionEvent| {
+                s.swipe_log = format!("{} on {}", event.action_id, event.item_id);
+            }),
         )
-        .on_action(|s: &mut State, event: SwipeActionEvent| {
-            s.swipe_log = format!("{} on {}", event.action_id, event.item_id);
-        })),
-        gap(8.0),
-        any(caption(format!("Last action: {}", state.swipe_log))),
-    ]))
+        .child(gap(8.0))
+        .child(caption(format!("Last action: {}", state.swipe_log))))
 }
 
 // ---- The page --------------------------------------------------------------
@@ -539,26 +539,25 @@ impl Component for MorphPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
-        any(Column(vec![
-            any(heading("Blocks \u{b7} Morph")),
-            gap(8.0),
-            any(caption(
+    fn build(&self, state: &mut State) -> impl View<State> {
+        any(column()
+            .child(heading("Blocks \u{b7} Morph"))
+            .child(gap(8.0))
+            .child(caption(
                 "Five blocks whose shape is the component: a tab shell that discloses, a tab set \
                  that reorders, a stack that unstacks, a pill that becomes a panel, and rows that \
                  open onto their rails.",
-            )),
-            gap(24.0),
-            expandable_tabs_block(state),
-            gap(24.0),
-            morphing_tabs_block(state),
-            gap(24.0),
-            notification_block(state),
-            gap(24.0),
-            island_block(state),
-            gap(24.0),
-            swipeable_block(state),
-        ]))
+            ))
+            .child(gap(24.0))
+            .child(expandable_tabs_block(state))
+            .child(gap(24.0))
+            .child(morphing_tabs_block(state))
+            .child(gap(24.0))
+            .child(notification_block(state))
+            .child(gap(24.0))
+            .child(island_block(state))
+            .child(gap(24.0))
+            .child(swipeable_block(state)))
     }
 }
 

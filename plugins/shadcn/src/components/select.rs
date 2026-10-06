@@ -1015,10 +1015,9 @@ mod tests {
     fn both_labels() -> impl FnMut(&mut ()) -> frust::FlexView<()> {
         let (selected, empty) = (OverlayAnchor::new(), OverlayAnchor::new());
         move |_: &mut ()| {
-            frust::Column(vec![
-                any(select_trigger::<()>(&selected, options(), Some(1))),
-                any(select_trigger::<()>(&empty, options(), None).placeholder("Select a fruit")),
-            ])
+            frust::column()
+                .child(select_trigger::<()>(&selected, options(), Some(1)))
+                .child(select_trigger::<()>(&empty, options(), None).placeholder("Select a fruit"))
         }
     }
 

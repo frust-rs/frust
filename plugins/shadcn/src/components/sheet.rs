@@ -103,7 +103,12 @@ fn config(side: SheetSide, close_button: bool) -> ModalConfig {
 
 /// Create a sheet whose panel stacks `children` `gap-4` apart, pinned to the
 /// window's trailing edge until [`SheetView::side`] says otherwise.
-pub fn sheet<State: 'static>(children: Vec<AnyView<State>>) -> SheetView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn sheet<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> SheetView<State> {
     let side = SheetSide::default();
     SheetView {
         inner: modal(
@@ -116,7 +121,12 @@ pub fn sheet<State: 'static>(children: Vec<AnyView<State>>) -> SheetView<State> 
 }
 
 /// A header slot: a `p-4 gap-1.5` stack (title, description).
-pub fn sheet_header<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn sheet_header<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
     stack_slots(children, HEADER_GAP, EdgeInsets::all(SLOT_PAD))
 }
 
@@ -132,7 +142,12 @@ pub fn sheet_description<State: 'static>(description: impl Into<String>) -> AnyV
 
 /// A footer slot: a stretched `p-4 gap-2` column (see the [module docs](self)'s
 /// `mt-auto` note).
-pub fn sheet_footer<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn sheet_footer<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
     stack_slots(children, FOOTER_GAP, EdgeInsets::all(SLOT_PAD))
 }
 

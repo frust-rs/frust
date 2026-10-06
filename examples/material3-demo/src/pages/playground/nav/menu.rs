@@ -11,7 +11,7 @@
 //! exercises — mounted here as [`trigger_view`] (inside the preview card) and
 //! [`menu_panel_view`] (at the page's own outer [`Stack`]).
 
-use frust::{AnyView, Component, Stack, any, component, icon};
+use frust::{AnyView, Component, View, any, component, icon, stack};
 use frust_material::{
     MenuAction, MenuColorStyle, MenuNode, MenuSelection, OverlayAlign, OverlayAnchor, OverlaySide,
     icons, menu, menu_entry, menu_group, menu_selectable, menu_submenu, menu_toggleable,
@@ -118,7 +118,7 @@ impl Component for MenuPlayground {
         }
     }
 
-    fn build(&self, state: &mut MenuState) -> AnyView<MenuState> {
+    fn build(&self, state: &mut MenuState) -> impl View<MenuState> {
         body(state)
     }
 }
@@ -133,11 +133,10 @@ fn body(state: &MenuState) -> AnyView<MenuState> {
         vec![play_snippet("Anchored menu", snippet_code(state))],
         vec![appearance_panel(state)],
     );
-    any(Stack(vec![
-        content,
-        menu_panel_view(state),
-        position_menu_panel(state),
-    ]))
+    any(stack()
+        .child(content)
+        .child(menu_panel_view(state))
+        .child(position_menu_panel(state)))
 }
 
 /// The mailbox/starred/more-actions node tree — the reference's `_children`
@@ -193,7 +192,7 @@ fn trigger_view(state: &MenuState) -> AnyView<MenuState> {
         tonal_button(state.selected.clone(), |s: &mut MenuState| {
             s.trigger_open = true;
         })
-        .icon(any(icon(icons::MORE_VERT))),
+        .icon(icon(icons::MORE_VERT)),
     ))
 }
 

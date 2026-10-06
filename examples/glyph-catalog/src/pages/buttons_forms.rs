@@ -73,9 +73,9 @@
 //! `examples/huddle`'s four-way appearance toggle for that check).
 
 use frust::{
-    Alignment, AnyView, Axis, ButtonStyle, Column, Component, CrossAxisAlignment, EdgeInsets,
-    FlexView, Get, Padding, RwSignal, Set, SizedBox, any, button, checkbox, component, inflexible,
-    radio, slider, text, text_input,
+    Alignment, AnyView, ButtonStyle, Component, CrossAxisAlignment, EdgeInsets, Get, Padding,
+    RwSignal, Set, SizedBox, View, any, button, checkbox, column, component, radio, row, slider,
+    text, text_input,
 };
 // The Glyph catalog's own authored toggle — not a baseline `frust`/
 // `frust-widgets` item, and not a themed stand-in for one either.
@@ -143,7 +143,7 @@ impl Component for ButtonsFormsScreen {
         }
     }
 
-    fn build(&self, state: &mut ButtonsFormsState) -> AnyView<ButtonsFormsState> {
+    fn build(&self, state: &mut ButtonsFormsState) -> impl View<ButtonsFormsState> {
         // Tracked reads: a later write from any control below wakes this
         // component's own rebuild (never the outer CatalogState tree).
         let loading = state.loading.get();
@@ -157,105 +157,98 @@ impl Component for ButtonsFormsScreen {
         let enabled_compare_value = state.enabled_compare_value.get();
         let obscured_value = state.obscured_value.get();
 
-        let content = Column(vec![
-            heading("Buttons"),
-            caption(
+        let content = column()
+            .child(heading("Buttons"))
+            .child(caption(
                 "Every ButtonStyle, .small(), and the 0.96 press-feedback scale (try clicking one).",
-            ),
-            spacer(8.0),
-            button_styles_row(),
-            spacer(12.0),
-            caption("Small (.small()):"),
-            spacer(4.0),
-            small_buttons_row(),
-            spacer(16.0),
-            caption(
+            ))
+            .child(spacer(8.0))
+            .child(button_styles_row())
+            .child(spacer(12.0))
+            .child(caption("Small (.small()):"))
+            .child(spacer(4.0))
+            .child(small_buttons_row())
+            .child(spacer(16.0))
+            .child(caption(
                 "Loading demo — toggled by the checkbox, not by pressing the button itself: .loading(true) suppresses on_press while shown (see the module docs).",
-            ),
-            spacer(4.0),
-            loading_demo_row(loading),
-            spacer(16.0),
-            caption(
+            ))
+            .child(spacer(4.0))
+            .child(loading_demo_row(loading))
+            .child(spacer(16.0))
+            .child(caption(
                 "Disabled look — ButtonView has no .enabled(false) seam; .loading(true) is the only disabled-semantics builder, so it doubles here.",
-            ),
-            spacer(4.0),
-            disabled_demo_row(),
-            spacer(16.0),
-            caption(
+            ))
+            .child(spacer(4.0))
+            .child(disabled_demo_row())
+            .child(spacer(16.0))
+            .child(caption(
                 "Stretched label alignment (.label_alignment — task 08): the wide CTA below has no explicit call and still centers its label, because the stretch-aware default auto-centers on width-only stretch; the natural-width button beside it is unaffected either way.",
-            ),
-            spacer(4.0),
-            stretched_button_row(),
-            spacer(12.0),
-            caption(
+            ))
+            .child(spacer(4.0))
+            .child(stretched_button_row())
+            .child(spacer(12.0))
+            .child(caption(
                 "Height stretch never auto-centers by default (contrast the top-pinned label on the left) — only an explicit .label_alignment(Alignment::CENTER) centers both axes (right).",
-            ),
-            spacer(4.0),
-            vertical_alignment_row(),
-            spacer(24.0),
-            heading("Form Controls"),
-            caption(
+            ))
+            .child(spacer(4.0))
+            .child(vertical_alignment_row())
+            .child(spacer(24.0))
+            .child(heading("Form Controls"))
+            .child(caption(
                 "BASELINE widgets (text_input/checkbox/radio/slider) rendered under the Glyph theme — not frust_glyph::* catalog components, but themed the same way. The toggle below is the exception: a frust_glyph::toggle catalog widget.",
-            ),
-            spacer(12.0),
-            caption("Text input (prompt-style placeholder):"),
-            spacer(4.0),
-            any(
-                text_input(input_value, |s: &mut ButtonsFormsState, v: String| {
+            ))
+            .child(spacer(12.0))
+            .child(caption("Text input (prompt-style placeholder):"))
+            .child(spacer(4.0))
+            .child(text_input(input_value, |s: &mut ButtonsFormsState, v: String| {
                     s.input_value.set(v)
                 })
-                .placeholder("> type a command"),
-            ),
-            spacer(12.0),
-            caption("Multiline textarea (.multiline(4)):"),
-            spacer(4.0),
-            any(
-                text_input(textarea_value, |s: &mut ButtonsFormsState, v: String| {
+                .placeholder("> type a command"))
+            .child(spacer(12.0))
+            .child(caption("Multiline textarea (.multiline(4)):"))
+            .child(spacer(4.0))
+            .child(text_input(textarea_value, |s: &mut ButtonsFormsState, v: String| {
                     s.textarea_value.set(v)
                 })
                 .placeholder("Write a longer note...")
-                .multiline(4),
-            ),
-            spacer(12.0),
-            caption(
+                .multiline(4))
+            .child(spacer(12.0))
+            .child(caption(
                 "Disabled vs enabled (.enabled(false) — task 07): both pre-filled so the dimmed chrome/content on the left is visible without typing; the disabled field also refuses focus.",
-            ),
-            spacer(4.0),
-            disabled_vs_enabled_row(disabled_input_value, enabled_compare_value),
-            spacer(12.0),
-            caption(
+            ))
+            .child(spacer(4.0))
+            .child(disabled_vs_enabled_row(disabled_input_value, enabled_compare_value))
+            .child(spacer(12.0))
+            .child(caption(
                 "Obscured / password mode (.obscured(true) — task 07): pre-filled with real text, masked with bullets; the underlying value is untouched.",
-            ),
-            spacer(4.0),
-            any(
-                text_input(obscured_value, |s: &mut ButtonsFormsState, v: String| {
+            ))
+            .child(spacer(4.0))
+            .child(text_input(obscured_value, |s: &mut ButtonsFormsState, v: String| {
                     s.obscured_value.set(v)
                 })
-                .obscured(true),
-            ),
-            spacer(12.0),
-            any(checkbox(
+                .obscured(true))
+            .child(spacer(12.0))
+            .child(checkbox(
                 checkbox_checked,
                 "Enable notifications",
                 |s: &mut ButtonsFormsState, v: bool| s.checkbox_checked.set(v),
-            )),
-            spacer(12.0),
-            caption("Radio pair:"),
-            spacer(4.0),
-            radio_pair_row(radio_selected),
-            spacer(12.0),
-            caption(
+            ))
+            .child(spacer(12.0))
+            .child(caption("Radio pair:"))
+            .child(spacer(4.0))
+            .child(radio_pair_row(radio_selected))
+            .child(spacer(12.0))
+            .child(caption(
                 "Toggle (frust_glyph::toggle — a spring-driven knob travel plus a fading track/border color, both independently timed — toggle it):",
-            ),
-            spacer(4.0),
-            any(toggle(toggle_on, |s: &mut ButtonsFormsState, v: bool| {
+            ))
+            .child(spacer(4.0))
+            .child(toggle(toggle_on, |s: &mut ButtonsFormsState, v: bool| {
                 s.toggle_on.set(v)
-            })),
-            spacer(16.0),
-            caption("Slider with live value readout:"),
-            spacer(4.0),
-            slider_row(slider_value),
-        ]);
+            }))
+            .child(spacer(16.0))
+            .child(caption("Slider with live value readout:"))
+            .child(spacer(4.0))
+            .child(slider_row(slider_value));
 
         any(Padding(EdgeInsets::all(16.0), content))
     }
@@ -283,57 +276,43 @@ fn hspacer(width: f64) -> AnyView<ButtonsFormsState> {
 
 /// Every [`ButtonStyle`] variant, side by side (display-only, no-op presses).
 fn button_styles_row() -> AnyView<ButtonsFormsState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(button("Primary", |_: &mut ButtonsFormsState| {})),
-            inflexible(hspacer(8.0)),
-            inflexible(
-                button("Secondary", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Secondary),
-            ),
-            inflexible(hspacer(8.0)),
-            inflexible(button("Ghost", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Ghost)),
-            inflexible(hspacer(8.0)),
-            inflexible(button("Danger", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Danger)),
-            inflexible(hspacer(8.0)),
-            inflexible(button("+", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Icon)),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(button("Primary", |_: &mut ButtonsFormsState| {}))
+        .child(hspacer(8.0))
+        .child(button("Secondary", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Secondary))
+        .child(hspacer(8.0))
+        .child(button("Ghost", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Ghost))
+        .child(hspacer(8.0))
+        .child(button("Danger", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Danger))
+        .child(hspacer(8.0))
+        .child(button("+", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Icon))
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// A `.small()` Primary + Secondary pair.
 fn small_buttons_row() -> AnyView<ButtonsFormsState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(button("Small primary", |_: &mut ButtonsFormsState| {}).small()),
-            inflexible(hspacer(8.0)),
-            inflexible(
-                button("Small secondary", |_: &mut ButtonsFormsState| {})
-                    .style(ButtonStyle::Secondary)
-                    .small(),
-            ),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(button("Small primary", |_: &mut ButtonsFormsState| {}).small())
+        .child(hspacer(8.0))
+        .child(
+            button("Small secondary", |_: &mut ButtonsFormsState| {})
+                .style(ButtonStyle::Secondary)
+                .small(),
+        )
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// The loading demo: a checkbox driving a Primary button's `.loading(..)`.
 fn loading_demo_row(loading: bool) -> AnyView<ButtonsFormsState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(checkbox(
-                loading,
-                "Loading",
-                |s: &mut ButtonsFormsState, v: bool| s.loading.set(v),
-            )),
-            inflexible(hspacer(12.0)),
-            inflexible(button("Save changes", |_: &mut ButtonsFormsState| {}).loading(loading)),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(checkbox(
+            loading,
+            "Loading",
+            |s: &mut ButtonsFormsState, v: bool| s.loading.set(v),
+        ))
+        .child(hspacer(12.0))
+        .child(button("Save changes", |_: &mut ButtonsFormsState| {}).loading(loading))
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// The disabled-look demo: a Secondary button statically shown with
@@ -351,18 +330,13 @@ fn disabled_demo_row() -> AnyView<ButtonsFormsState> {
 /// beside a natural-width button that's unaffected — there's no free space
 /// for any alignment fraction to distribute into.
 fn stretched_button_row() -> AnyView<ButtonsFormsState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(
-                SizedBox(Some(220.0), None)
-                    .child(button("Continue", |_: &mut ButtonsFormsState| {})),
-            ),
-            inflexible(hspacer(12.0)),
-            inflexible(button("Continue", |_: &mut ButtonsFormsState| {})),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(
+            SizedBox(Some(220.0), None).child(button("Continue", |_: &mut ButtonsFormsState| {})),
+        )
+        .child(hspacer(12.0))
+        .child(button("Continue", |_: &mut ButtonsFormsState| {}))
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// Contrasts the default vs an explicit `Alignment::CENTER` on a button
@@ -372,23 +346,16 @@ fn stretched_button_row() -> AnyView<ButtonsFormsState> {
 /// auto-centers), so an explicit call is the only way to also center
 /// vertically.
 fn vertical_alignment_row() -> AnyView<ButtonsFormsState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(
-                SizedBox(Some(160.0), Some(64.0))
-                    .child(button("Default", |_: &mut ButtonsFormsState| {})),
-            ),
-            inflexible(hspacer(12.0)),
-            inflexible(
-                SizedBox(Some(160.0), Some(64.0)).child(
-                    button("Centered", |_: &mut ButtonsFormsState| {})
-                        .label_alignment(Alignment::CENTER),
-                ),
-            ),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(
+            SizedBox(Some(160.0), Some(64.0))
+                .child(button("Default", |_: &mut ButtonsFormsState| {})),
+        )
+        .child(hspacer(12.0))
+        .child(SizedBox(Some(160.0), Some(64.0)).child(
+            button("Centered", |_: &mut ButtonsFormsState| {}).label_alignment(Alignment::CENTER),
+        ))
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// The disabled-vs-enabled `TextInput` pair (`.enabled(false)`):
@@ -398,55 +365,43 @@ fn disabled_vs_enabled_row(
     disabled_value: String,
     enabled_value: String,
 ) -> AnyView<ButtonsFormsState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(
-                text_input(disabled_value, |s: &mut ButtonsFormsState, v: String| {
-                    s.disabled_input_value.set(v)
-                })
-                .enabled(false),
-            ),
-            inflexible(hspacer(12.0)),
-            inflexible(text_input(
-                enabled_value,
-                |s: &mut ButtonsFormsState, v: String| s.enabled_compare_value.set(v),
-            )),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(
+            text_input(disabled_value, |s: &mut ButtonsFormsState, v: String| {
+                s.disabled_input_value.set(v)
+            })
+            .enabled(false),
+        )
+        .child(hspacer(12.0))
+        .child(text_input(
+            enabled_value,
+            |s: &mut ButtonsFormsState, v: String| s.enabled_compare_value.set(v),
+        ))
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// Two mutually-exclusive radios, `selected` = the currently-chosen index.
 fn radio_pair_row(selected: usize) -> AnyView<ButtonsFormsState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(
-                radio(selected == 0, "Option A")
-                    .on_select(|s: &mut ButtonsFormsState| s.radio_selected.set(0)),
-            ),
-            inflexible(hspacer(16.0)),
-            inflexible(
-                radio(selected == 1, "Option B")
-                    .on_select(|s: &mut ButtonsFormsState| s.radio_selected.set(1)),
-            ),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(
+            radio(selected == 0, "Option A")
+                .on_select(|s: &mut ButtonsFormsState| s.radio_selected.set(0)),
+        )
+        .child(hspacer(16.0))
+        .child(
+            radio(selected == 1, "Option B")
+                .on_select(|s: &mut ButtonsFormsState| s.radio_selected.set(1)),
+        )
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// The slider plus its live percentage readout.
 fn slider_row(value: f64) -> AnyView<ButtonsFormsState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(slider(value, |s: &mut ButtonsFormsState, v: f64| {
-                s.slider_value.set(v)
-            })),
-            inflexible(hspacer(12.0)),
-            inflexible(text(format!("{:.0}%", value * 100.0)).size(13.0)),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(slider(value, |s: &mut ButtonsFormsState, v: f64| {
+            s.slider_value.set(v)
+        }))
+        .child(hspacer(12.0))
+        .child(text(format!("{:.0}%", value * 100.0)).size(13.0))
+        .cross_axis(CrossAxisAlignment::Center))
 }

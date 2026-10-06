@@ -193,7 +193,7 @@ fn mount_thread(
 ) {
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     let mut tcx = TextContext::new();
 
     // Build once at "/" before queuing a push, mirroring

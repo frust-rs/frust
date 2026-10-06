@@ -465,7 +465,7 @@ mod tests {
     use super::*;
     use frust::authoring::{
         Color, InputEvent, PaintScene, Point, PointerButton, PointerEvent, PointerPhase, Rect,
-        Size, any, text::TextContext,
+        Size, text::TextContext,
     };
     use frust::{Brightness, FrameTime};
     use frust_core::RenderRoot;
@@ -643,12 +643,13 @@ mod tests {
         fn pass(&mut self, nodes: Vec<MenuNode>) {
             let anchor = self.anchor.clone();
             let mut logic = move |_s: &mut AppState| {
-                frust::Stack(vec![any(menu(
-                    nodes.clone(),
-                    |s: &mut AppState, selection| s.selections.push(selection),
+                frust::stack().child(
+                    menu(nodes.clone(), |s: &mut AppState, selection| {
+                        s.selections.push(selection)
+                    })
+                    .anchor(&anchor)
+                    .on_dismiss(|s: &mut AppState| s.dismissed += 1),
                 )
-                .anchor(&anchor)
-                .on_dismiss(|s: &mut AppState| s.dismissed += 1))])
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root

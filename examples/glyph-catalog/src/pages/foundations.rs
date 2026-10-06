@@ -30,8 +30,8 @@ use frust::authoring::{
 };
 use frust::{
     AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, Image, ImageFit, ImageSource,
-    Padding, Row, ShapeScale, SizedBox, StatusPalette, TextView, Theme, any, inflexible, text,
-    use_context,
+    Padding, Row, ShapeScale, SizedBox, StatusPalette, TextView, Theme, any, column, inflexible,
+    row, text, use_context,
 };
 use frust_glyph::GlyphInk;
 
@@ -140,16 +140,14 @@ const RADIUS_CHIP_SIZE: f64 = 44.0;
 fn swatch(name: &str, color: Color, label_color: Color) -> AnyView<CatalogState> {
     any(Padding(
         EdgeInsets::all(6.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(SizedBox(Some(SWATCH_SIZE), Some(SWATCH_SIZE))
-                    .child(Image(solid_source(color)).fit(ImageFit::Fill)))),
-                inflexible(any(mono_label(name.to_string(), label_color))),
-                inflexible(any(mono_label(hex(color), label_color))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Start),
+        column()
+            .child(
+                SizedBox(Some(SWATCH_SIZE), Some(SWATCH_SIZE))
+                    .child(Image(solid_source(color)).fit(ImageFit::Fill)),
+            )
+            .child(mono_label(name.to_string(), label_color))
+            .child(mono_label(hex(color), label_color))
+            .cross_axis(CrossAxisAlignment::Start),
     ))
 }
 
@@ -160,14 +158,10 @@ fn swatch(name: &str, color: Color, label_color: Color) -> AnyView<CatalogState>
 fn swatch_na(name: &str, reason: &str, label_color: Color) -> AnyView<CatalogState> {
     any(Padding(
         EdgeInsets::all(6.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(mono_label(format!("{name} — N/A"), label_color))),
-                inflexible(any(text(reason.to_string()).size(9.5).color(label_color))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Start),
+        column()
+            .child(mono_label(format!("{name} — N/A"), label_color))
+            .child(text(reason.to_string()).size(9.5).color(label_color))
+            .cross_axis(CrossAxisAlignment::Start),
     ))
 }
 
@@ -227,14 +221,10 @@ fn section(
 fn type_specimen(view: TextView, meta: &str, label_color: Color) -> AnyView<CatalogState> {
     any(Padding(
         EdgeInsets::symmetric(0.0, 6.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(view)),
-                inflexible(any(text(meta.to_string()).size(10.0).color(label_color))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Start),
+        column()
+            .child(view)
+            .child(text(meta.to_string()).size(10.0).color(label_color))
+            .cross_axis(CrossAxisAlignment::Start),
     ))
 }
 
@@ -249,19 +239,15 @@ fn radius_chip(
     let resolved = ShapeScale::resolve(radius, RADIUS_CHIP_SIZE, RADIUS_CHIP_SIZE);
     any(Padding(
         EdgeInsets::all(8.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(StaticRoundedRectView::new(
-                    RADIUS_CHIP_SIZE,
-                    RADIUS_CHIP_SIZE,
-                    resolved,
-                    fill_color,
-                ))),
-                inflexible(any(mono_label(label.to_string(), label_color))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Start),
+        column()
+            .child(StaticRoundedRectView::new(
+                RADIUS_CHIP_SIZE,
+                RADIUS_CHIP_SIZE,
+                resolved,
+                fill_color,
+            ))
+            .child(mono_label(label.to_string(), label_color))
+            .cross_axis(CrossAxisAlignment::Start),
     ))
 }
 
@@ -283,20 +269,18 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
     let mut page_children: Vec<AnyView<CatalogState>> = Vec::new();
     page_children.push(any(Padding(
         EdgeInsets::symmetric(16.0, 12.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(text("Foundations").size(24.0))),
-                inflexible(any(text(
+        column()
+            .child(text("Foundations").size(24.0))
+            .child(
+                text(
                     "Color, type, and radius tokens — every specimen below re-resolves \
                      from the live theme, so the header's brightness/motion toggles repaint \
                      this whole page.",
                 )
                 .size(11.0)
-                .color(muted))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Start),
+                .color(muted),
+            )
+            .cross_axis(CrossAxisAlignment::Start),
     )));
 
     // ---- Color tokens -------------------------------------------------
@@ -428,42 +412,50 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
     page_children.push(section(
         "Type scale",
         Some("6 roles, theme.type_scale — Space Mono (display/heading), IBM Plex Mono (rest)"),
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(type_specimen(
-                    text("Foundations").style(type_scale.display_large.clone()).color(scheme.on_surface),
-                    "display/32 · Space Mono 700",
-                    muted,
-                )),
-                inflexible(type_specimen(
-                    text("Foundations").style(type_scale.headline_large.clone()).color(scheme.on_surface),
-                    "heading/20 · Space Mono 700",
-                    muted,
-                )),
-                inflexible(type_specimen(
-                    text("Foundations").style(type_scale.title_large.clone()).color(scheme.on_surface),
-                    "title/15 · IBM Plex Mono 500",
-                    muted,
-                )),
-                inflexible(type_specimen(
-                    text("The quick brown fox jumps.").style(type_scale.body_large.clone()).color(scheme.on_surface),
-                    "body/12.5→13 (mobile floor) · IBM Plex Mono 400",
-                    muted,
-                )),
-                inflexible(type_specimen(
-                    text("The quick brown fox jumps.").style(type_scale.body_small.clone()).color(muted),
-                    "caption/11 · IBM Plex Mono 400 · fg-muted",
-                    muted,
-                )),
-                inflexible(type_specimen(
-                    text("THE QUICK BROWN FOX".to_string()).style(type_scale.label_small.clone()).color(muted),
-                    "micro/9.5 · IBM Plex Mono 500 · fg-dim(≈fg-muted, unmapped) · uppercase · +0.05em",
-                    muted,
-                )),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Start)),
+        any(column()
+            .child(type_specimen(
+                text("Foundations")
+                    .style(type_scale.display_large.clone())
+                    .color(scheme.on_surface),
+                "display/32 · Space Mono 700",
+                muted,
+            ))
+            .child(type_specimen(
+                text("Foundations")
+                    .style(type_scale.headline_large.clone())
+                    .color(scheme.on_surface),
+                "heading/20 · Space Mono 700",
+                muted,
+            ))
+            .child(type_specimen(
+                text("Foundations")
+                    .style(type_scale.title_large.clone())
+                    .color(scheme.on_surface),
+                "title/15 · IBM Plex Mono 500",
+                muted,
+            ))
+            .child(type_specimen(
+                text("The quick brown fox jumps.")
+                    .style(type_scale.body_large.clone())
+                    .color(scheme.on_surface),
+                "body/12.5→13 (mobile floor) · IBM Plex Mono 400",
+                muted,
+            ))
+            .child(type_specimen(
+                text("The quick brown fox jumps.")
+                    .style(type_scale.body_small.clone())
+                    .color(muted),
+                "caption/11 · IBM Plex Mono 400 · fg-muted",
+                muted,
+            ))
+            .child(type_specimen(
+                text("THE QUICK BROWN FOX".to_string())
+                    .style(type_scale.label_small.clone())
+                    .color(muted),
+                "micro/9.5 · IBM Plex Mono 500 · fg-dim(≈fg-muted, unmapped) · uppercase · +0.05em",
+                muted,
+            ))
+            .cross_axis(CrossAxisAlignment::Start)),
     ));
 
     // ---- Radius scale -----------------------------------------------------
@@ -471,13 +463,12 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
     page_children.push(section(
         "Radius scale",
         Some("4 / 6 / 10 / 16 / full, theme.shape — static rounded-rect fill"),
-        any(Row(vec![
-            radius_chip("4px", shape.extra_small, raised_bg, muted),
-            radius_chip("6px", shape.small, raised_bg, muted),
-            radius_chip("10px", shape.medium, raised_bg, muted),
-            radius_chip("16px", shape.large, raised_bg, muted),
-            radius_chip("full", shape.full, raised_bg, muted),
-        ])),
+        any(row()
+            .child(radius_chip("4px", shape.extra_small, raised_bg, muted))
+            .child(radius_chip("6px", shape.small, raised_bg, muted))
+            .child(radius_chip("10px", shape.medium, raised_bg, muted))
+            .child(radius_chip("16px", shape.large, raised_bg, muted))
+            .child(radius_chip("full", shape.full, raised_bg, muted))),
     ));
 
     any(FlexView::new(

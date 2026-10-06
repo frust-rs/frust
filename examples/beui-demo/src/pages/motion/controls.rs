@@ -12,7 +12,10 @@
 //! terms/updates checkboxes, the four-plan radio group, the email/password
 //! form, the five slider readouts, and the month/day/year date drum.
 
-use frust::{AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, any, component, text};
+use frust::{
+    AnyView, Column, Component, CrossAxisAlignment, SizedBox, View, any, column, component, row,
+    text,
+};
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 use frust_beui::components::checkbox::checkbox;
 use frust_beui::components::input::input;
@@ -120,27 +123,26 @@ fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> AnyView<State> {
 /// A control beside the visible text upstream renders as a sibling element —
 /// `switch`, `checkbox` and `radio` all paint no label of their own.
 fn labelled(control: AnyView<State>, label: &str) -> AnyView<State> {
-    any(Row(vec![
-        control,
-        hgap(10.0),
-        any(text(label.to_string()).size(14.0)),
-    ])
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(control)
+        .child(hgap(10.0))
+        .child(text(label.to_string()).size(14.0))
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// A slider row: the control at a fixed width under its own readout.
 fn slider_row(label: &str, readout: String, control: AnyView<State>) -> AnyView<State> {
-    any(Column(vec![
-        any(Row(vec![
-            any(text(label.to_string()).size(14.0)),
-            hgap(12.0),
-            any(caption(readout)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center)),
-        gap(8.0),
-        any(SizedBox(Some(320.0), None).child(control)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+    any(column()
+        .child(
+            row()
+                .child(text(label.to_string()).size(14.0))
+                .child(hgap(12.0))
+                .child(caption(readout))
+                .cross_axis(CrossAxisAlignment::Center),
+        )
+        .child(gap(8.0))
+        .child(SizedBox(Some(320.0), None).child(control))
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 /// How many days that month has, so the day drum never strands its value past
@@ -161,55 +163,53 @@ fn days_in(month: &str, year: i32) -> usize {
 
 /// [`switch`], [`checkbox`] and [`radio`] — the three boolean/selection rings.
 fn toggles(state: &State) -> AnyView<State> {
-    let switches = any(Column(vec![
-        labelled(
+    let switches = any(column()
+        .child(labelled(
             any(switch(state.switch_on, |s: &mut State, v| s.switch_on = v)
                 .label("Enable notifications")),
             "Enable notifications",
-        ),
-        gap(12.0),
-        labelled(
+        ))
+        .child(gap(12.0))
+        .child(labelled(
             any(switch(state.switch_off, |s: &mut State, v| s.switch_off = v).label("Off")),
             "Off",
-        ),
-        gap(12.0),
-        labelled(
+        ))
+        .child(gap(12.0))
+        .child(labelled(
             any(switch(true, |_: &mut State, _| {})
                 .disabled(true)
                 .label("Disabled")),
             "Disabled \u{b7} the refusal shake",
-        ),
-    ])
-    .cross_axis(CrossAxisAlignment::Start));
+        ))
+        .cross_axis(CrossAxisAlignment::Start));
 
-    let checkboxes = any(Column(vec![
-        labelled(
+    let checkboxes = any(column()
+        .child(labelled(
             any(checkbox(state.terms, |s: &mut State, v| s.terms = v)
                 .label("Accept terms and conditions")),
             "Accept terms and conditions",
-        ),
-        gap(12.0),
-        labelled(
+        ))
+        .child(gap(12.0))
+        .child(labelled(
             any(checkbox(state.updates, |s: &mut State, v| s.updates = v)
                 .label("Email me product updates")),
             "Email me product updates",
-        ),
-        gap(12.0),
-        labelled(
+        ))
+        .child(gap(12.0))
+        .child(labelled(
             any(checkbox(true, |_: &mut State, _| {})
                 .indeterminate(true)
                 .label("Select all (partial)")),
             "Select all (partial)",
-        ),
-        gap(12.0),
-        labelled(
+        ))
+        .child(gap(12.0))
+        .child(labelled(
             any(checkbox(true, |_: &mut State, _| {})
                 .disabled(true)
                 .label("Disabled")),
             "Disabled",
-        ),
-    ])
-    .cross_axis(CrossAxisAlignment::Start));
+        ))
+        .cross_axis(CrossAxisAlignment::Start));
 
     let mut radios: Vec<AnyView<State>> = Vec::new();
     for (value, label) in PLANS {
@@ -237,14 +237,13 @@ fn toggles(state: &State) -> AnyView<State> {
          (the mark still collapses on opacity and scale), and the radio dot \
          pops in place rather than gliding between items: there is no \
          shared-layout registry spanning sibling widgets here.",
-        vec![any(Row(vec![
-            switches,
-            hgap(40.0),
-            checkboxes,
-            hgap(40.0),
-            radios,
-        ])
-        .cross_axis(CrossAxisAlignment::Start))],
+        vec![any(row()
+            .child(switches)
+            .child(hgap(40.0))
+            .child(checkboxes)
+            .child(hgap(40.0))
+            .child(radios)
+            .cross_axis(CrossAxisAlignment::Start))],
     )
 }
 
@@ -274,7 +273,9 @@ fn inputs(state: &State) -> AnyView<State> {
         .label("Disabled")
         .disabled(true);
 
-    let field = |view: AnyView<State>| any(SizedBox(Some(240.0), None).child(view));
+    fn field(view: impl View<State>) -> AnyView<State> {
+        any(SizedBox(Some(240.0), None).child(view))
+    }
 
     demo(
         "input",
@@ -285,15 +286,17 @@ fn inputs(state: &State) -> AnyView<State> {
          ported, and inner padding is symmetric, so the check sits in the \
          trailing padding rather than in reserved space.",
         vec![
-            any(
-                Row(vec![field(any(email)), hgap(24.0), field(any(password))])
-                    .cross_axis(CrossAxisAlignment::Start),
-            ),
+            any(row()
+                .child(field(email))
+                .child(hgap(24.0))
+                .child(field(password))
+                .cross_axis(CrossAxisAlignment::Start)),
             gap(16.0),
-            any(
-                Row(vec![field(any(query)), hgap(24.0), field(any(disabled))])
-                    .cross_axis(CrossAxisAlignment::Start),
-            ),
+            any(row()
+                .child(field(query))
+                .child(hgap(24.0))
+                .child(field(disabled))
+                .cross_axis(CrossAxisAlignment::Start)),
             gap(12.0),
             any(button(
                 if state.show_password {
@@ -384,14 +387,27 @@ fn sliders(state: &State) -> AnyView<State> {
          velocity is sampled per painted frame, so the bubble's lean and the \
          ruler's fling are frame-quantised. PageUp/PageDown are not bound \
          \u{2014} the framework's key set has no page keys.",
-        vec![any(Row(vec![
-            any(Column(vec![default, gap(24.0), bubble, gap(24.0), fluid])
-                .cross_axis(CrossAxisAlignment::Start)),
-            hgap(56.0),
-            any(Column(vec![ruler, gap(24.0), wave, gap(24.0), disabled])
-                .cross_axis(CrossAxisAlignment::Start)),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))],
+        vec![any(row()
+            .child(
+                column()
+                    .child(default)
+                    .child(gap(24.0))
+                    .child(bubble)
+                    .child(gap(24.0))
+                    .child(fluid)
+                    .cross_axis(CrossAxisAlignment::Start),
+            )
+            .child(hgap(56.0))
+            .child(
+                column()
+                    .child(ruler)
+                    .child(gap(24.0))
+                    .child(wave)
+                    .child(gap(24.0))
+                    .child(disabled)
+                    .cross_axis(CrossAxisAlignment::Start),
+            )
+            .cross_axis(CrossAxisAlignment::Start))],
     )
 }
 
@@ -457,16 +473,15 @@ fn wheels(state: &State) -> AnyView<State> {
          not ported (there is no audio seam). A fling reports its landing \
          value at release \u{2014} the glide after it is purely visual.",
         vec![
-            any(Row(vec![
-                month_wheel,
-                hgap(12.0),
-                day_wheel,
-                hgap(12.0),
-                year_wheel,
-                hgap(48.0),
-                disabled_wheel,
-            ])
-            .cross_axis(CrossAxisAlignment::Center)),
+            any(row()
+                .child(month_wheel)
+                .child(hgap(12.0))
+                .child(day_wheel)
+                .child(hgap(12.0))
+                .child(year_wheel)
+                .child(hgap(48.0))
+                .child(disabled_wheel)
+                .cross_axis(CrossAxisAlignment::Center)),
             gap(12.0),
             any(caption(format!(
                 "{} {}, {}",
@@ -486,30 +501,28 @@ impl Component for ControlsPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
-        any(Column(vec![
-            toggles(state),
-            inputs(state),
-            sliders(state),
-            wheels(state),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))
+    fn build(&self, state: &mut State) -> impl View<State> {
+        any(column()
+            .child(toggles(state))
+            .child(inputs(state))
+            .child(sliders(state))
+            .child(wheels(state))
+            .cross_axis(CrossAxisAlignment::Start))
     }
 }
 
 pub fn page() -> AnyView<AppState> {
-    any(Column(vec![
-        any(heading("Motion \u{b7} Controls")),
-        any(SizedBox(None, Some(8.0))),
-        any(caption(
+    any(column()
+        .child(heading("Motion \u{b7} Controls"))
+        .child(SizedBox(None, Some(8.0)))
+        .child(caption(
             "Value controls: the toggle, the box, the ring, the text field, \
              all five slider designs, and the wheel drum \u{2014} every one \
              controlled, every one live.",
-        )),
-        any(SizedBox(None, Some(24.0))),
-        any(component(ControlsPage)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+        ))
+        .child(SizedBox(None, Some(24.0)))
+        .child(component(ControlsPage))
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 #[cfg(test)]

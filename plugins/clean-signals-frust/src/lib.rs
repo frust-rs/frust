@@ -53,7 +53,7 @@
 //! ```rust,ignore
 //! use clean_signals::{ControllerCore, async_state_signal, AsyncState};
 //! use clean_signals_frust::{use_controller, use_failure_listener};
-//! use frust::{AnyView, Component, any, text};
+//! use frust::{Component, View, any, text};
 //! use std::sync::Arc;
 //!
 //! impl Component for InboxScreen {
@@ -71,7 +71,7 @@
 //!         controller
 //!     }
 //!
-//!     fn build(&self, state: &mut Arc<InboxController>) -> AnyView<Arc<InboxController>> {
+//!     fn build(&self, state: &mut Arc<InboxController>) -> impl View<Arc<InboxController>> {
 //!         // Tracked read: re-runs `build` when the controller writes a new state.
 //!         match state.messages.get() { /* ... */ }
 //!     }

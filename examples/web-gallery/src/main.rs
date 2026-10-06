@@ -152,9 +152,9 @@ fn main() {}
 mod app {
     use frust::authoring::text::FontFamily;
     use frust::{
-        Axis, Color, Column, Component, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector,
-        Get, Padding, Row, RwSignal, TextView, Update, WindowMetrics, any, component, container,
-        flexible, inflexible, list_view, scroll_view, text, text_input, use_context,
+        Color, Component, CrossAxisAlignment, EdgeInsets, GestureDetector, Get, Padding, RwSignal,
+        TextView, Update, WindowMetrics, any, column, component, container, list_view, row,
+        scroll_view, text, text_input, use_context,
     };
     use frust_gallery::{Case, Design, Variant};
 
@@ -512,7 +512,7 @@ mod app {
 
         fn init(&self) -> Self::State {}
 
-        fn build(&self, _state: &mut Self::State) -> frust::AnyView<Self::State> {
+        fn build(&self, _state: &mut Self::State) -> impl frust::View<Self::State> {
             (self.0)()
         }
     }
@@ -550,30 +550,25 @@ mod app {
     /// theme colour render regardless, and its interaction handling
     /// (hover/press/focus/keyboard) runs exactly as elsewhere.
     fn case_view(case: &'static Case) -> frust::AnyView<AppState> {
-        let header = Row(vec![
-            nav_row(
+        let header = row()
+            .child(nav_row(
                 "< Index",
                 Color::from_rgb8(0x2a, 0x33, 0x40),
                 |state: &mut AppState| {
                     state.case = None;
                 },
-            ),
-            any(label(format!("{}  [{}]", case.title, case.slug))),
-        ]);
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(Padding(EdgeInsets::all(12.0), header))),
-                flexible(
-                    1,
-                    any(scroll_view(Padding(
-                        EdgeInsets::all(16.0),
-                        component(CaseHost(case_constructor(case))),
-                    ))),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch))
+            ))
+            .child(label(format!("{}  [{}]", case.title, case.slug)));
+        any(column()
+            .child(Padding(EdgeInsets::all(12.0), header))
+            .flex(
+                1,
+                scroll_view(Padding(
+                    EdgeInsets::all(16.0),
+                    component(CaseHost(case_constructor(case))),
+                )),
+            )
+            .cross_axis(CrossAxisAlignment::Stretch))
     }
 
     /// The `?case=<slug>&embed=1` page: the hosted case, and *nothing*
@@ -626,17 +621,17 @@ mod app {
             },
         );
 
-        let header = Column(vec![
-            any(label("frust-gallery — browser demo")),
-            any(label(format!(
+        let header = column()
+            .child(label("frust-gallery — browser demo"))
+            .child(label(format!(
                 "{total} cases in the registry ({shown} shown below)"
-            ))),
-            any(label(format!(
+            )))
+            .child(label(format!(
                 "signal-driven update, zero input events: ticks = {ticks} \
                  (a background timer writes an RwSignal once a second)"
-            ))),
-            any(label(metrics_line)),
-            any(
+            )))
+            .child(label(metrics_line))
+            .child(
                 text_input(state.filter.clone(), |state: &mut AppState, value| {
                     state.filter = value;
                 })
@@ -648,8 +643,7 @@ mod app {
                         Color::from_rgb8(0xe6, 0xed, 0xf5),
                     )
                 }),
-            ),
-        ]);
+            );
 
         let list = list_view(shown, 44.0, move |index| {
             let case = matches[index];
@@ -667,14 +661,10 @@ mod app {
             )
         });
 
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(Padding(EdgeInsets::all(16.0), header))),
-                flexible(1, any(Padding(EdgeInsets::symmetric(16.0, 0.0), list))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch))
+        any(column()
+            .child(Padding(EdgeInsets::all(16.0), header))
+            .flex(1, Padding(EdgeInsets::symmetric(16.0, 0.0), list))
+            .cross_axis(CrossAxisAlignment::Stretch))
     }
 
     /// `web_app!`'s build closure: dispatches to

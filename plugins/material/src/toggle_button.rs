@@ -1111,14 +1111,14 @@ impl<State: 'static> ToggleButtonView<State> {
 
     /// Icon shown while unchecked (and while checked too, if
     /// [`Self::checked_icon`] is unset).
-    pub fn icon(mut self, icon: AnyView<State>) -> Self {
-        self.icon = Some(icon);
+    pub fn icon(mut self, icon: impl View<State>) -> Self {
+        self.icon = Some(AnyView::new(icon));
         self
     }
 
     /// Icon shown while checked. Falls back to [`Self::icon`] when unset.
-    pub fn checked_icon(mut self, icon: AnyView<State>) -> Self {
-        self.checked_icon = Some(icon);
+    pub fn checked_icon(mut self, icon: impl View<State>) -> Self {
+        self.checked_icon = Some(AnyView::new(icon));
         self
     }
 

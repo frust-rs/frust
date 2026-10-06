@@ -2218,14 +2218,13 @@ mod tests {
             } else {
                 any(tooltip(hover, RICH_TITLE))
             };
-            frust::Stack(vec![
-                any(PageProbe),
-                any(tooltip_trigger(
+            frust::stack()
+                .child(PageProbe)
+                .child(tooltip_trigger(
                     hover,
                     frust::SizedBox(Some(TRIGGER.width), Some(TRIGGER.height)),
-                )),
-                panel,
-            ])
+                ))
+                .child(panel)
         }
 
         /// One whole frame — rebuild, layout, paint — answering with what was

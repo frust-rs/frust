@@ -24,8 +24,8 @@ use std::sync::Arc;
 
 use frust::{
     Align, Alignment, AnyView, Axis, Brightness, Button, Color, Column, CrossAxisAlignment,
-    DesignLanguage, EdgeInsets, FlexView, Get, Image, ImageFit, Padding, Row, Set, SizedBox, Stack,
-    Theme, any, component, flexible, inflexible, scroll_view, slider, text, use_context,
+    DesignLanguage, EdgeInsets, FlexView, Get, Image, ImageFit, Padding, Set, SizedBox, Theme,
+    View, any, column, component, inflexible, row, scroll_view, slider, stack, text, use_context,
 };
 use frust_cupertino::{cupertino_button, cupertino_switch};
 use frust_material::{CardVariant, Switch, app_bar, button_group, card};
@@ -74,7 +74,7 @@ impl frust::Component for AppearanceScreen {
         AppearanceState { controller }
     }
 
-    fn build(&self, state: &mut AppearanceState) -> AnyView<AppearanceState> {
+    fn build(&self, state: &mut AppearanceState) -> impl View<AppearanceState> {
         // Tracked reads: a later `apply`/veil write wakes the frame.
         let design_choice = state.controller.design.get();
         let brightness_choice = state.controller.brightness.get();
@@ -133,27 +133,19 @@ impl frust::Component for AppearanceScreen {
             text("Aa — the quick brown fox").size(18.0 * type_factor)
         ));
 
-        let content = any(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(app_bar::<AppearanceState>("Appearance"))),
-                flexible(
-                    1,
-                    any(scroll_view(Padding(
-                        EdgeInsets::all(16.0),
-                        Column(children),
-                    ))),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch));
+        let content = any(column()
+            .child(app_bar::<AppearanceState>("Appearance"))
+            .flex(
+                1,
+                scroll_view(Padding(EdgeInsets::all(16.0), Column(children))),
+            )
+            .cross_axis(CrossAxisAlignment::Stretch));
 
         // The fade veil (top `Stack` layer): a translucent surface wash painted
         // over this screen while a swap is in flight, inert (zero-size) otherwise.
-        any(Stack(vec![
-            content,
-            veil_layer(veil_opacity, theme.scheme().surface),
-        ]))
+        any(stack()
+            .child(content)
+            .child(veil_layer(veil_opacity, theme.scheme().surface)))
     }
 }
 
@@ -242,23 +234,20 @@ fn brightness_switch(
         // Glyph reuses the Material `Switch` for this toggle — the Glyph
         // catalog has no dedicated switch widget yet, and this settings-screen
         // control isn't itself in-app Glyph chrome.
-        DesignLanguage::Material3 | DesignLanguage::Glyph => any(Row(vec![
-            any(text("Dark").size(14.0)),
-            any(SizedBox(Some(8.0), None)),
-            any(Switch(effective_dark, on_toggle)),
-        ])),
-        DesignLanguage::Cupertino => any(Row(vec![
-            any(text("Dark").size(14.0)),
-            any(SizedBox(Some(8.0), None)),
-            any(cupertino_switch(effective_dark, on_toggle)),
-        ])),
+        DesignLanguage::Material3 | DesignLanguage::Glyph => any(row()
+            .child(text("Dark").size(14.0))
+            .child(SizedBox(Some(8.0), None))
+            .child(Switch(effective_dark, on_toggle))),
+        DesignLanguage::Cupertino => any(row()
+            .child(text("Dark").size(14.0))
+            .child(SizedBox(Some(8.0), None))
+            .child(cupertino_switch(effective_dark, on_toggle))),
         _ => {
             // external design systems (DesignLanguage::Custom) fall back to Material chrome here
-            any(Row(vec![
-                any(text("Dark").size(14.0)),
-                any(SizedBox(Some(8.0), None)),
-                any(Switch(effective_dark, on_toggle)),
-            ]))
+            any(row()
+                .child(text("Dark").size(14.0))
+                .child(SizedBox(Some(8.0), None))
+                .child(Switch(effective_dark, on_toggle)))
         }
     }
 }
@@ -301,11 +290,10 @@ fn swatch(
         any(SizedBox(Some(40.0), Some(40.0)).child(Image(solid_source(color)).fit(ImageFit::Fill)));
     let inner = Padding(
         EdgeInsets::all(8.0),
-        Column(vec![
-            any(Align(Alignment::CENTER, tile)),
-            any(SizedBox(None, Some(4.0))),
-            any(text(accent.label()).size(11.0)),
-        ]),
+        column()
+            .child(Align(Alignment::CENTER, tile))
+            .child(SizedBox(None, Some(4.0)))
+            .child(text(accent.label()).size(11.0)),
     );
     // Outlined = the selected-ring; filled = unselected.
     let variant = if selected {

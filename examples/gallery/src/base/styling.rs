@@ -22,8 +22,8 @@
 use frust_core::{AnyView, any};
 use frust_text::{FontWeight, TextStyle};
 use frust_widgets::{
-    Align, Alignment, Column, CrossAxisAlignment, EdgeInsets, Padding, Row, Stack, colored_box,
-    container, text,
+    Align, Alignment, CrossAxisAlignment, EdgeInsets, Padding, colored_box, column, container, row,
+    stack, text,
 };
 use peniko::Color;
 
@@ -56,14 +56,13 @@ fn alignment_case() -> AnyView<()> {
             .radius(6.0)
             .size_centered(104.0, 32.0))
     }
-    let stack = Stack(vec![
-        any(colored_box().expand()),
-        any(Align(Alignment::TOP_LEFT, badge("TOP_LEFT"))),
-        any(Align(Alignment::TOP_RIGHT, badge("TOP_RIGHT"))),
-        any(Align(Alignment::CENTER, badge("CENTER"))),
-        any(Align(Alignment::BOTTOM_LEFT, badge("BOTTOM_LEFT"))),
-        any(Align(Alignment::BOTTOM_RIGHT, badge("BOTTOM_RIGHT"))),
-    ]);
+    let stack = stack()
+        .child(colored_box().expand())
+        .child(Align(Alignment::TOP_LEFT, badge("TOP_LEFT")))
+        .child(Align(Alignment::TOP_RIGHT, badge("TOP_RIGHT")))
+        .child(Align(Alignment::CENTER, badge("CENTER")))
+        .child(Align(Alignment::BOTTOM_LEFT, badge("BOTTOM_LEFT")))
+        .child(Align(Alignment::BOTTOM_RIGHT, badge("BOTTOM_RIGHT")));
     framed(stack)
 }
 
@@ -83,19 +82,17 @@ pub(super) const ALIGNMENT: Case = Case {
 /// labels themselves are the counterpoint: they take the themed default.
 fn color_case() -> AnyView<()> {
     fn swatch(color: Color, label: &'static str) -> AnyView<()> {
-        any(Column(vec![
-            any(colored_box().fill(color).radius(8.0).size(64.0, 64.0)),
-            any(text(label).size(12.0)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center))
+        any(column()
+            .child(colored_box().fill(color).radius(8.0).size(64.0, 64.0))
+            .child(text(label).size(12.0))
+            .cross_axis(CrossAxisAlignment::Center))
     }
-    let row = Row(vec![
-        swatch(CARD_A, "#3B82F6"),
-        swatch(CARD_B, "#F43F5E"),
-        swatch(CARD_C, "#10B981"),
-        swatch(CARD_D, "#F59E0B"),
-    ])
-    .cross_axis(CrossAxisAlignment::Center);
+    let row = row()
+        .child(swatch(CARD_A, "#3B82F6"))
+        .child(swatch(CARD_B, "#F43F5E"))
+        .child(swatch(CARD_C, "#10B981"))
+        .child(swatch(CARD_D, "#F59E0B"))
+        .cross_axis(CrossAxisAlignment::Center);
     framed(row)
 }
 
@@ -156,12 +153,11 @@ fn text_style_case() -> AnyView<()> {
     let mut caption = TextStyle::new(13.0, CAPTION_INK);
     caption.letter_spacing = 2.0;
 
-    let column = Column(vec![
-        any(text("Heading").style(heading)),
-        any(text("Body copy styled in bulk").style(body)),
-        any(text("CAPTION").style(caption)),
-    ])
-    .cross_axis(CrossAxisAlignment::Center);
+    let column = column()
+        .child(text("Heading").style(heading))
+        .child(text("Body copy styled in bulk").style(body))
+        .child(text("CAPTION").style(caption))
+        .cross_axis(CrossAxisAlignment::Center);
     framed(column)
 }
 

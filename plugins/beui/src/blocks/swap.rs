@@ -1666,7 +1666,6 @@ fn draw_address_mark(
 mod tests {
     use super::*;
     use crate::components::popover::tests::{Recorder, ft_ms, light, pointer, reduced};
-    use frust::authoring::any;
     use frust::authoring::text::TextContext;
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -1908,7 +1907,7 @@ mod tests {
                     })
                     .on_destination_toggle(|s: &mut App, show| s.toggles.push(show))
                     .on_submit(|s: &mut App| s.submits += 1);
-                frust::Stack(vec![any(widget)])
+                frust::stack().child(widget)
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -2303,11 +2302,13 @@ mod tests {
     /// A funded swap with an amount entered, so both sides, the quote rows and
     /// the action all carry text.
     fn probe_view(_: &mut ()) -> frust::StackView<()> {
-        frust::Stack(vec![any(swap::<()>(
-            swap_token("ETH", "Ethereum").balance(2.0).usd(3_000.0),
-            swap_token("USDC", "Ethereum").balance(10.0).usd(1.0),
+        frust::stack().child(
+            swap::<()>(
+                swap_token("ETH", "Ethereum").balance(2.0).usd(3_000.0),
+                swap_token("USDC", "Ethereum").balance(10.0).usd(1.0),
+            )
+            .amount(0.5),
         )
-        .amount(0.5))])
     }
 
     #[test]

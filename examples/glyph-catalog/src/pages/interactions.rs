@@ -140,8 +140,8 @@ use frust::motion::{AnimatedOpacity, AnimatedScale};
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, CrossAxisAlignment, Curve, EdgeInsets,
     FlexChild, FlexView, GestureDetector, Get, GetUntracked, Image, ImageFit, ImageSource, Padding,
-    RwSignal, Set, SizedBox, Stack, Theme, Timing, Update, any, button, flexible, inflexible,
-    keyed, scroll_view, text, use_context,
+    RwSignal, Set, SizedBox, Stack, Theme, Timing, Update, any, button, column, inflexible, keyed,
+    row, scroll_view, stack, text, use_context,
 };
 // `progress` is aliased to avoid shadowing by `demo_charge_ring`'s own local
 // `progress: f64` binding (the hold fraction it reads off
@@ -524,22 +524,18 @@ fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
     };
     let ring = heartbeat_ring_view(ring_opacity, ring_scale);
 
-    let row = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(ring),
-            inflexible(SizedBox(Some(6.0), None)),
-            inflexible(badge("connected", BadgeVariant::Success).dot(true)),
-            inflexible(SizedBox(Some(10.0), None)),
-            flexible(1, text("203.0.113.57:50051 · zellij 0.44.3").size(11.5)),
-            inflexible(
-                text(format!("{:.0}ms", latency))
-                    .size(12.0)
-                    .color(if rolling { amber() } else { muted() }),
-            ),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center);
+    let row = row()
+        .child(ring)
+        .child(SizedBox(Some(6.0), None))
+        .child(badge("connected", BadgeVariant::Success).dot(true))
+        .child(SizedBox(Some(10.0), None))
+        .flex(1, text("203.0.113.57:50051 · zellij 0.44.3").size(11.5))
+        .child(
+            text(format!("{:.0}ms", latency))
+                .size(12.0)
+                .color(if rolling { amber() } else { muted() }),
+        )
+        .cross_axis(CrossAxisAlignment::Center);
 
     // The tap-to-play affordance (see this module's "Tap-to-play" docs
     // above) — tapping the row toggles `hb_active_sig`, resetting the wall
@@ -588,32 +584,24 @@ fn demo_attach() -> FlexChild<CatalogState> {
     let key = usize::from(attached);
 
     let face: AnyView<CatalogState> = if attached {
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(
-                    FlexView::new(
-                        Axis::Horizontal,
-                        vec![
-                            inflexible(
-                                button("‹ sessions", move |_s: &mut CatalogState| {
-                                    attached_sig.set(false)
-                                })
-                                .style(ButtonStyle::Ghost)
-                                .small(),
-                            ),
-                            flexible(1, text("dev").size(12.0).color(amber())),
-                        ],
+        any(column()
+            .child(
+                row()
+                    .child(
+                        button("‹ sessions", move |_s: &mut CatalogState| {
+                            attached_sig.set(false)
+                        })
+                        .style(ButtonStyle::Ghost)
+                        .small(),
                     )
+                    .flex(1, text("dev").size(12.0).color(amber()))
                     .cross_axis(CrossAxisAlignment::Center),
-                ),
-                gap(8.0),
-                inflexible(term_block(vec![
-                    TermLine::prompt("ed@dev:~$ btop"),
-                    TermLine::output("cpu 12% · mem 4.1/16gb"),
-                ])),
-            ],
-        ))
+            )
+            .push(gap(8.0))
+            .child(term_block(vec![
+                TermLine::prompt("ed@dev:~$ btop"),
+                TermLine::output("cpu 12% · mem 4.1/16gb"),
+            ])))
     } else {
         any(GestureDetector(
             glyph_card::<CatalogState>()
@@ -669,15 +657,11 @@ fn demo_boot() -> FlexChild<CatalogState> {
     let frame: AnyView<CatalogState> = if active {
         let elapsed = boot_elapsed_ms();
         let chip_visible = elapsed >= BOOT_CHIP_DELAY_MS;
-        let chip_row = FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(badge("running", BadgeVariant::Success).dot(true)),
-                inflexible(SizedBox(Some(8.0), None)),
-                inflexible(text("swift-otter").size(12.0)),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center);
+        let chip_row = row()
+            .child(badge("running", BadgeVariant::Success).dot(true))
+            .child(SizedBox(Some(8.0), None))
+            .child(text("swift-otter").size(12.0))
+            .cross_axis(CrossAxisAlignment::Center);
 
         let mut card_children = vec![
             keyed(n, term_block(boot_lines()).staggered(true)),
@@ -690,7 +674,7 @@ fn demo_boot() -> FlexChild<CatalogState> {
         if !chip_visible {
             card_children.push(frame_ticker());
         }
-        any(glyph_card::<CatalogState>().desc(any(FlexView::new(Axis::Vertical, card_children))))
+        any(glyph_card::<CatalogState>().desc(FlexView::new(Axis::Vertical, card_children)))
     } else {
         any(GestureDetector(
             glyph_card::<CatalogState>().desc(text("+ new session").size(12.0).color(amber())),
@@ -845,22 +829,18 @@ fn demo_token_scramble(state: &CatalogState) -> FlexChild<CatalogState> {
         )
     };
 
-    let row_inner = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(1, token_name_view(display, glitching)),
-            inflexible(SizedBox(Some(8.0), None)),
-            inflexible(
-                button("revoke", move |_s: &mut CatalogState| {
-                    token_reset_clock();
-                    active_sig.set(true);
-                })
-                .style(ButtonStyle::Danger)
-                .small(),
-            ),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center);
+    let row_inner = row()
+        .flex(1, token_name_view(display, glitching))
+        .child(SizedBox(Some(8.0), None))
+        .child(
+            button("revoke", move |_s: &mut CatalogState| {
+                token_reset_clock();
+                active_sig.set(true);
+            })
+            .style(ButtonStyle::Danger)
+            .small(),
+        )
+        .cross_axis(CrossAxisAlignment::Center);
 
     let row: AnyView<CatalogState> = any(AnimatedOpacity(
         ratio,
@@ -961,13 +941,14 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
     let icon_fg = if floated { amber() } else { muted() };
     let icon_box: AnyView<CatalogState> =
         any(
-            SizedBox(Some(CHARGE_ICON_SIZE), Some(CHARGE_ICON_SIZE)).child(Stack(vec![
-                any(Image(solid_source(icon_bg)).fit(ImageFit::Fill)),
-                any(Align(
-                    Alignment::CENTER,
-                    text("▤").size(12.0).color(icon_fg),
-                )),
-            ])),
+            SizedBox(Some(CHARGE_ICON_SIZE), Some(CHARGE_ICON_SIZE)).child(
+                stack()
+                    .child(Image(solid_source(icon_bg)).fit(ImageFit::Fill))
+                    .child(Align(
+                        Alignment::CENTER,
+                        text("▤").size(12.0).color(icon_fg),
+                    )),
+            ),
         );
 
     // `SizedBox` TIGHTENS its child's constraints (both axes forced to
@@ -1004,16 +985,12 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
     )
     .timing(ZERO));
 
-    let row_inner = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(icon_stack),
-            inflexible(SizedBox(Some(10.0), None)),
-            flexible(1, title_col),
-            inflexible(chip),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center);
+    let row_inner = row()
+        .child(icon_stack)
+        .child(SizedBox(Some(10.0), None))
+        .flex(1, title_col)
+        .child(chip)
+        .cross_axis(CrossAxisAlignment::Center);
 
     // The reference's `box-shadow` lift has no facade equivalent from
     // application code (see the module docs' substitution note) — an
@@ -1033,22 +1010,19 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
     // wraps the wash in a single-child horizontal `flexible(1, ..)` row:
     // its main axis (width) is tightened to the row's full available width
     // exactly the way a flexible flex child's main axis always is.
-    let glow_wash: AnyView<CatalogState> = any(FlexView::new(
-        Axis::Horizontal,
-        vec![flexible(
-            1,
-            SizedBox(None, Some(CHARGE_ROW_H)).child(
-                Image(solid_source(with_alpha(amber(), CHARGE_GLOW_ALPHA))).fit(ImageFit::Fill),
-            ),
-        )],
+    let glow_wash: AnyView<CatalogState> = any(row().flex(
+        1,
+        SizedBox(None, Some(CHARGE_ROW_H))
+            .child(Image(solid_source(with_alpha(amber(), CHARGE_GLOW_ALPHA))).fit(ImageFit::Fill)),
     ));
     let glow: AnyView<CatalogState> =
         any(AnimatedOpacity(if floated { 1.0 } else { 0.0 }, glow_wash).timing(ZERO));
 
-    let card: AnyView<CatalogState> = any(SizedBox(None, Some(CHARGE_ROW_H)).child(Stack(vec![
-        glow,
-        any(Padding(EdgeInsets::all(12.0), row_inner)),
-    ])));
+    let card: AnyView<CatalogState> = any(SizedBox(None, Some(CHARGE_ROW_H)).child(
+        stack()
+            .child(glow)
+            .child(Padding(EdgeInsets::all(12.0), row_inner)),
+    ));
 
     let scaled: AnyView<CatalogState> = if reduce {
         card
@@ -1281,16 +1255,10 @@ fn wave_row(name: &str, live: bool, reduce: bool, t: f64) -> AnyView<CatalogStat
         .collect();
     any(Padding(
         EdgeInsets::all(8.0),
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                flexible(1, text(name.to_string()).size(11.5)),
-                inflexible(
-                    FlexView::new(Axis::Horizontal, bars).cross_axis(CrossAxisAlignment::Center),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .flex(1, text(name.to_string()).size(11.5))
+            .child(FlexView::new(Axis::Horizontal, bars).cross_axis(CrossAxisAlignment::Center))
+            .cross_axis(CrossAxisAlignment::Center),
     ))
 }
 
@@ -1384,14 +1352,10 @@ fn demo_copy_burst() -> FlexChild<CatalogState> {
 
     let field_content: AnyView<CatalogState> = any(Padding(
         EdgeInsets::all(11.0),
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                flexible(1, text("203.0.113.57:50051").size(11.5)),
-                inflexible(text("⧉").size(13.0).color(muted())),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .flex(1, text("203.0.113.57:50051").size(11.5))
+            .child(text("⧉").size(13.0).color(muted()))
+            .cross_axis(CrossAxisAlignment::Center),
     ));
 
     let mut layers = vec![flash_bg, field_content];
@@ -1457,26 +1421,22 @@ pub fn start_waveform_for_test() {
 
 /// See the page-fn contract in [`crate::pages`].
 pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            demo_heartbeat(state),
-            gap(8.0),
-            demo_attach(),
-            gap(8.0),
-            demo_boot(),
-            gap(8.0),
-            demo_token_scramble(state),
-            gap(8.0),
-            demo_charge_ring(state),
-            gap(8.0),
-            demo_rain_burst(state),
-            gap(8.0),
-            demo_waveform(state),
-            gap(8.0),
-            demo_copy_burst(),
-        ],
-    ))
+    any(column()
+        .push(demo_heartbeat(state))
+        .push(gap(8.0))
+        .push(demo_attach())
+        .push(gap(8.0))
+        .push(demo_boot())
+        .push(gap(8.0))
+        .push(demo_token_scramble(state))
+        .push(gap(8.0))
+        .push(demo_charge_ring(state))
+        .push(gap(8.0))
+        .push(demo_rain_burst(state))
+        .push(gap(8.0))
+        .push(demo_waveform(state))
+        .push(gap(8.0))
+        .push(demo_copy_burst()))
 }
 
 #[cfg(test)]
@@ -1671,8 +1631,8 @@ mod tests {
     use kurbo::{Affine, Shape};
 
     use super::{
-        Axis, CHARGE_ICON_SIZE, CHARGE_RING_SIZE, CHARGE_ROW_H, FlexView, HB_RING_DIAMETER,
-        HB_RING_MS, HB_RING_SCALE_MAX, HB_RING_SLOT, demo_charge_ring, heartbeat_ring_state,
+        CHARGE_ICON_SIZE, CHARGE_RING_SIZE, CHARGE_ROW_H, HB_RING_DIAMETER, HB_RING_MS,
+        HB_RING_SCALE_MAX, HB_RING_SLOT, column, demo_charge_ring, heartbeat_ring_state,
         heartbeat_ring_view,
     };
 
@@ -1933,12 +1893,7 @@ mod tests {
     fn heartbeat_ping_headroom_does_not_stretch_sibling_row_content() {
         let _owner = setup();
         let recorder = paint_view_into_recorder(
-            |s| {
-                super::any(FlexView::new(
-                    Axis::Vertical,
-                    vec![super::demo_heartbeat(s)],
-                ))
-            },
+            |s| super::any(column().push(super::demo_heartbeat(s))),
             Size::new(390.0, 400.0),
         );
 
@@ -1974,7 +1929,7 @@ mod tests {
 
         super::charge_floated_sig().set(true);
         let recorder = paint_view_into_recorder(
-            |s| super::any(FlexView::new(Axis::Vertical, vec![demo_charge_ring(s)])),
+            |s| super::any(column().push(demo_charge_ring(s))),
             Size::new(W, 400.0),
         );
         super::charge_floated_sig().set(false);
@@ -2032,7 +1987,7 @@ mod tests {
         const MARGIN: f64 = (CHARGE_RING_SIZE - CHARGE_ICON_SIZE) / 2.0;
 
         let recorder = paint_view_into_recorder(
-            |s| super::any(FlexView::new(Axis::Vertical, vec![demo_charge_ring(s)])),
+            |s| super::any(column().push(demo_charge_ring(s))),
             Size::new(390.0, 400.0),
         );
 
@@ -2067,12 +2022,12 @@ mod tests {
 
         super::charge_progress_sig().set(0.4);
         let holding_recorder = paint_view_into_recorder(
-            |s| super::any(FlexView::new(Axis::Vertical, vec![demo_charge_ring(s)])),
+            |s| super::any(column().push(demo_charge_ring(s))),
             Size::new(W, 400.0),
         );
         super::charge_progress_sig().set(0.0);
         let idle_recorder = paint_view_into_recorder(
-            |s| super::any(FlexView::new(Axis::Vertical, vec![demo_charge_ring(s)])),
+            |s| super::any(column().push(demo_charge_ring(s))),
             Size::new(W, 400.0),
         );
 

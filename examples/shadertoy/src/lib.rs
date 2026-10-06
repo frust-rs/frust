@@ -16,8 +16,8 @@ pub mod shaders;
 use frust::authoring::scene::ShaderProgram;
 use frust::{
     AnyView, Axis, Brightness, Color, Component, EdgeInsets, FlexView, Get, Padding, RwSignal,
-    SizedBox, Stack, SystemUiMode, any, button, flexible, inflexible, safe_area, set_app_theme,
-    set_system_ui_mode, text,
+    SizedBox, SystemUiMode, View, any, button, column, inflexible, row, safe_area, set_app_theme,
+    set_system_ui_mode, stack, text,
 };
 
 use shader_view::shader_view;
@@ -97,22 +97,18 @@ fn hud_overlay(name: &'static str, fps: f64) -> impl frust::View<AppState> {
         "FPS: —".to_string()
     };
 
-    let top_row = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(button("< Back", |state: &mut AppState| {
-                state.screen = Screen::Menu;
-                // Restore the menu's edge-to-edge (bars-visible) system UI on
-                // the way out — the shader view's `ImmersiveSticky` (see
-                // `menu_screen`) must not leak into the menu screen.
-                set_system_ui_mode(SystemUiMode::EdgeToEdge);
-            })),
-            inflexible(SizedBox(Some(12.0), None)),
-            inflexible(text(name).size(18.0)),
-            flexible(1, SizedBox(None, None)),
-            inflexible(text(fps_label).size(18.0).color(fps_color(fps))),
-        ],
-    );
+    let top_row = row()
+        .child(button("< Back", |state: &mut AppState| {
+            state.screen = Screen::Menu;
+            // Restore the menu's edge-to-edge (bars-visible) system UI on
+            // the way out — the shader view's `ImmersiveSticky` (see
+            // `menu_screen`) must not leak into the menu screen.
+            set_system_ui_mode(SystemUiMode::EdgeToEdge);
+        }))
+        .child(SizedBox(Some(12.0), None))
+        .child(text(name).size(18.0))
+        .flex(1, SizedBox(None, None))
+        .child(text(fps_label).size(18.0).color(fps_color(fps)));
 
     let hint =
         text("Fragment shader rendered offscreen by the engine's ShaderQuad pass and drawn as a SceneTexture.")
@@ -121,14 +117,10 @@ fn hud_overlay(name: &'static str, fps: f64) -> impl frust::View<AppState> {
 
     Padding(
         EdgeInsets::all(16.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(top_row),
-                flexible(1, SizedBox(None, None)),
-                inflexible(hint),
-            ],
-        ),
+        column()
+            .child(top_row)
+            .flex(1, SizedBox(None, None))
+            .child(hint),
     )
 }
 
@@ -142,7 +134,7 @@ fn running_screen(state: &mut AppState, idx: usize) -> AnyView<AppState> {
 
     let hud = hud_overlay(name, state.fps.get());
 
-    any(Stack(vec![any(shader_view(program, state.fps)), any(hud)]))
+    any(stack().child(shader_view(program, state.fps)).child(hud))
 }
 
 /// The root [`Component`]: builds the shader registry once and
@@ -164,7 +156,7 @@ impl Component for ShadertoyApp {
         }
     }
 
-    fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+    fn build(&self, state: &mut AppState) -> impl View<AppState> {
         match state.screen {
             Screen::Menu => menu_screen(state),
             Screen::Running(idx) => running_screen(state, idx),

@@ -53,7 +53,7 @@ fn frame_at(
     tcx: &mut TextContext,
     t_ms: u64,
 ) -> (RecScene, bool) {
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     root.rebuild(&mut logic, state);
     let tcx_any: &mut dyn Any = tcx;
     root.layout_with_text(Size::new(W, H), tcx_any);
@@ -115,7 +115,7 @@ fn drive_until_drawer_gone(
 /// the settled destination scene, ready for counting or tapping.
 fn push_and_settle(route: &str) -> (Root, HuddleState, TextContext, RecScene) {
     let (mut root, mut state, mut tcx) = harness();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
 
     // First frame: mounts the navigator so the queued push has somewhere to
     // drain (mirrors `tests/activity.rs::mount_loaded_activity_tab`).
@@ -169,7 +169,7 @@ fn unknown_user_id_renders_a_fallback_without_panicking() {
     let _g = serial();
     let _ambient = setup();
     let (mut root, mut state, mut tcx) = harness();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
 
     state.nav.router().push("/user/999");
     let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);

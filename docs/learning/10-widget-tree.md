@@ -129,7 +129,7 @@ after lab 2 and before lab 3.
    included. A container exposes its pods with one `visit_children!(fields…)` line over `VisitPods`
    (`ChildPod`/`Option<T>`/`Vec<T>`/`[T]`); a container that skips that line reads as a leaf.
    **Components:** `Component` has exactly `type State`, `init` (once, under its own `Owner`), and
-   `build` (every rebuild, returns `AnyView<Self::State>`). It has no teardown. Teardown is
+   `build` (every rebuild, returns `impl View<Self::State>`, which the hosting `ComponentWidget` erases with `AnyView::new`). It has no teardown. Teardown is
    `View<Outer>::teardown` on `ComponentView` (≈254), which disposes the owner. `ComponentWidget`
    holds `state`, `prev`, `child: ChildPod`, `owner`, `next_id`, and `disposed`, and its rebuild
    takes the double-box hop from idea 2 (≈208–215).
@@ -191,13 +191,15 @@ Add a scratch test file under `crates/frust-widgets/tests/` (e.g. `lab10_scratch
 afterwards), then run `cargo test -p frust-widgets --test lab10_scratch`:
 
 ```rust
-use frust_core::{RenderRoot, any};
-use frust_widgets::{Column, SizedBox};
+use frust_core::RenderRoot;
+use frust_widgets::{SizedBox, column};
 use kurbo::Size;
 
 #[test]
 fn child_ids_are_stable_across_rebuilds() {
-    let mut app = |w: &mut f64| Column(vec![any(SizedBox(Some(*w), Some(10.0))), any(SizedBox(Some(20.0), Some(10.0)))]);
+    let mut app = |w: &mut f64| column()
+        .child(SizedBox(Some(*w), Some(10.0)))
+        .child(SizedBox(Some(20.0), Some(10.0)));
     let mut root = RenderRoot::new();
     let mut width = 10.0;
     root.rebuild(&mut app, &mut width);
@@ -216,7 +218,7 @@ fn child_ids_are_stable_across_rebuilds() {
 It passes. The root is `WidgetId(1)` (from `alloc_id`); the pods are `281474976710656` and `…657`.
 Ids belong to pods, and pods outlive views. Follow-up: make the second child `if swap {
 any(Column(vec![])) } else { any(SizedBox(..)) }` and flip `swap`. The id stays; `type_name` goes
-`SizedBoxWidget` → `FlexWidget`, because the swap happens *inside* the pod.
+`SizedBoxWidget` → `FlexWidget`, because the swap happens *inside* the pod. (The `any()` wrapper is only needed to unify different view types.)
 
 ## What to notice before moving on
 

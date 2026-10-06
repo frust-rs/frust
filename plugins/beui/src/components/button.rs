@@ -1803,14 +1803,11 @@ mod tests {
     /// A base button, which paints its idle run, over a stateful one showing
     /// its success label, which is shaped by the widest-state loop.
     fn probe_view(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            frust::any(button::<()>("Save", |_| {})),
-            frust::any(
-                button::<()>("Save", |_| {})
-                    .variant(ButtonVariant::Stateful)
-                    .state(ButtonState::Success),
-            ),
-        ])
+        frust::column().child(button::<()>("Save", |_| {})).child(
+            button::<()>("Save", |_| {})
+                .variant(ButtonVariant::Stateful)
+                .state(ButtonState::Success),
+        )
     }
 
     #[test]

@@ -87,9 +87,10 @@
 //! app with a real clock source substitutes its own reading.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Get, GetUntracked, NavigatorController,
-    PopResult, RwSignal, Set, SizedBox, Stack, any, component, navigator, text,
+    AnyView, Component, CrossAxisAlignment, Get, GetUntracked, NavigatorController, PopResult,
+    RwSignal, Set, SizedBox, View, any, column, component, navigator, stack, text,
 };
+
 use frust_material::{
     DatePickerDialog, DatePickerEntryMode, DatePickerMode, DatePickerState, MaterialDate,
     OverlayAnchor, calendar_date_picker, date_picker_dialog, show_date_picker, tonal_button,
@@ -248,12 +249,11 @@ fn dialogs_preview(
         );
     });
 
-    any(Column(vec![
-        any(trigger),
-        any(SizedBox::<Knobs>(None, Some(12.0))),
-        any(text(format!("Date: {date_label}")).style(body_style)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+    any(column()
+        .child(trigger)
+        .child(SizedBox::<Knobs>(None, Some(12.0)))
+        .child(text(format!("Date: {date_label}")).style(body_style))
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 /// The paste-ready "Calendar" snippet for the current picker state.
@@ -402,11 +402,18 @@ fn content(
             calendar_mode_open,
         )],
     );
-    any(Stack(vec![
-        playground,
-        entry_mode_menu_panel(picker_value.entry_mode, entry_mode_anchor, entry_mode_open),
-        calendar_mode_menu_panel(picker_value.mode, calendar_mode_anchor, calendar_mode_open),
-    ]))
+    any(stack()
+        .child(playground)
+        .child(entry_mode_menu_panel(
+            picker_value.entry_mode,
+            entry_mode_anchor,
+            entry_mode_open,
+        ))
+        .child(calendar_mode_menu_panel(
+            picker_value.mode,
+            calendar_mode_anchor,
+            calendar_mode_open,
+        )))
 }
 
 struct DatePickersPlayground;
@@ -418,7 +425,7 @@ impl Component for DatePickersPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let nav = state.nav.clone();
         let picker = state.picker;
         let confirmed = state.confirmed;

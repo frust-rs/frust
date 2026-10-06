@@ -2057,8 +2057,8 @@ pub trait Widget: Any {
     /// as a `dyn Widget`, where the concrete type is otherwise unrecoverable.
     /// Asking the live widget beats recording a name when it was built: a
     /// rebuild that swaps a child's concrete type cannot leave a stale name
-    /// behind, not even through the doubly-erased pods no reconciler can
-    /// observe (`docs/LIMITATIONS.md`'s `focus-double-erasure-swap-blind`).
+    /// behind, not even through wrapper views that re-box an inner `AnyView`
+    /// (`docs/LIMITATIONS.md`'s `focus-wrapper-erasure-swap-blind`).
     ///
     /// Diagnostic only: `type_name`'s output is not a stable contract across
     /// compiler versions, so never parse or match on it. Overriding it is

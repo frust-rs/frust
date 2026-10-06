@@ -59,7 +59,13 @@ pub struct BreadcrumbListView<State: 'static> {
 }
 
 /// `BreadcrumbList`: the row itself, `gap-1.5`, `items-center`.
-pub fn breadcrumb_list<State: 'static>(children: Vec<AnyView<State>>) -> BreadcrumbListView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn breadcrumb_list<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> BreadcrumbListView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     BreadcrumbListView {
         children,
         is_nav: false,
@@ -68,7 +74,13 @@ pub fn breadcrumb_list<State: 'static>(children: Vec<AnyView<State>>) -> Breadcr
 
 /// `Breadcrumb`: the same row, with an `aria-label="breadcrumb"`
 /// `Role::Navigation` semantics wrapper.
-pub fn breadcrumb<State: 'static>(children: Vec<AnyView<State>>) -> BreadcrumbListView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn breadcrumb<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> BreadcrumbListView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     BreadcrumbListView {
         children,
         is_nav: true,

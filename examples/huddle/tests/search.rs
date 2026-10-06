@@ -123,7 +123,7 @@ fn frame_at(
     tcx: &mut TextContext,
     t_ms: u64,
 ) -> (RecScene, bool) {
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     root.rebuild(&mut logic, state);
     let tcx_any: &mut dyn Any = tcx;
     root.layout_with_text(Size::new(W, H), tcx_any);
@@ -158,7 +158,7 @@ fn settle_transitions(root: &mut Root, state: &mut HuddleState, tcx: &mut TextCo
 fn boot_to_search() -> (Root, HuddleState, TextContext) {
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     let mut tcx = TextContext::new();
 
     frame(&mut root, &mut logic, &mut state, &mut tcx);
@@ -169,7 +169,7 @@ fn boot_to_search() -> (Root, HuddleState, TextContext) {
 }
 
 fn rebuild(root: &mut Root, state: &mut HuddleState, tcx: &mut TextContext) -> RecScene {
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     frame(root, &mut logic, state, tcx)
 }
 

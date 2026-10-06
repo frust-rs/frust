@@ -11,8 +11,8 @@
 
 use frust_core::AnyView;
 use frust_widgets::{
-    Axis, ButtonStyle, CrossAxisAlignment, FlexView, GestureDetector, SizedBox, button, container,
-    icon_button, icons, inflexible, text,
+    ButtonStyle, CrossAxisAlignment, GestureDetector, SizedBox, button, column, container,
+    icon_button, icons, row, text,
 };
 use peniko::Color;
 
@@ -24,93 +24,73 @@ const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 
 fn button_case() -> AnyView<()> {
     framed(
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(
-                    FlexView::new(
-                        Axis::Horizontal,
-                        vec![
-                            inflexible(
-                                button("Save", |_: &mut ()| {})
-                                    .style(ButtonStyle::Primary)
-                                    .small(),
-                            ),
-                            inflexible(SizedBox(Some(12.0), None)),
-                            inflexible(
-                                button("Cancel", |_: &mut ()| {})
-                                    .style(ButtonStyle::Secondary)
-                                    .small(),
-                            ),
-                            inflexible(SizedBox(Some(12.0), None)),
-                            inflexible(
-                                button("Skip", |_: &mut ()| {})
-                                    .style(ButtonStyle::Ghost)
-                                    .small(),
-                            ),
-                        ],
+        column()
+            .child(
+                row()
+                    .child(
+                        button("Save", |_: &mut ()| {})
+                            .style(ButtonStyle::Primary)
+                            .small(),
+                    )
+                    .child(SizedBox(Some(12.0), None))
+                    .child(
+                        button("Cancel", |_: &mut ()| {})
+                            .style(ButtonStyle::Secondary)
+                            .small(),
+                    )
+                    .child(SizedBox(Some(12.0), None))
+                    .child(
+                        button("Skip", |_: &mut ()| {})
+                            .style(ButtonStyle::Ghost)
+                            .small(),
                     )
                     .cross_axis(CrossAxisAlignment::Center),
-                ),
-                inflexible(SizedBox(None, Some(16.0))),
-                inflexible(
-                    FlexView::new(
-                        Axis::Horizontal,
-                        vec![
-                            inflexible(
-                                button("Delete", |_: &mut ()| {})
-                                    .style(ButtonStyle::Danger)
-                                    .small(),
-                            ),
-                            inflexible(SizedBox(Some(12.0), None)),
-                            inflexible(button("Locked", |_: &mut ()| {}).disabled(true).small()),
-                            inflexible(SizedBox(Some(12.0), None)),
-                            inflexible(button("Sync", |_: &mut ()| {}).loading(true).small()),
-                        ],
+            )
+            .child(SizedBox(None, Some(16.0)))
+            .child(
+                row()
+                    .child(
+                        button("Delete", |_: &mut ()| {})
+                            .style(ButtonStyle::Danger)
+                            .small(),
                     )
+                    .child(SizedBox(Some(12.0), None))
+                    .child(button("Locked", |_: &mut ()| {}).disabled(true).small())
+                    .child(SizedBox(Some(12.0), None))
+                    .child(button("Sync", |_: &mut ()| {}).loading(true).small())
                     .cross_axis(CrossAxisAlignment::Center),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
 fn gesture_detector_case() -> AnyView<()> {
     framed(
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(
-                    GestureDetector(
-                        container(text("Tap me").size(14.0).color(Color::WHITE))
-                            .fill(ACCENT)
-                            .radius(12.0)
-                            .size_centered(140.0, 64.0),
-                    )
-                    .on_tap(|_: &mut ()| {}),
-                ),
-                inflexible(SizedBox(None, Some(12.0))),
-                inflexible(text("wraps a target; tap or long-press to fire").size(12.0)),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(
+                GestureDetector(
+                    container(text("Tap me").size(14.0).color(Color::WHITE))
+                        .fill(ACCENT)
+                        .radius(12.0)
+                        .size_centered(140.0, 64.0),
+                )
+                .on_tap(|_: &mut ()| {}),
+            )
+            .child(SizedBox(None, Some(12.0)))
+            .child(text("wraps a target; tap or long-press to fire").size(12.0))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
 fn icon_button_case() -> AnyView<()> {
     framed(
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(icon_button(icons::CLOSE, "Close", |_: &mut ()| {})),
-                inflexible(SizedBox(Some(24.0), None)),
-                inflexible(icon_button(icons::SETTINGS, "Settings", |_: &mut ()| {})),
-                inflexible(SizedBox(Some(24.0), None)),
-                inflexible(icon_button(icons::SEND, "Send", |_: &mut ()| {}).ink(ACCENT)),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .child(icon_button(icons::CLOSE, "Close", |_: &mut ()| {}))
+            .child(SizedBox(Some(24.0), None))
+            .child(icon_button(icons::SETTINGS, "Settings", |_: &mut ()| {}))
+            .child(SizedBox(Some(24.0), None))
+            .child(icon_button(icons::SEND, "Send", |_: &mut ()| {}).ink(ACCENT))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 

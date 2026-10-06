@@ -99,7 +99,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use frust_core::{AnyView, any};
+use frust_core::{AnyView, View, any};
 
 use super::navigator::{NavigatorController, NavigatorId, PushOptions, ReplaceOptions};
 use super::path::{Location, PathPattern, RouteParams, encode_segment};
@@ -144,15 +144,24 @@ pub struct Route<State: 'static> {
 
 impl<State: 'static> Route<State> {
     /// A route matching `path` (a pattern like `/users/:id`, or a relative child
-    /// path like `:id`), rendered by `builder`.
-    pub fn new(
+    /// path like `:id`), rendered by `builder`. `builder` may return any
+    /// [`View`]; it is erased here.
+    ///
+    /// ```
+    /// use frust_widgets::{Route, text};
+    /// let route: Route<()> = Route::new("/users/:id", |params| {
+    ///     text(format!("user {}", params.get("id").map_or("?", String::as_str)))
+    /// });
+    /// # let _ = route;
+    /// ```
+    pub fn new<V: View<State>>(
         path: impl Into<String>,
-        builder: impl Fn(&RouteParams) -> AnyView<State> + 'static,
+        builder: impl Fn(&RouteParams) -> V + 'static,
     ) -> Self {
         Route {
             path: path.into(),
             name: None,
-            builder: Rc::new(builder),
+            builder: Rc::new(move |params: &RouteParams| any(builder(params))),
             redirect: None,
             children: Vec::new(),
             shell: None,
@@ -191,7 +200,7 @@ impl<State: 'static> Route<State> {
 /// stays retained on the enclosing stack (go_router's `ShellRoute`).
 ///
 /// `builder` builds the shell page — chrome plus the inner navigator, e.g.
-/// `scaffold(any(navigator(&inner, || …))).app_bar(…)` — and **must** mount a
+/// `scaffold(navigator(&inner, || …)).app_bar(…)` — and **must** mount a
 /// [`navigator`](super::navigator::navigator) driven by the *same* `inner`
 /// clone; that navigator is where the children land.
 ///
@@ -272,15 +281,15 @@ impl<State: 'static> Route<State> {
 /// facade's innermost-first arbitration reaches it first: back pops the inner
 /// stack while it is poppable, and an inner navigator at depth 1 claims no
 /// interest, so the press falls through and pops the shell page itself.
-pub fn shell_route<State: 'static>(
+pub fn shell_route<State: 'static, V: View<State>>(
     inner: &NavigatorController<State>,
-    builder: impl Fn(&RouteParams) -> AnyView<State> + 'static,
+    builder: impl Fn(&RouteParams) -> V + 'static,
     children: Vec<Route<State>>,
 ) -> Route<State> {
     Route {
         path: String::new(),
         name: None,
-        builder: Rc::new(builder),
+        builder: Rc::new(move |params: &RouteParams| any(builder(params))),
         redirect: None,
         children,
         shell: Some(inner.clone()),
@@ -450,11 +459,12 @@ impl<State: 'static> Router<State> {
     }
 
     /// Replace the error-page builder (default: a simple themed "not found" page).
-    pub fn error_builder(
+    /// `error_builder` may return any [`View`]; it is erased here.
+    pub fn error_builder<V: View<State>>(
         mut self,
-        error_builder: impl Fn(&Location) -> AnyView<State> + 'static,
+        error_builder: impl Fn(&Location) -> V + 'static,
     ) -> Self {
-        self.error_builder = Rc::new(error_builder);
+        self.error_builder = Rc::new(move |location: &Location| any(error_builder(location)));
         self
     }
 
@@ -1796,10 +1806,9 @@ mod tests {
                 move |_: &RouteParams| {
                     let inner = inner.clone();
                     let builds = builds.clone();
-                    any(crate::Column(vec![
-                        any(BuildCounter { builds }),
-                        any(navigator(&inner, || sized(11.0, 11.0))),
-                    ]))
+                    any(crate::column()
+                        .child(BuildCounter { builds })
+                        .child(navigator(&inner, || sized(11.0, 11.0))))
                 }
             };
             let routes = vec![

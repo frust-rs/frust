@@ -31,8 +31,8 @@
 use frust::Theme;
 use frust::authoring::text::TextStyle;
 use frust::authoring::{
-    BoxConstraints, Brush, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Point, Role,
-    RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, View, Widget,
+    AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Point,
+    Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, View, Widget,
 };
 use peniko::Color;
 
@@ -307,9 +307,13 @@ pub struct BubbleGroupView<State: 'static> {
 const GROUP_GAP: f64 = style::SPACING_UNIT * 2.0;
 
 /// Stack `children` (typically [`bubble`] views) in a column.
-pub fn bubble_group<State: 'static>(
-    children: Vec<frust::authoring::AnyView<State>>,
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn bubble_group<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
 ) -> BubbleGroupView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     BubbleGroupView { children }
 }
 

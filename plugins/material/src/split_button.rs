@@ -3131,7 +3131,7 @@ mod tests {
         let mut tcx = TextContext::new();
         let cell = anchor.clone();
         let mut logic = move |_s: &mut Log| {
-            frust::Stack(vec![with_items(true).menu_anchor(&cell).popup_menu()])
+            frust::stack().child(with_items(true).menu_anchor(&cell).popup_menu())
         };
         root.rebuild(&mut logic, &mut state);
         root.layout_with_text(Size::new(400.0, 600.0), &mut tcx as &mut dyn Any);

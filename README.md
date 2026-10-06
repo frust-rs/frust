@@ -153,28 +153,100 @@ apps, then the workbench scaffolds and runs one. `frust doctor` runs the wizard'
 non-interactively. Contributors can build a generated project against a checkout of this repository
 with `frust create my_app --frust-path <checkout>`.
 
-## Hello, Frust
+## Hello, Frust: the counter app
+
+The equivalent of Flutter's default counter app, and exactly what `frust create my_app`
+scaffolds. Two source files are the whole app; `main.rs` and the platform folders are generated
+and never hand-edited. The one `frust::app!` line binds the root component to every platform at
+once: the Android JNI exports, the iOS C-ABI exports, the browser's wasm entry and the desktop
+`__frust_main`.
 
 ```rust
-// crates/frust/src/lib.rs (doctest)
-use frust::{Component, View, AnyView, any, text};
+// src/lib.rs
+mod home_page;
 
-struct Counter;
+use frust::{Component, View, component};
 
-impl Component for Counter {
-    type State = i32;
+/// The root component: stateless config that hosts the home page.
+#[derive(Default)]
+pub struct MyApp;
 
-    fn init(&self) -> i32 {
-        0
-    }
+impl Component for MyApp {
+    type State = ();
 
-    fn build(&self, state: &mut i32) -> AnyView<i32> {
-        any(text(format!("count: {state}")).size(32.0))
+    fn init(&self) {}
+
+    fn build(&self, _state: &mut ()) -> impl View<()> {
+        component(home_page::HomePage {
+            title: "My App".into(),
+        })
     }
 }
 
-frust::run(Counter).unwrap();
+// `setup` runs once on the UI thread before the root `init`. Material 3 is the
+// design system; swap in `frust_glyph::install()` or `frust_cupertino::install()`
+// (and the matching `Cargo.toml` dependency) to change it.
+frust::app!(
+    MyApp,
+    setup = {
+        frust_material::install();
+    }
+);
 ```
+
+```rust
+// src/home_page.rs
+use frust::{Align, Alignment, Component, CrossAxisAlignment, View, column, scaffold, text};
+
+/// The counter screen; the count is its local state.
+pub struct HomePage {
+    pub title: String,
+}
+
+impl Component for HomePage {
+    type State = u32;
+
+    fn init(&self) -> u32 {
+        0
+    }
+
+    fn build(&self, count: &mut u32) -> impl View<u32> {
+        scaffold(counter_body(*count))
+            .app_bar(app_bar(&self.title))
+            .fab(increment_fab())
+    }
+}
+
+// The Material app bar insets itself under the status bar, so no safe_area wrapper is needed.
+fn app_bar(title: &str) -> impl View<u32> + use<> {
+    frust_material::app_bar::<u32>(title)
+        .container(frust_material::AppBarContainer::InversePrimary)
+        .elevation(2)
+}
+
+fn counter_body(count: u32) -> impl View<u32> + use<> {
+    Align(
+        Alignment::CENTER,
+        column()
+            .child(text("You have pushed the button this many times:"))
+            .child(text(count.to_string()).size(48.0))
+            .cross_axis(CrossAxisAlignment::Center),
+    )
+}
+
+// The Scaffold keeps the FAB clear of the gesture-nav inset.
+fn increment_fab() -> impl View<u32> + use<> {
+    frust_material::fab(frust::icon(frust_material::icons::ADD), |count: &mut u32| {
+        *count += 1
+    })
+    .label("Increment")
+}
+```
+
+`Cargo.toml` depends on `frust-ui` (imported as `frust`) and `frust-material`. Every API that
+takes a child accepts `impl View`, so there is no `any()` anywhere in a generated app; each
+`Component::build` returns `impl View` and the framework erases it once at the boundary.
+`frust run` builds and launches it on the connected device, emulator, simulator, or the desktop.
 
 ## Learning the rendering pipeline
 

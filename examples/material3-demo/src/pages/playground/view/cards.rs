@@ -1,7 +1,8 @@
 //! Cards: the reference's `CardsPlayground`.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Theme, any, component, text,
+    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Theme, View, any, column, component,
+    text,
 };
 use frust_material::{CardVariant, card};
 
@@ -54,7 +55,7 @@ impl Component for CardsPlayground {
         }
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }
@@ -94,12 +95,11 @@ fn card_body<State: 'static>(theme: &Theme, title: &str, body: &str) -> AnyView<
     title_style.color = scheme.on_surface;
     let mut body_style = theme.type_scale.body_medium.clone();
     body_style.color = scheme.on_surface_variant;
-    any(Column(vec![
-        any(text(title.to_string()).style(title_style)),
-        any(SizedBox::<State>(None, Some(4.0))),
-        any(text(body.to_string()).style(body_style)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+    any(column()
+        .child(text(title.to_string()).style(title_style))
+        .child(SizedBox::<State>(None, Some(4.0)))
+        .child(text(body.to_string()).style(body_style))
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 fn single_card_preview(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {

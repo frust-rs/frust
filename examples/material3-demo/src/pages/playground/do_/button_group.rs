@@ -30,7 +30,7 @@
 //! mounted at this page's own outer [`Stack`]); `Type` fits a plain
 //! [`play_enum_segmented`] since it is a 2-way choice.
 
-use frust::{AnyView, Component, SizedBox, Stack, any, component, icon};
+use frust::{AnyView, Component, SizedBox, View, any, component, icon, stack};
 use frust_material::{
     ButtonGroupDensity, ButtonGroupType, ButtonVariant, OverlayAnchor, ToggleButtonSize,
     button_group_action, button_group_actions, icons, toggle_button,
@@ -182,8 +182,8 @@ fn toggle_preview(state: &Knobs) -> AnyView<Knobs> {
         toggle_button(state.toggle_checked, |state: &mut Knobs, checked: bool| {
             state.toggle_checked = checked;
         })
-        .icon(any(icon(icons::STAR)))
-        .checked_icon(any(icon(icons::STAR)))
+        .icon(icon(icons::STAR))
+        .checked_icon(icon(icons::STAR))
         .label("Star")
         .variant(state.style)
         .size(state.size),
@@ -307,11 +307,10 @@ fn body(state: &Knobs) -> AnyView<Knobs> {
         vec![button_group_snippet(state), toggle_button_snippet(state)],
         vec![group_panel(state)],
     );
-    any(Stack(vec![
-        content,
-        size_menu_panel(state),
-        style_menu_panel(state),
-    ]))
+    any(stack()
+        .child(content)
+        .child(size_menu_panel(state))
+        .child(style_menu_panel(state)))
 }
 
 /// This page's knob component — see the [module docs](self).
@@ -324,7 +323,7 @@ impl Component for ButtonGroupPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

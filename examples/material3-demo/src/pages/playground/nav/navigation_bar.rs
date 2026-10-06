@@ -8,7 +8,7 @@
 //! (size, label behavior, indicator style, badges) and omits the two
 //! controls rather than wiring them to nothing.
 
-use frust::{AnyView, Component, Stack, Theme, View, any, component, container, icon};
+use frust::{AnyView, Component, Theme, View, any, component, container, icon, stack};
 use frust_material::{
     MaterialDimensions, NavBarIndicatorStyle, NavBarLabelBehavior, NavBarSize, NavItem,
     OverlayAnchor, icons, nav_item, navigation_bar,
@@ -97,7 +97,7 @@ impl Component for NavigationBarPlayground {
         }
     }
 
-    fn build(&self, state: &mut NavBarState) -> AnyView<NavBarState> {
+    fn build(&self, state: &mut NavBarState) -> impl View<NavBarState> {
         body(state)
     }
 }
@@ -112,11 +112,10 @@ fn body(state: &NavBarState) -> AnyView<NavBarState> {
         vec![play_snippet("Navigation bar", snippet_code(state))],
         vec![appearance_panel(state)],
     );
-    any(Stack(vec![
-        content,
-        label_menu_panel(state),
-        indicator_menu_panel(state),
-    ]))
+    any(stack()
+        .child(content)
+        .child(label_menu_panel(state))
+        .child(indicator_menu_panel(state)))
 }
 
 /// Frame `child` in an outlined, rounded box — the reference's `_framed`
@@ -131,17 +130,17 @@ fn framed(theme: &Theme, child: impl View<NavBarState>) -> AnyView<NavBarState> 
 
 /// The four destinations — the reference's own `_destinations` getter.
 fn destinations(state: &NavBarState) -> Vec<NavItem<NavBarState>> {
-    let mut search = nav_item::<NavBarState>("Search").icon(any(icon(icons::SEARCH)));
-    let mut agenda = nav_item::<NavBarState>("Agenda").icon(any(icon(icons::CALENDAR_TODAY)));
+    let mut search = nav_item::<NavBarState>("Search").icon(icon(icons::SEARCH));
+    let mut agenda = nav_item::<NavBarState>("Agenda").icon(icon(icons::CALENDAR_TODAY));
     if state.badges {
         search = search.badge_dot();
         agenda = agenda.badge_count(3);
     }
     vec![
-        nav_item::<NavBarState>("Home").icon(any(icon(icons::HOME))),
+        nav_item::<NavBarState>("Home").icon(icon(icons::HOME)),
         search,
         agenda,
-        nav_item::<NavBarState>("Drafts").icon(any(icon(icons::EDIT))),
+        nav_item::<NavBarState>("Drafts").icon(icon(icons::EDIT)),
     ]
 }
 

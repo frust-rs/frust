@@ -77,11 +77,10 @@ use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, Color, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
 };
 use frust::{
-    Align, Alignment, AnimationController, AnyView, Axis, ChildKey, Column, CrossAxisAlignment,
-    DesignLanguage, EdgeInsets, FlexView, GestureDetector, Get, Image, ImageFit, ImageSource,
-    ListView, NavigatorController, Padding, PopResult, Row, SizedBox, Stack, Theme, View, any,
-    button, component, flexible, hero, icon, icons, inflexible, scroll_view, text, text_input,
-    use_context,
+    Align, Alignment, AnimationController, AnyView, ChildKey, Column, CrossAxisAlignment,
+    DesignLanguage, EdgeInsets, GestureDetector, Get, Image, ImageFit, ImageSource, ListView,
+    NavigatorController, Padding, PopResult, SizedBox, Theme, View, any, button, column, component,
+    hero, icon, icons, row, scroll_view, stack, text, text_input, use_context,
 };
 use frust_cupertino::{action, show_cupertino_alert};
 use frust_material::{ProgressValue, app_bar, circular_progress, dialog, show_dialog, switch};
@@ -358,7 +357,7 @@ impl frust::Component for HomeScreen {
         }
     }
 
-    fn build(&self, state: &mut HomeState) -> AnyView<HomeState> {
+    fn build(&self, state: &mut HomeState) -> impl View<HomeState> {
         let async_state = state.controller.data.get(); // tracked
 
         let body: AnyView<HomeState> = if let Some(data) = async_state.value() {
@@ -382,16 +381,16 @@ impl frust::Component for HomeScreen {
             .leading(workspace_tile(&state.nav))
             .actions(vec![create_channel_action()]));
 
-        let screen = any(
-            FlexView::new(Axis::Vertical, vec![inflexible(bar), flexible(1, body)])
-                .cross_axis(CrossAxisAlignment::Stretch),
-        );
+        let screen = any(column()
+            .child(bar)
+            .flex(1, body)
+            .cross_axis(CrossAxisAlignment::Stretch));
 
         // The open Home overlay sheet mounts in the screen's own `Stack` top
         // layer (mirrors `screens::channel_feed`'s `feed_sheet`); when
         // closed it is an inert zero-size box, so the roster stays interactive.
         let overlay = home_sheet_overlay(state, design);
-        any(Stack(vec![screen, overlay]))
+        any(stack().child(screen).child(overlay))
     }
 }
 
@@ -410,17 +409,16 @@ fn workspace_tile(nav: &NavigatorController<HuddleState>) -> AnyView<HomeState> 
     let tile = Padding(
         EdgeInsets::symmetric(6.0, 12.0),
         // SizedBox+Align monogram idiom — see `channel_circle`.
-        Stack(vec![
-            any(fill_box(
+        stack()
+            .child(fill_box(
                 Size::new(AVATAR_SIZE, AVATAR_SIZE),
                 CHANNEL_TINT,
                 12.0,
-            )),
-            any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
+            ))
+            .child(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
                 Alignment::CENTER,
                 text("HQ").size(12.0).color(Color::WHITE),
             ))),
-        ]),
     );
     any(GestureDetector(tile).on_tap(move |_s: &mut HomeState| {
         nav.push(crate::features::channels::presentation::pages::workspace_drawer::workspace_drawer_screen);
@@ -458,25 +456,17 @@ fn skeleton_list() -> AnyView<HomeState> {
 fn skeleton_row() -> AnyView<HomeState> {
     any(Padding(
         EdgeInsets::symmetric(8.0, 10.0),
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(shimmer(
-                    Size::new(AVATAR_SIZE, AVATAR_SIZE),
-                    AVATAR_RADIUS,
-                ))),
-                inflexible(any(SizedBox(Some(12.0), None))),
-                flexible(
-                    1,
-                    any(Column(vec![
-                        any(shimmer(Size::new(150.0, 14.0), 4.0)),
-                        any(SizedBox(None, Some(6.0))),
-                        any(shimmer(Size::new(220.0, 12.0), 4.0)),
-                    ])),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .child(shimmer(Size::new(AVATAR_SIZE, AVATAR_SIZE), AVATAR_RADIUS))
+            .child(SizedBox(Some(12.0), None))
+            .flex(
+                1,
+                column()
+                    .child(shimmer(Size::new(150.0, 14.0), 4.0))
+                    .child(SizedBox(None, Some(6.0)))
+                    .child(shimmer(Size::new(220.0, 12.0), 4.0)),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     ))
 }
 
@@ -561,16 +551,13 @@ fn roster_list(
     // app supplies one, exactly as the pre-`ListView` `scroll_view` version
     // did. A `Stack` layer rather than a synthetic row, so it never
     // participates in row keying/windowing.
-    any(Stack(vec![
-        list,
-        any(Align(
-            Alignment::new(0.0, -0.85), // near the top, matching the old top-of-content spinner
-            Padding(
-                EdgeInsets::all(8.0),
-                circular_progress(ProgressValue::Indeterminate),
-            ),
-        )),
-    ]))
+    any(stack().child(list).child(Align(
+        Alignment::new(0.0, -0.85), // near the top, matching the old top-of-content spinner
+        Padding(
+            EdgeInsets::all(8.0),
+            circular_progress(ProgressValue::Indeterminate),
+        ),
+    )))
 }
 
 /// A section header row: left-aligned text at SECTION_LABEL_SIZE, its own
@@ -616,17 +603,16 @@ fn row_with_long_press_menu(
 /// tight-sized box is what gives `Align` the bounded constraints it centers
 /// within.
 fn channel_circle() -> AnyView<HomeState> {
-    any(Stack(vec![
-        any(fill_box(
+    any(stack()
+        .child(fill_box(
             Size::new(AVATAR_SIZE, AVATAR_SIZE),
             CHANNEL_TINT,
             AVATAR_RADIUS,
-        )),
-        any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
+        ))
+        .child(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
             Alignment::CENTER,
             text("#").size(MONOGRAM_SIZE).color(Color::WHITE),
-        ))),
-    ]))
+        ))))
 }
 
 /// The tappable middle-of-row content: name/title, preview, and trailing unread
@@ -637,17 +623,15 @@ fn tappable_content<F: Fn(&mut HomeState) + 'static>(
     unread: u32,
     on_tap: F,
 ) -> AnyView<HomeState> {
-    let column = any(Column(vec![
-        title,
-        any(SizedBox(None, Some(4.0))),
-        any(text(preview).size(LIST_SUBTITLE_SIZE)),
-    ]));
+    let column = any(column()
+        .child(title)
+        .child(SizedBox(None, Some(4.0)))
+        .child(text(preview).size(LIST_SUBTITLE_SIZE)));
     any(GestureDetector(
-        FlexView::new(
-            Axis::Horizontal,
-            vec![flexible(1, column), inflexible(unread_badge(unread))],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .flex(1, column)
+            .child(unread_badge(unread))
+            .cross_axis(CrossAxisAlignment::Center),
     )
     .on_tap(on_tap))
 }
@@ -665,17 +649,16 @@ fn unread_badge(count: u32) -> AnyView<HomeState> {
     any(Padding(
         EdgeInsets::symmetric(4.0, 0.0),
         // SizedBox+Align monogram idiom — see `channel_circle`.
-        Stack(vec![
-            any(fill_box(
+        stack()
+            .child(fill_box(
                 Size::new(BADGE_W, BADGE_H),
                 BADGE_COLOR,
                 BADGE_RADIUS,
-            )),
-            any(SizedBox(Some(BADGE_W), Some(BADGE_H)).child(Align(
+            ))
+            .child(SizedBox(Some(BADGE_W), Some(BADGE_H)).child(Align(
                 Alignment::CENTER,
                 text(label).size(BADGE_TEXT_SIZE).color(Color::WHITE),
             ))),
-        ]),
     ))
 }
 
@@ -683,15 +666,11 @@ fn unread_badge(count: u32) -> AnyView<HomeState> {
 fn row_layout(leading: AnyView<HomeState>, content: AnyView<HomeState>) -> AnyView<HomeState> {
     any(Padding(
         EdgeInsets::symmetric(8.0, 10.0),
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(leading),
-                inflexible(any(SizedBox(Some(12.0), None))),
-                flexible(1, content),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .child(leading)
+            .child(SizedBox(Some(12.0), None))
+            .flex(1, content)
+            .cross_axis(CrossAxisAlignment::Center),
     ))
 }
 
@@ -711,11 +690,10 @@ fn channel_row_keyed(
 
     // Title row: the name, plus a lock icon for a private channel.
     let title: AnyView<HomeState> = if c.private {
-        any(Row(vec![
-            any(text(c.name.clone()).size(LIST_TITLE_SIZE)),
-            any(SizedBox(Some(6.0), None)),
-            any(icon(icons::LOCK).size(16.0)),
-        ]))
+        any(row()
+            .child(text(c.name.clone()).size(LIST_TITLE_SIZE))
+            .child(SizedBox(Some(6.0), None))
+            .child(icon(icons::LOCK).size(16.0)))
     } else {
         any(text(c.name.clone()).size(LIST_TITLE_SIZE))
     };
@@ -798,26 +776,27 @@ fn dm_avatar_keyed(_logo: &Option<ImageSource>, d: &DmItem) -> AnyView<HomeState
         any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Image(src).fit(ImageFit::Cover)))
     } else {
         // SizedBox+Align monogram idiom — see `channel_circle`.
-        any(Stack(vec![
-            any(fill_box(
+        any(stack()
+            .child(fill_box(
                 Size::new(AVATAR_SIZE, AVATAR_SIZE),
                 avatar_color(d.user_id),
                 AVATAR_RADIUS,
-            )),
-            any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
-                Alignment::CENTER,
-                text(d.initials.clone())
-                    .size(MONOGRAM_SIZE)
-                    .color(Color::WHITE),
-            ))),
-        ]))
+            ))
+            .child(
+                SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
+                    Alignment::CENTER,
+                    text(d.initials.clone())
+                        .size(MONOGRAM_SIZE)
+                        .color(Color::WHITE),
+                )),
+            ))
     };
 
     let dot = any(Align(
         Alignment::new(1.0, 1.0),
         fill_box(Size::new(12.0, 12.0), status_color(d.status), 6.0),
     ));
-    let avatar = any(Stack(vec![base, dot]));
+    let avatar = any(stack().child(base).child(dot));
 
     let user_id = d.user_id;
     any(
@@ -918,21 +897,17 @@ fn create_channel_form(state: &HomeState) -> AnyView<HomeState> {
     )
     .placeholder("Channel name"));
 
-    let private_row = any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(any(icon(icons::LOCK).size(18.0))),
-            inflexible(any(SizedBox(Some(8.0), None))),
-            flexible(1, any(text("Private"))),
-            inflexible(any(switch(
-                state.create_private,
-                |s: &mut HomeState, checked: bool| {
-                    s.create_private = checked;
-                },
-            ))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center));
+    let private_row = any(row()
+        .child(icon(icons::LOCK).size(18.0))
+        .child(SizedBox(Some(8.0), None))
+        .flex(1, text("Private"))
+        .child(switch(
+            state.create_private,
+            |s: &mut HomeState, checked: bool| {
+                s.create_private = checked;
+            },
+        ))
+        .cross_axis(CrossAxisAlignment::Center));
 
     let cancel_btn = any(button("Cancel", |s: &mut HomeState| {
         s.sheet = HomeSheet::None;
@@ -947,32 +922,24 @@ fn create_channel_form(state: &HomeState) -> AnyView<HomeState> {
         s.toasts.show(format!("Created #{trimmed}"));
         s.sheet = HomeSheet::None;
     }));
-    let actions_row = any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(1, any(SizedBox(None, None))),
-            inflexible(cancel_btn),
-            inflexible(any(SizedBox(Some(8.0), None))),
-            inflexible(create_btn),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center));
+    let actions_row = any(row()
+        .flex(1, SizedBox(None, None))
+        .child(cancel_btn)
+        .child(SizedBox(Some(8.0), None))
+        .child(create_btn)
+        .cross_axis(CrossAxisAlignment::Center));
 
     any(Padding(
         EdgeInsets::all(16.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(text("Create a channel").size(18.0))),
-                inflexible(any(SizedBox(None, Some(16.0)))),
-                inflexible(name_field),
-                inflexible(any(SizedBox(None, Some(16.0)))),
-                inflexible(private_row),
-                inflexible(any(SizedBox(None, Some(20.0)))),
-                inflexible(actions_row),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch),
+        column()
+            .child(text("Create a channel").size(18.0))
+            .child(SizedBox(None, Some(16.0)))
+            .child(name_field)
+            .child(SizedBox(None, Some(16.0)))
+            .child(private_row)
+            .child(SizedBox(None, Some(20.0)))
+            .child(actions_row)
+            .cross_axis(CrossAxisAlignment::Stretch),
     ))
 }
 
@@ -1068,9 +1035,9 @@ fn show_invite_modal(nav: &NavigatorController<HuddleState>, design: DesignLangu
                     dialog()
                         .title("Invite people")
                         .body("Send invites to this workspace? (mock)")
-                        .action(any(button("Send", move |_s: &mut HuddleState| {
+                        .action(button("Send", move |_s: &mut HuddleState| {
                             confirm.pop_with_result(PopResult::of(true));
-                        })))
+                        }))
                 },
                 |s: &mut HuddleState, result: PopResult| {
                     if result.take::<bool>() == Some(true) {
@@ -1102,9 +1069,9 @@ fn show_invite_modal(nav: &NavigatorController<HuddleState>, design: DesignLangu
                     dialog()
                         .title("Invite people")
                         .body("Send invites to this workspace? (mock)")
-                        .action(any(button("Send", move |_s: &mut HuddleState| {
+                        .action(button("Send", move |_s: &mut HuddleState| {
                             confirm.pop_with_result(PopResult::of(true));
-                        })))
+                        }))
                 },
                 |s: &mut HuddleState, result: PopResult| {
                     if result.take::<bool>() == Some(true) {

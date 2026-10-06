@@ -15,8 +15,8 @@
 use std::time::Duration;
 
 use frust::{
-    AnyView, Color, Column, Component, CrossAxisAlignment, Row, SizedBox, any, colored_box,
-    component, text,
+    AnyView, Color, Component, CrossAxisAlignment, SizedBox, View, any, colored_box, column,
+    component, row, text,
 };
 use frust_beui::agents::agent_activity::{
     AgentActivityStatus, AgentStepStatus, activity_search, activity_step, activity_text,
@@ -190,32 +190,33 @@ impl State {
 
 /// The shell's rail: the workspace's resource tree.
 fn rail(state: &State) -> AnyView<State> {
-    any(Column(vec![
-        any(text("Agent workspace").size(13.0)),
-        any(SizedBox(None, Some(4.0))),
-        any(caption("Alt+Shift+Arrow moves a resource.")),
-        any(SizedBox(None, Some(12.0))),
-        any(ai_sidebar::<State>(state.resources.clone())
-            .active_id(state.active_resource.clone())
-            .default_expanded(vec!["release".to_string(), "design".to_string()])
-            .label("Agent workspace")
-            .on_activate(|s: &mut State, id: String| s.active_resource = id)
-            .on_move(|s: &mut State, requested: AiSidebarMove| {
-                let describe = format!(
-                    "{} \u{2192} {:?} {}",
-                    requested.item_id,
-                    requested.position,
-                    requested.target_id.clone().unwrap_or_default()
-                );
-                match ai_sidebar_move(&s.resources, &requested) {
-                    Some(next) => {
-                        s.resources = next;
-                        s.moved = Some(format!("Moved: {describe}"));
+    any(column()
+        .child(text("Agent workspace").size(13.0))
+        .child(SizedBox(None, Some(4.0)))
+        .child(caption("Alt+Shift+Arrow moves a resource."))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            ai_sidebar::<State>(state.resources.clone())
+                .active_id(state.active_resource.clone())
+                .default_expanded(vec!["release".to_string(), "design".to_string()])
+                .label("Agent workspace")
+                .on_activate(|s: &mut State, id: String| s.active_resource = id)
+                .on_move(|s: &mut State, requested: AiSidebarMove| {
+                    let describe = format!(
+                        "{} \u{2192} {:?} {}",
+                        requested.item_id,
+                        requested.position,
+                        requested.target_id.clone().unwrap_or_default()
+                    );
+                    match ai_sidebar_move(&s.resources, &requested) {
+                        Some(next) => {
+                            s.resources = next;
+                            s.moved = Some(format!("Moved: {describe}"));
+                        }
+                        None => s.moved = Some(format!("Refused: {describe}")),
                     }
-                    None => s.moved = Some(format!("Refused: {describe}")),
-                }
-            })),
-    ]))
+                }),
+        ))
 }
 
 /// The host-owned rows the conversation appends after its transcript: the
@@ -261,48 +262,54 @@ fn workspace_rows(
     vec![
         any(message::<State, _>(
             MessageFrom::Assistant,
-            Column(vec![
-                any(agent_activity::<State>(activity)
-                    .status(if busy {
-                        AgentActivityStatus::Working
-                    } else {
-                        AgentActivityStatus::Complete
-                    })
-                    .duration(worked)
-                    .open(activity_open)
-                    .collapse_on_complete(false)
-                    .max_height(200.0)
-                    .on_open_change(|s: &mut State, open| s.activity_open = open)),
-                any(SizedBox(None, Some(12.0))),
-                any(todo_list::<State>(plan)
-                    .title("Release plan")
-                    .open(plan_open)
-                    .collapse_on_complete(false)
-                    .max_height(200.0)
-                    .on_open_change(|s: &mut State, open| s.plan_open = open)),
-            ]),
+            column()
+                .child(
+                    agent_activity::<State>(activity)
+                        .status(if busy {
+                            AgentActivityStatus::Working
+                        } else {
+                            AgentActivityStatus::Complete
+                        })
+                        .duration(worked)
+                        .open(activity_open)
+                        .collapse_on_complete(false)
+                        .max_height(200.0)
+                        .on_open_change(|s: &mut State, open| s.activity_open = open),
+                )
+                .child(SizedBox(None, Some(12.0)))
+                .child(
+                    todo_list::<State>(plan)
+                        .title("Release plan")
+                        .open(plan_open)
+                        .collapse_on_complete(false)
+                        .max_height(200.0)
+                        .on_open_change(|s: &mut State, open| s.plan_open = open),
+                ),
         )
         .avatar_placeholder(true)),
         any(message::<State, _>(
             MessageFrom::Assistant,
-            Column(vec![
-                any(image_generation::<State>()
-                    .media(
-                        colored_box::<State>()
-                            .fill(Color::from_rgb8(0x22, 0xc5, 0x5e))
-                            .radius(20.0),
-                    )
-                    .status(media)
-                    .prompt("a clear checkout confirmation screen")
-                    .resolution("1280 \u{d7} 840")
-                    .size(ImageGenerationSize::Compact)
-                    .interactive(true)
-                    .on_retry(|s: &mut State| s.regenerate())),
-                any(SizedBox(None, Some(8.0))),
-                any(button("Regenerate", |s: &mut State| s.regenerate())
-                    .tone(ButtonTone::Ghost)
-                    .size(ButtonSize::Sm)),
-            ]),
+            column()
+                .child(
+                    image_generation::<State>()
+                        .media(
+                            colored_box::<State>()
+                                .fill(Color::from_rgb8(0x22, 0xc5, 0x5e))
+                                .radius(20.0),
+                        )
+                        .status(media)
+                        .prompt("a clear checkout confirmation screen")
+                        .resolution("1280 \u{d7} 840")
+                        .size(ImageGenerationSize::Compact)
+                        .interactive(true)
+                        .on_retry(|s: &mut State| s.regenerate()),
+                )
+                .child(SizedBox(None, Some(8.0)))
+                .child(
+                    button("Regenerate", |s: &mut State| s.regenerate())
+                        .tone(ButtonTone::Ghost)
+                        .size(ButtonSize::Sm),
+                ),
         )
         .avatar_placeholder(true)),
     ]
@@ -342,7 +349,7 @@ impl Component for Chat {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         let delta = state.clock.tick();
         state.advance(delta);
 
@@ -358,10 +365,10 @@ impl Component for Chat {
             .clone()
             .unwrap_or_else(|| "No move requested yet.".to_string());
 
-        any(Column(vec![
-            any(heading("Agents \u{b7} Chat")),
-            any(SizedBox(None, Some(8.0))),
-            any(caption(
+        any(column()
+            .child(heading("Agents \u{b7} Chat"))
+            .child(SizedBox(None, Some(8.0)))
+            .child(caption(
                 "chat_app is the shell; the conversation inside it is the \
                  catalog's own assembled surface over a ChatModel the page \
                  owns. A user bubble is Soft rather than upstream's inverted \
@@ -370,42 +377,46 @@ impl Component for Chat {
                  folds itself away below 600px and reports nothing when it does, \
                  since the fold is decided in layout, which carries no event \
                  context.",
-            )),
-            any(SizedBox(None, Some(10.0))),
-            any(caption(
+            ))
+            .child(SizedBox(None, Some(10.0)))
+            .child(caption(
                 "The nine cards upstream's preview mounts inline are host rows \
                  here, appended after the transcript rather than interleaved \
                  with it \u{2014} extra_rows is the seam the port offers, and it \
                  takes a factory rather than a list because the transcript is \
                  re-assembled on both sides of every rebuild.",
-            )),
-            any(SizedBox(None, Some(BLOCK_GAP))),
-            any(SizedBox(None, Some(WORKSPACE_HEIGHT))
-                .child(chat_app::<State, _, _>(rail(state), conversation(state)))),
+            ))
+            .child(SizedBox(None, Some(BLOCK_GAP)))
+            .child(
+                SizedBox(None, Some(WORKSPACE_HEIGHT))
+                    .child(chat_app::<State, _, _>(rail(state), conversation(state))),
+            )
             // The pump sits beside the workspace, not at the foot of the page:
             // see `FrameClock::pump` on why paint-time culling makes placement
             // load-bearing.
-            any(state.clock.pump(state.busy())),
-            any(SizedBox(None, Some(12.0))),
-            any(Row(vec![
-                any(caption(format!(
-                    "Driver: {status}. Active resource: {}.",
-                    state.active_resource
-                ))),
-                any(SizedBox(Some(12.0), None)),
-                any(button("Reset the conversation", |s: &mut State| {
-                    s.model = ChatModel::new()
-                        .with_driver(mock_chat_driver(REPLY).chars_per_second(REPLY_RATE))
-                        .with_history(history());
-                    s.worked = 6.0;
-                })
-                .tone(ButtonTone::Ghost)
-                .size(ButtonSize::Sm)),
-            ])
-            .cross_axis(CrossAxisAlignment::Center)),
-            any(SizedBox(None, Some(8.0))),
-            any(caption(moved)),
-        ]))
+            .child(state.clock.pump(state.busy()))
+            .child(SizedBox(None, Some(12.0)))
+            .child(
+                row()
+                    .child(caption(format!(
+                        "Driver: {status}. Active resource: {}.",
+                        state.active_resource
+                    )))
+                    .child(SizedBox(Some(12.0), None))
+                    .child(
+                        button("Reset the conversation", |s: &mut State| {
+                            s.model = ChatModel::new()
+                                .with_driver(mock_chat_driver(REPLY).chars_per_second(REPLY_RATE))
+                                .with_history(history());
+                            s.worked = 6.0;
+                        })
+                        .tone(ButtonTone::Ghost)
+                        .size(ButtonSize::Sm),
+                    )
+                    .cross_axis(CrossAxisAlignment::Center),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(caption(moved)))
     }
 }
 

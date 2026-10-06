@@ -346,7 +346,7 @@ pub fn text_button<State: 'static, F: Fn(&mut State) + 'static>(
 /// `button(label, on_press).icon(icon)` — both spellings exist because the
 /// reference has both a factory and an `iconAlignment`-carrying decoration.
 pub fn button_with_icon<State: 'static, F: Fn(&mut State) + 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     label: impl Into<String>,
     on_press: F,
 ) -> ButtonView<State> {
@@ -382,8 +382,8 @@ impl<State: 'static> ButtonView<State> {
     }
 
     /// Attach a leading icon (see [`button_with_icon`]).
-    pub fn icon(mut self, icon: AnyView<State>) -> Self {
-        self.icon = Some(icon);
+    pub fn icon(mut self, icon: impl View<State>) -> Self {
+        self.icon = Some(AnyView::new(icon));
         self
     }
 

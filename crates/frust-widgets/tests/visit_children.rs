@@ -30,7 +30,7 @@ use frust_text::TextContext;
 use frust_widgets::motion::patterns::FadeThrough;
 use frust_widgets::motion::switcher::{PatternSwitcherView, pattern_switcher};
 use frust_widgets::{
-    Column, EdgeInsets, NavigatorController, NavigatorView, Padding, SizedBox, navigator, text,
+    EdgeInsets, NavigatorController, NavigatorView, Padding, SizedBox, column, navigator, text,
 };
 use kurbo::Size;
 
@@ -88,10 +88,9 @@ fn a_multi_child_container_publishes_every_child_in_order() {
     // The `children: Vec<ChildPod>` shape, nested two levels deep so the walk
     // has to recurse rather than stop at the first container.
     let nodes = inspect(&mut |_: &mut ()| {
-        Column(vec![
-            any(text("a")),
-            any(Padding(EdgeInsets::all(1.0), text("b"))),
-        ])
+        column()
+            .child(text("a"))
+            .child(Padding(EdgeInsets::all(1.0), text("b")))
     });
     assert_eq!(
         short_names(&nodes),
@@ -130,7 +129,7 @@ fn a_multi_slot_container_publishes_each_filled_slot() {
         pattern_switcher(
             0u32,
             FadeThrough,
-            Column(vec![any(text("t")), any(text("d"))]),
+            column().child(text("t")).child(text("d")),
         )
     });
     assert_eq!(
@@ -186,7 +185,7 @@ fn the_navigator_publishes_every_retained_page() {
     // whole retained stack — including a page covered by the one above it,
     // which input routing and semantics both (deliberately) omit.
     let controller: NavigatorController<()> = NavigatorController::new();
-    controller.push(|| any(text("second")));
+    controller.push(|| text("second"));
     let ctl = controller.clone();
     let nodes = inspect(&mut move |_: &mut ()| -> NavigatorView<()> {
         navigator(&ctl, || -> AnyView<()> { any(text("root")) })

@@ -712,11 +712,12 @@ impl<State: 'static, V: View<State, Element = ModalWidget>> View<State> for Stag
 /// `FlexView` v1 has no `gap` property (only `MainAxisAlignment::Start`), so
 /// every gap in the catalog is an explicit [`SizedBox`] spacer — the same
 /// stand-in `crate::card` documents.
-fn with_gaps<State: 'static>(
-    children: Vec<AnyView<State>>,
+fn with_gaps<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
     gap: f64,
     vertical: bool,
 ) -> Vec<FlexChild<State>> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     let mut out: Vec<FlexChild<State>> = Vec::with_capacity(children.len() * 2);
     for (i, child) in children.into_iter().enumerate() {
         if i > 0 {
@@ -734,8 +735,11 @@ fn with_gaps<State: 'static>(
 /// A `flex flex-col gap-<gap> p-<pad>` stack, stretched to the panel's width —
 /// the shape of every modal panel's own content column *and* of each of its
 /// header slots.
-pub fn stack_slots<State: 'static>(
-    children: Vec<AnyView<State>>,
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn stack_slots<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
     gap: f64,
     pad: EdgeInsets,
 ) -> AnyView<State> {
@@ -760,8 +764,11 @@ pub fn stack_slots<State: 'static>(
 /// arm** at every width, matching the catalog's desktop-first charter — the
 /// same reason its headers stay start-aligned where upstream centres them below
 /// `sm`.
-pub fn trailing_row<State: 'static>(
-    children: Vec<AnyView<State>>,
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn trailing_row<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
     gap: f64,
     pad: EdgeInsets,
 ) -> AnyView<State> {
@@ -2943,10 +2950,9 @@ pub(crate) mod tests {
     /// header is built from, at the dialog family's `text-lg` title size.
     #[cfg(feature = "bundled-fonts")]
     fn header(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            panel_title("Edit profile", 18.0),
-            panel_description("Make changes to your profile here."),
-        ])
+        frust::column()
+            .child(panel_title("Edit profile", 18.0))
+            .child(panel_description("Make changes to your profile here."))
     }
 
     #[cfg(feature = "bundled-fonts")]

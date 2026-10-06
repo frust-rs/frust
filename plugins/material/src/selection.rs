@@ -327,7 +327,7 @@ pub struct SelectionHostView<State: 'static> {
 /// row (see the [module docs](self)' Wrapper section). `on_toggle` reports
 /// the row index whose membership should flip.
 pub fn selection_host<State: 'static, F>(
-    items: impl IntoIterator<Item = AnyView<State>>,
+    items: impl IntoIterator<Item = impl View<State>>,
     selected: &BTreeSet<usize>,
     on_toggle: F,
 ) -> SelectionHostView<State>
@@ -335,7 +335,7 @@ where
     F: Fn(&mut State, usize) + 'static,
 {
     SelectionHostView {
-        items: items.into_iter().collect(),
+        items: items.into_iter().map(AnyView::new).collect(),
         selected: selected.clone(),
         enabled: true,
         on_toggle: Rc::new(on_toggle),
@@ -677,7 +677,7 @@ pub struct SelectionAppBarView<State: 'static> {
 /// button ever empties it (see the [module docs](self)' Controlled semantics
 /// section).
 pub fn selection_app_bar<State: 'static, F>(
-    idle: AnyView<State>,
+    idle: impl View<State>,
     selected: &BTreeSet<usize>,
     item_count: usize,
     on_clear: F,
@@ -686,7 +686,7 @@ where
     F: Fn(&mut State) + 'static,
 {
     SelectionAppBarView {
-        idle,
+        idle: AnyView::new(idle),
         selected: selected.clone(),
         item_count,
         actions: Vec::new(),
@@ -701,8 +701,8 @@ where
 impl<State: 'static> SelectionAppBarView<State> {
     /// Attach contextual trailing action slots, in reading order
     /// (`M3ESelectionAppBar.actions`).
-    pub fn actions(mut self, actions: Vec<AnyView<State>>) -> Self {
-        self.actions = actions;
+    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
+        self.actions = actions.into_iter().map(AnyView::new).collect();
         self
     }
 
@@ -758,7 +758,7 @@ impl<State: 'static> SelectionAppBarView<State> {
 /// `dialog.rs`'s `close_view` helper of the same shape.
 fn close_view<State: 'static>(on_clear: OnClear<State>) -> AnyView<State> {
     any(
-        icon_button(any(icon(crate::icons::CLOSE)), move |state: &mut State| {
+        icon_button(icon(crate::icons::CLOSE), move |state: &mut State| {
             (on_clear)(state);
         })
         .semantic_label(CLEAR_SELECTION_LABEL),
@@ -1587,7 +1587,7 @@ mod tests {
             .leading(leaf_any(48.0, 48.0))
             .actions(vec![leaf_any(48.0, 48.0)])
             .safe_area(safe_area);
-        selection_app_bar(any(idle), selected, 3, |_: &mut ()| {})
+        selection_app_bar(idle, selected, 3, |_: &mut ()| {})
             .show_select_all(false)
             .actions(vec![leaf_any(48.0, 48.0)])
             .safe_area(safe_area)

@@ -47,8 +47,8 @@
 use frust::authoring::{PaintCtx, PaintScene, PointerEvent, PointerPhase};
 use frust::kurbo::{Point, Size, Vec2};
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexView, Get, Padding, PanZoomTransform, Set,
-    SizedBox, Stack, Theme, any, button, canvas, inflexible, pan_zoom, text, use_context,
+    AnyView, ButtonStyle, Color, EdgeInsets, Get, Padding, PanZoomTransform, Set, SizedBox, Stack,
+    Theme, any, button, canvas, column, pan_zoom, row, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -231,32 +231,26 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
 
     any(Padding(
         EdgeInsets::all(16.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(text("Graph").size(13.0).color(accent)),
-                inflexible(
-                    text(
-                        "A toy node-and-edge graph: CanvasView (a-01) paints nodes/edges inside a \
+        column()
+            .child(text("Graph").size(13.0).color(accent))
+            .child(
+                text(
+                    "A toy node-and-edge graph: CanvasView (a-01) paints nodes/edges inside a \
                          PanZoomView (a-09) viewport. Drag to pan, ctrl/\u{2318}+wheel or pinch to \
                          zoom, tap a node to select it, “Fit” frames the whole graph.",
-                    )
-                    .size(11.0)
-                    .color(muted),
-                ),
-                inflexible(SizedBox(None, Some(12.0))),
-                inflexible(graph_viewport),
-                inflexible(SizedBox(None, Some(8.0))),
-                inflexible(FlexView::new(
-                    Axis::Horizontal,
-                    vec![
-                        inflexible(fit_button),
-                        inflexible(SizedBox(Some(12.0), None)),
-                        inflexible(text(readout).size(12.0)),
-                    ],
-                )),
-            ],
-        ),
+                )
+                .size(11.0)
+                .color(muted),
+            )
+            .child(SizedBox(None, Some(12.0)))
+            .child(graph_viewport)
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                row()
+                    .child(fit_button)
+                    .child(SizedBox(Some(12.0), None))
+                    .child(text(readout).size(12.0)),
+            ),
     ))
 }
 

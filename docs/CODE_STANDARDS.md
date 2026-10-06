@@ -123,6 +123,12 @@ off this index — read this plus the one that covers what you are touching:
   lower layer threads a resource owned by a higher layer, pass it as `&mut dyn Any` and
   recover it at the one call site that knows the concrete type via a documented,
   panic-on-mismatch `downcast_mut::<T>()`.
+- **Erase at the API boundary, not at call sites.** Prefer the `column()`/`row()`/`stack()`
+  builders and `-> impl View<S>` helper returns (`+ use<>` when the helper borrows an
+  argument). Write `any()` only where branches of different concrete types must unify (if/else,
+  match arms, `async_view` arms); never wrap an argument of an API that already takes
+  `V: View`. A driver closure returning a `Component::build` result erases it:
+  `move |s| AnyView::new(root.build(s))`. Never add `#[allow(refining_impl_trait)]`.
 - **Edition-2024 `-> impl Trait` return types capture all in-scope lifetimes by default.**
   When a function returns an `impl Trait` that borrows nothing from its parameters (e.g.
   a widget fn returning `impl View<State>`, where views are `'static`), opt out
@@ -352,10 +358,10 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   `PatternSwitcher`'s): an inactive publish *is* a session release, so raise it only for an
   outgoing/covered subtree that was itself on the live chain — on a push the outgoing pod is the
   page being **covered**. Two severing paths are known to be **uncovered** and are registered rather
-  than fixed: a type swap through a doubly-erased pod, which no reconciler can observe
-  (`focus-double-erasure-swap-blind`), and the hand-rolled navbar/tabbar item lists, which never
-  clear or mark a truncated item's own focus link (`focus-navbar-item-truncation-unmarked`). See
-  `docs/LIMITATIONS.md`.
+  than fixed: a type swap inside a wrapper view that re-boxes an `AnyView` under its own
+  `Box<dyn Widget>` element, which no reconciler can observe (`focus-wrapper-erasure-swap-blind`),
+  and the hand-rolled navbar/tabbar item lists, which never clear or mark a truncated item's own
+  focus link (`focus-navbar-item-truncation-unmarked`). See `docs/LIMITATIONS.md`.
 
 - **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key, view)` marks a
   `Flex` child list for identity-based reconciliation; a mixed or duplicate key set
@@ -548,13 +554,10 @@ shipped instance.
 ## Testing Patterns
 
 - **Fixture-driven tests for parsers/validators**: register canned
-  `ProcessRunner`/`EnvLookup` responses keyed by the exact invocation, then assert the
-  resulting `Status`/`Validation`/`DoctorReport`.
+  `ProcessRunner`/`EnvLookup` responses keyed by the exact invocation, then assert the result.
 - **Injectable hook seams for process-global side effects**: a function installing a real
-  handler in production (`ctrlc::set_handler`, a filesystem watcher) takes a small `Hooks`
-  struct defaulted to the real installers, with a `::fake()` (`#[cfg(test)]`) no-op pair a
-  test injects instead — exercising dispatch logic without installing a real process-wide
-  handler.
+  handler (`ctrlc::set_handler`, a filesystem watcher) takes a `Hooks` struct defaulted to the
+  real installers, with a `#[cfg(test)]` `::fake()` no-op pair a test injects instead.
 - **`#[ignore = "<reason>"]` for GPU-dependent or slow end-to-end tests.** The reason string
   must say how to run it (`cargo test -p ... --ignored`) and why it's excluded by default
   (needs a real GPU; compiles a full generated dependency graph; etc.).
@@ -575,26 +578,23 @@ shipped instance.
   context; a ledger number dangles for readers without that repo.
 - **Sanctioned citations** stay fine: `docs/LIMITATIONS.md` stable ids (e.g.
   `` `engine-metal-postmultiplied-truth-bug` ``), named semantic rules (`R23`, `R44-back`),
-  doc-section pointers, and commit SHAs/version pins of *external* repos (e.g. clean-signals'
-  `910f626`). Keep a ledger entry's meaning, drop its number (`// re-created finding #44` →
-  `// re-created the root-modal double-claim bug`). Domain vocabulary (render encode/present
-  phases, an oscillator's phase, a doc comment's own numbered steps) is not residue.
+  doc-section pointers, and commit SHAs/version pins of *external* repos. Keep a ledger entry's
+  meaning, drop its number (`// re-created finding #44` → `// re-created the root-modal
+  double-claim bug`). Domain vocabulary (render phases, numbered steps) is not residue.
 - **Header budget scales with the module.** A simple module gets a 1–3 line header; a complex
-  one gives contract + rationale only, plus one pointer to the owning spoke doc. Inline
-  comments state what the code can't show (a `# Safety` contract, a magic-number source).
+  one gives contract + rationale plus one pointer to the owning spoke doc. Inline comments
+  state what the code can't show (a `# Safety` contract, a magic-number source).
 - **These conventions apply to TOML manifests too** (`Cargo.toml`, scaffold `*.tmpl`,
   `frust.toml`, `.cargo/config.toml`). A manifest comment states only what the TOML cannot
-  show — an exact/LAW pin and its lockstep site, a must-not-re-add feature or backend, a
-  non-obvious cfg/exclusion reason, an advisory — in at most 3 lines, pointing to the owning doc
-  (e.g. `docs/DEVELOPMENT.md` § Version-Pin Policy). Under the budget below, pin and constraint
-  comments are the last to cut. Commented-out scaffold option keys are documentation.
+  show — an exact/LAW pin and its lockstep site, a must-not-re-add feature, a non-obvious
+  cfg/exclusion reason — in at most 3 lines, pointing to the owning doc (e.g.
+  `docs/DEVELOPMENT.md` § Version-Pin Policy). Pin and constraint comments are the last to cut;
+  commented-out scaffold option keys are documentation.
 - **Mechanically checked.** `crates/frust/tests/comment_residue_conformance.rs` scans source and
-  manifest `#` comments for plan-phase (dotted `9.B`, parenthesized, `Phase-N`, "the Phase N"),
-  plan-task (`task-NN`), findings-ledger, review-round (`re-review`, `cfix-N`, gated `round-N`),
-  plan-document (`PLAN <tag>`, a plan-directory path), phase-adjacent `req N` and
-  `review finding <id>` refs; sanctioned citations exempt only their match span. Bare PR numbers
-  and plan tags (`T04`/`D6a` vs. `M3`/`R8`) stay human-reviewed, still banned.
-  `manifest_comment_budget.rs` fails a manifest comment block over 3 lines, and a manifest whose
-  prose `#` lines P (commented-out TOML excluded) exceed 12 and whose ratio to setting lines N
-  tops its kind's ceiling: 0.9 for Cargo manifests and `.cargo/config.toml`, 3.3 for
-  `frust.toml`; no per-file allowlist.
+  manifest `#` comments for the banned plan/phase, plan-task, findings-ledger, review-round,
+  plan-document, `req N` and `review finding <id>` refs; sanctioned citations exempt only
+  their match span. Bare PR numbers and plan tags (`T04`/`D6a` vs. `M3`/`R8`) stay
+  human-reviewed, still banned. `manifest_comment_budget.rs` fails a manifest comment block over
+  3 lines, and a manifest whose prose `#` lines (commented-out TOML excluded) exceed 12 and
+  whose ratio to setting lines tops 0.9 (Cargo manifests, `.cargo/config.toml`) or 3.3
+  (`frust.toml`); no per-file allowlist.

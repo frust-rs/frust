@@ -247,9 +247,11 @@ pub struct GlyphRevealView<State: 'static> {
 /// Create a reveal container over `children`. Controlled: pass the current
 /// [`.expanded(bool)`](GlyphRevealView::expanded); the container animates
 /// whenever that value flips after the first build.
-pub fn glyph_reveal<State: 'static>(children: Vec<AnyView<State>>) -> GlyphRevealView<State> {
+pub fn glyph_reveal<State: 'static>(
+    children: impl IntoIterator<Item = impl View<State>>,
+) -> GlyphRevealView<State> {
     GlyphRevealView {
-        children,
+        children: children.into_iter().map(AnyView::new).collect(),
         expanded: false,
         stagger: true,
         gap: GLYPH_REVEAL_GAP,
@@ -997,13 +999,7 @@ mod tests {
     }
 
     fn view_of(expanded: bool, heights: &[f64]) -> GlyphRevealView<()> {
-        glyph_reveal(
-            heights
-                .iter()
-                .map(|h| any(Block(Size::new(120.0, *h))))
-                .collect(),
-        )
-        .expanded(expanded)
+        glyph_reveal(heights.iter().map(|h| any(Block(Size::new(120.0, *h))))).expanded(expanded)
     }
 
     fn view(expanded: bool) -> GlyphRevealView<()> {
@@ -1522,13 +1518,8 @@ mod tests {
         // children 0 and 1. `semantics` must forward exactly that same
         // prefix — the parity `GlyphRevealWidget::input_reach` fixes.
         fn logic(expanded: &mut bool) -> GlyphRevealView<bool> {
-            glyph_reveal::<bool>(
-                HEIGHTS
-                    .iter()
-                    .map(|h| any(Block(Size::new(120.0, *h))))
-                    .collect(),
-            )
-            .expanded(*expanded)
+            glyph_reveal::<bool>(HEIGHTS.iter().map(|h| any(Block(Size::new(120.0, *h)))))
+                .expanded(*expanded)
         }
 
         let mut root: frust_core::RenderRoot<bool, GlyphRevealView<bool>> =

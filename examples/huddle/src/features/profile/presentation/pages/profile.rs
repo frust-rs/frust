@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Button, Column, CrossAxisAlignment, Row, SizedBox, Theme, any, hero,
+    Align, Alignment, AnyView, Button, CrossAxisAlignment, SizedBox, Theme, any, column, hero, row,
     text, use_context,
 };
 use frust_material::filled_card;
@@ -68,43 +68,40 @@ pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
         initials_tile::<HuddleState>(profile.user.initials, AVATAR_TILE, AVATAR_FONT),
     ));
 
-    let status_row = any(Row(vec![
-        any(text("\u{25CF}").color(status_color).size(14.0)),
-        any(SizedBox(Some(6.0), None)),
-        any(text(profile.user.status.label()).size(14.0)),
-    ]));
+    let status_row = any(row()
+        .child(text("\u{25CF}").color(status_color).size(14.0))
+        .child(SizedBox(Some(6.0), None))
+        .child(text(profile.user.status.label()).size(14.0)));
 
-    let actions = any(Row(vec![
-        any(Button("Message", move |s: &mut HuddleState| {
+    let actions = any(row()
+        .child(Button("Message", move |s: &mut HuddleState| {
             // Inert when there is no existing DM with this user (see the
             // module docs) — the button still shows its native pressed
             // feedback, just fires nothing.
             if let Some(dm_id) = &dm_channel_id {
                 s.nav.router().push(&format!("/channel/{dm_id}"));
             }
-        })),
-        any(SizedBox(Some(12.0), None)),
+        }))
+        .child(SizedBox(Some(12.0), None))
         // Deliberately inert (no huddle-call feature exists yet) — see the
         // module docs. `Button` already paints its own pressed state on
         // `Down`/`Move`, so this needs no extra wiring to satisfy "inert with
         // pressed state".
-        any(Button("Huddle call", |_s: &mut HuddleState| {})),
-    ]));
+        .child(Button("Huddle call", |_s: &mut HuddleState| {})));
 
-    let body = any(Column(vec![
-        avatar,
-        any(SizedBox(None, Some(16.0))),
-        any(text(profile.user.name).size(24.0)),
-        any(text(profile.handle.clone()).size(14.0)),
-        any(SizedBox(None, Some(8.0))),
-        status_row,
-        any(SizedBox(None, Some(4.0))),
-        any(text(profile.local_time.clone()).size(13.0)),
-        any(text(profile.role_team.clone()).size(13.0)),
-        any(SizedBox(None, Some(16.0))),
-        actions,
-    ])
-    .cross_axis(CrossAxisAlignment::Center));
+    let body = any(column()
+        .child(avatar)
+        .child(SizedBox(None, Some(16.0)))
+        .child(text(profile.user.name).size(24.0))
+        .child(text(profile.handle.clone()).size(14.0))
+        .child(SizedBox(None, Some(8.0)))
+        .child(status_row)
+        .child(SizedBox(None, Some(4.0)))
+        .child(text(profile.local_time.clone()).size(13.0))
+        .child(text(profile.role_team.clone()).size(13.0))
+        .child(SizedBox(None, Some(16.0)))
+        .child(actions)
+        .cross_axis(CrossAxisAlignment::Center));
 
     scaffold(profile.user.name, body)
 }

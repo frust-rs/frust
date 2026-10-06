@@ -69,7 +69,7 @@ use frust_material::{
 };
 use frust_widgets::{
     Align, Alignment, Column, CrossAxisAlignment, EdgeInsets, IconSource, Padding, Row, SizedBox,
-    Stack, container, icon, text,
+    column, container, icon, row, stack, text,
 };
 use kurbo::Size;
 
@@ -179,20 +179,22 @@ impl Component for ButtonGroupCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             STRIP,
-            Column(vec![
-                any(button_group_actions(vec![
-                    button_group_action("Left").icon(|| glyph(icons::FORMAT_ALIGN_LEFT)),
-                    button_group_action("Center").icon(|| glyph(icons::FORMAT_ALIGN_CENTER)),
-                    button_group_action("Right").icon(|| glyph(icons::FORMAT_ALIGN_RIGHT)),
-                ])
-                .group_type(ButtonGroupType::Connected)
-                .selected_index(state.align)
-                .on_select(|state: &mut ButtonGroupState, index| state.align = Some(index))),
-                gap(24.0),
-                any(segmented_button(
+            column()
+                .child(
+                    button_group_actions(vec![
+                        button_group_action("Left").icon(|| glyph(icons::FORMAT_ALIGN_LEFT)),
+                        button_group_action("Center").icon(|| glyph(icons::FORMAT_ALIGN_CENTER)),
+                        button_group_action("Right").icon(|| glyph(icons::FORMAT_ALIGN_RIGHT)),
+                    ])
+                    .group_type(ButtonGroupType::Connected)
+                    .selected_index(state.align)
+                    .on_select(|state: &mut ButtonGroupState, index| state.align = Some(index)),
+                )
+                .child(gap(24.0))
+                .child(segmented_button(
                     vec![
                         segment("day").label("Day"),
                         segment("week").label("Week"),
@@ -200,9 +202,8 @@ impl Component for ButtonGroupCase {
                     ],
                     state.span.iter().copied(),
                     |state: &mut ButtonGroupState, span: Vec<&'static str>| state.span = span,
-                )),
-            ])
-            .cross_axis(CrossAxisAlignment::Center),
+                ))
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -244,7 +245,7 @@ impl Component for ChipsCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         // The seeded single contact renders chip + gap + suggestion — the
         // recorded row, member for member.
         let mut second_row: Vec<AnyView<ChipsState>> = Vec::new();
@@ -259,20 +260,20 @@ impl Component for ChipsCase {
             suggestion_chip("Reply", |_: &mut ChipsState| {}).elevated(true)
         ));
         framed(
-            Column(vec![
-                any(Row(vec![
-                    any(assist_chip("Add to calendar", |_: &mut ChipsState| {})),
-                    hgap(10.0),
-                    any(filter_chip(
-                        "Unread",
-                        state.unread,
-                        |state: &mut ChipsState, selected| state.unread = selected,
-                    )),
-                ])),
-                gap(16.0),
-                any(Row(second_row)),
-            ])
-            .cross_axis(CrossAxisAlignment::Center),
+            column()
+                .child(
+                    row()
+                        .child(assist_chip("Add to calendar", |_: &mut ChipsState| {}))
+                        .child(hgap(10.0))
+                        .child(filter_chip(
+                            "Unread",
+                            state.unread,
+                            |state: &mut ChipsState, selected| state.unread = selected,
+                        )),
+                )
+                .child(gap(16.0))
+                .child(Row(second_row))
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -315,7 +316,7 @@ impl Component for DatePickerCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             PICKER,
             calendar_date_picker(
@@ -379,7 +380,7 @@ impl Component for DropdownCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let mut column: Vec<AnyView<DropdownState>> = vec![bleed(
             dropdown_field(dropdown_items())
                 .selected(state.selected.clone())
@@ -445,42 +446,41 @@ impl Component for IconButtonCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
-            Row(vec![
-                any(
+            row()
+                .child(
                     icon_button(glyph(icons::FAVORITE), |state: &mut IconButtonState| {
                         state.favorite = !state.favorite
                     })
                     .selected(state.favorite)
                     .semantic_label("Favorite"),
-                ),
-                hgap(12.0),
-                any(
+                )
+                .child(hgap(12.0))
+                .child(
                     icon_button(glyph(icons::FAVORITE), |state: &mut IconButtonState| {
                         state.filled_favorite = !state.filled_favorite
                     })
                     .variant(IconButtonVariant::Filled)
                     .selected(state.filled_favorite),
-                ),
-                hgap(12.0),
-                any(
+                )
+                .child(hgap(12.0))
+                .child(
                     icon_button(glyph(icons::BOOKMARK), |state: &mut IconButtonState| {
                         state.bookmark = !state.bookmark
                     })
                     .variant(IconButtonVariant::Tonal)
                     .selected(state.bookmark),
-                ),
-                hgap(12.0),
-                any(
+                )
+                .child(hgap(12.0))
+                .child(
                     icon_button(glyph(icons::SHARE), |state: &mut IconButtonState| {
                         state.shared = !state.shared
                     })
                     .variant(IconButtonVariant::Outlined)
                     .selected(state.shared),
-                ),
-            ])
-            .cross_axis(CrossAxisAlignment::Center),
+                )
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -513,35 +513,34 @@ impl Component for ListCase {
         ListState { selected: 2 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             STRIP,
-            Column(vec![
-                bleed(
+            column()
+                .child(bleed(
                     list_item("Weekly sync")
                         .supporting("Tomorrow, 09:00")
                         .leading(icon(icons::SCHEDULE))
                         .trailing(icon(icons::CHEVRON_RIGHT))
                         .selected(state.selected == 0)
                         .on_press(|state: &mut ListState| state.selected = 0),
-                ),
-                bleed(
+                ))
+                .child(bleed(
                     list_item("Design review")
                         .supporting("Thursday, 14:30")
                         .leading(icon(icons::LABEL))
                         .trailing(icon(icons::CHEVRON_RIGHT))
                         .selected(state.selected == 1)
                         .on_press(|state: &mut ListState| state.selected = 1),
-                ),
-                bleed(
+                ))
+                .child(bleed(
                     list_item("Release notes")
                         .supporting("Draft shared with the team")
                         .leading(icon(icons::ARCHIVE))
                         .selected(state.selected == 2)
                         .on_press(|state: &mut ListState| state.selected = 2),
-                ),
-            ])
-            .cross_axis(CrossAxisAlignment::Center),
+                ))
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -577,42 +576,43 @@ impl Component for MenuCase {
         MenuState { last: None }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let readout = match &state.last {
             Some(label) => format!("chose {label}"),
             None => String::new(),
         };
         framed_in(
             TALL,
-            SizedBox(Some(TALL.width), Some(TALL.height)).child(Stack(vec![
-                any(Align(
-                    Alignment::CENTER,
-                    menu_panel(
-                        vec![
-                            menu_entry("Archive").leading(icons::ARCHIVE).into(),
-                            menu_entry("Copy")
-                                .leading(icons::CONTENT_COPY)
-                                .shortcut("Ctrl+C")
-                                .into(),
-                            menu_group(vec![
-                                menu_entry("Share").leading(icons::SHARE).into(),
-                                menu_entry("Delete")
-                                    .leading(icons::DELETE)
-                                    .destructive(true)
+            SizedBox(Some(TALL.width), Some(TALL.height)).child(
+                stack()
+                    .child(Align(
+                        Alignment::CENTER,
+                        menu_panel(
+                            vec![
+                                menu_entry("Archive").leading(icons::ARCHIVE).into(),
+                                menu_entry("Copy")
+                                    .leading(icons::CONTENT_COPY)
+                                    .shortcut("Ctrl+C")
                                     .into(),
-                            ])
-                            .into(),
-                        ],
-                        |state: &mut MenuState, selection: MenuSelection| {
-                            state.last = Some(selection.label);
-                        },
-                    ),
-                )),
-                any(Align(
-                    Alignment::new(0.0, 1.0),
-                    Padding(EdgeInsets::all(8.0), text(readout).size(12.0)),
-                )),
-            ])),
+                                menu_group(vec![
+                                    menu_entry("Share").leading(icons::SHARE).into(),
+                                    menu_entry("Delete")
+                                        .leading(icons::DELETE)
+                                        .destructive(true)
+                                        .into(),
+                                ])
+                                .into(),
+                            ],
+                            |state: &mut MenuState, selection: MenuSelection| {
+                                state.last = Some(selection.label);
+                            },
+                        ),
+                    ))
+                    .child(Align(
+                        Alignment::new(0.0, 1.0),
+                        Padding(EdgeInsets::all(8.0), text(readout).size(12.0)),
+                    )),
+            ),
         )
     }
 }
@@ -646,7 +646,7 @@ impl Component for NavigationBarCase {
         NavigationBarState { selected: 0 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             BAR,
             bleed(
@@ -697,7 +697,7 @@ impl Component for NavigationDrawerCase {
         NavigationDrawerState { selected: 0 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             SURFACE,
             navigation_drawer_content(
@@ -745,7 +745,7 @@ impl Component for NavigationRailCase {
         NavigationRailState { selected: 1 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             RAIL,
             SizedBox(Some(RAIL_W), Some(440.0)).child(
@@ -819,51 +819,55 @@ impl Component for SelectionControlsCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
-            Column(vec![
-                any(Row(vec![
-                    any(checkbox(
-                        state.notifications,
-                        |state: &mut SelectionControlsState, checked| state.notifications = checked,
-                    )),
-                    hgap(8.0),
-                    any(text("Notifications").size(14.0)),
-                    hgap(24.0),
-                    any(checkbox(
-                        state.digest,
-                        |state: &mut SelectionControlsState, checked| state.digest = checked,
-                    )),
-                    hgap(8.0),
-                    any(text("Digest").size(14.0)),
-                ])
-                .cross_axis(CrossAxisAlignment::Center)),
-                gap(16.0),
-                any(Row(vec![
-                    any(radio("standard", state.plan)
-                        .label("Standard")
-                        .on_changed(|state: &mut SelectionControlsState, plan| state.plan = plan)),
-                    hgap(20.0),
-                    any(radio("express", state.plan)
-                        .label("Express")
-                        .on_changed(|state: &mut SelectionControlsState, plan| state.plan = plan)),
-                ])
-                .cross_axis(CrossAxisAlignment::Center)),
-                gap(16.0),
-                any(Row(vec![
-                    any(switch(
-                        state.sync,
-                        |state: &mut SelectionControlsState, checked| state.sync = checked,
-                    )),
-                    hgap(20.0),
-                    any(switch(
-                        state.backup,
-                        |state: &mut SelectionControlsState, checked| state.backup = checked,
-                    )),
-                ])
-                .cross_axis(CrossAxisAlignment::Center)),
-            ])
-            .cross_axis(CrossAxisAlignment::Center),
+            column()
+                .child(
+                    row()
+                        .child(checkbox(
+                            state.notifications,
+                            |state: &mut SelectionControlsState, checked| {
+                                state.notifications = checked
+                            },
+                        ))
+                        .child(hgap(8.0))
+                        .child(text("Notifications").size(14.0))
+                        .child(hgap(24.0))
+                        .child(checkbox(
+                            state.digest,
+                            |state: &mut SelectionControlsState, checked| state.digest = checked,
+                        ))
+                        .child(hgap(8.0))
+                        .child(text("Digest").size(14.0))
+                        .cross_axis(CrossAxisAlignment::Center),
+                )
+                .child(gap(16.0))
+                .child(
+                    row()
+                        .child(radio("standard", state.plan).label("Standard").on_changed(
+                            |state: &mut SelectionControlsState, plan| state.plan = plan,
+                        ))
+                        .child(hgap(20.0))
+                        .child(radio("express", state.plan).label("Express").on_changed(
+                            |state: &mut SelectionControlsState, plan| state.plan = plan,
+                        ))
+                        .cross_axis(CrossAxisAlignment::Center),
+                )
+                .child(gap(16.0))
+                .child(
+                    row()
+                        .child(switch(
+                            state.sync,
+                            |state: &mut SelectionControlsState, checked| state.sync = checked,
+                        ))
+                        .child(hgap(20.0))
+                        .child(switch(
+                            state.backup,
+                            |state: &mut SelectionControlsState, checked| state.backup = checked,
+                        ))
+                        .cross_axis(CrossAxisAlignment::Center),
+                )
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -906,33 +910,38 @@ impl Component for SliderCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
-            Column(vec![
-                any(SizedBox(Some(280.0), None)
-                    .child(slider(state.volume, |state: &mut SliderState, value| {
-                        state.volume = value
-                    }))),
-                gap(12.0),
-                any(SizedBox(Some(280.0), None).child(
-                    slider(state.steps, |state: &mut SliderState, value| {
-                        state.steps = value
-                    })
-                    .range(0.0, 5.0)
-                    .divisions(5),
-                )),
-                gap(12.0),
-                any(SizedBox(Some(280.0), None).child(centered_slider(
+            column()
+                .child(
+                    SizedBox(Some(280.0), None)
+                        .child(slider(state.volume, |state: &mut SliderState, value| {
+                            state.volume = value
+                        })),
+                )
+                .child(gap(12.0))
+                .child(
+                    SizedBox(Some(280.0), None).child(
+                        slider(state.steps, |state: &mut SliderState, value| {
+                            state.steps = value
+                        })
+                        .range(0.0, 5.0)
+                        .divisions(5),
+                    ),
+                )
+                .child(gap(12.0))
+                .child(SizedBox(Some(280.0), None).child(centered_slider(
                     state.balance,
                     |state: &mut SliderState, value| state.balance = value,
-                ))),
-                gap(12.0),
-                any(SizedBox(Some(280.0), None)
-                    .child(wavy_slider(state.wave, |state: &mut SliderState, value| {
-                        state.wave = value
-                    }))),
-            ])
-            .cross_axis(CrossAxisAlignment::Center),
+                )))
+                .child(gap(12.0))
+                .child(
+                    SizedBox(Some(280.0), None)
+                        .child(wavy_slider(state.wave, |state: &mut SliderState, value| {
+                            state.wave = value
+                        })),
+                )
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -978,7 +987,7 @@ impl Component for SnackbarCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let headline = if state.undone {
             "Archive undone"
         } else {
@@ -989,10 +998,10 @@ impl Component for SnackbarCase {
             snackbar_host(
                 &state.toasts,
                 container(
-                    Column(vec![
-                        any(text(headline).size(14.0)),
-                        gap(16.0),
-                        any(filled_button("Archive", |state: &mut SnackbarState| {
+                    column()
+                        .child(text(headline).size(14.0))
+                        .child(gap(16.0))
+                        .child(filled_button("Archive", |state: &mut SnackbarState| {
                             state.undone = false;
                             state.toasts.show(
                                 snackbar("Message archived")
@@ -1000,9 +1009,8 @@ impl Component for SnackbarCase {
                                         state.undone = true
                                     }),
                             );
-                        })),
-                    ])
-                    .cross_axis(CrossAxisAlignment::Center),
+                        }))
+                        .cross_axis(CrossAxisAlignment::Center),
                 )
                 .size_centered(STRIP.width, STRIP.height),
             ),
@@ -1037,7 +1045,7 @@ impl Component for TabsCase {
         TabsState { selected: 1 }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let specs: Vec<Tab> = vec![
             tab().label("Overview").icon(icons::SPACE_DASHBOARD),
             tab().label("Activity").icon(icons::SCHEDULE),
@@ -1106,7 +1114,7 @@ impl Component for TextFieldCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let mut password = text_field(
             state.password.clone(),
             |state: &mut TextFieldState, value| state.password = value,
@@ -1118,27 +1126,30 @@ impl Component for TextFieldCase {
         }
         framed_in(
             TALL,
-            Column(vec![
-                any(SizedBox(Some(280.0), None).child(
-                    text_field(state.email.clone(), |state: &mut TextFieldState, value| {
-                        state.email = value
-                    })
-                    .label("Email")
-                    .supporting_text("We never share this"),
-                )),
-                gap(16.0),
-                any(SizedBox(Some(280.0), None).child(
-                    text_field(
-                        state.display_name.clone(),
-                        |state: &mut TextFieldState, value| state.display_name = value,
-                    )
-                    .label("Display name")
-                    .variant(TextFieldVariant::Outlined),
-                )),
-                gap(16.0),
-                any(SizedBox(Some(280.0), None).child(password)),
-            ])
-            .cross_axis(CrossAxisAlignment::Center),
+            column()
+                .child(
+                    SizedBox(Some(280.0), None).child(
+                        text_field(state.email.clone(), |state: &mut TextFieldState, value| {
+                            state.email = value
+                        })
+                        .label("Email")
+                        .supporting_text("We never share this"),
+                    ),
+                )
+                .child(gap(16.0))
+                .child(
+                    SizedBox(Some(280.0), None).child(
+                        text_field(
+                            state.display_name.clone(),
+                            |state: &mut TextFieldState, value| state.display_name = value,
+                        )
+                        .label("Display name")
+                        .variant(TextFieldVariant::Outlined),
+                    ),
+                )
+                .child(gap(16.0))
+                .child(SizedBox(Some(280.0), None).child(password))
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -1172,7 +1183,7 @@ impl Component for TimePickerCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             PICKER,
             time_dial(state.value, |state: &mut TimePickerState, value| {

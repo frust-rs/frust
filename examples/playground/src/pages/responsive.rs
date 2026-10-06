@@ -59,7 +59,7 @@
 
 use frust::{
     AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, Orientation, Padding, SizedBox,
-    Theme, WindowMetrics, any, flexible, inflexible, text, use_context,
+    Theme, WindowMetrics, any, column, inflexible, row, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -162,14 +162,10 @@ fn orientation_label(orientation: Orientation) -> &'static str {
 fn article_body(article: &Article, muted: Color) -> AnyView<PlaygroundState> {
     any(Padding(
         EdgeInsets::symmetric(0.0, 8.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(text(article.title.to_string()).size(13.0))),
-                inflexible(any(text(article.body.to_string()).size(11.0).color(muted))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Start),
+        column()
+            .child(text(article.title.to_string()).size(13.0))
+            .child(text(article.body.to_string()).size(11.0).color(muted))
+            .cross_axis(CrossAxisAlignment::Start),
     ))
 }
 
@@ -192,7 +188,7 @@ fn narrow_layout(muted: Color) -> AnyView<PlaygroundState> {
 fn master_pane() -> AnyView<PlaygroundState> {
     let items = ARTICLES
         .iter()
-        .map(|article| inflexible(any(text(article.title.to_string()).size(13.0))))
+        .map(|article| inflexible(text(article.title.to_string()).size(13.0)))
         .collect();
     any(Padding(
         EdgeInsets::all(16.0),
@@ -217,10 +213,7 @@ fn detail_pane(muted: Color) -> AnyView<PlaygroundState> {
 /// pane (flex 1) is the titles-only master list; right pane (flex 2, wider)
 /// is the full detail content, side by side.
 fn wide_layout(muted: Color) -> AnyView<PlaygroundState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![flexible(1, master_pane()), flexible(2, detail_pane(muted))],
-    ))
+    any(row().flex(1, master_pane()).flex(2, detail_pane(muted)))
 }
 
 /// See the page-fn contract in [`crate::pages`].
@@ -241,30 +234,30 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
     let mut children: Vec<AnyView<PlaygroundState>> = Vec::new();
     children.push(any(Padding(
         EdgeInsets::symmetric(16.0, 12.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(text("Responsive").size(24.0))),
-                inflexible(any(text(
+        column()
+            .child(text("Responsive").size(24.0))
+            .child(
+                text(
                     "Structurally reshapes between a single column and a two-pane \
                      master/detail split, driven by WindowMetrics read live in build. \
                      Resize the window across the breakpoint below to see it switch.",
                 )
                 .size(11.0)
-                .color(muted))),
-                inflexible(any(SizedBox(None, Some(6.0)))),
-                inflexible(any(text(status_line(metrics)).size(10.5).color(muted))),
-                inflexible(any(text(corner_line(metrics)).size(10.5).color(muted))),
-                inflexible(any(text(
+                .color(muted),
+            )
+            .child(SizedBox(None, Some(6.0)))
+            .child(text(status_line(metrics)).size(10.5).color(muted))
+            .child(text(corner_line(metrics)).size(10.5).color(muted))
+            .child(
+                text(
                     "Orientation is derived from size (portrait when height >= width), \
                      never platform-sourced — on a desktop window it flips as you resize \
                      past square, independent of the breakpoint above. Expected, not a bug.",
                 )
                 .size(10.0)
-                .color(muted))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Start),
+                .color(muted),
+            )
+            .cross_axis(CrossAxisAlignment::Start),
     )));
 
     children.push(if is_wide {

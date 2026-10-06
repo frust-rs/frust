@@ -15,7 +15,7 @@
 //! same idiom `crate::pages::playground::pick::chips`'s "All types" preview
 //! uses) rather than the reference's `Wrap(spacing: 24, runSpacing: 16)`.
 
-use frust::{AnyView, Component, CrossAxisAlignment, Row, SizedBox, any, component, icon};
+use frust::{AnyView, Component, CrossAxisAlignment, Row, SizedBox, View, any, component, icon};
 use frust_material::{BadgeAlignment, badge, icons};
 
 use crate::AppState;
@@ -172,7 +172,7 @@ impl Component for BadgesPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }

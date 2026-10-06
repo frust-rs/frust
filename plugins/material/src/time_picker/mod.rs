@@ -573,7 +573,7 @@ impl<State: 'static> TimePickerPanelView<State> {
             crate::icons::SCHEDULE
         };
         Some(any(icon_button(
-            any(frust::icon(glyph)),
+            frust::icon(glyph),
             move |state: &mut State| {
                 on_press(state);
             },

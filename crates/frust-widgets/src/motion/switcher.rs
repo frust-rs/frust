@@ -469,7 +469,7 @@ mod tests {
     use super::*;
     use crate::motion::patterns::{FadeScale, SharedAxis};
     use crate::test_support::{RecordingScene, leaf_any};
-    use crate::{Column, FlexView};
+    use crate::{FlexView, column};
     use frust_core::{FrameTime, PointerButton, PointerEvent, PointerPhase, RenderRoot};
     use kurbo::Rect;
     use std::cell::Cell;
@@ -642,7 +642,7 @@ mod tests {
         let cancelled = Rc::new(Cell::new(false));
         let torn = Rc::new(Cell::new(0u32));
         let v1: PatternSwitcherView<(), _> =
-            pattern_switcher(1u32, FadeThrough, any(recorder(&cancelled, &torn)));
+            pattern_switcher(1u32, FadeThrough, recorder(&cancelled, &torn));
         let mut w = build(&v1);
         let size = w.layout(&mut LayoutCtx::new(), &loose());
 
@@ -763,16 +763,15 @@ mod tests {
         let mut app = {
             let key = key.clone();
             move |_: &mut ()| {
-                Column(vec![
-                    any(PersistentField {
+                column()
+                    .child(PersistentField {
                         size: Size::new(100.0, 40.0),
-                    }),
-                    any(pattern_switcher(
+                    })
+                    .child(pattern_switcher(
                         key.get(),
                         FadeThrough,
                         leaf_any(100.0, 40.0),
-                    )),
-                ])
+                    ))
             }
         };
         let mut root: RenderRoot<(), FlexView<()>> = RenderRoot::new();
@@ -830,7 +829,7 @@ mod tests {
         let torn = Rc::new(Cell::new(0u32));
         let short = Timing::Duration(Duration::from_millis(100), Curve::Linear);
         let v1: PatternSwitcherView<(), _> =
-            pattern_switcher(1u32, FadeThrough, any(recorder(&cancelled, &torn))).timing(short);
+            pattern_switcher(1u32, FadeThrough, recorder(&cancelled, &torn)).timing(short);
         let mut w = build(&v1);
         let size = w.layout(&mut LayoutCtx::new(), &loose());
 

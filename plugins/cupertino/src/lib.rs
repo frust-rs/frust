@@ -51,13 +51,13 @@
 //! default-theme slot:
 //!
 //! ```no_run
-//! # use frust::{AnyView, Component, any, text};
+//! # use frust::{Component, View, any, text};
 //! # #[derive(Default)]
 //! # struct MyApp;
 //! # impl Component for MyApp {
 //! #     type State = ();
 //! #     fn init(&self) -> Self::State {}
-//! #     fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> { any(text("hi")) }
+//! #     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> { any(text("hi")) }
 //! # }
 //! frust::app!(MyApp, setup = { frust_cupertino::install(); });
 //! # fn main() {}

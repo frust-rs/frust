@@ -61,8 +61,7 @@
 //! calling a documented-inert builder for symmetry.
 
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, FlexView, SizedBox, Stack, any, component,
-    flexible, inflexible,
+    AnyView, Component, CrossAxisAlignment, SizedBox, View, any, component, inflexible, row, stack,
 };
 use frust_material::{
     OverlayAnchor, ProgressSize, ProgressValue, circular_progress, circular_wavy_progress,
@@ -223,19 +222,15 @@ fn snippet_code(state: &Knobs) -> String {
 /// here specifically.
 fn all_styles_row(value: ProgressValue) -> AnyView<Knobs> {
     let gap = || inflexible(SizedBox::<Knobs>(Some(ALL_STYLES_GAP), None));
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(circular_progress(value)),
-            gap(),
-            inflexible(circular_wavy_progress(value)),
-            gap(),
-            flexible(1, linear_progress(value)),
-            gap(),
-            flexible(1, linear_wavy_progress(value)),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(circular_progress(value))
+        .push(gap())
+        .child(circular_wavy_progress(value))
+        .push(gap())
+        .flex(1, linear_progress(value))
+        .push(gap())
+        .flex(1, linear_wavy_progress(value))
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// The playground body for the current knob state: [`playground_body`]'s
@@ -304,7 +299,7 @@ fn body(state: &mut Knobs) -> AnyView<Knobs> {
         |s: &mut Knobs, next: ProgressKind| s.kind = next,
     );
 
-    any(Stack(vec![content, panel]))
+    any(stack().child(content).child(panel))
 }
 
 /// The nested [`Component`] this page owns its knobs in. See the page
@@ -319,7 +314,7 @@ impl Component for ProgressPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }

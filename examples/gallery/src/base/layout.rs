@@ -14,8 +14,8 @@
 
 use frust_core::{AnyView, any};
 use frust_widgets::{
-    Align, Alignment, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView, Padding, SizedBox,
-    Stack, colored_box, container, divider, flexible, inflexible, text,
+    Align, Alignment, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, colored_box, column,
+    container, divider, row, stack, text,
 };
 use kurbo::Size;
 use peniko::Color;
@@ -63,11 +63,10 @@ pub(super) const ALIGN: Case = Case {
 /// the flex pass's own unbounded main-axis probe. The two blocks are
 /// unfilled, so the rule reads against the variant's own surface.
 fn divider_case() -> AnyView<()> {
-    let column = Column(vec![
-        any(container(text("Above").size(18.0)).size_centered(FRAME.width, 130.0)),
-        any(divider(LINE).thickness(3.0)),
-        any(container(text("Below").size(18.0)).size_centered(FRAME.width, 130.0)),
-    ]);
+    let column = column()
+        .child(container(text("Above").size(18.0)).size_centered(FRAME.width, 130.0))
+        .child(divider(LINE).thickness(3.0))
+        .child(container(text("Below").size(18.0)).size_centered(FRAME.width, 130.0));
     framed_in(FRAME, column)
 }
 
@@ -86,25 +85,21 @@ pub(super) const DIVIDER: Case = Case {
 /// The row is boxed to 400x240 inside the frame so the three shares read as a
 /// band on the surface rather than as the whole preview.
 fn flex_case() -> AnyView<()> {
-    let row = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(
-                container(text("fixed").color(Color::WHITE).size(13.0))
-                    .fill(BOX_A)
-                    .size_centered(100.0, 220.0),
-            ),
-            flexible(
-                2,
-                container(text("flex 2").color(Color::WHITE).size(13.0)).fill(BOX_B),
-            ),
-            flexible(
-                1,
-                container(text("flex 1").color(Color::WHITE).size(13.0)).fill(BOX_C),
-            ),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch);
+    let row = row()
+        .child(
+            container(text("fixed").color(Color::WHITE).size(13.0))
+                .fill(BOX_A)
+                .size_centered(100.0, 220.0),
+        )
+        .flex(
+            2,
+            container(text("flex 2").color(Color::WHITE).size(13.0)).fill(BOX_B),
+        )
+        .flex(
+            1,
+            container(text("flex 1").color(Color::WHITE).size(13.0)).fill(BOX_C),
+        )
+        .cross_axis(CrossAxisAlignment::Stretch);
     framed_in(FRAME, SizedBox(Some(400.0), Some(240.0)).child(row))
 }
 
@@ -173,30 +168,29 @@ pub(super) const SIZED_BOX: Case = Case {
 /// centered panel and two corner badges that overlap its edges, which is what
 /// makes the overlay order visible.
 fn stack_case() -> AnyView<()> {
-    let overlay = Stack(vec![
-        any(colored_box().expand()),
-        any(Align(
+    let overlay = stack()
+        .child(colored_box().expand())
+        .child(Align(
             Alignment::CENTER,
             container(text("base panel").color(Color::WHITE).size(14.0))
                 .fill(PANEL)
                 .radius(12.0)
                 .size_centered(320.0, 200.0),
-        )),
-        any(Align(
+        ))
+        .child(Align(
             Alignment::TOP_LEFT,
             container(text("TOP_LEFT").color(Color::WHITE).size(13.0))
                 .fill(BOX_A)
                 .radius(6.0)
                 .size_centered(120.0, 48.0),
-        )),
-        any(Align(
+        ))
+        .child(Align(
             Alignment::BOTTOM_RIGHT,
             container(text("BOTTOM_RIGHT").color(Color::WHITE).size(13.0))
                 .fill(BOX_C)
                 .radius(6.0)
                 .size_centered(120.0, 48.0),
-        )),
-    ]);
+        ));
     any(SizedBox(Some(FRAME.width), Some(FRAME.height)).child(overlay))
 }
 

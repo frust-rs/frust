@@ -17,15 +17,16 @@ use crate::pages::brightness_action;
 pub fn playground_scaffold(title: &str, body: AnyView<AppState>) -> AnyView<AppState> {
     let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     let bar = app_bar::<AppState>(title)
-        .leading(any(icon_button(
-            any(icon(icons::ARROW_BACK)),
-            |state: &mut AppState| state.router.pop(),
+        .leading(
+            icon_button(icon(icons::ARROW_BACK), |state: &mut AppState| {
+                state.router.pop()
+            })
+            .semantic_label("Back"),
         )
-        .semantic_label("Back")))
         .actions(vec![brightness_action(theme.brightness)]);
 
     // The bar self-insets its top and side edges; no `safe_area` wrapper.
     any(scaffold(body)
-        .app_bar(any(bar))
+        .app_bar(bar)
         .background(theme.scheme().surface))
 }

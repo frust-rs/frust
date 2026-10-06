@@ -18,7 +18,7 @@
 //! menu is needed, so unlike `buttons.rs`/`icon_buttons.rs` this page mounts
 //! no outer [`frust::Stack`].
 
-use frust::{AnyView, Component, any, component, icon};
+use frust::{AnyView, Component, View, any, component, icon};
 use frust_material::{FabColor, FabSize, extended_fab, fab, icons};
 
 use crate::AppState;
@@ -81,7 +81,7 @@ fn color_label(color: FabColor) -> &'static str {
 
 /// The "FAB" preview.
 fn fab_preview(state: &Knobs) -> AnyView<Knobs> {
-    any(fab(any(icon(icons::ADD)), |_: &mut Knobs| {})
+    any(fab(icon(icons::ADD), |_: &mut Knobs| {})
         .size(state.size)
         .color(state.color)
         .label("Add"))
@@ -90,7 +90,7 @@ fn fab_preview(state: &Knobs) -> AnyView<Knobs> {
 /// The "Extended FAB" preview.
 fn extended_preview(state: &Knobs) -> AnyView<Knobs> {
     any(extended_fab(state.label.clone(), |_: &mut Knobs| {})
-        .icon(any(icon(icons::EDIT)))
+        .icon(icon(icons::EDIT))
         .color(state.color)
         .extended(state.extended))
 }
@@ -175,7 +175,7 @@ impl Component for FabsPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

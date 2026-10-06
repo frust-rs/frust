@@ -135,9 +135,7 @@ use frust_shadcn::{
     sidebar_inset, sidebar_menu, sidebar_menu_button, sidebar_menu_item, sidebar_provider, table,
     table_cell, table_row, tabs, tabs_tab, tooltip, tooltip_trigger,
 };
-use frust_widgets::{
-    Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView, Row, SizedBox, icon, icons,
-};
+use frust_widgets::{CrossAxisAlignment, EdgeInsets, SizedBox, column, icon, icons, row};
 use kurbo::Size;
 
 use crate::base::{framed, framed_in};
@@ -164,39 +162,30 @@ const TABLE_WIDE: Size = Size::new(420.0, 220.0);
 /// From `examples/shadcn-demo`'s primitives page — the variant row, wrapped
 /// over two rows so the full variant set fits [`Case::DEFAULT_SIZE`]'s width.
 fn button_case() -> AnyView<()> {
-    framed(Column(vec![
-        any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                frust_widgets::inflexible(button("Default", |_: &mut ()| {})),
-                frust_widgets::inflexible(SizedBox(Some(8.0), None)),
-                frust_widgets::inflexible(
-                    button("Secondary", |_: &mut ()| {}).variant(ButtonVariant::Secondary),
-                ),
-                frust_widgets::inflexible(SizedBox(Some(8.0), None)),
-                frust_widgets::inflexible(
-                    button("Outline", |_: &mut ()| {}).variant(ButtonVariant::Outline),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center)),
-        any(SizedBox(None, Some(12.0))),
-        any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                frust_widgets::inflexible(
-                    button("Destructive", |_: &mut ()| {}).variant(ButtonVariant::Destructive),
-                ),
-                frust_widgets::inflexible(SizedBox(Some(8.0), None)),
-                frust_widgets::inflexible(
-                    button("Link", |_: &mut ()| {}).variant(ButtonVariant::Link),
-                ),
-                frust_widgets::inflexible(SizedBox(Some(8.0), None)),
-                frust_widgets::inflexible(button("Disabled", |_: &mut ()| {}).disabled(true)),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center)),
-    ]))
+    framed(
+        column()
+            .child(
+                row()
+                    .child(button("Default", |_: &mut ()| {}))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(button("Secondary", |_: &mut ()| {}).variant(ButtonVariant::Secondary))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(button("Outline", |_: &mut ()| {}).variant(ButtonVariant::Outline))
+                    .cross_axis(CrossAxisAlignment::Center),
+            )
+            .child(SizedBox(None, Some(12.0)))
+            .child(
+                row()
+                    .child(
+                        button("Destructive", |_: &mut ()| {}).variant(ButtonVariant::Destructive),
+                    )
+                    .child(SizedBox(Some(8.0), None))
+                    .child(button("Link", |_: &mut ()| {}).variant(ButtonVariant::Link))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(button("Disabled", |_: &mut ()| {}).disabled(true))
+                    .cross_axis(CrossAxisAlignment::Center),
+            ),
+    )
 }
 
 /// From `examples/shadcn-demo`'s layout page (a carousel slide card) and its
@@ -204,16 +193,16 @@ fn button_case() -> AnyView<()> {
 fn card_case() -> AnyView<()> {
     framed_in(
         CARD_WIDE,
-        Column(vec![
-            any(card(vec![
+        column()
+            .child(card(vec![
                 card_header(vec![card_title("Slide 1")]),
                 card_content(
                     frust_widgets::text("Drag the slide sideways, or use the outline arrows.")
                         .size(13.0),
                 ),
-            ])),
-            any(SizedBox(None, Some(12.0))),
-            any(card(vec![
+            ]))
+            .child(SizedBox(None, Some(12.0)))
+            .child(card(vec![
                 card_header(vec![card_title("Delete project?")]),
                 card_footer(vec![
                     any(button("Cancel", |_: &mut ()| {}).variant(ButtonVariant::Ghost)),
@@ -221,7 +210,6 @@ fn card_case() -> AnyView<()> {
                     any(button("Save", |_: &mut ()| {})),
                 ]),
             ])),
-        ]),
     )
 }
 
@@ -297,22 +285,23 @@ fn dropdown_menu_case() -> AnyView<()> {
     let dropdown_anchor = OverlayAnchor::new();
     framed_in(
         DROPDOWN,
-        frust_widgets::Stack(vec![
-            any(anchor(&dropdown_anchor, button("Actions", |_: &mut ()| {}))),
-            any(dropdown_menu(
-                vec![
-                    dropdown_menu_label("Actions"),
-                    dropdown_menu_item("Bold")
-                        .checked(true)
-                        .shortcut("\u{2318}B"),
-                    dropdown_menu_item("Italic").shortcut("\u{2318}I"),
-                    dropdown_menu_separator(),
-                    dropdown_menu_item("Disabled row").disabled(true),
-                ],
-                |_: &mut (), _: usize| {},
-            )
-            .anchor(&dropdown_anchor)),
-        ]),
+        frust_widgets::stack()
+            .child(anchor(&dropdown_anchor, button("Actions", |_: &mut ()| {})))
+            .child(
+                dropdown_menu(
+                    vec![
+                        dropdown_menu_label("Actions"),
+                        dropdown_menu_item("Bold")
+                            .checked(true)
+                            .shortcut("\u{2318}B"),
+                        dropdown_menu_item("Italic").shortcut("\u{2318}I"),
+                        dropdown_menu_separator(),
+                        dropdown_menu_item("Disabled row").disabled(true),
+                    ],
+                    |_: &mut (), _: usize| {},
+                )
+                .anchor(&dropdown_anchor),
+            ),
     )
 }
 
@@ -321,20 +310,20 @@ fn dropdown_menu_case() -> AnyView<()> {
 fn form_controls_case() -> AnyView<()> {
     framed_in(
         Size::new(360.0, 220.0),
-        Column(vec![
-            any(Row(vec![
-                any(checkbox(true, |_: &mut (), _: bool| {})),
-                any(SizedBox(Some(8.0), None)),
-                any(shadcn_label("Accept the terms")),
-            ])
-            .cross_axis(CrossAxisAlignment::Center)),
-            any(SizedBox(None, Some(20.0))),
-            any(
+        column()
+            .child(
+                row()
+                    .child(checkbox(true, |_: &mut (), _: bool| {}))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(shadcn_label("Accept the terms"))
+                    .cross_axis(CrossAxisAlignment::Center),
+            )
+            .child(SizedBox(None, Some(20.0)))
+            .child(
                 field(input("", |_: &mut (), _: String| {}).placeholder("Full name"))
                     .label("Name")
                     .description("Shown on your public profile."),
             ),
-        ]),
     )
 }
 
@@ -343,17 +332,18 @@ fn form_controls_case() -> AnyView<()> {
 fn input_case() -> AnyView<()> {
     framed_in(
         Size::new(360.0, 200.0),
-        Column(vec![
-            any(input("", |_: &mut (), _: String| {}).placeholder("Write a message\u{2026}")),
-            any(SizedBox(None, Some(24.0))),
-            any(field(
-                input("", |_: &mut (), _: String| {})
-                    .invalid(true)
-                    .placeholder("Required"),
-            )
-            .label("Invalid example")
-            .error("This field is required.")),
-        ]),
+        column()
+            .child(input("", |_: &mut (), _: String| {}).placeholder("Write a message\u{2026}"))
+            .child(SizedBox(None, Some(24.0)))
+            .child(
+                field(
+                    input("", |_: &mut (), _: String| {})
+                        .invalid(true)
+                        .placeholder("Required"),
+                )
+                .label("Invalid example")
+                .error("This field is required."),
+            ),
     )
 }
 
@@ -413,16 +403,17 @@ fn select_case() -> AnyView<()> {
     ];
     framed_in(
         Size::new(360.0, 220.0),
-        frust_widgets::Stack(vec![
-            any(anchor(
+        frust_widgets::stack()
+            .child(anchor(
                 &select_anchor,
                 select_trigger::<()>(&select_anchor, options.clone(), Some(2))
                     .placeholder("Pick a fruit"),
-            )),
-            any(select(options, Some(2), |_: &mut (), _: usize| {})
-                .anchor(&select_anchor)
-                .align(OverlayAlign::Start)),
-        ]),
+            ))
+            .child(
+                select(options, Some(2), |_: &mut (), _: usize| {})
+                    .anchor(&select_anchor)
+                    .align(OverlayAlign::Start),
+            ),
     )
 }
 
@@ -485,7 +476,7 @@ fn sidebar_case() -> AnyView<()> {
                             .icon(icon(icons::FORUM).size(16.0))
                             .active(index == 0))]))
                         })
-                        .collect(),
+                        .collect::<Vec<_>>(),
                 ),
             ])]))
             .header(sidebar_header(vec![any(
@@ -547,13 +538,14 @@ fn tabs_case() -> AnyView<()> {
 fn tooltip_case() -> AnyView<()> {
     let hover = TooltipHover::new();
     hover.set_open(true);
-    framed(frust_widgets::Stack(vec![
-        any(tooltip_trigger::<(), _>(
-            &hover,
-            button("Hover me", |_: &mut ()| {}),
-        )),
-        any(tooltip::<()>(&hover, "A tooltip, 700ms after rest")),
-    ]))
+    framed(
+        frust_widgets::stack()
+            .child(tooltip_trigger::<(), _>(
+                &hover,
+                button("Hover me", |_: &mut ()| {}),
+            ))
+            .child(tooltip::<()>(&hover, "A tooltip, 700ms after rest")),
+    )
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.

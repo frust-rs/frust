@@ -24,7 +24,7 @@
 
 use std::time::Duration;
 
-use frust::{AnyView, Get, Set, any, button, checkbox, inflexible};
+use frust::{AnyView, Get, Set, button, checkbox, inflexible};
 use frust_native_widgets::{
     ActionRole, AlertOutcome, AlertSpec, AlertStyle, PresentError, present, show_native_alert_into,
 };
@@ -119,15 +119,13 @@ pub fn page(state: &S) -> AnyView<S> {
              tap; nothing on macOS or a UIKit alert.",
         )),
         gap(6.0),
-        inflexible(any(checkbox(
-            cancelable,
-            "cancelable",
-            |_: &mut S, on: bool| cancelable_sig().set(on),
-        ))),
+        inflexible(checkbox(cancelable, "cancelable", |_: &mut S, on: bool| {
+            cancelable_sig().set(on)
+        })),
         gap(6.0),
-        inflexible(any(button("Show three-role alert", move |_: &mut S| {
+        inflexible(button("Show three-role alert", move |_: &mut S| {
             present_alert("Three-role alert", three_role_spec(cancelable));
-        }))),
+        })),
     ]);
 
     let action_sheet = block(vec![
@@ -169,7 +167,7 @@ pub fn page(state: &S) -> AnyView<S> {
              free the slot.",
         )),
         gap(6.0),
-        inflexible(any(button("Request two alerts", |_: &mut S| {
+        inflexible(button("Request two alerts", |_: &mut S| {
             let first = present_alert(
                 "First",
                 AlertSpec::new(
@@ -194,7 +192,7 @@ pub fn page(state: &S) -> AnyView<S> {
                 "first: refused"
             };
             status_sig().set(format!("{first}; {second}"));
-        }))),
+        })),
     ]);
 
     let auto_dismiss = block(vec![
@@ -206,32 +204,29 @@ pub fn page(state: &S) -> AnyView<S> {
              (a stale handle is ignored).",
         )),
         gap(6.0),
-        inflexible(any(button(
-            "Show, auto-dismiss in 2 s",
-            move |_: &mut S| {
-                let Some(handle) = present_alert(
-                    "Auto-dismiss",
-                    AlertSpec::new("Going away", "This alert dismisses itself in 2 seconds.")
-                        .with_action("ok", "OK", ActionRole::Default),
-                ) else {
-                    return;
-                };
-                frust::spawn_local(async move {
-                    // Match the join `Result` and surface a failure rather than
-                    // silently dropping it (`examples/playground`'s
-                    // `camera.rs` convention).
-                    match frust::spawn_blocking(|| std::thread::sleep(AUTO_DISMISS_AFTER)).await {
-                        Ok(()) => present::dismiss(&handle),
-                        Err(join_err) => {
-                            log::warn!(
-                                "native-widgets-demo alerts: auto-dismiss timer panicked: {join_err}"
-                            );
-                            push_toast(toasts, "Alerts: auto-dismiss timer failed".to_string());
-                        }
+        inflexible(button("Show, auto-dismiss in 2 s", move |_: &mut S| {
+            let Some(handle) = present_alert(
+                "Auto-dismiss",
+                AlertSpec::new("Going away", "This alert dismisses itself in 2 seconds.")
+                    .with_action("ok", "OK", ActionRole::Default),
+            ) else {
+                return;
+            };
+            frust::spawn_local(async move {
+                // Match the join `Result` and surface a failure rather than
+                // silently dropping it (`examples/playground`'s
+                // `camera.rs` convention).
+                match frust::spawn_blocking(|| std::thread::sleep(AUTO_DISMISS_AFTER)).await {
+                    Ok(()) => present::dismiss(&handle),
+                    Err(join_err) => {
+                        log::warn!(
+                            "native-widgets-demo alerts: auto-dismiss timer panicked: {join_err}"
+                        );
+                        push_toast(toasts, "Alerts: auto-dismiss timer failed".to_string());
                     }
-                });
-            },
-        ))),
+                }
+            });
+        })),
     ]);
 
     let readouts = block(vec![

@@ -861,7 +861,7 @@ impl Component for TerminalPage {
         }
     }
 
-    fn build(&self, state: &mut TerminalPageState) -> AnyView<TerminalPageState> {
+    fn build(&self, state: &mut TerminalPageState) -> impl View<TerminalPageState> {
         // Tracked read: the feed loop's generation write wakes this rebuild, and
         // nothing else does.
         let generation = state.generation.get();
@@ -947,9 +947,8 @@ fn profile_block(state: &TerminalPageState) -> FlexChild<TerminalPageState> {
                 ButtonStyle::Secondary
             };
             [
-                inflexible(any(button(
-                    profile.name(),
-                    move |state: &mut TerminalPageState| {
+                inflexible(
+                    button(profile.name(), move |state: &mut TerminalPageState| {
                         if state.running {
                             start_replay(state, profile);
                         } else {
@@ -958,10 +957,10 @@ fn profile_block(state: &TerminalPageState) -> FlexChild<TerminalPageState> {
                             state.stats.set(GridStats::default());
                             state.generation.set(state.generation.get_untracked() + 1);
                         }
-                    },
-                )
-                .style(style)
-                .small())),
+                    })
+                    .style(style)
+                    .small(),
+                ),
                 gap(4.0),
             ]
         })
@@ -988,18 +987,21 @@ fn transport_block(state: &TerminalPageState, drained: bool) -> FlexChild<Termin
     let mut rows = vec![
         inflexible(label("Transport")),
         gap(6.0),
-        inflexible(any(button(
-            play_label,
-            move |state: &mut TerminalPageState| start_replay(state, profile),
-        )
-        .style(ButtonStyle::Primary)
-        .small())),
+        inflexible(
+            button(play_label, move |state: &mut TerminalPageState| {
+                start_replay(state, profile)
+            })
+            .style(ButtonStyle::Primary)
+            .small(),
+        ),
         gap(6.0),
     ];
     if state.running {
-        rows.push(inflexible(any(button("Stop", stop_replay)
-            .style(ButtonStyle::Secondary)
-            .small())));
+        rows.push(inflexible(
+            button("Stop", stop_replay)
+                .style(ButtonStyle::Secondary)
+                .small(),
+        ));
         rows.push(gap(6.0));
     }
     rows.push(inflexible(caption(

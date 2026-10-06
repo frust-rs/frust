@@ -544,8 +544,8 @@ pub fn selection_bar<State: 'static, F: Fn(&mut State) + 'static>(
 impl<State: 'static> SelectionBar<State> {
     /// Set the trailing bulk-action views (in reading order — the last sits
     /// closest to the trailing edge).
-    pub fn actions(mut self, actions: Vec<AnyView<State>>) -> Self {
-        self.actions = actions;
+    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
+        self.actions = actions.into_iter().map(AnyView::new).collect();
         self
     }
 }
@@ -595,11 +595,11 @@ pub struct LargeConfig<State: 'static> {
 /// Create a [`LargeConfig`] with `big_title` over the app-supplied `meta` row.
 pub fn large_config<State: 'static>(
     big_title: impl Into<String>,
-    meta: AnyView<State>,
+    meta: impl View<State>,
 ) -> LargeConfig<State> {
     LargeConfig {
         big_title: big_title.into(),
-        meta,
+        meta: AnyView::new(meta),
     }
 }
 
@@ -654,15 +654,15 @@ impl<State: 'static> AppBarView<State> {
 
     /// Set the leading slot (a back arrow, brand mark, or any app composition),
     /// erased as an [`AnyView`]. Its tint is the supplied view's responsibility.
-    pub fn leading(mut self, leading: AnyView<State>) -> Self {
-        self.leading = Some(leading);
+    pub fn leading(mut self, leading: impl View<State>) -> Self {
+        self.leading = Some(AnyView::new(leading));
         self
     }
 
     /// Set the trailing action slots (0–2, in reading order — the last sits
     /// closest to the trailing edge).
-    pub fn actions(mut self, actions: Vec<AnyView<State>>) -> Self {
-        self.actions = actions;
+    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
+        self.actions = actions.into_iter().map(AnyView::new).collect();
         self
     }
 

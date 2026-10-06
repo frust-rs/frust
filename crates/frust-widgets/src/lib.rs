@@ -80,7 +80,7 @@ pub use drag::{
 };
 pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,
-    flexible, inflexible, keyed,
+    column, flexible, inflexible, keyed, row,
 };
 pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
 pub use icon::{Icon, IconData, IconSource, IconView, IconWidget, icon};
@@ -133,7 +133,7 @@ pub use scroll_controller::{AnimateTo, ScrollController, ScrollSubscription};
 pub use selection_toolbar::selection_toolbar;
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
-pub use stack::{Stack, StackView, StackWidget};
+pub use stack::{Stack, StackView, StackWidget, stack};
 pub use text::{TextView, TextWidget, text};
 pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
 

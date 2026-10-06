@@ -6,7 +6,7 @@
 //! every sibling theme module, never further.
 
 use super::super::*;
-use crate::Stack;
+use crate::stack;
 use frust_core::{FrameTime, PointerButton, PointerEvent, PointerPhase, RenderRoot, any};
 use std::any::Any;
 use std::cell::Cell;
@@ -327,10 +327,9 @@ pub(super) fn overlay_host_fixture() -> HostFixture {
             let content = content.clone();
             let chrome = chrome.clone();
             overlay_host(&ctrl, move || {
-                any(Stack(vec![
-                    host_probe("app-content", &content),
-                    host_probe("app-chrome", &chrome),
-                ]))
+                stack()
+                    .child(host_probe("app-content", &content))
+                    .child(host_probe("app-chrome", &chrome))
             })
         })
     };

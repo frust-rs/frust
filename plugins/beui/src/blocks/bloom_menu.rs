@@ -1233,14 +1233,14 @@ mod tests {
         fn step(&mut self, ms: f64) {
             self.clock += ms;
             let mut logic = move |s: &mut App| {
-                frust::Stack(vec![any(bloom_menu(items(), |s: &mut App, index| {
-                    s.selected.push(index)
-                })
-                .open(s.open)
-                .on_open_change(|s: &mut App, open| {
-                    s.open = open;
-                    s.opens.push(open);
-                }))])
+                frust::stack().child(
+                    bloom_menu(items(), |s: &mut App, index| s.selected.push(index))
+                        .open(s.open)
+                        .on_open_change(|s: &mut App, open| {
+                            s.open = open;
+                            s.opens.push(open);
+                        }),
+                )
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root
@@ -1701,9 +1701,7 @@ mod tests {
                 .into_iter()
                 .map(|label| bloom_menu_item(icon::<()>(), label))
                 .collect();
-            frust::Stack(vec![any(
-                bloom_menu::<(), _>(items, |_: &mut (), _| {}).open(open)
-            )])
+            frust::stack().child(bloom_menu::<(), _>(items, |_: &mut (), _| {}).open(open))
         }
     }
 

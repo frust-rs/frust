@@ -13,8 +13,8 @@
 //! any ambient state tree.
 
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexView, Padding, SizedBox, View,
-    any, component, flexible, inflexible,
+    AnyView, Component, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, View, any, column,
+    component, row,
 };
 use frust_shadcn::{
     BubbleAlign, BubbleVariant, ButtonVariant, MessageAlign, avatar, bubble, button, input,
@@ -124,7 +124,7 @@ impl Component for Pill {
 
     fn init(&self) -> Self::State {}
 
-    fn build(&self, _state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
         any(bubble(self.body.clone())
             .variant(self.variant)
             .align(self.align))
@@ -133,7 +133,7 @@ impl Component for Pill {
 
 /// One transcript row: an avatar plus a headed bubble for the other party, a
 /// trailing-aligned bubble with a footer for the local user.
-fn row(entry: &Message) -> AnyView<AppState> {
+fn transcript_row(entry: &Message) -> AnyView<AppState> {
     if entry.mine {
         any(message_scroller_item(
             message(vec![any(message_content(vec![
@@ -166,12 +166,12 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     let draft = state.draft.clone();
     let count = state.messages.len();
 
-    let items: Vec<AnyView<AppState>> = state.messages.iter().map(row).collect();
+    let items: Vec<AnyView<AppState>> = state.messages.iter().map(transcript_row).collect();
 
-    let header = frust::Column(vec![
-        any(crate::nav::heading("Chat")),
-        any(SizedBox(None, Some(8.0))),
-        any(crate::nav::caption(format!(
+    let header = frust::column()
+        .child(crate::nav::heading("Chat"))
+        .child(SizedBox(None, Some(8.0)))
+        .child(crate::nav::caption(format!(
             "{count} messages \u{2014} {}. Scroll up to detach: new arrivals then \
              preserve your place and the floating button appears at the bottom \
              right. Press it (or scroll back into the bottom band) to re-stick.",
@@ -180,9 +180,8 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             } else {
                 "detached"
             }
-        ))),
-        any(SizedBox(None, Some(12.0))),
-    ]);
+        )))
+        .child(SizedBox(None, Some(12.0)));
 
     // A `message_group` around the scroller's rows would double the column;
     // the scroller already stacks its items, so the group is used for the one
@@ -193,54 +192,48 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             s.chat.stuck = stuck;
         });
 
-    let composer = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(
-                1,
-                any(input(draft, |s: &mut AppState, v: String| {
-                    s.chat.draft = v;
-                })
-                .placeholder("Write a message\u{2026}")
-                .on_submit(|s: &mut AppState, _v: String| send(s))),
-            ),
-            inflexible(any(SizedBox::<AppState>(Some(8.0), None))),
-            inflexible(any(button("Send", |s: &mut AppState| send(s)))),
-            inflexible(any(SizedBox::<AppState>(Some(8.0), None))),
-            inflexible(any(button("Simulate incoming", |s: &mut AppState| {
+    let composer = row()
+        .flex(
+            1,
+            input(draft, |s: &mut AppState, v: String| {
+                s.chat.draft = v;
+            })
+            .placeholder("Write a message\u{2026}")
+            .on_submit(|s: &mut AppState, _v: String| send(s)),
+        )
+        .child(SizedBox::<AppState>(Some(8.0), None))
+        .child(button("Send", |s: &mut AppState| send(s)))
+        .child(SizedBox::<AppState>(Some(8.0), None))
+        .child(
+            button("Simulate incoming", |s: &mut AppState| {
                 let index = s.chat.arrivals % ARRIVALS.len();
                 s.chat.arrivals += 1;
                 s.chat
                     .messages
                     .push(Message::theirs("Robin", ARRIVALS[index]));
             })
-            .variant(ButtonVariant::Outline))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center);
+            .variant(ButtonVariant::Outline),
+        )
+        .cross_axis(CrossAxisAlignment::Center);
 
     Padding(
         EdgeInsets::all(24.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(header)),
-                flexible(1, any(scroller)),
-                inflexible(any(SizedBox::<AppState>(None, Some(12.0)))),
-                inflexible(any(composer)),
-                inflexible(any(SizedBox::<AppState>(None, Some(12.0)))),
-                inflexible(any(message_group(vec![any(message(vec![any(
-                    message_content(vec![any(component(Pill {
-                        body: "message_group / message / message_content compose the \
+        column()
+            .child(header)
+            .flex(1, scroller)
+            .child(SizedBox::<AppState>(None, Some(12.0)))
+            .child(composer)
+            .child(SizedBox::<AppState>(None, Some(12.0)))
+            .child(message_group(vec![any(message(vec![any(
+                message_content(vec![any(component(Pill {
+                    body: "message_group / message / message_content compose the \
                                same parts outside the scroller too."
-                            .to_string(),
-                        variant: BubbleVariant::Outline,
-                        align: BubbleAlign::Start,
-                    }))]),
-                )]))]))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch),
+                        .to_string(),
+                    variant: BubbleVariant::Outline,
+                    align: BubbleAlign::Start,
+                }))]),
+            )]))]))
+            .cross_axis(CrossAxisAlignment::Stretch),
     )
 }
 

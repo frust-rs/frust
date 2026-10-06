@@ -112,15 +112,34 @@ pub struct ReorderableListView<State: 'static> {
 /// — the same [`crate::ChildKey`] a [`crate::keyed`] [`crate::Column`] row
 /// would carry. See the [module docs](self) for the composition and the
 /// index convention [`ReorderableListView::on_reorder`] reports through.
-pub fn reorderable_list<State: 'static>(
+///
+/// `items` is any iterable of one `(key, view)` pair type; each view is
+/// erased here, so a homogeneous list of rows needs no `any()`.
+///
+/// ```
+/// use frust_widgets::{ChildKey, DragCoordinator, ReorderableListView, reorderable_list, text};
+/// # fn demo(coordinator: DragCoordinator) -> ReorderableListView<()> {
+/// let names = ["alpha", "beta", "gamma"];
+/// reorderable_list(coordinator, names.map(|name| (ChildKey::new(name), text(name))))
+/// # }
+/// # let _ = demo;
+/// ```
+pub fn reorderable_list<State, K, V>(
     coordinator: DragCoordinator,
-    items: Vec<(ChildKey, AnyView<State>)>,
-) -> ReorderableListView<State> {
+    items: impl IntoIterator<Item = (K, V)>,
+) -> ReorderableListView<State>
+where
+    State: 'static,
+    K: Into<ChildKey>,
+    V: View<State>,
+{
     let on_reorder: ReorderCell<State> = Rc::new(RefCell::new(None));
-    let count = items.len();
+    let items = items.into_iter();
+    let count = items.size_hint().0;
     let mut children: Vec<FlexChild<State>> = Vec::with_capacity(count * 2 + 1);
     children.push(gap_child(0, &coordinator, &on_reorder));
-    for (index, (key, view)) in items.into_iter().enumerate() {
+    for (index, (key, view)) in items.enumerate() {
+        let key: ChildKey = key.into();
         let row = draggable(view, coordinator.clone(), move |_: &State| index);
         children.push(keyed(key, row));
         children.push(gap_child(index + 1, &coordinator, &on_reorder));

@@ -17,7 +17,7 @@
 //!    `set_app_theme` is a valid alternative.
 
 use frust::motion::switcher::pattern_switcher;
-use frust::{AnyView, Column, Component, SizedBox, any, text};
+use frust::{Component, SizedBox, View, any, column, text};
 use sample_design::{SampleReveal, sample_badge, sample_chip, sample_panel};
 
 /// Vertical rhythm between the panel's rows, in logical px.
@@ -39,7 +39,7 @@ impl Component for SampleApp {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
+    fn build(&self, state: &mut State) -> impl View<State> {
         // The switcher's key is the press count, so every press stages a
         // transition through the design system's own pattern.
         let status = pattern_switcher(
@@ -48,15 +48,16 @@ impl Component for SampleApp {
             text(format!("{} press(es)", state.presses)).size(15.0),
         );
 
-        any(sample_panel(Column(vec![
-            any(sample_badge("sample design system")),
-            any(SizedBox(None, Some(GAP))),
-            any(sample_chip("press me", |state: &mut State| {
-                state.presses += 1;
-            })),
-            any(SizedBox(None, Some(GAP))),
-            any(status),
-        ])))
+        any(sample_panel(
+            column()
+                .child(sample_badge("sample design system"))
+                .child(SizedBox(None, Some(GAP)))
+                .child(sample_chip("press me", |state: &mut State| {
+                    state.presses += 1;
+                }))
+                .child(SizedBox(None, Some(GAP)))
+                .child(status),
+        ))
     }
 }
 

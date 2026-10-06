@@ -73,7 +73,12 @@ fn config() -> ModalConfig {
 ///
 /// Typically `children` is a [`dialog_header`] and a [`dialog_footer`] with
 /// arbitrary content between them; see the [module docs](self).
-pub fn dialog<State: 'static>(children: Vec<AnyView<State>>) -> DialogView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn dialog<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> DialogView<State> {
     DialogView {
         inner: modal(
             stack_slots(children, SLOT_GAP, EdgeInsets::all(PANEL_PAD)),
@@ -83,7 +88,12 @@ pub fn dialog<State: 'static>(children: Vec<AnyView<State>>) -> DialogView<State
 }
 
 /// A header slot: a `flex flex-col gap-2` stack (title, description).
-pub fn dialog_header<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn dialog_header<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
     stack_slots(children, HEADER_GAP, EdgeInsets::all(0.0))
 }
 
@@ -99,7 +109,12 @@ pub fn dialog_description<State: 'static>(description: impl Into<String>) -> Any
 
 /// A footer slot: a trailing-aligned `gap-2` row of actions
 /// (`sm:flex-row sm:justify-end` — see [`trailing_row`]'s breakpoint note).
-pub fn dialog_footer<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn dialog_footer<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
     trailing_row(children, FOOTER_GAP, EdgeInsets::all(0.0))
 }
 

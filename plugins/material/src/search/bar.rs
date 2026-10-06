@@ -251,8 +251,8 @@ impl<State: 'static> SearchBarView<State> {
     /// `barLeading ?? Icon(M3EIcons.search)`, so its
     /// `noLeadingHintExtraPadding` (the extra start inset for a leadingless
     /// bar) has no reachable case here and is not ported.
-    pub fn leading(mut self, view: AnyView<State>) -> Self {
-        self.leading = Some(view);
+    pub fn leading(mut self, view: impl View<State>) -> Self {
+        self.leading = Some(AnyView::new(view));
         self
     }
 
@@ -260,8 +260,8 @@ impl<State: 'static> SearchBarView<State> {
     /// trailing action replaces the built-in clear button —
     /// `_M3ESearchAnchorBarState._buildTrailing`'s own
     /// `widget.barTrailing ?? [clear]` precedence.
-    pub fn trailing(mut self, view: AnyView<State>) -> Self {
-        self.trailing.push(view);
+    pub fn trailing(mut self, view: impl View<State>) -> Self {
+        self.trailing.push(AnyView::new(view));
         self
     }
 

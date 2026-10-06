@@ -757,7 +757,7 @@ impl Component for NativeButtonView {
         slot
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
@@ -861,7 +861,7 @@ impl Component for NativeLabelView {
         next_local_slot()
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
@@ -990,7 +990,7 @@ impl Component for NativeSwitchView {
         slot
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
@@ -1118,7 +1118,7 @@ impl Component for NativeSliderView {
         slot
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
@@ -1221,7 +1221,7 @@ impl Component for NativeProgressView {
         next_local_slot()
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
@@ -1356,7 +1356,7 @@ impl Component for NativeSpinnerView {
         next_local_slot()
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
@@ -1554,7 +1554,7 @@ impl Component for NativeDatePickerView {
         slot
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
@@ -1762,7 +1762,7 @@ impl Component for NativeSegmentedView {
         slot
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
@@ -1990,7 +1990,7 @@ impl Component for NativeStepperView {
         slot
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
@@ -2367,7 +2367,7 @@ impl Component for NativeTabBarView {
         slot
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }
@@ -2606,7 +2606,7 @@ impl Component for NativeImageView {
         slot
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_theme_tokens())
     }
 }

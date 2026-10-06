@@ -41,10 +41,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::{
-    AnyView, Axis, BackHandler, Component, CrossAxisAlignment, DesignLanguage, FlexView,
-    NavigatorController, PageTransition, Router, RouterDeepLinks, RwSignal, Stack, Theme,
-    TransitionSpec, any, attach_back_handler, flexible, inflexible, navigator, provide_context,
-    router_with_deep_links, use_context,
+    BackHandler, Component, CrossAxisAlignment, DesignLanguage, NavigatorController,
+    PageTransition, Router, RouterDeepLinks, RwSignal, Theme, TransitionSpec, View, any,
+    attach_back_handler, column, navigator, provide_context, router_with_deep_links, stack,
+    use_context,
 };
 
 use features::activity::data::repositories::StoreActivityRepository;
@@ -145,7 +145,7 @@ impl Component for HuddleApp {
         }
     }
 
-    fn build(&self, state: &mut HuddleState) -> AnyView<HuddleState> {
+    fn build(&self, state: &mut HuddleState) -> impl View<HuddleState> {
         // Consumes a new back press (pop if the stack can) and refreshes
         // `handles_back` from the current depth — see `BackHandler::track`'s
         // docs for the one-rebuild refresh lag. Drawer/sheet-first dismissal
@@ -176,15 +176,16 @@ impl Component for HuddleApp {
 
         // The tab shell: the router-driven navigator above the persistent
         // bottom bar.
-        let content = any(FlexView::new(
-            Axis::Vertical,
-            vec![flexible(1, any(nav_view)), inflexible(bottom)],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch));
+        let content = any(column()
+            .flex(1, nav_view)
+            .child(bottom)
+            .cross_axis(CrossAxisAlignment::Stretch));
 
         // The root `Stack`: the tab shell, then the toast overlay on top (the
         // reserved overlay slot — above everything, below nothing).
-        any(Stack(vec![content, toast_overlay(state.toasts.clone())]))
+        any(stack()
+            .child(content)
+            .child(toast_overlay(state.toasts.clone())))
     }
 }
 

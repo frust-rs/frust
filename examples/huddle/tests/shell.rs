@@ -38,7 +38,7 @@ fn shell_builds_and_tabs_switch_via_taps() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     let mut tcx = TextContext::new();
 
     // Initial frame: the Home tab renders.
@@ -91,7 +91,7 @@ fn routes_push_and_pop_without_panicking() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
 
     root.rebuild(&mut logic, &mut state);
     assert!(root.root_id().is_some(), "the shell builds at \"/\"");
@@ -131,7 +131,7 @@ fn back_press_pops_the_navigator_and_root_bubbles_to_the_platform() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
 
     root.rebuild(&mut logic, &mut state);
     root.rebuild(&mut logic, &mut state); // settle the initial handles_back read
@@ -181,7 +181,7 @@ fn modal_round_trip_delivers_its_result() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
 
     frust::provide_context(frust_material::baseline());
     root.rebuild(&mut logic, &mut state);
@@ -190,7 +190,7 @@ fn modal_round_trip_delivers_its_result() {
     let sink = Arc::clone(&delivered);
     let controller = state.nav.router().controller().clone();
     controller.push_transparent_for_result(
-        || frust::any(frust::text("probe dialog")),
+        || frust::text("probe dialog"),
         TransitionSpec::NONE,
         move |_s: &mut HuddleState, result: PopResult| {
             *sink.lock().unwrap() = result.take::<String>();
@@ -236,7 +236,7 @@ fn toast_renders_and_action_callback_fires() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     let mut tcx = TextContext::new();
 
     let fired = Arc::new(AtomicBool::new(false));

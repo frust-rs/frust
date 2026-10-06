@@ -125,6 +125,13 @@ pub fn inflexible<State: 'static, V: View<State>>(view: V) -> FlexChild<State> {
 /// are all-or-nothing per list and must be unique within it (see
 /// [`ChildKey`]).
 ///
+/// **All-or-nothing rule**: once one child has a key, *all* children in that
+/// container must have keys — do not mix `.keyed(..)` with `.child(..)`/`.flex(..)`
+/// in the same container. A keyed list cannot hold a `.flex` spacer. Mixing keyed
+/// and unkeyed children debug-asserts on the first rebuild and falls back to
+/// positional matching (preserving layout and interaction but losing the state
+/// retention that keying adds).
+///
 /// Use it inside [`FlexView::new`] alongside (or instead of) [`inflexible`]:
 ///
 /// ```
@@ -171,6 +178,57 @@ impl<State: 'static> FlexView<State> {
         }
     }
 
+    /// Append an inflexible child. Accepts any [`View`]; erasure happens
+    /// internally, so no `any()` is needed.
+    pub fn child<V: View<State>>(mut self, view: V) -> Self {
+        self.children.push(inflexible(view));
+        self
+    }
+
+    /// Append a flexible child taking `flex` proportional shares of the free
+    /// main-axis space.
+    pub fn flex<V: View<State>>(mut self, flex: u32, view: V) -> Self {
+        self.children.push(flexible(flex, view));
+        self
+    }
+
+    /// Append an inflexible child tagged with a stable [`ChildKey`] (see
+    /// [`keyed`] for the reconciliation semantics and the all-or-nothing rule).
+    pub fn keyed<V: View<State>>(mut self, key: impl Into<ChildKey>, view: V) -> Self {
+        self.children.push(keyed(key, view));
+        self
+    }
+
+    /// Append every item of `iter` as an inflexible child.
+    pub fn children<I, V>(mut self, iter: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: View<State>,
+    {
+        self.children.extend(iter.into_iter().map(inflexible));
+        self
+    }
+
+    /// Append a pre-built [`FlexChild`] (escape hatch for [`flexible`] /
+    /// [`inflexible`] / [`keyed`] values built elsewhere).
+    pub fn push(mut self, child: FlexChild<State>) -> Self {
+        self.children.push(child);
+        self
+    }
+
+    /// Apply `f` to the builder only when `cond` is true.
+    pub fn when(self, cond: bool, f: impl FnOnce(Self) -> Self) -> Self {
+        if cond { f(self) } else { self }
+    }
+
+    /// Apply `f` with the contained value when `opt` is `Some`.
+    pub fn when_some<T>(self, opt: Option<T>, f: impl FnOnce(Self, T) -> Self) -> Self {
+        match opt {
+            Some(value) => f(self, value),
+            None => self,
+        }
+    }
+
     /// Set the cross-axis alignment.
     pub fn cross_axis(mut self, cross: CrossAxisAlignment) -> Self {
         self.cross = cross;
@@ -184,37 +242,80 @@ impl<State: 'static> FlexView<State> {
     }
 }
 
+/// An empty vertical flex, ready for fluent children: no `any()` needed.
+///
+/// ```
+/// use frust_widgets::{FlexView, column, text};
+/// # fn demo(cond: bool) -> FlexView<()> {
+/// column()
+///     .child(text("a"))
+///     .flex(1, text("b"))
+///     .when(cond, |c| c.child(text("c")))
+/// # }
+/// # let _ = demo(true);
+/// ```
+pub fn column<State: 'static>() -> FlexView<State> {
+    FlexView::new(Axis::Vertical, Vec::new())
+}
+
+/// An empty horizontal flex, ready for fluent children. See [`column`].
+pub fn row<State: 'static>() -> FlexView<State> {
+    FlexView::new(Axis::Horizontal, Vec::new())
+}
+
 /// A horizontal flex (`Axis::Horizontal`) of inflexible children — the common
 /// sugar. Use [`FlexView::new`] with [`flexible`] children when some should expand.
+///
+/// `children` holds one view type; each item is erased here, so a homogeneous
+/// list needs no `any()`. A mixed-type list still erases per item
+/// (`vec![any(a), any(b)]`), and a bare empty list needs its item type spelled
+/// out (`Vec::<AnyView<State>>::new()`). The parameter stays a `Vec` so an
+/// un-annotated `.collect()` argument keeps inferring; for any other iterable,
+/// use [`row`] with `.children(..)`.
+///
+/// ```
+/// use frust_core::any;
+/// use frust_widgets::{FlexView, Row, text};
+/// # fn demo() -> (FlexView<()>, FlexView<()>) {
+/// let labels = Row(vec![text("a"), text("b"), text("c")]);
+/// let mixed = Row(vec![any(text("a")), any(Row(vec![text("b")]))]);
+/// # (labels, mixed)
+/// # }
+/// # let _ = demo();
+/// ```
 #[allow(non_snake_case)]
-pub fn Row<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
+pub fn Row<State: 'static, V: View<State>>(children: Vec<V>) -> FlexView<State> {
     FlexView::new(
         Axis::Horizontal,
-        children
-            .into_iter()
-            .map(|view| FlexChild {
-                view,
-                flex: 0,
-                key: None,
-            })
-            .collect(),
+        children.into_iter().map(inflexible).collect(),
     )
 }
 
 /// A vertical flex (`Axis::Vertical`) of inflexible children — the common sugar.
 /// Use [`FlexView::new`] with [`flexible`] children when some should expand.
+///
+/// `children` holds one view type; each item is erased here, so a homogeneous
+/// list needs no `any()`. A mixed-type list still erases per item
+/// (`vec![any(a), any(b)]`), and a bare empty list needs its item type spelled
+/// out (`Vec::<AnyView<State>>::new()`). The parameter stays a `Vec` so an
+/// un-annotated `.collect()` argument keeps inferring; for any other iterable,
+/// use [`column`] with `.children(..)`.
+///
+/// ```
+/// use frust_core::any;
+/// use frust_widgets::{FlexView, Column, text};
+/// # fn demo() -> (FlexView<()>, FlexView<()>) {
+/// let labels = Column(vec![text("a"), text("b"), text("c")]);
+/// let mixed = Column(vec![any(text("a")), any(Column(vec![text("b")]))]);
+/// # (labels, mixed)
+/// # }
+/// # let _ = demo();
+/// ```
 #[allow(non_snake_case)]
-pub fn Column<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
+pub fn Column<State: 'static, V: View<State>>(children: Vec<V>) -> FlexView<State> {
     FlexView::new(
         Axis::Vertical,
-        children
-            .into_iter()
-            .map(|view| FlexChild {
-                view,
-                flex: 0,
-                key: None,
-            })
-            .collect(),
+        children.into_iter().map(inflexible).collect(),
     )
 }
 
@@ -542,10 +643,9 @@ mod tests {
     fn shrink_wraps_main_axis_without_flexible_children() {
         // No flexible children → main extent is the sum of child widths (60),
         // not the 300px bound.
-        let view: FlexView<()> = Row(vec![
-            leaf(40.0, 10.0).into_any(),
-            leaf(20.0, 10.0).into_any(),
-        ]);
+        let view: FlexView<()> = row()
+            .child(leaf(40.0, 10.0).into_any())
+            .child(leaf(20.0, 10.0).into_any());
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(300.0, 100.0)));
@@ -557,8 +657,9 @@ mod tests {
     fn cross_axis_stretch_tightens_children() {
         // Stretch → every child gets a tight cross constraint = the 80px bound,
         // overriding its 10px intrinsic height.
-        let view: FlexView<()> =
-            Row(vec![leaf(30.0, 10.0).into_any()]).cross_axis(CrossAxisAlignment::Stretch);
+        let view: FlexView<()> = row()
+            .child(leaf(30.0, 10.0).into_any())
+            .cross_axis(CrossAxisAlignment::Stretch);
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 80.0)));
@@ -569,11 +670,10 @@ mod tests {
     #[test]
     fn cross_axis_start_packs_at_zero() {
         // Start → the shorter child sits at cross 0. cross_size = tallest = 40.
-        let view: FlexView<()> = Row(vec![
-            leaf(10.0, 40.0).into_any(),
-            leaf(10.0, 20.0).into_any(),
-        ])
-        .cross_axis(CrossAxisAlignment::Start);
+        let view: FlexView<()> = row()
+            .child(leaf(10.0, 40.0).into_any())
+            .child(leaf(10.0, 20.0).into_any())
+            .cross_axis(CrossAxisAlignment::Start);
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 100.0)));
@@ -584,11 +684,10 @@ mod tests {
     #[test]
     fn cross_axis_center_centers_shorter_children() {
         // Center → cross_size = 40; the 20px-tall child is centered at (40-20)/2.
-        let view: FlexView<()> = Row(vec![
-            leaf(10.0, 40.0).into_any(),
-            leaf(10.0, 20.0).into_any(),
-        ])
-        .cross_axis(CrossAxisAlignment::Center);
+        let view: FlexView<()> = row()
+            .child(leaf(10.0, 40.0).into_any())
+            .child(leaf(10.0, 20.0).into_any())
+            .cross_axis(CrossAxisAlignment::Center);
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 100.0)));
@@ -598,10 +697,9 @@ mod tests {
     #[test]
     fn column_lays_out_along_vertical_axis() {
         // A Column stacks children top-to-bottom: main = height.
-        let view: FlexView<()> = Column(vec![
-            leaf(30.0, 15.0).into_any(),
-            leaf(30.0, 25.0).into_any(),
-        ]);
+        let view: FlexView<()> = column()
+            .child(leaf(30.0, 15.0).into_any())
+            .child(leaf(30.0, 25.0).into_any());
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(100.0, 300.0)));
@@ -612,10 +710,9 @@ mod tests {
 
     #[test]
     fn paints_children_in_order() {
-        let view: FlexView<()> = Row(vec![
-            leaf(20.0, 20.0).into_any(),
-            leaf(20.0, 20.0).into_any(),
-        ]);
+        let view: FlexView<()> = row()
+            .child(leaf(20.0, 20.0).into_any())
+            .child(leaf(20.0, 20.0).into_any());
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 200.0)));
@@ -633,13 +730,12 @@ mod tests {
     /// Build+lay out a 5-row vertical column of 100x100 leaves (rows at
     /// y = 0,100,200,300,400) inside a 100x500 box.
     fn culling_column() -> FlexWidget {
-        let view: FlexView<()> = Column(vec![
-            leaf(100.0, 100.0).into_any(),
-            leaf(100.0, 100.0).into_any(),
-            leaf(100.0, 100.0).into_any(),
-            leaf(100.0, 100.0).into_any(),
-            leaf(100.0, 100.0).into_any(),
-        ]);
+        let view: FlexView<()> = column()
+            .child(leaf(100.0, 100.0).into_any())
+            .child(leaf(100.0, 100.0).into_any())
+            .child(leaf(100.0, 100.0).into_any())
+            .child(leaf(100.0, 100.0).into_any())
+            .child(leaf(100.0, 100.0).into_any());
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::loose(Size::new(100.0, 500.0)));
@@ -699,16 +795,15 @@ mod tests {
         // rows, then prove a tap at a culled row's geometry still captures and
         // fires on up-inside.
         let mut counter = 0u64;
-        let view: FlexView<Vec<u32>> = Column(vec![
-            captor(0),
-            captor(1),
-            captor(2),
-            captor(3),
-            captor(4),
-            captor(5),
-            captor(6),
-            captor(7),
-        ]);
+        let view: FlexView<Vec<u32>> = column()
+            .child(captor(0))
+            .child(captor(1))
+            .child(captor(2))
+            .child(captor(3))
+            .child(captor(4))
+            .child(captor(5))
+            .child(captor(6))
+            .child(captor(7));
         let mut w = view.build(&mut ctx(&mut counter));
         layout_column(&mut w);
 
@@ -867,17 +962,17 @@ mod tests {
 
         // --- Stale case: the offscreen row is NOT focused. ---
         let mut counter = 0u64;
-        let prev: FlexView<()> = Column(vec![any(ImeLeaf {
+        let prev: FlexView<()> = column().child(ImeLeaf {
             value: "v1".to_string(),
             painted: Rc::new(Cell::new(0)),
-        })]);
+        });
         let mut w = prev.build(&mut ctx(&mut counter));
         layout_column(&mut w);
         // Controlled change via rebuild → "v2", but the row is offscreen+unfocused.
-        let next: FlexView<()> = Column(vec![any(ImeLeaf {
+        let next: FlexView<()> = column().child(ImeLeaf {
             value: "v2".to_string(),
             painted: Rc::new(Cell::new(0)),
-        })]);
+        });
         next.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         let mut scene = RecordingScene::default();
         let mut pctx = PaintCtx::new(Point::ZERO, Size::new(ROW_W, ROW_H * 5.0));
@@ -890,17 +985,17 @@ mod tests {
 
         // --- Fixed case: the same offscreen row, now FOCUSED. ---
         let mut counter = 0u64;
-        let prev: FlexView<()> = Column(vec![any(ImeLeaf {
+        let prev: FlexView<()> = column().child(ImeLeaf {
             value: "v1".to_string(),
             painted: Rc::new(Cell::new(0)),
-        })]);
+        });
         let mut w = prev.build(&mut ctx(&mut counter));
         layout_column(&mut w);
         w.children[0].set_focused(true);
-        let next: FlexView<()> = Column(vec![any(ImeLeaf {
+        let next: FlexView<()> = column().child(ImeLeaf {
             value: "v2".to_string(),
             painted: Rc::new(Cell::new(0)),
-        })]);
+        });
         next.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         let mut scene = RecordingScene::default();
         let mut pctx = PaintCtx::new(Point::ZERO, Size::new(ROW_W, ROW_H * 5.0));
@@ -931,13 +1026,12 @@ mod tests {
 
         // Rows 0..4 at y = i·ROW_H. Row 2 (y 40..60) sits on the warm-band bottom
         // edge (band = [-20, 40]) → box overlaps; row 4 (y 80..100) is fully out.
-        let view: FlexView<()> = Column(vec![
-            leaf(ROW_W, ROW_H).into_any(),
-            leaf(ROW_W, ROW_H).into_any(),
-            any(crate::motion::AnimatedScale(2.8, leaf(ROW_W, ROW_H)).timing(snap)),
-            leaf(ROW_W, ROW_H).into_any(),
-            any(crate::motion::AnimatedScale(2.8, leaf(ROW_W, ROW_H)).timing(snap)),
-        ]);
+        let view: FlexView<()> = column()
+            .child(leaf(ROW_W, ROW_H).into_any())
+            .child(leaf(ROW_W, ROW_H).into_any())
+            .child(crate::motion::AnimatedScale(2.8, leaf(ROW_W, ROW_H)).timing(snap))
+            .child(leaf(ROW_W, ROW_H).into_any())
+            .child(crate::motion::AnimatedScale(2.8, leaf(ROW_W, ROW_H)).timing(snap));
         let mut counter = 0u64;
         let mut w = view.build(&mut ctx(&mut counter));
         layout_column(&mut w);
@@ -971,31 +1065,29 @@ mod tests {
     fn children_vec_diff_adds_removes_and_type_swaps() {
         // Start with two Leaf children.
         let mut counter = 0u64;
-        let prev: FlexView<()> = Row(vec![
-            leaf(10.0, 10.0).into_any(),
-            leaf(10.0, 10.0).into_any(),
-        ]);
+        let prev: FlexView<()> = row()
+            .child(leaf(10.0, 10.0).into_any())
+            .child(leaf(10.0, 10.0).into_any());
         let mut w = prev.build(&mut ctx(&mut counter));
         assert_eq!(w.children.len(), 2);
 
         // Grow to three.
-        let grown: FlexView<()> = Row(vec![
-            leaf(10.0, 10.0).into_any(),
-            leaf(10.0, 10.0).into_any(),
-            leaf(10.0, 10.0).into_any(),
-        ]);
+        let grown: FlexView<()> = row()
+            .child(leaf(10.0, 10.0).into_any())
+            .child(leaf(10.0, 10.0).into_any())
+            .child(leaf(10.0, 10.0).into_any());
         let flags = grown.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         assert_eq!(w.children.len(), 3);
         assert!(flags.needs_layout());
 
         // Shrink to one.
-        let shrunk: FlexView<()> = Row(vec![leaf(10.0, 10.0).into_any()]);
+        let shrunk: FlexView<()> = row().child(leaf(10.0, 10.0).into_any());
         shrunk.rebuild(&grown, &mut w, &mut ctx(&mut counter));
         assert_eq!(w.children.len(), 1);
         assert_eq!(w.flex.len(), 1);
 
         // Type-swap the sole child (Leaf → the other test widget via AnyView).
-        let swapped: FlexView<()> = Row(vec![crate::test_support::swap_leaf().into_any()]);
+        let swapped: FlexView<()> = row().child(crate::test_support::swap_leaf().into_any());
         swapped.rebuild(&shrunk, &mut w, &mut ctx(&mut counter));
         assert_eq!(w.children.len(), 1);
         // The swapped widget reports a distinctive size, proving the swap took.
@@ -1169,7 +1261,7 @@ mod tests {
         // Flutter's invariant — a sibling structural change must not break an
         // unchanged child's in-flight gesture.
         let mut counter = 0u64;
-        let prev: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1), captor(2)]);
+        let prev: FlexView<Vec<u32>> = column().child(captor(0)).child(captor(1)).child(captor(2));
         let mut w = prev.build(&mut ctx(&mut counter));
         layout_column(&mut w);
 
@@ -1178,7 +1270,11 @@ mod tests {
         assert!(w.children[1].is_active(), "row 1 captured the pointer");
 
         // Append a new row AFTER the captured one → length grows, no type swap.
-        let appended: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1), captor(2), captor(3)]);
+        let appended: FlexView<Vec<u32>> = column()
+            .child(captor(0))
+            .child(captor(1))
+            .child(captor(2))
+            .child(captor(3));
         appended.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         assert!(
             w.children[1].is_active(),
@@ -1199,7 +1295,7 @@ mod tests {
         // `Cancel` — it unwinds its state machine rather than being silently
         // dropped or firing on a later hit-tested `Up`.
         let mut counter = 0u64;
-        let prev: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1), captor(2)]);
+        let prev: FlexView<Vec<u32>> = column().child(captor(0)).child(captor(1)).child(captor(2));
         let mut w = prev.build(&mut ctx(&mut counter));
         layout_column(&mut w);
 
@@ -1212,8 +1308,10 @@ mod tests {
         // tail. A CaptorWidget that received `Cancel` disarms (its Cancel arm sets
         // `armed = false`); one that never received it would still fire on Up.
         let seen = Rc::new(Cell::new(0u32));
-        let swapped: FlexView<Vec<u32>> =
-            Column(vec![any(Recorder { seen }), captor(1), captor(2)]);
+        let swapped: FlexView<Vec<u32>> = column()
+            .child(Recorder { seen })
+            .child(captor(1))
+            .child(captor(2));
         swapped.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         assert!(
             w.children.iter().all(|p| !p.is_active()),
@@ -1234,7 +1332,11 @@ mod tests {
         // rows, dropping the active row. teardown_child cancels it: no panic, no
         // fire.
         let mut counter = 0u64;
-        let prev: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1), captor(2), captor(3)]);
+        let prev: FlexView<Vec<u32>> = column()
+            .child(captor(0))
+            .child(captor(1))
+            .child(captor(2))
+            .child(captor(3));
         let mut w = prev.build(&mut ctx(&mut counter));
         layout_column(&mut w);
 
@@ -1243,7 +1345,7 @@ mod tests {
         assert!(w.children[2].is_active());
 
         // Truncate to two rows — the active row 2 is dropped.
-        let truncated: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1)]);
+        let truncated: FlexView<Vec<u32>> = column().child(captor(0)).child(captor(1));
         truncated.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         assert_eq!(w.children.len(), 2);
         assert_eq!(w.flex.len(), 2);
@@ -1261,7 +1363,7 @@ mod tests {
         // but does NOT deliver anything to the fresh widget — it must see nothing
         // until a new Down.
         let mut counter = 0u64;
-        let prev: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1)]);
+        let prev: FlexView<Vec<u32>> = column().child(captor(0)).child(captor(1));
         let mut w = prev.build(&mut ctx(&mut counter));
         layout_column(&mut w);
 
@@ -1271,8 +1373,9 @@ mod tests {
 
         // Swap row 1 from Captor to a Recorder (a different concrete type).
         let seen = Rc::new(Cell::new(0u32));
-        let swapped: FlexView<Vec<u32>> =
-            Column(vec![captor(0), any(Recorder { seen: seen.clone() })]);
+        let swapped: FlexView<Vec<u32>> = column()
+            .child(captor(0))
+            .child(Recorder { seen: seen.clone() });
         swapped.rebuild(&prev, &mut w, &mut ctx(&mut counter));
 
         assert!(!w.children[1].is_active(), "stale capture path dropped");
@@ -1290,7 +1393,7 @@ mod tests {
         // rebuild (same length, same types) must NOT break a captured drag: the
         // active path survives and the release still fires on the captured row.
         let mut counter = 0u64;
-        let prev: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1)]);
+        let prev: FlexView<Vec<u32>> = column().child(captor(0)).child(captor(1));
         let mut w = prev.build(&mut ctx(&mut counter));
         layout_column(&mut w);
 
@@ -1299,7 +1402,7 @@ mod tests {
         assert!(w.children[1].is_active());
 
         // An ordinary every-frame rebuild: same structure, content only.
-        let same: FlexView<Vec<u32>> = Column(vec![captor(0), captor(1)]);
+        let same: FlexView<Vec<u32>> = column().child(captor(0)).child(captor(1));
         same.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         assert!(
             w.children[1].is_active(),
@@ -1326,8 +1429,7 @@ mod tests {
         // `focused` flag — and thus the next paint's `PaintCtx::has_focus` and the
         // published IME surface — stays live, and a Key event still reaches it.
         let mut counter = 0u64;
-        let prev: FlexView<Vec<u32>> =
-            Column(vec![any(FocusRow { id: 0 }), any(FocusRow { id: 1 })]);
+        let prev: FlexView<Vec<u32>> = column().child(FocusRow { id: 0 }).child(FocusRow { id: 1 });
         let mut w = prev.build(&mut ctx(&mut counter));
         layout_column(&mut w);
 
@@ -1336,11 +1438,10 @@ mod tests {
         assert!(w.children[0].is_focused(), "child 0 took focus");
 
         // Append a third row AFTER the focused one → length grows, no type swap.
-        let appended: FlexView<Vec<u32>> = Column(vec![
-            any(FocusRow { id: 0 }),
-            any(FocusRow { id: 1 }),
-            any(FocusRow { id: 2 }),
-        ]);
+        let appended: FlexView<Vec<u32>> = column()
+            .child(FocusRow { id: 0 })
+            .child(FocusRow { id: 1 })
+            .child(FocusRow { id: 2 });
         appended.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         assert!(
             w.children[0].is_focused(),
@@ -1358,11 +1459,10 @@ mod tests {
         // Symmetric to the append case: removing a row AFTER the focused index
         // (a shrink beyond it) leaves the focused pod in the stable prefix.
         let mut counter = 0u64;
-        let prev: FlexView<Vec<u32>> = Column(vec![
-            any(FocusRow { id: 0 }),
-            any(FocusRow { id: 1 }),
-            any(FocusRow { id: 2 }),
-        ]);
+        let prev: FlexView<Vec<u32>> = column()
+            .child(FocusRow { id: 0 })
+            .child(FocusRow { id: 1 })
+            .child(FocusRow { id: 2 });
         let mut w = prev.build(&mut ctx(&mut counter));
         layout_column(&mut w);
 
@@ -1372,7 +1472,7 @@ mod tests {
 
         // Remove the last row → shrink beyond the focused index.
         let removed: FlexView<Vec<u32>> =
-            Column(vec![any(FocusRow { id: 0 }), any(FocusRow { id: 1 })]);
+            column().child(FocusRow { id: 0 }).child(FocusRow { id: 1 });
         removed.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         assert!(
             w.children[0].is_focused(),
@@ -1389,8 +1489,7 @@ mod tests {
         // When the focused index itself type-swaps, its widget identity breaks →
         // the focus path is cleared and a subsequent Key event reaches nobody.
         let mut counter = 0u64;
-        let prev: FlexView<Vec<u32>> =
-            Column(vec![any(FocusRow { id: 0 }), any(FocusRow { id: 1 })]);
+        let prev: FlexView<Vec<u32>> = column().child(FocusRow { id: 0 }).child(FocusRow { id: 1 });
         let mut w = prev.build(&mut ctx(&mut counter));
         layout_column(&mut w);
 
@@ -1399,7 +1498,7 @@ mod tests {
         assert!(w.children[1].is_focused(), "child 1 took focus");
 
         // Swap the focused index 1 to a different concrete type (a Captor).
-        let swapped: FlexView<Vec<u32>> = Column(vec![any(FocusRow { id: 0 }), captor(9)]);
+        let swapped: FlexView<Vec<u32>> = column().child(FocusRow { id: 0 }).child(captor(9));
         swapped.rebuild(&prev, &mut w, &mut ctx(&mut counter));
         assert!(
             !w.children[1].is_focused(),

@@ -1410,14 +1410,11 @@ mod tests {
 
         fn rebuild_layout(&mut self) {
             let mut app = |_s: &mut Counter| {
-                frust::Column(vec![
-                    frust::authoring::any(
-                        list_item::<Counter>("first").on_press(|s: &mut Counter| s.presses += 1),
-                    ),
-                    frust::authoring::any(
+                frust::column()
+                    .child(list_item::<Counter>("first").on_press(|s: &mut Counter| s.presses += 1))
+                    .child(
                         list_item::<Counter>("second").on_press(|s: &mut Counter| s.presses += 1),
-                    ),
-                ])
+                    )
             };
             self.root.rebuild(&mut app, &mut self.state);
             self.root

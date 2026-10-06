@@ -51,10 +51,11 @@
 //! and is what this file's tests exercise instead.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, EdgeInsets, Get, GetUntracked,
-    NavigatorController, Padding, PopResult, Row, RwSignal, Set, SizedBox, any, component,
-    navigator, text,
+    AnyView, Component, CrossAxisAlignment, EdgeInsets, Get, GetUntracked, NavigatorController,
+    Padding, PopResult, RwSignal, Set, SizedBox, View, any, column, component, navigator, row,
+    text,
 };
+
 use frust_material::{
     MaterialSpacing, ModalDismiss, dialog, filled_button, full_screen_dialog, selection_dialog,
     show_dialog, show_full_screen_dialog, show_selection_dialog, text_button, tonal_button,
@@ -110,7 +111,7 @@ impl Component for DialogsPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let snapshot = state.clone();
         any(navigator(&state.nav, move || content(&snapshot)))
     }
@@ -217,9 +218,7 @@ fn open_full_screen(state: &Knobs) {
                     body_text::<Knobs>(&body),
                 ),
             )
-            .action(any(text_button("Save", move |_: &mut Knobs| {
-                save.dismiss()
-            })))
+            .action(text_button("Save", move |_: &mut Knobs| save.dismiss()))
             .dismiss_handle(dismiss.clone())
         },
         |_state: &mut Knobs, _result: PopResult| {},
@@ -268,24 +267,24 @@ fn triggers_preview(state: &Knobs) -> AnyView<Knobs> {
 
     any(play_preview_card(
         "Triggers",
-        Column(vec![
-            any(Row(vec![
-                any(tonal_button("Dialog", |state: &mut Knobs| {
-                    open_basic(state)
-                })),
-                any(SizedBox::<Knobs>(Some(MaterialSpacing::SM), None)),
-                any(tonal_button("Selection", |state: &mut Knobs| {
-                    open_selection(state)
-                })),
-                any(SizedBox::<Knobs>(Some(MaterialSpacing::SM), None)),
-                any(tonal_button("Full screen", |state: &mut Knobs| {
-                    open_full_screen(state)
-                })),
-            ])),
-            any(SizedBox::<Knobs>(None, Some(MaterialSpacing::MD))),
-            any(text(summary).style(caption)),
-        ])
-        .cross_axis(CrossAxisAlignment::Start),
+        column()
+            .child(
+                row()
+                    .child(tonal_button("Dialog", |state: &mut Knobs| {
+                        open_basic(state)
+                    }))
+                    .child(SizedBox::<Knobs>(Some(MaterialSpacing::SM), None))
+                    .child(tonal_button("Selection", |state: &mut Knobs| {
+                        open_selection(state)
+                    }))
+                    .child(SizedBox::<Knobs>(Some(MaterialSpacing::SM), None))
+                    .child(tonal_button("Full screen", |state: &mut Knobs| {
+                        open_full_screen(state)
+                    })),
+            )
+            .child(SizedBox::<Knobs>(None, Some(MaterialSpacing::MD)))
+            .child(text(summary).style(caption))
+            .cross_axis(CrossAxisAlignment::Start),
     ))
 }
 

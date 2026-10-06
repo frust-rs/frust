@@ -253,7 +253,7 @@ impl<State: 'static> RouterDeepLinks<State> {
 /// docs for the precedence rule and the call-once contract.
 ///
 /// ```no_run
-/// use frust::{AnyView, Component, Route, Router, RouterDeepLinks, any, navigator, text};
+/// use frust::{AnyView, Component, Route, Router, RouterDeepLinks, View, any, navigator, text};
 ///
 /// #[derive(Default)]
 /// struct App;
@@ -277,12 +277,12 @@ impl<State: 'static> RouterDeepLinks<State> {
 ///         }
 ///     }
 ///
-///     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
+///     fn build(&self, state: &mut AppState) -> impl View<AppState> {
 ///         // Called every rebuild: navigates on a new warm link, no-ops
 ///         // otherwise (see the module docs' dedupe contract).
 ///         state.router_links.track();
 ///         let controller = state.router_links.router().controller();
-///         any(navigator(controller, || any(text("home"))))
+///         navigator(controller, || text("home"))
 ///     }
 /// }
 ///

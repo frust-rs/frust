@@ -69,7 +69,7 @@
 //! Nothing here is a `Case::build`, so none of it reaches the snapshot oracle
 //! and no poster moves.
 
-use frust_core::{AnyView, Component, any, component};
+use frust_core::{AnyView, Component, View, any, component};
 use frust_shadcn::overlay::{OverlayAlign, OverlayAnchor, anchor};
 use frust_shadcn::{
     ButtonVariant, DrawerSide, QuestionnaireAnswer, QuestionnaireAnswerEvent,
@@ -83,7 +83,7 @@ use frust_shadcn::{
     sidebar_inset, sidebar_menu, sidebar_menu_button, sidebar_menu_item, sidebar_provider, table,
     table_cell, table_row, tabs, tabs_tab, tooltip, tooltip_trigger,
 };
-use frust_widgets::{Column, CrossAxisAlignment, Row, SizedBox, Stack, icon, icons, text};
+use frust_widgets::{CrossAxisAlignment, SizedBox, column, icon, icons, row, stack, text};
 use kurbo::Size;
 
 use super::{Entry, framed, framed_in};
@@ -174,32 +174,34 @@ impl Component for FormControlsCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             FORM_FRAME,
-            Column(vec![
-                any(Row(vec![
-                    any(checkbox(
-                        state.accepted,
-                        |state: &mut FormControlsState, checked| state.accepted = checked,
-                    )),
-                    any(SizedBox(Some(8.0), None)),
-                    any(shadcn_label("Accept the terms")),
-                ])
-                .cross_axis(CrossAxisAlignment::Center)),
-                any(SizedBox(None, Some(20.0))),
-                any(field(
-                    input(
-                        state.name.clone(),
-                        |state: &mut FormControlsState, value| {
-                            state.name = value;
-                        },
-                    )
-                    .placeholder("Full name"),
+            column()
+                .child(
+                    row()
+                        .child(checkbox(
+                            state.accepted,
+                            |state: &mut FormControlsState, checked| state.accepted = checked,
+                        ))
+                        .child(SizedBox(Some(8.0), None))
+                        .child(shadcn_label("Accept the terms"))
+                        .cross_axis(CrossAxisAlignment::Center),
                 )
-                .label("Name")
-                .description("Shown on your public profile.")),
-            ]),
+                .child(SizedBox(None, Some(20.0)))
+                .child(
+                    field(
+                        input(
+                            state.name.clone(),
+                            |state: &mut FormControlsState, value| {
+                                state.name = value;
+                            },
+                        )
+                        .placeholder("Full name"),
+                    )
+                    .label("Name")
+                    .description("Shown on your public profile."),
+                ),
         )
     }
 }
@@ -276,7 +278,7 @@ impl Component for InputCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let invalid = state.required_invalid;
         let mut required = field(
             input(state.required.clone(), |state: &mut InputState, value| {
@@ -294,16 +296,15 @@ impl Component for InputCase {
         }
         framed_in(
             INPUT_FRAME,
-            Column(vec![
-                any(
+            column()
+                .child(
                     input(state.message.clone(), |state: &mut InputState, value| {
                         state.message = value;
                     })
                     .placeholder("Write a message\u{2026}"),
-                ),
-                any(SizedBox(None, Some(24.0))),
-                any(required),
-            ]),
+                )
+                .child(SizedBox(None, Some(24.0)))
+                .child(required),
         )
     }
 }
@@ -338,7 +339,7 @@ impl Component for TabsCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(tabs(
             state.active.clone(),
             vec![
@@ -389,7 +390,7 @@ impl Component for TableCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let count = state.selected.iter().filter(|selected| **selected).count();
         let total = TABLE_ROWS.len();
         // The seed renders "1 of 2 row(s) selected — page 1 of 1", the recorded
@@ -460,7 +461,7 @@ impl Component for QuestionnaireCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             QUESTIONNAIRE,
             questionnaire(
@@ -545,15 +546,15 @@ impl Component for SelectCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let handle = state.anchor.clone();
         let open = state.open;
         let selected = state.selected;
         let options = || FRUITS.iter().map(|label| select_option(*label)).collect();
         framed_in(
             SELECT_FRAME,
-            Stack(vec![
-                any(anchor(
+            stack()
+                .child(anchor(
                     &handle,
                     select_trigger::<SelectState>(&handle, options(), selected)
                         .placeholder("Pick a fruit")
@@ -561,22 +562,23 @@ impl Component for SelectCase {
                         .on_open_change(|state: &mut SelectState, open: bool| {
                             state.open = open;
                         }),
-                )),
-                any(select(
-                    options(),
-                    selected,
-                    |state: &mut SelectState, index: usize| {
-                        state.selected = Some(index);
-                        state.open = false;
-                    },
-                )
-                .anchor(&handle)
-                .align(OverlayAlign::Start)
-                .open(open)
-                .on_open_change(|state: &mut SelectState, open: bool| {
-                    state.open = open;
-                })),
-            ]),
+                ))
+                .child(
+                    select(
+                        options(),
+                        selected,
+                        |state: &mut SelectState, index: usize| {
+                            state.selected = Some(index);
+                            state.open = false;
+                        },
+                    )
+                    .anchor(&handle)
+                    .align(OverlayAlign::Start)
+                    .open(open)
+                    .on_open_change(|state: &mut SelectState, open: bool| {
+                        state.open = open;
+                    }),
+                ),
         )
     }
 }
@@ -630,42 +632,45 @@ impl Component for DropdownMenuCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let handle = state.anchor.clone();
         let open = state.open;
         framed_in(
             DROPDOWN,
-            Stack(vec![
-                any(anchor(
+            stack()
+                .child(anchor(
                     &handle,
                     button("Actions", |state: &mut DropdownMenuState| {
                         state.open = !state.open;
                     }),
-                )),
-                any(dropdown_menu(
-                    vec![
-                        dropdown_menu_label("Actions"),
-                        dropdown_menu_item("Bold")
-                            .checked(state.bold)
-                            .shortcut("\u{2318}B"),
-                        dropdown_menu_item("Italic")
-                            .checked(state.italic)
-                            .shortcut("\u{2318}I"),
-                        dropdown_menu_separator(),
-                        dropdown_menu_item("Disabled row").disabled(true),
-                    ],
-                    |state: &mut DropdownMenuState, index: usize| match index {
-                        1 => state.bold = !state.bold,
-                        2 => state.italic = !state.italic,
-                        _ => {}
-                    },
-                )
-                .anchor(&handle)
-                .open(open)
-                .on_open_change(|state: &mut DropdownMenuState, open: bool| {
-                    state.open = open;
-                })),
-            ]),
+                ))
+                .child(
+                    dropdown_menu(
+                        vec![
+                            dropdown_menu_label("Actions"),
+                            dropdown_menu_item("Bold")
+                                .checked(state.bold)
+                                .shortcut("\u{2318}B"),
+                            dropdown_menu_item("Italic")
+                                .checked(state.italic)
+                                .shortcut("\u{2318}I"),
+                            dropdown_menu_separator(),
+                            dropdown_menu_item("Disabled row").disabled(true),
+                        ],
+                        |state: &mut DropdownMenuState, index: usize| match index {
+                            1 => state.bold = !state.bold,
+                            2 => state.italic = !state.italic,
+                            _ => {}
+                        },
+                    )
+                    .anchor(&handle)
+                    .open(open)
+                    .on_open_change(
+                        |state: &mut DropdownMenuState, open: bool| {
+                            state.open = open;
+                        },
+                    ),
+                ),
         )
     }
 }
@@ -733,18 +738,19 @@ impl Component for TooltipCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let hover = state.hover.clone();
-        framed(Stack(vec![
-            any(tooltip_trigger::<TooltipState, _>(
-                &hover,
-                button("Hover me", |_: &mut TooltipState| {}),
-            )),
-            any(tooltip::<TooltipState>(
-                &hover,
-                "A tooltip, 700ms after rest",
-            )),
-        ]))
+        framed(
+            stack()
+                .child(tooltip_trigger::<TooltipState, _>(
+                    &hover,
+                    button("Hover me", |_: &mut TooltipState| {}),
+                ))
+                .child(tooltip::<TooltipState>(
+                    &hover,
+                    "A tooltip, 700ms after rest",
+                )),
+        )
     }
 }
 
@@ -791,7 +797,7 @@ impl Component for SidebarCase {
         }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let active = state.active;
         framed_in(
             SIDEBAR_WIDE,
@@ -812,7 +818,7 @@ impl Component for SidebarCase {
                                 .icon(icon(icons::FORUM).size(16.0))
                                 .active(index == active))]))
                             })
-                            .collect(),
+                            .collect::<Vec<_>>(),
                     ),
                 ])]))
                 .header(sidebar_header(vec![any(text("Floating").size(14.0))]))
@@ -898,7 +904,7 @@ impl Component for DialogCase {
         ModalState { open: true }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let panel = if state.open {
             any(dialog(vec![
                 dialog_header(vec![
@@ -915,7 +921,7 @@ impl Component for DialogCase {
         } else {
             ModalState::reopen("Open dialog")
         };
-        framed_in(DIALOG_FRAME, Stack(vec![panel]))
+        framed_in(DIALOG_FRAME, stack().child(panel))
     }
 }
 
@@ -946,7 +952,7 @@ impl Component for DrawerCase {
         ModalState { open: true }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let panel = if state.open {
             any(drawer(
                 DrawerSide::Bottom,
@@ -963,7 +969,7 @@ impl Component for DrawerCase {
         } else {
             ModalState::reopen("Open drawer")
         };
-        framed_in(DRAWER_TALL, Stack(vec![panel]))
+        framed_in(DRAWER_TALL, stack().child(panel))
     }
 }
 
@@ -1010,7 +1016,7 @@ impl Component for SheetCase {
         ModalState { open: true }
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let panel = if state.open {
             any(sheet(vec![
                 sheet_header(vec![
@@ -1028,7 +1034,7 @@ impl Component for SheetCase {
         } else {
             ModalState::reopen("Open sheet")
         };
-        framed_in(SHEET_TALL, Stack(vec![panel]))
+        framed_in(SHEET_TALL, stack().child(panel))
     }
 }
 

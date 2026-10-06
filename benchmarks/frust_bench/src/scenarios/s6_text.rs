@@ -28,8 +28,8 @@ use frust::authoring::{
     PaintCtx, PaintScene, SemanticsCtx, Size, View, Widget,
 };
 use frust::{
-    Align, Alignment, AnimationController, AnyView, Color, Component, Get, RwSignal, Set, Stack,
-    any, component, text,
+    Align, Alignment, AnimationController, AnyView, Color, Component, Get, RwSignal, Set, any,
+    component, stack, text,
 };
 
 use super::{BenchState, Scenario};
@@ -86,7 +86,7 @@ impl Component for S6Text {
         }
     }
 
-    fn build(&self, state: &mut S6State) -> AnyView<S6State> {
+    fn build(&self, state: &mut S6State) -> impl View<S6State> {
         // Tracked read: a `WidthPulse` write wakes this rebuild each frame.
         let frac = state.frac.get();
 
@@ -97,11 +97,10 @@ impl Component for S6Text {
                 .color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xE6)),
         );
 
-        any(Stack(vec![
-            any(WidthPulse { frac: state.frac }),
+        any(stack()
+            .child(WidthPulse { frac: state.frac })
             // Top-center so the corpus starts at the top and wraps downward.
-            any(Align(Alignment::new(0.0, -1.0), column)),
-        ]))
+            .child(Align(Alignment::new(0.0, -1.0), column)))
     }
 }
 

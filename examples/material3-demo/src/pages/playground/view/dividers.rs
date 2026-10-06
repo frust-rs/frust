@@ -1,9 +1,10 @@
 //! Dividers: the reference's `DividersPlayground`.
 
 use frust::{
-    Align, Alignment, AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Theme, any,
-    component, text,
+    Align, Alignment, AnyView, Component, CrossAxisAlignment, SizedBox, Theme, View, any, column,
+    component, row, text,
 };
+
 use frust_material::divider;
 
 use crate::AppState;
@@ -55,7 +56,7 @@ impl Component for DividersPlayground {
         }
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }
@@ -93,30 +94,28 @@ fn preview(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
         // A vertical divider needs a bounded height to stretch into — the
         // reference's own `SizedBox(height: 64)` wrapping the row.
         any(SizedBox::<Knobs>(None, Some(64.0)).child(
-            Row(vec![
-                any(Align(
+            row()
+                .child(Align(
                     Alignment::new(-1.0, 0.0),
                     text("Left").style(body_style.clone()),
-                )),
-                any(SizedBox::<Knobs>(Some(12.0), None)),
-                any(line),
-                any(SizedBox::<Knobs>(Some(12.0), None)),
-                any(Align(
+                ))
+                .child(SizedBox::<Knobs>(Some(12.0), None))
+                .child(line)
+                .child(SizedBox::<Knobs>(Some(12.0), None))
+                .child(Align(
                     Alignment::new(-1.0, 0.0),
                     text("Right").style(body_style),
-                )),
-            ])
-            .cross_axis(CrossAxisAlignment::Stretch),
+                ))
+                .cross_axis(CrossAxisAlignment::Stretch),
         ))
     } else {
-        any(Column(vec![
-            any(text("Above").style(body_style.clone())),
-            any(SizedBox::<Knobs>(None, Some(12.0))),
-            any(line),
-            any(SizedBox::<Knobs>(None, Some(12.0))),
-            any(text("Below").style(body_style)),
-        ])
-        .cross_axis(CrossAxisAlignment::Stretch))
+        any(column()
+            .child(text("Above").style(body_style.clone()))
+            .child(SizedBox::<Knobs>(None, Some(12.0)))
+            .child(line)
+            .child(SizedBox::<Knobs>(None, Some(12.0)))
+            .child(text("Below").style(body_style))
+            .cross_axis(CrossAxisAlignment::Stretch))
     };
 
     any(play_preview_card("Divider", content))

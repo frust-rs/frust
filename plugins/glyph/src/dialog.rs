@@ -457,21 +457,21 @@ impl<State: 'static> GlyphDialogView<State> {
     /// are set**, silently (no panic, no assert, in debug or release). See
     /// the [module docs](self)'s "Body/content slot" section for the
     /// sizing/overflow and focus contract.
-    pub fn content(mut self, content: AnyView<State>) -> Self {
-        self.content = Some(content);
+    pub fn content(mut self, content: impl View<State>) -> Self {
+        self.content = Some(AnyView::new(content));
         self
     }
 
     /// Replace the trailing action row (app-provided buttons, in reading order —
     /// the last sits closest to the trailing edge).
-    pub fn actions(mut self, actions: Vec<AnyView<State>>) -> Self {
-        self.actions = actions;
+    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
+        self.actions = actions.into_iter().map(AnyView::new).collect();
         self
     }
 
     /// Append one action button to the trailing action row.
-    pub fn action(mut self, action: AnyView<State>) -> Self {
-        self.actions.push(action);
+    pub fn action(mut self, action: impl View<State>) -> Self {
+        self.actions.push(AnyView::new(action));
         self
     }
 

@@ -109,7 +109,13 @@ pub struct ItemView<State: 'static> {
 
 /// Create an item row from `children` (typically [`item_media`]?,
 /// [`item_content`], [`item_actions`]?, in order).
-pub fn item<State: 'static>(children: Vec<AnyView<State>>) -> ItemView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn item<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> ItemView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     ItemView {
         children,
         variant: ItemVariant::default(),
@@ -509,7 +515,13 @@ pub struct ItemContentView<State: 'static> {
 
 /// Stack `children` (typically [`item_title`]/[`item_description`]) in a
 /// left-aligned column.
-pub fn item_content<State: 'static>(children: Vec<AnyView<State>>) -> ItemContentView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn item_content<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> ItemContentView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     ItemContentView { children }
 }
 
@@ -621,7 +633,13 @@ pub struct ItemRowView<State: 'static> {
 }
 
 /// `ItemActions`: a row, `gap-2`, `items-center`.
-pub fn item_actions<State: 'static>(children: Vec<AnyView<State>>) -> ItemRowView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn item_actions<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> ItemRowView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     ItemRowView {
         children,
         justify_between: false,
@@ -629,7 +647,13 @@ pub fn item_actions<State: 'static>(children: Vec<AnyView<State>>) -> ItemRowVie
 }
 
 /// `ItemHeader`: a `justify-between` row, `gap-2`.
-pub fn item_header<State: 'static>(children: Vec<AnyView<State>>) -> ItemRowView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn item_header<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> ItemRowView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     ItemRowView {
         children,
         justify_between: true,
@@ -637,7 +661,13 @@ pub fn item_header<State: 'static>(children: Vec<AnyView<State>>) -> ItemRowView
 }
 
 /// `ItemFooter`: a `justify-between` row, `gap-2`.
-pub fn item_footer<State: 'static>(children: Vec<AnyView<State>>) -> ItemRowView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn item_footer<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> ItemRowView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     ItemRowView {
         children,
         justify_between: true,
@@ -763,7 +793,7 @@ mod tests {
     fn default_row_lays_media_content_actions_left_to_right() {
         let view: ItemView<()> = item(vec![
             any(item_media(leaf(20.0, 20.0)).variant(ItemMediaVariant::Icon)),
-            any(item_content::<()>(vec![any(item_title("Title"))])),
+            any(item_content::<(), _>(vec![any(item_title("Title"))])),
         ]);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));

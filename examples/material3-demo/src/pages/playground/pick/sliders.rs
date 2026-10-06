@@ -21,7 +21,7 @@
 //! (`(_value * 200) - 100` / `(_value * 5).roundToDouble()`), so every kind
 //! shares one continuous knob rather than a value per constructor.
 
-use frust::{AnyView, Component, SizedBox, Stack, any, component};
+use frust::{AnyView, Component, SizedBox, View, any, component, stack};
 use frust_material::{
     HapticSignal, OverlayAnchor, SliderIconPosition, SliderRange, centered_slider, icons,
     range_slider, slider, vertical_slider, wavy_slider,
@@ -295,7 +295,7 @@ fn body(state: &Knobs) -> AnyView<Knobs> {
         vec![snippet(state)],
         vec![controls_panel(state)],
     );
-    any(Stack(vec![content, kind_menu_panel(state)]))
+    any(stack().child(content).child(kind_menu_panel(state)))
 }
 
 /// This page's knob component — see the [module docs](self).
@@ -308,7 +308,7 @@ impl Component for SlidersPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

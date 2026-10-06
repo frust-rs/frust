@@ -48,7 +48,8 @@
 
 use frust::{
     AnyView, Axis, ButtonStyle, Color, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    Padding, RwSignal, Set, SizedBox, Theme, any, button, component, inflexible, text, use_context,
+    Padding, RwSignal, Set, SizedBox, Theme, View, any, button, component, inflexible, text,
+    use_context,
 };
 use frust_i18n::fmt::{self, CivilDate, CivilTime, DateLength};
 use frust_i18n::{I18n, Locale, use_i18n};
@@ -128,7 +129,7 @@ impl Component for I18nDemoPage {
         }
     }
 
-    fn build(&self, state: &mut I18nDemoPageState) -> AnyView<I18nDemoPageState> {
+    fn build(&self, state: &mut I18nDemoPageState) -> impl View<I18nDemoPageState> {
         // Provided by `crate::setup_i18n` under the real shell
         // (`PlaygroundApp::init`); [`resolve_i18n`] degrades rather than
         // panics when it is absent (a headless harness driving this page
@@ -267,18 +268,17 @@ fn switcher_row(i18n: &I18n, active: &Locale) -> AnyView<I18nDemoPageState> {
                 .expect("SWITCHER_LOCALES tags are valid BCP-47 identifiers");
             let selected = target == *active;
             let handle = i18n.clone();
-            inflexible(any(button(
-                *label,
-                move |_state: &mut I18nDemoPageState| {
+            inflexible(
+                button(*label, move |_state: &mut I18nDemoPageState| {
                     handle.set_locale(target.clone());
-                },
+                })
+                .style(if selected {
+                    ButtonStyle::Primary
+                } else {
+                    ButtonStyle::Secondary
+                })
+                .small(),
             )
-            .style(if selected {
-                ButtonStyle::Primary
-            } else {
-                ButtonStyle::Secondary
-            })
-            .small()))
         })
         .collect();
     any(FlexView::new(Axis::Horizontal, items))
@@ -291,18 +291,17 @@ fn plural_stepper_row(count_signal: RwSignal<i64>, current: i64) -> AnyView<I18n
         .iter()
         .map(|&count| {
             let selected = count == current;
-            inflexible(any(button(
-                count.to_string(),
-                move |_state: &mut I18nDemoPageState| {
+            inflexible(
+                button(count.to_string(), move |_state: &mut I18nDemoPageState| {
                     count_signal.set(count);
-                },
+                })
+                .style(if selected {
+                    ButtonStyle::Primary
+                } else {
+                    ButtonStyle::Secondary
+                })
+                .small(),
             )
-            .style(if selected {
-                ButtonStyle::Primary
-            } else {
-                ButtonStyle::Secondary
-            })
-            .small()))
         })
         .collect();
     any(FlexView::new(Axis::Horizontal, items))
@@ -319,18 +318,17 @@ fn theme_choice_row(
         .iter()
         .map(|&choice| {
             let selected = choice == current;
-            inflexible(any(button(
-                choice,
-                move |_state: &mut I18nDemoPageState| {
+            inflexible(
+                button(choice, move |_state: &mut I18nDemoPageState| {
                     choice_signal.set(choice);
-                },
+                })
+                .style(if selected {
+                    ButtonStyle::Primary
+                } else {
+                    ButtonStyle::Secondary
+                })
+                .small(),
             )
-            .style(if selected {
-                ButtonStyle::Primary
-            } else {
-                ButtonStyle::Secondary
-            })
-            .small()))
         })
         .collect();
     any(FlexView::new(Axis::Horizontal, items))
@@ -362,7 +360,7 @@ fn formatting_table(format_locale: &Locale, muted: Color) -> AnyView<I18nDemoPag
 
     let items = lines
         .into_iter()
-        .map(|line| inflexible(any(text(line).size(11.0).color(muted))))
+        .map(|line| inflexible(text(line).size(11.0).color(muted)))
         .collect();
     any(FlexView::new(Axis::Vertical, items).cross_axis(CrossAxisAlignment::Start))
 }

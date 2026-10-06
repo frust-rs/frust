@@ -26,7 +26,7 @@
 
 use frust::{
     AnyView, Component, EdgeInsets, Get, NavigatorController, Padding, PopResult, RwSignal, Set,
-    any, component, navigator, text,
+    View, any, component, navigator, text,
 };
 use frust_material::{
     ModalDismiss, filled_button, show_side_sheet, side_sheet, text_button, tonal_button,
@@ -67,7 +67,7 @@ impl Component for SideSheetPlayground {
         }
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let nav = state.nav.clone();
         let title = state.title;
         let body = state.body;

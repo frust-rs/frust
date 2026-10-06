@@ -25,7 +25,8 @@
 //! combobox, the team multi-select, and the guest stepper.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Stack, any, component, text,
+    AnyView, Column, Component, CrossAxisAlignment, SizedBox, View, any, column, component, row,
+    stack, text,
 };
 use frust_beui::components::adaptive_stepper::adaptive_stepper;
 use frust_beui::components::combobox::{
@@ -146,21 +147,24 @@ fn stage(
     panel: AnyView<State>,
 ) -> AnyView<State> {
     let (width, height) = size;
-    any(SizedBox(Some(width), Some(height)).child(Stack(vec![
-        any(Column(vec![
-            any(SizedBox(Some(trigger_width), None).child(trigger)),
-        ])
-        .cross_axis(CrossAxisAlignment::Start)),
-        panel,
-    ])))
+    any(SizedBox(Some(width), Some(height)).child(
+        stack()
+            .child(
+                column()
+                    .child(SizedBox(Some(trigger_width), None).child(trigger))
+                    .cross_axis(CrossAxisAlignment::Start),
+            )
+            .child(panel),
+    ))
 }
 
 /// A labelled stage: the caption above the live picker.
 fn labelled_stage(label: &str, body: AnyView<State>) -> AnyView<State> {
-    any(
-        Column(vec![any(caption(label.to_string())), gap(8.0), body])
-            .cross_axis(CrossAxisAlignment::Start),
-    )
+    any(column()
+        .child(caption(label.to_string()))
+        .child(gap(8.0))
+        .child(body)
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 /// [`select`]'s two variants, side by side.
@@ -227,12 +231,11 @@ fn selects(state: &State) -> AnyView<State> {
          edge. The item entrance drops its blur, the gooey separation animates \
          the near edge's two corners rather than all four, there is no \
          type-ahead, and the list height is a constant cap. Vite is disabled.",
-        vec![any(Row(vec![
-            labelled_stage("Default", default),
-            hgap(32.0),
-            labelled_stage("Morph", morph),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))],
+        vec![any(row()
+            .child(labelled_stage("Default", default))
+            .child(hgap(32.0))
+            .child(labelled_stage("Morph", morph))
+            .cross_axis(CrossAxisAlignment::Start))],
     )
 }
 
@@ -371,31 +374,37 @@ fn steppers(state: &State) -> AnyView<State> {
          reported as a plain numeric update rather than an announced one. The \
          arrow keys step \u{2014} an addition, since one widget cannot host \
          upstream's two focusable buttons.",
-        vec![any(Row(vec![
-            any(Column(vec![
-                guests,
-                gap(8.0),
-                any(caption(format!(
-                    "Guests \u{b7} 0\u{2013}3 \u{b7} {:.0}",
-                    state.guests
-                ))),
-            ])
-            .cross_axis(CrossAxisAlignment::Start)),
-            hgap(32.0),
-            any(Column(vec![
-                quantity,
-                gap(8.0),
-                any(caption(format!(
-                    "Quantity \u{b7} 0\u{2013}10 by 2 \u{b7} {:.0}",
-                    state.quantity
-                ))),
-            ])
-            .cross_axis(CrossAxisAlignment::Start)),
-            hgap(32.0),
-            any(Column(vec![disabled, gap(8.0), any(caption("Disabled"))])
-                .cross_axis(CrossAxisAlignment::Start)),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))],
+        vec![any(row()
+            .child(
+                column()
+                    .child(guests)
+                    .child(gap(8.0))
+                    .child(caption(format!(
+                        "Guests \u{b7} 0\u{2013}3 \u{b7} {:.0}",
+                        state.guests
+                    )))
+                    .cross_axis(CrossAxisAlignment::Start),
+            )
+            .child(hgap(32.0))
+            .child(
+                column()
+                    .child(quantity)
+                    .child(gap(8.0))
+                    .child(caption(format!(
+                        "Quantity \u{b7} 0\u{2013}10 by 2 \u{b7} {:.0}",
+                        state.quantity
+                    )))
+                    .cross_axis(CrossAxisAlignment::Start),
+            )
+            .child(hgap(32.0))
+            .child(
+                column()
+                    .child(disabled)
+                    .child(gap(8.0))
+                    .child(caption("Disabled"))
+                    .cross_axis(CrossAxisAlignment::Start),
+            )
+            .cross_axis(CrossAxisAlignment::Start))],
     )
 }
 
@@ -409,29 +418,27 @@ impl Component for SelectionPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
-        any(Column(vec![
-            selects(state),
-            comboboxes(state),
-            multi_selects(state),
-            steppers(state),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))
+    fn build(&self, state: &mut State) -> impl View<State> {
+        any(column()
+            .child(selects(state))
+            .child(comboboxes(state))
+            .child(multi_selects(state))
+            .child(steppers(state))
+            .cross_axis(CrossAxisAlignment::Start))
     }
 }
 
 pub fn page() -> AnyView<AppState> {
-    any(Column(vec![
-        any(heading("Motion \u{b7} Selection")),
-        any(SizedBox(None, Some(8.0))),
-        any(caption(
+    any(column()
+        .child(heading("Motion \u{b7} Selection"))
+        .child(SizedBox(None, Some(8.0)))
+        .child(caption(
             "Pickers that open a panel: the select in both variants, the \
              searchable combobox, the token multi-select, and the adaptive \
              stepper. Each panel is hosted in its own bounded stage \u{2014} an \
              overlay host may not sit directly inside the page's scroll view.",
-        )),
-        any(SizedBox(None, Some(24.0))),
-        any(component(SelectionPage)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+        ))
+        .child(SizedBox(None, Some(24.0)))
+        .child(component(SelectionPage))
+        .cross_axis(CrossAxisAlignment::Start))
 }

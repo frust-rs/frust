@@ -36,7 +36,7 @@
 
 use std::rc::Rc;
 
-use frust::{AnyView, Color, Column, Component, SizedBox, Stack, any, component, icon};
+use frust::{AnyView, Color, Column, Component, SizedBox, View, any, component, icon, stack};
 use frust_material::{
     ButtonDecoration, ButtonShape, ButtonSize, ButtonVariant, GradientButtonDecoration,
     LinearGradientSpec, OverlayAnchor, button, button_with_icon, constant_gradient, icons,
@@ -158,7 +158,7 @@ fn styled_button(state: &Knobs) -> AnyView<Knobs> {
         .shape(state.shape)
         .enabled(state.enabled);
     if state.show_icon {
-        view = view.icon(any(icon(icons::ADD)));
+        view = view.icon(icon(icons::ADD));
     }
     any(view)
 }
@@ -216,7 +216,7 @@ fn gradient_fill(state: &Knobs) -> AnyView<Knobs> {
         .decoration(purple));
     let gradient_icon =
         any(
-            button_with_icon(any(icon(icons::FAVORITE)), "Favorite", |_: &mut Knobs| {})
+            button_with_icon(icon(icons::FAVORITE), "Favorite", |_: &mut Knobs| {})
                 .size(state.size)
                 .shape(state.shape)
                 .decoration(red),
@@ -355,11 +355,10 @@ fn body(state: &Knobs) -> AnyView<Knobs> {
         vec![snippet(state)],
         vec![appearance_panel(state), content_panel(state)],
     );
-    any(Stack(vec![
-        content,
-        style_menu_panel(state),
-        size_menu_panel(state),
-    ]))
+    any(stack()
+        .child(content)
+        .child(style_menu_panel(state))
+        .child(size_menu_panel(state)))
 }
 
 /// This page's knob component — see the [module docs](self).
@@ -372,7 +371,7 @@ impl Component for ButtonsPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

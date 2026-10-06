@@ -36,7 +36,7 @@ use frust_beui::blocks::wallet_card::{WalletAction, wallet_account, wallet_card}
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 
 use frust::{
-    AnyView, Axis, Column, Component, CrossAxisAlignment, FlexView, SizedBox, TextView, any,
+    AnyView, Axis, Component, CrossAxisAlignment, FlexView, SizedBox, TextView, View, any, column,
     component, inflexible, text,
 };
 
@@ -189,33 +189,35 @@ fn masonry_items(count: usize) -> Vec<MasonryItem> {
 /// The masonry block: a virtualized feed that asks for more as its viewport
 /// nears the end.
 fn masonry_block(state: &State) -> AnyView<State> {
-    any(Column(vec![
-        any(section("infinite_masonry")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("infinite_masonry"))
+        .child(gap(6.0))
+        .child(caption(
             "A responsive, virtualized masonry: cards are packed into shortest-lane columns and \
              only the windowed ones are shaped and painted. Scroll the feed \u{2014} it owns its \
              own offset \u{2014} and it appends another page once the viewport nears the end, \
              once per approach rather than once per frame.",
-        )),
-        gap(10.0),
-        any(SizedBox(None, Some(420.0)).child(
-            infinite_masonry(masonry_items(state.masonry_count), |s: &mut State| {
-                if s.masonry_count >= MASONRY_MAX {
-                    return;
-                }
-                // A real caller would go asking here and hold
-                // `InfiniteMasonryView::loading` set until the answer landed,
-                // which is also what unlatches the block's load gate; the
-                // synthetic page below is immediate, so it never needs it.
-                s.masonry_count = (s.masonry_count + MASONRY_PAGE).min(MASONRY_MAX);
-            })
-            .has_more(state.masonry_count < MASONRY_MAX)
-            .end_label("That is every card.")
-            .label("Gallery masonry feed"),
-        )),
-        gap(10.0),
-        controls(vec![
+        ))
+        .child(gap(10.0))
+        .child(
+            SizedBox(None, Some(420.0)).child(
+                infinite_masonry(masonry_items(state.masonry_count), |s: &mut State| {
+                    if s.masonry_count >= MASONRY_MAX {
+                        return;
+                    }
+                    // A real caller would go asking here and hold
+                    // `InfiniteMasonryView::loading` set until the answer landed,
+                    // which is also what unlatches the block's load gate; the
+                    // synthetic page below is immediate, so it never needs it.
+                    s.masonry_count = (s.masonry_count + MASONRY_PAGE).min(MASONRY_MAX);
+                })
+                .has_more(state.masonry_count < MASONRY_MAX)
+                .end_label("That is every card.")
+                .label("Gallery masonry feed"),
+            ),
+        )
+        .child(gap(10.0))
+        .child(controls(vec![
             minor("Reset feed", |s: &mut State| {
                 s.masonry_count = MASONRY_PAGE * 2;
             }),
@@ -223,8 +225,7 @@ fn masonry_block(state: &State) -> AnyView<State> {
                 "{} of {MASONRY_MAX} cards",
                 state.masonry_count
             ))),
-        ]),
-    ]))
+        ])))
 }
 
 // ---- The project folder ----------------------------------------------------
@@ -260,25 +261,24 @@ fn folder_block(state: &State) -> AnyView<State> {
         folder = folder.open(open);
     }
 
-    any(Column(vec![
-        any(section("project_folder")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("project_folder"))
+        .child(gap(6.0))
+        .child(caption(
             "A folder card whose preview sheets fan out of it on hover or focus and tuck back \
              on leave. The fan is the block's own; pressing the card reports an activation.",
-        )),
-        gap(10.0),
-        any(folder),
-        gap(10.0),
-        controls(vec![
+        ))
+        .child(gap(10.0))
+        .child(folder)
+        .child(gap(10.0))
+        .child(controls(vec![
             minor("Toggle open", |s: &mut State| {
                 let next = !s.folder_open.unwrap_or(false);
                 s.folder_open = Some(next);
             }),
             minor("Release to hover", |s: &mut State| s.folder_open = None),
             any(caption(state.folder_log.clone())),
-        ]),
-    ]))
+        ])))
 }
 
 // ---- The knockout bracket --------------------------------------------------
@@ -425,24 +425,26 @@ fn bracket_block(state: &State) -> AnyView<State> {
         bracket_round("Grand final", vec![grand_final]),
     ];
 
-    any(Column(vec![
-        any(section("knockout_bracket")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("knockout_bracket"))
+        .child(gap(6.0))
+        .child(caption(
             "A single-elimination tree, widest round first, paged left and right with the \
              chevrons and joined by drawn connectors. Advance the tournament below: each round \
              fills its winners into the next, and the cards animate the change rather than \
              cutting to it.",
-        )),
-        gap(10.0),
-        any(knockout_bracket(rounds)
-            .page(state.bracket_page)
-            .third_place(third_place)
-            .third_place_label("Third place play-off")
-            .label("Sample knockout bracket")
-            .on_page_change(|s: &mut State, page: usize| s.bracket_page = page)),
-        gap(10.0),
-        controls(vec![
+        ))
+        .child(gap(10.0))
+        .child(
+            knockout_bracket(rounds)
+                .page(state.bracket_page)
+                .third_place(third_place)
+                .third_place_label("Third place play-off")
+                .label("Sample knockout bracket")
+                .on_page_change(|s: &mut State, page: usize| s.bracket_page = page),
+        )
+        .child(gap(10.0))
+        .child(controls(vec![
             minor("Advance round", |s: &mut State| {
                 s.bracket_played = (s.bracket_played + 1).min(3);
             }),
@@ -450,8 +452,7 @@ fn bracket_block(state: &State) -> AnyView<State> {
                 s.bracket_played = s.bracket_played.saturating_sub(1);
             }),
             any(caption(format!("{} of 3 rounds played", played))),
-        ]),
-    ]))
+        ])))
 }
 
 // ---- The swap --------------------------------------------------------------
@@ -469,35 +470,36 @@ fn usdc() -> SwapToken {
 /// The swap block: a two-chain ticket with a flip, a quote and an optional
 /// destination row.
 fn swap_block(state: &State) -> AnyView<State> {
-    any(Column(vec![
-        any(section("swap")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("swap"))
+        .child(gap(6.0))
+        .child(caption(
             "A cross-chain swap ticket: the amount drives a live quote, the flip button turns the \
              pair over, and the destination row expands to an address field that validates as it \
              is typed. The action button says what it is refusing when it refuses.",
-        )),
-        gap(10.0),
-        any(swap(state.swap_from.clone(), state.swap_to.clone())
-            .amount(state.swap_amount)
-            .destination(state.swap_destination.clone())
-            .show_destination(state.swap_show_destination)
-            .quote(SwapQuote::default())
-            .eta("\u{2248} 24s")
-            .title("Swap")
-            .on_flip(|s: &mut State| {
-                std::mem::swap(&mut s.swap_from, &mut s.swap_to);
-                s.swap_log = "pair flipped".to_string();
-            })
-            .on_amount_change(|s: &mut State, amount: f64| s.swap_amount = amount)
-            .on_destination_toggle(|s: &mut State, shown: bool| s.swap_show_destination = shown)
-            .on_pick_token(|s: &mut State, side| s.swap_log = format!("token picker: {side:?}"))
-            .on_submit(|s: &mut State| {
-                s.swap_log = format!("swapped {} {}", s.swap_amount, s.swap_from.symbol());
-            })),
-        gap(8.0),
-        any(caption(state.swap_log.clone())),
-    ]))
+        ))
+        .child(gap(10.0))
+        .child(
+            swap(state.swap_from.clone(), state.swap_to.clone())
+                .amount(state.swap_amount)
+                .destination(state.swap_destination.clone())
+                .show_destination(state.swap_show_destination)
+                .quote(SwapQuote::default())
+                .eta("\u{2248} 24s")
+                .title("Swap")
+                .on_flip(|s: &mut State| {
+                    std::mem::swap(&mut s.swap_from, &mut s.swap_to);
+                    s.swap_log = "pair flipped".to_string();
+                })
+                .on_amount_change(|s: &mut State, amount: f64| s.swap_amount = amount)
+                .on_destination_toggle(|s: &mut State, shown: bool| s.swap_show_destination = shown)
+                .on_pick_token(|s: &mut State, side| s.swap_log = format!("token picker: {side:?}"))
+                .on_submit(|s: &mut State| {
+                    s.swap_log = format!("swapped {} {}", s.swap_amount, s.swap_from.symbol());
+                }),
+        )
+        .child(gap(8.0))
+        .child(caption(state.swap_log.clone())))
 }
 
 // ---- The prediction market -------------------------------------------------
@@ -509,44 +511,46 @@ fn market_block(state: &State) -> AnyView<State> {
         market_outcome("no", "No", state.market_prices[1]).position(48.0),
     ];
 
-    any(Column(vec![
-        any(section("prediction_market")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("prediction_market"))
+        .child(gap(6.0))
+        .child(caption(
             "A buy/sell ticket over two outcomes: the price, the share count and the payout are \
              quoted from the amount, and a refusal shakes the ticket rather than silently doing \
              nothing. Tick the prices below \u{2014} the numbers roll to their new value instead \
              of snapping.",
-        )),
-        gap(10.0),
-        any(prediction_market(outcomes)
-            .mode(state.market_mode)
-            .outcome_id(state.market_outcome_id.clone())
-            .amount(state.market_amount)
-            .balance(500.0)
-            .min_trade(1.0)
-            .quick_amounts(vec![1.0, 5.0, 10.0, 100.0])
-            .order_type_label("Market")
-            .status(state.market_status)
-            .authenticated(true)
-            .on_mode_change(|s: &mut State, mode: MarketMode| s.market_mode = mode)
-            .on_outcome_change(|s: &mut State, id: String| s.market_outcome_id = id)
-            .on_amount_change(|s: &mut State, amount: f64| s.market_amount = amount)
-            .on_trade(|s: &mut State| {
-                s.market_status = MarketStatus::Filled;
-                s.market_log = format!(
-                    "{} {} at {:.0}c",
-                    if s.market_mode == MarketMode::Buy {
-                        "bought"
-                    } else {
-                        "sold"
-                    },
-                    s.market_outcome_id,
-                    s.market_prices[usize::from(s.market_outcome_id == "no")] * 100.0
-                );
-            })),
-        gap(10.0),
-        controls(vec![
+        ))
+        .child(gap(10.0))
+        .child(
+            prediction_market(outcomes)
+                .mode(state.market_mode)
+                .outcome_id(state.market_outcome_id.clone())
+                .amount(state.market_amount)
+                .balance(500.0)
+                .min_trade(1.0)
+                .quick_amounts(vec![1.0, 5.0, 10.0, 100.0])
+                .order_type_label("Market")
+                .status(state.market_status)
+                .authenticated(true)
+                .on_mode_change(|s: &mut State, mode: MarketMode| s.market_mode = mode)
+                .on_outcome_change(|s: &mut State, id: String| s.market_outcome_id = id)
+                .on_amount_change(|s: &mut State, amount: f64| s.market_amount = amount)
+                .on_trade(|s: &mut State| {
+                    s.market_status = MarketStatus::Filled;
+                    s.market_log = format!(
+                        "{} {} at {:.0}c",
+                        if s.market_mode == MarketMode::Buy {
+                            "bought"
+                        } else {
+                            "sold"
+                        },
+                        s.market_outcome_id,
+                        s.market_prices[usize::from(s.market_outcome_id == "no")] * 100.0
+                    );
+                }),
+        )
+        .child(gap(10.0))
+        .child(controls(vec![
             minor("Tick prices", |s: &mut State| {
                 // A market feed's next print, stood in for by a fixed nudge:
                 // deterministic, and enough to show the ticker roll.
@@ -561,8 +565,7 @@ fn market_block(state: &State) -> AnyView<State> {
                 s.market_log = "(no trade placed)".to_string();
             }),
             any(caption(state.market_log.clone())),
-        ]),
-    ]))
+        ])))
 }
 
 // ---- The wallet card -------------------------------------------------------
@@ -588,44 +591,46 @@ fn wallet_block(state: &State) -> AnyView<State> {
         ),
     ];
 
-    any(Column(vec![
-        any(section("wallet_card")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("wallet_card"))
+        .child(gap(6.0))
+        .child(caption(
             "A balance card whose header row morphs between the account switcher and a recent-\
              search picker \u{2014} the two share one box, so only one is ever open. The balance \
              rolls to a new value, and the four actions report which was pressed.",
-        )),
-        gap(10.0),
-        any(wallet_card(accounts, state.wallet_balance)
-            .account_id(state.wallet_account_id.clone())
-            .balance_prefix("$")
-            .change(state.wallet_change)
-            .has_notifications(true)
-            .search_recent(vec![
-                "vitalik.eth".to_string(),
-                "0xA0b8\u{2026}6EB4".to_string(),
-                "Uniswap".to_string(),
-                "Send to Trading".to_string(),
-            ])
-            .on_account_change(|s: &mut State, id: String| {
-                s.wallet_log = format!("switched to {id}");
-                s.wallet_account_id = id;
-            })
-            .on_action(|s: &mut State, action: WalletAction| {
-                s.wallet_log = format!("{} pressed", action.label());
-            })
-            .on_search_submit(|s: &mut State, query: String| {
-                s.wallet_log = format!("searched {query}");
-            })
-            .on_copy_address(|s: &mut State, address: String| {
-                s.wallet_log = format!("copied {address}");
-            })
-            .on_notifications(|s: &mut State| {
-                s.wallet_log = "notifications opened".to_string();
-            })),
-        gap(10.0),
-        controls(vec![
+        ))
+        .child(gap(10.0))
+        .child(
+            wallet_card(accounts, state.wallet_balance)
+                .account_id(state.wallet_account_id.clone())
+                .balance_prefix("$")
+                .change(state.wallet_change)
+                .has_notifications(true)
+                .search_recent(vec![
+                    "vitalik.eth".to_string(),
+                    "0xA0b8\u{2026}6EB4".to_string(),
+                    "Uniswap".to_string(),
+                    "Send to Trading".to_string(),
+                ])
+                .on_account_change(|s: &mut State, id: String| {
+                    s.wallet_log = format!("switched to {id}");
+                    s.wallet_account_id = id;
+                })
+                .on_action(|s: &mut State, action: WalletAction| {
+                    s.wallet_log = format!("{} pressed", action.label());
+                })
+                .on_search_submit(|s: &mut State, query: String| {
+                    s.wallet_log = format!("searched {query}");
+                })
+                .on_copy_address(|s: &mut State, address: String| {
+                    s.wallet_log = format!("copied {address}");
+                })
+                .on_notifications(|s: &mut State| {
+                    s.wallet_log = "notifications opened".to_string();
+                }),
+        )
+        .child(gap(10.0))
+        .child(controls(vec![
             minor("Simulate balance change", |s: &mut State| {
                 // A deterministic stand-in for a chain update: alternate a
                 // credit and a debit so the ticker rolls both ways.
@@ -635,8 +640,7 @@ fn wallet_block(state: &State) -> AnyView<State> {
                 s.wallet_change = delta;
             }),
             any(caption(state.wallet_log.clone())),
-        ]),
-    ]))
+        ])))
 }
 
 // ---- The 404 pages ---------------------------------------------------------
@@ -670,34 +674,35 @@ fn not_found_block(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(Column(vec![
-        any(section("not_found")),
-        gap(6.0),
-        any(caption(
+    any(column()
+        .child(section("not_found"))
+        .child(gap(6.0))
+        .child(caption(
             "Five 404 presentations behind one block: the digits scramble, the digits chase the \
              cursor, a spotlight reveals them, a card deck fans, or a terminal types a failed \
              `cd`. Two of them track the pointer inside their stage and two paint their own dark \
              panel.",
-        )),
-        gap(10.0),
-        controls(picker),
-        gap(12.0),
-        any(not_found::<State>()
-            .style(state.not_found_style)
-            .code("404")
-            .title("Page not found")
-            .description("The page you were looking for has moved or never existed.")
-            .home_label("Back home")
-            .browse_label("Browse components")
-            .on_action(|s: &mut State, action: NotFoundAction| {
-                s.not_found_log = match action {
-                    NotFoundAction::Home => "back home".to_string(),
-                    NotFoundAction::Browse => "browse components".to_string(),
-                };
-            })),
-        gap(8.0),
-        any(caption(format!("Last action: {}", state.not_found_log))),
-    ]))
+        ))
+        .child(gap(10.0))
+        .child(controls(picker))
+        .child(gap(12.0))
+        .child(
+            not_found::<State>()
+                .style(state.not_found_style)
+                .code("404")
+                .title("Page not found")
+                .description("The page you were looking for has moved or never existed.")
+                .home_label("Back home")
+                .browse_label("Browse components")
+                .on_action(|s: &mut State, action: NotFoundAction| {
+                    s.not_found_log = match action {
+                        NotFoundAction::Home => "back home".to_string(),
+                        NotFoundAction::Browse => "browse components".to_string(),
+                    };
+                }),
+        )
+        .child(gap(8.0))
+        .child(caption(format!("Last action: {}", state.not_found_log))))
 }
 
 // ---- The page --------------------------------------------------------------
@@ -713,30 +718,29 @@ impl Component for ShowcasePage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
-        any(Column(vec![
-            any(heading("Blocks \u{b7} Showcase")),
-            gap(8.0),
-            any(caption(
+    fn build(&self, state: &mut State) -> impl View<State> {
+        any(column()
+            .child(heading("Blocks \u{b7} Showcase"))
+            .child(gap(8.0))
+            .child(caption(
                 "Seven screen-scale blocks \u{2014} a feed, a folder, a tournament, two finance \
                  tickets, a wallet and five 404 pages \u{2014} over sample data held here on the \
                  page.",
-            )),
-            gap(24.0),
-            masonry_block(state),
-            gap(24.0),
-            folder_block(state),
-            gap(24.0),
-            bracket_block(state),
-            gap(24.0),
-            swap_block(state),
-            gap(24.0),
-            market_block(state),
-            gap(24.0),
-            wallet_block(state),
-            gap(24.0),
-            not_found_block(state),
-        ]))
+            ))
+            .child(gap(24.0))
+            .child(masonry_block(state))
+            .child(gap(24.0))
+            .child(folder_block(state))
+            .child(gap(24.0))
+            .child(bracket_block(state))
+            .child(gap(24.0))
+            .child(swap_block(state))
+            .child(gap(24.0))
+            .child(market_block(state))
+            .child(gap(24.0))
+            .child(wallet_block(state))
+            .child(gap(24.0))
+            .child(not_found_block(state)))
     }
 }
 

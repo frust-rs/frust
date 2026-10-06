@@ -18,7 +18,8 @@
 use std::rc::Rc;
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Stack, any, component, text,
+    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, column, component,
+    row, stack, text,
 };
 use frust_beui::components::animated_toast_stack::{
     AnimatedToastStackEntry, AnimatedToastStackPosition, AnimatedToastStackStatus, animated_toast,
@@ -285,34 +286,34 @@ fn toasts(state: &State) -> AnyView<State> {
         any(Row(row).cross_axis(CrossAxisAlignment::Center))
     };
 
-    let panel = any(Column(vec![
-        any(text("Raise a toast").size(15.0)),
-        gap(8.0),
-        any(Row(triggers).cross_axis(CrossAxisAlignment::Center)),
-        gap(12.0),
-        any(Row(vec![
-            knob("Dismiss oldest", |s: &mut State| {
-                if !s.toasts.is_empty() {
-                    s.toasts.remove(0);
-                }
-            }),
-            hgap(8.0),
-            knob("Dismiss all", |s: &mut State| s.toasts.clear()),
-        ])),
-        gap(12.0),
-        any(caption("Position")),
-        gap(6.0),
-        position_row(0, 3),
-        gap(6.0),
-        position_row(3, 6),
-        gap(12.0),
-        any(caption(state.toast_status.clone())),
-        gap(4.0),
-        any(caption(format!("Queued: {}", state.toasts.len()))),
-    ])
-    .cross_axis(CrossAxisAlignment::Start));
+    let panel = any(column()
+        .child(text("Raise a toast").size(15.0))
+        .child(gap(8.0))
+        .child(Row(triggers).cross_axis(CrossAxisAlignment::Center))
+        .child(gap(12.0))
+        .child(
+            row()
+                .child(knob("Dismiss oldest", |s: &mut State| {
+                    if !s.toasts.is_empty() {
+                        s.toasts.remove(0);
+                    }
+                }))
+                .child(hgap(8.0))
+                .child(knob("Dismiss all", |s: &mut State| s.toasts.clear())),
+        )
+        .child(gap(12.0))
+        .child(caption("Position"))
+        .child(gap(6.0))
+        .child(position_row(0, 3))
+        .child(gap(6.0))
+        .child(position_row(3, 6))
+        .child(gap(12.0))
+        .child(caption(state.toast_status.clone()))
+        .child(gap(4.0))
+        .child(caption(format!("Queued: {}", state.toasts.len())))
+        .cross_axis(CrossAxisAlignment::Start));
 
-    let stack = any(
+    let toast_stack = any(
         animated_toast_stack(state.toasts.clone(), |s: &mut State, id| {
             s.toasts.retain(|toast| toast.id() != id);
             s.toast_status = format!("Dismissed id {id}.");
@@ -335,7 +336,7 @@ fn toasts(state: &State) -> AnyView<State> {
          dismiss it \u{2014} the velocity arm is not ported, a PointerEvent carries \
          none \u{2014} and no ramp blurs.",
         vec![any(
-            SizedBox(Some(620.0), Some(380.0)).child(Stack(vec![panel, stack]))
+            SizedBox(Some(620.0), Some(380.0)).child(stack().child(panel).child(toast_stack))
         )],
     )
 }
@@ -412,8 +413,8 @@ fn tables(state: &State) -> AnyView<State> {
         vec![
             any(SizedBox(Some(720.0), None).child(view)),
             gap(12.0),
-            any(Row(vec![
-                any(caption(format!(
+            any(row()
+                .child(caption(format!(
                     "{} rows \u{b7} {} selected \u{b7} {} extra page(s) loaded \u{b7} sort: {}",
                     state.row_count,
                     state.selected.len(),
@@ -429,25 +430,24 @@ fn tables(state: &State) -> AnyView<State> {
                             }
                         ),
                     }
-                ))),
-                hgap(16.0),
-                knob("Clear selection", |s: &mut State| {
+                )))
+                .child(hgap(16.0))
+                .child(knob("Clear selection", |s: &mut State| {
                     s.selected = Rc::new(Vec::new())
-                }),
-                hgap(8.0),
-                knob("Sort by commits", |s: &mut State| {
+                }))
+                .child(hgap(8.0))
+                .child(knob("Sort by commits", |s: &mut State| {
                     let sort = table_next_sort(s.sort, 3);
                     s.sort = sort;
                     s.order = sorted_order(s.row_count, sort);
-                }),
-                hgap(8.0),
-                knob("Reset rows", |s: &mut State| {
+                }))
+                .child(hgap(8.0))
+                .child(knob("Reset rows", |s: &mut State| {
                     s.row_count = INITIAL_ROWS;
                     s.pages_loaded = 0;
                     s.order = sorted_order(s.row_count, s.sort);
-                }),
-            ])
-            .cross_axis(CrossAxisAlignment::Center)),
+                }))
+                .cross_axis(CrossAxisAlignment::Center)),
         ],
     )
 }
@@ -462,25 +462,27 @@ impl Component for DataPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
-        any(Column(vec![toasts(state), tables(state)]).cross_axis(CrossAxisAlignment::Start))
+    fn build(&self, state: &mut State) -> impl View<State> {
+        any(column()
+            .child(toasts(state))
+            .child(tables(state))
+            .cross_axis(CrossAxisAlignment::Start))
     }
 }
 
 pub fn page() -> AnyView<AppState> {
-    any(Column(vec![
-        any(heading("Motion \u{b7} Data")),
-        any(SizedBox(None, Some(8.0))),
-        any(caption(
+    any(column()
+        .child(heading("Motion \u{b7} Data"))
+        .child(SizedBox(None, Some(8.0)))
+        .child(caption(
             "The two data surfaces: the toast stack, with a trigger per status \
              and every anchor corner, and the virtualized table over a \
              1,000-row synthetic dataset that grows to 5,000 as you reach its \
              end.",
-        )),
-        any(SizedBox(None, Some(24.0))),
-        any(component(DataPage)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+        ))
+        .child(SizedBox(None, Some(24.0)))
+        .child(component(DataPage))
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 #[cfg(test)]

@@ -629,46 +629,78 @@ fix, see its commit message); no device or simulator run has occurred.
 
 ---
 
-### `focus-double-erasure-swap-blind` — a type swap through a doubly-erased pod is invisible to every reconciler
+### `focus-wrapper-erasure-swap-blind` — a type swap inside a wrapper view with `Element = Box<dyn Widget>` is invisible to the reconciler
 
-**Observed**: `any(any(view))` — an `AnyView` erased a second time — produces a
-`ChildPod` whose stored element has the concrete type `Box<dyn Widget>`
-*whatever the inner view is*. Every swap-detection site in `frust-widgets`
-decides "did this rebuild replace the widget?" by comparing that erased
-element's `TypeId` across the rebuild
-(`authoring::rebuild_child_tracked`, the one funnel `rebuild_child` and
-`rebuild_children` both use), so a genuine **inner** concrete-type change
-reports `swapped == false`: the old widget really is torn down and replaced
-inside `AnyView::rebuild`, but the pod's recorded `active`/`focused` flags are
-neither cleared nor reported. When the live focus session belonged to the
-replaced widget, the pod keeps routing `Key`/`Ime` events into a fresh widget
-that never claimed focus, no `mark_focus_orphaned` is raised, and
-`RenderRoot`'s `focus_active`/`ime_state` stay standing over a widget that no
-longer exists — exactly the failure the single-erasure swap arms exist to
-prevent (`docs/CODE_STANDARDS.md`'s orphan contract).
+**Observed**: `any(Wrap(any(view)))` — where `Wrap` is a custom view type with
+`type Element = Box<dyn Widget>` that forwards `build`/`rebuild`/`teardown` to
+an inner `AnyView` — produces a `ChildPod` whose recorded element has the
+concrete type `Box<dyn Widget>` regardless of the inner view. When the inner
+view swaps concrete type (e.g. `Text` → `Padding`), the swap-detection funnel
+in `authoring::rebuild_child_tracked` compares the erased element's `TypeId`
+before/after the rebuild and reports `swapped == false`: both are
+`Box<dyn Widget>`, though the inner rebuild succeeded. The pod's `active` and
+`focused` flags are neither cleared nor reported, and any live focus session
+routed into the replaced inner widget continues routing into a fresh widget
+that never claimed focus — exactly the failure the swap-detection arms exist to
+prevent.
 
-**Applies to**: any `ChildPod` built from a doubly-erased view, on every
-platform. It is reachable by accident rather than by intent: a builder that
-erases its own child (`pattern_switcher(key, pattern, child)` calls
-`any(child)` internally) double-erases whenever the caller already handed it an
-`AnyView`. **Single** erasure — the overwhelmingly common `any(concrete_view)`,
+**Applies to**: any `ChildPod` built from a wrapper view that re-boxes an inner
+`AnyView` under its own `Element = Box<dyn Widget>`. Pre-existing and in-tree
+only: `ReorderableListView` (crates/frust-widgets/src/drag/reorderable.rs:202-220,
+`self.inner: AnyView<State>`). The single-erasure case — `any(Wrap(concrete_view))`
 and every in-crate container's own child list — detects swaps correctly and is
-unaffected.
+unaffected. `any(any(view))` is CLOSED by idempotent erasure (`AnyView::new`
+unwraps an `AnyView` argument), so the residual is only wrapper views.
 
-**Why not fixed**: pre-existing (it predates the focus/IME fixes that
-found it) and not fixable at a call site — the information the reconciler needs
-has already been erased by the time it looks. Closing it needs **shared
-swap-detection machinery**: `ErasedView` would have to report the *element's*
-concrete `TypeId` through the erasure so nesting composes, instead of each
-reconciler probing whatever boxed element it happens to hold. That is a
-`frust-core` trait-surface change landing on every reconciler at once, and was
-deliberately not attempted inside a focus/IME review fix.
+**Why not fixed**: closing it needs shared `TypeId` reporting through
+`ErasedView` so nesting composes. Each reconciler today probes whatever boxed
+element it holds; `ErasedView` would need to report the element's concrete
+`TypeId` through the erasure boundary so `Wrap`'s element type is transparent to
+the swap check. That is a `frust-core` trait-surface change landing on every
+reconciler at once, and was deliberately not attempted during the focus/IME
+review fixes.
 
-**Evidence**: source inspection of `crates/frust-core/src/view.rs`
-(`AnyView`'s `View`/`ErasedView` impls — the outer `dyn_build` boxes the inner
-`Box<dyn Widget>`) against `crates/frust-widgets/src/authoring.rs`'s
-`rebuild_child_tracked`; found during review-fix-3 (FC)'s audit of the
-focus-severing sites.
+**Evidence**: source inspection of `crates/frust-core/src/view.rs` (AnyView's
+idempotent `new`), `crates/frust-widgets/src/drag/reorderable.rs` (the only
+in-tree wrapper; the `inner: AnyView<State>` field (:106), and the `type Element = Box<dyn Widget>` in its
+`impl View<State> for ReorderableListView<State>` block),
+`crates/frust-widgets/tests/double_erasure_swap.rs` (tripwire test
+`wrapper_view_erasure_swap_blind`), and `crates/frust-widgets/src/authoring.rs` (swap detection).
+
+---
+
+### `keyed-list-all-or-nothing-debug-only` — a mixed keyed/unkeyed list is caught by a `debug_assert` only, and the erasure codemod skips some sites
+
+**Observed**: a `FlexView` / `column()` / `row()` child list must be all-keyed
+or all-unkeyed. Mixing `.keyed(..)` with `.child(..)` / `.flex(..)` is detected
+by a `debug_assert!` on rebuild only
+(crates/frust-widgets/src/authoring.rs:~557 documents the tripwire; like the
+`debug_assert`s noted at list_view.rs:~102 it is inert in release builds), so in a release build a mixed list silently falls back to
+positional reconciliation: keyed children lose identity across a reorder and
+are rebuilt in place rather than relocated, with no diagnostic. The same
+applies to a duplicate key set.
+
+**Applies to**: any `FlexView` child list built with a mix of keyed and unkeyed
+children, in release builds only. All-keyed and all-unkeyed lists are
+unaffected. The erasure codemod also has documented blind spots: it skips,
+with a note, a site where a local binding or fn shadows a builder name, and a
+mixed keyed list; and a closure parameter typed `AnyView` whose `any()` call
+the tool would drop is not rewritten safely, which the compiler catches as a
+type error rather than a silent change.
+
+**Why not fixed**: the rule is a documented contract (CODE_STANDARDS.md's
+"Keyed lists are all-or-nothing, and keys must be unique": a mixed or
+duplicate key set `debug_assert!`s and falls back to positional matching in
+release, never panicking live), chosen so a live app never panics on a list
+shape error. Turning it into a compile-time or always-on check needs a
+typestate on the builder or a release-mode diagnostic channel, neither of
+which is in scope. The codemod's skipped sites are reported (exit status 2) and
+fixed by hand, and its one silent-risk case is compiler-caught.
+
+**Evidence**: `docs/CODE_STANDARDS.md` (keyed-list rule),
+`crates/frust-widgets/src/authoring.rs` (`rebuild_children`'s `debug_assert`), and the Phase 3
+review round of the any-erasure plan (its keyed-equivalence and codemod
+findings).
 
 ---
 

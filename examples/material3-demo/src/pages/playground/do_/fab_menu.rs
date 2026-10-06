@@ -29,7 +29,7 @@
 //! [`FabMenuPlayground`] `Component` (never [`AppState`]) per the page
 //! contract in [`crate::pages::playground`].
 
-use frust::{AnyView, Component, SizedBox, any, component, icon};
+use frust::{AnyView, Component, SizedBox, View, any, component, icon};
 use frust_material::{fab_menu, fab_menu_item, icons};
 
 use crate::AppState;
@@ -56,12 +56,12 @@ fn preview(state: &Knobs) -> AnyView<Knobs> {
     // quartet (see [module docs](self)).
     let trigger_icon = if state.open { icons::CLOSE } else { icons::ADD };
     let items = vec![
-        fab_menu_item(any(icon(icons::IMAGE)), "Image", |_: &mut Knobs| {}),
-        fab_menu_item(any(icon(icons::VIDEOCAM)), "Video", |_: &mut Knobs| {}),
-        fab_menu_item(any(icon(icons::MIC)), "Audio", |_: &mut Knobs| {}),
+        fab_menu_item(icon(icons::IMAGE), "Image", |_: &mut Knobs| {}),
+        fab_menu_item(icon(icons::VIDEOCAM), "Video", |_: &mut Knobs| {}),
+        fab_menu_item(icon(icons::MIC), "Audio", |_: &mut Knobs| {}),
     ];
     any(SizedBox::<Knobs>(None, Some(280.0)).child(fab_menu(
-        any(icon(trigger_icon)),
+        icon(trigger_icon),
         state.open,
         items,
         |state: &mut Knobs| state.open = !state.open,
@@ -96,7 +96,7 @@ impl Component for FabMenuPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

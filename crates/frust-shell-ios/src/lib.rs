@@ -119,7 +119,7 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// `#[cfg(target_os = "ios")]`, so off-iOS the invocation expands to nothing:
 ///
 /// ```ignore
-/// frust::ios_app!(AppState, move |s| root.build(s));
+/// frust::ios_app!(AppState, move |s| frust::AnyView::new(root.build(s)));
 /// ```
 ///
 /// Two forms:
@@ -131,7 +131,7 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 ///   delegates to this one with `<$state_ty as Default>::default` as the
 ///   factory.
 ///
-/// `$build` is the root component's build closure, a `FnMut(&mut State) -> impl View<State>` (`move |s| root.build(s)`).
+/// `$build` is the root component's build closure, a `FnMut(&mut State) -> impl View<State>` that returns any `View<State>`; since a `Component::build` result's opaque type captures the borrows, it must be erased with `AnyView::new` before passing it to the macro (`move |s| frust::AnyView::new(root.build(s))`).
 #[macro_export]
 macro_rules! ios_app {
     ($state_ty:ty, $build:expr $(,)?) => {

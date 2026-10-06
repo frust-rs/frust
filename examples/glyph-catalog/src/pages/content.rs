@@ -13,8 +13,8 @@
 //! lives in the retained `Component` element" rule.
 
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, Column, Component, FlexView, Row, SizedBox, Theme, any,
-    button, component, flexible, inflexible, keyed, text, use_context,
+    AnyView, ButtonStyle, Color, Component, SizedBox, Theme, View, any, button, column, component,
+    row, text, use_context,
 };
 use frust_glyph::{
     BadgeVariant, StatDelta, TermLine, accordion, badge, empty_state, glyph_card, glyph_list,
@@ -51,12 +51,11 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
 /// A titled section: an accent heading over `body`, with trailing space
 /// before the next section.
 fn section(title: &str, body: AnyView<ContentDemoState>) -> AnyView<ContentDemoState> {
-    any(Column(vec![
-        any(text(title).size(15.0).color(section_accent())),
-        any(SizedBox(None, Some(HEADING_GAP))),
-        body,
-        any(SizedBox(None, Some(SECTION_GAP))),
-    ]))
+    any(column()
+        .child(text(title).size(15.0).color(section_accent()))
+        .child(SizedBox(None, Some(HEADING_GAP)))
+        .child(body)
+        .child(SizedBox(None, Some(SECTION_GAP))))
 }
 
 /// [`ContentDemo`]'s retained local state (see the [module docs](self)): the
@@ -90,16 +89,18 @@ impl Component for ContentDemo {
         }
     }
 
-    fn build(&self, state: &mut ContentDemoState) -> AnyView<ContentDemoState> {
-        any(Column(vec![
-            section("Card", card_demo()),
-            section("Stat cards", stat_card_grid()),
-            section("List (also the data-table stand-in)", list_demo(state)),
-            section("Accordion", accordion_demo(state)),
-            section("Empty state", empty_state_demo()),
-            section("Terminal", term_demo(state)),
-            section("Tooltip", tooltip_demo()),
-        ]))
+    fn build(&self, state: &mut ContentDemoState) -> impl View<ContentDemoState> {
+        any(column()
+            .child(section("Card", card_demo()))
+            .child(section("Stat cards", stat_card_grid()))
+            .child(section(
+                "List (also the data-table stand-in)",
+                list_demo(state),
+            ))
+            .child(section("Accordion", accordion_demo(state)))
+            .child(section("Empty state", empty_state_demo()))
+            .child(section("Terminal", term_demo(state)))
+            .child(section("Tooltip", tooltip_demo())))
     }
 }
 
@@ -111,33 +112,32 @@ fn card_demo() -> AnyView<ContentDemoState> {
         .desc(text(
             "Builds, tests, and ships the release artifact on every push to main.",
         ))
-        .footer(Row(vec![
-            any(badge("stable", BadgeVariant::Success).dot(true)),
-            any(SizedBox(Some(8.0), None)),
-            any(button("Details", |_: &mut ContentDemoState| {})
-                .style(ButtonStyle::Secondary)
-                .small()),
-        ])))
+        .footer(
+            row()
+                .child(badge("stable", BadgeVariant::Success).dot(true))
+                .child(SizedBox(Some(8.0), None))
+                .child(
+                    button("Details", |_: &mut ContentDemoState| {})
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                ),
+        ))
 }
 
 /// A 4-up `stat_card` grid mixing an [`StatDelta::Up`] and a
 /// [`StatDelta::Down`] delta alongside two plain readouts.
 fn stat_card_grid() -> AnyView<ContentDemoState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(1, stat_card("Sessions", "1,284")),
-            inflexible(SizedBox(Some(STAT_GAP), None)),
-            flexible(
-                1,
-                stat_card("Uptime", "99.98%").delta(StatDelta::Up, "0.4%"),
-            ),
-            inflexible(SizedBox(Some(STAT_GAP), None)),
-            flexible(1, stat_card("Errors", "12").delta(StatDelta::Down, "3")),
-            inflexible(SizedBox(Some(STAT_GAP), None)),
-            flexible(1, stat_card("Latency", "42ms")),
-        ],
-    ))
+    any(row()
+        .flex(1, stat_card("Sessions", "1,284"))
+        .child(SizedBox(Some(STAT_GAP), None))
+        .flex(
+            1,
+            stat_card("Uptime", "99.98%").delta(StatDelta::Up, "0.4%"),
+        )
+        .child(SizedBox(Some(STAT_GAP), None))
+        .flex(1, stat_card("Errors", "12").delta(StatDelta::Down, "3"))
+        .child(SizedBox(Some(STAT_GAP), None))
+        .flex(1, stat_card("Latency", "42ms")))
 }
 
 /// A `glyph_list` of 4 rows (glyph box, title, sub, meta, chevron) that also
@@ -153,59 +153,59 @@ fn list_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
          table has no dedicated Frust widget. {press_note}"
     );
 
-    any(Column(vec![
-        any(glyph_list(vec![
-            glyph_list_item("$", "deploy")
-                .sub("main → production")
-                .meta("2m ago")
-                .chevron(true),
-            glyph_list_item("#", "rollback")
-                .sub("v0.44.0 → v0.43.2")
-                .meta("1h ago")
-                .chevron(true),
-            glyph_list_item("~", "migrate")
-                .sub("schema v12")
-                .meta("3h ago")
-                .chevron(true),
-            glyph_list_item("!", "alert")
-                .sub("latency spike")
-                .meta("6h ago")
-                .chevron(true),
-        ])
-        .on_press(|state: &mut ContentDemoState, i| state.pressed_row = Some(i))),
-        any(SizedBox(None, Some(6.0))),
-        any(text(caption).size(11.0)),
-    ]))
+    any(column()
+        .child(
+            glyph_list(vec![
+                glyph_list_item("$", "deploy")
+                    .sub("main → production")
+                    .meta("2m ago")
+                    .chevron(true),
+                glyph_list_item("#", "rollback")
+                    .sub("v0.44.0 → v0.43.2")
+                    .meta("1h ago")
+                    .chevron(true),
+                glyph_list_item("~", "migrate")
+                    .sub("schema v12")
+                    .meta("3h ago")
+                    .chevron(true),
+                glyph_list_item("!", "alert")
+                    .sub("latency spike")
+                    .meta("6h ago")
+                    .chevron(true),
+            ])
+            .on_press(|state: &mut ContentDemoState, i| state.pressed_row = Some(i)),
+        )
+        .child(SizedBox(None, Some(6.0)))
+        .child(text(caption).size(11.0)))
 }
 
 /// An accordion trio, one panel open at a time — the built-in height
 /// animation plays on every toggle.
 fn accordion_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
     let open = state.open_accordion;
-    any(Column(vec![
-        accordion_item(
+    any(column()
+        .child(accordion_item(
             0,
             open,
             "What is Glyph?",
             "A terminal-native design language: monospace type, amber accent, minimal chrome.",
-        ),
-        any(SizedBox(None, Some(8.0))),
-        accordion_item(
+        ))
+        .child(SizedBox(None, Some(8.0)))
+        .child(accordion_item(
             1,
             open,
             "Reduced motion",
             "Every transition collapses to a 120ms linear crossfade when the OS \
              accessibility flag is on.",
-        ),
-        any(SizedBox(None, Some(8.0))),
-        accordion_item(
+        ))
+        .child(SizedBox(None, Some(8.0)))
+        .child(accordion_item(
             2,
             open,
             "Data-table stand-in",
             "No dedicated table widget ships yet — glyph_list plays that role \
              (see the List section above).",
-        ),
-    ]))
+        )))
 }
 
 /// One accordion panel at `index`, open iff `index == open`. Pressing its
@@ -242,35 +242,34 @@ fn term_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
         TermLine::comment("# staggered per-line reveal — replays below"),
     ];
 
-    any(Column(vec![
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![keyed(state.replay_epoch, term_block(lines).staggered(true))],
-        )),
-        any(SizedBox(None, Some(8.0))),
-        any(button("Replay", |state: &mut ContentDemoState| {
-            state.replay_epoch += 1;
-        })
-        .small()),
-    ]))
+    any(column()
+        .child(column().keyed(state.replay_epoch, term_block(lines).staggered(true)))
+        .child(SizedBox(None, Some(8.0)))
+        .child(
+            button("Replay", |state: &mut ContentDemoState| {
+                state.replay_epoch += 1;
+            })
+            .small(),
+        ))
 }
 
 /// A `tooltip` wrapping a small button target, plus a caption on its
 /// brightness-invariant ink (unlike every other themed color on this page,
 /// `GlyphInk` never swaps between light and dark).
 fn tooltip_demo() -> AnyView<ContentDemoState> {
-    any(Column(vec![
-        any(tooltip(
+    any(column()
+        .child(tooltip(
             button("Hold me", |_: &mut ContentDemoState| {})
                 .style(ButtonStyle::Secondary)
                 .small(),
             "Long-press to peek",
-        )),
-        any(SizedBox(None, Some(6.0))),
-        any(text(
-            "Tooltip ink stays fixed (GlyphInk) — it never swaps with the page's \
+        ))
+        .child(SizedBox(None, Some(6.0)))
+        .child(
+            text(
+                "Tooltip ink stays fixed (GlyphInk) — it never swaps with the page's \
              light/dark brightness, unlike every other color on this page.",
-        )
-        .size(11.0)),
-    ]))
+            )
+            .size(11.0),
+        ))
 }

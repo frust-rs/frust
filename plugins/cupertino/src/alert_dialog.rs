@@ -897,7 +897,6 @@ mod tests {
 
     use frust::FrameTime;
     use frust::NavigatorView;
-    use frust::authoring::any;
     use frust_core::RenderRoot;
     use frust_widgets::navigator;
 
@@ -949,7 +948,7 @@ mod tests {
 
         fn app(&self) -> impl FnMut(&mut DialogState) -> NavigatorView<DialogState> + use<> {
             let ctrl = self.controller.clone();
-            move |_: &mut DialogState| navigator(&ctrl, || any(text("base").size(17.0)))
+            move |_: &mut DialogState| navigator(&ctrl, || text("base").size(17.0))
         }
 
         fn rebuild_layout(&mut self) {

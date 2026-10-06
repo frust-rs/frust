@@ -167,7 +167,7 @@ fn feed_screen_loads_and_renders_bubbles() {
 
     let mut root: AppRoot = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     let mut tcx = TextContext::new();
 
     frust::provide_context(frust_material::baseline());
@@ -249,7 +249,7 @@ fn keyed_feed_list_with_loading_and_typing_indicators() {
 
     let mut root: AppRoot = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     let mut tcx = TextContext::new();
 
     frust::provide_context(frust_material::baseline());

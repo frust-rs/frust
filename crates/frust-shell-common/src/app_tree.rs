@@ -1020,7 +1020,7 @@ mod tests {
         fn init(&self) {
             provide_context(ProvidedCtx(42));
         }
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             any(component(ChildComp {
                 sink: self.sink.clone(),
             }))
@@ -1036,7 +1036,7 @@ mod tests {
     impl Component for ChildComp {
         type State = ();
         fn init(&self) {}
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             let resolved = use_context::<ProvidedCtx>().map(|c| c.0);
             *self.sink.borrow_mut() = resolved;
             any(StubLeaf)
@@ -1057,7 +1057,7 @@ mod tests {
         owner.with(|| {
             let mut app = new_boxed_app_with(
                 move || root.init(),
-                move |state: &mut ()| root_for_build.build(state),
+                move |state: &mut ()| AnyView::new(root_for_build.build(state)),
             );
             app.rebuild();
         });
@@ -1082,7 +1082,7 @@ mod tests {
 
         let mut app = new_boxed_app_with(
             move || root.init(),
-            move |state: &mut ()| root_for_build.build(state),
+            move |state: &mut ()| AnyView::new(root_for_build.build(state)),
         );
         app.rebuild();
 
@@ -1131,7 +1131,7 @@ mod tests {
     impl Component for MetricsComp {
         type State = ();
         fn init(&self) {}
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             *self.sink.borrow_mut() = use_context::<WindowMetrics>();
             any(StubLeaf)
         }
@@ -1168,7 +1168,8 @@ mod tests {
             // @3x portrait phone surface, no insets reported yet.
             publish(&mut publisher, (1080, 2400), 3.0, WindowInsets::default());
 
-            let mut app = new_boxed_app_with(|| (), move |state: &mut ()| comp.build(state));
+            let mut app =
+                new_boxed_app_with(|| (), move |state: &mut ()| AnyView::new(comp.build(state)));
             app.rebuild();
 
             // (1) Delivery: it resolved inside `Component::build`, in LOGICAL px.

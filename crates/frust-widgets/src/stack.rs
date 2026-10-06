@@ -8,7 +8,7 @@
 
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
 };
 use kurbo::{Point, Size};
 
@@ -18,9 +18,66 @@ pub struct StackView<State: 'static> {
 }
 
 /// Overlay `children` in a z-order stack (first child at the bottom).
+///
+/// `children` holds one view type; each item is erased here, so a homogeneous
+/// list needs no `any()`. A mixed-type list still erases per item, and a bare
+/// empty list needs its item type spelled out. The parameter stays a `Vec` so an
+/// un-annotated `.collect()` argument keeps inferring; for any other iterable,
+/// use [`stack`] with `.children(..)`.
+///
+/// ```
+/// use frust_core::any;
+/// use frust_widgets::{Stack, StackView, text};
+/// # fn demo() -> (StackView<()>, StackView<()>) {
+/// let layers = Stack(vec![text("under"), text("over")]);
+/// let mixed = Stack(vec![any(text("under")), any(Stack(vec![text("over")]))]);
+/// # (layers, mixed)
+/// # }
+/// # let _ = demo();
+/// ```
 #[allow(non_snake_case)]
-pub fn Stack<State: 'static>(children: Vec<AnyView<State>>) -> StackView<State> {
-    StackView { children }
+pub fn Stack<State: 'static, V: View<State>>(children: Vec<V>) -> StackView<State> {
+    StackView {
+        children: children.into_iter().map(any).collect(),
+    }
+}
+
+/// An empty z-order stack, ready for fluent children: no `any()` needed.
+pub fn stack<State: 'static>() -> StackView<State> {
+    StackView {
+        children: Vec::new(),
+    }
+}
+
+impl<State: 'static> StackView<State> {
+    /// Append a child on top of the existing ones. Accepts any [`View`].
+    pub fn child<V: View<State>>(mut self, view: V) -> Self {
+        self.children.push(any(view));
+        self
+    }
+
+    /// Append every item of `iter` as a child, in order.
+    pub fn children<I, V>(mut self, iter: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: View<State>,
+    {
+        self.children.extend(iter.into_iter().map(any));
+        self
+    }
+
+    /// Apply `f` to the builder only when `cond` is true.
+    pub fn when(self, cond: bool, f: impl FnOnce(Self) -> Self) -> Self {
+        if cond { f(self) } else { self }
+    }
+
+    /// Apply `f` with the contained value when `opt` is `Some`.
+    pub fn when_some<T>(self, opt: Option<T>, f: impl FnOnce(Self, T) -> Self) -> Self {
+        match opt {
+            Some(value) => f(self, value),
+            None => self,
+        }
+    }
 }
 
 /// The retained widget for a [`StackView`].
@@ -120,7 +177,9 @@ mod tests {
 
     #[test]
     fn sizes_to_largest_child() {
-        let view: StackView<()> = Stack(vec![leaf_any(30.0, 60.0), leaf_any(80.0, 20.0)]);
+        let view: StackView<()> = stack()
+            .child(leaf_any(30.0, 60.0))
+            .child(leaf_any(80.0, 20.0));
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         // Widest child is 80 (child 1); tallest is 60 (child 0).
@@ -134,7 +193,9 @@ mod tests {
     #[test]
     fn hit_test_prefers_topmost_child() {
         // Two fully-overlapping probes; the last (topmost) must consume the event.
-        let view: StackView<Vec<u32>> = Stack(vec![probe(0).into_any(), probe(1).into_any()]);
+        let view: StackView<Vec<u32>> = stack()
+            .child(probe(0).into_any())
+            .child(probe(1).into_any());
         let mut w = build(&view);
         let mut lctx = LayoutCtx::new();
         w.layout(&mut lctx, &BoxConstraints::tight(Size::new(100.0, 100.0)));

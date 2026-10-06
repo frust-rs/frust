@@ -22,8 +22,8 @@
 //! `rebuild_optional_slot`) actually reports.
 
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, InspectNode, LayoutCtx, PaintCtx, PaintScene,
-    RenderRoot, View, Widget, WindowEdgeInsets, WindowInsets, any,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, InspectNode, LayoutCtx, PaintCtx, PaintScene,
+    RenderRoot, View, Widget, WindowEdgeInsets, WindowInsets,
 };
 use frust_widgets::{Alignment, ScaffoldView, scaffold};
 use kurbo::{Point, Size};
@@ -299,9 +299,9 @@ fn all_four_slots_are_present_sized_and_positioned_consistently() {
     let nodes = inspect(
         &mut |_: &mut ()| -> ScaffoldView<()> {
             scaffold(body(0.0, 0.0))
-                .app_bar(any(bar(56.0)))
-                .bottom_bar(any(bar(48.0)))
-                .fab(any(fab_leaf(56.0, 56.0)))
+                .app_bar(bar(56.0))
+                .bottom_bar(bar(48.0))
+                .fab(fab_leaf(56.0, 56.0))
         },
         Size::new(300.0, 400.0),
         WindowInsets::default(),
@@ -351,7 +351,7 @@ fn fab_alignment_moves_the_fab_within_its_box() {
     let nodes = inspect(
         &mut |_: &mut ()| -> ScaffoldView<()> {
             scaffold(body(0.0, 0.0))
-                .fab(any(fab_leaf(56.0, 56.0)))
+                .fab(fab_leaf(56.0, 56.0))
                 .fab_alignment(Alignment::TOP_LEFT)
         },
         Size::new(300.0, 400.0),
@@ -372,7 +372,7 @@ fn r_b4_inset_a_self_insetting_app_bar_is_never_pre_inset_by_the_scaffold() {
     );
     let nodes = inspect(
         &mut |_: &mut ()| -> ScaffoldView<()> {
-            scaffold(body(0.0, 0.0)).app_bar(any(self_inset_bar(56.0, InsetEdge::Top)))
+            scaffold(body(0.0, 0.0)).app_bar(self_inset_bar(56.0, InsetEdge::Top))
         },
         Size::new(300.0, 400.0),
         insets,
@@ -401,7 +401,7 @@ fn fab_consumes_the_bottom_window_inset_when_no_bottom_bar_is_present() {
     );
     let nodes = inspect(
         &mut |_: &mut ()| -> ScaffoldView<()> {
-            scaffold(body(0.0, 0.0)).fab(any(fab_leaf(56.0, 56.0)))
+            scaffold(body(0.0, 0.0)).fab(fab_leaf(56.0, 56.0))
         },
         Size::new(300.0, 400.0),
         insets,
@@ -428,8 +428,8 @@ fn bottom_bar_self_insets_and_the_fab_floats_above_it_without_double_consuming()
     let nodes = inspect(
         &mut |_: &mut ()| -> ScaffoldView<()> {
             scaffold(body(0.0, 0.0))
-                .bottom_bar(any(self_inset_bar(48.0, InsetEdge::Bottom)))
-                .fab(any(fab_leaf(56.0, 56.0)))
+                .bottom_bar(self_inset_bar(48.0, InsetEdge::Bottom))
+                .fab(fab_leaf(56.0, 56.0))
         },
         Size::new(300.0, 400.0),
         insets,
@@ -473,10 +473,10 @@ fn bottom_bar_self_insets_and_the_fab_floats_above_it_without_double_consuming()
 #[test]
 fn app_bar_removed_on_rebuild_expands_the_body_to_full_height() {
     let (before, after, flags) = two_pass(
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar_opt(Some(bar(56.0))) },
         |_: &mut ()| -> ScaffoldView<()> {
-            scaffold(body(0.0, 0.0)).app_bar_opt(Some(any(bar(56.0))))
+            scaffold(body(0.0, 0.0)).app_bar_opt(None::<AnyView<()>>)
         },
-        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar_opt(None) },
         Size::new(300.0, 400.0),
         WindowInsets::default(),
     );
@@ -498,10 +498,10 @@ fn app_bar_removed_on_rebuild_expands_the_body_to_full_height() {
 #[test]
 fn app_bar_added_on_rebuild_shrinks_the_body_below_it() {
     let (before, after, flags) = two_pass(
-        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar_opt(None) },
         |_: &mut ()| -> ScaffoldView<()> {
-            scaffold(body(0.0, 0.0)).app_bar_opt(Some(any(bar(56.0))))
+            scaffold(body(0.0, 0.0)).app_bar_opt(None::<AnyView<()>>)
         },
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar_opt(Some(bar(56.0))) },
         Size::new(300.0, 400.0),
         WindowInsets::default(),
     );
@@ -523,9 +523,11 @@ fn app_bar_added_on_rebuild_shrinks_the_body_below_it() {
 fn bottom_bar_removed_on_rebuild_expands_the_body_to_full_height() {
     let (before, after, flags) = two_pass(
         |_: &mut ()| -> ScaffoldView<()> {
-            scaffold(body(0.0, 0.0)).bottom_bar_opt(Some(any(bar(48.0))))
+            scaffold(body(0.0, 0.0)).bottom_bar_opt(Some(bar(48.0)))
         },
-        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).bottom_bar_opt(None) },
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).bottom_bar_opt(None::<AnyView<()>>)
+        },
         Size::new(300.0, 400.0),
         WindowInsets::default(),
     );
@@ -547,9 +549,11 @@ fn bottom_bar_removed_on_rebuild_expands_the_body_to_full_height() {
 #[test]
 fn bottom_bar_added_on_rebuild_shrinks_the_body_above_it() {
     let (before, after, flags) = two_pass(
-        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).bottom_bar_opt(None) },
         |_: &mut ()| -> ScaffoldView<()> {
-            scaffold(body(0.0, 0.0)).bottom_bar_opt(Some(any(bar(48.0))))
+            scaffold(body(0.0, 0.0)).bottom_bar_opt(None::<AnyView<()>>)
+        },
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).bottom_bar_opt(Some(bar(48.0)))
         },
         Size::new(300.0, 400.0),
         WindowInsets::default(),
@@ -570,9 +574,7 @@ fn bottom_bar_added_on_rebuild_shrinks_the_body_above_it() {
 fn fab_appearing_on_rebuild_positions_the_fab_without_disturbing_the_body() {
     let (before, after, flags) = two_pass(
         |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)) },
-        |_: &mut ()| -> ScaffoldView<()> {
-            scaffold(body(0.0, 0.0)).fab(any(fab_leaf(56.0, 56.0)))
-        },
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).fab(fab_leaf(56.0, 56.0)) },
         Size::new(300.0, 400.0),
         WindowInsets::default(),
     );
@@ -599,9 +601,7 @@ fn fab_appearing_on_rebuild_positions_the_fab_without_disturbing_the_body() {
 #[test]
 fn fab_disappearing_on_rebuild_leaves_the_body_undisturbed() {
     let (before, after, flags) = two_pass(
-        |_: &mut ()| -> ScaffoldView<()> {
-            scaffold(body(0.0, 0.0)).fab(any(fab_leaf(56.0, 56.0)))
-        },
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).fab(fab_leaf(56.0, 56.0)) },
         |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)) },
         Size::new(300.0, 400.0),
         WindowInsets::default(),
@@ -632,8 +632,8 @@ fn app_bar_content_swap_with_a_different_height_relayouts_the_body() {
     // exercises `rebuild_optional_slot`'s `(Some, Some, Some(pod))` arm, not a
     // teardown/build swap.
     let (before, after, flags) = two_pass(
-        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar(any(bar(56.0))) },
-        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar(any(bar(80.0))) },
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar(bar(56.0)) },
+        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar(bar(80.0)) },
         Size::new(300.0, 400.0),
         WindowInsets::default(),
     );
@@ -660,15 +660,15 @@ fn rebuild_with_unchanged_slots_reports_no_change_flags() {
     let (before, after, flags) = two_pass(
         |_: &mut ()| -> ScaffoldView<()> {
             scaffold(body(50.0, 50.0))
-                .app_bar_opt(Some(any(bar(56.0))))
-                .bottom_bar_opt(Some(any(bar(48.0))))
-                .fab(any(fab_leaf(56.0, 56.0)))
+                .app_bar_opt(Some(bar(56.0)))
+                .bottom_bar_opt(Some(bar(48.0)))
+                .fab(fab_leaf(56.0, 56.0))
         },
         |_: &mut ()| -> ScaffoldView<()> {
             scaffold(body(50.0, 50.0))
-                .app_bar_opt(Some(any(bar(56.0))))
-                .bottom_bar_opt(Some(any(bar(48.0))))
-                .fab(any(fab_leaf(56.0, 56.0)))
+                .app_bar_opt(Some(bar(56.0)))
+                .bottom_bar_opt(Some(bar(48.0)))
+                .fab(fab_leaf(56.0, 56.0))
         },
         Size::new(300.0, 400.0),
         WindowInsets::default(),

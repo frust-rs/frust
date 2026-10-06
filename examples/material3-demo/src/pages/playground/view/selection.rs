@@ -91,9 +91,9 @@
 use std::collections::BTreeSet;
 
 use frust::{
-    AnyView, Axis, Color, ColorScheme, Column, Component, CrossAxisAlignment, EdgeInsets, FlexView,
-    Get, GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox, any, component,
-    container, flexible, icon, inflexible, navigator, scroll_view, text,
+    AnyView, Color, ColorScheme, Column, Component, CrossAxisAlignment, EdgeInsets, Get,
+    GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox, View, any, column,
+    component, container, icon, navigator, scroll_view, text,
 };
 use frust_material::{
     MaterialDimensions, MaterialSpacing, MaterialTokens, SnackbarController, dismiss_background,
@@ -168,7 +168,7 @@ impl Component for SelectionPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let snapshot = state.clone();
         any(navigator(&state.nav, move || content(&snapshot)))
     }
@@ -201,19 +201,20 @@ fn trigger_preview() -> AnyView<Knobs> {
 
     any(play_preview_card(
         "Selection demo",
-        Column(vec![
-            any(text(
-                "Long-press a row to enter selection mode, then tap rows to \
+        column()
+            .child(
+                text(
+                    "Long-press a row to enter selection mode, then tap rows to \
                  add or remove them. The contextual bar's close button clears \
                  the selection.",
+                )
+                .style(caption),
             )
-            .style(caption)),
-            any(SizedBox::<Knobs>(None, Some(MaterialSpacing::MD))),
-            any(tonal_button("Open selection demo", |state: &mut Knobs| {
+            .child(SizedBox::<Knobs>(None, Some(MaterialSpacing::MD)))
+            .child(tonal_button("Open selection demo", |state: &mut Knobs| {
                 open_demo(state)
-            })),
-        ])
-        .cross_axis(CrossAxisAlignment::Start),
+            }))
+            .cross_axis(CrossAxisAlignment::Start),
     ))
 }
 
@@ -225,12 +226,12 @@ fn open_demo(state: &Knobs) {
     let show_select_all = state.show_select_all.get_untracked();
     let custom_highlight = state.custom_highlight.get_untracked();
     state.nav.push(move || {
-        any(component(SelectionDemoHost {
+        component(SelectionDemoHost {
             nav: nav.clone(),
             dismissible,
             show_select_all,
             custom_highlight,
-        }))
+        })
     });
 }
 
@@ -331,7 +332,7 @@ impl Component for SelectionDemoHost {
         }
     }
 
-    fn build(&self, state: &mut DemoState) -> AnyView<DemoState> {
+    fn build(&self, state: &mut DemoState) -> impl View<DemoState> {
         let controller = state.toasts.clone();
         any(snackbar_host(
             &controller,
@@ -354,23 +355,17 @@ fn demo_content(
     show_select_all: bool,
     custom_highlight: bool,
 ) -> AnyView<DemoState> {
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(demo_bar(state, show_select_all)),
-            flexible(
-                1,
-                scroll_view(Padding(
-                    EdgeInsets {
-                        left: MaterialSpacing::LG,
-                        top: MaterialSpacing::SM,
-                        right: MaterialSpacing::LG,
-                        bottom: MaterialSpacing::XXL,
-                    },
-                    demo_list(state, dismissible, custom_highlight),
-                )),
-            ),
-        ],
+    any(column().child(demo_bar(state, show_select_all)).flex(
+        1,
+        scroll_view(Padding(
+            EdgeInsets {
+                left: MaterialSpacing::LG,
+                top: MaterialSpacing::SM,
+                right: MaterialSpacing::LG,
+                bottom: MaterialSpacing::XXL,
+            },
+            demo_list(state, dismissible, custom_highlight),
+        )),
     ))
 }
 
@@ -389,13 +384,12 @@ fn demo_bar(state: &DemoState, show_select_all: bool) -> AnyView<DemoState> {
     )
     // Mid-page, below the page's own app bar: not at the window top.
     .safe_area(false)
-    .leading(any(icon_button(
-        any(icon(icons::ARROW_BACK)),
-        move |_: &mut DemoState| {
+    .leading(
+        icon_button(icon(icons::ARROW_BACK), move |_: &mut DemoState| {
             back_nav.pop();
-        },
-    )
-    .semantic_label("Back"))));
+        })
+        .semantic_label("Back"),
+    ));
 
     any(selection_app_bar(
         idle,
@@ -407,11 +401,8 @@ fn demo_bar(state: &DemoState, show_select_all: bool) -> AnyView<DemoState> {
     .safe_area(false)
     .show_select_all(show_select_all)
     .actions(vec![
-        any(
-            icon_button(any(icon(icons::ARCHIVE)), |_: &mut DemoState| {})
-                .semantic_label("Archive"),
-        ),
-        any(icon_button(any(icon(icons::DELETE)), |_: &mut DemoState| {}).semantic_label("Delete")),
+        any(icon_button(icon(icons::ARCHIVE), |_: &mut DemoState| {}).semantic_label("Archive")),
+        any(icon_button(icon(icons::DELETE), |_: &mut DemoState| {}).semantic_label("Delete")),
     ])
     .on_all_selected(|state: &mut DemoState, all: bool| {
         state.selected = if all {

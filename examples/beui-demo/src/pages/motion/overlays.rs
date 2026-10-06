@@ -22,8 +22,8 @@
 //! `crate::pages::motion::text`).
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, EdgeInsets, Padding, Row, SizedBox, Stack, any,
-    component, text,
+    AnyView, Column, Component, CrossAxisAlignment, EdgeInsets, Padding, Row, SizedBox, View, any,
+    column, component, row, stack, text,
 };
 use frust_beui::components::bottom_sheet::bottom_sheet;
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
@@ -133,26 +133,30 @@ fn stage(
 ) -> AnyView<State> {
     let (width, height) = size;
     let (left, top) = inset;
-    any(SizedBox(Some(width), Some(height)).child(Stack(vec![
-        any(Padding(
-            EdgeInsets {
-                left,
-                top,
-                right: 0.0,
-                bottom: 0.0,
-            },
-            Column(vec![content]).cross_axis(CrossAxisAlignment::Start),
-        )),
-        host,
-    ])))
+    any(SizedBox(Some(width), Some(height)).child(
+        stack()
+            .child(Padding(
+                EdgeInsets {
+                    left,
+                    top,
+                    right: 0.0,
+                    bottom: 0.0,
+                },
+                column()
+                    .child(content)
+                    .cross_axis(CrossAxisAlignment::Start),
+            ))
+            .child(host),
+    ))
 }
 
 /// A labelled stage: the caption above the live overlay.
 fn labelled(label: &str, body: AnyView<State>) -> AnyView<State> {
-    any(
-        Column(vec![any(caption(label.to_string())), gap(8.0), body])
-            .cross_axis(CrossAxisAlignment::Start),
-    )
+    any(column()
+        .child(caption(label.to_string()))
+        .child(gap(8.0))
+        .child(body)
+        .cross_axis(CrossAxisAlignment::Start))
 }
 
 /// A small outline button — the trigger most stages here open from.
@@ -195,8 +199,8 @@ fn tooltips(state: &State) -> AnyView<State> {
 
     let no_arrow = state.tooltips[4].clone();
     let instant = state.tooltips[5].clone();
-    let extras = any(Row(vec![
-        labelled(
+    let extras = any(row()
+        .child(labelled(
             "arrow: off",
             stage(
                 (160.0, 130.0),
@@ -209,9 +213,9 @@ fn tooltips(state: &State) -> AnyView<State> {
                 )),
                 any(tooltip::<State>(&no_arrow, "No arrow").arrow(false)),
             ),
-        ),
-        hgap(24.0),
-        labelled(
+        ))
+        .child(hgap(24.0))
+        .child(labelled(
             "delay: 0",
             stage(
                 (160.0, 130.0),
@@ -225,9 +229,8 @@ fn tooltips(state: &State) -> AnyView<State> {
                 .delay(std::time::Duration::ZERO)),
                 any(tooltip::<State>(&instant, "Instant").side(OverlaySide::Bottom)),
             ),
-        ),
-    ])
-    .cross_axis(CrossAxisAlignment::Start));
+        ))
+        .cross_axis(CrossAxisAlignment::Start));
 
     demo(
         "tooltip",
@@ -249,15 +252,14 @@ fn tooltips(state: &State) -> AnyView<State> {
 /// [`popover`]'s two morph sources, plus a side-mounted panel.
 fn popovers(state: &State) -> AnyView<State> {
     let panel_content = || {
-        any(Column(vec![
-            any(text("Share this project").size(14.0)),
-            gap(6.0),
-            any(caption(
+        any(column()
+            .child(text("Share this project").size(14.0))
+            .child(gap(6.0))
+            .child(caption(
                 "Anyone with the link can comment. The panel is kept mounted, \
                  so closing it plays the morph backwards.",
-            )),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))
+            ))
+            .cross_axis(CrossAxisAlignment::Start))
     };
 
     let neck = stage(
@@ -315,14 +317,13 @@ fn popovers(state: &State) -> AnyView<State> {
          travels as a hard-edged rounded rect and passes over the trigger \
          instead of merging with it. The hover trigger mode is not ported \
          (see the tooltip for the hover opening this catalog does support).",
-        vec![any(Row(vec![
-            labelled("Neck \u{b7} out of the trigger", neck),
-            hgap(16.0),
-            labelled("Corner \u{b7} out of the panel corner", corner),
-            hgap(16.0),
-            labelled("Any side is reachable", side),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))],
+        vec![any(row()
+            .child(labelled("Neck \u{b7} out of the trigger", neck))
+            .child(hgap(16.0))
+            .child(labelled("Corner \u{b7} out of the panel corner", corner))
+            .child(hgap(16.0))
+            .child(labelled("Any side is reachable", side))
+            .cross_axis(CrossAxisAlignment::Start))],
     )
 }
 
@@ -347,14 +348,13 @@ fn context_menus(state: &State) -> AnyView<State> {
         &state.menu_anchor,
         SizedBox(Some(320.0), Some(120.0)).child(Padding(
             EdgeInsets::all(16.0),
-            Column(vec![
-                any(text("Right-click anywhere in this panel").size(14.0)),
-                gap(6.0),
-                any(caption(
+            column()
+                .child(text("Right-click anywhere in this panel").size(14.0))
+                .child(gap(6.0))
+                .child(caption(
                     "The menu unfolds from a 16px seed square at the pointer.",
-                )),
-            ])
-            .cross_axis(CrossAxisAlignment::Start),
+                ))
+                .cross_axis(CrossAxisAlignment::Start),
         )),
     )
     .on_open_change(|s: &mut State, open| s.menu_open = open));
@@ -400,42 +400,42 @@ fn morphing_modals(state: &State) -> AnyView<State> {
     };
 
     let content: AnyView<State> = if state.modal_view == 0 {
-        any(Column(vec![
-            any(text("Project details").size(16.0)),
-            gap(8.0),
-            any(caption(
+        any(column()
+            .child(text("Project details").size(16.0))
+            .child(gap(8.0))
+            .child(caption(
                 "The panel's surface travelled here from the button's own rect, \
                  and returns to it on close.",
-            )),
-            gap(16.0),
-            any(Row(vec![
-                trigger("Share instead", |s: &mut State| s.modal_view = 1),
-                hgap(8.0),
-                trigger("Close", |s: &mut State| s.modal_open = false),
-            ])),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))
+            ))
+            .child(gap(16.0))
+            .child(
+                row()
+                    .child(trigger("Share instead", |s: &mut State| s.modal_view = 1))
+                    .child(hgap(8.0))
+                    .child(trigger("Close", |s: &mut State| s.modal_open = false)),
+            )
+            .cross_axis(CrossAxisAlignment::Start))
     } else {
-        any(Column(vec![
-            any(text("Share").size(16.0)),
-            gap(8.0),
-            any(caption(
+        any(column()
+            .child(text("Share").size(16.0))
+            .child(gap(8.0))
+            .child(caption(
                 "Changing the view id cross-fades the panel's content with an \
                  8px lift \u{2014} upstream's own morph, and taller content grows \
                  the panel.",
-            )),
-            gap(8.0),
-            any(caption("\u{b7} anyone with the link may comment")),
-            gap(4.0),
-            any(caption("\u{b7} the link expires in 30 days")),
-            gap(16.0),
-            any(Row(vec![
-                trigger("Back to details", |s: &mut State| s.modal_view = 0),
-                hgap(8.0),
-                trigger("Close", |s: &mut State| s.modal_open = false),
-            ])),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))
+            ))
+            .child(gap(8.0))
+            .child(caption("\u{b7} anyone with the link may comment"))
+            .child(gap(4.0))
+            .child(caption("\u{b7} the link expires in 30 days"))
+            .child(gap(16.0))
+            .child(
+                row()
+                    .child(trigger("Back to details", |s: &mut State| s.modal_view = 0))
+                    .child(hgap(8.0))
+                    .child(trigger("Close", |s: &mut State| s.modal_open = false)),
+            )
+            .cross_axis(CrossAxisAlignment::Start))
     };
 
     let host = any(morphing_modal(content)
@@ -447,8 +447,8 @@ fn morphing_modals(state: &State) -> AnyView<State> {
         .open(state.modal_open)
         .on_open_change(|s: &mut State, open| s.modal_open = open));
 
-    let triggers = any(Column(vec![
-        any(frust_beui::overlay::anchor(
+    let triggers = any(column()
+        .child(frust_beui::overlay::anchor(
             &state.modal_anchor,
             button("Open project", |s: &mut State| {
                 s.modal_open = true;
@@ -456,27 +456,27 @@ fn morphing_modals(state: &State) -> AnyView<State> {
             })
             .tone(ButtonTone::Primary)
             .size(ButtonSize::Sm),
-        )),
-        gap(10.0),
-        any(Row(vec![
-            trigger("Centre", |s: &mut State| {
-                s.modal_placement = MorphingPlacement::Center
-            }),
-            hgap(8.0),
-            trigger("Bottom", |s: &mut State| {
-                s.modal_placement = MorphingPlacement::Bottom
-            }),
-            hgap(8.0),
-            trigger("Scrim", |s: &mut State| {
-                s.modal_backdrop = MorphingBackdrop::Scrim
-            }),
-            hgap(8.0),
-            trigger("Frosted", |s: &mut State| {
-                s.modal_backdrop = MorphingBackdrop::Frosted
-            }),
-        ])),
-    ])
-    .cross_axis(CrossAxisAlignment::Start));
+        ))
+        .child(gap(10.0))
+        .child(
+            row()
+                .child(trigger("Centre", |s: &mut State| {
+                    s.modal_placement = MorphingPlacement::Center
+                }))
+                .child(hgap(8.0))
+                .child(trigger("Bottom", |s: &mut State| {
+                    s.modal_placement = MorphingPlacement::Bottom
+                }))
+                .child(hgap(8.0))
+                .child(trigger("Scrim", |s: &mut State| {
+                    s.modal_backdrop = MorphingBackdrop::Scrim
+                }))
+                .child(hgap(8.0))
+                .child(trigger("Frosted", |s: &mut State| {
+                    s.modal_backdrop = MorphingBackdrop::Frosted
+                })),
+        )
+        .cross_axis(CrossAxisAlignment::Start));
 
     demo(
         "morphing_modal",
@@ -493,18 +493,17 @@ fn morphing_modals(state: &State) -> AnyView<State> {
 
 /// [`center_morph_modal`]: the panel that unfolds from its own centre.
 fn center_modals(state: &State) -> AnyView<State> {
-    let content = any(Column(vec![
-        any(text("Unfolded from the centre").size(16.0)),
-        gap(8.0),
-        any(caption(
+    let content = any(column()
+        .child(text("Unfolded from the centre").size(16.0))
+        .child(gap(8.0))
+        .child(caption(
             "A 4%-of-each-axis sliver at the panel's centre unfolds outward, \
              with the radius held constant so the last frames unfold rather \
              than round off.",
-        )),
-        gap(16.0),
-        trigger("Close", |s: &mut State| s.center_open = false),
-    ])
-    .cross_axis(CrossAxisAlignment::Start));
+        ))
+        .child(gap(16.0))
+        .child(trigger("Close", |s: &mut State| s.center_open = false))
+        .cross_axis(CrossAxisAlignment::Start));
 
     let host = any(center_morph_modal(content)
         .label("Centre morph")
@@ -532,18 +531,17 @@ fn center_modals(state: &State) -> AnyView<State> {
 
 /// [`drawer`] on either side, and [`bottom_sheet`] with its two snap points.
 fn panels(state: &State) -> AnyView<State> {
-    let drawer_content = any(Column(vec![
-        any(text("Filters").size(16.0)),
-        gap(8.0),
-        any(caption(
+    let drawer_content = any(column()
+        .child(text("Filters").size(16.0))
+        .child(gap(8.0))
+        .child(caption(
             "The scrim, the edge mount, the slide, the barrier, Escape and the \
              backdrop press are the shared modal host's; the drawer is its \
              panel plus two upstream numbers.",
-        )),
-        gap(16.0),
-        trigger("Close", |s: &mut State| s.drawer_open = false),
-    ])
-    .cross_axis(CrossAxisAlignment::Start));
+        ))
+        .child(gap(16.0))
+        .child(trigger("Close", |s: &mut State| s.drawer_open = false))
+        .cross_axis(CrossAxisAlignment::Start));
 
     let drawer_host = any(drawer(drawer_content)
         .side(state.drawer_side)
@@ -554,29 +552,27 @@ fn panels(state: &State) -> AnyView<State> {
     let drawer_stage = stage(
         (360.0, 380.0),
         (0.0, 0.0),
-        any(Row(vec![
-            trigger("Open left", |s: &mut State| {
+        any(row()
+            .child(trigger("Open left", |s: &mut State| {
                 s.drawer_side = DrawerSide::Left;
                 s.drawer_open = true;
-            }),
-            hgap(8.0),
-            trigger("Open right", |s: &mut State| {
+            }))
+            .child(hgap(8.0))
+            .child(trigger("Open right", |s: &mut State| {
                 s.drawer_side = DrawerSide::Right;
                 s.drawer_open = true;
-            }),
-        ])),
+            }))),
         drawer_host,
     );
 
-    let sheet_content = any(Column(vec![
-        any(caption(
+    let sheet_content = any(column()
+        .child(caption(
             "Drag the handle row: past 120px (or a fast flick) dismisses, an \
              80px step moves between the two snap points.",
-        )),
-        gap(12.0),
-        trigger("Close", |s: &mut State| s.sheet_open = false),
-    ])
-    .cross_axis(CrossAxisAlignment::Start));
+        ))
+        .child(gap(12.0))
+        .child(trigger("Close", |s: &mut State| s.sheet_open = false))
+        .cross_axis(CrossAxisAlignment::Start));
 
     let sheet_host = any(bottom_sheet(sheet_content)
         .title("Trip details")
@@ -590,21 +586,22 @@ fn panels(state: &State) -> AnyView<State> {
     let sheet_stage = stage(
         (360.0, 400.0),
         (0.0, 0.0),
-        any(Column(vec![
-            any(button("Open sheet", |s: &mut State| s.sheet_open = true)
-                .tone(ButtonTone::Primary)
-                .size(ButtonSize::Sm)),
-            gap(10.0),
-            any(caption(format!(
+        any(column()
+            .child(
+                button("Open sheet", |s: &mut State| s.sheet_open = true)
+                    .tone(ButtonTone::Primary)
+                    .size(ButtonSize::Sm),
+            )
+            .child(gap(10.0))
+            .child(caption(format!(
                 "Snap point: {}",
                 if state.sheet_snap == 0 {
                     "half"
                 } else {
                     "almost full"
                 }
-            ))),
-        ])
-        .cross_axis(CrossAxisAlignment::Start)),
+            )))
+            .cross_axis(CrossAxisAlignment::Start)),
         sheet_host,
     );
 
@@ -617,12 +614,11 @@ fn panels(state: &State) -> AnyView<State> {
          no clock \u{2014} its whole handle row is the grip rather than the 40px \
          pill, its snap is reported and handed back (only the host can change \
          a height), and upstream's \"auto\" snap point is not modelled.",
-        vec![any(Row(vec![
-            labelled("drawer \u{b7} left and right", drawer_stage),
-            hgap(20.0),
-            labelled("bottom_sheet \u{b7} two snap points", sheet_stage),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))],
+        vec![any(row()
+            .child(labelled("drawer \u{b7} left and right", drawer_stage))
+            .child(hgap(20.0))
+            .child(labelled("bottom_sheet \u{b7} two snap points", sheet_stage))
+            .cross_axis(CrossAxisAlignment::Start))],
     )
 }
 
@@ -636,32 +632,30 @@ impl Component for OverlaysPage {
         State::default()
     }
 
-    fn build(&self, state: &mut State) -> AnyView<State> {
-        any(Column(vec![
-            tooltips(state),
-            popovers(state),
-            context_menus(state),
-            morphing_modals(state),
-            center_modals(state),
-            panels(state),
-        ])
-        .cross_axis(CrossAxisAlignment::Start))
+    fn build(&self, state: &mut State) -> impl View<State> {
+        any(column()
+            .child(tooltips(state))
+            .child(popovers(state))
+            .child(context_menus(state))
+            .child(morphing_modals(state))
+            .child(center_modals(state))
+            .child(panels(state))
+            .cross_axis(CrossAxisAlignment::Start))
     }
 }
 
 pub fn page() -> AnyView<AppState> {
-    any(Column(vec![
-        any(heading("Motion \u{b7} Overlays")),
-        any(SizedBox(None, Some(8.0))),
-        any(caption(
+    any(column()
+        .child(heading("Motion \u{b7} Overlays"))
+        .child(SizedBox(None, Some(8.0)))
+        .child(caption(
             "Panels that leave their parent's box: the tooltip, the popover's \
              two morphs, the context menu, both morphing modals, the drawer \
              and the bottom sheet \u{2014} each in its own bounded stage, because \
              an overlay host may not sit directly inside the page's scroll \
              view.",
-        )),
-        any(SizedBox(None, Some(24.0))),
-        any(component(OverlaysPage)),
-    ])
-    .cross_axis(CrossAxisAlignment::Start))
+        ))
+        .child(SizedBox(None, Some(24.0)))
+        .child(component(OverlaysPage))
+        .cross_axis(CrossAxisAlignment::Start))
 }

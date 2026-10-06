@@ -33,7 +33,7 @@ pub mod scenarios;
 
 use frust::{
     AnyView, Axis, Brightness, Component, EdgeInsets, FlexChild, FlexView, Get, Padding, Set,
-    SizedBox, Stack, any, button, flexible, inflexible, safe_area, set_app_theme,
+    SizedBox, View, any, button, column, inflexible, safe_area, set_app_theme, stack,
 };
 
 use scenarios::{BenchState, SCENARIOS};
@@ -60,7 +60,7 @@ impl Component for BenchApp {
         state
     }
 
-    fn build(&self, state: &mut BenchState) -> AnyView<BenchState> {
+    fn build(&self, state: &mut BenchState) -> impl View<BenchState> {
         // Log the deferred env-var unknown-id diagnostic (if any), now that
         // logger installation has completed on all platforms.
         if let Some(unknown_id) = state.pending_unknown_env_id.take() {
@@ -92,10 +92,9 @@ impl Component for BenchApp {
         // also the S1 size-parity contract's play area: `min(playW, playH)` is
         // measured over the SafeArea-inset region on both apps (see
         // `benchmarks/flutter_bench/lib/bench/datasets.dart`'s S1 spec).
-        any(safe_area(Stack(vec![
-            scenario_view,
-            any(scenario_switcher(state)),
-        ])))
+        any(safe_area(
+            stack().child(scenario_view).child(scenario_switcher(state)),
+        ))
     }
 }
 
@@ -120,13 +119,9 @@ fn scenario_switcher(state: &BenchState) -> AnyView<BenchState> {
     let row = FlexView::new(Axis::Horizontal, buttons);
 
     // Push the row to the bottom edge with a flexible top spacer.
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            flexible(1, SizedBox(None, None)),
-            inflexible(Padding(EdgeInsets::all(8.0), row)),
-        ],
-    ))
+    any(column()
+        .flex(1, SizedBox(None, None))
+        .child(Padding(EdgeInsets::all(8.0), row)))
 }
 
 // The generated app's sole entry point: one line binds

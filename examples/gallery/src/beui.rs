@@ -102,7 +102,7 @@
 //! in this module leaves its text at the themed default.
 
 use frust_core::{AnyView, any};
-use frust_widgets::{Column, EdgeInsets, Padding, Row, SizedBox, container, text};
+use frust_widgets::{EdgeInsets, Padding, SizedBox, column, container, row, text};
 use kurbo::Size;
 use peniko::Color;
 
@@ -173,29 +173,37 @@ fn gap_x(width: f64) -> AnyView<()> {
 /// the reason in the module docs (`Magnetic` needs a pointer, `Metallic` a
 /// clock, `Stateful` a transition a single frame cannot stage).
 fn button_case() -> AnyView<()> {
-    framed(Column(vec![
-        any(Row(vec![
-            any(button("Primary", |_: &mut ()| {}).tone(ButtonTone::Primary)),
-            gap_x(12.0),
-            any(button("Secondary", |_: &mut ()| {}).tone(ButtonTone::Secondary)),
-        ])),
-        gap_y(14.0),
-        any(Row(vec![
-            any(button("Outline", |_: &mut ()| {}).tone(ButtonTone::Outline)),
-            gap_x(12.0),
-            any(button("Ghost", |_: &mut ()| {}).tone(ButtonTone::Ghost)),
-        ])),
-        gap_y(14.0),
-        any(Row(vec![
-            any(button("Small", |_: &mut ()| {})
-                .tone(ButtonTone::Secondary)
-                .size(ButtonSize::Sm)),
-            gap_x(12.0),
-            any(button("Large", |_: &mut ()| {})
-                .tone(ButtonTone::Primary)
-                .size(ButtonSize::Lg)),
-        ])),
-    ]))
+    framed(
+        column()
+            .child(
+                row()
+                    .child(button("Primary", |_: &mut ()| {}).tone(ButtonTone::Primary))
+                    .child(gap_x(12.0))
+                    .child(button("Secondary", |_: &mut ()| {}).tone(ButtonTone::Secondary)),
+            )
+            .child(gap_y(14.0))
+            .child(
+                row()
+                    .child(button("Outline", |_: &mut ()| {}).tone(ButtonTone::Outline))
+                    .child(gap_x(12.0))
+                    .child(button("Ghost", |_: &mut ()| {}).tone(ButtonTone::Ghost)),
+            )
+            .child(gap_y(14.0))
+            .child(
+                row()
+                    .child(
+                        button("Small", |_: &mut ()| {})
+                            .tone(ButtonTone::Secondary)
+                            .size(ButtonSize::Sm),
+                    )
+                    .child(gap_x(12.0))
+                    .child(
+                        button("Large", |_: &mut ()| {})
+                            .tone(ButtonTone::Primary)
+                            .size(ButtonSize::Lg),
+                    ),
+            ),
+    )
 }
 
 // ---- components/input ------------------------------------------------------
@@ -205,22 +213,27 @@ fn button_case() -> AnyView<()> {
 fn input_case() -> AnyView<()> {
     framed_in(
         Size::new(360.0, 300.0),
-        Column(vec![
-            any(SizedBox(Some(280.0), None)
-                .child(input("ada@example.com", |_: &mut (), _: String| {}).label("Email"))),
-            gap_y(14.0),
-            any(SizedBox(Some(280.0), None).child(
-                input("", |_: &mut (), _: String| {})
-                    .label("Workspace")
-                    .placeholder("acme-inc"),
-            )),
-            gap_y(14.0),
-            any(SizedBox(Some(280.0), None).child(
-                input("nope", |_: &mut (), _: String| {})
-                    .label("Handle")
-                    .error("That handle is taken."),
-            )),
-        ]),
+        column()
+            .child(
+                SizedBox(Some(280.0), None)
+                    .child(input("ada@example.com", |_: &mut (), _: String| {}).label("Email")),
+            )
+            .child(gap_y(14.0))
+            .child(
+                SizedBox(Some(280.0), None).child(
+                    input("", |_: &mut (), _: String| {})
+                        .label("Workspace")
+                        .placeholder("acme-inc"),
+                ),
+            )
+            .child(gap_y(14.0))
+            .child(
+                SizedBox(Some(280.0), None).child(
+                    input("nope", |_: &mut (), _: String| {})
+                        .label("Handle")
+                        .error("That handle is taken."),
+                ),
+            ),
     )
 }
 
@@ -235,41 +248,47 @@ fn input_case() -> AnyView<()> {
 fn form_controls_case() -> AnyView<()> {
     framed_in(
         Size::new(360.0, 280.0),
-        Column(vec![
-            any(Row(vec![
-                any(checkbox(true, |_: &mut (), _: bool| {}).label("Notifications")),
-                gap_x(10.0),
-                any(text("Notifications").size(14.0)),
-                gap_x(24.0),
-                any(checkbox(false, |_: &mut (), _: bool| {})
-                    .indeterminate(true)
-                    .label("Partial")),
-                gap_x(10.0),
-                any(text("Partial").size(14.0)),
-            ])),
-            gap_y(18.0),
-            any(Row(vec![
-                any(radio(true, |_: &mut ()| {}).label("Monthly")),
-                gap_x(10.0),
-                any(text("Monthly").size(14.0)),
-                gap_x(24.0),
-                any(radio(false, |_: &mut ()| {}).label("Yearly")),
-                gap_x(10.0),
-                any(text("Yearly").size(14.0)),
-            ])),
-            gap_y(18.0),
-            any(Row(vec![
-                any(switch(true, |_: &mut (), _: bool| {}).label("Dark mode")),
-                gap_x(10.0),
-                any(text("Dark mode").size(14.0)),
-                gap_x(24.0),
-                any(switch(false, |_: &mut (), _: bool| {})
-                    .disabled(true)
-                    .label("Beta features")),
-                gap_x(10.0),
-                any(text("Beta features").size(14.0)),
-            ])),
-        ]),
+        column()
+            .child(
+                row()
+                    .child(checkbox(true, |_: &mut (), _: bool| {}).label("Notifications"))
+                    .child(gap_x(10.0))
+                    .child(text("Notifications").size(14.0))
+                    .child(gap_x(24.0))
+                    .child(
+                        checkbox(false, |_: &mut (), _: bool| {})
+                            .indeterminate(true)
+                            .label("Partial"),
+                    )
+                    .child(gap_x(10.0))
+                    .child(text("Partial").size(14.0)),
+            )
+            .child(gap_y(18.0))
+            .child(
+                row()
+                    .child(radio(true, |_: &mut ()| {}).label("Monthly"))
+                    .child(gap_x(10.0))
+                    .child(text("Monthly").size(14.0))
+                    .child(gap_x(24.0))
+                    .child(radio(false, |_: &mut ()| {}).label("Yearly"))
+                    .child(gap_x(10.0))
+                    .child(text("Yearly").size(14.0)),
+            )
+            .child(gap_y(18.0))
+            .child(
+                row()
+                    .child(switch(true, |_: &mut (), _: bool| {}).label("Dark mode"))
+                    .child(gap_x(10.0))
+                    .child(text("Dark mode").size(14.0))
+                    .child(gap_x(24.0))
+                    .child(
+                        switch(false, |_: &mut (), _: bool| {})
+                            .disabled(true)
+                            .label("Beta features"),
+                    )
+                    .child(gap_x(10.0))
+                    .child(text("Beta features").size(14.0)),
+            ),
     )
 }
 
@@ -286,11 +305,10 @@ fn tabs_case() -> AnyView<()> {
                     tabs_tab(
                         "overview",
                         "Overview",
-                        Column(vec![
-                            any(text("Overview").size(15.0)),
-                            gap_y(6.0),
-                            any(text("The active panel swaps under the pill.").size(13.0)),
-                        ]),
+                        column()
+                            .child(text("Overview").size(15.0))
+                            .child(gap_y(6.0))
+                            .child(text("The active panel swaps under the pill.").size(13.0)),
                     ),
                     tabs_tab("activity", "Activity", text("Activity").size(15.0)),
                     tabs_tab("settings", "Settings", text("Settings").size(15.0)),
@@ -321,15 +339,14 @@ fn tilt_card_case() -> AnyView<()> {
             tilt_card(
                 container(Padding(
                     EdgeInsets::all(20.0),
-                    Column(vec![
-                        any(text("Tilt Card").size(18.0).color(ACCENT_INK)),
-                        gap_y(8.0),
-                        any(
+                    column()
+                        .child(text("Tilt Card").size(18.0).color(ACCENT_INK))
+                        .child(gap_y(8.0))
+                        .child(
                             text("Leans toward the pointer, with a cursor-tracked glare.")
                                 .size(13.0)
                                 .color(ACCENT_INK),
                         ),
-                    ]),
                 ))
                 .fill(ACCENT_SURFACE)
                 .expand(),
@@ -484,23 +501,22 @@ fn otp_input_case() -> AnyView<()> {
 /// Every child paints in [`ISLAND_INK`] rather than the themed default,
 /// because the shell is inverted chrome — see the module docs.
 fn dynamic_island_case() -> AnyView<()> {
-    let compact = Column(vec![any(text("9:41").size(13.0).color(ISLAND_INK))]);
+    let compact = column().child(text("9:41").size(13.0).color(ISLAND_INK));
     let slots = vec![
         dynamic_island_slot(
             "music",
-            Column(vec![
-                any(text("NOW PLAYING").size(10.0).color(ISLAND_INK)),
-                gap_y(4.0),
-                any(text("Weightless \u{b7} Marconi Union")
-                    .size(13.0)
-                    .color(ISLAND_INK)),
-            ]),
+            column()
+                .child(text("NOW PLAYING").size(10.0).color(ISLAND_INK))
+                .child(gap_y(4.0))
+                .child(
+                    text("Weightless \u{b7} Marconi Union")
+                        .size(13.0)
+                        .color(ISLAND_INK),
+                ),
         ),
         dynamic_island_slot(
             "call",
-            Column(vec![any(text("INCOMING CALL")
-                .size(10.0)
-                .color(ISLAND_INK))]),
+            column().child(text("INCOMING CALL").size(10.0).color(ISLAND_INK)),
         ),
     ];
     framed(dynamic_island(Some("music".to_string()), compact, slots).label("Live activity"))

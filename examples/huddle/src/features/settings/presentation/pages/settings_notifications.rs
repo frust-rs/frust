@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use frust::{
-    AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView, Get, Padding, Row, Set,
-    SizedBox, any, component, flexible, inflexible, radio, scroll_view, text,
+    AnyView, Column, CrossAxisAlignment, EdgeInsets, Get, Padding, Set, SizedBox, View, any,
+    column, component, radio, row, scroll_view, text,
 };
 use frust_material::{Switch, app_bar};
 
@@ -46,7 +46,7 @@ impl frust::Component for NotificationsScreen {
         NotificationsState { controller }
     }
 
-    fn build(&self, state: &mut NotificationsState) -> AnyView<NotificationsState> {
+    fn build(&self, state: &mut NotificationsState) -> impl View<NotificationsState> {
         // Tracked reads: a later `set` on any of these wakes the frame.
         let freq = state.controller.frequency.get();
         let sound = state.controller.sound.get();
@@ -77,20 +77,13 @@ impl frust::Component for NotificationsScreen {
             st.controller.previews.set(on)
         }));
 
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(any(app_bar::<NotificationsState>("Notifications"))),
-                flexible(
-                    1,
-                    any(scroll_view(Padding(
-                        EdgeInsets::all(16.0),
-                        Column(children),
-                    ))),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Stretch))
+        any(column()
+            .child(app_bar::<NotificationsState>("Notifications"))
+            .flex(
+                1,
+                scroll_view(Padding(EdgeInsets::all(16.0), Column(children))),
+            )
+            .cross_axis(CrossAxisAlignment::Stretch))
     }
 }
 
@@ -100,9 +93,8 @@ fn toggle_row<F>(label: &str, on: bool, on_toggle: F) -> AnyView<NotificationsSt
 where
     F: Fn(&mut NotificationsState, bool) + 'static,
 {
-    any(Row(vec![
-        any(text(label.to_string()).size(14.0)),
-        any(SizedBox(Some(12.0), None)),
-        any(Switch(on, on_toggle)),
-    ]))
+    any(row()
+        .child(text(label.to_string()).size(14.0))
+        .child(SizedBox(Some(12.0), None))
+        .child(Switch(on, on_toggle)))
 }

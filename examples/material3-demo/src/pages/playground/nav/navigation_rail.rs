@@ -10,7 +10,7 @@
 //! (scrim-over-content) presentation this widget also supports goes
 //! undemoed on this page, exactly as it does upstream.
 
-use frust::{AnyView, Component, SizedBox, Stack, Theme, View, any, component, container, icon};
+use frust::{AnyView, Component, SizedBox, Theme, View, any, component, container, icon, stack};
 use frust_material::{
     MaterialDimensions, NavigationRailModality, NavigationRailType, OverlayAnchor,
     RailLabelBehavior, RailSection, icons, navigation_rail, rail_destination, rail_fab,
@@ -127,7 +127,7 @@ impl Component for NavigationRailPlayground {
         }
     }
 
-    fn build(&self, state: &mut RailState) -> AnyView<RailState> {
+    fn build(&self, state: &mut RailState) -> impl View<RailState> {
         body(state)
     }
 }
@@ -142,11 +142,10 @@ fn body(state: &RailState) -> AnyView<RailState> {
         vec![play_snippet("Navigation rail", snippet_code(state))],
         vec![appearance_panel(state)],
     );
-    any(Stack(vec![
-        content,
-        type_menu_panel(state),
-        label_menu_panel(state),
-    ]))
+    any(stack()
+        .child(content)
+        .child(type_menu_panel(state))
+        .child(label_menu_panel(state)))
 }
 
 /// Frame `child` in an outlined, rounded box — the reference's `_framed`
@@ -162,10 +161,10 @@ fn framed(theme: &Theme, child: impl View<RailState>) -> AnyView<RailState> {
 /// The one section of four destinations — the reference's own `_sections`.
 fn sections() -> Vec<RailSection<RailState>> {
     vec![rail_section(vec![
-        rail_destination(any(icon(icons::HOME)), "Home"),
-        rail_destination(any(icon(icons::SEARCH)), "Search"),
-        rail_destination(any(icon(icons::CALENDAR_TODAY)), "Agenda").badge_count(3),
-        rail_destination(any(icon(icons::EDIT)), "Drafts"),
+        rail_destination(icon(icons::HOME), "Home"),
+        rail_destination(icon(icons::SEARCH), "Search"),
+        rail_destination(icon(icons::CALENDAR_TODAY), "Agenda").badge_count(3),
+        rail_destination(icon(icons::EDIT), "Drafts"),
     ])]
 }
 

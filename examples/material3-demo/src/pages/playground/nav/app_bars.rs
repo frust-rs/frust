@@ -21,9 +21,8 @@
 //! the real seam.
 
 use frust::{
-    AnyView, Axis, Column, Component, CrossAxisAlignment, EdgeInsets, FlexView, Padding,
-    ScrollInfo, SizedBox, Stack, Theme, View, any, component, container, flexible, icon,
-    inflexible, safe_area, scroll_view, text,
+    AnyView, Column, Component, CrossAxisAlignment, EdgeInsets, Padding, ScrollInfo, SizedBox,
+    Theme, View, any, column, component, container, icon, safe_area, scroll_view, stack, text,
 };
 use frust_material::{
     AppBarDensity, AppBarShapeFamily, AppBarVariant, FabSize, MaterialDimensions, MaterialSpacing,
@@ -149,7 +148,7 @@ impl Component for AppBarsPlayground {
         }
     }
 
-    fn build(&self, state: &mut AppBarsState) -> AnyView<AppBarsState> {
+    fn build(&self, state: &mut AppBarsState) -> impl View<AppBarsState> {
         body(state)
     }
 }
@@ -168,7 +167,7 @@ fn body(state: &AppBarsState) -> AnyView<AppBarsState> {
         vec![play_snippet(state.kind.label(), snippet_code(state))],
         vec![variant_panel(state), appearance_panel(state)],
     );
-    any(Stack(vec![content, kind_menu_panel(state)]))
+    any(stack().child(content).child(kind_menu_panel(state)))
 }
 
 /// An icon-only, non-interactive-feeling slot for a bar's leading/action
@@ -179,7 +178,7 @@ fn body(state: &AppBarsState) -> AnyView<AppBarsState> {
 /// caller-supplied content (see `plugins/material/src/appbar/mod.rs`'s slot
 /// contract).
 fn icon_slot(source: frust::IconSource, label: &str) -> AnyView<AppBarsState> {
-    any(icon_button(any(icon(source)), |_: &mut AppBarsState| {}).semantic_label(label))
+    any(icon_button(icon(source), |_: &mut AppBarsState| {}).semantic_label(label))
 }
 
 /// Wrap `bar` in [`frust::safe_area`] when the Safe area toggle is on. Only
@@ -244,9 +243,11 @@ fn bottom_bar_view(_state: &AppBarsState) -> AnyView<AppBarsState> {
             icon_slot(icons::SEARCH, "Search"),
             icon_slot(icons::EDIT, "Edit"),
         ])
-        .fab(any(fab(any(icon(icons::ADD)), |_: &mut AppBarsState| {})
-            .size(FabSize::Small)
-            .label("Add"))))
+        .fab(
+            fab(icon(icons::ADD), |_: &mut AppBarsState| {})
+                .size(FabSize::Small)
+                .label("Add"),
+        ))
 }
 
 fn sliver_bar_view(state: &AppBarsState) -> AnyView<AppBarsState> {
@@ -284,7 +285,9 @@ fn sliver_preview(theme: &Theme, state: &AppBarsState) -> AnyView<AppBarsState> 
         s.scrolled = info.offset;
     });
 
-    let column = FlexView::new(Axis::Vertical, vec![inflexible(bar), flexible(1, list)])
+    let column = column()
+        .child(bar)
+        .flex(1, list)
         .cross_axis(CrossAxisAlignment::Stretch);
 
     framed(

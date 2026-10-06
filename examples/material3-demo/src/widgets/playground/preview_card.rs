@@ -18,8 +18,8 @@
 //! natural width and repositions it at [`Alignment::TOP_LEFT`], the same
 //! leading position `CrossAxisAlignment::Start` gave it before this fix.
 use frust::{
-    Align, Alignment, AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView, Padding,
-    SizedBox, View, any, container, flexible, text,
+    Align, Alignment, AnyView, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, View, any,
+    column, container, row, text,
 };
 use frust_material::{MaterialDimensions, MaterialSpacing};
 
@@ -37,10 +37,7 @@ pub fn play_preview_card<State: 'static>(
     label_style.color = scheme.on_surface_variant;
     let fill = scheme.surface_container_low;
 
-    let header = FlexView::new(
-        Axis::Horizontal,
-        vec![flexible(1, text(label.into()).style(label_style))],
-    );
+    let header = row().flex(1, text(label.into()).style(label_style));
 
     any(Padding(
         EdgeInsets {
@@ -51,12 +48,11 @@ pub fn play_preview_card<State: 'static>(
         },
         container(Padding(
             EdgeInsets::all(MaterialSpacing::LG),
-            Column(vec![
-                any(header),
-                any(SizedBox::<State>(None, Some(MaterialSpacing::MD))),
-                any(Align(Alignment::TOP_LEFT, child)),
-            ])
-            .cross_axis(CrossAxisAlignment::Stretch),
+            column()
+                .child(header)
+                .child(SizedBox::<State>(None, Some(MaterialSpacing::MD)))
+                .child(Align(Alignment::TOP_LEFT, child))
+                .cross_axis(CrossAxisAlignment::Stretch),
         ))
         .fill(fill)
         .radius(MaterialDimensions::RADIUS_LARGE),

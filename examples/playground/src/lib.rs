@@ -99,8 +99,8 @@ use frust::{
     DragCoordinator, EdgeInsets, FlexView, Get, GetUntracked, MotionScheme, NavigatorController,
     Padding, PageTransition, PanZoomController, PanZoomTransform, RwSignal, ScrollController,
     ScrollInfo, ScrollSubscription, Set, SizedBox, Stack, Theme, TransitionSpec, Update, View,
-    WindowMetrics, any, button, container, deep_links, flexible, icon, icons, inflexible,
-    navigator, safe_area, scroll_view, set_app_theme, text, use_context,
+    WindowMetrics, any, button, column, container, deep_links, icon, icons, inflexible, navigator,
+    row, safe_area, scroll_view, set_app_theme, text, use_context,
 };
 use frust_material::{app_bar, nav_item, navigation_bar};
 
@@ -568,7 +568,7 @@ fn toast_overlay(pending: &[String]) -> AnyView<PlaygroundState> {
         .on_surface_variant;
     let lines = pending
         .iter()
-        .map(|message| inflexible(any(text(message.clone()).size(12.0).color(ink))))
+        .map(|message| inflexible(text(message.clone()).size(12.0).color(ink)))
         .collect();
     any(Align(
         Alignment::new(0.0, 1.0),
@@ -633,13 +633,15 @@ fn side_rail(section: usize) -> AnyView<PlaygroundState> {
             } else {
                 ButtonStyle::Secondary
             };
-            inflexible(any(button(*label, move |state: &mut PlaygroundState| {
-                let current = state.section.get_untracked();
-                state.reverse.set(index < current);
-                state.section.set(index);
-            })
-            .style(style)
-            .small()))
+            inflexible(
+                button(*label, move |state: &mut PlaygroundState| {
+                    let current = state.section.get_untracked();
+                    state.reverse.set(index < current);
+                    state.section.set(index);
+                })
+                .style(style)
+                .small(),
+            )
         })
         .collect();
     any(
@@ -665,22 +667,25 @@ fn more_overlay() -> AnyView<PlaygroundState> {
         .iter()
         .enumerate()
         .map(|(index, label)| {
-            inflexible(any(button(*label, move |state: &mut PlaygroundState| {
-                let current = state.section.get_untracked();
-                state.reverse.set(index < current);
-                state.section.set(index);
-                state.more_open.set(false);
-            })
-            .style(ButtonStyle::Secondary)
-            .small()))
+            inflexible(
+                button(*label, move |state: &mut PlaygroundState| {
+                    let current = state.section.get_untracked();
+                    state.reverse.set(index < current);
+                    state.section.set(index);
+                    state.more_open.set(false);
+                })
+                .style(ButtonStyle::Secondary)
+                .small(),
+            )
         })
         .collect();
-    rows.push(inflexible(any(button(
-        "Close",
-        |state: &mut PlaygroundState| state.more_open.set(false),
-    )
-    .style(ButtonStyle::Primary)
-    .small())));
+    rows.push(inflexible(
+        button("Close", |state: &mut PlaygroundState| {
+            state.more_open.set(false)
+        })
+        .style(ButtonStyle::Primary)
+        .small(),
+    ));
     any(Align(
         Alignment::new(0.0, 1.0),
         container(Padding(
@@ -724,15 +729,9 @@ fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
     // width) to the body's own intrinsic extent, so the viewport would never
     // be smaller than the content and scrolling would never engage.
     let content: AnyView<PlaygroundState> = if wide {
-        any(FlexView::new(
-            Axis::Horizontal,
-            vec![inflexible(side_rail(section)), flexible(1, body)],
-        ))
+        any(row().child(side_rail(section)).flex(1, body))
     } else {
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![flexible(1, body), inflexible(bottom_nav_bar(section))],
-        ))
+        any(column().flex(1, body).child(bottom_nav_bar(section)))
     };
 
     // One safe area around the whole column: unlike a design-system app bar
@@ -742,11 +741,7 @@ fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
     // (self-sizing chrome rule), so the safe area leaves that edge to it; at
     // wide width nothing else sits on that edge, so the safe area consumes it
     // instead (`.bottom(wide)`).
-    let column = safe_area(FlexView::new(
-        Axis::Vertical,
-        vec![inflexible(playground_app_bar(state)), flexible(1, content)],
-    ))
-    .bottom(wide);
+    let column = safe_area(column().child(playground_app_bar(state)).flex(1, content)).bottom(wide);
 
     // `AppBackground` is the BOTTOM-most layer (see the module docs' "Mode B
     // background" section above): under the ON `FRUST_TRANSLUCENT_SURFACE`/
@@ -820,7 +815,7 @@ impl Component for PlaygroundApp {
         PlaygroundState::new()
     }
 
-    fn build(&self, state: &mut PlaygroundState) -> AnyView<PlaygroundState> {
+    fn build(&self, state: &mut PlaygroundState) -> impl View<PlaygroundState> {
         // Clone the reactive handle into the navigator's stateless home-page
         // builder; the controller is shared so overlay pages push onto this
         // same stack.

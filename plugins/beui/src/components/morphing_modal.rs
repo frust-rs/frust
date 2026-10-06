@@ -692,7 +692,7 @@ mod tests {
                 if let Some(anchor) = &anchor {
                     view = view.anchor(anchor);
                 }
-                frust::Stack(vec![any(view)])
+                frust::stack().child(view)
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root

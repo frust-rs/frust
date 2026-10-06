@@ -204,7 +204,7 @@ impl Component for LongListPage {
         }
     }
 
-    fn build(&self, state: &mut LongListState) -> AnyView<LongListState> {
+    fn build(&self, state: &mut LongListState) -> impl View<LongListState> {
         if state.fetching {
             let current = state.task.signal().get();
             if let Some(&added) = current.ready() {

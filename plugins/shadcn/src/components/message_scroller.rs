@@ -132,7 +132,13 @@ pub struct MessageScrollerView<State: 'static> {
 /// Wrap each item in [`message_scroller_item`] (the source's `Item` slot) or
 /// hand any view in directly — the column stretches every child to its own
 /// width either way.
-pub fn message_scroller<State: 'static>(items: Vec<AnyView<State>>) -> MessageScrollerView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn message_scroller<State: 'static, V: View<State>>(
+    items: impl IntoIterator<Item = V>,
+) -> MessageScrollerView<State> {
+    let items: Vec<AnyView<State>> = items.into_iter().map(AnyView::new).collect();
     MessageScrollerView {
         items,
         button_label: DEFAULT_BUTTON_LABEL.to_owned(),
@@ -1051,7 +1057,7 @@ mod tests {
 
     /// The view under test at `items` messages.
     fn view_for(items: usize) -> MessageScrollerView<AppState> {
-        let items = (0..items)
+        let items: Vec<AnyView<AppState>> = (0..items)
             .map(|_| any(message_scroller_item::<AppState, _>(Block)))
             .collect();
         message_scroller(items)

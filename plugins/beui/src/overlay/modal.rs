@@ -1640,7 +1640,7 @@ mod tests {
                         any(view)
                     }
                 };
-                frust::Stack(vec![view])
+                frust::stack().child(view)
             };
             self.root.rebuild(&mut logic, &mut self.state);
             self.root

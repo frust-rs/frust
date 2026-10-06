@@ -319,10 +319,8 @@ fn swipe_complete_delivers_result_to_callback() {
     let mut app = {
         let ctrl = controller.clone();
         move |_: &mut SwipeResultState| {
-            navigator(&ctrl, || {
-                any(SizedLeaf {
-                    size: Size::new(100.0, 100.0),
-                })
+            navigator(&ctrl, || SizedLeaf {
+                size: Size::new(100.0, 100.0),
             })
             .pop_swipe(true)
         }
@@ -331,10 +329,8 @@ fn swipe_complete_delivers_result_to_callback() {
 
     // Push B (instant) registering a result callback fired on its pop.
     controller.push_for_result(
-        || {
-            any(SizedLeaf {
-                size: Size::new(100.0, 60.0),
-            })
+        || SizedLeaf {
+            size: Size::new(100.0, 60.0),
         },
         |state: &mut SwipeResultState, _result: PopResult| {
             state.popped = true;
@@ -1058,7 +1054,7 @@ fn r_b3_inner_both_arm_on_down_and_the_outer_defers_at_move() {
     // poppable while that page stays current.
     {
         let inner_c = inner.clone();
-        outer.push(move || any(navigator(&inner_c, || sized_page(100.0, 100.0)).pop_swipe(true)));
+        outer.push(move || navigator(&inner_c, || sized_page(100.0, 100.0)).pop_swipe(true));
     }
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
@@ -1122,7 +1118,7 @@ fn r_b3_inner_three_level_chain_defers_to_the_innermost() {
     // outer → middle: middle hosted directly on outer's pushed top page.
     {
         let middle_c = middle.clone();
-        outer.push(move || any(navigator(&middle_c, || sized_page(100.0, 100.0)).pop_swipe(true)));
+        outer.push(move || navigator(&middle_c, || sized_page(100.0, 100.0)).pop_swipe(true));
     }
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
@@ -1131,7 +1127,7 @@ fn r_b3_inner_three_level_chain_defers_to_the_innermost() {
     // middle → inner: inner hosted directly on middle's pushed top page.
     {
         let inner_c = inner.clone();
-        middle.push(move || any(navigator(&inner_c, || sized_page(100.0, 100.0)).pop_swipe(true)));
+        middle.push(move || navigator(&inner_c, || sized_page(100.0, 100.0)).pop_swipe(true));
     }
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
@@ -1191,7 +1187,7 @@ fn r_b3_inner_claim_clears_on_cancel_so_a_later_swipe_works() {
 
     {
         let inner_c = inner.clone();
-        outer.push(move || any(navigator(&inner_c, || sized_page(100.0, 100.0)).pop_swipe(true)));
+        outer.push(move || navigator(&inner_c, || sized_page(100.0, 100.0)).pop_swipe(true));
     }
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));

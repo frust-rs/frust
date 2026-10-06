@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, DiscardScene, FrameTime, InspectNode, LayoutCtx,
-    PaintCtx, PaintScene, RenderRoot, View, Widget, WindowEdgeInsets, WindowInsets, any,
+    PaintCtx, PaintScene, RenderRoot, View, Widget, WindowEdgeInsets, WindowInsets,
 };
 use frust_widgets::{EdgeInsets, overlay_portal, safe_area};
 use kurbo::{Point, Size};
@@ -315,7 +315,7 @@ fn overlay_floated_pod_is_painted_under_the_owners_consumed_insets() {
 
     run(
         &mut |_: &mut ()| {
-            safe_area(overlay_portal(probe(&owner_content)).overlay(Some(any(probe(&record)))))
+            safe_area(overlay_portal(probe(&owner_content)).overlay(Some(probe(&record))))
         },
         root_insets,
     );

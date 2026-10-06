@@ -89,7 +89,7 @@
 //! * **Infinite looping** (`infinite`) — needs the sliver's cycle-length
 //!   pixel correction; a finite item list is the whole surface here.
 //! * **Lazy item building** (`M3ECarouselView.builder`) — this view takes a
-//!   `Vec<AnyView>` like every other container in this catalog.
+//!   finite list of views like every other container in this catalog.
 //! * **The tap pulse** (`M3ECarouselWrapper`'s `fixedPulseDelta`) — it animates
 //!   a per-item clip window against content laid out with a pulse budget on
 //!   top of the max slot. A pressed item takes this crate's shared
@@ -228,9 +228,11 @@ pub struct CarouselView<State: 'static> {
 
 /// A hero carousel over `items` — the reference's own default layout, focal
 /// item centred. See the [module docs](self).
-pub fn carousel<State: 'static>(items: Vec<AnyView<State>>) -> CarouselView<State> {
+pub fn carousel<State: 'static>(
+    items: impl IntoIterator<Item = impl View<State>>,
+) -> CarouselView<State> {
     CarouselView {
-        items,
+        items: items.into_iter().map(AnyView::new).collect(),
         layout: CarouselLayout::default(),
         hero_alignment: HeroAlignment::default(),
         extended: false,
@@ -251,7 +253,7 @@ pub fn carousel<State: 'static>(items: Vec<AnyView<State>>) -> CarouselView<Stat
 /// A [`CarouselLayout::Hero`] carousel over `items` — one large item plus
 /// peeks, placed by `alignment`.
 pub fn hero_carousel<State: 'static>(
-    items: Vec<AnyView<State>>,
+    items: impl IntoIterator<Item = impl View<State>>,
     alignment: HeroAlignment,
 ) -> CarouselView<State> {
     carousel(items).hero_alignment(alignment)
@@ -259,14 +261,16 @@ pub fn hero_carousel<State: 'static>(
 
 /// A [`CarouselLayout::Contained`] carousel over `items` — large/medium/small
 /// items kept inside the bounds.
-pub fn contained_carousel<State: 'static>(items: Vec<AnyView<State>>) -> CarouselView<State> {
+pub fn contained_carousel<State: 'static>(
+    items: impl IntoIterator<Item = impl View<State>>,
+) -> CarouselView<State> {
     carousel(items).layout(CarouselLayout::Contained)
 }
 
 /// A [`CarouselLayout::Uncontained`] carousel over `items` — uniform
 /// `item_extent`-wide items scrolling to the container's edge.
 pub fn uncontained_carousel<State: 'static>(
-    items: Vec<AnyView<State>>,
+    items: impl IntoIterator<Item = impl View<State>>,
     item_extent: f64,
 ) -> CarouselView<State> {
     carousel(items)

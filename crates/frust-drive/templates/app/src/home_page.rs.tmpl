@@ -1,9 +1,6 @@
 //! The home screen: a counter, built from small widget fns.
 
-use frust::{
-    Align, Alignment, AnyView, Column, Component, CrossAxisAlignment, View, any, scaffold,
-    text,
-};
+use frust::{Align, Alignment, Component, CrossAxisAlignment, View, column, scaffold, text};
 
 /// The counter screen; the count is its local state.
 pub struct HomePage {
@@ -17,10 +14,10 @@ impl Component for HomePage {
         0
     }
 
-    fn build(&self, count: &mut u32) -> AnyView<u32> {
-        any(scaffold(counter_body(*count))
-            .app_bar(any(app_bar(&self.title)))
-            .fab(any(increment_fab())))
+    fn build(&self, count: &mut u32) -> impl View<u32> {
+        scaffold(counter_body(*count))
+            .app_bar(app_bar(&self.title))
+            .fab(increment_fab())
     }
 }
 
@@ -34,19 +31,17 @@ fn app_bar(title: &str) -> impl View<u32> + use<> {
 fn counter_body(count: u32) -> impl View<u32> + use<> {
     Align(
         Alignment::CENTER,
-        Column(vec![
-            any(text("You have pushed the button this many times:")),
-            any(text(count.to_string()).size(48.0)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(text("You have pushed the button this many times:"))
+            .child(text(count.to_string()).size(48.0))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
 // The Scaffold keeps the FAB clear of the gesture-nav inset.
 fn increment_fab() -> impl View<u32> + use<> {
-    frust_material::fab(
-        any(frust::icon(frust_material::icons::ADD)),
-        |count: &mut u32| *count += 1,
-    )
+    frust_material::fab(frust::icon(frust_material::icons::ADD), |count: &mut u32| {
+        *count += 1
+    })
     .label("Increment")
 }

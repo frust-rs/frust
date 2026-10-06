@@ -1056,10 +1056,9 @@ mod tests {
     /// A pressed and a released toggle.
     #[cfg(feature = "bundled-fonts")]
     fn pair(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            frust::authoring::any(toggle::<(), _>("Bold", true, |_: &mut (), _| {})),
-            frust::authoring::any(toggle::<(), _>("Italic", false, |_: &mut (), _| {})),
-        ])
+        frust::column()
+            .child(toggle::<(), _>("Bold", true, |_: &mut (), _| {}))
+            .child(toggle::<(), _>("Italic", false, |_: &mut (), _| {}))
     }
 
     #[cfg(feature = "bundled-fonts")]

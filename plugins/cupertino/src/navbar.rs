@@ -192,15 +192,15 @@ pub fn CupertinoNavBar<State: 'static>(title: impl Into<String>) -> CupertinoNav
 impl<State: 'static> CupertinoNavBarView<State> {
     /// Attach a leading slot (typically a back button), erased as an
     /// [`AnyView`]. Tint is the supplied view's own responsibility.
-    pub fn leading(mut self, leading: AnyView<State>) -> Self {
-        self.leading = Some(leading);
+    pub fn leading(mut self, leading: impl View<State>) -> Self {
+        self.leading = Some(AnyView::new(leading));
         self
     }
 
     /// Attach a trailing slot (typically an action button), erased as an
     /// [`AnyView`]. Tint is the supplied view's own responsibility.
-    pub fn trailing(mut self, trailing: AnyView<State>) -> Self {
-        self.trailing = Some(trailing);
+    pub fn trailing(mut self, trailing: impl View<State>) -> Self {
+        self.trailing = Some(AnyView::new(trailing));
         self
     }
 }

@@ -985,7 +985,7 @@ impl Component for KeysPage {
         }
     }
 
-    fn build(&self, state: &mut KeysPageState) -> AnyView<KeysPageState> {
+    fn build(&self, state: &mut KeysPageState) -> impl View<KeysPageState> {
         // Tracked read: a probe event's signal write wakes this rebuild, and
         // nothing else does.
         let generation = state.generation.get();
@@ -1045,15 +1045,17 @@ fn probe_children(
     row: KeyProbeView,
 ) -> Vec<FlexChild<KeysPageState>> {
     vec![
-        inflexible(any(text("Keys").size(13.0).color(accent()))),
-        inflexible(any(text(
-            "An IME keystroke probe: the platform hands frust a whole reconciled buffer, \
+        inflexible(text("Keys").size(13.0).color(accent())),
+        inflexible(
+            text(
+                "An IME keystroke probe: the platform hands frust a whole reconciled buffer, \
                  never a keystroke, so the keystroke is recovered by diffing every snapshot \
                  against a fixed sentinel and pinning the buffer back. Tap the blue zone, then \
                  type.",
-        )
-        .size(11.0)
-        .color(muted()))),
+            )
+            .size(11.0)
+            .color(muted()),
+        ),
         inflexible(text(header).size(12.0).family(mono())),
         inflexible(SizedBox(None, Some(BLOCK_GAP))),
         inflexible(text(stream).size(12.0).family(mono())),

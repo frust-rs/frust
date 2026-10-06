@@ -54,9 +54,9 @@ use frust::authoring::{
 use frust::motion::switcher::pattern_switcher;
 use frust::{
     AnyView, Axis, Brightness, ButtonStyle, Color, Component, DeepLink, EdgeInsets, FlexView, Get,
-    GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox, Stack, Theme,
-    TransitionSpec, Update, View, any, button, deep_links, flexible, icon, icon_button, icons,
-    inflexible, navigator, safe_area, scroll_view, set_app_theme,
+    GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox, Theme, TransitionSpec,
+    Update, View, any, button, column, deep_links, flexible, icon, icon_button, icons, inflexible,
+    navigator, safe_area, scroll_view, set_app_theme, stack,
 };
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
 
@@ -531,27 +531,19 @@ fn home_page(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState> 
 
     // Bottom/left/right edges only — the app bar above already consumes the
     // top inset.
-    let body_column = safe_area(FlexView::new(
-        Axis::Vertical,
-        vec![body, inflexible(section_nav(section))],
-    ))
-    .top(false);
+    let body_column = safe_area(column().push(body).child(section_nav(section))).top(false);
 
-    let column = FlexView::new(
-        Axis::Vertical,
-        vec![inflexible(demo_app_bar(state)), flexible(1, body_column)],
-    );
+    let column = column().child(demo_app_bar(state)).flex(1, body_column);
 
     let background_color = frust::use_context::<Theme>()
         .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .surface;
-    any(Stack(vec![
-        any(AppBackground(background_color)),
-        any(column),
-        deep_link_router(state),
-        any(frust_glyph::toast_host(pending)),
-    ]))
+    any(stack()
+        .child(AppBackground(background_color))
+        .child(column)
+        .child(deep_link_router(state))
+        .child(frust_glyph::toast_host(pending)))
 }
 
 /// The root [`Component`]. The `frust::app!` call below installs Glyph as the
@@ -576,7 +568,7 @@ impl Component for NativeWidgetsDemoApp {
         state
     }
 
-    fn build(&self, state: &mut NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState> {
+    fn build(&self, state: &mut NativeWidgetsDemoState) -> impl View<NativeWidgetsDemoState> {
         // `frust::navigator` auto-wires Android/gesture back handling for
         // `state.nav`, so back-dismiss works with zero app-side back code.
         let handles = state.clone();

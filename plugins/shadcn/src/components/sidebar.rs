@@ -1091,8 +1091,13 @@ pub struct SidebarInsetView<State: 'static> {
 /// shrink-wrap semantics) — wrapping more than one child that itself hosts a
 /// `scroll_view` or an overlay host is unsupported; give `sidebar_inset` a
 /// single child (composing internally, e.g. with `Column`/`FlexView`) instead.
-pub fn sidebar_inset<State: 'static>(children: Vec<AnyView<State>>) -> SidebarInsetView<State> {
-    let mut children = children;
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn sidebar_inset<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> SidebarInsetView<State> {
+    let mut children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     let child = if children.len() == 1 {
         children.remove(0)
     } else {
@@ -1241,7 +1246,12 @@ impl Widget for SidebarInsetWidget {
 // ---- Composed slots -------------------------------------------------------
 
 /// Create the header slot: `flex-col gap-2 p-2`.
-pub fn sidebar_header<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
+pub fn sidebar_header<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     any(Padding(
         EdgeInsets::all(SLOT_PAD),
         Column(interleave(children, SLOT_GAP)),
@@ -1249,7 +1259,11 @@ pub fn sidebar_header<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<
 }
 
 /// Create the footer slot: the header's mirror (`flex-col gap-2 p-2`).
-pub fn sidebar_footer<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
+pub fn sidebar_footer<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
     sidebar_header(children)
 }
 
@@ -1260,17 +1274,32 @@ pub fn sidebar_footer<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<
 /// the workspace's platform-adaptive default — the same deliberate,
 /// desktop-first choice [`scroll_area`](crate::components::scroll_area)
 /// documents.
-pub fn sidebar_content<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
+pub fn sidebar_content<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     any(scroll_view(Column(interleave(children, SLOT_GAP))).physics(RubberBand::new()))
 }
 
 /// Create a group: `flex-col p-2`, the unit a label plus a menu lives in.
-pub fn sidebar_group<State: 'static>(children: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
+pub fn sidebar_group<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     any(Padding(EdgeInsets::all(SLOT_PAD), Column(children)))
 }
 
 /// Create a menu: a `gap-1` column of [`sidebar_menu_item`] rows.
-pub fn sidebar_menu<State: 'static>(items: Vec<AnyView<State>>) -> AnyView<State> {
+///
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
+pub fn sidebar_menu<State: 'static, V: View<State>>(
+    items: impl IntoIterator<Item = V>,
+) -> AnyView<State> {
+    let items: Vec<AnyView<State>> = items.into_iter().map(AnyView::new).collect();
     any(Column(interleave(items, MENU_GAP)))
 }
 
@@ -1279,7 +1308,12 @@ pub fn sidebar_menu<State: 'static>(items: Vec<AnyView<State>>) -> AnyView<State
 /// Upstream stacks a menu action and a badge on top of the button with absolute
 /// positioning; this port lays the same three parts out as a centered row, so
 /// the button is `flexible` and the trailing parts keep their natural width.
-pub fn sidebar_menu_item<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
+///
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
+pub fn sidebar_menu_item<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> FlexView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     let children = children
         .into_iter()
         .enumerate()
@@ -1296,7 +1330,11 @@ pub fn sidebar_menu_item<State: 'static>(children: Vec<AnyView<State>>) -> FlexV
 
 /// Create one sub-menu row — a [`sidebar_menu_item`] inside a
 /// [`sidebar_menu_sub`].
-pub fn sidebar_menu_sub_item<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
+///
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
+pub fn sidebar_menu_sub_item<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> FlexView<State> {
     sidebar_menu_item(children)
 }
 
@@ -1545,9 +1583,12 @@ pub struct SidebarMenuSubView<State: 'static> {
 /// [`crate::components::collapsible`] with a [`sidebar_menu_button`] trigger
 /// (upstream's blocks do exactly that; `sidebar.tsx` itself only styles the
 /// list).
-pub fn sidebar_menu_sub<State: 'static>(
-    children: Vec<AnyView<State>>,
+///
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
+pub fn sidebar_menu_sub<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
 ) -> SidebarMenuSubView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     SidebarMenuSubView {
         child: any(Column(interleave(children, MENU_GAP))),
     }
@@ -2607,6 +2648,7 @@ mod tests {
     use frust::authoring::{
         KeyEvent, Modifiers, PointerButton, PointerEvent, Rect, scene::GlyphRun,
     };
+    use frust::column;
     use frust::{Brightness, CursorIcon, FrameTime};
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -3324,7 +3366,7 @@ mod tests {
         let probe = ConstraintProbe {
             captured: captured.clone(),
         };
-        let view = sidebar_inset::<()>(vec![any(probe)]);
+        let view = sidebar_inset::<(), _>(vec![any(probe)]);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
 
@@ -3421,7 +3463,7 @@ mod tests {
     #[test]
     fn the_menu_row_gives_the_button_the_space_the_badge_leaves() {
         let theme = theme_light();
-        let row = sidebar_menu_item::<AppState>(vec![
+        let row = sidebar_menu_item::<AppState, _>(vec![
             any(sidebar_menu_button("Inbox", |_: &mut AppState| {})),
             any(sidebar_menu_badge("3")),
         ]);
@@ -3700,7 +3742,7 @@ mod tests {
     /// shapes itself.
     #[cfg(feature = "bundled-fonts")]
     fn nav(_: &mut ()) -> FlexView<()> {
-        Column(vec![sidebar_group(vec![
+        column().child(sidebar_group(vec![
             any(sidebar_group_label("Platform")),
             sidebar_menu(vec![
                 any(sidebar_menu_item(vec![
@@ -3715,7 +3757,7 @@ mod tests {
                     any(sidebar_menu_sub_button("Starred", |_: &mut ()| {})),
                 ]))])),
             ]),
-        ])])
+        ]))
     }
 
     #[cfg(feature = "bundled-fonts")]

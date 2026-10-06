@@ -60,7 +60,13 @@ pub struct EmptyColumnView<State: 'static> {
 }
 
 /// `Empty`: the root centered column (`gap-6 p-6`).
-pub fn empty<State: 'static>(children: Vec<AnyView<State>>) -> EmptyColumnView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn empty<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> EmptyColumnView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     EmptyColumnView {
         children,
         gap: ROOT_GAP,
@@ -69,7 +75,13 @@ pub fn empty<State: 'static>(children: Vec<AnyView<State>>) -> EmptyColumnView<S
 }
 
 /// `EmptyHeader`: a centered column (`gap-2`, no padding of its own).
-pub fn empty_header<State: 'static>(children: Vec<AnyView<State>>) -> EmptyColumnView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn empty_header<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> EmptyColumnView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     EmptyColumnView {
         children,
         gap: HEADER_GAP,
@@ -78,7 +90,13 @@ pub fn empty_header<State: 'static>(children: Vec<AnyView<State>>) -> EmptyColum
 }
 
 /// `EmptyContent`: a centered column (`gap-4`, no padding of its own).
-pub fn empty_content<State: 'static>(children: Vec<AnyView<State>>) -> EmptyColumnView<State> {
+///
+/// The list takes any iterator of one [`View`] type, so a homogeneous list
+/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+pub fn empty_content<State: 'static, V: View<State>>(
+    children: impl IntoIterator<Item = V>,
+) -> EmptyColumnView<State> {
+    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     EmptyColumnView {
         children,
         gap: CONTENT_GAP,

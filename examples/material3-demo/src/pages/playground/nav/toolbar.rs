@@ -21,7 +21,7 @@
 //! knob set below. This page mirrors that source rather than inventing a
 //! scroll-hide preview the reference itself does not show.
 
-use frust::{Align, Alignment, AnyView, Component, any, component, icon};
+use frust::{Align, Alignment, AnyView, Component, View, any, component, icon};
 use frust_material::{
     FabSize, ToolbarAction, ToolbarColorStyle, ToolbarVariant, docked_toolbar, fab,
     floating_toolbar, icons, toolbar_action,
@@ -84,7 +84,7 @@ impl Component for ToolbarPlayground {
         }
     }
 
-    fn build(&self, state: &mut ToolbarState) -> AnyView<ToolbarState> {
+    fn build(&self, state: &mut ToolbarState) -> impl View<ToolbarState> {
         body(state)
     }
 }
@@ -141,7 +141,7 @@ fn fab_view(state: &ToolbarState) -> AnyView<ToolbarState> {
     } else {
         (icons::ADD, "Expand")
     };
-    any(fab(any(icon(source)), |s: &mut ToolbarState| {
+    any(fab(icon(source), |s: &mut ToolbarState| {
         s.expanded = !s.expanded;
     })
     .size(FabSize::Medium)
