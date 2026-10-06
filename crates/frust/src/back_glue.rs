@@ -535,7 +535,7 @@ impl<State: 'static> BackHandler<State> {
 ///
 /// ```no_run
 /// use frust::{
-///     BackHandler, Component, NavigatorController, View, any, attach_back_handler, navigator,
+///     BackHandler, Component, NavigatorController, View, attach_back_handler, navigator,
 ///     text,
 /// };
 ///
@@ -563,7 +563,7 @@ impl<State: 'static> BackHandler<State> {
 ///         // still pops exactly once (shared consumption source).
 ///         state.back.track();
 ///         let controller = state.back.controller();
-///         any(navigator(controller, || any(text("home"))))
+///         navigator(controller, || text("home"))
 ///     }
 /// }
 ///
