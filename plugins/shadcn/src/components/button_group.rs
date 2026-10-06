@@ -207,7 +207,6 @@ impl Widget for ButtonGroupWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::any;
     use frust_widgets::test_support::leaf;
 
     fn build<S: 'static>(view: &ButtonGroupView<S>) -> ButtonGroupWidget {
@@ -224,8 +223,7 @@ mod tests {
     fn horizontal_members_abut_flush_left_to_right() {
         // An unbounded cross axis (height): `items-stretch` has nothing to
         // stretch to, so each member keeps its own natural height.
-        let view: ButtonGroupView<()> =
-            button_group(vec![any(leaf(40.0, 20.0)), any(leaf(60.0, 20.0))]);
+        let view: ButtonGroupView<()> = button_group(vec![leaf(40.0, 20.0), leaf(60.0, 20.0)]);
         let mut w = build(&view);
         let size = layout(&mut w, Size::new(500.0, f64::INFINITY));
         assert_eq!(size, Size::new(100.0, 20.0));
@@ -235,9 +233,8 @@ mod tests {
 
     #[test]
     fn vertical_members_stack_flush_top_to_bottom() {
-        let view: ButtonGroupView<()> =
-            button_group(vec![any(leaf(40.0, 20.0)), any(leaf(40.0, 30.0))])
-                .orientation(ButtonGroupOrientation::Vertical);
+        let view: ButtonGroupView<()> = button_group(vec![leaf(40.0, 20.0), leaf(40.0, 30.0)])
+            .orientation(ButtonGroupOrientation::Vertical);
         let mut w = build(&view);
         let size = layout(&mut w, Size::new(f64::INFINITY, 500.0));
         assert_eq!(size, Size::new(40.0, 50.0));
@@ -247,8 +244,7 @@ mod tests {
 
     #[test]
     fn a_finite_cross_axis_stretches_every_member_to_it() {
-        let view: ButtonGroupView<()> =
-            button_group(vec![any(leaf(40.0, 20.0)), any(leaf(60.0, 10.0))]);
+        let view: ButtonGroupView<()> = button_group(vec![leaf(40.0, 20.0), leaf(60.0, 10.0)]);
         let mut w = build(&view);
         let size = layout(&mut w, Size::new(500.0, 500.0));
         assert_eq!(
@@ -259,11 +255,8 @@ mod tests {
 
     #[test]
     fn no_gap_between_members() {
-        let view: ButtonGroupView<()> = button_group(vec![
-            any(leaf(10.0, 10.0)),
-            any(leaf(10.0, 10.0)),
-            any(leaf(10.0, 10.0)),
-        ]);
+        let view: ButtonGroupView<()> =
+            button_group(vec![leaf(10.0, 10.0), leaf(10.0, 10.0), leaf(10.0, 10.0)]);
         let mut w = build(&view);
         let size = layout(&mut w, Size::new(500.0, 500.0));
         assert_eq!(size.width, 30.0, "three 10px members, zero gap");
@@ -273,7 +266,7 @@ mod tests {
     fn event_routing_reaches_a_member() {
         use frust::authoring::{PointerButton, PointerEvent, PointerPhase};
         let view: ButtonGroupView<Vec<u32>> =
-            button_group(vec![any(frust_widgets::test_support::probe(0))]);
+            button_group(vec![frust_widgets::test_support::probe(0)]);
         let mut w = build(&view);
         layout(&mut w, Size::new(100.0, 100.0));
         let mut log: Vec<u32> = Vec::new();

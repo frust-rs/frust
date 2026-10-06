@@ -356,7 +356,7 @@ mod tests {
 
     #[test]
     fn root_pads_24px_and_centers_children() {
-        let view: EmptyColumnView<()> = empty(vec![any(leaf(20.0, 10.0)), any(leaf(40.0, 10.0))]);
+        let view: EmptyColumnView<()> = empty(vec![leaf(20.0, 10.0), leaf(40.0, 10.0)]);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         let size = layout(&mut w, Size::new(400.0, 400.0));
@@ -369,8 +369,7 @@ mod tests {
 
     #[test]
     fn header_uses_gap_2_with_no_padding() {
-        let view: EmptyColumnView<()> =
-            empty_header(vec![any(leaf(10.0, 10.0)), any(leaf(10.0, 10.0))]);
+        let view: EmptyColumnView<()> = empty_header(vec![leaf(10.0, 10.0), leaf(10.0, 10.0)]);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         let size = layout(&mut w, Size::new(400.0, 400.0));
