@@ -629,48 +629,6 @@ fix, see its commit message); no device or simulator run has occurred.
 
 ---
 
-### `focus-double-erasure-swap-blind` — a type swap through a doubly-erased pod is invisible to every reconciler
-
-**Observed**: `any(any(view))` — an `AnyView` erased a second time — produces a
-`ChildPod` whose stored element has the concrete type `Box<dyn Widget>`
-*whatever the inner view is*. Every swap-detection site in `frust-widgets`
-decides "did this rebuild replace the widget?" by comparing that erased
-element's `TypeId` across the rebuild
-(`authoring::rebuild_child_tracked`, the one funnel `rebuild_child` and
-`rebuild_children` both use), so a genuine **inner** concrete-type change
-reports `swapped == false`: the old widget really is torn down and replaced
-inside `AnyView::rebuild`, but the pod's recorded `active`/`focused` flags are
-neither cleared nor reported. When the live focus session belonged to the
-replaced widget, the pod keeps routing `Key`/`Ime` events into a fresh widget
-that never claimed focus, no `mark_focus_orphaned` is raised, and
-`RenderRoot`'s `focus_active`/`ime_state` stay standing over a widget that no
-longer exists — exactly the failure the single-erasure swap arms exist to
-prevent (`docs/CODE_STANDARDS.md`'s orphan contract).
-
-**Applies to**: any `ChildPod` built from a doubly-erased view, on every
-platform. It is reachable by accident rather than by intent: a builder that
-erases its own child (`pattern_switcher(key, pattern, child)` calls
-`any(child)` internally) double-erases whenever the caller already handed it an
-`AnyView`. **Single** erasure — the overwhelmingly common `any(concrete_view)`,
-and every in-crate container's own child list — detects swaps correctly and is
-unaffected.
-
-**Why not fixed**: pre-existing (it predates the focus/IME fixes that
-found it) and not fixable at a call site — the information the reconciler needs
-has already been erased by the time it looks. Closing it needs **shared
-swap-detection machinery**: `ErasedView` would have to report the *element's*
-concrete `TypeId` through the erasure so nesting composes, instead of each
-reconciler probing whatever boxed element it happens to hold. That is a
-`frust-core` trait-surface change landing on every reconciler at once, and was
-deliberately not attempted inside a focus/IME review fix.
-
-**Evidence**: source inspection of `crates/frust-core/src/view.rs`
-(`AnyView`'s `View`/`ErasedView` impls — the outer `dyn_build` boxes the inner
-`Box<dyn Widget>`) against `crates/frust-widgets/src/authoring.rs`'s
-`rebuild_child_tracked`; found during review-fix-3 (FC)'s audit of the
-focus-severing sites.
-
----
 
 ### `focus-navbar-item-truncation-unmarked` — a truncated navbar/tabbar item drops its focus link silently
 
