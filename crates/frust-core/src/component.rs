@@ -51,8 +51,12 @@ use crate::widget::{ChildPod, LayoutCtx, PaintCtx, PaintScene, Widget};
 /// A `Component` declares an associated [`Component::State`] type, seeds it once
 /// with [`Component::init`], and produces its subtree with [`Component::build`],
 /// which receives `&mut State` so the build can read (and the subtree's events
-/// can mutate) the retained state. The subtree is an [`AnyView`] over the
-/// component's own `State` — the outer state type never appears.
+/// can mutate) the retained state. The subtree is any `impl View` over the
+/// component's own `State` — the outer state type never appears. Erasure
+/// happens at the API boundary: [`ComponentWidget`] wraps whatever `build`
+/// returns in an [`AnyView`] before storing it, and because [`AnyView::new`] is
+/// idempotent a body that already returns an `AnyView` (e.g. `any(..)`) is not
+/// boxed a second time.
 pub trait Component: 'static {
     /// The retained local state this component owns across rebuilds.
     type State: 'static;
@@ -73,9 +77,17 @@ pub trait Component: 'static {
     /// Produce the component's subtree from its current local state.
     ///
     /// Re-run on every rebuild (local state may have changed even when the
-    /// component value is equal). The returned [`AnyView`] is diffed against the
-    /// previous one exactly like `RenderRoot`'s root view is.
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State>;
+    /// component value is equal). The returned view is erased into an
+    /// [`AnyView`] by the hosting [`ComponentWidget`] and diffed against the
+    /// previous one exactly like `RenderRoot`'s root view is. Implementations
+    /// declare the return type as `impl View<Self::State>`; returning a concrete
+    /// view type or an `any(..)` value both satisfy it.
+    ///
+    /// The opaque return type captures the `&self` and `&mut State` borrows, so
+    /// a caller that hands the result out of a closure (a root driver's
+    /// `move |state| ..` build closure) erases it first with
+    /// `AnyView::new(root.build(state))`.
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State>;
 }
 
 /// The `View` adapter that hosts a [`Component`] in any surrounding view tree.
@@ -160,7 +172,9 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         let owner = Owner::new();
         let (state, prev, child, next_id) = owner.with(|| {
             let mut state = self.component.init();
-            let view = self.component.build(&mut state);
+            // Erase at the boundary; idempotent, so an `AnyView` body is not
+            // re-boxed.
+            let view = AnyView::new(self.component.build(&mut state));
             // A component-local build counter; the child never enters the arena.
             let mut next_id = 0u64;
             let mut inner = BuildCtx::new(&mut next_id);
@@ -202,7 +216,7 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         let outer_has_focus = ctx.has_focus();
         let owner = element.owner.clone();
         owner.with(|| {
-            let new_view = self.component.build(&mut element.state);
+            let new_view = AnyView::new(self.component.build(&mut element.state));
             // Read before the `widget_mut` borrow below.
             let child_focused = element.child.is_focused();
             let (flags, swapped) = {
@@ -530,7 +544,7 @@ mod tests {
         fn init(&self) -> CounterState {
             CounterState { count: 0 }
         }
-        fn build(&self, state: &mut CounterState) -> AnyView<CounterState> {
+        fn build(&self, state: &mut CounterState) -> impl View<CounterState> {
             any(CounterButtonView {
                 count: state.count,
                 label: self.label,
@@ -638,7 +652,7 @@ mod tests {
     impl Component for Provider {
         type State = ();
         fn init(&self) {}
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             provide_context(Theme(7));
             any(component(Reader {
                 sink: self.sink.clone(),
@@ -653,7 +667,7 @@ mod tests {
     impl Component for Reader {
         type State = ();
         fn init(&self) {}
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             *self.sink.lock().unwrap() = use_context::<Theme>().map(|t| t.0);
             any(Empty)
         }
@@ -665,7 +679,7 @@ mod tests {
     impl Component for SecretProvider {
         type State = ();
         fn init(&self) {}
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             provide_context(Theme(99));
             any(Empty)
         }
@@ -711,7 +725,7 @@ mod tests {
                 probe.fetch_add(1, Ordering::SeqCst);
             });
         }
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             any(Empty)
         }
     }
@@ -740,6 +754,63 @@ mod tests {
         assert_eq!(probe.load(Ordering::SeqCst), 1);
     }
 
+    // --- Erasure at the boundary --------------------------------------------
+
+    /// A component whose `build` returns a concrete view (no `any(..)`): the
+    /// host erases it, so the pod's double-boxed element wraps the leaf widget.
+    struct ConcreteComp;
+    impl Component for ConcreteComp {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> impl View<()> {
+            Empty
+        }
+    }
+
+    /// The same leaf, returned already erased: `AnyView::new` is idempotent, so
+    /// the host does not wrap the `AnyView` in a second box.
+    struct ErasedComp;
+    impl Component for ErasedComp {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> impl View<()> {
+            any(Empty)
+        }
+    }
+
+    /// Whether the component's child element is the leaf widget itself (one
+    /// erasure), not a box around another boxed element (two).
+    fn child_is_empty_widget<C: Component>(widget: &mut ComponentWidget<C>) -> bool {
+        let boxed = widget
+            .child
+            .widget_mut()
+            .downcast_mut::<Box<dyn Widget>>()
+            .expect("double-boxed AnyView element");
+        let any: &dyn Any = &**boxed;
+        any.is::<EmptyWidget>()
+    }
+
+    #[test]
+    fn build_result_is_erased_exactly_once_at_the_boundary() {
+        let _owner = ambient();
+
+        let concrete = component(ConcreteComp);
+        let mut widget = build_widget::<(), _>(&concrete);
+        assert!(child_is_empty_widget(&mut widget), "concrete body, build");
+        let mut next_id = 0u64;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        View::<()>::rebuild(&concrete, &concrete, &mut widget, &mut ctx);
+        assert!(child_is_empty_widget(&mut widget), "concrete body, rebuild");
+
+        let erased = component(ErasedComp);
+        let mut widget = build_widget::<(), _>(&erased);
+        assert!(child_is_empty_widget(&mut widget), "any(..) body, build");
+        let mut next_id = 0u64;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        View::<()>::rebuild(&erased, &erased, &mut widget, &mut ctx);
+        assert!(child_is_empty_widget(&mut widget), "any(..) body, rebuild");
+    }
+
     // --- The swap arm's orphan mark, across the state boundary --------------
 
     /// A component whose child view *type* flips on a shared flag: `Empty`
@@ -752,7 +823,7 @@ mod tests {
     impl Component for SwapComp {
         type State = ();
         fn init(&self) {}
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             if self.swapped.get() {
                 any(OtherLeaf)
             } else {
@@ -905,7 +976,7 @@ mod tests {
     impl Component for CaptureComp {
         type State = ();
         fn init(&self) {}
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             any(CaptureView)
         }
     }
@@ -1024,7 +1095,7 @@ mod tests {
     impl Component for CursorComp {
         type State = ();
         fn init(&self) {}
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             any(CursorLeafView)
         }
     }
@@ -1109,7 +1180,7 @@ mod tests {
     impl Component for ImeComp {
         type State = ();
         fn init(&self) {}
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             any(ImeLeafView)
         }
     }
@@ -1184,7 +1255,7 @@ mod tests {
     impl Component for Labeled {
         type State = ();
         fn init(&self) {}
-        fn build(&self, _state: &mut ()) -> AnyView<()> {
+        fn build(&self, _state: &mut ()) -> impl View<()> {
             any(TextLeafView { text: self.text })
         }
     }
