@@ -61,7 +61,21 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
 ## Data Flow
 
 - `Component::build` runs each frame inside a tracked reactive scope, producing a `View` tree that
-  `RenderRoot` diffs into the retained `Widget` tree.
+  `RenderRoot` diffs into the retained `Widget` tree. It returns `impl View<Self::State>`;
+  `ComponentView`/`ComponentWidget` erase the result with `AnyView::new` before storing it.
+  - **Erasure sits at API boundaries, not call sites.** `AnyView::new`/`any()` is idempotent (an
+    argument already an `AnyView<State>` is returned unchanged via a `'static` downcast), so
+    `any(any(v))` is one box. Authoring code writes `any()` only where branches of different
+    concrete types must unify; widget APIs take `V: View<State>` and erase internally (see
+    WIDGETS_ARCHITECTURE.md's *Erasure at the API Boundary*).
+  - **Driver closures erase explicitly.** The opaque `build` return captures the `&self`/
+    `&mut State` borrows, so a closure that hands the result out (the facade's `run*` drivers, the
+    `app!` android/ios/web arms, test drivers) wraps it: `move |s| AnyView::new(root.build(s))`.
+  - **Reconciliation identity is unchanged:** position/key plus a downcast to the concrete element
+    `TypeId`. That `TypeId` is the concrete widget type only while no wrapper view re-boxes an
+    `AnyView` (`type Element = Box<dyn Widget>` forwarding to an inner `AnyView`; in-tree only
+    `ReorderableListView`): such a wrapper hides inner type swaps from the check — see
+    LIMITATIONS.md `focus-wrapper-erasure-swap-blind`.
 - `RenderRoot::layout` threads box constraints down and sizes up through the widget tree, kept
   renderer- and text-crate-agnostic via a type-erased text context.
 - `RenderRoot::paint` walks widgets into a renderer-agnostic `Scene`, later encoded for the GPU by
@@ -377,7 +391,8 @@ one binary cannot fight over it and an app's explicit choice survives a catalog 
 | `View<State>` / `Widget` | The declarative/retained pair every UI element implements |
 | `RenderRoot<State, V>` | Owns the widget tree and theme; drives rebuild/layout/paint/event |
 | `WidgetTree` / `InspectNode` | Read-only tree accessors (`roots`/`children`/`inspect`) and the plain owned snapshot node (id, type name, debug label, absolute bounds, children) they produce |
-| `Component` / `ComponentView` / `ComponentWidget` | Stateful widget analog with a per-instance reactive `Owner` |
+| `Component` / `ComponentView` / `ComponentWidget` | Stateful widget analog with a per-instance reactive `Owner`; `build` returns `impl View<Self::State>` |
+| `AnyView<State>` / `any()` | Type-erased `View` (`Element = Box<dyn Widget>`); construction is idempotent, so erasure happens once at an API boundary |
 | `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including both broadcast variants (`Housekeeping`, `Overlay`; a file drop's `Ended` phase also broadcasts) and the focus-routed `EditCommand` (see Data Flow), opt-in hover claiming (`claim_hover`/`is_hovered`), the multi-contact pair (`pointer_id`/`capture_contacts`), and the per-pass request channels (`set_cursor`, `write_clipboard`, `request_paste`, `dispatch_edit_command`) |
 | `PointerId` / `PointerSource` | A pointer contact's identity (device plus slot), riding beside a `PointerEvent` and read via `EventCtx::pointer_id()` — see Data Flow's Multi-contact pointer routing |
 | `ScaleEvent` / `ScalePhase` | A pinch/zoom gesture event, hit-tested and bubbling like `Scroll` — see Data Flow's Scale gestures |

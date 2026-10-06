@@ -42,21 +42,16 @@ controller, the view constructors, and the edge-swipe driver, with tests alongsi
 semantics), `frust-scene` (renderer-agnostic draw commands), `frust-text` (text layout/editing
 engine backing `frust-theme`'s typography tokens), `frust-theme` (design tokens bundled into
 `Theme`), `peniko`/`kurbo` (shared color/geometry primitives), and the `image` crate (image decode
-path). `frust-theme` is `frust-widgets`' primary consumer.
-
-The one reverse edge is `frust-theme` depending on `frust-core`, but only for context-accessor
-sugar (reading the active `Theme` from a context handle) — this does not create a cycle back into
-`frust-widgets`.
+path). `frust-theme` is `frust-widgets`' primary consumer. The one reverse edge, `frust-theme` →
+`frust-core`, is context-accessor sugar only and creates no cycle into `frust-widgets`.
 
 Every container and interactive widget in `frust-widgets` is built through the crate's own public
-authoring toolkit rather than touching `frust-core` primitives directly. The boundary is now
-enforced structurally by the crate graph rather than a source-scan test: the three built-in design
-systems are separate crates (`frust-glyph`/`frust-material`/`frust-cupertino`, PLUGINS unit) whose
-only production dependency is the `frust` facade (`default-features = false`) plus `kurbo`/
-`peniko` — they physically cannot reach a `frust-core` primitive `frust` doesn't re-export, the
-same seam any third-party design system builds against (see *External Design-System Contract*
-below). `frust::authoring` is the toolkit both the baseline set and every design-system plugin
-build from.
+authoring toolkit rather than touching `frust-core` primitives directly. The crate graph enforces
+this structurally: the three built-in design systems (`frust-glyph`/`frust-material`/
+`frust-cupertino`, PLUGINS unit) depend only on the `frust` facade (`default-features = false`)
+plus `kurbo`/`peniko`, so they cannot reach a `frust-core` primitive `frust` doesn't re-export —
+the same seam any third-party design system builds against (see *External Design-System
+Contract*). `frust::authoring` is the toolkit both the baseline set and every plugin build from.
 
 ## Data Flow
 
@@ -66,24 +61,17 @@ build from.
 - Widget resolution precedence: explicit builder value > theme token > unthemed-fallback constant,
   generally re-resolved every paint; `Text`/`TextInput` instead bake the resolved color at layout
   time, and `Text` also bakes the font family of an opted-in type-scale role (`.themed_family`).
-- Container plumbing: every container and interactive widget is built through the shared public
-  authoring toolkit rather than touching `frust-core` primitives directly.
 - Introspection flow: a container implements `Widget::visit_children` (CORE unit) via the
-  authoring toolkit's `VisitPods` trait and `visit_children!` macro — one line naming its
-  `ChildPod`-holding fields — so `WidgetTree::inspect`/`RenderRoot::inspect()` can enumerate its
-  children; a hand-rolled child list (a row/slot struct behind an enum) implements `VisitPods`
-  by hand instead and stays on the same seam. Both the baseline set and all five design-system
-  plugins use it; see WIDGETS_CODE_STANDARDS.md for the authoring convention this obliges.
-- Design-system layering: the five design-system plugins (PLUGINS unit) sit above the baseline
-  set and the authoring seam, each an ordinary sibling crate assembling its own `Theme` via
-  `ThemeBuilder`'s editors over `frust-theme`'s neutral floor rather than consuming a token module
-  `frust-theme` ships for it.
-- Glass/Cupertino chrome flow: `frust-cupertino` owns its own "Liquid Glass" `GlassScale` recipe
-  (moved out of `frust-theme` with the rest of the catalog) and paints from it when supported,
-  degrading to `frust-theme`'s neutral `GlassScale::opaque_material()` otherwise.
+  authoring toolkit's `VisitPods` trait and `visit_children!` macro (one line naming its
+  `ChildPod` fields) so `RenderRoot::inspect()` can enumerate its children; a hand-rolled child
+  list implements `VisitPods` by hand on the same seam. The baseline set and all five plugins use
+  it; see WIDGETS_CODE_STANDARDS.md for the convention this obliges.
+- Design-system layering: the five design-system plugins (PLUGINS unit) assemble their own
+  `Theme` via `ThemeBuilder`'s editors over `frust-theme`'s neutral floor; `frust-cupertino`
+  owns its "Liquid Glass" `GlassScale` recipe, degrading to the neutral
+  `GlassScale::opaque_material()` where unsupported.
 - Motion flow: implicit-animation and transition widgets resolve default timing from `Theme.motion`,
-  collapsing to a short crossfade under `reduce_motion`; decorative loops request paced frames so
-  the mobile frame gate can throttle them. `reduce_motion` is a floor, not an assignment: every
+  collapsing to a short crossfade under `reduce_motion`; decorative loops request paced frames. `reduce_motion` is a floor, not an assignment: every
   baseline defaults it `false`, and a mobile shell OR's the OS accessibility preference over whatever
   the active theme authored (`effective = authored || os`, see SHELLS_ARCHITECTURE.md for the
   sensors) — an authored `true` is never un-reduced by an OS report of `false`.
@@ -307,19 +295,15 @@ build from.
 ## Architectural Facts & Constraints
 
 ### External Design-System Contract
-The three built-in design systems — `frust-glyph`/`frust-material`/`frust-cupertino`
-(`plugins/{glyph,material,cupertino}`, PLUGINS unit) — are themselves proof of this contract: each
-is an ordinary sibling crate depending on `frust` (`default-features = false`) plus `kurbo`/
-`peniko` only, built entirely on the public authoring/theme seam a third party gets too, no
-special-cased access. Each follows the same conventions: its catalog is flat re-exported at the
-crate root (`frust_glyph::app_bar`, `frust_material::AppBar`, `frust_cupertino::CupertinoButton`),
-its token constructors are free functions (`baseline()`, `color_scheme_light()`/`_dark()`,
-`type_scale()`, `shape_scale()`, `elevation()`, `motion_scheme()`) rather than an in-crate module
-`frust-theme` used to ship, and `install()` seeds the theme with `frust::set_default_theme(baseline())`
-from an `app!` `setup` block. `frust-glyph::baseline()` and `frust-material::baseline()` additionally
-attach the `NativeTypefaces` theme extension (their bundled monospace and Roboto faces,
-respectively) — Cupertino's does not — see Key Types and NATIVE_WIDGETS_ARCHITECTURE.md's theme
-ladder.
+The three built-in design systems (`plugins/{glyph,material,cupertino}`, PLUGINS unit) prove this
+contract: each is an ordinary sibling crate on the public authoring/theme seam, with no
+special-cased access. Each flat re-exports its catalog at the crate root (`frust_glyph::app_bar`,
+`frust_material::AppBar`, `frust_cupertino::CupertinoButton`), exposes its token constructors as
+free functions (`baseline()`, `color_scheme_light()`/`_dark()`, `type_scale()`, `shape_scale()`,
+`elevation()`, `motion_scheme()`), and its `install()` seeds the theme with
+`frust::set_default_theme(baseline())` from an `app!` `setup` block. Glyph's and Material's
+`baseline()` also attach the `NativeTypefaces` extension — Cupertino's does not (see Key Types and
+NATIVE_WIDGETS_ARCHITECTURE.md's theme ladder).
 
 `DesignLanguage` is `#[non_exhaustive]` with a `Custom(&'static str)` variant (compared by string
 content, not interning identity) so a third-party design system can tag its identity without a
@@ -334,12 +318,9 @@ built-in one does. `examples/design-system-sample` is the reference proof for a 
 crate (outside this repo's own workspace, unlike the three built-ins above) — a themed catalog plus
 installer built on `frust`'s public API alone (see ARCHITECTURE.md's Examples table); its one
 finding, that `Widget::semantics` cannot be exercised from out of tree, is registered in
-LIMITATIONS.md. `plugins/shadcn` (`frust-shadcn`, PLUGINS unit) is the production-scale companion
-proof: a 55-component port of a real third-party design system (shadcn/ui) built on this same
-seam, not a sample. `plugins/beui` (`frust-beui`) is a second external-origin port on the same
-seam — beUI, an 81-part motion-first web catalog — proving the contract holds for a design system
-whose whole premise is per-component animation, not just static layout. See
-PLUGINS_ARCHITECTURE.md's Design-System Plugins for both.
+LIMITATIONS.md. `plugins/shadcn` (55 components) and `plugins/beui` (81 motion-first parts) are
+production-scale external-origin ports on the same seam — see PLUGINS_ARCHITECTURE.md's
+Design-System Plugins.
 
 Three more seams are part of the same public authoring surface: opt-in hover claiming
 (`EventCtx::claim_hover`/`PaintCtx::is_hovered`) for state-layer-style interaction chrome, cursor
@@ -348,22 +329,40 @@ design system's own hover/drag affordances, and the overlay portal — `place`/`
 `overlay_portal`, re-exported through `frust::authoring` — for a popover, menu, tooltip or context
 menu (see *Overlay flow* above).
 
+### Erasure at the API Boundary
+Authoring code rarely names `AnyView`: `AnyView::new`/`any()` is idempotent (an argument already
+an `AnyView<State>` is returned unchanged), so erasure happens once, inside the API that stores
+the child; struct fields and the `&AnyView` reconciler seams in `authoring` (`build_child`/
+`rebuild_child`/`teardown_child`) stay erased.
+- **Fluent builders:** `column()`/`row()` (`FlexView`: `child`/`flex`/`keyed`/`children`/`push`/
+  `when`/`when_some`) and `stack()` (`StackView`: `child`/`children`/`when`/`when_some`), flat
+  re-exported through `frust_widgets` and `frust`. The `Column`/`Row`/`Stack` sugar remains,
+  taking `Vec<V>` with `V: View<State>` (a `Vec`, not an iterator, so `Column(iter.collect())`
+  still infers).
+- **Parameter contract** (widgets, facade, plugins): a single slot is `impl View<State>`
+  (scaffold `app_bar`/`bottom_bar`/`fab`, plugin icon/leading/trailing/title/action); an
+  optional slot is `Option<V>` (`app_bar_opt`, `bottom_bar_opt`, `overlay`); a plugin list is
+  `impl IntoIterator<Item = impl View<State>>`; a builder closure is `impl Fn(..) -> V`
+  (navigator/`overlay_host`, `NavigatorController` push/replace, `Route::new`/`shell_route`/
+  `Router::error_builder`, `ListView` item builders, `DraggableView::ghost`; `reorderable_list`
+  takes `impl IntoIterator<Item = (K, V)>`).
+- **Caller consequences:** a bare `None` on an optional slot becomes `None::<AnyView<S>>`; an
+  explicit turbofish gains a `_` for the view type; `.collect()` into an iterator parameter needs
+  `::<Vec<_>>()`.
+
 ### Reactive-Free Design
-`frust-widgets` contains no `reactive_graph` symbols crate-wide — the crate is entirely signal-free.
-Reactive bridging lives in the CORE unit's facade (`router_glue.rs`, `back_glue.rs`), where observer
-callbacks and context providers can reach the reactive runtime. This boundary keeps the widget set
-reusable and decouples it from the reactive layer; state machine state in nav/navigator is held in
-plain `Rc<Cell<_>>`/`Arc<Mutex<_>>` instead.
+`frust-widgets` contains no `reactive_graph` symbols — the crate is entirely signal-free. Reactive
+bridging lives in the CORE facade (`router_glue.rs`, `back_glue.rs`), keeping the widget set
+reusable; nav/navigator state is held in plain `Rc<Cell<_>>`/`Arc<Mutex<_>>`.
 
 ### Icon Generation
 `crates/frust-widgets/src/icons/mod.rs` is **generated** by `scripts/gen_icons.py` from a hardcoded
-`STARTER_SET`. Hand-edits to this file are destroyed on the next `gen_icons.py` run; expand the icon
-set by modifying the script's source list, not the generated output.
+`STARTER_SET`; hand-edits are destroyed on the next run — expand the script's source list instead.
 
 ### Text Widget Alignment
-`TextInput`'s live-edited text is always start-aligned, regardless of `TextStyle::align`, because
-parley's `PlainEditor` exposes no text-alignment hook. This is a parley limitation, not a frust
-design decision; users cannot work around it per-field. `TextView` does honor `align`.
+`TextInput`'s live-edited text is always start-aligned regardless of `TextStyle::align`: parley's
+`PlainEditor` exposes no alignment hook (a parley limitation, no per-field workaround).
+`TextView` honors `align`.
 
 ### Text Selection and the Clipboard
 Four gestures reach a `TextInput`'s selection and only two raise the toolbar: a **stationary
@@ -596,4 +595,5 @@ flow*). **Navigator observation:** `TransitionState`/`PageVisibility`; `overlay_
 params merge query under path captures; `RouteNavigator` off-thread navigation. **Text:**
 `TextInput` read-only mode and `content_type` IME hints; `TextView` alignment, `.max_lines`,
 `.overflow(TextOverflow)` (see RENDER_ARCHITECTURE.md). **Baseline primitives:**
-`container()`/`colored_box()`, `divider()`, `icon_button()`.
+`container()`/`colored_box()`, `divider()`, `icon_button()`. **Authoring:** `column()`/`row()`/
+`stack()` builders and `impl View<State>` slot/builder parameters (*Erasure at the API Boundary*).
