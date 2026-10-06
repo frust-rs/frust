@@ -254,7 +254,6 @@ pub fn KbdGroup<State: 'static, V: View<State>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::any;
     use frust::authoring::text::TextContext;
     use std::any::Any;
 
@@ -336,7 +335,7 @@ mod tests {
 
     #[test]
     fn group_lays_out_children_left_to_right_with_the_group_gap() {
-        let view: KbdGroupView<()> = kbd_group(vec![any(kbd("Ctrl")), any(kbd("K"))]);
+        let view: KbdGroupView<()> = kbd_group(vec![kbd("Ctrl"), kbd("K")]);
         let mut w = build_group(&view);
         let size = layout_group(&mut w, None);
         assert_eq!(w.children.len(), 2);
@@ -359,7 +358,7 @@ mod tests {
 
     #[test]
     fn group_visit_children_publishes_every_pod() {
-        let view: KbdGroupView<()> = kbd_group(vec![any(kbd("Ctrl")), any(kbd("K"))]);
+        let view: KbdGroupView<()> = kbd_group(vec![kbd("Ctrl"), kbd("K")]);
         let mut w = build_group(&view);
         let _ = layout_group(&mut w, None);
         let mut seen = 0usize;

@@ -294,7 +294,7 @@ mod tests {
     use frust::Brightness;
     use frust::authoring::{
         BoxConstraints, CursorIcon, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, Point,
-        PointerButton, PointerEvent, PointerPhase, Size, Widget, any, text::TextContext,
+        PointerButton, PointerEvent, PointerPhase, Size, Widget, text::TextContext,
     };
     use frust_core::RenderRoot;
     use std::any::Any;
@@ -313,7 +313,7 @@ mod tests {
                     drawer_title("Move goal"),
                     drawer_description("Set your daily activity goal."),
                 ]),
-                drawer_footer(vec![any(Block(Size::new(80.0, 36.0)))]),
+                drawer_footer(vec![Block(Size::new(80.0, 36.0))]),
             ],
         )
         .on_dismiss(|s: &mut Flags| s.dismissed += 1)

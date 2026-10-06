@@ -245,7 +245,7 @@ mod tests {
     use crate::overlay::modal::{EDGE_FRACTION, MAX_WIDTH_SM};
     use frust::authoring::{
         BoxConstraints, EventCtx, InputEvent, LayoutCtx, PaintCtx, Point, PointerPhase, Size,
-        Widget, any, text::TextContext,
+        Widget, text::TextContext,
     };
     use frust::{Brightness, FrameTime};
     use std::any::Any;
@@ -262,7 +262,7 @@ mod tests {
                 sheet_title("Edit profile"),
                 sheet_description("Make changes to your profile here."),
             ]),
-            sheet_footer(vec![any(Block(Size::new(80.0, 36.0)))]),
+            sheet_footer(vec![Block(Size::new(80.0, 36.0))]),
         ])
         .side(side)
         .on_dismiss(|s: &mut Flags| s.dismissed += 1)
