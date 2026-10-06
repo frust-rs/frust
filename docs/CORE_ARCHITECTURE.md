@@ -80,9 +80,10 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   separate registry. Events fall into three routing classes: hit-tested (pointer/scroll),
   focus-routed (`Key`/`Ime`/`EditCommand`, delivered down the recorded focus path to whatever
   widget holds focus *at delivery* — a clipboard verb belongs here because it is *about the
-  selection*, which lives wherever focus is), and **broadcast** — `InputEvent::Housekeeping`
-  and `InputEvent::Overlay`, non-input events every container forwards to every child
-  unconditionally, ahead of its capture/focus/hit-test logic, and never consumes.
+  selection*, which lives wherever focus is), and **broadcast** — `InputEvent::Housekeeping`,
+  `InputEvent::Overlay` and a file drop's `FileDropPhase::Ended` follow-up, events every container
+  forwards to every child unconditionally, ahead of its capture/focus/hit-test logic, and never
+  consumes.
 - `RenderRoot::rebuild` dispatches a `Housekeeping` broadcast when a thread-local flag
   (`mark_pending_result_flush`/`take_pending_result_flush`) is set — the seam a widget uses to run
   a deferred callback that needs `&mut State` but was queued during the state-free view diff (a
@@ -138,7 +139,12 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   concept on the platform side, so it is hit-tested straight against the main tree — a drop target
   living inside a popover is a gap this does not close (see `file-drop-desktop-only` in
   [LIMITATIONS.md](LIMITATIONS.md)). Only `frust-shell-desktop` publishes it today (see
-  [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)); Android, iOS and web publish nothing.
+  [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)); Android, iOS and web publish nothing. When a
+  `Drop` or `Cancel` comes back unhandled — it resolved over a region with no drop target —
+  `RenderRoot::event` follows it in the same call with `FileDropPhase::Ended`, a positionless
+  broadcast (`is_broadcast()`), so state the drag opened (`frust-widgets`' external drag session)
+  always ends; a handled one gets no follow-up. Dropped `paths` arrive verbatim from the OS drag
+  source and are untrusted input.
 - **Transformed pods.** `ChildPod::set_transform(Option<kurbo::Affine>)` places a child under an
   arbitrary affine, opt-in and unset by default. While set, `ChildPod::contains`/`event_child` map a
   point or a positioned event (`InputEvent::transformed`) through the inverse before hit-testing or
@@ -371,10 +377,10 @@ one binary cannot fight over it and an app's explicit choice survives a catalog 
 | `RenderRoot<State, V>` | Owns the widget tree and theme; drives rebuild/layout/paint/event |
 | `WidgetTree` / `InspectNode` | Read-only tree accessors (`roots`/`children`/`inspect`) and the plain owned snapshot node (id, type name, debug label, absolute bounds, children) they produce |
 | `Component` / `ComponentView` / `ComponentWidget` | Stateful widget analog with a per-instance reactive `Owner` |
-| `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including both broadcast variants (`Housekeeping`, `Overlay`) and the focus-routed `EditCommand` (see Data Flow), opt-in hover claiming (`claim_hover`/`is_hovered`), the multi-contact pair (`pointer_id`/`capture_contacts`), and the per-pass request channels (`set_cursor`, `write_clipboard`, `request_paste`, `dispatch_edit_command`) |
+| `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including both broadcast variants (`Housekeeping`, `Overlay`; a file drop's `Ended` phase also broadcasts) and the focus-routed `EditCommand` (see Data Flow), opt-in hover claiming (`claim_hover`/`is_hovered`), the multi-contact pair (`pointer_id`/`capture_contacts`), and the per-pass request channels (`set_cursor`, `write_clipboard`, `request_paste`, `dispatch_edit_command`) |
 | `PointerId` / `PointerSource` | A pointer contact's identity (device plus slot), riding beside a `PointerEvent` and read via `EventCtx::pointer_id()` — see Data Flow's Multi-contact pointer routing |
 | `ScaleEvent` / `ScalePhase` | A pinch/zoom gesture event, hit-tested and bubbling like `Scroll` — see Data Flow's Scale gestures |
-| `FileDropEvent` / `FileDropPhase` | A desktop OS file-drag event (`Hover`/`Drop`/`Cancel`), hit-tested and bubbling like `Scroll`, bypassing the overlay pre-pass — see Data Flow's Desktop file drop |
+| `FileDropEvent` / `FileDropPhase` | A desktop OS file-drag event (`Hover`/`Drop`/`Cancel`), hit-tested and bubbling like `Scroll`, bypassing the overlay pre-pass, plus the root's broadcast-only `Ended` follow-up to an unhandled `Drop`/`Cancel` — see Data Flow's Desktop file drop |
 | `frust_core::hit::point_in_transformed_rect` / `checked_inverse` | Hit-testing helpers for content drawn under an arbitrary `Affine` — what `ChildPod::set_transform` uses internally, exposed for a canvas hit closure or pan/zoom container |
 | `EditCommand` | The four clipboard/selection verbs a shell or a floated toolbar hands the focused editable: `Copy`/`Cut` carry nothing (the widget owns the selection and answers into the clipboard slot), `Paste(text)` carries text already read by the shell, `SelectAll` is pure selection. `Debug` redacts the paste payload |
 | `OverlayEntry` / `OverlayKey` / `OverlayBand` / `OverlayInput` / `OutsideTap` | One floated surface's registration and the four rules the root reads back from it — owner identity, z-band, whether it hit-tests at all, and what a press outside every surface delivers (see Overlay Portal) |

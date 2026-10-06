@@ -3263,10 +3263,14 @@ SHELLS_ARCHITECTURE.md); Android, iOS and web surface no equivalent OS signal, s
 `frust_widgets::drag::drag_target::<Vec<PathBuf>>` never engages on those hosts. On desktop, a file
 drag hovering a window region with no `DragTargetWidget` anywhere in its hit-test path never opens
 (or updates) an `ExternalFiles` session, since nothing calls `handle_file_drop` for it; a session
-already open over one target stays latched on that target's last known position if the drag
-wanders into such a region before dropping or being cancelled there too. The reported hover
-position is always the shell's last known cursor position, not a position winit's `HoveredFile`
-itself carries (it has none).
+already open over one target keeps that target's last resolved hover while the drag crosses such a
+region. The drag still always ends: a `Drop` or `Cancel` that reaches no target is followed by the
+root's `FileDropPhase::Ended` broadcast, which ends the session (a `Drop` there cancels — nothing
+accepts it), so in-app drags are never left blocked behind a finished OS drag. Every `Hover`, `Drop`
+and `Cancel` is resolved at the shell's last in-window cursor position, never a position winit's
+file events carry (they have none) — and on a platform that sends no `CursorMoved` during an OS drag
+that is wherever the cursor was last seen in the window before the drag, not the point the files
+were released over.
 
 **Applies to**: every `frust_widgets::drag::drag_target()` typed over `Vec<PathBuf>`, on every
 platform for the mobile/web gap, and on desktop for the unregistered-region gap.
@@ -3277,9 +3281,10 @@ the coordinator's own registry-not-hit-test design working as specified: resolut
 registry a target reports at paint, and a region with nothing registered has nothing to resolve
 against.
 
-**Evidence**: `crates/frust-core/src/event.rs`'s `FileDropEvent` "Source" doc section;
-`crates/frust-widgets/src/drag/target.rs`'s "OS file drops" module-doc section ("Known limit");
-`crates/frust-shell-desktop/src/app_handler.rs`'s `FileDropAccumulator` and the
+**Evidence**: `crates/frust-core/src/event.rs`'s `FileDropEvent` "Source" and "Broadcast follow-up"
+doc sections; `crates/frust-widgets/src/drag/target.rs`'s "OS file drops" module-doc section ("The
+drag always ends", "Known limit"); `crates/frust-shell-desktop/src/app_handler.rs`'s
+`FileDropAccumulator`, `FileHoverLatch` and the
 `WindowEvent::HoveredFile`/`DroppedFile`/`HoveredFileCancelled` arms.
 
 ---

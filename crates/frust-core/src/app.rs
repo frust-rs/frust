@@ -22,9 +22,9 @@ use kurbo::{Point, Rect, Size};
 
 use crate::anim::FrameTime;
 use crate::event::{
-    ContactFrame, ContactPass, CursorIcon, EventCtx, EventOutcome, EventResult, ImeState,
-    InputEvent, OverlayEvent, OverlayEventKind, PointerButton, PointerEvent, PointerId,
-    PointerPhase, RequestPass,
+    ContactFrame, ContactPass, CursorIcon, EventCtx, EventOutcome, EventResult, FileDropEvent,
+    FileDropPhase, ImeState, InputEvent, OverlayEvent, OverlayEventKind, PointerButton,
+    PointerEvent, PointerId, PointerPhase, RequestPass,
 };
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
@@ -2163,6 +2163,16 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// [`InputEvent::Housekeeping`] to flush deferred state-bearing callbacks.
     /// That is *sequential*, not re-entrant — the dispatch fully returns before
     /// the next diff starts — so the rule above is intact.
+    ///
+    /// # File-drag follow-up
+    ///
+    /// An [`InputEvent::FileDrop`] whose phase is
+    /// [`FileDropPhase::Drop`] or [`FileDropPhase::Cancel`] and whose
+    /// hit-tested dispatch nothing handled is followed, within this same
+    /// call, by a [`FileDropPhase::Ended`] broadcast to the whole tree; the
+    /// returned outcome folds both. A handled `Drop`/`Cancel`, a `Hover`, and
+    /// an `Ended` dispatched directly get no follow-up. See
+    /// [`FileDropEvent`]'s *Broadcast follow-up* for why.
     pub fn event(&mut self, state: &mut State, event: &InputEvent) -> EventOutcome {
         let Some(root_id) = self.root_id else {
             return EventOutcome::default();
@@ -2508,7 +2518,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // rather than getting one of its own: a target that calls
             // `request_focus`/`release_focus` from its `FileDrop` handler is
             // honoured on the same terms a scroll's would be, even though no
-            // shipped drop target does today.
+            // shipped drop target does today. Its `Ended` broadcast follow-up
+            // lands here too: like an overlay event it is a broadcast that
+            // stands for a real user gesture, so an explicit request is
+            // honoured and nothing blurs (only a pointer `Down` blurs).
             InputEvent::Scroll { .. }
             | InputEvent::Scale(_)
             | InputEvent::FileDrop(_)
@@ -2761,13 +2774,37 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // consumer's internal flag is normative (see `EventCtx::claim_hover`).
         let needs_redraw = needs_redraw || (hover_was_active && !self.hover_active);
 
-        EventOutcome {
+        let mut outcome = EventOutcome {
             // Merge whatever the overlay pre-pass already produced: a
             // pass-through outside-tap notification ran before this dispatch and
             // its redraw is owed just as much as the dispatch's own.
             handled: handled || carried.handled,
             needs_redraw: needs_redraw || carried.needs_redraw,
+        };
+
+        // An OS file drag that just ended (`Drop`/`Cancel`) with nothing on the
+        // hit-tested path handling it is followed by the broadcast form, so a
+        // widget holding state the drag opened — a drop target's external
+        // session — hears the drag is over even though the release resolved
+        // over a region with no drop target in it (see `FileDropEvent`'s
+        // *Broadcast follow-up*). Re-entered through the front door for the
+        // reason `route_overlay` re-enters: the follow-up gets the same request
+        // bracket and outcome folding as any dispatch. Shallow by construction:
+        // `Ended` is not one of the two phases that trigger it.
+        if !handled
+            && let InputEvent::FileDrop(drop) = event
+            && matches!(drop.phase, FileDropPhase::Drop | FileDropPhase::Cancel)
+        {
+            let ended = InputEvent::FileDrop(FileDropEvent {
+                phase: FileDropPhase::Ended,
+                position: Point::ZERO,
+                paths: Vec::new(),
+            });
+            let follow_up = self.event(state, &ended);
+            outcome.handled |= follow_up.handled;
+            outcome.needs_redraw |= follow_up.needs_redraw;
         }
+        outcome
     }
 
     /// Decide what one pointer contact does — the root half of
@@ -2832,7 +2869,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// native OS drag has no floated-surface concept on the platform side —
     /// winit reports it against the window, not a particular surface — so a
     /// drop target living inside a popover is unreachable by one in v1 (see
-    /// `docs/LIMITATIONS.md`).
+    /// `docs/LIMITATIONS.md`). Its [`FileDropPhase::Ended`] follow-up passes
+    /// through as well, as the broadcast it is.
     fn route_overlay(&mut self, state: &mut State, event: &InputEvent) -> OverlayRoute {
         if self.capture_claimant.is_some() || self.overlay_hits.is_empty() {
             return OverlayRoute::Continue(EventOutcome::default());
@@ -9915,6 +9953,150 @@ mod scale_tests {
             log.seen.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
             vec!['T', 'B'],
             "the ignoring top leaf saw it first, and bottom is what it bubbled to"
+        );
+    }
+}
+
+/// The [`RenderRoot::event`] file-drag follow-up: an unhandled `Drop`/`Cancel`
+/// is re-broadcast as `Ended`.
+#[cfg(test)]
+mod file_drop_tests {
+    use super::*;
+
+    /// Every `FileDrop` phase a leaf saw, in order, and whether the leaf
+    /// handles the hit-tested phases.
+    #[derive(Default)]
+    struct DropLog {
+        handles: bool,
+        seen: Vec<(char, FileDropPhase)>,
+    }
+
+    struct DropLeaf {
+        tag: char,
+    }
+    impl crate::widget::Widget for DropLeaf {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 40.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let InputEvent::FileDrop(drop) = event else {
+                return EventResult::Ignored;
+            };
+            let log = ctx.state_mut::<DropLog>();
+            log.seen.push((self.tag, drop.phase));
+            if log.handles && !event.is_broadcast() {
+                EventResult::Handled
+            } else {
+                EventResult::Ignored
+            }
+        }
+    }
+
+    /// One 40x40 leaf at the origin of a 200x200 root that routes like
+    /// `frust-widgets`' helpers: a broadcast to the child unconditionally,
+    /// anything else only on a hit.
+    struct DropRoot {
+        leaf: crate::widget::ChildPod,
+    }
+    impl crate::widget::Widget for DropRoot {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.leaf.layout_child(ctx, bc);
+            self.leaf.set_origin(Point::ZERO);
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            self.leaf.paint_child(ctx, scene);
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if event.is_broadcast() {
+                self.leaf.event_child(ctx, event);
+                return EventResult::Ignored;
+            }
+            if self.leaf.contains(event.position()) {
+                return self.leaf.event_child(ctx, event);
+            }
+            EventResult::Ignored
+        }
+    }
+
+    struct DropRootView;
+    impl View<DropLog> for DropRootView {
+        type Element = DropRoot;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> DropRoot {
+            DropRoot {
+                leaf: crate::widget::ChildPod::new(Box::new(DropLeaf { tag: 'L' })),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut DropRoot,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn drop_root(handles: bool) -> (RenderRoot<DropLog, DropRootView>, DropLog) {
+        let mut root: RenderRoot<DropLog, DropRootView> = RenderRoot::new();
+        let mut log = DropLog {
+            handles,
+            seen: Vec::new(),
+        };
+        root.rebuild(&mut |_| DropRootView, &mut log);
+        root.layout(Size::new(200.0, 200.0));
+        (root, log)
+    }
+
+    fn file_drop(phase: FileDropPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::FileDrop(FileDropEvent {
+            phase,
+            position: Point::new(x, y),
+            paths: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn an_unhandled_file_drop_end_is_re_broadcast_to_the_whole_tree() {
+        for phase in [FileDropPhase::Drop, FileDropPhase::Cancel] {
+            let (mut root, mut log) = drop_root(false);
+            // Far outside the leaf: the hit-tested dispatch reaches nothing.
+            let outcome = root.event(&mut log, &file_drop(phase, 150.0, 150.0));
+            assert!(!outcome.handled, "a broadcast is never consumed");
+            assert_eq!(
+                log.seen,
+                vec![('L', FileDropPhase::Ended)],
+                "the {phase:?} that missed the leaf is followed by an Ended broadcast it hears"
+            );
+
+            // Over the leaf but ignored by it: still unhandled, so still
+            // followed — the leaf hears the hit-tested phase, then Ended.
+            log.seen.clear();
+            root.event(&mut log, &file_drop(phase, 10.0, 10.0));
+            assert_eq!(log.seen, vec![('L', phase), ('L', FileDropPhase::Ended)]);
+        }
+    }
+
+    #[test]
+    fn a_handled_file_drop_end_a_hover_and_a_direct_ended_get_no_follow_up() {
+        let (mut root, mut log) = drop_root(true);
+        for phase in [FileDropPhase::Drop, FileDropPhase::Cancel] {
+            log.seen.clear();
+            let outcome = root.event(&mut log, &file_drop(phase, 10.0, 10.0));
+            assert!(outcome.handled);
+            assert_eq!(log.seen, vec![('L', phase)], "{phase:?} was handled");
+        }
+
+        let (mut root, mut log) = drop_root(false);
+        root.event(&mut log, &file_drop(FileDropPhase::Hover, 150.0, 150.0));
+        assert!(log.seen.is_empty(), "a Hover is never re-broadcast");
+
+        root.event(&mut log, &file_drop(FileDropPhase::Ended, 0.0, 0.0));
+        assert_eq!(
+            log.seen,
+            vec![('L', FileDropPhase::Ended)],
+            "an Ended dispatched directly is delivered once, not followed again"
         );
     }
 }
