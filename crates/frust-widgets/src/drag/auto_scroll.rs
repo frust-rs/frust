@@ -34,7 +34,14 @@
 //! moved bounds; after the child has painted, the wrapper calls
 //! [`DragCoordinator::resolve_hover`] so a target that scrolled under a
 //! stationary pointer becomes the hovered one without waiting for the pointer
-//! to move.
+//! to move. Both guarantees — the same-frame drain and the band geometry
+//! itself — hold only when the zone encloses the scroll surface directly, as
+//! [`auto_scroll_zone()`] is documented to be used: a zone wrapping only the
+//! surface's *content* (rather than a bound `ScrollView`/`ListView` whose own
+//! layout reports the viewport, not the content's full extent) reads that
+//! content's full, usually taller, extent at paint instead of the viewport,
+//! so its edge bands sit at the content's own edges rather than the
+//! viewport's.
 //!
 //! # Limits
 //!

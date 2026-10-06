@@ -54,6 +54,22 @@
 //!   (a themed inset stroke) rather than a bespoke insertion-line treatment;
 //!   override per gap is not exposed — a design system wanting its own gap
 //!   affordance composes the two primitives directly instead of this helper.
+//! * [`ReorderableListView::auto_scroll`] builds its own [`crate::ScrollView`]
+//!   bound to the controller it is given — the list itself becomes the
+//!   scroll surface, not something a caller wraps around it. Bound the
+//!   result's height from outside (a fixed-size ancestor, the way every
+//!   other scroll surface in this crate needs one) to get a real viewport to
+//!   scroll within; do not also put the list inside a separate
+//!   `scroll_view(...)` bound to the same controller, which would give one
+//!   handle two competing surfaces.
+//! * Row identity during a session: each row's drag payload is the plain
+//!   index [`reorderable_list()`] captured when it built the column, not a
+//!   stable id. A caller that mutates `items`' order or length while a
+//!   session on this list's coordinator is in flight can have
+//!   [`ReorderableListView::on_reorder`] fire against a pair computed for a
+//!   list that no longer matches what is on screen — this helper does not
+//!   guard against it. Keep the list's order and length fixed for the
+//!   duration of any session on its coordinator.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -65,7 +81,7 @@ use super::coordinator::DragCoordinator;
 use super::draggable::draggable;
 use super::target::drag_target;
 use crate::flex::{Axis, CrossAxisAlignment, FlexChild, FlexView};
-use crate::{ChildKey, ScrollController, SizedBox, keyed};
+use crate::{ChildKey, ScrollController, SizedBox, keyed, scroll_view};
 
 /// Thickness, in logical px, of the drop-target band between two rows (and
 /// before the first/after the last).
@@ -164,12 +180,18 @@ impl<State: 'static> ReorderableListView<State> {
         self
     }
 
-    /// Wrap the whole column in edge auto-scroll for sessions on this list's
-    /// coordinator, driving `controller` — the same handle the enclosing
-    /// scroll surface attaches. See [`super::auto_scroll_zone()`].
+    /// Wrap the list in its own scroll surface bound to `controller`, then
+    /// enclose *that* surface in edge auto-scroll for sessions on this
+    /// list's coordinator — so the zone's edge bands measure the surface's
+    /// own (bounded) viewport, not the list's full, usually taller, content.
+    /// See [`super::auto_scroll_zone()`] and the [module docs](self#limits)
+    /// for the contract this puts on the caller: bound this view's height
+    /// from outside (a fixed-size ancestor), and do not also wrap it in a
+    /// second scroll surface bound to the same controller.
     pub fn auto_scroll(mut self, controller: ScrollController) -> Self {
+        let surface = scroll_view(self.inner).controller(controller.clone());
         self.inner = any(auto_scroll_zone(
-            self.inner,
+            surface,
             self.coordinator.clone(),
             controller,
         ));
@@ -365,6 +387,110 @@ mod tests {
             hovering_again.transforms.len(),
             1,
             "a later gap takes over the indicator"
+        );
+    }
+
+    #[test]
+    fn auto_scroll_measures_the_bounded_viewport_not_the_full_content() {
+        use crate::SizedBoxView;
+        use frust_core::PointerPhase;
+
+        // 20 rows plus 21 gaps is 968 px of content (20 * ROW_PX + 21 *
+        // GAP_PX) — far taller than the 300 px viewport below. A zone that
+        // (wrongly) measured the full scrolled content instead of the
+        // viewport would need the pointer roughly 650 px further down than
+        // this to ever see a non-zero velocity.
+        const ROWS: u32 = 20;
+        const VIEWPORT_PX: f64 = 300.0;
+
+        struct ScrollApp {
+            coordinator: DragCoordinator,
+            controller: ScrollController,
+        }
+
+        fn build_scrolling_view(state: &mut ScrollApp) -> SizedBoxView<ScrollApp> {
+            let items: Vec<(ChildKey, AnyView<ScrollApp>)> = (0..ROWS)
+                .map(|id| {
+                    (
+                        ChildKey::new(id),
+                        any(SizedBox::<ScrollApp>(Some(WINDOW.width), Some(ROW_PX))),
+                    )
+                })
+                .collect();
+            let list = reorderable_list(state.coordinator.clone(), items)
+                .auto_scroll(state.controller.clone());
+            SizedBox::<ScrollApp>(Some(WINDOW.width), Some(VIEWPORT_PX)).child(list)
+        }
+
+        struct ScrollHarness {
+            root: RenderRoot<ScrollApp, SizedBoxView<ScrollApp>>,
+            state: ScrollApp,
+            clock_ms: f64,
+        }
+
+        impl ScrollHarness {
+            fn new() -> Self {
+                let mut harness = ScrollHarness {
+                    root: RenderRoot::new(),
+                    state: ScrollApp {
+                        coordinator: DragCoordinator::new(),
+                        controller: ScrollController::new(),
+                    },
+                    clock_ms: 0.0,
+                };
+                harness.frame();
+                harness
+            }
+
+            fn frame(&mut self) {
+                self.root
+                    .rebuild(&mut build_scrolling_view, &mut self.state);
+                self.root.layout(WINDOW);
+                self.clock_ms += 16.0;
+                let mut scene = crate::test_support::RecordingScene::default();
+                self.root.paint(
+                    &mut scene,
+                    FrameTime::from_nanos((self.clock_ms * 1_000_000.0) as u64),
+                );
+            }
+
+            fn mouse(&mut self, phase: PointerPhase, x: f64, y: f64) {
+                self.root.event(
+                    &mut self.state,
+                    &InputEvent::Pointer(frust_core::PointerEvent {
+                        phase,
+                        position: Point::new(x, y),
+                        button: frust_core::PointerButton::Primary,
+                    }),
+                );
+            }
+        }
+
+        let mut h = ScrollHarness::new();
+        assert!(
+            h.state.controller.max_offset() > 0.0,
+            "the content must be taller than the viewport for this to be a\
+             meaningful test"
+        );
+
+        // Press row 0, take it past its own slop with a small move (so the
+        // draggable — not the enclosing scroll surface's own gesture
+        // recognition — claims the session), then carry it down to the
+        // *viewport's* own bottom edge, well short of the list's full
+        // content.
+        h.mouse(PointerPhase::Down, 50.0, row_y(0));
+        h.mouse(PointerPhase::Move, 50.0, row_y(0) + 8.0);
+        assert_eq!(h.state.coordinator.phase(), DragPhase::Dragging);
+        h.mouse(PointerPhase::Move, 50.0, VIEWPORT_PX - 5.0);
+        assert_eq!(h.state.coordinator.phase(), DragPhase::Dragging);
+
+        for _ in 0..4 {
+            h.frame();
+        }
+
+        assert!(
+            h.state.controller.offset() > 0.0,
+            "a pointer at the viewport's own bottom edge must auto-scroll"
         );
     }
 
