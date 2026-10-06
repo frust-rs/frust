@@ -2503,8 +2503,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 }
                 PointerPhase::Move => {}
             },
+            // A file drop is hit-tested exactly like `Scroll`/`Scale` above —
+            // no capture, no claimant bookkeeping — so it joins their bucket
+            // rather than getting one of its own: a target that calls
+            // `request_focus`/`release_focus` from its `FileDrop` handler is
+            // honoured on the same terms a scroll's would be, even though no
+            // shipped drop target does today.
             InputEvent::Scroll { .. }
             | InputEvent::Scale(_)
+            | InputEvent::FileDrop(_)
             | InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_) => {
@@ -2818,6 +2825,14 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// being routed pass straight through: a broadcast and a focus-routed event
     /// each reach their target with no hit test, so there is nothing here to
     /// redirect.
+    ///
+    /// A `FileDrop` passes straight through too, but for a different reason:
+    /// it is hit-tested (see [`InputEvent::FileDrop`]), yet there is no
+    /// [`OverlayEventKind`] carrier for it to ride a redirect through. A
+    /// native OS drag has no floated-surface concept on the platform side —
+    /// winit reports it against the window, not a particular surface — so a
+    /// drop target living inside a popover is unreachable by one in v1 (see
+    /// `docs/LIMITATIONS.md`).
     fn route_overlay(&mut self, state: &mut State, event: &InputEvent) -> OverlayRoute {
         if self.capture_claimant.is_some() || self.overlay_hits.is_empty() {
             return OverlayRoute::Continue(EventOutcome::default());
@@ -2846,7 +2861,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                     velocity: scale.velocity,
                 },
             ),
-            InputEvent::Key(_)
+            InputEvent::FileDrop(_)
+            | InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
             | InputEvent::Housekeeping

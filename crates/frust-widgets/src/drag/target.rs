@@ -91,10 +91,37 @@
 //! type-matches and [`DragTargetView::accepts`] it, `"drop target"`
 //! otherwise — and `Click` is advertised only in the accepting case, so an
 //! adapter never offers an action that would be a no-op.
+//!
+//! # OS file drops
+//!
+//! A desktop [`frust_core::InputEvent::FileDrop`] is hit-tested and bubbles
+//! exactly like a pointer event, so it simply reaches whichever
+//! `DragTargetWidget` (of any `T`) the position hit-tests into — there is no
+//! separate registration for it. [`DragTargetWidget::handle_file_drop`]
+//! drives the shared [`DragCoordinator`] directly from it: `Hover` opens an
+//! `ExternalFiles` session (or re-resolves one already open),
+//! [`DragCoordinator::set_external_payload`] fills in the real paths on
+//! `Drop` (a hover notification carries none — see
+//! [`frust_core::event::FileDropEvent::paths`]), and `Cancel` abandons it.
+//! Once the session exists, every registered `DragTargetWidget<State,
+//! Vec<PathBuf>>` sees Enter/Hover/Leave/Drop through the same
+//! `Housekeeping`-polled path internal drags use, regardless of which
+//! target's hit test happened to carry the triggering event — resolution
+//! reads the registry, not the tree.
+//!
+//! **Known limit**: a file drag hovering a window region with no
+//! `DragTargetWidget` anywhere in its hit-test path never opens (or updates)
+//! a session, since nothing calls `handle_file_drop` for it. A session begun
+//! over one target therefore stays latched on that target's last known
+//! position if the drag wanders into such a region before either dropping
+//! or being cancelled there too — see `docs/LIMITATIONS.md`. Mobile and web
+//! shells publish no `FileDrop` at all, so this section is desktop-only in
+//! every sense (see [`frust_core::event::FileDropEvent`]'s Source section).
 
 use std::rc::Rc;
 
 use frust_core::accesskit::{Action, Role};
+use frust_core::event::{FileDropEvent, FileDropPhase};
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
@@ -103,7 +130,7 @@ use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
-use super::coordinator::{DragCoordinator, DragState, DragTargetId};
+use super::coordinator::{DragCoordinator, DragPhase, DragState, DragTargetId};
 use crate::authoring::{ErasedArgCallback, ErasedCallback, TypedArgCallback, presses};
 
 /// Flattening tolerance for the highlight's rounded-rect stroke path (mirrors
@@ -365,6 +392,17 @@ impl<State: 'static, T: 'static> DragTargetWidget<State, T> {
         window - self.window_origin.to_vec2()
     }
 
+    /// The inverse of [`Self::to_local`]: a window-space position from one
+    /// already hit-tested into this widget's local space — what
+    /// [`Self::handle_file_drop`] needs, since [`InputEvent::FileDrop`]
+    /// arrives localized by the ordinary hit-test chain
+    /// ([`InputEvent::translated`]) while the coordinator's own session state
+    /// (`DragSession::pointer`, a registered target's bounds) is window-space
+    /// throughout.
+    fn to_window(&self, local: Point) -> Point {
+        local + self.window_origin.to_vec2()
+    }
+
     /// Whether a session is live and this target would accept it right now —
     /// the gate [`Widget::event`]'s click-to-drop and [`Widget::semantics`]'s
     /// label/action both read (see the [module docs](self#click-to-drop-and-semantics)).
@@ -434,6 +472,44 @@ impl<State: 'static, T: 'static> DragTargetWidget<State, T> {
                 }
             }
         }
+    }
+
+    /// Drive the coordinator from an [`InputEvent::FileDrop`] that
+    /// hit-tested into this target — see the [module docs](self#os-file-drops)
+    /// for the design and its limits.
+    ///
+    /// `Hover` opens an `ExternalFiles` session with an empty payload (the
+    /// real list is not known yet — see
+    /// [`DragCoordinator::set_external_payload`]) if nothing is in flight,
+    /// then resolves the pointer either way (`begin_external` itself leaves
+    /// nothing hovered, so a fresh session still needs this to enter on the
+    /// same event that opened it); `Drop` fills in the real paths, resolves
+    /// once more at the final position, then drops; `Cancel` abandons it.
+    /// Every arm polls inline afterward, like the pointer click-to-drop arm
+    /// above, so `on_enter`/`on_hover`/`on_drop`/`on_leave` resolve within
+    /// the event that caused them rather than waiting for the next
+    /// `Housekeeping` broadcast.
+    fn handle_file_drop(&mut self, ctx: &mut EventCtx, drop: &FileDropEvent) -> EventResult {
+        let window_pos = self.to_window(drop.position);
+        match drop.phase {
+            FileDropPhase::Hover => {
+                if self.coordinator.phase() == DragPhase::Idle {
+                    self.coordinator.begin_external(Vec::new(), window_pos);
+                }
+                self.coordinator.update_pointer(window_pos);
+            }
+            FileDropPhase::Drop => {
+                self.coordinator.set_external_payload(drop.paths.clone());
+                self.coordinator.update_pointer(window_pos);
+                self.coordinator.drop();
+            }
+            FileDropPhase::Cancel => {
+                self.coordinator.cancel();
+            }
+        }
+        self.poll(ctx);
+        ctx.request_redraw();
+        EventResult::Handled
     }
 
     /// Paint the current highlight (if any), in the custom seam's local-space
@@ -511,6 +587,9 @@ impl<State: 'static, T: 'static> Widget for DragTargetWidget<State, T> {
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if event.is_broadcast() {
             self.poll(ctx);
+        }
+        if let InputEvent::FileDrop(drop) = event {
+            return self.handle_file_drop(ctx, drop);
         }
         if let InputEvent::Pointer(p) = event
             && p.phase == PointerPhase::Up
@@ -591,6 +670,25 @@ mod tests {
             phase: PointerPhase::Up,
             position: Point::ZERO,
             button: frust_core::PointerButton::Primary,
+        });
+        w.event(&mut ctx, &event)
+    }
+
+    /// Dispatch an [`InputEvent::FileDrop`] at `position` (already local to
+    /// `w`, as a real hit test would deliver it) straight into `w`.
+    fn file_drop<S: 'static, T: 'static>(
+        w: &mut DragTargetWidget<S, T>,
+        state: &mut S,
+        phase: FileDropPhase,
+        position: Point,
+        paths: Vec<std::path::PathBuf>,
+    ) -> EventResult {
+        let state_any: &mut dyn Any = state;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, Size::new(100.0, 100.0));
+        let event = InputEvent::FileDrop(FileDropEvent {
+            phase,
+            position,
+            paths,
         });
         w.event(&mut ctx, &event)
     }
@@ -831,6 +929,104 @@ mod tests {
             DragPhase::Idle,
             "phase returns to Idle after drop completes"
         );
+    }
+
+    #[test]
+    fn a_file_drop_hover_then_drop_delivers_the_dropped_paths() {
+        use std::path::PathBuf;
+
+        let coordinator = DragCoordinator::new();
+        let entered = Rc::new(RefCell::new(0u32));
+        let dropped = Rc::new(RefCell::new(Vec::new()));
+        let e2 = Rc::clone(&entered);
+        let d2 = Rc::clone(&dropped);
+
+        let view: DragTargetView<App, Vec<PathBuf>> =
+            drag_target(SizedBox::<App>(Some(10.0), Some(10.0)), coordinator.clone())
+                .on_enter(move |_s: &mut App| *e2.borrow_mut() += 1)
+                .on_drop(move |_s: &mut App, paths: Vec<PathBuf>| *d2.borrow_mut() = paths);
+
+        let mut counter = 0u64;
+        let mut w = view.build(&mut BuildCtx::new(&mut counter));
+        laid_out(&mut w, Point::new(5.0, 5.0), Size::new(10.0, 10.0));
+        let mut state = App;
+
+        // Hover carries no paths — the real list is unknown until the drop.
+        let result = file_drop(
+            &mut w,
+            &mut state,
+            FileDropPhase::Hover,
+            Point::ZERO,
+            vec![],
+        );
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            coordinator.phase(),
+            DragPhase::Dragging,
+            "hovering a target opens an external session"
+        );
+        assert_eq!(
+            *entered.borrow(),
+            1,
+            "on_enter fires on the same hover that opened the session"
+        );
+
+        let paths = vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")];
+        let result = file_drop(
+            &mut w,
+            &mut state,
+            FileDropPhase::Drop,
+            Point::ZERO,
+            paths.clone(),
+        );
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            *dropped.borrow(),
+            paths,
+            "on_drop receives the dropped paths, not the empty hover list"
+        );
+        assert_eq!(coordinator.phase(), DragPhase::Idle);
+    }
+
+    #[test]
+    fn a_file_drop_cancel_fires_leave_and_ends_the_session() {
+        use std::path::PathBuf;
+
+        let coordinator = DragCoordinator::new();
+        let left = Rc::new(RefCell::new(0u32));
+        let l2 = Rc::clone(&left);
+
+        let view: DragTargetView<App, Vec<PathBuf>> =
+            drag_target(SizedBox::<App>(Some(10.0), Some(10.0)), coordinator.clone())
+                .on_leave(move |_s: &mut App| *l2.borrow_mut() += 1);
+
+        let mut counter = 0u64;
+        let mut w = view.build(&mut BuildCtx::new(&mut counter));
+        laid_out(&mut w, Point::ZERO, Size::new(10.0, 10.0));
+        let mut state = App;
+
+        file_drop(
+            &mut w,
+            &mut state,
+            FileDropPhase::Hover,
+            Point::ZERO,
+            vec![],
+        );
+        assert_eq!(coordinator.phase(), DragPhase::Dragging);
+
+        file_drop(
+            &mut w,
+            &mut state,
+            FileDropPhase::Cancel,
+            Point::ZERO,
+            vec![],
+        );
+        assert_eq!(
+            *left.borrow(),
+            1,
+            "cancelling a hovered external session fires on_leave once"
+        );
+        assert_eq!(coordinator.phase(), DragPhase::Idle);
     }
 
     #[test]

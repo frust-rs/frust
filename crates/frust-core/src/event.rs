@@ -73,6 +73,7 @@
 use std::any::Any;
 use std::cell::Cell;
 use std::fmt;
+use std::path::PathBuf;
 use std::thread::LocalKey;
 
 use kurbo::{Affine, Point, Rect, Size, Vec2};
@@ -591,13 +592,58 @@ pub enum OverlayEventKind {
     OutsideDown,
 }
 
+/// The phase of a desktop OS file drag entering, hovering over, dropping on,
+/// or leaving the window — see [`InputEvent::FileDrop`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileDropPhase {
+    /// The drag is hovering the window — it just entered, or moved while
+    /// still over it. Carries no paths; see [`FileDropEvent::paths`].
+    Hover,
+    /// The files were released over the window. Carries every dropped path.
+    Drop,
+    /// The drag left the window, or the OS otherwise called it off, without a
+    /// drop. Carries no paths.
+    Cancel,
+}
+
+/// A desktop OS file drag/drop event — hit-tested and bubbling exactly like
+/// [`InputEvent::Scroll`], by `position`, so a [`crate::widget::ChildPod`]
+/// container routes it with no change of its own (see
+/// [`InputEvent::translated`]/[`InputEvent::transformed`]).
+///
+/// # Source
+///
+/// Only a desktop shell publishes this today: `frust-shell-desktop` maps
+/// winit's `HoveredFile`/`DroppedFile`/`HoveredFileCancelled` window events
+/// onto the three [`FileDropPhase`]s (see that crate's `app_handler` module
+/// for the exact mapping, including why `Drop`'s `paths` is a coalesced
+/// batch rather than one event per file). Android, iOS and web publish
+/// nothing — none of those embeddings surfaces an OS file-drag signal to this
+/// framework, so a `frust-widgets` drop target never engages on those hosts
+/// (see `docs/LIMITATIONS.md`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileDropEvent {
+    /// The gesture phase.
+    pub phase: FileDropPhase,
+    /// Where the drag is, in the receiving widget's local logical space —
+    /// translated like [`InputEvent::Scroll`]'s `position` by the container
+    /// chain that routes it.
+    pub position: Point,
+    /// The dropped files — populated only for [`FileDropPhase::Drop`].
+    /// [`FileDropPhase::Hover`]/[`FileDropPhase::Cancel`] always carry an
+    /// empty list: the platform source delivers one file per hover
+    /// notification with no "this is the complete set" signal, so the full
+    /// list is only ever knowable once files are actually released.
+    pub paths: Vec<PathBuf>,
+}
+
 /// An input event delivered to the widget tree.
 ///
-/// Pointer gestures, scroll, and scale are **hit-tested** (routed by position);
-/// keyboard, IME, and edit-command events are **focus-routed** — delivered
-/// straight down the recorded focus chain with no hit test and no meaningful
-/// position (see [`crate::widget::ChildPod`]'s focus bookkeeping and
-/// `frust-widgets`' `route_event`). [`InputEvent::Housekeeping`] and
+/// Pointer gestures, scroll, scale, and a file drop are **hit-tested** (routed
+/// by position); keyboard, IME, and edit-command events are **focus-routed**
+/// — delivered straight down the recorded focus chain with no hit test and no
+/// meaningful position (see [`crate::widget::ChildPod`]'s focus bookkeeping
+/// and `frust-widgets`' `route_event`). [`InputEvent::Housekeeping`] and
 /// [`InputEvent::Overlay`] are neither: they are **broadcasts** that reach
 /// every child unconditionally.
 #[derive(Clone, Debug, PartialEq)]
@@ -777,13 +823,28 @@ pub enum InputEvent {
     /// from inside the surface is honoured (see
     /// [`crate::app::RenderRoot::event`]).
     Overlay(OverlayEvent),
+    /// A desktop OS file drag entering, hovering over, dropping on, or
+    /// leaving the window — hit-tested and bubbling exactly like
+    /// [`InputEvent::Scroll`], by [`FileDropEvent::position`]. See
+    /// [`FileDropEvent`] for the phase/path contract and which shells
+    /// publish it.
+    ///
+    /// Deliberately **not** routed through the overlay pre-pass
+    /// ([`crate::app::RenderRoot::event`]'s `route_overlay`): a native OS
+    /// drag is a window-level signal with no floated-surface concept on the
+    /// platform side, so it is hit-tested straight against the main tree —
+    /// a drop target living inside a popover is a gap this variant does not
+    /// close (see `docs/LIMITATIONS.md`).
+    FileDrop(FileDropEvent),
 }
 
 impl InputEvent {
     /// The event's location, in the receiving widget's local coordinate space.
     ///
     /// [`InputEvent::Scale`] reports its [`ScaleEvent::focal`] point here, the
-    /// same way [`InputEvent::Scroll`] reports `position`. Focus-routed events
+    /// same way [`InputEvent::Scroll`] reports `position`, and
+    /// [`InputEvent::FileDrop`] reports its own [`FileDropEvent::position`]
+    /// identically. Focus-routed events
     /// ([`InputEvent::Key`]/[`InputEvent::Ime`]/
     /// [`InputEvent::EditCommand`]) and the two broadcasts
     /// ([`Housekeeping`](InputEvent::Housekeeping) and
@@ -799,6 +860,7 @@ impl InputEvent {
             InputEvent::Pointer(p) | InputEvent::PointerContact { event: p, .. } => p.position,
             InputEvent::Scroll { position, .. } => *position,
             InputEvent::Scale(scale) => scale.focal,
+            InputEvent::FileDrop(drop) => drop.position,
             InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
@@ -813,7 +875,9 @@ impl InputEvent {
     /// from their own coordinate space into a child's local space before
     /// forwarding it — see [`crate::widget::ChildPod::event_child`].
     /// [`InputEvent::Scale`] shifts its [`ScaleEvent::focal`] point the same way
-    /// [`InputEvent::Scroll`] shifts its `position`. Focus-routed
+    /// [`InputEvent::Scroll`] shifts its `position`, and
+    /// [`InputEvent::FileDrop`] shifts [`FileDropEvent::position`] identically.
+    /// Focus-routed
     /// events ([`InputEvent::Key`]/[`InputEvent::Ime`]/
     /// [`InputEvent::EditCommand`]) and the
     /// [`Housekeeping`](InputEvent::Housekeeping) broadcast carry no position, so
@@ -844,6 +908,11 @@ impl InputEvent {
                 focal: scale.focal + offset,
                 ..*scale
             }),
+            InputEvent::FileDrop(drop) => InputEvent::FileDrop(FileDropEvent {
+                position: drop.position + offset,
+                phase: drop.phase,
+                paths: drop.paths.clone(),
+            }),
             InputEvent::Key(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
@@ -859,8 +928,9 @@ impl InputEvent {
     ///
     /// Maps exactly the positions `translated` shifts, and leaves alone exactly
     /// what it leaves alone: [`InputEvent::Pointer`]'s position, the inner event
-    /// of an [`InputEvent::PointerContact`], [`InputEvent::Scroll`]'s `position`
-    /// and [`InputEvent::Scale`]'s [`ScaleEvent::focal`] are mapped; the
+    /// of an [`InputEvent::PointerContact`], [`InputEvent::Scroll`]'s `position`,
+    /// [`InputEvent::Scale`]'s [`ScaleEvent::focal`], and
+    /// [`InputEvent::FileDrop`]'s [`FileDropEvent::position`] are mapped; the
     /// focus-routed events, the [`Housekeeping`](InputEvent::Housekeeping)
     /// broadcast and the window-space [`Overlay`](InputEvent::Overlay) payload are
     /// returned unchanged (cloned), for the reasons `translated` gives.
@@ -893,6 +963,11 @@ impl InputEvent {
             InputEvent::Scale(scale) => InputEvent::Scale(ScaleEvent {
                 focal: *affine * scale.focal,
                 ..*scale
+            }),
+            InputEvent::FileDrop(drop) => InputEvent::FileDrop(FileDropEvent {
+                position: *affine * drop.position,
+                phase: drop.phase,
+                paths: drop.paths.clone(),
             }),
             InputEvent::Key(_)
             | InputEvent::Ime(_)
@@ -3034,11 +3109,42 @@ mod tests {
                 delta: ScrollDelta::Pixels(3.0, 4.0),
             },
             InputEvent::Scale(scale),
+            InputEvent::FileDrop(FileDropEvent {
+                phase: FileDropPhase::Hover,
+                position: Point::new(20.0, 30.0),
+                paths: Vec::new(),
+            }),
             InputEvent::Housekeeping,
         ];
         for event in &events {
             assert_eq!(event.transformed(&affine), event.translated(offset));
         }
+    }
+
+    #[test]
+    fn file_drop_is_hit_tested_and_translates_its_position_only() {
+        let drop = InputEvent::FileDrop(FileDropEvent {
+            phase: FileDropPhase::Drop,
+            position: Point::new(20.0, 30.0),
+            paths: vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")],
+        });
+        assert_eq!(drop.position(), Point::new(20.0, 30.0));
+        assert!(!drop.is_broadcast());
+        assert!(!drop.is_focus_routed());
+
+        let local = drop.translated(-Vec2::new(5.0, 7.0));
+        let InputEvent::FileDrop(local_drop) = &local else {
+            panic!("expected FileDrop");
+        };
+        assert_eq!(local_drop.position, Point::new(15.0, 23.0));
+        assert_eq!(local_drop.phase, FileDropPhase::Drop);
+        assert_eq!(
+            local_drop.paths,
+            vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")],
+            "translating must not disturb the dropped paths"
+        );
+        // The original is untouched.
+        assert_eq!(drop.position(), Point::new(20.0, 30.0));
     }
 
     #[test]
