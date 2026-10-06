@@ -150,7 +150,7 @@ pub mod __jni {
 ///
 /// ```ignore
 /// #[cfg(target_os = "android")]
-/// frust::android_app!(AppState, move |s| root.build(s));
+/// frust::android_app!(AppState, move |s| frust::AnyView::new(root.build(s)));
 /// ```
 ///
 /// Two forms:
@@ -161,7 +161,7 @@ pub mod __jni {
 ///   like `MyState::new`), for a `State` that doesn't implement `Default`. The
 ///   2-arg form delegates to this one.
 ///
-/// `$build` is the root component's build closure, a `FnMut(&mut State) -> impl View<State>` (`move |s| root.build(s)`).
+/// `$build` is the root component's build closure, a `FnMut(&mut State) -> impl View<State>` that returns any `View<State>`; since a `Component::build` result's opaque type captures the borrows, it must be erased with `AnyView::new` before passing it to the macro (`move |s| frust::AnyView::new(root.build(s))`).
 #[macro_export]
 macro_rules! android_app {
     ($state_ty:ty, $build:expr $(,)?) => {
