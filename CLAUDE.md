@@ -22,6 +22,7 @@ cold.
 | DEVTOOLS — wire protocol + in-app debug service | [docs/DEVTOOLS_ARCHITECTURE.md](docs/DEVTOOLS_ARCHITECTURE.md) |
 | Coding conventions (shared across units) | [docs/CODE_STANDARDS.md](docs/CODE_STANDARDS.md) |
 | Build, run, test, environment | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
+| Performance baselines (release profile, size/build-time measurements) | [docs/PERFORMANCE_BASELINES.md](docs/PERFORMANCE_BASELINES.md) |
 | Test tiers and gates | [docs/TESTING.md](docs/TESTING.md) |
 | Accepted limitations register | [docs/LIMITATIONS.md](docs/LIMITATIONS.md) |
 | Contributing (branching, PR rules) | [CONTRIBUTING.md](CONTRIBUTING.md) |
