@@ -25,7 +25,7 @@ use std::time::Instant;
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
-use frust::{AnyView, Axis, FlexChild, FlexView, Get, GetUntracked, Set, any, inflexible};
+use frust::{AnyView, Axis, FlexChild, FlexView, Get, GetUntracked, Set, any, column, inflexible};
 use frust_native_widgets::{
     NativeImageFit, native_button, native_image, native_label, native_progress, native_slider,
     native_switch,
@@ -134,44 +134,54 @@ fn cycle_group(mounted: bool) -> AnyView<S> {
     if !mounted {
         return caption("(cycler group currently unmounted)");
     }
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(any(native_button("Cycle button")
+    any(column()
+        .child(
+            native_button("Cycle button")
                 .content_description("Gate-harness cycler button")
-                .size(160.0, 40.0))),
-            gap(4.0),
-            inflexible(any(native_label("Cycle label")
+                .size(160.0, 40.0),
+        )
+        .push(gap(4.0))
+        .child(
+            native_label("Cycle label")
                 .content_description("Gate-harness cycler label")
-                .size(160.0, 28.0))),
-            gap(4.0),
-            inflexible(any(native_switch(false)
+                .size(160.0, 28.0),
+        )
+        .push(gap(4.0))
+        .child(
+            native_switch(false)
                 .content_description("Gate-harness cycler switch")
-                .size(70.0, 32.0))),
-            gap(4.0),
-            inflexible(any(native_slider(0, 0, 100)
+                .size(70.0, 32.0),
+        )
+        .push(gap(4.0))
+        .child(
+            native_slider(0, 0, 100)
                 .content_description("Gate-harness cycler slider")
-                .size(200.0, 32.0))),
-            gap(4.0),
-            inflexible(any(native_progress(0, 0, 100)
+                .size(200.0, 32.0),
+        )
+        .push(gap(4.0))
+        .child(
+            native_progress(0, 0, 100)
                 .content_description("Gate-harness cycler progress")
-                .size(200.0, 20.0))),
-            gap(4.0),
-            inflexible(any(native_image(demo_image_bytes())
+                .size(200.0, 20.0),
+        )
+        .push(gap(4.0))
+        .child(
+            native_image(demo_image_bytes())
                 .fit(NativeImageFit::Contain)
                 .content_description("Gate-harness cycler image")
-                .size(48.0, 48.0))),
-        ],
-    ))
+                .size(48.0, 48.0),
+        ))
 }
 
 /// [`STRESS_SLOT_COUNT`] `native_label` slots in a plain column.
 fn stress_grid() -> AnyView<S> {
     let rows: Vec<FlexChild<S>> = (1..=STRESS_SLOT_COUNT)
         .map(|i| {
-            inflexible(any(native_label(format!("Stress slot {i:02}"))
-                .content_description(format!("Gate-harness stress slot {i}"))
-                .size(220.0, 28.0)))
+            inflexible(
+                native_label(format!("Stress slot {i:02}"))
+                    .content_description(format!("Gate-harness stress slot {i}"))
+                    .size(220.0, 28.0),
+            )
         })
         .collect();
     any(FlexView::new(Axis::Vertical, rows))

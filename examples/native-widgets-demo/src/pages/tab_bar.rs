@@ -30,7 +30,7 @@
 //! banner in place of the bar. One native slot at rest on iOS/iPadOS, none
 //! elsewhere.
 
-use frust::{AnyView, Get, Set, any, inflexible};
+use frust::{AnyView, Get, Set, inflexible};
 use frust_glyph::tabs;
 use frust_native_widgets::{TabIcon, TabId, TabItem, native_tab_bar};
 
@@ -117,7 +117,7 @@ pub fn page(_state: &S) -> AnyView<S> {
     let drawn = block(vec![
         inflexible(label("Drawn peer: Glyph tabs on the same selection")),
         gap(6.0),
-        inflexible(any(tabs(
+        inflexible(tabs(
             TABS.iter().map(|(_, title, _)| title.to_string()).collect(),
             selected,
             |_: &mut S, index: usize| {
@@ -125,7 +125,7 @@ pub fn page(_state: &S) -> AnyView<S> {
                     selected_sig().set(index);
                 }
             },
-        ))),
+        )),
     ]);
 
     let native_intro = block(vec![
@@ -153,6 +153,6 @@ pub fn page(_state: &S) -> AnyView<S> {
         tab_page,
         drawn,
         native_intro,
-        inflexible(any(bar)),
+        inflexible(bar),
     ])
 }

@@ -284,7 +284,7 @@ fn every_page_publishes_its_documented_at_rest_slot_count() {
 /// child's own size.
 #[test]
 fn anchor_probe_records_the_painted_window_rect() {
-    use frust::{Axis, EdgeInsets, FlexView, Padding, SizedBox, inflexible};
+    use frust::{EdgeInsets, Padding, SizedBox, column};
     use native_widgets_demo::pages::common::{anchor_probe, anchor_rect};
 
     let _owner = setup();
@@ -295,16 +295,12 @@ fn anchor_probe_records_the_painted_window_rect() {
     let mut logic = |_: &mut NativeWidgetsDemoState| {
         any(Padding(
             EdgeInsets::all(20.0),
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(SizedBox(Some(10.0), Some(40.0))),
-                    inflexible(anchor_probe(
-                        "smoke.anchor",
-                        SizedBox(Some(120.0), Some(44.0)),
-                    )),
-                ],
-            ),
+            column()
+                .child(SizedBox(Some(10.0), Some(40.0)))
+                .child(anchor_probe(
+                    "smoke.anchor",
+                    SizedBox(Some(120.0), Some(44.0)),
+                )),
         ))
     };
     frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);

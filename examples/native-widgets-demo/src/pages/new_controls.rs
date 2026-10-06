@@ -195,11 +195,11 @@ fn segmented_block(selected: usize, refusing: bool, refused: u32, events: u32) -
             })),
         ),
         block(vec![
-            inflexible(any(checkbox(
+            inflexible(checkbox(
                 refusing,
                 "REFUSE segment changes",
                 |_: &mut S, on: bool| segment_refuse_sig().set(on),
-            ))),
+            )),
             gap(4.0),
             inflexible(readout(format!(
                 "Segment: {} \u{2014} events {events}, refused {refused}",
@@ -218,17 +218,21 @@ fn segmented_block(selected: usize, refusing: bool, refused: u32, events: u32) -
 fn stepper_block(value: i32, wraps: bool, big_step: bool, events: u32) -> Vec<FlexChildS> {
     let step = stepper_step(big_step);
     let drawn = row(vec![
-        inflexible(any(button("\u{2212}", move |_: &mut S| {
-            confirm_stepper(stepped(stepper_sig().get_untracked(), -step, wraps))
-        })
-        .small())),
+        inflexible(
+            button("\u{2212}", move |_: &mut S| {
+                confirm_stepper(stepped(stepper_sig().get_untracked(), -step, wraps))
+            })
+            .small(),
+        ),
         gap_h(8.0),
         inflexible(readout(format!("{value}"))),
         gap_h(8.0),
-        inflexible(any(button("+", move |_: &mut S| {
-            confirm_stepper(stepped(stepper_sig().get_untracked(), step, wraps))
-        })
-        .small())),
+        inflexible(
+            button("+", move |_: &mut S| {
+                confirm_stepper(stepped(stepper_sig().get_untracked(), step, wraps))
+            })
+            .small(),
+        ),
     ]);
     vec![
         pair_row(
@@ -255,13 +259,13 @@ fn stepper_block(value: i32, wraps: bool, big_step: bool, events: u32) -> Vec<Fl
         ),
         block(vec![
             inflexible(row(vec![
-                inflexible(any(checkbox(wraps, "wraps", |_: &mut S, on: bool| {
+                inflexible(checkbox(wraps, "wraps", |_: &mut S, on: bool| {
                     stepper_wraps_sig().set(on)
-                }))),
+                })),
                 gap_h(12.0),
-                inflexible(any(checkbox(big_step, "step 2", |_: &mut S, on: bool| {
+                inflexible(checkbox(big_step, "step 2", |_: &mut S, on: bool| {
                     stepper_big_step_sig().set(on)
-                }))),
+                })),
             ])),
             gap(4.0),
             inflexible(readout(format!(

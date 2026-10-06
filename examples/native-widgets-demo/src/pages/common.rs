@@ -293,9 +293,7 @@ pub fn live_readout(section: usize) -> Vec<FlexChild<S>> {
 /// count.
 pub fn page_header(section: usize) -> FlexChild<S> {
     let mut rows = vec![
-        inflexible(any(text(SECTION_LABELS[section])
-            .size(22.0)
-            .color(accent()))),
+        inflexible(text(SECTION_LABELS[section]).size(22.0).color(accent())),
         gap(6.0),
         inflexible(caption(super::SECTION_SUMMARIES[section])),
         gap(6.0),
