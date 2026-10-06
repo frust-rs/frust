@@ -1247,8 +1247,7 @@ impl Widget for SidebarInsetWidget {
 
 /// Create the header slot: `flex-col gap-2 p-2`.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
 pub fn sidebar_header<State: 'static, V: View<State>>(
     children: impl IntoIterator<Item = V>,
 ) -> AnyView<State> {
@@ -1261,8 +1260,7 @@ pub fn sidebar_header<State: 'static, V: View<State>>(
 
 /// Create the footer slot: the header's mirror (`flex-col gap-2 p-2`).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
 pub fn sidebar_footer<State: 'static, V: View<State>>(
     children: impl IntoIterator<Item = V>,
 ) -> AnyView<State> {
@@ -1277,8 +1275,7 @@ pub fn sidebar_footer<State: 'static, V: View<State>>(
 /// desktop-first choice [`scroll_area`](crate::components::scroll_area)
 /// documents.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
 pub fn sidebar_content<State: 'static, V: View<State>>(
     children: impl IntoIterator<Item = V>,
 ) -> AnyView<State> {
@@ -1288,8 +1285,7 @@ pub fn sidebar_content<State: 'static, V: View<State>>(
 
 /// Create a group: `flex-col p-2`, the unit a label plus a menu lives in.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
 pub fn sidebar_group<State: 'static, V: View<State>>(
     children: impl IntoIterator<Item = V>,
 ) -> AnyView<State> {
@@ -1299,8 +1295,7 @@ pub fn sidebar_group<State: 'static, V: View<State>>(
 
 /// Create a menu: a `gap-1` column of [`sidebar_menu_item`] rows.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
 pub fn sidebar_menu<State: 'static, V: View<State>>(
     items: impl IntoIterator<Item = V>,
 ) -> AnyView<State> {
@@ -1314,8 +1309,7 @@ pub fn sidebar_menu<State: 'static, V: View<State>>(
 /// positioning; this port lays the same three parts out as a centered row, so
 /// the button is `flexible` and the trailing parts keep their natural width.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
 pub fn sidebar_menu_item<State: 'static, V: View<State>>(
     children: impl IntoIterator<Item = V>,
 ) -> FlexView<State> {
@@ -1337,8 +1331,7 @@ pub fn sidebar_menu_item<State: 'static, V: View<State>>(
 /// Create one sub-menu row — a [`sidebar_menu_item`] inside a
 /// [`sidebar_menu_sub`].
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
 pub fn sidebar_menu_sub_item<State: 'static, V: View<State>>(
     children: impl IntoIterator<Item = V>,
 ) -> FlexView<State> {
@@ -1591,8 +1584,7 @@ pub struct SidebarMenuSubView<State: 'static> {
 /// (upstream's blocks do exactly that; `sidebar.tsx` itself only styles the
 /// list).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
+/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
 pub fn sidebar_menu_sub<State: 'static, V: View<State>>(
     children: impl IntoIterator<Item = V>,
 ) -> SidebarMenuSubView<State> {

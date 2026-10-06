@@ -87,10 +87,6 @@ fn builder_chain_matches_explicit_flex_children() {
 
 #[test]
 fn builder_keyed_children_match_explicit_keyed_flex_children() {
-    use frust_widgets::authoring::{build_child, rebuild_child};
-
-    let mut counter = 0u64;
-
     // Build an all-keyed column using the fluent builder.
     let built: FlexView<()> = column()
         .keyed(1, leaf(10.0, 15.0))
@@ -104,25 +100,83 @@ fn builder_keyed_children_match_explicit_keyed_flex_children() {
     // Both should lay out identically.
     assert_eq!(rects(&built), rects(&legacy));
 
-    // Also verify that the keyed property is exercised through a rebuild,
-    // ensuring key-based reconciliation is actually active.
-    let mut ctx = BuildCtx::new(&mut counter);
-    let mut pod = build_child(&any::<(), _>(built), &mut ctx);
-
-    // Rebuild with a different (keyed) column to exercise reconciliation.
-    let rebuilt: FlexView<()> = column()
-        .keyed(2, leaf(25.0, 25.0)) // swapped order
-        .keyed(1, leaf(15.0, 18.0));
-
-    let flags = rebuild_child(
-        &any::<(), _>(legacy),
-        &any::<(), _>(rebuilt),
-        &mut pod,
-        &mut ctx,
+    // Keyed reconciliation must survive a reorder: widgets are matched by key,
+    // not by position. `Tagged` fixes its widget's width at build time and its
+    // rebuild never touches it, so a widget's painted width is a durable
+    // identity handle that an integration test can observe through paint.
+    let mut counter = 0u64;
+    let before: FlexView<()> = column().keyed(1, tagged(10.0)).keyed(2, tagged(20.0));
+    let mut widget = before.build(&mut BuildCtx::new(&mut counter));
+    assert_eq!(
+        painted_widths(&mut widget),
+        vec![10.0, 20.0],
+        "initial build paints key 1 then key 2"
     );
 
-    // The rebuild should complete without panic; keyed children are reconciled by key.
-    assert!(flags.is_empty() || !flags.is_empty()); // always true; just ensure no panic
+    // Rebuild against the view the widget was built from (prev == `before`),
+    // with the two keyed children swapped in position.
+    let after: FlexView<()> = column().keyed(2, tagged(20.0)).keyed(1, tagged(10.0));
+    after.rebuild(&before, &mut widget, &mut BuildCtx::new(&mut counter));
+
+    // Position 0 is now key 2 and position 1 is key 1. Each keeps the widget
+    // it was built with (widths 20 then 10) and the child count is unchanged;
+    // positional reconciliation would have left widths 10 then 20.
+    assert_eq!(
+        painted_widths(&mut widget),
+        vec![20.0, 10.0],
+        "keyed children keep their widget identity across a reorder"
+    );
+}
+
+/// A leaf whose widget's width is fixed at build time and never rebuilt, so
+/// it identifies the widget instance.
+struct Tagged(f64);
+
+struct TaggedWidget(f64);
+
+impl View<()> for Tagged {
+    type Element = TaggedWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> TaggedWidget {
+        TaggedWidget(self.0)
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        _el: &mut TaggedWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        ChangeFlags::NONE
+    }
+}
+
+impl Widget for TaggedWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.constrain(Size::new(self.0, 10.0))
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
+    }
+}
+
+fn tagged(width: f64) -> Tagged {
+    Tagged(width)
+}
+
+/// Lay out + paint a built tree and return each leaf's painted width in order.
+fn painted_widths(widget: &mut impl Widget) -> Vec<f64> {
+    let _ = widget.layout(
+        &mut LayoutCtx::new(),
+        &BoxConstraints::loose(Size::new(300.0, 200.0)),
+    );
+    let mut scene = Rects::default();
+    widget.paint(
+        &mut PaintCtx::new(Point::ZERO, Size::new(300.0, 200.0)),
+        &mut scene,
+    );
+    scene.0.iter().map(|(_, size)| size.width).collect()
 }
 
 #[test]
