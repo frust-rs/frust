@@ -34,17 +34,14 @@
 
 use kurbo::Size;
 
-use frust_core::{AnyView, any};
+use frust_core::AnyView;
 use frust_glyph::{
     AlertVariant, BadgeVariant, PaletteItem, StatDelta, TermLine, ToastVariant, accordion, alert,
     app_bar, badge, command_palette, dots_loader, empty_state, glyph_card, glyph_dialog,
     glyph_list, glyph_list_item, glyph_nav_bar, glyph_nav_item, progress, segmented_control,
     skeleton, stat_card, tabs, tag, term_block, toast, toggle,
 };
-use frust_widgets::{
-    Axis, ButtonStyle, CrossAxisAlignment, FlexView, Row, SizedBox, button, flexible, inflexible,
-    text,
-};
+use frust_widgets::{ButtonStyle, CrossAxisAlignment, SizedBox, button, column, row, text};
 
 use crate::base::{framed, framed_in};
 use crate::case::{Case, Design};
@@ -61,48 +58,42 @@ const MEDIUM_FRAME: Size = Size::new(360.0, 300.0);
 /// `glyph/accordion` — one settled-open panel (no tween on first build, per
 /// the accordion doc's "already open" contract) above a settled-closed one.
 fn accordion_case() -> AnyView<()> {
-    framed(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(
+    framed(
+        column()
+            .child(
                 accordion(
                     "Deploy pipeline",
                     text("Builds, tests, and ships the release artifact on every push to main."),
                 )
                 .open(true),
-            ),
-            inflexible(SizedBox(None, Some(12.0))),
-            inflexible(accordion("Rollback", text("Revert to the previous release.")).open(false)),
-        ],
-    ))
+            )
+            .child(SizedBox(None, Some(12.0)))
+            .child(accordion("Rollback", text("Revert to the previous release.")).open(false)),
+    )
 }
 
 /// `glyph/alert` — the four severities stacked.
 fn alert_case() -> AnyView<()> {
     framed_in(
         MEDIUM_FRAME,
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(alert(
-                    AlertVariant::Info,
-                    "Heads up",
-                    "A new workspace layout is available in settings.",
-                )),
-                inflexible(SizedBox(None, Some(10.0))),
-                inflexible(alert(
-                    AlertVariant::Success,
-                    "Saved",
-                    "Your changes have been saved.",
-                )),
-                inflexible(SizedBox(None, Some(10.0))),
-                inflexible(alert(
-                    AlertVariant::Warning,
-                    "Low disk space",
-                    "Free up space soon to avoid interruptions.",
-                )),
-            ],
-        ),
+        column()
+            .child(alert(
+                AlertVariant::Info,
+                "Heads up",
+                "A new workspace layout is available in settings.",
+            ))
+            .child(SizedBox(None, Some(10.0)))
+            .child(alert(
+                AlertVariant::Success,
+                "Saved",
+                "Your changes have been saved.",
+            ))
+            .child(SizedBox(None, Some(10.0)))
+            .child(alert(
+                AlertVariant::Warning,
+                "Low disk space",
+                "Free up space soon to avoid interruptions.",
+            )),
     )
 }
 
@@ -118,36 +109,26 @@ fn appbar_case() -> AnyView<()> {
 /// `glyph/badge-and-tag` — one badge per status variant, plus a removable and
 /// a static tag.
 fn badge_and_tag_case() -> AnyView<()> {
-    framed(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(
-                FlexView::new(
-                    Axis::Horizontal,
-                    vec![
-                        inflexible(badge("connected", BadgeVariant::Success).dot(true)),
-                        inflexible(SizedBox(Some(8.0), None)),
-                        inflexible(badge("degraded", BadgeVariant::Warning).dot(true)),
-                        inflexible(SizedBox(Some(8.0), None)),
-                        inflexible(badge("offline", BadgeVariant::Error).dot(true)),
-                    ],
-                )
-                .cross_axis(CrossAxisAlignment::Center),
+    framed(
+        column()
+            .child(
+                row()
+                    .child(badge("connected", BadgeVariant::Success).dot(true))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(badge("degraded", BadgeVariant::Warning).dot(true))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(badge("offline", BadgeVariant::Error).dot(true))
+                    .cross_axis(CrossAxisAlignment::Center),
+            )
+            .child(SizedBox(None, Some(16.0)))
+            .child(
+                row()
+                    .child(tag::<()>("stable"))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(tag("v0.44.1").on_remove(|_: &mut ()| {}))
+                    .cross_axis(CrossAxisAlignment::Center),
             ),
-            inflexible(SizedBox(None, Some(16.0))),
-            inflexible(
-                FlexView::new(
-                    Axis::Horizontal,
-                    vec![
-                        inflexible(tag::<()>("stable")),
-                        inflexible(SizedBox(Some(8.0), None)),
-                        inflexible(tag("v0.44.1").on_remove(|_: &mut ()| {})),
-                    ],
-                )
-                .cross_axis(CrossAxisAlignment::Center),
-            ),
-        ],
-    ))
+    )
 }
 
 /// `glyph/card` — a three-slot card with a status footer, above a two-up
@@ -155,32 +136,20 @@ fn badge_and_tag_case() -> AnyView<()> {
 fn card_case() -> AnyView<()> {
     framed_in(
         TALL_FRAME,
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(
-                    glyph_card::<()>()
-                        .title(text("Deploy pipeline"))
-                        .desc(text(
-                            "Builds, tests, and ships the release artifact on every push to main.",
-                        ))
-                        .footer(Row(vec![any(
-                            badge("stable", BadgeVariant::Success).dot(true)
-                        )])),
-                ),
-                inflexible(SizedBox(None, Some(14.0))),
-                inflexible(FlexView::new(
-                    Axis::Horizontal,
-                    vec![
-                        flexible(1, stat_card("Sessions", "1,284")),
-                        flexible(
-                            1,
-                            stat_card("Uptime", "99.98%").delta(StatDelta::Up, "0.4%"),
-                        ),
-                    ],
-                )),
-            ],
-        ),
+        column()
+            .child(
+                glyph_card::<()>()
+                    .title(text("Deploy pipeline"))
+                    .desc(text(
+                        "Builds, tests, and ships the release artifact on every push to main.",
+                    ))
+                    .footer(row().child(badge("stable", BadgeVariant::Success).dot(true))),
+            )
+            .child(SizedBox(None, Some(14.0)))
+            .child(row().flex(1, stat_card("Sessions", "1,284")).flex(
+                1,
+                stat_card("Uptime", "99.98%").delta(StatDelta::Up, "0.4%"),
+            )),
     )
 }
 
@@ -218,12 +187,16 @@ fn dialog_case() -> AnyView<()> {
         glyph_dialog::<()>()
             .title("Revoke observer-token?")
             .body("Any device using this token loses access immediately. This can't be undone.")
-            .action(any(button("Cancel", |_: &mut ()| {})
-                .style(ButtonStyle::Ghost)
-                .small()))
-            .action(any(button("Revoke token", |_: &mut ()| {})
-                .style(ButtonStyle::Danger)
-                .small())),
+            .action(
+                button("Cancel", |_: &mut ()| {})
+                    .style(ButtonStyle::Ghost)
+                    .small(),
+            )
+            .action(
+                button("Revoke token", |_: &mut ()| {})
+                    .style(ButtonStyle::Danger)
+                    .small(),
+            ),
     )
 }
 
@@ -232,30 +205,26 @@ fn dialog_case() -> AnyView<()> {
 fn list_case() -> AnyView<()> {
     framed_in(
         TALL_FRAME,
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(glyph_list::<()>(vec![
-                    glyph_list_item("$", "deploy")
-                        .sub("main → production")
-                        .meta("2m ago")
-                        .chevron(true),
-                    glyph_list_item("#", "rollback")
-                        .sub("v0.44.0 → v0.43.2")
-                        .meta("1h ago")
-                        .chevron(true),
-                ])),
-                inflexible(SizedBox(None, Some(14.0))),
-                inflexible(
-                    empty_state::<()>(
-                        "No deployments yet",
-                        "Trigger your first deploy to see activity here.",
-                    )
-                    .glyph("▪")
-                    .action(button("Deploy now", |_: &mut ()| {}).style(ButtonStyle::Primary)),
-                ),
-            ],
-        ),
+        column()
+            .child(glyph_list::<()>(vec![
+                glyph_list_item("$", "deploy")
+                    .sub("main → production")
+                    .meta("2m ago")
+                    .chevron(true),
+                glyph_list_item("#", "rollback")
+                    .sub("v0.44.0 → v0.43.2")
+                    .meta("1h ago")
+                    .chevron(true),
+            ]))
+            .child(SizedBox(None, Some(14.0)))
+            .child(
+                empty_state::<()>(
+                    "No deployments yet",
+                    "Trigger your first deploy to see activity here.",
+                )
+                .glyph("▪")
+                .action(button("Deploy now", |_: &mut ()| {}).style(ButtonStyle::Primary)),
+            ),
     )
 }
 
@@ -263,17 +232,13 @@ fn list_case() -> AnyView<()> {
 /// indeterminate dot cycle.
 fn loaders_case() -> AnyView<()> {
     framed(
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(progress(0.65)),
-                inflexible(SizedBox(None, Some(18.0))),
-                inflexible(skeleton(220.0, 16.0)),
-                inflexible(SizedBox(None, Some(18.0))),
-                inflexible(dots_loader()),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Start),
+        column()
+            .child(progress(0.65))
+            .child(SizedBox(None, Some(18.0)))
+            .child(skeleton(220.0, 16.0))
+            .child(SizedBox(None, Some(18.0)))
+            .child(dots_loader())
+            .cross_axis(CrossAxisAlignment::Start),
     )
 }
 
@@ -292,10 +257,9 @@ fn navbar_case() -> AnyView<()> {
 
 /// `glyph/tabs` — the label tab strip above a pill segmented control.
 fn tabs_case() -> AnyView<()> {
-    framed(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(tabs::<(), _>(
+    framed(
+        column()
+            .child(tabs::<(), _>(
                 vec![
                     "Overview".to_string(),
                     "Activity".to_string(),
@@ -303,9 +267,9 @@ fn tabs_case() -> AnyView<()> {
                 ],
                 0,
                 |_: &mut (), _: usize| {},
-            )),
-            inflexible(SizedBox(None, Some(20.0))),
-            inflexible(segmented_control::<(), _>(
+            ))
+            .child(SizedBox(None, Some(20.0)))
+            .child(segmented_control::<(), _>(
                 vec![
                     "List".to_string(),
                     "Grid".to_string(),
@@ -314,8 +278,7 @@ fn tabs_case() -> AnyView<()> {
                 1,
                 |_: &mut (), _: usize| {},
             )),
-        ],
-    ))
+    )
 }
 
 /// `glyph/term-block` — a prompt/output/comment transcript, unstaggered.
@@ -346,28 +309,24 @@ fn term_block_case() -> AnyView<()> {
 /// a [`Case::time_ms`] could advance. Measured the same way as
 /// [`term_block_case`]: `time_ms: 400` recorded byte-identical PNGs.
 fn toast_case() -> AnyView<()> {
-    framed(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(toast("New layout available").variant(ToastVariant::Info)),
-            inflexible(SizedBox(None, Some(12.0))),
-            inflexible(toast("Changes saved").variant(ToastVariant::Success)),
-            inflexible(SizedBox(None, Some(12.0))),
-            inflexible(toast("Low disk space").variant(ToastVariant::Warning)),
-        ],
-    ))
+    framed(
+        column()
+            .child(toast("New layout available").variant(ToastVariant::Info))
+            .child(SizedBox(None, Some(12.0)))
+            .child(toast("Changes saved").variant(ToastVariant::Success))
+            .child(SizedBox(None, Some(12.0)))
+            .child(toast("Low disk space").variant(ToastVariant::Warning)),
+    )
 }
 
 /// `glyph/toggle` — checked and unchecked, both labelled.
 fn toggle_case() -> AnyView<()> {
-    framed(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(toggle::<(), _>(true, |_: &mut (), _: bool| {}).label("Notifications")),
-            inflexible(SizedBox(None, Some(16.0))),
-            inflexible(toggle::<(), _>(false, |_: &mut (), _: bool| {}).label("Auto-sync")),
-        ],
-    ))
+    framed(
+        column()
+            .child(toggle::<(), _>(true, |_: &mut (), _: bool| {}).label("Notifications"))
+            .child(SizedBox(None, Some(16.0)))
+            .child(toggle::<(), _>(false, |_: &mut (), _: bool| {}).label("Auto-sync")),
+    )
 }
 
 /// This module's slice of the registry [`crate::cases`]: one entry per

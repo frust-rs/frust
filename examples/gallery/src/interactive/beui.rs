@@ -68,7 +68,7 @@
 //! would cost an IME composition, not merely a caret.
 
 use frust_core::{AnyView, Component, View, any, component};
-use frust_widgets::{Align, Alignment, Column, GestureDetector, Row, SizedBox, Stack, text};
+use frust_widgets::{Align, Alignment, GestureDetector, SizedBox, column, row, stack, text};
 use kurbo::Size;
 use peniko::Color;
 
@@ -380,7 +380,7 @@ impl Component for CommandPaletteCase {
                 .tone(ButtonTone::Secondary),
             ))
         };
-        framed_in(COMMAND_PALETTE, Stack(vec![backdrop, any(palette)]))
+        framed_in(COMMAND_PALETTE, stack().child(backdrop).child(palette))
     }
 }
 
@@ -444,26 +444,27 @@ impl Component for DynamicIslandCase {
     }
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-        let compact = GestureDetector(Column(vec![any(text("9:41").size(13.0).color(ISLAND_INK))]))
+        let compact = GestureDetector(column().child(text("9:41").size(13.0).color(ISLAND_INK)))
             .on_tap(|state: &mut DynamicIslandState| state.advance());
         let slots = vec![
             dynamic_island_slot(
                 "music",
-                GestureDetector(Column(vec![
-                    any(text("NOW PLAYING").size(10.0).color(ISLAND_INK)),
-                    gap_y(4.0),
-                    any(text("Weightless \u{b7} Marconi Union")
-                        .size(13.0)
-                        .color(ISLAND_INK)),
-                ]))
+                GestureDetector(
+                    column()
+                        .child(text("NOW PLAYING").size(10.0).color(ISLAND_INK))
+                        .child(gap_y(4.0))
+                        .child(
+                            text("Weightless \u{b7} Marconi Union")
+                                .size(13.0)
+                                .color(ISLAND_INK),
+                        ),
+                )
                 .on_tap(|state: &mut DynamicIslandState| state.advance()),
             ),
             dynamic_island_slot(
                 "call",
-                GestureDetector(Column(vec![any(text("INCOMING CALL")
-                    .size(10.0)
-                    .color(ISLAND_INK))]))
-                .on_tap(|state: &mut DynamicIslandState| state.advance()),
+                GestureDetector(column().child(text("INCOMING CALL").size(10.0).color(ISLAND_INK)))
+                    .on_tap(|state: &mut DynamicIslandState| state.advance()),
             ),
         ];
         framed(dynamic_island(state.view.clone(), compact, slots).label("Live activity"))
@@ -537,63 +538,75 @@ impl Component for FormControlsCase {
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed_in(
             FORM_CONTROLS,
-            Column(vec![
-                any(Row(vec![
-                    any(checkbox(
-                        state.notifications,
-                        |state: &mut FormControlsState, checked| state.notifications = checked,
-                    )
-                    .label("Notifications")),
-                    gap_x(10.0),
-                    any(text("Notifications").size(14.0)),
-                    gap_x(24.0),
-                    any(
-                        checkbox(state.partial, |state: &mut FormControlsState, checked| {
-                            state.partial = checked;
-                            state.partial_mixed = false;
-                        })
-                        .indeterminate(state.partial_mixed)
-                        .label("Partial"),
-                    ),
-                    gap_x(10.0),
-                    any(text("Partial").size(14.0)),
-                ])),
-                gap_y(18.0),
-                any(Row(vec![
-                    any(radio(
-                        state.plan == PLAN_MONTHLY,
-                        |state: &mut FormControlsState| state.plan = PLAN_MONTHLY,
-                    )
-                    .label("Monthly")),
-                    gap_x(10.0),
-                    any(text("Monthly").size(14.0)),
-                    gap_x(24.0),
-                    any(radio(
-                        state.plan == PLAN_YEARLY,
-                        |state: &mut FormControlsState| state.plan = PLAN_YEARLY,
-                    )
-                    .label("Yearly")),
-                    gap_x(10.0),
-                    any(text("Yearly").size(14.0)),
-                ])),
-                gap_y(18.0),
-                any(Row(vec![
-                    any(
-                        switch(state.dark_mode, |state: &mut FormControlsState, checked| {
-                            state.dark_mode = checked
-                        })
-                        .label("Dark mode"),
-                    ),
-                    gap_x(10.0),
-                    any(text("Dark mode").size(14.0)),
-                    gap_x(24.0),
-                    any(switch(false, |_: &mut FormControlsState, _: bool| {})
-                        .disabled(true)
-                        .label("Beta features")),
-                    gap_x(10.0),
-                    any(text("Beta features").size(14.0)),
-                ])),
-            ]),
+            column()
+                .child(
+                    row()
+                        .child(
+                            checkbox(
+                                state.notifications,
+                                |state: &mut FormControlsState, checked| {
+                                    state.notifications = checked
+                                },
+                            )
+                            .label("Notifications"),
+                        )
+                        .child(gap_x(10.0))
+                        .child(text("Notifications").size(14.0))
+                        .child(gap_x(24.0))
+                        .child(
+                            checkbox(state.partial, |state: &mut FormControlsState, checked| {
+                                state.partial = checked;
+                                state.partial_mixed = false;
+                            })
+                            .indeterminate(state.partial_mixed)
+                            .label("Partial"),
+                        )
+                        .child(gap_x(10.0))
+                        .child(text("Partial").size(14.0)),
+                )
+                .child(gap_y(18.0))
+                .child(
+                    row()
+                        .child(
+                            radio(
+                                state.plan == PLAN_MONTHLY,
+                                |state: &mut FormControlsState| state.plan = PLAN_MONTHLY,
+                            )
+                            .label("Monthly"),
+                        )
+                        .child(gap_x(10.0))
+                        .child(text("Monthly").size(14.0))
+                        .child(gap_x(24.0))
+                        .child(
+                            radio(
+                                state.plan == PLAN_YEARLY,
+                                |state: &mut FormControlsState| state.plan = PLAN_YEARLY,
+                            )
+                            .label("Yearly"),
+                        )
+                        .child(gap_x(10.0))
+                        .child(text("Yearly").size(14.0)),
+                )
+                .child(gap_y(18.0))
+                .child(
+                    row()
+                        .child(
+                            switch(state.dark_mode, |state: &mut FormControlsState, checked| {
+                                state.dark_mode = checked
+                            })
+                            .label("Dark mode"),
+                        )
+                        .child(gap_x(10.0))
+                        .child(text("Dark mode").size(14.0))
+                        .child(gap_x(24.0))
+                        .child(
+                            switch(false, |_: &mut FormControlsState, _: bool| {})
+                                .disabled(true)
+                                .label("Beta features"),
+                        )
+                        .child(gap_x(10.0))
+                        .child(text("Beta features").size(14.0)),
+                ),
         )
     }
 }
@@ -709,24 +722,27 @@ impl Component for InputCase {
         }
         framed_in(
             INPUT,
-            Column(vec![
-                any(SizedBox(Some(280.0), None).child(
-                    input(state.email.clone(), |state: &mut InputState, value| {
-                        state.email = value;
-                    })
-                    .label("Email"),
-                )),
-                gap_y(14.0),
-                any(SizedBox(Some(280.0), None).child(
-                    input(state.workspace.clone(), |state: &mut InputState, value| {
-                        state.workspace = value;
-                    })
-                    .label("Workspace")
-                    .placeholder("acme-inc"),
-                )),
-                gap_y(14.0),
-                any(SizedBox(Some(280.0), None).child(handle)),
-            ]),
+            column()
+                .child(
+                    SizedBox(Some(280.0), None).child(
+                        input(state.email.clone(), |state: &mut InputState, value| {
+                            state.email = value;
+                        })
+                        .label("Email"),
+                    ),
+                )
+                .child(gap_y(14.0))
+                .child(
+                    SizedBox(Some(280.0), None).child(
+                        input(state.workspace.clone(), |state: &mut InputState, value| {
+                            state.workspace = value;
+                        })
+                        .label("Workspace")
+                        .placeholder("acme-inc"),
+                    ),
+                )
+                .child(gap_y(14.0))
+                .child(SizedBox(Some(280.0), None).child(handle)),
         )
     }
 }
@@ -917,11 +933,10 @@ impl Component for TabsCase {
                         tabs_tab(
                             "overview",
                             "Overview",
-                            Column(vec![
-                                any(text("Overview").size(15.0)),
-                                gap_y(6.0),
-                                any(text("The active panel swaps under the pill.").size(13.0)),
-                            ]),
+                            column()
+                                .child(text("Overview").size(15.0))
+                                .child(gap_y(6.0))
+                                .child(text("The active panel swaps under the pill.").size(13.0)),
                         ),
                         tabs_tab("activity", "Activity", text("Activity").size(15.0)),
                         tabs_tab("settings", "Settings", text("Settings").size(15.0)),

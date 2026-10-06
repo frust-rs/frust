@@ -6,8 +6,7 @@
 use frust_core::{AnyView, any};
 use frust_text::FontWeight;
 use frust_widgets::{
-    Axis, CrossAxisAlignment, FlexView, NavigatorController, SizedBox, container, hero, inflexible,
-    navigator, text,
+    CrossAxisAlignment, NavigatorController, SizedBox, column, container, hero, navigator, text,
 };
 use peniko::Color;
 
@@ -23,23 +22,17 @@ const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 /// would later morph, painted exactly as it renders at rest.
 fn hero_case() -> AnyView<()> {
     framed(
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(hero(
-                    "preview-avatar",
-                    container(text("AB").size(16.0).color(Color::WHITE))
-                        .fill(ACCENT)
-                        .radius(32.0)
-                        .size_centered(64.0, 64.0),
-                )),
-                inflexible(SizedBox(None, Some(12.0))),
-                inflexible(
-                    text("hero(\"preview-avatar\", ..) — morphs across a matching tag").size(12.0),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(hero(
+                "preview-avatar",
+                container(text("AB").size(16.0).color(Color::WHITE))
+                    .fill(ACCENT)
+                    .radius(32.0)
+                    .size_centered(64.0, 64.0),
+            ))
+            .child(SizedBox(None, Some(12.0)))
+            .child(text("hero(\"preview-avatar\", ..) — morphs across a matching tag").size(12.0))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
@@ -50,18 +43,14 @@ fn hero_case() -> AnyView<()> {
 /// outer `framed(..)`.
 fn navigator_case() -> AnyView<()> {
     any(navigator(&NavigatorController::<()>::new(), || {
-        any(container(
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(text("Home").size(18.0).weight(FontWeight::BOLD)),
-                    inflexible(SizedBox(None, Some(8.0))),
-                    inflexible(text("navigator(&controller, || home_page())").size(12.0)),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
+        container(
+            column()
+                .child(text("Home").size(18.0).weight(FontWeight::BOLD))
+                .child(SizedBox(None, Some(8.0)))
+                .child(text("navigator(&controller, || home_page())").size(12.0))
+                .cross_axis(CrossAxisAlignment::Center),
         )
-        .size_centered(Case::DEFAULT_SIZE.width, Case::DEFAULT_SIZE.height))
+        .size_centered(Case::DEFAULT_SIZE.width, Case::DEFAULT_SIZE.height)
     }))
 }
 

@@ -61,8 +61,8 @@ use frust_glyph::{
     glyph_nav_bar, glyph_nav_item, progress, segmented_control, skeleton, tabs, tag, toggle,
 };
 use frust_widgets::{
-    Axis, ButtonStyle, CrossAxisAlignment, FlexView, GestureDetector, SizedBox, button, inflexible,
-    text,
+    Axis, ButtonStyle, CrossAxisAlignment, FlexView, GestureDetector, SizedBox, button, column,
+    inflexible, row, text,
 };
 
 use super::{Entry, framed};
@@ -119,10 +119,9 @@ impl Component for AccordionCase {
     }
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-        framed(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(
+        framed(
+            column()
+                .child(
                     accordion(
                         "Deploy pipeline",
                         text(
@@ -131,15 +130,14 @@ impl Component for AccordionCase {
                     )
                     .open(state.deploy)
                     .on_toggle(|state: &mut AccordionState| state.deploy = !state.deploy),
-                ),
-                inflexible(SizedBox(None, Some(12.0))),
-                inflexible(
+                )
+                .child(SizedBox(None, Some(12.0)))
+                .child(
                     accordion("Rollback", text("Revert to the previous release."))
                         .open(state.rollback)
                         .on_toggle(|state: &mut AccordionState| state.rollback = !state.rollback),
                 ),
-            ],
-        ))
+        )
     }
 }
 
@@ -208,28 +206,22 @@ impl Component for BadgeAndTagCase {
             ));
         }
 
-        framed(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(
-                    FlexView::new(
-                        Axis::Horizontal,
-                        vec![
-                            inflexible(badge("connected", BadgeVariant::Success).dot(true)),
-                            inflexible(SizedBox(Some(8.0), None)),
-                            inflexible(badge("degraded", BadgeVariant::Warning).dot(true)),
-                            inflexible(SizedBox(Some(8.0), None)),
-                            inflexible(badge("offline", BadgeVariant::Error).dot(true)),
-                        ],
-                    )
-                    .cross_axis(CrossAxisAlignment::Center),
-                ),
-                inflexible(SizedBox(None, Some(16.0))),
-                inflexible(
+        framed(
+            column()
+                .child(
+                    row()
+                        .child(badge("connected", BadgeVariant::Success).dot(true))
+                        .child(SizedBox(Some(8.0), None))
+                        .child(badge("degraded", BadgeVariant::Warning).dot(true))
+                        .child(SizedBox(Some(8.0), None))
+                        .child(badge("offline", BadgeVariant::Error).dot(true))
+                        .cross_axis(CrossAxisAlignment::Center),
+                )
+                .child(SizedBox(None, Some(16.0)))
+                .child(
                     FlexView::new(Axis::Horizontal, tags).cross_axis(CrossAxisAlignment::Center),
                 ),
-            ],
-        ))
+        )
     }
 }
 
@@ -372,16 +364,16 @@ impl Component for DialogCase {
                 .title("Revoke observer-token?")
                 .body("Any device using this token loses access immediately. This can't be undone.")
                 .dismissable(false)
-                .action(any(button("Cancel", |state: &mut DialogState| {
-                    state.open = false
-                })
-                .style(ButtonStyle::Ghost)
-                .small()))
-                .action(any(button("Revoke token", |state: &mut DialogState| {
-                    state.open = false
-                })
-                .style(ButtonStyle::Danger)
-                .small())),
+                .action(
+                    button("Cancel", |state: &mut DialogState| state.open = false)
+                        .style(ButtonStyle::Ghost)
+                        .small(),
+                )
+                .action(
+                    button("Revoke token", |state: &mut DialogState| state.open = false)
+                        .style(ButtonStyle::Danger)
+                        .small(),
+                ),
         )
     }
 }
@@ -437,19 +429,16 @@ impl Component for LoadersCase {
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(GestureDetector(progress(state.value)).on_tap(
-                        |state: &mut LoadersState| state.value = advance_ramp(state.value),
-                    )),
-                    inflexible(SizedBox(None, Some(18.0))),
-                    inflexible(skeleton(220.0, 16.0)),
-                    inflexible(SizedBox(None, Some(18.0))),
-                    inflexible(dots_loader()),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Start),
+            column()
+                .child(
+                    GestureDetector(progress(state.value))
+                        .on_tap(|state: &mut LoadersState| state.value = advance_ramp(state.value)),
+                )
+                .child(SizedBox(None, Some(18.0)))
+                .child(skeleton(220.0, 16.0))
+                .child(SizedBox(None, Some(18.0)))
+                .child(dots_loader())
+                .cross_axis(CrossAxisAlignment::Start),
         )
     }
 }
@@ -525,10 +514,9 @@ impl Component for TabsCase {
     }
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-        framed(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(tabs(
+        framed(
+            column()
+                .child(tabs(
                     vec![
                         "Overview".to_string(),
                         "Activity".to_string(),
@@ -536,9 +524,9 @@ impl Component for TabsCase {
                     ],
                     state.tab,
                     |state: &mut TabsState, index: usize| state.tab = index,
-                )),
-                inflexible(SizedBox(None, Some(20.0))),
-                inflexible(segmented_control(
+                ))
+                .child(SizedBox(None, Some(20.0)))
+                .child(segmented_control(
                     vec![
                         "List".to_string(),
                         "Grid".to_string(),
@@ -547,8 +535,7 @@ impl Component for TabsCase {
                     state.segment,
                     |state: &mut TabsState, index: usize| state.segment = index,
                 )),
-            ],
-        ))
+        )
     }
 }
 
@@ -585,24 +572,22 @@ impl Component for ToggleCase {
     }
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-        framed(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(
+        framed(
+            column()
+                .child(
                     toggle(state.notifications, |state: &mut ToggleState, checked| {
                         state.notifications = checked;
                     })
                     .label("Notifications"),
-                ),
-                inflexible(SizedBox(None, Some(16.0))),
-                inflexible(
+                )
+                .child(SizedBox(None, Some(16.0)))
+                .child(
                     toggle(state.auto_sync, |state: &mut ToggleState, checked| {
                         state.auto_sync = checked;
                     })
                     .label("Auto-sync"),
                 ),
-            ],
-        ))
+        )
     }
 }
 

@@ -7,9 +7,9 @@
 //! themed `on_surface` default, and the heading's one explicit colour is an
 //! accent picked to stay legible against a light *and* a dark surface.
 
-use frust_core::{AnyView, any};
+use frust_core::AnyView;
 use frust_text::FontWeight;
-use frust_widgets::{Column, CrossAxisAlignment, text};
+use frust_widgets::{CrossAxisAlignment, column, text};
 use peniko::Color;
 
 use super::framed;
@@ -22,14 +22,15 @@ const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 
 fn text_case() -> AnyView<()> {
     framed(
-        Column(vec![
-            any(text("Hello, Frust")
-                .size(28.0)
-                .weight(FontWeight::SEMI_BOLD)
-                .color(ACCENT)),
-            any(text("the text leaf").size(15.0)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(
+                text("Hello, Frust")
+                    .size(28.0)
+                    .weight(FontWeight::SEMI_BOLD)
+                    .color(ACCENT),
+            )
+            .child(text("the text leaf").size(15.0))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
