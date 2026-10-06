@@ -66,6 +66,14 @@
 //! gesture to swallow, so the widget lands back on its idle state at once,
 //! ready for another lift.
 //!
+//! A keyboard session can also end from outside this source entirely — a
+//! target completing the drop on its own click, a cancel raised elsewhere —
+//! noticed on the next event or rebuild rather than through `Escape` or this
+//! source's own drop chord. With no pointer gesture pending either way, that
+//! also lands the widget back on idle at once (never the pointer case's
+//! swallowing wait for a stray `Up`/`Cancel`), the focus claim left exactly
+//! as it is — still focused, ready for another lift.
+//!
 //! Key events are focus-routed, never routed to a pointer captor, so the source
 //! holds the keyboard focus for the length of each press: the arming `Down`
 //! requests focus ([`EventCtx::request_focus`]) unless the child took it on
@@ -144,19 +152,26 @@
 //! only `Action::Click`/`Action::Focus`, dropping every other action and the
 //! `ActionRequest::data` a custom action's id would ride in (the same gap
 //! `TextInput`'s own advertised-but-uninvocable custom actions document — see
-//! `docs/CODE_STANDARDS.md`'s *Text Selection and the Clipboard*). So this
-//! widget advertises **`Action::Click` as a lift/drop toggle** instead: the
-//! synthesized `Down`+`Up` pair `perform_accessibility_action` already gives
-//! `Action::Click`, at this node's own bounds center, reaches [`event`]
-//! exactly like a real press — on an idle source that is a press-and-release
-//! too short to cross the drag threshold, i.e. a tap, which (per *Keyboard*,
-//! above) leaves the source focused; a following activation reads as the
-//! source now holding its own focus with nothing dragging, i.e. a lift chord.
-//! A drop needs the hovered target to already be the one wanted — reachable
-//! today only by cycling with a real keyboard, since there is no
-//! accesskit-level "next target" action either — so this toggle alone does
-//! not yet give an assistive-technology user the whole lift-cycle-drop walk
-//! single-handed; it is one documented step, not the final word.
+//! `docs/CODE_STANDARDS.md`'s *Text Selection and the Clipboard*). The node
+//! still advertises `Action::Click`, as any `Role::Button` does, but it is
+//! **a plain activation here, not a lift/drop toggle**: `Action::Click`
+//! reaches this widget as a synthesized `Down`+`Up` pair at the node's own
+//! bounds center, routed through the normal [`event`] path exactly like a
+//! real press, with no marker distinguishing it from one — [`PointerEvent`]
+//! and [`EventCtx`] carry no synthetic-origin field to key an honest
+//! lift-on-idle/drop-on-live-session reading off (see
+//! `perform_accessibility_action`'s doc comment in `frust-core`'s `app.rs`).
+//! Routed through that path, the synthesized press-and-release is simply too
+//! short to cross the drag threshold — a tap — on an idle source, which
+//! reaches the child and (per *Keyboard*, above) leaves the source focused,
+//! same as any other plain tap. Arriving while this source drags, either by
+//! pointer or by keyboard, it is indistinguishable from an unrelated stray
+//! press and so is handled exactly the same way every other press interrupts
+//! a session in flight: it cancels the session rather than committing a
+//! drop. The keyboard chord — `Enter`/Space to lift and drop,
+//! `ArrowRight`/`ArrowDown`/`ArrowLeft`/`ArrowUp` to cycle the hovered
+//! target, `Escape` to cancel — is the assistive-technology path through the
+//! whole lift-cycle-drop walk; `Action::Click` only ever activates.
 //!
 //! # Limits
 //!
@@ -387,8 +402,11 @@ enum Gesture {
     Declined,
     /// This source's session is in flight.
     Dragging,
-    /// The session ended out from under the gesture (cancelled or superseded
-    /// elsewhere); the rest of the gesture is swallowed.
+    /// A *pointer* session ended out from under the gesture (cancelled or
+    /// superseded elsewhere); the rest of the still-pressed gesture is
+    /// swallowed. A *keyboard* session ended the same way has no pressed
+    /// gesture to wait for, so it returns straight to [`Idle`](Self::Idle)
+    /// instead — see [`end_elsewhere`](DraggableWidget::end_elsewhere).
     Ended,
 }
 
@@ -433,6 +451,11 @@ pub struct DraggableWidget<State: 'static, T: 'static> {
     /// Whether the current press requested keyboard focus for this source (so
     /// `Escape` reaches it) and has not released it yet.
     focus_claimed: bool,
+    /// Whether the current [`Gesture::Dragging`] session was begun by
+    /// [`keyboard_lift`](Self::keyboard_lift) rather than a pointer press —
+    /// set there and by [`begin`](Self::begin), read when a session is
+    /// noticed to have ended elsewhere (see [`end_elsewhere`](Self::end_elsewhere)).
+    keyboard_drag: bool,
 }
 
 impl<State: 'static, T: 'static> View<State> for DraggableView<State, T> {
@@ -466,6 +489,7 @@ impl<State: 'static, T: 'static> View<State> for DraggableView<State, T> {
             window_origin: Point::ZERO,
             scroll_veto: None,
             focus_claimed: false,
+            keyboard_drag: false,
         }
     }
 
@@ -511,6 +535,7 @@ impl<State: 'static, T: 'static> View<State> for DraggableView<State, T> {
         element.source = None;
         // The pod is going away, and its focus link with it.
         element.focus_claimed = false;
+        element.keyboard_drag = false;
         element.release_scroll_veto();
         element.ghost.live = false;
         element.ghost.pending = None;
@@ -559,15 +584,34 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
         self.scroll_veto = None;
     }
 
+    /// A [`Gesture::Dragging`] session noticed to have ended out from under
+    /// this source — cancelled or superseded elsewhere, not through this
+    /// widget's own end-of-session call ([`on_session_end`](Self::on_session_end)).
+    /// A pointer drag still has a physical gesture in flight (its `Move`s and
+    /// its `Up`/`Cancel` are still coming): land on [`Gesture::Ended`] and
+    /// swallow them, same as before. A keyboard drag has no physical gesture
+    /// to wait for — nothing will ever deliver the `Up`/`Cancel` that would
+    /// otherwise release it from `Ended` — so it returns straight to `Idle`,
+    /// the focus claim it already holds left exactly as it is, ready for
+    /// another lift.
+    fn end_elsewhere(&mut self) {
+        self.gesture = if self.keyboard_drag {
+            Gesture::Idle
+        } else {
+            Gesture::Ended
+        };
+        self.keyboard_drag = false;
+        self.ghost.live = false;
+        self.release_scroll_veto();
+    }
+
     /// Mount a staged ghost, or tear down one whose session ended — the
     /// rebuild half of the ghost's lifecycle (see [`Ghost`]).
     fn sync_ghost(&mut self, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
         // A session cancelled or superseded elsewhere since the last event:
         // stop showing it now rather than on the next pointer event.
         if matches!(self.gesture, Gesture::Dragging) && !self.is_dragging() {
-            self.gesture = Gesture::Ended;
-            self.ghost.live = false;
-            self.release_scroll_veto();
+            self.end_elsewhere();
         }
         let mut flags = ChangeFlags::NONE;
         if let Some(next) = self.ghost.pending.take() {
@@ -694,6 +738,7 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
         }
         self.set_scroll_veto(true);
         self.gesture = Gesture::Dragging;
+        self.keyboard_drag = false;
         ctx.request_redraw();
         true
     }
@@ -710,6 +755,7 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
     fn on_session_end(&mut self, ctx: &mut EventCtx<'_>, release_focus: bool) {
         self.gesture = Gesture::Idle;
         self.source = None;
+        self.keyboard_drag = false;
         self.hold.cancel();
         self.release_scroll_veto();
         if release_focus {
@@ -928,6 +974,7 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
             offset: Vec2::ZERO,
         });
         self.gesture = Gesture::Dragging;
+        self.keyboard_drag = true;
         ctx.request_focus();
         self.focus_claimed = true;
         ctx.request_redraw();
@@ -990,9 +1037,7 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
     fn drag_move(&mut self, ctx: &mut EventCtx<'_>, at: Point) -> EventResult {
         if !self.is_dragging() {
             // Ended elsewhere since the last event.
-            self.gesture = Gesture::Ended;
-            self.ghost.live = false;
-            self.release_scroll_veto();
+            self.end_elsewhere();
             frust_core::mark_pending_result_flush();
             ctx.request_redraw();
             return EventResult::Handled;
@@ -2201,5 +2246,107 @@ mod tests {
             .find(|(_, n)| n.role() == Role::Button)
             .expect("a Role::Button node was pushed");
         assert_eq!(node.label(), Some("Drop"), "dragging flips the label");
+    }
+
+    /// Where `perform_accessibility_action`'s `Action::Click` synthesizes its
+    /// `Down`+`Up` pair: this node's own bounds center, in window space.
+    fn node_center() -> Point {
+        Point::new(AT.x + CHILD.width / 2.0, AT.y + CHILD.height / 2.0)
+    }
+
+    #[test]
+    fn an_accessibility_click_on_an_idle_focused_source_is_a_plain_tap() {
+        let mut h = Harness::new(Cfg::default());
+        // Focus the source with a plain tap first, same as a real click would.
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        assert!(h.root.is_focus_active());
+        h.state.taps = 0;
+        h.state.log.borrow_mut().clear();
+
+        // `Action::Click` reaches the widget as a synthesized `Down` then
+        // `Up` at the node's own center — reproduced here through the
+        // widget's own event path, not the accessibility seam itself.
+        let center = node_center();
+        h.mouse(PointerPhase::Down, center.x, center.y);
+        h.mouse(PointerPhase::Up, center.x, center.y);
+
+        assert_eq!(h.state.taps, 1, "Click reaches the child as a plain tap");
+        assert_eq!(h.phase(), DragPhase::Idle, "Click never lifts a drag");
+    }
+
+    #[test]
+    fn an_accessibility_click_during_a_live_keyboard_session_cancels_it_not_a_drop() {
+        let mut h = Harness::new(Cfg::default());
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        h.key(Key::Named(NamedKey::Enter));
+        assert_eq!(
+            h.phase(),
+            DragPhase::Dragging,
+            "Enter lifts a keyboard session"
+        );
+
+        // `Action::Click` arriving mid-session: the same synthesized `Down`
+        // then `Up` at the node's own center. Click is a plain activation
+        // (see the module docs), not the drop verb, so an unrelated press
+        // arriving here cancels the live session exactly as any other stray
+        // press would, rather than committing a drop.
+        let center = node_center();
+        h.mouse(PointerPhase::Down, center.x, center.y);
+        h.mouse(PointerPhase::Up, center.x, center.y);
+
+        assert_eq!(h.phase(), DragPhase::Idle, "the session ended, not dropped");
+        assert!(
+            h.changes.borrow().iter().any(|c| matches!(
+                c,
+                DragStateChange::Phase {
+                    next: DragPhase::Cancelled,
+                    ..
+                }
+            )),
+            "cancelled, never a drop: {:?}",
+            h.changes.borrow()
+        );
+        assert!(
+            !h.changes.borrow().iter().any(|c| matches!(
+                c,
+                DragStateChange::Phase {
+                    next: DragPhase::Dropping,
+                    ..
+                }
+            )),
+            "never a drop: {:?}",
+            h.changes.borrow()
+        );
+    }
+
+    #[test]
+    fn a_keyboard_session_ended_elsewhere_returns_to_idle_ready_for_another_lift() {
+        let mut h = Harness::new(Cfg::default());
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        h.key(Key::Named(NamedKey::Enter));
+        assert_eq!(h.phase(), DragPhase::Dragging, "Enter lifts");
+
+        // Ended from outside this source entirely — a target's own
+        // click-to-drop handling, or a cancel raised elsewhere — never
+        // through this widget's own key or pointer paths.
+        h.state.coordinator.cancel();
+        let after = h.frame();
+        assert_eq!(rects(&after), vec![rest()], "the ghost closed");
+        assert!(
+            h.root.is_focus_active(),
+            "the focus claim is left exactly as it was, not released"
+        );
+
+        // Not stuck swallowing a pointer gesture that will never arrive: a
+        // later lift still works.
+        h.key(Key::Named(NamedKey::Enter));
+        assert_eq!(
+            h.phase(),
+            DragPhase::Dragging,
+            "the source landed back on Idle, ready for another lift"
+        );
     }
 }
