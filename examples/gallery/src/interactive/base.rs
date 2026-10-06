@@ -19,9 +19,9 @@
 
 use frust_core::{AnyView, Component, View, any, component};
 use frust_widgets::{
-    Align, Alignment, Axis, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector, Padding,
-    PlatformViewView, SizedBox, Stack, button, checkbox, container, inflexible, platform_view,
-    radio, shield, slider, text, text_input,
+    Align, Alignment, CrossAxisAlignment, EdgeInsets, GestureDetector, Padding, PlatformViewView,
+    SizedBox, button, checkbox, column, container, platform_view, radio, row, shield, slider,
+    stack, text, text_input,
 };
 use peniko::Color;
 
@@ -85,23 +85,19 @@ impl Component for CheckboxCase {
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
-            FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(checkbox(
-                        state.notifications,
-                        "Notifications",
-                        |state: &mut CheckboxState, checked| state.notifications = checked,
-                    )),
-                    inflexible(SizedBox(Some(28.0), None)),
-                    inflexible(checkbox(
-                        state.marketing,
-                        "Marketing emails",
-                        |state: &mut CheckboxState, checked| state.marketing = checked,
-                    )),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
+            row()
+                .child(checkbox(
+                    state.notifications,
+                    "Notifications",
+                    |state: &mut CheckboxState, checked| state.notifications = checked,
+                ))
+                .child(SizedBox(Some(28.0), None))
+                .child(checkbox(
+                    state.marketing,
+                    "Marketing emails",
+                    |state: &mut CheckboxState, checked| state.marketing = checked,
+                ))
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -141,21 +137,17 @@ impl Component for RadioCase {
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
-            FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(
-                        radio(state.selected == 0, "Option A")
-                            .on_select(|state: &mut RadioState| state.selected = 0),
-                    ),
-                    inflexible(SizedBox(Some(28.0), None)),
-                    inflexible(
-                        radio(state.selected == 1, "Option B")
-                            .on_select(|state: &mut RadioState| state.selected = 1),
-                    ),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
+            row()
+                .child(
+                    radio(state.selected == 0, "Option A")
+                        .on_select(|state: &mut RadioState| state.selected = 0),
+                )
+                .child(SizedBox(Some(28.0), None))
+                .child(
+                    radio(state.selected == 1, "Option B")
+                        .on_select(|state: &mut RadioState| state.selected = 1),
+                )
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -199,17 +191,13 @@ impl Component for SliderCase {
         // for character — so the poster-to-live handoff is silent.
         let percent = (state.value * 100.0).round();
         framed(
-            FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(slider(state.value, |state: &mut SliderState, value| {
-                        state.value = value;
-                    })),
-                    inflexible(SizedBox(Some(12.0), None)),
-                    inflexible(text(format!("{percent}%")).size(13.0)),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
+            row()
+                .child(slider(state.value, |state: &mut SliderState, value| {
+                    state.value = value;
+                }))
+                .child(SizedBox(Some(12.0), None))
+                .child(text(format!("{percent}%")).size(13.0))
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -269,25 +257,21 @@ impl Component for TextInputCase {
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(
-                        SizedBox(Some(280.0), None).child(
-                            text_input(state.note.clone(), |state: &mut TextInputState, value| {
-                                state.note = value;
-                            })
-                            .placeholder("Write a note..."),
-                        ),
+            column()
+                .child(
+                    SizedBox(Some(280.0), None).child(
+                        text_input(state.note.clone(), |state: &mut TextInputState, value| {
+                            state.note = value;
+                        })
+                        .placeholder("Write a note..."),
                     ),
-                    inflexible(SizedBox(None, Some(16.0))),
-                    inflexible(SizedBox(Some(280.0), None).child(text_input(
-                        state.phrase.clone(),
-                        |state: &mut TextInputState, value| state.phrase = value,
-                    ))),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
+                )
+                .child(SizedBox(None, Some(16.0)))
+                .child(SizedBox(Some(280.0), None).child(text_input(
+                    state.phrase.clone(),
+                    |state: &mut TextInputState, value| state.phrase = value,
+                )))
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -329,24 +313,20 @@ impl Component for GestureDetectorCase {
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let caption = format!("{} taps, {} long-presses", state.taps, state.long_presses);
         framed(
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(
-                        GestureDetector(
-                            container(text("Tap me").size(14.0).color(Color::WHITE))
-                                .fill(ACCENT)
-                                .radius(12.0)
-                                .size_centered(140.0, 64.0),
-                        )
-                        .on_tap(|state: &mut GestureState| state.taps += 1)
-                        .on_long_press(|state: &mut GestureState| state.long_presses += 1),
-                    ),
-                    inflexible(SizedBox(None, Some(12.0))),
-                    inflexible(text(caption).size(12.0)),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
+            column()
+                .child(
+                    GestureDetector(
+                        container(text("Tap me").size(14.0).color(Color::WHITE))
+                            .fill(ACCENT)
+                            .radius(12.0)
+                            .size_centered(140.0, 64.0),
+                    )
+                    .on_tap(|state: &mut GestureState| state.taps += 1)
+                    .on_long_press(|state: &mut GestureState| state.long_presses += 1),
+                )
+                .child(SizedBox(None, Some(12.0)))
+                .child(text(caption).size(12.0))
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -402,13 +382,13 @@ impl Component for ShieldCase {
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let taps = state.taps;
         let unit = if taps == 1 { "time" } else { "times" };
-        any(Stack(vec![
-            any(maybe_debug_fill(
+        any(stack()
+            .child(maybe_debug_fill(
                 platform_view("dev.frust.MapFactory")
                     .interactive()
                     .size(Case::DEFAULT_SIZE.width, Case::DEFAULT_SIZE.height),
-            )),
-            any(Align(
+            ))
+            .child(Align(
                 Alignment::TOP_LEFT,
                 Padding(
                     EdgeInsets::all(16.0),
@@ -421,8 +401,8 @@ impl Component for ShieldCase {
                     .radius(8.0)
                     .size_centered(230.0, 34.0),
                 ),
-            )),
-            any(Align(
+            ))
+            .child(Align(
                 Alignment::BOTTOM_RIGHT,
                 Padding(
                     EdgeInsets::all(16.0),
@@ -430,8 +410,7 @@ impl Component for ShieldCase {
                         state.taps += 1
                     })),
                 ),
-            )),
-        ]))
+            )))
     }
 }
 

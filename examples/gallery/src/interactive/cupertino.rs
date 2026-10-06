@@ -71,8 +71,7 @@ use frust_cupertino::{
     cupertino_tab_bar, show_action_sheet, show_cupertino_alert, tab_item,
 };
 use frust_widgets::{
-    Axis, CrossAxisAlignment, FlexView, NavigatorController, PopResult, SizedBox, inflexible,
-    navigator, text,
+    CrossAxisAlignment, NavigatorController, PopResult, SizedBox, column, navigator, row, text,
 };
 
 use super::{Entry, framed};
@@ -131,41 +130,29 @@ impl Component for SwitchCase {
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         framed(
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(
-                        FlexView::new(
-                            Axis::Horizontal,
-                            vec![
-                                inflexible(text("Off")),
-                                inflexible(SizedBox(Some(16.0), None)),
-                                inflexible(cupertino_switch(
-                                    state.off_row,
-                                    |state: &mut SwitchState, checked| state.off_row = checked,
-                                )),
-                            ],
-                        )
+            column()
+                .child(
+                    row()
+                        .child(text("Off"))
+                        .child(SizedBox(Some(16.0), None))
+                        .child(cupertino_switch(
+                            state.off_row,
+                            |state: &mut SwitchState, checked| state.off_row = checked,
+                        ))
                         .cross_axis(CrossAxisAlignment::Center),
-                    ),
-                    inflexible(SizedBox(None, Some(12.0))),
-                    inflexible(
-                        FlexView::new(
-                            Axis::Horizontal,
-                            vec![
-                                inflexible(text("On")),
-                                inflexible(SizedBox(Some(16.0), None)),
-                                inflexible(cupertino_switch(
-                                    state.on_row,
-                                    |state: &mut SwitchState, checked| state.on_row = checked,
-                                )),
-                            ],
-                        )
+                )
+                .child(SizedBox(None, Some(12.0)))
+                .child(
+                    row()
+                        .child(text("On"))
+                        .child(SizedBox(Some(16.0), None))
+                        .child(cupertino_switch(
+                            state.on_row,
+                            |state: &mut SwitchState, checked| state.on_row = checked,
+                        ))
                         .cross_axis(CrossAxisAlignment::Center),
-                    ),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
+                )
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -203,19 +190,15 @@ impl Component for TabBarCase {
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let caption = format!("Tab bar (selected: {})", state.selected);
         framed(
-            FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(text(caption)),
-                    inflexible(SizedBox(None, Some(12.0))),
-                    inflexible(cupertino_tab_bar::<TabBarState, _>(
-                        vec![tab_item("Home"), tab_item("Search"), tab_item("Favorites")],
-                        state.selected,
-                        |state: &mut TabBarState, index| state.selected = index,
-                    )),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
+            column()
+                .child(text(caption))
+                .child(SizedBox(None, Some(12.0)))
+                .child(cupertino_tab_bar::<TabBarState, _>(
+                    vec![tab_item("Home"), tab_item("Search"), tab_item("Favorites")],
+                    state.selected,
+                    |state: &mut TabBarState, index| state.selected = index,
+                ))
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
@@ -301,20 +284,16 @@ impl Component for AlertDialogCase {
             let outcome = root_readout.borrow().clone();
             let reopen_controller = root_controller.clone();
             let reopen_readout = root_readout.clone();
-            any(FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(text(outcome)),
-                    inflexible(SizedBox(None, Some(12.0))),
-                    inflexible(cupertino_button(
-                        "Show alert",
-                        move |_: &mut AlertDialogState| {
-                            push_alert_dialog(&reopen_controller, &reopen_readout);
-                        },
-                    )),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center))
+            any(column()
+                .child(text(outcome))
+                .child(SizedBox(None, Some(12.0)))
+                .child(cupertino_button(
+                    "Show alert",
+                    move |_: &mut AlertDialogState| {
+                        push_alert_dialog(&reopen_controller, &reopen_readout);
+                    },
+                ))
+                .cross_axis(CrossAxisAlignment::Center))
         }))
     }
 }
@@ -386,20 +365,16 @@ impl Component for ActionSheetCase {
             let outcome = root_readout.borrow().clone();
             let reopen_controller = root_controller.clone();
             let reopen_readout = root_readout.clone();
-            any(FlexView::new(
-                Axis::Vertical,
-                vec![
-                    inflexible(text(outcome)),
-                    inflexible(SizedBox(None, Some(12.0))),
-                    inflexible(cupertino_button(
-                        "Show action sheet",
-                        move |_: &mut ActionSheetState| {
-                            push_action_sheet(&reopen_controller, &reopen_readout);
-                        },
-                    )),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center))
+            any(column()
+                .child(text(outcome))
+                .child(SizedBox(None, Some(12.0)))
+                .child(cupertino_button(
+                    "Show action sheet",
+                    move |_: &mut ActionSheetState| {
+                        push_action_sheet(&reopen_controller, &reopen_readout);
+                    },
+                ))
+                .cross_axis(CrossAxisAlignment::Center))
         }))
     }
 }

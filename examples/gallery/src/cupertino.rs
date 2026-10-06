@@ -5,44 +5,38 @@
 //! Cupertino theme. See the crate docs and `crate::base` for the pure-`View`/slug-rule
 //! contract every case in this registry follows.
 
-use frust_core::{AnyView, any};
+use frust_core::AnyView;
 use frust_cupertino::{
     CupertinoActionStyle, CupertinoAlertDialogView, CupertinoButtonSize, CupertinoButtonStyle,
     action, cupertino_activity_indicator, cupertino_button, cupertino_nav_bar, cupertino_switch,
     cupertino_tab_bar, tab_item,
 };
-use frust_widgets::{
-    Axis, CrossAxisAlignment, FlexView, NavigatorController, SizedBox, inflexible, text,
-};
+use frust_widgets::{CrossAxisAlignment, NavigatorController, SizedBox, column, row, text};
 
 use super::base::framed;
 use crate::case::{Case, Design};
 
 fn button_case() -> AnyView<()> {
     framed(
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(
-                    cupertino_button("Small Filled", |_: &mut ()| {})
-                        .size(CupertinoButtonSize::Small)
-                        .style(CupertinoButtonStyle::Filled),
-                ),
-                inflexible(SizedBox(None, Some(8.0))),
-                inflexible(
-                    cupertino_button("Medium Gray", |_: &mut ()| {})
-                        .size(CupertinoButtonSize::Medium)
-                        .style(CupertinoButtonStyle::Gray),
-                ),
-                inflexible(SizedBox(None, Some(8.0))),
-                inflexible(
-                    cupertino_button("Large Glass", |_: &mut ()| {})
-                        .size(CupertinoButtonSize::Large)
-                        .style(CupertinoButtonStyle::Glass),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(
+                cupertino_button("Small Filled", |_: &mut ()| {})
+                    .size(CupertinoButtonSize::Small)
+                    .style(CupertinoButtonStyle::Filled),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                cupertino_button("Medium Gray", |_: &mut ()| {})
+                    .size(CupertinoButtonSize::Medium)
+                    .style(CupertinoButtonStyle::Gray),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                cupertino_button("Large Glass", |_: &mut ()| {})
+                    .size(CupertinoButtonSize::Large)
+                    .style(CupertinoButtonStyle::Glass),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
@@ -52,71 +46,51 @@ fn activity_indicator_case() -> AnyView<()> {
 
 fn navbar_case() -> AnyView<()> {
     framed(
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(
-                    cupertino_nav_bar("Settings")
-                        .leading(any(SizedBox(Some(30.0), Some(30.0))))
-                        .trailing(any(SizedBox(Some(30.0), Some(30.0)))),
-                ),
-                inflexible(SizedBox(None, Some(16.0))),
-                inflexible(text("Navbar with leading and trailing content")),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(
+                cupertino_nav_bar("Settings")
+                    .leading(SizedBox(Some(30.0), Some(30.0)))
+                    .trailing(SizedBox(Some(30.0), Some(30.0))),
+            )
+            .child(SizedBox(None, Some(16.0)))
+            .child(text("Navbar with leading and trailing content"))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
 fn switch_case() -> AnyView<()> {
     framed(
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(
-                    FlexView::new(
-                        Axis::Horizontal,
-                        vec![
-                            inflexible(text("Off")),
-                            inflexible(SizedBox(Some(16.0), None)),
-                            inflexible(cupertino_switch(false, |_: &mut (), _: bool| {})),
-                        ],
-                    )
+        column()
+            .child(
+                row()
+                    .child(text("Off"))
+                    .child(SizedBox(Some(16.0), None))
+                    .child(cupertino_switch(false, |_: &mut (), _: bool| {}))
                     .cross_axis(CrossAxisAlignment::Center),
-                ),
-                inflexible(SizedBox(None, Some(12.0))),
-                inflexible(
-                    FlexView::new(
-                        Axis::Horizontal,
-                        vec![
-                            inflexible(text("On")),
-                            inflexible(SizedBox(Some(16.0), None)),
-                            inflexible(cupertino_switch(true, |_: &mut (), _: bool| {})),
-                        ],
-                    )
+            )
+            .child(SizedBox(None, Some(12.0)))
+            .child(
+                row()
+                    .child(text("On"))
+                    .child(SizedBox(Some(16.0), None))
+                    .child(cupertino_switch(true, |_: &mut (), _: bool| {}))
                     .cross_axis(CrossAxisAlignment::Center),
-                ),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
 fn tabbar_case() -> AnyView<()> {
     framed(
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(text("Tab bar (selected: 0)")),
-                inflexible(SizedBox(None, Some(12.0))),
-                inflexible(cupertino_tab_bar::<(), _>(
-                    vec![tab_item("Home"), tab_item("Search"), tab_item("Favorites")],
-                    0,
-                    |_: &mut (), _: usize| {},
-                )),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(text("Tab bar (selected: 0)"))
+            .child(SizedBox(None, Some(12.0)))
+            .child(cupertino_tab_bar::<(), _>(
+                vec![tab_item("Home"), tab_item("Search"), tab_item("Favorites")],
+                0,
+                |_: &mut (), _: usize| {},
+            ))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 

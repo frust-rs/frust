@@ -4,7 +4,7 @@
 //! the current value and every callback writes it back through the full
 //! `AppState` path.
 
-use frust::{Column, Row, SizedBox, View, any, text};
+use frust::{SizedBox, View, any, column, row, text};
 use frust_shadcn::{
     AccordionMode, PaginationItem, ToggleGroupMode, ToggleVariant, accordion, accordion_item,
     checkbox, collapsible, label, pagination, radio_group, radio_group_item, separator, slider,
@@ -59,50 +59,60 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     let tabs_value = state.tabs_value.clone();
     let pagination_current = state.pagination_current;
 
-    Column(vec![
-        any(crate::nav::heading("Controls")),
-        any(SizedBox(None, Some(16.0))),
-        any(Row(vec![
-            any(checkbox(checkbox_checked, |s: &mut AppState, v: bool| {
-                s.controls.checkbox_checked = v;
-            })
-            .label("Accept terms")),
-            any(SizedBox(Some(24.0), None)),
-            any(checkbox(false, |_: &mut AppState, _: bool| {})
-                .label("Disabled")
-                .disabled(true)),
-            any(SizedBox(Some(24.0), None)),
-            any(switch(switch_checked, |s: &mut AppState, v: bool| {
-                s.controls.switch_checked = v;
-            })
-            .label("Airplane mode")),
-        ])),
-        gap(),
-        any(Row(vec![
-            any(toggle(
-                "Bold",
-                toggle_pressed,
-                |s: &mut AppState, v: bool| {
-                    s.controls.toggle_pressed = v;
-                },
-            )),
-            any(SizedBox(Some(16.0), None)),
-            any(toggle_group(
-                vec![
-                    toggle_group_item("bold", "B"),
-                    toggle_group_item("italic", "I"),
-                    toggle_group_item("underline", "U").disabled(true),
-                ],
-                toggle_group_selected,
-                |s: &mut AppState, v: Vec<String>| {
-                    s.controls.toggle_group_selected = v;
-                },
-            )
-            .mode(ToggleGroupMode::Multiple)
-            .variant(ToggleVariant::Outline)),
-        ])),
-        gap(),
-        any(radio_group(
+    column()
+        .child(crate::nav::heading("Controls"))
+        .child(SizedBox(None, Some(16.0)))
+        .child(
+            row()
+                .child(
+                    checkbox(checkbox_checked, |s: &mut AppState, v: bool| {
+                        s.controls.checkbox_checked = v;
+                    })
+                    .label("Accept terms"),
+                )
+                .child(SizedBox(Some(24.0), None))
+                .child(
+                    checkbox(false, |_: &mut AppState, _: bool| {})
+                        .label("Disabled")
+                        .disabled(true),
+                )
+                .child(SizedBox(Some(24.0), None))
+                .child(
+                    switch(switch_checked, |s: &mut AppState, v: bool| {
+                        s.controls.switch_checked = v;
+                    })
+                    .label("Airplane mode"),
+                ),
+        )
+        .child(gap())
+        .child(
+            row()
+                .child(toggle(
+                    "Bold",
+                    toggle_pressed,
+                    |s: &mut AppState, v: bool| {
+                        s.controls.toggle_pressed = v;
+                    },
+                ))
+                .child(SizedBox(Some(16.0), None))
+                .child(
+                    toggle_group(
+                        vec![
+                            toggle_group_item("bold", "B"),
+                            toggle_group_item("italic", "I"),
+                            toggle_group_item("underline", "U").disabled(true),
+                        ],
+                        toggle_group_selected,
+                        |s: &mut AppState, v: Vec<String>| {
+                            s.controls.toggle_group_selected = v;
+                        },
+                    )
+                    .mode(ToggleGroupMode::Multiple)
+                    .variant(ToggleVariant::Outline),
+                ),
+        )
+        .child(gap())
+        .child(radio_group(
             radio_value,
             vec![
                 radio_group_item("default").label("Default"),
@@ -112,32 +122,37 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             |s: &mut AppState, v: String| {
                 s.controls.radio_value = v;
             },
-        )),
-        gap(),
-        any(slider(slider_value, |s: &mut AppState, v: Vec<f64>| {
-            s.controls.slider_value = v;
-        })
-        .label("Volume")),
-        gap(),
-        any(separator()),
-        gap(),
-        any(accordion(
-            vec![
-                accordion_item(
-                    "Is it accessible?",
-                    text("Yes, it follows the WAI-ARIA pattern."),
-                ),
-                accordion_item("Is it styled?", text("Yes, it uses shadcn's own tokens.")),
-                accordion_item("Disabled item", text("Never shown while disabled.")).disabled(true),
-            ],
-            accordion_open,
-            |s: &mut AppState, open: Vec<usize>| {
-                s.controls.accordion_open = open;
-            },
+        ))
+        .child(gap())
+        .child(
+            slider(slider_value, |s: &mut AppState, v: Vec<f64>| {
+                s.controls.slider_value = v;
+            })
+            .label("Volume"),
         )
-        .mode(AccordionMode::Single)),
-        gap(),
-        any(collapsible(
+        .child(gap())
+        .child(separator())
+        .child(gap())
+        .child(
+            accordion(
+                vec![
+                    accordion_item(
+                        "Is it accessible?",
+                        text("Yes, it follows the WAI-ARIA pattern."),
+                    ),
+                    accordion_item("Is it styled?", text("Yes, it uses shadcn's own tokens.")),
+                    accordion_item("Disabled item", text("Never shown while disabled."))
+                        .disabled(true),
+                ],
+                accordion_open,
+                |s: &mut AppState, open: Vec<usize>| {
+                    s.controls.accordion_open = open;
+                },
+            )
+            .mode(AccordionMode::Single),
+        )
+        .child(gap())
+        .child(collapsible(
             label(if collapsible_open {
                 "Hide details"
             } else {
@@ -148,9 +163,9 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             |s: &mut AppState, v: bool| {
                 s.controls.collapsible_open = v;
             },
-        )),
-        gap(),
-        any(tabs(
+        ))
+        .child(gap())
+        .child(tabs(
             tabs_value,
             vec![
                 tabs_tab("account", "Account", text("Account settings go here.")),
@@ -159,9 +174,9 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             |s: &mut AppState, v: String| {
                 s.controls.tabs_value = v;
             },
-        )),
-        gap(),
-        any(pagination(
+        ))
+        .child(gap())
+        .child(pagination(
             vec![
                 PaginationItem::Page(1),
                 PaginationItem::Page(2),
@@ -173,6 +188,5 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             |s: &mut AppState, page: usize| {
                 s.controls.pagination_current = page;
             },
-        )),
-    ])
+        ))
 }

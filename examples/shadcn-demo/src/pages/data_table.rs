@@ -11,10 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use frust::{
-    Axis, Column as ColumnOf, CrossAxisAlignment, FlexView, SizedBox, Stack, View, any, flexible,
-    inflexible, text,
-};
+use frust::{Column as ColumnOf, CrossAxisAlignment, SizedBox, Stack, View, any, row, text};
 use frust_shadcn::overlay::{OverlayAnchor, anchor};
 use frust_shadcn::{
     BadgeVariant, ButtonSize, ButtonVariant, PaginationItem, badge, button, checkbox,
@@ -253,28 +250,24 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     let sort = state.sort;
 
     // --- The toolbar: the filter field and the column-visibility trigger ---
-    let toolbar = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(
-                1,
-                any(input(filter, |s: &mut AppState, v: String| {
-                    s.data_table.filter = v;
-                    s.data_table.page = 0;
-                })
-                .placeholder("Filter names\u{2026}")),
-            ),
-            inflexible(any(SizedBox::<AppState>(Some(8.0), None))),
-            inflexible(any(anchor(
-                &state.columns_anchor,
-                button("Columns \u{25BE}", |s: &mut AppState| {
-                    s.data_table.columns_open = !s.data_table.columns_open;
-                })
-                .variant(ButtonVariant::Outline),
-            ))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center);
+    let toolbar = row()
+        .flex(
+            1,
+            input(filter, |s: &mut AppState, v: String| {
+                s.data_table.filter = v;
+                s.data_table.page = 0;
+            })
+            .placeholder("Filter names\u{2026}"),
+        )
+        .child(SizedBox::<AppState>(Some(8.0), None))
+        .child(anchor(
+            &state.columns_anchor,
+            button("Columns \u{25BE}", |s: &mut AppState| {
+                s.data_table.columns_open = !s.data_table.columns_open;
+            })
+            .variant(ButtonVariant::Outline),
+        ))
+        .cross_axis(CrossAxisAlignment::Center);
 
     // --- The header row ---
     //

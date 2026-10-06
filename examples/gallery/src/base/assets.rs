@@ -16,8 +16,8 @@
 use frust_core::{AnyView, any};
 use frust_widgets::icons;
 use frust_widgets::{
-    Column, CrossAxisAlignment, IconSource, Image, ImageFit, ImageSource, Row, SizedBox, container,
-    icon, text,
+    CrossAxisAlignment, IconSource, Image, ImageFit, ImageSource, SizedBox, column, container,
+    icon, row, text,
 };
 use peniko::Color;
 
@@ -36,22 +36,20 @@ const CHIP_INK: Color = Color::from_rgb8(0x33, 0x41, 0x55);
 
 fn icon_case() -> AnyView<()> {
     framed(
-        Column(vec![
-            any(icon(icons::HOME).size(128.0).color(ACCENT).label("Home")),
-            any(text("icon(icons::HOME).size(128.0)").size(14.0)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(icon(icons::HOME).size(128.0).color(ACCENT).label("Home"))
+            .child(text("icon(icons::HOME).size(128.0)").size(14.0))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
 /// One labelled swatch in the [`icon_sets_case`] grid.
 fn icon_chip(source: IconSource, label: &'static str) -> AnyView<()> {
     any(container(
-        Column(vec![
-            any(icon(source).size(28.0).color(ACCENT).label(label)),
-            any(text(label).size(11.0).color(CHIP_INK)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(icon(source).size(28.0).color(ACCENT).label(label))
+            .child(text(label).size(11.0).color(CHIP_INK))
+            .cross_axis(CrossAxisAlignment::Center),
     )
     .fill(CHIP)
     .radius(10.0)
@@ -59,18 +57,21 @@ fn icon_chip(source: IconSource, label: &'static str) -> AnyView<()> {
 }
 
 fn icon_sets_case() -> AnyView<()> {
-    framed(Column(vec![
-        any(Row(vec![
-            icon_chip(icons::HOME, "home"),
-            icon_chip(icons::SEARCH, "search"),
-            icon_chip(icons::SETTINGS, "settings"),
-        ])),
-        any(Row(vec![
-            icon_chip(icons::PERSON, "person"),
-            icon_chip(icons::STAR, "star"),
-            icon_chip(icons::MOOD, "mood"),
-        ])),
-    ]))
+    framed(
+        column()
+            .child(
+                row()
+                    .child(icon_chip(icons::HOME, "home"))
+                    .child(icon_chip(icons::SEARCH, "search"))
+                    .child(icon_chip(icons::SETTINGS, "settings")),
+            )
+            .child(
+                row()
+                    .child(icon_chip(icons::PERSON, "person"))
+                    .child(icon_chip(icons::STAR, "star"))
+                    .child(icon_chip(icons::MOOD, "mood")),
+            ),
+    )
 }
 
 /// A small procedurally generated checkerboard, decoded straight from RGBA8

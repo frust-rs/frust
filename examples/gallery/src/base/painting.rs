@@ -20,8 +20,8 @@
 
 use frust_core::{AnyView, any};
 use frust_widgets::{
-    Align, Alignment, EdgeInsets, Padding, PlatformViewView, Stack, button, container,
-    platform_view, shield, text,
+    Align, Alignment, EdgeInsets, Padding, PlatformViewView, button, container, platform_view,
+    shield, stack, text,
 };
 use peniko::Color;
 
@@ -48,14 +48,16 @@ fn maybe_debug_fill(view: PlatformViewView) -> PlatformViewView {
 }
 
 fn platform_view_case() -> AnyView<()> {
-    any(Stack(vec![
-        any(maybe_debug_fill(
-            platform_view("dev.frust.MapFactory")
-                .params_json(r#"{"style":"dark"}"#)
-                .size(Case::DEFAULT_SIZE.width, Case::DEFAULT_SIZE.height),
+    any(stack()
+        .child(
+            maybe_debug_fill(
+                platform_view("dev.frust.MapFactory")
+                    .params_json(r#"{"style":"dark"}"#)
+                    .size(Case::DEFAULT_SIZE.width, Case::DEFAULT_SIZE.height),
+            )
+            .semantics_label("Map placeholder"),
         )
-        .semantics_label("Map placeholder")),
-        any(Align(
+        .child(Align(
             Alignment::CENTER,
             container(
                 text("platform_view (debug_fill)")
@@ -65,18 +67,17 @@ fn platform_view_case() -> AnyView<()> {
             .fill(CARD)
             .radius(10.0)
             .size_centered(260.0, 40.0),
-        )),
-    ]))
+        )))
 }
 
 fn shield_case() -> AnyView<()> {
-    any(Stack(vec![
-        any(maybe_debug_fill(
+    any(stack()
+        .child(maybe_debug_fill(
             platform_view("dev.frust.MapFactory")
                 .interactive()
                 .size(Case::DEFAULT_SIZE.width, Case::DEFAULT_SIZE.height),
-        )),
-        any(Align(
+        ))
+        .child(Align(
             Alignment::TOP_LEFT,
             Padding(
                 EdgeInsets::all(16.0),
@@ -89,15 +90,14 @@ fn shield_case() -> AnyView<()> {
                 .radius(8.0)
                 .size_centered(230.0, 34.0),
             ),
-        )),
-        any(Align(
+        ))
+        .child(Align(
             Alignment::BOTTOM_RIGHT,
             Padding(
                 EdgeInsets::all(16.0),
                 shield(button("Recenter", |_: &mut ()| {})),
             ),
-        )),
-    ]))
+        )))
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.

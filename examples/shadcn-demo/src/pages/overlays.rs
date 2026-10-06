@@ -30,7 +30,7 @@ use std::rc::Rc;
 
 use frust::{
     AnyView, Column, EdgeInsets, NavigatorController, Padding, PopResult, SizedBox, View, any,
-    navigator, scroll_view, text,
+    column, navigator, scroll_view, text,
 };
 use frust_shadcn::{
     ButtonVariant, DrawerSide, SheetSide, alert_dialog, alert_dialog_action, alert_dialog_cancel,
@@ -197,23 +197,23 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         // the navigator: a pushed modal page is laid out under the navigator's
         // own constraints, and a scroll view's infinite max height would
         // collapse every panel it hosts to nothing.
-        crate::scroll_slot(any(Column(vec![
-            any(crate::nav::heading("Overlays")),
-            any(SizedBox(None, Some(16.0))),
-            any(text(format!("Last result: {last_result}")).size(14.0)),
-            any(SizedBox(None, Some(8.0))),
-            any(crate::nav::caption(
+        crate::scroll_slot(any(column()
+            .child(crate::nav::heading("Overlays"))
+            .child(SizedBox(None, Some(16.0)))
+            .child(text(format!("Last result: {last_result}")).size(14.0))
+            .child(SizedBox(None, Some(8.0)))
+            .child(crate::nav::caption(
                 "Watch every dismissal, not just every opening: the panel plays its \
                  entrance in reverse (fade + zoom for the centered ones, the edge \
                  slide for sheets and drawers) and the scrim fades down with it \
                  before the navigator page pops. Under reduced motion it closes \
                  outright instead.",
-            )),
-            gap(),
+            ))
+            .child(gap())
             // --- The centered family ---
-            any(text("Dialogs").size(16.0)),
-            any(SizedBox(None, Some(8.0))),
-            trigger_row(vec![
+            .child(text("Dialogs").size(16.0))
+            .child(SizedBox(None, Some(8.0)))
+            .child(trigger_row(vec![
                 any(button("Open Dialog", move |_: &mut AppState| {
                     let cancel_ctrl = dialog_ctrl.clone();
                     show_dialog(
@@ -251,20 +251,18 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                                     ),
                                 ]),
                                 alert_dialog_footer(vec![
-                                    alert_dialog_cancel(any(button(
-                                        "Cancel",
-                                        move |_: &mut AppState| {
+                                    alert_dialog_cancel(
+                                        button("Cancel", move |_: &mut AppState| {
                                             cancel_ctrl.pop_with_result(PopResult::of(false));
-                                        },
-                                    )
-                                    .variant(ButtonVariant::Outline))),
-                                    alert_dialog_action(any(button(
-                                        "Continue",
-                                        move |_: &mut AppState| {
+                                        })
+                                        .variant(ButtonVariant::Outline),
+                                    ),
+                                    alert_dialog_action(
+                                        button("Continue", move |_: &mut AppState| {
                                             action_ctrl.pop_with_result(PopResult::of(true));
-                                        },
-                                    )
-                                    .variant(ButtonVariant::Destructive))),
+                                        })
+                                        .variant(ButtonVariant::Destructive),
+                                    ),
                                 ]),
                             ])
                         },
@@ -327,26 +325,26 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                         },
                     );
                 })),
-            ]),
-            gap(),
-            any(frust_shadcn::separator()),
-            gap(),
+            ]))
+            .child(gap())
+            .child(frust_shadcn::separator())
+            .child(gap())
             // --- Sheets: four sides plus two content variants ---
-            any(text("Sheets").size(16.0)),
-            any(SizedBox(None, Some(8.0))),
-            any(crate::nav::caption(
+            .child(text("Sheets").size(16.0))
+            .child(SizedBox(None, Some(8.0)))
+            .child(crate::nav::caption(
                 "A sheet is dialog-family, so it does NOT drag: it is dismissed by \
                  the scrim, Escape or its close X, and only then slides out.",
-            )),
-            any(SizedBox(None, Some(8.0))),
-            trigger_row(vec![
+            ))
+            .child(SizedBox(None, Some(8.0)))
+            .child(trigger_row(vec![
                 sheet_trigger("Right", &root_controller, SheetSide::Right),
                 sheet_trigger("Left", &root_controller, SheetSide::Left),
                 sheet_trigger("Top", &root_controller, SheetSide::Top),
                 sheet_trigger("Bottom", &root_controller, SheetSide::Bottom),
-            ]),
-            any(SizedBox(None, Some(8.0))),
-            trigger_row(vec![
+            ]))
+            .child(SizedBox(None, Some(8.0)))
+            .child(trigger_row(vec![
                 any(button(
                     "Sheet with scrolling content",
                     move |_: &mut AppState| {
@@ -402,30 +400,30 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                         );
                     },
                 )),
-            ]),
-            gap(),
-            any(frust_shadcn::separator()),
-            gap(),
+            ]))
+            .child(gap())
+            .child(frust_shadcn::separator())
+            .child(gap())
             // --- Drawers: four directions, drag-to-close, snap points ---
-            any(text("Drawers").size(16.0)),
-            any(SizedBox(None, Some(8.0))),
-            any(crate::nav::caption(
+            .child(text("Drawers").size(16.0))
+            .child(SizedBox(None, Some(8.0)))
+            .child(crate::nav::caption(
                 "A drawer drags. Press the panel (the handle on a bottom drawer, or \
                  anywhere the content does not take the press) and pull it toward its \
                  own edge: the panel follows the pointer and the scrim fades with it. \
                  Release past the halfway point, or flick it, and the exit ramp \
                  continues from wherever the drag left it; release short of it and it \
                  springs back. Catching a closing drawer cancels its dismissal.",
-            )),
-            any(SizedBox(None, Some(8.0))),
-            trigger_row(vec![
+            ))
+            .child(SizedBox(None, Some(8.0)))
+            .child(trigger_row(vec![
                 drawer_trigger("Bottom", &root_controller, DrawerSide::Bottom),
                 drawer_trigger("Top", &root_controller, DrawerSide::Top),
                 drawer_trigger("Left", &root_controller, DrawerSide::Left),
                 drawer_trigger("Right", &root_controller, DrawerSide::Right),
-            ]),
-            any(SizedBox(None, Some(8.0))),
-            trigger_row(vec![any(button(
+            ]))
+            .child(SizedBox(None, Some(8.0)))
+            .child(trigger_row(vec![any(button(
                 "Drawer with snap points (40% / 100%)",
                 move |_: &mut AppState| {
                     show_drawer(
@@ -455,9 +453,8 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                         record("drawer_snap"),
                     );
                 },
-            ))]),
-            any(SizedBox(None, Some(24.0))),
-        ])))
+            ))]))
+            .child(SizedBox(None, Some(24.0)))))
     })
 }
 

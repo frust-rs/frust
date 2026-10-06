@@ -17,7 +17,7 @@
 //! and costs one layout pass. Wrapping the mount in an `if` stays valid and
 //! correct; it just truncates the exit.
 
-use frust::{Column, Row, SizedBox, Stack, View, any, text};
+use frust::{SizedBox, Stack, View, any, column, row, text};
 use frust_shadcn::overlay::{OverlayAlign, OverlayAnchor, OverlaySide, anchor};
 use frust_shadcn::{
     ButtonVariant, TooltipHover, combobox, combobox_item, combobox_trigger, context_menu,
@@ -139,121 +139,133 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     let combobox_query = state.combobox_query.clone();
     let combobox_value = state.combobox_value.clone();
 
-    let base = Column(vec![
-        any(crate::nav::heading("Anchored")),
-        any(SizedBox(None, Some(16.0))),
-        any(text(
-            "Overlays here need one pointer press inside them before Escape \
+    let base = column()
+        .child(crate::nav::heading("Anchored"))
+        .child(SizedBox(None, Some(16.0)))
+        .child(
+            text(
+                "Overlays here need one pointer press inside them before Escape \
              or an arrow key does anything — no auto-focus-on-appear hook \
              exists in the framework yet.",
+            )
+            .size(12.0),
         )
-        .size(12.0)),
-        any(SizedBox(None, Some(8.0))),
-        any(crate::nav::caption(
+        .child(SizedBox(None, Some(8.0)))
+        .child(crate::nav::caption(
             "Watch each panel CLOSE: every one is kept mounted and handed \
              `.open(flag)`, so a dismissal fades and scales it back out (a tooltip \
              and a hover card fade only, per source) instead of vanishing between \
              two frames. Reopening mid-exit picks the entrance up from wherever the \
              ramp had got to.",
-        )),
-        gap(),
+        ))
+        .child(gap())
         // --- Popover: placement knobs + light-dismiss + Escape-after-press ---
-        any(Row(vec![
-            any(anchor(
-                &popover_anchor,
-                button("Toggle Popover", move |s: &mut AppState| {
-                    s.anchored.popover_open = !s.anchored.popover_open;
-                }),
-            )),
-            any(SizedBox(Some(16.0), None)),
-            any(button("side \u{2192}", move |s: &mut AppState| {
-                s.anchored.popover_side = s.anchored.popover_side.wrapping_add(1);
-            })
-            .variant(ButtonVariant::Outline)),
-            any(SizedBox(Some(8.0), None)),
-            any(button("align \u{2192}", move |s: &mut AppState| {
-                s.anchored.popover_align = s.anchored.popover_align.wrapping_add(1);
-            })
-            .variant(ButtonVariant::Outline)),
-            any(SizedBox(Some(8.0), None)),
-            any(button("offset \u{2192}", move |s: &mut AppState| {
-                s.anchored.popover_offset = s.anchored.popover_offset.wrapping_add(1);
-            })
-            .variant(ButtonVariant::Outline)),
-        ])),
-        gap(),
+        .child(
+            row()
+                .child(anchor(
+                    &popover_anchor,
+                    button("Toggle Popover", move |s: &mut AppState| {
+                        s.anchored.popover_open = !s.anchored.popover_open;
+                    }),
+                ))
+                .child(SizedBox(Some(16.0), None))
+                .child(
+                    button("side \u{2192}", move |s: &mut AppState| {
+                        s.anchored.popover_side = s.anchored.popover_side.wrapping_add(1);
+                    })
+                    .variant(ButtonVariant::Outline),
+                )
+                .child(SizedBox(Some(8.0), None))
+                .child(
+                    button("align \u{2192}", move |s: &mut AppState| {
+                        s.anchored.popover_align = s.anchored.popover_align.wrapping_add(1);
+                    })
+                    .variant(ButtonVariant::Outline),
+                )
+                .child(SizedBox(Some(8.0), None))
+                .child(
+                    button("offset \u{2192}", move |s: &mut AppState| {
+                        s.anchored.popover_offset = s.anchored.popover_offset.wrapping_add(1);
+                    })
+                    .variant(ButtonVariant::Outline),
+                ),
+        )
+        .child(gap())
         // --- Tooltip: hover-delay + click-through proof ---
-        any(anchor(
+        .child(anchor(
             &OverlayAnchor::new(),
             tooltip_trigger(
                 &tooltip_hover,
                 button("Hover me (tooltip, ~700ms)", |_: &mut AppState| {}),
             ),
-        )),
-        gap(),
+        ))
+        .child(gap())
         // --- Hover card: 300ms grace crossing trigger -> panel ---
-        any(hover_card_trigger(
+        .child(hover_card_trigger(
             &hover_card_hover,
             button("Hover me (hover card)", |_: &mut AppState| {}),
-        )),
-        gap(),
+        ))
+        .child(gap())
         // --- Dropdown menu: full row vocabulary ---
-        any(anchor(
+        .child(anchor(
             &dropdown_anchor,
             button("Open Dropdown Menu", move |s: &mut AppState| {
                 s.anchored.dropdown_open = !s.anchored.dropdown_open;
             }),
-        )),
-        gap(),
+        ))
+        .child(gap())
         // --- Context menu ---
-        any(text(
-            "Context menu area below — right-click it to open the menu at the \
+        .child(
+            text(
+                "Context menu area below — right-click it to open the menu at the \
                  press point (the desktop shell forwards the secondary mouse button, \
                  so this is live; a left-click does nothing here).",
+            )
+            .size(12.0),
         )
-        .size(12.0)),
-        any(SizedBox(None, Some(4.0))),
-        any(context_menu_trigger(
+        .child(SizedBox(None, Some(4.0)))
+        .child(context_menu_trigger(
             &context_menu_anchor,
             frust::SizedBox::<AppState>(Some(240.0), Some(60.0))
                 .child(text("Right-click here").size(13.0)),
-        )),
-        gap(),
+        ))
+        .child(gap())
         // --- Select: grouped, disabled option, long scrolling list ---
-        any(anchor(
+        .child(anchor(
             &select_anchor,
             select_trigger(&select_anchor, fruit_options(), select_value)
                 .placeholder("Pick a fruit")
                 .on_open_change(move |s: &mut AppState, open: bool| {
                     s.anchored.select_open = open;
                 }),
-        )),
-        gap(),
+        ))
+        .child(gap())
         // --- Combobox: type-to-filter + empty state + commit updates trigger ---
-        any(anchor(
+        .child(anchor(
             &combobox_anchor,
             combobox_trigger::<AppState>(&combobox_anchor, combobox_value.clone())
                 .placeholder("Search fruit…")
                 .on_open_change(move |s: &mut AppState, open: bool| {
                     s.anchored.combobox_open = open;
                 }),
-        )),
-        any(SizedBox(None, Some(200.0))),
-        any(text(
-            "Scroll the trigger below down to the window's bottom edge so its \
+        ))
+        .child(SizedBox(None, Some(200.0)))
+        .child(
+            text(
+                "Scroll the trigger below down to the window's bottom edge so its \
              popover has no room to open downward — watch it flip to open \
              above instead (avoidCollisions' default flip).",
+            )
+            .size(12.0),
         )
-        .size(12.0)),
-        any(SizedBox(None, Some(8.0))),
-        any(anchor(
+        .child(SizedBox(None, Some(8.0)))
+        .child(anchor(
             &flip_anchor,
             button("Open near the bottom edge", move |s: &mut AppState| {
                 s.anchored.flip_open = !s.anchored.flip_open;
             }),
-        )),
-        any(SizedBox(None, Some(24.0))),
-    ]);
+        ))
+        .child(SizedBox(None, Some(24.0)));
 
     // The stack is the full-area host every overlay below is placed against, so
     // only the static body scrolls: a scroll view around the stack would hand
@@ -283,10 +295,9 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     layers.push(any(tooltip(&tooltip_hover, "A tooltip, 700ms after rest")));
     layers.push(any(hover_card(
         &hover_card_hover,
-        Column(vec![
-            any(text("Hover card").size(14.0)),
-            any(text("Crossing onto this panel keeps it open.").size(12.0)),
-        ]),
+        column()
+            .child(text("Hover card").size(14.0))
+            .child(text("Crossing onto this panel keeps it open.").size(12.0)),
     )));
 
     layers.push(any(dropdown_menu(

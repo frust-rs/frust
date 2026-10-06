@@ -68,7 +68,7 @@ use frust_material::{
     tonal_button, toolbar_action, wavy_slider,
 };
 use frust_widgets::{
-    Column, CrossAxisAlignment, EdgeInsets, IconSource, Padding, Row, SizedBox, container, icon,
+    CrossAxisAlignment, EdgeInsets, IconSource, Padding, SizedBox, column, container, icon, row,
     text,
 };
 use kurbo::Size;
@@ -205,48 +205,47 @@ fn hgap(width: f64) -> AnyView<()> {
 fn app_bar_case() -> AnyView<()> {
     framed_in(
         STRIP,
-        Column(vec![
-            bleed(
+        column()
+            .child(bleed(
                 app_bar("Inbox")
-                    .leading(any(icon_button(glyph(icons::MENU), |_: &mut ()| {})))
+                    .leading(icon_button(glyph(icons::MENU), |_: &mut ()| {}))
                     .actions(vec![
                         any(icon_button(glyph(icons::SEARCH), |_: &mut ()| {})),
                         any(icon_button(glyph(icons::MORE_VERT), |_: &mut ()| {})),
                     ])
                     .density(AppBarDensity::Regular)
                     .safe_area(false),
-            ),
-            gap(24.0),
-            bleed(
+            ))
+            .child(gap(24.0))
+            .child(bleed(
                 bottom_app_bar()
                     .actions(vec![
                         any(icon_button(glyph(icons::MENU), |_: &mut ()| {})),
                         any(icon_button(glyph(icons::SEARCH), |_: &mut ()| {})),
                         any(icon_button(glyph(icons::EDIT), |_: &mut ()| {})),
                     ])
-                    .fab(any(
-                        fab(glyph(icons::ADD), |_: &mut ()| {}).size(FabSize::Small)
-                    )),
-            ),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+                    .fab(fab(glyph(icons::ADD), |_: &mut ()| {}).size(FabSize::Small)),
+            ))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
 fn button_group_case() -> AnyView<()> {
     framed_in(
         STRIP,
-        Column(vec![
-            any(button_group_actions(vec![
-                button_group_action("Left").icon(|| glyph(icons::FORMAT_ALIGN_LEFT)),
-                button_group_action("Center").icon(|| glyph(icons::FORMAT_ALIGN_CENTER)),
-                button_group_action("Right").icon(|| glyph(icons::FORMAT_ALIGN_RIGHT)),
-            ])
-            .group_type(ButtonGroupType::Connected)
-            .selected_index(Some(1))
-            .on_select(|_: &mut (), _: usize| {})),
-            gap(24.0),
-            any(segmented_button(
+        column()
+            .child(
+                button_group_actions(vec![
+                    button_group_action("Left").icon(|| glyph(icons::FORMAT_ALIGN_LEFT)),
+                    button_group_action("Center").icon(|| glyph(icons::FORMAT_ALIGN_CENTER)),
+                    button_group_action("Right").icon(|| glyph(icons::FORMAT_ALIGN_RIGHT)),
+                ])
+                .group_type(ButtonGroupType::Connected)
+                .selected_index(Some(1))
+                .on_select(|_: &mut (), _: usize| {}),
+            )
+            .child(gap(24.0))
+            .child(segmented_button(
                 vec![
                     segment("day").label("Day"),
                     segment("week").label("Week"),
@@ -254,33 +253,35 @@ fn button_group_case() -> AnyView<()> {
                 ],
                 ["week"],
                 |_: &mut (), _: Vec<&'static str>| {},
-            )),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+            ))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
 fn button_case() -> AnyView<()> {
     framed(
-        Column(vec![
-            any(Row(vec![
-                any(filled_button("Filled", |_: &mut ()| {})),
-                hgap(12.0),
-                any(tonal_button("Tonal", |_: &mut ()| {})),
-                hgap(12.0),
-                any(elevated_button("Elevated", |_: &mut ()| {})),
-            ])),
-            gap(16.0),
-            any(Row(vec![
-                any(outlined_button("Outlined", |_: &mut ()| {})),
-                hgap(12.0),
-                any(text_button("Text", |_: &mut ()| {})),
-                hgap(12.0),
-                any(button_with_icon(glyph(icons::ADD), "Icon", |_: &mut ()| {})
-                    .variant(ButtonVariant::Filled)),
-            ])),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(
+                row()
+                    .child(filled_button("Filled", |_: &mut ()| {}))
+                    .child(hgap(12.0))
+                    .child(tonal_button("Tonal", |_: &mut ()| {}))
+                    .child(hgap(12.0))
+                    .child(elevated_button("Elevated", |_: &mut ()| {})),
+            )
+            .child(gap(16.0))
+            .child(
+                row()
+                    .child(outlined_button("Outlined", |_: &mut ()| {}))
+                    .child(hgap(12.0))
+                    .child(text_button("Text", |_: &mut ()| {}))
+                    .child(hgap(12.0))
+                    .child(
+                        button_with_icon(glyph(icons::ADD), "Icon", |_: &mut ()| {})
+                            .variant(ButtonVariant::Filled),
+                    ),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
@@ -288,11 +289,10 @@ fn button_case() -> AnyView<()> {
 /// cards in [`card_case`] measure alike.
 fn card_body(title: &'static str) -> AnyView<()> {
     any(container(
-        Column(vec![
-            any(text(title).size(14.0)),
-            any(text("Body").size(12.0)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(text(title).size(14.0))
+            .child(text("Body").size(12.0))
+            .cross_axis(CrossAxisAlignment::Center),
     )
     .size_centered(76.0, 64.0))
 }
@@ -300,33 +300,33 @@ fn card_body(title: &'static str) -> AnyView<()> {
 fn card_case() -> AnyView<()> {
     framed_in(
         BAR,
-        Row(vec![
-            any(card(CardVariant::Elevated, card_body("Elevated"))),
-            hgap(12.0),
-            any(card(CardVariant::Filled, card_body("Filled"))),
-            hgap(12.0),
-            any(card(CardVariant::Outlined, card_body("Outlined")).on_press(|_: &mut ()| {})),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .child(card(CardVariant::Elevated, card_body("Elevated")))
+            .child(hgap(12.0))
+            .child(card(CardVariant::Filled, card_body("Filled")))
+            .child(hgap(12.0))
+            .child(card(CardVariant::Outlined, card_body("Outlined")).on_press(|_: &mut ()| {}))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
 fn chips_case() -> AnyView<()> {
     framed(
-        Column(vec![
-            any(Row(vec![
-                any(assist_chip("Add to calendar", |_: &mut ()| {})),
-                hgap(10.0),
-                any(filter_chip("Unread", true, |_: &mut (), _: bool| {})),
-            ])),
-            gap(16.0),
-            any(Row(vec![
-                any(input_chip("Ada Lovelace", |_: &mut ()| {}).on_deleted(|_: &mut ()| {})),
-                hgap(10.0),
-                any(suggestion_chip("Reply", |_: &mut ()| {}).elevated(true)),
-            ])),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(
+                row()
+                    .child(assist_chip("Add to calendar", |_: &mut ()| {}))
+                    .child(hgap(10.0))
+                    .child(filter_chip("Unread", true, |_: &mut (), _: bool| {})),
+            )
+            .child(gap(16.0))
+            .child(
+                row()
+                    .child(input_chip("Ada Lovelace", |_: &mut ()| {}).on_deleted(|_: &mut ()| {}))
+                    .child(hgap(10.0))
+                    .child(suggestion_chip("Reply", |_: &mut ()| {}).elevated(true)),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
@@ -360,20 +360,20 @@ fn dialog_case() -> AnyView<()> {
         overlay_modal(
             Padding(
                 EdgeInsets::all(24.0),
-                Column(vec![
-                    any(text("Delete draft?").size(24.0)),
-                    gap(16.0),
-                    any(text(
-                        "This draft will be permanently removed from every signed-in device.",
+                column()
+                    .child(text("Delete draft?").size(24.0))
+                    .child(gap(16.0))
+                    .child(
+                        text("This draft will be permanently removed from every signed-in device.")
+                            .size(14.0),
                     )
-                    .size(14.0)),
-                    gap(24.0),
-                    any(Row(vec![
-                        any(text_button("Cancel", |_: &mut ()| {})),
-                        hgap(8.0),
-                        any(filled_button("Delete", |_: &mut ()| {})),
-                    ])),
-                ]),
+                    .child(gap(24.0))
+                    .child(
+                        row()
+                            .child(text_button("Cancel", |_: &mut ()| {}))
+                            .child(hgap(8.0))
+                            .child(filled_button("Delete", |_: &mut ()| {})),
+                    ),
             ),
             OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH),
         ),
@@ -393,21 +393,20 @@ fn dropdown_items() -> Vec<DropdownItem> {
 fn dropdown_case() -> AnyView<()> {
     framed_in(
         SURFACE,
-        Column(vec![
-            bleed(
+        column()
+            .child(bleed(
                 dropdown_field(dropdown_items())
                     .selected(vec!["cherry".to_string()])
                     .hint("Pick a fruit")
                     .show_clear(true),
-            ),
-            gap(12.0),
-            any(
+            ))
+            .child(gap(12.0))
+            .child(
                 dropdown_panel(dropdown_items(), |_: &mut (), _: Vec<String>| {})
                     .selected(vec!["cherry".to_string()])
                     .max_height(220.0),
-            ),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
@@ -419,67 +418,74 @@ fn dropdown_case() -> AnyView<()> {
 /// through a widget with no `entrance`-style seam to opt out of.
 fn fab_case() -> AnyView<()> {
     framed(
-        Row(vec![
-            any(fab(glyph(icons::ADD), |_: &mut ()| {}).size(FabSize::Small)),
-            hgap(16.0),
-            any(fab(glyph(icons::EDIT), |_: &mut ()| {})
-                .size(FabSize::Medium)
-                .color(FabColor::Tertiary)),
-            hgap(16.0),
-            any(fab(glyph(icons::SEND), |_: &mut ()| {})
-                .size(FabSize::Large)
-                .color(FabColor::Secondary)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .child(fab(glyph(icons::ADD), |_: &mut ()| {}).size(FabSize::Small))
+            .child(hgap(16.0))
+            .child(
+                fab(glyph(icons::EDIT), |_: &mut ()| {})
+                    .size(FabSize::Medium)
+                    .color(FabColor::Tertiary),
+            )
+            .child(hgap(16.0))
+            .child(
+                fab(glyph(icons::SEND), |_: &mut ()| {})
+                    .size(FabSize::Large)
+                    .color(FabColor::Secondary),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
 fn icon_button_case() -> AnyView<()> {
     framed(
-        Row(vec![
-            any(icon_button(glyph(icons::FAVORITE), |_: &mut ()| {}).semantic_label("Favorite")),
-            hgap(12.0),
-            any(icon_button(glyph(icons::FAVORITE), |_: &mut ()| {})
-                .variant(IconButtonVariant::Filled)
-                .selected(true)),
-            hgap(12.0),
-            any(icon_button(glyph(icons::BOOKMARK), |_: &mut ()| {})
-                .variant(IconButtonVariant::Tonal)),
-            hgap(12.0),
-            any(icon_button(glyph(icons::SHARE), |_: &mut ()| {})
-                .variant(IconButtonVariant::Outlined)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .child(icon_button(glyph(icons::FAVORITE), |_: &mut ()| {}).semantic_label("Favorite"))
+            .child(hgap(12.0))
+            .child(
+                icon_button(glyph(icons::FAVORITE), |_: &mut ()| {})
+                    .variant(IconButtonVariant::Filled)
+                    .selected(true),
+            )
+            .child(hgap(12.0))
+            .child(
+                icon_button(glyph(icons::BOOKMARK), |_: &mut ()| {})
+                    .variant(IconButtonVariant::Tonal),
+            )
+            .child(hgap(12.0))
+            .child(
+                icon_button(glyph(icons::SHARE), |_: &mut ()| {})
+                    .variant(IconButtonVariant::Outlined),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
 fn list_case() -> AnyView<()> {
     framed_in(
         STRIP,
-        Column(vec![
-            bleed(
+        column()
+            .child(bleed(
                 list_item("Weekly sync")
                     .supporting("Tomorrow, 09:00")
                     .leading(icon(icons::SCHEDULE))
                     .trailing(icon(icons::CHEVRON_RIGHT))
                     .on_press(|_: &mut ()| {}),
-            ),
-            bleed(
+            ))
+            .child(bleed(
                 list_item("Design review")
                     .supporting("Thursday, 14:30")
                     .leading(icon(icons::LABEL))
                     .trailing(icon(icons::CHEVRON_RIGHT))
                     .on_press(|_: &mut ()| {}),
-            ),
-            bleed(
+            ))
+            .child(bleed(
                 list_item("Release notes")
                     .supporting("Draft shared with the team")
                     .leading(icon(icons::ARCHIVE))
                     .selected(true)
                     .on_press(|_: &mut ()| {}),
-            ),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+            ))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
@@ -569,37 +575,43 @@ fn navigation_rail_case() -> AnyView<()> {
 
 fn selection_controls_case() -> AnyView<()> {
     framed(
-        Column(vec![
-            any(Row(vec![
-                any(frust_material::checkbox(true, |_: &mut (), _: bool| {})),
-                hgap(8.0),
-                any(text("Notifications").size(14.0)),
-                hgap(24.0),
-                any(frust_material::checkbox(false, |_: &mut (), _: bool| {})),
-                hgap(8.0),
-                any(text("Digest").size(14.0)),
-            ])
-            .cross_axis(CrossAxisAlignment::Center)),
-            gap(16.0),
-            any(Row(vec![
-                any(radio("standard", "standard")
-                    .label("Standard")
-                    .on_changed(|_: &mut (), _: &'static str| {})),
-                hgap(20.0),
-                any(radio("express", "standard")
-                    .label("Express")
-                    .on_changed(|_: &mut (), _: &'static str| {})),
-            ])
-            .cross_axis(CrossAxisAlignment::Center)),
-            gap(16.0),
-            any(Row(vec![
-                any(switch(true, |_: &mut (), _: bool| {})),
-                hgap(20.0),
-                any(switch(false, |_: &mut (), _: bool| {})),
-            ])
-            .cross_axis(CrossAxisAlignment::Center)),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(
+                row()
+                    .child(frust_material::checkbox(true, |_: &mut (), _: bool| {}))
+                    .child(hgap(8.0))
+                    .child(text("Notifications").size(14.0))
+                    .child(hgap(24.0))
+                    .child(frust_material::checkbox(false, |_: &mut (), _: bool| {}))
+                    .child(hgap(8.0))
+                    .child(text("Digest").size(14.0))
+                    .cross_axis(CrossAxisAlignment::Center),
+            )
+            .child(gap(16.0))
+            .child(
+                row()
+                    .child(
+                        radio("standard", "standard")
+                            .label("Standard")
+                            .on_changed(|_: &mut (), _: &'static str| {}),
+                    )
+                    .child(hgap(20.0))
+                    .child(
+                        radio("express", "standard")
+                            .label("Express")
+                            .on_changed(|_: &mut (), _: &'static str| {}),
+                    )
+                    .cross_axis(CrossAxisAlignment::Center),
+            )
+            .child(gap(16.0))
+            .child(
+                row()
+                    .child(switch(true, |_: &mut (), _: bool| {}))
+                    .child(hgap(20.0))
+                    .child(switch(false, |_: &mut (), _: bool| {}))
+                    .cross_axis(CrossAxisAlignment::Center),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
@@ -628,20 +640,20 @@ fn sheet_case() -> AnyView<()> {
                     bottom: 24.0,
                 },
                 container(
-                    Column(vec![
-                        any(text("Share via").size(16.0)),
-                        gap(16.0),
-                        any(Row(vec![
-                            any(icon_button(glyph(icons::MAIL), |_: &mut ()| {})),
-                            hgap(12.0),
-                            any(icon_button(glyph(icons::MESSAGE), |_: &mut ()| {})),
-                            hgap(12.0),
-                            any(icon_button(glyph(icons::CONTENT_COPY), |_: &mut ()| {})),
-                            hgap(12.0),
-                            any(icon_button(glyph(icons::SHARE), |_: &mut ()| {})),
-                        ])),
-                    ])
-                    .cross_axis(CrossAxisAlignment::Center),
+                    column()
+                        .child(text("Share via").size(16.0))
+                        .child(gap(16.0))
+                        .child(
+                            row()
+                                .child(icon_button(glyph(icons::MAIL), |_: &mut ()| {}))
+                                .child(hgap(12.0))
+                                .child(icon_button(glyph(icons::MESSAGE), |_: &mut ()| {}))
+                                .child(hgap(12.0))
+                                .child(icon_button(glyph(icons::CONTENT_COPY), |_: &mut ()| {}))
+                                .child(hgap(12.0))
+                                .child(icon_button(glyph(icons::SHARE), |_: &mut ()| {})),
+                        )
+                        .cross_axis(CrossAxisAlignment::Center),
                 )
                 .size_centered(TALL.width - 48.0, 100.0),
             ),
@@ -654,20 +666,23 @@ fn sheet_case() -> AnyView<()> {
 
 fn slider_case() -> AnyView<()> {
     framed(
-        Column(vec![
-            any(SizedBox(Some(280.0), None).child(slider(0.4, |_: &mut (), _: f64| {}))),
-            gap(12.0),
-            any(SizedBox(Some(280.0), None).child(
-                slider(3.0, |_: &mut (), _: f64| {})
-                    .range(0.0, 5.0)
-                    .divisions(5),
-            )),
-            gap(12.0),
-            any(SizedBox(Some(280.0), None).child(centered_slider(0.65, |_: &mut (), _: f64| {}))),
-            gap(12.0),
-            any(SizedBox(Some(280.0), None).child(wavy_slider(0.5, |_: &mut (), _: f64| {}))),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(SizedBox(Some(280.0), None).child(slider(0.4, |_: &mut (), _: f64| {})))
+            .child(gap(12.0))
+            .child(
+                SizedBox(Some(280.0), None).child(
+                    slider(3.0, |_: &mut (), _: f64| {})
+                        .range(0.0, 5.0)
+                        .divisions(5),
+                ),
+            )
+            .child(gap(12.0))
+            .child(
+                SizedBox(Some(280.0), None).child(centered_slider(0.65, |_: &mut (), _: f64| {})),
+            )
+            .child(gap(12.0))
+            .child(SizedBox(Some(280.0), None).child(wavy_slider(0.5, |_: &mut (), _: f64| {})))
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
@@ -685,12 +700,11 @@ fn snackbar_case() -> AnyView<()> {
         snackbar_host(
             &toasts,
             container(
-                Column(vec![
-                    any(text("Archive the selected message").size(14.0)),
-                    gap(16.0),
-                    any(filled_button("Archive", |_: &mut ()| {})),
-                ])
-                .cross_axis(CrossAxisAlignment::Center),
+                column()
+                    .child(text("Archive the selected message").size(14.0))
+                    .child(gap(16.0))
+                    .child(filled_button("Archive", |_: &mut ()| {}))
+                    .cross_axis(CrossAxisAlignment::Center),
             )
             .size_centered(STRIP.width, STRIP.height),
         ),
@@ -716,27 +730,32 @@ fn tabs_case() -> AnyView<()> {
 fn text_field_case() -> AnyView<()> {
     framed_in(
         TALL,
-        Column(vec![
-            any(SizedBox(Some(280.0), None).child(
-                text_field("ada@example.com", |_: &mut (), _: String| {})
-                    .label("Email")
-                    .supporting_text("We never share this"),
-            )),
-            gap(16.0),
-            any(SizedBox(Some(280.0), None).child(
-                text_field("", |_: &mut (), _: String| {})
-                    .label("Display name")
-                    .variant(TextFieldVariant::Outlined),
-            )),
-            gap(16.0),
-            any(SizedBox(Some(280.0), None).child(
-                text_field("hunter2", |_: &mut (), _: String| {})
-                    .label("Password")
-                    .obscured(true)
-                    .error_text("Too short"),
-            )),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+        column()
+            .child(
+                SizedBox(Some(280.0), None).child(
+                    text_field("ada@example.com", |_: &mut (), _: String| {})
+                        .label("Email")
+                        .supporting_text("We never share this"),
+                ),
+            )
+            .child(gap(16.0))
+            .child(
+                SizedBox(Some(280.0), None).child(
+                    text_field("", |_: &mut (), _: String| {})
+                        .label("Display name")
+                        .variant(TextFieldVariant::Outlined),
+                ),
+            )
+            .child(gap(16.0))
+            .child(
+                SizedBox(Some(280.0), None).child(
+                    text_field("hunter2", |_: &mut (), _: String| {})
+                        .label("Password")
+                        .obscured(true)
+                        .error_text("Too short"),
+                ),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 
@@ -754,22 +773,23 @@ fn time_picker_case() -> AnyView<()> {
 fn toolbar_case() -> AnyView<()> {
     framed_in(
         STRIP,
-        Column(vec![
-            bleed(docked_toolbar().actions(vec![
+        column()
+            .child(bleed(docked_toolbar().actions(vec![
                 toolbar_action(icons::FORMAT_ALIGN_LEFT, |_: &mut ()| {}).label("Left"),
                 toolbar_action(icons::FORMAT_ALIGN_CENTER, |_: &mut ()| {}).label("Center"),
                 toolbar_action(icons::FORMAT_ALIGN_RIGHT, |_: &mut ()| {}).label("Right"),
-            ])),
-            gap(24.0),
-            any(floating_toolbar()
-                .color_style(ToolbarColorStyle::Vibrant)
-                .actions(vec![
-                    toolbar_action(icons::EDIT, |_: &mut ()| {}).label("Edit"),
-                    toolbar_action(icons::SHARE, |_: &mut ()| {}).label("Share"),
-                    toolbar_action(icons::DELETE, |_: &mut ()| {}).label("Delete"),
-                ])),
-        ])
-        .cross_axis(CrossAxisAlignment::Center),
+            ])))
+            .child(gap(24.0))
+            .child(
+                floating_toolbar()
+                    .color_style(ToolbarColorStyle::Vibrant)
+                    .actions(vec![
+                        toolbar_action(icons::EDIT, |_: &mut ()| {}).label("Edit"),
+                        toolbar_action(icons::SHARE, |_: &mut ()| {}).label("Share"),
+                        toolbar_action(icons::DELETE, |_: &mut ()| {}).label("Delete"),
+                    ]),
+            )
+            .cross_axis(CrossAxisAlignment::Center),
     )
 }
 

@@ -6,7 +6,7 @@
 //! carries the font-verification row: a body line in Inter, a `kbd` row in
 //! JetBrains Mono.
 
-use frust::{Brightness, Column, Row, SizedBox, View, any, set_app_theme, text};
+use frust::{Brightness, Row, SizedBox, View, any, column, row, set_app_theme, text};
 use frust_shadcn::{ButtonVariant, ShadcnBase, button, kbd, kbd_group, separator, theme_for};
 
 use crate::AppState;
@@ -57,19 +57,21 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         base_buttons.push(any(SizedBox(Some(8.0), None)));
     }
 
-    Column(vec![
-        any(crate::nav::heading("Theming")),
-        any(SizedBox(None, Some(16.0))),
-        any(text(format!(
-            "Active: DesignLanguage::Custom(\"shadcn\") — base = {}, brightness = {}",
-            base.id(),
-            if dark { "dark" } else { "light" },
-        ))
-        .size(14.0)),
-        gap(),
-        any(Row(base_buttons)),
-        gap(),
-        any(button(
+    column()
+        .child(crate::nav::heading("Theming"))
+        .child(SizedBox(None, Some(16.0)))
+        .child(
+            text(format!(
+                "Active: DesignLanguage::Custom(\"shadcn\") — base = {}, brightness = {}",
+                base.id(),
+                if dark { "dark" } else { "light" },
+            ))
+            .size(14.0),
+        )
+        .child(gap())
+        .child(Row(base_buttons))
+        .child(gap())
+        .child(button(
             if dark {
                 "Switch to Light"
             } else {
@@ -79,25 +81,27 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                 s.theming.dark = !s.theming.dark;
                 apply(s.theming.base, s.theming.dark);
             },
-        )),
-        gap(),
-        any(separator()),
-        gap(),
-        any(text(
-            "This paragraph is set in Inter — the sans stack every shadcn \
+        ))
+        .child(gap())
+        .child(separator())
+        .child(gap())
+        .child(
+            text(
+                "This paragraph is set in Inter — the sans stack every shadcn \
              text role resolves to (frust_shadcn::tokens::sans_family()).",
+            )
+            .size(16.0)
+            .family(frust_shadcn::tokens::sans_family()),
         )
-        .size(16.0)
-        .family(frust_shadcn::tokens::sans_family())),
-        gap(),
-        any(Row(vec![
-            any(text("JetBrains Mono:").size(13.0)),
-            any(SizedBox(Some(8.0), None)),
-            any(kbd_group(vec![
-                any(kbd("Ctrl")),
-                any(kbd("Shift")),
-                any(kbd("P")),
-            ])),
-        ])),
-    ])
+        .child(gap())
+        .child(
+            row()
+                .child(text("JetBrains Mono:").size(13.0))
+                .child(SizedBox(Some(8.0), None))
+                .child(kbd_group(vec![
+                    any(kbd("Ctrl")),
+                    any(kbd("Shift")),
+                    any(kbd("P")),
+                ])),
+        )
 }

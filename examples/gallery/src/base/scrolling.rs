@@ -4,7 +4,7 @@
 //! registry follows, and [`super::framed`] for why neither case fills its
 //! own backdrop.
 
-use frust_core::{AnyView, any};
+use frust_core::AnyView;
 use frust_widgets::{
     Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, container, inflexible, list_view,
     scroll_view, text,
@@ -59,11 +59,9 @@ fn list_view_case() -> AnyView<()> {
             6,
             LIST_ITEM_EXTENT,
             |i: usize| {
-                any(
-                    container(text(format!("Row {}", i + 1)).size(14.0).color(CAPTION))
-                        .fill(row_color(i))
-                        .size_centered(ROW_WIDTH, LIST_ITEM_EXTENT - 12.0),
-                )
+                container(text(format!("Row {}", i + 1)).size(14.0).color(CAPTION))
+                    .fill(row_color(i))
+                    .size_centered(ROW_WIDTH, LIST_ITEM_EXTENT - 12.0)
             },
         )),
     )
