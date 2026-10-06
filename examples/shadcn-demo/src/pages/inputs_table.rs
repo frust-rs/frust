@@ -202,10 +202,10 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                     any(attachment_title("resume.pdf")),
                     any(attachment_description("240 KB", false)),
                 ])),
-                any(attachment_actions(vec![any(button(
+                any(attachment_actions(vec![button(
                     "Remove",
                     |_: &mut AppState| {},
-                ))])),
+                )])),
             ])
             .size(AttachmentSize::Default)
             .state(AttachmentState::Done),

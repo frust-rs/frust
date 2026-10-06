@@ -133,7 +133,7 @@ impl Component for ShadcnDemoApp {
 
         any(sidebar_provider(
             nav::shell_sidebar(state),
-            sidebar_inset(vec![any(shell_body(page, open, content))]),
+            sidebar_inset(vec![shell_body(page, open, content)]),
             open,
             |s: &mut AppState, next: bool| {
                 s.sidebar_open = next;

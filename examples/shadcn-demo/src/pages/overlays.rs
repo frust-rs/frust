@@ -133,7 +133,7 @@ fn sheet_trigger(
                                  edge it came from before the page pops.",
                         ),
                     ]),
-                    sheet_footer(vec![any(text("Escape, the scrim, or the X."))]),
+                    sheet_footer(vec![text("Escape, the scrim, or the X.")]),
                 ])
                 .side(side)
             },
@@ -165,10 +165,10 @@ fn drawer_trigger(
                                      short of it, it springs back open.",
                             ),
                         ]),
-                        drawer_footer(vec![any(text(
+                        drawer_footer(vec![text(
                             "Only a bottom drawer draws the handle \u{2014} every \
                                  side drags.",
-                        ))]),
+                        )]),
                     ],
                 )
             },
@@ -225,11 +225,10 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                                     dialog_title("Delete project?"),
                                     dialog_description("This action cannot be undone."),
                                 ]),
-                                dialog_footer(vec![any(button(
-                                    "Cancel",
-                                    move |_: &mut AppState| cancel_ctrl.pop(),
-                                )
-                                .variant(ButtonVariant::Outline))]),
+                                dialog_footer(vec![
+                                    button("Cancel", move |_: &mut AppState| cancel_ctrl.pop())
+                                        .variant(ButtonVariant::Outline),
+                                ]),
                             ])
                         },
                         record("dialog"),
@@ -392,7 +391,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                                          are the only ways out.",
                                         ),
                                     ]),
-                                    sheet_footer(vec![any(text("Press Escape."))]),
+                                    sheet_footer(vec![text("Press Escape.")]),
                                 ])
                                 .close_button(false)
                             },
@@ -442,10 +441,10 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                                              closed counts as one of them.",
                                         ),
                                     ]),
-                                    drawer_footer(vec![any(text(
+                                    drawer_footer(vec![text(
                                         "The scrim rides the open fraction, so a \
                                          part-open drawer sits under a lighter scrim.",
-                                    ))]),
+                                    )]),
                                 ],
                             )
                             .snap_points(&[0.4, 1.0])
