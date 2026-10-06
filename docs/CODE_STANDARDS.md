@@ -6,8 +6,11 @@ off this index — read this plus the one that covers what you are touching:
 | Unit | Spoke | Holds |
 |------|-------|-------|
 | PLUGINS + NATIVE_WIDGETS | [PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md) | Plugin Conventions — backend gating, JNI attach scope, the platform/facade charter lines, theme-token folding, idempotent project mutation |
-| WIDGETS | [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md) | Theming & Animation Conventions — token resolution/precedence, animation pacing, design-system installation |
+| WIDGETS | [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md) | Widget Authoring Conventions — erasure at the API boundary, the builder idiom, keyed-list uniqueness, the `frust::authoring` seam; Theming & Animation Conventions — token resolution/precedence, animation pacing, design-system installation |
 | TUI | [TUI_CODE_STANDARDS.md](TUI_CODE_STANDARDS.md) | TUI Conventions — render/update layering, keyboard parity, the single command registry |
+
+Widget-authoring rules — erasure at the API boundary, the builder idiom, keyed-list uniqueness, the
+`frust::authoring` seam — live in [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md).
 
 ## Language Idioms
 
@@ -123,12 +126,6 @@ off this index — read this plus the one that covers what you are touching:
   lower layer threads a resource owned by a higher layer, pass it as `&mut dyn Any` and
   recover it at the one call site that knows the concrete type via a documented,
   panic-on-mismatch `downcast_mut::<T>()`.
-- **Erase at the API boundary, not at call sites.** Prefer the `column()`/`row()`/`stack()`
-  builders and `-> impl View<S>` helper returns (`+ use<>` when the helper borrows an
-  argument). Write `any()` only where branches of different concrete types must unify (if/else,
-  match arms, `async_view` arms); never wrap an argument of an API that already takes
-  `V: View`. A driver closure returning a `Component::build` result erases it:
-  `move |s| AnyView::new(root.build(s))`. Never add `#[allow(refining_impl_trait)]`.
 - **Edition-2024 `-> impl Trait` return types capture all in-scope lifetimes by default.**
   When a function returns an `impl Trait` that borrows nothing from its parameters (e.g.
   a widget fn returning `impl View<State>`, where views are `'static`), opt out
@@ -363,11 +360,6 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   and the hand-rolled navbar/tabbar item lists, which never clear or mark a truncated item's own
   focus link (`focus-navbar-item-truncation-unmarked`). See `docs/LIMITATIONS.md`.
 
-- **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key, view)` marks a
-  `Flex` child list for identity-based reconciliation; a mixed or duplicate key set
-  `debug_assert!`s and falls back to positional matching in release (never panics live). A
-  matched reorder relocates the existing widget rather than rebuilding it.
-
 - **Input constants have one source.** Gesture thresholds (`TOUCH_SLOP`, `MOUSE_SLOP`),
   scroll/fling tuning (`WHEEL_LINE_PX`, `FLING_DECAY`, `FLING_STOP`, `VELOCITY_WINDOW_MS`),
   and `VelocityTracker` live in `frust-core::input`; widgets import them rather than
@@ -520,18 +512,6 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
 - **`Component::State` holds `RwSignal`s directly; app code depends on the `frust` facade
   only, never `reactive_graph`/`any_spawner`/`frust-reactive` directly.** A reactive field
   is typed `RwSignal<T>`, read/written through the facade's `Get`/`Set`/`Update` traits.
-- **An app authors a custom `View`/`Widget` pair through `frust::authoring`, never a direct
-  `frust-core`/`frust-scene`/`frust-text`/`accesskit`/`kurbo`/`peniko` dependency.**
-  `frust::authoring` (plus its `text`/`scene` submodules) re-exports the full trait
-  lifecycle, child/event/callback plumbing, semantics, and geometry/paint types a custom
-  widget needs, so an `examples/*`/app crate's `Cargo.toml` depends on `frust` plus plugin
-  crates only. For the long tail, reach through the whole-crate valves `frust::kurbo`,
-  `frust::peniko`, `frust::accesskit` rather than re-declaring the dependency — each of
-  those crates is version-pinned in exactly one place (`docs/DEVELOPMENT.md` §
-  Version-Pin Policy). Mechanically enforced across `benchmarks/frust_bench` and the five
-  in-repo example apps — `huddle`, `shadertoy`, `glyph-catalog`, `playground`, and
-  `examples/native-widgets-demo` — by `crates/frust/tests/authoring_seam_conformance.rs`;
-  the plugin tier is exempt ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
 - **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
   untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
   *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
@@ -542,14 +522,8 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
 
 ## Theming & Animation Conventions
 
-Token resolution and precedence, animation pacing, and design-system installation are the
-WIDGETS unit's rules — [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md). The same
-**explicit builder value > theme > fallback constant** precedence binds a `ThemeExtensions`
-payload identically to a plain token: a consumer (a design-system plugin or a fully external
-catalog) checks its own explicit override first, then `Theme::extension::<T>()`, and only then a
-hardcoded fallback — see
-[NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s typeface ladder for the
-shipped instance.
+Token resolution and precedence (including `ThemeExtensions` payloads), animation pacing, and
+design-system installation are the WIDGETS unit's rules — [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md).
 
 ## Testing Patterns
 
