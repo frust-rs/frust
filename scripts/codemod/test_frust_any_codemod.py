@@ -43,6 +43,11 @@ def check_g(src: str):
     return check(GLOB + textwrap.dedent(src))
 
 
+def run5(src: str) -> str:
+    """Rewrite `src` with the opt-in T5 rule on."""
+    return cm.rewrite(textwrap.dedent(src), APIS, t5=True).text
+
+
 class NameListTest(unittest.TestCase):
     def test_sections_load(self):
         self.assertIn(".child", APIS.slot)
@@ -415,6 +420,126 @@ class ImportTest(unittest.TestCase):
         self.assertEqual(run(src), "use frust::*;\nfn f() -> V { column().child(a) }\n")
 
 
+class T5Test(unittest.TestCase):
+    def test_homogeneous_list_dropped(self):
+        self.assertEqual(run5("s.actions(vec![any(button(a)), any(button(b))])"),
+                         "s.actions(vec![button(a), button(b)])")
+        self.assertEqual(run5("carousel(vec![any(slide(1)), frust::any(slide(2))])"),
+                         "carousel(vec![slide(1), slide(2)])")
+
+    def test_heterogeneous_heads_untouched(self):
+        for src in (
+            "s.actions(vec![any(button(a)), any(text(b))])",
+            "s.actions(vec![any(text(a)), any(frust::text(b))])",   # different callee path
+        ):
+            self.assertEqual(run5(src), src, src)
+
+    def test_same_head_needs_same_trailing_chain(self):
+        same = "s.children(vec![any(text(a).size(1)), any(text(b).size(2))])"
+        self.assertEqual(run5(same), "s.children(vec![text(a).size(1), text(b).size(2)])")
+        for src in (
+            "s.children(vec![any(text(a)), any(text(b).size(2))])",
+            "s.children(vec![any(text(a).size(1)), any(text(b).bold())])",
+        ):
+            self.assertEqual(run5(src), src, src)
+
+    def test_single_element_dropped(self):
+        self.assertEqual(run5("sidebar_menu(vec![any(sidebar_menu_item(x))])"),
+                         "sidebar_menu(vec![sidebar_menu_item(x)])")
+
+    def test_nested_calls_in_elements(self):
+        src = "s.children(vec![any(card(f(a, g(1)), h())), any(card(b, vec![c]))])"
+        self.assertEqual(run5(src), "s.children(vec![card(f(a, g(1)), h()), card(b, vec![c])])")
+
+    def test_nested_lists_reach_fixpoint(self):
+        src = "s.children(vec![any(column().children(vec![any(t(1)), any(t(2))]))])"
+        self.assertEqual(run5(src), "s.children(vec![column().children(vec![t(1), t(2)])])")
+
+    def test_trailing_comma_and_comments_preserved(self):
+        src = """\
+        s.children(vec![
+            // first
+            any(item(1)), /* between */
+            any(item(
+                2,
+            )), // last
+        ])
+        """
+        want = """\
+        s.children(vec![
+            // first
+            item(1), /* between */
+            item(
+                2,
+            ), // last
+        ])
+        """
+        self.assertEqual(run5(src), textwrap.dedent(want))
+
+    def test_left_alone(self):
+        for src in (
+            "s.children(vec![])",                            # empty list
+            "s.children(vec![any(x), any(y)])",              # no head: plain variables
+            "s.children(vec![any(t(1)), t(2)])",             # a non-erasure element
+            "s.children(vec![any(t(1)); 3])",                # repeat form
+            "s.children(vec![any::<S, _>(t(1)), any::<S, _>(t(2))])",  # turbofish erasure
+            "s.children(vec![any(t!(1)), any(t!(2))])",      # macro element
+            "s.children(vec![any(t(1)?), any(t(2)?)])",      # not a pure call chain
+            "s.children(items)",                             # not a literal
+            "s.unknown(vec![any(t(1)), any(t(2))])",         # not a list callee
+            "s.children(Some(vec![any(t(1))]))",             # not a direct argument
+        ):
+            self.assertEqual(run5(src), src, src)
+
+    def test_local_vec_not_a_list_argument_untouched(self):
+        src = "fn f() { let v = vec![any(t(1)), any(t(2))]; s.children(v); }"
+        self.assertEqual(run5(src), src)
+
+    def test_authoring_and_sugar_forms(self):
+        self.assertEqual(run5("s.children(vec![authoring::any(t(1)), AnyView::new(t(2))])"),
+                         "s.children(vec![t(1), t(2)])")
+        # T2 cannot resolve a builder here (no import): T5 still drops the erasure.
+        self.assertEqual(run5("Row(vec![any(t(1)), any(t(2))])"), "Row(vec![t(1), t(2)])")
+
+    def test_t2_site_not_listed_twice(self):
+        rules, _ = check_g("fn f() { Column(vec![any(t(1)), any(t(2))]) }")
+        self.assertEqual(rules, ["T2"])
+        res = cm.rewrite(GLOB + "fn f() { Column(vec![any(t(1)), any(t(2))]) }", APIS, t5=True)
+        self.assertEqual([c.rule for c in res.candidates], ["T2"])
+
+    def test_off_by_default(self):
+        src = "s.actions(vec![any(button(a)), any(button(b))])"
+        self.assertEqual(run(src), src)
+        self.assertEqual(check(src), ([], []))
+
+    def test_idempotent(self):
+        src = textwrap.dedent("""\
+            use frust::{any, text};
+            fn f() -> V {
+                s.children(vec![any(text("a")), any(text("b"))])
+            }
+            """)
+        once = run5(src)
+        self.assertEqual(run5(once), once)
+        self.assertNotIn("any", once)   # the now-unused import is dropped too
+
+    def test_comment_in_erasure_head_skipped_with_note(self):
+        res = cm.rewrite("s.children(vec![any /*c*/ (t(1))])", APIS, t5=True)
+        self.assertEqual(res.text, "s.children(vec![any /*c*/ (t(1))])")
+        self.assertTrue(any("T5 skipped" in n for _, n in res.notes), res.notes)
+
+    def test_excluded_list_api_untouched(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write("[list]\nlist_api\n[exclude]\nother::list_api\n")
+        try:
+            apis = cm.load_apis(fh.name)
+        finally:
+            os.unlink(fh.name)
+        src = "other::list_api(vec![any(t(1))]); mine::list_api(vec![any(t(1))]);"
+        self.assertEqual(cm.rewrite(src, apis, t5=True).text,
+                         "other::list_api(vec![any(t(1))]); mine::list_api(vec![t(1)]);")
+
+
 class DriverFixture:
     FIXTURE = textwrap.dedent("""\
         use frust::{Column, any, text};
@@ -596,6 +721,55 @@ class HygieneTest(DriverFixture, unittest.TestCase):
             fh.write(self.FIXTURE)
         code, _ = self.main("--check", "--strict", self.dir.name)
         self.assertEqual(code, 1)
+
+
+class T5DriverTest(DriverFixture, unittest.TestCase):
+    FIXTURE = textwrap.dedent("""\
+        use frust::{any, text};
+
+        fn f() -> V {
+            s.children(vec![
+                any(text("a")),
+                any(text("b")),
+            ])
+        }
+        """)
+
+    def test_check_lists_t5_only_when_opted_in(self):
+        code, out = self.main("--check", self.dir.name)
+        self.assertEqual(code, 0, out)
+        self.assertIn("no candidates", out)
+        code, out = self.main("--check", "--t5", self.dir.name)
+        self.assertEqual(code, 1, out)
+        self.assertIn("lib.rs:4: T5 homogeneous list argument of .children", out)
+
+    def test_write_requires_flag_and_is_idempotent(self):
+        self.main("--write", self.dir.name)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), self.FIXTURE)   # T5 off: untouched
+        code, _ = self.main("--write", "--t5", self.dir.name)
+        self.assertEqual(code, 0)
+        with open(self.path, encoding="utf-8") as fh:
+            once = fh.read()
+        self.assertIn('text("a"),\n', once)
+        self.assertNotIn("any", once)
+        code, out = self.main("--check", "--t5", "--strict", self.dir.name)
+        self.assertEqual(code, 0, out)
+        self.main("--write", "--t5", self.dir.name)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), once)
+
+    def test_stats_reports_t5_separately(self):
+        code, out = self.main("--stats", self.path)
+        self.assertEqual(code, 0)
+        self.assertNotIn("T5", out)
+        code, out = self.main("--stats", "--t5", self.path)
+        self.assertEqual(code, 0)
+        self.assertIn("lib.rs: T5 candidates=1", out)
+        self.assertIn("total: T5 candidates=1", out)
+        self.assertIn("erasure calls before=2 after=0", out)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), self.FIXTURE)   # --stats alone never writes
 
 
 class CommentGapTest(unittest.TestCase):

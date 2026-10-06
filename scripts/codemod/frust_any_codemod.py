@@ -24,6 +24,28 @@ Rewrites (each one is type-preserving, or changes only an argument's type):
       anything else -> `.push(elem)`. A list mixing literal `keyed(..)` with
       literal `inflexible`/`flexible` children is left alone (keyed flex lists
       are all-or-nothing) and reported as a note.
+  T5  (opt-in, `--t5` only) `api(.., vec![any(E1), .., any(En)], ..)` ->
+      `api(.., vec![E1, .., En], ..)` when the `vec![..]` literal (n >= 1) is a
+      whole argument of a list entry of the name list, of `Column`/`Row`/
+      `Stack` sugar, or of `.children`, every element is one erasure call
+      (`any(E)`, `frust..::any(E)`, `authoring::any(E)`, `AnyView::new(E)`),
+      and all E_i share the same *head*. The rewrite only drops the wrappers:
+      element text, trailing commas and comments between elements are kept.
+      A `Column`/`Row`/`Stack` site T2 already rewrites is not listed again.
+
+T5 heuristic: the head of `E` is the full callee path of its outermost call
+plus the exact sequence of trailing method-call names, so `text(a).size(1)`
+and `text(b).size(2)` match while `text(a)` and `text(b).size(2)` (or
+`text(a)` and `frust::text(b)`) do not. An element that is not
+`path(..)` followed only by `.name(..)` calls (a variable, a macro, a
+turbofish, a field access, `?`, `.await`) has no head, so its list is left
+alone, as is a list with any non-erasure element or with two different heads.
+Failure mode: a head is a syntactic proxy for the element type. A same-head
+list whose elements are not type-homogeneous — a generic callee whose result
+type follows its arguments (`container(a)` vs `container(b)` with different
+child types), or a builder method that changes the type — fails to compile
+after the drop (`Vec<V>` needs one `V`); the compiler, not this tool, catches
+it, and the apply recipe restores `any()` on that list by hand.
 
 Erasure calls are bare `any(X)`, `frust..::any(X)`, and `AnyView::new(X)`
 (optionally path-qualified). A turbofish erasure (`any::<S, _>(X)`) is never
@@ -44,7 +66,7 @@ cannot be resolved.
 Usage:
 
     python3 scripts/codemod/frust_any_codemod.py [--check] [--write] [--stats]
-        [--strict] [--apis FILE] [--exclude PATH]... PATH...
+        [--strict] [--t5] [--apis FILE] [--exclude PATH]... PATH...
 
 PATH is a `.rs` file or a directory (recursed for `*.rs`, skipping `target/`).
 `--check` (the default) lists `file:line` of every remaining candidate and
@@ -63,6 +85,10 @@ atomically (temp file in the same directory, mode copied, fsync, then
 `os.replace`), iterating to a fixpoint, so a second run is a no-op. Symlinked
 `.rs` files are skipped in directory walks and refused (exit 2) as explicit
 PATH arguments. `--stats` prints per-file erasure-call counts before/after.
+`--t5` turns rule T5 on for every mode (off by default): `--check --t5` also
+lists `T5 homogeneous list argument of <callee>` candidates, `--write --t5`
+applies them, and `--stats --t5` additionally reports the T5 candidate count
+per file (when non-zero) and in total, separately from the erasure counts.
 
 Known blind spot: a closure parameter typed `AnyView<..>` whose body is
 `any(x)` is still a T1/T4 candidate when the call sits in a slot position; the
@@ -798,8 +824,10 @@ def _excluded(s: Source, apis: Apis, name: str, qual: list, pos: int) -> bool:
     return any(full[-len(e):] == e for e in apis.exclude if len(e) <= len(full))
 
 
-def find_candidates(s: Source, apis: Apis):
-    """Return (candidates, notes). Candidates may overlap; callers pick outermost."""
+def find_candidates(s: Source, apis: Apis, t5: bool = False):
+    """Return (candidates, notes). Candidates may overlap; callers pick outermost.
+
+    `t5` turns on the opt-in homogeneous list rule T5."""
     t = s.t
     cands: list[Candidate] = []
     notes: list[tuple[int, str]] = []
@@ -811,17 +839,21 @@ def find_candidates(s: Source, apis: Apis):
         if key is None or s.forbidden(k):
             continue
         o = k + 1
-        if key in apis.slot or key in apis.builder:
+        is_list = t5 and (key in apis.lists or key in T5_BUILTIN)
+        if key in apis.slot or key in apis.builder or is_list:
             if "::" not in key and not key.startswith(".") and _excluded(s, apis, key, qual, tok.start):
                 continue
         if key in apis.slot:
             _t1(s, key, k, o, cands)
         if key in apis.builder:
             _t4(s, key, k, o, cands)
+        before_t2 = len(cands)
         if key in BUILDER_OF:
             _t2(s, key, k, o, qual, cands, notes)
         if key == "FlexView::new":
             _t3(s, k, o, qual, cands, notes)
+        if is_list and len(cands) == before_t2:
+            _t5(s, key, o, cands)
         if len(cands) > first_new:
             _drop_comment_losers(s, cands, first_new, notes)
             first_new = len(cands)
@@ -839,7 +871,9 @@ def _drop_comment_losers(s: Source, cands: list, first: int, notes: list) -> Non
     """Remove new candidates whose rewrite would lose a comment; note each one."""
     keep = []
     for c in cands[first:]:
-        old = _comment_count(s.src[c.span[0]:c.span[1]])
+        # Compare per replaced range, so comments T5 keeps between elements
+        # (outside every edit) are not mistaken for lost ones.
+        old = sum(_comment_count(s.src[e.start:e.end]) for e in c.edits)
         new = sum(_comment_count(e.text) for e in c.edits)
         if new < old:
             notes.append((c.line, f"note: {c.rule} skipped: comment inside the call head"))
@@ -1084,6 +1118,85 @@ def _t3(s, k, o, qual, cands, notes):
                            (start, end), [Edit(start, end, text)], imports))
 
 
+# Callees whose `vec![..]` argument is always a list of views, whatever the
+# name list says (T5 also uses every [list] entry of `erasing_apis.txt`).
+T5_BUILTIN = frozenset({"Column", "Row", "Stack", ".children"})
+# Keywords that can never start a callee path (path roots like `crate` can).
+_T5_NON_PATH = frozenset(KEYWORDS - {"crate", "super", "self", "Self"})
+
+
+def _t5_erasure(s: Source, a: int, b: int):
+    """Like `erasure_call`, also accepting a module-relative `authoring::any(X)`."""
+    o = s.erasure_call(a, b)
+    if o is not None:
+        return o
+    if s.is_id(a, "authoring") and s.is_p(a + 1, "::") and s.is_id(a + 2, "any") \
+            and s.is_p(a + 3, "(") and s.match[a + 3] == b and len(s.split_args(a + 3)) == 1:
+        return a + 3
+    return None
+
+
+def _t5_head(s: Source, a: int, b: int):
+    """Head of the expression a..b: (callee path, trailing method names), or None.
+
+    The expression must be exactly `path(..)` followed by zero or more
+    `.name(..)` method calls; anything else has no head."""
+    k = a
+    segs = []
+    if s.is_p(k, "::"):
+        segs.append("::")
+        k += 1
+    while True:
+        if not s.is_id(k) or s.t[k].text in _T5_NON_PATH:
+            return None
+        segs.append(s.t[k].text)
+        k += 1
+        if s.is_p(k, "::") and s.is_id(k + 1):
+            segs.append("::")
+            k += 1
+            continue
+        break
+    if not s.is_p(k, "("):
+        return None
+    k = s.match[k]
+    methods = []
+    while k < b:
+        if not (s.is_p(k + 1, ".") and s.is_id(k + 2) and s.is_p(k + 3, "(")):
+            return None
+        methods.append(s.t[k + 2].text)
+        k = s.match[k + 3]
+    if k != b:
+        return None
+    return "".join(segs), tuple(methods)
+
+
+def _t5(s, key, o, cands):
+    for a, b in s.split_args(o):
+        lb = _vec_literal(s, a, b)
+        if lb is None:
+            continue
+        elems, _ = _elements(s, lb)
+        if not elems:
+            continue
+        heads, edits = set(), []
+        for ea, eb, _, _ in elems:
+            eo = _t5_erasure(s, ea, eb)
+            if eo is None:
+                break
+            inner = s.split_args(eo)
+            head = _t5_head(s, *inner[0]) if len(inner) == 1 else None
+            if head is None:
+                break
+            heads.add(head)
+            if len(heads) > 1:
+                break
+            edits.append(Edit(s.t[ea].start, s.t[eb].end, s.inner_text(eo)))
+        else:
+            span = (s.t[a].start, s.t[b].end)
+            cands.append(Candidate("T5", s.line_of(span[0]), f"homogeneous list argument of {key}",
+                                   span, edits))
+
+
 def select_outermost(cands: list[Candidate]) -> list[Candidate]:
     chosen, taken = [], []
     for c in sorted(cands, key=lambda c: (c.span[0], -(c.span[1] - c.span[0]))):
@@ -1224,15 +1337,17 @@ class Result:
     notes: list
 
 
-def rewrite(src: str, apis: Apis) -> Result:
-    """Rewrite `src` to a fixpoint; raises LexError on unparseable input."""
+def rewrite(src: str, apis: Apis, t5: bool = False) -> Result:
+    """Rewrite `src` to a fixpoint; raises LexError on unparseable input.
+
+    `t5` turns on the opt-in homogeneous list rule T5."""
     original = Source(src)
     before = original.erasure_count()
-    cands0, notes0 = find_candidates(original, apis)
+    cands0, notes0 = find_candidates(original, apis, t5)
     text = src
     for _ in range(MAX_PASSES):
         s = Source(text)
-        cands, _ = find_candidates(s, apis)
+        cands, _ = find_candidates(s, apis, t5)
         chosen = select_outermost(cands)
         if not chosen:
             break
@@ -1310,6 +1425,10 @@ def main(argv=None) -> int:
     ap.add_argument("--stats", action="store_true", help="print per-file erasure-call counts before/after")
     ap.add_argument("--strict", action="store_true",
                     help="--check exits 2 when any site was shadow-skipped (candidates still win: 1)")
+    ap.add_argument("--t5", action="store_true",
+                    help="opt in to rule T5: drop any() from vec![..] list arguments whose "
+                         "elements all share one head (callee path + trailing method names); "
+                         "a same-head list that is not type-homogeneous then fails to compile")
     ap.add_argument("--exclude", action="append", default=[], metavar="PATH",
                     help="skip PATH, a file or directory, by whole path components (repeatable)")
     ap.add_argument("--apis", default=DEFAULT_APIS, help="name list (default: erasing_apis.txt beside this script)")
@@ -1323,6 +1442,7 @@ def main(argv=None) -> int:
     shadow = 0
     refused = 0
     total_before = total_after = 0
+    total_t5 = 0
     for path in iter_rs(args.paths):
         if excludes and _path_excluded(path, excludes):
             continue
@@ -1337,7 +1457,7 @@ def main(argv=None) -> int:
         try:
             with open(path, encoding="utf-8", newline="") as fh:
                 src = fh.read()
-            res = rewrite(src, apis)
+            res = rewrite(src, apis, args.t5)
         except (LexError, UnicodeDecodeError) as exc:
             print(f"{path}: skipped, cannot tokenise: {exc}", file=sys.stderr)
             skipped += 1
@@ -1349,7 +1469,7 @@ def main(argv=None) -> int:
         if check:
             if args.write:
                 post = Source(res.text)
-                cands, notes = find_candidates(post, apis)
+                cands, notes = find_candidates(post, apis, args.t5)
                 notes = sorted(set(notes))
             else:
                 cands, notes = res.candidates, res.notes
@@ -1361,8 +1481,15 @@ def main(argv=None) -> int:
             shadow += len(notes)
         if args.stats:
             print(f"{path}: erasure calls before={res.before} after={res.after}")
+            if args.t5:
+                n_t5 = sum(1 for c in res.candidates if c.rule == "T5")
+                total_t5 += n_t5
+                if n_t5:
+                    print(f"{path}: T5 candidates={n_t5}")
     if args.stats:
         print(f"total: erasure calls before={total_before} after={total_after}")
+        if args.t5:
+            print(f"total: T5 candidates={total_t5}")
     if check:
         print(f"{shadow} shadow skip(s)")
         print(f"{remaining} candidate(s)" if remaining else "no candidates")
