@@ -498,8 +498,9 @@ class T5Test(unittest.TestCase):
     def test_authoring_and_sugar_forms(self):
         self.assertEqual(run5("s.children(vec![authoring::any(t(1)), AnyView::new(t(2))])"),
                          "s.children(vec![t(1), t(2)])")
-        # T2 cannot resolve a builder here (no import): T5 still drops the erasure.
-        self.assertEqual(run5("Row(vec![any(t(1)), any(t(2))])"), "Row(vec![t(1), t(2)])")
+        # An unresolved `Row` (no frust import) is not frust's sugar: left alone.
+        src = "Row(vec![any(t(1)), any(t(2))])"
+        self.assertEqual(run5(src), src)
 
     def test_t2_site_not_listed_twice(self):
         rules, _ = check_g("fn f() { Column(vec![any(t(1)), any(t(2))]) }")
@@ -770,6 +771,184 @@ class T5DriverTest(DriverFixture, unittest.TestCase):
         self.assertIn("erasure calls before=2 after=0", out)
         with open(self.path, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), self.FIXTURE)   # --stats alone never writes
+
+
+MIXED = "column().children(vec![any(component(Header { a: 1 })), any(component(Counter { b: 2 }))])"
+
+
+def t5_rules(src: str):
+    res = cm.rewrite(textwrap.dedent(src), APIS, t5=True)
+    return [c.rule for c in res.candidates], res
+
+
+class KeepMarkerTest(unittest.TestCase):
+    def test_unmarked_mixed_type_list_is_flagged(self):
+        rules, _ = t5_rules(MIXED)
+        self.assertEqual(rules, ["T5"])
+
+    def test_marker_same_line_suppresses_t5(self):
+        src = MIXED + " // erasure: keep"
+        rules, res = t5_rules(src)
+        self.assertEqual(rules, [])
+        self.assertEqual(res.kept, 1)
+        self.assertEqual(res.text, src)
+
+    def test_marker_line_above_suppresses_t5(self):
+        src = "fn f() {\n    // erasure: keep\n    " + MIXED + ";\n}\n"
+        rules, res = t5_rules(src)
+        self.assertEqual(rules, [])
+        self.assertEqual(res.text, src)
+
+    def test_marker_with_trailing_reason(self):
+        for marker in ("// erasure: keep component<C> differs per call",
+                       "//erasure: keep\tmixed types", "//   erasure: keep"):
+            rules, _ = t5_rules(f"{marker}\n{MIXED}")
+            self.assertEqual(rules, [], marker)
+
+    def test_marker_must_be_exact(self):
+        for marker in ("// erasure: keeping", "// erasure:keep", "/// erasure: keep",
+                       "// not erasure: keep", "/* erasure: keep */"):
+            rules, _ = t5_rules(f"{marker}\n{MIXED}")
+            self.assertEqual(rules, ["T5"], marker)
+
+    def test_marker_on_unrelated_line_does_not_suppress(self):
+        src = "// erasure: keep\nlet a = 1;\n" + MIXED
+        self.assertEqual(t5_rules(src)[0], ["T5"])
+        src = "let a = 1;\n" + MIXED + "\n// erasure: keep\n"
+        self.assertEqual(t5_rules(src)[0], ["T5"])
+        # A trailing marker on the previous code line belongs to that line.
+        src = "let a = 1; // erasure: keep\n" + MIXED
+        self.assertEqual(t5_rules(src)[0], ["T5"])
+
+    def test_marker_suppresses_t1_slot_site(self):
+        src = "b.child(any(text(1))); // erasure: keep\nb.child(any(text(2)));"
+        res = cm.rewrite(src, APIS)
+        self.assertEqual(len(res.candidates), 1)
+        self.assertEqual(res.kept, 1)
+        self.assertEqual(res.text, "b.child(any(text(1))); // erasure: keep\nb.child(text(2));")
+
+    def test_marker_suppresses_t2_and_its_notes(self):
+        src = "// erasure: keep\nColumn(vec![any(a()), b()])"
+        res = cm.rewrite(GLOB + src, APIS)
+        self.assertEqual(res.candidates, [])
+        self.assertEqual(res.kept, 1)
+        self.assertEqual(res.text, GLOB + src)
+
+    def test_kept_file_is_idempotent(self):
+        src = "// erasure: keep why\n" + MIXED + "\nx.child(any(text(1)));\n"
+        once = cm.rewrite(src, APIS, t5=True).text
+        self.assertEqual(once, "// erasure: keep why\n" + MIXED + "\nx.child(text(1));\n")
+        self.assertEqual(cm.rewrite(once, APIS, t5=True).text, once)
+
+
+class KeepDriverTest(DriverFixture, unittest.TestCase):
+    FIXTURE = textwrap.dedent("""\
+        use frust::{any, component};
+
+        fn f() -> V {
+            column().children(vec![ // erasure: keep component<C> differs
+                any(component(A {})),
+                any(component(B {})),
+            ])
+        }
+        """)
+    UNMARKED = FIXTURE.replace(" // erasure: keep component<C> differs", "")
+
+    def test_check_strict_t5_exits_0_when_kept_and_1_without(self):
+        code, out = self.main("--check", "--strict", "--t5", self.dir.name)
+        self.assertEqual(code, 0, out)
+        self.assertIn("no candidates", out)
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(self.UNMARKED)
+        code, out = self.main("--check", "--strict", "--t5", self.dir.name)
+        self.assertEqual(code, 1, out)
+        self.assertIn("T5 homogeneous list argument of .children", out)
+
+    def test_stats_reports_kept(self):
+        code, out = self.main("--stats", "--t5", self.path)
+        self.assertEqual(code, 0)
+        self.assertIn("lib.rs: kept=1", out)
+        self.assertIn("total: kept=1", out)
+
+    def test_write_leaves_kept_file_untouched(self):
+        self.main("--write", "--t5", self.dir.name)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), self.FIXTURE)
+
+
+class T5ResolutionTest(unittest.TestCase):
+    LIST = "(vec![any(t(1)), any(t(2))])"
+
+    def test_foreign_and_local_row_not_flagged(self):
+        for src in (
+            "ui::Row" + self.LIST,
+            "use ui::Row;\nRow" + self.LIST,
+            "use frust::Row as Row;\nuse other::Column as Row;\nRow" + self.LIST,
+            "struct Row;\nRow" + self.LIST,
+            "Row" + self.LIST,
+        ):
+            self.assertEqual(t5_rules(src)[0], [], src)
+
+    def test_frust_row_still_flagged(self):
+        # Resolved frust sugar is still a candidate (T2 where it can build the chain).
+        for src in (
+            "frust::Row" + self.LIST,
+            "use frust::Row;\nRow" + self.LIST,
+            "use frust::*;\nRow" + self.LIST,
+        ):
+            self.assertNotEqual(t5_rules(src)[0], [], src)
+
+    def test_children_method_unchanged(self):
+        self.assertEqual(t5_rules("s.children" + self.LIST)[0], ["T5"])
+
+
+class T5NegativeTest(unittest.TestCase):
+    def test_not_a_head_is_left_alone(self):
+        for src in (
+            "s.children(vec![any(t.name::<T>(1)), any(t.name::<T>(2))])",
+            "s.children(vec![any(move || t(1)), any(move || t(2))])",
+            "s.children(vec![any(t(1).await), any(t(2).await)])",
+        ):
+            self.assertEqual(t5_rules(src)[0], [], src)
+
+    def test_leading_path_separator_is_a_head(self):
+        # `::path(..)` has a head: a same-head list is flagged, a mixed one is not.
+        self.assertEqual(t5_rules("s.children(vec![any(::p::a(1)), any(::p::a(2))])")[0], ["T5"])
+        self.assertEqual(t5_rules("s.children(vec![any(::p::a(1)), any(p::a(2))])")[0], [])
+
+    def test_exclude_on_a_method_key_is_ignored(self):
+        # `_excluded` is skipped for keys starting with `.`, so an [exclude]
+        # entry cannot opt a `.children` site out; use `// erasure: keep`.
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+            fh.write("[list]\n.children\n[exclude]\nother::children\n.children\n")
+        try:
+            apis = cm.load_apis(fh.name)
+        finally:
+            os.unlink(fh.name)
+        res = cm.rewrite("x.children(vec![any(t(1)), any(t(2))])", apis, t5=True)
+        self.assertEqual(res.text, "x.children(vec![t(1), t(2)])")
+
+
+class CommentBetweenRangesTest(unittest.TestCase):
+    def test_t2_comment_between_elements_survives_rewrite(self):
+        src = textwrap.dedent("""\
+            Column(vec![
+                any(a()),
+                // between the two
+                any(b()),
+            ])""")
+        out = run_g(src)
+        self.assertIn("// between the two", out)
+        self.assertIn(".child(a())", out)
+        self.assertIn(".child(b())", out)
+        self.assertNotIn("any", out)
+
+    def test_t3_comment_between_children_survives_rewrite(self):
+        src = "FlexView::new(Axis::Vertical, vec![\n    inflexible(any(a())),\n    /* gap */\n    flexible(1, b()),\n])"
+        out = run_g(src)
+        self.assertIn("/* gap */", out)
+        self.assertIn(".child(a())", out)
+        self.assertIn(".flex(1, b())", out)
 
 
 class CommentGapTest(unittest.TestCase):

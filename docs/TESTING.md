@@ -144,7 +144,8 @@ standalone workspace excluded from it.
 
 Also run `scripts/ci/erasure-check.sh` (the any-erasure tripwire: no redundant `any()`, literal
 vec-list containers or homogeneous `vec![any(..), ..]` list arguments; fix with
-`scripts/codemod/frust_any_codemod.py --write --t5`).
+`scripts/codemod/frust_any_codemod.py --write --t5`, or mark a same-head mixed-type list
+`// erasure: keep <why>`; the same command runs as a CI hygiene step).
 
 `frust-gpu` and `frust-engine` are plain dependencies of `frust-render` (not a cargo feature) —
 their host-only tests already ride the chain above; their real-GPU arms are separate, `--ignored`

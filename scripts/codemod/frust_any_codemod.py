@@ -40,12 +40,22 @@ and `text(b).size(2)` match while `text(a)` and `text(b).size(2)` (or
 `path(..)` followed only by `.name(..)` calls (a variable, a macro, a
 turbofish, a field access, `?`, `.await`) has no head, so its list is left
 alone, as is a list with any non-erasure element or with two different heads.
-Failure mode: a head is a syntactic proxy for the element type. A same-head
-list whose elements are not type-homogeneous — a generic callee whose result
-type follows its arguments (`container(a)` vs `container(b)` with different
-child types), or a builder method that changes the type — fails to compile
-after the drop (`Vec<V>` needs one `V`); the compiler, not this tool, catches
-it, and the apply recipe restores `any()` on that list by hand.
+Failure mode: T5 judges heads, not types. A same-head list whose elements are
+not type-homogeneous — a generic callee whose result type follows its
+arguments (`component(Header{..})` vs `component(Counter{..})`,
+`breadcrumb_item(a)` vs `breadcrumb_item(b)`), or a builder method that
+changes the type — is still flagged, and dropping the `any()` does not compile
+(`Vec<V>` needs one `V`). For such a list keep `any()` and mark the `vec![`
+line with `// erasure: keep <why>`; the alternatives are binding the vec to a
+local or using the fluent builder (`.child(..)` chain).
+
+Opt-out: a line comment `// erasure: keep` (exact text after `//`, optional
+trailing reason) on the same line as the start of a candidate's span, or alone
+on the line immediately above it, exempts that site from every rule (T1-T5).
+Kept sites are never listed by `--check` and never rewritten; `--stats`
+counts them as `kept=N`. T5 applies `Column`/`Row`/`Stack` only when T2
+would resolve them to frust's own sugar (a local `struct Row` or a foreign
+`ui::Row` is left alone).
 
 Erasure calls are bare `any(X)`, `frust..::any(X)`, and `AnyView::new(X)`
 (optionally path-qualified). A turbofish erasure (`any::<S, _>(X)`) is never
@@ -297,11 +307,37 @@ class Source:
         self.group_kind = {o: self._classify_group(o) for o in self.match if t[o].text in OPEN}
         self.line_starts = [0] + [m.end() for m in re.finditer("\n", src)]
         self.line_comment_ends = {tok.end for tok in self.all if tok.kind == LINE_COMMENT}
+        self.keep_lines, self.keep_above = self._keep_markers()
+        self.kept = 0
         self.bare_any_ok = not self._defines_foreign_any()
         self.decls = self._parse_uses()
         self.local_types = self._local_type_names()
         self.local_fns = {t[k + 1].text for k in range(len(t) - 1)
                           if t[k].text == "fn" and t[k + 1].kind == IDENT}
+
+    def _keep_markers(self):
+        """Lines carrying a `// erasure: keep` comment, from the comment tokens.
+
+        Returns (every marker line, marker lines whose comment is the only thing
+        on its line). The marker is the exact text `erasure: keep` right after
+        `//`, ending the comment or followed by whitespace and a reason."""
+        anywhere, alone = set(), set()
+        for tok in self.all:
+            if tok.kind != LINE_COMMENT or not tok.text.startswith("//"):
+                continue
+            body = tok.text[2:].lstrip(" \t")
+            if body != "erasure: keep" and not re.match(r"erasure: keep[ \t]", body):
+                continue
+            line = self.line_of(tok.start)
+            anywhere.add(line)
+            if not self.src[self.line_starts[line - 1]:tok.start].strip():
+                alone.add(line)
+        return anywhere, alone
+
+    def is_kept(self, line: int) -> bool:
+        """True when a site starting on `line` carries the opt-out marker: on
+        that line, or alone on the line immediately above."""
+        return line in self.keep_lines or (line - 1) in self.keep_above
 
     # -- basic helpers -----------------------------------------------------
 
@@ -832,6 +868,8 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False):
     cands: list[Candidate] = []
     notes: list[tuple[int, str]] = []
     first_new = 0
+    first_note = 0
+    s.kept = 0
     for k, tok in enumerate(t):
         if tok.kind != IDENT or not s.is_p(k + 1, "("):
             continue
@@ -839,7 +877,7 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False):
         if key is None or s.forbidden(k):
             continue
         o = k + 1
-        is_list = t5 and (key in apis.lists or key in T5_BUILTIN)
+        is_list = t5 and (key in apis.lists or key in T5_BUILTIN) and _t5_sugar_resolves(s, k, key, qual)
         if key in apis.slot or key in apis.builder or is_list:
             if "::" not in key and not key.startswith(".") and _excluded(s, apis, key, qual, tok.start):
                 continue
@@ -854,6 +892,16 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False):
             _t3(s, k, o, qual, cands, notes)
         if is_list and len(cands) == before_t2:
             _t5(s, key, o, cands)
+        if len(cands) > first_new or len(notes) > first_note:
+            # A `// erasure: keep` site is exempt from every rule: neither
+            # listed, rewritten, nor noted; only counted.
+            fresh = cands[first_new:]
+            kept = [c for c in fresh if s.is_kept(s.line_of(c.span[0]))]
+            if kept:
+                s.kept += len(kept)
+                cands[first_new:] = [c for c in fresh if c not in kept]
+            notes[first_note:] = [n for n in notes[first_note:] if not s.is_kept(n[0])]
+            first_note = len(notes)
         if len(cands) > first_new:
             _drop_comment_losers(s, cands, first_new, notes)
             first_new = len(cands)
@@ -1121,6 +1169,26 @@ def _t3(s, k, o, qual, cands, notes):
 # Callees whose `vec![..]` argument is always a list of views, whatever the
 # name list says (T5 also uses every [list] entry of `erasing_apis.txt`).
 T5_BUILTIN = frozenset({"Column", "Row", "Stack", ".children"})
+_T5_SUGAR = frozenset({"Column", "Row", "Stack"})
+
+
+def _t5_sugar_resolves(s: Source, k: int, key: str, qual: list) -> bool:
+    """Whether the `Column`/`Row`/`Stack` call at `k` is frust's own sugar.
+
+    Same conditions T2 applies: a frust-rooted qualifier, or a non-aliased
+    frust import (or a glob import); a local type or foreign path declines.
+    `.children` is a method key and always passes."""
+    if key not in _T5_SUGAR:
+        return True
+    if key in s.local_types:
+        return False
+    if qual:
+        return _frust_root(qual[0])
+    pos = s.t[k].start
+    hit = s.decl_for(key, pos)
+    if hit:
+        return not hit[1].aliased and _frust_root(hit[1].path[0])
+    return s.glob_covers(pos)
 # Keywords that can never start a callee path (path roots like `crate` can).
 _T5_NON_PATH = frozenset(KEYWORDS - {"crate", "super", "self", "Self"})
 
@@ -1335,6 +1403,7 @@ class Result:
     after: int
     candidates: list
     notes: list
+    kept: int = 0
 
 
 def rewrite(src: str, apis: Apis, t5: bool = False) -> Result:
@@ -1344,6 +1413,7 @@ def rewrite(src: str, apis: Apis, t5: bool = False) -> Result:
     original = Source(src)
     before = original.erasure_count()
     cands0, notes0 = find_candidates(original, apis, t5)
+    kept0 = original.kept
     text = src
     for _ in range(MAX_PASSES):
         s = Source(text)
@@ -1374,7 +1444,7 @@ def rewrite(src: str, apis: Apis, t5: bool = False) -> Result:
         if drops:
             text = apply_edits(text, import_edits(final, [], drops))
     after = Source(text).erasure_count() if text != src else before
-    return Result(text, before, after, cands0, sorted(set(notes0)))
+    return Result(text, before, after, cands0, sorted(set(notes0)), kept0)
 
 
 def _norm(p):
@@ -1428,7 +1498,9 @@ def main(argv=None) -> int:
     ap.add_argument("--t5", action="store_true",
                     help="opt in to rule T5: drop any() from vec![..] list arguments whose "
                          "elements all share one head (callee path + trailing method names); "
-                         "a same-head list that is not type-homogeneous then fails to compile")
+                         "T5 judges heads, not types: for a same-head list whose elements differ "
+                         "in type keep any() and mark the vec![ line with `// erasure: keep <why>` "
+                         "(or bind the vec to a local, or use the fluent builder)")
     ap.add_argument("--exclude", action="append", default=[], metavar="PATH",
                     help="skip PATH, a file or directory, by whole path components (repeatable)")
     ap.add_argument("--apis", default=DEFAULT_APIS, help="name list (default: erasing_apis.txt beside this script)")
@@ -1443,6 +1515,7 @@ def main(argv=None) -> int:
     refused = 0
     total_before = total_after = 0
     total_t5 = 0
+    total_kept = 0
     for path in iter_rs(args.paths):
         if excludes and _path_excluded(path, excludes):
             continue
@@ -1481,6 +1554,9 @@ def main(argv=None) -> int:
             shadow += len(notes)
         if args.stats:
             print(f"{path}: erasure calls before={res.before} after={res.after}")
+            total_kept += res.kept
+            if res.kept:
+                print(f"{path}: kept={res.kept}")
             if args.t5:
                 n_t5 = sum(1 for c in res.candidates if c.rule == "T5")
                 total_t5 += n_t5
@@ -1488,6 +1564,7 @@ def main(argv=None) -> int:
                     print(f"{path}: T5 candidates={n_t5}")
     if args.stats:
         print(f"total: erasure calls before={total_before} after={total_after}")
+        print(f"total: kept={total_kept}")
         if args.t5:
             print(f"total: T5 candidates={total_t5}")
     if check:

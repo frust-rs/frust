@@ -35,9 +35,11 @@
 #           tool never rewrites them. With it, a `vec![any(E1), .., any(En)]`
 #           whole argument loses every erasure when all E_i share one head
 #           (callee path + trailing method names); `Column`/`Row`/`Stack` and
-#           `.children` are list callees even when absent here. A same-head
-#           list can still be mixed-type (a generic callee), which then fails
-#           to compile, and the apply recipe restores `any()` on that list.
+#           `.children` are list callees even when absent here. T5 judges
+#           heads, not types: a same-head list can still be mixed-type (a
+#           generic callee); keep `any()` there and mark the `vec![` line
+#           with `// erasure: keep <why>` (or bind the vec to a local, or use
+#           the fluent builder).
 #
 # Derived from the merged signatures of crates/frust-widgets, crates/frust,
 # crates/frust-core and plugins/{material,glyph,cupertino,beui,shadcn}.
