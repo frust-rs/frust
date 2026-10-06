@@ -1215,23 +1215,23 @@ pub fn DockedToolbar<State: 'static>() -> ToolbarView<State> {
 impl<State: 'static> ToolbarView<State> {
     /// Attach leading slot children, in reading order (hugs the leading edge).
     /// Tint/styling is each supplied view's own responsibility.
-    pub fn leading(mut self, leading: Vec<AnyView<State>>) -> Self {
-        self.leading = leading;
+    pub fn leading(mut self, leading: impl IntoIterator<Item = impl View<State>>) -> Self {
+        self.leading = leading.into_iter().map(AnyView::new).collect();
         self
     }
 
     /// Attach center slot children, in reading order — upstream's inline
     /// `M3EToolbarWidget` items, which never overflow. They lead the typed
     /// [`Self::actions`] within the same center group.
-    pub fn center(mut self, center: Vec<AnyView<State>>) -> Self {
-        self.center = center;
+    pub fn center(mut self, center: impl IntoIterator<Item = impl View<State>>) -> Self {
+        self.center = center.into_iter().map(AnyView::new).collect();
         self
     }
 
     /// Attach trailing slot children, in reading order (hugs the trailing
     /// edge, or the fab slot if also attached).
-    pub fn trailing(mut self, trailing: Vec<AnyView<State>>) -> Self {
-        self.trailing = trailing;
+    pub fn trailing(mut self, trailing: impl IntoIterator<Item = impl View<State>>) -> Self {
+        self.trailing = trailing.into_iter().map(AnyView::new).collect();
         self
     }
 
@@ -1239,8 +1239,8 @@ impl<State: 'static> ToolbarView<State> {
     /// On a **floating** bar this takes the adjacent morph layout described in
     /// the [module docs](self); on a **docked** one it simply trails the row,
     /// as it always has (upstream has no docked FAB at all).
-    pub fn fab(mut self, fab: AnyView<State>) -> Self {
-        self.fab = Some(fab);
+    pub fn fab(mut self, fab: impl View<State>) -> Self {
+        self.fab = Some(AnyView::new(fab));
         self
     }
 

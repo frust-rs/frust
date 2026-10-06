@@ -197,16 +197,16 @@ impl<State: 'static> SearchView<State> {
 
     /// Replace the header's default back affordance
     /// (`M3ESearchAnchor.viewLeading`). The slot is never empty.
-    pub fn leading(mut self, view: AnyView<State>) -> Self {
-        self.leading = Some(view);
+    pub fn leading(mut self, view: impl View<State>) -> Self {
+        self.leading = Some(AnyView::new(view));
         self
     }
 
     /// Append a trailing header action. Setting any replaces the built-in clear
     /// button — `M3ESearchAnchor.viewTrailing`'s own
     /// `widget.viewTrailing ?? [clear]` precedence.
-    pub fn trailing(mut self, view: AnyView<State>) -> Self {
-        self.trailing.push(view);
+    pub fn trailing(mut self, view: impl View<State>) -> Self {
+        self.trailing.push(AnyView::new(view));
         self
     }
 

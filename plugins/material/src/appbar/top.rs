@@ -102,7 +102,7 @@ pub fn AppBar<State: 'static>(title: impl Into<String>) -> AppBarView<State> {
 ///         .hint("Search recipes")
 ///         .on_tap(|s: &mut App| s.search_open = true),
 /// )
-/// .actions(vec![any(icon_button(icons::MORE_VERT, |_: &mut App| {}))])
+/// .actions([icon_button(icons::MORE_VERT, |_: &mut App| {})])
 /// ```
 ///
 /// Upstream additionally overrides the embedded bar's fill to
@@ -128,16 +128,16 @@ impl<State: 'static> AppBarView<State> {
     /// Attach a leading slot (typically a nav/back icon button), erased as an
     /// [`AnyView`]. Tint is the supplied view's own responsibility — see
     /// [`super`]'s slot contract.
-    pub fn leading(mut self, leading: AnyView<State>) -> Self {
-        self.leading = Some(leading);
+    pub fn leading(mut self, leading: impl View<State>) -> Self {
+        self.leading = Some(AnyView::new(leading));
         self
     }
 
     /// Attach trailing action slots, in reading order (the last one sits
     /// closest to the trailing edge). Tint is each supplied view's own
     /// responsibility.
-    pub fn actions(mut self, actions: Vec<AnyView<State>>) -> Self {
-        self.actions = actions;
+    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
+        self.actions = actions.into_iter().map(AnyView::new).collect();
         self
     }
 
@@ -145,8 +145,8 @@ impl<State: 'static> AppBarView<State> {
     /// slot, which takes precedence over its `titleText`. The view is placed
     /// but never styled, and (unlike a string title) labels itself for
     /// accessibility.
-    pub fn title_view(mut self, title: AnyView<State>) -> Self {
-        self.title = TitleSlot::View(title);
+    pub fn title_view(mut self, title: impl View<State>) -> Self {
+        self.title = TitleSlot::View(AnyView::new(title));
         self
     }
 

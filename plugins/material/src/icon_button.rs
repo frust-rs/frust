@@ -765,11 +765,11 @@ pub struct IconButtonView<State: 'static> {
 /// painting `icon`, running `on_press` on release inside its bounds — the
 /// reference's default `M3EIconButton`.
 pub fn icon_button<State: 'static, F: Fn(&mut State) + 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     on_press: F,
 ) -> IconButtonView<State> {
     IconButtonView {
-        icon,
+        icon: AnyView::new(icon),
         selected_icon: None,
         variant: IconButtonVariant::default(),
         size: IconButtonSize::default(),
@@ -789,7 +789,7 @@ pub fn icon_button<State: 'static, F: Fn(&mut State) + 'static>(
 /// vocabulary (`Button`, `AssistChip`, …).
 #[allow(non_snake_case)]
 pub fn IconButton<State: 'static, F: Fn(&mut State) + 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     on_press: F,
 ) -> IconButtonView<State> {
     icon_button(icon, on_press)
@@ -798,7 +798,7 @@ pub fn IconButton<State: 'static, F: Fn(&mut State) + 'static>(
 /// Create a filled icon button — [`icon_button`] with
 /// [`IconButtonVariant::Filled`].
 pub fn filled_icon_button<State: 'static, F: Fn(&mut State) + 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     on_press: F,
 ) -> IconButtonView<State> {
     icon_button(icon, on_press).variant(IconButtonVariant::Filled)
@@ -807,7 +807,7 @@ pub fn filled_icon_button<State: 'static, F: Fn(&mut State) + 'static>(
 /// Create a tonal icon button — [`icon_button`] with
 /// [`IconButtonVariant::Tonal`].
 pub fn tonal_icon_button<State: 'static, F: Fn(&mut State) + 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     on_press: F,
 ) -> IconButtonView<State> {
     icon_button(icon, on_press).variant(IconButtonVariant::Tonal)
@@ -816,7 +816,7 @@ pub fn tonal_icon_button<State: 'static, F: Fn(&mut State) + 'static>(
 /// Create an outlined icon button — [`icon_button`] with
 /// [`IconButtonVariant::Outlined`].
 pub fn outlined_icon_button<State: 'static, F: Fn(&mut State) + 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     on_press: F,
 ) -> IconButtonView<State> {
     icon_button(icon, on_press).variant(IconButtonVariant::Outlined)
@@ -857,8 +857,8 @@ impl<State: 'static> IconButtonView<State> {
     /// The icon painted while selected, falling back to the base `icon` when
     /// unset — also makes this a toggle icon button on its own even without
     /// [`Self::selected`] (the [module docs](self)' Toggle section).
-    pub fn selected_icon(mut self, icon: AnyView<State>) -> Self {
-        self.selected_icon = Some(icon);
+    pub fn selected_icon(mut self, icon: impl View<State>) -> Self {
+        self.selected_icon = Some(AnyView::new(icon));
         self
     }
 

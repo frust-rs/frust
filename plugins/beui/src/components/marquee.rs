@@ -147,10 +147,10 @@ impl MarqueeDirection {
 /// # Example
 ///
 /// ```
-/// use frust::{any, text};
+/// use frust::text;
 /// use frust_beui::components::marquee::{MarqueeDirection, marquee};
 ///
-/// let ticker = marquee::<()>(vec![any(text("one")), any(text("two"))])
+/// let ticker = marquee::<()>(vec![text("one"), text("two")])
 ///     .direction(MarqueeDirection::Right)
 ///     .pause_on_hover(true);
 /// ```
@@ -165,9 +165,11 @@ pub struct MarqueeView<State: 'static> {
 
 /// Scroll `children` in an endless loop, travelling
 /// [`left`](MarqueeDirection::Left) at [`DEFAULT_SPEED`].
-pub fn marquee<State: 'static>(children: Vec<AnyView<State>>) -> MarqueeView<State> {
+pub fn marquee<State: 'static>(
+    children: impl IntoIterator<Item = impl View<State>>,
+) -> MarqueeView<State> {
     MarqueeView {
-        children,
+        children: children.into_iter().map(AnyView::new).collect(),
         direction: MarqueeDirection::default(),
         speed: DEFAULT_SPEED,
         gap: DEFAULT_GAP,
@@ -918,7 +920,7 @@ mod tests {
     /// An empty marquee is inert rather than a division by zero.
     #[test]
     fn an_empty_marquee_is_inert() {
-        let mut widget = laid_out(&marquee::<()>(Vec::new()));
+        let mut widget = laid_out(&marquee::<()>(Vec::<AnyView<()>>::new()));
         assert_eq!(widget.track_length(), 0.0);
         let (_, needs_frame, _) = painted(&mut widget, 0, None);
         assert!(!needs_frame);

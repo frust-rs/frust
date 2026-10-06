@@ -599,11 +599,11 @@ pub struct DrawerDestination<State: 'static> {
 /// Tint is the supplied icon view's own responsibility, the same stance
 /// [`crate::navbar`]'s and [`crate::navigation_rail`]'s icon slots take.
 pub fn drawer_destination<State: 'static>(
-    icon: AnyView<State>,
+    icon: impl View<State>,
     label: impl Into<String>,
 ) -> DrawerDestination<State> {
     DrawerDestination {
-        icon,
+        icon: AnyView::new(icon),
         selected_icon: None,
         label: label.into(),
         badge_label: None,
@@ -615,8 +615,8 @@ pub fn drawer_destination<State: 'static>(
 impl<State: 'static> DrawerDestination<State> {
     /// A distinct icon to show while this destination is selected (falls back
     /// to the base icon).
-    pub fn selected_icon(mut self, icon: AnyView<State>) -> Self {
-        self.selected_icon = Some(icon);
+    pub fn selected_icon(mut self, icon: impl View<State>) -> Self {
+        self.selected_icon = Some(AnyView::new(icon));
         self
     }
 

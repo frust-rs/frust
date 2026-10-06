@@ -127,15 +127,15 @@ pub fn SliverAppBar<State: 'static>(title: impl Into<String>) -> SliverAppBarVie
 impl<State: 'static> SliverAppBarView<State> {
     /// Attach a leading slot (typically a nav/back icon button). It stays in
     /// the top row at every collapse value.
-    pub fn leading(mut self, leading: AnyView<State>) -> Self {
-        self.leading = Some(leading);
+    pub fn leading(mut self, leading: impl View<State>) -> Self {
+        self.leading = Some(AnyView::new(leading));
         self
     }
 
     /// Attach trailing action slots, in reading order. They stay in the top row
     /// at every collapse value.
-    pub fn actions(mut self, actions: Vec<AnyView<State>>) -> Self {
-        self.actions = actions;
+    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
+        self.actions = actions.into_iter().map(AnyView::new).collect();
         self
     }
 
@@ -143,8 +143,8 @@ impl<State: 'static> SliverAppBarView<State> {
     /// slot. The view is placed (and moved between the expanded and collapsed
     /// anchors) but never styled, so it carries no type-scale interpolation of
     /// its own.
-    pub fn title_view(mut self, title: AnyView<State>) -> Self {
-        self.title = TitleSlot::View(title);
+    pub fn title_view(mut self, title: impl View<State>) -> Self {
+        self.title = TitleSlot::View(AnyView::new(title));
         self
     }
 

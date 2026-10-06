@@ -259,7 +259,7 @@ type OnPinChange<State> = Rc<dyn Fn(&mut State, bool)>;
 /// # Example
 ///
 /// ```
-/// use frust::{any, text};
+/// use frust::text;
 /// use frust_beui::agents::message_scroller::message_scroller;
 ///
 /// #[derive(Default)]
@@ -267,7 +267,7 @@ type OnPinChange<State> = Rc<dyn Fn(&mut State, bool)>;
 ///     following: bool,
 /// }
 ///
-/// let transcript = message_scroller(vec![any(text("hello")), any(text("hi"))])
+/// let transcript = message_scroller(vec![text("hello"), text("hi")])
 ///     .on_pin_change(|state: &mut Chat, pinned| state.following = pinned);
 /// ```
 pub struct MessageScrollerView<State: 'static> {
@@ -280,9 +280,11 @@ pub struct MessageScrollerView<State: 'static> {
 }
 
 /// A pin-to-the-live-edge transcript viewport over `items`, oldest first.
-pub fn message_scroller<State: 'static>(items: Vec<AnyView<State>>) -> MessageScrollerView<State> {
+pub fn message_scroller<State: 'static>(
+    items: impl IntoIterator<Item = impl View<State>>,
+) -> MessageScrollerView<State> {
     MessageScrollerView {
-        items,
+        items: items.into_iter().map(AnyView::new).collect(),
         threshold: MESSAGE_SCROLLER_FOLLOW_THRESHOLD,
         gap: MESSAGE_SCROLLER_GAP,
         jump_label: MESSAGE_SCROLLER_JUMP_LABEL.to_owned(),
@@ -1680,9 +1682,7 @@ mod tests {
     -> Probe<MessageScrollerView<()>, impl FnMut(&mut ()) -> MessageScrollerView<()>> {
         let logic = |_: &mut ()| {
             message_scroller::<()>(
-                (0..20)
-                    .map(|_| any(frust::SizedBox::<()>(Some(200.0), Some(40.0))))
-                    .collect(),
+                (0..20).map(|_| any(frust::SizedBox::<()>(Some(200.0), Some(40.0)))),
             )
         };
         let mut probe = Probe::new(logic, BOX, crate::theme());

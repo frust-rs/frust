@@ -70,15 +70,15 @@ pub fn BottomAppBar<State: 'static>() -> BottomAppBarView<State> {
 impl<State: 'static> BottomAppBarView<State> {
     /// Attach the action slots, in reading order from the leading edge. Tint is
     /// each supplied view's own responsibility — see [`super`]'s slot contract.
-    pub fn actions(mut self, actions: Vec<AnyView<State>>) -> Self {
-        self.actions = actions;
+    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
+        self.actions = actions.into_iter().map(AnyView::new).collect();
         self
     }
 
     /// Attach the prominent/FAB slot at the trailing edge
     /// (`floatingActionButton`).
-    pub fn fab(mut self, fab: AnyView<State>) -> Self {
-        self.fab = Some(fab);
+    pub fn fab(mut self, fab: impl View<State>) -> Self {
+        self.fab = Some(AnyView::new(fab));
         self
     }
 
