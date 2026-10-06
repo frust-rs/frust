@@ -157,7 +157,7 @@ with `frust create my_app --frust-path <checkout>`.
 
 ```rust
 // crates/frust/src/lib.rs (doctest)
-use frust::{Component, View, any, text};
+use frust::{Component, View, text};
 
 struct Counter;
 
@@ -169,7 +169,7 @@ impl Component for Counter {
     }
 
     fn build(&self, state: &mut i32) -> impl View<i32> {
-        any(text(format!("count: {state}")).size(32.0))
+        text(format!("count: {state}")).size(32.0)
     }
 }
 
