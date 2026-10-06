@@ -46,13 +46,38 @@
 //! taken on the arming `Down` — the only phase the root mirrors a capture on —
 //! keeps every `Move` and the final `Up`/`Cancel` coming here wherever the
 //! pointer goes; each `Move` is lifted into window space and reported with
-//! [`DragCoordinator::update_pointer`]. An `Up` calls
-//! [`DragCoordinator::drop`] and a `Cancel` [`DragCoordinator::cancel`]; both
-//! end in [`DraggableWidget`]'s single teardown (`on_session_end`), and the
-//! root releases the capture on that same physical `Up`/`Cancel`. A session
-//! ended from elsewhere (cancelled, or superseded by an OS file drag) is noticed
-//! on the next event or rebuild and torn down the same way, the rest of the
-//! gesture swallowed.
+//! [`DragCoordinator::update_pointer`], which also resolves the drop target
+//! under it (see the [module docs](super#target-resolution)). An `Up` reports
+//! the release point the same way and calls [`DragCoordinator::drop`] — a
+//! release outside every target is therefore a cancel — and a `Cancel` calls
+//! [`DragCoordinator::cancel`]; both end in [`DraggableWidget`]'s single
+//! teardown (`on_session_end`), and the root releases the capture on that same
+//! physical `Up`/`Cancel`. A session ended from elsewhere (cancelled, or
+//! superseded by an OS file drag) is noticed on the next event or rebuild and
+//! torn down the same way, the rest of the gesture swallowed.
+//!
+//! # Escape
+//!
+//! `Escape` ([`NamedKey::Escape`]) while this source drags cancels the
+//! session ([`DragCoordinator::cancel`]) and runs the same teardown; the
+//! pointer is still down, so the rest of the gesture — its `Move`s and its
+//! `Up` — is swallowed, never reaching the child as a stray release.
+//!
+//! Key events are focus-routed, never routed to a pointer captor, so the source
+//! holds the keyboard focus for the length of each press: the arming `Down`
+//! requests focus ([`EventCtx::request_focus`]) unless the child took it on
+//! that same `Down` (a field inside the source keeps its own focus, and Escape
+//! still passes through this wrapper on its way down the focus chain). A `Down`
+//! is the only phase on which the root honours a focus claim — a drag begins on
+//! a `Move` or a housekeeping broadcast, too late to take it then. Whatever
+//! held focus elsewhere before the press is not displaced by this: a `Down`
+//! that claims nothing blurs the tree anyway. The claim is released
+//! ([`EventCtx::release_focus`]) when the press ends — by drop, cancel, Escape
+//! or a plain tap — restoring the unfocused state the press would otherwise
+//! have left. Escape ends the focus session outright; an `Up`/`Cancel`
+//! release clears the recorded focus path at once, but the root's own focus
+//! flag is reconciled only by its next `Down` (the root adjusts its focus
+//! bookkeeping on `Down` and keyboard passes, not on a release).
 //!
 //! While dragging, the enclosing scroll surface's live takeover veto (the one
 //! a pinch raises, see `crate::scroll`'s *Multi-contact veto*) is held raised,
@@ -90,6 +115,9 @@
 //!   [`ghost`](DraggableView::ghost) of its own.
 //! * Nested draggables are unsupported: both arm on the same `Down` and the
 //!   outer arm cancels the inner one.
+//! * Every press takes keyboard focus for its length (see *Escape*), so a
+//!   press on a source that never becomes a drag still moves focus there until
+//!   the release.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -97,8 +125,8 @@ use std::rc::Rc;
 use frust_core::event::PointerSource;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx, EventResult,
-    InputEvent, LayoutCtx, OverlayBand, OverlayInput, PaintCtx, PaintScene, PointerButton,
-    PointerEvent, PointerPhase, SemanticsCtx, TOUCH_SLOP, View, Widget, any,
+    InputEvent, Key, LayoutCtx, NamedKey, OverlayBand, OverlayInput, PaintCtx, PaintScene,
+    PointerButton, PointerEvent, PointerPhase, SemanticsCtx, TOUCH_SLOP, View, Widget, any,
 };
 use frust_theme::Theme;
 use kurbo::{Point, Size};
@@ -343,6 +371,9 @@ pub struct DraggableWidget<State: 'static, T: 'static> {
     /// The enclosing scroll surface's live takeover veto, captured on the
     /// arming `Down` and held raised while dragging.
     scroll_veto: Option<Rc<Cell<bool>>>,
+    /// Whether the current press requested keyboard focus for this source (so
+    /// `Escape` reaches it) and has not released it yet.
+    focus_claimed: bool,
 }
 
 impl<State: 'static, T: 'static> View<State> for DraggableView<State, T> {
@@ -375,6 +406,7 @@ impl<State: 'static, T: 'static> View<State> for DraggableView<State, T> {
             },
             window_origin: Point::ZERO,
             scroll_veto: None,
+            focus_claimed: false,
         }
     }
 
@@ -418,6 +450,8 @@ impl<State: 'static, T: 'static> View<State> for DraggableView<State, T> {
         }
         element.gesture = Gesture::Idle;
         element.source = None;
+        // The pod is going away, and its focus link with it.
+        element.focus_claimed = false;
         element.release_scroll_veto();
         element.ghost.live = false;
         element.ghost.pending = None;
@@ -524,8 +558,26 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
         ctx.capture_pointer();
         // Start the hold clock on the next paint.
         ctx.request_redraw();
-        self.child.borrow_mut().event_child(ctx, event);
+        let child_took_focus = {
+            let mut child = self.child.borrow_mut();
+            child.event_child(ctx, event);
+            child.holds_live_focus()
+        };
+        // Hold the keyboard focus for the press so `Escape` reaches this
+        // source — unless the child took it, in which case `Escape` passes
+        // through here anyway (see the module docs' *Escape*).
+        if !child_took_focus {
+            ctx.request_focus();
+            self.focus_claimed = true;
+        }
         EventResult::Handled
+    }
+
+    /// Release the keyboard focus the current press claimed, if it did.
+    fn release_focus_claim(&mut self, ctx: &mut EventCtx<'_>) {
+        if std::mem::take(&mut self.focus_claimed) {
+            ctx.release_focus();
+        }
     }
 
     /// Give a press up to the child: drop this source's arm and route the rest
@@ -588,15 +640,17 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
     }
 
     /// The local teardown every end of a session runs, whichever way it ended
-    /// (an `Up`'s drop, a `Cancel`, or a session ended elsewhere): the gesture
-    /// resets, the ghost stops registering at once and is unmounted by the next
-    /// rebuild, and the scroll veto drops. The coordinator call that ended the
-    /// session, if any, is the caller's.
+    /// (an `Up`'s drop, a `Cancel`, an `Escape`, or a session ended
+    /// elsewhere): the gesture resets, the ghost stops registering at once and
+    /// is unmounted by the next rebuild, the scroll veto drops, and the press's
+    /// focus claim is released. The coordinator call that ended the session,
+    /// if any, is the caller's.
     fn on_session_end(&mut self, ctx: &mut EventCtx<'_>) {
         self.gesture = Gesture::Idle;
         self.source = None;
         self.hold.cancel();
         self.release_scroll_veto();
+        self.release_focus_claim(ctx);
         if self.ghost.live || self.ghost.mounted.is_some() {
             self.ghost.live = false;
             frust_core::mark_pending_result_flush();
@@ -715,11 +769,25 @@ impl<State: 'static, T: 'static> DraggableWidget<State, T> {
             (PointerPhase::Move, Gesture::Ended) => EventResult::Handled,
             (PointerPhase::Up | PointerPhase::Cancel, Gesture::Declined) => {
                 self.gesture = Gesture::Idle;
+                self.release_focus_claim(ctx);
                 crate::authoring::route_event_single(&mut self.child.borrow_mut(), ctx, event)
             }
             // Hover moves, stray releases, and a declined press's moves.
             _ => crate::authoring::route_event_single(&mut self.child.borrow_mut(), ctx, event),
         }
+    }
+
+    /// `Escape` while this source drags: cancel the session and tear it down,
+    /// swallowing the rest of the still-pressed gesture.
+    fn escape(&mut self, ctx: &mut EventCtx<'_>) -> EventResult {
+        if self.owns_session() {
+            self.coordinator.cancel();
+        }
+        self.on_session_end(ctx);
+        // The pointer is still down: its `Move`s and `Up` are this gesture's
+        // and must not reach the child as a fresh one.
+        self.gesture = Gesture::Ended;
+        EventResult::Handled
     }
 
     /// A `Move` while this source drags: report it and move the ghost.
@@ -825,6 +893,12 @@ impl<State: 'static, T: 'static> Widget for DraggableWidget<State, T> {
         }
         if let InputEvent::Pointer(p) = event {
             return self.pointer(ctx, event, p);
+        }
+        if let InputEvent::Key(key) = event
+            && key.key == Key::Named(NamedKey::Escape)
+            && matches!(self.gesture, Gesture::Dragging)
+        {
+            return self.escape(ctx);
         }
         crate::authoring::route_event_single(&mut self.child.borrow_mut(), ctx, event)
     }
@@ -979,6 +1053,8 @@ mod tests {
         custom_ghost: bool,
         /// Host the source inside a tall `ScrollView`.
         in_scroll: bool,
+        /// The child requests keyboard focus on its own primary `Down`.
+        focusable_child: bool,
     }
 
     impl Default for Cfg {
@@ -988,6 +1064,7 @@ mod tests {
                 feedback: SourceFeedback::Dim,
                 custom_ghost: false,
                 in_scroll: false,
+                focusable_child: false,
             }
         }
     }
@@ -1001,16 +1078,19 @@ mod tests {
     }
 
     /// A button-like leaf: paints its rect, records every pointer event in
-    /// its own space, captures on a primary `Down` and counts an in-bounds
-    /// `Up` as a tap.
+    /// its own space (and every key it is routed), captures on a primary
+    /// `Down` — optionally taking focus with it — and counts an in-bounds `Up`
+    /// as a tap.
     struct Probe {
         size: Size,
         log: Log,
+        focusable: bool,
     }
 
     struct ProbeWidget {
         size: Size,
         log: Log,
+        focusable: bool,
     }
 
     impl View<App> for Probe {
@@ -1019,6 +1099,7 @@ mod tests {
             ProbeWidget {
                 size: self.size,
                 log: Rc::clone(&self.log),
+                focusable: self.focusable,
             }
         }
         fn rebuild(
@@ -1029,6 +1110,7 @@ mod tests {
         ) -> ChangeFlags {
             element.size = self.size;
             element.log = Rc::clone(&self.log);
+            element.focusable = self.focusable;
             ChangeFlags::NONE
         }
     }
@@ -1041,6 +1123,10 @@ mod tests {
             scene.fill_rect(ctx.origin(), ctx.size(), Color::BLACK);
         }
         fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if let InputEvent::Key(key) = event {
+                self.log.borrow_mut().push(format!("Key {:?}", key.key));
+                return EventResult::Handled;
+            }
             let InputEvent::Pointer(p) = event else {
                 return EventResult::Ignored;
             };
@@ -1048,7 +1134,12 @@ mod tests {
                 .borrow_mut()
                 .push(format!("{:?}@{},{}", p.phase, p.position.x, p.position.y));
             match p.phase {
-                PointerPhase::Down => ctx.capture_pointer(),
+                PointerPhase::Down => {
+                    ctx.capture_pointer();
+                    if self.focusable && presses(p) {
+                        ctx.request_focus();
+                    }
+                }
                 PointerPhase::Up => {
                     let inside =
                         Rect::from_origin_size(Point::ZERO, ctx.size()).contains(p.position);
@@ -1068,6 +1159,7 @@ mod tests {
             Probe {
                 size: CHILD,
                 log: Rc::clone(&state.log),
+                focusable: cfg.focusable_child,
             },
             state.coordinator.clone(),
             |state: &App| state.item,
@@ -1161,6 +1253,31 @@ mod tests {
 
         fn phase(&self) -> DragPhase {
             self.state.coordinator.phase()
+        }
+
+        fn key(&mut self, key: Key) {
+            self.root.event(
+                &mut self.state,
+                &InputEvent::Key(frust_core::KeyEvent {
+                    key,
+                    modifiers: frust_core::Modifiers::default(),
+                    repeat: false,
+                }),
+            );
+        }
+
+        fn escape(&mut self) {
+            self.key(Key::Named(NamedKey::Escape));
+        }
+
+        /// Register a drop target with window-space `bounds`, as a painted
+        /// target would.
+        fn target(&mut self, bounds: Rect) -> DragTargetId {
+            let drag = &self.state.coordinator;
+            let id = drag.new_target_id();
+            drag.register_target(id);
+            drag.set_target_bounds(id, bounds);
+            id
         }
 
         fn log(&self) -> Vec<String> {
@@ -1403,11 +1520,29 @@ mod tests {
     }
 
     #[test]
-    fn releasing_over_a_hovered_target_drops_on_it() {
+    fn releasing_over_a_target_drops_on_it() {
         let mut h = Harness::new(Cfg::default());
+        let target = h.target(Rect::new(70.0, 150.0, 170.0, 250.0));
         h.mouse_drag();
-        let target: DragTargetId = h.state.coordinator.new_target_id();
-        h.state.coordinator.set_hovered(Some(target));
+        assert_eq!(
+            h.state
+                .coordinator
+                .state()
+                .session()
+                .and_then(|s| s.hovered),
+            None,
+            "(60, 150) is outside the target"
+        );
+        h.mouse(PointerPhase::Move, 75.0, 155.0);
+        assert_eq!(
+            h.state
+                .coordinator
+                .state()
+                .session()
+                .and_then(|s| s.hovered),
+            Some(target),
+            "the move resolved the target under the pointer"
+        );
         h.mouse(PointerPhase::Up, 80.0, 160.0);
         match h.state.coordinator.state() {
             DragState::Dropping { session, target: t } => {
@@ -1419,15 +1554,145 @@ mod tests {
     }
 
     #[test]
-    fn releasing_over_nothing_cancels() {
+    fn releasing_outside_every_target_cancels() {
         let mut h = Harness::new(Cfg::default());
+        let target = h.target(Rect::new(70.0, 150.0, 170.0, 250.0));
         h.mouse_drag();
-        h.mouse(PointerPhase::Up, 80.0, 160.0);
+        h.mouse(PointerPhase::Move, 75.0, 155.0);
+        // Released just outside the target, off the hover it had.
+        h.mouse(PointerPhase::Up, 200.0, 160.0);
         assert_eq!(h.phase(), DragPhase::Idle);
+        let changes = h.changes.borrow();
+        let tail: Vec<_> = changes.iter().rev().take(4).rev().copied().collect();
+        assert_eq!(
+            tail,
+            vec![
+                DragStateChange::Leave { target },
+                DragStateChange::Move {
+                    pointer: Point::new(200.0, 160.0)
+                },
+                DragStateChange::Phase {
+                    previous: DragPhase::Dragging,
+                    next: DragPhase::Cancelled,
+                },
+                DragStateChange::Phase {
+                    previous: DragPhase::Cancelled,
+                    next: DragPhase::Idle,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn escape_cancels_the_drag_and_restores_focus() {
+        let mut h = Harness::new(Cfg::default());
+        assert!(
+            !h.root.is_focus_active(),
+            "nothing focused before the press"
+        );
+        let target = h.target(Rect::new(0.0, 0.0, 400.0, 600.0));
+        h.mouse_drag();
+        h.frame();
+        assert!(
+            h.root.is_focus_active(),
+            "the press holds focus for the source"
+        );
+        assert_eq!(
+            h.state
+                .coordinator
+                .state()
+                .session()
+                .and_then(|s| s.hovered),
+            Some(target)
+        );
+        h.escape();
+        assert_eq!(h.phase(), DragPhase::Idle, "Escape cancelled the session");
         assert!(h.changes.borrow().contains(&DragStateChange::Phase {
             previous: DragPhase::Dragging,
             next: DragPhase::Cancelled,
         }));
+        assert!(
+            h.changes
+                .borrow()
+                .contains(&DragStateChange::Leave { target }),
+            "the hovered target heard Leave, not a drop"
+        );
+        assert!(
+            !h.root.is_focus_active(),
+            "focus is back to what it was before the press"
+        );
+        let after = h.frame();
+        assert_eq!(rects(&after), vec![rest()], "the ghost closed");
+
+        // The rest of the still-pressed gesture is swallowed.
+        h.state.log.borrow_mut().clear();
+        h.mouse(PointerPhase::Move, 32.0, 122.0);
+        h.mouse(PointerPhase::Up, 32.0, 122.0);
+        assert!(h.log().is_empty(), "{:?}", h.log());
+        assert_eq!(h.state.taps, 0);
+        assert!(!h.root.is_pointer_captured());
+
+        // And the next press works normally.
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        assert_eq!(h.state.taps, 1);
+    }
+
+    #[test]
+    fn escape_cancels_through_a_child_that_holds_focus_and_leaves_it_focused() {
+        let mut h = Harness::new(Cfg {
+            focusable_child: true,
+            ..Cfg::default()
+        });
+        h.mouse_drag();
+        assert!(h.root.is_focus_active());
+        h.escape();
+        assert_eq!(h.phase(), DragPhase::Idle);
+        assert!(
+            !h.log().iter().any(|line| line.starts_with("Key")),
+            "the source consumed Escape: {:?}",
+            h.log()
+        );
+        h.mouse(PointerPhase::Up, 60.0, 150.0);
+        // The child's own focus was never the source's to release.
+        assert!(h.root.is_focus_active(), "the child is still focused");
+        h.key(Key::Character("a".into()));
+        assert_eq!(
+            h.log().last().map(String::as_str),
+            Some("Key Character(\"a\")"),
+            "keys still reach the focused child"
+        );
+    }
+
+    #[test]
+    fn escape_outside_a_drag_reaches_the_child() {
+        let mut h = Harness::new(Cfg {
+            focusable_child: true,
+            ..Cfg::default()
+        });
+        h.mouse(PointerPhase::Down, 30.0, 120.0);
+        h.mouse(PointerPhase::Up, 30.0, 120.0);
+        h.escape();
+        assert_eq!(
+            h.log().last().map(String::as_str),
+            Some("Key Named(Escape)")
+        );
+    }
+
+    #[test]
+    fn a_drop_releases_the_focus_path_the_press_claimed() {
+        let mut h = Harness::new(Cfg::default());
+        h.mouse_drag();
+        h.mouse(PointerPhase::Up, 60.0, 150.0);
+        assert_eq!(h.phase(), DragPhase::Idle);
+        // The focus path is gone: a key routes to nothing, and a later Escape
+        // (no session) is inert.
+        h.escape();
+        assert!(!h.log().iter().any(|line| line.starts_with("Key")));
+        // The next press elsewhere settles the root's own flag.
+        h.mouse(PointerPhase::Down, 300.0, 500.0);
+        h.mouse(PointerPhase::Up, 300.0, 500.0);
+        assert!(!h.root.is_focus_active());
     }
 
     #[test]
