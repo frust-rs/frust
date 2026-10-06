@@ -765,12 +765,13 @@ mod tests {
     /// The control is a text-free leaf, since it is the caller's own view.
     #[cfg(feature = "bundled-fonts")]
     fn slots(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            any(full_field(FieldOrientation::Vertical)),
-            any(field(leaf(120.0, 36.0))
-                .label("Password")
-                .error("Too short.")),
-        ])
+        frust::column()
+            .child(full_field(FieldOrientation::Vertical))
+            .child(
+                field(leaf(120.0, 36.0))
+                    .label("Password")
+                    .error("Too short."),
+            )
     }
 
     #[cfg(feature = "bundled-fonts")]

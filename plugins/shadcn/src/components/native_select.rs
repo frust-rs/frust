@@ -790,17 +790,16 @@ mod tests {
     /// One trigger showing a selected option and one showing its placeholder.
     #[cfg(feature = "bundled-fonts")]
     fn both_labels(_: &mut ()) -> frust::FlexView<()> {
-        frust::Column(vec![
-            any(native_select::<(), _>(
+        frust::column()
+            .child(native_select::<(), _>(
                 ["Light", "Dark"],
                 Some(1),
                 |_: &mut ()| {},
-            )),
-            any(
+            ))
+            .child(
                 native_select::<(), _>(["Light", "Dark"], None, |_: &mut ()| {})
                     .placeholder("Theme"),
-            ),
-        ])
+            )
     }
 
     #[cfg(feature = "bundled-fonts")]
