@@ -22,7 +22,7 @@ use std::cell::Cell;
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
     NavigatorController, Padding, PopResult, RwSignal, Set, SizedBox, Theme, any, button,
-    inflexible, text, use_context,
+    inflexible, row, text, use_context,
 };
 use frust_glyph::{
     PaletteItem, command_palette, glyph_dialog, glyph_sheet, show_command_palette,
@@ -156,18 +156,18 @@ fn open_dialog_button(
                 glyph_dialog()
                     .title("Revoke observer-token?")
                     .body("Any device using this token loses access immediately. This can't be undone.")
-                    .action(any(button("Cancel", {
+                    .action(button("Cancel", {
                         let cancel_nav = cancel_nav.clone();
                         move |_: &mut CatalogState| cancel_nav.pop()
                     })
                     .style(ButtonStyle::Ghost)
-                    .small()))
-                    .action(any(button("Revoke token", {
+                    .small())
+                    .action(button("Revoke token", {
                         let confirm_nav = confirm_nav.clone();
                         move |_: &mut CatalogState| confirm_nav.pop_with_result(PopResult::of(true))
                     })
                     .style(ButtonStyle::Danger)
-                    .small()))
+                    .small())
             },
             move |_: &mut CatalogState, result: PopResult| {
                 let revoked = result.take::<bool>().unwrap_or(false);
@@ -241,14 +241,12 @@ const SHEET_ROWS: [(&str, &str); 4] = [
 
 /// One pane-picker row: a small amber glyph marker + its label.
 fn sheet_row(glyph: &str, label: &str) -> FlexChild<CatalogState> {
-    inflexible(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(text(glyph.to_string()).size(13.0).color(sheet_glyph_ink())),
-            inflexible(SizedBox(Some(12.0), None)),
-            inflexible(text(label.to_string()).size(12.5)),
-        ],
-    ))
+    inflexible(
+        row()
+            .child(text(glyph.to_string()).size(13.0).color(sheet_glyph_ink()))
+            .child(SizedBox(Some(12.0), None))
+            .child(text(label.to_string()).size(12.5)),
+    )
 }
 
 /// The sheet's content: a heading, the four pane-picker rows, and a Close

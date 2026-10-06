@@ -53,8 +53,8 @@
 use std::cell::Cell;
 
 use frust::{
-    AnyView, Color, Column, EdgeInsets, Get, IconSource, Padding, Row, RwSignal, Set, SizedBox,
-    Theme, WithUntracked, any, text, use_context,
+    AnyView, Color, EdgeInsets, Get, IconSource, Padding, RwSignal, Set, SizedBox, Theme,
+    WithUntracked, any, column, row, text, use_context,
 };
 
 use crate::CatalogState;
@@ -74,10 +74,9 @@ fn accent() -> Color {
 
 /// A section heading: label + a little breathing room below it.
 fn heading(label: &str) -> AnyView<CatalogState> {
-    any(Column(vec![
-        any(text(label.to_string()).size(15.0).color(accent())),
-        any(SizedBox(Some(0.0), Some(8.0))),
-    ]))
+    any(column()
+        .child(text(label.to_string()).size(15.0).color(accent()))
+        .child(SizedBox(Some(0.0), Some(8.0))))
 }
 
 /// Vertical gap between demo blocks.
@@ -216,11 +215,10 @@ fn breadcrumb_demo() -> AnyView<CatalogState> {
         frust_glyph::crumb::<CatalogState>("navigation"),
     ];
     let caption = caption_sig.get();
-    any(Column(vec![
-        any(frust_glyph::breadcrumb(crumbs)),
-        gap(6.0),
-        any(text(caption).size(11.0)),
-    ]))
+    any(column()
+        .child(frust_glyph::breadcrumb(crumbs))
+        .child(gap(6.0))
+        .child(text(caption).size(11.0)))
 }
 
 /// The CHAR-item nav bar: box-drawing glyphs the bundled fonts actually cover
@@ -260,45 +258,47 @@ fn icon_nav_bar_demo() -> AnyView<CatalogState> {
 /// Three avatars: default size/accent, a larger custom accent, and a small
 /// override-everything variant.
 fn avatars_demo() -> AnyView<CatalogState> {
-    any(Row(vec![
-        any(frust_glyph::avatar("ed").size(28.0)),
-        any(SizedBox(Some(12.0), None)),
-        any(frust_glyph::avatar("mk").size(40.0)),
-        any(SizedBox(Some(12.0), None)),
-        any(frust_glyph::avatar("ai")
-            .size(52.0)
-            .accent(Color::from_rgb8(0x39, 0x49, 0xAB))),
-    ]))
+    any(row()
+        .child(frust_glyph::avatar("ed").size(28.0))
+        .child(SizedBox(Some(12.0), None))
+        .child(frust_glyph::avatar("mk").size(40.0))
+        .child(SizedBox(Some(12.0), None))
+        .child(
+            frust_glyph::avatar("ai")
+                .size(52.0)
+                .accent(Color::from_rgb8(0x39, 0x49, 0xAB)),
+        ))
 }
 
 /// See the page-fn contract in [`crate::pages`].
 pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
     any(Padding(
         EdgeInsets::all(16.0),
-        Column(vec![
-            heading("Tabs"),
-            tabs_demo(),
-            gap(20.0),
-            heading("Segmented Control"),
-            segmented_demo(),
-            gap(20.0),
-            heading("Breadcrumb"),
-            breadcrumb_demo(),
-            gap(20.0),
-            heading("Nav Bar — chars vs. icons"),
-            any(text(
-                "Box-drawing chars (bundled-font coverage) above; \
+        column()
+            .child(heading("Tabs"))
+            .child(tabs_demo())
+            .child(gap(20.0))
+            .child(heading("Segmented Control"))
+            .child(segmented_demo())
+            .child(gap(20.0))
+            .child(heading("Breadcrumb"))
+            .child(breadcrumb_demo())
+            .child(gap(20.0))
+            .child(heading("Nav Bar — chars vs. icons"))
+            .child(
+                text(
+                    "Box-drawing chars (bundled-font coverage) above; \
                      deterministic vector icons (no font-fallback dependency) below."
-                    .to_string(),
+                        .to_string(),
+                )
+                .size(11.0),
             )
-            .size(11.0)),
-            gap(8.0),
-            char_nav_bar_demo(),
-            gap(8.0),
-            icon_nav_bar_demo(),
-            gap(20.0),
-            heading("Avatars"),
-            avatars_demo(),
-        ]),
+            .child(gap(8.0))
+            .child(char_nav_bar_demo())
+            .child(gap(8.0))
+            .child(icon_nav_bar_demo())
+            .child(gap(20.0))
+            .child(heading("Avatars"))
+            .child(avatars_demo()),
     ))
 }

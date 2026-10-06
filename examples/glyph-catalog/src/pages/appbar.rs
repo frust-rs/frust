@@ -71,8 +71,8 @@ use frust::motion::switcher::pattern_switcher;
 use frust::{
     AnyView, Axis, ButtonStyle, Color, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get,
     GetUntracked, Image, ImageFit, ImageSource, NavigatorController, Padding, PopResult, RwSignal,
-    ScrollInfo, Set, SizedBox, Theme, View, any, button, checkbox, flexible, inflexible, safe_area,
-    scroll_view, spawn_local, text, use_context,
+    ScrollInfo, Set, SizedBox, Theme, View, any, button, checkbox, column, inflexible, row,
+    safe_area, scroll_view, spawn_local, text, use_context,
 };
 use frust_glyph::{
     BadgeVariant, BannerVariant, MenuEntry, TitleDirection, app_bar, banner_spec, glyph_list,
@@ -174,10 +174,7 @@ fn variation_frame(
     bar: AnyView<CatalogState>,
     body: AnyView<CatalogState>,
 ) -> AnyView<CatalogState> {
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![inflexible(bar), flexible(1, safe_area(body).top(false))],
-    ))
+    any(column().child(bar).flex(1, safe_area(body).top(false)))
 }
 
 /// Defines a `fn $name() -> RwSignal<$ty>` returning a screen-local signal
@@ -381,28 +378,20 @@ fn mark_cell(color: Color) -> AnyView<CatalogState> {
 fn brand_mark() -> AnyView<CatalogState> {
     let accent = amber();
     let faded = with_alpha(accent, 0.4);
-    any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(mark_cell(accent)),
-                    gap(2.0),
-                    inflexible(mark_cell(faded)),
-                ],
-            )),
-            gap(2.0),
-            inflexible(FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(mark_cell(faded)),
-                    gap(2.0),
-                    inflexible(mark_cell(accent)),
-                ],
-            )),
-        ],
-    ))
+    any(column()
+        .child(
+            row()
+                .child(mark_cell(accent))
+                .push(gap(2.0))
+                .child(mark_cell(faded)),
+        )
+        .push(gap(2.0))
+        .child(
+            row()
+                .child(mark_cell(faded))
+                .push(gap(2.0))
+                .child(mark_cell(accent)),
+        ))
 }
 
 /// 01 anatomy: a compact bar — brand-mark leading, a title + subtitle, one
@@ -455,17 +444,11 @@ const ELEVATED_THRESHOLD_PX: f64 = 4.0;
 /// `demo_heartbeat` is private, so a small duplicate here was preferred over
 /// editing that file). Shown under the large variant's big title.
 fn collapse_meta_row() -> AnyView<CatalogState> {
-    any(FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(any(
-                frust_glyph::badge("connected", BadgeVariant::Success).dot(true)
-            )),
-            gap(8.0),
-            inflexible(text("203.0.113.57:50051 · 42ms").size(11.0).color(muted())),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center))
+    any(row()
+        .child(frust_glyph::badge("connected", BadgeVariant::Success).dot(true))
+        .push(gap(8.0))
+        .child(text("203.0.113.57:50051 · 42ms").size(11.0).color(muted()))
+        .cross_axis(CrossAxisAlignment::Center))
 }
 
 /// A bounded list of filler rows — the scrollable content that drives the
@@ -573,23 +556,15 @@ const BACKNAV_TITLES: [&str; 2] = ["Sessions", "dev · session"];
 /// two-button demo swapping title and sliding a fake screen underneath.
 fn backnav_screen(page: usize) -> AnyView<CatalogState> {
     if page == 0 {
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(text("3 active sessions").size(12.5)),
-                gap(4.0),
-                inflexible(caption("tap \u{2039} Open session to push a detail screen")),
-            ],
-        ))
+        any(column()
+            .child(text("3 active sessions").size(12.5))
+            .push(gap(4.0))
+            .child(caption("tap \u{2039} Open session to push a detail screen")))
     } else {
-        any(FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(text("dev — 9 panes · 4 tabs · running").size(12.5)),
-                gap(4.0),
-                inflexible(caption("tap \u{2039} Close session to pop back")),
-            ],
-        ))
+        any(column()
+            .child(text("dev — 9 panes · 4 tabs · running").size(12.5))
+            .push(gap(4.0))
+            .child(caption("tap \u{2039} Close session to pop back")))
     }
 }
 
@@ -615,43 +590,35 @@ fn variation_backnav(nav: NavigatorController<CatalogState>) -> AnyView<CatalogS
 
     let screen = pattern_switcher(page, SharedAxis::X, backnav_screen(page)).reverse(back);
 
-    let buttons = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(
-                button("Open session \u{203a}", move |_: &mut CatalogState| {
-                    back_sig.set(false);
-                    page_sig.set(1);
-                })
-                .style(ButtonStyle::Secondary)
-                .small(),
-            ),
-            gap(8.0),
-            inflexible(
-                button("\u{2039} Close session", move |_: &mut CatalogState| {
-                    back_sig.set(true);
-                    page_sig.set(0);
-                })
-                .style(ButtonStyle::Ghost)
-                .small(),
-            ),
-        ],
-    );
+    let buttons = row()
+        .child(
+            button("Open session \u{203a}", move |_: &mut CatalogState| {
+                back_sig.set(false);
+                page_sig.set(1);
+            })
+            .style(ButtonStyle::Secondary)
+            .small(),
+        )
+        .push(gap(8.0))
+        .child(
+            button("\u{2039} Close session", move |_: &mut CatalogState| {
+                back_sig.set(true);
+                page_sig.set(0);
+            })
+            .style(ButtonStyle::Ghost)
+            .small(),
+        );
 
-    let body = any(scroll_view(any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(caption(
+    let body = any(scroll_view(column()
+            .child(caption(
                 "the title crossfades in the tapped direction; the screen below slides the same way",
-            )),
-            gap(6.0),
-            inflexible(screen),
-            gap(12.0),
-            inflexible(buttons),
-            gap(12.0),
-            inflexible(filler_rows()),
-        ],
-    ))));
+            ))
+            .push(gap(6.0))
+            .child(screen)
+            .push(gap(12.0))
+            .child(buttons)
+            .push(gap(12.0))
+            .child(filler_rows())));
 
     variation_frame(any(bar), body)
 }
@@ -730,10 +697,9 @@ fn variation_overflow(nav: NavigatorController<CatalogState>) -> AnyView<Catalog
     }
     top_children.push(gap(6.0));
 
-    let body = any(scroll_view(any(FlexView::new(
-        Axis::Vertical,
-        vec![block(top_children), inflexible(filler_rows())],
-    ))));
+    let body = any(scroll_view(
+        column().push(block(top_children)).child(filler_rows()),
+    ));
 
     variation_frame(any(bar), body)
 }
@@ -805,7 +771,7 @@ fn variation_selection(nav: NavigatorController<CatalogState>) -> AnyView<Catalo
     children.push(gap(12.0));
     children.push(inflexible(filler_rows()));
 
-    let body = any(scroll_view(any(FlexView::new(Axis::Vertical, children))));
+    let body = any(scroll_view(FlexView::new(Axis::Vertical, children)));
 
     variation_frame(any(bar), body)
 }
@@ -902,23 +868,21 @@ fn variation_banner(nav: NavigatorController<CatalogState>) -> AnyView<CatalogSt
         .leading(back_button(nav))
         .banner(banner);
 
-    let body = any(scroll_view(any(FlexView::new(
-        Axis::Vertical,
-        vec![
-            inflexible(caption(
+    let body = any(scroll_view(
+        column()
+            .child(caption(
                 "simulates a dropped connection: a countdown, then a success flash, then auto-hide",
-            )),
-            gap(6.0),
-            inflexible(
+            ))
+            .push(gap(6.0))
+            .child(
                 button("Simulate disconnect", |_: &mut CatalogState| {
                     start_disconnect_sequence();
                 })
                 .small(),
-            ),
-            gap(12.0),
-            inflexible(filler_rows()),
-        ],
-    ))));
+            )
+            .push(gap(12.0))
+            .child(filler_rows()),
+    ));
 
     variation_frame(any(bar), body)
 }
@@ -1034,20 +998,17 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
 
     any(Padding(
         EdgeInsets::all(16.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                demo_anatomy(),
-                gap(12.0),
-                inflexible(label("Variations")),
-                inflexible(caption(
-                    "each opens as a full-screen page with a real app bar — inset consumption, \
+        column()
+            .push(demo_anatomy())
+            .push(gap(12.0))
+            .child(label("Variations"))
+            .child(caption(
+                "each opens as a full-screen page with a real app bar — inset consumption, \
                      scroll collapse, and back all live",
-                )),
-                gap(6.0),
-                inflexible(any(glyph_list(items)
-                    .on_press(|state: &mut CatalogState, i| open_variation(state, i)))),
-            ],
-        ),
+            ))
+            .push(gap(6.0))
+            .child(
+                glyph_list(items).on_press(|state: &mut CatalogState, i| open_variation(state, i)),
+            ),
     ))
 }

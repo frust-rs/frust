@@ -38,9 +38,9 @@ use frust::authoring::{
 
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    AnyView, Axis, Brightness, Color, Component, FlexView, Get, GetUntracked, MotionScheme,
-    NavigatorController, RwSignal, ScrollInfo, Set, Stack, Theme, TransitionSpec, View, any,
-    button, flexible, icon, icons, inflexible, navigator, safe_area, scroll_view, set_app_theme,
+    AnyView, Brightness, Color, Component, Get, GetUntracked, MotionScheme, NavigatorController,
+    RwSignal, ScrollInfo, Set, Theme, TransitionSpec, View, any, button, column, flexible, icon,
+    icons, inflexible, navigator, safe_area, scroll_view, set_app_theme, stack,
 };
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
 
@@ -327,12 +327,9 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
 
     // Bottom/left/right edges only — the AppBar above already consumes the
     // top inset, so padding it again here would double-pad (module docs).
-    let body_column = safe_area(FlexView::new(Axis::Vertical, vec![tab_strip, body])).top(false);
+    let body_column = safe_area(column().push(tab_strip).push(body)).top(false);
 
-    let column = FlexView::new(
-        Axis::Vertical,
-        vec![inflexible(catalog_app_bar(state)), flexible(1, body_column)],
-    );
+    let column = column().child(catalog_app_bar(state)).flex(1, body_column);
 
     // Toast host overlays the whole page — a FIFO overlay mounted above
     // every screen. A bare `toast_host` anchors itself
@@ -346,11 +343,10 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
         .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .surface;
-    any(Stack(vec![
-        any(AppBackground(background_color)),
-        any(column),
-        any(frust_glyph::toast_host(pending)),
-    ]))
+    any(stack()
+        .child(AppBackground(background_color))
+        .child(column)
+        .child(frust_glyph::toast_host(pending)))
 }
 
 /// The root [`Component`]. This example's `frust::app!` call below installs
