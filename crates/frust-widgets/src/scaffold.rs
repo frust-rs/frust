@@ -94,36 +94,45 @@ pub fn scaffold<State: 'static, V: View<State>>(body: V) -> ScaffoldView<State> 
 
 impl<State: 'static> ScaffoldView<State> {
     /// Attach a top app bar. Self-sizes; see [R-B4-inset](self#r-b4-inset--a-scaffold-consumes-no-window-inset-itself).
-    pub fn app_bar(mut self, bar: AnyView<State>) -> Self {
-        self.app_bar = Some(bar);
+    pub fn app_bar<V: View<State>>(mut self, bar: V) -> Self {
+        self.app_bar = Some(any(bar));
         self
     }
 
     /// Conditionally attach a top app bar — `None` clears it. The common
     /// shape for chrome derived from route metadata that isn't always
-    /// present.
-    pub fn app_bar_opt(mut self, bar: Option<AnyView<State>>) -> Self {
-        self.app_bar = bar;
+    /// present. A bare `None` needs the slot's view type spelled out, e.g.
+    /// `.app_bar_opt(None::<AnyView<State>>)`.
+    ///
+    /// ```
+    /// use frust_widgets::{ScaffoldView, scaffold, text};
+    /// # fn demo(title: Option<&str>) -> ScaffoldView<()> {
+    /// scaffold(text("body")).app_bar_opt(title.map(text))
+    /// # }
+    /// # let _ = demo(Some("Inbox"));
+    /// ```
+    pub fn app_bar_opt<V: View<State>>(mut self, bar: Option<V>) -> Self {
+        self.app_bar = bar.map(any);
         self
     }
 
     /// Attach a bottom bar. Self-sizes for the bottom window inset the same
     /// way `app_bar` self-sizes for the top one — see the [module docs](self).
-    pub fn bottom_bar(mut self, bar: AnyView<State>) -> Self {
-        self.bottom_bar = Some(bar);
+    pub fn bottom_bar<V: View<State>>(mut self, bar: V) -> Self {
+        self.bottom_bar = Some(any(bar));
         self
     }
 
     /// Conditionally attach a bottom bar — `None` clears it. Mirrors
     /// [`ScaffoldView::app_bar_opt`].
-    pub fn bottom_bar_opt(mut self, bar: Option<AnyView<State>>) -> Self {
-        self.bottom_bar = bar;
+    pub fn bottom_bar_opt<V: View<State>>(mut self, bar: Option<V>) -> Self {
+        self.bottom_bar = bar.map(any);
         self
     }
 
     /// Attach a floating action button.
-    pub fn fab(mut self, fab: AnyView<State>) -> Self {
-        self.fab = Some(fab);
+    pub fn fab<V: View<State>>(mut self, fab: V) -> Self {
+        self.fab = Some(any(fab));
         self
     }
 

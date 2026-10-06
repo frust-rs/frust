@@ -600,8 +600,8 @@ impl<State: 'static> ListView<State> {
     /// Create a virtualized list of `item_count` rows, each `item_extent`
     /// logical pixels tall, whose row at `index` is produced by `builder`.
     ///
-    /// The builder returns an [`AnyView`] (rows may differ in concrete view
-    /// type); spell each row with [`frust_core::any`]. Panics if
+    /// The builder may return any [`View`]; it is erased here. Rows that differ
+    /// in concrete view type return [`frust_core::any`] per branch. Panics if
     /// `item_extent` is not positive (the uniform extent is the virtualization
     /// fast path; a zero/negative extent has no well-defined window).
     ///
@@ -616,10 +616,16 @@ impl<State: 'static> ListView<State> {
     /// a mid-list mutation.
     ///
     /// [module docs]: self
-    pub fn builder(
+    ///
+    /// ```
+    /// use frust_widgets::{ListView, text};
+    /// let list: ListView<()> = ListView::builder(100, 48.0, |i| text(format!("row {i}")));
+    /// # let _ = list;
+    /// ```
+    pub fn builder<V: View<State>>(
         item_count: usize,
         item_extent: f64,
-        builder: impl Fn(usize) -> AnyView<State> + 'static,
+        builder: impl Fn(usize) -> V + 'static,
     ) -> Self {
         assert!(
             item_extent > 0.0,
@@ -628,7 +634,7 @@ impl<State: 'static> ListView<State> {
         Self {
             item_count,
             item_extent,
-            builder: Rc::new(builder),
+            builder: Rc::new(move |index| AnyView::new(builder(index))),
             key_of: None,
             estimated_item_extent: None,
             on_near_start: None,
@@ -658,7 +664,7 @@ impl<State: 'static> ListView<State> {
     ///     rows.len(),
     ///     56.0,
     ///     move |i| ChildKey::new(rows[i].id),
-    ///     move |i| any::<AppState, _>(row_view(&rows[i])),
+    ///     move |i| row_view(&rows[i]),
     /// )
     /// ```
     ///
@@ -674,11 +680,11 @@ impl<State: 'static> ListView<State> {
     /// [module docs]' *Row identity* section.
     ///
     /// [module docs]: self
-    pub fn builder_keyed(
+    pub fn builder_keyed<V: View<State>>(
         item_count: usize,
         item_extent: f64,
         key_of: impl Fn(usize) -> ChildKey + 'static,
-        builder: impl Fn(usize) -> AnyView<State> + 'static,
+        builder: impl Fn(usize) -> V + 'static,
     ) -> Self {
         assert!(
             item_extent > 0.0,
@@ -687,7 +693,7 @@ impl<State: 'static> ListView<State> {
         Self {
             item_count,
             item_extent,
-            builder: Rc::new(builder),
+            builder: Rc::new(move |index| AnyView::new(builder(index))),
             key_of: Some(Rc::new(key_of)),
             estimated_item_extent: None,
             on_near_start: None,
@@ -1237,11 +1243,18 @@ impl<State: 'static> ListView<State> {
 }
 
 /// Create a virtualized [`ListView`] — the free-function spelling of
-/// [`ListView::builder`].
-pub fn list_view<State: 'static>(
+/// [`ListView::builder`]. `builder` may return any [`View`]; it is erased
+/// here.
+///
+/// ```
+/// use frust_widgets::{ListView, list_view, text};
+/// let list: ListView<()> = list_view(100, 48.0, |i| text(format!("row {i}")));
+/// # let _ = list;
+/// ```
+pub fn list_view<State: 'static, V: View<State>>(
     item_count: usize,
     item_extent: f64,
-    builder: impl Fn(usize) -> AnyView<State> + 'static,
+    builder: impl Fn(usize) -> V + 'static,
 ) -> ListView<State> {
     ListView::builder(item_count, item_extent, builder)
 }

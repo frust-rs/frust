@@ -258,35 +258,57 @@ pub fn row<State: 'static>() -> FlexView<State> {
 
 /// A horizontal flex (`Axis::Horizontal`) of inflexible children — the common
 /// sugar. Use [`FlexView::new`] with [`flexible`] children when some should expand.
+///
+/// `children` holds one view type; each item is erased here, so a homogeneous
+/// list needs no `any()`. A mixed-type list still erases per item
+/// (`vec![any(a), any(b)]`), and a bare empty list needs its item type spelled
+/// out (`Vec::<AnyView<State>>::new()`). The parameter stays a `Vec` so an
+/// un-annotated `.collect()` argument keeps inferring; for any other iterable,
+/// use [`row`] with `.children(..)`.
+///
+/// ```
+/// use frust_core::any;
+/// use frust_widgets::{FlexView, Row, text};
+/// # fn demo() -> (FlexView<()>, FlexView<()>) {
+/// let labels = Row(vec![text("a"), text("b"), text("c")]);
+/// let mixed = Row(vec![any(text("a")), any(Row(vec![text("b")]))]);
+/// # (labels, mixed)
+/// # }
+/// # let _ = demo();
+/// ```
 #[allow(non_snake_case)]
-pub fn Row<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
+pub fn Row<State: 'static, V: View<State>>(children: Vec<V>) -> FlexView<State> {
     FlexView::new(
         Axis::Horizontal,
-        children
-            .into_iter()
-            .map(|view| FlexChild {
-                view,
-                flex: 0,
-                key: None,
-            })
-            .collect(),
+        children.into_iter().map(inflexible).collect(),
     )
 }
 
 /// A vertical flex (`Axis::Vertical`) of inflexible children — the common sugar.
 /// Use [`FlexView::new`] with [`flexible`] children when some should expand.
+///
+/// `children` holds one view type; each item is erased here, so a homogeneous
+/// list needs no `any()`. A mixed-type list still erases per item
+/// (`vec![any(a), any(b)]`), and a bare empty list needs its item type spelled
+/// out (`Vec::<AnyView<State>>::new()`). The parameter stays a `Vec` so an
+/// un-annotated `.collect()` argument keeps inferring; for any other iterable,
+/// use [`column`] with `.children(..)`.
+///
+/// ```
+/// use frust_core::any;
+/// use frust_widgets::{FlexView, Column, text};
+/// # fn demo() -> (FlexView<()>, FlexView<()>) {
+/// let labels = Column(vec![text("a"), text("b"), text("c")]);
+/// let mixed = Column(vec![any(text("a")), any(Column(vec![text("b")]))]);
+/// # (labels, mixed)
+/// # }
+/// # let _ = demo();
+/// ```
 #[allow(non_snake_case)]
-pub fn Column<State: 'static>(children: Vec<AnyView<State>>) -> FlexView<State> {
+pub fn Column<State: 'static, V: View<State>>(children: Vec<V>) -> FlexView<State> {
     FlexView::new(
         Axis::Vertical,
-        children
-            .into_iter()
-            .map(|view| FlexChild {
-                view,
-                flex: 0,
-                key: None,
-            })
-            .collect(),
+        children.into_iter().map(inflexible).collect(),
     )
 }
 

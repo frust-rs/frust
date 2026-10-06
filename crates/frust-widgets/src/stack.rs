@@ -18,9 +18,28 @@ pub struct StackView<State: 'static> {
 }
 
 /// Overlay `children` in a z-order stack (first child at the bottom).
+///
+/// `children` holds one view type; each item is erased here, so a homogeneous
+/// list needs no `any()`. A mixed-type list still erases per item, and a bare
+/// empty list needs its item type spelled out. The parameter stays a `Vec` so an
+/// un-annotated `.collect()` argument keeps inferring; for any other iterable,
+/// use [`stack`] with `.children(..)`.
+///
+/// ```
+/// use frust_core::any;
+/// use frust_widgets::{Stack, StackView, text};
+/// # fn demo() -> (StackView<()>, StackView<()>) {
+/// let layers = Stack(vec![text("under"), text("over")]);
+/// let mixed = Stack(vec![any(text("under")), any(Stack(vec![text("over")]))]);
+/// # (layers, mixed)
+/// # }
+/// # let _ = demo();
+/// ```
 #[allow(non_snake_case)]
-pub fn Stack<State: 'static>(children: Vec<AnyView<State>>) -> StackView<State> {
-    StackView { children }
+pub fn Stack<State: 'static, V: View<State>>(children: Vec<V>) -> StackView<State> {
+    StackView {
+        children: children.into_iter().map(any).collect(),
+    }
 }
 
 /// An empty z-order stack, ready for fluent children: no `any()` needed.

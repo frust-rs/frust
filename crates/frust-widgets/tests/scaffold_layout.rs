@@ -22,7 +22,7 @@
 //! `rebuild_optional_slot`) actually reports.
 
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, InspectNode, LayoutCtx, PaintCtx, PaintScene,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, InspectNode, LayoutCtx, PaintCtx, PaintScene,
     RenderRoot, View, Widget, WindowEdgeInsets, WindowInsets, any,
 };
 use frust_widgets::{Alignment, ScaffoldView, scaffold};
@@ -476,7 +476,9 @@ fn app_bar_removed_on_rebuild_expands_the_body_to_full_height() {
         |_: &mut ()| -> ScaffoldView<()> {
             scaffold(body(0.0, 0.0)).app_bar_opt(Some(any(bar(56.0))))
         },
-        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar_opt(None) },
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).app_bar_opt(None::<AnyView<()>>)
+        },
         Size::new(300.0, 400.0),
         WindowInsets::default(),
     );
@@ -498,7 +500,9 @@ fn app_bar_removed_on_rebuild_expands_the_body_to_full_height() {
 #[test]
 fn app_bar_added_on_rebuild_shrinks_the_body_below_it() {
     let (before, after, flags) = two_pass(
-        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).app_bar_opt(None) },
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).app_bar_opt(None::<AnyView<()>>)
+        },
         |_: &mut ()| -> ScaffoldView<()> {
             scaffold(body(0.0, 0.0)).app_bar_opt(Some(any(bar(56.0))))
         },
@@ -525,7 +529,9 @@ fn bottom_bar_removed_on_rebuild_expands_the_body_to_full_height() {
         |_: &mut ()| -> ScaffoldView<()> {
             scaffold(body(0.0, 0.0)).bottom_bar_opt(Some(any(bar(48.0))))
         },
-        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).bottom_bar_opt(None) },
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).bottom_bar_opt(None::<AnyView<()>>)
+        },
         Size::new(300.0, 400.0),
         WindowInsets::default(),
     );
@@ -547,7 +553,9 @@ fn bottom_bar_removed_on_rebuild_expands_the_body_to_full_height() {
 #[test]
 fn bottom_bar_added_on_rebuild_shrinks_the_body_above_it() {
     let (before, after, flags) = two_pass(
-        |_: &mut ()| -> ScaffoldView<()> { scaffold(body(0.0, 0.0)).bottom_bar_opt(None) },
+        |_: &mut ()| -> ScaffoldView<()> {
+            scaffold(body(0.0, 0.0)).bottom_bar_opt(None::<AnyView<()>>)
+        },
         |_: &mut ()| -> ScaffoldView<()> {
             scaffold(body(0.0, 0.0)).bottom_bar_opt(Some(any(bar(48.0))))
         },

@@ -992,7 +992,6 @@ impl<PodState: 'static> OverlaySlot<PodState> {
 /// same view in while the surface ramps out, and hand `None` once it has.
 ///
 /// ```
-/// use frust_core::any;
 /// use frust_widgets::{OverlayPlacement, OverlaySide, overlay_portal, text};
 ///
 /// struct App {
@@ -1001,7 +1000,7 @@ impl<PodState: 'static> OverlaySlot<PodState> {
 ///
 /// fn tip(state: &mut App) -> impl frust_core::View<App> + use<> {
 ///     overlay_portal(text("save"))
-///         .overlay(state.hovering.then(|| any(text("Save the document"))))
+///         .overlay(state.hovering.then(|| text("Save the document")))
 ///         .placement(OverlayPlacement::on(OverlaySide::Top))
 /// }
 /// # let _ = tip;
@@ -1042,8 +1041,11 @@ impl<State: 'static> OverlayPortalView<State> {
     /// itself is, so the surface reads and writes app state exactly like the
     /// child does — it is a logical child of this call site that happens to be
     /// painted elsewhere.
-    pub fn overlay(mut self, overlay: Option<AnyView<State>>) -> Self {
-        self.overlay = overlay;
+    ///
+    /// A bare `None` needs the surface's view type spelled out, e.g.
+    /// `.overlay(None::<AnyView<State>>)`.
+    pub fn overlay<V: View<State>>(mut self, overlay: Option<V>) -> Self {
+        self.overlay = overlay.map(any);
         self
     }
 
