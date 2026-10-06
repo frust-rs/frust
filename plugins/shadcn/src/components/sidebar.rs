@@ -1097,8 +1097,7 @@ pub struct SidebarInsetView<State: 'static> {
 pub fn sidebar_inset<State: 'static, V: View<State>>(
     children: impl IntoIterator<Item = V>,
 ) -> SidebarInsetView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
-    let mut children = children;
+    let mut children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
     let child = if children.len() == 1 {
         children.remove(0)
     } else {

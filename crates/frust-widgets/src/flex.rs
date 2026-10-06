@@ -125,6 +125,13 @@ pub fn inflexible<State: 'static, V: View<State>>(view: V) -> FlexChild<State> {
 /// are all-or-nothing per list and must be unique within it (see
 /// [`ChildKey`]).
 ///
+/// **All-or-nothing rule**: once one child has a key, *all* children in that
+/// container must have keys — do not mix `.keyed(..)` with `.child(..)`/`.flex(..)`
+/// in the same container. A keyed list cannot hold a `.flex` spacer. Mixing keyed
+/// and unkeyed children debug-asserts on the first rebuild and falls back to
+/// positional matching (preserving layout and interaction but losing the state
+/// retention that keying adds).
+///
 /// Use it inside [`FlexView::new`] alongside (or instead of) [`inflexible`]:
 ///
 /// ```
@@ -186,7 +193,7 @@ impl<State: 'static> FlexView<State> {
     }
 
     /// Append an inflexible child tagged with a stable [`ChildKey`] (see
-    /// [`keyed`] for the reconciliation semantics).
+    /// [`keyed`] for the reconciliation semantics and the all-or-nothing rule).
     pub fn keyed<V: View<State>>(mut self, key: impl Into<ChildKey>, view: V) -> Self {
         self.children.push(keyed(key, view));
         self
