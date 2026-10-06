@@ -669,6 +669,41 @@ in-tree wrapper; the `inner: AnyView<State>` field (:106), and the `type Element
 
 ---
 
+### `keyed-list-all-or-nothing-debug-only` — a mixed keyed/unkeyed list is caught by a `debug_assert` only, and the erasure codemod skips some sites
+
+**Observed**: a `FlexView` / `column()` / `row()` child list must be all-keyed
+or all-unkeyed. Mixing `.keyed(..)` with `.child(..)` / `.flex(..)` is detected
+by a `debug_assert!` on rebuild only
+(crates/frust-widgets/src/authoring.rs:~557 documents the tripwire; like the
+`debug_assert`s noted at list_view.rs:~102 it is inert in release builds), so in a release build a mixed list silently falls back to
+positional reconciliation: keyed children lose identity across a reorder and
+are rebuilt in place rather than relocated, with no diagnostic. The same
+applies to a duplicate key set.
+
+**Applies to**: any `FlexView` child list built with a mix of keyed and unkeyed
+children, in release builds only. All-keyed and all-unkeyed lists are
+unaffected. The erasure codemod also has documented blind spots: it skips,
+with a note, a site where a local binding or fn shadows a builder name, and a
+mixed keyed list; and a closure parameter typed `AnyView` whose `any()` call
+the tool would drop is not rewritten safely, which the compiler catches as a
+type error rather than a silent change.
+
+**Why not fixed**: the rule is a documented contract (CODE_STANDARDS.md's
+"Keyed lists are all-or-nothing, and keys must be unique": a mixed or
+duplicate key set `debug_assert!`s and falls back to positional matching in
+release, never panicking live), chosen so a live app never panics on a list
+shape error. Turning it into a compile-time or always-on check needs a
+typestate on the builder or a release-mode diagnostic channel, neither of
+which is in scope. The codemod's skipped sites are reported (exit status 2) and
+fixed by hand, and its one silent-risk case is compiler-caught.
+
+**Evidence**: `docs/CODE_STANDARDS.md` (keyed-list rule),
+`crates/frust-widgets/src/authoring.rs` (`rebuild_children`'s `debug_assert`), and the Phase 3
+review round of the any-erasure plan (its keyed-equivalence and codemod
+findings).
+
+---
+
 ### `focus-navbar-item-truncation-unmarked` — a truncated navbar/tabbar item drops its focus link silently
 
 **Observed**: `frust_material::navbar`'s `NavigationBarView::rebuild` and
