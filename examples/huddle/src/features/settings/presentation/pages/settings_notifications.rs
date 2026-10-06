@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use frust::{
     AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView, Get, Padding, Row, Set,
-    SizedBox, any, component, flexible, inflexible, radio, scroll_view, text,
+    SizedBox, View, any, component, flexible, inflexible, radio, scroll_view, text,
 };
 use frust_material::{Switch, app_bar};
 
@@ -46,7 +46,7 @@ impl frust::Component for NotificationsScreen {
         NotificationsState { controller }
     }
 
-    fn build(&self, state: &mut NotificationsState) -> AnyView<NotificationsState> {
+    fn build(&self, state: &mut NotificationsState) -> impl View<NotificationsState> {
         // Tracked reads: a later `set` on any of these wakes the frame.
         let freq = state.controller.frequency.get();
         let sound = state.controller.sound.get();

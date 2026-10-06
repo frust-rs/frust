@@ -196,7 +196,7 @@ impl frust::Component for ToastOverlay {
         }
     }
 
-    fn build(&self, state: &mut ToastOverlayState) -> AnyView<ToastOverlayState> {
+    fn build(&self, state: &mut ToastOverlayState) -> impl View<ToastOverlayState> {
         let entries = state.controller.snapshot(); // tracked
 
         // Bottom-anchored stack of toast cards. An empty queue renders an empty

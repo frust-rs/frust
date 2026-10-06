@@ -41,10 +41,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::{
-    AnyView, Axis, BackHandler, Component, CrossAxisAlignment, DesignLanguage, FlexView,
+    Axis, BackHandler, Component, CrossAxisAlignment, DesignLanguage, FlexView,
     NavigatorController, PageTransition, Router, RouterDeepLinks, RwSignal, Stack, Theme,
-    TransitionSpec, any, attach_back_handler, flexible, inflexible, navigator, provide_context,
-    router_with_deep_links, use_context,
+    TransitionSpec, View, any, attach_back_handler, flexible, inflexible, navigator,
+    provide_context, router_with_deep_links, use_context,
 };
 
 use features::activity::data::repositories::StoreActivityRepository;
@@ -145,7 +145,7 @@ impl Component for HuddleApp {
         }
     }
 
-    fn build(&self, state: &mut HuddleState) -> AnyView<HuddleState> {
+    fn build(&self, state: &mut HuddleState) -> impl View<HuddleState> {
         // Consumes a new back press (pop if the stack can) and refreshes
         // `handles_back` from the current depth — see `BackHandler::track`'s
         // docs for the one-rebuild refresh lag. Drawer/sheet-first dismissal

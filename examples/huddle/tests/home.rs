@@ -155,7 +155,7 @@ fn boot_entrance_transition_settles_on_the_paint_clock() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     let mut tcx = TextContext::new();
     let mut clock = PaintClock::new();
     let nav = state.nav.router().controller().clone();
@@ -188,7 +188,7 @@ fn loading_transitions_to_a_loaded_roster() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     let mut tcx = TextContext::new();
     let mut clock = PaintClock::new();
 
@@ -225,7 +225,7 @@ fn swipe_right_archives_with_an_undo_toast() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     let mut tcx = TextContext::new();
     let mut clock = PaintClock::new();
 
@@ -292,7 +292,7 @@ fn pull_to_refresh_reloads_without_disrupting_the_roster() {
 
     let mut root: Root = RenderRoot::new();
     let mut state = HuddleApp.init();
-    let mut logic = |s: &mut HuddleState| HuddleApp.build(s);
+    let mut logic = |s: &mut HuddleState| AnyView::new(HuddleApp.build(s));
     let mut tcx = TextContext::new();
     let mut clock = PaintClock::new();
 
