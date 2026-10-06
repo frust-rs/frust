@@ -26,7 +26,7 @@ use clean_signals::{ControllerCore, FailureSink};
 use clean_signals_frust::{
     expect_controller, provide_controller, use_controller, use_failure_listener,
 };
-use frust::{AnyView, Axis, Component, FlexView, any, component, keyed, text};
+use frust::{Axis, Component, FlexView, View, any, component, keyed, text};
 use frust_core::RenderRoot;
 use frust_text::TextContext;
 
@@ -123,7 +123,7 @@ impl Component for ControllerScreen {
         controller
     }
 
-    fn build(&self, _state: &mut Arc<GlueController>) -> AnyView<Arc<GlueController>> {
+    fn build(&self, _state: &mut Arc<GlueController>) -> impl View<Arc<GlueController>> {
         any(text("controller screen"))
     }
 }
@@ -222,7 +222,7 @@ impl Component for ProviderScreen {
         provide_controller(Arc::clone(&controller));
     }
 
-    fn build(&self, _state: &mut ()) -> AnyView<()> {
+    fn build(&self, _state: &mut ()) -> impl View<()> {
         // A nested consumer component: its owner is a child of this provider's
         // owner, so `expect_controller` finds the context by walking up.
         any(component(ConsumerScreen {
@@ -244,7 +244,7 @@ impl Component for ConsumerScreen {
         spy_set(&self.spy, fetched);
     }
 
-    fn build(&self, _state: &mut ()) -> AnyView<()> {
+    fn build(&self, _state: &mut ()) -> impl View<()> {
         any(text("consumer screen"))
     }
 }
@@ -291,7 +291,7 @@ impl Component for MissingConsumer {
         let _ = expect_controller::<Arc<GlueController>>();
     }
 
-    fn build(&self, _state: &mut ()) -> AnyView<()> {
+    fn build(&self, _state: &mut ()) -> impl View<()> {
         any(text("unreachable"))
     }
 }
@@ -331,7 +331,7 @@ impl Component for ListenerScreen {
         });
     }
 
-    fn build(&self, _state: &mut ()) -> AnyView<()> {
+    fn build(&self, _state: &mut ()) -> impl View<()> {
         any(text("listener screen"))
     }
 }
