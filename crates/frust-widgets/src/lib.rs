@@ -71,8 +71,12 @@ pub use checkbox::{Checkbox, CheckboxView, CheckboxWidget, checkbox};
 pub use container::{BorderStyle, ContainerView, ContainerWidget, colored_box, container};
 pub use divider::{DividerView, DividerWidget, divider};
 pub use drag::{
-    DragCoordinator, DragKind, DragPhase, DragSession, DragSourceId, DragState, DragStateChange,
-    DragSubscription, DragTargetId,
+    AUTO_SCROLL_EDGE_PX, AUTO_SCROLL_MAX_PX_PER_S, AutoScroll, AutoScrollZone,
+    AutoScrollZoneWidget, DRAG_THRESHOLD, DragCoordinator, DragHighlight, DragKind, DragPhase,
+    DragPolicy, DragSession, DragSourceId, DragState, DragStateChange, DragSubscription,
+    DragTargetId, DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, GHOST_OPACITY,
+    HIGHLIGHT_FALLBACK, ReorderableListView, SourceFeedback, auto_scroll_zone, drag_target,
+    draggable, reorderable_list,
 };
 pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,
