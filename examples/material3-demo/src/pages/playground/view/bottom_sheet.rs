@@ -35,8 +35,9 @@
 
 use frust::{
     AnyView, Component, EdgeInsets, Get, NavigatorController, Padding, PopResult, RwSignal, Set,
-    any, component, navigator, text,
+    View, any, component, navigator, text,
 };
+
 use frust_material::{bottom_sheet, show_bottom_sheet, tonal_button};
 
 use crate::AppState;
@@ -68,7 +69,7 @@ impl Component for BottomSheetPlayground {
         }
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let nav = state.nav.clone();
         let body = state.body;
         any(navigator(&state.nav, move || content(&nav, &body.get())))

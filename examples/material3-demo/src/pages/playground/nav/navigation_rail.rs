@@ -127,7 +127,7 @@ impl Component for NavigationRailPlayground {
         }
     }
 
-    fn build(&self, state: &mut RailState) -> AnyView<RailState> {
+    fn build(&self, state: &mut RailState) -> impl View<RailState> {
         body(state)
     }
 }

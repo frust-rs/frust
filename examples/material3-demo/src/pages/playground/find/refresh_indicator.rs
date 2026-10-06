@@ -65,9 +65,10 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use frust::{
-    AnyView, Component, Get, RwSignal, Set, SizedBox, Stack, Update, any, component, container,
-    icon, spawn_local,
+    AnyView, Component, Get, RwSignal, Set, SizedBox, Stack, Update, View, any, component,
+    container, icon, spawn_local,
 };
+
 use frust_material::{
     MaterialDimensions, OverlayAnchor, card_list_items, icons, list_item, refresh_indicator,
 };
@@ -286,7 +287,7 @@ impl Component for RefreshIndicatorPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }

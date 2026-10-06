@@ -9,7 +9,7 @@
 //! limitations (single-line, no per-field alignment) — none of them are
 //! reachable from this playground's controls.
 
-use frust::{AnyView, Component, any, component, icon};
+use frust::{AnyView, Component, View, any, component, icon};
 use frust_material::{TextFieldVariant, icons, text_field};
 
 use crate::AppState;
@@ -152,7 +152,7 @@ impl Component for TextFieldsPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }

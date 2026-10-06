@@ -14,7 +14,7 @@
 //! reach an already-showing bar (the crate's own queue/replace rule) — so
 //! this page ports the one preview the public API actually supports.
 
-use frust::{AnyView, Component, any, component};
+use frust::{AnyView, Component, View, any, component};
 use frust_material::{SnackbarController, button, snackbar, snackbar_host};
 
 use crate::AppState;
@@ -105,7 +105,7 @@ impl Component for SnackbarPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let controller = state.toasts.clone();
         let content = body(state);
         any(snackbar_host(&controller, content))

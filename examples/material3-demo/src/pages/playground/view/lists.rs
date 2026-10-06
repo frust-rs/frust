@@ -31,7 +31,8 @@
 use std::collections::BTreeSet;
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Stack, any, component, icon, text,
+    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Stack, View, any, component, icon,
+    text,
 };
 use frust_material::{
     DismissDirection, ExpandMode, MaterialSpacing, MaterialTokens, OverlayAnchor, card_list_items,
@@ -131,7 +132,7 @@ impl Component for ListsPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }

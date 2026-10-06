@@ -43,7 +43,7 @@
 use frust::authoring::text::{FontWeight, TextAlign};
 use frust::{
     AnyView, AsyncValue, Axis, Color, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    Image, ImageDecodeError, ImageFit, ImageSource, Padding, SizedBox, Stack, UseTask, any,
+    Image, ImageDecodeError, ImageFit, ImageSource, Padding, SizedBox, Stack, UseTask, View, any,
     component, container, decode_image_async, flexible, inflexible, text, use_task,
 };
 use frust_material::{
@@ -195,7 +195,7 @@ impl Component for CarouselPlayground {
         }
     }
 
-    fn build(&self, state: &mut PageState) -> AnyView<PageState> {
+    fn build(&self, state: &mut PageState) -> impl View<PageState> {
         let decoded = state.images.signal().get();
         match &decoded {
             AsyncValue::Ready(images) => content(&state.knobs, images, None),

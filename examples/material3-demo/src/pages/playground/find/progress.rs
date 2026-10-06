@@ -61,7 +61,7 @@
 //! calling a documented-inert builder for symmetry.
 
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, FlexView, SizedBox, Stack, any, component,
+    AnyView, Axis, Component, CrossAxisAlignment, FlexView, SizedBox, Stack, View, any, component,
     flexible, inflexible,
 };
 use frust_material::{
@@ -319,7 +319,7 @@ impl Component for ProgressPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }

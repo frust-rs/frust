@@ -30,7 +30,7 @@
 //! mounted at this page's own outer [`Stack`]); `Type` fits a plain
 //! [`play_enum_segmented`] since it is a 2-way choice.
 
-use frust::{AnyView, Component, SizedBox, Stack, any, component, icon};
+use frust::{AnyView, Component, SizedBox, Stack, View, any, component, icon};
 use frust_material::{
     ButtonGroupDensity, ButtonGroupType, ButtonVariant, OverlayAnchor, ToggleButtonSize,
     button_group_action, button_group_actions, icons, toggle_button,
@@ -324,7 +324,7 @@ impl Component for ButtonGroupPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

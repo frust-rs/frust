@@ -17,7 +17,8 @@
 //! omitted here rather than faking a functional-only no-op.
 
 use frust::{
-    AnyView, Component, CrossAxisAlignment, Get, Row, RwSignal, Set, SizedBox, any, component, text,
+    AnyView, Component, CrossAxisAlignment, Get, Row, RwSignal, Set, SizedBox, View, any,
+    component, text,
 };
 use frust_material::{checkbox, tristate_checkbox};
 
@@ -59,7 +60,7 @@ impl Component for CheckboxPlayground {
         }
     }
 
-    fn build(&self, state: &mut CheckboxPlaygroundState) -> AnyView<CheckboxPlaygroundState> {
+    fn build(&self, state: &mut CheckboxPlaygroundState) -> impl View<CheckboxPlaygroundState> {
         let value = state.value.get();
         let tristate = state.tristate.get();
         let error = state.error.get();

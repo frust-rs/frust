@@ -23,7 +23,7 @@
 //! faked.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Stack, any, component, text,
+    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Stack, View, any, component, text,
 };
 use frust_material::{
     DropdownItem, OverlayAnchor, OverlaySide, dropdown, dropdown_field, dropdown_item,
@@ -313,7 +313,7 @@ impl Component for DropdownMenuPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Self::State) -> AnyView<Self::State> {
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         body(state)
     }
 }

@@ -18,7 +18,7 @@
 //! own docs — this page drives no knob for any of the three, since none is
 //! exposed as a prop upstream either.
 
-use frust::{AnyView, Component, Stack, any, component, icon};
+use frust::{AnyView, Component, Stack, View, any, component, icon};
 use frust_material::{
     IconButtonVariant, TooltipHover, icon_button, icons, rich_tooltip, tooltip, tooltip_action,
     tooltip_trigger,
@@ -148,7 +148,7 @@ impl Component for TooltipsPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }

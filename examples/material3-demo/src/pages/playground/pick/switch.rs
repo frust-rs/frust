@@ -9,8 +9,10 @@
 //! straight through it.
 
 use frust::{
-    AnyView, Component, CrossAxisAlignment, Get, Row, RwSignal, Set, SizedBox, any, component, text,
+    AnyView, Component, CrossAxisAlignment, Get, Row, RwSignal, Set, SizedBox, View, any,
+    component, text,
 };
+
 use frust_material::{icons, switch};
 
 use crate::AppState;
@@ -56,7 +58,7 @@ impl Component for SwitchPlayground {
         }
     }
 
-    fn build(&self, state: &mut SwitchPlaygroundState) -> AnyView<SwitchPlaygroundState> {
+    fn build(&self, state: &mut SwitchPlaygroundState) -> impl View<SwitchPlaygroundState> {
         let value = state.value.get();
         let enabled = state.enabled.get();
         let show_icons = state.show_icons.get();

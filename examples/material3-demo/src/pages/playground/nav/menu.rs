@@ -11,7 +11,7 @@
 //! exercises — mounted here as [`trigger_view`] (inside the preview card) and
 //! [`menu_panel_view`] (at the page's own outer [`Stack`]).
 
-use frust::{AnyView, Component, Stack, any, component, icon};
+use frust::{AnyView, Component, Stack, View, any, component, icon};
 use frust_material::{
     MenuAction, MenuColorStyle, MenuNode, MenuSelection, OverlayAlign, OverlayAnchor, OverlaySide,
     icons, menu, menu_entry, menu_group, menu_selectable, menu_submenu, menu_toggleable,
@@ -118,7 +118,7 @@ impl Component for MenuPlayground {
         }
     }
 
-    fn build(&self, state: &mut MenuState) -> AnyView<MenuState> {
+    fn build(&self, state: &mut MenuState) -> impl View<MenuState> {
         body(state)
     }
 }

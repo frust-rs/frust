@@ -63,7 +63,9 @@
 //! fixed-diameter seed swatches, rather than the reference's
 //! `Wrap(spacing: 8, runSpacing: 8)`.
 
-use frust::{AnyView, Column, Component, Get, RwSignal, Set, SizedBox, Stack, any, component};
+use frust::{
+    AnyView, Column, Component, Get, RwSignal, Set, SizedBox, Stack, View, any, component,
+};
 use frust_material::{OverlayAnchor, assist_chip, filter_chip, input_chip, suggestion_chip};
 
 use crate::AppState;
@@ -151,7 +153,7 @@ impl Component for ChipsPlayground {
         }
     }
 
-    fn build(&self, state: &mut ChipsPlaygroundState) -> AnyView<ChipsPlaygroundState> {
+    fn build(&self, state: &mut ChipsPlaygroundState) -> impl View<ChipsPlaygroundState> {
         let kind = state.kind.get();
         let selected = state.selected.get();
         let elevated = state.elevated.get();

@@ -13,7 +13,7 @@
 //! (see `crate::pages::playground::pick::chips`' module docs for the same
 //! divergence).
 
-use frust::{AnyView, Component, CrossAxisAlignment, Row, SizedBox, any, component};
+use frust::{AnyView, Component, CrossAxisAlignment, Row, SizedBox, View, any, component};
 use frust_material::{LoadingIndicatorVariant, loading_indicator};
 
 use crate::AppState;
@@ -125,7 +125,7 @@ impl Component for LoadingIndicatorPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }

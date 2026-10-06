@@ -92,7 +92,7 @@ use std::collections::BTreeSet;
 
 use frust::{
     AnyView, Axis, Color, ColorScheme, Column, Component, CrossAxisAlignment, EdgeInsets, FlexView,
-    Get, GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox, any, component,
+    Get, GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox, View, any, component,
     container, flexible, icon, inflexible, navigator, scroll_view, text,
 };
 use frust_material::{
@@ -168,7 +168,7 @@ impl Component for SelectionPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let snapshot = state.clone();
         any(navigator(&state.nav, move || content(&snapshot)))
     }
@@ -331,7 +331,7 @@ impl Component for SelectionDemoHost {
         }
     }
 
-    fn build(&self, state: &mut DemoState) -> AnyView<DemoState> {
+    fn build(&self, state: &mut DemoState) -> impl View<DemoState> {
         let controller = state.toasts.clone();
         any(snackbar_host(
             &controller,

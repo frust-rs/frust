@@ -29,7 +29,7 @@
 //! [`play_enum_menu_field`]: crate::widgets::playground::play_enum_menu_field
 //! [`play_enum_menu_panel`]: crate::widgets::playground::play_enum_menu_panel
 
-use frust::{AnyView, Column, Component, Stack, any, component};
+use frust::{AnyView, Column, Component, Stack, View, any, component};
 use frust_material::{OverlayAnchor, list_item, overlay_anchor, search_bar, search_view};
 
 use crate::AppState;
@@ -203,7 +203,7 @@ impl Component for SearchPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }

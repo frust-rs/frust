@@ -1,9 +1,10 @@
 //! Dividers: the reference's `DividersPlayground`.
 
 use frust::{
-    Align, Alignment, AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Theme, any,
-    component, text,
+    Align, Alignment, AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, Theme, View,
+    any, component, text,
 };
+
 use frust_material::divider;
 
 use crate::AppState;
@@ -55,7 +56,7 @@ impl Component for DividersPlayground {
         }
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }

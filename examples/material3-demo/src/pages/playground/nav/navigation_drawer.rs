@@ -60,7 +60,7 @@ impl Component for NavigationDrawerPlayground {
         }
     }
 
-    fn build(&self, state: &mut DrawerState) -> AnyView<DrawerState> {
+    fn build(&self, state: &mut DrawerState) -> impl View<DrawerState> {
         body(state)
     }
 }

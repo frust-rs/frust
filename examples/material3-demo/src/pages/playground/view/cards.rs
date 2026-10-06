@@ -1,7 +1,7 @@
 //! Cards: the reference's `CardsPlayground`.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Theme, any, component, text,
+    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Theme, View, any, component, text,
 };
 use frust_material::{CardVariant, card};
 
@@ -54,7 +54,7 @@ impl Component for CardsPlayground {
         }
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         body(state)
     }
 }

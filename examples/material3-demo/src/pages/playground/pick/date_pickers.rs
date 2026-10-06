@@ -88,8 +88,9 @@
 
 use frust::{
     AnyView, Column, Component, CrossAxisAlignment, Get, GetUntracked, NavigatorController,
-    PopResult, RwSignal, Set, SizedBox, Stack, any, component, navigator, text,
+    PopResult, RwSignal, Set, SizedBox, Stack, View, any, component, navigator, text,
 };
+
 use frust_material::{
     DatePickerDialog, DatePickerEntryMode, DatePickerMode, DatePickerState, MaterialDate,
     OverlayAnchor, calendar_date_picker, date_picker_dialog, show_date_picker, tonal_button,
@@ -418,7 +419,7 @@ impl Component for DatePickersPlayground {
         Knobs::default()
     }
 
-    fn build(&self, state: &mut Knobs) -> AnyView<Knobs> {
+    fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let nav = state.nav.clone();
         let picker = state.picker;
         let confirmed = state.confirmed;
