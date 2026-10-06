@@ -314,7 +314,7 @@ impl<C: NativeComponent> Component for NativeComponentView<C> {
         slot
     }
 
-    fn build(&self, state: &mut SlotId) -> AnyView<SlotId> {
+    fn build(&self, state: &mut SlotId) -> impl View<SlotId> {
         self.build_with_mode(*state, resolved_surface_mode(), ambient_dark())
     }
 }
