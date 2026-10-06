@@ -7,11 +7,12 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use frust_core::AnyView;
+use frust_core::{AnyView, View};
 
 use super::ambient::host_reachable;
 use super::options::{
-    BackPolicy, NavOp, NavigatorId, PopResult, PushOptions, ReplaceOptions, ResultCallback,
+    BackPolicy, NavOp, NavigatorId, PageBuilder, PopResult, PushOptions, ReplaceOptions,
+    ResultCallback,
 };
 use super::route_state::RouteStack;
 use super::transition::{TransitionSpec, TransitionState};
@@ -327,25 +328,34 @@ impl<State: 'static> NavigatorController<State> {
 
     /// Push an **opaque** page built by `builder` on top of the stack, using the
     /// navigator's default transition (instant unless the navigator sets one).
-    pub fn push(&self, builder: impl Fn() -> AnyView<State> + 'static) {
-        self.push_impl(builder, true, None, None);
+    ///
+    /// Every `push*`/`replace*` builder may return any [`View`]; it is erased
+    /// here.
+    ///
+    /// ```no_run
+    /// use frust_widgets::{NavigatorController, text};
+    /// let nav: NavigatorController<()> = NavigatorController::new();
+    /// nav.push(|| text("details"));
+    /// ```
+    pub fn push<V: View<State>>(&self, builder: impl Fn() -> V + 'static) {
+        self.push_impl(erase_page(builder), true, None, None);
     }
 
     /// Push an **opaque** page with an explicit [`TransitionSpec`], overriding the
     /// navigator's default for this push only. The spec is stored on the pushed
     /// page and *reversed* when it is later popped.
-    pub fn push_with(
+    pub fn push_with<V: View<State>>(
         &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
+        builder: impl Fn() -> V + 'static,
         transition: TransitionSpec,
     ) {
-        self.push_impl(builder, true, None, Some(transition));
+        self.push_impl(erase_page(builder), true, None, Some(transition));
     }
 
     /// Push a **transparent** page (e.g. a dialog/overlay) — the page below it
     /// stays visible and painted (see [module docs](self)'s paint culling).
-    pub fn push_transparent(&self, builder: impl Fn() -> AnyView<State> + 'static) {
-        self.push_impl(builder, false, None, None);
+    pub fn push_transparent<V: View<State>>(&self, builder: impl Fn() -> V + 'static) {
+        self.push_impl(erase_page(builder), false, None, None);
     }
 
     /// Push an opaque page and register `on_result`, invoked with `&mut State`
@@ -354,12 +364,12 @@ impl<State: 'static> NavigatorController<State> {
     /// The callback is delivered at the start of the [`NavigatorWidget::event`]
     /// pass after the pop's rebuild — the first point after the pop where the
     /// erased app state is in scope (a rebuild carries only a `BuildCtx`).
-    pub fn push_for_result(
+    pub fn push_for_result<V: View<State>>(
         &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
+        builder: impl Fn() -> V + 'static,
         on_result: impl Fn(&mut State, PopResult) + 'static,
     ) {
-        self.push_impl(builder, true, Some(Rc::new(on_result)), None);
+        self.push_impl(erase_page(builder), true, Some(Rc::new(on_result)), None);
     }
 
     /// Push a **transparent** page (e.g. a dialog/bottom sheet) with an explicit
@@ -385,13 +395,18 @@ impl<State: 'static> NavigatorController<State> {
     /// The callback is delivered the same way [`push_for_result`](Self::push_for_result)'s
     /// is: at the start of the [`NavigatorWidget::event`] pass after the pop's
     /// rebuild.
-    pub fn push_transparent_for_result(
+    pub fn push_transparent_for_result<V: View<State>>(
         &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
+        builder: impl Fn() -> V + 'static,
         transition: TransitionSpec,
         on_result: impl Fn(&mut State, PopResult) + 'static,
     ) {
-        self.push_impl(builder, false, Some(Rc::new(on_result)), Some(transition));
+        self.push_impl(
+            erase_page(builder),
+            false,
+            Some(Rc::new(on_result)),
+            Some(transition),
+        );
     }
 
     /// Push a page with an explicit [`PushOptions`] — the full-control variant
@@ -400,13 +415,13 @@ impl<State: 'static> NavigatorController<State> {
     /// signal) alongside opacity/transition/result. The dismissable-overlay
     /// helpers push through this; every other `push*` method
     /// pushes with [`BackPolicy::Pop`].
-    pub fn push_with_options(
+    pub fn push_with_options<V: View<State>>(
         &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
+        builder: impl Fn() -> V + 'static,
         options: PushOptions<State>,
     ) {
         self.enqueue(NavOp::Push {
-            builder: Rc::new(builder),
+            builder: erase_page(builder),
             opaque: options.opaque,
             on_result: options.on_result,
             transition: options.transition,
@@ -425,13 +440,13 @@ impl<State: 'static> NavigatorController<State> {
     /// uses [`push_with_options`](Self::push_with_options).
     fn push_impl(
         &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
+        builder: PageBuilder<State>,
         opaque: bool,
         on_result: Option<ResultCallback<State>>,
         transition: Option<TransitionSpec>,
     ) {
         self.enqueue(NavOp::Push {
-            builder: Rc::new(builder),
+            builder,
             opaque,
             on_result,
             transition,
@@ -477,9 +492,9 @@ impl<State: 'static> NavigatorController<State> {
 
     /// Replace the top page in place with an opaque page built by `builder`,
     /// using the navigator's default transition.
-    pub fn replace(&self, builder: impl Fn() -> AnyView<State> + 'static) {
+    pub fn replace<V: View<State>>(&self, builder: impl Fn() -> V + 'static) {
         self.enqueue(NavOp::Replace {
-            builder: Rc::new(builder),
+            builder: erase_page(builder),
             opaque: true,
             transition: None,
             route: None,
@@ -488,13 +503,13 @@ impl<State: 'static> NavigatorController<State> {
 
     /// Replace the top page with an explicit [`TransitionSpec`], overriding the
     /// navigator's default for this replace only.
-    pub fn replace_with(
+    pub fn replace_with<V: View<State>>(
         &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
+        builder: impl Fn() -> V + 'static,
         transition: TransitionSpec,
     ) {
         self.enqueue(NavOp::Replace {
-            builder: Rc::new(builder),
+            builder: erase_page(builder),
             opaque: true,
             transition: Some(transition),
             route: None,
@@ -505,13 +520,13 @@ impl<State: 'static> NavigatorController<State> {
     /// full-control variant carrying a route identity alongside opacity
     /// and transition. [`Router::go`](super::router::Router::go)/
     /// [`Router::replace`](super::router::Router::replace) push through this.
-    pub fn replace_with_options(
+    pub fn replace_with_options<V: View<State>>(
         &self,
-        builder: impl Fn() -> AnyView<State> + 'static,
+        builder: impl Fn() -> V + 'static,
         options: ReplaceOptions,
     ) {
         self.enqueue(NavOp::Replace {
-            builder: Rc::new(builder),
+            builder: erase_page(builder),
             opaque: options.opaque,
             transition: options.transition,
             route: options.route,
@@ -551,4 +566,13 @@ impl<State: 'static> NavigatorController<State> {
     pub(super) fn drain(&self) -> Vec<NavOp<State>> {
         std::mem::take(&mut *self.ops.borrow_mut())
     }
+}
+
+/// Erase a page builder at the API boundary: the public `push*`/`replace*`
+/// family (and the navigator/router entry points) accept a closure returning
+/// any [`View`] and store it as the erased [`PageBuilder`] the op queue holds.
+pub(super) fn erase_page<State: 'static, V: View<State>>(
+    builder: impl Fn() -> V + 'static,
+) -> PageBuilder<State> {
+    Rc::new(move || AnyView::new(builder()))
 }

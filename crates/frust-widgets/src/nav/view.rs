@@ -6,9 +6,9 @@
 
 use std::rc::Rc;
 
-use frust_core::AnyView;
+use frust_core::View;
 
-use super::controller::NavigatorController;
+use super::controller::{NavigatorController, erase_page};
 use super::options::{PageBuilder, PageVisibility, RouteChangeCallback, VisibilityCallback};
 use super::path::Location;
 use super::route_state::RouteStack;
@@ -21,7 +21,7 @@ use super::navigator::NavigatorWidget;
 #[allow(unused_imports)]
 use super::options::{BackPolicy, PushOptions};
 #[allow(unused_imports)]
-use frust_core::{View, Widget};
+use frust_core::Widget;
 
 /// A declarative navigator. See the [module docs](self).
 pub struct NavigatorView<State: 'static> {
@@ -177,13 +177,22 @@ impl<State: 'static> NavigatorView<State> {
 
 /// Build a [`NavigatorView`] driven by `controller`, whose initial (root) page is
 /// produced by `initial`. The app-facing entry point (see [module docs](self)).
-pub fn navigator<State: 'static>(
+///
+/// `initial` may return any [`View`]; it is erased here.
+///
+/// ```no_run
+/// # use frust_widgets::{NavigatorController, navigator, text};
+/// # let controller: NavigatorController<()> = NavigatorController::new();
+/// let nav = navigator(&controller, || text("home"));
+/// # let _ = nav;
+/// ```
+pub fn navigator<State: 'static, V: View<State>>(
     controller: &NavigatorController<State>,
-    initial: impl Fn() -> AnyView<State> + 'static,
+    initial: impl Fn() -> V + 'static,
 ) -> NavigatorView<State> {
     NavigatorView {
         controller: controller.clone(),
-        initial: Rc::new(initial),
+        initial: erase_page(initial),
         default_transition: TransitionSpec::NONE,
         pop_swipe: None,
         platform_pop_swipe: None,
@@ -215,9 +224,8 @@ pub fn navigator<State: 'static>(
 ///
 /// ```no_run
 /// # use frust_widgets::{NavigatorController, overlay_host, text};
-/// # use frust_core::any;
 /// # let controller: NavigatorController<()> = NavigatorController::new();
-/// # let app_root = || any(text("the whole app: chrome, tabs, inner navigator"));
+/// # let app_root = || text("the whole app: chrome, tabs, inner navigator");
 /// // Wrap the app's existing root view; nothing inside it changes.
 /// let root = overlay_host(&controller, move || app_root());
 /// # let _ = root;
@@ -252,9 +260,9 @@ pub fn navigator<State: 'static>(
 /// the inner navigator outright: the host's root page — the whole app — is no
 /// longer input-routed, so under the R23 back-reach gate (see the module docs)
 /// nothing inside it claims the press either.
-pub fn overlay_host<State: 'static>(
+pub fn overlay_host<State: 'static, V: View<State>>(
     controller: &NavigatorController<State>,
-    app: impl Fn() -> AnyView<State> + 'static,
+    app: impl Fn() -> V + 'static,
 ) -> NavigatorView<State> {
     navigator(controller, app)
         // Both are stated explicitly rather than left to the `navigator`

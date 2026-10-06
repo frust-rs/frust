@@ -184,7 +184,7 @@ pub use frust_widgets::scroll_controller::ItemAlignment;
 ///
 /// ```
 /// use frust::{
-///     OverlayBand, OverlayInput, OverlayPlacement, OverlaySide, View, any, overlay_portal, text,
+///     OverlayBand, OverlayInput, OverlayPlacement, OverlaySide, View, overlay_portal, text,
 /// };
 ///
 /// struct App {
@@ -195,7 +195,7 @@ pub use frust_widgets::scroll_controller::ItemAlignment;
 /// // pointer so hovering the trigger is never interrupted by its own tip.
 /// fn trigger(state: &mut App) -> impl View<App> + use<> {
 ///     overlay_portal(text("Save"))
-///         .overlay(state.hovering.then(|| any(text("Save the document"))))
+///         .overlay(state.hovering.then(|| text("Save the document")))
 ///         .placement(OverlayPlacement::on(OverlaySide::Top))
 ///         .band(OverlayBand::Tooltip)
 ///         .input(OverlayInput::Transparent)
@@ -1111,7 +1111,7 @@ pub use back_glue::{BackHandler, attach_back_handler};
 ///
 ///     fn build(&self, state: &mut AppState) -> AnyView<AppState> {
 ///         // Back handling is automatic — no BackHandler needed.
-///         any(navigator(&state.nav, || any(text("home"))))
+///         any(navigator(&state.nav, || text("home")))
 ///     }
 /// }
 ///
@@ -1126,9 +1126,12 @@ pub use back_glue::{BackHandler, attach_back_handler};
 /// app-side wiring. An app can still override it per navigator
 /// ([`NavigatorView::pop_swipe`]) or per page
 /// ([`frust_widgets::PushOptions::pop_swipe`]).
-pub fn navigator<State: 'static>(
+///
+/// `initial` may return any [`View`]; it is erased inside
+/// [`frust_widgets::navigator`].
+pub fn navigator<State: 'static, V: View<State>>(
     controller: &NavigatorController<State>,
-    initial: impl Fn() -> AnyView<State> + 'static,
+    initial: impl Fn() -> V + 'static,
 ) -> NavigatorView<State> {
     back_glue::auto_wire(controller);
     frust_widgets::navigator(controller, initial).platform_pop_swipe(cfg!(target_os = "ios"))
@@ -1182,10 +1185,10 @@ pub fn navigator<State: 'static>(
 ///         // The former root view moves INSIDE the host's page builder — which
 ///         // is also what puts the inner navigator's wiring after the host's.
 ///         any(overlay_host(&state.overlays, move || {
-///             any(Stack(vec![
-///                 any(navigator(&nav, || any(text("home")))),
+///             Stack(vec![
+///                 any(navigator(&nav, || text("home"))),
 ///                 any(text("persistent chrome")),
-///             ]))
+///             ])
 ///         }))
 ///     }
 /// }
@@ -1199,9 +1202,12 @@ pub fn navigator<State: 'static>(
 /// pins an *explicit* [`NavigatorView::pop_swipe(false)`](NavigatorView::pop_swipe)
 /// (an edge swipe must never dismiss an overlay), which outranks the platform
 /// slot by construction.
-pub fn overlay_host<State: 'static>(
+///
+/// `app` may return any [`View`]; it is erased inside
+/// [`frust_widgets::overlay_host`].
+pub fn overlay_host<State: 'static, V: View<State>>(
     controller: &NavigatorController<State>,
-    app: impl Fn() -> AnyView<State> + 'static,
+    app: impl Fn() -> V + 'static,
 ) -> NavigatorView<State> {
     back_glue::auto_wire_overlay_host(controller);
     frust_widgets::overlay_host(controller, app).platform_pop_swipe(cfg!(target_os = "ios"))

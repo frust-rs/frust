@@ -359,12 +359,22 @@ impl<State: 'static, T: 'static> DraggableView<State, T> {
     /// Build the ghost from the application state when the drag begins,
     /// instead of snapshotting the child. Sized by its own content, laid out
     /// loosely against the window, and painted at
-    /// [`ghost_opacity`](Self::ghost_opacity).
-    pub fn ghost<F>(mut self, ghost: F) -> Self
+    /// [`ghost_opacity`](Self::ghost_opacity). `ghost` may return any
+    /// [`View`]; it is erased here.
+    ///
+    /// ```
+    /// use frust_widgets::{DragCoordinator, DraggableView, draggable, text};
+    /// # fn demo(coordinator: DragCoordinator) -> DraggableView<(), u32> {
+    /// draggable(text("card"), coordinator, |_: &()| 7u32).ghost(|_: &()| text("moving"))
+    /// # }
+    /// # let _ = demo;
+    /// ```
+    pub fn ghost<F, V>(mut self, ghost: F) -> Self
     where
-        F: Fn(&State) -> AnyView<State> + 'static,
+        F: Fn(&State) -> V + 'static,
+        V: View<State>,
     {
-        self.ghost = Some(Rc::new(ghost));
+        self.ghost = Some(Rc::new(move |state: &State| any(ghost(state))));
         self
     }
 

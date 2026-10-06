@@ -357,7 +357,7 @@ fn list_20_rows() -> CorpusCase {
         record_still(scene, |family| {
             let family = family.clone();
             any(
-                frust_widgets::container::<(), _>(frust_widgets::list_view::<()>(
+                frust_widgets::container::<(), _>(frust_widgets::list_view::<(), _>(
                     20,
                     72.0,
                     move |index| {
