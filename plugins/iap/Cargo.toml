@@ -20,7 +20,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # Android JNI substrate; the only `frust-*` dependency a platform plugin may have (see
 # docs/CODE_STANDARDS.md Plugin Conventions). Unconditional: inert off Android.
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.0" }
 log = { workspace = true }
 
 # Direct `jni` for the plugin's own JNI exports and `FrustIapHost` calls.

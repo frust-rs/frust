@@ -16,7 +16,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 # Path dependency: a `proc-macro = true` crate cannot export ordinary items. Re-exported at the
 # root as `frust_i18n::locales`.
-frust-i18n-macros = { path = "macros", version = "0.5.2" }
+frust-i18n-macros = { path = "macros", version = "0.6.0" }
 # Direct dependency: `fluent-templates` is deliberately not used; this crate owns bundle
 # construction and caching.
 fluent-bundle = { workspace = true }
@@ -26,7 +26,7 @@ unic-langid = { workspace = true }
 # Optional `frust-api` glue. Literal `path`, not `workspace = true`: the root `frust` entry sets no
 # `default-features`, so a member cannot override it.
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.5.2", optional = true }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.0", optional = true }
 
 # Pin rationale in the root `Cargo.toml` (`icu_experimental` exact-pinned). Independent of
 # `frust-api`.
@@ -64,7 +64,7 @@ formatting = [
 # Gated, unlike other plugins' unconditional `frust-plugin`: only `src/detect`'s Android backend
 # needs the platform handle, so non-Android graphs stay free of it.
 [target.'cfg(target_os = "android")'.dependencies]
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.0" }
 jni = { workspace = true }
 
 # `target_vendor = "apple"`, wider than UIKit-only arms: `NSLocale` is plain Foundation. Only iOS

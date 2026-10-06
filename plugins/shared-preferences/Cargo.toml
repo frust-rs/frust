@@ -14,10 +14,10 @@ readme = "README.md"
 [dependencies]
 # Only `frust-*` dependency the Android backend needs for its platform handle
 # (platform-plugin charter, `frust-plugin` crate doc).
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.0" }
 # Second `frust-*` dependency, accepted by the amended platform-plugin charter
 # (leaf substrate; docs/ARCHITECTURE.md).
-frust-paths = { path = "../../crates/frust-paths", version = "0.5.2" }
+frust-paths = { path = "../../crates/frust-paths", version = "0.6.0" }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 
