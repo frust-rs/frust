@@ -147,10 +147,24 @@
 //! [`AutoScroll::max_px_per_s`]), stopping at the scroll limits, when the
 //! pointer leaves the band, or when the session ends. See the
 //! [`mod@auto_scroll`] module docs.
+//!
+//! # Reorderable lists
+//!
+//! [`reorderable_list()`] composes [`draggable()`] and [`drag_target()`] into
+//! a drag-to-reorder column, needing no new layout: each of its rows carries
+//! its own index as the payload, an `N + 1`-gap set of drop targets sits
+//! between/around them, and [`ReorderableListView::on_reorder`] fires with
+//! the source and destination indices when a drop actually moves something
+//! (dropping back on the source's own slot reports nothing). Keyboard
+//! lift/cycle/drop is inherited from [`draggable()`] unchanged — the gaps are
+//! this list's only registered targets, cycled in the same visual order they
+//! are built in. See the [`mod@reorderable`] module docs for the full index
+//! convention and limits.
 
 pub mod auto_scroll;
 mod coordinator;
 pub mod draggable;
+pub mod reorderable;
 pub mod target;
 
 pub use auto_scroll::{
@@ -165,6 +179,7 @@ pub use draggable::{
     DRAG_THRESHOLD, DragPolicy, DraggableView, DraggableWidget, GHOST_OPACITY, SourceFeedback,
     draggable,
 };
+pub use reorderable::{ReorderableListView, reorderable_list};
 pub use target::{
     DragHighlight, DragTargetView, DragTargetWidget, HIGHLIGHT_FALLBACK, drag_target,
 };
