@@ -153,35 +153,13 @@ apps, then the workbench scaffolds and runs one. `frust doctor` runs the wizard'
 non-interactively. Contributors can build a generated project against a checkout of this repository
 with `frust create my_app --frust-path <checkout>`.
 
-## Hello, Frust
+## Hello, Frust: the counter app
 
-```rust
-// crates/frust/src/lib.rs (doctest)
-use frust::{Component, View, text};
-
-struct Counter;
-
-impl Component for Counter {
-    type State = i32;
-
-    fn init(&self) -> i32 {
-        0
-    }
-
-    fn build(&self, state: &mut i32) -> impl View<i32> {
-        text(format!("count: {state}")).size(32.0)
-    }
-}
-
-frust::run(Counter).unwrap();
-```
-
-## The generated app, in full
-
-`frust create my_app` scaffolds a Material counter. Two source files are the whole app;
-`main.rs` and the platform folders are generated and never hand-edited. The one
-`frust::app!` line binds the root component to every platform at once: the Android JNI
-exports, the iOS C-ABI exports, the browser's wasm entry and the desktop `__frust_main`.
+The equivalent of Flutter's default counter app, and exactly what `frust create my_app`
+scaffolds. Two source files are the whole app; `main.rs` and the platform folders are generated
+and never hand-edited. The one `frust::app!` line binds the root component to every platform at
+once: the Android JNI exports, the iOS C-ABI exports, the browser's wasm entry and the desktop
+`__frust_main`.
 
 ```rust
 // src/lib.rs
