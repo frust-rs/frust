@@ -15,9 +15,9 @@ use std::any::Any;
 use frust_core::accesskit::Role;
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, CornerRadii, DashPattern, LayoutCtx, PaintCtx,
-    PaintScene, RenderRoot, View, Widget, any,
+    PaintScene, RenderRoot, View, Widget,
 };
-use frust_widgets::{BorderStyle, Column, colored_box, container, divider, text};
+use frust_widgets::{BorderStyle, colored_box, column, container, divider, text};
 use kurbo::{BezPath, Point, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
@@ -291,7 +291,7 @@ fn colored_box_expand_inside_a_flex_intrinsic_pass_does_not_report_the_old_senti
     // main axis, not leak the old 1e7 `EXPAND_INTRINSIC` sentinel into the
     // flex's main-axis allocation.
     let view: frust_widgets::FlexView<()> =
-        Column(vec![any(colored_box().fill(Color::WHITE).expand())]);
+        column().child(colored_box().fill(Color::WHITE).expand());
     let mut w = build(&view);
     let mut lctx = LayoutCtx::new();
     let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(320.0, 640.0)));

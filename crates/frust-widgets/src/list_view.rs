@@ -7864,9 +7864,7 @@ mod contact_tests {
         let (mut root, mut state) = root_over(|| {
             let (content, _seen) = row_content(false, false, false);
             ListView::builder(10, 200.0, move |_| {
-                AnyView::new(
-                    pinch_detector(content.clone()).on_scale(|s: &mut App, e| s.scales.push(e)),
-                )
+                pinch_detector(content.clone()).on_scale(|s: &mut App, e| s.scales.push(e))
             })
         });
         let mut sink = NullScene;
@@ -7909,9 +7907,7 @@ mod contact_tests {
         let (mut root, mut state) = root_over(|| {
             let (content, _seen) = row_content(true, false, false);
             ListView::builder(10, 200.0, move |_| {
-                AnyView::new(
-                    pan_zoom(content.clone()).on_transform(|s: &mut App, t| s.transforms.push(t)),
-                )
+                pan_zoom(content.clone()).on_transform(|s: &mut App, t| s.transforms.push(t))
             })
         });
         root.event(&mut state, &touch(0, Down, 100.0, 100.0));
@@ -7937,9 +7933,7 @@ mod contact_tests {
         let (mut root, mut state) = root_over(|| {
             let (content, _seen) = row_content(false, false, false);
             ListView::builder(10, 200.0, move |_| {
-                AnyView::new(
-                    pinch_detector(content.clone()).on_scale(|s: &mut App, e| s.scales.push(e)),
-                )
+                pinch_detector(content.clone()).on_scale(|s: &mut App, e| s.scales.push(e))
             })
         });
         root.event(&mut state, &touch(0, Down, 100.0, 100.0));
@@ -7959,9 +7953,7 @@ mod contact_tests {
         let (mut root, mut state) = root_over(|| {
             let (content, _seen) = row_content(true, false, false);
             ListView::builder(10, 200.0, move |_| {
-                AnyView::new(
-                    pinch_detector(content.clone()).on_scale(|s: &mut App, e| s.scales.push(e)),
-                )
+                pinch_detector(content.clone()).on_scale(|s: &mut App, e| s.scales.push(e))
             })
         });
         let mut sink = NullScene;

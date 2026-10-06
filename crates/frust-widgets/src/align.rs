@@ -265,10 +265,9 @@ mod tests {
         // hands its children a *bounded* loose constraint, the align fills 40x40
         // and centers the child at (10,10) — not shrink-wrapped to the origin,
         // which is what pinned the avatar initials to the corner.
-        let view: crate::StackView<()> = crate::Stack(vec![
-            leaf_any(40.0, 40.0),
-            any(Align(Alignment::CENTER, leaf(20.0, 20.0))),
-        ]);
+        let view: crate::StackView<()> = crate::stack()
+            .child(leaf_any(40.0, 40.0))
+            .child(Align(Alignment::CENTER, leaf(20.0, 20.0)));
         let mut counter = 0u64;
         let mut w = view.build(&mut BuildCtx::new(&mut counter));
         let mut lctx = LayoutCtx::new();

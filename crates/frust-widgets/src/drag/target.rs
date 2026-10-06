@@ -1595,16 +1595,17 @@ mod tests {
     }
 
     fn file_app_logic(state: &mut FileApp) -> crate::StackView<FileApp> {
-        crate::Stack(vec![
-            any(SizedBox::<FileApp>(Some(400.0), Some(400.0))),
-            any(drag_target::<Vec<std::path::PathBuf>, FileApp, _>(
-                SizedBox::<FileApp>(Some(100.0), Some(100.0)),
-                state.coordinator.clone(),
+        crate::stack()
+            .child(SizedBox::<FileApp>(Some(400.0), Some(400.0)))
+            .child(
+                drag_target::<Vec<std::path::PathBuf>, FileApp, _>(
+                    SizedBox::<FileApp>(Some(100.0), Some(100.0)),
+                    state.coordinator.clone(),
+                )
+                .on_enter(|s: &mut FileApp| s.entered += 1)
+                .on_leave(|s: &mut FileApp| s.left += 1)
+                .on_drop(|s: &mut FileApp, paths| s.dropped = paths),
             )
-            .on_enter(|s: &mut FileApp| s.entered += 1)
-            .on_leave(|s: &mut FileApp| s.left += 1)
-            .on_drop(|s: &mut FileApp, paths| s.dropped = paths)),
-        ])
     }
 
     #[test]
@@ -1752,22 +1753,26 @@ mod tests {
     }
 
     fn two_groups_logic(state: &mut TwoGroups) -> crate::StackView<TwoGroups> {
-        crate::Stack(vec![
-            any(SizedBox::<TwoGroups>(Some(400.0), Some(400.0))),
-            any(crate::Row(vec![
-                any(drag_target::<Vec<std::path::PathBuf>, TwoGroups, _>(
-                    SizedBox::<TwoGroups>(Some(100.0), Some(100.0)),
-                    state.a.clone(),
-                )
-                .on_leave(|s: &mut TwoGroups| s.a_left += 1)
-                .on_drop(|s: &mut TwoGroups, paths| s.a_dropped = Some(paths))),
-                any(drag_target::<Vec<std::path::PathBuf>, TwoGroups, _>(
-                    SizedBox::<TwoGroups>(Some(100.0), Some(100.0)),
-                    state.b.clone(),
-                )
-                .on_drop(|s: &mut TwoGroups, paths| s.b_dropped = Some(paths))),
-            ])),
-        ])
+        crate::stack()
+            .child(SizedBox::<TwoGroups>(Some(400.0), Some(400.0)))
+            .child(
+                crate::row()
+                    .child(
+                        drag_target::<Vec<std::path::PathBuf>, TwoGroups, _>(
+                            SizedBox::<TwoGroups>(Some(100.0), Some(100.0)),
+                            state.a.clone(),
+                        )
+                        .on_leave(|s: &mut TwoGroups| s.a_left += 1)
+                        .on_drop(|s: &mut TwoGroups, paths| s.a_dropped = Some(paths)),
+                    )
+                    .child(
+                        drag_target::<Vec<std::path::PathBuf>, TwoGroups, _>(
+                            SizedBox::<TwoGroups>(Some(100.0), Some(100.0)),
+                            state.b.clone(),
+                        )
+                        .on_drop(|s: &mut TwoGroups, paths| s.b_dropped = Some(paths)),
+                    ),
+            )
     }
 
     /// A drag that hovers group `a` (opening an external session on its
@@ -1847,7 +1852,7 @@ mod tests {
             |_: &Kanban| 7u32,
         );
         let a = drag_target::<u32, Kanban, _>(
-            SizedBox::<Kanban>(Some(100.0), Some(100.0)).child(crate::Column(vec![any(card)])),
+            SizedBox::<Kanban>(Some(100.0), Some(100.0)).child(crate::column().child(card)),
             state.coordinator.clone(),
         )
         .on_enter(|s: &mut Kanban| s.a_entered += 1)
@@ -1858,10 +1863,9 @@ mod tests {
         )
         .on_enter(|s: &mut Kanban| s.b_entered += 1)
         .on_drop(|s: &mut Kanban, v: u32| s.b_dropped = Some(v));
-        crate::Stack(vec![
-            any(SizedBox::<Kanban>(Some(400.0), Some(400.0))),
-            any(crate::Row(vec![any(a), any(b)])),
-        ])
+        crate::stack()
+            .child(SizedBox::<Kanban>(Some(400.0), Some(400.0)))
+            .child(crate::row().child(a).child(b))
     }
 
     /// Drives [`kanban_logic`] through a real [`frust_core::RenderRoot`];

@@ -1806,10 +1806,9 @@ mod tests {
                 move |_: &RouteParams| {
                     let inner = inner.clone();
                     let builds = builds.clone();
-                    any(crate::Column(vec![
-                        any(BuildCounter { builds }),
-                        any(navigator(&inner, || sized(11.0, 11.0))),
-                    ]))
+                    any(crate::column()
+                        .child(BuildCounter { builds })
+                        .child(navigator(&inner, || sized(11.0, 11.0))))
                 }
             };
             let routes = vec![

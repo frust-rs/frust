@@ -2480,7 +2480,7 @@ mod tests {
 
         fn logic(_: &mut ()) -> ScrollView<()> {
             // A 1000px spacer, then a 100px perpetual animator (content 1100 tall).
-            scroll_view(crate::Column(vec![any(leaf(100.0, 1000.0)), any(Ticker)]))
+            scroll_view(crate::column().child(leaf(100.0, 1000.0)).child(Ticker))
         }
         let mut root: RenderRoot<(), ScrollView<()>> = RenderRoot::new();
         let mut state = ();
@@ -3819,7 +3819,7 @@ mod tests {
     /// [`nest_surface`] is.
     fn nested_list(viewport_h: f64) -> crate::list_view::ListViewWidget {
         let view: crate::list_view::ListView<Nest> =
-            crate::list_view::list_view(10, 100.0, |_| any(spacer_content()));
+            crate::list_view::list_view(10, 100.0, |_| spacer_content());
         let mut counter = 0u64;
         let mut w = View::<Nest>::build(&view, &mut BuildCtx::new(&mut counter));
         let mut lctx = LayoutCtx::new();

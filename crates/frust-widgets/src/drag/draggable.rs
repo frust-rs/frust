@@ -1345,7 +1345,7 @@ impl Widget for SnapshotWidget {
 mod tests {
     use super::*;
     use crate::test_support::RecordingScene;
-    use crate::{EdgeInsets, Padding, Stack, StackView};
+    use crate::{EdgeInsets, Padding, StackView, stack};
     use frust_core::event::PointerId;
     use frust_core::{FrameTime, RenderRoot};
     use kurbo::Rect;
@@ -1485,7 +1485,7 @@ mod tests {
         .policy(cfg.policy)
         .while_dragging(cfg.feedback);
         if cfg.custom_ghost {
-            source = source.ghost(|_: &App| any(crate::SizedBox(Some(30.0), Some(20.0))));
+            source = source.ghost(|_: &App| crate::SizedBox(Some(30.0), Some(20.0)));
         }
         let placed = any(Padding(
             EdgeInsets {
@@ -1497,10 +1497,11 @@ mod tests {
             source,
         ));
         if cfg.in_scroll {
-            return Stack(vec![any(crate::scroll_view(Stack(vec![
-                any(crate::SizedBox(Some(WINDOW.width), Some(2_000.0))),
-                placed,
-            ])))]);
+            return stack().child(crate::scroll_view(
+                stack()
+                    .child(crate::SizedBox(Some(WINDOW.width), Some(2_000.0)))
+                    .child(placed),
+            ));
         }
         if cfg.in_nested_scroll {
             // A page scroll surface (the window's own height, 2_000 px of
@@ -1509,13 +1510,14 @@ mod tests {
             // — a column with nothing of its own to scroll, same as a short
             // kanban column, which still forwards every `Down` and still has
             // a touch-slop takeover of its own to fire.
-            let inner = any(crate::scroll_view(Stack(vec![placed])));
-            return Stack(vec![any(crate::scroll_view(Stack(vec![
-                any(crate::SizedBox(Some(WINDOW.width), Some(2_000.0))),
-                inner,
-            ])))]);
+            let inner = any(crate::scroll_view(stack().child(placed)));
+            return stack().child(crate::scroll_view(
+                stack()
+                    .child(crate::SizedBox(Some(WINDOW.width), Some(2_000.0)))
+                    .child(inner),
+            ));
         }
-        Stack(vec![placed])
+        stack().child(placed)
     }
 
     struct Harness {

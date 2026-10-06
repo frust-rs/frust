@@ -289,7 +289,7 @@ mod tests {
     use super::*;
     use crate::drag::{DragPhase, DragTargetId, drag_target, draggable};
     use crate::test_support::RecordingScene;
-    use crate::{EdgeInsets, Padding, SizedBox, Stack, StackView, scroll_view};
+    use crate::{EdgeInsets, Padding, SizedBox, Stack, StackView, scroll_view, stack};
     use frust_core::{PointerButton, PointerEvent, PointerPhase, RenderRoot};
 
     const WINDOW: Size = Size::new(400.0, 600.0);
@@ -348,7 +348,7 @@ mod tests {
             )));
         }
         let surface = scroll_view(Stack(content)).controller(state.controller.clone());
-        Stack(vec![any(Padding(
+        stack().child(Padding(
             EdgeInsets {
                 left: 0.0,
                 top: ZONE.y0,
@@ -356,7 +356,7 @@ mod tests {
                 bottom: WINDOW.height - ZONE.y1,
             },
             auto_scroll_zone(surface, state.coordinator.clone(), state.controller.clone()),
-        ))])
+        ))
     }
 
     struct Harness {
@@ -628,8 +628,8 @@ mod tests {
         fn logic(state: &mut App) -> StackView<App> {
             let column = scroll_view(SizedBox::<App>(Some(WINDOW.width), Some(1_000.0)))
                 .controller(state.controller.clone());
-            Stack(vec![
-                any(Padding(
+            stack()
+                .child(Padding(
                     EdgeInsets {
                         left: 0.0,
                         top: ZONE.y0,
@@ -641,12 +641,11 @@ mod tests {
                         state.coordinator.clone(),
                         state.controller.clone(),
                     ),
-                )),
-                any(drag_target::<u32, App, _>(
+                ))
+                .child(drag_target::<u32, App, _>(
                     SizedBox::<App>(Some(WINDOW.width), Some(WINDOW.height)),
                     state.coordinator.clone(),
-                )),
-            ])
+                ))
         }
 
         let mut root: RenderRoot<App, StackView<App>> = RenderRoot::new();
