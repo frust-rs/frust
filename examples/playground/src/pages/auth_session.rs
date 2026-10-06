@@ -84,8 +84,8 @@ use std::time::Duration;
 
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Padding,
-    RwSignal, Set, SizedBox, Theme, any, button, checkbox, deep_links, inflexible, spawn_local,
-    text, text_input, use_context,
+    RwSignal, Set, SizedBox, Theme, any, button, checkbox, deep_links, inflexible, row,
+    spawn_local, text, text_input, use_context,
 };
 use frust_auth_session::{
     AuthSession, AuthSessionError, AuthSessionOutcome, AuthSessionRequest,
@@ -491,40 +491,34 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
             },
         )),
         any(SizedBox(None, Some(12.0))),
-        any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(button(
+        any(row()
+            .child(
+                button(
                     "Callback",
                     fire("Callback", "callback.html?scheme=frustplay"),
                 )
                 .style(ButtonStyle::Primary)
-                .small())),
-                gap_h(8.0),
-                inflexible(any(button(
-                    "Cancel test",
-                    fire("Cancel test", "cookie.html"),
-                )
-                .style(ButtonStyle::Secondary)
-                .small())),
-            ],
-        )),
-        any(SizedBox(None, Some(8.0))),
-        any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(button("Busy", fire_busy)
+                .small(),
+            )
+            .push(gap_h(8.0))
+            .child(
+                button("Cancel test", fire("Cancel test", "cookie.html"))
                     .style(ButtonStyle::Secondary)
-                    .small())),
-                gap_h(8.0),
-                inflexible(any(button(
-                    "Cookie check",
-                    fire("Cookie check", "cookie.html"),
-                )
-                .style(ButtonStyle::Secondary)
-                .small())),
-            ],
-        )),
+                    .small(),
+            )),
+        any(SizedBox(None, Some(8.0))),
+        any(row()
+            .child(
+                button("Busy", fire_busy)
+                    .style(ButtonStyle::Secondary)
+                    .small(),
+            )
+            .push(gap_h(8.0))
+            .child(
+                button("Cookie check", fire("Cookie check", "cookie.html"))
+                    .style(ButtonStyle::Secondary)
+                    .small(),
+            )),
         any(SizedBox(None, Some(8.0))),
         any(text(status_line).size(12.0)),
         any(SizedBox(None, Some(12.0))),
@@ -549,10 +543,9 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
             .size(11.0)
             .color(muted())),
             any(SizedBox(None, Some(8.0))),
-            any(FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(any(button(
+            any(row()
+                .child(
+                    button(
                         "Loopback login",
                         fire_loopback(
                             "Loopback login",
@@ -563,9 +556,11 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
                         ),
                     )
                     .style(ButtonStyle::Primary)
-                    .small())),
-                    gap_h(8.0),
-                    inflexible(any(button(
+                    .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button(
                         "Loopback deny",
                         fire_loopback(
                             "Loopback deny",
@@ -576,14 +571,12 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
                         ),
                     )
                     .style(ButtonStyle::Secondary)
-                    .small())),
-                ],
-            )),
+                    .small(),
+                )),
             any(SizedBox(None, Some(8.0))),
-            any(FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(any(button(
+            any(row()
+                .child(
+                    button(
                         "Loopback bad iss",
                         fire_loopback(
                             "Loopback bad iss",
@@ -594,9 +587,11 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
                         ),
                     )
                     .style(ButtonStyle::Secondary)
-                    .small())),
-                    gap_h(8.0),
-                    inflexible(any(button(
+                    .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button(
                         "Loopback timeout (10 s)",
                         fire_loopback(
                             "Loopback timeout (10 s)",
@@ -607,14 +602,12 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
                         ),
                     )
                     .style(ButtonStyle::Secondary)
-                    .small())),
-                ],
-            )),
+                    .small(),
+                )),
             any(SizedBox(None, Some(8.0))),
-            any(FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(any(button(
+            any(row()
+                .child(
+                    button(
                         "Loopback cancel",
                         fire_loopback(
                             "Loopback cancel",
@@ -625,19 +618,19 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
                         ),
                     )
                     .style(ButtonStyle::Secondary)
-                    .small())),
-                    gap_h(8.0),
-                    inflexible(any(button("Cancel loopback", fire_cancel_loopback)
+                    .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("Cancel loopback", fire_cancel_loopback)
                         .style(ButtonStyle::Secondary)
-                        .small())),
-                ],
-            )),
+                        .small(),
+                )),
             any(SizedBox(None, Some(8.0))),
-            any(FlexView::new(
-                Axis::Horizontal,
-                vec![inflexible(any(button("Loopback busy", fire_loopback_busy)
+            any(row().child(
+                button("Loopback busy", fire_loopback_busy)
                     .style(ButtonStyle::Secondary)
-                    .small()))],
+                    .small(),
             )),
             any(SizedBox(None, Some(8.0))),
             any(text(loopback_port_line).size(11.0).color(muted())),

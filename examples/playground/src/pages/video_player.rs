@@ -76,11 +76,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-use frust::{Align, Alignment, Stack, container};
+use frust::{Align, Alignment, container, stack};
 use frust::{
     AnyView, Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get,
     GetUntracked, Padding, PlatformViewView, SizedBox, Theme, View, any, button, component,
-    inflexible, slider, text, use_context,
+    inflexible, row, slider, text, use_context,
 };
 use frust_video_player::api::{VideoPlayerHandle, video_view};
 use frust_video_player::{
@@ -375,29 +375,35 @@ fn source_picker_block(state: &VideoPageState) -> FlexChild<VideoPageState> {
              immediately and returns before it has loaded.",
         )),
         gap(6.0),
-        inflexible(any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(button("https MP4", open_https_handler)
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-                gap_h(8.0),
-                inflexible(any(button("HLS", open_hls_handler)
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-                gap_h(8.0),
-                inflexible(any(button("Asset", open_asset_handler)
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-            ],
-        ))),
+        inflexible(
+            row()
+                .child(
+                    button("https MP4", open_https_handler)
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("HLS", open_hls_handler)
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("Asset", open_asset_handler)
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                ),
+        ),
     ];
 
     if let Some(err) = &state.open_error {
         rows.push(gap(6.0));
-        rows.push(inflexible(any(text(format!("open error: {err}"))
-            .size(11.0)
-            .color(error_ink()))));
+        rows.push(inflexible(
+            text(format!("open error: {err}"))
+                .size(11.0)
+                .color(error_ink()),
+        ));
     } else if state.handle.is_none() {
         rows.push(gap(6.0));
         rows.push(inflexible(caption("No session open yet.")));
@@ -461,8 +467,9 @@ fn slot_block(
     let slot = maybe_debug_fill(video_view(handle, fit).size(VIDEO_W, VIDEO_H));
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    let slot_view: AnyView<VideoPageState> =
-        any(Stack(vec![any(slot), mobile_state_chip(_playback_state)]));
+    let slot_view: AnyView<VideoPageState> = any(stack()
+        .child(slot)
+        .child(mobile_state_chip(_playback_state)));
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let slot_view: AnyView<VideoPageState> = any(slot);
 
@@ -599,75 +606,90 @@ fn transport_block(
     block(vec![
         inflexible(label("Transport")),
         gap(6.0),
-        inflexible(any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(button(play_pause_label, play_pause_handler)
-                    .style(ButtonStyle::Primary)
-                    .small())),
-                gap_h(8.0),
-                inflexible(any(button("\u{2212}10s", seek_back_handler)
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-                gap_h(8.0),
-                inflexible(any(button("+10s", seek_forward_handler)
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-                gap_h(8.0),
-                inflexible(any(button("Close", close_handler)
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-            ],
-        ))),
+        inflexible(
+            row()
+                .child(
+                    button(play_pause_label, play_pause_handler)
+                        .style(ButtonStyle::Primary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("\u{2212}10s", seek_back_handler)
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("+10s", seek_forward_handler)
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("Close", close_handler)
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                ),
+        ),
         gap(6.0),
         inflexible(caption(format!("Rate: {:.2}x", state.rate))),
         gap(4.0),
-        inflexible(any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(button("0.5x", rate_handler(0.5))
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-                gap_h(8.0),
-                inflexible(any(button("1x", rate_handler(1.0))
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-                gap_h(8.0),
-                inflexible(any(button("1.5x", rate_handler(1.5))
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-                gap_h(8.0),
-                inflexible(any(button("2x", rate_handler(2.0))
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-            ],
-        ))),
+        inflexible(
+            row()
+                .child(
+                    button("0.5x", rate_handler(0.5))
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("1x", rate_handler(1.0))
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("1.5x", rate_handler(1.5))
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("2x", rate_handler(2.0))
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                ),
+        ),
         gap(6.0),
         inflexible(caption(format!("Volume: {:.0}%", state.volume * 100.0))),
         gap(4.0),
-        inflexible(any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(button(
-                    "Vol \u{2212}",
-                    volume_step_handler(-VOLUME_STEP),
+        inflexible(
+            row()
+                .child(
+                    button("Vol \u{2212}", volume_step_handler(-VOLUME_STEP))
+                        .style(ButtonStyle::Secondary)
+                        .small(),
                 )
-                .style(ButtonStyle::Secondary)
-                .small())),
-                gap_h(8.0),
-                inflexible(any(button("Vol +", volume_step_handler(VOLUME_STEP))
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-                gap_h(8.0),
-                inflexible(any(button(loop_label, loop_toggle_handler)
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-                gap_h(8.0),
-                inflexible(any(button(fit_label, fit_toggle_handler)
-                    .style(ButtonStyle::Secondary)
-                    .small())),
-            ],
-        ))),
+                .push(gap_h(8.0))
+                .child(
+                    button("Vol +", volume_step_handler(VOLUME_STEP))
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button(loop_label, loop_toggle_handler)
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button(fit_label, fit_toggle_handler)
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                ),
+        ),
     ])
 }
 
@@ -709,7 +731,7 @@ fn scrubber_block(position: Duration, duration: Option<Duration>) -> FlexChild<V
     block(vec![
         inflexible(label("Scrubber")),
         gap(6.0),
-        inflexible(any(slider(fraction, seek_handler))),
+        inflexible(slider(fraction, seek_handler)),
         gap(6.0),
         inflexible(caption(readout)),
     ])
@@ -734,20 +756,24 @@ fn state_chip_block(
     let mut rows = vec![
         inflexible(label("Status")),
         gap(6.0),
-        inflexible(any(text(state_text).size(12.0).color(color))),
+        inflexible(text(state_text).size(12.0).color(color)),
     ];
 
     if let Some(err) = playback_error {
         rows.push(gap(4.0));
-        rows.push(inflexible(any(text(format!("playback error: {err}"))
-            .size(11.0)
-            .color(error_ink()))));
+        rows.push(inflexible(
+            text(format!("playback error: {err}"))
+                .size(11.0)
+                .color(error_ink()),
+        ));
     }
     if let Some(err) = control_error {
         rows.push(gap(4.0));
-        rows.push(inflexible(any(text(format!("control error: {err}"))
-            .size(11.0)
-            .color(error_ink()))));
+        rows.push(inflexible(
+            text(format!("control error: {err}"))
+                .size(11.0)
+                .color(error_ink()),
+        ));
     }
 
     block(rows)

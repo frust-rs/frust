@@ -44,8 +44,8 @@
 //! programmatic move, not just on a button press.
 
 use frust::{
-    AnimateTo, AnyView, Axis, ButtonStyle, ChildKey, Color, Curve, EdgeInsets, FlexView, Get,
-    ItemAlignment, ListView, Padding, SizedBox, Theme, any, button, inflexible, text, use_context,
+    AnimateTo, AnyView, ButtonStyle, ChildKey, Color, Curve, EdgeInsets, Get, ItemAlignment,
+    ListView, Padding, SizedBox, Theme, any, button, column, row, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -182,50 +182,42 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
 
     any(Padding(
         EdgeInsets::all(16.0),
-        FlexView::new(
-            Axis::Vertical,
-            vec![
-                inflexible(text("Scroll").size(13.0).color(accent)),
-                inflexible(
-                    text(
-                        "A keyed, variable-extent ListView bound to a ScrollController: \
+        column()
+            .child(text("Scroll").size(13.0).color(accent))
+            .child(
+                text(
+                    "A keyed, variable-extent ListView bound to a ScrollController: \
                          jump or animate to an offset, or scroll straight to a named row. \
                          Dragging the list while an animated move is in flight interrupts \
                          it — user input always wins. Under reduce-motion (or with \
                          animations off) every animated move here collapses to an instant \
                          jump instead.",
-                    )
-                    .size(11.0)
-                    .color(muted),
-                ),
-                inflexible(SizedBox(None, Some(12.0))),
-                inflexible(list_viewport),
-                inflexible(SizedBox(None, Some(8.0))),
-                inflexible(text(readout).size(12.0)),
-                inflexible(SizedBox(None, Some(8.0))),
-                inflexible(FlexView::new(
-                    Axis::Horizontal,
-                    vec![
-                        inflexible(jump_start),
-                        inflexible(SizedBox(Some(8.0), None)),
-                        inflexible(jump_end),
-                        inflexible(SizedBox(Some(8.0), None)),
-                        inflexible(animate_half),
-                    ],
-                )),
-                inflexible(SizedBox(None, Some(8.0))),
-                inflexible(FlexView::new(
-                    Axis::Horizontal,
-                    vec![
-                        inflexible(item_150),
-                        inflexible(SizedBox(Some(8.0), None)),
-                        inflexible(item_42),
-                        inflexible(SizedBox(Some(8.0), None)),
-                        inflexible(item_280_animated),
-                    ],
-                )),
-            ],
-        ),
+                )
+                .size(11.0)
+                .color(muted),
+            )
+            .child(SizedBox(None, Some(12.0)))
+            .child(list_viewport)
+            .child(SizedBox(None, Some(8.0)))
+            .child(text(readout).size(12.0))
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                row()
+                    .child(jump_start)
+                    .child(SizedBox(Some(8.0), None))
+                    .child(jump_end)
+                    .child(SizedBox(Some(8.0), None))
+                    .child(animate_half),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                row()
+                    .child(item_150)
+                    .child(SizedBox(Some(8.0), None))
+                    .child(item_42)
+                    .child(SizedBox(Some(8.0), None))
+                    .child(item_280_animated),
+            ),
     ))
 }
 

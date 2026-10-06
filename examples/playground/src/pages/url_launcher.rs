@@ -24,7 +24,7 @@
 
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Padding,
-    RwSignal, Set, SizedBox, Theme, any, button, deep_links, inflexible, text, use_context,
+    RwSignal, Set, SizedBox, Theme, any, button, deep_links, inflexible, row, text, use_context,
 };
 use frust_url_launcher::UrlLauncher;
 
@@ -124,22 +124,20 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
         .size(11.0)
         .color(muted())),
         any(SizedBox(None, Some(12.0))),
-        any(FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(any(button(
-                    "Open example.com",
-                    |_state: &mut PlaygroundState| {
-                        let result = UrlLauncher::open_external("https://example.com");
-                        status_sig().set(format!(
-                            "open_external(\"https://example.com\") -> {result:?}"
-                        ));
-                    },
-                )
+        any(row()
+            .child(
+                button("Open example.com", |_state: &mut PlaygroundState| {
+                    let result = UrlLauncher::open_external("https://example.com");
+                    status_sig().set(format!(
+                        "open_external(\"https://example.com\") -> {result:?}"
+                    ));
+                })
                 .style(ButtonStyle::Primary)
-                .small())),
-                gap_h(8.0),
-                inflexible(any(button(
+                .small(),
+            )
+            .push(gap_h(8.0))
+            .child(
+                button(
                     "Open invalid (javascript:)",
                     |_state: &mut PlaygroundState| {
                         let result = UrlLauncher::open_external("javascript:alert(1)");
@@ -149,9 +147,8 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
                     },
                 )
                 .style(ButtonStyle::Secondary)
-                .small())),
-            ],
-        )),
+                .small(),
+            )),
         any(SizedBox(None, Some(8.0))),
         any(text(status_line).size(12.0)),
         any(SizedBox(None, Some(12.0))),
