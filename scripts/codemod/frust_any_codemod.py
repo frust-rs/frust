@@ -44,26 +44,42 @@ cannot be resolved.
 Usage:
 
     python3 scripts/codemod/frust_any_codemod.py [--check] [--write] [--stats]
-        [--apis FILE] [--exclude PREFIX]... PATH...
+        [--strict] [--apis FILE] [--exclude PATH]... PATH...
 
 PATH is a `.rs` file or a directory (recursed for `*.rs`, skipping `target/`).
 `--check` (the default) lists `file:line` of every remaining candidate and
 exits 1 if there is one, 0 otherwise; skipped-site notes do not affect the exit
 code. A file that cannot be tokenised or decoded is reported as skipped, counted,
 and makes `--check` exit 2 when no candidate was found (candidates still win: 1).
-`--exclude PREFIX` (repeatable; repository-relative or absolute, prefix match on
-the normalised path) drops matching files from `--check`, `--write` and
-`--stats`; they are neither read nor counted. `--write` rewrites in place (iterating to a fixpoint, so a second run is a
-no-op). `--stats` prints per-file erasure-call counts before/after.
+The summary always reports the number of shadow-skipped sites (a local binding
+or fn shadows the builder, a mixed keyed flex list, an unresolvable import, or a
+comment inside the replaced call head); `--strict` makes any of them exit 2
+under `--check` (candidates still win: 1).
+`--exclude PATH` (repeatable; repository-relative or absolute) drops the
+file or directory, matched by whole path components on the normalised path
+(`a/src` does not exclude `a/src2`), from `--check`, `--write` and `--stats`;
+excluded files are neither read nor counted. `--write` rewrites in place
+atomically (temp file in the same directory, mode copied, fsync, then
+`os.replace`), iterating to a fixpoint, so a second run is a no-op. Symlinked
+`.rs` files are skipped in directory walks and refused (exit 2) as explicit
+PATH arguments. `--stats` prints per-file erasure-call counts before/after.
+
+Known blind spot: a closure parameter typed `AnyView<..>` whose body is
+`any(x)` is still a T1/T4 candidate when the call sits in a slot position; the
+rewrite then fails to compile (the closure must return the erased type), and
+the compiler, not this tool, catches it.
 """
 
 from __future__ import annotations
 
 import argparse
 import bisect
+import contextlib
 import os
 import re
+import shutil
 import sys
+import tempfile
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -787,6 +803,7 @@ def find_candidates(s: Source, apis: Apis):
     t = s.t
     cands: list[Candidate] = []
     notes: list[tuple[int, str]] = []
+    first_new = 0
     for k, tok in enumerate(t):
         if tok.kind != IDENT or not s.is_p(k + 1, "("):
             continue
@@ -805,7 +822,30 @@ def find_candidates(s: Source, apis: Apis):
             _t2(s, key, k, o, qual, cands, notes)
         if key == "FlexView::new":
             _t3(s, k, o, qual, cands, notes)
+        if len(cands) > first_new:
+            _drop_comment_losers(s, cands, first_new, notes)
+            first_new = len(cands)
     return cands, notes
+
+
+def _comment_count(text: str) -> int:
+    try:
+        return sum(1 for tk in lex(text) if tk.kind in (LINE_COMMENT, BLOCK_COMMENT))
+    except LexError:
+        return 0
+
+
+def _drop_comment_losers(s: Source, cands: list, first: int, notes: list) -> None:
+    """Remove new candidates whose rewrite would lose a comment; note each one."""
+    keep = []
+    for c in cands[first:]:
+        old = _comment_count(s.src[c.span[0]:c.span[1]])
+        new = sum(_comment_count(e.text) for e in c.edits)
+        if new < old:
+            notes.append((c.line, f"note: {c.rule} skipped: comment inside the call head"))
+        else:
+            keep.append(c)
+    cands[first:] = keep
 
 
 def _t1(s, key, k, o, cands):
@@ -1226,9 +1266,28 @@ def _norm(p):
     return os.path.normpath(os.path.abspath(p))
 
 
-def _path_excluded(path, prefixes):
+def _path_excluded(path, excluded):
     n = _norm(path)
-    return any(n.startswith(x) for x in prefixes)
+    return any(n == x or n.startswith(x + os.sep) for x in excluded)
+
+
+def _write_atomic(path: str, text: str) -> None:
+    """Replace `path` (resolving symlinks) with `text`, never leaving a partial file."""
+    real = os.path.realpath(path)
+    tmp = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", newline="", dir=os.path.dirname(real),
+        prefix=".codemod-", suffix=".tmp", delete=False)
+    try:
+        with tmp:
+            tmp.write(text)
+            shutil.copymode(real, tmp.name)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp.name, real)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp.name)
+        raise
 
 
 def iter_rs(paths):
@@ -1237,7 +1296,7 @@ def iter_rs(paths):
             for dp, dn, fn in os.walk(p):
                 dn[:] = sorted(d for d in dn if d != "target" and not d.startswith("."))
                 for f in sorted(fn):
-                    if f.endswith(".rs"):
+                    if f.endswith(".rs") and not os.path.islink(os.path.join(dp, f)):
                         yield os.path.join(dp, f)
         else:
             yield p
@@ -1249,8 +1308,10 @@ def main(argv=None) -> int:
     ap.add_argument("--check", action="store_true", help="list remaining candidates; exit 1 if any")
     ap.add_argument("--write", action="store_true", help="rewrite files in place")
     ap.add_argument("--stats", action="store_true", help="print per-file erasure-call counts before/after")
-    ap.add_argument("--exclude", action="append", default=[], metavar="PREFIX",
-                    help="skip files whose normalised path starts with PREFIX (repeatable)")
+    ap.add_argument("--strict", action="store_true",
+                    help="--check exits 2 when any site was shadow-skipped (candidates still win: 1)")
+    ap.add_argument("--exclude", action="append", default=[], metavar="PATH",
+                    help="skip PATH, a file or directory, by whole path components (repeatable)")
     ap.add_argument("--apis", default=DEFAULT_APIS, help="name list (default: erasing_apis.txt beside this script)")
     args = ap.parse_args(argv)
     check = args.check or not (args.write or args.stats)
@@ -1259,9 +1320,16 @@ def main(argv=None) -> int:
     excludes = [_norm(x) for x in args.exclude]
     remaining = 0
     skipped = 0
+    shadow = 0
+    refused = 0
     total_before = total_after = 0
     for path in iter_rs(args.paths):
         if excludes and _path_excluded(path, excludes):
+            continue
+        if os.path.islink(path):
+            print(f"{path}: skipped, refusing to follow a symlink", file=sys.stderr)
+            skipped += 1
+            refused += 1
             continue
         if not os.path.isfile(path):
             print(f"{path}: no such file", file=sys.stderr)
@@ -1277,8 +1345,7 @@ def main(argv=None) -> int:
         total_before += res.before
         total_after += res.after
         if args.write and res.text != src:
-            with open(path, "w", encoding="utf-8", newline="") as fh:
-                fh.write(res.text)
+            _write_atomic(path, res.text)
         if check:
             if args.write:
                 post = Source(res.text)
@@ -1291,16 +1358,20 @@ def main(argv=None) -> int:
             for line, msg in notes:
                 print(f"{path}:{line}: {msg}")
             remaining += len(cands)
+            shadow += len(notes)
         if args.stats:
             print(f"{path}: erasure calls before={res.before} after={res.after}")
     if args.stats:
         print(f"total: erasure calls before={total_before} after={total_after}")
     if check:
+        print(f"{shadow} shadow skip(s)")
         print(f"{remaining} candidate(s)" if remaining else "no candidates")
         if skipped:
             print(f"{skipped} file(s) skipped")
-        return 1 if remaining else (2 if skipped else 0)
-    return 0
+        if remaining:
+            return 1
+        return 2 if skipped or (args.strict and shadow) else 0
+    return 2 if refused else 0
 
 
 if __name__ == "__main__":
