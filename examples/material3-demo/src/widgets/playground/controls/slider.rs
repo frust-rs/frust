@@ -2,7 +2,7 @@
 
 use std::ops::RangeInclusive;
 
-use frust::{AnyView, Column, CrossAxisAlignment, EdgeInsets, Padding, any, text};
+use frust::{AnyView, CrossAxisAlignment, EdgeInsets, Padding, any, column, text};
 use frust_material::{MaterialSpacing, slider};
 
 use crate::widgets::playground::ambient_theme;
@@ -44,7 +44,9 @@ pub fn play_slider<State: 'static>(
             right: 0.0,
             bottom: MaterialSpacing::MD,
         },
-        Column(vec![any(text(display).style(body)), any(track)])
+        column()
+            .child(text(display).style(body))
+            .child(track)
             .cross_axis(CrossAxisAlignment::Stretch),
     ))
 }

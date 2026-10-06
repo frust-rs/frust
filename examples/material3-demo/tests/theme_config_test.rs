@@ -22,7 +22,7 @@
 //! pinned below is the resolved token data those pixels come from.
 
 use frust::authoring::text::{FontFamily, GenericSlot};
-use frust::{Brightness, Color, Resolution, Route, RouteParams, Router, any, text};
+use frust::{Brightness, Color, Resolution, Route, RouteParams, Router, text};
 use frust_material::{card_list_items, list_item, switch, theme_from_seed};
 
 /// This file's own state type — no test below needs anything in it.
@@ -50,7 +50,7 @@ const ROSE_SEED: Color = Color::from_rgb8(0xA1, 0x00, 0x3C);
 #[test]
 fn theme_route_resolves_outside_any_shell_and_its_toggles_build() {
     let router: Router<St> = Router::new(vec![Route::new("/theme", |_: &RouteParams| {
-        any(text("theme settings"))
+        text("theme settings")
     })]);
     match router.resolve("/theme") {
         Resolution::Matched { pages, .. } => {

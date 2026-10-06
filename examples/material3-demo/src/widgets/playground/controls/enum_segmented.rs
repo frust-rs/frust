@@ -1,7 +1,7 @@
 //! Discrete enum control via a segmented button — the reference's
 //! `PlayEnumSegmented`.
 
-use frust::{AnyView, Column, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, any, text};
+use frust::{AnyView, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, any, column, text};
 use frust_material::{MaterialSpacing, segment, segmented_button};
 
 use crate::widgets::playground::ambient_theme;
@@ -31,10 +31,10 @@ pub fn play_enum_segmented<State: 'static, T: PartialEq + Copy + 'static>(
             right: 0.0,
             bottom: MaterialSpacing::MD,
         },
-        Column(vec![
-            any(text(label.into()).style(body)),
-            any(SizedBox::<State>(None, Some(MaterialSpacing::SM))),
-            any(segmented_button(
+        column()
+            .child(text(label.into()).style(body))
+            .child(SizedBox::<State>(None, Some(MaterialSpacing::SM)))
+            .child(segmented_button(
                 segments,
                 vec![value],
                 move |state: &mut State, next: Vec<T>| {
@@ -42,9 +42,8 @@ pub fn play_enum_segmented<State: 'static, T: PartialEq + Copy + 'static>(
                         on_changed(state, v);
                     }
                 },
-            )),
-        ])
-        .cross_axis(CrossAxisAlignment::Stretch),
+            ))
+            .cross_axis(CrossAxisAlignment::Stretch),
     ))
 }
 

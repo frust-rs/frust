@@ -6,8 +6,8 @@
 
 use frust::authoring::text::{FontFamily, GenericSlot};
 use frust::{
-    AnyView, Axis, Column, CrossAxisAlignment, EdgeInsets, FlexView, Padding, SizedBox, any,
-    container, flexible, icon, inflexible, text,
+    AnyView, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, any, column, container, icon, row,
+    text,
 };
 use frust_material::{IconButtonSize, MaterialDimensions, MaterialSpacing, icon_button, icons};
 
@@ -58,20 +58,16 @@ pub fn play_code_snippet<State: 'static>(snippet: &PlaySnippet) -> AnyView<State
     let fill = scheme.surface_container_low;
 
     let code = snippet.code.clone();
-    let header = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            flexible(1, text(snippet.label.clone()).style(label_style)),
-            inflexible(
-                icon_button(any(icon(icons::CONTENT_COPY)), move |_state: &mut State| {
-                    let _ = copy_to_clipboard(&code);
-                })
-                .size(IconButtonSize::Sm)
-                .semantic_label("Copy snippet"),
-            ),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Center);
+    let header = row()
+        .flex(1, text(snippet.label.clone()).style(label_style))
+        .child(
+            icon_button(icon(icons::CONTENT_COPY), move |_state: &mut State| {
+                let _ = copy_to_clipboard(&code);
+            })
+            .size(IconButtonSize::Sm)
+            .semantic_label("Copy snippet"),
+        )
+        .cross_axis(CrossAxisAlignment::Center);
 
     any(Padding(
         EdgeInsets {
@@ -82,12 +78,11 @@ pub fn play_code_snippet<State: 'static>(snippet: &PlaySnippet) -> AnyView<State
         },
         container(Padding(
             EdgeInsets::all(MaterialSpacing::LG),
-            Column(vec![
-                any(header),
-                any(SizedBox::<State>(None, Some(MaterialSpacing::MD))),
-                any(text(snippet.code.clone()).style(code_style)),
-            ])
-            .cross_axis(CrossAxisAlignment::Stretch),
+            column()
+                .child(header)
+                .child(SizedBox::<State>(None, Some(MaterialSpacing::MD)))
+                .child(text(snippet.code.clone()).style(code_style))
+                .cross_axis(CrossAxisAlignment::Stretch),
         ))
         .fill(fill)
         .radius(MaterialDimensions::RADIUS_LARGE),

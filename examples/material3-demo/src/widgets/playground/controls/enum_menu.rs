@@ -14,7 +14,7 @@
 //! `on_change` from `rebuild`), so nothing here needs the deferred
 //! post-frame guard it applies.
 
-use frust::{AnyView, Column, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, any, text};
+use frust::{AnyView, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, any, column, text};
 use frust_material::{
     DropdownItem, MaterialSpacing, OverlayAnchor, dropdown, dropdown_field, dropdown_item,
 };
@@ -72,17 +72,18 @@ pub fn play_enum_menu_field<State: 'static, T: PartialEq + Copy + 'static>(
             right: 0.0,
             bottom: MaterialSpacing::MD,
         },
-        Column(vec![
-            any(text(label.clone()).style(body)),
-            any(SizedBox::<State>(None, Some(MaterialSpacing::SM))),
-            any(dropdown_field(items)
-                .anchor(anchor)
-                .selected(selected)
-                .hint(label)
-                .open(open)
-                .on_open(on_open)),
-        ])
-        .cross_axis(CrossAxisAlignment::Stretch),
+        column()
+            .child(text(label.clone()).style(body))
+            .child(SizedBox::<State>(None, Some(MaterialSpacing::SM)))
+            .child(
+                dropdown_field(items)
+                    .anchor(anchor)
+                    .selected(selected)
+                    .hint(label)
+                    .open(open)
+                    .on_open(on_open),
+            )
+            .cross_axis(CrossAxisAlignment::Stretch),
     ))
 }
 
