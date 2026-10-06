@@ -282,7 +282,7 @@ impl<State: 'static> RouterDeepLinks<State> {
 ///         // otherwise (see the module docs' dedupe contract).
 ///         state.router_links.track();
 ///         let controller = state.router_links.router().controller();
-///         any(navigator(controller, || any(text("home"))))
+///         navigator(controller, || text("home"))
 ///     }
 /// }
 ///

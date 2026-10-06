@@ -11,8 +11,8 @@ use std::sync::Arc;
 use clean_signals::{AsyncState, Failure};
 use clean_signals_frust::{async_view, use_controller};
 use frust::{
-    Align, Alignment, AnyView, Column, CrossAxisAlignment, Get, View, any, scaffold,
-    spawn_local, text,
+    Align, Alignment, CrossAxisAlignment, Get, View, any, column, scaffold, spawn_local,
+    text,
 };
 
 use crate::failure::AppFailure;
@@ -38,13 +38,13 @@ pub fn init_controller(repo: Arc<dyn CounterRepository + Send + Sync>) -> PageSt
 
 /// The counter screen: a Material scaffold with an app bar, the count and an
 /// increment button.
-pub fn counter_page(state: &mut PageState) -> AnyView<PageState> {
+pub fn counter_page(state: &mut PageState) -> impl View<PageState> + use<> {
     // Tracked read: the controller writes this signal from spawned tasks,
     // which wakes the frame and rebuilds the page.
     let count = state.count.get();
-    any(scaffold(counter_body(count))
-        .app_bar(any(app_bar("{{ title_case_name }}")))
-        .fab(any(increment_fab())))
+    scaffold(counter_body(count))
+        .app_bar(app_bar("{{ title_case_name }}"))
+        .fab(increment_fab())
 }
 
 // The Material app bar insets itself under the status bar, so no safe_area wrapper is needed.
@@ -57,6 +57,7 @@ fn app_bar(title: &str) -> impl View<PageState> + use<> {
 fn counter_body(count: AsyncState<u32, AppFailure>) -> impl View<PageState> + use<> {
     Align(
         Alignment::CENTER,
+        // The three arms are different view types, so each is erased with `any`.
         async_view(
             count,
             || any(text("Loading…")),
@@ -67,17 +68,16 @@ fn counter_body(count: AsyncState<u32, AppFailure>) -> impl View<PageState> + us
 }
 
 fn counter_column(count: u32) -> impl View<PageState> + use<> {
-    Column(vec![
-        any(text("You have pushed the button this many times:")),
-        any(text(count.to_string()).size(48.0)),
-    ])
-    .cross_axis(CrossAxisAlignment::Center)
+    column()
+        .child(text("You have pushed the button this many times:"))
+        .child(text(count.to_string()).size(48.0))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 // The Scaffold keeps the FAB clear of the gesture-nav inset.
 fn increment_fab() -> impl View<PageState> + use<> {
     frust_material::fab(
-        any(frust::icon(frust_material::icons::ADD)),
+        frust::icon(frust_material::icons::ADD),
         |state: &mut PageState| {
             let handle = Arc::clone(state);
             spawn_local(async move {
