@@ -185,7 +185,7 @@ pub fn bottom_bar(
         DesignLanguage::Material3 => any(safe_area(navigation_bar::<HuddleState, _>(
             Tab::ALL
                 .iter()
-                .map(|t| nav_item::<HuddleState>(t.label()).icon(any(icon(t.icon()).size(24.0))))
+                .map(|t| nav_item::<HuddleState>(t.label()).icon(icon(t.icon()).size(24.0)))
                 .collect(),
             selected,
             move |_s: &mut HuddleState, idx: usize| {
@@ -215,7 +215,7 @@ pub fn bottom_bar(
         DesignLanguage::Cupertino => any(safe_area(cupertino_tab_bar::<HuddleState, _>(
             Tab::ALL
                 .iter()
-                .map(|t| tab_item::<HuddleState>(t.label()).icon(any(icon(t.icon()).size(24.0))))
+                .map(|t| tab_item::<HuddleState>(t.label()).icon(icon(t.icon()).size(24.0)))
                 .collect(),
             selected,
             move |_s: &mut HuddleState, idx: usize| {
@@ -230,9 +230,7 @@ pub fn bottom_bar(
             any(safe_area(navigation_bar::<HuddleState, _>(
                 Tab::ALL
                     .iter()
-                    .map(|t| {
-                        nav_item::<HuddleState>(t.label()).icon(any(icon(t.icon()).size(24.0)))
-                    })
+                    .map(|t| nav_item::<HuddleState>(t.label()).icon(icon(t.icon()).size(24.0)))
                     .collect(),
                 selected,
                 move |_s: &mut HuddleState, idx: usize| {

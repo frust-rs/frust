@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 
 use frust::{
     Align, Alignment, AnimationController, AnyView, Column, Curve, EdgeInsets, FrameTime,
-    GestureDetector, Get, GetUntracked, Padding, Row, RwSignal, Set, SizedBox, Stack, any, text,
+    GestureDetector, Get, GetUntracked, Padding, Row, RwSignal, Set, SizedBox, any, stack, text,
 };
 use frust_material::filled_card;
 
@@ -215,7 +215,7 @@ pub fn workspace_drawer_screen() -> AnyView<HuddleState> {
     );
     let panel: AnyView<HuddleState> = any(Align(Alignment::new(0.0, -1.0), panel_slid));
 
-    any(Stack(vec![scrim, panel]))
+    any(stack().child(scrim).child(panel))
 }
 
 /// One tappable workspace row: an initials tile, name, and a trailing

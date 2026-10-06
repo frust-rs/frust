@@ -94,8 +94,8 @@ use std::sync::Arc;
 use frust::{
     Align, Alignment, AnyView, Axis, ChildKey, Color, CrossAxisAlignment, DesignLanguage,
     EdgeInsets, FlexView, GestureDetector, Get, GetUntracked, ListView, NavigatorController,
-    Padding, RwSignal, Set, SizedBox, Stack, Theme, Update, any, flexible, hero, icon, icons,
-    inflexible, kurbo::Size, text, text_input, use_context,
+    Padding, RwSignal, Set, SizedBox, Theme, Update, any, column, hero, icon, icons, inflexible,
+    kurbo::Size, row, stack, text, text_input, use_context,
 };
 use frust_cupertino::cupertino_activity_indicator;
 use frust_material::{app_bar, assist_chip, filter_chip, loading_indicator};
@@ -274,17 +274,17 @@ pub fn channel_feed(
     let body = feed_body(&controller, design, sheet_sig);
     let composer_row = composer_bar(&controller, composer, sheet_sig);
 
-    let screen = any(FlexView::new(
-        Axis::Vertical,
-        vec![inflexible(bar), flexible(1, body), inflexible(composer_row)],
-    )
-    .cross_axis(CrossAxisAlignment::Stretch));
+    let screen = any(column()
+        .child(bar)
+        .flex(1, body)
+        .child(composer_row)
+        .cross_axis(CrossAxisAlignment::Stretch));
 
     // The message-action sheet mounts in the screen's own `Stack` top layer
     // (see `crate::ui::sheet`); when closed it is an inert zero-size box, so the
     // feed stays interactive.
     let overlay = feed_sheet(&controller, composer, sheet_sig);
-    any(Stack(vec![screen, overlay]))
+    any(stack().child(screen).child(overlay))
 }
 
 /// The open message-action sheet as a `Stack` overlay layer, or an inert
@@ -387,7 +387,7 @@ fn feed_app_bar(
 
     // Docked at the window top: the bar insets itself (top + sides) and
     // paints its container through the status-bar band.
-    any(app_bar::<HuddleState>(title).leading(any(Padding(EdgeInsets::symmetric(4.0, 0.0), back))))
+    any(app_bar::<HuddleState>(title).leading(Padding(EdgeInsets::symmetric(4.0, 0.0), back)))
 }
 
 /// One row of the virtualized feed list — the two ephemeral singleton rows
@@ -514,23 +514,16 @@ fn message_row(
 ) -> AnyView<HuddleState> {
     let bubble = message_bubble(controller, msg, sheet_sig);
     if msg.is_own() {
-        let row = FlexView::new(
-            Axis::Horizontal,
-            vec![flexible(1, any(SizedBox(None, None))), inflexible(bubble)],
-        );
+        let row = row().flex(1, SizedBox(None, None)).child(bubble);
         return any(Padding(EdgeInsets::symmetric(0.0, 4.0), row));
     }
 
-    let row = FlexView::new(
-        Axis::Horizontal,
-        vec![
-            inflexible(avatar(controller, msg.author_id)),
-            inflexible(any(SizedBox(Some(8.0), None))),
-            inflexible(bubble),
-            flexible(1, any(SizedBox(None, None))),
-        ],
-    )
-    .cross_axis(CrossAxisAlignment::Start);
+    let row = row()
+        .child(avatar(controller, msg.author_id))
+        .child(SizedBox(Some(8.0), None))
+        .child(bubble)
+        .flex(1, SizedBox(None, None))
+        .cross_axis(CrossAxisAlignment::Start);
 
     // Swipe right → open the thread (starting it if the message has none yet —
     // the thread screen already handles an empty thread).
@@ -612,21 +605,15 @@ fn message_body(msg: &FeedMessage) -> AnyView<HuddleState> {
         FeedBody::Link { url, title } => any(filled_box(
             Padding(
                 EdgeInsets::all(10.0),
-                FlexView::new(
-                    Axis::Vertical,
-                    vec![
-                        inflexible(any(FlexView::new(
-                            Axis::Horizontal,
-                            vec![
-                                inflexible(any(icon(icons::LINK).size(16.0))),
-                                inflexible(any(SizedBox(Some(6.0), None))),
-                                inflexible(any(text(title.clone()).size(14.0))),
-                            ],
-                        ))),
-                        inflexible(any(text(url.clone()).size(12.0))),
-                    ],
-                )
-                .cross_axis(CrossAxisAlignment::Start),
+                column()
+                    .child(
+                        row()
+                            .child(icon(icons::LINK).size(16.0))
+                            .child(SizedBox(Some(6.0), None))
+                            .child(text(title.clone()).size(14.0)),
+                    )
+                    .child(text(url.clone()).size(12.0))
+                    .cross_axis(CrossAxisAlignment::Start),
             ),
             TILE_FILL,
             8.0,
@@ -634,22 +621,16 @@ fn message_body(msg: &FeedMessage) -> AnyView<HuddleState> {
         FeedBody::File { name, size } => any(filled_box(
             Padding(
                 EdgeInsets::all(10.0),
-                FlexView::new(
-                    Axis::Horizontal,
-                    vec![
-                        inflexible(any(icon(icons::DESCRIPTION).size(24.0))),
-                        inflexible(any(SizedBox(Some(8.0), None))),
-                        inflexible(any(FlexView::new(
-                            Axis::Vertical,
-                            vec![
-                                inflexible(any(text(name.clone()).size(14.0))),
-                                inflexible(any(text(size.clone()).size(12.0))),
-                            ],
-                        )
-                        .cross_axis(CrossAxisAlignment::Start))),
-                    ],
-                )
-                .cross_axis(CrossAxisAlignment::Center),
+                row()
+                    .child(icon(icons::DESCRIPTION).size(24.0))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(
+                        column()
+                            .child(text(name.clone()).size(14.0))
+                            .child(text(size.clone()).size(12.0))
+                            .cross_axis(CrossAxisAlignment::Start),
+                    )
+                    .cross_axis(CrossAxisAlignment::Center),
             ),
             TILE_FILL,
             8.0,
@@ -675,22 +656,23 @@ fn reaction_chips(
         let emoji = reaction.emoji.clone();
         let ctrl = Arc::clone(controller);
         let id = msg.id;
-        chips.push(inflexible(any(filter_chip::<HuddleState, _>(
+        chips.push(inflexible(filter_chip::<HuddleState, _>(
             label,
             reaction.mine,
             move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
-        ))));
-        chips.push(inflexible(any(SizedBox(Some(6.0), None))));
+        )));
+        chips.push(inflexible(SizedBox(Some(6.0), None)));
     }
 
     // The quick-react add chip.
     let ctrl = Arc::clone(controller);
     let id = msg.id;
-    chips.push(inflexible(any(assist_chip::<HuddleState, _>(
-        QUICK_REACT,
-        move |_st: &mut HuddleState| ctrl.toggle_reaction(id, QUICK_REACT),
-    )
-    .leading("+"))));
+    chips.push(inflexible(
+        assist_chip::<HuddleState, _>(QUICK_REACT, move |_st: &mut HuddleState| {
+            ctrl.toggle_reaction(id, QUICK_REACT)
+        })
+        .leading("+"),
+    ));
 
     Some(any(Padding(
         EdgeInsets::symmetric(0.0, 6.0),
@@ -731,19 +713,20 @@ fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> AnyView<Huddl
         .user(author_id)
         .map(|u| u.initials)
         .unwrap_or("?");
-    let tile = any(Stack(vec![
-        any(fill_box(
+    let tile = any(stack()
+        .child(fill_box(
             Size::new(AVATAR_SIZE, AVATAR_SIZE),
             avatar_color(author_id),
             AVATAR_RADIUS,
-        )),
-        any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
-            Alignment::CENTER,
-            text(initials.to_string())
-                .size(AVATAR_MONOGRAM_SIZE)
-                .color(Color::WHITE),
-        ))),
-    ]));
+        ))
+        .child(
+            SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
+                Alignment::CENTER,
+                text(initials.to_string())
+                    .size(AVATAR_MONOGRAM_SIZE)
+                    .color(Color::WHITE),
+            )),
+        ));
     any(
         GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
             move |st: &mut HuddleState| {
@@ -779,15 +762,11 @@ fn typing_row(design: DesignLanguage) -> AnyView<HuddleState> {
     };
     any(Padding(
         EdgeInsets::symmetric(4.0, 8.0),
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(spinner),
-                inflexible(any(SizedBox(Some(8.0), None))),
-                inflexible(any(text("typing\u{2026}").size(13.0))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .child(spinner)
+            .child(SizedBox(Some(8.0), None))
+            .child(text("typing\u{2026}").size(13.0))
+            .cross_axis(CrossAxisAlignment::Center),
     ))
 }
 
@@ -807,15 +786,11 @@ fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
         EdgeInsets::all(8.0),
         frust::Align(
             frust::Alignment::CENTER,
-            FlexView::new(
-                Axis::Horizontal,
-                vec![
-                    inflexible(spinner),
-                    inflexible(any(SizedBox(Some(8.0), None))),
-                    inflexible(any(text("loading older\u{2026}").size(13.0))),
-                ],
-            )
-            .cross_axis(CrossAxisAlignment::Center),
+            row()
+                .child(spinner)
+                .child(SizedBox(Some(8.0), None))
+                .child(text("loading older\u{2026}").size(13.0))
+                .cross_axis(CrossAxisAlignment::Center),
         ),
     ))
 }
@@ -899,19 +874,15 @@ fn composer_bar(
     // bottom-anchored panel consumes for its own keyboard avoidance.
     any(avoid_keyboard(Padding(
         EdgeInsets::all(8.0),
-        FlexView::new(
-            Axis::Horizontal,
-            vec![
-                inflexible(attach_btn),
-                inflexible(any(SizedBox(Some(4.0), None))),
-                inflexible(emoji_btn),
-                inflexible(any(SizedBox(Some(6.0), None))),
-                flexible(1, any(field)),
-                inflexible(any(SizedBox(Some(8.0), None))),
-                inflexible(any(Padding(EdgeInsets::symmetric(0.0, 6.0), send_btn))),
-            ],
-        )
-        .cross_axis(CrossAxisAlignment::Center),
+        row()
+            .child(attach_btn)
+            .child(SizedBox(Some(4.0), None))
+            .child(emoji_btn)
+            .child(SizedBox(Some(6.0), None))
+            .flex(1, field)
+            .child(SizedBox(Some(8.0), None))
+            .child(Padding(EdgeInsets::symmetric(0.0, 6.0), send_btn))
+            .cross_axis(CrossAxisAlignment::Center),
     )))
 }
 
@@ -925,15 +896,18 @@ fn affordance_button<F>(leading: frust::IconSource, on_tap: F) -> AnyView<Huddle
 where
     F: Fn(&mut HuddleState) + 'static,
 {
-    any(GestureDetector(Stack(vec![
-        any(fill_box(
-            Size::new(COMPOSER_TILE, COMPOSER_TILE),
-            TILE_FILL,
-            COMPOSER_TILE_RADIUS,
-        )),
-        any(SizedBox(Some(COMPOSER_TILE), Some(COMPOSER_TILE))
-            .child(Align(Alignment::CENTER, icon(leading).size(24.0)))),
-    ]))
+    any(GestureDetector(
+        stack()
+            .child(fill_box(
+                Size::new(COMPOSER_TILE, COMPOSER_TILE),
+                TILE_FILL,
+                COMPOSER_TILE_RADIUS,
+            ))
+            .child(
+                SizedBox(Some(COMPOSER_TILE), Some(COMPOSER_TILE))
+                    .child(Align(Alignment::CENTER, icon(leading).size(24.0))),
+            ),
+    )
     .on_tap(on_tap))
 }
 
