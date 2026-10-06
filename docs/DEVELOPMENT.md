@@ -425,12 +425,12 @@ periodic `frust-perf frame ...` summaries; on a platform-view page it also emits
 `frust-perf platform-view tail depth=...` line from the Android scroll-sync tail. `frust-camera`'s
 backends separately `log::debug!` the platform's expected frame-rate range (`FRUST_LOG=debug`).
 
-`scripts/size-report.sh [--app <dir>]` (default `examples/huddle`) builds the arm64-v8a release
-`.so` via `cargo ndk`, reporting unstripped/stripped size, an APK/AAB per-ABI `.so`+dex breakdown
-when Gradle output already exists, and a desktop `cargo bloat --release -n 20` breakdown when
-installed — every missing-tool/artifact path degrades to a printed note.
-`benchmarks/harness/size_attribute.py` takes the follow-up question (which crate, which ELF section)
-against an unstripped Android release `.so`, via the NDK's `llvm-readelf`/`llvm-nm`.
+`scripts/size-report.sh [--app <dir>]` (default `examples/huddle`) builds the arm64-v8a release `.so`
+via `cargo ndk` and reports unstripped/stripped size plus APK/AAB and `cargo bloat` breakdowns when
+available (a missing tool degrades to a note); `benchmarks/harness/size_attribute.py` attributes an
+unstripped Android release `.so` to crates and ELF sections. Baseline (2026-10-06, `feature/any-erasure`
+89b379d3, i5-12600): stripped huddle `.so` 9,069,848 B (unstripped 9,070,176 B); clean release rebuild
+of `frust-gallery`, warm cache, median of 3, 13.6 s — +0.12 % / +3.4 % vs main 79686b68 (bars ≤ 2 % / ≤ 10 %).
 
 ## Version-Pin Policy
 
