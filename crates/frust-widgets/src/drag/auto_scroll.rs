@@ -608,4 +608,113 @@ mod tests {
             other => panic!("expected a drop, got {other:?}"),
         }
     }
+
+    #[test]
+    fn resolve_hover_after_the_zone_paints_does_not_flicker_a_later_sibling() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use crate::drag::DragStateChange;
+
+        // A later sibling sharing the coordinator, painted (and so
+        // registered) after the zone: a second kanban column, a `Stack`
+        // layer above, an overlay. Covers the whole window, including the
+        // zone's own bottom edge band.
+        struct App {
+            coordinator: DragCoordinator,
+            controller: ScrollController,
+        }
+
+        fn logic(state: &mut App) -> StackView<App> {
+            let column = scroll_view(SizedBox::<App>(Some(WINDOW.width), Some(1_000.0)))
+                .controller(state.controller.clone());
+            Stack(vec![
+                any(Padding(
+                    EdgeInsets {
+                        left: 0.0,
+                        top: ZONE.y0,
+                        right: 0.0,
+                        bottom: WINDOW.height - ZONE.y1,
+                    },
+                    auto_scroll_zone(
+                        drag_target::<u32, App, _>(column, state.coordinator.clone()),
+                        state.coordinator.clone(),
+                        state.controller.clone(),
+                    ),
+                )),
+                any(drag_target::<u32, App, _>(
+                    SizedBox::<App>(Some(WINDOW.width), Some(WINDOW.height)),
+                    state.coordinator.clone(),
+                )),
+            ])
+        }
+
+        let mut root: RenderRoot<App, StackView<App>> = RenderRoot::new();
+        let mut state = App {
+            coordinator: DragCoordinator::new(),
+            controller: ScrollController::new(),
+        };
+        let log: Rc<RefCell<Vec<DragStateChange>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&log);
+        let _subscription = state
+            .coordinator
+            .subscribe(move |change| sink.borrow_mut().push(change));
+
+        let mut build: fn(&mut App) -> StackView<App> = logic;
+        let mut clock_ms = 0.0_f64;
+        root.rebuild(&mut build, &mut state);
+        root.layout(WINDOW);
+        clock_ms += FRAME_MS;
+        let mut scene = RecordingScene::default();
+        root.paint(
+            &mut scene,
+            FrameTime::from_nanos((clock_ms * 1_000_000.0) as u64),
+        );
+
+        let targets = state.coordinator.registered_targets();
+        assert_eq!(targets.len(), 2, "the zone's own target plus the sibling");
+        let sibling = targets[1];
+
+        // The sibling, registered after the zone's own target, wins the
+        // overlap at a point both cover — the pointer sits in the zone's
+        // bottom edge band, which the sibling also spans.
+        let source = state.coordinator.new_source_id();
+        let at = Point::new(200.0, ZONE.y1 - 16.0);
+        state.coordinator.arm(source, at);
+        state.coordinator.begin(0_u32);
+        state.coordinator.update_pointer(at);
+        assert_eq!(
+            state.coordinator.state().session().and_then(|s| s.hovered),
+            Some(sibling),
+            "the later-registered sibling wins the overlap"
+        );
+        log.borrow_mut().clear();
+
+        // Two more frames: the first only seeds the auto-scroll clock, the
+        // second actually jumps the surface, which is when the zone's own
+        // target repaints (and the zone calls `resolve_hover`) before the
+        // sibling — the later Stack child — gets its own turn to repaint
+        // this same frame.
+        for _ in 0..2 {
+            root.rebuild(&mut build, &mut state);
+            root.layout(WINDOW);
+            clock_ms += FRAME_MS;
+            let mut scene = RecordingScene::default();
+            root.paint(
+                &mut scene,
+                FrameTime::from_nanos((clock_ms * 1_000_000.0) as u64),
+            );
+        }
+
+        assert!(
+            log.borrow().is_empty(),
+            "the sibling simply has not repainted yet this frame, not culled: {:?}",
+            log.borrow()
+        );
+        assert_eq!(
+            state.coordinator.state().session().and_then(|s| s.hovered),
+            Some(sibling),
+            "the hover must not flicker away from the sibling mid-frame"
+        );
+    }
 }

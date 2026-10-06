@@ -93,13 +93,28 @@
 //!   [`DragCoordinator::set_target_bounds`]) a target reporting a second time
 //!   is what opens the next pass. **Limit:** a pass is only ever opened by a
 //!   report, so a frame in which *no* target of a coordinator paints leaves the
-//!   previous pass standing until one does.
+//!   previous pass standing until one does. Keyboard cycling
+//!   ([`DragCoordinator::move_to_next_target`]/
+//!   [`DragCoordinator::move_to_previous_target`]) inherits this same
+//!   visibility gate: it only reaches a target visible in the latest pass,
+//!   and nothing scrolls an off-screen one into view on the keyboard's
+//!   behalf, so a keyboard user can move only between a list's currently
+//!   *visible* targets once that list is taller than its viewport
+//!   (`drag-keyboard-cycle-visible-targets-only`, `docs/LIMITATIONS.md`).
 //! - **Every pointer report resolves.** [`DragCoordinator::update_pointer`]
 //!   records the pointer and re-picks the hovered target as
 //!   [`DragCoordinator::target_at`] of it, reporting a change as `Leave` (old)
 //!   then `Enter` (new), then the `Move`.
 //!   [`DragCoordinator::resolve_hover`] re-picks without moving the pointer,
 //!   for bounds that moved under it (auto-scroll calls it after each step).
+//!   Because that call happens mid-paint — the auto-scroll zone calls it
+//!   right after its own child paints, possibly before a later sibling
+//!   sharing the coordinator gets its own turn this same frame —
+//!   `resolve_hover` tolerates a target stamped with the pass immediately
+//!   before the current one, so a sibling that simply has not repainted
+//!   *yet* is not mistaken for one that stopped painting; `update_pointer`/
+//!   `target_at` and keyboard cycling stay strict to the latest pass, since
+//!   a pointer or keyboard event is never dispatched mid-paint.
 //! - **Later registration wins an overlap.** Of several visible,
 //!   type-matching targets whose bounds contain the point, the one registered
 //!   last is picked. A target
