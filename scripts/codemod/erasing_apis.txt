@@ -30,10 +30,14 @@
 # [exclude] path suffixes of same-named APIs whose closure or slot is NOT
 #           generic, matched against the call's qualifier or, for an
 #           unqualified call, against the `use` that imports it.
-# [list]    informational only — list parameters (`Vec<V>`,
-#           `impl IntoIterator<Item = impl View<State>>`). The tool never
-#           rewrites them: `vec![any(a), any(b)]` may be a mixed-type list, so
-#           the compile-driven hand pass in each apply card owns them.
+# [list]    (T5, opt-in `--t5` only) list parameters (`Vec<V>`,
+#           `impl IntoIterator<Item = impl View<State>>`). Without `--t5` the
+#           tool never rewrites them. With it, a `vec![any(E1), .., any(En)]`
+#           whole argument loses every erasure when all E_i share one head
+#           (callee path + trailing method names); `Column`/`Row`/`Stack` and
+#           `.children` are list callees even when absent here. A same-head
+#           list can still be mixed-type (a generic callee), which then fails
+#           to compile, and the apply recipe restores `any()` on that list.
 #
 # Derived from the merged signatures of crates/frust-widgets, crates/frust,
 # crates/frust-core and plugins/{material,glyph,cupertino,beui,shadcn}.
