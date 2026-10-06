@@ -37,18 +37,23 @@ rewritten; `.any(..)` iterator calls are method calls and never erasure.
 an import (`any`, `AnyView`, `Column`, `Row`, `Stack`, `FlexView`, `Axis`,
 `inflexible`, `flexible`, `keyed`) that a rewrite left unused is removed from
 the (non-`pub`) `use` that brought it in. A chain is skipped, with a note, when
-a local binding named `column`/`row`/`stack` is in scope or the builder's
-import cannot be resolved.
+a local binding or `fn` (free or method) named `column`/`row`/`stack` is in
+scope (unless that name is itself imported by a `use`), or the builder's import
+cannot be resolved.
 
 Usage:
 
     python3 scripts/codemod/frust_any_codemod.py [--check] [--write] [--stats]
-        [--apis FILE] PATH...
+        [--apis FILE] [--exclude PREFIX]... PATH...
 
 PATH is a `.rs` file or a directory (recursed for `*.rs`, skipping `target/`).
 `--check` (the default) lists `file:line` of every remaining candidate and
 exits 1 if there is one, 0 otherwise; skipped-site notes do not affect the exit
-code. `--write` rewrites in place (iterating to a fixpoint, so a second run is a
+code. A file that cannot be tokenised or decoded is reported as skipped, counted,
+and makes `--check` exit 2 when no candidate was found (candidates still win: 1).
+`--exclude PREFIX` (repeatable; repository-relative or absolute, prefix match on
+the normalised path) drops matching files from `--check`, `--write` and
+`--stats`; they are neither read nor counted. `--write` rewrites in place (iterating to a fixpoint, so a second run is a
 no-op). `--stats` prints per-file erasure-call counts before/after.
 """
 
@@ -925,8 +930,11 @@ def _resolve_builder(s, k, o, anchor, builder, qual, notes, rule):
     if s.binding_shadows(builder, k):
         notes.append((s.line_of(pos), f"note: {rule} skipped: a local binding `{builder}` is in scope"))
         return None
-    if s.decl_for(builder, pos) or builder in s.local_fns:
+    if s.decl_for(builder, pos):
         return "", []
+    if builder in s.local_fns:
+        notes.append((s.line_of(pos), f"note: {rule} skipped: a local fn `{builder}` is in scope"))
+        return None
     if hit and not hit[0].is_pub:
         decl, leaf = hit
         site_mod = s.module_of(pos)
@@ -1214,6 +1222,15 @@ def rewrite(src: str, apis: Apis) -> Result:
     return Result(text, before, after, cands0, sorted(set(notes0)))
 
 
+def _norm(p):
+    return os.path.normpath(os.path.abspath(p))
+
+
+def _path_excluded(path, prefixes):
+    n = _norm(path)
+    return any(n.startswith(x) for x in prefixes)
+
+
 def iter_rs(paths):
     for p in paths:
         if os.path.isdir(p):
@@ -1232,23 +1249,30 @@ def main(argv=None) -> int:
     ap.add_argument("--check", action="store_true", help="list remaining candidates; exit 1 if any")
     ap.add_argument("--write", action="store_true", help="rewrite files in place")
     ap.add_argument("--stats", action="store_true", help="print per-file erasure-call counts before/after")
+    ap.add_argument("--exclude", action="append", default=[], metavar="PREFIX",
+                    help="skip files whose normalised path starts with PREFIX (repeatable)")
     ap.add_argument("--apis", default=DEFAULT_APIS, help="name list (default: erasing_apis.txt beside this script)")
     args = ap.parse_args(argv)
     check = args.check or not (args.write or args.stats)
     apis = load_apis(args.apis)
 
+    excludes = [_norm(x) for x in args.exclude]
     remaining = 0
+    skipped = 0
     total_before = total_after = 0
     for path in iter_rs(args.paths):
+        if excludes and _path_excluded(path, excludes):
+            continue
         if not os.path.isfile(path):
             print(f"{path}: no such file", file=sys.stderr)
             return 2
-        with open(path, encoding="utf-8", newline="") as fh:
-            src = fh.read()
         try:
+            with open(path, encoding="utf-8", newline="") as fh:
+                src = fh.read()
             res = rewrite(src, apis)
-        except LexError as exc:
+        except (LexError, UnicodeDecodeError) as exc:
             print(f"{path}: skipped, cannot tokenise: {exc}", file=sys.stderr)
+            skipped += 1
             continue
         total_before += res.before
         total_after += res.after
@@ -1273,7 +1297,9 @@ def main(argv=None) -> int:
         print(f"total: erasure calls before={total_before} after={total_after}")
     if check:
         print(f"{remaining} candidate(s)" if remaining else "no candidates")
-        return 1 if remaining else 0
+        if skipped:
+            print(f"{skipped} file(s) skipped")
+        return 1 if remaining else (2 if skipped else 0)
     return 0
 
 

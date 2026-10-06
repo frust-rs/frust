@@ -250,6 +250,31 @@ class T2Test(unittest.TestCase):
         self.assertEqual(rules, [])
         self.assertTrue(any("local binding `row`" in n for _, n in notes))
 
+    def test_free_fn_shadow_skips_with_note(self):
+        src = "fn column(x: u32) -> u32 { x }\nfn f() -> V { Column(vec![a, b]) }\n"
+        self.assertEqual(run_g(src), src)
+        rules, notes = check_g(src)
+        self.assertEqual(rules, [])
+        self.assertTrue(any("local fn `column`" in n for _, n in notes))
+
+    def test_method_shadow_skips_with_note(self):
+        src = ("use frust::{any, Column, View};\n"
+               "impl P { fn column(&self) -> u32 { 1 } }\n"
+               "fn f() -> V { Column(vec![any(a()), any(b())]) }\n")
+        out = run(src)
+        self.assertIn("Column(vec![", out)
+        self.assertNotIn("column().child", out)
+        self.assertIn("Column", out.split("\n")[0])
+        _, notes = check(src)
+        self.assertTrue(any("local fn `column`" in n for _, n in notes))
+
+    def test_imported_builder_plus_method_rewrites(self):
+        src = ("use frust::{column, Column};\n"
+               "impl P { fn column(&self) -> u32 { 1 } }\n"
+               "fn f() -> V { Column(vec![a, b]) }\n")
+        out = run(src)
+        self.assertIn("column().child(a).child(b)", out)
+
     def test_let_initialiser_is_not_shadowed(self):
         src = "fn f() -> V { let column = Column(vec![a]); framed(column) }\n"
         self.assertEqual(run_g(src), "fn f() -> V { let column = column().child(a); framed(column) }\n")
@@ -440,6 +465,39 @@ class DriverTest(unittest.TestCase):
         self.main("--write", self.dir.name)
         with open(self.path, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), once)   # a second --write is a no-op
+
+    def test_exclude_prefix(self):
+        code, out = self.main("--check", self.dir.name, "--exclude", os.path.join(self.dir.name, "src"))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("lib.rs", out)
+        code, _ = self.main("--write", self.dir.name, "--exclude", self.path)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), self.FIXTURE)   # excluded: never written
+        code, out = self.main("--stats", self.dir.name, "--exclude", self.path)
+        self.assertNotIn("lib.rs", out)
+
+    def test_skipped_files_exit_2(self):
+        os.remove(self.path)
+        bad = os.path.join(self.dir.name, "src", "bad.rs")
+        with open(bad, "wb") as fh:
+            fh.write(b"fn f() { // \xff\xfe\n}\n")
+        code, out = self.main("--check", self.dir.name)
+        self.assertEqual(code, 2)
+        self.assertIn("1 file(s) skipped", out)
+        lex = os.path.join(self.dir.name, "src", "lex.rs")
+        with open(lex, "w", encoding="utf-8") as fh:
+            fh.write("fn f() { (\n")
+        code, out = self.main("--check", self.dir.name)
+        self.assertEqual(code, 2)
+        self.assertIn("2 file(s) skipped", out)
+        code, _ = self.main("--check", self.dir.name, "--exclude", bad, "--exclude", lex)
+        self.assertEqual(code, 0)
+
+    def test_candidates_beat_skipped(self):
+        with open(os.path.join(self.dir.name, "src", "bad.rs"), "wb") as fh:
+            fh.write(b"\xff")
+        code, _ = self.main("--check", self.dir.name)
+        self.assertEqual(code, 1)
 
     def test_stats(self):
         code, out = self.main("--stats", self.path)
