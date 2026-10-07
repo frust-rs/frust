@@ -32,6 +32,19 @@ Rewrites (each one is type-preserving, or changes only an argument's type):
       and all E_i share the same *head*. The rewrite only drops the wrappers:
       element text, trailing commas and comments between elements are kept.
       A `Column`/`Row`/`Stack` site T2 already rewrites is not listed again.
+  T6  (opt-in, `--t6` only) `api(.., vec![any(E1), .., any(En)], ..)` ->
+      `api(.., (E1, .., En), ..)` (`(E1,)` for n = 1) when the `vec![..]`
+      literal (1 <= n <= 12, trailing comma allowed) is a whole argument of a
+      `[seq]` entry of the name list (the APIs whose list parameter takes a
+      `ViewSeq`; `Column`/`Row`/`Stack` only when they resolve to frust's own
+      sugar) and EVERY element is one erasure call (`any(E)`, `frust..::any(E)`,
+      `authoring::any(E)`, `AnyView::new(E)`). The elements' heads may differ:
+      that is the point. Only `vec![` and `]` change (to `(` and `)`) and the
+      wrappers drop, so commas and comments between elements are kept. A
+      `let`-bound list is not an argument and is left alone, as is a list with
+      a turbofish `any::<..>` element (intentional erasure, not listed). A
+      `Column`/`Row`/`Stack` site T2 already rewrites is not listed again, and
+      with `--t6` a list T6 rewrites is never also rewritten by T5.
   T7  (opt-in, `--t7` only) a helper fn (free, nested, or an inherent-impl
       method) `fn f(..) -> AnyView<S> { ..; any(E) }` -> `fn f(..) -> impl
       View<S> { ..; E }`: the return type is `AnyView<T>`, bare or path-qualified
@@ -44,6 +57,15 @@ Rewrites (each one is type-preserving, or changes only an argument's type):
       (or, in a `use super::*` test module, as its own `use`), and an `AnyView`/
       `any` import the rewrite left unused is removed. Async and const fns are
       never touched.
+
+T6 exclusions — listed by `--check --t6` as `<bucket> excluded: <callee> (<why>)`
+(a list with no erasure call in it is neither rewritten nor listed), never
+rewritten and never counted as candidates (they do not affect the exit code);
+the first matching bucket wins:
+  T6-keyed   a `keyed(..)` element: a tuple is positional.
+  T6-mixed   an element that is not an erasure call next to erased ones.
+  T6-arity   more than 12 erased elements: tuples take at most 12.
+`--t6` exits 2 up front when the name list (`--apis`) has no `[seq]` section.
 
 T7 captures: edition 2024 `-> impl Trait` captures every in-scope generic
 parameter and lifetime, and `View<S>: 'static` keeps a captured borrow from
@@ -125,7 +147,7 @@ cannot be resolved.
 Usage:
 
     python3 scripts/codemod/frust_any_codemod.py [--check] [--write] [--stats]
-        [--strict] [--t5] [--t7] [--apis FILE] [--exclude PATH]... PATH...
+        [--strict] [--t5] [--t6] [--t7] [--apis FILE] [--exclude PATH]... PATH...
 
 PATH is a `.rs` file or a directory (recursed for `*.rs`, skipping `target/`).
 `--check` (the default) lists `file:line` of every remaining candidate and
@@ -148,6 +170,11 @@ PATH arguments. `--stats` prints per-file erasure-call counts before/after.
 lists `T5 homogeneous list argument of <callee>` candidates, `--write --t5`
 applies them, and `--stats --t5` additionally reports the T5 candidate count
 per file (when non-zero) and in total, separately from the erasure counts.
+`--t6` turns rule T6 on the same way: `--check --t6` lists `T6 erased list
+argument of <callee> -> tuple` candidates and the T6 exclusions (with a `N T6
+exclusion(s)` summary line), `--write --t6` applies the candidates, and
+`--stats --t6` reports the T6 candidate count and the three exclusion buckets
+(`T6-keyed`, `T6-arity`, `T6-mixed`) per file (when non-zero) and in total.
 `--t7` likewise turns rule T7 on for every mode (off by default): `--check
 --t7` also lists `T7 helper returns impl View: <fn>` candidates and the T7
 exclusions (with a `N T7 exclusion(s)` summary line), `--write --t7` applies
@@ -373,6 +400,7 @@ class Source:
         self.keep_lines, self.keep_above = self._keep_markers()
         self.kept = 0
         self.t7_excluded: list = []   # (line, bucket, fn name, reason), set by T7
+        self.t6_excluded: list = []   # (line, bucket, callee, reason), set by T6
         self.bare_any_ok = not self._defines_foreign_any()
         self.decls = self._parse_uses()
         self.local_types = self._local_type_names()
@@ -845,6 +873,7 @@ class Apis:
     exclude: list = field(default_factory=list)
     lists: set = field(default_factory=set)
     seq: set = field(default_factory=set)
+    has_seq: bool = False   # a `[seq]` section was present in the file
 
 
 DEFAULT_APIS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "erasing_apis.txt")
@@ -862,6 +891,8 @@ def load_apis(path: str = DEFAULT_APIS) -> Apis:
                 section = line[1:-1].strip()
                 if section not in ("slot", "builder", "exclude", "list", "seq"):
                     raise ValueError(f"{path}: unknown section [{section}]")
+                if section == "seq":
+                    apis.has_seq = True
                 continue
             for entry in line.split():
                 if section == "slot":
@@ -928,12 +959,13 @@ def _excluded(s: Source, apis: Apis, name: str, qual: list, pos: int) -> bool:
 
 
 def find_candidates(s: Source, apis: Apis, t5: bool = False, t7: bool = False,
-                    ctx: "T7Ctx | None" = None):
+                    ctx: "T7Ctx | None" = None, t6: bool = False):
     """Return (candidates, notes). Candidates may overlap; callers pick outermost.
 
     `t5` turns on the opt-in homogeneous list rule T5, `t7` the opt-in helper
     return rule T7 (`ctx` carries the crate facts it needs; T7 exclusions land
-    in `s.t7_excluded`)."""
+    in `s.t7_excluded`), `t6` the opt-in tuple rule T6 (its exclusions land in
+    `s.t6_excluded`)."""
     t = s.t
     cands: list[Candidate] = []
     notes: list[tuple[int, str]] = []
@@ -941,6 +973,7 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False, t7: bool = False,
     first_note = 0
     s.kept = 0
     s.t7_excluded = []
+    s.t6_excluded = []
     for k, tok in enumerate(t):
         if tok.kind != IDENT or not s.is_p(k + 1, "("):
             continue
@@ -949,7 +982,8 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False, t7: bool = False,
             continue
         o = k + 1
         is_list = t5 and (key in apis.lists or key in T5_BUILTIN) and _t5_sugar_resolves(s, k, key, qual)
-        if key in apis.slot or key in apis.builder or is_list:
+        is_seq = t6 and key in apis.seq and _t5_sugar_resolves(s, k, key, qual)
+        if key in apis.slot or key in apis.builder or is_list or is_seq:
             if "::" not in key and not key.startswith(".") and _excluded(s, apis, key, qual, tok.start):
                 continue
         if key in apis.slot:
@@ -961,7 +995,9 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False, t7: bool = False,
             _t2(s, key, k, o, qual, cands, notes)
         if key == "FlexView::new":
             _t3(s, k, o, qual, cands, notes)
-        if is_list and len(cands) == before_t2:
+        if is_seq and len(cands) == before_t2:
+            _t6(s, key, o, cands)
+        if is_list and len(cands) == before_t2:   # T6 (above) wins a list it rewrote
             _t5(s, key, o, cands)
         if len(cands) > first_new or len(notes) > first_note:
             # A `// erasure: keep` site is exempt from every rule: neither
@@ -1337,6 +1373,87 @@ def _t5(s, key, o, cands):
             span = (s.t[a].start, s.t[b].end)
             cands.append(Candidate("T5", s.line_of(span[0]), f"homogeneous list argument of {key}",
                                    span, edits))
+
+
+T6_MAX_ARITY = 12
+T6_BUCKETS = ("T6-keyed", "T6-arity", "T6-mixed")
+
+
+def _t6_turbofish_any(s: Source, a: int, b: int) -> bool:
+    """Whether tokens a..b are one turbofish `any::<..>(..)` erasure call."""
+    k = a
+    if s.is_p(k, "::"):
+        k += 1
+    while s.is_id(k) and s.is_p(k + 1, "::") and s.is_id(k + 2):
+        k += 2
+    return (s.is_id(k, "any") and s.is_p(k + 1, "::") and s.is_p(k + 2, "<")
+            and s.is_p(b, ")") and s.match[b] > k)
+
+
+def _t6_keyed(s: Source, a: int, b: int):
+    """The `(` index when tokens a..b are exactly one `keyed(..)` call."""
+    k = a
+    if s.is_p(k, "::"):
+        k += 1
+    while s.is_id(k) and s.is_p(k + 1, "::") and s.is_id(k + 2):
+        k += 2
+    if s.is_id(k, "keyed") and s.is_p(k + 1, "(") and s.match[k + 1] == b:
+        return k + 1
+    return None
+
+
+def _t6(s, key, o, cands):
+    """A whole-argument `vec![any(e1), .., any(en)]` of a [seq] API -> `(e1, .., en)`."""
+    for a, b in s.split_args(o):
+        lb = _vec_literal(s, a, b)
+        if lb is None:
+            continue
+        elems, _ = _elements(s, lb)
+        if not elems:
+            continue
+        erased, keyed_erased, plain, turbofish = 0, 0, 0, False
+        for ea, eb, _, _ in elems:
+            if _t5_erasure(s, ea, eb) is not None:
+                erased += 1
+                continue
+            if _t6_turbofish_any(s, ea, eb):
+                turbofish = True
+                continue
+            ko = _t6_keyed(s, ea, eb)
+            if ko is None:
+                plain += 1
+            elif any(_t5_erasure(s, *arg) is not None for arg in s.split_args(ko)):
+                keyed_erased += 1
+        if turbofish:
+            continue     # an intentional `any::<S, _>` is never stripped, nor listed
+        span = (s.t[a].start, s.t[b].end)
+        line = s.line_of(span[0])
+
+        def leave(bucket, why):
+            if not s.is_kept(line):
+                s.t6_excluded.append((line, bucket, key, why))
+
+        if not erased and not keyed_erased:
+            continue     # no erasure here: not T6's business
+        if any(_t6_keyed(s, ea, eb) is not None for ea, eb, _, _ in elems):
+            leave("T6-keyed", "a keyed(..) element: tuples are positional")
+            continue
+        if plain:
+            leave("T6-mixed", f"{erased} of {len(elems)} elements erased")
+            continue
+        if len(elems) > T6_MAX_ARITY:
+            leave("T6-arity", f"{len(elems)} elements, tuples take at most {T6_MAX_ARITY}")
+            continue
+        edits = [Edit(s.t[a].start, s.t[lb].end, "(")]
+        for i, (ea, eb, _, _) in enumerate(elems):
+            eo = _t5_erasure(s, ea, eb)
+            text = s.inner_text(eo)
+            if len(elems) == 1 and not s.is_p(eb + 1, ","):
+                text += ","
+            edits.append(Edit(s.t[ea].start, s.t[eb].end, text))
+        rb = s.match[lb]
+        edits.append(Edit(s.t[rb].start, s.t[rb].end, ")"))
+        cands.append(Candidate("T6", line, f"erased list argument of {key} -> tuple", span, edits))
 
 
 # ---------------------------------------------------------------------------
@@ -2074,24 +2191,27 @@ class Result:
     notes: list
     kept: int = 0
     excluded: list = field(default_factory=list)   # T7 exclusions of the original text
+    excluded6: list = field(default_factory=list)  # T6 exclusions of the original text
 
 
 def rewrite(src: str, apis: Apis, t5: bool = False, t7: bool = False,
-            ctx: "T7Ctx | None" = None) -> Result:
+            ctx: "T7Ctx | None" = None, t6: bool = False) -> Result:
     """Rewrite `src` to a fixpoint; raises LexError on unparseable input.
 
     `t5` turns on the opt-in homogeneous list rule T5, `t7` the opt-in helper
     return rule T7 with the crate facts in `ctx` (default: edition 2024, not a
-    library source, no value uses outside this text)."""
+    library source, no value uses outside this text), `t6` the opt-in tuple
+    rule T6."""
     original = Source(src)
     before = original.erasure_count()
-    cands0, notes0 = find_candidates(original, apis, t5, t7, ctx)
+    cands0, notes0 = find_candidates(original, apis, t5, t7, ctx, t6)
     kept0 = original.kept
     excluded0 = list(original.t7_excluded)
+    excluded6 = list(original.t6_excluded)
     text = src
     for _ in range(MAX_PASSES):
         s = Source(text)
-        cands, _ = find_candidates(s, apis, t5, t7, ctx)
+        cands, _ = find_candidates(s, apis, t5, t7, ctx, t6)
         chosen = select_outermost(cands)
         if not chosen:
             break
@@ -2119,7 +2239,7 @@ def rewrite(src: str, apis: Apis, t5: bool = False, t7: bool = False,
         if drops:
             text = apply_edits(text, import_edits(final, [], drops))
     after = Source(text).erasure_count() if text != src else before
-    return Result(text, before, after, cands0, sorted(set(notes0)), kept0, excluded0)
+    return Result(text, before, after, cands0, sorted(set(notes0)), kept0, excluded0, excluded6)
 
 
 def _align_decls(original: Source, final: Source) -> dict:
@@ -2205,12 +2325,23 @@ def main(argv=None) -> int:
                          "T7-trait/T7-arms/T7-ref/T7-public exclusions, never rewritten and never "
                          "counted toward the exit code; `// erasure: keep <why>` on the signature "
                          "line (or alone above it) exempts a fn")
+    ap.add_argument("--t6", action="store_true",
+                    help="opt in to rule T6: a vec![..] argument of a [seq] API (name list) whose "
+                         "elements are all erasure calls (1-12 of them, heads may differ) becomes "
+                         "the tuple (e1, .., en) (`(e1,)` for one); a list with a keyed(..) "
+                         "element, a partly erased list and one of more than 12 elements are "
+                         "listed as T6-keyed/T6-mixed/T6-arity, never rewritten and never counted "
+                         "toward the exit code; exits 2 when the name list has no [seq] section; "
+                         "wins over --t5 for the lists it rewrites")
     ap.add_argument("--exclude", action="append", default=[], metavar="PATH",
                     help="skip PATH, a file or directory, by whole path components (repeatable)")
     ap.add_argument("--apis", default=DEFAULT_APIS, help="name list (default: erasing_apis.txt beside this script)")
     args = ap.parse_args(argv)
     check = args.check or not (args.write or args.stats)
     apis = load_apis(args.apis)
+    if args.t6 and not apis.has_seq:
+        print(f"{args.apis}: --t6 needs a [seq] section in the name list", file=sys.stderr)
+        return 2
 
     excludes = [_norm(x) for x in args.exclude]
     remaining = 0
@@ -2222,6 +2353,9 @@ def main(argv=None) -> int:
     total_t7 = 0
     total_kept = 0
     excluded_t7 = 0
+    excluded_t6 = 0
+    total_t6 = 0
+    total_b6 = dict.fromkeys(T6_BUCKETS, 0)
     total_buckets = dict.fromkeys(T7_BUCKETS, 0)
     pkg_cache: dict = {}
     for path in iter_rs(args.paths):
@@ -2239,7 +2373,7 @@ def main(argv=None) -> int:
             with open(path, encoding="utf-8", newline="") as fh:
                 src = fh.read()
             ctx = t7_context(path, excludes, pkg_cache) if args.t7 else None
-            res = rewrite(src, apis, args.t5, args.t7, ctx)
+            res = rewrite(src, apis, args.t5, args.t7, ctx, args.t6)
         except (LexError, UnicodeDecodeError) as exc:
             print(f"{path}: skipped, cannot tokenise: {exc}", file=sys.stderr)
             skipped += 1
@@ -2251,11 +2385,11 @@ def main(argv=None) -> int:
         if check:
             if args.write:
                 post = Source(res.text)
-                cands, notes = find_candidates(post, apis, args.t5, args.t7, ctx)
+                cands, notes = find_candidates(post, apis, args.t5, args.t7, ctx, args.t6)
                 notes = sorted(set(notes))
-                excluded = post.t7_excluded
+                excluded = post.t7_excluded + post.t6_excluded
             else:
-                cands, notes, excluded = res.candidates, res.notes, res.excluded
+                cands, notes, excluded = res.candidates, res.notes, res.excluded + res.excluded6
             for c in sorted(cands, key=lambda c: (c.line, c.span[0])):
                 print(f"{path}:{c.line}: {c.rule} {c.desc}")
             for line, bucket, name, reason in excluded:
@@ -2264,7 +2398,8 @@ def main(argv=None) -> int:
                 print(f"{path}:{line}: {msg}")
             remaining += len(cands)
             shadow += len(notes)
-            excluded_t7 += len(excluded)
+            excluded_t7 += sum(1 for e in excluded if e[1] in T7_BUCKETS)
+            excluded_t6 += sum(1 for e in excluded if e[1] in T6_BUCKETS)
         if args.stats:
             print(f"{path}: erasure calls before={res.before} after={res.after}")
             total_kept += res.kept
@@ -2275,6 +2410,17 @@ def main(argv=None) -> int:
                 total_t5 += n_t5
                 if n_t5:
                     print(f"{path}: T5 candidates={n_t5}")
+            if args.t6:
+                n_t6 = sum(1 for c in res.candidates if c.rule == "T6")
+                total_t6 += n_t6
+                b6 = dict.fromkeys(T6_BUCKETS, 0)
+                for _, bucket, _, _ in res.excluded6:
+                    b6[bucket] += 1
+                    total_b6[bucket] += 1
+                if n_t6:
+                    print(f"{path}: T6 candidates={n_t6}")
+                if res.excluded6:
+                    print(f"{path}: T6 excluded " + " ".join(f"{b}={n}" for b, n in b6.items()))
             if args.t7:
                 n_t7 = sum(1 for c in res.candidates if c.rule == "T7")
                 total_t7 += n_t7
@@ -2291,10 +2437,15 @@ def main(argv=None) -> int:
         print(f"total: kept={total_kept}")
         if args.t5:
             print(f"total: T5 candidates={total_t5}")
+        if args.t6:
+            print(f"total: T6 candidates={total_t6}")
+            print("total: T6 excluded " + " ".join(f"{b}={n}" for b, n in total_b6.items()))
         if args.t7:
             print(f"total: T7 candidates={total_t7}")
             print("total: T7 excluded " + " ".join(f"{b}={n}" for b, n in total_buckets.items()))
     if check:
+        if args.t6:
+            print(f"{excluded_t6} T6 exclusion(s)")
         if args.t7:
             print(f"{excluded_t7} T7 exclusion(s)")
         print(f"{shadow} shadow skip(s)")
