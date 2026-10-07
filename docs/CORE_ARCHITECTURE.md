@@ -68,6 +68,20 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
     `any(any(v))` is one box. Authoring code writes `any()` only where branches of different
     concrete types must unify; widget APIs take `V: View<State>` and erase internally (see
     WIDGETS_ARCHITECTURE.md's *Erasure at the API Boundary*).
+  - **Child lists are sequences, erased once inside the container.** `ViewSeq<State, M>`
+    (`frust-core`, re-exported as `frust::ViewSeq`) is implemented by a single `View`, a tuple
+    of up to 12 views (nest tuples beyond 12), `Vec<V>`, `[V; N]`, `Option<V>` (`None` drops its
+    slot, exactly like `.when_some()`), and `views(iter)` for an iterator; `M` is an inference
+    marker callers never name (`fn children<M>(.., c: impl ViewSeq<State, M>)`). The container
+    calls `extend_views` into its existing `Vec<AnyView<State>>`, so a tuple costs one
+    allocation and each element is erased exactly once. Identity inside a tuple is positional —
+    keyed reconciliation still needs a `Vec` of `keyed(..)` children.
+  - **Two-arm bodies stay typed with `Either`.** `frust_widgets::Either<L, R>` /
+    `either(cond, || l, || r)` (WIDGETS, re-exported by the facade) returns `impl View<State>`
+    from an `if`/`else`; its `EitherWidget` delegates every pass to the live arm, an arm swap
+    tears the old arm down and rebuilds (state dropped, `LAYOUT | PAINT`), and because both arms
+    share one element type the view raises `mark_focus_orphaned` itself on a swap under focus.
+    Three or more arms stay `AnyView`.
   - **Driver closures erase explicitly.** The opaque `build` return captures the `&self`/
     `&mut State` borrows, so a closure that hands the result out (the facade's `run*` drivers, the
     `app!` android/ios/web arms, test drivers) wraps it: `move |s| AnyView::new(root.build(s))`.
@@ -393,6 +407,7 @@ one binary cannot fight over it and an app's explicit choice survives a catalog 
 | `WidgetTree` / `InspectNode` | Read-only tree accessors (`roots`/`children`/`inspect`) and the plain owned snapshot node (id, type name, debug label, absolute bounds, children) they produce |
 | `Component` / `ComponentView` / `ComponentWidget` | Stateful widget analog with a per-instance reactive `Owner`; `build` returns `impl View<Self::State>` |
 | `AnyView<State>` / `any()` | Type-erased `View` (`Element = Box<dyn Widget>`); construction is idempotent, so erasure happens once at an API boundary |
+| `ViewSeq<State, M>` / `views()` | Child-sequence trait a container's list parameter takes (`impl ViewSeq<State, M>`, `M` an inference marker): a `View`, a tuple ≤ 12, `Vec`, array, `Option`, or `views(iter)`; `extend_views` erases each element once into the container's `Vec<AnyView>` |
 | `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including both broadcast variants (`Housekeeping`, `Overlay`; a file drop's `Ended` phase also broadcasts) and the focus-routed `EditCommand` (see Data Flow), opt-in hover claiming (`claim_hover`/`is_hovered`), the multi-contact pair (`pointer_id`/`capture_contacts`), and the per-pass request channels (`set_cursor`, `write_clipboard`, `request_paste`, `dispatch_edit_command`) |
 | `PointerId` / `PointerSource` | A pointer contact's identity (device plus slot), riding beside a `PointerEvent` and read via `EventCtx::pointer_id()` — see Data Flow's Multi-contact pointer routing |
 | `ScaleEvent` / `ScalePhase` | A pinch/zoom gesture event, hit-tested and bubbling like `Scroll` — see Data Flow's Scale gestures |
