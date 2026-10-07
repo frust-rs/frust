@@ -14,20 +14,29 @@
 #                  README.md). No `applied` line exists here; only the frame delta is recorded.
 #   --runs <n>     Edits to measure (default: 5).
 #   --target <t>   What each run edits (default: home):
-#                    home    bump `hotpatch-sentinel: vN` (app/src/home_page.rs, // SENTINEL-HOME)
-#                    card    bump `card-sentinel: vN` (app/src/counter_card.rs, // SENTINEL-CARD)
-#                    helper  add a new private fn called from HomePage::build
-#                    state   add a field to HomePage's State (expected unsupported: a crash or a
-#                            timeout is recorded, not fatal)
+#                    home         bump `hotpatch-sentinel: vN` (app/src/home_page.rs, // SENTINEL-HOME)
+#                    card         bump `card-sentinel: vN` (app/src/counter_card.rs, // SENTINEL-CARD)
+#                    helper       add a new private fn called from HomePage::build
+#                    state-type   swap HomePage's `State` (the named `HomeState`) for an (N+1)-tuple
+#                                 of u32: a type-IDENTITY change (RESULTS.md row D, a silent no-op)
+#                    state-field  add `extra: u32` to `struct HomeState` (same type identity, new
+#                                 layout; RESULTS.md row D2). The patched build reads it into the
+#                                 sentinel and logs `frust-hotpatch-spike: state-field vN build ran
+#                                 extra=<v>`, so each run records whether the new build ran, the
+#                                 value it read, and whether the app PID survived.
+#                  A crash, an app exit or a timeout is recorded as a run result, never fatal.
 #   STARTUP_TIMEOUT=<s> overrides the first-frame wait (default 900: a cold dx fat build is slow).
 #   PRE_RUN_PAUSE=<s>   sleeps <s> seconds after the first frame, before the first edit, so the
 #                       counter can be clicked (state-preservation check); default 0.
 #   POST_RUN_PAUSE=<s>  sleeps <s> seconds after the last run, before the app is killed, so the
 #                       patched window can be inspected; default 0.
+#   STATE_FIELD_WRITE=1 with --target state-field, the patched build also WRITES the new field
+#                       (`state.extra += 1`) before reading it; default 0 (read only).
 #
 # Every edited file is restored on exit (trap EXIT, Ctrl-C included) and the runner's process group
-# is killed; the summary ends with `git status` of this directory as proof. Logs live in a mktemp
-# dir whose path is printed. A failed wait is recorded as a run result, never a script failure.
+# is killed; the summary ends with `git status` of this directory as proof. The manual restore
+# command (pristine copies in the log dir) is printed up front, for a SIGKILLed script. Logs live in
+# a mktemp dir whose path is printed. A failed wait is recorded as a run result, never a failure.
 
 set -uo pipefail
 
@@ -43,9 +52,12 @@ EDIT_TIMEOUT=60
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-900}"
 PRE_RUN_PAUSE="${PRE_RUN_PAUSE:-0}"
 POST_RUN_PAUSE="${POST_RUN_PAUSE:-0}"
+STATE_FIELD_WRITE="${STATE_FIELD_WRITE:-0}"
+TARGETS="home|card|helper|state-type|state-field"
 
+# The comment header (line 2 up to the first non-comment line), without the `# ` prefix.
 usage() {
-  sed -n '2,30p' "$0"
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
 }
 
 while [ $# -gt 0 ]; do
@@ -57,7 +69,7 @@ while [ $# -gt 0 ]; do
       RUNS="$2"; shift 2 ;;
     --runs=*) RUNS="${1#--runs=}"; shift ;;
     --target)
-      [ $# -ge 2 ] || { echo "error: --target requires home|card|helper|state" >&2; exit 2; }
+      [ $# -ge 2 ] || { echo "error: --target requires ${TARGETS}" >&2; exit 2; }
       TARGET="$2"; shift 2 ;;
     --target=*) TARGET="${1#--target=}"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -69,9 +81,9 @@ case "$RUNS" in
   ''|*[!0-9]*|0) echo "error: --runs must be a positive integer, got '$RUNS'" >&2; exit 2 ;;
 esac
 case "$TARGET" in
-  home|helper|state) EDIT_FILE="$HOME_RS" ;;
+  home|helper|state-type|state-field) EDIT_FILE="$HOME_RS" ;;
   card) EDIT_FILE="$CARD_RS" ;;
-  *) echo "error: --target must be home|card|helper|state, got '$TARGET'" >&2; exit 2 ;;
+  *) echo "error: --target must be ${TARGETS}, got '$TARGET'" >&2; exit 2 ;;
 esac
 command -v python3 >/dev/null 2>&1 || { echo "error: python3 is required" >&2; exit 2; }
 
@@ -121,9 +133,10 @@ PY
 # Apply run `$3`'s edit for target `$2` to `$1` (in place, derived from the pristine copy `$4`),
 # then print the save time in unix ms.
 apply_edit() {
-  python3 - "$1" "$2" "$3" "$4" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "$STATE_FIELD_WRITE" <<'PY'
 import re, sys, time
 path, target, run, orig = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+write_field = sys.argv[5] == "1"
 src = open(orig).read().split("\n")
 
 def replace_marked(lines, marker, fn):
@@ -147,15 +160,30 @@ elif target == "helper":
                 f"fn spike_helper_{run}() -> String {{",
                 f'    "hotpatch-helper: v{run}".to_string()',
                 "}", ""]
-elif target == "state":
+elif target == "state-type":
+    # A new State TYPE: the seam's call_it instance changes its generic arguments (RESULTS.md row D).
     n = run + 1
     replace_marked(src, "// STATE-TYPE",
                    lambda _: f"type State = ({', '.join(['u32'] * n)}); // STATE-TYPE")
     replace_marked(src, "// STATE-INIT", lambda _: f"({', '.join(['0'] * n)}) // STATE-INIT")
     replace_marked(src, "// STATE-READ", lambda _: "let count = state.0; // STATE-READ")
     replace_marked(src, "// STATE-INC",
-                   lambda _: 'button("Increment", |state: &mut HomeState| state.0 += 1) // STATE-INC')
+                   lambda _: 'button("Increment", |state: &mut PageState| state.0 += 1) // STATE-INC')
+    # `HomeState` is now unused; keep the patch warning-free.
+    src.insert(next(i for i, l in enumerate(src) if l.startswith("pub struct HomeState")),
+               "#[allow(dead_code)]")
     replace_marked(src, "// SENTINEL-HOME", bump)
+elif target == "state-field":
+    # Same State type (same def-path, same symbol), new layout (RESULTS.md row D2).
+    replace_marked(src, "// STATE-FIELDS",
+                   lambda l: l.replace(" // STATE-FIELDS", "") + "\n    pub extra: u32, // STATE-FIELDS")
+    replace_marked(src, "// STATE-INIT",
+                   lambda _: "HomeState { count: 0, extra: 4242 } // STATE-INIT")
+    write = "state.extra = state.extra.wrapping_add(1); " if write_field else ""
+    replace_marked(src, "// SENTINEL-HOME", lambda _: (
+        f"let sentinel = {{ {write}log::info!(\"frust-hotpatch-spike: state-field v{run} build ran "
+        f"extra={{}}\", state.extra); text(format!(\"hotpatch-sentinel: v{run} extra={{}}\", "
+        f"state.extra)) }}; // SENTINEL-HOME"))
 new = "\n".join(src)
 with open(path, "r+") as f:
     f.seek(0)
@@ -178,15 +206,29 @@ start_runner() {
   set +m
 }
 
+# TERM the runner's process group, wait up to 5 s, then KILL whatever is left. Every KILL is guarded:
+# the group only while it still exists (the leader is not reaped until `wait` below, so its group id
+# cannot be reused before that), and the scraped app PID only while it is still in the runner's
+# process group (`ps -o pgid=`) — a stale or reused PID from the log is never killed.
 stop_runner() {
   [ -n "$RUNNER_PID" ] || return 0
   kill -TERM -- "-${RUNNER_PID}" 2>/dev/null || kill -TERM "$RUNNER_PID" 2>/dev/null
   local i=0
-  while kill -0 "$RUNNER_PID" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
-  kill -KILL -- "-${RUNNER_PID}" 2>/dev/null || true
-  if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then kill -KILL "$APP_PID" 2>/dev/null; fi
+  while kill -0 -- "-${RUNNER_PID}" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  if kill -0 -- "-${RUNNER_PID}" 2>/dev/null; then kill -KILL -- "-${RUNNER_PID}" 2>/dev/null; fi
+  if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
+    local pgid
+    pgid="$(ps -o pgid= -p "$APP_PID" 2>/dev/null | tr -d ' ')"
+    if [ "$pgid" = "$RUNNER_PID" ]; then
+      kill -KILL "$APP_PID" 2>/dev/null
+    else
+      echo "warning: app pid ${APP_PID} is not in the runner's process group" \
+        "(pgid ${pgid:-?} != ${RUNNER_PID}); not killing it" >&2
+    fi
+  fi
   wait "$RUNNER_PID" 2>/dev/null
   RUNNER_PID=""
+  APP_PID=""
 }
 
 cleanup() {
@@ -232,6 +274,42 @@ find_app_pid() {
   fi
 }
 
+# The `extra=<v>` the patched state-field build of run `$2` logged after log line `$1`, waiting at
+# most `$3` seconds. Prints the value, or nothing.
+wait_build_line() {
+  local from_line="$1" run_n="$2" deadline=$(( $(date +%s) + $3 )) v
+  while :; do
+    v="$(tail -n +"$((from_line + 1))" "$LOG" \
+      | grep -o "frust-hotpatch-spike: state-field v${run_n} build ran extra=[0-9]*" \
+      | head -1 | sed 's/.*=//')"
+    if [ -n "$v" ] || [ "$(date +%s)" -ge "$deadline" ]; then echo "$v"; return 0; fi
+    sleep 0.1
+  done
+}
+
+# Echo log lines after `$1` that look like an app failure (panic, abort, signal, guard malloc).
+trouble_lines() {
+  tail -n +"$(($1 + 1))" "$LOG" \
+    | grep -iE 'panick|abort|sigsegv|sigbus|sigabrt|sigill|signal [0-9]|guardmalloc|segmentation|bus error|exit (code|status)|exited|crash' \
+    | tr -d '\033' | sed -e 's/\[[0-9;]*m//g' -e 's/^ */    log: /' | cut -c1-200 | head -5
+}
+
+# Process survival after a hot-patch run: is the app PID found at startup alive, and is it still the
+# PID the log names last (a relaunch by dx would log a new `pid: Some(..)`)?
+pid_state() {
+  local latest
+  latest="$(grep -o 'pid: Some([0-9]*)' "$LOG" | tail -1 | grep -o '[0-9][0-9]*')"
+  if [ -z "$APP_PID" ]; then
+    echo "app pid unknown"
+  elif ! kill -0 "$APP_PID" 2>/dev/null; then
+    echo "app pid ${APP_PID} GONE"
+  elif [ -n "$latest" ] && [ "$latest" != "$APP_PID" ]; then
+    echo "app pid ${APP_PID} alive, but the log now names pid ${latest} (relaunch?)"
+  else
+    echo "app pid ${APP_PID} alive (same)"
+  fi
+}
+
 median() {
   sort -n | awk '{ v[NR] = $1 } END {
     if (NR == 0) { print "n/a"; exit }
@@ -241,6 +319,9 @@ median() {
 echo "hotpatch-spike measure: mode=${MODE} target=${TARGET} runs=${RUNS}"
 [ "$MODE" = "hotpatch" ] && echo "dx: ${DX} (${DX_VERSION})"
 echo "Logs: ${LOG_DIR}"
+echo "If this script dies without its EXIT trap, restore the sources in place with:"
+echo "  cat '${LOG_DIR}/home_page.rs.orig' > '${HOME_RS}'" \
+  "&& cat '${LOG_DIR}/counter_card.rs.orig' > '${CARD_RS}'"
 
 START_MS="$(now_ms)"
 start_runner
@@ -270,7 +351,6 @@ while [ "$run" -le "$RUNS" ]; do
   applied="" frame="" status="ok"
   if [ "$MODE" = "restart" ]; then
     stop_runner
-    APP_PID=""
     start_runner
     frame="$(wait_for frame "$from" "$stamp" "$EDIT_TIMEOUT")" || status="timeout"
     find_app_pid
@@ -279,15 +359,29 @@ while [ "$run" -le "$RUNS" ]; do
     if [ "$status" = "ok" ]; then
       frame="$(wait_for frame "$from" "$stamp" "$EDIT_TIMEOUT")" || status="timeout"
     fi
+    extra=""
+    if [ "$TARGET" = "state-field" ]; then
+      # Did the PATCHED build run? Only it logs this line (the edit adds it); allow 2 s after frame.
+      extra="$(wait_build_line "$from" "$run" 2)"
+    fi
     if [ -n "$APP_PID" ] && ! kill -0 "$APP_PID" 2>/dev/null; then status="crashed"; fi
     tail -n +"$((from + 1))" "$LOG" \
       | grep -E 'Patch rebuild:|replaying crates:|Hot-patching:|Build failed|Full rebuild' \
       | tr -d '\033' | sed -e 's/\[[0-9;]*m//g' -e 's/^ */    dx: /' | cut -c1-200
+    trouble_lines "$from"
   fi
   a_delta="n/a" f_delta="n/a"
   [ -n "$applied" ] && { a_delta=$((applied - stamp)); APPLIED_DELTAS="${APPLIED_DELTAS}${a_delta}"$'\n'; }
   [ -n "$frame" ] && { f_delta=$((frame - stamp)); FRAME_DELTAS="${FRAME_DELTAS}${f_delta}"$'\n'; }
   line="run ${run}: save->applied ${a_delta} ms, save->frame ${f_delta} ms (${status})"
+  if [ "$MODE" = "hotpatch" ]; then line="${line}; $(pid_state)"; fi
+  if [ "$TARGET" = "state-field" ] && [ "$MODE" = "hotpatch" ]; then
+    if [ -n "$extra" ]; then
+      line="${line}; patched build RAN, read extra=${extra}"
+    else
+      line="${line}; patched build NOT seen (old build kept?)"
+    fi
+  fi
   echo "$line"
   RESULTS="${RESULTS}${line}"$'\n'
   [ "$status" = "crashed" ] && { echo "app exited; stopping runs"; break; }

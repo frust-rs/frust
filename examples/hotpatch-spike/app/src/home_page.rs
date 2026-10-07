@@ -12,18 +12,26 @@ pub struct HomePage {
     pub title: String,
 }
 
-/// HomePage's state type, named once so the widget fns below follow a `--target state` edit.
-type HomeState = <HomePage as Component>::State;
+/// HomePage's local state. A named struct on purpose: `measure.sh --target state-field` adds a field
+/// to it, which keeps the type's identity (and the seam's symbol) while changing its layout
+/// (RESULTS.md, row D2).
+pub struct HomeState {
+    pub count: u32, // STATE-FIELDS
+}
+
+/// The state type the widget fns are written against, so a `--target state-type` edit (which swaps
+/// `State` for a tuple) only has to rewrite the marked lines.
+type PageState = <HomePage as Component>::State;
 
 impl Component for HomePage {
-    type State = u32; // STATE-TYPE
+    type State = HomeState; // STATE-TYPE
 
-    fn init(&self) -> HomeState {
-        0 // STATE-INIT
+    fn init(&self) -> PageState {
+        HomeState { count: 0 } // STATE-INIT
     }
 
-    fn build(&self, state: &mut HomeState) -> impl View<HomeState> {
-        let count = *state; // STATE-READ
+    fn build(&self, state: &mut PageState) -> impl View<PageState> {
+        let count = state.count; // STATE-READ
         let sentinel = text("hotpatch-sentinel: v0"); // SENTINEL-HOME
         column()
             .child(text(self.title.clone()).size(24.0))
@@ -35,10 +43,10 @@ impl Component for HomePage {
     }
 }
 
-fn count_label(count: u32) -> impl View<HomeState> + use<> {
+fn count_label(count: u32) -> impl View<PageState> + use<> {
     text(format!("count: {count}")).size(48.0)
 }
 
-fn increment_button() -> impl View<HomeState> + use<> {
-    button("Increment", |count: &mut HomeState| *count += 1) // STATE-INC
+fn increment_button() -> impl View<PageState> + use<> {
+    button("Increment", |state: &mut PageState| state.count += 1) // STATE-INC
 }
