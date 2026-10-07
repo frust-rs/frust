@@ -34,7 +34,7 @@
 
 use kurbo::Size;
 
-use frust_core::AnyView;
+use frust_core::{AnyView, any};
 use frust_glyph::{
     AlertVariant, BadgeVariant, PaletteItem, StatDelta, TermLine, ToastVariant, accordion, alert,
     app_bar, badge, command_palette, dots_loader, empty_state, glyph_card, glyph_dialog,
@@ -58,7 +58,7 @@ const MEDIUM_FRAME: Size = Size::new(360.0, 300.0);
 /// `glyph/accordion` — one settled-open panel (no tween on first build, per
 /// the accordion doc's "already open" contract) above a settled-closed one.
 fn accordion_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 accordion(
@@ -69,12 +69,12 @@ fn accordion_case() -> AnyView<()> {
             )
             .child(SizedBox(None, Some(12.0)))
             .child(accordion("Rollback", text("Revert to the previous release.")).open(false)),
-    )
+    ))
 }
 
 /// `glyph/alert` — the four severities stacked.
 fn alert_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         MEDIUM_FRAME,
         column()
             .child(alert(
@@ -94,22 +94,22 @@ fn alert_case() -> AnyView<()> {
                 "Low disk space",
                 "Free up space soon to avoid interruptions.",
             )),
-    )
+    ))
 }
 
 /// `glyph/app-bar` — the compact bar with a subtitle, elevated.
 fn appbar_case() -> AnyView<()> {
-    framed(
+    any(framed(
         app_bar::<()>("Deploys")
             .subtitle("production")
             .elevated(true),
-    )
+    ))
 }
 
 /// `glyph/badge-and-tag` — one badge per status variant, plus a removable and
 /// a static tag.
 fn badge_and_tag_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 row()
@@ -128,13 +128,13 @@ fn badge_and_tag_case() -> AnyView<()> {
                     .child(tag("v0.44.1").on_remove(|_: &mut ()| {}))
                     .cross_axis(CrossAxisAlignment::Center),
             ),
-    )
+    ))
 }
 
 /// `glyph/card` — a three-slot card with a status footer, above a two-up
 /// stat-card row mixing both delta directions.
 fn card_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         TALL_FRAME,
         column()
             .child(
@@ -150,7 +150,7 @@ fn card_case() -> AnyView<()> {
                 1,
                 stat_card("Uptime", "99.98%").delta(StatDelta::Up, "0.4%"),
             )),
-    )
+    ))
 }
 
 /// `glyph/command-palette` — a live query over a short filtered list, built
@@ -169,7 +169,7 @@ fn card_case() -> AnyView<()> {
 /// live tier; the one loss is that the catalog no longer demonstrates the
 /// literal glyph the real widget would show on a Mac keyboard.
 fn command_palette_case() -> AnyView<()> {
-    framed(
+    any(framed(
         command_palette::<(), _, _>(
             vec![PaletteItem::new("Deploy").hint("Cmd+D")],
             |_: &mut (), _: String| {},
@@ -177,13 +177,13 @@ fn command_palette_case() -> AnyView<()> {
         )
         .query("dep")
         .placeholder("Type a command or search…"),
-    )
+    ))
 }
 
 /// `glyph/dialog` — a confirm/cancel modal, built directly (not through the
 /// navigator-pushed `show_glyph_dialog`).
 fn dialog_case() -> AnyView<()> {
-    framed(
+    any(framed(
         glyph_dialog::<()>()
             .title("Revoke observer-token?")
             .body("Any device using this token loses access immediately. This can't be undone.")
@@ -197,13 +197,13 @@ fn dialog_case() -> AnyView<()> {
                     .style(ButtonStyle::Danger)
                     .small(),
             ),
-    )
+    ))
 }
 
 /// `glyph/list` — a glyph-led list, above its zero-item `empty_state`
 /// counterpart.
 fn list_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         TALL_FRAME,
         column()
             .child(glyph_list::<()>(vec![
@@ -225,13 +225,13 @@ fn list_case() -> AnyView<()> {
                 .glyph("▪")
                 .action(button("Deploy now", |_: &mut ()| {}).style(ButtonStyle::Primary)),
             ),
-    )
+    ))
 }
 
 /// `glyph/loaders` — the determinate bar, the shimmer placeholder and the
 /// indeterminate dot cycle.
 fn loaders_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(progress(0.65))
             .child(SizedBox(None, Some(18.0)))
@@ -239,12 +239,12 @@ fn loaders_case() -> AnyView<()> {
             .child(SizedBox(None, Some(18.0)))
             .child(dots_loader())
             .cross_axis(CrossAxisAlignment::Start),
-    )
+    ))
 }
 
 /// `glyph/nav-bar` — the glyph-character bottom bar.
 fn navbar_case() -> AnyView<()> {
-    framed(glyph_nav_bar::<(), _>(
+    any(framed(glyph_nav_bar::<(), _>(
         vec![
             glyph_nav_item("┌", "frame"),
             glyph_nav_item("─", "stream"),
@@ -252,12 +252,12 @@ fn navbar_case() -> AnyView<()> {
         ],
         0,
         |_: &mut (), _: usize| {},
-    ))
+    )))
 }
 
 /// `glyph/tabs` — the label tab strip above a pill segmented control.
 fn tabs_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(tabs::<(), _>(
                 vec![
@@ -278,7 +278,7 @@ fn tabs_case() -> AnyView<()> {
                 1,
                 |_: &mut (), _: usize| {},
             )),
-    )
+    ))
 }
 
 /// `glyph/term-block` — a prompt/output/comment transcript, unstaggered.
@@ -292,12 +292,12 @@ fn tabs_case() -> AnyView<()> {
 /// at `time_ms: 400` with the warm pass active, both variants came back
 /// byte-identical.
 fn term_block_case() -> AnyView<()> {
-    framed(term_block(vec![
+    any(framed(term_block(vec![
         TermLine::prompt("frust build apk --release"),
         TermLine::output("Compiling glyph-catalog v0.1.0"),
         TermLine::output("Finished release [optimized] target(s) in 38.2s"),
         TermLine::comment("# staggered per-line reveal — replays below"),
-    ]))
+    ])))
 }
 
 /// `glyph/toast` — three severities of the transient message itself, not the
@@ -309,24 +309,24 @@ fn term_block_case() -> AnyView<()> {
 /// a [`Case::time_ms`] could advance. Measured the same way as
 /// [`term_block_case`]: `time_ms: 400` recorded byte-identical PNGs.
 fn toast_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(toast("New layout available").variant(ToastVariant::Info))
             .child(SizedBox(None, Some(12.0)))
             .child(toast("Changes saved").variant(ToastVariant::Success))
             .child(SizedBox(None, Some(12.0)))
             .child(toast("Low disk space").variant(ToastVariant::Warning)),
-    )
+    ))
 }
 
 /// `glyph/toggle` — checked and unchecked, both labelled.
 fn toggle_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(toggle::<(), _>(true, |_: &mut (), _: bool| {}).label("Notifications"))
             .child(SizedBox(None, Some(16.0)))
             .child(toggle::<(), _>(false, |_: &mut (), _: bool| {}).label("Auto-sync")),
-    )
+    ))
 }
 
 /// This module's slice of the registry [`crate::cases`]: one entry per

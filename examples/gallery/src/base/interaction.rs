@@ -9,7 +9,7 @@
 //! were dropped from `base/mod.rs` once the real category modules landed, so
 //! no second case competes for it.
 
-use frust_core::AnyView;
+use frust_core::{AnyView, any};
 use frust_widgets::{
     ButtonStyle, CrossAxisAlignment, GestureDetector, SizedBox, button, column, container,
     icon_button, icons, row, text,
@@ -23,7 +23,7 @@ use crate::case::{Case, Design};
 const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 
 fn button_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 row()
@@ -61,11 +61,11 @@ fn button_case() -> AnyView<()> {
                     .cross_axis(CrossAxisAlignment::Center),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn gesture_detector_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 GestureDetector(
@@ -79,11 +79,11 @@ fn gesture_detector_case() -> AnyView<()> {
             .child(SizedBox(None, Some(12.0)))
             .child(text("wraps a target; tap or long-press to fire").size(12.0))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn icon_button_case() -> AnyView<()> {
-    framed(
+    any(framed(
         row()
             .child(icon_button(icons::CLOSE, "Close", |_: &mut ()| {}))
             .child(SizedBox(Some(24.0), None))
@@ -91,7 +91,7 @@ fn icon_button_case() -> AnyView<()> {
             .child(SizedBox(Some(24.0), None))
             .child(icon_button(icons::SEND, "Send", |_: &mut ()| {}).ink(ACCENT))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.

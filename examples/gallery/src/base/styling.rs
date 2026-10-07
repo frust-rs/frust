@@ -19,7 +19,7 @@
 //! field, so a bulk-styled run can never fall back to the theme — and it
 //! picks values that keep contrast on a light and a dark surface alike.
 
-use frust_core::{AnyView, any};
+use frust_core::{AnyView, View, any};
 use frust_text::{FontWeight, TextStyle};
 use frust_widgets::{
     Align, Alignment, CrossAxisAlignment, EdgeInsets, Padding, colored_box, column, container, row,
@@ -50,11 +50,11 @@ const CAPTION_INK: Color = Color::from_rgb8(0x8A, 0x8A, 0x8A);
 /// box the five `Align`s resolve against without painting over the variant's
 /// surface clear.
 fn alignment_case() -> AnyView<()> {
-    fn badge(label: &'static str) -> AnyView<()> {
-        any(container(text(label).color(Color::WHITE).size(11.0))
+    fn badge(label: &'static str) -> impl View<()> {
+        container(text(label).color(Color::WHITE).size(11.0))
             .fill(CARD_A)
             .radius(6.0)
-            .size_centered(104.0, 32.0))
+            .size_centered(104.0, 32.0)
     }
     let stack = stack()
         .child(colored_box().expand())
@@ -63,7 +63,7 @@ fn alignment_case() -> AnyView<()> {
         .child(Align(Alignment::CENTER, badge("CENTER")))
         .child(Align(Alignment::BOTTOM_LEFT, badge("BOTTOM_LEFT")))
         .child(Align(Alignment::BOTTOM_RIGHT, badge("BOTTOM_RIGHT")));
-    framed(stack)
+    any(framed(stack))
 }
 
 pub(super) const ALIGNMENT: Case = Case {
@@ -81,11 +81,11 @@ pub(super) const ALIGNMENT: Case = Case {
 /// itself" case the page calls out, as opposed to a themed role lookup. The
 /// labels themselves are the counterpoint: they take the themed default.
 fn color_case() -> AnyView<()> {
-    fn swatch(color: Color, label: &'static str) -> AnyView<()> {
-        any(column()
+    fn swatch(color: Color, label: &'static str) -> impl View<()> {
+        column()
             .child(colored_box().fill(color).radius(8.0).size(64.0, 64.0))
             .child(text(label).size(12.0))
-            .cross_axis(CrossAxisAlignment::Center))
+            .cross_axis(CrossAxisAlignment::Center)
     }
     let row = row()
         .child(swatch(CARD_A, "#3B82F6"))
@@ -93,7 +93,7 @@ fn color_case() -> AnyView<()> {
         .child(swatch(CARD_C, "#10B981"))
         .child(swatch(CARD_D, "#F59E0B"))
         .cross_axis(CrossAxisAlignment::Center);
-    framed(row)
+    any(framed(row))
 }
 
 pub(super) const COLOR: Case = Case {
@@ -124,7 +124,7 @@ fn edge_insets_case() -> AnyView<()> {
     .fill(CARD_A)
     .radius(10.0)
     .size_centered(280.0, 180.0);
-    framed(framed_child)
+    any(framed(framed_child))
 }
 
 pub(super) const EDGE_INSETS: Case = Case {
@@ -158,7 +158,7 @@ fn text_style_case() -> AnyView<()> {
         .child(text("Body copy styled in bulk").style(body))
         .child(text("CAPTION").style(caption))
         .cross_axis(CrossAxisAlignment::Center);
-    framed(column)
+    any(framed(column))
 }
 
 pub(super) const TEXT_STYLE: Case = Case {

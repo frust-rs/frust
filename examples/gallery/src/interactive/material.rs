@@ -130,24 +130,24 @@ const BLEED_W: f64 = 344.0;
 
 /// `icon(..)` as an `AnyView`, at whatever state the surrounding case is bound
 /// to — the state-generic mirror of `crate::material`'s own `()`-bound helper.
-fn glyph<State: 'static>(source: IconSource) -> AnyView<State> {
-    any(icon(source))
+fn glyph<State: 'static>(source: IconSource) -> impl View<State> {
+    icon(source)
 }
 
 /// A fixed-width box around a component that would otherwise shrink-wrap; see
 /// [`BLEED_W`].
-fn bleed<State: 'static, V: View<State>>(child: V) -> AnyView<State> {
-    any(SizedBox(Some(BLEED_W), None).child(child))
+fn bleed<State: 'static, V: View<State>>(child: V) -> impl View<State> {
+    SizedBox(Some(BLEED_W), None).child(child)
 }
 
 /// A vertical gap between stacked rows in a case.
-fn gap<State: 'static>(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn gap<State: 'static>(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal gap between side-by-side controls in a case.
-fn hgap<State: 'static>(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn hgap<State: 'static>(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 // ---- button-group -----------------------------------------------------------
@@ -185,9 +185,10 @@ impl Component for ButtonGroupCase {
             column()
                 .child(
                     button_group_actions(vec![
-                        button_group_action("Left").icon(|| glyph(icons::FORMAT_ALIGN_LEFT)),
-                        button_group_action("Center").icon(|| glyph(icons::FORMAT_ALIGN_CENTER)),
-                        button_group_action("Right").icon(|| glyph(icons::FORMAT_ALIGN_RIGHT)),
+                        button_group_action("Left").icon(|| any(glyph(icons::FORMAT_ALIGN_LEFT))),
+                        button_group_action("Center")
+                            .icon(|| any(glyph(icons::FORMAT_ALIGN_CENTER))),
+                        button_group_action("Right").icon(|| any(glyph(icons::FORMAT_ALIGN_RIGHT))),
                     ])
                     .group_type(ButtonGroupType::Connected)
                     .selected_index(state.align)
@@ -254,7 +255,7 @@ impl Component for ChipsCase {
             second_row.push(any(input_chip(name, |_: &mut ChipsState| {}).on_deleted(
                 move |state: &mut ChipsState| state.contacts.retain(|held| *held != name),
             )));
-            second_row.push(hgap(10.0));
+            second_row.push(any(hgap(10.0)));
         }
         second_row.push(any(
             suggestion_chip("Reply", |_: &mut ChipsState| {}).elevated(true)
@@ -381,7 +382,7 @@ impl Component for DropdownCase {
     }
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-        let mut column: Vec<AnyView<DropdownState>> = vec![bleed(
+        let mut column: Vec<AnyView<DropdownState>> = vec![any(bleed(
             dropdown_field(dropdown_items())
                 .selected(state.selected.clone())
                 .hint("Pick a fruit")
@@ -389,9 +390,9 @@ impl Component for DropdownCase {
                 .open(state.open)
                 .on_open(|state: &mut DropdownState, open| state.open = open)
                 .on_change(|state: &mut DropdownState, selected| state.selected = selected),
-        )];
+        ))];
         if state.open {
-            column.push(gap(12.0));
+            column.push(any(gap(12.0)));
             column.push(any(dropdown_panel(
                 dropdown_items(),
                 |state: &mut DropdownState, selected| state.selected = selected,

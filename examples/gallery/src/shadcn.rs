@@ -162,7 +162,7 @@ const TABLE_WIDE: Size = Size::new(420.0, 220.0);
 /// From `examples/shadcn-demo`'s primitives page — the variant row, wrapped
 /// over two rows so the full variant set fits [`Case::DEFAULT_SIZE`]'s width.
 fn button_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 row()
@@ -185,13 +185,13 @@ fn button_case() -> AnyView<()> {
                     .child(button("Disabled", |_: &mut ()| {}).disabled(true))
                     .cross_axis(CrossAxisAlignment::Center),
             ),
-    )
+    ))
 }
 
 /// From `examples/shadcn-demo`'s layout page (a carousel slide card) and its
 /// primitives page (a footer-actions card), stacked.
 fn card_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         CARD_WIDE,
         column()
             .child(card(vec![
@@ -204,13 +204,13 @@ fn card_case() -> AnyView<()> {
             .child(SizedBox(None, Some(12.0)))
             .child(card(vec![
                 card_header(vec![card_title("Delete project?")]),
-                card_footer(vec![
-                    any(button("Cancel", |_: &mut ()| {}).variant(ButtonVariant::Ghost)),
-                    any(SizedBox(Some(8.0), None)),
-                    any(button("Save", |_: &mut ()| {})),
-                ]),
+                card_footer((
+                    button("Cancel", |_: &mut ()| {}).variant(ButtonVariant::Ghost),
+                    SizedBox(Some(8.0), None),
+                    button("Save", |_: &mut ()| {}),
+                )),
             ])),
-    )
+    ))
 }
 
 /// The real `dialog()`, sugared constructor and all: the panel fades and zooms
@@ -220,7 +220,7 @@ fn card_case() -> AnyView<()> {
 ///
 /// Content mirrors `examples/shadcn-demo`'s overlays page.
 fn dialog_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         DIALOG,
         dialog(vec![
             dialog_header(vec![
@@ -231,7 +231,7 @@ fn dialog_case() -> AnyView<()> {
                 button("Cancel", |_: &mut ()| {}).variant(ButtonVariant::Outline),
             ]),
         ]),
-    )
+    ))
 }
 
 /// The bottom drawer chrome, `drawer()`'s own composition for
@@ -243,7 +243,7 @@ fn dialog_case() -> AnyView<()> {
 /// Content mirrors `examples/shadcn-demo`'s overlays page.
 fn drawer_case() -> AnyView<()> {
     let side = DrawerSide::Bottom;
-    framed_in(
+    any(framed_in(
         DRAWER_TALL,
         modal(
             stack_slots(
@@ -273,7 +273,7 @@ fn drawer_case() -> AnyView<()> {
                 )
                 .entrance(ModalEntrance::None),
         ),
-    )
+    ))
 }
 
 /// From `examples/shadcn-demo`'s anchored page. See the module docs' "Three
@@ -283,7 +283,7 @@ fn drawer_case() -> AnyView<()> {
 /// interaction instead, entrance and all — see [`crate::interactive::shadcn`].
 fn dropdown_menu_case() -> AnyView<()> {
     let dropdown_anchor = OverlayAnchor::new();
-    framed_in(
+    any(framed_in(
         DROPDOWN,
         frust_widgets::stack()
             .child(anchor(&dropdown_anchor, button("Actions", |_: &mut ()| {})))
@@ -302,13 +302,13 @@ fn dropdown_menu_case() -> AnyView<()> {
                 )
                 .anchor(&dropdown_anchor),
             ),
-    )
+    ))
 }
 
 /// From `examples/shadcn-demo`'s controls page (checkbox) and its inputs page
 /// (a labelled, described `field` wrapping an `input`).
 fn form_controls_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         Size::new(360.0, 220.0),
         column()
             .child(
@@ -324,13 +324,13 @@ fn form_controls_case() -> AnyView<()> {
                     .label("Name")
                     .description("Shown on your public profile."),
             ),
-    )
+    ))
 }
 
 /// From `examples/shadcn-demo`'s chat composer, and its inputs page's
 /// invalid-`field` example.
 fn input_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         Size::new(360.0, 200.0),
         column()
             .child(input("", |_: &mut (), _: String| {}).placeholder("Write a message\u{2026}"))
@@ -344,31 +344,31 @@ fn input_case() -> AnyView<()> {
                 .label("Invalid example")
                 .error("This field is required."),
             ),
-    )
+    ))
 }
 
 /// From `examples/shadcn-demo`'s chat page: a `message_scroller` over a
 /// couple of `message` rows, one per side of the thread.
 fn message_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         DROPDOWN,
-        message_scroller(vec![
-            any(message(vec![message_content(vec![bubble(
+        message_scroller((
+            message(vec![message_content(vec![bubble(
                 "Hey — got a minute to review the PR?",
-            )])])),
-            any(message(vec![message_content(vec![
+            )])]),
+            message(vec![message_content(vec![
                 bubble("On it now.")
                     .variant(BubbleVariant::Secondary)
                     .align(BubbleAlign::End),
             ])])
-            .align(frust_shadcn::MessageAlign::End)),
-        ]),
-    )
+            .align(frust_shadcn::MessageAlign::End),
+        )),
+    ))
 }
 
 /// From `examples/shadcn-demo`'s questionnaire page.
 fn questionnaire_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         QUESTIONNAIRE,
         questionnaire(
             vec![
@@ -385,7 +385,7 @@ fn questionnaire_case() -> AnyView<()> {
         .on_answer(|_: &mut (), _| {})
         .on_navigate(|_: &mut (), _| {})
         .on_submit(|_: &mut ()| {}),
-    )
+    ))
 }
 
 /// From `examples/shadcn-demo`'s anchored page. See the module docs' "Three
@@ -401,7 +401,7 @@ fn select_case() -> AnyView<()> {
         select_option("Banana"),
         select_option("Cherry"),
     ];
-    framed_in(
+    any(framed_in(
         Size::new(360.0, 220.0),
         frust_widgets::stack()
             .child(anchor(
@@ -414,7 +414,7 @@ fn select_case() -> AnyView<()> {
                     .anchor(&select_anchor)
                     .align(OverlayAlign::Start),
             ),
-    )
+    ))
 }
 
 /// The right-edge sheet chrome, `sheet()`'s own composition
@@ -426,7 +426,7 @@ fn select_case() -> AnyView<()> {
 /// Content mirrors `examples/shadcn-demo`'s overlays page.
 fn sheet_case() -> AnyView<()> {
     let side = SheetSide::Right;
-    framed_in(
+    any(framed_in(
         SHEET_TALL,
         modal(
             stack_slots(
@@ -447,7 +447,7 @@ fn sheet_case() -> AnyView<()> {
                 .close_button(true)
                 .entrance(ModalEntrance::None),
         ),
-    )
+    ))
 }
 
 /// From `examples/shadcn-demo`'s layout page: a floating, icon-collapsible
@@ -457,7 +457,7 @@ fn sheet_case() -> AnyView<()> {
 /// sidebar.rs`'s "A panel built collapsed starts collapsed rather than
 /// animating shut"), so this case needs no entrance workaround.
 fn sidebar_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         SIDEBAR_WIDE,
         sidebar_provider(
             sidebar(sidebar_content(vec![sidebar_group(vec![
@@ -487,7 +487,7 @@ fn sidebar_case() -> AnyView<()> {
             true,
             |_: &mut (), _: bool| {},
         ),
-    )
+    ))
 }
 
 /// From `examples/shadcn-demo`'s data-table page: a selectable row and the
@@ -497,17 +497,17 @@ fn table_case() -> AnyView<()> {
         table_row(vec![any(table_cell("Alex Kim")), any(table_cell("Admin"))]).selected(true),
         table_row(vec![any(table_cell("Sam Lee")), any(table_cell("Member"))]),
     ];
-    framed_in(
+    any(framed_in(
         TABLE_WIDE,
         table(rows)
             .header(["Name", "Role"])
             .caption("1 of 2 row(s) selected \u{2014} page 1 of 1"),
-    )
+    ))
 }
 
 /// From `examples/shadcn-demo`'s controls page.
 fn tabs_case() -> AnyView<()> {
-    framed(tabs(
+    any(framed(tabs(
         "account",
         vec![
             tabs_tab(
@@ -522,7 +522,7 @@ fn tabs_case() -> AnyView<()> {
             ),
         ],
         |_: &mut (), _: String| {},
-    ))
+    )))
 }
 
 /// From `examples/shadcn-demo`'s anchored page. See the module docs' "Three
@@ -535,14 +535,14 @@ fn tabs_case() -> AnyView<()> {
 fn tooltip_case() -> AnyView<()> {
     let hover = TooltipHover::new();
     hover.set_open(true);
-    framed(
+    any(framed(
         frust_widgets::stack()
             .child(tooltip_trigger::<(), _>(
                 &hover,
                 button("Hover me", |_: &mut ()| {}),
             ))
             .child(tooltip::<()>(&hover, "A tooltip, 700ms after rest")),
-    )
+    ))
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.

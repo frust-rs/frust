@@ -351,15 +351,16 @@ impl Component for DialogCase {
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         if !state.open {
-            return framed(
+            // erasure: keep two return arms differ in type and the swap replays the entrance
+            return any(framed(
                 button("Revoke observer-token", |state: &mut DialogState| {
                     state.open = true
                 })
                 .style(ButtonStyle::Danger)
                 .small(),
-            );
+            ));
         }
-        framed(
+        any(framed(
             glyph_dialog::<DialogState>()
                 .title("Revoke observer-token?")
                 .body("Any device using this token loses access immediately. This can't be undone.")
@@ -374,7 +375,7 @@ impl Component for DialogCase {
                         .style(ButtonStyle::Danger)
                         .small(),
                 ),
-        )
+        ))
     }
 }
 
