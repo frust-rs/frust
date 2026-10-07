@@ -124,8 +124,8 @@
 //!   section) — never a raw pop that would drop the page mid-slide.
 
 use frust::{
-    AnyView, Component, Get, GetUntracked, NavigatorController, PopResult, RwSignal, Set, Stack,
-    View, any, component, icon, navigator,
+    AnyView, Component, Get, GetUntracked, NavigatorController, PopResult, RwSignal, Set, View,
+    any, component, icon, navigator, stack,
 };
 use frust_material::{
     BottomSheetView, MenuNode, MenuSelection, ModalDismiss, OverlayAnchor, SplitButtonItem,
@@ -361,8 +361,8 @@ fn split_view(state: &Knobs) -> frust_material::SplitButtonView<Knobs> {
 }
 
 /// The "Split button" preview.
-fn preview(state: &Knobs) -> AnyView<Knobs> {
-    any(split_view(state))
+fn preview(state: &Knobs) -> impl View<Knobs> {
+    split_view(state)
 }
 
 /// The trailing trigger's own popup menu — mounted separately at the page's
@@ -445,8 +445,8 @@ fn content_panel(state: &Knobs) -> AnyView<Knobs> {
     )
 }
 
-/// The "Style" menu's popup half — mounted at this page's outer [`Stack`].
-fn style_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+/// The "Style" menu's popup half — mounted at this page's outer [`frust::Stack`].
+fn style_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel(
         state.style.get(),
         &SplitButtonVariant::ALL,
@@ -458,8 +458,8 @@ fn style_menu_panel(state: &Knobs) -> AnyView<Knobs> {
     )
 }
 
-/// The "Size" menu's popup half — mounted at this page's outer [`Stack`].
-fn size_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+/// The "Size" menu's popup half — mounted at this page's outer [`frust::Stack`].
+fn size_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel(
         state.size.get(),
         &SplitButtonSize::ALL,
@@ -502,17 +502,20 @@ fn snippet(state: &Knobs) -> PlaySnippet {
 /// The playground body: the trigger preview, snippet, controls, and the
 /// dropdown/popup panels they anchor — everything that varies with `state`,
 /// built without touching the navigator (see the [module docs](self)).
-fn content(state: &Knobs) -> AnyView<Knobs> {
+fn content(state: &Knobs) -> impl View<Knobs> + use<> {
     let body = playground_body(
         vec![play_preview_card("Split button", preview(state))],
         vec![snippet(state)],
         vec![appearance_panel(state), content_panel(state)],
     );
-    let mut layers = vec![body, style_menu_panel(state), size_menu_panel(state)];
-    if state.menu_style.get() == SplitButtonMenuStyle::Popup {
-        layers.push(split_popup_menu(state));
-    }
-    any(Stack(layers))
+    stack()
+        .child(body)
+        .child(style_menu_panel(state))
+        .child(size_menu_panel(state))
+        .when(
+            state.menu_style.get() == SplitButtonMenuStyle::Popup,
+            |layers| layers.child(split_popup_menu(state)),
+        )
 }
 
 /// This page's knob component — see the [module docs](self).

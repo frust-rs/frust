@@ -275,7 +275,7 @@ fn controls_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The "Kind" menu's popup half — mounted at this page's outer [`Stack`].
-fn kind_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+fn kind_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel(
         state.kind,
         &KINDS,
@@ -289,13 +289,13 @@ fn kind_menu_panel(state: &Knobs) -> AnyView<Knobs> {
 
 /// The page body: the playground content plus the "Kind" dropdown panel it
 /// anchors, stacked so both can paint above the scrollable content.
-fn body(state: &Knobs) -> AnyView<Knobs> {
+fn body(state: &Knobs) -> impl View<Knobs> {
     let content = playground_body(
         vec![play_preview_card("Slider", preview(state))],
         vec![snippet(state)],
         vec![controls_panel(state)],
     );
-    any(stack().child(content).child(kind_menu_panel(state)))
+    stack().child(content).child(kind_menu_panel(state))
 }
 
 /// This page's knob component — see the [module docs](self).

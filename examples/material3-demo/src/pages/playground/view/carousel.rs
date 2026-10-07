@@ -221,28 +221,32 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 ///
 /// `status` replaces the carousel with a one-line message while the images
 /// are not decoded yet (see the module docs).
-fn content(knobs: &Knobs, images: &[ImageSource], status: Option<&str>) -> AnyView<PageState> {
+fn content(
+    knobs: &Knobs,
+    images: &[ImageSource],
+    status: Option<&str>,
+) -> impl View<PageState> + use<> {
     let preview = match status {
-        Some(message) => status_view(message),
-        None => carousel_preview(knobs, images),
+        Some(message) => any(status_view(message)),
+        None => any(carousel_preview(knobs, images)),
     };
     let body = playground_body(
         vec![any(play_preview_card("Carousel", preview))],
         vec![snippet(knobs)],
         vec![controls(knobs)],
     );
-    any(stack()
+    stack()
         .child(body)
         .child(layout_menu_panel(knobs))
-        .child(alignment_menu_panel(knobs)))
+        .child(alignment_menu_panel(knobs))
 }
 
 /// The decode's non-ready state, shown in the preview card's slot.
-fn status_view(message: &str) -> AnyView<PageState> {
+fn status_view(message: &str) -> impl View<PageState> {
     let theme = ambient_theme();
     let mut style = theme.type_scale.body_medium.clone();
     style.color = theme.scheme().on_surface_variant;
-    any(text(message.to_string()).style(style))
+    text(message.to_string()).style(style)
 }
 
 /// The carousel itself, in the reference's own fixed preview box.
@@ -252,7 +256,7 @@ fn status_view(message: &str) -> AnyView<PageState> {
 /// [`mod@frust_material::carousel`]'s own `rebuild` already re-slots and re-seats
 /// its offset when any of those props change (its "jumps back" note, ported
 /// from `M3ECarousel.didUpdateWidget`).
-fn carousel_preview(knobs: &Knobs, images: &[ImageSource]) -> AnyView<PageState> {
+fn carousel_preview(knobs: &Knobs, images: &[ImageSource]) -> impl View<PageState> {
     let vertical = knobs.axis == CarouselAxis::Vertical;
     let items: Vec<AnyView<PageState>> = images
         .iter()
@@ -281,7 +285,7 @@ fn carousel_preview(knobs: &Knobs, images: &[ImageSource]) -> AnyView<PageState>
     } else {
         (None, Some(HORIZONTAL_HEIGHT))
     };
-    any(SizedBox::<PageState>(width, height).child(view))
+    SizedBox::<PageState>(width, height).child(view)
 }
 
 /// One carousel cell: the image, plus the focal title band over it — the
@@ -295,7 +299,7 @@ fn carousel_item(source: ImageSource, title: &str, show_title: bool) -> AnyView<
 }
 
 /// The bottom-pinned title band — see the module docs' scrim divergence.
-fn title_band(title: &str) -> AnyView<PageState> {
+fn title_band(title: &str) -> impl View<PageState> {
     let theme = ambient_theme();
     let mut style = theme.type_scale.title_medium.clone();
     style.size = TITLE_SIZE;
@@ -309,14 +313,14 @@ fn title_band(title: &str) -> AnyView<PageState> {
     ))
     .fill(TITLE_SCRIM);
 
-    any(column()
+    column()
         .flex(1, SizedBox::<PageState>(None, None))
         .child(band)
-        .cross_axis(CrossAxisAlignment::Stretch))
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 fn controls(knobs: &Knobs) -> AnyView<PageState> {
-    any(control_panel::<PageState>(
+    control_panel::<PageState>(
         "Layout",
         vec![
             play_enum_menu_field::<PageState, CarouselLayout>(
@@ -355,11 +359,11 @@ fn controls(knobs: &Knobs) -> AnyView<PageState> {
                 |state: &mut PageState, next: bool| state.knobs.show_titles = next,
             ),
         ],
-    ))
+    )
 }
 
 /// The "Type" menu's popup half — mounted at this page's outer [`Stack`].
-fn layout_menu_panel(knobs: &Knobs) -> AnyView<PageState> {
+fn layout_menu_panel(knobs: &Knobs) -> impl View<PageState> {
     play_enum_menu_panel::<PageState, CarouselLayout>(
         knobs.layout,
         &LAYOUTS,
@@ -372,7 +376,7 @@ fn layout_menu_panel(knobs: &Knobs) -> AnyView<PageState> {
 }
 
 /// The "Hero alignment" menu's popup half — mounted at the outer [`Stack`].
-fn alignment_menu_panel(knobs: &Knobs) -> AnyView<PageState> {
+fn alignment_menu_panel(knobs: &Knobs) -> impl View<PageState> {
     play_enum_menu_panel::<PageState, HeroAlignment>(
         knobs.alignment,
         &ALIGNMENTS,

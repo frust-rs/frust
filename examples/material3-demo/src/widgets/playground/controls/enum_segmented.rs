@@ -8,6 +8,7 @@ use crate::widgets::playground::ambient_theme;
 
 /// A row picking one of `values` via a segmented button (2-5 options — see
 /// `frust_material::segmented_button`'s own bound).
+// erasure: keep element of a heterogeneous Vec<AnyView> list (control_panel children)
 pub fn play_enum_segmented<State: 'static, T: PartialEq + Copy + 'static>(
     label: impl Into<String>,
     value: T,

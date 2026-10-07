@@ -182,7 +182,7 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 /// The playground body: the demo trigger, the snippet, and the controls —
 /// everything that varies with this page's knobs, built without touching the
 /// navigator (see the module docs).
-fn content(state: &Knobs) -> AnyView<Knobs> {
+fn content(state: &Knobs) -> impl View<Knobs> + use<> {
     playground_body(
         vec![trigger_preview()],
         vec![snippet(state)],
@@ -199,7 +199,7 @@ fn trigger_preview() -> AnyView<Knobs> {
     let mut caption = theme.type_scale.body_medium.clone();
     caption.color = theme.scheme().on_surface_variant;
 
-    any(play_preview_card(
+    play_preview_card(
         "Selection demo",
         column()
             .child(
@@ -215,7 +215,7 @@ fn trigger_preview() -> AnyView<Knobs> {
                 open_demo(state)
             }))
             .cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 /// Push the demo host, copying the knobs into it — the reference's own
@@ -236,7 +236,7 @@ fn open_demo(state: &Knobs) {
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {
-    any(control_panel::<Knobs>(
+    control_panel::<Knobs>(
         "Demo options",
         vec![
             play_switch::<Knobs>(
@@ -255,7 +255,7 @@ fn controls(state: &Knobs) -> AnyView<Knobs> {
                 |state: &mut Knobs, next: bool| state.custom_highlight.set(next),
             ),
         ],
-    ))
+    )
 }
 
 fn snippet(state: &Knobs) -> PlaySnippet {
@@ -354,8 +354,8 @@ fn demo_content(
     dismissible: bool,
     show_select_all: bool,
     custom_highlight: bool,
-) -> AnyView<DemoState> {
-    any(column().child(demo_bar(state, show_select_all)).flex(
+) -> impl View<DemoState> {
+    column().child(demo_bar(state, show_select_all)).flex(
         1,
         scroll_view(Padding(
             EdgeInsets {
@@ -366,12 +366,12 @@ fn demo_content(
             },
             demo_list(state, dismissible, custom_highlight),
         )),
-    ))
+    )
 }
 
 /// The idle search bar, wrapped in the contextual selection bar — the
 /// reference's `M3ESelectionAppBar(idle: M3EAppBar.search(..), actions: ..)`.
-fn demo_bar(state: &DemoState, show_select_all: bool) -> AnyView<DemoState> {
+fn demo_bar(state: &DemoState, show_select_all: bool) -> impl View<DemoState> {
     let back_nav = state.nav.clone();
     let idle = any(search_app_bar(
         search_bar(
@@ -391,7 +391,7 @@ fn demo_bar(state: &DemoState, show_select_all: bool) -> AnyView<DemoState> {
         .semantic_label("Back"),
     ));
 
-    any(selection_app_bar(
+    selection_app_bar(
         idle,
         &state.selected,
         ITEMS.len(),
@@ -410,7 +410,7 @@ fn demo_bar(state: &DemoState, show_select_all: bool) -> AnyView<DemoState> {
         } else {
             selection::cleared()
         };
-    }))
+    })
 }
 
 /// The row list, in whichever of the two compositions the `dismissible` knob
@@ -445,7 +445,11 @@ fn demo_list(state: &DemoState, dismissible: bool, custom_highlight: bool) -> An
 /// ([`mod@frust_material::dismissible`]'s Exit section), so this keeps the row
 /// mounted and reports the commit through the page's snackbar instead of
 /// removing it — the reference's own handler is a snackbar too.
-fn dismissible_row(state: &DemoState, index: usize, custom_highlight: bool) -> AnyView<DemoState> {
+fn dismissible_row(
+    state: &DemoState,
+    index: usize,
+    custom_highlight: bool,
+) -> impl View<DemoState> {
     let theme = ambient_theme();
     let success = theme
         .extension::<MaterialTokens>()
@@ -469,18 +473,18 @@ fn dismissible_row(state: &DemoState, index: usize, custom_highlight: bool) -> A
     if let Some(success) = success {
         forward = forward.color(success);
     }
-    any(dismissible(host)
+    dismissible(host)
         .background(forward)
         .secondary_background(dismiss_background().icon(icons::CLOSE))
         .on_dismissed(move |state: &mut DemoState, _direction| {
             let title = ITEMS[index].0;
             state.toasts.show(snackbar(format!("Dismissed {title}")));
-        }))
+        })
 }
 
 /// One row: a `list_item` whose leading avatar and container surface both key
 /// off its own selected state (see the module docs).
-fn row_view(state: &DemoState, index: usize, custom_highlight: bool) -> AnyView<DemoState> {
+fn row_view(state: &DemoState, index: usize, custom_highlight: bool) -> impl View<DemoState> {
     let (title, subtitle) = ITEMS[index];
     let selected = selection::is_selected(&state.selected, index);
     let row = list_item(title)
@@ -495,7 +499,7 @@ fn row_view(state: &DemoState, index: usize, custom_highlight: bool) -> AnyView<
         any(row.contained(true).selected(selected))
     };
 
-    any(Padding(
+    Padding(
         EdgeInsets {
             left: 0.0,
             top: 0.0,
@@ -503,7 +507,7 @@ fn row_view(state: &DemoState, index: usize, custom_highlight: bool) -> AnyView<
             bottom: ROW_GAP,
         },
         surface,
-    ))
+    )
 }
 
 /// The leading slot: the row's initial on a rotating accent circle, swapped

@@ -12,6 +12,7 @@ use frust::{AnyView, EdgeInsets, Padding, any};
 use frust_material::{MaterialSpacing, TextFieldVariant, text_field};
 
 /// A row editing `value` as plain text.
+// erasure: keep element of a heterogeneous Vec<AnyView> list (control_panel children)
 pub fn play_text_field<State: 'static>(
     label: impl Into<String>,
     value: impl Into<String>,

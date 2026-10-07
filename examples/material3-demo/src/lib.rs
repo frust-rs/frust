@@ -133,19 +133,19 @@ fn routes(
 fn gallery_shell(
     inner: &NavigatorController<AppState>,
     section_routes: RouteObserver,
-) -> AnyView<AppState> {
+) -> impl View<AppState> + use<> {
     let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     let selected = DemoSection::from_path(&section_routes.path())
         .map(DemoSection::index)
         .unwrap_or(0);
 
-    let bar = app_bar::<AppState>(APP_TITLE).actions(vec![
-        any(icon_button(icon(icons::PALETTE), |state: &mut AppState| {
+    let bar = app_bar::<AppState>(APP_TITLE).actions((
+        icon_button(icon(icons::PALETTE), |state: &mut AppState| {
             state.router.push(THEME_ROUTE)
         })
-        .semantic_label("Theme settings")),
+        .semantic_label("Theme settings"),
         brightness_action(theme.brightness),
-    ]);
+    ));
 
     let destinations = DemoSection::ALL
         .into_iter()
@@ -173,10 +173,10 @@ fn gallery_shell(
     // behind the status bar), so it needs no wrapper. The navigation bar
     // self-insets the bottom and is wrapped only for the horizontal edges
     // (respecting display-cutout insets).
-    any(scaffold(section_routes.observe(inner_view))
+    scaffold(section_routes.observe(inner_view))
         .app_bar(bar)
         .bottom_bar(safe_area(nav_bar).top(false).bottom(false))
-        .background(theme.scheme().surface))
+        .background(theme.scheme().surface)
 }
 
 #[derive(Default)]

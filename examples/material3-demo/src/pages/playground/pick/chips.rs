@@ -292,7 +292,7 @@ fn all_types_row(
     selected: bool,
     elevated: bool,
     show_leading: bool,
-) -> AnyView<ChipsPlaygroundState> {
+) -> impl View<ChipsPlaygroundState> {
     let leading = show_leading.then_some(LEADING_TAG_GLYPH);
     let chips: Vec<AnyView<ChipsPlaygroundState>> = ChipKind::ALL
         .into_iter()
@@ -317,7 +317,7 @@ fn all_types_row(
 /// (`CrossAxisAlignment::Start`, `Column`'s default): a chip's own natural
 /// width, never a fixed one, so there is nothing to stretch or center
 /// against.
-fn spaced_column<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> AnyView<State> {
+fn spaced_column<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> impl View<State> {
     let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
     for item in items {
         if !children.is_empty() {
@@ -325,7 +325,7 @@ fn spaced_column<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> AnyVie
         }
         children.push(item);
     }
-    any(Column(children))
+    Column(children)
 }
 
 /// The paste-ready Frust equivalent of the "Selected type" preview.

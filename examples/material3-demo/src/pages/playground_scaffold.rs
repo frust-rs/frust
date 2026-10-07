@@ -6,7 +6,7 @@
 //! living inside it. The split layout has chrome of its own (the shell's app
 //! bar stays put), so it renders the playground body bare.
 
-use frust::{AnyView, Theme, any, icon, scaffold, use_context};
+use frust::{AnyView, Theme, View, icon, scaffold, use_context};
 use frust_material::{app_bar, icon_button, icons};
 
 use crate::AppState;
@@ -14,7 +14,7 @@ use crate::pages::brightness_action;
 
 /// `body` under a titled app bar with a back button and the brightness
 /// toggle — the reference's `PlaygroundScaffold`.
-pub fn playground_scaffold(title: &str, body: AnyView<AppState>) -> AnyView<AppState> {
+pub fn playground_scaffold(title: &str, body: AnyView<AppState>) -> impl View<AppState> {
     let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     let bar = app_bar::<AppState>(title)
         .leading(
@@ -26,7 +26,7 @@ pub fn playground_scaffold(title: &str, body: AnyView<AppState>) -> AnyView<AppS
         .actions(vec![brightness_action(theme.brightness)]);
 
     // The bar self-insets its top and side edges; no `safe_area` wrapper.
-    any(scaffold(body)
+    scaffold(body)
         .app_bar(bar)
-        .background(theme.scheme().surface))
+        .background(theme.scheme().surface)
 }
