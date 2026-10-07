@@ -59,8 +59,8 @@ use std::time::Duration;
 
 use frust::authoring::{
     Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, View, Widget, build_child,
-    rebuild_children, teardown_child, visit_children,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, View, ViewSeq, Widget,
+    build_child, rebuild_children, teardown_child, visit_children,
 };
 use frust::{FrameTime, Theme};
 use kurbo::{Point, Size, Vec2};
@@ -150,7 +150,7 @@ impl MarqueeDirection {
 /// use frust::text;
 /// use frust_beui::components::marquee::{MarqueeDirection, marquee};
 ///
-/// let ticker = marquee::<()>(vec![text("one"), text("two")])
+/// let ticker = marquee::<(), _>((text("one"), text("two")))
 ///     .direction(MarqueeDirection::Right)
 ///     .pause_on_hover(true);
 /// ```
@@ -165,11 +165,11 @@ pub struct MarqueeView<State: 'static> {
 
 /// Scroll `children` in an endless loop, travelling
 /// [`left`](MarqueeDirection::Left) at [`DEFAULT_SPEED`].
-pub fn marquee<State: 'static>(
-    children: impl IntoIterator<Item = impl View<State>>,
-) -> MarqueeView<State> {
+pub fn marquee<State: 'static, M>(children: impl ViewSeq<State, M>) -> MarqueeView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
     MarqueeView {
-        children: children.into_iter().map(AnyView::new).collect(),
+        children: erased,
         direction: MarqueeDirection::default(),
         speed: DEFAULT_SPEED,
         gap: DEFAULT_GAP,
@@ -920,7 +920,7 @@ mod tests {
     /// An empty marquee is inert rather than a division by zero.
     #[test]
     fn an_empty_marquee_is_inert() {
-        let mut widget = laid_out(&marquee::<()>(Vec::<AnyView<()>>::new()));
+        let mut widget = laid_out(&marquee::<(), _>(Vec::<AnyView<()>>::new()));
         assert_eq!(widget.track_length(), 0.0);
         let (_, needs_frame, _) = painted(&mut widget, 0, None);
         assert!(!needs_frame);

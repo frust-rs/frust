@@ -298,7 +298,7 @@ use std::time::Duration;
 
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, View, Widget,
+    LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, View, ViewSeq, Widget,
 };
 use frust::{
     AnimationController, Curve, FrameTime, IconSource, ShapeScale, SpringDesc, Theme, Tween, icon,
@@ -1215,23 +1215,26 @@ pub fn DockedToolbar<State: 'static>() -> ToolbarView<State> {
 impl<State: 'static> ToolbarView<State> {
     /// Attach leading slot children, in reading order (hugs the leading edge).
     /// Tint/styling is each supplied view's own responsibility.
-    pub fn leading(mut self, leading: impl IntoIterator<Item = impl View<State>>) -> Self {
-        self.leading = leading.into_iter().map(AnyView::new).collect();
+    pub fn leading<M>(mut self, leading: impl ViewSeq<State, M>) -> Self {
+        self.leading.clear();
+        leading.extend_views(&mut self.leading);
         self
     }
 
     /// Attach center slot children, in reading order — upstream's inline
     /// `M3EToolbarWidget` items, which never overflow. They lead the typed
     /// [`Self::actions`] within the same center group.
-    pub fn center(mut self, center: impl IntoIterator<Item = impl View<State>>) -> Self {
-        self.center = center.into_iter().map(AnyView::new).collect();
+    pub fn center<M>(mut self, center: impl ViewSeq<State, M>) -> Self {
+        self.center.clear();
+        center.extend_views(&mut self.center);
         self
     }
 
     /// Attach trailing slot children, in reading order (hugs the trailing
     /// edge, or the fab slot if also attached).
-    pub fn trailing(mut self, trailing: impl IntoIterator<Item = impl View<State>>) -> Self {
-        self.trailing = trailing.into_iter().map(AnyView::new).collect();
+    pub fn trailing<M>(mut self, trailing: impl ViewSeq<State, M>) -> Self {
+        self.trailing.clear();
+        trailing.extend_views(&mut self.trailing);
         self
     }
 

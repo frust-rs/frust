@@ -27,7 +27,7 @@
 
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, View, Widget,
+    LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, View, ViewSeq, Widget,
 };
 
 /// `buttonGroupVariants`' `orientation` axis. `Horizontal` = shadcn's
@@ -50,12 +50,13 @@ pub struct ButtonGroupView<State: 'static> {
 /// Group `children` (buttons, inputs, a select — any widget) flush together,
 /// horizontally by default.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn button_group<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> ButtonGroupView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn button_group<State: 'static, M>(children: impl ViewSeq<State, M>) -> ButtonGroupView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     ButtonGroupView {
         children,
         orientation: ButtonGroupOrientation::default(),

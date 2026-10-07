@@ -115,7 +115,7 @@ use frust::authoring::{Action, Role};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CornerRadii, ErasedArgCallback,
     EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx,
-    View, Widget,
+    View, ViewSeq, Widget,
 };
 use kurbo::{Point, Size};
 use peniko::Color;
@@ -212,11 +212,11 @@ pub struct CardListView<State: 'static> {
 /// Stack `items` as a card list, each child painted inside its own card
 /// surface at its position's radii (upstream's arbitrary `itemBuilder`
 /// children).
-pub fn card_list<State: 'static>(
-    items: impl IntoIterator<Item = impl View<State>>,
-) -> CardListView<State> {
+pub fn card_list<State: 'static, M>(items: impl ViewSeq<State, M>) -> CardListView<State> {
+    let mut erased = Vec::new();
+    items.extend_views(&mut erased);
     CardListView {
-        items: items.into_iter().map(AnyView::new).collect(),
+        items: erased,
         outer_radius: CARD_LIST_OUTER_RADIUS,
         inner_radius: CARD_LIST_INNER_RADIUS,
         gap: CARD_LIST_GAP,
@@ -236,7 +236,7 @@ pub fn card_list<State: 'static>(
 pub fn card_list_items<State: 'static>(
     items: impl IntoIterator<Item = ListItem<State>>,
 ) -> CardListView<State> {
-    card_list(items.into_iter().map(frust::authoring::any))
+    card_list(frust::authoring::views(items))
 }
 
 impl<State: 'static> CardListView<State> {
@@ -986,10 +986,11 @@ mod tests {
     }
 
     fn interactive_stack() -> CardListWidget {
-        let view: CardListView<Pressed> = card_list(
-            (0..3).map(|_| any::<Pressed, _>(frust::SizedBox(Some(10.0), Some(CHILD_HEIGHT)))),
-        )
-        .on_press(|s: &mut Pressed, index| s.indices.push(index));
+        let view: CardListView<Pressed> =
+            card_list(frust::views((0..3).map(|_| {
+                any::<Pressed, _>(frust::SizedBox(Some(10.0), Some(CHILD_HEIGHT)))
+            })))
+            .on_press(|s: &mut Pressed, index| s.indices.push(index));
         let mut w = build(&view);
         layout(&mut w);
         w
@@ -1065,11 +1066,12 @@ mod tests {
 
     #[test]
     fn a_disabled_stack_ignores_every_pointer_phase() {
-        let view: CardListView<Pressed> = card_list(
-            (0..2).map(|_| any::<Pressed, _>(frust::SizedBox(Some(10.0), Some(CHILD_HEIGHT)))),
-        )
-        .on_press(|s: &mut Pressed, index| s.indices.push(index))
-        .enabled(false);
+        let view: CardListView<Pressed> =
+            card_list(frust::views((0..2).map(|_| {
+                any::<Pressed, _>(frust::SizedBox(Some(10.0), Some(CHILD_HEIGHT)))
+            })))
+            .on_press(|s: &mut Pressed, index| s.indices.push(index))
+            .enabled(false);
         let mut w = build(&view);
         layout(&mut w);
         let mut state = Pressed::default();
@@ -1237,14 +1239,13 @@ mod tests {
                 enabled,
             };
             let enabled_flag = enabled;
-            let mut app =
-                move |_s: &mut Pressed| {
-                    card_list((0..3).map(|_| {
-                        any::<Pressed, _>(frust::SizedBox(Some(10.0), Some(CHILD_HEIGHT)))
-                    }))
-                    .on_press(|s: &mut Pressed, index| s.indices.push(index))
-                    .enabled(enabled_flag)
-                };
+            let mut app = move |_s: &mut Pressed| {
+                card_list(frust::views((0..3).map(|_| {
+                    any::<Pressed, _>(frust::SizedBox(Some(10.0), Some(CHILD_HEIGHT)))
+                })))
+                .on_press(|s: &mut Pressed, index| s.indices.push(index))
+                .enabled(enabled_flag)
+            };
             h.root.rebuild(&mut app, &mut h.state);
             h.root
                 .layout_with_text(Size::new(WIDTH, 400.0), &mut h.tcx as &mut dyn Any);

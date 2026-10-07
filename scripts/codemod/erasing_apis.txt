@@ -31,7 +31,8 @@
 #           generic, matched against the call's qualifier or, for an
 #           unqualified call, against the `use` that imports it.
 # [list]    (T5, opt-in `--t5` only) list parameters (`Vec<V>`,
-#           `impl IntoIterator<Item = impl View<State>>`). Without `--t5` the
+#           `impl IntoIterator<Item = impl View<State>>`, or the
+#           `impl ViewSeq<State, M>` of a [seq] entry). Without `--t5` the
 #           tool never rewrites them. With it, a `vec![any(E1), .., any(En)]`
 #           whole argument loses every erasure when all E_i share one head
 #           (callee path + trailing method names); `Column`/`Row`/`Stack` and
@@ -40,6 +41,15 @@
 #           generic callee); keep `any()` there and mark the `vec![` line
 #           with `// erasure: keep <why>` (or bind the vec to a local, or use
 #           the fluent builder).
+# [seq]     (T6) list parameters typed `impl ViewSeq<State, M>`: the argument
+#           may be a tuple of mixed view types, a `Vec`/array, an `Option`
+#           or `views(iter)`, so a fully erased `vec![any(e1), .., any(en)]`
+#           argument can become the tuple `(e1, .., en)`. Lists every API
+#           whose list parameter accepts a sequence today; [list] keeps its
+#           own T5 entries unchanged. A name shared with a single-view [slot]
+#           API (`card`, `drawer`, `message`, `side_sheet`, `.leading`,
+#           `.trailing`) is safe: a `vec![..]` never type-checks as a single
+#           view, so only the sequence form can carry one.
 #
 # T7 (opt-in `--t7` only) reads no section: it rewrites a helper fn's
 # `-> AnyView<S>` return to `-> impl View<S>` when the body's tail is exactly
@@ -117,3 +127,24 @@ reorderable_list selection_host shared_layout_bg sheet sheet_footer
 sheet_header side_sheet sidebar_content sidebar_footer sidebar_group
 sidebar_header sidebar_inset sidebar_menu sidebar_menu_item sidebar_menu_sub
 sidebar_menu_sub_item stack_slots trailing_row uncontained_carousel
+
+[seq]
+# Methods.
+.actions .center .children .leading .trailing
+
+# Free functions: frust-widgets sugar.
+Column Row Stack
+
+# Free functions: plugins/{shadcn,beui,material,glyph}.
+KbdGroup alert alert_dialog alert_dialog_footer alert_dialog_header attachment
+attachment_actions attachment_content attachment_group avatar_group breadcrumb
+breadcrumb_list bubble_group button_group card card_footer card_header
+card_header_with_action card_list carousel contained_carousel cylinder_carousel
+dialog dialog_footer dialog_header drawer drawer_footer drawer_header empty
+empty_content empty_header glyph_reveal hero_carousel item item_actions
+item_content item_footer item_header kbd_group marquee message
+message_bubble_group message_content message_group message_scroller
+selection_host shared_layout_bg sheet sheet_footer sheet_header side_sheet
+sidebar_content sidebar_footer sidebar_group sidebar_header sidebar_inset
+sidebar_menu sidebar_menu_item sidebar_menu_sub sidebar_menu_sub_item
+stack_slots trailing_row uncontained_carousel

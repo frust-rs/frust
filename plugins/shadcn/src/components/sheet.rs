@@ -46,7 +46,7 @@
 
 use std::rc::Rc;
 
-use frust::authoring::{AnyView, BuildCtx, ChangeFlags, View};
+use frust::authoring::{AnyView, BuildCtx, ChangeFlags, View, ViewSeq};
 use frust::{EdgeInsets, NavigatorController, PopResult};
 
 use crate::overlay::{
@@ -104,11 +104,10 @@ fn config(side: SheetSide, close_button: bool) -> ModalConfig {
 /// Create a sheet whose panel stacks `children` `gap-4` apart, pinned to the
 /// window's trailing edge until [`SheetView::side`] says otherwise.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn sheet<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> SheetView<State> {
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn sheet<State: 'static, M>(children: impl ViewSeq<State, M>) -> SheetView<State> {
     let side = SheetSide::default();
     SheetView {
         inner: modal(
@@ -122,11 +121,10 @@ pub fn sheet<State: 'static, V: View<State>>(
 
 /// A header slot: a `p-4 gap-1.5` stack (title, description).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn sheet_header<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn sheet_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     stack_slots(children, HEADER_GAP, EdgeInsets::all(SLOT_PAD))
 }
 
@@ -143,11 +141,10 @@ pub fn sheet_description<State: 'static>(description: impl Into<String>) -> AnyV
 /// A footer slot: a stretched `p-4 gap-2` column (see the [module docs](self)'s
 /// `mt-auto` note).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn sheet_footer<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn sheet_footer<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     stack_slots(children, FOOTER_GAP, EdgeInsets::all(SLOT_PAD))
 }
 

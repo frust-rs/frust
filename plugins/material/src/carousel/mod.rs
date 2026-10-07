@@ -104,7 +104,7 @@ use std::rc::Rc;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, ErasedArgCallback, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent,
-    PointerPhase, Role, ScrollDelta, SemanticsCtx, TypedArgCallback, View, Widget,
+    PointerPhase, Role, ScrollDelta, SemanticsCtx, TypedArgCallback, View, ViewSeq, Widget,
 };
 use frust::input::{TOUCH_SLOP, VelocityTracker, WHEEL_LINE_PX};
 use frust::{AnimationController, FrameTime, Theme};
@@ -228,11 +228,11 @@ pub struct CarouselView<State: 'static> {
 
 /// A hero carousel over `items` — the reference's own default layout, focal
 /// item centred. See the [module docs](self).
-pub fn carousel<State: 'static>(
-    items: impl IntoIterator<Item = impl View<State>>,
-) -> CarouselView<State> {
+pub fn carousel<State: 'static, M>(items: impl ViewSeq<State, M>) -> CarouselView<State> {
+    let mut erased = Vec::new();
+    items.extend_views(&mut erased);
     CarouselView {
-        items: items.into_iter().map(AnyView::new).collect(),
+        items: erased,
         layout: CarouselLayout::default(),
         hero_alignment: HeroAlignment::default(),
         extended: false,
@@ -252,8 +252,8 @@ pub fn carousel<State: 'static>(
 
 /// A [`CarouselLayout::Hero`] carousel over `items` — one large item plus
 /// peeks, placed by `alignment`.
-pub fn hero_carousel<State: 'static>(
-    items: impl IntoIterator<Item = impl View<State>>,
+pub fn hero_carousel<State: 'static, M>(
+    items: impl ViewSeq<State, M>,
     alignment: HeroAlignment,
 ) -> CarouselView<State> {
     carousel(items).hero_alignment(alignment)
@@ -261,16 +261,14 @@ pub fn hero_carousel<State: 'static>(
 
 /// A [`CarouselLayout::Contained`] carousel over `items` — large/medium/small
 /// items kept inside the bounds.
-pub fn contained_carousel<State: 'static>(
-    items: impl IntoIterator<Item = impl View<State>>,
-) -> CarouselView<State> {
+pub fn contained_carousel<State: 'static, M>(items: impl ViewSeq<State, M>) -> CarouselView<State> {
     carousel(items).layout(CarouselLayout::Contained)
 }
 
 /// A [`CarouselLayout::Uncontained`] carousel over `items` — uniform
 /// `item_extent`-wide items scrolling to the container's edge.
-pub fn uncontained_carousel<State: 'static>(
-    items: impl IntoIterator<Item = impl View<State>>,
+pub fn uncontained_carousel<State: 'static, M>(
+    items: impl ViewSeq<State, M>,
     item_extent: f64,
 ) -> CarouselView<State> {
     carousel(items)

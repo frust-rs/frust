@@ -94,8 +94,8 @@ use std::time::Duration;
 use frust::Theme;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, build_child,
-    rebuild_children, route_event, teardown_child, visit_children,
+    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, ViewSeq, Widget,
+    build_child, rebuild_children, route_event, teardown_child, visit_children,
 };
 use frust::{AnimationController, Curve, FrameTime, Tween};
 use kurbo::{Affine, Point, Size, Vec2};
@@ -247,11 +247,11 @@ pub struct GlyphRevealView<State: 'static> {
 /// Create a reveal container over `children`. Controlled: pass the current
 /// [`.expanded(bool)`](GlyphRevealView::expanded); the container animates
 /// whenever that value flips after the first build.
-pub fn glyph_reveal<State: 'static>(
-    children: impl IntoIterator<Item = impl View<State>>,
-) -> GlyphRevealView<State> {
+pub fn glyph_reveal<State: 'static, M>(children: impl ViewSeq<State, M>) -> GlyphRevealView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
     GlyphRevealView {
-        children: children.into_iter().map(AnyView::new).collect(),
+        children: erased,
         expanded: false,
         stagger: true,
         gap: GLYPH_REVEAL_GAP,
@@ -999,7 +999,10 @@ mod tests {
     }
 
     fn view_of(expanded: bool, heights: &[f64]) -> GlyphRevealView<()> {
-        glyph_reveal(heights.iter().map(|h| any(Block(Size::new(120.0, *h))))).expanded(expanded)
+        glyph_reveal(frust::views(
+            heights.iter().map(|h| any(Block(Size::new(120.0, *h)))),
+        ))
+        .expanded(expanded)
     }
 
     fn view(expanded: bool) -> GlyphRevealView<()> {
@@ -1518,8 +1521,10 @@ mod tests {
         // children 0 and 1. `semantics` must forward exactly that same
         // prefix — the parity `GlyphRevealWidget::input_reach` fixes.
         fn logic(expanded: &mut bool) -> GlyphRevealView<bool> {
-            glyph_reveal::<bool>(HEIGHTS.iter().map(|h| any(Block(Size::new(120.0, *h)))))
-                .expanded(*expanded)
+            glyph_reveal::<bool, _>(frust::views(
+                HEIGHTS.iter().map(|h| any(Block(Size::new(120.0, *h)))),
+            ))
+            .expanded(*expanded)
         }
 
         let mut root: frust_core::RenderRoot<bool, GlyphRevealView<bool>> =
@@ -1556,7 +1561,7 @@ mod tests {
 
     #[test]
     fn a_rebuilt_child_list_relays_out_and_re_measures() {
-        let two = glyph_reveal::<()>(vec![
+        let two = glyph_reveal::<(), _>(vec![
             any(Block(Size::new(120.0, 20.0))),
             any(Block(Size::new(120.0, 30.0))),
         ])

@@ -73,8 +73,8 @@ use frust::authoring::{
     Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     CursorIcon, ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
     PaintScene, Point, PointerPhase, Role, RoundedRect, ScrollDelta, SemanticsCtx, Shape, Size,
-    Vec2, View, Widget, any, build_child, erase_callback_arg, rebuild_child, rebuild_children,
-    route_event, route_event_single, teardown_child, visit_children,
+    Vec2, View, ViewSeq, Widget, any, build_child, erase_callback_arg, rebuild_child,
+    rebuild_children, route_event, route_event_single, teardown_child, visit_children,
 };
 use frust::input::{
     FLING_STOP, TOUCH_SLOP, VelocityTracker, WHEEL_LINE_PX, fling_decay, fling_displacement,
@@ -133,12 +133,15 @@ pub struct MessageScrollerView<State: 'static> {
 /// hand any view in directly — the column stretches every child to its own
 /// width either way.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn message_scroller<State: 'static, V: View<State>>(
-    items: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn message_scroller<State: 'static, M>(
+    items: impl ViewSeq<State, M>,
 ) -> MessageScrollerView<State> {
-    let items: Vec<AnyView<State>> = items.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    items.extend_views(&mut erased);
+    let items = erased;
     MessageScrollerView {
         items,
         button_label: DEFAULT_BUTTON_LABEL.to_owned(),

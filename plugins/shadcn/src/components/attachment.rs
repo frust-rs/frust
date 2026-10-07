@@ -36,7 +36,7 @@ use frust::authoring::text::FontWeight;
 use frust::authoring::{
     AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, RoundedRect, SemanticsCtx, Shape,
-    Size, ThemeTextColor, ThemeTextType, View, Widget, any,
+    Size, ThemeTextColor, ThemeTextType, View, ViewSeq, Widget, any,
 };
 use frust::{Theme, text};
 use peniko::Color;
@@ -109,12 +109,13 @@ pub struct AttachmentView<State: 'static> {
 /// Create an attachment card from `children` (typically
 /// [`attachment_media`]?, [`attachment_content`], [`attachment_actions`]?).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn attachment<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AttachmentView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn attachment<State: 'static, M>(children: impl ViewSeq<State, M>) -> AttachmentView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     AttachmentView {
         children,
         size: AttachmentSize::default(),
@@ -442,12 +443,15 @@ pub struct AttachmentContentView<State: 'static> {
 /// Stack `children` (typically [`attachment_title`]/
 /// [`attachment_description`]) in a left-aligned column.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn attachment_content<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn attachment_content<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> AttachmentContentView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     AttachmentContentView { children }
 }
 
@@ -564,12 +568,15 @@ pub struct AttachmentRowView<State: 'static> {
 /// `AttachmentActions`: a row of controls (no fixed gap in the source beyond
 /// the parent's own `gap`; this port uses `gap-2`, 8px).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn attachment_actions<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn attachment_actions<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> AttachmentRowView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     AttachmentRowView {
         children,
         gap: style::SPACING_UNIT * 2.0,
@@ -579,12 +586,15 @@ pub fn attachment_actions<State: 'static, V: View<State>>(
 /// `AttachmentGroup`: a row of attachments, `gap-3` (12px). See the module
 /// docs for the scroll-affordance deviation.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn attachment_group<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn attachment_group<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> AttachmentRowView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     AttachmentRowView {
         children,
         gap: style::SPACING_UNIT * 3.0,

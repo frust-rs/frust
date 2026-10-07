@@ -19,7 +19,7 @@ use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, Vec2, View,
-    Widget, build_child, rebuild_children, route_event, teardown_child, visit_children,
+    ViewSeq, Widget, build_child, rebuild_children, route_event, teardown_child, visit_children,
 };
 
 use crate::style::{SPACING_UNIT, TEXT_XS};
@@ -154,12 +154,13 @@ pub struct KbdGroupView<State: 'static> {
 /// Wrap `children` (typically [`kbd`] views and inline separator glyphs) in a
 /// `gap-1` row.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn kbd_group<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> KbdGroupView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn kbd_group<State: 'static, M>(children: impl ViewSeq<State, M>) -> KbdGroupView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     KbdGroupView { children }
 }
 
@@ -244,10 +245,7 @@ impl Widget for KbdGroupWidget {
 /// PascalCase alias for [`kbd_group`], for symmetry with the source's
 /// `KbdGroup`.
 #[allow(non_snake_case)]
-pub fn KbdGroup<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> KbdGroupView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+pub fn KbdGroup<State: 'static, M>(children: impl ViewSeq<State, M>) -> KbdGroupView<State> {
     kbd_group(children)
 }
 

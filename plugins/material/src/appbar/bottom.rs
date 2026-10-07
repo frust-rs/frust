@@ -29,7 +29,7 @@
 use frust::Theme;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, View, Widget, build_child,
+    LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, View, ViewSeq, Widget, build_child,
     rebuild_children, route_event, teardown_child, visit_children,
 };
 use kurbo::{Point, Size};
@@ -70,8 +70,9 @@ pub fn BottomAppBar<State: 'static>() -> BottomAppBarView<State> {
 impl<State: 'static> BottomAppBarView<State> {
     /// Attach the action slots, in reading order from the leading edge. Tint is
     /// each supplied view's own responsibility — see [`super`]'s slot contract.
-    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
-        self.actions = actions.into_iter().map(AnyView::new).collect();
+    pub fn actions<M>(mut self, actions: impl ViewSeq<State, M>) -> Self {
+        self.actions.clear();
+        actions.extend_views(&mut self.actions);
         self
     }
 
