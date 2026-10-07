@@ -105,8 +105,8 @@ impl Default for State {
 
 const FRUITS: [&str; 6] = ["Apple", "Banana", "Cherry", "Date", "Elderberry", "Fig"];
 
-fn gap() -> frust::AnyView<AppState> {
-    any(SizedBox(None, Some(12.0)))
+fn gap() -> impl frust::View<AppState> {
+    SizedBox(None, Some(12.0))
 }
 
 pub fn page(state: &mut State) -> impl View<AppState> + use<> {
@@ -271,7 +271,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     // only the static body scrolls: a scroll view around the stack would hand
     // the hosts an infinite max height, which they coerce to a zero-height area
     // (a tooltip clamped to `y = 0`, an anchored panel with nowhere to sit).
-    let mut layers: Vec<frust::AnyView<AppState>> = vec![crate::scroll_slot(any(base))];
+    let mut layers: Vec<frust::AnyView<AppState>> = vec![any(crate::scroll_slot(any(base)))];
 
     layers.push(any(popover(text(
         "Placement knobs move me around the trigger.",

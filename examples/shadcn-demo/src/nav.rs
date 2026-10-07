@@ -61,12 +61,10 @@ impl Page {
 
 /// One nav row: a menu button that selects `page`, lit when it is the active
 /// one and carrying the glyph an icon-mode rail shows on its own.
-fn nav_button(page: Page, active: Page, glyph: IconSource) -> frust::AnyView<AppState> {
-    any(
-        sidebar_menu_button(page.title(), move |s: &mut AppState| s.page = page)
-            .icon(icon(glyph).size(16.0))
-            .active(page == active),
-    )
+fn nav_button(page: Page, active: Page, glyph: IconSource) -> impl frust::View<AppState> {
+    sidebar_menu_button(page.title(), move |s: &mut AppState| s.page = page)
+        .icon(icon(glyph).size(16.0))
+        .active(page == active)
 }
 
 /// The nav panel: header, three groups, footer, rail.
@@ -77,10 +75,10 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
     let gallery = sidebar_group(vec![
         any(sidebar_group_label("Gallery")),
         sidebar_menu(vec![
-            sidebar_menu_item(vec![nav_button(Page::Primitives, active, icons::STAR)]),
-            sidebar_menu_item(vec![nav_button(Page::Controls, active, icons::SETTINGS)]),
-            sidebar_menu_item(vec![nav_button(Page::InputsTable, active, icons::EDIT)]),
-            sidebar_menu_item(vec![nav_button(Page::Layout, active, icons::PANE_MARK)]),
+            sidebar_menu_item((nav_button(Page::Primitives, active, icons::STAR),)),
+            sidebar_menu_item((nav_button(Page::Controls, active, icons::SETTINGS),)),
+            sidebar_menu_item((nav_button(Page::InputsTable, active, icons::EDIT),)),
+            sidebar_menu_item((nav_button(Page::Layout, active, icons::PANE_MARK),)),
         ]),
     ]);
 
@@ -88,28 +86,24 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
     // it is a `sidebar_menu_sub` under it rather than a fourth top-level row.
     let overlays = sidebar_group(vec![
         any(sidebar_group_label("Overlays")),
-        sidebar_menu(vec![
-            any(sidebar_menu_item(vec![nav_button(
-                Page::Overlays,
-                active,
-                icons::SCAN_MARK,
-            )])),
-            any(sidebar_menu_sub(vec![sidebar_menu_sub_item(vec![
+        sidebar_menu((
+            sidebar_menu_item((nav_button(Page::Overlays, active, icons::SCAN_MARK),)),
+            sidebar_menu_sub(vec![sidebar_menu_sub_item(vec![
                 sidebar_menu_sub_button(Page::Anchored.title(), |s: &mut AppState| {
                     s.page = Page::Anchored
                 })
                 .icon(icon(icons::PUSH_PIN).size(14.0))
                 .active(active == Page::Anchored),
-            ])])),
-        ]),
+            ])]),
+        )),
     ]);
 
     let patterns = sidebar_group(vec![
         // `sidebar_menu_item` is the composed row this port gives a label plus
         // its trailing action (upstream positions the action absolutely).
-        any(sidebar_menu_item(vec![
-            any(sidebar_group_label("Patterns")),
-            any(sidebar_group_action(
+        any(sidebar_menu_item((
+            sidebar_group_label("Patterns"),
+            sidebar_group_action(
                 icon(icons::REFRESH).size(14.0),
                 "Reset the pattern demos",
                 |s: &mut AppState| {
@@ -117,28 +111,20 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
                     s.questionnaire = Default::default();
                     s.data_table = Default::default();
                 },
-            )),
-        ])),
+            ),
+        ))),
         sidebar_menu(vec![
-            sidebar_menu_item(vec![
+            sidebar_menu_item((
                 nav_button(Page::Chat, active, icons::FORUM),
-                any(sidebar_menu_action(
+                sidebar_menu_action(
                     icon(icons::DELETE).size(14.0),
                     "Clear the transcript",
                     |s: &mut AppState| s.chat.messages.clear(),
-                )),
-                any(sidebar_menu_badge(message_count.to_string())),
-            ]),
-            sidebar_menu_item(vec![nav_button(
-                Page::Questionnaire,
-                active,
-                icons::DONE_ALL,
-            )]),
-            sidebar_menu_item(vec![nav_button(
-                Page::DataTable,
-                active,
-                icons::DESCRIPTION,
-            )]),
+                ),
+                sidebar_menu_badge(message_count.to_string()),
+            )),
+            sidebar_menu_item((nav_button(Page::Questionnaire, active, icons::DONE_ALL),)),
+            sidebar_menu_item((nav_button(Page::DataTable, active, icons::DESCRIPTION),)),
         ]),
     ]);
 

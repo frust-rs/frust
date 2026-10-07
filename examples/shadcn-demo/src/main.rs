@@ -81,8 +81,8 @@ impl Default for AppState {
 /// Pages that host an overlay, or that own a scroll surface of their own, take
 /// the page slot's bounded constraints directly instead (see this module's
 /// constraint chain).
-pub fn scroll_slot(content: AnyView<AppState>) -> AnyView<AppState> {
-    any(scroll_view(Padding(EdgeInsets::all(24.0), content)))
+pub fn scroll_slot(content: AnyView<AppState>) -> impl View<AppState> {
+    scroll_view(Padding(EdgeInsets::all(24.0), content))
 }
 
 /// The inset's content: the top bar over a page slot that fills whatever
@@ -114,21 +114,24 @@ impl Component for ShadcnDemoApp {
         // carrying its two menus), and the chat page (whose message scroller is
         // a scroll surface that needs a finite viewport). Every other page is
         // wrapped in the shared scroll slot here.
+        // erasure: keep 10 arms with distinct impl Trait types
         let content = match page {
-            Page::Primitives => scroll_slot(any(pages::primitives::page(&mut state.primitives))),
-            Page::Controls => scroll_slot(any(pages::controls::page(&mut state.controls))),
-            Page::InputsTable => {
-                scroll_slot(any(pages::inputs_table::page(&mut state.inputs_table)))
-            }
-            Page::Layout => scroll_slot(any(pages::layout::page(&mut state.layout))),
+            Page::Primitives => any(scroll_slot(any(pages::primitives::page(
+                &mut state.primitives,
+            )))),
+            Page::Controls => any(scroll_slot(any(pages::controls::page(&mut state.controls)))),
+            Page::InputsTable => any(scroll_slot(any(pages::inputs_table::page(
+                &mut state.inputs_table,
+            )))),
+            Page::Layout => any(scroll_slot(any(pages::layout::page(&mut state.layout)))),
             Page::Overlays => any(pages::overlays::page(&mut state.overlays)),
             Page::Anchored => any(pages::anchored::page(&mut state.anchored)),
             Page::Chat => any(pages::chat::page(&mut state.chat)),
-            Page::Questionnaire => {
-                scroll_slot(any(pages::questionnaire::page(&mut state.questionnaire)))
-            }
+            Page::Questionnaire => any(scroll_slot(any(pages::questionnaire::page(
+                &mut state.questionnaire,
+            )))),
             Page::DataTable => any(pages::data_table::page(&mut state.data_table)),
-            Page::Theming => scroll_slot(any(pages::theming::page(&mut state.theming))),
+            Page::Theming => any(scroll_slot(any(pages::theming::page(&mut state.theming)))),
         };
 
         any(sidebar_provider(
