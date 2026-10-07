@@ -1403,7 +1403,7 @@ mod tests {
             offset: f64,
         }
 
-        fn logic(_s: &mut S) -> AnyView<S> {
+        fn logic(_s: &mut S) -> impl View<S> + use<> {
             let rows: Vec<AnyView<S>> = (0..8)
                 .map(|i| {
                     any(
@@ -1412,8 +1412,8 @@ mod tests {
                     )
                 })
                 .collect();
-            any(frust::scroll_view(frust::Column(rows))
-                .on_scroll(|s: &mut S, info| s.offset = info.offset))
+            frust::scroll_view(frust::Column(rows))
+                .on_scroll(|s: &mut S, info| s.offset = info.offset)
         }
 
         let ev = |phase, x: f64, y: f64| {
@@ -1424,7 +1424,7 @@ mod tests {
             })
         };
         let boot = || {
-            let mut root: frust_core::RenderRoot<S, AnyView<S>> = frust_core::RenderRoot::new();
+            let mut root: frust_core::RenderRoot<S, _> = frust_core::RenderRoot::new();
             let mut state = S::default();
             root.rebuild(&mut logic, &mut state);
             let mut tcx = TextContext::new();
