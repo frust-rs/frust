@@ -226,7 +226,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                     Column(
                         (1..=40)
                             .map(|i| any::<AppState, _>(text(format!("Row {i}")).size(14.0)))
-                            .collect(),
+                            .collect::<Vec<_>>(),
                     ),
                     |s: &mut AppState, info: ScrollInfo| {
                         s.inputs_table.scroll_offset = info.offset;

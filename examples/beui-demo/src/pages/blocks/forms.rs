@@ -545,7 +545,7 @@ fn time_panel(state: &State) -> Option<AnyView<State>> {
         ))))
         .chain(std::iter::once(gap(8.0)))
         .chain(rows)
-        .collect(),
+        .collect::<Vec<_>>(),
     )))
 }
 
