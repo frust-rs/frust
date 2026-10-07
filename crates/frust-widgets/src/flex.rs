@@ -1129,8 +1129,8 @@ mod tests {
     }
 
     /// Erase a [`Captor`] tagged `id` into an `AnyView<Vec<u32>>`.
-    fn captor(id: u32) -> AnyView<Vec<u32>> {
-        any(Captor { id })
+    fn captor(id: u32) -> impl View<Vec<u32>> {
+        Captor { id }
     }
 
     impl View<Vec<u32>> for Captor {

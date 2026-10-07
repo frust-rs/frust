@@ -1090,10 +1090,10 @@ mod tests {
             scene.fill_rect(ctx.origin(), ctx.size(), peniko::Color::BLACK);
         }
     }
-    fn sized<S: 'static>(w: f64, h: f64) -> AnyView<S> {
-        any(SizedLeaf {
+    fn sized<S: 'static>(w: f64, h: f64) -> impl View<S> {
+        SizedLeaf {
             size: Size::new(w, h),
-        })
+        }
     }
 
     // --- A leaf with retained state so go(replace) vs push(retain) is provable. ---
@@ -1141,6 +1141,7 @@ mod tests {
             EventResult::Ignored
         }
     }
+    // erasure: keep borrow escapes the fn (callers pass it through a 'static route closure)
     fn counter(observed: &Rc<Cell<u32>>) -> AnyView<()> {
         any(CounterView {
             observed: observed.clone(),

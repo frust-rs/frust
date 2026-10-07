@@ -91,6 +91,7 @@ impl Widget for CounterWidget {
     }
 }
 
+// erasure: keep borrow escapes the fn (callers pass it through a 'static page-builder closure)
 pub(super) fn counter_page(observed: &Rc<Cell<u32>>) -> AnyView<()> {
     any(CounterView {
         observed: observed.clone(),
@@ -127,10 +128,10 @@ impl Widget for SizedLeafWidget {
         scene.fill_rect(ctx.origin(), ctx.size(), peniko::Color::BLACK);
     }
 }
-pub(super) fn sized_page<S: 'static>(w: f64, h: f64) -> AnyView<S> {
-    any(SizedLeaf {
+pub(super) fn sized_page<S: 'static>(w: f64, h: f64) -> impl View<S> {
+    SizedLeaf {
         size: Size::new(w, h),
-    })
+    }
 }
 
 #[derive(Default)]
@@ -286,6 +287,7 @@ impl Widget for HostProbeWidget {
     }
 }
 
+// erasure: keep borrow escapes the fn (callers pass it through a 'static page-builder closure)
 pub(super) fn host_probe(label: &'static str, hits: &Rc<Cell<u32>>) -> AnyView<()> {
     any(HostProbe {
         label,

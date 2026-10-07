@@ -165,33 +165,33 @@ fn toolbar_children(actions: SelectionToolbarActions) -> Vec<ToolbarChild> {
     if actions.cut {
         children.push(ToolbarChild {
             action: ToolbarAction::Cut,
-            view: item_view(ToolbarAction::Cut, LABELS.cut),
+            view: any(item_view(ToolbarAction::Cut, LABELS.cut)),
         });
     }
     if actions.copy {
         children.push(ToolbarChild {
             action: ToolbarAction::Copy,
-            view: item_view(ToolbarAction::Copy, LABELS.copy),
+            view: any(item_view(ToolbarAction::Copy, LABELS.copy)),
         });
     }
     if actions.paste {
         children.push(ToolbarChild {
             action: ToolbarAction::Paste,
-            view: item_view(ToolbarAction::Paste, LABELS.paste),
+            view: any(item_view(ToolbarAction::Paste, LABELS.paste)),
         });
     }
     if actions.select_all {
         children.push(ToolbarChild {
             action: ToolbarAction::SelectAll,
-            view: item_view(ToolbarAction::SelectAll, LABELS.select_all),
+            view: any(item_view(ToolbarAction::SelectAll, LABELS.select_all)),
         });
     }
     children
 }
 
 /// Erase one [`ToolbarButtonView`] into an `AnyView<()>`.
-fn item_view(action: ToolbarAction, label: &'static str) -> AnyView<()> {
-    any(ToolbarButtonView { action, label })
+fn item_view(action: ToolbarAction, label: &'static str) -> impl View<()> {
+    ToolbarButtonView { action, label }
 }
 
 /// Build this item's label child view — a plain [`crate::text::text`] run,
