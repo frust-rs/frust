@@ -34,8 +34,8 @@ fn apply(base: ShadcnBase, dark: bool) {
     set_app_theme(theme_for(base).with_brightness(brightness));
 }
 
-fn gap() -> frust::AnyView<AppState> {
-    any(SizedBox(None, Some(16.0)))
+fn gap() -> impl frust::View<AppState> {
+    SizedBox(None, Some(16.0))
 }
 
 pub fn page(state: &mut State) -> impl View<AppState> + use<> {

@@ -588,6 +588,7 @@ impl<State: 'static> SignupFormView<State> {
 
     /// One wrapped field, built from the current values, the resolved errors,
     /// and the widget-held touched/reveal state (see the [module docs](self)).
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn field_view(
         &self,
         field: SignupField,
@@ -622,6 +623,7 @@ impl<State: 'static> SignupFormView<State> {
     }
 
     /// The terms checkbox.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn terms_view(&self) -> AnyView<State> {
         let values = self.values.clone();
         let on_change = self.on_values_change.clone();

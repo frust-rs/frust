@@ -113,8 +113,8 @@ use std::rc::Rc;
 use frust::authoring::{
     Action, Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey,
-    PaintCtx, PaintScene, PointerPhase, Role, ScrollDelta, SemanticsCtx, TickClass, View, Widget,
-    build_child, erase_callback_arg, rebuild_children, teardown_child, visit_children,
+    PaintCtx, PaintScene, PointerPhase, Role, ScrollDelta, SemanticsCtx, TickClass, View, ViewSeq,
+    Widget, build_child, erase_callback_arg, rebuild_children, teardown_child, visit_children,
 };
 use frust::{FrameTime, SpringDescription, Theme};
 use kurbo::{Point, Size};
@@ -411,7 +411,7 @@ type OnIndexChange<State> = Rc<dyn Fn(&mut State, usize)>;
 ///     CylinderCarouselVariant, cylinder_carousel,
 /// };
 ///
-/// let rail = cylinder_carousel::<()>(vec![text("a"), text("b")])
+/// let rail = cylinder_carousel::<(), _>((text("a"), text("b")))
 ///     .variant(CylinderCarouselVariant::Convex)
 ///     .snap(false);
 /// ```
@@ -434,11 +434,13 @@ pub struct CylinderCarouselView<State: 'static> {
 }
 
 /// Line `items` on the inside of a cylinder, with upstream's own defaults.
-pub fn cylinder_carousel<State: 'static>(
-    items: impl IntoIterator<Item = impl View<State>>,
+pub fn cylinder_carousel<State: 'static, M>(
+    items: impl ViewSeq<State, M>,
 ) -> CylinderCarouselView<State> {
+    let mut erased = Vec::new();
+    items.extend_views(&mut erased);
     CylinderCarouselView {
-        items: items.into_iter().map(AnyView::new).collect(),
+        items: erased,
         item_size: DEFAULT_ITEM_SIZE,
         visible_items: DEFAULT_VISIBLE_ITEMS,
         variant: CylinderCarouselVariant::default(),
@@ -1886,7 +1888,7 @@ mod tests {
     /// An empty carousel is inert rather than a division by zero.
     #[test]
     fn an_empty_carousel_is_inert() {
-        let mut widget = laid_out(&cylinder_carousel::<Landings>(
+        let mut widget = laid_out(&cylinder_carousel::<Landings, _>(
             Vec::<AnyView<Landings>>::new(),
         ));
         let mut state = Landings::default();

@@ -31,7 +31,7 @@ use frust::authoring::text::FontWeight;
 use frust::authoring::{
     AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, RoundedRect, SemanticsCtx, Shape,
-    Size, View, Widget, any, build_child, rebuild_child, rebuild_children, route_event,
+    Size, View, ViewSeq, Widget, any, build_child, rebuild_child, rebuild_children, route_event,
     route_event_single, teardown_child,
 };
 use frust::authoring::{ThemeTextColor, ThemeTextType};
@@ -112,16 +112,19 @@ pub struct AlertView<State: 'static> {
 /// Create an alert of `variant` wrapping `children` (typically
 /// [`alert_title`]/[`alert_description`] rows).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn alert<State: 'static, V: View<State>>(
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn alert<State: 'static, M>(
     variant: AlertVariant,
-    children: impl IntoIterator<Item = V>,
+    children: impl ViewSeq<State, M>,
 ) -> AlertView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
     AlertView {
         variant,
         icon: None,
-        children: children.into_iter().map(AnyView::new).collect(),
+        children: erased,
     }
 }
 

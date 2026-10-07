@@ -151,7 +151,7 @@ fn variant_ctor(style: ButtonVariant) -> &'static str {
 }
 
 /// The "Selected style" preview: one button built from every knob.
-fn styled_button(state: &Knobs) -> AnyView<Knobs> {
+fn styled_button(state: &Knobs) -> impl View<Knobs> {
     let mut view = button(state.label.clone(), |_: &mut Knobs| {})
         .variant(state.style)
         .size(state.size)
@@ -160,12 +160,12 @@ fn styled_button(state: &Knobs) -> AnyView<Knobs> {
     if state.show_icon {
         view = view.icon(icon(icons::ADD));
     }
-    any(view)
+    view
 }
 
 /// The "All styles" preview: every [`ButtonVariant`] at the current size and
 /// shape, one per row — see the module docs' `Wrap` divergence (G10).
-fn all_styles(state: &Knobs) -> AnyView<Knobs> {
+fn all_styles(state: &Knobs) -> impl View<Knobs> {
     let buttons: Vec<AnyView<Knobs>> = STYLES
         .iter()
         .map(|&style| {
@@ -183,7 +183,7 @@ fn all_styles(state: &Knobs) -> AnyView<Knobs> {
 /// decorated via [`GradientButtonDecoration`] — the reference's two literal
 /// gradient examples (`buttons_playground.dart`'s own hardcoded colors, not
 /// knob-driven).
-fn gradient_fill(state: &Knobs) -> AnyView<Knobs> {
+fn gradient_fill(state: &Knobs) -> impl View<Knobs> {
     let purple: Rc<dyn ButtonDecoration> = Rc::new(
         GradientButtonDecoration::new()
             .background(constant_gradient(LinearGradientSpec::new(vec![
@@ -302,7 +302,7 @@ fn content_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The "Style" menu's popup half — mounted at this page's outer [`Stack`].
-fn style_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+fn style_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel(
         state.style,
         &STYLES,
@@ -315,7 +315,7 @@ fn style_menu_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The "Size" menu's popup half — mounted at this page's outer [`Stack`].
-fn size_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+fn size_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel(
         state.size,
         &SIZES,
@@ -332,7 +332,7 @@ fn size_menu_panel(state: &Knobs) -> AnyView<Knobs> {
 /// buttons (see the module docs' `Wrap` divergence, G10). `Column` has no
 /// spacing knob of its own, the same interleaved-spacer idiom
 /// `theme_config_page`'s own `spaced_row` uses horizontally.
-fn spaced_column<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> AnyView<State> {
+fn spaced_column<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> impl View<State> {
     let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
     for item in items {
         if !children.is_empty() {
@@ -340,12 +340,12 @@ fn spaced_column<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> AnyVie
         }
         children.push(item);
     }
-    any(Column(children))
+    Column(children)
 }
 
 /// The page body: the playground content plus the two dropdown panels it
 /// anchors, stacked so both can paint above the scrollable content.
-fn body(state: &Knobs) -> AnyView<Knobs> {
+fn body(state: &Knobs) -> impl View<Knobs> {
     let content = playground_body(
         vec![
             play_preview_card("Selected style", styled_button(state)),
@@ -355,10 +355,10 @@ fn body(state: &Knobs) -> AnyView<Knobs> {
         vec![snippet(state)],
         vec![appearance_panel(state), content_panel(state)],
     );
-    any(stack()
+    stack()
         .child(content)
         .child(style_menu_panel(state))
-        .child(size_menu_panel(state)))
+        .child(size_menu_panel(state))
 }
 
 /// This page's knob component — see the [module docs](self).
@@ -495,7 +495,7 @@ mod tests {
             }
         }
 
-        fn assert_never_overflows(label: &str, view: super::AnyView<Knobs>, card_inner_width: f64) {
+        fn assert_never_overflows(label: &str, view: impl View<Knobs>, card_inner_width: f64) {
             let mut counter = 0u64;
             let mut widget = view.build(&mut BuildCtx::new(&mut counter));
             let bc = BoxConstraints::new(Size::ZERO, Size::new(card_inner_width, 2000.0));

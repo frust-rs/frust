@@ -43,7 +43,7 @@ pub mod motion;
 pub mod navigation;
 pub mod overlays;
 
-use frust::AnyView;
+use frust::{AnyView, any};
 
 use crate::CatalogState;
 
@@ -64,17 +64,18 @@ pub const SECTION_LABELS: [&str; 9] = [
 /// Dispatch to the section page for `section` (0..9), falling back to
 /// foundations for any out-of-range index (defensive — the tab strip only ever
 /// yields a valid index).
+// erasure: keep the nine-arm section dispatch erases each page at this one boundary
 pub fn current(section: usize, state: &CatalogState) -> AnyView<CatalogState> {
     match section {
-        0 => foundations::page(state),
-        1 => buttons_forms::page(state),
-        2 => feedback::page(state),
-        3 => navigation::page(state),
-        4 => content::page(state),
-        5 => overlays::page(state),
-        6 => motion::page(state),
-        7 => interactions::page(state),
-        8 => appbar::page(state),
-        _ => foundations::page(state),
+        0 => any(foundations::page(state)),
+        1 => any(buttons_forms::page(state)),
+        2 => any(feedback::page(state)),
+        3 => any(navigation::page(state)),
+        4 => any(content::page(state)),
+        5 => any(overlays::page(state)),
+        6 => any(motion::page(state)),
+        7 => any(interactions::page(state)),
+        8 => any(appbar::page(state)),
+        _ => any(foundations::page(state)),
     }
 }

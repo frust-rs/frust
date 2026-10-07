@@ -245,7 +245,11 @@ fn increment_fab() -> impl View<u32> + use<> {
 
 `Cargo.toml` depends on `frust-ui` (imported as `frust`) and `frust-material`. Every API that
 takes a child accepts `impl View`, so there is no `any()` anywhere in a generated app; each
-`Component::build` returns `impl View` and the framework erases it once at the boundary.
+`Component::build` returns `impl View` and the framework erases it once at the boundary. When
+a `Column` or `Row` has children of different types (e.g. an app bar and a body), pass them as a
+tuple: `Column((app_bar(&self.title), counter_body(*count)))` instead of the pre-tuple
+`Column(vec![any(..), any(..)])`. Tuples nest beyond 12 children, homogeneous lists stay `Vec<V>`,
+and two-arm conditionals use `either(cond, || a, || b)` instead of `any()`.
 `frust run` builds and launches it on the connected device, emulator, simulator, or the desktop.
 
 ## Learning the rendering pipeline

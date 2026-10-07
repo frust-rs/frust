@@ -30,8 +30,8 @@
 use frust::Theme;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, ThemeTextColor, View, Widget, build_child,
-    rebuild_children, route_event, teardown_child, visit_children,
+    LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, ThemeTextColor, View, ViewSeq, Widget,
+    build_child, rebuild_children, route_event, teardown_child, visit_children,
 };
 use kurbo::{Point, Size};
 use peniko::Color;
@@ -136,8 +136,9 @@ impl<State: 'static> AppBarView<State> {
     /// Attach trailing action slots, in reading order (the last one sits
     /// closest to the trailing edge). Tint is each supplied view's own
     /// responsibility.
-    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
-        self.actions = actions.into_iter().map(AnyView::new).collect();
+    pub fn actions<M>(mut self, actions: impl ViewSeq<State, M>) -> Self {
+        self.actions.clear();
+        actions.extend_views(&mut self.actions);
         self
     }
 

@@ -220,9 +220,9 @@ fn snippet_code(state: &Knobs) -> String {
 /// all-inflexible row (this file's precedent before the fix, and still
 /// `crate::pages::playground::pick::chips`' `spaced_row` shape) is unsafe
 /// here specifically.
-fn all_styles_row(value: ProgressValue) -> AnyView<Knobs> {
+fn all_styles_row(value: ProgressValue) -> impl View<Knobs> {
     let gap = || inflexible(SizedBox::<Knobs>(Some(ALL_STYLES_GAP), None));
-    any(row()
+    row()
         .child(circular_progress(value))
         .push(gap())
         .child(circular_wavy_progress(value))
@@ -230,13 +230,13 @@ fn all_styles_row(value: ProgressValue) -> AnyView<Knobs> {
         .flex(1, linear_progress(value))
         .push(gap())
         .flex(1, linear_wavy_progress(value))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The playground body for the current knob state: [`playground_body`]'s
 /// scrollable content, plus the type picker's anchored panel at the outer
 /// `Stack` — see the module docs.
-fn body(state: &mut Knobs) -> AnyView<Knobs> {
+fn body(state: &mut Knobs) -> impl View<Knobs> {
     let value = progress_value(state);
     let is_linear = state.kind.is_linear();
 
@@ -299,7 +299,7 @@ fn body(state: &mut Knobs) -> AnyView<Knobs> {
         |s: &mut Knobs, next: ProgressKind| s.kind = next,
     );
 
-    any(stack().child(content).child(panel))
+    stack().child(content).child(panel)
 }
 
 /// The nested [`Component`] this page owns its knobs in. See the page

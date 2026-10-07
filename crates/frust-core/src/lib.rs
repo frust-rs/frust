@@ -9,7 +9,9 @@
 //!
 //! * [`view`] — layer 1: the [`View`](view::View) trait, [`ChangeFlags`], and
 //!   [`BuildCtx`](view::BuildCtx). Views are cheap descriptors produced by
-//!   `fn build(&mut State) -> impl View<State>`.
+//!   `fn build(&mut State) -> impl View<State>`. [`ViewSeq`] is
+//!   the child-sequence trait container child lists take (a view, a tuple, a
+//!   `Vec`/array/`Option`, or [`views`] over an iterator).
 //! * [`widget`] — layer 2: the [`Widget`](widget::Widget) trait and its
 //!   layout/paint/event contexts, the [`PaintScene`](widget::PaintScene) paint
 //!   boundary, and container-owned [`ChildPod`](widget::ChildPod) children.
@@ -226,7 +228,7 @@ pub use selection_toolbar::{
 };
 pub use semantics::{SemanticsCtx, SemanticsUpdate};
 pub use tree::{InspectNode, WidgetPod, WidgetTree};
-pub use view::{AnyView, BuildCtx, ChangeFlags, View, WidgetId, any};
+pub use view::{AnyView, BuildCtx, ChangeFlags, View, ViewSeq, WidgetId, any, views};
 pub use widget::{
     ChildPod, CornerRadii, DashPattern, DiscardScene, HeroDirective, HeroFrames, LayoutCtx,
     PaintCtx, PaintOutcome, PaintScene, TickClass, Widget,

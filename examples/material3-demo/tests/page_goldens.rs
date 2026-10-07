@@ -86,13 +86,13 @@ fn case(name: &'static str) -> frust_testing::CaseSpec {
 }
 
 /// A vertical gap of [`GAP`] logical px.
-fn gap() -> AnyView<()> {
-    any(frust::SizedBox::<()>(None, Some(GAP)))
+fn gap() -> impl View<()> {
+    frust::SizedBox::<()>(None, Some(GAP))
 }
 
 /// A horizontal gap of [`GAP`] logical px.
-fn hgap() -> AnyView<()> {
-    any(frust::SizedBox::<()>(Some(GAP), None))
+fn hgap() -> impl View<()> {
+    frust::SizedBox::<()>(Some(GAP), None)
 }
 
 /// Records one still frame of `build` under the Material baseline theme, with
@@ -111,19 +111,19 @@ fn record_page(scene: &mut Scene, build: impl Fn(&FontFamily) -> AnyView<()> + '
 }
 
 /// Text this file authors, pinned to the bundled Latin face.
-fn label(family: &FontFamily, content: &str, size: f32) -> AnyView<()> {
-    any(frust::text(content).style(pinned_text_style(family, size, INK)))
+fn label(family: &FontFamily, content: &str, size: f32) -> impl View<()> {
+    frust::text(content).style(pinned_text_style(family, size, INK))
 }
 
 /// The gallery shell: the top app bar, a section list of tappable cards, and
 /// the bottom navigation bar — `src/lib.rs`'s own composition, rebuilt from
 /// `frust_material`'s public constructors.
 fn gallery_shell() -> CorpusCase {
-    fn row(family: &FontFamily) -> AnyView<()> {
-        any(m3::filled_card::<(), _>(frust::Padding(
+    fn row(family: &FontFamily) -> impl View<()> {
+        m3::filled_card::<(), _>(frust::Padding(
             frust::EdgeInsets::all(16.0),
             label(family, SAMPLE_TEXT, 17.0),
-        )))
+        ))
     }
     fn record(scene: &mut Scene) {
         record_page(scene, |family| {

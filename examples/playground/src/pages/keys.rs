@@ -150,8 +150,8 @@ use frust::authoring::{
     PaintScene, Point, PointerPhase, Rect, Size, View, Widget,
 };
 use frust::{
-    AnyView, Axis, Color, Component, EdgeInsets, FlexChild, FlexView, Get, Padding, RwSignal, Set,
-    SizedBox, Theme, any, component, inflexible, text, use_context,
+    Axis, Color, Component, EdgeInsets, FlexChild, FlexView, Get, Padding, RwSignal, Set, SizedBox,
+    Theme, any, component, inflexible, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -955,8 +955,8 @@ fn mono() -> FontFamily {
 
 /// See the page-fn contract in [`crate::pages`]. The Keys section reads no shared
 /// signal — it only mounts [`KeysPage`]'s own retained state.
-pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
-    any(component(KeysPage))
+pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
+    component(KeysPage)
 }
 
 /// The Keys section's own [`Component`]: owns the shared [`Probe`] and the one
@@ -1518,6 +1518,7 @@ impl Widget for KeyProbeWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::AnyView;
     use frust_core::{FrameTime, KeyEvent, PointerButton, PointerEvent, RenderRoot};
     use frust_reactive::ReactiveRuntime;
     use frust_text::TextContext as RawTextContext;

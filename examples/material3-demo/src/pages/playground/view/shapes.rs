@@ -57,11 +57,11 @@ const CLIPPED_TILE_SIZE: f64 = 120.0;
 /// See the page contract in [`crate::pages::playground`].
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     let theme = ambient_theme();
-    playground_body(
+    any(playground_body(
         vec![catalog_preview(&theme), clipped_child_preview(&theme)],
         vec![catalog_snippet(), clipped_child_snippet()],
         vec![],
-    )
+    ))
 }
 
 /// The 35-shape catalog, chunked [`CATALOG_COLUMNS`] wide — the reference's
@@ -72,12 +72,12 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 /// `crate::pages::playground::view::cards`'s `all_variants_column`/G16 fix
 /// both use.
 fn catalog_preview(theme: &Theme) -> AnyView<AppState> {
-    any(play_preview_card("Catalog", catalog_rows(theme)))
+    play_preview_card("Catalog", catalog_rows(theme))
 }
 
 /// The tile grid [`catalog_preview`] wraps in a [`play_preview_card`]. See
 /// [`CATALOG_COLUMNS`]' own doc comment for the row-width arithmetic (G17).
-fn catalog_rows(theme: &Theme) -> AnyView<AppState> {
+fn catalog_rows(theme: &Theme) -> impl View<AppState> {
     let mut rows: Vec<AnyView<AppState>> = Vec::new();
     for (row_index, chunk) in ShapeKind::ALL.chunks(CATALOG_COLUMNS).enumerate() {
         if row_index > 0 {
@@ -88,20 +88,20 @@ fn catalog_rows(theme: &Theme) -> AnyView<AppState> {
             if col_index > 0 {
                 cells.push(any(SizedBox::<AppState>(Some(CATALOG_TILE_GAP), None)));
             }
-            cells.push(catalog_tile(theme, *kind));
+            cells.push(any(catalog_tile(theme, *kind)));
         }
         rows.push(any(Row(cells)));
     }
-    any(Column(rows))
+    Column(rows)
 }
 
 /// One catalog tile: a filled shape over its label — the reference's own
 /// `Column` of `M3EShapeContainer` + `Text(kind.name)`.
-fn catalog_tile(theme: &Theme, kind: ShapeKind) -> AnyView<AppState> {
+fn catalog_tile(theme: &Theme, kind: ShapeKind) -> impl View<AppState> {
     let scheme = theme.scheme();
     let mut label_style = theme.type_scale.label_small.clone();
     label_style.color = scheme.on_surface_variant;
-    any(column()
+    column()
         .child(shape_tile(
             kind,
             CATALOG_TILE_SIZE,
@@ -115,7 +115,7 @@ fn catalog_tile(theme: &Theme, kind: ShapeKind) -> AnyView<AppState> {
                     .align(TextAlign::Center),
             ),
         )
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A shape's catalog label — the reference's own `kind.name` (its enum's
@@ -143,7 +143,7 @@ fn clipped_child_preview(theme: &Theme) -> AnyView<AppState> {
                 icon(icons::FAVORITE).color(scheme.on_tertiary_container),
             )),
     );
-    any(play_preview_card("Clipped child", tile))
+    play_preview_card("Clipped child", tile)
 }
 
 fn catalog_snippet() -> PlaySnippet {

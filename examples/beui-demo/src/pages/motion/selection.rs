@@ -109,27 +109,27 @@ impl Default for State {
 }
 
 /// A vertical spacer.
-fn gap(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal spacer.
-fn hgap(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn hgap(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 /// One component's block: its name, a one-line note (where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> AnyView<State> {
+fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
     let mut children = vec![
         any(text(title.to_string()).size(16.0)),
-        gap(4.0),
+        any(gap(4.0)),
         any(caption(note.to_string())),
-        gap(12.0),
+        any(gap(12.0)),
     ];
     children.extend(body);
-    children.push(gap(32.0));
-    any(Column(children).cross_axis(CrossAxisAlignment::Start))
+    children.push(any(gap(32.0)));
+    Column(children).cross_axis(CrossAxisAlignment::Start)
 }
 
 /// One picker's bounded overlay stage — see the [module docs](self).
@@ -145,9 +145,9 @@ fn stage(
     size: (f64, f64),
     trigger: AnyView<State>,
     panel: AnyView<State>,
-) -> AnyView<State> {
+) -> impl View<State> {
     let (width, height) = size;
-    any(SizedBox(Some(width), Some(height)).child(
+    SizedBox(Some(width), Some(height)).child(
         stack()
             .child(
                 column()
@@ -155,20 +155,20 @@ fn stage(
                     .cross_axis(CrossAxisAlignment::Start),
             )
             .child(panel),
-    ))
+    )
 }
 
 /// A labelled stage: the caption above the live picker.
-fn labelled_stage(label: &str, body: AnyView<State>) -> AnyView<State> {
-    any(column()
+fn labelled_stage(label: &str, body: AnyView<State>) -> impl View<State> {
+    column()
         .child(caption(label.to_string()))
         .child(gap(8.0))
         .child(body)
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// [`select`]'s two variants, side by side.
-fn selects(state: &State) -> AnyView<State> {
+fn selects(state: &State) -> impl View<State> {
     let options = || {
         FRAMEWORKS
             .iter()
@@ -232,15 +232,15 @@ fn selects(state: &State) -> AnyView<State> {
          the near edge's two corners rather than all four, there is no \
          type-ahead, and the list height is a constant cap. Vite is disabled.",
         vec![any(row()
-            .child(labelled_stage("Default", default))
+            .child(labelled_stage("Default", any(default)))
             .child(hgap(32.0))
-            .child(labelled_stage("Morph", morph))
+            .child(labelled_stage("Morph", any(morph)))
             .cross_axis(CrossAxisAlignment::Start))],
     )
 }
 
 /// [`combobox`]: the searchable panel, filtered live.
-fn comboboxes(state: &State) -> AnyView<State> {
+fn comboboxes(state: &State) -> impl View<State> {
     let options: Vec<ComboboxOption> = WORKSPACES
         .iter()
         .map(|(label, keywords)| {
@@ -289,12 +289,12 @@ fn comboboxes(state: &State) -> AnyView<State> {
          (the wrapped field owns the focus path), the hover highlight cuts \
          between rows rather than travelling, and a long list clips at the \
          height cap rather than scrolling.",
-        vec![live],
+        vec![any(live)],
     )
 }
 
 /// [`multi_select`]: the token field and its toggling panel.
-fn multi_selects(state: &State) -> AnyView<State> {
+fn multi_selects(state: &State) -> impl View<State> {
     let options: Vec<MultiSelectOption> = TEAMS.iter().map(|t| multi_select_option(*t)).collect();
     let panel_options: Vec<MultiSelectOption> =
         TEAMS.iter().map(|t| multi_select_option(*t)).collect();
@@ -339,12 +339,12 @@ fn multi_selects(state: &State) -> AnyView<State> {
          and the hosted search field paints its own surface fill (the baseline \
          field offers no seam to suppress it). Backspace does not remove the \
          last chip \u{2014} that key belongs to the field's own focus path.",
-        vec![live],
+        vec![any(live)],
     )
 }
 
 /// [`adaptive_stepper`]: the fixed-footprint quantity control.
-fn steppers(state: &State) -> AnyView<State> {
+fn steppers(state: &State) -> impl View<State> {
     let guests = any(
         adaptive_stepper(state.guests, |s: &mut State, v| s.guests = v)
             .min(0.0)
@@ -428,8 +428,8 @@ impl Component for SelectionPage {
     }
 }
 
-pub fn page() -> AnyView<AppState> {
-    any(column()
+pub fn page() -> impl View<AppState> {
+    column()
         .child(heading("Motion \u{b7} Selection"))
         .child(SizedBox(None, Some(8.0)))
         .child(caption(
@@ -440,5 +440,5 @@ pub fn page() -> AnyView<AppState> {
         ))
         .child(SizedBox(None, Some(24.0)))
         .child(component(SelectionPage))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }

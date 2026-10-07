@@ -161,12 +161,10 @@ fn open_basic(state: &Knobs) {
                 .body(body.clone())
                 .dismissable(dismissable)
                 .dismiss_handle(dismiss.clone())
-                .actions(vec![
-                    any(text_button("Cancel", move |_: &mut Knobs| cancel.dismiss())),
-                    any(filled_button("Confirm", move |_: &mut Knobs| {
-                        confirm.dismiss()
-                    })),
-                ])
+                .actions((
+                    text_button("Cancel", move |_: &mut Knobs| cancel.dismiss()),
+                    filled_button("Confirm", move |_: &mut Knobs| confirm.dismiss()),
+                ))
         },
         |_state: &mut Knobs, _result: PopResult| {},
     );
@@ -228,17 +226,17 @@ fn open_full_screen(state: &Knobs) {
 /// A body paragraph in the ambient theme's `bodyLarge`/`onSurface` — the
 /// same shape [`super::bottom_sheet`]'s sheet content takes (a bare
 /// [`frust::text`] would keep its unthemed default ink inside a panel).
-fn body_text<State: 'static>(body: &str) -> AnyView<State> {
+fn body_text<State: 'static>(body: &str) -> impl View<State> {
     let theme = ambient_theme();
     let mut style = theme.type_scale.body_large.clone();
     style.color = theme.scheme().on_surface;
-    any(text(body.to_string()).style(style))
+    text(body.to_string()).style(style)
 }
 
 /// The playground body: the three triggers, the three snippets, and the
 /// controls — everything that varies with this page's knobs, built without
 /// touching the navigator (see the module docs).
-fn content(state: &Knobs) -> AnyView<Knobs> {
+fn content(state: &Knobs) -> impl View<Knobs> + use<> {
     playground_body(
         vec![triggers_preview(state)],
         vec![
@@ -265,7 +263,7 @@ fn triggers_preview(state: &Knobs) -> AnyView<Knobs> {
         format!("Selection: {}", selected.join(", "))
     };
 
-    any(play_preview_card(
+    play_preview_card(
         "Triggers",
         column()
             .child(
@@ -285,11 +283,11 @@ fn triggers_preview(state: &Knobs) -> AnyView<Knobs> {
             .child(SizedBox::<Knobs>(None, Some(MaterialSpacing::MD)))
             .child(text(summary).style(caption))
             .cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {
-    any(control_panel::<Knobs>(
+    control_panel::<Knobs>(
         "Content",
         vec![
             play_text_field::<Knobs>(
@@ -313,7 +311,7 @@ fn controls(state: &Knobs) -> AnyView<Knobs> {
                 |state: &mut Knobs, next: bool| state.multi_select.set(next),
             ),
         ],
-    ))
+    )
 }
 
 fn dialog_snippet(state: &Knobs) -> PlaySnippet {

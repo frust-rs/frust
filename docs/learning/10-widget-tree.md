@@ -217,8 +217,19 @@ fn child_ids_are_stable_across_rebuilds() {
 
 It passes. The root is `WidgetId(1)` (from `alloc_id`); the pods are `281474976710656` and `…657`.
 Ids belong to pods, and pods outlive views. Follow-up: make the second child `if swap {
-any(Column(vec![])) } else { any(SizedBox(..)) }` and flip `swap`. The id stays; `type_name` goes
-`SizedBoxWidget` → `FlexWidget`, because the swap happens *inside* the pod. (The `any()` wrapper is only needed to unify different view types.)
+Either::Left(column()) } else { Either::Right(SizedBox(..)) }` and flip `swap` — or more idiomatically, `either(swap, || column(), || SizedBox(..))`. The id stays; `type_name` goes
+`SizedBoxWidget` → `FlexWidget`, because the swap happens *inside* the pod. (`Either<L, R>` keeps both arms statically typed, and the container erases the `Either` value once, like any other child; `either()` is only the lazy constructor, while `any()` stays for stored tables, accumulators into `Vec<AnyView>`, and three-plus-arm bodies.)
+
+## Child Sequences and Type Erasure
+
+The container APIs that take children accept `impl ViewSeq<State, M>`, erased once inside. Choose the form that fits:
+
+- **Tuples for mixed-type children:** `Column((app_bar, body, footer))` when each child is a different type. Tuples nest beyond 12 items; a 13-child list nests as `Column(((a, b, c), (d, e, f), ..., (x, y, z)))`.
+- **`Vec<V>` for homogeneous or dynamic lists:** `Column(vec![item1, item2, ...])` when every child shares a type, or the count or order changes at runtime. Keyed lists always stay `Vec` via `keyed(id, view)`.
+- **`either(cond, || left, || right)` for two-arm conditionals:** `Either<L, R>` keeps both arms statically typed (its `EitherWidget` is an enum over the two arm widgets); the container that receives the value erases it once, like any other child, and `either()` is only the lazy constructor. An arm swap tears the old arm down and rebuilds (its state is dropped); rebuilding the same arm keeps state.
+- **`any()`/`AnyView` only for irreducible cases:** stored view tables, accumulators pushing into `Vec<AnyView>`, recursive helpers, three-plus-arm bodies (which `any()` handles; anything with exactly two arms uses `either()` instead), trait extension points, and helpers feeding a `ChildPod` directly.
+
+Helper functions return `impl View<State>` (or `impl View<State> + use<>` when the result is stored); the framework erases once at the API boundary, never at the call site.
 
 ## What to notice before moving on
 

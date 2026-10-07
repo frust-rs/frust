@@ -38,9 +38,9 @@ use frust::authoring::{
 
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    AnyView, Brightness, Color, Component, Get, GetUntracked, MotionScheme, NavigatorController,
-    RwSignal, ScrollInfo, Set, Theme, TransitionSpec, View, any, button, column, flexible, icon,
-    icons, inflexible, navigator, safe_area, scroll_view, set_app_theme, stack,
+    Brightness, Color, Component, Get, GetUntracked, MotionScheme, NavigatorController, RwSignal,
+    ScrollInfo, Set, Theme, TransitionSpec, View, any, button, column, flexible, icon, icons,
+    inflexible, navigator, safe_area, scroll_view, set_app_theme, stack,
 };
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
 
@@ -214,7 +214,7 @@ const ELEVATION_THRESHOLD_PX: f64 = 4.0;
 /// The AppBar consumes the top window inset itself (its [module
 /// docs](frust_glyph::app_bar)), so the body below never pads its own top
 /// edge.
-fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
+fn catalog_app_bar(state: &CatalogState) -> impl View<CatalogState> + use<> {
     let brightness = state.brightness.get();
     let reduce_motion = state.reduce_motion.get();
     let animations_enabled = state.animations_enabled.get();
@@ -269,10 +269,10 @@ fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
         );
     }));
 
-    any(frust_glyph::app_bar::<CatalogState>("glyph catalog")
+    frust_glyph::app_bar::<CatalogState>("glyph catalog")
         .leading(brand)
         .actions(vec![brightness_btn, motion_btn, animations_btn])
-        .elevated(elevated))
+        .elevated(elevated)
 }
 
 /// The navigator's home page: the root AppBar over a safe-area'd body (the
@@ -281,7 +281,7 @@ fn catalog_app_bar(state: &CatalogState) -> AnyView<CatalogState> {
 /// layer (see the module docs' "Mode B background" section). Re-run on every
 /// rebuild (the navigator re-invokes its page builder), so the signal reads
 /// here subscribe the shell to section/brightness/elevation/toast changes.
-fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
+fn home_page(state: &CatalogState) -> impl View<CatalogState> + use<> {
     let section = state.section.get();
     let slide = state.slide.get();
     let pending = state.toasts.get();
@@ -343,10 +343,10 @@ fn home_page(state: &CatalogState) -> AnyView<CatalogState> {
         .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .surface;
-    any(stack()
+    stack()
         .child(AppBackground(background_color))
         .child(column)
-        .child(frust_glyph::toast_host(pending)))
+        .child(frust_glyph::toast_host(pending))
 }
 
 /// The root [`Component`]. This example's `frust::app!` call below installs
@@ -376,7 +376,7 @@ impl Component for CatalogApp {
         // so back-dismiss (overlay → pop → app
         // exit at the root) works with zero catalog-side back code.
         let handles = state.clone();
-        any(navigator(&state.nav, move || home_page(&handles)).transition(TransitionSpec::glyph()))
+        navigator(&state.nav, move || home_page(&handles)).transition(TransitionSpec::glyph())
     }
 }
 

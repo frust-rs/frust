@@ -118,8 +118,8 @@ const VOLUME_STEP: f32 = 0.25;
 /// See the page-fn contract in [`crate::pages`]. Video has no shared signal
 /// to read — it only mounts [`VideoPlayerPage`]'s own retained local
 /// state.
-pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
-    any(component(VideoPlayerPage))
+pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
+    component(VideoPlayerPage)
 }
 
 // ---------------------------------------------------------------------------
@@ -283,12 +283,12 @@ fn error_ink() -> Color {
         .error
 }
 
-fn label(s: impl Into<String>) -> AnyView<VideoPageState> {
-    any(text(s).size(13.0).color(accent()))
+fn label(s: impl Into<String>) -> impl View<VideoPageState> {
+    text(s).size(13.0).color(accent())
 }
 
-fn caption(s: impl Into<String>) -> AnyView<VideoPageState> {
-    any(text(s).size(11.0).color(muted()))
+fn caption(s: impl Into<String>) -> impl View<VideoPageState> {
+    text(s).size(11.0).color(muted())
 }
 
 fn gap(h: f64) -> FlexChild<VideoPageState> {
@@ -310,7 +310,7 @@ fn block(children: Vec<FlexChild<VideoPageState>>) -> FlexChild<VideoPageState> 
 /// back — see `platform_views.rs`'s own `filler_rows` doc comment for
 /// the device-viewport lesson behind the row count — duplicated
 /// locally per that module's own precedent.
-fn filler_rows() -> AnyView<VideoPageState> {
+fn filler_rows() -> impl View<VideoPageState> {
     let rows: Vec<AnyView<VideoPageState>> = (1..=64)
         .map(|i| {
             any(Padding(
@@ -319,10 +319,7 @@ fn filler_rows() -> AnyView<VideoPageState> {
             ))
         })
         .collect();
-    any(FlexView::new(
-        Axis::Vertical,
-        rows.into_iter().map(inflexible).collect(),
-    ))
+    FlexView::new(Axis::Vertical, rows.into_iter().map(inflexible).collect())
 }
 
 /// Format a [`Duration`] as `mm:ss`, truncating sub-second precision.
@@ -446,7 +443,7 @@ fn maybe_debug_fill(view: PlatformViewView) -> PlatformViewView {
 /// incorrectly at a punched-hole edge, so this overlay avoids that shape
 /// here.
 #[cfg(any(target_os = "android", target_os = "ios"))]
-fn mobile_state_chip(playback_state: PlaybackState) -> AnyView<VideoPageState> {
+fn mobile_state_chip(playback_state: PlaybackState) -> impl View<VideoPageState> {
     let chip = container(Padding(
         EdgeInsets::symmetric(3.0, 6.0),
         text(format!("{playback_state:?}"))
@@ -456,7 +453,7 @@ fn mobile_state_chip(playback_state: PlaybackState) -> AnyView<VideoPageState> {
     .fill(Color::new([0.0, 0.0, 0.0, 0.6]))
     .radius(0.0);
 
-    any(Align(Alignment::TOP_RIGHT, chip))
+    Align(Alignment::TOP_RIGHT, chip)
 }
 
 fn slot_block(

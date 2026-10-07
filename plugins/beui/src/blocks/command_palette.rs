@@ -844,6 +844,7 @@ impl Row {
 impl<State: 'static> PalettePanelView<State> {
     /// The wrapped baseline filter field, with its own chrome suppressed (this
     /// widget paints the row's rule, mark and key cap).
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn field(&self) -> AnyView<State> {
         let on_change = self.on_query_change.clone();
         any(

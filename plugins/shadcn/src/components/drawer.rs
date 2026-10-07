@@ -61,7 +61,7 @@
 
 use std::rc::Rc;
 
-use frust::authoring::{AnyView, BuildCtx, ChangeFlags, View};
+use frust::authoring::{AnyView, BuildCtx, ChangeFlags, View, ViewSeq};
 use frust::{EdgeInsets, NavigatorController, PopResult};
 
 use crate::overlay::modal::{DRAWER_MAX_HEIGHT_FRACTION, HANDLE_RESERVE};
@@ -164,11 +164,12 @@ fn config(side: DrawerSide) -> ModalConfig {
 /// strip), which is baked into the composed children — vaul takes `direction`
 /// on the root for the same reason.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn drawer<State: 'static, V: View<State>>(
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn drawer<State: 'static, M>(
     side: DrawerSide,
-    children: impl IntoIterator<Item = V>,
+    children: impl ViewSeq<State, M>,
 ) -> DrawerView<State> {
     DrawerView {
         inner: modal(
@@ -180,11 +181,10 @@ pub fn drawer<State: 'static, V: View<State>>(
 
 /// A header slot: a `p-4 gap-1.5` stack (title, description).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn drawer_header<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn drawer_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     stack_slots(children, HEADER_GAP, EdgeInsets::all(SLOT_PAD))
 }
 
@@ -201,11 +201,10 @@ pub fn drawer_description<State: 'static>(description: impl Into<String>) -> Any
 /// A footer slot: a stretched `p-4 gap-2` column (upstream's `mt-auto` is not
 /// modelled — see [`crate::sheet`]'s note).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn drawer_footer<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn drawer_footer<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     stack_slots(children, FOOTER_GAP, EdgeInsets::all(SLOT_PAD))
 }
 

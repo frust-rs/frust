@@ -4,8 +4,11 @@
 
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget, any,
+    views,
 };
-use frust_widgets::{Axis, FlexView, Stack, column, flexible, inflexible, keyed, row, stack};
+use frust_widgets::{
+    Axis, Column, FlexView, Stack, column, flexible, inflexible, keyed, row, stack,
+};
 use kurbo::{Point, Size};
 use peniko::Color;
 
@@ -239,7 +242,8 @@ fn when_and_when_some_apply_conditionally() {
 
 #[test]
 fn children_accepts_a_concrete_iterator_without_any() {
-    let built: FlexView<()> = column().children((1..=3).map(|i| leaf(10.0, i as f64 * 10.0)));
+    let built: FlexView<()> =
+        column().children(views((1..=3).map(|i| leaf(10.0, i as f64 * 10.0))));
     let legacy = FlexView::new(
         Axis::Vertical,
         (1..=3)
@@ -247,7 +251,7 @@ fn children_accepts_a_concrete_iterator_without_any() {
             .collect(),
     );
     assert_eq!(rects(&built), rects(&legacy));
-    let st = stack::<()>().children((1..=2).map(|i| leaf(i as f64, i as f64)));
+    let st = stack::<()>().children(views((1..=2).map(|i| leaf(i as f64, i as f64))));
     assert_eq!(rects(&st).1.len(), 2);
 }
 
@@ -268,4 +272,77 @@ fn already_erased_child_is_not_double_erased() {
     assert_eq!(rects(&built), rects(&legacy));
     let st = stack::<()>().child(any::<(), _>(leaf(4.0, 4.0)));
     assert_eq!(rects(&st).1.len(), 1);
+}
+
+#[test]
+fn tuple_children_match_vec_and_fluent_forms() {
+    let a = || leaf(30.0, 10.0);
+    let b = || leaf(20.0, 15.0);
+    let tuple: FlexView<()> = Column((a(), b()));
+    let vec: FlexView<()> = Column(vec![any(a()), any(b())]);
+    let fluent: FlexView<()> = column().child(a()).child(b());
+    let (ts, tr) = rects(&tuple);
+    assert_eq!(tr.len(), 2);
+    assert_eq!((ts, &tr), (rects(&vec).0, &rects(&vec).1));
+    assert_eq!(rects(&fluent), rects(&tuple));
+    // The fluent `.children(..)` takes the same sequences.
+    assert_eq!(rects(&column::<()>().children((a(), b()))), rects(&tuple));
+    // Stack too.
+    let st_tuple = Stack((a(), b()));
+    let st_vec = Stack(vec![any(a()), any(b())]);
+    assert_eq!(rects(&st_tuple), rects(&st_vec));
+    assert_eq!(rects(&st_tuple).1.len(), 2);
+}
+
+#[test]
+fn nested_tuple_flattens_to_three_children() {
+    let nested: FlexView<()> = Column(((leaf(10.0, 10.0), leaf(20.0, 20.0)), leaf(30.0, 30.0)));
+    let flat: FlexView<()> = Column((leaf(10.0, 10.0), leaf(20.0, 20.0), leaf(30.0, 30.0)));
+    assert_eq!(rects(&nested).1.len(), 3);
+    assert_eq!(rects(&nested), rects(&flat));
+}
+
+#[test]
+fn option_element_drops_its_slot_when_none() {
+    let some: FlexView<()> = Column((leaf(10.0, 10.0), Some(leaf(20.0, 20.0)), leaf(30.0, 30.0)));
+    let none: FlexView<()> = Column((leaf(10.0, 10.0), None::<Leaf>, leaf(30.0, 30.0)));
+    assert_eq!(rects(&some).1.len(), 3);
+    let (_, none_rects) = rects(&none);
+    assert_eq!(none_rects.len(), 2);
+    let gapless: FlexView<()> = Column((leaf(10.0, 10.0), leaf(30.0, 30.0)));
+    assert_eq!(rects(&none), rects(&gapless));
+}
+
+#[test]
+fn views_adapter_matches_vec_of_erased() {
+    let adapted: FlexView<()> = Column(views((1..=4).map(|i| leaf(10.0, i as f64 * 5.0))));
+    let legacy: FlexView<()> = Column(
+        (1..=4)
+            .map(|i| any(leaf(10.0, i as f64 * 5.0)))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(rects(&adapted).1.len(), 4);
+    assert_eq!(rects(&adapted), rects(&legacy));
+}
+
+#[test]
+fn twelve_tuple_builds_twelve_children() {
+    let l = |i: f64| leaf(10.0, i);
+    let view: FlexView<()> = Column((
+        l(1.0),
+        l(2.0),
+        l(3.0),
+        l(4.0),
+        l(5.0),
+        l(6.0),
+        l(7.0),
+        l(8.0),
+        l(9.0),
+        l(10.0),
+        l(11.0),
+        l(12.0),
+    ));
+    let legacy: FlexView<()> = Column((1..=12).map(|i| any(l(i as f64))).collect::<Vec<_>>());
+    assert_eq!(rects(&view).1.len(), 12);
+    assert_eq!(rects(&view), rects(&legacy));
 }

@@ -44,8 +44,8 @@
 //! programmatic move, not just on a button press.
 
 use frust::{
-    AnimateTo, AnyView, ButtonStyle, ChildKey, Color, Curve, EdgeInsets, Get, ItemAlignment,
-    ListView, Padding, SizedBox, Theme, any, button, column, row, text, use_context,
+    AnimateTo, ButtonStyle, ChildKey, Color, Curve, EdgeInsets, Get, ItemAlignment, ListView,
+    Padding, SizedBox, Theme, View, button, column, row, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -84,25 +84,23 @@ fn row_height(index: usize) -> f64 {
 /// One row's content: its index, a tall row highlighted in the theme's
 /// accent color and marked "(tall)" so the variable-extent mix is visible on
 /// screen, not just measurable.
-fn row_view(index: usize, accent: Color, muted: Color) -> AnyView<PlaygroundState> {
+fn row_view(index: usize, accent: Color, muted: Color) -> impl View<PlaygroundState> {
     let tall = index.is_multiple_of(TALL_ROW_PERIOD);
     let label = if tall {
         format!("Row {index} (tall)")
     } else {
         format!("Row {index}")
     };
-    any(
-        SizedBox::<PlaygroundState>(None, Some(row_height(index))).child(Padding(
-            EdgeInsets::symmetric(12.0, 8.0),
-            text(label)
-                .size(12.0)
-                .color(if tall { accent } else { muted }),
-        )),
-    )
+    SizedBox::<PlaygroundState>(None, Some(row_height(index))).child(Padding(
+        EdgeInsets::symmetric(12.0, 8.0),
+        text(label)
+            .size(12.0)
+            .color(if tall { accent } else { muted }),
+    ))
 }
 
 /// See the page-fn contract in [`crate::pages`].
-pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
+pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
     let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     let scheme = theme.scheme();
     let accent = scheme.primary;
@@ -180,7 +178,7 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
         .small()
     };
 
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         column()
             .child(text("Scroll").size(13.0).color(accent))
@@ -218,7 +216,7 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
                     .child(SizedBox(Some(8.0), None))
                     .child(item_280_animated),
             ),
-    ))
+    )
 }
 
 #[cfg(test)]

@@ -55,7 +55,7 @@ impl Component for TabsPlayground {
     }
 }
 
-fn body(state: &TabsState) -> AnyView<TabsState> {
+fn body(state: &TabsState) -> impl View<TabsState> {
     playground_body(
         vec![play_preview_card("Tabs", preview(state))],
         vec![play_snippet("Tabs", snippet_code(state))],
@@ -85,13 +85,11 @@ fn build_tabs(state: &TabsState) -> Vec<Tab> {
         .collect()
 }
 
-fn preview(state: &TabsState) -> AnyView<TabsState> {
-    any(
-        tabs::<TabsState, _>(build_tabs(state), state.selected, |s: &mut TabsState, i| {
-            s.selected = i;
-        })
-        .variant(state.variant),
-    )
+fn preview(state: &TabsState) -> impl View<TabsState> {
+    tabs::<TabsState, _>(build_tabs(state), state.selected, |s: &mut TabsState, i| {
+        s.selected = i;
+    })
+    .variant(state.variant)
 }
 
 fn appearance_panel(state: &TabsState) -> AnyView<TabsState> {

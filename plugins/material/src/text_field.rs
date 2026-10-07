@@ -375,6 +375,7 @@ impl<State: 'static> TextFieldView<State> {
 
     /// The wrapped baseline field, with its own chrome suppressed (see the
     /// [module docs](self)).
+    // erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn field_view(&self) -> AnyView<State> {
         let on_change = self.on_change.clone();
         let mut field = text_input(self.value.clone(), move |state: &mut State, text| {

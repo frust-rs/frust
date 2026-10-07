@@ -103,12 +103,12 @@ fn preview_column(
     error: bool,
     show_labels: bool,
     enabled: bool,
-) -> AnyView<RadioPlaygroundState> {
-    let rows: Vec<AnyView<RadioPlaygroundState>> = PLANS
+) -> impl View<RadioPlaygroundState> {
+    let rows: Vec<_> = PLANS
         .iter()
         .map(|&plan| radio_row(plan, current, error, show_labels, enabled))
         .collect();
-    any(Column(rows).cross_axis(CrossAxisAlignment::Start))
+    Column(rows).cross_axis(CrossAxisAlignment::Start)
 }
 
 /// One grouped radio, 4px above the next — the reference's
@@ -119,7 +119,7 @@ fn radio_row(
     error: bool,
     show_labels: bool,
     enabled: bool,
-) -> AnyView<RadioPlaygroundState> {
+) -> impl View<RadioPlaygroundState> {
     let mut view = radio::<RadioPlaygroundState, &'static str>(plan, current).error(error);
     if show_labels {
         view = view.label(plan);
@@ -127,7 +127,7 @@ fn radio_row(
     if enabled {
         view = view.on_changed(|s: &mut RadioPlaygroundState, next: &'static str| s.plan.set(next));
     }
-    any(Padding(
+    Padding(
         EdgeInsets {
             left: 0.0,
             top: 0.0,
@@ -135,7 +135,7 @@ fn radio_row(
             bottom: 4.0,
         },
         view,
-    ))
+    )
 }
 
 /// The paste-ready Frust equivalent of the currently-selected radio's state.

@@ -162,8 +162,8 @@ impl Default for Knobs {
 
 /// The preview's trigger half, sized to the reference's own `SizedBox(width:
 /// 320)`.
-fn preview_field(state: &Knobs) -> AnyView<Knobs> {
-    any(SizedBox::<Knobs>(Some(320.0), None).child(
+fn preview_field(state: &Knobs) -> impl View<Knobs> {
+    SizedBox::<Knobs>(Some(320.0), None).child(
         dropdown_field(items())
             .anchor(&state.anchor)
             .selected(state.selected.clone())
@@ -174,13 +174,13 @@ fn preview_field(state: &Knobs) -> AnyView<Knobs> {
             .show_clear(state.show_clear)
             .on_open(|s: &mut Knobs, next: bool| s.open = next)
             .on_change(|s: &mut Knobs, values: Vec<String>| s.selected = values),
-    ))
+    )
 }
 
 /// The "Dropdown menu" preview card's content: the trigger, plus the
 /// selection summary line once something is picked.
-fn preview(state: &Knobs) -> AnyView<Knobs> {
-    let mut rows: Vec<AnyView<Knobs>> = vec![preview_field(state)];
+fn preview(state: &Knobs) -> impl View<Knobs> {
+    let mut rows: Vec<AnyView<Knobs>> = vec![any(preview_field(state))];
     if let Some(summary) = selection_summary(&state.selected) {
         let theme = ambient_theme();
         let mut style = theme.type_scale.body_medium.clone();
@@ -188,13 +188,13 @@ fn preview(state: &Knobs) -> AnyView<Knobs> {
         rows.push(any(SizedBox::<Knobs>(None, Some(12.0))));
         rows.push(any(text(format!("Selected: {summary}")).style(style)));
     }
-    any(Column(rows).cross_axis(CrossAxisAlignment::Start))
+    Column(rows).cross_axis(CrossAxisAlignment::Start)
 }
 
 /// The preview's panel half — mounted at this page's outer [`Stack`], pointed
 /// at the same [`OverlayAnchor`] the trigger captures into.
-fn preview_panel(state: &Knobs) -> AnyView<Knobs> {
-    any(dropdown(items(), |s: &mut Knobs, values: Vec<String>| {
+fn preview_panel(state: &Knobs) -> impl View<Knobs> {
+    dropdown(items(), |s: &mut Knobs, values: Vec<String>| {
         s.selected = values
     })
     .anchor(&state.anchor)
@@ -205,7 +205,7 @@ fn preview_panel(state: &Knobs) -> AnyView<Knobs> {
     .query(state.query.clone())
     .side(expand_side(state.expand))
     .on_query(|s: &mut Knobs, next: String| s.query = next)
-    .on_open(|s: &mut Knobs, next: bool| s.open = next))
+    .on_open(|s: &mut Knobs, next: bool| s.open = next)
 }
 
 /// The paste-ready snippet for the current knob state — the reference's
@@ -275,7 +275,7 @@ fn controls_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The "Expand" menu's popup half — mounted at this page's outer [`Stack`].
-fn expand_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+fn expand_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel(
         state.expand,
         &EXPAND_DIRECTIONS,
@@ -290,16 +290,16 @@ fn expand_menu_panel(state: &Knobs) -> AnyView<Knobs> {
 /// The page body: the playground content plus both dropdown panels it
 /// anchors (the live preview's own, and the "Expand" control's), stacked so
 /// all three can paint above the scrollable content.
-fn body(state: &Knobs) -> AnyView<Knobs> {
+fn body(state: &Knobs) -> impl View<Knobs> {
     let content = playground_body(
         vec![play_preview_card("Dropdown menu", preview(state))],
         vec![snippet(state)],
         vec![controls_panel(state)],
     );
-    any(stack()
+    stack()
         .child(content)
         .child(preview_panel(state))
-        .child(expand_menu_panel(state)))
+        .child(expand_menu_panel(state))
 }
 
 /// This page's knob component — see the [module docs](self).

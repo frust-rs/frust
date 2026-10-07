@@ -517,6 +517,7 @@ impl<State: 'static> TableView<State> {
     ///
     /// `enter` is passed to every row built on this pass — see the
     /// [module docs](self) on why only a count change stages an entrance.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn body(&self, enter: bool) -> AnyView<State> {
         let columns = Rc::clone(&self.columns);
         let cell = Rc::clone(&self.cell);

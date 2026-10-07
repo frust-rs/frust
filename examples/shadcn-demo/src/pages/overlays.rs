@@ -84,24 +84,25 @@ fn clear_command_query(handle: &Rc<RefCell<String>>) {
     handle.borrow_mut().clear();
 }
 
-fn gap() -> AnyView<AppState> {
-    any(SizedBox(None, Some(12.0)))
+fn gap() -> impl View<AppState> {
+    SizedBox(None, Some(12.0))
 }
 
-fn hgap() -> AnyView<AppState> {
-    any(SizedBox(Some(8.0), None))
+fn hgap() -> impl View<AppState> {
+    SizedBox(Some(8.0), None)
 }
 
 /// A row of trigger buttons, each separated by a fixed gap.
-fn trigger_row(buttons: Vec<AnyView<AppState>>) -> AnyView<AppState> {
+fn trigger_row(buttons: Vec<AnyView<AppState>>) -> impl View<AppState> {
     let mut children = Vec::with_capacity(buttons.len() * 2);
     for (index, child) in buttons.into_iter().enumerate() {
         if index > 0 {
-            children.push(hgap());
+            // erasure: keep mixed Vec types from hgap() and child
+            children.push(any(hgap()));
         }
         children.push(child);
     }
-    any(frust::Row(children))
+    frust::Row(children)
 }
 
 /// Record `result` (via `PopResult::take::<&str>`-style tagging) as the last
@@ -119,9 +120,9 @@ fn sheet_trigger(
     label: &'static str,
     controller: &NavigatorController<AppState>,
     side: SheetSide,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let controller = controller.clone();
-    any(button(label, move |_: &mut AppState| {
+    button(label, move |_: &mut AppState| {
         show_sheet(
             &controller,
             move || {
@@ -140,7 +141,7 @@ fn sheet_trigger(
             record("sheet"),
         );
     })
-    .variant(ButtonVariant::Outline))
+    .variant(ButtonVariant::Outline)
 }
 
 /// A trigger that pushes a drawer pinned to `side`.
@@ -148,9 +149,9 @@ fn drawer_trigger(
     label: &'static str,
     controller: &NavigatorController<AppState>,
     side: DrawerSide,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let controller = controller.clone();
-    any(button(label, move |_: &mut AppState| {
+    button(label, move |_: &mut AppState| {
         show_drawer(
             &controller,
             move || {
@@ -175,7 +176,7 @@ fn drawer_trigger(
             record("drawer"),
         );
     })
-    .variant(ButtonVariant::Outline))
+    .variant(ButtonVariant::Outline)
 }
 
 pub fn page(state: &mut State) -> impl View<AppState> + use<> {
@@ -337,10 +338,10 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             ))
             .child(SizedBox(None, Some(8.0)))
             .child(trigger_row(vec![
-                sheet_trigger("Right", &root_controller, SheetSide::Right),
-                sheet_trigger("Left", &root_controller, SheetSide::Left),
-                sheet_trigger("Top", &root_controller, SheetSide::Top),
-                sheet_trigger("Bottom", &root_controller, SheetSide::Bottom),
+                any(sheet_trigger("Right", &root_controller, SheetSide::Right)),
+                any(sheet_trigger("Left", &root_controller, SheetSide::Left)),
+                any(sheet_trigger("Top", &root_controller, SheetSide::Top)),
+                any(sheet_trigger("Bottom", &root_controller, SheetSide::Bottom)),
             ]))
             .child(SizedBox(None, Some(8.0)))
             .child(trigger_row(vec![
@@ -367,7 +368,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                                                             text(format!("Line {i}")).size(13.0),
                                                         )
                                                     })
-                                                    .collect(),
+                                                    .collect::<Vec<_>>(),
                                             )),
                                         ),
                                     )),
@@ -416,10 +417,14 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             ))
             .child(SizedBox(None, Some(8.0)))
             .child(trigger_row(vec![
-                drawer_trigger("Bottom", &root_controller, DrawerSide::Bottom),
-                drawer_trigger("Top", &root_controller, DrawerSide::Top),
-                drawer_trigger("Left", &root_controller, DrawerSide::Left),
-                drawer_trigger("Right", &root_controller, DrawerSide::Right),
+                any(drawer_trigger(
+                    "Bottom",
+                    &root_controller,
+                    DrawerSide::Bottom,
+                )),
+                any(drawer_trigger("Top", &root_controller, DrawerSide::Top)),
+                any(drawer_trigger("Left", &root_controller, DrawerSide::Left)),
+                any(drawer_trigger("Right", &root_controller, DrawerSide::Right)),
             ]))
             .child(SizedBox(None, Some(8.0)))
             .child(trigger_row(vec![any(button(

@@ -68,8 +68,8 @@ use frust::authoring::{
     Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     CursorIcon, ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey,
     PaintCtx, PaintScene, Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size,
-    View, Widget, build_child, erase_callback_arg, rebuild_children, route_event, teardown_child,
-    visit_children,
+    View, ViewSeq, Widget, build_child, erase_callback_arg, rebuild_children, route_event,
+    teardown_child, visit_children,
 };
 use frust::input::TOUCH_SLOP;
 use frust::{AnimationController, Curve, Theme};
@@ -137,12 +137,13 @@ pub struct CarouselView<State: 'static> {
 /// default — **uncontrolled** unless [`CarouselView::selected`] says otherwise
 /// (see the [module docs](self)).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn carousel<State: 'static, V: View<State>>(
-    items: impl IntoIterator<Item = V>,
-) -> CarouselView<State> {
-    let items: Vec<AnyView<State>> = items.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn carousel<State: 'static, M>(items: impl ViewSeq<State, M>) -> CarouselView<State> {
+    let mut erased = Vec::new();
+    items.extend_views(&mut erased);
+    let items = erased;
     CarouselView {
         items,
         orientation: CarouselOrientation::default(),

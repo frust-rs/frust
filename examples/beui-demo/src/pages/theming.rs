@@ -4,7 +4,7 @@
 //! timeline against `frust_beui::tokens::motion`'s curves and springs — this
 //! page only names the surface.
 
-use frust::{Color, CrossAxisAlignment, SizedBox, View, any, colored_box, column, row, text};
+use frust::{Color, CrossAxisAlignment, SizedBox, View, colored_box, column, row, text};
 use frust_beui::components::theme_toggle::theme_toggle;
 use frust_beui::{BEUI_DARK, BEUI_LIGHT, BeuiPalette};
 
@@ -19,17 +19,17 @@ use crate::nav::{caption, heading};
 pub struct State;
 
 /// One named swatch: a tile painted in `color` beside its token role name.
-fn swatch(name: &str, color: Color) -> frust::AnyView<AppState> {
-    any(row()
+fn swatch(name: &str, color: Color) -> impl frust::View<AppState> {
+    row()
         .child(colored_box().fill(color).radius(6.0).size(28.0, 28.0))
         .child(SizedBox(Some(8.0), None))
         .child(text(name.to_string()).size(13.0))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// One brightness's whole swatch column.
-fn swatch_column(title: &str, palette: BeuiPalette) -> frust::AnyView<AppState> {
-    any(column()
+fn swatch_column(title: &str, palette: BeuiPalette) -> impl frust::View<AppState> {
+    column()
         .child(text(title.to_string()).size(14.0))
         .child(SizedBox(None, Some(8.0)))
         .child(swatch("background", palette.background))
@@ -42,7 +42,7 @@ fn swatch_column(title: &str, palette: BeuiPalette) -> frust::AnyView<AppState> 
         .child(SizedBox(None, Some(6.0)))
         .child(swatch("danger", palette.danger))
         .child(SizedBox(None, Some(6.0)))
-        .child(swatch("success", palette.success)))
+        .child(swatch("success", palette.success))
 }
 
 pub fn page(_state: &mut State) -> impl View<AppState> + use<> {

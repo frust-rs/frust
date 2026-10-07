@@ -91,8 +91,9 @@ use frust::authoring::{Action, RoundedRect};
 use frust::authoring::{
     Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
-    PointerEvent, PointerPhase, Rect, Role, ScrollDelta, SemanticsCtx, Shape, Size, View, Widget,
-    build_child, erase_callback_arg, rebuild_children, route_event, teardown_child, visit_children,
+    PointerEvent, PointerPhase, Rect, Role, ScrollDelta, SemanticsCtx, Shape, Size, View, ViewSeq,
+    Widget, build_child, erase_callback_arg, rebuild_children, route_event, teardown_child,
+    visit_children,
 };
 use frust::input::{
     FLING_STOP, TOUCH_SLOP, VelocityTracker, WHEEL_LINE_PX, fling_decay, fling_displacement,
@@ -267,7 +268,7 @@ type OnPinChange<State> = Rc<dyn Fn(&mut State, bool)>;
 ///     following: bool,
 /// }
 ///
-/// let transcript = message_scroller(vec![text("hello"), text("hi")])
+/// let transcript = message_scroller((text("hello"), text("hi")))
 ///     .on_pin_change(|state: &mut Chat, pinned| state.following = pinned);
 /// ```
 pub struct MessageScrollerView<State: 'static> {
@@ -280,11 +281,13 @@ pub struct MessageScrollerView<State: 'static> {
 }
 
 /// A pin-to-the-live-edge transcript viewport over `items`, oldest first.
-pub fn message_scroller<State: 'static>(
-    items: impl IntoIterator<Item = impl View<State>>,
+pub fn message_scroller<State: 'static, M>(
+    items: impl ViewSeq<State, M>,
 ) -> MessageScrollerView<State> {
+    let mut erased = Vec::new();
+    items.extend_views(&mut erased);
     MessageScrollerView {
-        items: items.into_iter().map(AnyView::new).collect(),
+        items: erased,
         threshold: MESSAGE_SCROLLER_FOLLOW_THRESHOLD,
         gap: MESSAGE_SCROLLER_GAP,
         jump_label: MESSAGE_SCROLLER_JUMP_LABEL.to_owned(),
@@ -1681,9 +1684,9 @@ mod tests {
     fn scrolled_probe()
     -> Probe<MessageScrollerView<()>, impl FnMut(&mut ()) -> MessageScrollerView<()>> {
         let logic = |_: &mut ()| {
-            message_scroller::<()>(
+            message_scroller::<(), _>(frust::views(
                 (0..20).map(|_| any(frust::SizedBox::<()>(Some(200.0), Some(40.0)))),
-            )
+            ))
         };
         let mut probe = Probe::new(logic, BOX, crate::theme());
         probe.frame();

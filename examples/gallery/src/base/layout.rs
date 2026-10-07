@@ -45,7 +45,7 @@ fn align_case() -> AnyView<()> {
         .fill(BOX_A)
         .radius(8.0)
         .size_centered(160.0, 56.0);
-    framed_in(FRAME, Align(Alignment::BOTTOM_RIGHT, badge))
+    any(framed_in(FRAME, Align(Alignment::BOTTOM_RIGHT, badge)))
 }
 
 pub(super) const ALIGN: Case = Case {
@@ -67,7 +67,7 @@ fn divider_case() -> AnyView<()> {
         .child(container(text("Above").size(18.0)).size_centered(FRAME.width, 130.0))
         .child(divider(LINE).thickness(3.0))
         .child(container(text("Below").size(18.0)).size_centered(FRAME.width, 130.0));
-    framed_in(FRAME, column)
+    any(framed_in(FRAME, column))
 }
 
 pub(super) const DIVIDER: Case = Case {
@@ -100,7 +100,10 @@ fn flex_case() -> AnyView<()> {
             container(text("flex 1").color(Color::WHITE).size(13.0)).fill(BOX_C),
         )
         .cross_axis(CrossAxisAlignment::Stretch);
-    framed_in(FRAME, SizedBox(Some(400.0), Some(240.0)).child(row))
+    any(framed_in(
+        FRAME,
+        SizedBox(Some(400.0), Some(240.0)).child(row),
+    ))
 }
 
 pub(super) const FLEX: Case = Case {
@@ -127,7 +130,7 @@ fn padding_case() -> AnyView<()> {
     ))
     .fill(BOX_A)
     .radius(10.0);
-    framed_in(FRAME, framed_child)
+    any(framed_in(FRAME, framed_child))
 }
 
 pub(super) const PADDING: Case = Case {
@@ -148,7 +151,7 @@ fn sized_box_case() -> AnyView<()> {
             .fill(BOX_B)
             .radius(8.0),
     );
-    framed_in(FRAME, boxed)
+    any(framed_in(FRAME, boxed))
 }
 
 pub(super) const SIZED_BOX: Case = Case {

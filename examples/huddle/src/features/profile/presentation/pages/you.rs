@@ -10,9 +10,9 @@
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Color, CrossAxisAlignment, EdgeInsets, Image, ImageFit,
-    NavigatorController, Padding, SizedBox, Theme, any, column, hero, icon, icons, scroll_view,
-    stack, text, use_context,
+    Align, Alignment, Color, CrossAxisAlignment, EdgeInsets, Image, ImageFit, NavigatorController,
+    Padding, SizedBox, Theme, View, any, column, hero, icon, icons, scroll_view, stack, text,
+    use_context,
 };
 use frust_material::{app_bar, list_item};
 
@@ -25,7 +25,7 @@ use crate::ui::solid_source::solid_source;
 use super::profile;
 
 /// The You tab root. `controller` pushes the settings stack and the profile page.
-pub fn you_screen(controller: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
+pub fn you_screen(controller: NavigatorController<HuddleState>) -> impl View<HuddleState> {
     let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     let scheme = theme.scheme();
 
@@ -95,15 +95,15 @@ pub fn you_screen(controller: NavigatorController<HuddleState>) -> AnyView<Huddl
             .child(prefs_row),
     )));
 
-    any(column()
+    column()
         .child(app_bar::<HuddleState>("You"))
         .flex(1, body)
-        .cross_axis(CrossAxisAlignment::Stretch))
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// A square avatar block: a solid `primary`-filled 56×56 tile with the user's
 /// initials centered in `on_primary`.
-fn avatar_block(initials: String, fill: Color, on_fill: Color) -> AnyView<HuddleState> {
+fn avatar_block(initials: String, fill: Color, on_fill: Color) -> impl View<HuddleState> {
     let tile =
         any(SizedBox(Some(56.0), Some(56.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill)));
     // Center the monogram with the SizedBox+Align idiom (a bare `Align` under a
@@ -114,7 +114,7 @@ fn avatar_block(initials: String, fill: Color, on_fill: Color) -> AnyView<Huddle
         Alignment::CENTER,
         text(initials).size(20.0).color(on_fill),
     )));
-    any(stack().child(tile).child(label))
+    stack().child(tile).child(label)
 }
 
 /// Derive an `@handle` from a display name — the first name, lowercased.

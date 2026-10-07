@@ -57,7 +57,7 @@
 //! page content. What the baselines pin for that chrome is its geometry and
 //! the catalog's own tokens, which is a page case's subject anyway.
 
-use frust_core::{AnyView, RenderRoot, any};
+use frust_core::{AnyView, RenderRoot, View, any};
 use frust_scene::Scene;
 use frust_text::FontFamily;
 use frust_theme::Theme;
@@ -139,11 +139,13 @@ fn light_on_dark(family: &FontFamily, content: &str, size: f32) -> frust_widgets
 }
 
 /// A vertical gap of [`GAP`] logical px.
+// erasure: keep element of a heterogeneous Vec<AnyView> list passed to body()
 fn gap() -> AnyView<()> {
     any(SizedBox::<()>(None, Some(GAP)))
 }
 
 /// A horizontal gap of [`GAP`] logical px.
+// erasure: keep element of a heterogeneous Vec<AnyView> list passed to body()
 fn hgap() -> AnyView<()> {
     any(SizedBox::<()>(Some(GAP), None))
 }
@@ -151,8 +153,8 @@ fn hgap() -> AnyView<()> {
 /// A fixed-size rounded box in `fill` — the stand-in for a catalog's icon
 /// slot, which would otherwise shape an icon-font glyph and so reach a
 /// non-bundled face.
-fn swatch(size: f64, fill: Color) -> AnyView<()> {
-    any(colored_box::<()>().fill(fill).size(size, size).radius(6.0))
+fn swatch(size: f64, fill: Color) -> impl View<()> {
+    colored_box::<()>().fill(fill).size(size, size).radius(6.0)
 }
 
 /// Records one still frame of `build` under `theme`, with the theme's type
@@ -183,6 +185,7 @@ fn record_page(
 /// content width on a real screen, and a start-aligned column would instead
 /// shrink each one to its own natural width and pin geometry no shipped screen
 /// has.
+// erasure: keep takes a runtime Vec<AnyView> and its callers return it as a page root
 fn body(background: Color, children: Vec<AnyView<()>>) -> AnyView<()> {
     any(container::<(), _>(Padding(
         EdgeInsets::all(GUTTER),
@@ -206,11 +209,11 @@ fn material_home() -> CorpusCase {
     /// `tests/corpus_budget.rs` caps a single golden PNG at 64 KB, which dense
     /// antialiased text reaches quickly — and the card VARIANT (fill, outline,
     /// elevation shadow) is what this page exists to pin, not its typography.
-    fn card_body(family: &FontFamily) -> AnyView<()> {
-        any(Padding::<(), _>(
+    fn card_body(family: &FontFamily) -> impl View<()> {
+        Padding::<(), _>(
             EdgeInsets::all(16.0),
             dark_on_light(family, SAMPLE_TEXT, 18.0),
-        ))
+        )
     }
     fn record(scene: &mut Scene) {
         record_page(scene, frust_material::baseline, |family| {
@@ -288,19 +291,10 @@ fn material_home() -> CorpusCase {
 fn material_dialog() -> CorpusCase {
     fn record(scene: &mut Scene) {
         record_page(scene, frust_material::baseline, |family| {
-            let dialog = frust_material::dialog::<()>()
-                .title("")
-                .body("")
-                .actions(vec![
-                    any(frust_material::text_button::<(), _>(
-                        SAMPLE_TEXT,
-                        |_: &mut ()| {},
-                    )),
-                    any(frust_material::filled_button::<(), _>(
-                        SAMPLE_TEXT,
-                        |_: &mut ()| {},
-                    )),
-                ]);
+            let dialog = frust_material::dialog::<()>().title("").body("").actions((
+                frust_material::text_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {}),
+                frust_material::filled_button::<(), _>(SAMPLE_TEXT, |_: &mut ()| {}),
+            ));
             body(
                 SCRIM,
                 vec![
@@ -329,8 +323,8 @@ fn material_dialog() -> CorpusCase {
 /// A Cupertino settings screen: nav bar, a grouped switch list on the iOS
 /// grouped background, the activity indicator, and a tab bar.
 fn cupertino_settings() -> CorpusCase {
-    fn row(family: &FontFamily, checked: bool) -> AnyView<()> {
-        any(container::<(), _>(Padding(
+    fn row(family: &FontFamily, checked: bool) -> impl View<()> {
+        container::<(), _>(Padding(
             EdgeInsets::symmetric(16.0, 12.0),
             frust_widgets::row()
                 .child(dark_on_light(family, SAMPLE_TEXT, 17.0))
@@ -340,7 +334,7 @@ fn cupertino_settings() -> CorpusCase {
                     |_: &mut (), _: bool| {},
                 )),
         ))
-        .fill(Color::WHITE))
+        .fill(Color::WHITE)
     }
     fn record(scene: &mut Scene) {
         record_page(scene, frust_cupertino::baseline, |family| {
@@ -388,6 +382,7 @@ fn cupertino_settings() -> CorpusCase {
 /// A Cupertino controls surface: every button style at rest, both switch
 /// states, and the activity indicator at a fixed frame time.
 fn cupertino_controls() -> CorpusCase {
+    // erasure: keep element of a heterogeneous Vec<AnyView> list passed to body()
     fn styled(style: frust_cupertino::CupertinoButtonStyle) -> AnyView<()> {
         any(container::<(), _>(
             frust_cupertino::cupertino_button::<(), _>("", |_: &mut ()| {}).style(style),

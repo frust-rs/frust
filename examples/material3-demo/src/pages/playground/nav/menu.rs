@@ -127,16 +127,16 @@ impl Component for MenuPlayground {
 /// popup and the Position picker's popup, both mounted at this page's own
 /// outer [`Stack`] — the kept-mounted pattern the kit's own module docs
 /// document.
-fn body(state: &MenuState) -> AnyView<MenuState> {
+fn body(state: &MenuState) -> impl View<MenuState> {
     let content = playground_body(
         vec![play_preview_card("Anchored menu", trigger_view(state))],
         vec![play_snippet("Anchored menu", snippet_code(state))],
         vec![appearance_panel(state)],
     );
-    any(stack()
+    stack()
         .child(content)
         .child(menu_panel_view(state))
-        .child(position_menu_panel(state)))
+        .child(position_menu_panel(state))
 }
 
 /// The mailbox/starred/more-actions node tree — the reference's `_children`
@@ -186,26 +186,26 @@ fn apply_selection(state: &mut MenuState, selection: MenuSelection) {
 
 /// The trigger half: a tonal icon+label button reporting its own rect into
 /// [`MenuState::trigger_anchor`] — the reference's `anchorBuilder`.
-fn trigger_view(state: &MenuState) -> AnyView<MenuState> {
-    any(overlay_anchor(
+fn trigger_view(state: &MenuState) -> impl View<MenuState> {
+    overlay_anchor(
         &state.trigger_anchor,
         tonal_button(state.selected.clone(), |s: &mut MenuState| {
             s.trigger_open = true;
         })
         .icon(icon(icons::MORE_VERT)),
-    ))
+    )
 }
 
 /// The popup half: the demoed menu itself, anchored to [`trigger_view`]'s
 /// captured rect.
-fn menu_panel_view(state: &MenuState) -> AnyView<MenuState> {
-    any(menu(nodes(state), apply_selection)
+fn menu_panel_view(state: &MenuState) -> impl View<MenuState> {
+    menu(nodes(state), apply_selection)
         .anchor(&state.trigger_anchor)
         .side(state.position.side())
         .align(state.position.align())
         .color_style(state.color_style)
         .open(state.trigger_open)
-        .on_dismiss(|s: &mut MenuState| s.trigger_open = false))
+        .on_dismiss(|s: &mut MenuState| s.trigger_open = false)
 }
 
 fn appearance_panel(state: &MenuState) -> AnyView<MenuState> {
@@ -235,7 +235,7 @@ fn appearance_panel(state: &MenuState) -> AnyView<MenuState> {
     )
 }
 
-fn position_menu_panel(state: &MenuState) -> AnyView<MenuState> {
+fn position_menu_panel(state: &MenuState) -> impl View<MenuState> {
     play_enum_menu_panel::<MenuState, MenuPosition>(
         state.position,
         &MenuPosition::ALL,

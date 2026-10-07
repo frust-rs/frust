@@ -44,8 +44,8 @@ impl Default for State {
     }
 }
 
-fn gap() -> frust::AnyView<AppState> {
-    any(SizedBox(None, Some(16.0)))
+fn gap() -> impl frust::View<AppState> {
+    SizedBox(None, Some(16.0))
 }
 
 const COUNTRIES: [&str; 4] = ["United Kingdom", "United States", "Japan", "Kenya"];
@@ -196,17 +196,14 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         .child(gap())
         // --- Attachment ---
         .child(
-            attachment(vec![
-                any(attachment_media(any::<AppState, _>(text("\u{1F4C4}")))),
-                any(attachment_content(vec![
-                    any(attachment_title("resume.pdf")),
-                    any(attachment_description("240 KB", false)),
-                ])),
-                any(attachment_actions(vec![button(
-                    "Remove",
-                    |_: &mut AppState| {},
-                )])),
-            ])
+            attachment((
+                attachment_media(any::<AppState, _>(text("\u{1F4C4}"))),
+                attachment_content((
+                    attachment_title("resume.pdf"),
+                    attachment_description("240 KB", false),
+                )),
+                attachment_actions(vec![button("Remove", |_: &mut AppState| {})]),
+            ))
             .size(AttachmentSize::Default)
             .state(AttachmentState::Done),
         )
@@ -226,7 +223,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                     Column(
                         (1..=40)
                             .map(|i| any::<AppState, _>(text(format!("Row {i}")).size(14.0)))
-                            .collect(),
+                            .collect::<Vec<_>>(),
                     ),
                     |s: &mut AppState, info: ScrollInfo| {
                         s.inputs_table.scroll_offset = info.offset;

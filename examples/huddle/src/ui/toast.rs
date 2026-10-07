@@ -172,8 +172,8 @@ impl ToastController {
 /// The overlay `Component` mounted in the shell's `Stack` top layer. Reads the
 /// [`ToastController`] queue and paints each toast bottom-anchored above every
 /// screen.
-pub fn toast_overlay(controller: ToastController) -> AnyView<crate::HuddleState> {
-    any(frust::component(ToastOverlay { controller }))
+pub fn toast_overlay(controller: ToastController) -> impl View<crate::HuddleState> {
+    frust::component(ToastOverlay { controller })
 }
 
 /// The toast overlay component (see [`toast_overlay`]).
@@ -204,7 +204,7 @@ impl frust::Component for ToastOverlay {
         // there is nothing to show.
         let mut rows: Vec<AnyView<ToastOverlayState>> = Vec::new();
         for entry in entries {
-            rows.push(toast_card(entry));
+            rows.push(any(toast_card(entry)));
             rows.push(any(SizedBox(None, Some(8.0))));
         }
 
@@ -215,7 +215,7 @@ impl frust::Component for ToastOverlay {
 }
 
 /// Render one toast as a `filled_card` with its text and optional action button.
-fn toast_card(entry: ToastEntry) -> AnyView<ToastOverlayState> {
+fn toast_card(entry: ToastEntry) -> impl View<ToastOverlayState> {
     let id = entry.id;
     let mut row: Vec<AnyView<ToastOverlayState>> = vec![any(text(entry.text).size(14.0))];
 
@@ -231,10 +231,10 @@ fn toast_card(entry: ToastEntry) -> AnyView<ToastOverlayState> {
         )));
     }
 
-    any(toast_entrance(Padding(
+    toast_entrance(Padding(
         EdgeInsets::all(8.0),
         filled_card(Padding(EdgeInsets::symmetric(16.0, 12.0), frust::Row(row))),
-    )))
+    ))
 }
 
 // ---------------------------------------------------------------------------

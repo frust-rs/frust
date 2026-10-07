@@ -81,48 +81,48 @@ impl Default for State {
 }
 
 /// A vertical spacer.
-fn gap(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal spacer.
-fn hgap(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn hgap(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 /// One component's block: its name, a one-line note (where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> AnyView<State> {
+fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
     let mut children = vec![
         any(text(title.to_string()).size(16.0)),
-        gap(4.0),
+        any(gap(4.0)),
         any(caption(note.to_string())),
-        gap(12.0),
+        any(gap(12.0)),
     ];
     children.extend(body);
-    children.push(gap(32.0));
-    any(Column(children).cross_axis(CrossAxisAlignment::Start))
+    children.push(any(gap(32.0)));
+    Column(children).cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A row of live instances, `spacing`px apart.
-fn row(items: Vec<AnyView<State>>, spacing: f64) -> AnyView<State> {
+fn row(items: Vec<AnyView<State>>, spacing: f64) -> impl View<State> {
     let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
     for item in items {
         if !children.is_empty() {
-            children.push(hgap(spacing));
+            children.push(any(hgap(spacing)));
         }
         children.push(item);
     }
-    any(Row(children).cross_axis(CrossAxisAlignment::Center))
+    Row(children).cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A labelled specimen: the live component over its caption.
-fn specimen(label: &str, body: AnyView<State>) -> AnyView<State> {
-    any(column()
+fn specimen(label: &str, body: AnyView<State>) -> impl View<State> {
+    column()
         .child(body)
         .child(gap(6.0))
         .child(caption(label.to_string()))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// The next state in the demo's own idle → loading → outcome → idle cycle.
@@ -139,7 +139,7 @@ fn advance(state: ButtonState, outcome: ButtonState) -> ButtonState {
 
 /// [`button`]'s two axes: the base's tones and sizes, then the three
 /// behavioural variants.
-fn buttons(state: &State) -> AnyView<State> {
+fn buttons(state: &State) -> impl View<State> {
     let tones = row(
         vec![
             any(button("Continue", |_: &mut State| {}).tone(ButtonTone::Primary)),
@@ -223,24 +223,33 @@ fn buttons(state: &State) -> AnyView<State> {
          morphing its width; press it repeatedly to walk idle \u{2192} loading \u{2192} \
          outcome \u{2192} idle (upstream uses a timer, this page uses the press).",
         vec![
-            specimen(
+            any(specimen(
                 "Tones \u{b7} primary, secondary, outline, ghost, disabled",
-                tones,
-            ),
-            gap(18.0),
-            specimen("Sizes \u{b7} sm, md, lg, icon", sizes),
-            gap(18.0),
-            specimen("Metallic \u{b7} md, sm, sheen paused", metallic),
-            gap(18.0),
-            specimen("Magnetic \u{b7} strength 0.35, 0.25, 0.5", magnetic),
-            gap(18.0),
-            specimen("Stateful \u{b7} success path, error path", stateful),
+                any(tones),
+            )),
+            any(gap(18.0)),
+            any(specimen("Sizes \u{b7} sm, md, lg, icon", any(sizes))),
+            any(gap(18.0)),
+            any(specimen(
+                "Metallic \u{b7} md, sm, sheen paused",
+                any(metallic),
+            )),
+            any(gap(18.0)),
+            any(specimen(
+                "Magnetic \u{b7} strength 0.35, 0.25, 0.5",
+                any(magnetic),
+            )),
+            any(gap(18.0)),
+            any(specimen(
+                "Stateful \u{b7} success path, error path",
+                any(stateful),
+            )),
         ],
     )
 }
 
 /// The three call-to-action buttons the `expanding-arrow-button` slug installs.
-fn call_to_action(state: &State) -> AnyView<State> {
+fn call_to_action(state: &State) -> impl View<State> {
     let arrow = row(
         vec![
             any(expanding_arrow_button("Book a demo", |s: &mut State| {
@@ -285,19 +294,25 @@ fn call_to_action(state: &State) -> AnyView<State> {
          pass rather than the instant the fill does, and neither the hold nor \
          the slide accepts keyboard activation.",
         vec![
-            specimen("Hover or focus to expand the arrow trail", arrow),
-            gap(18.0),
-            specimen("Hold to the end; release early to cancel", hold),
-            gap(18.0),
-            specimen("Drag the thumb past 82% of the track", slide),
-            gap(14.0),
+            any(specimen(
+                "Hover or focus to expand the arrow trail",
+                any(arrow),
+            )),
+            any(gap(18.0)),
+            any(specimen(
+                "Hold to the end; release early to cancel",
+                any(hold),
+            )),
+            any(gap(18.0)),
+            any(specimen("Drag the thumb past 82% of the track", slide)),
+            any(gap(14.0)),
             any(caption(state.cta_status.clone())),
         ],
     )
 }
 
 /// Both `expandable_control` shapes, controlled from this page's state.
-fn expandables(state: &State) -> AnyView<State> {
+fn expandables(state: &State) -> impl View<State> {
     let controls = row(
         vec![
             any(
@@ -331,18 +346,18 @@ fn expandables(state: &State) -> AnyView<State> {
          the icon slot takes a short string because this catalog has no icon \
          vocabulary.",
         vec![
-            specimen(
+            any(specimen(
                 "Press to expand \u{b7} chip action \u{b7} disabled",
-                controls,
-            ),
-            gap(14.0),
+                any(controls),
+            )),
+            any(gap(14.0)),
             any(caption(state.chip_status.clone())),
         ],
     )
 }
 
 /// [`action_swap`]'s four treatments, each cycling a Copy/Copied pair.
-fn action_swaps(state: &State) -> AnyView<State> {
+fn action_swaps(state: &State) -> impl View<State> {
     let items = || {
         vec![
             ActionSwapItem::new("copy", "Copy link"),
@@ -354,13 +369,13 @@ fn action_swaps(state: &State) -> AnyView<State> {
         .iter()
         .enumerate()
         .map(|(index, (transition, label))| {
-            specimen(
+            any(specimen(
                 label,
                 any(action_swap(items())
                     .transition(*transition)
                     .value(state.swap_values[index].clone())
                     .on_change(move |s: &mut State, id: String| s.swap_values[index] = id)),
-            )
+            ))
         })
         .collect();
 
@@ -403,12 +418,12 @@ fn action_swaps(state: &State) -> AnyView<State> {
          slot (an item is an id and a label), and the button reserves its \
          widest item rather than morphing its width.",
         vec![
-            row(swaps, 24.0),
-            gap(18.0),
-            specimen(
+            any(row(swaps, 24.0)),
+            any(gap(18.0)),
+            any(specimen(
                 "Sizes \u{b7} sm, lg (secondary), icon (outline), disabled",
-                sizes,
-            ),
+                any(sizes),
+            )),
         ],
     )
 }
@@ -433,8 +448,8 @@ impl Component for ButtonsPage {
     }
 }
 
-pub fn page() -> AnyView<AppState> {
-    any(column()
+pub fn page() -> impl View<AppState> {
+    column()
         .child(heading("Motion \u{b7} Buttons"))
         .child(SizedBox(None, Some(8.0)))
         .child(caption(
@@ -444,5 +459,5 @@ pub fn page() -> AnyView<AppState> {
         ))
         .child(SizedBox(None, Some(24.0)))
         .child(component(ButtonsPage))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }

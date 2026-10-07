@@ -77,6 +77,7 @@ impl Widget for DragProbeWidget {
     }
 }
 
+// erasure: keep borrow escapes the fn (callers pass it through a 'static page-builder closure)
 fn drag_probe_page(moves: &Rc<Cell<u32>>, cancelled: &Rc<Cell<bool>>) -> AnyView<()> {
     any(DragProbe {
         moves: moves.clone(),

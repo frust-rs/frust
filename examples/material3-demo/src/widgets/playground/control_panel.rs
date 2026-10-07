@@ -52,6 +52,7 @@ fn title_style(theme: &Theme) -> TextStyle {
 /// Wrap `children` (control rows, e.g. [`super::play_slider`]/
 /// [`super::play_switch`] output) in a titled, outlined panel — the standard
 /// frame every playground's controls sit in.
+// erasure: keep element of a heterogeneous Vec<AnyView> list (playground_body controls)
 pub fn control_panel<State: 'static>(
     title: impl Into<String>,
     children: Vec<AnyView<State>>,

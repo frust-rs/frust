@@ -151,17 +151,20 @@ fn label(family: &FontFamily, content: &str, size: f32) -> frust_widgets::TextVi
 
 /// A fixed-size slot holding `child` — how a control is given the exact
 /// geometry [`control_centre`] predicts.
+// erasure: keep element of a heterogeneous Vec<AnyView> list passed to body()
 fn slot<V: View<()> + 'static>(child: V) -> AnyView<()> {
     any(frust_widgets::SizedBox::<()>(Some(CONTROL_W), Some(CONTROL_H)).child(child))
 }
 
 /// A vertical gap of [`GAP`] logical px.
+// erasure: keep element of a heterogeneous Vec<AnyView> list passed to body()
 fn gap() -> AnyView<()> {
     any(frust_widgets::SizedBox::<()>(None, Some(GAP)))
 }
 
 /// Wraps `children` in the corpus's standard gutter-padded, white-filled
 /// page body.
+// erasure: keep takes a runtime Vec<AnyView> and its callers return it as a page root
 fn body(children: Vec<AnyView<()>>) -> AnyView<()> {
     any(frust_widgets::container::<(), _>(frust_widgets::Padding(
         frust_widgets::EdgeInsets::all(GUTTER),

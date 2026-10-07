@@ -27,6 +27,7 @@ use super::ambient_theme;
 
 /// Wrap `child` in a labeled, tinted surface — the standard frame every
 /// playground preview sits in.
+// erasure: keep element of a heterogeneous Vec<AnyView> list (playground_body previews)
 pub fn play_preview_card<State: 'static>(
     label: impl Into<String>,
     child: impl View<State>,

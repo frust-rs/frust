@@ -53,7 +53,7 @@ use frust::authoring::{
 
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    AnyView, Axis, Brightness, ButtonStyle, Color, Component, DeepLink, EdgeInsets, FlexView, Get,
+    Axis, Brightness, ButtonStyle, Color, Component, DeepLink, EdgeInsets, FlexView, Get,
     GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox, Theme, TransitionSpec,
     Update, View, any, button, column, deep_links, flexible, icon, icon_button, icons, inflexible,
     navigator, safe_area, scroll_view, set_app_theme, stack,
@@ -246,7 +246,7 @@ fn plan_deep_link(link: &DeepLink, last_applied: Option<u64>) -> Option<DeepLink
 /// delivery's sequence in [`NativeWidgetsDemoState::last_applied_sequence`]
 /// so a later rebuild that re-observes the same delivery is a no-op. Renders
 /// nothing (a zero-size [`SizedBox`]).
-fn deep_link_router(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState> {
+fn deep_link_router(state: &NativeWidgetsDemoState) -> impl View<NativeWidgetsDemoState> + use<> {
     if let Some(link) = deep_links().latest.get() {
         let last_applied = state.last_applied_sequence.get();
         if let Some(action) = plan_deep_link(&link, last_applied) {
@@ -283,7 +283,7 @@ fn deep_link_router(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemo
         }
         state.last_applied_sequence.set(Some(link.sequence));
     }
-    any(SizedBox(Some(0.0), Some(0.0)))
+    SizedBox(Some(0.0), Some(0.0))
 }
 
 // ---------------------------------------------------------------------------
@@ -426,7 +426,7 @@ fn slide_for(from: usize, to: usize) -> SlideDirection {
 /// The root [`app_bar`](frust_glyph::app_bar): a brand mark, the title, and
 /// the brightness toggle. The Glyph app bar consumes the top window inset
 /// itself, so the body below never pads its own top edge.
-fn demo_app_bar(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState> {
+fn demo_app_bar(state: &NativeWidgetsDemoState) -> impl View<NativeWidgetsDemoState> + use<> {
     // The mark names the brightness a press switches TO.
     let (brightness_mark, brightness_label) = match state.brightness.get() {
         Brightness::Dark => (icons::LIGHT_MODE, "Switch to light theme"),
@@ -453,11 +453,9 @@ fn demo_app_bar(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoStat
         },
     ));
 
-    any(
-        frust_glyph::app_bar::<NativeWidgetsDemoState>("native widgets")
-            .leading(brand)
-            .actions(vec![brightness_btn]),
-    )
+    frust_glyph::app_bar::<NativeWidgetsDemoState>("native widgets")
+        .leading(brand)
+        .actions(vec![brightness_btn])
 }
 
 /// Sections per navigation row — eight labelled buttons do not fit one
@@ -471,7 +469,7 @@ const NAV_GAP_PX: f64 = 2.0;
 /// [`SECTION_LABELS`] entry, the active section [`ButtonStyle::Primary`] and
 /// the rest [`ButtonStyle::Ghost`], in rows of [`NAV_COLUMNS`]. Frust-drawn on
 /// every platform — see the module docs for why it is not the native tab bar.
-fn section_nav(section: usize) -> AnyView<NativeWidgetsDemoState> {
+fn section_nav(section: usize) -> impl View<NativeWidgetsDemoState> {
     let rows = SECTION_LABELS
         .chunks(NAV_COLUMNS)
         .enumerate()
@@ -499,10 +497,10 @@ fn section_nav(section: usize) -> AnyView<NativeWidgetsDemoState> {
             inflexible(FlexView::new(Axis::Horizontal, cells))
         })
         .collect();
-    any(Padding(
+    Padding(
         EdgeInsets::all(NAV_GAP_PX),
         FlexView::new(Axis::Vertical, rows),
-    ))
+    )
 }
 
 /// The navigator's home page: the root app bar over a safe-area'd column of
@@ -511,7 +509,7 @@ fn section_nav(section: usize) -> AnyView<NativeWidgetsDemoState> {
 /// (see the module docs' "Mode B background" section). Re-run on every
 /// rebuild, so the signal reads here subscribe the shell to section/toast
 /// changes.
-fn home_page(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState> {
+fn home_page(state: &NativeWidgetsDemoState) -> impl View<NativeWidgetsDemoState> + use<> {
     let section = state.section.get();
     let slide = state.slide.get();
     let pending = state.toasts.get();
@@ -539,11 +537,11 @@ fn home_page(state: &NativeWidgetsDemoState) -> AnyView<NativeWidgetsDemoState> 
         .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .surface;
-    any(stack()
+    stack()
         .child(AppBackground(background_color))
         .child(column)
         .child(deep_link_router(state))
-        .child(frust_glyph::toast_host(pending)))
+        .child(frust_glyph::toast_host(pending))
 }
 
 /// The root [`Component`]. The `frust::app!` call below installs Glyph as the
@@ -572,7 +570,7 @@ impl Component for NativeWidgetsDemoApp {
         // `frust::navigator` auto-wires Android/gesture back handling for
         // `state.nav`, so back-dismiss works with zero app-side back code.
         let handles = state.clone();
-        any(navigator(&state.nav, move || home_page(&handles)).transition(TransitionSpec::glyph()))
+        navigator(&state.nav, move || home_page(&handles)).transition(TransitionSpec::glyph())
     }
 }
 

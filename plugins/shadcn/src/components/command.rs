@@ -269,6 +269,7 @@ impl<State: 'static> CommandView<State> {
     ///
     /// Its query text keeps the system UI family: `text_input` takes a style
     /// only at build and has no theme-resolved family to opt into.
+    // erasure: keep built into a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn input(&self) -> AnyView<State> {
         let on_change = self.on_query_change.clone();
         any(
@@ -321,6 +322,7 @@ impl<State: 'static> CommandView<State> {
 }
 
 /// A group heading row: `px-2 py-1.5 text-xs font-medium text-muted-foreground`.
+// erasure: keep pushed into a heterogeneous Vec<AnyView> row list
 fn heading_view<State: 'static>(name: &str) -> AnyView<State> {
     any(Padding(
         EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
@@ -333,11 +335,13 @@ fn heading_view<State: 'static>(name: &str) -> AnyView<State> {
 }
 
 /// A separator row: `h-px`, painted as a `bg-border` rule by the widget.
+// erasure: keep pushed into a heterogeneous Vec<AnyView> row list
 fn separator_view<State: 'static>() -> AnyView<State> {
     any(SizedBox(None, Some(SEPARATOR_HEIGHT)))
 }
 
 /// The empty row: `py-6 text-sm`.
+// erasure: keep pushed into a heterogeneous Vec<AnyView> row list
 fn empty_view<State: 'static>(label: &str) -> AnyView<State> {
     any(Padding(
         EdgeInsets::symmetric(ROW_PAD_X, EMPTY_PAD_Y),
@@ -354,6 +358,7 @@ fn empty_view<State: 'static>(label: &str) -> AnyView<State> {
 /// A disabled item takes the muted ink rather than upstream's `opacity-50`:
 /// the authoring seam's themed text roles carry no alpha, and the muted role is
 /// the catalog's dimmed ink.
+// erasure: keep pushed into a heterogeneous Vec<AnyView> row list
 fn item_view<State: 'static>(item: &CommandItem) -> AnyView<State> {
     let label = text(item.label.clone())
         .size(style::TEXT_SM as f32)

@@ -136,28 +136,28 @@ impl Component for Pill {
 fn transcript_row(entry: &Message) -> AnyView<AppState> {
     if entry.mine {
         any(message_scroller_item(
-            message(vec![message_content(vec![
-                any(component(Pill {
+            message(vec![message_content((
+                component(Pill {
                     body: entry.body.clone(),
                     variant: BubbleVariant::Default,
                     align: BubbleAlign::End,
-                })),
-                any(message_footer("Sent").align(MessageAlign::End)),
-            ])])
+                }),
+                message_footer("Sent").align(MessageAlign::End),
+            ))])
             .align(MessageAlign::End),
         ))
     } else {
-        any(message_scroller_item(message(vec![
-            any(message_avatar(avatar::<AppState>().fallback("RB"))),
-            any(message_content(vec![
-                any(message_header(entry.who.clone())),
-                any(component(Pill {
+        any(message_scroller_item(message((
+            message_avatar(avatar::<AppState>().fallback("RB")),
+            message_content((
+                message_header(entry.who.clone()),
+                component(Pill {
                     body: entry.body.clone(),
                     variant: BubbleVariant::Muted,
                     align: BubbleAlign::Start,
-                })),
-            ])),
-        ])))
+                }),
+            )),
+        ))))
     }
 }
 

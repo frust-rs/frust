@@ -32,8 +32,8 @@
 pub mod scenarios;
 
 use frust::{
-    AnyView, Axis, Brightness, Component, EdgeInsets, FlexChild, FlexView, Get, Padding, Set,
-    SizedBox, View, any, button, column, inflexible, safe_area, set_app_theme, stack,
+    Axis, Brightness, Component, EdgeInsets, FlexChild, FlexView, Get, Padding, Set, SizedBox,
+    View, any, button, column, inflexible, safe_area, set_app_theme, stack,
 };
 
 use scenarios::{BenchState, SCENARIOS};
@@ -102,7 +102,7 @@ impl Component for BenchApp {
 /// the harness selects via deep link / env). The active scenario's button is
 /// prefixed with `*`. Clicking sets [`BenchState::selected`], which wakes the
 /// rebuild that switches scenarios.
-fn scenario_switcher(state: &BenchState) -> AnyView<BenchState> {
+fn scenario_switcher(state: &BenchState) -> impl View<BenchState> {
     let active = state.active;
     let mut buttons: Vec<FlexChild<BenchState>> = Vec::with_capacity(SCENARIOS.len() * 2);
     for (i, scenario) in SCENARIOS.iter().enumerate() {
@@ -119,9 +119,9 @@ fn scenario_switcher(state: &BenchState) -> AnyView<BenchState> {
     let row = FlexView::new(Axis::Horizontal, buttons);
 
     // Push the row to the bottom edge with a flexible top spacer.
-    any(column()
+    column()
         .flex(1, SizedBox(None, None))
-        .child(Padding(EdgeInsets::all(8.0), row)))
+        .child(Padding(EdgeInsets::all(8.0), row))
 }
 
 // The generated app's sole entry point: one line binds

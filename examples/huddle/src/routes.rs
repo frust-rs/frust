@@ -11,7 +11,7 @@
 //! [`controller`](frust::NavigatorController) is cloned into every builder
 //! that pushes a nested page.
 
-use frust::{AnyView, NavigatorController, Route, RouteParams};
+use frust::{NavigatorController, Route, RouteParams, View};
 
 use crate::HuddleState;
 use crate::features::activity::presentation::pages::activity as activity_activity;
@@ -33,7 +33,7 @@ use crate::features::settings::presentation::pages::{
 
 /// The `/` route (and the navigator's initial page): the Home tab (now a
 /// channels-feature page).
-pub fn home_page(controller: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
+pub fn home_page(controller: NavigatorController<HuddleState>) -> impl View<HuddleState> {
     channels_home::home_screen(controller)
 }
 

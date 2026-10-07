@@ -4,7 +4,7 @@
 //! the current value and every callback writes it back through the full
 //! `AppState` path.
 
-use frust::{SizedBox, View, any, column, row, text};
+use frust::{SizedBox, View, column, row, text};
 use frust_shadcn::{
     AccordionMode, PaginationItem, ToggleGroupMode, ToggleVariant, accordion, accordion_item,
     checkbox, collapsible, label, pagination, radio_group, radio_group_item, separator, slider,
@@ -43,8 +43,8 @@ impl Default for State {
     }
 }
 
-fn gap() -> frust::AnyView<AppState> {
-    any(SizedBox(None, Some(12.0)))
+fn gap() -> impl frust::View<AppState> {
+    SizedBox(None, Some(12.0))
 }
 
 pub fn page(state: &mut State) -> impl View<AppState> + use<> {

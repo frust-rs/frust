@@ -275,8 +275,8 @@ impl Widget for ShimmerWidget {
 
 /// The Home tab root: a `Component` hosting the roster controller. `nav` lets
 /// row/avatar taps push detail pages.
-pub fn home_screen(nav: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
-    any(component(HomeScreen { nav }))
+pub fn home_screen(nav: NavigatorController<HuddleState>) -> impl View<HuddleState> {
+    component(HomeScreen { nav })
 }
 
 /// The Home screen `Component` (stateless config; state lives in [`HomeState`]).
@@ -363,7 +363,7 @@ impl frust::Component for HomeScreen {
         let body: AnyView<HomeState> = if let Some(data) = async_state.value() {
             roster_list(state, data, async_state.is_loading())
         } else if async_state.is_loading() {
-            skeleton_list()
+            any(skeleton_list())
         } else {
             any(Align(
                 Alignment::CENTER,
@@ -404,7 +404,7 @@ impl frust::Component for HomeScreen {
 /// past the 64dp bar's own height). Tapping it pushes `/workspace-switcher`
 /// onto the outer app navigator (see the [module docs](self)' "Home actions"
 /// section) — an entry point the drawer previously lacked.
-fn workspace_tile(nav: &NavigatorController<HuddleState>) -> AnyView<HomeState> {
+fn workspace_tile(nav: &NavigatorController<HuddleState>) -> impl View<HomeState> {
     let nav = nav.clone();
     let tile = Padding(
         EdgeInsets::symmetric(6.0, 12.0),
@@ -420,22 +420,20 @@ fn workspace_tile(nav: &NavigatorController<HuddleState>) -> AnyView<HomeState> 
                 text("HQ").size(12.0).color(Color::WHITE),
             ))),
     );
-    any(GestureDetector(tile).on_tap(move |_s: &mut HomeState| {
+    GestureDetector(tile).on_tap(move |_s: &mut HomeState| {
         nav.push(crate::features::channels::presentation::pages::workspace_drawer::workspace_drawer_screen);
-    }))
+    })
 }
 
 /// The app bar's trailing `icons::ADD` action — opens the create-channel
 /// sheet with a fresh (empty, public) draft.
-fn create_channel_action() -> AnyView<HomeState> {
-    any(
-        GestureDetector(icon(icons::ADD).size(24.0).label("Create a channel")).on_tap(
-            |s: &mut HomeState| {
-                s.sheet = HomeSheet::Create;
-                s.create_name.clear();
-                s.create_private = false;
-            },
-        ),
+fn create_channel_action() -> impl View<HomeState> {
+    GestureDetector(icon(icons::ADD).size(24.0).label("Create a channel")).on_tap(
+        |s: &mut HomeState| {
+            s.sheet = HomeSheet::Create;
+            s.create_name.clear();
+            s.create_private = false;
+        },
     )
 }
 
@@ -444,17 +442,17 @@ fn create_channel_action() -> AnyView<HomeState> {
 // ---------------------------------------------------------------------------
 
 /// The loading skeleton: shimmer rows standing in for the roster.
-fn skeleton_list() -> AnyView<HomeState> {
+fn skeleton_list() -> impl View<HomeState> {
     let mut rows: Vec<AnyView<HomeState>> = Vec::new();
     for _ in 0..7 {
-        rows.push(skeleton_row());
+        rows.push(any(skeleton_row()));
     }
-    any(scroll_view(Padding(EdgeInsets::all(8.0), Column(rows))))
+    scroll_view(Padding(EdgeInsets::all(8.0), Column(rows)))
 }
 
 /// One skeleton row: a shimmer circle + two shimmer lines.
-fn skeleton_row() -> AnyView<HomeState> {
-    any(Padding(
+fn skeleton_row() -> impl View<HomeState> {
+    Padding(
         EdgeInsets::symmetric(8.0, 10.0),
         row()
             .child(shimmer(Size::new(AVATAR_SIZE, AVATAR_SIZE), AVATAR_RADIUS))
@@ -467,7 +465,7 @@ fn skeleton_row() -> AnyView<HomeState> {
                     .child(shimmer(Size::new(220.0, 12.0), 4.0)),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -514,14 +512,22 @@ fn roster_list(
     // the pieces for navigation, async ops, and UI state that were extracted
     // above.
     let builder = move |i: usize| match &build_rows[i] {
-        RosterRow::ChannelsHeader => section_header("Channels"),
-        RosterRow::Channel(c) => {
-            channel_row_keyed(&build_nav, &build_controller, &build_toasts, &build_logo, c)
-        }
-        RosterRow::DmsHeader => section_header("Direct messages"),
-        RosterRow::Dm(d) => {
-            dm_row_keyed(&build_nav, &build_controller, &build_toasts, &build_logo, d)
-        }
+        RosterRow::ChannelsHeader => any(section_header("Channels")),
+        RosterRow::Channel(c) => any(channel_row_keyed(
+            &build_nav,
+            &build_controller,
+            &build_toasts,
+            &build_logo,
+            c,
+        )),
+        RosterRow::DmsHeader => any(section_header("Direct messages")),
+        RosterRow::Dm(d) => any(dm_row_keyed(
+            &build_nav,
+            &build_controller,
+            &build_toasts,
+            &build_logo,
+            d,
+        )),
     };
 
     // The refresh callback: same operation the earlier scroll_view used.
@@ -565,12 +571,12 @@ fn roster_list(
 /// [`ROSTER_ROW_EXTENT`]) — safe under the roster's variable-extent `ListView`
 /// (see [`roster_list`]), which measures each row rather than forcing every
 /// row to one uniform height.
-fn section_header(title: &str) -> AnyView<HomeState> {
-    any(Padding(
+fn section_header(title: &str) -> impl View<HomeState> {
+    Padding(
         // Start margin 16 (8 outer list pad + 8 here) — Material side margin.
         EdgeInsets::symmetric(8.0, 12.0),
         text(title.to_string()).size(SECTION_LABEL_SIZE),
-    ))
+    )
 }
 
 /// Wrap a row (leading + tappable content, pre-swipe) so a long-press opens
@@ -583,16 +589,14 @@ fn row_with_long_press_menu(
     id: String,
     label: String,
     muted: bool,
-) -> AnyView<HomeState> {
-    any(
-        GestureDetector(row).on_long_press(move |s: &mut HomeState| {
-            s.sheet = HomeSheet::RowActions {
-                id: id.clone(),
-                label: label.clone(),
-                muted,
-            };
-        }),
-    )
+) -> impl View<HomeState> {
+    GestureDetector(row).on_long_press(move |s: &mut HomeState| {
+        s.sheet = HomeSheet::RowActions {
+            id: id.clone(),
+            label: label.clone(),
+            muted,
+        };
+    })
 }
 
 /// The leading `#` circle for a channel row.
@@ -602,8 +606,8 @@ fn row_with_long_press_menu(
 /// shrink-wraps to the glyph and lands at the stack origin (top-left), so the
 /// tight-sized box is what gives `Align` the bounded constraints it centers
 /// within.
-fn channel_circle() -> AnyView<HomeState> {
-    any(stack()
+fn channel_circle() -> impl View<HomeState> {
+    stack()
         .child(fill_box(
             Size::new(AVATAR_SIZE, AVATAR_SIZE),
             CHANNEL_TINT,
@@ -612,7 +616,7 @@ fn channel_circle() -> AnyView<HomeState> {
         .child(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
             Alignment::CENTER,
             text("#").size(MONOGRAM_SIZE).color(Color::WHITE),
-        ))))
+        )))
 }
 
 /// The tappable middle-of-row content: name/title, preview, and trailing unread
@@ -622,18 +626,18 @@ fn tappable_content<F: Fn(&mut HomeState) + 'static>(
     preview: String,
     unread: u32,
     on_tap: F,
-) -> AnyView<HomeState> {
+) -> impl View<HomeState> {
     let column = any(column()
         .child(title)
         .child(SizedBox(None, Some(4.0)))
         .child(text(preview).size(LIST_SUBTITLE_SIZE)));
-    any(GestureDetector(
+    GestureDetector(
         row()
             .flex(1, column)
             .child(unread_badge(unread))
             .cross_axis(CrossAxisAlignment::Center),
     )
-    .on_tap(on_tap))
+    .on_tap(on_tap)
 }
 
 /// The unread badge: a colored pill + count (empty when zero).
@@ -663,15 +667,15 @@ fn unread_badge(count: u32) -> AnyView<HomeState> {
 }
 
 /// The horizontal row layout: leading avatar + tappable content.
-fn row_layout(leading: AnyView<HomeState>, content: AnyView<HomeState>) -> AnyView<HomeState> {
-    any(Padding(
+fn row_layout(leading: AnyView<HomeState>, content: AnyView<HomeState>) -> impl View<HomeState> {
+    Padding(
         EdgeInsets::symmetric(8.0, 10.0),
         row()
             .child(leading)
             .child(SizedBox(Some(12.0), None))
             .flex(1, content)
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// A channel roster row, built from extracted state pieces. This is the
@@ -683,7 +687,7 @@ fn channel_row_keyed(
     toasts: &crate::ui::toast::ToastController,
     _logo: &Option<ImageSource>,
     c: &ChannelItem,
-) -> AnyView<HomeState> {
+) -> impl View<HomeState> {
     // Mimic the structure of the original channel_row, but accept the
     // extracted pieces instead of HomeState.
     let leading = any(channel_circle());
@@ -716,10 +720,11 @@ fn channel_row_keyed(
         },
     );
 
-    let row = row_layout(leading, content);
-    let menu_row = row_with_long_press_menu(row, c.id.clone(), format!("#{}", c.name), c.muted);
+    let row = row_layout(leading, any(content));
+    let menu_row =
+        row_with_long_press_menu(any(row), c.id.clone(), format!("#{}", c.name), c.muted);
     swipe_wrap_keyed(
-        menu_row,
+        any(menu_row),
         c.id.clone(),
         format!("#{}", c.name),
         controller,
@@ -736,7 +741,7 @@ fn dm_row_keyed(
     toasts: &crate::ui::toast::ToastController,
     logo: &Option<ImageSource>,
     d: &DmItem,
-) -> AnyView<HomeState> {
+) -> impl View<HomeState> {
     // Mimic the structure of the original dm_row, but accept the extracted
     // pieces instead of HomeState.
     let leading = dm_avatar_keyed(logo, d);
@@ -760,15 +765,21 @@ fn dm_row_keyed(
         },
     );
 
-    let row = row_layout(leading, content);
-    let menu_row = row_with_long_press_menu(row, d.id.clone(), d.name.clone(), d.muted);
-    swipe_wrap_keyed(menu_row, d.id.clone(), d.name.clone(), controller, toasts)
+    let row = row_layout(any(leading), any(content));
+    let menu_row = row_with_long_press_menu(any(row), d.id.clone(), d.name.clone(), d.muted);
+    swipe_wrap_keyed(
+        any(menu_row),
+        d.id.clone(),
+        d.name.clone(),
+        controller,
+        toasts,
+    )
 }
 
 /// A DM avatar built from extracted state pieces (primarily `logo`). This is
 /// the ListView version of [`dm_avatar`], used when the full HomeState cannot
 /// be passed as a reference.
-fn dm_avatar_keyed(_logo: &Option<ImageSource>, d: &DmItem) -> AnyView<HomeState> {
+fn dm_avatar_keyed(_logo: &Option<ImageSource>, d: &DmItem) -> impl View<HomeState> {
     // A couple of users get a real `Image` avatar; the rest an initials circle.
     let use_image = matches!(d.user_id, 2 | 5) && _logo.is_some();
     let base: AnyView<HomeState> = if use_image {
@@ -799,19 +810,13 @@ fn dm_avatar_keyed(_logo: &Option<ImageSource>, d: &DmItem) -> AnyView<HomeState
     let avatar = any(stack().child(base).child(dot));
 
     let user_id = d.user_id;
-    any(
-        GestureDetector(hero(format!("avatar-{user_id}"), avatar)).on_tap(
-            move |_s: &mut HomeState| {
-                let id = user_id.to_string();
-                let nav = _s.nav.clone(); // Capture nav from the state in the closure
-                nav.push(move || {
-                    crate::features::profile::presentation::pages::profile::profile_screen(
-                        id.clone(),
-                    )
-                });
-            },
-        ),
-    )
+    GestureDetector(hero(format!("avatar-{user_id}"), avatar)).on_tap(move |_s: &mut HomeState| {
+        let id = user_id.to_string();
+        let nav = _s.nav.clone(); // Capture nav from the state in the closure
+        nav.push(move || {
+            crate::features::profile::presentation::pages::profile::profile_screen(id.clone())
+        });
+    })
 }
 
 /// Wrap a row in a [`swipeable_row`](crate::ui::swipeable::swipeable_row):
@@ -823,7 +828,7 @@ fn swipe_wrap_keyed(
     label: String,
     controller: &Arc<ChannelsController>,
     toasts: &crate::ui::toast::ToastController,
-) -> AnyView<HomeState> {
+) -> impl View<HomeState> {
     let data = controller.data;
 
     let archive_id = id.clone();
@@ -858,9 +863,9 @@ fn swipe_wrap_keyed(
         });
     };
 
-    any(crate::ui::swipeable::swipeable_row(row)
+    crate::ui::swipeable::swipeable_row(row)
         .on_swipe_right(ARCHIVE_COLOR, archive_cb)
-        .on_swipe_left(MUTE_COLOR, mute_cb))
+        .on_swipe_left(MUTE_COLOR, mute_cb)
 }
 
 // ---------------------------------------------------------------------------

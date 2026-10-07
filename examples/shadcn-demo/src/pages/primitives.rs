@@ -26,8 +26,8 @@ fn row(children: Vec<frust::AnyView<AppState>>) -> impl View<AppState> + use<> {
     Row(children)
 }
 
-fn gap() -> frust::AnyView<AppState> {
-    any(SizedBox(Some(12.0), None))
+fn gap() -> impl frust::View<AppState> {
+    SizedBox(Some(12.0), None)
 }
 
 pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
@@ -37,17 +37,17 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
         // --- Badges, avatars, kbd, labels ---
         .child(row(vec![
             any(badge("Default")),
-            gap(),
+            any(gap()),
             any(badge("Secondary").variant(BadgeVariant::Secondary)),
-            gap(),
+            any(gap()),
             any(badge("Destructive").variant(BadgeVariant::Destructive)),
-            gap(),
+            any(gap()),
             any(badge("Outline").variant(BadgeVariant::Outline)),
-            gap(),
+            any(gap()),
             any(avatar::<AppState>().fallback("ED")),
-            gap(),
+            any(gap()),
             any(avatar::<AppState>().fallback("SM").size(AvatarSize::Sm)),
-            gap(),
+            any(gap()),
             any(kbd("Ctrl")),
             any(SizedBox(Some(4.0), None)),
             any(kbd_group(vec![kbd("Shift"), kbd("P")])),
@@ -55,7 +55,7 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
         .child(SizedBox(None, Some(16.0)))
         .child(row(vec![
             any(label("A plain label")),
-            gap(),
+            any(gap()),
             any(label("Disabled").disabled(true)),
         ]))
         .child(SizedBox(None, Some(16.0)))
@@ -64,13 +64,13 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
         // --- Progress / spinner / skeleton / marker ---
         .child(row(vec![
             any(progress(0.65)),
-            gap(),
+            any(gap()),
             any(spinner()),
-            gap(),
+            any(gap()),
             any(skeleton(120.0, 20.0)),
-            gap(),
+            any(gap()),
             any(marker("1")),
-            gap(),
+            any(gap()),
             any(marker("Section").variant(MarkerVariant::Separator)),
         ]))
         .child(SizedBox(None, Some(16.0)))
@@ -81,19 +81,15 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
         ))
         .child(SizedBox(None, Some(16.0)))
         // --- Breadcrumb ---
-        .child(breadcrumb_list(vec![
-            any(breadcrumb_item(
-                breadcrumb_link("Home").on_click(|_: &mut AppState| {}),
-            )),
-            any(breadcrumb_separator::<AppState>()),
-            any(breadcrumb_item(breadcrumb_link("Components"))),
-            any(breadcrumb_separator::<AppState>()),
-            any(breadcrumb_ellipsis()),
-            any(breadcrumb_separator::<AppState>()),
-            any(breadcrumb_item::<AppState, _>(breadcrumb_page(
-                "Primitives",
-            ))),
-        ]))
+        .child(breadcrumb_list((
+            breadcrumb_item(breadcrumb_link("Home").on_click(|_: &mut AppState| {})),
+            breadcrumb_separator::<AppState>(),
+            breadcrumb_item(breadcrumb_link("Components")),
+            breadcrumb_separator::<AppState>(),
+            breadcrumb_ellipsis(),
+            breadcrumb_separator::<AppState>(),
+            breadcrumb_item::<AppState, _>(breadcrumb_page("Primitives")),
+        )))
         .child(SizedBox(None, Some(16.0)))
         // --- Alert ---
         .child(alert(
@@ -119,61 +115,52 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
                 card_description("A short supporting line."),
             ]),
             card_content(text("Card body content goes here.")),
-            card_footer(vec![
-                any(button("Cancel", |_: &mut AppState| {}).variant(ButtonVariant::Ghost)),
-                any(button("Save", |_: &mut AppState| {})),
-            ]),
+            card_footer((
+                button("Cancel", |_: &mut AppState| {}).variant(ButtonVariant::Ghost),
+                button("Save", |_: &mut AppState| {}),
+            )),
         ]))
         .child(SizedBox(None, Some(16.0)))
         // --- Item ---
         .child(
-            item(vec![
-                any(item_media(any::<AppState, _>(
-                    avatar::<AppState>().fallback("IT"),
-                ))),
-                any(item_content(vec![
-                    any(item_title("Item title")),
-                    any(item_description("A trailing detail.")),
-                ])),
-                any(item_actions(vec![
+            item((
+                item_media(any::<AppState, _>(avatar::<AppState>().fallback("IT"))),
+                item_content((
+                    item_title("Item title"),
+                    item_description("A trailing detail."),
+                )),
+                item_actions(vec![
                     button("Open", |_: &mut AppState| {}).size(ButtonSize::Sm),
-                ])),
-            ])
+                ]),
+            ))
             .variant(ItemVariant::Outline),
         )
         .child(SizedBox(None, Some(16.0)))
         // --- Empty state ---
-        .child(empty(vec![
-            any(empty_header(vec![
-                any(
-                    empty_media(any::<AppState, _>(text("\u{1F4ED}").size(28.0)))
-                        .variant(EmptyMediaVariant::Icon),
-                ),
-                any(empty_title("Nothing here yet")),
-                any(empty_description(
-                    "Once you add data it shows up in this space.",
-                )),
-            ])),
-            any(empty_content(vec![button(
-                "Add data",
-                |_: &mut AppState| {},
-            )])),
-        ]))
+        .child(empty((
+            empty_header((
+                empty_media(any::<AppState, _>(text("\u{1F4ED}").size(28.0)))
+                    .variant(EmptyMediaVariant::Icon),
+                empty_title("Nothing here yet"),
+                empty_description("Once you add data it shows up in this space."),
+            )),
+            empty_content(vec![button("Add data", |_: &mut AppState| {})]),
+        )))
         .child(SizedBox(None, Some(16.0)))
         .child(separator())
         .child(SizedBox(None, Some(16.0)))
         // --- Buttons, sizes, disabled ---
         .child(row(vec![
             any(button("Default", |_: &mut AppState| {})),
-            gap(),
+            any(gap()),
             any(button("Secondary", |_: &mut AppState| {}).variant(ButtonVariant::Secondary)),
-            gap(),
+            any(gap()),
             any(button("Outline", |_: &mut AppState| {}).variant(ButtonVariant::Outline)),
-            gap(),
+            any(gap()),
             any(button("Destructive", |_: &mut AppState| {}).variant(ButtonVariant::Destructive)),
-            gap(),
+            any(gap()),
             any(button("Link", |_: &mut AppState| {}).variant(ButtonVariant::Link)),
-            gap(),
+            any(gap()),
             any(button("Disabled", |_: &mut AppState| {}).disabled(true)),
         ]))
         .child(SizedBox(None, Some(12.0)))

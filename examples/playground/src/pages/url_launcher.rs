@@ -24,7 +24,8 @@
 
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Padding,
-    RwSignal, Set, SizedBox, Theme, any, button, deep_links, inflexible, row, text, use_context,
+    RwSignal, Set, SizedBox, Theme, View, any, button, deep_links, inflexible, row, text,
+    use_context,
 };
 use frust_url_launcher::UrlLauncher;
 
@@ -96,7 +97,7 @@ fn gap_h(w: f64) -> FlexChild<PlaygroundState> {
 /// See the page-fn contract in [`crate::pages`]. Reads no
 /// [`PlaygroundState`] signal — the call status lives in [`status_sig`] and
 /// the deep-link readout comes straight from [`frust::deep_links`].
-pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
+pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
     let status = status_sig().get();
     // Tracked read: `Get::get()` subscribes this rebuild to `latest`, so a
     // warm `frustplay://` link pushed while this page is on screen repaints
@@ -164,11 +165,11 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
         .color(muted())),
     ];
 
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         FlexView::new(
             Axis::Vertical,
             children.into_iter().map(inflexible).collect(),
         ),
-    ))
+    )
 }

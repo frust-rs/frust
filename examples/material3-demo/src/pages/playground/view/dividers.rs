@@ -69,7 +69,7 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 /// The playground body — everything that varies with `state`; the same
 /// function [`DividersPlayground::build`] calls, and this file's tests
 /// exercise directly across every knob state.
-fn body(state: &Knobs) -> AnyView<Knobs> {
+fn body(state: &Knobs) -> impl View<Knobs> {
     let theme = ambient_theme();
     playground_body(
         vec![preview(&theme, state)],
@@ -118,11 +118,11 @@ fn preview(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
             .cross_axis(CrossAxisAlignment::Stretch))
     };
 
-    any(play_preview_card("Divider", content))
+    play_preview_card("Divider", content)
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {
-    any(control_panel::<Knobs>(
+    control_panel::<Knobs>(
         "Appearance",
         vec![
             play_enum_segmented::<Knobs, DividerAxis>(
@@ -154,7 +154,7 @@ fn controls(state: &Knobs) -> AnyView<Knobs> {
                 |state: &mut Knobs, next: f64| state.end_indent = next,
             ),
         ],
-    ))
+    )
 }
 
 fn snippet(state: &Knobs) -> PlaySnippet {

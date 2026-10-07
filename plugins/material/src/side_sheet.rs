@@ -115,7 +115,7 @@ use std::rc::Rc;
 use frust::authoring::text::{FontWeight, LineHeight};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ThemeTextType, View, Widget, any,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ThemeTextType, View, ViewSeq, Widget, any,
 };
 use frust::text;
 use kurbo::{Point, Size};
@@ -429,16 +429,18 @@ pub struct SideSheetView<State: 'static>(OverlayModalView<State>);
 ///     [text_button("Close").on_press(|s: &mut State| { .. })],
 /// )
 /// ```
-pub fn side_sheet<State: 'static, V: View<State>>(
+pub fn side_sheet<State: 'static, V: View<State>, M>(
     title: impl Into<String>,
     body: V,
-    actions: impl IntoIterator<Item = impl View<State>>,
+    actions: impl ViewSeq<State, M>,
 ) -> SideSheetView<State> {
+    let mut erased = Vec::new();
+    actions.extend_views(&mut erased);
     let title = title.into();
     let content = SideSheetContentView {
         title: title.clone(),
         body: any(body),
-        actions: actions.into_iter().map(AnyView::new).collect(),
+        actions: erased,
     };
     SideSheetView(overlay_modal(content, side_sheet_config()).label(title))
 }

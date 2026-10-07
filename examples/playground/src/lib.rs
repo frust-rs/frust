@@ -65,7 +65,7 @@
 //! surface's own base clear turns alpha-0 (`frust-shell-*`'s per-frame
 //! `base_color` swap), so **every** pixel no widget explicitly paints becomes
 //! a window straight through to whatever sits behind the surface — not just
-//! `platform_views`'s own deliberate slot. [`home_page`]'s root [`Stack`]
+//! `platform_views`'s own deliberate slot. [`home_page`]'s root [`Stack`](frust::Stack)
 //! therefore paints an explicit, surface-colored [`AppBackground`] as its
 //! bottom-most layer, restoring every other section's opaque look; the
 //! `platform_views` section's own slot is the one deliberate hole punched
@@ -98,9 +98,9 @@ use frust::{
     Align, Alignment, AnyView, Axis, Brightness, ButtonStyle, Color, Component, DeepLink,
     DragCoordinator, EdgeInsets, FlexView, Get, GetUntracked, MotionScheme, NavigatorController,
     Padding, PageTransition, PanZoomController, PanZoomTransform, RwSignal, ScrollController,
-    ScrollInfo, ScrollSubscription, Set, SizedBox, Stack, Theme, TransitionSpec, Update, View,
+    ScrollInfo, ScrollSubscription, Set, SizedBox, Theme, TransitionSpec, Update, View,
     WindowMetrics, any, button, column, container, deep_links, icon, icons, inflexible, navigator,
-    row, safe_area, scroll_view, set_app_theme, text, use_context,
+    row, safe_area, scroll_view, set_app_theme, stack, text, use_context,
 };
 use frust_material::{app_bar, nav_item, navigation_bar};
 
@@ -190,7 +190,7 @@ fn plan_deep_link(link: &DeepLink, last_applied: Option<u64>) -> Option<DeepLink
 /// [`PlaygroundState::last_applied_sequence`] so a later rebuild that
 /// re-observes the same delivery is a no-op. Renders nothing (a zero-size
 /// [`SizedBox`]) — it exists purely for its side effect on `state`.
-fn deep_link_router(state: &PlaygroundState) -> AnyView<PlaygroundState> {
+fn deep_link_router(state: &PlaygroundState) -> impl View<PlaygroundState> + use<> {
     if let Some(link) = deep_links().latest.get() {
         let last_applied = state.last_applied_sequence.get();
         if let Some(action) = plan_deep_link(&link, last_applied) {
@@ -220,7 +220,7 @@ fn deep_link_router(state: &PlaygroundState) -> AnyView<PlaygroundState> {
         }
         state.last_applied_sequence.set(Some(link.sequence));
     }
-    any(SizedBox(Some(0.0), Some(0.0)))
+    SizedBox(Some(0.0), Some(0.0))
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +233,7 @@ fn deep_link_router(state: &PlaygroundState) -> AnyView<PlaygroundState> {
 /// is the identical pattern, built the same way). Needed because no facade widget
 /// paints an unconditional "fill available space" rect: `Image`/`SizedBox`
 /// only tighten a child when the INCOMING constraint is already tight, and
-/// [`Stack`] hands every child a LOOSE (min-zero) constraint, so a naive
+/// [`Stack`](frust::Stack) hands every child a LOOSE (min-zero) constraint, so a naive
 /// background child would collapse to zero size. Declaring a large
 /// (larger-than-any-real-viewport) intrinsic size and letting
 /// [`BoxConstraints::constrain`] clamp it into whatever the `Stack` hands
@@ -482,7 +482,7 @@ pub(crate) fn effective_reduce_motion(reduce_motion: bool, animations_enabled: b
 /// The root [`app_bar`](frust_material::app_bar): a plug brand mark, the "playground"
 /// title, and the brightness/reduce-motion/animations toggles folded into its
 /// trailing actions.
-fn playground_app_bar(state: &PlaygroundState) -> AnyView<PlaygroundState> {
+fn playground_app_bar(state: &PlaygroundState) -> impl View<PlaygroundState> + use<> {
     let brightness = state.brightness.get();
     let reduce_motion = state.reduce_motion.get();
     let animations_enabled = state.animations_enabled.get();
@@ -544,9 +544,9 @@ fn playground_app_bar(state: &PlaygroundState) -> AnyView<PlaygroundState> {
         );
     }));
 
-    any(app_bar::<PlaygroundState>("playground")
+    app_bar::<PlaygroundState>("playground")
         .leading(brand)
-        .actions(vec![brightness_btn, motion_btn, animations_btn]))
+        .actions(vec![brightness_btn, motion_btn, animations_btn])
 }
 
 /// Bottom-center inset of the toast strip from the safe-area edge (logical
@@ -561,7 +561,7 @@ const TOAST_MARGIN_PX: f64 = 16.0;
 /// shipped toast host belongs to a design-system catalog, and playground is
 /// deliberately design-system-neutral (module docs). A page raises a toast by
 /// appending to [`PlaygroundState::toasts`] from an event handler.
-fn toast_overlay(pending: &[String]) -> AnyView<PlaygroundState> {
+fn toast_overlay(pending: &[String]) -> impl View<PlaygroundState> + use<> {
     let ink = frust::use_context::<Theme>()
         .unwrap_or_else(frust_material::baseline)
         .scheme()
@@ -570,13 +570,13 @@ fn toast_overlay(pending: &[String]) -> AnyView<PlaygroundState> {
         .iter()
         .map(|message| inflexible(text(message.clone()).size(12.0).color(ink)))
         .collect();
-    any(Align(
+    Align(
         Alignment::new(0.0, 1.0),
         Padding(
             EdgeInsets::all(TOAST_MARGIN_PX),
             FlexView::new(Axis::Vertical, lines),
         ),
-    ))
+    )
 }
 
 /// The narrow-width bottom nav bar: the first [`PRIMARY_NAV_COUNT`]
@@ -584,7 +584,7 @@ fn toast_overlay(pending: &[String]) -> AnyView<PlaygroundState> {
 /// [`more_overlay`] instead of navigating directly. `section` is the live
 /// selected index (any value — an overflow section has no primary slot of
 /// its own, see below).
-fn bottom_nav_bar(section: usize) -> AnyView<PlaygroundState> {
+fn bottom_nav_bar(section: usize) -> impl View<PlaygroundState> {
     let mut items: Vec<_> = SECTION_LABELS[..PRIMARY_NAV_COUNT]
         .iter()
         .map(|label| nav_item::<PlaygroundState>(*label))
@@ -598,21 +598,17 @@ fn bottom_nav_bar(section: usize) -> AnyView<PlaygroundState> {
     } else {
         PRIMARY_NAV_COUNT
     };
-    any(navigation_bar(
-        items,
-        selected,
-        |state: &mut PlaygroundState, index| {
-            if index < PRIMARY_NAV_COUNT {
-                let current = state.section.get_untracked();
-                // A move to an earlier section reads as "back": the switcher
-                // plays its shared-axis slide in reverse.
-                state.reverse.set(index < current);
-                state.section.set(index);
-            } else {
-                state.more_open.set(true);
-            }
-        },
-    ))
+    navigation_bar(items, selected, |state: &mut PlaygroundState, index| {
+        if index < PRIMARY_NAV_COUNT {
+            let current = state.section.get_untracked();
+            // A move to an earlier section reads as "back": the switcher
+            // plays its shared-axis slide in reverse.
+            state.reverse.set(index < current);
+            state.section.set(index);
+        } else {
+            state.more_open.set(true);
+        }
+    })
 }
 
 /// [`side_rail`]'s fixed column width, in logical px.
@@ -623,7 +619,7 @@ const SIDE_RAIL_WIDTH_PX: f64 = 180.0;
 /// live selection highlighted via [`ButtonStyle::Primary`]. See the module
 /// docs' "Responsive navigation" section for why this is hand-rolled rather
 /// than `frust_material::navigation_rail`.
-fn side_rail(section: usize) -> AnyView<PlaygroundState> {
+fn side_rail(section: usize) -> impl View<PlaygroundState> {
     let items = SECTION_LABELS
         .iter()
         .enumerate()
@@ -644,21 +640,19 @@ fn side_rail(section: usize) -> AnyView<PlaygroundState> {
             )
         })
         .collect();
-    any(
-        SizedBox::<PlaygroundState>(Some(SIDE_RAIL_WIDTH_PX), None).child(scroll_view(Padding(
-            EdgeInsets::all(8.0),
-            FlexView::new(Axis::Vertical, items),
-        ))),
-    )
+    SizedBox::<PlaygroundState>(Some(SIDE_RAIL_WIDTH_PX), None).child(scroll_view(Padding(
+        EdgeInsets::all(8.0),
+        FlexView::new(Axis::Vertical, items),
+    )))
 }
 
 /// The narrow-width "More" destination's overlay (see the module docs'
 /// "Responsive navigation" section): a bottom-anchored, opaque list of every
 /// [`SECTION_LABELS`] destination plus a "Close" row. Tapping a destination
 /// navigates to it and dismisses the overlay; tapping "Close" dismisses it
-/// without navigating. Mounted as a top [`Stack`] layer by [`home_page`] only
+/// without navigating. Mounted as a top [`Stack`](frust::Stack) layer by [`home_page`] only
 /// while [`PlaygroundState::more_open`] is set.
-fn more_overlay() -> AnyView<PlaygroundState> {
+fn more_overlay() -> impl View<PlaygroundState> {
     let background = frust::use_context::<Theme>()
         .unwrap_or_else(frust_material::baseline)
         .scheme()
@@ -686,14 +680,14 @@ fn more_overlay() -> AnyView<PlaygroundState> {
         .style(ButtonStyle::Primary)
         .small(),
     ));
-    any(Align(
+    Align(
         Alignment::new(0.0, 1.0),
         container(Padding(
             EdgeInsets::all(16.0),
             FlexView::new(Axis::Vertical, rows),
         ))
         .fill(background),
-    ))
+    )
 }
 
 /// The navigator's home page: the root app bar over the pattern-switched
@@ -704,7 +698,7 @@ fn more_overlay() -> AnyView<PlaygroundState> {
 /// section). Re-run on every rebuild (the navigator re-invokes its page
 /// builder), so the signal reads here subscribe the shell to
 /// section/brightness/toast/more-open changes.
-fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
+fn home_page(state: &PlaygroundState) -> impl View<PlaygroundState> + use<> {
     let section = state.section.get();
     let reverse = state.reverse.get();
     let pending = state.toasts.get();
@@ -752,18 +746,14 @@ fn home_page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
         .unwrap_or_else(frust_material::baseline)
         .scheme()
         .surface;
-    let mut layers = vec![
-        any(AppBackground(background_color)),
-        any(column),
-        deep_link_router(state),
-    ];
-    if !pending.is_empty() {
-        layers.push(toast_overlay(&pending));
-    }
-    if !wide && more_open {
-        layers.push(more_overlay());
-    }
-    any(Stack(layers))
+    stack()
+        .child(AppBackground(background_color))
+        .child(column)
+        .child(deep_link_router(state))
+        .when(!pending.is_empty(), |layers| {
+            layers.child(toast_overlay(&pending))
+        })
+        .when(!wide && more_open, |layers| layers.child(more_overlay()))
 }
 
 /// Builds the app-scoped [`frust_i18n::I18n`] handle the "i18n" section
@@ -825,8 +815,8 @@ impl Component for PlaygroundApp {
         // so back-dismiss (overlay → pop → app exit at the root) works with
         // zero app-side back code.
         let handles = state.clone();
-        any(navigator(&state.nav, move || home_page(&handles))
-            .transition(TransitionSpec::duration(PageTransition::M3SharedAxisX)))
+        navigator(&state.nav, move || home_page(&handles))
+            .transition(TransitionSpec::duration(PageTransition::M3SharedAxisX))
     }
 }
 

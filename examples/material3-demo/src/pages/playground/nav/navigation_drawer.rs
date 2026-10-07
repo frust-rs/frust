@@ -68,7 +68,7 @@ impl Component for NavigationDrawerPlayground {
 /// The whole page body: [`playground_body`]'s preview/snippet/controls
 /// arrangement — no overlay to mount, so (unlike its `nav` siblings with an
 /// enum-menu picker) this page needs no outer [`frust::Stack`].
-fn body(state: &DrawerState) -> AnyView<DrawerState> {
+fn body(state: &DrawerState) -> impl View<DrawerState> {
     let theme = ambient_theme();
     playground_body(
         vec![play_preview_card(
@@ -83,11 +83,11 @@ fn body(state: &DrawerState) -> AnyView<DrawerState> {
 /// Frame `child` in an outlined, rounded box — the reference's `_framed`
 /// helper (duplicated per playground page upstream, so this port does the
 /// same rather than sharing one across files).
-fn framed(theme: &Theme, child: impl View<DrawerState>) -> AnyView<DrawerState> {
+fn framed(theme: &Theme, child: impl View<DrawerState>) -> impl View<DrawerState> {
     let outline = theme.scheme().outline_variant;
-    any(container(child)
+    container(child)
         .radius(MaterialDimensions::RADIUS_LARGE)
-        .border(outline, 1.0))
+        .border(outline, 1.0)
 }
 
 /// The one section of four destinations — the reference's `_destinations`
@@ -114,7 +114,7 @@ fn section(state: &DrawerState) -> DrawerSection<DrawerState> {
     section
 }
 
-fn preview(theme: &Theme, state: &DrawerState) -> AnyView<DrawerState> {
+fn preview(theme: &Theme, state: &DrawerState) -> impl View<DrawerState> {
     let content = navigation_drawer_content(
         vec![section(state)],
         state.selected,

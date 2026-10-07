@@ -59,7 +59,7 @@ fn snippet_code(state: &Knobs) -> String {
 }
 
 /// The playground body for the current knob state.
-fn body(state: &mut Knobs) -> AnyView<Knobs> {
+fn body(state: &mut Knobs) -> impl View<Knobs> {
     let message = state.message.clone();
     let action_label = state.action_label.clone();
     let show_action = state.show_action;

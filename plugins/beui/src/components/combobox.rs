@@ -370,6 +370,7 @@ impl<State: 'static> ComboboxTriggerView<State> {
     /// Built on demand rather than stored so the view stays a plain data
     /// description: the field is `input`'s, and this is the one place its props
     /// are assembled.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn field_view(&self) -> AnyView<State> {
         let on_change = self.on_query_change.clone();
         // The query and placeholder keep the wrapped baseline `text_input`'s own

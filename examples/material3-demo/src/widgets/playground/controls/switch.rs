@@ -6,6 +6,7 @@ use frust_material::{MaterialSpacing, switch};
 use crate::widgets::playground::ambient_theme;
 
 /// A row toggling `value`.
+// erasure: keep element of a heterogeneous Vec<AnyView> list (control_panel children)
 pub fn play_switch<State: 'static>(
     label: impl Into<String>,
     value: bool,

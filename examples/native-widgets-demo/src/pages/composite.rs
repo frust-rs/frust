@@ -31,7 +31,7 @@
 //! for the whole card however many native children it has. Reading three
 //! more would mean the card's children leaked into frust's slot space.
 
-use frust::{AnyView, Color, Get, GetUntracked, Set, any, inflexible};
+use frust::{AnyView, Color, Get, GetUntracked, Set, View, inflexible};
 use frust_native_widgets::{
     DEMO_CARD_HEIGHT, DEMO_CARD_KIND, DEMO_CARD_WIDTH, DemoCard, DemoCardProps, native_component,
     register_demo_components,
@@ -80,8 +80,8 @@ fn ensure_demo_registered() {
 /// The card itself: ONE `platform_view` slot. `title` and the two theme
 /// colors are live props (update path); `presses` closes the event round
 /// trip.
-fn composite_demo(title: &str, background: Color, ink: Color, presses: u32) -> AnyView<S> {
-    any(native_component(
+fn composite_demo(title: &str, background: Color, ink: Color, presses: u32) -> impl View<S> {
+    native_component(
         DEMO_CARD_KIND,
         DemoCard,
         DemoCardProps {
@@ -100,7 +100,7 @@ fn composite_demo(title: &str, background: Color, ink: Color, presses: u32) -> A
         if event.is_click() {
             bump(presses_sig());
         }
-    }))
+    })
 }
 
 /// The explanation, the toggle, the readout, and (when on) the card.

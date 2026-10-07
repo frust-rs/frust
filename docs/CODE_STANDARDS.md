@@ -123,16 +123,23 @@ off this index — read this plus the one that covers what you are touching:
   lower layer threads a resource owned by a higher layer, pass it as `&mut dyn Any` and
   recover it at the one call site that knows the concrete type via a documented,
   panic-on-mismatch `downcast_mut::<T>()`.
-- **Erase at the API boundary, not at call sites.** Prefer the `column()`/`row()`/`stack()`
-  builders and `-> impl View<S>` helper returns (`+ use<>` when the helper borrows an
-  argument). Write `any()` only where branches of different concrete types must unify (if/else,
-  match arms, `async_view` arms); never wrap an argument of an API that already takes
-  `V: View`. A driver closure returning a `Component::build` result erases it:
-  `move |s| AnyView::new(root.build(s))`. Never add `#[allow(refining_impl_trait)]`.
+- **Erase at the API boundary, not at call sites.** A helper returns `-> impl View<S>`
+  (`+ use<..>` only when the opaque type must not be tied to a borrow — a navigator closure, a
+  stored result; edition 2024 captures correctly by default otherwise); a child list is a tuple
+  of up to 12 views (nest beyond; `Vec<V>` when homogeneous or dynamic; `keyed()` lists stay
+  `Vec`); an API that takes a child list is written `fn f<M>(.., c: impl ViewSeq<S, M>)` and
+  erases once inside. `any()`/`AnyView` remain only for the documented irreducible cases:
+  stored view tables (`Vec`/`Option<AnyView>`, `Box<dyn Fn(..) -> AnyView>`, page registries),
+  accumulators pushing into a `Vec<AnyView>`, recursive helpers, three-plus-arm bodies (two
+  arms use `either(cond, || a, || b)`), trait extension points, and helpers feeding a
+  hand-written view's `ChildPod` (`build_child`/`rebuild_child`/`teardown_child` take
+  `&AnyView`). A kept site carries `// erasure: keep <why>`; `scripts/ci/erasure-check.sh`
+  enforces codemod rules T1-T7. A driver closure returning a `Component::build` result erases
+  it: `move |s| AnyView::new(root.build(s))`. Never add `#[allow(refining_impl_trait)]`.
 - **Edition-2024 `-> impl Trait` return types capture all in-scope lifetimes by default.**
-  When a function returns an `impl Trait` that borrows nothing from its parameters (e.g.
-  a widget fn returning `impl View<State>`, where views are `'static`), opt out
-  explicitly:
+  When a function returning `impl View<State>` must not be tied to a parameter borrow (the
+  result is stored, or returned from a navigator/`RenderRoot` closure that needs one type for
+  every lifetime), opt out explicitly — the compiler says so; otherwise the default is fine:
 
   ```rust
   fn greeting(state: &AppState) -> impl frust::View<AppState> + use<> {
