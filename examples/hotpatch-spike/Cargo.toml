@@ -1,0 +1,11 @@
+# Standalone workspace (in the root `exclude` list): the dx 0.7.10 hot-patch spike. Two packages on
+# purpose: dx's thin rebuild replays rustc only for workspace packages other than the tip, so the
+# patched code must live in a lib package (`app`) separate from the bin (`runner`). See README.md.
+[workspace]
+resolver = "3"
+members = ["app", "runner"]
+
+# Debug dependencies at `opt-level = 1`, copied from Frust's root `Cargo.toml`. Hot patching works only
+# in the dev profile: subsecond consults its jump table under `cfg!(debug_assertions)`.
+[profile.dev.package."*"]
+opt-level = 1
