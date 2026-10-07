@@ -16,6 +16,12 @@ runtime and stays wire-compatible with `dx` (dioxus-cli) 0.7.10, which still bui
   pointer). `HotFn::from_fn_ptr` keys a plain `fn(A, ..) -> R` on its own value instead; its sealed
   `FnPointer` bound is the only way into that path. There is no stale-call detection and no retry:
   a panic propagates untouched, and code already running when a patch lands finishes as old code.
+- Sound dispatch means the key names the right function, not that the patched function is safe to
+  call. `apply_patch`'s contract covers that: the table must be built against this exact
+  executable, **and** every mapped function's argument, return and capture types must keep their
+  layout between the running image and the patch. Symbol names do not encode layout, so a field
+  added to a component's `State` keeps the entry and breaks the second condition (RESULTS.md row
+  D2 in the spike); checking it is the patch builder's job (the spike's PORT.md, section 2(c)).
 - `apply_patch`, `get_jump_table`, `register_handler`, and `load_patch_library` (the platform
   loader `apply_patch` uses: `libloading` on desktop, memfd + `android_dlopen_ext` on Android).
 - `JumpTable` / `AddressMap`: the same serde shape as `subsecond-types` 0.7.10. The
@@ -69,7 +75,11 @@ devserver connection debug-only. Moving the gate onto the cargo feature is follo
 - Fall-through diagnostics: `last_call_fell_through()` (this thread's most recent `HotFn` call
   found a table installed but no entry for its own key) and `fall_through_count()` (misses on
   any thread since the last patch, reset by every patch). Dispatch never reads them. A miss is
-  also normal for any hot function the patch did not recompile.
+  also normal for any hot function the patch did not recompile, and for every call made from
+  patch-image code: the key is the calling image's own `call_it` address and the table's keys are
+  base-image addresses, so a nested component's hot call from the newest patch's rebuild misses
+  although it already runs the newest code. The counter stays a plain count here; a restart rule needs the missed
+  key, whose address range names the calling image.
 - No `unwrap()` outside tests: a poisoned handler or apply lock is recovered, and a patch library
   without the `main` anchor returns `PatchError::Dlopen` instead of panicking.
 - ASLR offsets use wrapping arithmetic.

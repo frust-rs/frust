@@ -138,6 +138,16 @@ pub unsafe fn load_patch_library(path: &Path) -> Result<libloading::Library, Pat
 /// not built against this exact executable) makes calls jump to arbitrary addresses with the wrong
 /// signatures. Only apply tables produced by the patch builder for this running build.
 ///
+/// A well-formed table built against this executable is not enough on its own. Entries are matched
+/// by symbol name, and a name does not encode layout, so the caller must also ensure that every
+/// mapped function's argument, return and capture types keep their layout between the running
+/// image and the patch. Otherwise the patched function reads and writes live values through the
+/// new layout: the measured case is a component's `build` taking `(&C, &mut C::State)` after a
+/// field grew `C::State` from 4 to 8 bytes (the hot-patch spike's RESULTS.md, row D2). Closures
+/// dispatched through [`HotFn::current`](crate::HotFn::current) carry their captures as an
+/// argument, so a changed capture is the same hazard. Checking this is the patch builder's job
+/// (the spike's PORT.md, section 2(c)); this function cannot see layouts.
+///
 /// It loads a library and allocates, so it must not run where the process is stopped (e.g. in a
 /// signal handler), nor from a patch handler (it would wait on its own lock).
 #[cfg(any(unix, windows))]

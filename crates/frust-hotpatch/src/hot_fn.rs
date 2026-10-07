@@ -67,19 +67,35 @@ pub(crate) fn reset_fall_throughs() {
 }
 
 /// Whether this thread's most recent [`HotFn`] call found a jump table installed but no mapping
-/// for its own address, and so ran the original code.
+/// for its own key, and so ran the function compiled into the calling image.
 ///
-/// A purely diagnostic read; dispatch never consults it. After a patch that changes a generic
-/// call's type parameters (e.g. a component's state type), the patched monomorphisation has a new
-/// address the running binary never calls, so the old code keeps running: this is how a caller
-/// notices. A miss is also normal for any hot function the patch did not recompile, so read it
-/// for a call the caller expects the patch to cover.
+/// A purely diagnostic read; dispatch never consults it. The key is the address of `call_it` as
+/// seen by the image the call is made from, and the table's keys are the running executable's
+/// (base image) addresses. So a miss means one of three things:
+///
+/// - Stale code: after a patch that changes a generic call's type parameters (e.g. a component's
+///   state type), the patched monomorphisation has a new symbol the running binary never calls,
+///   so the base caller's old code keeps running.
+/// - Nothing to patch: a hot function the patch did not recompile has no entry.
+/// - A benign patch-image caller: a call made from patch code (e.g. a patched component's rebuild
+///   calling a nested component's hot function) computes the patch image's own `call_it`
+///   address, which is never a key. A call from the newest patch's code already runs the newest
+///   code; one from an older patch's code still reachable through its vtables runs that older
+///   patch's version.
+///
+/// This crate records only the outcome, not the missed key, so it cannot tell these apart: read
+/// it for a call made from base-image code that the caller expects the patch to cover.
 pub fn last_call_fell_through() -> bool {
     LAST_FELL_THROUGH.with(Cell::get)
 }
 
 /// How many [`HotFn`] calls, on any thread, missed the jump table since the last patch was
 /// applied (see [`last_call_fell_through`]). Reset to zero by every successful `apply_patch`.
+///
+/// The count includes the benign misses of calls made from patch-image code, so after a patch
+/// to an app with nested components it is normally non-zero. It stays a plain count in this
+/// crate; telling a stale-code miss from a benign one needs the missed key (whose address range
+/// names the calling image), which a restart rule built on this diagnostic must record instead.
 pub fn fall_through_count() -> u64 {
     FALL_THROUGHS.load(Ordering::Relaxed)
 }
@@ -221,9 +237,13 @@ impl<A, M, F: HotFunction<A, M>> HotFn<A, M, F> {
         match target {
             // SAFETY: the lookup above found `target` as the installed table's entry for this
             // function's own key. Tables are installed only by `apply_patch`, whose safety
-            // contract makes every entry the patched version of the keyed function, so it has the
-            // signature `call_at` expects for this `HotFn`; it lives in the loaded patch library,
-            // which is never unloaded.
+            // contract requires two things of every entry: it is the patched version of the keyed
+            // function in a table built against this exact executable, and every argument, return
+            // and capture type of that function (here `A`, `F::Return` and `F` itself, a
+            // closure's captures included) keeps its layout between the running image and the
+            // patch. Together they give `target` the signature and the argument layouts
+            // `call_at` passes for this `HotFn`. It lives in the loaded patch library, which is
+            // never unloaded.
             Some(target) => Ok(unsafe { self.call_at(target, args) }),
             None => Ok(self.inner.call_it(args)),
         }
@@ -239,8 +259,9 @@ impl<A, M, F: HotFunction<A, M>> HotFn<A, M, F> {
     /// For a [`HotFn::current`] value, `ptr` must be this monomorphisation's `call_it` (signature
     /// `fn(&mut F, A) -> F::Return`) or its patched equivalent. For a [`HotFn::from_fn_ptr`]
     /// value, `ptr` must be a function of type `F`: the pointer's own target or its patched
-    /// equivalent. Either way the argument and return layouts must not have changed since `ptr`
-    /// was taken. [`HotFn::ptr_address`] on a `HotFn` built the same way returns such an address.
+    /// equivalent. Either way the argument and return layouts (for [`HotFn::current`], `F`'s own
+    /// layout too: a closure's captures) must not have changed since `ptr` was taken.
+    /// [`HotFn::ptr_address`] on a `HotFn` built the same way returns such an address.
     pub unsafe fn try_call_with_ptr(
         &mut self,
         ptr: HotFnPtr,

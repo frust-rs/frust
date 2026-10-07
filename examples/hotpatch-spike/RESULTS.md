@@ -621,13 +621,16 @@ which is 37% of the 1570 ms restart. An Android app also loads code delivered af
 memfd, by plain `dlopen` from `files/` and from `cache/`, though only with a self-contained library,
 not a relocated patch. [PORT.md](PORT.md) sizes the frust-owned builder that would replace dx. dx's
 native builder core is 3,153 lines at v0.7.10, 2,023 of them code. The frust builder is estimated at
-4,350 new code lines plus 2,420 test lines for desktop, and about 8,500 lines once Android, Windows
-and the iOS simulator are added. PORT.md gives each Phase 1 requirement a cited cause and a design,
-and ends with 35 adoptable cards. The key design is the boundary-layout gate, covering the component
-type, its State and `build`'s return type, recursively: `build` erases its result inside the hot
-function, the app checks size and alignment at call time, and the host compares DWARF layouts before
-it sends a patch. PORT.md recommends STAGED delivery, desktop first. Milestone 1 is `frust run
---watch` hot-patching an unmodified one-package `frust create` app on macOS, with Linux covered by a
-CI canary, and rows D, D2, D3 and E must each answer "restart required". Android follows once a
-device gate proves patch relocation against the base cdylib. Row D3, a `build` return-type edit, is
-still unmeasured and is the follow-up plan's first card (H0-00).
+4,610 new code lines plus 2,690 test lines for desktop (stage 1), and about 9,500 lines (6,110 code,
+3,390 tests) once Android, Windows and the iOS simulator are added. PORT.md section 6 is the
+authoritative sizing; these figures are copied from it as of its revision r2-04 and follow it if it
+changes. PORT.md gives each Phase 1 requirement a cited cause and a design, and ends with 36
+adoptable cards. The key design is the boundary-layout gate, covering the component type, its State
+and `build`'s return type, recursively: `build` erases its result inside the hot function, the host
+compares DWARF layouts against every accepted image before it sends a patch, and the app keeps a
+creator-image State-size witness as a backstop. PORT.md recommends STAGED delivery, desktop first.
+Milestone 1 is `frust run --watch` hot-patching an unmodified one-package `frust create` app on
+macOS, with Linux covered by a CI canary, and rows D, D2, D3, D4, D5 and E must each answer
+"restart required". Android follows once a device gate proves patch relocation against the base
+cdylib. Row D3, a `build` return-type edit, is still unmeasured and is the follow-up plan's first
+card (H0-00).

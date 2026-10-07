@@ -1,10 +1,11 @@
 //! Desktop entry point of the hot-patch spike.
 //!
-//! A spike-only deviation from the template's "never hand-edit `main.rs`" rule: the desktop arm first
-//! connects to dx's devserver (`dioxus_devtools::connect`, a no-op when the binary was not launched
-//! by `dx serve`) and applies each patch dx builds for the `app` package through frust-hotpatch. The
-//! template's `wasm32` arm is absent on purpose: it exists only because a one-package app's `[lib]`
-//! and `[[bin]]` collide on one `.wasm` output name, and here the lib is another package.
+//! A spike-only deviation from the template's "never hand-edit `main.rs`" rule: in a debug desktop
+//! build, `main` first connects to dx's devserver (`connect_devserver`: `dioxus_devtools::connect_at`
+//! behind a loopback guard, a no-op when the binary was not launched by `dx serve`) and applies each
+//! patch dx builds for the `app` package through frust-hotpatch. The template's `wasm32` arm is
+//! absent on purpose: it exists only because a one-package app's `[lib]` and `[[bin]]` collide on
+//! one `.wasm` output name, and here the lib is another package.
 
 #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
 fn main() {
@@ -25,6 +26,9 @@ fn main() {
 /// serve`; unset means not launched by dx, so nothing happens) and refuses any non-loopback address.
 /// The devserver speaks plaintext `ws://` with no authentication, so connecting to a remote host
 /// would let that host choose code this process loads and runs.
+///
+/// Both refusals print with `eprintln!`, not `log`: this runs before `__frust_main`, so the desktop
+/// shell has not installed its logger yet and a `log` record would be dropped silently.
 #[cfg(all(
     debug_assertions,
     not(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))
@@ -39,12 +43,12 @@ fn connect_devserver() {
     let addr = match format!("{ip}:{port}").parse::<std::net::SocketAddr>() {
         Ok(addr) => addr,
         Err(err) => {
-            log::error!("frust-hotpatch: unparsable devserver address {ip}:{port}: {err}");
+            eprintln!("frust-hotpatch: unparsable devserver address {ip}:{port}: {err}");
             return;
         }
     };
     if !addr.ip().is_loopback() {
-        log::error!("frust-hotpatch: refusing non-loopback devserver {addr}; not connecting");
+        eprintln!("frust-hotpatch: refusing non-loopback devserver {addr}; not connecting");
         return;
     }
     dioxus_devtools::connect_at(format!("ws://{addr}/_dioxus"), apply_hot_patch);
