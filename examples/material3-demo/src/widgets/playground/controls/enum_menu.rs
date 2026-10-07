@@ -14,7 +14,7 @@
 //! `on_change` from `rebuild`), so nothing here needs the deferred
 //! post-frame guard it applies.
 
-use frust::{AnyView, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, any, column, text};
+use frust::{AnyView, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, View, any, column, text};
 use frust_material::{
     DropdownItem, MaterialSpacing, OverlayAnchor, dropdown, dropdown_field, dropdown_item,
 };
@@ -48,6 +48,7 @@ fn resolve_selection<T: PartialEq + Copy>(
 
 /// The trigger half: a labeled field showing `value`'s label, requesting
 /// [`play_enum_menu_panel`] open/closed through `on_open`.
+// erasure: keep element of a heterogeneous Vec<AnyView> list (control_panel children)
 pub fn play_enum_menu_field<State: 'static, T: PartialEq + Copy + 'static>(
     label: impl Into<String>,
     value: T,
@@ -99,22 +100,20 @@ pub fn play_enum_menu_panel<State: 'static, T: PartialEq + Copy + 'static>(
     open: bool,
     on_open: impl Fn(&mut State, bool) + 'static,
     on_changed: impl Fn(&mut State, T) + 'static,
-) -> AnyView<State> {
+) -> impl View<State> {
     let items = menu_items(values, label_of);
     let selected = vec![label_of(value).to_string()];
     let values: Vec<T> = values.to_vec();
 
-    any(
-        dropdown(items, move |state: &mut State, selection: Vec<String>| {
-            if let Some(picked) = resolve_selection(&values, label_of, &selection) {
-                on_changed(state, picked);
-            }
-        })
-        .anchor(anchor)
-        .selected(selected)
-        .open(open)
-        .on_open(on_open),
-    )
+    dropdown(items, move |state: &mut State, selection: Vec<String>| {
+        if let Some(picked) = resolve_selection(&values, label_of, &selection) {
+            on_changed(state, picked);
+        }
+    })
+    .anchor(anchor)
+    .selected(selected)
+    .open(open)
+    .on_open(on_open)
 }
 
 #[cfg(test)]

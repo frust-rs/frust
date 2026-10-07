@@ -139,8 +139,8 @@ impl Default for Knobs {
 }
 
 /// The "Dial" preview: the inline ring bound to `time`.
-fn dial_preview(time: TimeOfDay, use_24_hour: bool) -> AnyView<Knobs> {
-    any(time_dial(time, |s: &mut Knobs, next: TimeOfDay| s.time.set(next)).use_24_hour(use_24_hour))
+fn dial_preview(time: TimeOfDay, use_24_hour: bool) -> impl View<Knobs> {
+    time_dial(time, |s: &mut Knobs, next: TimeOfDay| s.time.set(next)).use_24_hour(use_24_hour)
 }
 
 /// The value the pushed dialog resolves on *this* invocation — read inside
@@ -190,7 +190,7 @@ fn dialog_preview(
     time_signal: RwSignal<TimeOfDay>,
     entry_mode_signal: RwSignal<TimePickerEntryMode>,
     use_24_hour_signal: RwSignal<bool>,
-) -> AnyView<Knobs> {
+) -> impl View<Knobs> {
     let theme = ambient_theme();
     let mut body_style = theme.type_scale.body_medium.clone();
     body_style.color = theme.scheme().on_surface_variant;
@@ -211,11 +211,11 @@ fn dialog_preview(
         );
     });
 
-    any(column()
+    column()
         .child(trigger)
         .child(SizedBox::<Knobs>(None, Some(12.0)))
         .child(text(format!("Time: {time_label}")).style(body_style))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// The paste-ready "Dial" snippet for the current knob state.
@@ -307,7 +307,7 @@ fn entry_mode_menu_panel(
     value: TimePickerEntryMode,
     anchor: &OverlayAnchor,
     open: bool,
-) -> AnyView<Knobs> {
+) -> impl View<Knobs> {
     play_enum_menu_panel(
         value,
         &ENTRY_MODES,
@@ -334,7 +334,7 @@ fn content(
     use_24_hour: RwSignal<bool>,
     entry_mode_anchor: &OverlayAnchor,
     entry_mode_open: bool,
-) -> AnyView<Knobs> {
+) -> impl View<Knobs> + use<> {
     let time_value = time.get();
     let entry_mode_value = entry_mode.get();
     let use_24_hour_value = use_24_hour.get();
@@ -357,11 +357,11 @@ fn content(
             entry_mode_open,
         )],
     );
-    any(stack().child(playground).child(entry_mode_menu_panel(
+    stack().child(playground).child(entry_mode_menu_panel(
         entry_mode_value,
         entry_mode_anchor,
         entry_mode_open,
-    )))
+    ))
 }
 
 struct TimePickersPlayground;

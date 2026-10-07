@@ -87,7 +87,7 @@ fn snippet_code(state: &Knobs) -> String {
 
 /// Lay `items` out horizontally with `gap`px between each pair — see the
 /// module docs' `Wrap` divergence.
-fn spaced_row<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> AnyView<State> {
+fn spaced_row<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> impl View<State> {
     let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
     for item in items {
         if !children.is_empty() {
@@ -95,11 +95,11 @@ fn spaced_row<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> AnyView<S
         }
         children.push(item);
     }
-    any(Row(children).cross_axis(CrossAxisAlignment::Center))
+    Row(children).cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The playground body for the current knob state.
-fn body(state: &mut Knobs) -> AnyView<Knobs> {
+fn body(state: &mut Knobs) -> impl View<Knobs> {
     let count = state.count.round() as u32;
     let max_count = state.max_count.round() as u32;
 

@@ -84,7 +84,7 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 /// The playground body: the trigger preview, snippet, and controls —
 /// everything that varies with `body`, built without touching the
 /// navigator (see the module docs).
-fn content(nav: &NavigatorController<Knobs>, body: &str) -> AnyView<Knobs> {
+fn content(nav: &NavigatorController<Knobs>, body: &str) -> impl View<Knobs> + use<> {
     playground_body(
         vec![trigger_preview(nav.clone(), body.to_string())],
         vec![snippet(body)],
@@ -93,7 +93,7 @@ fn content(nav: &NavigatorController<Knobs>, body: &str) -> AnyView<Knobs> {
 }
 
 fn trigger_preview(nav: NavigatorController<Knobs>, body: String) -> AnyView<Knobs> {
-    any(play_preview_card(
+    play_preview_card(
         "Trigger",
         tonal_button("Show bottom sheet", move |_: &mut Knobs| {
             let body = body.clone();
@@ -103,30 +103,27 @@ fn trigger_preview(nav: NavigatorController<Knobs>, body: String) -> AnyView<Kno
                 |_state: &mut Knobs, _result: PopResult| {},
             );
         }),
-    ))
+    )
 }
 
 /// The sheet's own content — a single padded paragraph, the reference's
 /// `Padding(EdgeInsets.all(24), Text(_body))`.
-fn sheet_content<State: 'static>(body: &str) -> AnyView<State> {
+fn sheet_content<State: 'static>(body: &str) -> impl View<State> {
     let theme = ambient_theme();
     let mut style = theme.type_scale.body_large.clone();
     style.color = theme.scheme().on_surface;
-    any(Padding(
-        EdgeInsets::all(24.0),
-        text(body.to_string()).style(style),
-    ))
+    Padding(EdgeInsets::all(24.0), text(body.to_string()).style(style))
 }
 
 fn controls(body: &str) -> AnyView<Knobs> {
-    any(control_panel::<Knobs>(
+    control_panel::<Knobs>(
         "Sheet",
         vec![play_text_field::<Knobs>(
             "Body",
             body.to_string(),
             |state: &mut Knobs, next: String| state.body.set(next),
         )],
-    ))
+    )
 }
 
 fn snippet(body: &str) -> PlaySnippet {

@@ -98,7 +98,7 @@ fn panel(state: &Knobs) -> AnyView<Knobs> {
 /// The playground body for the current knob state: [`playground_body`]'s
 /// scrollable content, plus the portal panel at the outer `Stack` — see
 /// the module docs.
-fn body(state: &mut Knobs) -> AnyView<Knobs> {
+fn body(state: &mut Knobs) -> impl View<Knobs> {
     let preview = preview_trigger(state);
     let snippet_label = if state.rich {
         "Rich tooltip"
@@ -133,7 +133,7 @@ fn body(state: &mut Knobs) -> AnyView<Knobs> {
     let controls = control_panel("Content", rows);
 
     let content = playground_body(vec![preview], vec![snippet], vec![controls]);
-    any(stack().child(content).child(panel(state)))
+    stack().child(content).child(panel(state))
 }
 
 /// The nested [`Component`] this page owns its knobs in. See the page

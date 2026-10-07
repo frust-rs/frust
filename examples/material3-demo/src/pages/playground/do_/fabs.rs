@@ -80,19 +80,19 @@ fn color_label(color: FabColor) -> &'static str {
 }
 
 /// The "FAB" preview.
-fn fab_preview(state: &Knobs) -> AnyView<Knobs> {
-    any(fab(icon(icons::ADD), |_: &mut Knobs| {})
+fn fab_preview(state: &Knobs) -> impl View<Knobs> {
+    fab(icon(icons::ADD), |_: &mut Knobs| {})
         .size(state.size)
         .color(state.color)
-        .label("Add"))
+        .label("Add")
 }
 
 /// The "Extended FAB" preview.
-fn extended_preview(state: &Knobs) -> AnyView<Knobs> {
-    any(extended_fab(state.label.clone(), |_: &mut Knobs| {})
+fn extended_preview(state: &Knobs) -> impl View<Knobs> {
+    extended_fab(state.label.clone(), |_: &mut Knobs| {})
         .icon(icon(icons::EDIT))
         .color(state.color)
-        .extended(state.extended))
+        .extended(state.extended)
 }
 
 /// The two paste-ready snippets for the current knob state — the reference's
@@ -154,7 +154,7 @@ fn extended_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The page body: preview cards, snippets, then controls.
-fn body(state: &Knobs) -> AnyView<Knobs> {
+fn body(state: &Knobs) -> impl View<Knobs> {
     playground_body(
         vec![
             play_preview_card("FAB", fab_preview(state)),

@@ -142,7 +142,7 @@ fn on_selected_index_changed(state: &mut Knobs, next: Option<usize>) {
 /// whose three short-label actions pan under the default
 /// [`frust_material::ButtonGroupOverflow::Scroll`] once they overflow the
 /// card's width — the reference's own `SizedBox(height: 32)` wrapper.
-fn compact_preview(state: &Knobs) -> AnyView<Knobs> {
+fn compact_preview(state: &Knobs) -> impl View<Knobs> {
     let group = button_group_actions(vec![
         button_group_action("Every day"),
         button_group_action("Days per week"),
@@ -156,13 +156,13 @@ fn compact_preview(state: &Knobs) -> AnyView<Knobs> {
     .neighbor_squish(state.neighbor_squish)
     .selected_index(Some(state.selected))
     .on_selected_index_changed(on_selected_index_changed);
-    any(SizedBox::<Knobs>(None, Some(32.0)).child(group))
+    SizedBox::<Knobs>(None, Some(32.0)).child(group)
 }
 
 /// The "Button group" preview: the full-size group at the current knob
 /// state, with icon+label actions.
-fn button_group_preview(state: &Knobs) -> AnyView<Knobs> {
-    any(button_group_actions(vec![
+fn button_group_preview(state: &Knobs) -> impl View<Knobs> {
+    button_group_actions(vec![
         button_group_action("Left").icon(|| any(icon(icons::FORMAT_ALIGN_LEFT))),
         button_group_action("Center").icon(|| any(icon(icons::FORMAT_ALIGN_CENTER))),
         button_group_action("Right").icon(|| any(icon(icons::FORMAT_ALIGN_RIGHT))),
@@ -172,22 +172,20 @@ fn button_group_preview(state: &Knobs) -> AnyView<Knobs> {
     .size(state.size)
     .neighbor_squish(state.neighbor_squish)
     .selected_index(Some(state.selected))
-    .on_selected_index_changed(on_selected_index_changed))
+    .on_selected_index_changed(on_selected_index_changed)
 }
 
 /// The "Toggle button" preview: a single [`mod@frust_material::toggle_button`]
 /// sharing the same style/size knobs.
-fn toggle_preview(state: &Knobs) -> AnyView<Knobs> {
-    any(
-        toggle_button(state.toggle_checked, |state: &mut Knobs, checked: bool| {
-            state.toggle_checked = checked;
-        })
-        .icon(icon(icons::STAR))
-        .checked_icon(icon(icons::STAR))
-        .label("Star")
-        .variant(state.style)
-        .size(state.size),
-    )
+fn toggle_preview(state: &Knobs) -> impl View<Knobs> {
+    toggle_button(state.toggle_checked, |state: &mut Knobs, checked: bool| {
+        state.toggle_checked = checked;
+    })
+    .icon(icon(icons::STAR))
+    .checked_icon(icon(icons::STAR))
+    .label("Star")
+    .variant(state.style)
+    .size(state.size)
 }
 
 /// "Group" controls: type, size, style, neighbor squish. See the [module
@@ -231,7 +229,7 @@ fn group_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The "Size" menu's popup half — mounted at this page's outer [`Stack`].
-fn size_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+fn size_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel(
         state.size,
         &SIZES,
@@ -244,7 +242,7 @@ fn size_menu_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The "Style" menu's popup half — mounted at this page's outer [`Stack`].
-fn style_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+fn style_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel(
         state.style,
         &STYLES,
@@ -297,7 +295,7 @@ fn toggle_button_snippet(state: &Knobs) -> PlaySnippet {
 
 /// The page body: the playground content plus the two dropdown panels it
 /// anchors, stacked so both can paint above the scrollable content.
-fn body(state: &Knobs) -> AnyView<Knobs> {
+fn body(state: &Knobs) -> impl View<Knobs> {
     let content = playground_body(
         vec![
             play_preview_card("Compact xs (scroll overflow)", compact_preview(state)),
@@ -307,10 +305,10 @@ fn body(state: &Knobs) -> AnyView<Knobs> {
         vec![button_group_snippet(state), toggle_button_snippet(state)],
         vec![group_panel(state)],
     );
-    any(stack()
+    stack()
         .child(content)
         .child(size_menu_panel(state))
-        .child(style_menu_panel(state)))
+        .child(style_menu_panel(state))
 }
 
 /// This page's knob component — see the [module docs](self).

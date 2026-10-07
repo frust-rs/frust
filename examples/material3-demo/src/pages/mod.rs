@@ -17,7 +17,8 @@ pub use section_list::section_list;
 pub use theme_config_page::theme_config_page;
 
 use frust::{
-    AnyView, Brightness, EdgeInsets, Padding, RouteParams, Theme, any, icon, text, use_context,
+    AnyView, Brightness, EdgeInsets, Padding, RouteParams, Theme, View, any, icon, text,
+    use_context,
 };
 use frust_material::{icon_button, icons};
 
@@ -32,15 +33,15 @@ pub const THEME_ROUTE: &str = "/theme";
 /// `brightness` is what is showing right now (read from the ambient
 /// [`Theme`] by the caller) — the reference's `fallback`, which decides both
 /// the icon and which way the toggle goes.
-pub fn brightness_action(brightness: Brightness) -> AnyView<AppState> {
+pub fn brightness_action(brightness: Brightness) -> impl View<AppState> {
     let glyph = match brightness {
         Brightness::Dark => icons::LIGHT_MODE,
         Brightness::Light => icons::DARK_MODE,
     };
-    any(icon_button(icon(glyph), move |state: &mut AppState| {
+    icon_button(icon(glyph), move |state: &mut AppState| {
         state.settings.toggle_brightness(brightness)
     })
-    .semantic_label("Toggle theme"))
+    .semantic_label("Toggle theme")
 }
 
 /// The `/playground/:id` route: one entry's playground, under its own chrome.
@@ -48,21 +49,23 @@ pub fn brightness_action(brightness: Brightness) -> AnyView<AppState> {
 /// An unknown id renders a plain message rather than an empty screen — it is
 /// reachable from a hand-typed deep link, not just from a list row.
 pub fn playground_route(params: &RouteParams) -> AnyView<AppState> {
-    match params.get("id").and_then(|id| catalog::find_by_id(id)) {
-        Some(entry) => playground_scaffold(entry.title, (entry.build)(entry)),
-        None => playground_scaffold("Not found", unknown_entry()),
-    }
+    any(
+        match params.get("id").and_then(|id| catalog::find_by_id(id)) {
+            Some(entry) => playground_scaffold(entry.title, (entry.build)(entry)),
+            None => playground_scaffold("Not found", any(unknown_entry())),
+        },
+    )
 }
 
 /// The body a `/playground/:id` with no matching catalog entry shows.
-fn unknown_entry() -> AnyView<AppState> {
+fn unknown_entry() -> impl View<AppState> {
     let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     let mut style = theme.type_scale.body_large.clone();
     style.color = theme.scheme().on_surface_variant;
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         text("No catalog entry has that id.").style(style),
-    ))
+    )
 }
 
 #[cfg(test)]

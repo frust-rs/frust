@@ -46,6 +46,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), frust_clipboard::ClipboardErr
 }
 
 /// Render `snippet` as a monospace block with a copy button.
+// erasure: keep element of playground_body's heterogeneous Vec<AnyView> rows
 pub fn play_code_snippet<State: 'static>(snippet: &PlaySnippet) -> AnyView<State> {
     let theme = ambient_theme();
     let scheme = theme.scheme();

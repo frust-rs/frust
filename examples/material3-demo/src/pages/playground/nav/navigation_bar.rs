@@ -105,27 +105,27 @@ impl Component for NavigationBarPlayground {
 /// The whole page body: preview/snippet/controls, plus both enum-menu
 /// popups mounted at this page's own outer [`Stack`] — the kept-mounted
 /// pattern the kit's own module docs document.
-fn body(state: &NavBarState) -> AnyView<NavBarState> {
+fn body(state: &NavBarState) -> impl View<NavBarState> {
     let theme = ambient_theme();
     let content = playground_body(
         vec![play_preview_card("Navigation bar", preview(&theme, state))],
         vec![play_snippet("Navigation bar", snippet_code(state))],
         vec![appearance_panel(state)],
     );
-    any(stack()
+    stack()
         .child(content)
         .child(label_menu_panel(state))
-        .child(indicator_menu_panel(state)))
+        .child(indicator_menu_panel(state))
 }
 
 /// Frame `child` in an outlined, rounded box — the reference's `_framed`
 /// helper (duplicated per playground page upstream, so this port does the
 /// same rather than sharing one across files).
-fn framed(theme: &Theme, child: impl View<NavBarState>) -> AnyView<NavBarState> {
+fn framed(theme: &Theme, child: impl View<NavBarState>) -> impl View<NavBarState> {
     let outline = theme.scheme().outline_variant;
-    any(container(child)
+    container(child)
         .radius(MaterialDimensions::RADIUS_LARGE)
-        .border(outline, 1.0))
+        .border(outline, 1.0)
 }
 
 /// The four destinations — the reference's own `_destinations` getter.
@@ -144,7 +144,7 @@ fn destinations(state: &NavBarState) -> Vec<NavItem<NavBarState>> {
     ]
 }
 
-fn preview(theme: &Theme, state: &NavBarState) -> AnyView<NavBarState> {
+fn preview(theme: &Theme, state: &NavBarState) -> impl View<NavBarState> {
     framed(
         theme,
         navigation_bar::<NavBarState, _>(
@@ -195,7 +195,7 @@ fn appearance_panel(state: &NavBarState) -> AnyView<NavBarState> {
     )
 }
 
-fn label_menu_panel(state: &NavBarState) -> AnyView<NavBarState> {
+fn label_menu_panel(state: &NavBarState) -> impl View<NavBarState> {
     play_enum_menu_panel::<NavBarState, NavBarLabelBehavior>(
         state.label_behavior,
         &LABEL_BEHAVIORS,
@@ -207,7 +207,7 @@ fn label_menu_panel(state: &NavBarState) -> AnyView<NavBarState> {
     )
 }
 
-fn indicator_menu_panel(state: &NavBarState) -> AnyView<NavBarState> {
+fn indicator_menu_panel(state: &NavBarState) -> impl View<NavBarState> {
     play_enum_menu_panel::<NavBarState, NavBarIndicatorStyle>(
         state.indicator,
         &INDICATOR_STYLES,

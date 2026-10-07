@@ -68,7 +68,7 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 /// The playground body — everything that varies with `state`; the same
 /// function [`CardsPlayground::build`] calls, and this file's tests exercise
 /// directly across every knob state.
-fn body(state: &Knobs) -> AnyView<Knobs> {
+fn body(state: &Knobs) -> impl View<Knobs> {
     let theme = ambient_theme();
     playground_body(
         vec![
@@ -89,17 +89,17 @@ fn variant_label(variant: CardVariant) -> &'static str {
 }
 
 /// The card's own content — the reference's `_CardBody`.
-fn card_body<State: 'static>(theme: &Theme, title: &str, body: &str) -> AnyView<State> {
+fn card_body<State: 'static>(theme: &Theme, title: &str, body: &str) -> impl View<State> {
     let scheme = theme.scheme();
     let mut title_style = theme.type_scale.title_medium.clone();
     title_style.color = scheme.on_surface;
     let mut body_style = theme.type_scale.body_medium.clone();
     body_style.color = scheme.on_surface_variant;
-    any(column()
+    column()
         .child(text(title.to_string()).style(title_style))
         .child(SizedBox::<State>(None, Some(4.0)))
         .child(text(body.to_string()).style(body_style))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 fn single_card_preview(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
@@ -108,10 +108,7 @@ fn single_card_preview(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
     if state.tappable {
         view = view.on_press(|_: &mut Knobs| {});
     }
-    any(play_preview_card(
-        "Card",
-        SizedBox::<Knobs>(Some(260.0), None).child(view),
-    ))
+    play_preview_card("Card", SizedBox::<Knobs>(Some(260.0), None).child(view))
 }
 
 /// One card per [`VARIANTS`] entry, stacked one per row — the reference's
@@ -130,14 +127,11 @@ fn single_card_preview(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
 /// this wrapper, the same split `crate::pages::playground::find::progress`'s
 /// `all_styles_row`/G10 fix uses.
 fn all_variants_preview(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
-    any(play_preview_card(
-        "All variants",
-        all_variants_column(theme, state),
-    ))
+    play_preview_card("All variants", all_variants_column(theme, state))
 }
 
 /// The tile column [`all_variants_preview`] wraps in a [`play_preview_card`].
-fn all_variants_column(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
+fn all_variants_column(theme: &Theme, state: &Knobs) -> impl View<Knobs> {
     let mut rows: Vec<AnyView<Knobs>> = Vec::new();
     for (index, variant) in VARIANTS.iter().enumerate() {
         if index > 0 {
@@ -152,11 +146,11 @@ fn all_variants_column(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
             SizedBox::<Knobs>(Some(ALL_VARIANTS_TILE_WIDTH), None).child(view)
         ));
     }
-    any(Column(rows))
+    Column(rows)
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {
-    any(control_panel::<Knobs>(
+    control_panel::<Knobs>(
         "Appearance",
         vec![
             play_enum_segmented::<Knobs, CardVariant>(
@@ -184,7 +178,7 @@ fn controls(state: &Knobs) -> AnyView<Knobs> {
                 },
             ),
         ],
-    ))
+    )
 }
 
 fn snippet(state: &Knobs) -> PlaySnippet {

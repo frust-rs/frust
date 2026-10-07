@@ -69,14 +69,14 @@ fn on_multi_select_changed(state: &mut Knobs, next: bool) {
 }
 
 /// The "Segmented button" preview.
-fn preview(state: &Knobs) -> AnyView<Knobs> {
-    any(segmented_button(
+fn preview(state: &Knobs) -> impl View<Knobs> {
+    segmented_button(
         segments(),
         state.selected.clone(),
         |state: &mut Knobs, next: Vec<usize>| state.selected = next,
     )
     .multi_select(state.multi_select)
-    .show_selected_icon(state.show_selected_icon))
+    .show_selected_icon(state.show_selected_icon)
 }
 
 /// "Behavior" controls: multi select, show selected icon.
@@ -115,7 +115,7 @@ fn snippet(state: &Knobs) -> PlaySnippet {
 
 /// The page body: one live preview, one static snippet, and the behavior
 /// controls.
-fn body(state: &Knobs) -> AnyView<Knobs> {
+fn body(state: &Knobs) -> impl View<Knobs> {
     playground_body(
         vec![play_preview_card("Segmented button", preview(state))],
         vec![snippet(state)],

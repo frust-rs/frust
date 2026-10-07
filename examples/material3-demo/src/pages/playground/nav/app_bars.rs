@@ -157,7 +157,7 @@ impl Component for AppBarsPlayground {
 /// arrangement, plus the Kind picker's popup panel mounted at this page's own
 /// outer [`Stack`] — the kept-mounted pattern the kit's own module docs
 /// document for `play_enum_menu_field`/`play_enum_menu_panel`.
-fn body(state: &AppBarsState) -> AnyView<AppBarsState> {
+fn body(state: &AppBarsState) -> impl View<AppBarsState> {
     let theme = ambient_theme();
     let content = playground_body(
         vec![play_preview_card(
@@ -167,7 +167,7 @@ fn body(state: &AppBarsState) -> AnyView<AppBarsState> {
         vec![play_snippet(state.kind.label(), snippet_code(state))],
         vec![variant_panel(state), appearance_panel(state)],
     );
-    any(stack().child(content).child(kind_menu_panel(state)))
+    stack().child(content).child(kind_menu_panel(state))
 }
 
 /// An icon-only, non-interactive-feeling slot for a bar's leading/action
@@ -177,23 +177,24 @@ fn body(state: &AppBarsState) -> AnyView<AppBarsState> {
 /// than a bare glyph, since every bar slot in this family is opaque
 /// caller-supplied content (see `plugins/material/src/appbar/mod.rs`'s slot
 /// contract).
-fn icon_slot(source: frust::IconSource, label: &str) -> AnyView<AppBarsState> {
-    any(icon_button(icon(source), |_: &mut AppBarsState| {}).semantic_label(label))
+fn icon_slot(source: frust::IconSource, label: &str) -> impl View<AppBarsState> {
+    icon_button(icon(source), |_: &mut AppBarsState| {}).semantic_label(label)
 }
 
 /// Wrap `bar` in [`frust::safe_area`] when the Safe area toggle is on. Only
 /// for the bottom and sliver bars, which have no `safe_area` prop; the top
 /// and search bars take `.safe_area(on)` directly.
-fn wrap_safe_area(state: &AppBarsState, bar: AnyView<AppBarsState>) -> AnyView<AppBarsState> {
+fn wrap_safe_area(state: &AppBarsState, bar: impl View<AppBarsState>) -> AnyView<AppBarsState> {
     if state.safe_area {
         any(safe_area(bar))
     } else {
-        bar
+        any(bar)
     }
 }
 
 /// Frame `child` in an outlined, rounded box — the reference's `_framed`
 /// helper.
+// erasure: keep match-arm value in preview_content's four-arm match
 fn framed(theme: &Theme, child: impl View<AppBarsState>) -> AnyView<AppBarsState> {
     let outline = theme.scheme().outline_variant;
     any(container(child)
@@ -210,18 +211,18 @@ fn preview_content(theme: &Theme, state: &AppBarsState) -> AnyView<AppBarsState>
     }
 }
 
-fn top_bar_view(state: &AppBarsState) -> AnyView<AppBarsState> {
-    any(app_bar::<AppBarsState>(state.title.clone())
+fn top_bar_view(state: &AppBarsState) -> impl View<AppBarsState> {
+    app_bar::<AppBarsState>(state.title.clone())
         .center_title(state.center_title)
         .density(state.density)
         .shape_family(state.shape)
         .safe_area(state.safe_area)
         .leading(icon_slot(icons::MENU, "Menu"))
-        .actions(vec![icon_slot(icons::SEARCH, "Search")]))
+        .actions(vec![icon_slot(icons::SEARCH, "Search")])
 }
 
-fn search_bar_view(state: &AppBarsState) -> AnyView<AppBarsState> {
-    any(search_app_bar::<AppBarsState>(
+fn search_bar_view(state: &AppBarsState) -> impl View<AppBarsState> {
+    search_app_bar::<AppBarsState>(
         search_bar(state.search_query.clone(), |s: &mut AppBarsState, q| {
             s.search_query = q;
         })
@@ -233,11 +234,11 @@ fn search_bar_view(state: &AppBarsState) -> AnyView<AppBarsState> {
     .safe_area(state.safe_area)
     .center_title(state.center_title)
     .leading(icon_slot(icons::MENU, "Menu"))
-    .actions(vec![icon_slot(icons::ACCOUNT_CIRCLE, "Account")]))
+    .actions(vec![icon_slot(icons::ACCOUNT_CIRCLE, "Account")])
 }
 
-fn bottom_bar_view(_state: &AppBarsState) -> AnyView<AppBarsState> {
-    any(bottom_app_bar::<AppBarsState>()
+fn bottom_bar_view(_state: &AppBarsState) -> impl View<AppBarsState> {
+    bottom_app_bar::<AppBarsState>()
         .actions(vec![
             icon_slot(icons::MENU, "Menu"),
             icon_slot(icons::SEARCH, "Search"),
@@ -247,17 +248,17 @@ fn bottom_bar_view(_state: &AppBarsState) -> AnyView<AppBarsState> {
             fab(icon(icons::ADD), |_: &mut AppBarsState| {})
                 .size(FabSize::Small)
                 .label("Add"),
-        ))
+        )
 }
 
-fn sliver_bar_view(state: &AppBarsState) -> AnyView<AppBarsState> {
-    any(sliver_app_bar::<AppBarsState>(state.title.clone())
+fn sliver_bar_view(state: &AppBarsState) -> impl View<AppBarsState> {
+    sliver_app_bar::<AppBarsState>(state.title.clone())
         .variant(state.variant)
         .density(state.density)
         .shape_family(state.shape)
         .center_title(state.center_title)
         .scroll_offset(state.scrolled)
-        .actions(vec![icon_slot(icons::SEARCH, "Search")]))
+        .actions(vec![icon_slot(icons::SEARCH, "Search")])
 }
 
 /// The collapsing bar over a real scrolling item list, both stacked inside a
@@ -351,7 +352,7 @@ fn appearance_panel(state: &AppBarsState) -> AnyView<AppBarsState> {
 
 /// The Kind picker's popup half — mounted at the page's own outer [`Stack`],
 /// kept mounted regardless of `kind_open` so its close plays the exit ramp.
-fn kind_menu_panel(state: &AppBarsState) -> AnyView<AppBarsState> {
+fn kind_menu_panel(state: &AppBarsState) -> impl View<AppBarsState> {
     play_enum_menu_panel::<AppBarsState, AppBarKind>(
         state.kind,
         &AppBarKind::ALL,

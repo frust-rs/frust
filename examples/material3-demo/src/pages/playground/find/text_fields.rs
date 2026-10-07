@@ -83,7 +83,7 @@ fn snippet_code(state: &Knobs) -> String {
 }
 
 /// The playground body for the current knob state.
-fn body(state: &mut Knobs) -> AnyView<Knobs> {
+fn body(state: &mut Knobs) -> impl View<Knobs> {
     let mut field = text_field(state.value.clone(), |s: &mut Knobs, v: String| s.value = v)
         .label(state.label.clone())
         .variant(state.variant)

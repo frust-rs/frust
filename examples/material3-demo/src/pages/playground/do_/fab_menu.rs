@@ -50,7 +50,7 @@ struct Knobs {
 /// (the reference's own `SizedBox(height: 280)`) — unlike the reference's
 /// `M3EFabMenu`, this port fills that box and self-positions its trigger at
 /// its own bottom-right corner, so no `Align` wrapper is needed.
-fn preview(state: &Knobs) -> AnyView<Knobs> {
+fn preview(state: &Knobs) -> impl View<Knobs> {
     // Swapping the trigger icon on open/close is this port's documented
     // substitute for the reference's `closeIcon`/`expandIcon`/`collapseIcon`
     // quartet (see [module docs](self)).
@@ -60,17 +60,17 @@ fn preview(state: &Knobs) -> AnyView<Knobs> {
         fab_menu_item(icon(icons::VIDEOCAM), "Video", |_: &mut Knobs| {}),
         fab_menu_item(icon(icons::MIC), "Audio", |_: &mut Knobs| {}),
     ];
-    any(SizedBox::<Knobs>(None, Some(280.0)).child(fab_menu(
+    SizedBox::<Knobs>(None, Some(280.0)).child(fab_menu(
         icon(trigger_icon),
         state.open,
         items,
         |state: &mut Knobs| state.open = !state.open,
-    )))
+    ))
 }
 
 /// The page body: one live preview, one static snippet (nothing here is
 /// knob-driven — see the [module docs](self)), and no controls panel.
-fn body(state: &Knobs) -> AnyView<Knobs> {
+fn body(state: &Knobs) -> impl View<Knobs> {
     playground_body(
         vec![play_preview_card("FAB menu", preview(state))],
         vec![play_snippet(

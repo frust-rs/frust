@@ -118,7 +118,7 @@ fn preview_row(
     enabled: bool,
     show_icons: bool,
     state_layer_size: f64,
-) -> AnyView<SwitchPlaygroundState> {
+) -> impl View<SwitchPlaygroundState> {
     let theme = ambient_theme();
     let mut body = theme.type_scale.body_large.clone();
     body.color = theme.scheme().on_surface;
@@ -134,11 +134,11 @@ fn preview_row(
             .unselected_icon(icons::CLOSE);
     }
 
-    any(row()
+    row()
         .child(control)
         .child(SizedBox::<SwitchPlaygroundState>(Some(16.0), None))
         .child(text(if value { "On" } else { "Off" }).style(body))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The paste-ready Frust equivalent of the current preview state.

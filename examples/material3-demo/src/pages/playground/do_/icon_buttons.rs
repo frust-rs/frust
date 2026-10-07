@@ -147,7 +147,7 @@ fn width_label(width: IconButtonWidth) -> &'static str {
 
 /// The "Icon button" preview: always a toggle (a `selected_icon` is always
 /// supplied, mirroring the reference always passing `selectedIcon`).
-fn preview(state: &Knobs) -> AnyView<Knobs> {
+fn preview(state: &Knobs) -> impl View<Knobs> {
     let mut view = icon_button(icon(icons::FAVORITE), |_: &mut Knobs| {})
         .selected_icon(icon(icons::FAVORITE))
         .variant(state.variant)
@@ -160,7 +160,7 @@ fn preview(state: &Knobs) -> AnyView<Knobs> {
     if state.badge {
         view = view.badge(BadgeValue::Count(3));
     }
-    any(view)
+    view
 }
 
 /// The paste-ready snippet for the current knob state — the reference's
@@ -246,7 +246,7 @@ fn state_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The "Variant" menu's popup half — mounted at this page's outer [`Stack`].
-fn variant_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+fn variant_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel(
         state.variant,
         &VARIANTS,
@@ -259,7 +259,7 @@ fn variant_menu_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The "Size" menu's popup half — mounted at this page's outer [`Stack`].
-fn size_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+fn size_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel(
         state.size,
         &SIZES,
@@ -272,7 +272,7 @@ fn size_menu_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// The "Width" menu's popup half — mounted at this page's outer [`Stack`].
-fn width_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+fn width_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel(
         state.width,
         &WIDTHS,
@@ -286,17 +286,17 @@ fn width_menu_panel(state: &Knobs) -> AnyView<Knobs> {
 
 /// The page body: the playground content plus the three dropdown panels it
 /// anchors, stacked so all can paint above the scrollable content.
-fn body(state: &Knobs) -> AnyView<Knobs> {
+fn body(state: &Knobs) -> impl View<Knobs> {
     let content = playground_body(
         vec![play_preview_card("Icon button", preview(state))],
         vec![snippet(state)],
         vec![appearance_panel(state), state_panel(state)],
     );
-    any(stack()
+    stack()
         .child(content)
         .child(variant_menu_panel(state))
         .child(size_menu_panel(state))
-        .child(width_menu_panel(state)))
+        .child(width_menu_panel(state))
 }
 
 /// This page's knob component — see the [module docs](self).
