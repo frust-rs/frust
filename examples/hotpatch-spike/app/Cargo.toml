@@ -1,0 +1,22 @@
+[package]
+name = "hotpatch-spike-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Deliberately NOT the template's `["cdylib", "staticlib", "rlib"]` (crates/frust-drive/templates/app/
+# Cargo.toml.tmpl): dx 0.7.10 cannot thin-patch a lib built with those crate types, for two reasons
+# verified on this spike (README.md, finding 2). Its rustc wrapper files captured args under the FIRST
+# `--crate-type` (`cdylib` -> `.bin`, while the patch looks the crate up as `.lib`); and even with
+# `rlib` listed first, cargo builds the template's set without the `-C extra-filename` hash
+# (`libhotpatch_spike_app.rlib`), which dx's `lib<crate>-*.rlib` lookup never matches. The spike is
+# desktop-only, so an rlib loses nothing.
+[lib]
+name = "hotpatch_spike_app"
+crate-type = ["rlib"]
+
+[dependencies]
+# Published as `frust-ui`, imported as `frust`. `hotpatch` routes every child `Component::build`
+# through subsecond's jump table and logs the `frust-hotpatch:` probe lines on desktop.
+frust = { package = "frust-ui", path = "../../../crates/frust", features = ["hotpatch"] }
+log = "0.4"
