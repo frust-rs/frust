@@ -80,7 +80,7 @@ use frust::authoring::{
     Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, PaintCtx, PaintScene,
     Point, PointerEvent, PointerPhase, Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType,
-    Vec2, View, Widget, any, build_child, erase_callback_arg, rebuild_child, route_event,
+    Vec2, View, ViewSeq, Widget, any, build_child, erase_callback_arg, rebuild_child, route_event,
     route_event_single, teardown_child, visit_children,
 };
 use frust::{
@@ -1092,12 +1092,15 @@ pub struct SidebarInsetView<State: 'static> {
 /// `scroll_view` or an overlay host is unsupported; give `sidebar_inset` a
 /// single child (composing internally, e.g. with `Column`/`FlexView`) instead.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn sidebar_inset<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn sidebar_inset<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> SidebarInsetView<State> {
-    let mut children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let mut children = erased;
     let child = if children.len() == 1 {
         children.remove(0)
     } else {
@@ -1247,11 +1250,11 @@ impl Widget for SidebarInsetWidget {
 
 /// Create the header slot: `flex-col gap-2 p-2`.
 ///
-/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
-pub fn sidebar_header<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// List parameter: any [`ViewSeq`], as for [`sidebar_inset`].
+pub fn sidebar_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     any(Padding(
         EdgeInsets::all(SLOT_PAD),
         Column(interleave(children, SLOT_GAP)),
@@ -1260,10 +1263,8 @@ pub fn sidebar_header<State: 'static, V: View<State>>(
 
 /// Create the footer slot: the header's mirror (`flex-col gap-2 p-2`).
 ///
-/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
-pub fn sidebar_footer<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
+/// List parameter: any [`ViewSeq`], as for [`sidebar_inset`].
+pub fn sidebar_footer<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     sidebar_header(children)
 }
 
@@ -1275,31 +1276,31 @@ pub fn sidebar_footer<State: 'static, V: View<State>>(
 /// desktop-first choice [`scroll_area`](crate::components::scroll_area)
 /// documents.
 ///
-/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
-pub fn sidebar_content<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// List parameter: any [`ViewSeq`], as for [`sidebar_inset`].
+pub fn sidebar_content<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     any(scroll_view(Column(interleave(children, SLOT_GAP))).physics(RubberBand::new()))
 }
 
 /// Create a group: `flex-col p-2`, the unit a label plus a menu lives in.
 ///
-/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
-pub fn sidebar_group<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// List parameter: any [`ViewSeq`], as for [`sidebar_inset`].
+pub fn sidebar_group<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     any(Padding(EdgeInsets::all(SLOT_PAD), Column(children)))
 }
 
 /// Create a menu: a `gap-1` column of [`sidebar_menu_item`] rows.
 ///
-/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
-pub fn sidebar_menu<State: 'static, V: View<State>>(
-    items: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
-    let items: Vec<AnyView<State>> = items.into_iter().map(AnyView::new).collect();
+/// List parameter: any [`ViewSeq`], as for [`sidebar_inset`].
+pub fn sidebar_menu<State: 'static, M>(items: impl ViewSeq<State, M>) -> AnyView<State> {
+    let mut erased = Vec::new();
+    items.extend_views(&mut erased);
+    let items = erased;
     any(Column(interleave(items, MENU_GAP)))
 }
 
@@ -1309,11 +1310,11 @@ pub fn sidebar_menu<State: 'static, V: View<State>>(
 /// positioning; this port lays the same three parts out as a centered row, so
 /// the button is `flexible` and the trailing parts keep their natural width.
 ///
-/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
-pub fn sidebar_menu_item<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> FlexView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// List parameter: any [`ViewSeq`], as for [`sidebar_inset`].
+pub fn sidebar_menu_item<State: 'static, M>(children: impl ViewSeq<State, M>) -> FlexView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     let children = children
         .into_iter()
         .enumerate()
@@ -1331,9 +1332,9 @@ pub fn sidebar_menu_item<State: 'static, V: View<State>>(
 /// Create one sub-menu row — a [`sidebar_menu_item`] inside a
 /// [`sidebar_menu_sub`].
 ///
-/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
-pub fn sidebar_menu_sub_item<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// List parameter: any [`ViewSeq`], as for [`sidebar_inset`].
+pub fn sidebar_menu_sub_item<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> FlexView<State> {
     sidebar_menu_item(children)
 }
@@ -1584,11 +1585,13 @@ pub struct SidebarMenuSubView<State: 'static> {
 /// (upstream's blocks do exactly that; `sidebar.tsx` itself only styles the
 /// list).
 ///
-/// List parameter: see [`sidebar_inset`] for the one-`View`-type rule.
-pub fn sidebar_menu_sub<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// List parameter: any [`ViewSeq`], as for [`sidebar_inset`].
+pub fn sidebar_menu_sub<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> SidebarMenuSubView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     SidebarMenuSubView {
         child: any(Column(interleave(children, MENU_GAP))),
     }

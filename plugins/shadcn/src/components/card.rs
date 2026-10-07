@@ -29,8 +29,8 @@ use frust::authoring::text::FontWeight;
 use frust::authoring::{
     AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, RoundedRect, SemanticsCtx, Shape,
-    Size, View, Widget, any, build_child, rebuild_child, route_event_single, teardown_child,
-    visit_children,
+    Size, View, ViewSeq, Widget, any, build_child, rebuild_child, route_event_single,
+    teardown_child, visit_children,
 };
 use frust::authoring::{ThemeTextColor, ThemeTextType};
 use frust::{Column, CrossAxisAlignment, EdgeInsets, Padding, Row, Theme, text};
@@ -64,12 +64,13 @@ fn interleave<State: 'static>(children: Vec<AnyView<State>>, gap: f64) -> Vec<An
 /// Create a card wrapping `children` (typically [`card_header`]/
 /// [`card_content`]/[`card_footer`] rows), `gap-6` apart with `py-6`.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn card<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> CardView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn card<State: 'static, M>(children: impl ViewSeq<State, M>) -> CardView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     let stacked = interleave(children, CARD_GAP);
     let inner = any(Padding(
         EdgeInsets::symmetric(0.0, CARD_PAD_Y),
@@ -82,12 +83,13 @@ pub fn card<State: 'static, V: View<State>>(
 /// optional top-right [`card_action`] slot (the source's `has-data-[slot=
 /// card-action]:grid-cols-[1fr_auto]`).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn card_header<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn card_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     let stacked = interleave(children, HEADER_GAP);
     any(Padding(
         EdgeInsets::symmetric(SLOT_PAD_X, 0.0),
@@ -99,13 +101,16 @@ pub fn card_header<State: 'static, V: View<State>>(
 /// The main column takes every pixel the action doesn't need
 /// (`flexible(1, ...)`/`inflexible(...)`, this port's `1fr auto`).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn card_header_with_action<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn card_header_with_action<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
     action: impl View<State> + 'static,
 ) -> AnyView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     let stacked = interleave(children, HEADER_GAP);
     let row = frust::row().flex(1, Column(stacked)).child(action);
     any(Padding(EdgeInsets::symmetric(SLOT_PAD_X, 0.0), row))
@@ -145,12 +150,13 @@ pub fn card_content<State: 'static>(child: impl View<State> + 'static) -> AnyVie
 /// Create a footer row: `px-6`, a horizontal, vertically-centered stack of
 /// `children` (`flex items-center`).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn card_footer<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn card_footer<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     any(Padding(
         EdgeInsets::symmetric(SLOT_PAD_X, 0.0),
         Row(children).cross_axis(CrossAxisAlignment::Center),
@@ -320,7 +326,7 @@ mod tests {
                 card_description("You have 3 unread messages."),
             ]),
             card_content(text("Body content.")),
-            card_footer::<(), AnyView<()>>(vec![]),
+            card_footer(Vec::<AnyView<()>>::new()),
         ])
     }
 

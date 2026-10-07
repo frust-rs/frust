@@ -29,7 +29,7 @@ use frust::authoring::text::FontWeight;
 use frust::authoring::{
     Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
-    SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, Widget, any,
+    SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, ViewSeq, Widget, any,
 };
 use frust::{Theme, text};
 use peniko::Color;
@@ -110,12 +110,13 @@ pub struct ItemView<State: 'static> {
 /// Create an item row from `children` (typically [`item_media`]?,
 /// [`item_content`], [`item_actions`]?, in order).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn item<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> ItemView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn item<State: 'static, M>(children: impl ViewSeq<State, M>) -> ItemView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     ItemView {
         children,
         variant: ItemVariant::default(),
@@ -516,12 +517,13 @@ pub struct ItemContentView<State: 'static> {
 /// Stack `children` (typically [`item_title`]/[`item_description`]) in a
 /// left-aligned column.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn item_content<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> ItemContentView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn item_content<State: 'static, M>(children: impl ViewSeq<State, M>) -> ItemContentView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     ItemContentView { children }
 }
 
@@ -634,12 +636,13 @@ pub struct ItemRowView<State: 'static> {
 
 /// `ItemActions`: a row, `gap-2`, `items-center`.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn item_actions<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> ItemRowView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn item_actions<State: 'static, M>(children: impl ViewSeq<State, M>) -> ItemRowView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     ItemRowView {
         children,
         justify_between: false,
@@ -648,12 +651,13 @@ pub fn item_actions<State: 'static, V: View<State>>(
 
 /// `ItemHeader`: a `justify-between` row, `gap-2`.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn item_header<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> ItemRowView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn item_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> ItemRowView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     ItemRowView {
         children,
         justify_between: true,
@@ -662,12 +666,13 @@ pub fn item_header<State: 'static, V: View<State>>(
 
 /// `ItemFooter`: a `justify-between` row, `gap-2`.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn item_footer<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> ItemRowView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn item_footer<State: 'static, M>(children: impl ViewSeq<State, M>) -> ItemRowView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     ItemRowView {
         children,
         justify_between: true,

@@ -133,8 +133,8 @@ use frust::authoring::{
     Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     CursorIcon, ErasedCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey,
     PaintCtx, PaintScene, Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size,
-    ThemeTextColor, ThemeTextType, View, Widget, any, build_child, erase_callback, rebuild_child,
-    route_event_single, teardown_child, text::FontWeight, visit_children,
+    ThemeTextColor, ThemeTextType, View, ViewSeq, Widget, any, build_child, erase_callback,
+    rebuild_child, route_event_single, teardown_child, text::FontWeight, visit_children,
 };
 use frust::input::{TOUCH_SLOP, VelocityTracker};
 use frust::{
@@ -712,12 +712,14 @@ impl<State: 'static, V: View<State, Element = ModalWidget>> View<State> for Stag
 /// `FlexView` v1 has no `gap` property (only `MainAxisAlignment::Start`), so
 /// every gap in the catalog is an explicit [`SizedBox`] spacer — the same
 /// stand-in `crate::card` documents.
-fn with_gaps<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+fn with_gaps<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
     gap: f64,
     vertical: bool,
 ) -> Vec<FlexChild<State>> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     let mut out: Vec<FlexChild<State>> = Vec::with_capacity(children.len() * 2);
     for (i, child) in children.into_iter().enumerate() {
         if i > 0 {
@@ -736,10 +738,11 @@ fn with_gaps<State: 'static, V: View<State>>(
 /// the shape of every modal panel's own content column *and* of each of its
 /// header slots.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn stack_slots<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn stack_slots<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
     gap: f64,
     pad: EdgeInsets,
 ) -> AnyView<State> {
@@ -765,10 +768,11 @@ pub fn stack_slots<State: 'static, V: View<State>>(
 /// same reason its headers stay start-aligned where upstream centres them below
 /// `sm`.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn trailing_row<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn trailing_row<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
     gap: f64,
     pad: EdgeInsets,
 ) -> AnyView<State> {

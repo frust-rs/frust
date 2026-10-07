@@ -30,7 +30,7 @@ use frust::authoring::text::FontWeight;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextColor,
-    ThemeTextType, View, Widget, any,
+    ThemeTextType, View, ViewSeq, Widget, any,
 };
 use frust::{Theme, text};
 use peniko::Color;
@@ -61,12 +61,13 @@ pub struct EmptyColumnView<State: 'static> {
 
 /// `Empty`: the root centered column (`gap-6 p-6`).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn empty<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> EmptyColumnView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn empty<State: 'static, M>(children: impl ViewSeq<State, M>) -> EmptyColumnView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     EmptyColumnView {
         children,
         gap: ROOT_GAP,
@@ -76,12 +77,13 @@ pub fn empty<State: 'static, V: View<State>>(
 
 /// `EmptyHeader`: a centered column (`gap-2`, no padding of its own).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn empty_header<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> EmptyColumnView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn empty_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> EmptyColumnView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     EmptyColumnView {
         children,
         gap: HEADER_GAP,
@@ -91,12 +93,15 @@ pub fn empty_header<State: 'static, V: View<State>>(
 
 /// `EmptyContent`: a centered column (`gap-4`, no padding of its own).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn empty_content<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn empty_content<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> EmptyColumnView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     EmptyColumnView {
         children,
         gap: CONTENT_GAP,

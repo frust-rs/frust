@@ -425,15 +425,17 @@ fn demo_list(state: &DemoState, dismissible: bool, custom_highlight: bool) -> An
         .cross_axis(CrossAxisAlignment::Stretch));
     }
     let rows = (0..ITEMS.len()).map(|index| row_view(state, index, custom_highlight));
-    any(
-        selection_host(rows, &state.selected, |state: &mut DemoState, index| {
+    any(selection_host(
+        frust::views(rows),
+        &state.selected,
+        |state: &mut DemoState, index| {
             state.selected = selection::toggle(&state.selected, index);
-        })
-        .on_activate(|state: &mut DemoState, index| {
-            let title = ITEMS[index].0;
-            state.toasts.show(snackbar(format!("Open {title}")));
-        }),
+        },
     )
+    .on_activate(|state: &mut DemoState, index| {
+        let title = ITEMS[index].0;
+        state.toasts.show(snackbar(format!("Open {title}")));
+    }))
 }
 
 /// One swipe-to-dismiss row: the wrapper *outside*, a single-row selection

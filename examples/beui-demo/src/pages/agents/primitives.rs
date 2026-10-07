@@ -389,7 +389,7 @@ fn bubbles() -> AnyView<State> {
          is End-aligned.",
     )));
     column.push(any(SizedBox(None, Some(10.0))));
-    column.push(any(message_bubble_group::<State>(vec![
+    column.push(any(message_bubble_group::<State, _>(vec![
         any(message_bubble::<State, _>(
             text("Compact spacing, first line.").size(14.0),
         )),
@@ -399,7 +399,7 @@ fn bubbles() -> AnyView<State> {
     ])
     .spacing(MessageBubbleSpacing::Compact)));
     column.push(any(SizedBox(None, Some(10.0))));
-    column.push(any(message_bubble_group::<State>(vec![
+    column.push(any(message_bubble_group::<State, _>(vec![
         any(message_bubble::<State, _>(
             text("Default spacing \u{2014} a change of sender.").size(14.0),
         )),
@@ -508,7 +508,7 @@ fn scroller(state: &State) -> AnyView<State> {
         )))
         .child(SizedBox(None, Some(12.0)))
         .child(
-            SizedBox(None, Some(300.0)).child(message_scroller::<State>(rows).on_pin_change(
+            SizedBox(None, Some(300.0)).child(message_scroller::<State, _>(rows).on_pin_change(
                 |s: &mut State, pinned| {
                     s.pinned = pinned;
                 },

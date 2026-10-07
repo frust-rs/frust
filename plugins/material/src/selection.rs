@@ -190,7 +190,7 @@ use frust::authoring::{Action, Role};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, ErasedArgCallback, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx,
-    ThemeTextColor, ThemeTextType, View, Widget, any,
+    ThemeTextColor, ThemeTextType, View, ViewSeq, Widget, any,
 };
 use frust::input::TOUCH_SLOP;
 use frust::{FrameTime, Theme, icon, text};
@@ -326,16 +326,18 @@ pub struct SelectionHostView<State: 'static> {
 /// ([`SelectionHostView::on_activate`]); a long-press selects an unselected
 /// row (see the [module docs](self)' Wrapper section). `on_toggle` reports
 /// the row index whose membership should flip.
-pub fn selection_host<State: 'static, F>(
-    items: impl IntoIterator<Item = impl View<State>>,
+pub fn selection_host<State: 'static, F, M>(
+    items: impl ViewSeq<State, M>,
     selected: &BTreeSet<usize>,
     on_toggle: F,
 ) -> SelectionHostView<State>
 where
     F: Fn(&mut State, usize) + 'static,
 {
+    let mut erased = Vec::new();
+    items.extend_views(&mut erased);
     SelectionHostView {
-        items: items.into_iter().map(AnyView::new).collect(),
+        items: erased,
         selected: selected.clone(),
         enabled: true,
         on_toggle: Rc::new(on_toggle),
@@ -701,8 +703,9 @@ where
 impl<State: 'static> SelectionAppBarView<State> {
     /// Attach contextual trailing action slots, in reading order
     /// (`M3ESelectionAppBar.actions`).
-    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
-        self.actions = actions.into_iter().map(AnyView::new).collect();
+    pub fn actions<M>(mut self, actions: impl ViewSeq<State, M>) -> Self {
+        self.actions.clear();
+        actions.extend_views(&mut self.actions);
         self
     }
 

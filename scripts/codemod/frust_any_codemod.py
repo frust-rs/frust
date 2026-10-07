@@ -844,6 +844,7 @@ class Apis:
     builder: set = field(default_factory=set)
     exclude: list = field(default_factory=list)
     lists: set = field(default_factory=set)
+    seq: set = field(default_factory=set)
 
 
 DEFAULT_APIS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "erasing_apis.txt")
@@ -859,7 +860,7 @@ def load_apis(path: str = DEFAULT_APIS) -> Apis:
                 continue
             if line.startswith("[") and line.endswith("]"):
                 section = line[1:-1].strip()
-                if section not in ("slot", "builder", "exclude", "list"):
+                if section not in ("slot", "builder", "exclude", "list", "seq"):
                     raise ValueError(f"{path}: unknown section [{section}]")
                 continue
             for entry in line.split():
@@ -871,6 +872,8 @@ def load_apis(path: str = DEFAULT_APIS) -> Apis:
                     apis.exclude.append(tuple(entry.split("::")))
                 elif section == "list":
                     apis.lists.add(entry)
+                elif section == "seq":
+                    apis.seq.add(entry)
                 else:
                     raise ValueError(f"{path}: entry {entry!r} before any [section]")
     return apis

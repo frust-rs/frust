@@ -51,7 +51,7 @@ use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextType,
-    Vec2, View, Widget, any, build_child, rebuild_child, rebuild_children, route_event,
+    Vec2, View, ViewSeq, Widget, any, build_child, rebuild_child, rebuild_children, route_event,
     route_event_single, teardown_child, visit_children,
 };
 
@@ -129,12 +129,15 @@ pub struct MessageGroupView<State: 'static> {
 
 /// Stack `children` (typically [`message`] rows) in a `gap-2` column.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn message_group<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn message_group<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> MessageGroupView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     MessageGroupView { children }
 }
 
@@ -216,12 +219,13 @@ pub struct MessageView<State: 'static> {
 /// A message row over `children` — typically an avatar box and a content
 /// column, in that (measurement) order.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn message<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> MessageView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn message<State: 'static, M>(children: impl ViewSeq<State, M>) -> MessageView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     MessageView {
         children,
         align: MessageAlign::default(),
@@ -478,12 +482,15 @@ pub struct MessageContentView<State: 'static> {
 /// `group-data-[align=end]/message:*:self-end` itself rather than being placed
 /// by this column.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn message_content<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn message_content<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> MessageContentView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     MessageContentView { children }
 }
 

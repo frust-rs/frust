@@ -89,7 +89,7 @@ fn skeleton_body() -> AnyView<HuddleState> {
     any(Column(
         (0..3)
             .map(|_| any(list_item::<HuddleState>("Loading…").supporting(" ")))
-            .collect(),
+            .collect::<Vec<_>>(),
     ))
 }
 
@@ -107,7 +107,9 @@ fn list_body(
     repo: &Arc<dyn ActivityRepository + Send + Sync>,
 ) -> AnyView<HuddleState> {
     any(Column(
-        rows.into_iter().map(|row| row_view(row, repo)).collect(),
+        rows.into_iter()
+            .map(|row| row_view(row, repo))
+            .collect::<Vec<_>>(),
     ))
 }
 
