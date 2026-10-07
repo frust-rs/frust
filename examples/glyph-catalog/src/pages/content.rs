@@ -13,8 +13,8 @@
 //! lives in the retained `Component` element" rule.
 
 use frust::{
-    AnyView, ButtonStyle, Color, Component, SizedBox, Theme, View, any, button, column, component,
-    row, text, use_context,
+    ButtonStyle, Color, Component, SizedBox, Theme, View, any, button, column, component, row,
+    text, use_context,
 };
 use frust_glyph::{
     BadgeVariant, StatDelta, TermLine, accordion, badge, empty_state, glyph_card, glyph_list,
@@ -44,18 +44,18 @@ const STAT_GAP: f64 = 10.0;
 
 /// See the page-fn contract in [`crate::pages`]. Content has no shared signal
 /// to read — it only mounts [`ContentDemo`]'s own retained local state.
-pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
-    any(component(ContentDemo))
+pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
+    component(ContentDemo)
 }
 
 /// A titled section: an accent heading over `body`, with trailing space
 /// before the next section.
-fn section(title: &str, body: AnyView<ContentDemoState>) -> AnyView<ContentDemoState> {
-    any(column()
+fn section(title: &str, body: impl View<ContentDemoState>) -> impl View<ContentDemoState> {
+    column()
         .child(text(title).size(15.0).color(section_accent()))
         .child(SizedBox(None, Some(HEADING_GAP)))
         .child(body)
-        .child(SizedBox(None, Some(SECTION_GAP))))
+        .child(SizedBox(None, Some(SECTION_GAP)))
 }
 
 /// [`ContentDemo`]'s retained local state (see the [module docs](self)): the
@@ -106,8 +106,8 @@ impl Component for ContentDemo {
 
 /// A `glyph_card` with all three slots: title, description, and a footer
 /// pairing a status badge with a small secondary button.
-fn card_demo() -> AnyView<ContentDemoState> {
-    any(glyph_card()
+fn card_demo() -> impl View<ContentDemoState> {
+    glyph_card()
         .title(text("Deploy pipeline"))
         .desc(text(
             "Builds, tests, and ships the release artifact on every push to main.",
@@ -121,13 +121,13 @@ fn card_demo() -> AnyView<ContentDemoState> {
                         .style(ButtonStyle::Secondary)
                         .small(),
                 ),
-        ))
+        )
 }
 
 /// A 4-up `stat_card` grid mixing an [`StatDelta::Up`] and a
 /// [`StatDelta::Down`] delta alongside two plain readouts.
-fn stat_card_grid() -> AnyView<ContentDemoState> {
-    any(row()
+fn stat_card_grid() -> impl View<ContentDemoState> {
+    row()
         .flex(1, stat_card("Sessions", "1,284"))
         .child(SizedBox(Some(STAT_GAP), None))
         .flex(
@@ -137,13 +137,13 @@ fn stat_card_grid() -> AnyView<ContentDemoState> {
         .child(SizedBox(Some(STAT_GAP), None))
         .flex(1, stat_card("Errors", "12").delta(StatDelta::Down, "3"))
         .child(SizedBox(Some(STAT_GAP), None))
-        .flex(1, stat_card("Latency", "42ms")))
+        .flex(1, stat_card("Latency", "42ms"))
 }
 
 /// A `glyph_list` of 4 rows (glyph box, title, sub, meta, chevron) that also
 /// stands in for the reference build's data table, plus a caption echoing the
 /// last-pressed row index.
-fn list_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
+fn list_demo(state: &ContentDemoState) -> impl View<ContentDemoState> {
     let press_note = match state.pressed_row {
         Some(i) => format!("Row {i} pressed."),
         None => "Tap a row to see it announced here.".to_string(),
@@ -153,7 +153,7 @@ fn list_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
          table has no dedicated Frust widget. {press_note}"
     );
 
-    any(column()
+    column()
         .child(
             glyph_list(vec![
                 glyph_list_item("$", "deploy")
@@ -176,14 +176,14 @@ fn list_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
             .on_press(|state: &mut ContentDemoState, i| state.pressed_row = Some(i)),
         )
         .child(SizedBox(None, Some(6.0)))
-        .child(text(caption).size(11.0)))
+        .child(text(caption).size(11.0))
 }
 
 /// An accordion trio, one panel open at a time — the built-in height
 /// animation plays on every toggle.
-fn accordion_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
+fn accordion_demo(state: &ContentDemoState) -> impl View<ContentDemoState> {
     let open = state.open_accordion;
-    any(column()
+    column()
         .child(accordion_item(
             0,
             open,
@@ -205,28 +205,33 @@ fn accordion_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
             "Data-table stand-in",
             "No dedicated table widget ships yet — glyph_list plays that role \
              (see the List section above).",
-        )))
+        ))
 }
 
 /// One accordion panel at `index`, open iff `index == open`. Pressing its
 /// header always opens *that* panel (an exclusive group never collapses to
 /// zero open).
-fn accordion_item(index: usize, open: usize, title: &str, body: &str) -> AnyView<ContentDemoState> {
-    any(accordion(title, text(body)).open(open == index).on_toggle(
+fn accordion_item(
+    index: usize,
+    open: usize,
+    title: &str,
+    body: &str,
+) -> impl View<ContentDemoState> {
+    accordion(title, text(body)).open(open == index).on_toggle(
         move |state: &mut ContentDemoState| {
             state.open_accordion = index;
         },
-    ))
+    )
 }
 
 /// An `empty_state` panel with a glyph, title/description, and a CTA button.
-fn empty_state_demo() -> AnyView<ContentDemoState> {
-    any(empty_state(
+fn empty_state_demo() -> impl View<ContentDemoState> {
+    empty_state(
         "No deployments yet",
         "Trigger your first deploy to see activity here.",
     )
     .glyph("▪")
-    .action(button("Deploy now", |_: &mut ContentDemoState| {}).style(ButtonStyle::Primary)))
+    .action(button("Deploy now", |_: &mut ContentDemoState| {}).style(ButtonStyle::Primary))
 }
 
 /// A staggered `term_block` plus a Replay button. Per API.md's semantics, a
@@ -234,7 +239,7 @@ fn empty_state_demo() -> AnyView<ContentDemoState> {
 /// wrapped in a single [`keyed`] flex child, re-keyed by
 /// [`ContentDemoState::replay_epoch`] on every press (a full teardown +
 /// rebuild, never a content-diff `rebuild`).
-fn term_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
+fn term_demo(state: &ContentDemoState) -> impl View<ContentDemoState> {
     let lines = vec![
         TermLine::prompt("frust build apk --release"),
         TermLine::output("Compiling glyph-catalog v0.1.0"),
@@ -242,7 +247,7 @@ fn term_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
         TermLine::comment("# staggered per-line reveal — replays below"),
     ];
 
-    any(column()
+    column()
         .child(column().keyed(state.replay_epoch, term_block(lines).staggered(true)))
         .child(SizedBox(None, Some(8.0)))
         .child(
@@ -250,14 +255,14 @@ fn term_demo(state: &ContentDemoState) -> AnyView<ContentDemoState> {
                 state.replay_epoch += 1;
             })
             .small(),
-        ))
+        )
 }
 
 /// A `tooltip` wrapping a small button target, plus a caption on its
 /// brightness-invariant ink (unlike every other themed color on this page,
 /// `GlyphInk` never swaps between light and dark).
-fn tooltip_demo() -> AnyView<ContentDemoState> {
-    any(column()
+fn tooltip_demo() -> impl View<ContentDemoState> {
+    column()
         .child(tooltip(
             button("Hold me", |_: &mut ContentDemoState| {})
                 .style(ButtonStyle::Secondary)
@@ -271,5 +276,5 @@ fn tooltip_demo() -> AnyView<ContentDemoState> {
              light/dark brightness, unlike every other color on this page.",
             )
             .size(11.0),
-        ))
+        )
 }
