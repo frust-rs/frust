@@ -20,8 +20,8 @@
 use std::cell::Cell;
 
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
-    NavigatorController, Padding, PopResult, RwSignal, Set, SizedBox, Theme, any, button,
+    Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
+    NavigatorController, Padding, PopResult, RwSignal, Set, SizedBox, Theme, View, button,
     inflexible, row, text, use_context,
 };
 use frust_glyph::{
@@ -128,13 +128,13 @@ fn filter_items(query: &str) -> Vec<PaletteItem> {
 }
 
 /// A muted section subhead (mirrors the reference build's `.subhead`).
-fn subhead(label: &str) -> AnyView<CatalogState> {
-    any(text(label.to_string()).size(11.5).color(subhead_ink()))
+fn subhead(label: &str) -> impl View<CatalogState> {
+    text(label.to_string()).size(11.5).color(subhead_ink())
 }
 
 /// The last-result caption row (empty until a dialog/palette/sheet closes).
-fn caption_view(caption: &str) -> AnyView<CatalogState> {
-    any(text(caption.to_string()).size(12.5).color(caption_ink()))
+fn caption_view(caption: &str) -> impl View<CatalogState> {
+    text(caption.to_string()).size(12.5).color(caption_ink())
 }
 
 /// Wire the "Open dialog" button: `show_glyph_dialog` with the reference
@@ -252,7 +252,7 @@ fn sheet_row(glyph: &str, label: &str) -> FlexChild<CatalogState> {
 /// The sheet's content: a heading, the four pane-picker rows, and a Close
 /// button that pops the navigator — in addition to the sheet's own scrim
 /// tap/handle drag/Escape/back dismiss vectors.
-fn sheet_body(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
+fn sheet_body(nav: NavigatorController<CatalogState>) -> impl View<CatalogState> {
     let mut children: Vec<FlexChild<CatalogState>> = vec![
         inflexible(text("Pane picker".to_string()).size(13.5)),
         inflexible(SizedBox(None, Some(12.0))),
@@ -264,10 +264,10 @@ fn sheet_body(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
             .style(ButtonStyle::Ghost)
             .small(),
     ));
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         FlexView::new(Axis::Vertical, children),
-    ))
+    )
 }
 
 /// Wire the "Bottom sheet" button: [`show_glyph_sheet`] holding
@@ -295,7 +295,7 @@ fn open_sheet_button(
 }
 
 /// See the page-fn contract in [`crate::pages`].
-pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
+pub fn page(state: &CatalogState) -> impl View<CatalogState> {
     let demo = demo_state();
     let caption = demo.caption.get();
     let nav = state.nav.clone();
@@ -328,8 +328,8 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
         children.push(inflexible(caption_view(&caption)));
     }
 
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         FlexView::new(Axis::Vertical, children),
-    ))
+    )
 }

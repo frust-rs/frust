@@ -81,6 +81,7 @@ pub fn sample_chip<State: 'static>(
 ) -> SampleChipView<State> {
     let label = label.into();
     SampleChipView {
+        // erasure: keep stored in the view's non-generic AnyView child field
         child: any(text(label.clone())
             .size(FONT_SIZE)
             .themed_role(ThemeTextColor::OnPrimaryContainer)),

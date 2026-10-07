@@ -53,8 +53,8 @@
 use std::cell::Cell;
 
 use frust::{
-    AnyView, Color, EdgeInsets, Get, IconSource, Padding, RwSignal, Set, SizedBox, Theme,
-    WithUntracked, any, column, row, text, use_context,
+    Color, EdgeInsets, Get, IconSource, Padding, RwSignal, Set, SizedBox, Theme, View,
+    WithUntracked, column, row, text, use_context,
 };
 
 use crate::CatalogState;
@@ -73,15 +73,15 @@ fn accent() -> Color {
 }
 
 /// A section heading: label + a little breathing room below it.
-fn heading(label: &str) -> AnyView<CatalogState> {
-    any(column()
+fn heading(label: &str) -> impl View<CatalogState> {
+    column()
         .child(text(label.to_string()).size(15.0).color(accent()))
-        .child(SizedBox(Some(0.0), Some(8.0))))
+        .child(SizedBox(Some(0.0), Some(8.0)))
 }
 
 /// Vertical gap between demo blocks.
-fn gap(px: f64) -> AnyView<CatalogState> {
-    any(SizedBox(Some(0.0), Some(px)))
+fn gap(px: f64) -> impl View<CatalogState> {
+    SizedBox(Some(0.0), Some(px))
 }
 
 // ---- Local demo state (see module docs) --------------------------------
@@ -170,7 +170,7 @@ const RINGED_DOT_ICON: IconSource = IconSource {
 
 /// A standalone 3-tab strip (moving underline indicator) — independent of
 /// the shell's own section tabs.
-fn tabs_demo() -> AnyView<CatalogState> {
+fn tabs_demo() -> impl View<CatalogState> {
     let sig = tabs_selected();
     let selected = sig.get();
     let labels = vec![
@@ -178,15 +178,15 @@ fn tabs_demo() -> AnyView<CatalogState> {
         "Activity".to_string(),
         "Settings".to_string(),
     ];
-    any(frust_glyph::tabs(
+    frust_glyph::tabs(
         labels,
         selected,
         move |_state: &mut CatalogState, idx: usize| sig.set(idx),
-    ))
+    )
 }
 
 /// A controlled 3-segment pill group.
-fn segmented_demo() -> AnyView<CatalogState> {
+fn segmented_demo() -> impl View<CatalogState> {
     let sig = segmented_selected();
     let selected = sig.get();
     let segments = vec![
@@ -194,16 +194,16 @@ fn segmented_demo() -> AnyView<CatalogState> {
         "Grid".to_string(),
         "Compact".to_string(),
     ];
-    any(frust_glyph::segmented_control(
+    frust_glyph::segmented_control(
         segments,
         selected,
         move |_state: &mut CatalogState, idx: usize| sig.set(idx),
-    ))
+    )
 }
 
 /// A 3-crumb breadcrumb (last crumb current, non-link); tapping a link crumb
 /// updates the caption beneath it.
-fn breadcrumb_demo() -> AnyView<CatalogState> {
+fn breadcrumb_demo() -> impl View<CatalogState> {
     let caption_sig = breadcrumb_caption();
     let crumbs = vec![
         frust_glyph::crumb::<CatalogState>("catalog").on_tap(move |_s: &mut CatalogState| {
@@ -215,15 +215,15 @@ fn breadcrumb_demo() -> AnyView<CatalogState> {
         frust_glyph::crumb::<CatalogState>("navigation"),
     ];
     let caption = caption_sig.get();
-    any(column()
+    column()
         .child(frust_glyph::breadcrumb(crumbs))
         .child(gap(6.0))
-        .child(text(caption).size(11.0)))
+        .child(text(caption).size(11.0))
 }
 
 /// The CHAR-item nav bar: box-drawing glyphs the bundled fonts actually cover
 /// (see the module docs' coverage story).
-fn char_nav_bar_demo() -> AnyView<CatalogState> {
+fn char_nav_bar_demo() -> impl View<CatalogState> {
     let sig = char_nav_selected();
     let selected = sig.get();
     let items = vec![
@@ -231,16 +231,16 @@ fn char_nav_bar_demo() -> AnyView<CatalogState> {
         frust_glyph::glyph_nav_item("─", "stream"),
         frust_glyph::glyph_nav_item("╳", "close"),
     ];
-    any(frust_glyph::glyph_nav_bar(
+    frust_glyph::glyph_nav_bar(
         items,
         selected,
         move |_state: &mut CatalogState, idx: usize| sig.set(idx),
-    ))
+    )
 }
 
 /// The VECTOR-item nav bar: deterministic app-local icon paths (see the
 /// module docs' coverage story).
-fn icon_nav_bar_demo() -> AnyView<CatalogState> {
+fn icon_nav_bar_demo() -> impl View<CatalogState> {
     let sig = icon_nav_selected();
     let selected = sig.get();
     let items = vec![
@@ -248,17 +248,17 @@ fn icon_nav_bar_demo() -> AnyView<CatalogState> {
         frust_glyph::glyph_nav_item_icon(DIAMOND_ICON, "diamond"),
         frust_glyph::glyph_nav_item_icon(RINGED_DOT_ICON, "dot"),
     ];
-    any(frust_glyph::glyph_nav_bar(
+    frust_glyph::glyph_nav_bar(
         items,
         selected,
         move |_state: &mut CatalogState, idx: usize| sig.set(idx),
-    ))
+    )
 }
 
 /// Three avatars: default size/accent, a larger custom accent, and a small
 /// override-everything variant.
-fn avatars_demo() -> AnyView<CatalogState> {
-    any(row()
+fn avatars_demo() -> impl View<CatalogState> {
+    row()
         .child(frust_glyph::avatar("ed").size(28.0))
         .child(SizedBox(Some(12.0), None))
         .child(frust_glyph::avatar("mk").size(40.0))
@@ -267,12 +267,12 @@ fn avatars_demo() -> AnyView<CatalogState> {
             frust_glyph::avatar("ai")
                 .size(52.0)
                 .accent(Color::from_rgb8(0x39, 0x49, 0xAB)),
-        ))
+        )
 }
 
 /// See the page-fn contract in [`crate::pages`].
-pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
-    any(Padding(
+pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
+    Padding(
         EdgeInsets::all(16.0),
         column()
             .child(heading("Tabs"))
@@ -300,5 +300,5 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
             .child(gap(20.0))
             .child(heading("Avatars"))
             .child(avatars_demo()),
-    ))
+    )
 }

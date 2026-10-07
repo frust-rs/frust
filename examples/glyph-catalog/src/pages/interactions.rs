@@ -275,13 +275,13 @@ macro_rules! local_clock {
 }
 
 /// A demo heading in accent amber.
-fn label(s: impl Into<String>) -> AnyView<CatalogState> {
-    any(text(s).size(13.0).color(amber()))
+fn label(s: impl Into<String>) -> impl View<CatalogState> {
+    text(s).size(13.0).color(amber())
 }
 
 /// A muted per-demo caption.
-fn caption(s: impl Into<String>) -> AnyView<CatalogState> {
-    any(text(s).size(11.0).color(muted()))
+fn caption(s: impl Into<String>) -> impl View<CatalogState> {
+    text(s).size(11.0).color(muted())
 }
 
 /// A fixed-height vertical spacer between demo blocks.
@@ -439,8 +439,8 @@ fn heartbeat_ring_state(elapsed_in_cycle: f64, reduce: bool) -> (f64, f64) {
 /// background — its hairline border is the only thing painted, giving a
 /// border-only stroked circle rather than the deleted Material catalog's
 /// filled-arc primitive.
-fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> AnyView<CatalogState> {
-    any(AnimatedOpacity(
+fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> impl View<CatalogState> {
+    AnimatedOpacity(
         ring_opacity,
         SizedBox(Some(HB_RING_SLOT), Some(HB_RING_SLOT)).child(Align(
             Alignment::CENTER,
@@ -458,7 +458,7 @@ fn heartbeat_ring_view(ring_opacity: f64, ring_scale: f64) -> AnyView<CatalogSta
             .timing(ZERO),
         )),
     )
-    .timing(ZERO))
+    .timing(ZERO)
 }
 
 /// 01 connection heartbeat: a radar-ping ring (a border-only, decorative,
@@ -1231,20 +1231,18 @@ fn bar_height(t_ms: f64, idx: usize, live: bool, reduce: bool) -> f64 {
 /// One bar: a fixed-height slot, its filled portion bottom-anchored via top
 /// padding (`CrossAxisAlignment` has no `End` variant — see the
 /// [module docs](self)) so it visibly grows upward.
-fn wave_bar(height: f64, color: Color) -> AnyView<CatalogState> {
-    any(
-        SizedBox(Some(WAVE_BAR_W), Some(WAVE_BAR_MAX_H)).child(Padding(
-            EdgeInsets {
-                top: WAVE_BAR_MAX_H - height,
-                ..EdgeInsets::all(0.0)
-            },
-            SizedBox(Some(WAVE_BAR_W), Some(height))
-                .child(Image(solid_source(color)).fit(ImageFit::Fill)),
-        )),
-    )
+fn wave_bar(height: f64, color: Color) -> impl View<CatalogState> {
+    SizedBox(Some(WAVE_BAR_W), Some(WAVE_BAR_MAX_H)).child(Padding(
+        EdgeInsets {
+            top: WAVE_BAR_MAX_H - height,
+            ..EdgeInsets::all(0.0)
+        },
+        SizedBox(Some(WAVE_BAR_W), Some(height))
+            .child(Image(solid_source(color)).fit(ImageFit::Fill)),
+    ))
 }
 
-fn wave_row(name: &str, live: bool, reduce: bool, t: f64) -> AnyView<CatalogState> {
+fn wave_row(name: &str, live: bool, reduce: bool, t: f64) -> impl View<CatalogState> {
     let color = if live {
         amber()
     } else {
@@ -1253,13 +1251,13 @@ fn wave_row(name: &str, live: bool, reduce: bool, t: f64) -> AnyView<CatalogStat
     let bars: Vec<FlexChild<CatalogState>> = (0..4)
         .map(|i| inflexible(wave_bar(bar_height(t, i, live, reduce), color)))
         .collect();
-    any(Padding(
+    Padding(
         EdgeInsets::all(8.0),
         row()
             .flex(1, text(name.to_string()).size(11.5))
             .child(FlexView::new(Axis::Horizontal, bars).cross_axis(CrossAxisAlignment::Center))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// 07 live output indicator: three panes, one toggleable — a small waveform
@@ -1420,8 +1418,8 @@ pub fn start_waveform_for_test() {
 }
 
 /// See the page-fn contract in [`crate::pages`].
-pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
-    any(column()
+pub fn page(state: &CatalogState) -> impl View<CatalogState> {
+    column()
         .push(demo_heartbeat(state))
         .push(gap(8.0))
         .push(demo_attach())
@@ -1436,7 +1434,7 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
         .push(gap(8.0))
         .push(demo_waveform(state))
         .push(gap(8.0))
-        .push(demo_copy_burst()))
+        .push(demo_copy_burst())
 }
 
 #[cfg(test)]
@@ -1457,7 +1455,7 @@ mod tests {
     use peniko::{Brush, Color};
     use reactive_graph::owner::Owner;
 
-    use super::{AnyView, PaintScene, Set, page};
+    use super::{AnyView, PaintScene, Set, any, page};
     use crate::CatalogState;
 
     /// A paint target that records nothing — only `RenderRoot::paint`'s
@@ -1492,7 +1490,7 @@ mod tests {
         state: &mut CatalogState,
         tcx: &mut TextContext,
     ) -> bool {
-        let mut logic = |s: &mut CatalogState| page(s);
+        let mut logic = |s: &mut CatalogState| any(page(s));
         root.rebuild(&mut logic, state);
         let tcx_any: &mut dyn Any = tcx;
         root.layout_with_text(Size::new(390.0, 3000.0), tcx_any);
@@ -1808,7 +1806,7 @@ mod tests {
         assert_eq!(scale, HB_RING_SCALE_MAX);
 
         let recorder = paint_view_into_recorder(
-            |_s| heartbeat_ring_view(opacity.max(0.3), scale),
+            |_s| any(heartbeat_ring_view(opacity.max(0.3), scale)),
             Size::new(200.0, 200.0),
         );
 
@@ -1860,7 +1858,7 @@ mod tests {
 
         let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
         let mut state = CatalogState::new();
-        let mut logic = |_s: &mut CatalogState| heartbeat_ring_view(opacity.max(0.3), scale);
+        let mut logic = |_s: &mut CatalogState| any(heartbeat_ring_view(opacity.max(0.3), scale));
         root.rebuild(&mut logic, &mut state);
         let mut tcx = TextContext::new();
         let tcx_any: &mut dyn Any = &mut tcx;

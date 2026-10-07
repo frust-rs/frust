@@ -46,10 +46,10 @@
 use std::path::PathBuf;
 
 use frust::{
-    AnyView, Axis, ChildKey, Color, DragCoordinator, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, Padding, RwSignal, ScrollController, Set, SizedBox, SourceFeedback, Theme,
-    Update, any, auto_scroll_zone, column, container, drag_target, draggable, inflexible,
-    reorderable_list, scroll_view, text, use_context,
+    Axis, ChildKey, Color, DragCoordinator, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
+    Padding, RwSignal, ScrollController, Set, SizedBox, SourceFeedback, Theme, Update, View,
+    auto_scroll_zone, column, container, drag_target, draggable, inflexible, reorderable_list,
+    scroll_view, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -221,13 +221,13 @@ struct ColumnColors {
 }
 
 /// One card's chip: its label over a themed container fill.
-fn card_chip(card: KanbanCard, colors: ColumnColors) -> AnyView<PlaygroundState> {
-    any(container(Padding(
+fn card_chip(card: KanbanCard, colors: ColumnColors) -> impl View<PlaygroundState> {
+    container(Padding(
         EdgeInsets::all(8.0),
         text(card.label).size(12.0).color(colors.accent),
     ))
     .fill(colors.card_fill)
-    .radius(6.0))
+    .radius(6.0)
 }
 
 /// Build column `to_column`: its heading, its cards (each a drag source
@@ -240,7 +240,7 @@ fn kanban_column(
     coordinator: DragCoordinator,
     controller: ScrollController,
     colors: ColumnColors,
-) -> AnyView<PlaygroundState> {
+) -> impl View<PlaygroundState> {
     let mut children: Vec<FlexChild<PlaygroundState>> = Vec::with_capacity(cards.len() * 2);
     for card in cards {
         let id = card.id;
@@ -266,26 +266,24 @@ fn kanban_column(
             move_card(state, moved.id, to_column);
         });
     let zoned = auto_scroll_zone(target, coordinator, controller);
-    any(column()
+    column()
         .child(text(label).size(12.0).color(colors.muted))
         .child(SizedBox::<PlaygroundState>(None, Some(4.0)))
-        .child(zoned))
+        .child(zoned)
 }
 
 /// One reorder row's content: its id-derived label, fixed to
 /// [`REORDER_ROW_HEIGHT_PX`] so the list's drop gaps land at predictable
 /// positions.
-fn reorder_row_view(id: u32, accent: Color) -> AnyView<PlaygroundState> {
-    any(
-        SizedBox::<PlaygroundState>(None, Some(REORDER_ROW_HEIGHT_PX)).child(Padding(
-            EdgeInsets::symmetric(12.0, 8.0),
-            text(format!("Item {}", id + 1)).size(12.0).color(accent),
-        )),
-    )
+fn reorder_row_view(id: u32, accent: Color) -> impl View<PlaygroundState> {
+    SizedBox::<PlaygroundState>(None, Some(REORDER_ROW_HEIGHT_PX)).child(Padding(
+        EdgeInsets::symmetric(12.0, 8.0),
+        text(format!("Item {}", id + 1)).size(12.0).color(accent),
+    ))
 }
 
 /// See the page-fn contract in [`crate::pages`].
-pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
+pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
     let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
     let scheme = theme.scheme();
     let accent = scheme.primary;
@@ -323,7 +321,7 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
     let kanban_row = FlexView::new(Axis::Horizontal, column_views);
 
     // --- Reorderable list ---
-    let reorder_rows: Vec<(ChildKey, AnyView<PlaygroundState>)> = reorder_order_sig()
+    let reorder_rows: Vec<(ChildKey, _)> = reorder_order_sig()
         .get()
         .iter()
         .map(|&id| (ChildKey::new(id), reorder_row_view(id, accent)))
@@ -373,7 +371,7 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
             .collect()
     };
 
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         column()
             .child(text("Drag").size(13.0).color(accent))
@@ -401,7 +399,7 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
             .child(file_target)
             .child(SizedBox::<PlaygroundState>(None, Some(8.0)))
             .child(FlexView::new(Axis::Vertical, dropped_lines)),
-    ))
+    )
 }
 
 #[cfg(test)]

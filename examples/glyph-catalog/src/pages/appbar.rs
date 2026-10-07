@@ -126,13 +126,13 @@ fn solid_source(color: Color) -> ImageSource {
 }
 
 /// A demo heading in accent amber.
-fn label(s: impl Into<String>) -> AnyView<CatalogState> {
-    any(text(s).size(13.0).color(amber()))
+fn label(s: impl Into<String>) -> impl View<CatalogState> {
+    text(s).size(13.0).color(amber())
 }
 
 /// A muted per-demo caption.
-fn caption(s: impl Into<String>) -> AnyView<CatalogState> {
-    any(text(s).size(11.0).color(muted()))
+fn caption(s: impl Into<String>) -> impl View<CatalogState> {
+    text(s).size(11.0).color(muted())
 }
 
 /// A fixed-height vertical spacer between demo blocks.
@@ -159,10 +159,10 @@ fn block(children: Vec<FlexChild<CatalogState>>) -> FlexChild<CatalogState> {
 /// `nav` is the page's own captured [`NavigatorController`] clone, threaded
 /// in by [`open_variation`] at push time (mirrors the dialog demos' push
 /// pattern).
-fn back_button(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> {
-    any(button("\u{2039}", move |_: &mut CatalogState| nav.pop())
+fn back_button(nav: NavigatorController<CatalogState>) -> impl View<CatalogState> {
+    button("\u{2039}", move |_: &mut CatalogState| nav.pop())
         .style(ButtonStyle::Icon)
-        .small())
+        .small()
 }
 
 /// Wrap a variation page's real `bar` over a scrollable `body` — the pushed
@@ -170,6 +170,7 @@ fn back_button(nav: NavigatorController<CatalogState>) -> AnyView<CatalogState> 
 /// inset itself (`frust_glyph::app_bar`'s own module docs), so `body`'s safe area
 /// disables its own top edge (`.top(false)`) to avoid double-padding it,
 /// exactly mirroring `crate::lib`'s root shell composition.
+// erasure: keep every caller is a navigator-pushed variation page returning AnyView
 fn variation_frame(
     bar: AnyView<CatalogState>,
     body: AnyView<CatalogState>,
@@ -368,17 +369,17 @@ impl Future for Delay {
 local_sig!(anatomy_starred_sig, bool, false);
 
 /// A small square filled with `color`, the brand-mark's unit cell.
-fn mark_cell(color: Color) -> AnyView<CatalogState> {
-    any(SizedBox(Some(8.0), Some(8.0)).child(Image(solid_source(color)).fit(ImageFit::Fill)))
+fn mark_cell(color: Color) -> impl View<CatalogState> {
+    SizedBox(Some(8.0), Some(8.0)).child(Image(solid_source(color)).fit(ImageFit::Fill))
 }
 
 /// The design's 2×2 grid brand mark, composed from four small filled
 /// squares — a checkerboard of `accent`/a faded `accent` (the anatomy demo's
 /// leading slot: a back arrow / brand mark / nothing).
-fn brand_mark() -> AnyView<CatalogState> {
+fn brand_mark() -> impl View<CatalogState> {
     let accent = amber();
     let faded = with_alpha(accent, 0.4);
-    any(column()
+    column()
         .child(
             row()
                 .child(mark_cell(accent))
@@ -391,7 +392,7 @@ fn brand_mark() -> AnyView<CatalogState> {
                 .child(mark_cell(faded))
                 .push(gap(2.0))
                 .child(mark_cell(accent)),
-        ))
+        )
 }
 
 /// 01 anatomy: a compact bar — brand-mark leading, a title + subtitle, one
@@ -445,12 +446,12 @@ const ELEVATED_THRESHOLD_PX: f64 = 4.0;
 /// interactions section's fuller connection-heartbeat composition (its own
 /// `demo_heartbeat` is private, so a small duplicate here was preferred over
 /// editing that file). Shown under the large variant's big title.
-fn collapse_meta_row() -> AnyView<CatalogState> {
-    any(row()
+fn collapse_meta_row() -> impl View<CatalogState> {
+    row()
         .child(frust_glyph::badge("connected", BadgeVariant::Success).dot(true))
         .push(gap(8.0))
         .child(text("203.0.113.57:50051 · 42ms").size(11.0).color(muted()))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A bounded list of filler rows — the scrollable content that drives the
@@ -464,7 +465,7 @@ fn collapse_meta_row() -> AnyView<CatalogState> {
 /// span — while the 700px-tall headless test viewport made the same filler
 /// scroll generously, so every gate stayed green (the M1 device-only
 /// mystery, root-caused 2026-07-24).
-fn filler_rows() -> AnyView<CatalogState> {
+fn filler_rows() -> impl View<CatalogState> {
     let rows: Vec<AnyView<CatalogState>> = (1..=64)
         .map(|i| {
             any(Padding(
@@ -473,10 +474,7 @@ fn filler_rows() -> AnyView<CatalogState> {
             ))
         })
         .collect();
-    any(FlexView::new(
-        Axis::Vertical,
-        rows.into_iter().map(inflexible).collect(),
-    ))
+    FlexView::new(Axis::Vertical, rows.into_iter().map(inflexible).collect())
 }
 
 /// 02 scroll-collapse large: the real pushed page. A full-height filler
@@ -994,13 +992,13 @@ fn open_variation(state: &mut CatalogState, index: usize) {
 /// over a [`glyph_list`] of the six variation pages (see the [module
 /// docs](self)'s "Structure" section) — each row pushes a real full-screen
 /// page via [`open_variation`].
-pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
+pub fn page(_state: &CatalogState) -> impl View<CatalogState> + use<> {
     let items = VARIATIONS
         .iter()
         .map(|(glyph, title, sub)| glyph_list_item(*glyph, *title).sub(*sub).chevron(true))
         .collect();
 
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         column()
             .push(demo_anatomy())
@@ -1014,5 +1012,5 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
             .child(
                 glyph_list(items).on_press(|state: &mut CatalogState, i| open_variation(state, i)),
             ),
-    ))
+    )
 }

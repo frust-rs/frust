@@ -137,6 +137,7 @@ const RADIUS_CHIP_SIZE: f64 = 44.0;
 /// One color swatch: a filled box, the token's reference name, and its
 /// live-resolved hex text — `color` is always a value read off the current
 /// theme by the caller, never a literal.
+// erasure: keep an element of wrap_rows' Vec<AnyView> items, mixed with swatch_na
 fn swatch(name: &str, color: Color, label_color: Color) -> AnyView<CatalogState> {
     any(Padding(
         EdgeInsets::all(6.0),
@@ -155,6 +156,7 @@ fn swatch(name: &str, color: Color, label_color: Color) -> AnyView<CatalogState>
 /// (see the module docs' "Unmapped Glyph text tokens" section) — same
 /// footprint as [`swatch`] so the ramp stays visually aligned, but painted
 /// with a dashed-feel dim label instead of a resolved color/hex.
+// erasure: keep an element of wrap_rows' Vec<AnyView> items, mixed with swatch
 fn swatch_na(name: &str, reason: &str, label_color: Color) -> AnyView<CatalogState> {
     any(Padding(
         EdgeInsets::all(6.0),
@@ -175,6 +177,7 @@ fn mono_label(content: String, color: Color) -> TextView {
 /// Group `items` into rows of `per_row`, stacked vertically — the closest
 /// approximation of a wrapping grid the facade offers today (no `Wrap`
 /// widget yet).
+// erasure: keep every caller passes it as section's AnyView body
 fn wrap_rows(mut items: Vec<AnyView<CatalogState>>, per_row: usize) -> AnyView<CatalogState> {
     let mut rows: Vec<AnyView<CatalogState>> = Vec::new();
     while !items.is_empty() {
@@ -193,6 +196,7 @@ fn wrap_rows(mut items: Vec<AnyView<CatalogState>>, per_row: usize) -> AnyView<C
 }
 
 /// A titled section: a heading line, a small vertical gap, then `body`.
+// erasure: keep every caller pushes it onto the page's Vec<AnyView> children
 fn section(
     title: &str,
     subtitle: Option<&str>,
@@ -218,14 +222,14 @@ fn section(
 
 /// One type-scale specimen: the sample text set in `style`, plus a
 /// family/size caption underneath.
-fn type_specimen(view: TextView, meta: &str, label_color: Color) -> AnyView<CatalogState> {
-    any(Padding(
+fn type_specimen(view: TextView, meta: &str, label_color: Color) -> impl View<CatalogState> {
+    Padding(
         EdgeInsets::symmetric(0.0, 6.0),
         column()
             .child(view)
             .child(text(meta.to_string()).size(10.0).color(label_color))
             .cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 /// One radius chip: a static rounded-rect fill at `radius`, sized against
@@ -235,9 +239,9 @@ fn radius_chip(
     radius: f64,
     fill_color: Color,
     label_color: Color,
-) -> AnyView<CatalogState> {
+) -> impl View<CatalogState> {
     let resolved = ShapeScale::resolve(radius, RADIUS_CHIP_SIZE, RADIUS_CHIP_SIZE);
-    any(Padding(
+    Padding(
         EdgeInsets::all(8.0),
         column()
             .child(StaticRoundedRectView::new(
@@ -248,11 +252,11 @@ fn radius_chip(
             ))
             .child(mono_label(label.to_string(), label_color))
             .cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 /// See the page-fn contract in [`crate::pages`].
-pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
+pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
     // Live theme read: subscribes this build to `set_app_theme` writes, so a
     // header brightness/motion toggle repaints every swatch below from the
     // CURRENT scheme — never a hardcoded hex.
@@ -471,9 +475,9 @@ pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
             .child(radius_chip("full", shape.full, raised_bg, muted))),
     ));
 
-    any(FlexView::new(
+    FlexView::new(
         Axis::Vertical,
         page_children.into_iter().map(inflexible).collect(),
     )
-    .cross_axis(CrossAxisAlignment::Start))
+    .cross_axis(CrossAxisAlignment::Start)
 }

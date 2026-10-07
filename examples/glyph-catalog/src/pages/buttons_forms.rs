@@ -73,9 +73,8 @@
 //! `examples/huddle`'s four-way appearance toggle for that check).
 
 use frust::{
-    Alignment, AnyView, ButtonStyle, Component, CrossAxisAlignment, EdgeInsets, Get, Padding,
-    RwSignal, Set, SizedBox, View, any, button, checkbox, column, component, radio, row, slider,
-    text, text_input,
+    Alignment, ButtonStyle, Component, CrossAxisAlignment, EdgeInsets, Get, Padding, RwSignal, Set,
+    SizedBox, View, any, button, checkbox, column, component, radio, row, slider, text, text_input,
 };
 // The Glyph catalog's own authored toggle — not a baseline `frust`/
 // `frust-widgets` item, and not a themed stand-in for one either.
@@ -86,8 +85,8 @@ use crate::CatalogState;
 /// See the page-fn contract in [`crate::pages`]. Unused: every demo on this
 /// page lives in its own nested [`ButtonsFormsScreen`] component state (see
 /// the [module docs](self)).
-pub fn page(_state: &CatalogState) -> AnyView<CatalogState> {
-    any(component(ButtonsFormsScreen))
+pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
+    component(ButtonsFormsScreen)
 }
 
 /// Stateless configuration; all state lives in [`ButtonsFormsState`].
@@ -255,28 +254,28 @@ impl Component for ButtonsFormsScreen {
 }
 
 /// A section heading.
-fn heading(label: &str) -> AnyView<ButtonsFormsState> {
-    any(text(label).size(20.0))
+fn heading(label: &str) -> impl View<ButtonsFormsState> {
+    text(label).size(20.0)
 }
 
 /// A small explanatory caption line.
-fn caption(label: &str) -> AnyView<ButtonsFormsState> {
-    any(text(label).size(11.0))
+fn caption(label: &str) -> impl View<ButtonsFormsState> {
+    text(label).size(11.0)
 }
 
 /// A vertical spacer of `height` logical px.
-fn spacer(height: f64) -> AnyView<ButtonsFormsState> {
-    any(SizedBox(None, Some(height)))
+fn spacer(height: f64) -> impl View<ButtonsFormsState> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal spacer of `width` logical px.
-fn hspacer(width: f64) -> AnyView<ButtonsFormsState> {
-    any(SizedBox(Some(width), None))
+fn hspacer(width: f64) -> impl View<ButtonsFormsState> {
+    SizedBox(Some(width), None)
 }
 
 /// Every [`ButtonStyle`] variant, side by side (display-only, no-op presses).
-fn button_styles_row() -> AnyView<ButtonsFormsState> {
-    any(row()
+fn button_styles_row() -> impl View<ButtonsFormsState> {
+    row()
         .child(button("Primary", |_: &mut ButtonsFormsState| {}))
         .child(hspacer(8.0))
         .child(button("Secondary", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Secondary))
@@ -286,12 +285,12 @@ fn button_styles_row() -> AnyView<ButtonsFormsState> {
         .child(button("Danger", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Danger))
         .child(hspacer(8.0))
         .child(button("+", |_: &mut ButtonsFormsState| {}).style(ButtonStyle::Icon))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A `.small()` Primary + Secondary pair.
-fn small_buttons_row() -> AnyView<ButtonsFormsState> {
-    any(row()
+fn small_buttons_row() -> impl View<ButtonsFormsState> {
+    row()
         .child(button("Small primary", |_: &mut ButtonsFormsState| {}).small())
         .child(hspacer(8.0))
         .child(
@@ -299,12 +298,12 @@ fn small_buttons_row() -> AnyView<ButtonsFormsState> {
                 .style(ButtonStyle::Secondary)
                 .small(),
         )
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The loading demo: a checkbox driving a Primary button's `.loading(..)`.
-fn loading_demo_row(loading: bool) -> AnyView<ButtonsFormsState> {
-    any(row()
+fn loading_demo_row(loading: bool) -> impl View<ButtonsFormsState> {
+    row()
         .child(checkbox(
             loading,
             "Loading",
@@ -312,16 +311,16 @@ fn loading_demo_row(loading: bool) -> AnyView<ButtonsFormsState> {
         ))
         .child(hspacer(12.0))
         .child(button("Save changes", |_: &mut ButtonsFormsState| {}).loading(loading))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The disabled-look demo: a Secondary button statically shown with
 /// `.loading(true)` (see the [module docs](self) on why no dedicated
 /// disabled builder exists).
-fn disabled_demo_row() -> AnyView<ButtonsFormsState> {
-    any(button("Unavailable", |_: &mut ButtonsFormsState| {})
+fn disabled_demo_row() -> impl View<ButtonsFormsState> {
+    button("Unavailable", |_: &mut ButtonsFormsState| {})
         .style(ButtonStyle::Secondary)
-        .loading(true))
+        .loading(true)
 }
 
 /// Stretch-aware default from `ButtonView::label_alignment`: a
@@ -329,14 +328,14 @@ fn disabled_demo_row() -> AnyView<ButtonsFormsState> {
 /// auto-centers its label with *no* explicit `.label_alignment(..)` call,
 /// beside a natural-width button that's unaffected — there's no free space
 /// for any alignment fraction to distribute into.
-fn stretched_button_row() -> AnyView<ButtonsFormsState> {
-    any(row()
+fn stretched_button_row() -> impl View<ButtonsFormsState> {
+    row()
         .child(
             SizedBox(Some(220.0), None).child(button("Continue", |_: &mut ButtonsFormsState| {})),
         )
         .child(hspacer(12.0))
         .child(button("Continue", |_: &mut ButtonsFormsState| {}))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// Contrasts the default vs an explicit `Alignment::CENTER` on a button
@@ -345,8 +344,8 @@ fn stretched_button_row() -> AnyView<ButtonsFormsState> {
 /// (`ButtonView::label_alignment`'s module docs — height stretch never
 /// auto-centers), so an explicit call is the only way to also center
 /// vertically.
-fn vertical_alignment_row() -> AnyView<ButtonsFormsState> {
-    any(row()
+fn vertical_alignment_row() -> impl View<ButtonsFormsState> {
+    row()
         .child(
             SizedBox(Some(160.0), Some(64.0))
                 .child(button("Default", |_: &mut ButtonsFormsState| {})),
@@ -355,7 +354,7 @@ fn vertical_alignment_row() -> AnyView<ButtonsFormsState> {
         .child(SizedBox(Some(160.0), Some(64.0)).child(
             button("Centered", |_: &mut ButtonsFormsState| {}).label_alignment(Alignment::CENTER),
         ))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The disabled-vs-enabled `TextInput` pair (`.enabled(false)`):
@@ -364,8 +363,8 @@ fn vertical_alignment_row() -> AnyView<ButtonsFormsState> {
 fn disabled_vs_enabled_row(
     disabled_value: String,
     enabled_value: String,
-) -> AnyView<ButtonsFormsState> {
-    any(row()
+) -> impl View<ButtonsFormsState> {
+    row()
         .child(
             text_input(disabled_value, |s: &mut ButtonsFormsState, v: String| {
                 s.disabled_input_value.set(v)
@@ -377,12 +376,12 @@ fn disabled_vs_enabled_row(
             enabled_value,
             |s: &mut ButtonsFormsState, v: String| s.enabled_compare_value.set(v),
         ))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// Two mutually-exclusive radios, `selected` = the currently-chosen index.
-fn radio_pair_row(selected: usize) -> AnyView<ButtonsFormsState> {
-    any(row()
+fn radio_pair_row(selected: usize) -> impl View<ButtonsFormsState> {
+    row()
         .child(
             radio(selected == 0, "Option A")
                 .on_select(|s: &mut ButtonsFormsState| s.radio_selected.set(0)),
@@ -392,16 +391,16 @@ fn radio_pair_row(selected: usize) -> AnyView<ButtonsFormsState> {
             radio(selected == 1, "Option B")
                 .on_select(|s: &mut ButtonsFormsState| s.radio_selected.set(1)),
         )
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The slider plus its live percentage readout.
-fn slider_row(value: f64) -> AnyView<ButtonsFormsState> {
-    any(row()
+fn slider_row(value: f64) -> impl View<ButtonsFormsState> {
+    row()
         .child(slider(value, |s: &mut ButtonsFormsState, v: f64| {
             s.slider_value.set(v)
         }))
         .child(hspacer(12.0))
         .child(text(format!("{:.0}%", value * 100.0)).size(13.0))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }

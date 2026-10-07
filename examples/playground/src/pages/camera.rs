@@ -123,8 +123,8 @@ const PREVIEW_H: f64 = 240.0;
 /// See the page-fn contract in [`crate::pages`]. Camera has no shared signal
 /// to read — it only mounts [`CameraPage`]'s own retained local state (the
 /// [module docs](self)'s Session lifecycle section).
-pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
-    any(component(CameraPage))
+pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
+    component(CameraPage)
 }
 
 // ---------------------------------------------------------------------------
@@ -412,13 +412,13 @@ fn error_ink() -> Color {
 }
 
 /// A demo heading in the accent role.
-fn label(s: impl Into<String>) -> AnyView<CameraPageState> {
-    any(text(s).size(13.0).color(accent()))
+fn label(s: impl Into<String>) -> impl View<CameraPageState> {
+    text(s).size(13.0).color(accent())
 }
 
 /// A muted per-demo caption.
-fn caption(s: impl Into<String>) -> AnyView<CameraPageState> {
-    any(text(s).size(11.0).color(muted()))
+fn caption(s: impl Into<String>) -> impl View<CameraPageState> {
+    text(s).size(11.0).color(muted())
 }
 
 /// A fixed-height vertical spacer between demo blocks.
@@ -439,7 +439,7 @@ fn block(children: Vec<FlexChild<CameraPageState>>) -> FlexChild<CameraPageState
 /// comment for the device-viewport lesson behind the row count —
 /// duplicated locally per that module's own precedent (private,
 /// per-module, not shared).
-fn filler_rows() -> AnyView<CameraPageState> {
+fn filler_rows() -> impl View<CameraPageState> {
     let rows: Vec<AnyView<CameraPageState>> = (1..=64)
         .map(|i| {
             any(Padding(
@@ -448,10 +448,7 @@ fn filler_rows() -> AnyView<CameraPageState> {
             ))
         })
         .collect();
-    any(FlexView::new(
-        Axis::Vertical,
-        rows.into_iter().map(inflexible).collect(),
-    ))
+    FlexView::new(Axis::Vertical, rows.into_iter().map(inflexible).collect())
 }
 
 // ---------------------------------------------------------------------------

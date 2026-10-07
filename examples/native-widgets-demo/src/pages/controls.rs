@@ -64,7 +64,7 @@
 //! every control's `NSAppearance` follows the app theme, not the Mac.
 
 use frust::{
-    AnyView, Brightness, Get, GetUntracked, Image, ImageFit, Set, SizedBox, any, button, checkbox,
+    AnyView, Brightness, Get, GetUntracked, Image, ImageFit, Set, SizedBox, View, button, checkbox,
     inflexible, slider, text,
 };
 use frust_glyph::{progress, toggle};
@@ -163,114 +163,112 @@ fn slider_description(rejecting: bool, refused: u32) -> String {
 // ---------------------------------------------------------------------------
 
 /// A native button: each tap bumps [`tap_count_sig`] (`Taps:`).
-fn button_native() -> AnyView<S> {
-    any(native_button("Tap me")
+fn button_native() -> impl View<S> {
+    native_button("Tap me")
         .content_description("Native tap counter button")
         .size(PAIR_CELL_W, PAIR_BUTTON_H)
-        .on_press(|| bump(tap_count_sig())))
+        .on_press(|| bump(tap_count_sig()))
 }
 
 /// The drawn button, counting into its OWN signal.
-fn button_drawn() -> AnyView<S> {
-    any(button("Tap me", |_: &mut S| bump(drawn_tap_count_sig())))
+fn button_drawn() -> impl View<S> {
+    button("Tap me", |_: &mut S| bump(drawn_tap_count_sig()))
 }
 
 /// A display-only native label.
-fn label_native() -> AnyView<S> {
-    any(native_label("Native Label")
+fn label_native() -> impl View<S> {
+    native_label("Native Label")
         .content_description("A display-only native label")
-        .size(PAIR_CELL_W, PAIR_LABEL_H))
+        .size(PAIR_CELL_W, PAIR_LABEL_H)
 }
 
 /// frust's own shaped text — where the type-scale difference shows.
-fn label_drawn() -> AnyView<S> {
-    any(text("Drawn Label").size(13.0))
+fn label_drawn() -> impl View<S> {
+    text("Drawn Label").size(13.0)
 }
 
 /// A controlled native switch: `on_toggle` only reports a *requested* value
 /// (`docs/CODE_STANDARDS.md`'s Interaction Semantics), which
 /// [`confirm_switch`] confirms or refuses.
-fn switch_native(checked: bool, rejecting: bool, refused: u32) -> AnyView<S> {
-    any(native_switch(checked)
+fn switch_native(checked: bool, rejecting: bool, refused: u32) -> impl View<S> {
+    native_switch(checked)
         .content_description(switch_description(rejecting, refused))
         .size(70.0, PAIR_SWITCH_H)
         .on_toggle(|requested| {
             bump(switch_events_sig());
             confirm_switch(requested);
-        }))
+        })
 }
 
 /// Glyph's toggle on the very same signal.
-fn switch_drawn(checked: bool) -> AnyView<S> {
-    any(toggle(checked, |_: &mut S, requested: bool| {
+fn switch_drawn(checked: bool) -> impl View<S> {
+    toggle(checked, |_: &mut S, requested: bool| {
         confirm_switch(requested)
     })
-    .label("Drawn switch"))
+    .label("Drawn switch")
 }
 
 /// A controlled native slider on the shared `0..=100` value.
-fn slider_native(value: i32, rejecting: bool, refused: u32) -> AnyView<S> {
-    any(native_slider(value, 0, 100)
+fn slider_native(value: i32, rejecting: bool, refused: u32) -> impl View<S> {
+    native_slider(value, 0, 100)
         .content_description(slider_description(rejecting, refused))
         .size(PAIR_CELL_W, PAIR_SLIDER_H)
         .on_change(|requested| {
             bump(slider_events_sig());
             confirm_slider(requested);
-        }))
+        })
 }
 
 /// frust's slider on the same signal — `0.0..=1.0`, so this pair converts.
-fn slider_drawn(value: i32) -> AnyView<S> {
-    any(slider(
-        f64::from(value) / 100.0,
-        |_: &mut S, requested: f64| confirm_slider((requested * 100.0).round() as i32),
-    ))
+fn slider_drawn(value: i32) -> impl View<S> {
+    slider(f64::from(value) / 100.0, |_: &mut S, requested: f64| {
+        confirm_slider((requested * 100.0).round() as i32)
+    })
 }
 
 /// A native progress bar mirroring the slider (native → signal → native).
-fn progress_native(value: i32) -> AnyView<S> {
-    any(native_progress(value, 0, 100)
+fn progress_native(value: i32) -> impl View<S> {
+    native_progress(value, 0, 100)
         .content_description("Progress mirroring the slider above")
-        .size(PAIR_CELL_W, PAIR_PROGRESS_H))
+        .size(PAIR_CELL_W, PAIR_PROGRESS_H)
 }
 
 /// Glyph's determinate progress bar on the same value.
-fn progress_drawn(value: i32) -> AnyView<S> {
-    any(progress(f64::from(value) / 100.0))
+fn progress_drawn(value: i32) -> impl View<S> {
+    progress(f64::from(value) / 100.0)
 }
 
 /// A native image, cover-fit (macOS letterboxes instead of cropping —
 /// `native-widgets-macos-image-cover-letterboxes`).
-fn image_native() -> AnyView<S> {
-    any(native_image(demo_image_bytes())
+fn image_native() -> impl View<S> {
+    native_image(demo_image_bytes())
         .fit(NativeImageFit::Cover)
         .content_description("Demo image, rendered by a native image view")
-        .size(PAIR_IMAGE, PAIR_IMAGE))
+        .size(PAIR_IMAGE, PAIR_IMAGE)
 }
 
 /// The SAME bytes through frust's own decoder, same size and fit.
-fn image_drawn() -> AnyView<S> {
-    any(SizedBox(Some(PAIR_IMAGE), Some(PAIR_IMAGE))
-        .child(Image(demo_image()).fit(ImageFit::Cover)))
+fn image_drawn() -> impl View<S> {
+    SizedBox(Some(PAIR_IMAGE), Some(PAIR_IMAGE)).child(Image(demo_image()).fit(ImageFit::Cover))
 }
 
 /// The page-local brightness toggle: flips the shell's `brightness` signal and
 /// forces the app theme through [`crate::apply_theme`] — the app bar's own
 /// mechanism.
-fn theme_toggle_demo(brightness: Brightness) -> AnyView<S> {
+fn theme_toggle_demo(brightness: Brightness) -> impl View<S> {
     let label_text = match brightness {
         // Plain text: Glyph's bundled faces carry no half-circle glyph.
         Brightness::Dark => "Dark \u{2014} tap for Light",
         Brightness::Light => "Light \u{2014} tap for Dark",
     };
-    any(button(label_text, |state: &mut S| {
+    button(label_text, |state: &mut S| {
         let next = match state.brightness.get_untracked() {
             Brightness::Dark => Brightness::Light,
             Brightness::Light => Brightness::Dark,
         };
         state.brightness.set(next);
         crate::apply_theme(next);
-    }))
+    })
 }
 
 /// See the page-fn contract in [`crate::pages`] and the [module docs](self).

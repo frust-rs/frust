@@ -27,8 +27,8 @@
 //! framework-API gap, not a bug in this page.
 
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get, Padding,
-    RwSignal, SizedBox, Update, View, any, button, column, component, keyed, row, text,
+    Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get, Padding, RwSignal,
+    SizedBox, Update, View, any, button, column, component, keyed, row, text,
 };
 // Re-anchored onto `frust_glyph` under the old `glyph` local name (this
 // file's own dense `glyph::` call-site prefix predates the plugin split) —
@@ -40,10 +40,10 @@ use crate::CatalogState;
 /// See the page-fn contract in [`crate::pages`]. Hands the shared toast queue
 /// into a nested [`FeedbackPage`] component that owns everything else locally
 /// (see the [module docs](self)).
-pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
-    any(component(FeedbackPage {
+pub fn page(state: &CatalogState) -> impl View<CatalogState> {
+    component(FeedbackPage {
         toasts: state.toasts,
-    }))
+    })
 }
 
 /// Config for the nested feedback-demo component (see the [module docs](self)).
@@ -103,26 +103,26 @@ impl Component for FeedbackPage {
 }
 
 /// A section heading label (15px, themed `on_surface` — no hardcoded color).
-fn section_title<State: 'static>(label: &str) -> AnyView<State> {
-    any(text(label.to_string()).size(15.0))
+fn section_title<State: 'static>(label: &str) -> impl View<State> {
+    text(label.to_string()).size(15.0)
 }
 
 /// A vertical spacer of `height` logical px.
-fn v_gap<State: 'static>(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn v_gap<State: 'static>(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal spacer of `width` logical px.
-fn h_gap<State: 'static>(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn h_gap<State: 'static>(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 // ---------------------------------------------------------------------
 // Badges — Success/Warning/Error (dotted), Neutral, Accent.
 // ---------------------------------------------------------------------
 
-fn badges_row<State: 'static>() -> AnyView<State> {
-    any(row()
+fn badges_row<State: 'static>() -> impl View<State> {
+    row()
         .child(glyph::badge("connected", glyph::BadgeVariant::Success).dot(true))
         .child(h_gap(8.0))
         .child(glyph::badge("degraded", glyph::BadgeVariant::Warning).dot(true))
@@ -133,7 +133,7 @@ fn badges_row<State: 'static>() -> AnyView<State> {
         .child(h_gap(8.0))
         .child(glyph::badge("read-only", glyph::BadgeVariant::Neutral))
         .child(h_gap(8.0))
-        .child(glyph::badge("v0.44.1", glyph::BadgeVariant::Accent)))
+        .child(glyph::badge("v0.44.1", glyph::BadgeVariant::Accent))
 }
 
 // ---------------------------------------------------------------------
@@ -144,7 +144,7 @@ fn badges_row<State: 'static>() -> AnyView<State> {
 /// unique per the demo's fixed starting set — so a removal reconciles by
 /// identity rather than position, per `docs/CODE_STANDARDS.md`'s Interaction
 /// Semantics "keyed lists" rule).
-fn tags_row(state: &FeedbackState) -> AnyView<FeedbackState> {
+fn tags_row(state: &FeedbackState) -> impl View<FeedbackState> {
     let labels = state.tags.get();
 
     let children: Vec<FlexChild<FeedbackState>> = labels
@@ -168,7 +168,7 @@ fn tags_row(state: &FeedbackState) -> AnyView<FeedbackState> {
         })
         .collect();
 
-    any(FlexView::new(Axis::Horizontal, children))
+    FlexView::new(Axis::Horizontal, children)
 }
 
 // ---------------------------------------------------------------------
@@ -176,8 +176,8 @@ fn tags_row(state: &FeedbackState) -> AnyView<FeedbackState> {
 // build exactly (i / ✓ / ! / ×, see `glyph::alert`'s `default_icon`).
 // ---------------------------------------------------------------------
 
-fn alerts_column<State: 'static>() -> AnyView<State> {
-    any(column()
+fn alerts_column<State: 'static>() -> impl View<State> {
+    column()
         .child(glyph::alert(
             glyph::AlertVariant::Info,
             "Heads up",
@@ -200,7 +200,7 @@ fn alerts_column<State: 'static>() -> AnyView<State> {
             glyph::AlertVariant::Error,
             "Sync failed",
             "Check your connection and try again.",
-        )))
+        ))
 }
 
 // ---------------------------------------------------------------------
@@ -208,7 +208,7 @@ fn alerts_column<State: 'static>() -> AnyView<State> {
 // `glyph::toast_host` queue (see the [module docs](self) caveat).
 // ---------------------------------------------------------------------
 
-fn toasts_row(state: &FeedbackState) -> AnyView<FeedbackState> {
+fn toasts_row(state: &FeedbackState) -> impl View<FeedbackState> {
     let toasts = state.toasts;
 
     let trigger = move |message: &'static str| {
@@ -217,7 +217,7 @@ fn toasts_row(state: &FeedbackState) -> AnyView<FeedbackState> {
         }
     };
 
-    any(column()
+    column()
         .child(
             row()
                 .child(button("Plain", trigger("Plain notification")))
@@ -232,15 +232,15 @@ fn toasts_row(state: &FeedbackState) -> AnyView<FeedbackState> {
                 .cross_axis(CrossAxisAlignment::Center),
         )
         .child(v_gap(8.0))
-        .child(text("Toasts play one at a time (FIFO) and auto-dismiss after 2.4s.").size(11.0)))
+        .child(text("Toasts play one at a time (FIFO) and auto-dismiss after 2.4s.").size(11.0))
 }
 
 // ---------------------------------------------------------------------
 // Loaders — progress bar, skeleton block, dots loader.
 // ---------------------------------------------------------------------
 
-fn loaders_column<State: 'static>() -> AnyView<State> {
-    any(column()
+fn loaders_column<State: 'static>() -> impl View<State> {
+    column()
         .child(text("Progress (65%)".to_string()).size(12.0))
         .child(v_gap(6.0))
         .child(glyph::progress(0.65))
@@ -251,5 +251,5 @@ fn loaders_column<State: 'static>() -> AnyView<State> {
         .child(v_gap(20.0))
         .child(text("Dots loader".to_string()).size(12.0))
         .child(v_gap(6.0))
-        .child(glyph::dots_loader()))
+        .child(glyph::dots_loader())
 }

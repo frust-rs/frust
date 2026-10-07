@@ -17,7 +17,7 @@
 //!    `set_app_theme` is a valid alternative.
 
 use frust::motion::switcher::pattern_switcher;
-use frust::{Component, SizedBox, View, any, column, text};
+use frust::{Component, SizedBox, View, column, text};
 use sample_design::{SampleReveal, sample_badge, sample_chip, sample_panel};
 
 /// Vertical rhythm between the panel's rows, in logical px.
@@ -48,7 +48,7 @@ impl Component for SampleApp {
             text(format!("{} press(es)", state.presses)).size(15.0),
         );
 
-        any(sample_panel(
+        sample_panel(
             column()
                 .child(sample_badge("sample design system"))
                 .child(SizedBox(None, Some(GAP)))
@@ -57,7 +57,7 @@ impl Component for SampleApp {
                 }))
                 .child(SizedBox(None, Some(GAP)))
                 .child(status),
-        ))
+        )
     }
 }
 

@@ -28,7 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Padding,
-    RwSignal, Set, SizedBox, Theme, Update, any, button, inflexible, row, spawn_blocking,
+    RwSignal, Set, SizedBox, Theme, Update, View, any, button, inflexible, row, spawn_blocking,
     spawn_local, text, use_context,
 };
 use frust_database::{Database, DatabaseError, Value};
@@ -167,7 +167,7 @@ fn run_clear() -> Result<(), DatabaseError> {
 /// `state.auto_run_db_smoke` are accessed; the latter is a plain `Cell`, not a
 /// tracked signal, since nothing subscribes to it (see
 /// [`PlaygroundState::auto_run_db_smoke`]'s doc comment).
-pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
+pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
     // Consume the flag unconditionally (so a release build never leaves it
     // set for a later debug rebuild to auto-run retroactively), then only
     // spawn the smoke test in a debug build.
@@ -229,11 +229,11 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
         any(text(status_line).size(12.0)),
     ];
 
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         FlexView::new(
             Axis::Vertical,
             children.into_iter().map(inflexible).collect(),
         ),
-    ))
+    )
 }
