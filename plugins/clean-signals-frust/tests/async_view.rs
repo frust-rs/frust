@@ -46,7 +46,7 @@ fn render(state: Fixture) -> AnyView<()> {
                 values
                     .into_iter()
                     .map(|v| any(text(v.to_string())))
-                    .collect(),
+                    .collect::<Vec<_>>(),
             ))
         },
         |failure: NetworkFailure| any(text(format!("error: {failure}"))),
