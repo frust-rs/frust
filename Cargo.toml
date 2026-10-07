@@ -4,9 +4,8 @@ resolver = "3"
 # `plugins/` (or nested `plugins/i18n/macros`), and `benchmarks/` sits outside every member glob.
 members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/oauth-native", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
 # Standalone workspaces (gate each from its dir). huddle, plugins/clean-signals-frust: keep crates.io clean-signals
-# out of the root graph (Version-Pin Policy). shadertoy, glyph-catalog, playground, material3-demo, native-widgets-demo:
-# `frust create` scaffolds ([profile.*] needs a root). design-system-sample: facade-only build. web-*: wasm-only.
-# hotpatch-spike: dx/subsecond pins stay out of the root graph.
+# out of the root graph (Version-Pin Policy); hotpatch-spike: dx/subsecond pins likewise. shadertoy, glyph-catalog,
+# playground, material3-demo, native-widgets-demo: `frust create` scaffolds. design-system-sample: facade-only. web-*: wasm-only.
 exclude = ["examples/huddle", "examples/shadertoy", "examples/web-spike", "examples/web-gallery", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "examples/native-widgets-demo", "examples/hotpatch-spike", "plugins/clean-signals-frust"]
 
 [workspace.package]
