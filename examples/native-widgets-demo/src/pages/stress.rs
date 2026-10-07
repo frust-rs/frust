@@ -132,7 +132,7 @@ fn cycle_state(target: u32) -> (bool, u32, bool) {
 /// page, display-only: the point is create/dispose churn, not interaction.
 fn cycle_group(mounted: bool) -> AnyView<S> {
     if !mounted {
-        return caption("(cycler group currently unmounted)");
+        return any(caption("(cycler group currently unmounted)"));
     }
     any(column()
         .child(
@@ -174,7 +174,7 @@ fn cycle_group(mounted: bool) -> AnyView<S> {
 }
 
 /// [`STRESS_SLOT_COUNT`] `native_label` slots in a plain column.
-fn stress_grid() -> AnyView<S> {
+fn stress_grid() -> impl View<S> {
     let rows: Vec<FlexChild<S>> = (1..=STRESS_SLOT_COUNT)
         .map(|i| {
             inflexible(
@@ -184,7 +184,7 @@ fn stress_grid() -> AnyView<S> {
             )
         })
         .collect();
-    any(FlexView::new(Axis::Vertical, rows))
+    FlexView::new(Axis::Vertical, rows)
 }
 
 /// The at-rest table: every page's documented count for this build.
