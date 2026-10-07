@@ -1217,11 +1217,11 @@ name = "frust-core"
 version = "0.6.0"
 dependencies = [
  "accesskit",
+ "frust-hotpatch",
  "frust-scene",
  "kurbo",
  "peniko",
  "reactive_graph",
- "subsecond",
  "tree_arena",
 ]
 
@@ -1252,6 +1252,18 @@ dependencies = [
  "log",
  "peniko",
  "wgpu",
+]
+
+[[package]]
+name = "frust-hotpatch"
+version = "0.6.0"
+dependencies = [
+ "libc",
+ "libloading",
+ "memfd",
+ "memmap2",
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2016,7 +2028,10 @@ name = "hotpatch-spike"
 version = "0.1.0"
 dependencies = [
  "dioxus-devtools",
+ "frust-hotpatch",
  "hotpatch-spike-app",
+ "log",
+ "serde_json",
 ]
 
 [[package]]

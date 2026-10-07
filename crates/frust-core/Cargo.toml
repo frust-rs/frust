@@ -18,12 +18,12 @@ peniko = { workspace = true }
 frust-scene = { workspace = true }
 accesskit = { workspace = true }
 reactive_graph = { workspace = true }
-subsecond = { workspace = true, optional = true }
+frust-hotpatch = { workspace = true, optional = true }
 
 [features]
 # Compiles `PaintCtx::for_test` so an app can paint a clock-dependent widget at a chosen time;
 # `set_frame_time` stays `pub(crate)` (only `RenderRoot::paint` advances the clock). Off by default.
 test-support = []
-# Opt-in, never default: routes every `Component::build` through subsecond's jump table so `dx` hot patches
-# take effect; absent, `subsecond` is not in the dependency graph. Dev-profile mechanism (spike).
-hotpatch = ["dep:subsecond"]
+# Opt-in, never default: routes every `Component::build` through frust-hotpatch's jump table so `dx` hot
+# patches take effect; absent, `frust-hotpatch` is not in the dependency graph. Dev-profile mechanism (spike).
+hotpatch = ["dep:frust-hotpatch"]

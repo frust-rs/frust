@@ -1,9 +1,9 @@
-//! Hot-patch seam (opt-in `hotpatch` feature): every `Component::build` runs through subsecond's jump
-//! table, so a `dx` patch that swaps the monomorphised call takes effect on the next rebuild.
+//! Hot-patch seam (opt-in `hotpatch` feature): every `Component::build` runs through frust-hotpatch's
+//! jump table, so a `dx` patch that swaps the monomorphised call takes effect on the next rebuild.
 
 use std::sync::Arc;
 
-use subsecond::HotFn;
+use frust_hotpatch::HotFn;
 
 use crate::component::Component;
 use crate::view::AnyView;
@@ -11,8 +11,8 @@ use crate::view::AnyView;
 /// Call `component.build(state)` through the jump table and erase the result.
 ///
 /// This is the single erasure point `ComponentView` uses under the feature (the non-feature path keeps
-/// its inline `AnyView::new`). With no patch applied subsecond falls through to the original function.
-/// `init` is deliberately not routed here: it must not re-run on a patch.
+/// its inline `AnyView::new`). With no patch applied frust-hotpatch falls through to the original
+/// function. `init` is deliberately not routed here: it must not re-run on a patch.
 pub(crate) fn call_build<C: Component>(component: &C, state: &mut C::State) -> AnyView<C::State> {
     AnyView::new(HotFn::current(<C as Component>::build).call((component, state)))
 }
@@ -22,7 +22,7 @@ pub(crate) fn call_build<C: Component>(component: &C, state: &mut C::State) -> A
 /// It runs on the thread that applied the patch, not the UI thread: it must only signal (e.g. send
 /// through an event-loop proxy).
 pub fn set_patch_listener(listener: Arc<dyn Fn() + Send + Sync>) {
-    subsecond::register_handler(listener);
+    frust_hotpatch::register_handler(listener);
 }
 
 #[cfg(all(test, feature = "hotpatch"))]
