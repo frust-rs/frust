@@ -219,11 +219,13 @@ stop_runner() {
   if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
     local pgid
     pgid="$(ps -o pgid= -p "$APP_PID" 2>/dev/null | tr -d ' ')"
-    if [ "$pgid" = "$RUNNER_PID" ]; then
+    if [ -z "$pgid" ]; then
+      : # already gone (the group KILL above reached it; `kill -0` raced its exit)
+    elif [ "$pgid" = "$RUNNER_PID" ]; then
       kill -KILL "$APP_PID" 2>/dev/null
     else
       echo "warning: app pid ${APP_PID} is not in the runner's process group" \
-        "(pgid ${pgid:-?} != ${RUNNER_PID}); not killing it" >&2
+        "(pgid ${pgid} != ${RUNNER_PID}); not killing it" >&2
     fi
   fi
   wait "$RUNNER_PID" 2>/dev/null

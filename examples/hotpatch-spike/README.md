@@ -15,7 +15,7 @@ stay out of the root graph. It builds into its own `target/`.
 hotpatch-spike/
 ├── Cargo.toml        workspace only: members app + runner, dev-profile opt-level override
 ├── app/              lib package `hotpatch-spike-app`: SpikeApp, HomePage, CounterCard, frust::app!
-├── runner/           bin package `hotpatch-spike`: connect_subsecond(), then __frust_main()
+├── runner/           bin package `hotpatch-spike`: connect_subsecond() (debug only), then __frust_main()
 └── measure.sh        edit-to-frame timing (hot patch or restart)
 ```
 
@@ -26,8 +26,9 @@ hotpatch-spike/
    the tip (the bin). It never recompiles the lib target of the bin's own package. With `[lib]` and a
    thin `main.rs` in one package, `dx --verbose` logs `replaying crates: []`: the patch builds and
    applies, but the changed code is not in it. When the lib is its own package, dx logs
-   `replaying crates: ["hotpatch_spike_app"]` and the patch lands in 0.5-0.8 s with the process
-   kept alive (same PID). So `app` (lib) and `runner` (bin) split the template's single package.
+   `replaying crates: ["hotpatch_spike_app"]` and the patch lands with the process kept alive (same
+   PID). Save->frame submitted is 0.47-0.5 s in steady state, and the first patch of a session
+   takes up to 1.7-2.1 s (RESULTS.md). So `app` (lib) and `runner` (bin) split the template's single package.
    Everything else mirrors the template.
 2. **The `app` lib is `crate-type = ["rlib"]`, not the template's
    `["cdylib", "staticlib", "rlib"]`.** dx 0.7.10 fails a thin patch of a lib with the template's
@@ -66,7 +67,10 @@ export DX=<scratch-dir>/bin/dx      # `"$DX" --version` prints `dioxus 0.7.10 (.
 
 ## Running
 
-Use the dev profile only. subsecond reads its jump table only under `cfg!(debug_assertions)`.
+Use the dev profile only. subsecond reads its jump table only under `cfg!(debug_assertions)`, and
+the runner connects to dx's devserver only under `cfg(debug_assertions)`. A release build never
+opens the devtools connection or applies a patch. The connection and `apply_patch` (which loads and
+runs code the devserver sends) must stay debug-only in any integration built from this spike.
 
 ```sh
 cd examples/hotpatch-spike
@@ -84,7 +88,9 @@ The first `dx serve` does a cold fat build of frust and wgpu, which takes minute
 ./measure.sh                                # --hotpatch --target home --runs 5
 ./measure.sh --target card --runs 10        # child component in a second module
 ./measure.sh --target helper                # adds a new private fn called from HomePage::build
-./measure.sh --target state                 # adds a field to HomePage's State (expected unsupported)
+./measure.sh --target state-type            # swaps HomeState for a tuple: State TYPE change (row D)
+./measure.sh --target state-field           # adds `extra: u32` to struct HomeState: LAYOUT change (row D2)
+STATE_FIELD_WRITE=1 ./measure.sh --target state-field   # ...and the patched build writes it
 ./measure.sh --restart                      # baseline: rebuild + relaunch per edit
 ./measure.sh --help
 ```
@@ -94,17 +100,27 @@ Each run rewrites the marked line(s) in place (`// SENTINEL-HOME`, `// SENTINEL-
 renames a temp file, and dx patches off that temp-file event with stale content. The script stamps
 the save time, then waits up to 60 s for the next `applied` and `frame` lines. It prints the
 per-run deltas, the dx patch lines and the medians. A timeout or app crash is recorded as a run
-result, not a script failure. On exit (Ctrl-C included) the script kills the runner's process
-group, restores every edited file and prints `git status` as proof. Logs go to a `mktemp` directory
-whose path is printed.
+result, not a script failure. Hot runs also report whether the app PID survived. `state-field`
+runs report whether the patched `build` ran (it logs `frust-hotpatch-spike: state-field vN build
+ran extra=<v>`) and the value it read. On exit (Ctrl-C included) the script kills the runner's
+process group, restores every edited file and prints `git status` as proof. Every KILL is guarded:
+the group only while it exists, and a PID scraped from the log only if it is in the runner's process
+group. Logs go to a `mktemp` directory whose path is printed. So does the manual restore command,
+for a script killed without its trap.
 
 The probe lines prove a patch landed and a frame followed. They cannot show what the window drew.
-Check visually that the text changed and that the counter kept its value, especially for
-`--target state`.
+Check visually that the text changed and that the counter kept its value.
+
+The two State targets behave differently. A State *type* change (`state-type`, row D) is a silent
+no-op: dx says it patched, but the old `build` keeps running. A field added to the named struct
+(`state-field`, row D2) is NOT a no-op. The new `build` runs against the old, smaller state value
+and reads and writes memory past it, which is undefined behaviour with no warning. Restart after any
+State change.
 
 ## Results
 
-Measurements are recorded in `RESULTS.md` (p1-03), not here.
+Measurements are recorded in `RESULTS.md` (p1-03b, plus row D2 and the corrections from review
+round r1-01), not here.
 
 ## Gates
 
