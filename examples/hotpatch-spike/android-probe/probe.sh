@@ -45,13 +45,14 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/frust-android-probe.XXXXXX")" || exit 2
 WORK="$(cd "$WORK" && pwd -P)" || exit 2
 APP="$WORK/probeapp"
 APP_ID=""
+INSTALLED=0
 
 cleanup() {
     "${ADB[@]}" shell rm -f "$DEVICE_TMP" >/dev/null 2>&1
     if [[ "$KEEP" == 1 ]]; then
         echo "probe.sh: kept $WORK (app $APP_ID left installed)"
     else
-        [[ -n "$APP_ID" ]] && "${ADB[@]}" uninstall "$APP_ID" >/dev/null 2>&1
+        [[ "$INSTALLED" == 1 ]] && "${ADB[@]}" uninstall "$APP_ID" >/dev/null 2>&1
         rm -rf "$WORK"
     fi
 }
@@ -78,6 +79,10 @@ done
 APP_ID="$(sed -n 's/^ *applicationId = "\(.*\)"$/\1/p' "$APP/android/app/build.gradle.kts" | head -1)"
 [[ -n "$APP_ID" ]] || die "no applicationId in $APP/android/app/build.gradle.kts"
 
+if "${ADB[@]}" shell pm list packages "$APP_ID" | tr -d '\r' | grep -qx "package:$APP_ID"; then
+    die "$APP_ID is already installed on the device; refusing to run (it would be overwritten and uninstalled)"
+fi
+
 step "build debug APK (arm64-v8a) for $APP_ID"
 (cd "$APP" && frust build apk --debug --target-platform android-arm64) || die "frust build apk failed"
 APK="$(find "$APP/build/android/app/outputs/apk" -name '*debug*.apk' | head -1)"
@@ -85,6 +90,7 @@ APK="$(find "$APP/build/android/app/outputs/apk" -name '*debug*.apk' | head -1)"
 
 step "install $APK"
 "${ADB[@]}" install -r "$APK" || die "adb install failed"
+INSTALLED=1
 
 step "build patch/ with cargo-ndk"
 cp -R "$HERE/patch" "$WORK/patch" || die "copy patch/ failed"
@@ -107,16 +113,18 @@ step "launch"
 ACTIVITY="$("${ADB[@]}" shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "$APP_ID" | tr -d '\r' | tail -1)"
 [[ "$ACTIVITY" == */* ]] || die "no launcher activity for $APP_ID: $ACTIVITY"
 "${ADB[@]}" shell am force-stop "$APP_ID"
-"${ADB[@]}" logcat -c
+# Bound every logcat read by the device clock instead of wiping the device log with `logcat -c`.
+SINCE="$("${ADB[@]}" shell date '+%m-%d %H:%M:%S.000' | tr -d '\r')"
+[[ -n "$SINCE" ]] || die "could not read the device time"
 "${ADB[@]}" shell am start -W -n "$ACTIVITY" >/dev/null || die "am start failed"
 
 LINES=""
 for _ in $(seq 1 30); do
-    LINES="$("${ADB[@]}" logcat -d | grep 'frust-probe:')"
+    LINES="$("${ADB[@]}" logcat -d -T "$SINCE" | grep 'frust-probe:')"
     [[ "$(grep -c 'strategy=' <<<"$LINES")" -ge 3 ]] && break
     sleep 1
 done
-LOGCAT="$("${ADB[@]}" logcat -d)"
+LOGCAT="$("${ADB[@]}" logcat -d -T "$SINCE")"
 
 DEVICE="model=$("${ADB[@]}" shell getprop ro.product.model | tr -d '\r')
 android=$("${ADB[@]}" shell getprop ro.build.version.release | tr -d '\r') (sdk $("${ADB[@]}" shell getprop ro.build.version.sdk | tr -d '\r'))

@@ -10,12 +10,44 @@
 fn main() {
     // `dioxus-devtools` is a desktop-only dependency; iOS shares this arm only to reach the
     // `__frust_main` stub `frust::app!` emits there. The devserver connection (and the `apply_patch`
-    // it performs, which loads and jumps into code the devserver sends) must stay debug-only: a
-    // release build never connects. frust-hotpatch itself consults its jump table only under
-    // `debug_assertions`, so gating the connection the same way keeps both halves in step.
-    #[cfg(all(debug_assertions, not(target_os = "ios")))]
-    dioxus_devtools::connect(apply_hot_patch);
+    // it performs, which loads and jumps into code the devserver sends) is debug-only and desktop-only:
+    // `connect_devserver` and `apply_hot_patch` carry one identical cfg, so no target sees one without
+    // the other. frust-hotpatch itself consults its jump table only under `debug_assertions`.
+    #[cfg(all(
+        debug_assertions,
+        not(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))
+    ))]
+    connect_devserver();
     hotpatch_spike_app::__frust_main();
+}
+
+/// Connects to the devserver named by `DIOXUS_DEVSERVER_IP` / `DIOXUS_DEVSERVER_PORT` (set by `dx
+/// serve`; unset means not launched by dx, so nothing happens) and refuses any non-loopback address.
+/// The devserver speaks plaintext `ws://` with no authentication, so connecting to a remote host
+/// would let that host choose code this process loads and runs.
+#[cfg(all(
+    debug_assertions,
+    not(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))
+))]
+fn connect_devserver() {
+    let (Ok(ip), Ok(port)) = (
+        std::env::var("DIOXUS_DEVSERVER_IP"),
+        std::env::var("DIOXUS_DEVSERVER_PORT"),
+    ) else {
+        return;
+    };
+    let addr = match format!("{ip}:{port}").parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(err) => {
+            log::error!("frust-hotpatch: unparsable devserver address {ip}:{port}: {err}");
+            return;
+        }
+    };
+    if !addr.ip().is_loopback() {
+        log::error!("frust-hotpatch: refusing non-loopback devserver {addr}; not connecting");
+        return;
+    }
+    dioxus_devtools::connect_at(format!("ws://{addr}/_dioxus"), apply_hot_patch);
 }
 
 /// Applies a devserver hot-patch addressed to this process through frust-hotpatch, the same filter
@@ -43,8 +75,12 @@ fn apply_hot_patch(msg: dioxus_devtools::DevserverMsg) {
                 return;
             }
         };
-    // SAFETY: the table was built by the dx devserver that launched this exact binary and is
-    // addressed to this process id, which is `apply_patch`'s contract.
+    // SAFETY: this is only as safe as the devserver it trusts. `apply_patch` loads `table.lib`, a
+    // path the server chose, and jumps into it. The process obeys whatever
+    // DIOXUS_DEVSERVER_IP/PORT point it at over plaintext ws:// with no authentication; the pid
+    // filter above is a routing check, not authentication. `connect_devserver` therefore refuses
+    // non-loopback addresses, so the trusted peer is a local process (the `dx serve` that launched
+    // us). A malicious local process on that port could still deliver code: debug-only spike.
     if let Err(err) = unsafe { frust_hotpatch::apply_patch(table) } {
         log::error!("frust-hotpatch: apply_patch failed: {err}");
     }
