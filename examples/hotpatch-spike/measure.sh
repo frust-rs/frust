@@ -20,6 +20,10 @@
 #                    state   add a field to HomePage's State (expected unsupported: a crash or a
 #                            timeout is recorded, not fatal)
 #   STARTUP_TIMEOUT=<s> overrides the first-frame wait (default 900: a cold dx fat build is slow).
+#   PRE_RUN_PAUSE=<s>   sleeps <s> seconds after the first frame, before the first edit, so the
+#                       counter can be clicked (state-preservation check); default 0.
+#   POST_RUN_PAUSE=<s>  sleeps <s> seconds after the last run, before the app is killed, so the
+#                       patched window can be inspected; default 0.
 #
 # Every edited file is restored on exit (trap EXIT, Ctrl-C included) and the runner's process group
 # is killed; the summary ends with `git status` of this directory as proof. Logs live in a mktemp
@@ -37,9 +41,11 @@ RUNS=5
 TARGET="home"
 EDIT_TIMEOUT=60
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-900}"
+PRE_RUN_PAUSE="${PRE_RUN_PAUSE:-0}"
+POST_RUN_PAUSE="${POST_RUN_PAUSE:-0}"
 
 usage() {
-  sed -n '2,26p' "$0"
+  sed -n '2,30p' "$0"
 }
 
 while [ $# -gt 0 ]; do
@@ -245,6 +251,10 @@ if ! FIRST_FRAME="$(wait_for frame 0 0 "$STARTUP_TIMEOUT")"; then
 fi
 find_app_pid
 echo "First frame after $((FIRST_FRAME - START_MS)) ms (app pid ${APP_PID:-?})."
+if [ "$PRE_RUN_PAUSE" != "0" ]; then
+  echo "Pausing ${PRE_RUN_PAUSE}s before the first edit (PRE_RUN_PAUSE)..."
+  sleep "$PRE_RUN_PAUSE"
+fi
 
 APPLIED_DELTAS=""
 FRAME_DELTAS=""
@@ -283,6 +293,11 @@ while [ "$run" -le "$RUNS" ]; do
   [ "$status" = "crashed" ] && { echo "app exited; stopping runs"; break; }
   run=$((run + 1))
 done
+
+if [ "$POST_RUN_PAUSE" != "0" ]; then
+  echo "Pausing ${POST_RUN_PAUSE}s after the last run (POST_RUN_PAUSE)..."
+  sleep "$POST_RUN_PAUSE"
+fi
 
 echo
 echo "=== Summary: mode=${MODE} target=${TARGET} ==="
