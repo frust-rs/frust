@@ -2121,11 +2121,64 @@ pub fn run_with_setup_and_config<C: Component>(
         root.init()
     });
     App::new(state, move |state: &mut C::State| {
-        AnyView::new(root.build(state))
+        __frust_root_build(&root, state)
     })
     .desktop(config)
     .run()
 }
+
+/// Build the root component's view for a root driver: the desktop [`run`]
+/// family and every closure [`app!`] generates.
+///
+/// Under the `hotpatch` feature the build goes through the hot-patch seam
+/// ([`frust_core::build_erased`]) with the driver's own
+/// `SeamWitness::of::<C>()` — the driver ran `init`, so its layout is the
+/// creator's — and a refused build keeps the tree already on screen until the
+/// session restarts. Without the feature it is the direct, erased call.
+///
+/// The two definitions are the feature gate `app!` relies on: its expansion
+/// lives in the app crate, which has no `hotpatch` feature of its own, so the
+/// macro calls this unconditionally and never writes the `cfg` itself.
+#[cfg(feature = "hotpatch")]
+#[doc(hidden)]
+pub fn __frust_root_build<C: Component>(
+    root: &C,
+    state: &mut C::State,
+) -> impl View<C::State> + use<C> {
+    frust_core::hotpatch::RootView::new(frust_core::build_erased(
+        root,
+        state,
+        frust_core::SeamWitness::of::<C>(),
+    ))
+}
+
+/// Build the root component's view for a root driver (see the `hotpatch`
+/// definition): the direct call, erased so the view owns no borrow of `root`
+/// or `state`.
+#[cfg(not(feature = "hotpatch"))]
+#[doc(hidden)]
+pub fn __frust_root_build<C: Component>(
+    root: &C,
+    state: &mut C::State,
+) -> impl View<C::State> + use<C> {
+    AnyView::new(root.build(state))
+}
+
+/// Register the app's hot-patch anchor, the `__frust_hotpatch_anchor`
+/// function [`app!`] defines in the app crate, with frust-hotpatch; until it
+/// is registered every patch is refused. The `hotpatch`-feature definition;
+/// without the feature this is a no-op, so `app!` can call it unconditionally.
+#[cfg(feature = "hotpatch")]
+#[doc(hidden)]
+pub fn __frust_register_hotpatch_anchor(anchor: extern "C" fn()) {
+    frust_core::hotpatch::set_anchor(anchor);
+}
+
+/// Register the app's hot-patch anchor: a no-op without the `hotpatch`
+/// feature (see the feature-on definition).
+#[cfg(not(feature = "hotpatch"))]
+#[doc(hidden)]
+pub fn __frust_register_hotpatch_anchor(_anchor: extern "C" fn()) {}
 
 /// The canonical app entry point: one line binds a root
 /// [`Component`] to all three platforms.
@@ -2221,10 +2274,38 @@ pub fn run_with_setup_and_config<C: Component>(
 /// `AppHandle`; the desktop arm routes through [`run_with_setup`]); the
 /// ordering contract above is what is guaranteed.
 ///
-/// The one-argument form is unchanged: no setup tokens are emitted, the two
-/// mobile state factories expand to exactly what they always did, and the
+/// The one-argument form emits no setup tokens: the two mobile state
+/// factories carry only the anchor registration below ahead of `init`, and the
 /// desktop arm's `run_with_setup(root, || {})` is literally what [`run`] itself
 /// is.
+///
+/// # The hot-patch anchor
+///
+/// In a debug build every expansion also defines the app's hot-patch anchor,
+/// `#[unsafe(no_mangle)] pub extern "C" fn __frust_hotpatch_anchor() {}`, and
+/// registers it at startup (first thing in the desktop `__frust_main` and in
+/// the Android/iOS state factories). The symbol is emitted whatever the
+/// features; the registration only does something with the facade's
+/// `hotpatch` feature on. It is omitted under `cfg(test)` and on wasm32. Each
+/// root build goes through the same hidden root-build function the desktop
+/// [`run`] family uses, which routes it through the hot-patch seam under that
+/// feature.
+///
+/// ```
+/// # use frust::{Component, View, text};
+/// # #[derive(Default)]
+/// # struct MyApp;
+/// # impl Component for MyApp {
+/// #     type State = ();
+/// #     fn init(&self) -> Self::State {}
+/// #     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> { text("hi") }
+/// # }
+/// frust::app!(MyApp);
+/// # fn main() {
+/// #[cfg(debug_assertions)]
+/// __frust_hotpatch_anchor();
+/// # }
+/// ```
 ///
 /// # `desktop = { .. }`: name the app on desktop
 ///
@@ -2282,10 +2363,25 @@ macro_rules! app {
     // `@emit` (zero-config) and `@emit_desktop` (config-carrying), and two
     // hand-maintained copies of the JNI/C-ABI bindings would be free to drift.
     (@emit_mobile $root:ty, $($setup:block)?) => {
+        // The app-owned hot-patch anchor: one fixed, unmangled symbol whose
+        // address the patch builder and frust-hotpatch both resolve, so a
+        // binary without `main` (an Android cdylib) is anchored too. Emitted in
+        // every debug build because this expansion cannot see the facade's
+        // `hotpatch` feature; registering it is the feature-gated half. Not under
+        // `cfg(test)`, where a crate may hold several fixtures and the symbol
+        // must stay unique, and not on wasm32, which frust-hotpatch does not
+        // support.
+        #[cfg(all(debug_assertions, not(test), not(target_arch = "wasm32")))]
+        #[doc(hidden)]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn __frust_hotpatch_anchor() {}
+
         #[cfg(target_os = "android")]
         $crate::android_app!(
             <$root as $crate::Component>::State,
             || {
+                #[cfg(all(debug_assertions, not(test)))]
+                $crate::__frust_register_hotpatch_anchor(__frust_hotpatch_anchor);
                 $($setup)?
                 $crate::__install_default_selection_toolbar();
                 $crate::Component::init(&<$root as ::core::default::Default>::default())
@@ -2293,7 +2389,7 @@ macro_rules! app {
             {
                 let __frust_root = <$root as ::core::default::Default>::default();
                 move |state: &mut <$root as $crate::Component>::State| {
-                    $crate::AnyView::new($crate::Component::build(&__frust_root, state))
+                    $crate::__frust_root_build(&__frust_root, state)
                 }
             }
         );
@@ -2301,6 +2397,8 @@ macro_rules! app {
         $crate::ios_app!(
             <$root as $crate::Component>::State,
             || {
+                #[cfg(all(debug_assertions, not(test)))]
+                $crate::__frust_register_hotpatch_anchor(__frust_hotpatch_anchor);
                 $($setup)?
                 $crate::__install_default_selection_toolbar();
                 $crate::Component::init(&<$root as ::core::default::Default>::default())
@@ -2308,7 +2406,7 @@ macro_rules! app {
             {
                 let __frust_root = <$root as ::core::default::Default>::default();
                 move |state: &mut <$root as $crate::Component>::State| {
-                    $crate::AnyView::new($crate::Component::build(&__frust_root, state))
+                    $crate::__frust_root_build(&__frust_root, state)
                 }
             }
         );
@@ -2331,7 +2429,7 @@ macro_rules! app {
             {
                 let __frust_root = <$root as ::core::default::Default>::default();
                 move |state: &mut <$root as $crate::Component>::State| {
-                    $crate::AnyView::new($crate::Component::build(&__frust_root, state))
+                    $crate::__frust_root_build(&__frust_root, state)
                 }
             }
         );
@@ -2362,6 +2460,8 @@ macro_rules! app {
         #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         #[doc(hidden)]
         pub fn __frust_main() {
+            #[cfg(all(debug_assertions, not(test)))]
+            $crate::__frust_register_hotpatch_anchor(__frust_hotpatch_anchor);
             let __frust_setup = || { $($setup)? };
             if let Err(e) = $crate::run_with_setup(
                 <$root as ::core::default::Default>::default(),
@@ -2381,6 +2481,8 @@ macro_rules! app {
         #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         #[doc(hidden)]
         pub fn __frust_main() {
+            #[cfg(all(debug_assertions, not(test)))]
+            $crate::__frust_register_hotpatch_anchor(__frust_hotpatch_anchor);
             let __frust_setup = || { $($setup)? };
             if let Err(e) = $crate::run_with_setup_and_config(
                 <$root as ::core::default::Default>::default(),
@@ -2592,6 +2694,45 @@ mod macro_expansion_desktop_config {
                 crate::set_default_theme(crate::Theme::neutral());
             }
         );
+    }
+}
+
+/// The root drivers' build ([`__frust_root_build`]), with or without the
+/// `hotpatch` feature: one real `build` per call, and a view that materialises.
+/// Under the feature the build crosses the seam with the driver's own witness,
+/// which matches, so it must behave exactly as the direct call does.
+#[cfg(test)]
+mod root_build {
+    use crate::{Component, View};
+    use frust_core::BuildCtx;
+
+    struct Counter;
+
+    impl Component for Counter {
+        type State = u32;
+
+        fn init(&self) -> u32 {
+            0
+        }
+
+        fn build(&self, state: &mut u32) -> impl View<u32> {
+            *state += 1;
+            crate::any(crate::text(format!("{state}")))
+        }
+    }
+
+    #[test]
+    fn the_root_build_runs_build_once_and_yields_a_buildable_view() {
+        let root = Counter;
+        let mut state = root.init();
+        let view = crate::__frust_root_build(&root, &mut state);
+        assert_eq!(state, 1);
+        let mut next_id = 0u64;
+        let mut ctx = BuildCtx::new(&mut next_id);
+        let mut element = view.build(&mut ctx);
+        let again = crate::__frust_root_build(&root, &mut state);
+        assert_eq!(state, 2);
+        again.rebuild(&view, &mut element, &mut ctx);
     }
 }
 
