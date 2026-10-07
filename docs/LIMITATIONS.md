@@ -651,6 +651,10 @@ only: `ReorderableListView` (crates/frust-widgets/src/drag/reorderable.rs:202-22
 and every in-crate container's own child list — detects swaps correctly and is
 unaffected. `any(any(view))` is CLOSED by idempotent erasure (`AnyView::new`
 unwraps an `AnyView` argument), so the residual is only wrapper views.
+`frust_widgets::Either` is not this shape: its `EitherWidget` is an enum over
+two statically typed arms (no `AnyView` field) and it raises
+`mark_focus_orphaned` itself on an arm swap under focus, so it is not subject
+to this limitation.
 
 **Why not fixed**: closing it needs shared `TypeId` reporting through
 `ErasedView` so nesting composes. Each reconciler today probes whatever boxed
@@ -667,6 +671,92 @@ in-tree wrapper; the `inner: AnyView<State>` field (:106), and the `type Element
 `crates/frust-widgets/tests/double_erasure_swap.rs` (tripwire test
 `wrapper_view_erasure_swap_blind`), `crates/frust-widgets/tests/wrapper_view_guard.rs`
 (source-scan guard failing on any new in-tree view of this shape), and `crates/frust-widgets/src/authoring.rs` (swap detection).
+
+---
+
+### `tuple-children-positional-only` — a tuple child sequence reconciles by position only
+
+**Observed**: `Column((a, b, c))`, `.children((a, b))` and every catalog list
+parameter typed `impl ViewSeq<State, M>` erase a tuple's elements into the
+container's `Vec<AnyView<State>>` in order, so reconciliation matches children
+by slot (plus the element `TypeId` check). Moving an element from one slot to
+another — or conditionally omitting one via an `Option` element, which drops
+its slot — rebuilds the widgets after it rather than relocating them; their
+retained state (scroll offset, text-input buffer, animation) is lost.
+
+**Applies to**: any tuple, array or `Option` child sequence. Identity-based
+reconciliation (`keyed(key, view)`) is a `Vec` affair and is unaffected.
+
+**Why not fixed**: a tuple has no per-element key to carry; adding one would
+mean a second sequence trait or a keyed tuple wrapper, and the documented
+answer (`Vec` + `keyed()` for identity, tuples for fixed shapes) covers the
+cases observed in the tree.
+
+**Workaround**: put a dynamically ordered or optional child that must keep
+state in a `Vec` with `keyed(..)`, or keep it last in the tuple so no sibling
+shifts.
+
+**Evidence**: `crates/frust-core/src/view.rs` (`ViewSeq` rustdoc and the
+tuple impls), `crates/frust-widgets/tests/builders.rs` (tuple == `vec![any(..)]`
+== fluent equivalence, `Option` slot drop), the Phase 0 record of the
+erasure-free-app-code plan.
+
+---
+
+### `viewseq-arity-12` — a flat tuple of more than 12 views is not a child sequence
+
+**Observed**: `ViewSeq<State, M>` is implemented for tuples of 1 to 12
+elements. A 13-element tuple fails to compile with the trait's
+`#[diagnostic::on_unimplemented]` note naming the accepted shapes (a `View`, a
+tuple of up to 12 views, an array, a `Vec`, an `Option`, or `views(iter)`);
+nesting — `((a, b, c), (d, ..))` — flattens in order and has no limit.
+
+**Applies to**: hand-written tuple children and the codemod's rule T6, which
+leaves a fully erased list of more than 12 elements as a `vec![any(..), ..]`
+(listed as `T6-arity`, not rewritten). Two such lists exist in
+`examples/shadcn-demo` (`pages/primitives.rs`, `pages/data_table.rs`).
+
+**Why not fixed**: the impls are macro-generated per arity; 12 matches the
+standard library's tuple-trait convention and keeps compile time flat, while
+nesting already gives unbounded width.
+
+**Workaround**: nest tuples, or use a `Vec<V>` when the elements share a type.
+
+**Evidence**: `crates/frust-core/src/view.rs` (`compile_fail,E0277` doc test
+for the 13-tuple), `scripts/codemod/frust_any_codemod.py` (`T6-arity` bucket).
+
+---
+
+### `helper-impl-view-capture` — an `impl View<S>` returned from a borrowing helper is tied to the borrow
+
+**Observed**: a helper `fn row(label: &str) -> impl View<S>` compiled on
+edition 2024 captures the `&str` lifetime in its opaque type by default. The
+value cannot be stored past the borrow, returned from a closure that must
+yield one type for every lifetime (a navigator route builder, a `RenderRoot`
+rebuild closure), or placed in a `Vec<AnyView>` next to other types without
+erasing it again; the compiler reports the capture rather than the intent.
+
+**Applies to**: every `-> impl View<S>` helper that takes a reference and whose
+result escapes the call. Codemod rule T7 rewrites a helper only when its body
+ends in a single erasure call and lists it instead when the helper is used as a
+value, is recursive, is a trait method, or has several return arms
+(`T7-ref`/`T7-trait`/`T7-arms`); a rewritten helper whose result then needs to
+escape is restored and marked `// erasure: keep <why>`.
+
+**Why not fixed**: this is the language's opaque-type rule, not a frust
+limitation; `+ use<..>` names exactly what the type may capture and
+`AnyView` is the type-erased escape hatch, so both resolutions are a one-token
+change at the site that needs it.
+
+**Workaround**: add `+ use<>` (or `+ use<S>` and the generics actually
+needed) when the result borrows nothing it keeps — `fn app_bar(title: &str)
+-> impl View<u32> + use<>` as the scaffolded app template does — pass an owned
+argument, or erase with `any(..)` where the value is stored.
+
+**Evidence**: `crates/frust-drive/templates/app/src/home_page.rs.tmpl`,
+`plugins/material/src/dismissible.rs` (test `logic`, `+ use<>` required under a
+`RenderRoot` closure), `examples/huddle/src/ui/scaffold.rs` (`placeholder_body`),
+`scripts/codemod/frust_any_codemod.py` (rule T7 exclusions).
 
 ---
 
