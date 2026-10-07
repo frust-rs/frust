@@ -5,8 +5,9 @@ table, so a patch library built from edited code takes effect in a running proce
 restart. It is a frust-owned port of the [subsecond](https://crates.io/crates/subsecond) 0.7.10
 runtime and stays wire-compatible with `dx` (dioxus-cli) 0.7.10, which still builds the patches.
 
-`publish = false`: this crate ships only on the hot-patch spike branch. It is reached through
-`frust-core`'s opt-in `hotpatch` feature and is absent from every default dependency graph.
+The crate is published with the workspace so that `frust-core`'s optional dependency on it
+resolves from crates.io. It is reached only through `frust-core`'s opt-in `hotpatch` feature and is
+absent from every default dependency graph.
 
 ## Scope
 
@@ -89,6 +90,6 @@ devserver connection debug-only. Moving the gate onto the cargo feature is follo
 
 Every source file is ported from subsecond 0.7.10 and subsecond-types 0.7.10 by DioxusLabs
 (Jonathan Kelley), <https://github.com/DioxusLabs/dioxus/tree/main/packages/subsecond>, licensed
-MIT OR Apache-2.0 (the published crates' `license` field; the crate packages ship no LICENSE file).
+MIT OR Apache-2.0 (the published crates' `license` field; their packages ship no LICENSE file).
 This crate keeps that dual license; the dispatch, ordering, serialisation and fail-closed changes
 listed above are frust's.
