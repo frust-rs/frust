@@ -175,7 +175,7 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
             // Erase at the boundary; idempotent, so an `AnyView` body is not
             // re-boxed.
             #[cfg(feature = "hotpatch")]
-            let view = crate::hotpatch::call_build(&self.component, &mut state);
+            let view = AnyView::new(crate::hotpatch::call_build(&self.component, &mut state));
             #[cfg(not(feature = "hotpatch"))]
             let view = AnyView::new(self.component.build(&mut state));
             // A component-local build counter; the child never enters the arena.
@@ -220,7 +220,10 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         let owner = element.owner.clone();
         owner.with(|| {
             #[cfg(feature = "hotpatch")]
-            let new_view = crate::hotpatch::call_build(&self.component, &mut element.state);
+            let new_view = AnyView::new(crate::hotpatch::call_build(
+                &self.component,
+                &mut element.state,
+            ));
             #[cfg(not(feature = "hotpatch"))]
             let new_view = AnyView::new(self.component.build(&mut element.state));
             // Read before the `widget_mut` borrow below.

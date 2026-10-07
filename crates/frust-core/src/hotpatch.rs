@@ -6,15 +6,16 @@ use std::sync::Arc;
 use frust_hotpatch::HotFn;
 
 use crate::component::Component;
-use crate::view::AnyView;
+use crate::view::View;
 
-/// Call `component.build(state)` through the jump table and erase the result.
+/// Call `component.build(state)` through the jump table.
 ///
-/// This is the single erasure point `ComponentView` uses under the feature (the non-feature path keeps
-/// its inline `AnyView::new`). With no patch applied frust-hotpatch falls through to the original
-/// function. `init` is deliberately not routed here: it must not re-run on a patch.
-pub(crate) fn call_build<C: Component>(component: &C, state: &mut C::State) -> AnyView<C::State> {
-    AnyView::new(HotFn::current(<C as Component>::build).call((component, state)))
+/// `ComponentView` erases the result at its boundary exactly as the non-feature path does; this
+/// helper only routes the call (erasure tripwire rule T7). With no patch applied frust-hotpatch
+/// falls through to the original function. `init` is deliberately not routed here: it must not
+/// re-run on a patch.
+pub(crate) fn call_build<C: Component>(component: &C, state: &mut C::State) -> impl View<C::State> {
+    HotFn::current(<C as Component>::build).call((component, state))
 }
 
 /// Register `listener` to run right after a patch library is loaded and the jump table swapped.
@@ -28,7 +29,7 @@ pub fn set_patch_listener(listener: Arc<dyn Fn() + Send + Sync>) {
 #[cfg(all(test, feature = "hotpatch"))]
 mod tests {
     use super::*;
-    use crate::view::{BuildCtx, ChangeFlags, View};
+    use crate::view::{AnyView, BuildCtx, ChangeFlags, View};
     use crate::widget::{LayoutCtx, PaintCtx, PaintScene, Widget};
     use kurbo::Size;
     use std::any::Any;
@@ -75,7 +76,7 @@ mod tests {
         let c = Probe;
         let mut state = 0u32;
         let direct = AnyView::new(c.build(&mut state));
-        let via_seam = call_build(&c, &mut state);
+        let via_seam = AnyView::new(call_build(&c, &mut state));
         // Both builds ran the real `build` exactly once each.
         assert_eq!(state, 2);
         let mut id = 0u64;
