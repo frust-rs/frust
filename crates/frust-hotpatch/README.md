@@ -25,6 +25,23 @@ absent from every default dependency graph.
   D2 in the spike); checking it is the patch builder's job (the spike's PORT.md, section 2(c)).
 - `apply_patch`, `get_jump_table`, `register_handler`, and `load_patch_library` (the platform
   loader `apply_patch` uses: `libloading` on desktop, memfd + `android_dlopen_ext` on Android).
+- The app-owned anchor: the app defines `#[unsafe(no_mangle)] pub extern "C" fn
+  __frust_hotpatch_anchor() {}` and registers it once with `set_anchor(__frust_hotpatch_anchor as
+  usize)` (a function-pointer address, no `dlsym`). The builder sends the symbol's link-time
+  address as `aslr_reference` and exports the same symbol from every patch, so `apply_patch`
+  resolves the patch's anchor by that name (`ANCHOR_SYMBOL`), not `main`: an Android cdylib has no
+  `main`. A patch library without the symbol is refused with `PatchError::Dlopen`.
+- `apply_from_devtools(bytes_path, table) -> ApplyReport`: the safe entry the in-app devtools
+  service calls, so the one `unsafe` call stays in this crate. `bytes_path` must be a file the app
+  wrote from bytes received on the authenticated devtools connection, never a wire path. It
+  refuses while any layout-mismatch record is unreported: nothing is loaded and the report says
+  `applied: false` with the records.
+- `report_layout_mismatch(type_name, stored, own)`: records a layout disagreement found at run
+  time and keeps it until reported. `pending_layout_mismatches()` reads the list (for
+  `hotpatch_info`); `mark_layout_mismatches_reported(&records)` removes the records a
+  `PatchOutcome` or `hotpatch_info` answer carried (records reported meanwhile stay pending).
+- `seam_hits()` and `missed_keys()`: hits and distinct missed keys since the last patch (see
+  below).
 - `JumpTable` / `AddressMap`: the same serde shape as `subsecond-types` 0.7.10. The
   `wire_compat_with_subsecond_types` test round-trips a `subsecond_types::JumpTable` through JSON
   into this crate's type and back.
@@ -49,8 +66,9 @@ keeps running; the fall-through diagnostics below expose that.
 The jump table is consulted only under `cfg!(debug_assertions)`, exactly as in subsecond 0.7.10: a
 release-profile build calls every `HotFn` directly and never reads the table, even with the
 `hotpatch` feature on (`try_call_with_ptr`, which calls the address it is given, is the one call
-that honours its pointer in every profile). `apply_patch` itself is not gated; callers keep the
-devserver connection debug-only. Moving the gate onto the cargo feature is follow-up work.
+that honours its pointer in every profile). `apply_patch` is gated too: a release-profile
+build returns `PatchError::ReleaseBuild` before touching anything, so it refuses to load a patch
+whatever the callers do.
 
 ## Differences from subsecond 0.7.10
 
@@ -62,12 +80,14 @@ devserver connection debug-only. Moving the gate onto the cargo feature is follo
 - No `HotFnPanic` and no retry loop: nothing in either crate ever produced one. `try_call` and
   `try_call_with_ptr` return `Result<_, Infallible>`.
 - Ordering: the table is published with a Release store and read with an Acquire load, so a
-  reader on another thread sees a fully built map (subsecond uses `Relaxed`). The `main` anchor
-  cache uses the same pairing and is an atomic rather than a `static mut`.
+  reader on another thread sees a fully built map (subsecond uses `Relaxed`). The anchor
+  is an atomic rather than a `static mut`.
 - Serialisation: `apply_patch` holds a lock end to end (load, rebase, publish, handlers), so
   concurrent patches apply one at a time. A handler must not apply a patch itself.
-- Fail-closed anchor: when this executable's `main` cannot be resolved, `apply_patch` returns
-  `PatchError::AnchorUnresolved` before loading the library; nothing is installed, no handler runs.
+- Fail-closed anchor: while no anchor is set, `apply_patch` returns `PatchError::AnchorUnresolved`
+  before loading the library; nothing is installed, no handler runs. The anchor is the app's
+  `__frust_hotpatch_anchor`, not `main`; `aslr_reference` reads the registered value and retries
+  an unset one rather than caching it.
 - Handlers run under `catch_unwind`: a panicking handler is logged to stderr, the patch stays
   installed, and the remaining handlers still run.
 - The Android memfd stays owned until `android_dlopen_ext` succeeds, so a failed patch closes it
@@ -75,14 +95,18 @@ devserver connection debug-only. Moving the gate onto the cargo feature is follo
 - `load_patch_library` is public, so the Android loader can be probed on its own.
 - Fall-through diagnostics: `last_call_fell_through()` (this thread's most recent `HotFn` call
   found a table installed but no entry for its own key) and `fall_through_count()` (misses on
-  any thread since the last patch, reset by every patch). Dispatch never reads them. A miss is
+  any thread since the last patch, reset by every patch). Dispatch never reads them. Beside them
+  `seam_hits()` counts table hits, and `missed_keys()` lists each distinct missed key once as
+  `MissedKey { image, link_address }`: `image` 0 is the base executable and `n` the n-th patch
+  loaded (found from the address ranges of the images this crate loaded; an address in none is
+  `UNKNOWN_IMAGE`), `link_address` the key minus that image's slide. This crate only records; the
+  host classifies. Both reset with every patch. A miss is
   also normal for any hot function the patch did not recompile, and for every call made from
   patch-image code: the key is the calling image's own `call_it` address and the table's keys are
   base-image addresses, so a nested component's hot call from the newest patch's rebuild misses
-  although it already runs the newest code. The counter stays a plain count here; a restart rule needs the missed
-  key, whose address range names the calling image.
+  although it already runs the newest code. The count stays a plain count; a restart rule reads the missed keys.
 - No `unwrap()` outside tests: a poisoned handler or apply lock is recovered, and a patch library
-  without the `main` anchor returns `PatchError::Dlopen` instead of panicking.
+  without the anchor symbol returns `PatchError::Dlopen` instead of panicking.
 - ASLR offsets use wrapping arithmetic.
 - The memfd and its pseudo-path are named `frust-hotpatch` instead of `subsecond-patch`.
 
