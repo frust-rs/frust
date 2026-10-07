@@ -10,7 +10,7 @@
 //! <https://developer.android.com/ndk/reference/structandroid/dlextinfo>.
 
 use std::ffi::{CStr, c_void};
-use std::os::fd::IntoRawFd;
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::path::Path;
 use std::ptr;
 
@@ -57,11 +57,11 @@ pub(crate) unsafe fn memfd_dlopen(file: &Path) -> Result<libloading::Library, Pa
         .set_len(contents.len() as u64)
         .map_err(|e| memfd_err("Failed to set memfd length", &e))?;
 
-    // The descriptor is deliberately leaked: the loaded library stays mapped for the process life.
-    let raw_fd = mfd.into_raw_fd();
+    // `mfd` owns the descriptor until `android_dlopen_ext` succeeds: every error return below
+    // drops it, closing the fd, so a failed patch leaks nothing.
 
-    // SAFETY: `raw_fd` is a fresh memfd sized to `contents` that nothing else maps or resizes.
-    let mut map = unsafe { memmap2::MmapMut::map_mut(raw_fd) }
+    // SAFETY: `mfd` is a fresh memfd sized to `contents` that nothing else maps or resizes.
+    let mut map = unsafe { memmap2::MmapMut::map_mut(mfd.as_file()) }
         .map_err(|e| memfd_err("Failed to map memfd", &e))?;
     map.copy_from_slice(&contents);
     // Held until the library is loaded, then unmapped; the loader maps the fd itself.
@@ -74,7 +74,7 @@ pub(crate) unsafe fn memfd_dlopen(file: &Path) -> Result<libloading::Library, Pa
         reserved_addr: ptr::null(),
         reserved_size: 0,
         relro_fd: 0,
-        library_fd: raw_fd,
+        library_fd: mfd.as_raw_fd(),
         library_fd_offset: 0,
         library_namespace: ptr::null(),
     };
@@ -82,8 +82,9 @@ pub(crate) unsafe fn memfd_dlopen(file: &Path) -> Result<libloading::Library, Pa
 
     let handle = libloading::os::unix::with_dlerror(
         || {
-            // SAFETY: the name is NUL-terminated and `info` outlives the call; the caller vouches
-            // for the library's initialisers.
+            // SAFETY: the name is NUL-terminated, `info` outlives the call, and `info.library_fd`
+            // is `mfd`'s descriptor, still open because `mfd` is alive; the caller vouches for
+            // the library's initialisers.
             let handle = unsafe { android_dlopen_ext(c"/frust-hotpatch".as_ptr(), flags, &info) };
             (!handle.is_null()).then_some(handle)
         },
@@ -95,6 +96,10 @@ pub(crate) unsafe fn memfd_dlopen(file: &Path) -> Result<libloading::Library, Pa
             e.unwrap_or_default()
         ))
     })?;
+
+    // Loaded: the descriptor is now deliberately leaked, as the library stays mapped for the
+    // process life.
+    let _ = mfd.into_raw_fd();
 
     // SAFETY: `handle` is a live handle `android_dlopen_ext` just returned; ownership moves into
     // the `Library`.
