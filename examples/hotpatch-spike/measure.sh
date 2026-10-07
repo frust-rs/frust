@@ -31,7 +31,7 @@
 #   POST_RUN_PAUSE=<s>  sleeps <s> seconds after the last run, before the app is killed, so the
 #                       patched window can be inspected; default 0.
 #   STATE_FIELD_WRITE=1 with --target state-field, the patched build also WRITES the new field
-#                       (`state.extra += 1`) before reading it; default 0 (read only).
+#                       (`state.extra = state.extra.wrapping_add(1)`) before reading it; default 0 (read only).
 #
 # Every edited file is restored on exit (trap EXIT, Ctrl-C included) and the runner's process group
 # is killed; the summary ends with `git status` of this directory as proof. The manual restore
@@ -207,8 +207,9 @@ start_runner() {
 }
 
 # TERM the runner's process group, wait up to 5 s, then KILL whatever is left. Every KILL is guarded:
-# the group only while it still exists (the leader is not reaped until `wait` below, so its group id
-# cannot be reused before that), and the scraped app PID only while it is still in the runner's
+# the group only while some member of it still exists (`kill -0 -- -PID`, re-checked right before
+# the KILL; bash reaps the leader on SIGCHLD, so the only window left is a reused pgid with a
+# brand-new leader — negligible), and the scraped app PID only while it is still in the runner's
 # process group (`ps -o pgid=`) — a stale or reused PID from the log is never killed.
 stop_runner() {
   [ -n "$RUNNER_PID" ] || return 0

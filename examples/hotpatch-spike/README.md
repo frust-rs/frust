@@ -1,10 +1,11 @@
 # hotpatch-spike
 
 A throwaway measurement app for the hot-reload spike: can `dx serve --hot-patch` (dioxus-cli
-0.7.10, subsecond) patch a running Frust desktop app, and how fast is edit-to-frame compared with a
+0.7.10; subsecond in Phase 1, Frust's own `crates/frust-hotpatch` runtime since Phase 2) patch a
+running Frust desktop app, and how fast is edit-to-frame compared with a
 rebuild and relaunch? It is the `frust create` counter with baseline Frust widgets only (no design
 system), built against `frust-ui` with the opt-in `hotpatch` feature. With that feature, every
-`component(..)` child's `build` runs through subsecond's jump table, and the desktop shell logs
+`component(..)` child's `build` runs through the hot-patch seam's jump table (frust-hotpatch), and the desktop shell logs
 `frust-hotpatch: applied t_unix_ms=<ms>` when a patch lands and `frust-hotpatch: frame t_unix_ms=<ms>`
 after the next frame (also once after the first startup frame).
 
@@ -15,7 +16,7 @@ stay out of the root graph. It builds into its own `target/`.
 hotpatch-spike/
 ├── Cargo.toml        workspace only: members app + runner, dev-profile opt-level override
 ├── app/              lib package `hotpatch-spike-app`: SpikeApp, HomePage, CounterCard, frust::app!
-├── runner/           bin package `hotpatch-spike`: connect_subsecond() (debug only), then __frust_main()
+├── runner/           bin package `hotpatch-spike`: dioxus_devtools::connect -> frust_hotpatch::apply_patch (debug only), then __frust_main()
 └── measure.sh        edit-to-frame timing (hot patch or restart)
 ```
 
@@ -27,9 +28,9 @@ hotpatch-spike/
    thin `main.rs` in one package, `dx --verbose` logs `replaying crates: []`: the patch builds and
    applies, but the changed code is not in it. When the lib is its own package, dx logs
    `replaying crates: ["hotpatch_spike_app"]` and the patch lands with the process kept alive (same
-   PID). Save->frame submitted is 0.47-0.5 s in steady state, and the first patch of a session
-   takes up to 1.7-2.1 s (RESULTS.md). So `app` (lib) and `runner` (bin) split the template's single package.
-   Everything else mirrors the template.
+   PID). So `app` (lib) and `runner` (bin) split the template's single package. Everything else
+   mirrors the template. Save->frame submitted is 0.47-0.5 s in steady state, and the first patch
+   of a session takes up to 1.7-2.1 s (RESULTS.md).
 2. **The `app` lib is `crate-type = ["rlib"]`, not the template's
    `["cdylib", "staticlib", "rlib"]`.** dx 0.7.10 fails a thin patch of a lib with the template's
    crate types, for two reasons, both verified here:
@@ -55,8 +56,9 @@ hotpatch-spike/
 
 ## Prerequisites
 
-Install dx 0.7.10 into a scratch root, never `~/.cargo/bin`. Its `subsecond` must equal the
-`=0.7.10` pin that frust-core's `hotpatch` feature and the runner's `dioxus-devtools` resolve:
+Install dx 0.7.10 into a scratch root, never `~/.cargo/bin`. Its jump-table wire format is the
+one `crates/frust-hotpatch` speaks (ported from subsecond 0.7.10), and the runner's
+`dioxus-devtools` is pinned `=0.7.10` to match:
 
 ```sh
 cargo install dioxus-cli --version 0.7.10 --locked --root <scratch-dir>
@@ -67,7 +69,8 @@ export DX=<scratch-dir>/bin/dx      # `"$DX" --version` prints `dioxus 0.7.10 (.
 
 ## Running
 
-Use the dev profile only. subsecond reads its jump table only under `cfg!(debug_assertions)`, and
+Use the dev profile only. frust-hotpatch (like subsecond) reads its jump table only under
+`cfg!(debug_assertions)`, and
 the runner connects to dx's devserver only under `cfg(debug_assertions)`. A release build never
 opens the devtools connection or applies a patch. The connection and `apply_patch` (which loads and
 runs code the devserver sends) must stay debug-only in any integration built from this spike.

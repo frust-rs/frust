@@ -34,7 +34,7 @@ All three GO conditions hold:
 
 Row D2 does not touch these three criteria: they are about patching, speed and crashes under
 layout-preserving edits, and all three still hold as measured. The GO stands. D2 changes the
-*limits*, which are now five:
+*limits*, which are now seven:
 
 - **Row D:** a State edit that changes the State *type identity* (here `u32` -> a tuple) is a
   *silent no-op*. dx reports a successful patch, but the old `build` keeps running.
@@ -44,6 +44,14 @@ layout-preserving edits, and all three still hold as measured. The GO stands. D2
   plain runs and crashed in run 1 of both guard-malloc sessions (one confound is open, see D2). A
   State *layout* change must force a restart. Telling the two cases apart needs a layout
   fingerprint, not a symbol check (see Surprises).
+- **Boundary layout, not just State (follows from D2 by construction; not measured):** the same
+  hazard applies to every type whose values cross the old/new code boundary at the seam — the
+  component struct itself (props, passed as `&self.component`), its State, and `build`'s
+  concrete return type, recursively. A State-only fingerprint is necessary but not sufficient
+  (see the Phase 2 requirements).
+- **Return-type-changing `build` edits are untested.** By the same mechanism they are probably a
+  D2-class hazard, not a no-op (row D). A measured row D3 — an edit that wraps the root
+  `column()` in another container — is the first Phase 2 follow-up measurement.
 - **Row E:** framework crates are never patched. dx does not even see the edit.
 - **Row H:** the `frust create` one-package layout cannot be patched by dx at all (see the
   template implication below).
@@ -82,7 +90,7 @@ as `hotpatch-spike.<id>/runner.log`. They are not committed, so the relevant lin
 | B | card sentinel, `app/src/counter_card.rs` | yes | yes: count 2 -> 2 | **479** (469-583), 5 | `["hotpatch_spike_app"]` | PASS |
 | C | new private fn called from `HomePage::build` | yes | yes: count 2 -> 2 | **482** (475-1694), 5 | `["hotpatch_spike_app"]` | PASS |
 | D | State type identity changed (`type State = u32` -> (N+1)-tuple) | patch "applies", but the old `build` keeps running | count 2 unchanged; the edit never shows | 623 (622-1282), 5, "applied" only | `["hotpatch_spike_app"]` | silent no-op |
-| D2 | field `extra: u32` added to the named `struct HomeState` | yes: the NEW `build` runs (its log line appears), same PID | the new code reads/writes past the old 4-byte value | 481 (473-1227), 3 read; 485 (477-1008), 3 write | `["hotpatch_spike_app"]` | patched over the old layout (UB); survived 6/6 plain runs; crashed in run 1 of 2/2 guard-malloc sessions |
+| D2 | field `extra: u32` added to the named `struct HomeState` | yes: the NEW `build` runs (its log line appears), same PID | the new code reads/writes past the old 4-byte value | 481 (473-1227), 3 read; 485 (478-1008), 3 write | `["hotpatch_spike_app"]` | patched over the old layout (UB); survived 6/6 plain runs; crashed in run 1 of 2/2 guard-malloc sessions (confound open) |
 | E | `PAD_X` 12 -> 48 in `crates/frust-widgets/src/button.rs` (manual) | no: dx logs nothing | n/a | n/a (no event) | none emitted | NOT patched (expected) |
 | F | restart: kill + `cargo run -p hotpatch-spike` per edit | relaunch | no: count resets to 0 | **1570** (1436-1731), 5 | n/a | baseline |
 | G | 10 consecutive home patches | yes, all 10 | yes: count 2 -> 2 | 493 (490-505), 10 | `["hotpatch_spike_app"]` | no crash; RSS +5.4 MB |
@@ -147,7 +155,8 @@ function, which is a new symbol, patches fine when it is called from a patched `
 
 Run N changes `type State = u32` to an (N+1)-tuple of `u32`, the init, the read and the increment.
 It also bumps the sentinel. (The target was called `state` then. r1-01 renamed it `state-type`; it
-now swaps the named `HomeState` for the tuple, which is the same kind of change.) What happens:
+now swaps the named `HomeState` for the tuple, which is the same kind of change. Its outcome was
+not re-measured after the HomeState change; it follows from the mechanism below.) What happens:
 
 - dx builds and applies a thin patch every run (`replaying crates: ["hotpatch_spike_app"]`, thin
   builds 580-810 ms, `Hot-patching: app/src/home_page.rs took 214-225ms`).
@@ -175,8 +184,9 @@ you so.
 type's path, so the symbol matches and the patch IS taken (row D2). The p1-03b wording "a State
 change is a silent no-op, not UB" was too broad and is withdrawn.
 
-**Return-type-changing `build` edits are untested** (for example, adding a `.child(..)` changes the
-concrete type behind `impl View<State>`). The review asked for them to be recorded as the same
+**Return-type-changing `build` edits are untested** (for example, wrapping the root `column()` in another
+container changes the concrete type behind `impl View<State>`; `.child(..)`, `.flex(..)` and
+`.when(..)` on a `FlexView` return `Self` and do not). The review asked for them to be recorded as the same
 silent no-op. The D2 crash reports suggest otherwise, so they are recorded here as *untested, and
 probably not a no-op*. The symbols are v0-mangled (rustc 1.98.1's default; the reports show
 `_R...` names). The patched `call_it` symbol in those reports is
@@ -195,7 +205,7 @@ committed app change). Run N adds `pub extra: u32` (initialised to 4242 in `init
 line, so its presence proves the new `build` ran and shows what it read. `init` does not re-run on a
 patch (frust-core seam), so the live value is still the old 4-byte `HomeState { count }`, stored
 inline in `ComponentWidget::state` (`crates/frust-core/src/component.rs`, read through
-`&mut element.state` at `:222`).
+`&mut element.state` at `:223`).
 
 **Read session** (`PRE_RUN_PAUSE=20 POST_RUN_PAUSE=15`, PID 54590, counter clicked to 2 before the
 runs, before-capture `count: 2`, `hotpatch-sentinel: v0`):
@@ -206,7 +216,7 @@ runs, before-capture `count: 2`, `hotpatch-sentinel: v0`):
 | 2 | 481 / 481 ms | yes | 0 | 54590 alive |
 | 3 | 473 / 473 ms | yes | 0 | 54590 alive |
 
-**Write session** (`STATE_FIELD_WRITE=1`, so the patched `build` does `state.extra += 1` before
+**Write session** (`STATE_FIELD_WRITE=1`, so the patched `build` does `state.extra = state.extra.wrapping_add(1)` before
 reading it; PID 56161):
 
 | Run | save->applied / frame submitted | Patched build ran? | `extra` read | PID |
@@ -261,7 +271,8 @@ Guard malloc did not trap *on* the out-of-bounds field access. The access lies i
 instead in code the D2 edit added, with the patched `build` on the stack. The edit adds a field
 *and* the crate's first reference to `log` (the instrumentation line). The missing control would
 separate those two. Until it runs, the guard-malloc crashes cannot be attributed to the layout
-change alone. They do show that a D2 edit is not reliably survivable.
+change alone. Whether a D2 edit is survivable is therefore open; the verdict below rests on the
+proven out-of-bounds reads and writes (0, then 1-2-3), not on these crashes.
 
 Verdict for D2: a field added to a named State struct is hot-patched *over the old layout*. The new
 `build` reads and writes 4 bytes past the live value with no warning from dx, subsecond or frust.
@@ -386,10 +397,12 @@ r1-01 changed `measure.sh` again:
   "undefined behaviour or a crash", and that holds for D2. An "automatic fallback to restart"
   follow-up must *detect* the change *before* applying the patch. Comparing `call_it` /
   `HotFn::call` instances or symbol names cannot do it: it catches D and misses D2 by
-  construction, because D2's symbols are identical. Detection needs a **layout fingerprint** of each
-  component's `State`: size, alignment and the type's structure (field names, offsets and types,
-  recursively), recorded at fat-build time and compared against the patch. Any mismatch means
-  restart.
+  construction, because D2's symbols are identical. Detection needs a **layout fingerprint** of every type
+  whose values cross the patch boundary at the seam — the component type `C` (props),
+  `C::State` and `build`'s concrete return type: size, alignment and the type's structure
+  (field names, offsets and types, recursively), recorded at fat-build time and compared
+  against the patch. Any mismatch means restart. A State-only fingerprint would miss a new prop
+  field or a changed return type, whose symbols are equally unchanged.
 - **The first patch of a session can be 1-2 s slower.** In the cold session, run 1 took 2128 ms,
   with a 1216 ms thin build. In row C, run 1 took 1694 ms although dx's build took only 497 ms, so
   ~1.2 s passed before dx started. In row D2, run 1 took 1227 ms (thin build 1124 ms) and 1008 ms.
@@ -435,13 +448,15 @@ hot-reload-capable frust has two options:
 p2-03's PORT.md should size the second option against the first. Rows D, D2 and E add
 requirements for that builder:
 
-- **State layout gate (row D2, mandatory).** Before applying a patch, compare a layout fingerprint
-  of every component `State` reachable from a patched `build` (size, alignment, type structure)
-  against the running binary's. Any difference means restart, never apply. A symbol or instance
-  comparison is not enough, because a field added to a named struct keeps the symbol.
-- **Silent no-ops (row D)** should be surfaced: State type-identity changes, and possibly
-  return-type changes (untested; they may instead be D2-like, see row D), should report "restart
-  needed" instead of "patched".
+- **Boundary layout gate (row D2, mandatory).** Before applying a patch, compare a layout
+  fingerprint of every type whose values cross the old/new boundary at a patched `build` — the
+  component type `C` (props), `C::State` and the concrete `build` return type, recursively
+  (size, alignment, type structure) — against the running binary's. Any difference means
+  restart, never apply. A symbol or instance comparison is not enough: a field added to a named
+  struct, a new prop field and a changed return type all keep the symbol.
+- **Silent no-ops (row D)** should be surfaced: a State type-identity change should report
+  "restart needed" instead of "patched". Return-type changes are not a no-op case; they belong
+  under the boundary layout gate above (untested, see row D).
 - **frust path dependencies (row E)** should be covered, or the builder should tell the developer
   to restart.
 
