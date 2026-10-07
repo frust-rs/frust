@@ -42,6 +42,8 @@ use kurbo::{Point, Size};
 use reactive_graph::owner::Owner;
 
 use crate::event::{EventCtx, EventResult, InputEvent, PointerPhase};
+#[cfg(feature = "hotpatch")]
+use crate::hotpatch::SeamWitness;
 use crate::layout::BoxConstraints;
 use crate::view::{AnyView, BuildCtx, ChangeFlags, View};
 use crate::widget::{ChildPod, LayoutCtx, PaintCtx, PaintScene, Widget};
@@ -118,9 +120,29 @@ pub fn component<C: Component>(c: C) -> ComponentView<C> {
 /// `&mut Box<dyn Widget>`, the exact type [`AnyView::rebuild`] needs to swap the
 /// widget on a concrete-type change. This mirrors `frust-widgets`'
 /// `build_child`/`rebuild_child` pod convention.
+///
+/// # Under the `hotpatch` feature
+///
+/// The struct is `repr(C)`, starts with the [`SeamWitness`] the creating image
+/// wrote, and holds the state boxed, so every field sits at the same offset in
+/// every image whatever `C::State` looks like there. `rebuild`, `teardown` and
+/// `Drop` check the witness first; on a mismatch nothing `C`-generic touches the
+/// state, and `Drop` leaks the state box (`mem::forget`) rather than let another
+/// image's layout drop or free it, while still disposing the owner.
+#[cfg_attr(feature = "hotpatch", repr(C))]
 pub struct ComponentWidget<C: Component> {
+    /// The layout of `C` and `C::State` in the image that built this widget.
+    #[cfg(feature = "hotpatch")]
+    witness: SeamWitness,
     /// The component's retained local state; the inner [`EventCtx`] is built
     /// over this, so the subtree's event handlers mutate it via `state_mut`.
+    /// Always `Some` while the widget is live; `Drop` takes it to leak it on a
+    /// layout mismatch.
+    #[cfg(feature = "hotpatch")]
+    state: Option<Box<C::State>>,
+    /// The component's retained local state; the inner [`EventCtx`] is built
+    /// over this, so the subtree's event handlers mutate it via `state_mut`.
+    #[cfg(not(feature = "hotpatch"))]
     state: C::State,
     /// The previous child view, diffed against the freshly built one each
     /// rebuild (the same reconcile `RenderRoot::rebuild_view` performs).
@@ -153,10 +175,53 @@ impl<C: Component> ComponentWidget<C> {
             self.disposed = true;
         }
     }
+
+    /// The retained local state.
+    #[cfg(feature = "hotpatch")]
+    fn state_mut(&mut self) -> &mut C::State {
+        self.state
+            .as_deref_mut()
+            .expect("component state is present while the widget is live")
+    }
+
+    /// The retained local state.
+    #[cfg(not(feature = "hotpatch"))]
+    fn state_mut(&mut self) -> &mut C::State {
+        &mut self.state
+    }
+
+    /// The retained local state, read-only.
+    #[cfg(all(test, feature = "hotpatch"))]
+    fn state(&self) -> &C::State {
+        self.state
+            .as_deref()
+            .expect("component state is present while the widget is live")
+    }
+
+    /// The retained local state, read-only.
+    #[cfg(all(test, not(feature = "hotpatch")))]
+    fn state(&self) -> &C::State {
+        &self.state
+    }
+
+    /// Overwrite the stored witness, standing in for a widget another image
+    /// built.
+    #[cfg(all(test, feature = "hotpatch"))]
+    fn set_witness_for_test(&mut self, witness: SeamWitness) {
+        self.witness = witness;
+    }
 }
 
 impl<C: Component> Drop for ComponentWidget<C> {
     fn drop(&mut self) {
+        // A mismatched witness means this drop glue belongs to an image whose
+        // `C::State` layout differs from the creator's: leak the state box
+        // without dropping or freeing it. `take` reads and clears only the
+        // pointer, whose layout does not depend on `C::State`.
+        #[cfg(feature = "hotpatch")]
+        if crate::hotpatch::verify_witness::<C>(self.witness).is_err() {
+            std::mem::forget(self.state.take());
+        }
         // Defensive: a component removed by a path that did not route through
         // `View::teardown` (or a panic mid-teardown) still disposes its owner.
         self.dispose();
@@ -170,12 +235,23 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         // A child of the ambient owner: the root owner a shell installs, or the
         // enclosing component's owner (we build under `owner.with`, below).
         let owner = Owner::new();
+        // This image runs `init`, so its layout is the creator's.
+        #[cfg(feature = "hotpatch")]
+        let witness = SeamWitness::of::<C>();
         let (state, prev, child, next_id) = owner.with(|| {
+            #[cfg(feature = "hotpatch")]
+            let mut state = Box::new(self.component.init());
+            #[cfg(not(feature = "hotpatch"))]
             let mut state = self.component.init();
             // Erase at the boundary; idempotent, so an `AnyView` body is not
-            // re-boxed.
+            // re-boxed. The seam erases inside the hot function; a patch that
+            // already changed `C`'s layout yields an inert child instead.
             #[cfg(feature = "hotpatch")]
-            let view = AnyView::new(crate::hotpatch::call_build(&self.component, &mut state));
+            let view = crate::hotpatch::built_or_inert(crate::hotpatch::build_erased(
+                &self.component,
+                &mut *state,
+                witness,
+            ));
             #[cfg(not(feature = "hotpatch"))]
             let view = AnyView::new(self.component.build(&mut state));
             // A component-local build counter; the child never enters the arena.
@@ -191,6 +267,11 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
             (state, view, ChildPod::new(Box::new(element)), next_id)
         });
         ComponentWidget {
+            #[cfg(feature = "hotpatch")]
+            witness,
+            #[cfg(feature = "hotpatch")]
+            state: Some(state),
+            #[cfg(not(feature = "hotpatch"))]
             state,
             prev,
             child,
@@ -206,6 +287,13 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         element: &mut Self::Element,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
+        // Before anything forms `&mut C::State` or reads `prev`/`child`: a
+        // widget another image built with a different layout is left exactly as
+        // it is (the stale subtree stays until the session restarts).
+        #[cfg(feature = "hotpatch")]
+        if crate::hotpatch::verify_witness::<C>(element.witness).is_err() {
+            return ChangeFlags::NONE;
+        }
         // The outer `_prev` ComponentView is intentionally unused: the component
         // always re-runs `build` because its retained local state may have
         // changed even when the component value is equal (tracked-scope skipping
@@ -219,13 +307,19 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         let outer_has_focus = ctx.has_focus();
         let owner = element.owner.clone();
         owner.with(|| {
+            // The seam passes the stored witness, so a patched hot function
+            // compares the creator's layout with its own.
             #[cfg(feature = "hotpatch")]
-            let new_view = AnyView::new(crate::hotpatch::call_build(
-                &self.component,
-                &mut element.state,
-            ));
+            let new_view = {
+                let witness = element.witness;
+                match crate::hotpatch::build_erased(&self.component, element.state_mut(), witness) {
+                    Ok(view) => view,
+                    // Reported by the seam; nothing below has been touched.
+                    Err(_) => return ChangeFlags::NONE,
+                }
+            };
             #[cfg(not(feature = "hotpatch"))]
-            let new_view = AnyView::new(self.component.build(&mut element.state));
+            let new_view = AnyView::new(self.component.build(element.state_mut()));
             // Read before the `widget_mut` borrow below.
             let child_focused = element.child.is_focused();
             let (flags, swapped) = {
@@ -275,6 +369,13 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
     }
 
     fn teardown(&self, element: &mut Self::Element, ctx: &mut BuildCtx<'_>) {
+        // A widget another image built with a different layout is not torn
+        // down: neither the child teardown through `prev` nor the dispose runs
+        // here (`Drop` disposes the owner and leaks the state).
+        #[cfg(feature = "hotpatch")]
+        if crate::hotpatch::verify_witness::<C>(element.witness).is_err() {
+            return;
+        }
         // Forward teardown to the child view/element under the component owner,
         // then dispose the owner (runs `on_cleanup`s) and let the state drop.
         //
@@ -352,6 +453,14 @@ impl<C: Component> Widget for ComponentWidget<C> {
         // `set_cursor` below this boundary already reaches the root, and the
         // component boundary is transparent to it by construction.
         let (result, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
+            // Spelled per field (not through `state_mut`) so the borrow stays
+            // disjoint from `self.child` below.
+            #[cfg(feature = "hotpatch")]
+            let state_any: &mut dyn Any = self
+                .state
+                .as_deref_mut()
+                .expect("component state is present while the widget is live");
+            #[cfg(not(feature = "hotpatch"))]
             let state_any: &mut dyn Any = &mut self.state;
             let mut inner = EventCtx::new(state_any, Point::ZERO, size);
             inner.set_has_focus(has_focus);
@@ -638,14 +747,18 @@ mod tests {
             let mut ectx = EventCtx::new(&mut outer, Point::ZERO, Size::new(40.0, 20.0));
             widget.event(&mut ectx, &pointer(PointerPhase::Down, 5.0, 5.0));
         }
-        assert_eq!(widget.state.count, 3);
+        assert_eq!(widget.state().count, 3);
 
         // A parent-driven rebuild with changed props must not reset the count.
         let v2 = component(ClickCounter { label: "changed" });
         let mut next_id = 0u64;
         let mut ctx = BuildCtx::new(&mut next_id);
         View::<()>::rebuild(&v2, &v1, &mut widget, &mut ctx);
-        assert_eq!(widget.state.count, 3, "local state retained across rebuild");
+        assert_eq!(
+            widget.state().count,
+            3,
+            "local state retained across rebuild"
+        );
     }
 
     // --- Criterion 2: context scoping across the component boundary ---------
@@ -1287,5 +1400,328 @@ mod tests {
         let v2 = component(Labeled { text: "b" });
         let flags = View::<()>::rebuild(&v2, &v_same, &mut widget, &mut ctx);
         assert_eq!(flags, ChangeFlags::PAINT);
+    }
+
+    // --- Hot-patch seam: the creator-image layout witness --------------------
+
+    #[cfg(feature = "hotpatch")]
+    mod seam {
+        use super::*;
+        use crate::hotpatch::{Inert, SeamWitness};
+        use std::any::type_name;
+        use std::mem::offset_of;
+
+        /// A witness no image computes for `C`: the stored layout of a widget
+        /// another image built.
+        fn foreign<C: Component>() -> SeamWitness {
+            let own = SeamWitness::of::<C>();
+            SeamWitness {
+                size_state: own.size_state + 8,
+                ..own
+            }
+        }
+
+        /// Whether a mismatch for `S` is pending; clears this test's records.
+        fn take_reported<S>() -> bool {
+            let mine: Vec<_> = frust_hotpatch::pending_layout_mismatches()
+                .into_iter()
+                .filter(|m| m.type_name == type_name::<S>())
+                .collect();
+            frust_hotpatch::mark_layout_mismatches_reported(&mine);
+            !mine.is_empty()
+        }
+
+        /// A state whose drop is observable. Each test names its own type so
+        /// the process-global mismatch records never cross tests.
+        struct Counted<const N: usize> {
+            value: u32,
+            drops: Arc<AtomicU32>,
+        }
+        impl<const N: usize> Drop for Counted<N> {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        /// A component over `Counted<N>` counting its builds, its owner's
+        /// disposal and its child's teardowns.
+        struct Probe<const N: usize> {
+            builds: Arc<AtomicU32>,
+            drops: Arc<AtomicU32>,
+            disposed: Arc<AtomicU32>,
+            child_teardowns: Arc<AtomicU32>,
+        }
+        impl<const N: usize> Probe<N> {
+            fn new() -> Self {
+                Self {
+                    builds: Arc::new(AtomicU32::new(0)),
+                    drops: Arc::new(AtomicU32::new(0)),
+                    disposed: Arc::new(AtomicU32::new(0)),
+                    child_teardowns: Arc::new(AtomicU32::new(0)),
+                }
+            }
+            fn handle(&self) -> Self {
+                Self {
+                    builds: self.builds.clone(),
+                    drops: self.drops.clone(),
+                    disposed: self.disposed.clone(),
+                    child_teardowns: self.child_teardowns.clone(),
+                }
+            }
+        }
+        impl<const N: usize> Component for Probe<N> {
+            type State = Counted<N>;
+            fn init(&self) -> Counted<N> {
+                let disposed = self.disposed.clone();
+                on_cleanup(move || {
+                    disposed.fetch_add(1, Ordering::SeqCst);
+                });
+                Counted {
+                    value: 0,
+                    drops: self.drops.clone(),
+                }
+            }
+            fn build(&self, state: &mut Counted<N>) -> impl View<Counted<N>> {
+                self.builds.fetch_add(1, Ordering::SeqCst);
+                state.value += 1;
+                TeardownProbe {
+                    teardowns: self.child_teardowns.clone(),
+                }
+            }
+        }
+
+        /// A leaf counting its teardowns.
+        struct TeardownProbe {
+            teardowns: Arc<AtomicU32>,
+        }
+        impl<S: 'static> View<S> for TeardownProbe {
+            type Element = EmptyWidget;
+            fn build(&self, _ctx: &mut BuildCtx<'_>) -> EmptyWidget {
+                EmptyWidget
+            }
+            fn rebuild(
+                &self,
+                _prev: &Self,
+                _element: &mut EmptyWidget,
+                _ctx: &mut BuildCtx<'_>,
+            ) -> ChangeFlags {
+                ChangeFlags::NONE
+            }
+            fn teardown(&self, _element: &mut EmptyWidget, _ctx: &mut BuildCtx<'_>) {
+                self.teardowns.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        /// Hosts `Probe<1>` as its subtree, so the nested widget sits in its
+        /// own erased box.
+        struct Parent {
+            nested: Probe<1>,
+        }
+        impl Component for Parent {
+            type State = ();
+            fn init(&self) {}
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                component(self.nested.handle())
+            }
+        }
+
+        fn nested_of(parent: &mut ComponentWidget<Parent>) -> &mut ComponentWidget<Probe<1>> {
+            let boxed = parent
+                .child
+                .widget_mut()
+                .downcast_mut::<Box<dyn Widget>>()
+                .expect("component child element is a boxed AnyView widget");
+            (**boxed)
+                .downcast_mut::<ComponentWidget<Probe<1>>>()
+                .expect("the parent's subtree is the nested component")
+        }
+
+        #[test]
+        fn a_nested_widget_with_a_foreign_witness_is_never_rebuilt() {
+            let _owner = ambient();
+            let nested = Probe::<1>::new();
+            let v1 = component(Parent {
+                nested: nested.handle(),
+            });
+            let mut widget = build_widget::<(), _>(&v1);
+            assert_eq!(nested.builds.load(Ordering::SeqCst), 1);
+
+            nested_of(&mut widget).set_witness_for_test(foreign::<Probe<1>>());
+            let v2 = component(Parent {
+                nested: nested.handle(),
+            });
+            let mut next_id = 0u64;
+            let mut ctx = BuildCtx::new(&mut next_id);
+            let flags = View::<()>::rebuild(&v2, &v1, &mut widget, &mut ctx);
+
+            assert_eq!(flags, ChangeFlags::NONE);
+            assert_eq!(nested.builds.load(Ordering::SeqCst), 1, "never rebuilt");
+            assert_eq!(nested_of(&mut widget).state().value, 1, "state untouched");
+            assert!(take_reported::<Counted<1>>(), "the mismatch is reported");
+
+            // Dropping the tree leaks the mismatched state and disposes its owner.
+            drop(widget);
+            assert_eq!(nested.drops.load(Ordering::SeqCst), 0);
+            assert_eq!(nested.disposed.load(Ordering::SeqCst), 1);
+            assert!(take_reported::<Counted<1>>());
+        }
+
+        /// A two-arm view whose element holds the live arm inline, the shape of
+        /// `frust-widgets`' `Either` (which this crate cannot depend on).
+        enum TwoArm<L, R> {
+            Left(L),
+            Right(R),
+        }
+        enum TwoArmWidget<L, R> {
+            Left(L),
+            Right(R),
+        }
+        impl<L: Widget, R: Widget> Widget for TwoArmWidget<L, R> {
+            fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                match self {
+                    Self::Left(w) => w.layout(ctx, bc),
+                    Self::Right(w) => w.layout(ctx, bc),
+                }
+            }
+            fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                match self {
+                    Self::Left(w) => w.paint(ctx, scene),
+                    Self::Right(w) => w.paint(ctx, scene),
+                }
+            }
+        }
+        impl<S: 'static, L: View<S>, R: View<S>> View<S> for TwoArm<L, R> {
+            type Element = TwoArmWidget<L::Element, R::Element>;
+            fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
+                match self {
+                    Self::Left(v) => TwoArmWidget::Left(v.build(ctx)),
+                    Self::Right(v) => TwoArmWidget::Right(v.build(ctx)),
+                }
+            }
+            fn rebuild(
+                &self,
+                prev: &Self,
+                element: &mut Self::Element,
+                ctx: &mut BuildCtx<'_>,
+            ) -> ChangeFlags {
+                match (self, prev, &mut *element) {
+                    (Self::Left(v), Self::Left(p), TwoArmWidget::Left(w)) => v.rebuild(p, w, ctx),
+                    (Self::Right(v), Self::Right(p), TwoArmWidget::Right(w)) => {
+                        v.rebuild(p, w, ctx)
+                    }
+                    _ => {
+                        // Arm swap: tear the old arm down, then build the new
+                        // one in place, dropping the old element inline.
+                        prev.teardown(element, ctx);
+                        *element = self.build(ctx);
+                        ChangeFlags::LAYOUT | ChangeFlags::PAINT
+                    }
+                }
+            }
+            fn teardown(&self, element: &mut Self::Element, ctx: &mut BuildCtx<'_>) {
+                match (self, element) {
+                    (Self::Left(v), TwoArmWidget::Left(w)) => v.teardown(w, ctx),
+                    (Self::Right(v), TwoArmWidget::Right(w)) => v.teardown(w, ctx),
+                    _ => {}
+                }
+            }
+        }
+
+        #[test]
+        fn an_inline_arm_swap_leaks_a_foreign_state_and_disposes_its_owner() {
+            let _owner = ambient();
+            let probe = Probe::<2>::new();
+            let left: TwoArm<ComponentView<Probe<2>>, Empty> =
+                TwoArm::Left(component(probe.handle()));
+            let mut next_id = 0u64;
+            let mut ctx = BuildCtx::new(&mut next_id);
+            let mut element = View::<()>::build(&left, &mut ctx);
+            match &mut element {
+                TwoArmWidget::Left(w) => w.set_witness_for_test(foreign::<Probe<2>>()),
+                TwoArmWidget::Right(_) => unreachable!("built the left arm"),
+            }
+
+            let right: TwoArm<ComponentView<Probe<2>>, Empty> = TwoArm::Right(Empty);
+            let flags = View::<()>::rebuild(&right, &left, &mut element, &mut ctx);
+
+            assert_eq!(flags, ChangeFlags::LAYOUT | ChangeFlags::PAINT);
+            assert!(matches!(element, TwoArmWidget::Right(_)), "swapped out");
+            assert_eq!(
+                probe.drops.load(Ordering::SeqCst),
+                0,
+                "the state is neither dropped nor freed"
+            );
+            assert_eq!(
+                probe.child_teardowns.load(Ordering::SeqCst),
+                0,
+                "teardown did not proceed"
+            );
+            assert_eq!(probe.disposed.load(Ordering::SeqCst), 1, "owner disposed");
+            assert!(take_reported::<Counted<2>>(), "the mismatch is reported");
+        }
+
+        #[test]
+        fn a_matching_widget_tears_down_and_drops_its_state() {
+            let _owner = ambient();
+            let probe = Probe::<3>::new();
+            let view = component(probe.handle());
+            let mut widget = build_widget::<(), _>(&view);
+            let mut next_id = 0u64;
+            let mut ctx = BuildCtx::new(&mut next_id);
+            View::<()>::rebuild(&view, &view, &mut widget, &mut ctx);
+            assert_eq!(probe.builds.load(Ordering::SeqCst), 2);
+            View::<()>::teardown(&view, &mut widget, &mut ctx);
+            assert_eq!(probe.child_teardowns.load(Ordering::SeqCst), 1);
+            assert_eq!(probe.disposed.load(Ordering::SeqCst), 1);
+            drop(widget);
+            assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+            assert!(!take_reported::<Counted<3>>());
+        }
+
+        struct Tiny;
+        impl Component for Tiny {
+            type State = u8;
+            fn init(&self) -> u8 {
+                0
+            }
+            fn build(&self, _state: &mut u8) -> impl View<u8> {
+                Inert
+            }
+        }
+
+        struct Huge;
+        impl Component for Huge {
+            type State = [u64; 32];
+            fn init(&self) -> [u64; 32] {
+                [0; 32]
+            }
+            fn build(&self, _state: &mut [u64; 32]) -> impl View<[u64; 32]> {
+                Inert
+            }
+        }
+
+        #[test]
+        fn widget_layout_does_not_depend_on_the_state_layout() {
+            assert_ne!(size_of::<u8>(), size_of::<[u64; 32]>());
+            assert_eq!(
+                size_of::<ComponentWidget<Tiny>>(),
+                size_of::<ComponentWidget<Huge>>()
+            );
+            assert_eq!(
+                align_of::<ComponentWidget<Tiny>>(),
+                align_of::<ComponentWidget<Huge>>()
+            );
+            macro_rules! same_offset {
+                ($($field:ident),*) => {$(
+                    assert_eq!(
+                        offset_of!(ComponentWidget<Tiny>, $field),
+                        offset_of!(ComponentWidget<Huge>, $field),
+                        stringify!($field)
+                    );
+                )*};
+            }
+            same_offset!(witness, state, prev, child, owner, next_id, disposed);
+            assert_eq!(offset_of!(ComponentWidget<Tiny>, witness), 0);
+        }
     }
 }
