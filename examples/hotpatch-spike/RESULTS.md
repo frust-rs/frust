@@ -447,3 +447,67 @@ requirements for that builder:
 
 The p1-01 seam also must stay debug-only. The spike's runner now connects to the devserver only
 under `cfg(debug_assertions)`, the same gate subsecond's jump table uses.
+
+## Phase 2: frust-hotpatch runtime
+
+Card p2-01b (tsk_000001a1165e435aotlRYShH), run 2026-10-07 on `task/hp-p2-01` (base
+`spike/hotpatch` @ 219e099d plus this card's changes), same machine, toolchain and dx 0.7.10 as the
+Environment block above. The in-app runtime is now `crates/frust-hotpatch`, a native-only port of
+subsecond 0.7.10. frust-core's `call_build` / `set_patch_listener` call `frust_hotpatch::HotFn` /
+`register_handler`, and the runner uses `dioxus_devtools::connect(callback)`: the callback keeps
+`connect_subsecond`'s filter (a `HotReload` message with a jump table and `for_pid` equal to this
+process), converts dx's `subsecond_types::JumpTable` into `frust_hotpatch::JumpTable` by a
+`serde_json` round-trip and calls `frust_hotpatch::apply_patch`. `dioxus-devtools` still links
+subsecond (it reports `aslr_reference` in the websocket URL), but nothing calls subsecond's
+`apply_patch` any more. The `frust-hotpatch: applied` probe line comes from the listener
+registered with `frust_hotpatch::register_handler`, so every `applied` line below proves the patch
+went through frust-hotpatch.
+
+All sessions used `PRE_RUN_PAUSE=20 POST_RUN_PAUSE=15 ./measure.sh --target <home|card> --runs 5`
+with `DX` exported, except the two control rows (no pauses, no clicks). Increment was clicked three
+times during the pre-run pause (AppleScript click at the button centre, window at `500,141`, size
+`800x632`); all three landed this time.
+
+| Row | Session | Patched without relaunch? | State kept? | save->frame submitted median (per run), n | dx thin build | `replaying crates` |
+|---|---|---|---|---|---|---|
+| A | home, frust-hotpatch, clicks + captures | yes, PID 20117 alive (same) for all 5 | yes: count 3 -> 3, `hotpatch-sentinel: v0` -> `v5` | **575** (960 / 569 / 566 / 579 / 575), 5 | 533-560 ms | `["hotpatch_spike_app"]` |
+| B | card, frust-hotpatch, clicks + captures | yes, PID 21385 alive (same) for all 5 | yes: count 3 -> 3, `card-sentinel: v0` -> `v5` | **577** (580 / 566 / 575 / 577 / 580), 5 | 532-544 ms | `["hotpatch_spike_app"]` |
+| A' | home, frust-hotpatch, screen locked (no clicks possible) | yes, PID 98843 same | not checked | 576 (1147 / 569 / 576 / 570 / 578), 5 | 528-1066 ms | `["hotpatch_spike_app"]` |
+| B' | card, frust-hotpatch, no clicks | yes, PID 17881 same | not checked | 583 (994 / 568 / 583 / 593 / 582), 5 | 528-550 ms | `["hotpatch_spike_app"]` |
+| A-ctl | home, **control**: unmodified base 219e099d (subsecond runtime), exported to a scratch dir, cold `target/` | yes, PID 26887 same | not checked | 493 (495 / 480 / 493 / 493 / 499), 5 | 451-458 ms | `["hotpatch_spike_app"]` |
+| A-exp | home, frust-hotpatch, experiment: field-by-field table conversion instead of serde (reverted) | yes, PID 27994 same | not checked | 546 (552 / 551 / 542 / 538 / 546), 5 | 506-521 ms | `["hotpatch_spike_app"]` |
+
+No crash in any session, and every run logged both probe lines. Quoted from row B:
+
+```
+DEBUG Patch rebuild: changed_crates=["hotpatch_spike_app"], modified_crates={"hotpatch_spike", "hotpatch_spike_app"}
+DEBUG replaying crates: ["hotpatch_spike_app"]
+INFO Hot-patching: app/src/counter_card.rs took 310ms
+[frust INFO] frust-hotpatch: applied t_unix_ms=1791382075220
+```
+
+**Comparison with the subsecond runtime.** Rows A/B are about 100 ms slower than the Phase 1 medians
+(475 / 479 ms) and about 80 ms slower than a same-day control on the unmodified base (A-ctl, 493 ms).
+The runtime is not where the time goes. From dx's `Build completed` to the app's `applied` line
+takes 20-35 ms in every session, frust-hotpatch and control alike, and `applied` and `frame` land
+in the same millisecond. The whole difference is inside dx's thin build, in its `Compiling` step
+(the tip crate, i.e. the runner bin, which dx recompiles on every patch): 104-106 ms in the control,
+181-192 ms with the new runner. `Workspace hotpatch replay` (241 ms) and `Patch: Link` (79-80 ms)
+are unchanged. The serde round-trip in the runner accounts for about 15-20 ms of it (A-exp:
+`Compiling` 160-174 ms). The rest is most likely `dioxus_devtools::connect(callback)` itself: it is
+generic over the callback, so the tip crate now monomorphises the websocket loop and the
+`DevserverMsg` deserializer that `connect_subsecond` kept pre-compiled inside dioxus-devtools. This
+is a property of where the connection code lives, not of frust-hotpatch: moving the devserver
+connection and the table conversion out of the tip crate (into a non-tip lib or the frust shell)
+should return the thin build to the control's figure. Even as measured, 575 ms is 37% of row F's
+1570 ms restart median, under the 50% bar.
+
+The first patch of each session is slower (960-1147 ms), as in Phase 1 (2128 ms cold): dx's first
+thin build of a session takes longer.
+
+**Screen-lock note.** The first frust-hotpatch session (A') ran while the screen was locked. dx's
+fat build finished in 71 s, but the window was not created until 378 s, so its first-frame time is
+meaningless. Patching itself worked locked, at the same latency.
+
+**Plain launch.** `cargo run -p hotpatch-spike` (no dx) logs exactly one `frust-hotpatch: frame`
+line, as before.

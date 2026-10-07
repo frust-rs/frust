@@ -1,0 +1,31 @@
+[package]
+name = "frust-hotpatch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Native-only hot-patch runtime for Frust: a jump-table detour ported from subsecond 0.7.10, wire-compatible with dx."
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(any(unix, windows))'.dependencies]
+libloading = "0.8.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+# The memfd + `android_dlopen_ext` loader; versions match subsecond 0.7.10's own requirements.
+[target.'cfg(target_os = "android")'.dependencies]
+memmap2 = "0.9.8"
+memfd = "0.6.4"
+
+[dev-dependencies]
+# Exact pin: the wire-compat test round-trips this crate's JSON shape, which dx 0.7.10 speaks.
+subsecond-types = "=0.7.10"
+serde_json = { workspace = true }

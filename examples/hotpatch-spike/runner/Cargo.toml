@@ -11,7 +11,10 @@ path = "src/main.rs"
 [dependencies]
 hotpatch-spike-app = { path = "../app" }
 
-# Desktop only. Exact pin: must equal the `dx` (dioxus-cli) driving the spike, 0.7.10, and the
-# `subsecond` row frust-core's `hotpatch` feature resolves.
+# Desktop only. Exact pin: must equal the `dx` (dioxus-cli) driving the spike, 0.7.10, whose wire
+# format `frust-hotpatch`'s `JumpTable` matches. Patches are applied by frust-hotpatch, not subsecond.
 [target.'cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))'.dependencies]
 dioxus-devtools = "=0.7.10"
+frust-hotpatch = { path = "../../../crates/frust-hotpatch" }
+serde_json = "1"
+log = "0.4"
