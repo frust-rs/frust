@@ -424,10 +424,10 @@ mod tests {
 
     #[cfg(feature = "bundled-fonts")]
     fn header(_: &mut ()) -> EmptyColumnView<()> {
-        empty_header(vec![
-            any(empty_title("No projects yet")),
-            any(empty_description("Create a project to get started.")),
-        ])
+        empty_header((
+            empty_title("No projects yet"),
+            empty_description("Create a project to get started."),
+        ))
     }
 
     #[cfg(feature = "bundled-fonts")]

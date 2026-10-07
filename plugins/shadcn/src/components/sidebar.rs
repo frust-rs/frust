@@ -575,6 +575,7 @@ pub fn sidebar<State: 'static, V: View<State>>(content: V) -> SidebarView<State>
 /// The panel always holds three pods so the slot structure never changes across
 /// a rebuild — an `Option<ChildPod>` appearing or vanishing would be a
 /// structural change for every sibling behind it.
+// erasure: keep stored in the AnyView header/footer slot fields
 fn empty_slot<State: 'static>() -> AnyView<State> {
     any(SizedBox(Some(0.0), Some(0.0)))
 }
@@ -2845,14 +2846,14 @@ mod tests {
     /// rows (the first one active and badged), and a footer.
     fn panel(cfg: Cfg) -> SidebarView<AppState> {
         let menu = sidebar_menu(vec![
-            sidebar_menu_item(vec![
-                any(sidebar_menu_button("Inbox", |s: &mut AppState| {
+            sidebar_menu_item((
+                sidebar_menu_button("Inbox", |s: &mut AppState| {
                     s.presses.push("Inbox".to_string())
                 })
                 .icon(Block(Size::new(16.0, 16.0)))
-                .active(true)),
-                any(sidebar_menu_badge("3")),
-            ]),
+                .active(true),
+                sidebar_menu_badge("3"),
+            )),
             sidebar_menu_item(vec![
                 sidebar_menu_button("Drafts", |s: &mut AppState| {
                     s.presses.push("Drafts".to_string())
@@ -2860,10 +2861,10 @@ mod tests {
                 .icon(Block(Size::new(16.0, 16.0))),
             ]),
         ]);
-        sidebar(sidebar_content(vec![sidebar_group(vec![
-            any(sidebar_group_label("Platform")),
+        sidebar(sidebar_content(vec![sidebar_group((
+            sidebar_group_label("Platform"),
             menu,
-        ])]))
+        ))]))
         .header(Block(Size::new(0.0, SLOT_H)))
         .footer(Block(Size::new(0.0, SLOT_H)))
         .side(cfg.side)
@@ -3746,22 +3747,20 @@ mod tests {
     /// shapes itself.
     #[cfg(feature = "bundled-fonts")]
     fn nav(_: &mut ()) -> FlexView<()> {
-        column().child(sidebar_group(vec![
-            any(sidebar_group_label("Platform")),
-            sidebar_menu(vec![
-                any(sidebar_menu_item(vec![
-                    any(sidebar_menu_button("Inbox", |_: &mut ()| {}).active(true)),
-                    any(sidebar_menu_badge("24")),
-                ])),
-                any(sidebar_menu_item(vec![sidebar_menu_button(
-                    "Drafts",
+        column().child(sidebar_group((
+            sidebar_group_label("Platform"),
+            sidebar_menu((
+                sidebar_menu_item((
+                    sidebar_menu_button("Inbox", |_: &mut ()| {}).active(true),
+                    sidebar_menu_badge("24"),
+                )),
+                sidebar_menu_item(vec![sidebar_menu_button("Drafts", |_: &mut ()| {})]),
+                sidebar_menu_sub(vec![sidebar_menu_sub_item(vec![sidebar_menu_sub_button(
+                    "Starred",
                     |_: &mut ()| {},
-                )])),
-                any(sidebar_menu_sub(vec![sidebar_menu_sub_item(vec![
-                    sidebar_menu_sub_button("Starred", |_: &mut ()| {}),
-                ])])),
-            ]),
-        ]))
+                )])]),
+            )),
+        )))
     }
 
     #[cfg(feature = "bundled-fonts")]

@@ -506,10 +506,7 @@ mod tests {
     /// Two bubbles, one per alignment, each a run shaped here.
     #[cfg(feature = "bundled-fonts")]
     fn thread(_: &mut ()) -> BubbleGroupView<()> {
-        bubble_group(vec![
-            frust::authoring::any(bubble("Hello there")),
-            frust::authoring::any(bubble("Hi!").align(BubbleAlign::End)),
-        ])
+        bubble_group((bubble("Hello there"), bubble("Hi!").align(BubbleAlign::End)))
     }
 
     #[cfg(feature = "bundled-fonts")]

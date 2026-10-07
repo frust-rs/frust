@@ -435,6 +435,7 @@ impl<State: 'static> MenuListView<State> {
 
 /// A group label row: `px-2 py-1.5 text-sm font-medium`, or the select's
 /// `text-xs text-muted-foreground`.
+// erasure: keep pushed into a heterogeneous Vec<AnyView> row list
 fn label_view<State: 'static>(label: &str, insets: EdgeInsets, muted: bool) -> AnyView<State> {
     let view = if muted {
         text(label.to_string())
@@ -457,6 +458,7 @@ fn label_view<State: 'static>(label: &str, insets: EdgeInsets, muted: bool) -> A
 /// A disabled item takes the muted ink rather than upstream's `opacity-50`: the
 /// authoring seam's themed text roles carry no alpha, and the muted role is the
 /// catalog's dimmed ink (the same substitution [`crate::command`] makes).
+// erasure: keep pushed into a heterogeneous Vec<AnyView> row list
 fn item_view<State: 'static>(
     item: &DropdownMenuItem,
     insets: EdgeInsets,

@@ -471,7 +471,7 @@ mod tests {
                         c.pop_with_result(PopResult::of(true))
                     }),
                 };
-                any::<NavState, _>(dialog(vec![dialog_footer(vec![any(tap)])]))
+                any::<NavState, _>(dialog(vec![dialog_footer((tap,))]))
             },
             TransitionSpec::NONE,
             |state: &mut NavState, result: PopResult| {
