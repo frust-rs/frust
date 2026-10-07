@@ -35,6 +35,7 @@ mod checkbox;
 mod container;
 mod divider;
 pub mod drag;
+pub mod either;
 mod flex;
 mod gesture;
 mod icon;
@@ -78,6 +79,7 @@ pub use drag::{
     HIGHLIGHT_FALLBACK, ReorderableListView, SourceFeedback, auto_scroll_zone, drag_target,
     draggable, reorderable_list,
 };
+pub use either::{Either, EitherWidget, either};
 pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,
     column, flexible, inflexible, keyed, row,
