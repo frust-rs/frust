@@ -287,6 +287,7 @@ fn unix_ms() -> u128 {
 /// user-event type; `#[doc(hidden)]` keeps it out of published docs, the same
 /// escape the `paced_wake` module uses for its test-only visibility.
 #[doc(hidden)]
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum ShellUserEvent {
     /// One or more tracked signals became dirty since the last frame — pump the
@@ -2557,6 +2558,10 @@ where
             }
             #[cfg(feature = "hotpatch")]
             ShellUserEvent::HotPatched => {
+                // A timing instrument: save->applied timestamp for latency measurement.
+                // The line is parsed by measure.sh and H0-00/H1-11; level, wording and format
+                // are load-bearing. Not a success signal — success requires no L2 mismatch,
+                // seam_hits > 0, and no stale missed key (see PORT.md §2(d)).
                 log::info!("frust-hotpatch: applied t_unix_ms={}", unix_ms());
                 self.hotpatch_frame_pending = true;
                 if let Some(window) = self.window.as_ref() {
@@ -3339,6 +3344,10 @@ where
                 if self.hotpatch_frame_pending || self.hotpatch_first_frame_pending {
                     self.hotpatch_frame_pending = false;
                     self.hotpatch_first_frame_pending = false;
+                    // A timing instrument: save->frame timestamp for latency measurement.
+                    // The line is parsed by measure.sh and H0-00/H1-11; level, wording and format
+                    // are load-bearing. Not a success signal — success requires no L2 mismatch,
+                    // seam_hits > 0, and no stale missed key (see PORT.md §2(d)).
                     log::info!("frust-hotpatch: frame t_unix_ms={}", unix_ms());
                 }
 
