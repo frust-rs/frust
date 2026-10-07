@@ -615,6 +615,7 @@ impl<State: 'static> PredictionMarketView<State> {
 
     /// The payout ticker's own view — a [`crate::components::number`] in roll
     /// mode, timed like upstream's `NumberTicker`.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn ticker_view(&self) -> AnyView<State> {
         let outcome = self
             .outcomes

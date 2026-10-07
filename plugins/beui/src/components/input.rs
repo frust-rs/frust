@@ -384,6 +384,7 @@ impl<State: 'static> InputView<State> {
     }
 
     /// The wrapped baseline field, configured with its own chrome suppressed.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn control(&self) -> AnyView<State> {
         let on_change = self.on_change.clone();
         let mut field = text_input(self.value.clone(), move |state: &mut State, text| {

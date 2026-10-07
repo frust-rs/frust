@@ -331,6 +331,7 @@ impl<State: 'static> MultiSelectTriggerView<State> {
     }
 
     /// The hosted editable, with the baseline's own chrome suppressed.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn control(&self) -> AnyView<State> {
         let on_change = self.on_query_change.clone();
         let placeholder = if self.selected.is_empty() {

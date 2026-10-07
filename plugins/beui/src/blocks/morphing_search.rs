@@ -983,6 +983,7 @@ impl MorphingSearchWidget {
 
 impl<State: 'static> SearchPanelView<State> {
     /// The wrapped baseline field, with its own chrome suppressed.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn field(&self) -> AnyView<State> {
         let on_change = self.on_query_change.clone();
         any(

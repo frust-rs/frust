@@ -545,6 +545,7 @@ impl<State: 'static> ChatConversationView<State> {
 
     /// The transcript view: one row per message, plus whatever the host
     /// appended.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn transcript(&self) -> AnyView<State> {
         let mut rows: Vec<AnyView<State>> = Vec::with_capacity(self.messages.len());
         for turn in &self.messages {
@@ -580,6 +581,7 @@ impl<State: 'static> ChatConversationView<State> {
     }
 
     /// The composer view.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn composer(&self) -> AnyView<State> {
         let on_input = self.on_input.clone();
         let mut composer = prompt_input::<State, _>(self.input.clone(), move |state, text| {

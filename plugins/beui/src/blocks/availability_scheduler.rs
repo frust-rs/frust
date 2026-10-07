@@ -669,6 +669,7 @@ impl<State: 'static> AvailabilitySchedulerView<State> {
     }
 
     /// One day's switch, reporting the whole week back.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn switch_view(&self, day: DayKey) -> AnyView<State> {
         let week = self.value.clone();
         let on_change = self.on_change.clone();
