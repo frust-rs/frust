@@ -740,8 +740,7 @@ mod tests {
         assert_eq!(recorder.clips, 1, "overflow: hidden");
 
         // A short track needs more copies, not a stretched one.
-        let mut short =
-            laid_out(&marquee(vec![any(SizedBox::<()>(Some(20.0), Some(20.0)))]).gap(0.0));
+        let mut short = laid_out(&marquee((SizedBox::<()>(Some(20.0), Some(20.0)),)).gap(0.0));
         let (recorder, _, _) = painted(&mut short, 0, None);
         assert_eq!(recorder.transforms.len(), 6, "five to fill 100px, plus one");
     }
@@ -860,8 +859,7 @@ mod tests {
     /// with the box extent.
     #[test]
     fn a_near_zero_track_is_floored_and_its_paint_copies_are_capped() {
-        let mut widget =
-            laid_out(&marquee(vec![any(SizedBox::<()>(Some(0.01), Some(20.0)))]).gap(0.0));
+        let mut widget = laid_out(&marquee((SizedBox::<()>(Some(0.01), Some(20.0)),)).gap(0.0));
         assert_eq!(
             widget.track_length(),
             MIN_TRACK_LENGTH,
@@ -881,7 +879,7 @@ mod tests {
     #[test]
     fn an_extreme_speed_track_ratio_clamps_instead_of_panicking() {
         let widget = laid_out(
-            &marquee(vec![any(SizedBox::<()>(Some(0.01), Some(20.0)))])
+            &marquee((SizedBox::<()>(Some(0.01), Some(20.0)),))
                 .gap(0.0)
                 .speed(Duration::MAX),
         );
