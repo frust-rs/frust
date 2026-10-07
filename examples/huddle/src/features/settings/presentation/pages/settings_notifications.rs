@@ -67,15 +67,17 @@ impl frust::Component for NotificationsScreen {
 
         children.push(any(SizedBox(None, Some(20.0))));
         children.push(any(text("Alert style").size(16.0)));
-        children.push(toggle_row("Play a sound", sound, |st, on| {
+        children.push(any(toggle_row("Play a sound", sound, |st, on| {
             st.controller.sound.set(on)
-        }));
-        children.push(toggle_row("Vibrate", vibrate, |st, on| {
+        })));
+        children.push(any(toggle_row("Vibrate", vibrate, |st, on| {
             st.controller.vibrate.set(on)
-        }));
-        children.push(toggle_row("Show message preview", previews, |st, on| {
-            st.controller.previews.set(on)
-        }));
+        })));
+        children.push(any(toggle_row(
+            "Show message preview",
+            previews,
+            |st, on| st.controller.previews.set(on),
+        )));
 
         any(column()
             .child(app_bar::<NotificationsState>("Notifications"))
@@ -89,12 +91,12 @@ impl frust::Component for NotificationsScreen {
 
 /// A labelled toggle row: the label, a spacer, and a `Switch` reporting into
 /// `on_toggle`.
-fn toggle_row<F>(label: &str, on: bool, on_toggle: F) -> AnyView<NotificationsState>
+fn toggle_row<F>(label: &str, on: bool, on_toggle: F) -> impl View<NotificationsState>
 where
     F: Fn(&mut NotificationsState, bool) + 'static,
 {
-    any(row()
+    row()
         .child(text(label.to_string()).size(14.0))
         .child(SizedBox(Some(12.0), None))
-        .child(Switch(on, on_toggle)))
+        .child(Switch(on, on_toggle))
 }

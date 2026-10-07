@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use clean_signals::async_state::AsyncState;
 use frust::{
-    Align, Alignment, AnyView, Column, CrossAxisAlignment, GestureDetector, Get, SizedBox, any,
+    Align, Alignment, Column, CrossAxisAlignment, GestureDetector, Get, SizedBox, View, any,
     column, hero, icon, icons, scroll_view, text, use_context,
 };
 use frust_material::{app_bar, filled_card, filter_chip, list_item};
@@ -36,7 +36,7 @@ use crate::features::activity::domain::ActivityRepository;
 use crate::features::activity::{ActivityController, ActivityRow};
 
 /// The Activity tab root.
-pub fn activity_screen() -> AnyView<HuddleState> {
+pub fn activity_screen() -> impl View<HuddleState> {
     let controller = ActivityController::instance();
     // Recover the repository the composition root published under the root
     // Owner (see `crate::HuddleApp::init`) — a row's headline needs it for
@@ -49,19 +49,19 @@ pub fn activity_screen() -> AnyView<HuddleState> {
     // `docs/ARCHITECTURE.md`'s Signal-driven wake).
     let snapshot = controller.rows.get();
     let body = match snapshot {
-        AsyncState::Loading => skeleton_body(),
+        AsyncState::Loading => any(skeleton_body()),
         AsyncState::Data(rows) | AsyncState::Reloading(rows) => {
             if rows.is_empty() {
-                empty_body()
+                any(empty_body())
             } else {
-                list_body(rows, &repo)
+                any(list_body(rows, &repo))
             }
         }
         // `LoadActivity`/`MarkAllRead` never fail (see
         // `features::activity`'s module docs); kept exhaustive rather than
         // `unreachable!()` so a future fallible use case swap isn't a silent
         // panic trap.
-        AsyncState::Error { .. } => empty_body(),
+        AsyncState::Error { .. } => any(empty_body()),
     };
 
     let mark_all_read_ctrl = Arc::clone(&controller);
@@ -76,41 +76,41 @@ pub fn activity_screen() -> AnyView<HuddleState> {
         ),
     ]);
 
-    any(column()
+    column()
         .child(bar)
         .flex(1, scroll_view(body))
-        .cross_axis(CrossAxisAlignment::Stretch))
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// Loading skeletons: three blank placeholder rows at the feed's normal row
 /// height, shown while [`ActivityController::rows`] is
 /// [`AsyncState::Loading`].
-fn skeleton_body() -> AnyView<HuddleState> {
-    any(Column(
+fn skeleton_body() -> impl View<HuddleState> {
+    Column(
         (0..3)
             .map(|_| any(list_item::<HuddleState>("Loading…").supporting(" ")))
             .collect::<Vec<_>>(),
-    ))
+    )
 }
 
 /// The "nothing to see" empty state, shown when the feed resolved with zero
 /// items.
-fn empty_body() -> AnyView<HuddleState> {
-    any(column()
+fn empty_body() -> impl View<HuddleState> {
+    column()
         .child(icon(icons::CHECK).size(48.0))
-        .child(text("You're all caught up").size(16.0)))
+        .child(text("You're all caught up").size(16.0))
 }
 
 /// The loaded feed: one row per [`ActivityRow`].
 fn list_body(
     rows: Vec<ActivityRow>,
     repo: &Arc<dyn ActivityRepository + Send + Sync>,
-) -> AnyView<HuddleState> {
-    any(Column(
+) -> impl View<HuddleState> {
+    Column(
         rows.into_iter()
             .map(|row| row_view(row, repo))
             .collect::<Vec<_>>(),
-    ))
+    )
 }
 
 /// A synthetic, presentation-only "relative time" label.
@@ -132,7 +132,7 @@ fn relative_time(message_id: u32) -> String {
 fn row_view(
     row: ActivityRow,
     repo: &Arc<dyn ActivityRepository + Send + Sync>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let ActivityRow { item, unread } = row;
 
     let actor = repo.user(item.author_id);
@@ -182,7 +182,7 @@ fn row_view(
     }
 
     let channel_id = item.channel_id.to_string();
-    any(list_row.on_press(move |s: &mut HuddleState| {
+    list_row.on_press(move |s: &mut HuddleState| {
         s.nav.router().push(&format!("/channel/{channel_id}"));
-    }))
+    })
 }

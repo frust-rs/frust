@@ -8,7 +8,7 @@
 
 use frust::{
     Align, Alignment, AnyView, Color, CrossAxisAlignment, EdgeInsets, Image, ImageFit, ImageSource,
-    Padding, SizedBox, Theme, any, column, scroll_view, stack, text, use_context,
+    Padding, SizedBox, Theme, View, any, column, scroll_view, stack, text, use_context,
 };
 use frust_material::{app_bar, filled_card, outlined_card};
 
@@ -28,7 +28,7 @@ pub fn about_screen() -> AnyView<HuddleState> {
             any(SizedBox(Some(72.0), Some(72.0)).child(Image(source).fit(ImageFit::Contain)))
         }
         // Escape hatch: a solid-primary tile with the app initial.
-        Err(_) => initials_block("H", scheme.primary, scheme.on_primary),
+        Err(_) => any(initials_block("H", scheme.primary, scheme.on_primary)),
     };
 
     let header = any(column()
@@ -85,7 +85,7 @@ pub fn about_screen() -> AnyView<HuddleState> {
 
 /// A 72×72 solid-`fill` tile with a centered initial in `on_fill` — the app-icon
 /// fallback when the bundled logo fails to decode.
-fn initials_block(initial: &str, fill: Color, on_fill: Color) -> AnyView<HuddleState> {
+fn initials_block(initial: &str, fill: Color, on_fill: Color) -> impl View<HuddleState> {
     let tile =
         any(SizedBox(Some(72.0), Some(72.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill)));
     // Center the monogram with the SizedBox+Align idiom (a bare `Align` under a
@@ -96,5 +96,5 @@ fn initials_block(initial: &str, fill: Color, on_fill: Color) -> AnyView<HuddleS
         Alignment::CENTER,
         text(initial.to_string()).size(32.0).color(on_fill),
     )));
-    any(stack().child(tile).child(label))
+    stack().child(tile).child(label)
 }

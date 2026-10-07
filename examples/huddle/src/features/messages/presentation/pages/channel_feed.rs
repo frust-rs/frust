@@ -94,8 +94,8 @@ use std::sync::Arc;
 use frust::{
     Align, Alignment, AnyView, Axis, ChildKey, Color, CrossAxisAlignment, DesignLanguage,
     EdgeInsets, FlexView, GestureDetector, Get, GetUntracked, ListView, NavigatorController,
-    Padding, RwSignal, Set, SizedBox, Theme, Update, any, column, hero, icon, icons, inflexible,
-    kurbo::Size, row, stack, text, text_input, use_context,
+    Padding, RwSignal, Set, SizedBox, Theme, Update, View, any, column, hero, icon, icons,
+    inflexible, kurbo::Size, row, stack, text, text_input, use_context,
 };
 use frust_cupertino::cupertino_activity_indicator;
 use frust_material::{app_bar, assist_chip, filter_chip, loading_indicator};
@@ -262,7 +262,7 @@ fn sheet_for(channel_id: &str) -> RwSignal<FeedSheet> {
 pub fn channel_feed(
     navigator: NavigatorController<HuddleState>,
     channel_id: String,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let controller = MessagesController::for_channel(channel_id.clone());
     let composer = composer_for(&channel_id);
     let sheet_sig = sheet_for(&channel_id);
@@ -284,7 +284,7 @@ pub fn channel_feed(
     // (see `crate::ui::sheet`); when closed it is an inert zero-size box, so the
     // feed stays interactive.
     let overlay = feed_sheet(&controller, composer, sheet_sig);
-    any(stack().child(screen).child(overlay))
+    stack().child(screen).child(overlay)
 }
 
 /// The open message-action sheet as a `Stack` overlay layer, or an inert
@@ -367,7 +367,7 @@ fn feed_app_bar(
     controller: &Arc<MessagesController>,
     channel_id: &str,
     navigator: NavigatorController<HuddleState>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let title = if let Some(ch) = controller.channel(channel_id) {
         let members = controller.users().len();
         format!("#{}  ·  {members} members", ch.name)
@@ -387,7 +387,7 @@ fn feed_app_bar(
 
     // Docked at the window top: the bar insets itself (top + sides) and
     // paints its container through the status-bar band.
-    any(app_bar::<HuddleState>(title).leading(Padding(EdgeInsets::symmetric(4.0, 0.0), back)))
+    app_bar::<HuddleState>(title).leading(Padding(EdgeInsets::symmetric(4.0, 0.0), back))
 }
 
 /// One row of the virtualized feed list — the two ephemeral singleton rows
@@ -427,7 +427,7 @@ fn feed_body(
     sheet_sig: RwSignal<FeedSheet>,
 ) -> AnyView<HuddleState> {
     if controller.loading.get() {
-        return skeletons();
+        return any(skeletons());
     }
 
     let messages = controller.feed(); // tracked
@@ -437,7 +437,7 @@ fn feed_body(
     // Empty conversation (e.g. a DM with no messages): a real empty state
     // rather than a blank scroll area.
     if messages.is_empty() && !loading_older && !typing {
-        return empty_feed_state();
+        return any(empty_feed_state());
     }
 
     let mut rows: Vec<FeedRow> = Vec::with_capacity(messages.len() + 2);
@@ -492,9 +492,9 @@ fn feed_row_view(
     design: DesignLanguage,
 ) -> AnyView<HuddleState> {
     match row {
-        FeedRow::LoadingOlder => loading_older_row(design),
+        FeedRow::LoadingOlder => any(loading_older_row(design)),
         FeedRow::Message(msg) => message_row(controller, msg, sheet_sig),
-        FeedRow::Typing => typing_row(design),
+        FeedRow::Typing => any(typing_row(design)),
     }
 }
 
@@ -547,7 +547,7 @@ fn message_bubble(
     controller: &Arc<MessagesController>,
     msg: &FeedMessage,
     sheet_sig: RwSignal<FeedSheet>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let mut lines: Vec<AnyView<HuddleState>> = Vec::new();
 
     if !msg.is_own()
@@ -567,7 +567,7 @@ fn message_bubble(
     }
 
     if msg.reply_count() > 0 {
-        lines.push(thread_affordance(msg));
+        lines.push(any(thread_affordance(msg)));
     }
 
     // FLAT ROW: no `filled_card`/
@@ -587,11 +587,9 @@ fn message_bubble(
     );
 
     let id = msg.id;
-    any(
-        GestureDetector(inner).on_long_press(move |_st: &mut HuddleState| {
-            sheet_sig.set(FeedSheet::Menu(id));
-        }),
-    )
+    GestureDetector(inner).on_long_press(move |_st: &mut HuddleState| {
+        sheet_sig.set(FeedSheet::Menu(id));
+    })
 }
 
 /// The message body: plain text, a link-preview card, or a file-stub card.
@@ -684,20 +682,20 @@ fn reaction_chips(
 /// `state.nav`'s router (mirroring `screens::thread`'s own `s.nav.router()`
 /// back-action — this plain fn has no captured `NavigatorController` of its
 /// own to push imperatively with).
-fn thread_affordance(msg: &FeedMessage) -> AnyView<HuddleState> {
+fn thread_affordance(msg: &FeedMessage) -> impl View<HuddleState> {
     let count = msg.reply_count();
     let label = format!(
         "{count} {} \u{2192}",
         if count == 1 { "reply" } else { "replies" }
     );
     let id = msg.id;
-    any(Padding(
+    Padding(
         EdgeInsets::symmetric(0.0, 4.0),
         assist_chip::<HuddleState, _>(label, move |st: &mut HuddleState| {
             st.nav.router().push(&format!("/thread/{id}"));
         })
         .leading("\u{1F4AC}"),
-    ))
+    )
 }
 
 /// A 40px circular initials avatar (chat-row avatar 36–40, per the sizing
@@ -708,7 +706,7 @@ fn thread_affordance(msg: &FeedMessage) -> AnyView<HuddleState> {
 /// Wrapped in a `hero("avatar-{author_id}")` shared element + a tap that opens
 /// the author's profile (`/user/:id`) — completing the "avatar tap anywhere"
 /// matrix row alongside Home/Search/Activity.
-fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> AnyView<HuddleState> {
+fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> impl View<HuddleState> {
     let initials = controller
         .user(author_id)
         .map(|u| u.initials)
@@ -727,29 +725,27 @@ fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> AnyView<Huddl
                     .color(Color::WHITE),
             )),
         ));
-    any(
-        GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
-            move |st: &mut HuddleState| {
-                st.nav.router().push(&format!("/user/{author_id}"));
-            },
-        ),
+    GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
+        move |st: &mut HuddleState| {
+            st.nav.router().push(&format!("/user/{author_id}"));
+        },
     )
 }
 
 /// The empty-conversation state: shown when a channel/DM feed has loaded with no
 /// messages (a DM with no history) instead of a blank scroll area.
-fn empty_feed_state() -> AnyView<HuddleState> {
-    any(Padding(
+fn empty_feed_state() -> impl View<HuddleState> {
+    Padding(
         EdgeInsets::all(24.0),
         Align(
             Alignment::CENTER,
             text("No messages yet \u{2014} say hi \u{1F44B}").size(15.0),
         ),
-    ))
+    )
 }
 
 /// The typing indicator row (a self-animating facade spinner + label).
-fn typing_row(design: DesignLanguage) -> AnyView<HuddleState> {
+fn typing_row(design: DesignLanguage) -> impl View<HuddleState> {
     let spinner: AnyView<HuddleState> = match design {
         DesignLanguage::Cupertino => any(cupertino_activity_indicator()),
         // Glyph has no spinner chrome baseline yet —
@@ -760,18 +756,18 @@ fn typing_row(design: DesignLanguage) -> AnyView<HuddleState> {
             any(loading_indicator())
         }
     };
-    any(Padding(
+    Padding(
         EdgeInsets::symmetric(4.0, 8.0),
         row()
             .child(spinner)
             .child(SizedBox(Some(8.0), None))
             .child(text("typing\u{2026}").size(13.0))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// The "loading older…" row shown at the top while an older page is fetched.
-fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
+fn loading_older_row(design: DesignLanguage) -> impl View<HuddleState> {
     let spinner: AnyView<HuddleState> = match design {
         DesignLanguage::Cupertino => any(cupertino_activity_indicator()),
         // Glyph has no spinner chrome baseline yet —
@@ -782,7 +778,7 @@ fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
             any(loading_indicator())
         }
     };
-    any(Padding(
+    Padding(
         EdgeInsets::all(8.0),
         frust::Align(
             frust::Alignment::CENTER,
@@ -792,7 +788,7 @@ fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
                 .child(text("loading older\u{2026}").size(13.0))
                 .cross_axis(CrossAxisAlignment::Center),
         ),
-    ))
+    )
 }
 
 /// The loading skeleton: a column of flat grey placeholder bars. Each bar is a
@@ -801,7 +797,7 @@ fn loading_older_row(design: DesignLanguage) -> AnyView<HuddleState> {
 /// row whose 16px inset was the size driver.
 /// Under `CrossAxisAlignment::Stretch` the fill_box's nominal width
 /// is overridden by the tight cross-axis constraint, so it fills the row.
-fn skeletons() -> AnyView<HuddleState> {
+fn skeletons() -> impl View<HuddleState> {
     let mut rows: Vec<AnyView<HuddleState>> = Vec::new();
     for _ in 0..SKELETON_COUNT {
         rows.push(any(Padding(
@@ -809,14 +805,14 @@ fn skeletons() -> AnyView<HuddleState> {
             fill_box(Size::new(0.0, SKELETON_HEIGHT), SKELETON_FILL, 8.0),
         )));
     }
-    any(Padding(
+    Padding(
         EdgeInsets::all(8.0),
         FlexView::new(
             Axis::Vertical,
             rows.into_iter().map(inflexible).collect::<Vec<_>>(),
         )
         .cross_axis(CrossAxisAlignment::Stretch),
-    ))
+    )
 }
 
 /// The composer: an affordance chip row (shown only when there is text), the
@@ -825,7 +821,7 @@ fn composer_bar(
     controller: &Arc<MessagesController>,
     composer: RwSignal<String>,
     sheet_sig: RwSignal<FeedSheet>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let value = composer.get(); // tracked
     let has_text = !value.trim().is_empty();
 
@@ -872,7 +868,7 @@ fn composer_bar(
     // relying on a window resize. `avoid_keyboard` pads by the live
     // `WindowInsets::view_insets.bottom` — the same raw inset `ui::sheet`'s
     // bottom-anchored panel consumes for its own keyboard avoidance.
-    any(avoid_keyboard(Padding(
+    avoid_keyboard(Padding(
         EdgeInsets::all(8.0),
         row()
             .child(attach_btn)
@@ -883,7 +879,7 @@ fn composer_bar(
             .child(SizedBox(Some(8.0), None))
             .child(Padding(EdgeInsets::symmetric(0.0, 6.0), send_btn))
             .cross_axis(CrossAxisAlignment::Center),
-    )))
+    ))
 }
 
 /// One composer affordance icon button (attach / emoji): a 44×44 [`fill_box`]
@@ -892,11 +888,11 @@ fn composer_bar(
 /// Home tile idiom (`fill_box` disc + `SizedBox+Align` centered glyph) so the
 /// tile is exactly [`COMPOSER_TILE`] rather than the card's 24-inset-driven
 /// size; a headless test still locates its rounded chrome (the fill_box).
-fn affordance_button<F>(leading: frust::IconSource, on_tap: F) -> AnyView<HuddleState>
+fn affordance_button<F>(leading: frust::IconSource, on_tap: F) -> impl View<HuddleState>
 where
     F: Fn(&mut HuddleState) + 'static,
 {
-    any(GestureDetector(
+    GestureDetector(
         stack()
             .child(fill_box(
                 Size::new(COMPOSER_TILE, COMPOSER_TILE),
@@ -908,7 +904,7 @@ where
                     .child(Align(Alignment::CENTER, icon(leading).size(24.0))),
             ),
     )
-    .on_tap(on_tap))
+    .on_tap(on_tap)
 }
 
 /// Send `text`: append it to the feed immediately, clear the composer, and

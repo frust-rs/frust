@@ -95,16 +95,16 @@ impl frust::Component for AppearanceScreen {
         .size(13.0)));
 
         // --- Brightness + design language (the original two axes) ------------
-        children.push(section_label(format!(
+        children.push(any(section_label(format!(
             "Design language: {}",
             design_choice.label()
-        )));
+        ))));
         children.push(design_selector(design_lang, design_choice, theme.clone()));
 
-        children.push(section_label(format!(
+        children.push(any(section_label(format!(
             "Brightness: {}",
             brightness_choice.label()
-        )));
+        ))));
         children.push(brightness_switch(
             design_lang,
             effective_dark,
@@ -119,15 +119,18 @@ impl frust::Component for AppearanceScreen {
         })));
 
         // --- Accent palette --------------------------------------------------
-        children.push(section_label(format!("Accent: {}", accent_choice.label())));
-        children.push(accent_picker(accent_choice, brightness, theme.clone()));
+        children.push(any(section_label(format!(
+            "Accent: {}",
+            accent_choice.label()
+        ))));
+        children.push(any(accent_picker(accent_choice, brightness, theme.clone())));
 
         // --- Dynamic type ----------------------------------------------------
-        children.push(section_label(format!(
+        children.push(any(section_label(format!(
             "Text size: {:.0}%",
             (type_factor * 100.0).round()
-        )));
-        children.push(type_slider(type_factor, theme.clone()));
+        ))));
+        children.push(any(type_slider(type_factor, theme.clone())));
         // Live preview scaled by the current factor.
         children.push(any(
             text("Aa — the quick brown fox").size(18.0 * type_factor)
@@ -150,11 +153,8 @@ impl frust::Component for AppearanceScreen {
 }
 
 /// A section heading text.
-fn section_label(label: String) -> AnyView<AppearanceState> {
-    any(Padding(
-        EdgeInsets::symmetric(0.0, 4.0),
-        text(label).size(16.0),
-    ))
+fn section_label(label: String) -> impl View<AppearanceState> {
+    Padding(EdgeInsets::symmetric(0.0, 4.0), text(label).size(16.0))
 }
 
 /// The language selector: a Material `button_group`, or a row of Cupertino
@@ -258,24 +258,24 @@ fn accent_picker(
     selected: AccentChoice,
     brightness: Brightness,
     current: Theme,
-) -> AnyView<AppearanceState> {
+) -> impl View<AppearanceState> {
     let mut cards: Vec<AnyView<AppearanceState>> = Vec::new();
     for (i, accent) in AccentChoice::SWATCHES.into_iter().enumerate() {
         if i > 0 {
             cards.push(any(SizedBox(Some(10.0), None)));
         }
-        cards.push(swatch(
+        cards.push(any(swatch(
             accent,
             accent == selected,
             brightness,
             current.clone(),
-        ));
+        )));
     }
-    any(FlexView::new(
+    FlexView::new(
         Axis::Horizontal,
         cards.into_iter().map(inflexible).collect::<Vec<_>>(),
     )
-    .cross_axis(CrossAxisAlignment::Center))
+    .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// One accent swatch card.
@@ -284,7 +284,7 @@ fn swatch(
     selected: bool,
     brightness: Brightness,
     current: Theme,
-) -> AnyView<AppearanceState> {
+) -> impl View<AppearanceState> {
     let color = accent.primary(brightness);
     let tile =
         any(SizedBox(Some(40.0), Some(40.0)).child(Image(solid_source(color)).fit(ImageFit::Fill)));
@@ -301,21 +301,19 @@ fn swatch(
     } else {
         CardVariant::Filled
     };
-    any(
-        card(variant, inner).on_press(move |st: &mut AppearanceState| {
-            st.controller.accent.set(accent);
-            spawn_apply(&st.controller, current.clone());
-        }),
-    )
+    card(variant, inner).on_press(move |st: &mut AppearanceState| {
+        st.controller.accent.set(accent);
+        spawn_apply(&st.controller, current.clone());
+    })
 }
 
 /// The dynamic-type slider (maps `0.0..=1.0` ↔ the type multiplier).
-fn type_slider(type_factor: f32, current: Theme) -> AnyView<AppearanceState> {
+fn type_slider(type_factor: f32, current: Theme) -> impl View<AppearanceState> {
     let value = type_factor_to_slider(type_factor);
-    any(slider(value, move |st: &mut AppearanceState, v: f64| {
+    slider(value, move |st: &mut AppearanceState, v: f64| {
         st.controller.type_factor.set(slider_to_type_factor(v));
         spawn_apply(&st.controller, current.clone());
-    }))
+    })
 }
 
 /// The fade-veil overlay layer: a full-bleed translucent `surface` wash while
