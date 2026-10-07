@@ -1,0 +1,14 @@
+# The code library the Android load probe delivers at runtime (see ../README.md). Its own workspace
+# so it builds alone with `cargo ndk -t arm64-v8a build --release`, outside both the root graph and
+# the hotpatch-spike workspace.
+[package]
+name = "frust-probe-patch"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]

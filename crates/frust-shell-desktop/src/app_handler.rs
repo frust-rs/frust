@@ -250,6 +250,15 @@ fn window_size_config() -> (LogicalSize<u32>, bool, WindowKnobSource) {
     })
 }
 
+/// Milliseconds since the UNIX epoch for the `frust-hotpatch:` probe lines (0 if the clock is
+/// before the epoch).
+#[cfg(feature = "hotpatch")]
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis())
+}
+
 /// User events posted to the desktop event loop from off the UI thread.
 ///
 /// Winit's [`ControlFlow::Wait`] idles the loop until an event arrives, so a
@@ -293,6 +302,11 @@ pub enum ShellUserEvent {
     /// direct `request_redraw` from the render thread) so winit's dirty-driven
     /// `ControlFlow::Wait` model is preserved.
     RenderNeedsRedraw,
+    /// A `dx` hot patch was applied (`hotpatch` feature): the patch listener runs on the
+    /// patching thread and routes here so the UI thread logs the probe line and requests a
+    /// redraw, which re-runs the (now patched) `build` via the unconditional root rebuild.
+    #[cfg(feature = "hotpatch")]
+    HotPatched,
     /// The render thread lost the surface and needs it re-created (split path).
     /// Re-creation reads the window handle, which winit only yields on the main
     /// thread, so the render thread routes the request here and the UI thread
@@ -898,10 +912,19 @@ where
     // first copy/cut/paste: it answers a paste request with
     // `ShellUserEvent::ClipboardPaste` from off the event-loop thread.
     let clipboard_proxy = proxy.clone();
+    // A fourth, for the hot-patch listener (`hotpatch` feature), which runs on the
+    // thread that applied the patch and may only signal through the proxy.
+    #[cfg(feature = "hotpatch")]
+    let hotpatch_proxy = proxy.clone();
     let waker: FrameWaker = Arc::new(move || {
         let _ = proxy.send_event(ShellUserEvent::SignalsDirty);
     });
     let runtime = ReactiveRuntime::init(waker);
+    #[cfg(feature = "hotpatch")]
+    frust_core::set_patch_listener(Arc::new(move || {
+        // Closed-loop send errors are a shutdown race, ignored like the frame waker.
+        let _ = hotpatch_proxy.send_event(ShellUserEvent::HotPatched);
+    }));
 
     // Devtools, compiled in only under this crate's `devtools` feature. Started
     // here because both of its prerequisites first exist at this point: the
@@ -957,6 +980,10 @@ where
         window: None,
         accesskit_proxy,
         clipboard_proxy,
+        #[cfg(feature = "hotpatch")]
+        hotpatch_frame_pending: false,
+        #[cfg(feature = "hotpatch")]
+        hotpatch_first_frame_pending: true,
         adapter: None,
         // The generation `RenderRoot::new()` starts at (0); the first rebuild
         // always dirties it to a different value (a first `rebuild_view` always
@@ -1846,6 +1873,13 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// from `accesskit_proxy` so each producer owns its own handle, the same
     /// way the frame waker and the render thread do.
     clipboard_proxy: winit::event_loop::EventLoopProxy<ShellUserEvent>,
+    /// A patch was applied and its first following frame has not been stamped yet
+    /// (`hotpatch` feature); consumed by the `frust-hotpatch: frame` probe line.
+    #[cfg(feature = "hotpatch")]
+    hotpatch_frame_pending: bool,
+    /// The very first frame at startup has not been stamped yet (`hotpatch` feature).
+    #[cfg(feature = "hotpatch")]
+    hotpatch_first_frame_pending: bool,
     /// The `accesskit_winit` platform adapter, created once in
     /// `resumed` alongside the window (it must be constructed before the
     /// window is first shown — see [`Adapter::with_event_loop_proxy`]'s
@@ -2517,6 +2551,14 @@ where
             // "repaint" and both go through the proxy so the `Wait` loop stays
             // dirty-driven (idle CPU near zero).
             ShellUserEvent::SignalsDirty | ShellUserEvent::RenderNeedsRedraw => {
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
+            }
+            #[cfg(feature = "hotpatch")]
+            ShellUserEvent::HotPatched => {
+                log::info!("frust-hotpatch: applied t_unix_ms={}", unix_ms());
+                self.hotpatch_frame_pending = true;
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
                 }
@@ -3290,6 +3332,15 @@ where
                     frame_time,
                     size,
                 );
+
+                // Probe stamp: the UI-thread hand-off of the finished frame, not the GPU
+                // present. Once after startup and once per applied patch, never every frame.
+                #[cfg(feature = "hotpatch")]
+                if self.hotpatch_frame_pending || self.hotpatch_first_frame_pending {
+                    self.hotpatch_frame_pending = false;
+                    self.hotpatch_first_frame_pending = false;
+                    log::info!("frust-hotpatch: frame t_unix_ms={}", unix_ms());
+                }
 
                 // Hand the platform-view batch to the per-OS host, on this
                 // thread, right after the scene is submitted. One call site

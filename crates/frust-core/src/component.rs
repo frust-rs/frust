@@ -174,6 +174,9 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
             let mut state = self.component.init();
             // Erase at the boundary; idempotent, so an `AnyView` body is not
             // re-boxed.
+            #[cfg(feature = "hotpatch")]
+            let view = AnyView::new(crate::hotpatch::call_build(&self.component, &mut state));
+            #[cfg(not(feature = "hotpatch"))]
             let view = AnyView::new(self.component.build(&mut state));
             // A component-local build counter; the child never enters the arena.
             let mut next_id = 0u64;
@@ -216,6 +219,12 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         let outer_has_focus = ctx.has_focus();
         let owner = element.owner.clone();
         owner.with(|| {
+            #[cfg(feature = "hotpatch")]
+            let new_view = AnyView::new(crate::hotpatch::call_build(
+                &self.component,
+                &mut element.state,
+            ));
+            #[cfg(not(feature = "hotpatch"))]
             let new_view = AnyView::new(self.component.build(&mut element.state));
             // Read before the `widget_mut` borrow below.
             let child_focused = element.child.is_focused();
