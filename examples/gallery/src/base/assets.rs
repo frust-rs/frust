@@ -13,7 +13,7 @@
 //! `on_surface` default (see [`super`]'s "The variant has to reach the
 //! pixels").
 
-use frust_core::{AnyView, any};
+use frust_core::{AnyView, View, any};
 use frust_widgets::icons;
 use frust_widgets::{
     CrossAxisAlignment, IconSource, Image, ImageFit, ImageSource, SizedBox, column, container,
@@ -35,17 +35,17 @@ const CHIP: Color = Color::from_rgb8(0xE2, 0xE8, 0xF0);
 const CHIP_INK: Color = Color::from_rgb8(0x33, 0x41, 0x55);
 
 fn icon_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(icon(icons::HOME).size(128.0).color(ACCENT).label("Home"))
             .child(text("icon(icons::HOME).size(128.0)").size(14.0))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 /// One labelled swatch in the [`icon_sets_case`] grid.
-fn icon_chip(source: IconSource, label: &'static str) -> AnyView<()> {
-    any(container(
+fn icon_chip(source: IconSource, label: &'static str) -> impl View<()> {
+    container(
         column()
             .child(icon(source).size(28.0).color(ACCENT).label(label))
             .child(text(label).size(11.0).color(CHIP_INK))
@@ -53,11 +53,11 @@ fn icon_chip(source: IconSource, label: &'static str) -> AnyView<()> {
     )
     .fill(CHIP)
     .radius(10.0)
-    .size_centered(104.0, 84.0))
+    .size_centered(104.0, 84.0)
 }
 
 fn icon_sets_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 row()
@@ -71,7 +71,7 @@ fn icon_sets_case() -> AnyView<()> {
                     .child(icon_chip(icons::STAR, "star"))
                     .child(icon_chip(icons::MOOD, "mood")),
             ),
-    )
+    ))
 }
 
 /// A small procedurally generated checkerboard, decoded straight from RGBA8
@@ -99,9 +99,9 @@ fn checkerboard_source() -> ImageSource {
 }
 
 fn image_case() -> AnyView<()> {
-    framed(
+    any(framed(
         SizedBox(Some(300.0), Some(180.0)).child(Image(checkerboard_source()).fit(ImageFit::Cover)),
-    )
+    ))
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.

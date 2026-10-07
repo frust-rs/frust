@@ -37,7 +37,9 @@ fn any_view_case() -> AnyView<()> {
             .fill(CARD_B)
             .radius(6.0)),
     ];
-    framed(Column(children).cross_axis(CrossAxisAlignment::Center))
+    any(framed(
+        Column(children).cross_axis(CrossAxisAlignment::Center),
+    ))
 }
 
 pub(super) const ANY_VIEW: Case = Case {
@@ -55,13 +57,13 @@ pub(super) const ANY_VIEW: Case = Case {
 /// `gpu_effects.rs`). The swatch is deliberately smaller than the frame so
 /// the box reads as a box rather than as the whole preview.
 fn container_case() -> AnyView<()> {
-    framed(
+    any(framed(
         container(text("Hello, Frust").color(Color::WHITE).size(20.0))
             .fill(CARD_A)
             .radius(12.0)
             .border(Color::WHITE, 2.0)
             .size_centered(260.0, 140.0),
-    )
+    ))
 }
 
 pub(super) const CONTAINER: Case = Case {
@@ -81,9 +83,9 @@ pub(super) const CONTAINER: Case = Case {
 /// the inner panel inward from the frame on every edge. The inset gap is the
 /// cleared surface itself, so it reads light or dark with the variant.
 fn safe_area_case() -> AnyView<()> {
-    framed(
+    any(framed(
         safe_area(colored_box().fill(CARD_B).radius(8.0).expand()).minimum(EdgeInsets::all(24.0)),
-    )
+    ))
 }
 
 pub(super) const SAFE_AREA: Case = Case {

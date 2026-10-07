@@ -4,7 +4,7 @@
 //! registry follows, and [`super::framed`] for why none of these cases fills
 //! its own backdrop.
 
-use frust_core::AnyView;
+use frust_core::{AnyView, any};
 use frust_widgets::{
     CrossAxisAlignment, SizedBox, checkbox, column, radio, row, slider, text, text_input,
 };
@@ -13,7 +13,7 @@ use super::framed;
 use crate::case::{Case, Design};
 
 fn checkbox_case() -> AnyView<()> {
-    framed(
+    any(framed(
         row()
             .child(checkbox(true, "Notifications", |_: &mut (), _: bool| {}))
             .child(SizedBox(Some(28.0), None))
@@ -23,31 +23,31 @@ fn checkbox_case() -> AnyView<()> {
                 |_: &mut (), _: bool| {},
             ))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn radio_case() -> AnyView<()> {
-    framed(
+    any(framed(
         row()
             .child(radio(true, "Option A").on_select(|_: &mut ()| {}))
             .child(SizedBox(Some(28.0), None))
             .child(radio(false, "Option B").on_select(|_: &mut ()| {}))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn slider_case() -> AnyView<()> {
-    framed(
+    any(framed(
         row()
             .child(slider(0.4, |_: &mut (), _: f64| {}))
             .child(SizedBox(Some(12.0), None))
             .child(text("40%").size(13.0))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn text_input_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 SizedBox(Some(280.0), None).child(
@@ -60,7 +60,7 @@ fn text_input_case() -> AnyView<()> {
                     .child(text_input("Frust rocks", |_: &mut (), _: String| {})),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.

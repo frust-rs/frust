@@ -877,8 +877,8 @@ struct ModalState {
 
 impl ModalState {
     /// The reopen affordance shown in the panel's place while it is down.
-    fn reopen(label: &'static str) -> AnyView<ModalState> {
-        any(button(label, |state: &mut ModalState| state.open = true))
+    fn reopen(label: &'static str) -> impl View<ModalState> {
+        button(label, |state: &mut ModalState| state.open = true)
     }
 }
 
@@ -918,7 +918,7 @@ impl Component for DialogCase {
             .label("Delete project?")
             .on_dismiss(|state: &mut ModalState| state.open = false))
         } else {
-            ModalState::reopen("Open dialog")
+            any(ModalState::reopen("Open dialog"))
         };
         framed_in(DIALOG_FRAME, stack().child(panel))
     }
@@ -966,7 +966,7 @@ impl Component for DrawerCase {
             .label("Bottom drawer")
             .on_dismiss(|state: &mut ModalState| state.open = false))
         } else {
-            ModalState::reopen("Open drawer")
+            any(ModalState::reopen("Open drawer"))
         };
         framed_in(DRAWER_TALL, stack().child(panel))
     }
@@ -1031,7 +1031,7 @@ impl Component for SheetCase {
             .label("Right sheet")
             .on_dismiss(|state: &mut ModalState| state.open = false))
         } else {
-            ModalState::reopen("Open sheet")
+            any(ModalState::reopen("Open sheet"))
         };
         framed_in(SHEET_TALL, stack().child(panel))
     }

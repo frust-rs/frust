@@ -95,7 +95,7 @@ pub const INTERACTIVE: &[Entry] = &[
 /// "not a state problem" section: nothing here owns state, because nothing
 /// about this widget reports anything back to an app to hold.
 fn activity_indicator_case() -> AnyView<()> {
-    framed(cupertino_activity_indicator())
+    any(framed(cupertino_activity_indicator()))
 }
 
 // ---- switch -------------------------------------------------------------------

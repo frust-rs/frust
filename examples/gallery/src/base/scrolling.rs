@@ -4,7 +4,7 @@
 //! registry follows, and [`super::framed`] for why neither case fills its
 //! own backdrop.
 
-use frust_core::AnyView;
+use frust_core::{AnyView, any};
 use frust_widgets::{
     Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, container, inflexible, list_view,
     scroll_view, text,
@@ -54,7 +54,7 @@ const ROW_WIDTH: f64 = 320.0;
 const LIST_ITEM_EXTENT: f64 = 132.0;
 
 fn list_view_case() -> AnyView<()> {
-    framed(
+    any(framed(
         SizedBox(Some(LIST_VIEWPORT.0), Some(LIST_VIEWPORT.1)).child(list_view(
             6,
             LIST_ITEM_EXTENT,
@@ -64,7 +64,7 @@ fn list_view_case() -> AnyView<()> {
                     .size_centered(ROW_WIDTH, LIST_ITEM_EXTENT - 12.0)
             },
         )),
-    )
+    ))
 }
 
 fn scroll_view_case() -> AnyView<()> {
@@ -77,9 +77,9 @@ fn scroll_view_case() -> AnyView<()> {
             )
         })
         .collect();
-    framed(scroll_view(
+    any(framed(scroll_view(
         FlexView::new(Axis::Vertical, rows).cross_axis(CrossAxisAlignment::Center),
-    ))
+    )))
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.

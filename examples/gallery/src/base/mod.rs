@@ -28,7 +28,7 @@
 
 use std::sync::OnceLock;
 
-use frust_core::{AnyView, View, any};
+use frust_core::View;
 use frust_widgets::container;
 use kurbo::Size;
 
@@ -55,15 +55,15 @@ mod text;
 /// Deliberately no `.fill(..)` — see this module's "The variant has to reach
 /// the pixels" section for why a case must never paint a fixed full-frame
 /// backdrop.
-pub(super) fn framed<V: View<()>>(child: V) -> AnyView<()> {
+pub(super) fn framed<V: View<()>>(child: V) -> impl View<()> {
     framed_in(Case::DEFAULT_SIZE, child)
 }
 
 /// [`framed`] at an explicit frame size, for a module that records at its own
 /// overridden viewport rather than [`Case::DEFAULT_SIZE`] (today: [`layout`]).
 /// Fills nothing, for the same reason.
-pub(super) fn framed_in<V: View<()>>(frame: Size, child: V) -> AnyView<()> {
-    any(container(child).size_centered(frame.width, frame.height))
+pub(super) fn framed_in<V: View<()>>(frame: Size, child: V) -> impl View<()> {
+    container(child).size_centered(frame.width, frame.height)
 }
 
 /// The per-case constants of the modules that expose cases one by one.

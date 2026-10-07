@@ -50,7 +50,7 @@
 //! [`crate::base::framed`] (which is `View<()>`-shaped) cannot frame it — use
 //! [`framed`]/[`framed_in`] below, this module's state-generic mirrors of it.
 
-use frust_core::{AnyView, View, any};
+use frust_core::{AnyView, View};
 use frust_widgets::container;
 use kurbo::Size;
 
@@ -109,13 +109,13 @@ pub fn find(slug: &str) -> Option<Build> {
 /// for the reason `crate::base`'s "the variant has to reach the pixels"
 /// section gives: a full-frame opaque backdrop would overwrite the recorder's
 /// per-variant clear.
-pub fn framed<State: 'static, V: View<State>>(child: V) -> AnyView<State> {
+pub fn framed<State: 'static, V: View<State>>(child: V) -> impl View<State> {
     framed_in(Case::DEFAULT_SIZE, child)
 }
 
 /// [`framed`] at an explicit frame size, for a case recorded at its own
 /// overridden viewport rather than [`Case::DEFAULT_SIZE`]. Fills nothing, for
 /// the same reason.
-pub fn framed_in<State: 'static, V: View<State>>(frame: Size, child: V) -> AnyView<State> {
-    any(container(child).size_centered(frame.width, frame.height))
+pub fn framed_in<State: 'static, V: View<State>>(frame: Size, child: V) -> impl View<State> {
+    container(child).size_centered(frame.width, frame.height)
 }
