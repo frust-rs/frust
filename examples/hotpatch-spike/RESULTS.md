@@ -542,12 +542,12 @@ nothing in it is relocated against the running app library. Building a patch tha
 the base library's addresses and making those addresses resolve is the patch builder's job
 (PORT.md), and nothing here says that part works on Android.
 
-**Run.** `probe.sh --serial 13261FDD40030W --keep --log-dir <scratch>`, base `spike/hotpatch` @
+**Run.** `probe.sh --serial <adb-serial> --keep --log-dir <scratch>`, base `spike/hotpatch` @
 593d54d1 plus this card's files, 2026-10-07.
 
 | | |
 |---|---|
-| Device | Pixel 5 (`redfin`), USB serial 13261FDD40030W |
+| Device | Pixel 5 (`redfin`), USB serial <adb-serial> |
 | Android | 14 (SDK 34) |
 | `ro.build.fingerprint` | `google/redfin/redfin:14/UP1A.231105.001.B2/11260668:user/release-keys` |
 | App | `dev.frust.probe.probeapp`, debug APK, arm64-v8a, `targetSdk 36`, process domain `u:r:untrusted_app:s0:c18,c257,c512,c768` (`ps -Z`) |
