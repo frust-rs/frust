@@ -41,6 +41,17 @@
 #           with `// erasure: keep <why>` (or bind the vec to a local, or use
 #           the fluent builder).
 #
+# T7 (opt-in `--t7` only) reads no section: it rewrites a helper fn's
+# `-> AnyView<S>` return to `-> impl View<S>` when the body's tail is exactly
+# one erasure call, adding `+ use<..>` only in a pre-2024 crate whose fn has a
+# lifetime or reference parameter. It never rewrites, and `--check --t7` lists
+# as exclusions (not candidates): trait declarations and trait-impl methods
+# (T7-trait), `if`/`match` tails and early returns (T7-arms), recursive fns and
+# fns named as a value anywhere in their package (T7-ref), and `pub fn`s of
+# crates/ and plugins/ library sources outside tests/, examples/, src/corpus/
+# and `#[cfg(test)]` modules (T7-public). Mark a helper whose callers need the
+# erased type with `// erasure: keep <why>` on its `fn` line or alone above it.
+#
 # Derived from the merged signatures of crates/frust-widgets, crates/frust,
 # crates/frust-core and plugins/{material,glyph,cupertino,beui,shadcn}.
 # Deliberately absent: `breadcrumb_item` (returns its argument's type `V`, so
