@@ -511,3 +511,89 @@ meaningless. Patching itself worked locked, at the same latency.
 
 **Plain launch.** `cargo run -p hotpatch-spike` (no dx) logs exactly one `frust-hotpatch: frame`
 line, as before.
+
+## Phase 2: Android load probe
+
+Card p2-02b. Can an installed Frust app load a code library that arrives after install, and by
+which path? `android-probe/probe.sh` scaffolds a throwaway `frust create` app (in a mktemp dir,
+never committed), overlays `android-probe/app_lib.rs`, installs the debug APK, delivers
+`libfrust_probe_patch.so` (built from `android-probe/patch/`, exports
+`frust_probe_value() -> u32 { 42 }`) into the app's files dir with `run-as cp`, launches the app
+and reads logcat. The root component's `init` tries three strategies once, before the first frame.
+See `android-probe/README.md`.
+
+**This probe tests loading only.** The library is self-contained: no jump table is installed and
+nothing in it is relocated against the running app library. Building a patch that links against
+the base library's addresses and making those addresses resolve is the patch builder's job
+(PORT.md), and nothing here says that part works on Android.
+
+**Run.** `probe.sh --serial 13261FDD40030W --keep --log-dir <scratch>`, base `spike/hotpatch` @
+593d54d1 plus this card's files, 2026-10-07.
+
+| | |
+|---|---|
+| Device | Pixel 5 (`redfin`), USB serial 13261FDD40030W |
+| Android | 14 (SDK 34) |
+| `ro.build.fingerprint` | `google/redfin/redfin:14/UP1A.231105.001.B2/11260668:user/release-keys` |
+| App | `dev.frust.probe.probeapp`, debug APK, arm64-v8a, `targetSdk 36`, process domain `u:r:untrusted_app:s0:c18,c257,c512,c768` (`ps -Z`) |
+| Build | `frust build apk --debug --target-platform android-arm64` (Gradle 9.5.1, JDK 21.0.8 from Android Studio's JBR as `JAVA_HOME`: Gradle accepted 21), patch via cargo-ndk 4.1.2 `-t arm64-v8a build --release`, rustc 1.98.1 |
+| Delivery | `adb push` to `/data/local/tmp`, then `adb shell run-as <app> cp` into `files/`; the file there is `u:object_r:app_data_file`, owned by the app uid |
+
+| Strategy | Load path | Outcome |
+|---|---|---|
+| `memfd` | `frust_hotpatch::load_patch_library(<files>/libfrust_probe_patch.so)`: bytes copied into a memfd, `android_dlopen_ext(ANDROID_DLEXT_USE_LIBRARY_FD)` | **loaded, returned 42** |
+| `plain-dlopen` | `libloading::Library::new` (`dlopen`) on the same files-dir path | **loaded, returned 42** |
+| `cache-dir` | file copied to `<cache>/libfrust_probe_patch.so`, then `dlopen` | **loaded, returned 42** |
+
+Verbatim logcat (`adb logcat -d`, filtered on `frust-probe`; the app logs under the `frust` tag):
+
+```
+10-07 21:50:51.066 14417 14417 I frust   : probeapp: frust-probe: strategy=memfd result=42
+10-07 21:50:51.066 14417 14417 I frust   : probeapp: frust-probe: strategy=plain-dlopen result=42
+10-07 21:50:51.066 14417 14417 I frust   : probeapp: frust-probe: strategy=cache-dir result=42
+```
+
+No `avc: denied` line was logged during the run. The three loads are three distinct images:
+`/proc/14417/maps` shows an `r-xp` text segment for each of `/memfd:frust-hotpatch (deleted)`,
+`/data/data/dev.frust.probe.probeapp/files/libfrust_probe_patch.so` and
+`/data/data/dev.frust.probe.probeapp/cache/libfrust_probe_patch.so`. The bionic linker did not hand
+back one already-loaded library for the later calls.
+
+**Controls** (same install, relaunched by hand with `am force-stop` + `am start`):
+
+1. *Mode bits.* `adb push` leaves the file `-rwxrwxrwx` and `run-as cp` keeps that. A file the app
+   wrote itself would be `0600`, so the files copy was set to `chmod 600` and the cache copy
+   deleted. All three strategies still returned 42 (`10-07 21:51:18.797 ... strategy=memfd
+   result=42`, same for `plain-dlopen` and `cache-dir`). The exec bit is not needed.
+2. *Negative control: can the probe see a failed load at all?* Yes. The patch file was replaced
+   with 11 bytes of text, and each loader's own error reached the log:
+
+   ```
+   10-07 21:51:26.462 14891 14891 I frust   : probeapp: frust-probe: strategy=memfd error=Failed to load library on Android: android_dlopen_ext failed: dlopen failed: "/memfd:frust-hotpatch (deleted)" is too small to be an ELF executable: only found 11 bytes
+   10-07 21:51:26.462 14891 14891 I frust   : probeapp: frust-probe: strategy=plain-dlopen error=dlopen failed: "/data/data/dev.frust.probe.probeapp/files/libfrust_probe_patch.so" is too small to be an ELF executable: only found 11 bytes
+   10-07 21:51:26.462 14891 14891 I frust   : probeapp: frust-probe: strategy=cache-dir error=dlopen failed: "/data/data/dev.frust.probe.probeapp/cache/libfrust_probe_patch.so" is too small to be an ELF executable: only found 11 bytes
+   ```
+
+   With the file removed, all three logged `error=patch file missing: /data/user/0/dev.frust.probe.probeapp/files/libfrust_probe_patch.so`.
+
+**Interpretation.** On this device, a frust app process in `untrusted_app` loads app-delivered
+code by all three paths. Neither SELinux (`app_data_file` may be mapped executable) nor the app's
+linker namespace (its permitted paths cover the app's data dir) blocks a plain `dlopen` from
+`files/` or `cache/`. So the memfd detour is not *required* on Android 14 for a file inside the
+app's own data dir. A frust builder should still use frust-hotpatch's default:
+
+- **Load path: `frust_hotpatch::load_patch_library` (memfd + `android_dlopen_ext`).** It works
+  here, `apply_patch` already uses it, and it does not depend on where the bytes sit or on that
+  location's SELinux label or namespace permission. Plain `dlopen` from the app's data dir is a
+  verified fallback.
+- **Delivery: get the bytes into the app's own data dir** (`files/` or `cache/`). This probe
+  verified `adb push` + `run-as <applicationId> cp`. That needs a debuggable build, which hot
+  patching is anyway (debug-only, see the frust-hotpatch README). Having the app fetch the bytes
+  from the devserver and write them itself is the other option, and control 1 shows such a `0600`
+  file loads.
+
+**Not covered.** Loading straight from `/data/local/tmp` (where `adb push` lands) was not tried:
+the probe always copies into the app's dirs first. Only a debuggable APK on one device and Android
+version was tested, and no release or non-debuggable build. 32-bit (`armeabi-v7a`) and x86_64
+were not tested. Symbol interposition and relocation against the base library are not covered
+(see the scope note above).
