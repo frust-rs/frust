@@ -15,8 +15,8 @@ pub mod shaders;
 
 use frust::authoring::scene::ShaderProgram;
 use frust::{
-    AnyView, Axis, Brightness, Color, Component, EdgeInsets, FlexView, Get, Padding, RwSignal,
-    SizedBox, SystemUiMode, View, any, button, column, inflexible, row, safe_area, set_app_theme,
+    Axis, Brightness, Color, Component, EdgeInsets, Either, FlexView, Get, Padding, RwSignal,
+    SizedBox, SystemUiMode, View, button, column, inflexible, row, safe_area, set_app_theme,
     set_system_ui_mode, stack, text,
 };
 
@@ -65,7 +65,7 @@ fn fps_color(fps: f64) -> Color {
 /// keep its content clear of them. Entering a shader flips to
 /// `ImmersiveSticky` (see `running_screen`'s back button, which restores
 /// `EdgeToEdge` on the way out).
-fn menu_screen(state: &AppState) -> AnyView<AppState> {
+fn menu_screen(state: &AppState) -> impl View<AppState> {
     let title = text("Frust Shader Showcase").size(28.0);
 
     let mut rows = vec![inflexible(title), inflexible(SizedBox(None, Some(24.0)))];
@@ -85,7 +85,7 @@ fn menu_screen(state: &AppState) -> AnyView<AppState> {
     rows.push(inflexible(hint));
 
     let menu = Padding(EdgeInsets::all(24.0), FlexView::new(Axis::Vertical, rows));
-    any(safe_area(menu))
+    safe_area(menu)
 }
 
 /// The running screen's HUD: back button + shader name + FPS traffic-light
@@ -127,14 +127,14 @@ fn hud_overlay(name: &'static str, fps: f64) -> impl frust::View<AppState> {
 /// The running screen: the shader canvas filling the window, under a HUD
 /// overlay (back button + shader name + FPS traffic-light readout at the
 /// top, a hint caption at the bottom).
-fn running_screen(state: &mut AppState, idx: usize) -> AnyView<AppState> {
+fn running_screen(state: &mut AppState, idx: usize) -> impl View<AppState> {
     let (name, program) = &state.shaders[idx];
     let name = *name;
     let program = program.clone();
 
     let hud = hud_overlay(name, state.fps.get());
 
-    any(stack().child(shader_view(program, state.fps)).child(hud))
+    stack().child(shader_view(program, state.fps)).child(hud)
 }
 
 /// The root [`Component`]: builds the shader registry once and
@@ -158,8 +158,8 @@ impl Component for ShadertoyApp {
 
     fn build(&self, state: &mut AppState) -> impl View<AppState> {
         match state.screen {
-            Screen::Menu => menu_screen(state),
-            Screen::Running(idx) => running_screen(state, idx),
+            Screen::Menu => Either::Left(menu_screen(state)),
+            Screen::Running(idx) => Either::Right(running_screen(state, idx)),
         }
     }
 }
