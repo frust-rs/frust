@@ -51,7 +51,7 @@ pub mod terminal;
 pub mod url_launcher;
 pub mod video_player;
 
-use frust::AnyView;
+use frust::{AnyView, any};
 
 use crate::PlaygroundState;
 
@@ -87,22 +87,23 @@ pub const PRIMARY_NAV_COUNT: usize = 5;
 /// Dispatch to the section page for `section` (0..13), falling back to
 /// platform views for any out-of-range index (defensive — the navigation bar
 /// and side rail only ever yield a valid index).
+// erasure: keep the 14-arm section dispatch erases each page at this one boundary
 pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundState> {
     match section {
-        0 => platform_views::page(state),
-        1 => camera::page(state),
-        2 => responsive::page(state),
-        3 => terminal::page(state),
-        4 => keys::page(state),
-        5 => i18n::page(state),
-        6 => video_player::page(state),
-        7 => url_launcher::page(state),
-        8 => auth_session::page(state),
-        9 => database::page(state),
-        10 => graph_canvas::page(state),
-        11 => scroll_control::page(state),
-        12 => drag_drop::page(state),
-        _ => platform_views::page(state),
+        0 => any(platform_views::page(state)),
+        1 => any(camera::page(state)),
+        2 => any(responsive::page(state)),
+        3 => any(terminal::page(state)),
+        4 => any(keys::page(state)),
+        5 => any(i18n::page(state)),
+        6 => any(video_player::page(state)),
+        7 => any(url_launcher::page(state)),
+        8 => any(auth_session::page(state)),
+        9 => any(database::page(state)),
+        10 => any(graph_canvas::page(state)),
+        11 => any(scroll_control::page(state)),
+        12 => any(drag_drop::page(state)),
+        _ => any(platform_views::page(state)),
     }
 }
 

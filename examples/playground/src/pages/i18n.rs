@@ -101,8 +101,8 @@ const BOTTOM_GAP: f64 = 24.0;
 /// See the page-fn contract in [`crate::pages`]. Reads no
 /// [`PlaygroundState`] signal — every reactive read here goes through the
 /// app-scoped [`I18n`] handle ([`use_i18n`]) instead.
-pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
-    any(component(I18nDemoPage))
+pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
+    component(I18nDemoPage)
 }
 
 /// The i18n section's own [`Component`]: owns the local demo state (the
@@ -212,6 +212,7 @@ impl Component for I18nDemoPage {
 }
 
 /// A section's small caption heading, in the accent role.
+// erasure: keep an element of the page's let-bound Vec<AnyView> children list
 fn section_heading(label: &str) -> AnyView<I18nDemoPageState> {
     any(text(label.to_string()).size(12.0).color(accent()))
 }
@@ -259,6 +260,7 @@ fn system_locales_line() -> String {
 ///
 /// The active locale's button is [`ButtonStyle::Primary`]; the rest are
 /// [`ButtonStyle::Secondary`].
+// erasure: keep an element of the page's let-bound Vec<AnyView> children list
 fn switcher_row(i18n: &I18n, active: &Locale) -> AnyView<I18nDemoPageState> {
     let items = SWITCHER_LOCALES
         .iter()
@@ -286,6 +288,7 @@ fn switcher_row(i18n: &I18n, active: &Locale) -> AnyView<I18nDemoPageState> {
 
 /// The plural stepper: one button per [`PLURAL_COUNTS`] entry, writing
 /// `count_signal` on press. The selected count is [`ButtonStyle::Primary`].
+// erasure: keep an element of the page's let-bound Vec<AnyView> children list
 fn plural_stepper_row(count_signal: RwSignal<i64>, current: i64) -> AnyView<I18nDemoPageState> {
     let items = PLURAL_COUNTS
         .iter()
@@ -310,6 +313,7 @@ fn plural_stepper_row(count_signal: RwSignal<i64>, current: i64) -> AnyView<I18n
 /// The `theme-choice` select demo's row: one button per [`THEME_CHOICES`]
 /// entry, writing `choice_signal` on press. The selected choice is
 /// [`ButtonStyle::Primary`].
+// erasure: keep an element of the page's let-bound Vec<AnyView> children list
 fn theme_choice_row(
     choice_signal: RwSignal<&'static str>,
     current: &'static str,
@@ -341,6 +345,7 @@ fn theme_choice_row(
 /// the caller's actual requested region rather than the negotiated message
 /// locale) — every value is a fresh call, so switching languages re-renders
 /// locale-correct output rather than a hardcoded string.
+// erasure: keep an element of the page's let-bound Vec<AnyView> children list
 fn formatting_table(format_locale: &Locale, muted: Color) -> AnyView<I18nDemoPageState> {
     let mut lines = vec![format!("decimal: {}", fmt::decimal(format_locale, 1234.56))];
 
