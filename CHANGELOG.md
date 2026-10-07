@@ -6,6 +6,52 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+Child sequences, view composition, and further erasure reduction: `ViewSeq<State, _>` accepts
+tuples (up to 12 elements), arrays, `Option`, nested sequences, and iterators wrapped in `views()`;
+`Either<L, R>` pairs two typed arms; fluent builders and layout/plugin APIs accept child sequences;
+helper functions return `impl View<S>` for type capture; rules T6 and T7 of the erasure codemod are
+now enforced by the tripwire.
+
+### Added
+
+- `frust::ViewSeq<State, M>` — a child-sequence trait polymorphic over a single view, tuples of 2–12
+  views, arrays of fixed or dynamic length, `Option<V>` sequences (where `None` drops its slot), and
+  iterators wrapped with `views(..)`.
+- `frust::Either<L, R>` — two-arm typed view composition with `either(cond, || l, || r)` factory.
+  Swapping an arm rebuilds; both arms stay typed.
+- `views(iter)` — wraps an iterator into a sequence type, converting `.collect::<Vec<_>>()` chains
+  into sequences.
+- Codemod rules T6 and T7 (opt-in flags, now enforced by the tripwire): T6 rewrites `vec![..]`
+  arguments of sequence APIs to tuples when all elements are erasure calls (1–12 of them); T7
+  converts helpers ending in one erasure call to return `impl View<S>` instead of `AnyView<S>`.
+
+### Changed
+
+- `Column`, `Row`, `Stack` fluent builders and all layout/plugin list parameters (`frust_material`,
+  `beui`, `frust-shadcn`, `frust-glyph`) accept any child sequence; `Vec<_>` callers compile
+  unchanged.
+- All template, example, and benchmark helpers that build views now return `-> impl View<S>`
+  (1,159 → 592 `-> AnyView` signatures tree-wide), reducing type-parameter clutter and enabling
+  callers to compose without `any()`.
+
+### Measured
+
+- Stripped arm64 `.so` (material3-demo): 14,643,024 B → 14,658,576 B (+0.11 %; bar ≤ 2 %).
+- Clean release rebuild time (frust-gallery): 14.42 s → 13.74 s (−4.7 %; bar ≤ 10 %).
+- Clean release rebuild time (material3demo): 129.02 s → 125.77 s (−2.5 %; bar ≤ 10 %).
+- Measurements on i5-12600 Linux from main 721ab1e0 → feature/erasure-free-apps b2a41334; see
+  `docs/PERFORMANCE_BASELINES.md` for methodological notes.
+
+### Migration
+
+1. Run `python3 -I scripts/codemod/frust_any_codemod.py --write --t5 --t6 --t7 <src dirs>`, then
+   `cargo fmt` and `cargo check`.
+2. Correct any type-inference rejections: a bare `None`, empty `vec![]`, turbofish call, or
+   `.collect()` that the compiler rejects; a same-head list whose elements differ in type; or a
+   list with keyed items, mixed erasure, or over 12 elements — mark these with
+   `// erasure: keep <why>` instead.
+3. Verify with `scripts/ci/erasure-check.sh`.
+
 ## 0.6.0 — 2026-10-07
 
 Type erasure moved from the call site to the API boundary: public builders take generic views and
