@@ -154,44 +154,44 @@ fn caption(body: impl Into<String>) -> TextView {
 }
 
 /// A vertical gap.
-fn gap(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal gap.
-fn hgap(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn hgap(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 /// A centred row of controls.
-fn controls(children: Vec<AnyView<State>>) -> AnyView<State> {
+fn controls(children: Vec<AnyView<State>>) -> impl View<State> {
     let mut spaced = Vec::with_capacity(children.len() * 2);
     for (index, child) in children.into_iter().enumerate() {
         if index > 0 {
-            spaced.push(hgap(8.0));
+            spaced.push(any(hgap(8.0)));
         }
         spaced.push(child);
     }
-    any(FlexView::new(
+    FlexView::new(
         Axis::Horizontal,
         spaced.into_iter().map(inflexible).collect(),
     )
-    .cross_axis(CrossAxisAlignment::Center))
+    .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A small secondary button.
-fn minor(label: impl Into<String>, on_press: impl Fn(&mut State) + 'static) -> AnyView<State> {
-    any(button(label, on_press)
+fn minor(label: impl Into<String>, on_press: impl Fn(&mut State) + 'static) -> impl View<State> {
+    button(label, on_press)
         .tone(ButtonTone::Secondary)
-        .size(ButtonSize::Sm))
+        .size(ButtonSize::Sm)
 }
 
 // ---- The one-time-code field -----------------------------------------------
 
 /// The OTP block: six slots, typed entry, and the error state the wrong code
 /// puts it in.
-fn otp_block(state: &State) -> AnyView<State> {
-    any(column()
+fn otp_block(state: &State) -> impl View<State> {
+    column()
         .child(section("otp_input"))
         .child(gap(6.0))
         .child(caption(
@@ -220,18 +220,18 @@ fn otp_block(state: &State) -> AnyView<State> {
             }),
         )
         .child(gap(10.0))
-        .child(controls(vec![minor("Clear", |s: &mut State| {
+        .child(controls(vec![any(minor("Clear", |s: &mut State| {
             s.otp_value.clear();
             s.otp_status = OtpStatus::Idle;
-        })])))
+        }))]))
 }
 
 // ---- The sign-up form ------------------------------------------------------
 
 /// The sign-up block: the five fields, the strength meter, and the rejection
 /// upstream's own preview wires up.
-fn signup_block(state: &State) -> AnyView<State> {
-    any(column()
+fn signup_block(state: &State) -> impl View<State> {
+    column()
         .child(section("signup_form"))
         .child(gap(6.0))
         .child(caption(
@@ -243,11 +243,11 @@ fn signup_block(state: &State) -> AnyView<State> {
         .child(gap(10.0))
         .child(signup_view(state))
         .child(gap(10.0))
-        .child(controls(vec![minor("Reset form", |s: &mut State| {
+        .child(controls(vec![any(minor("Reset form", |s: &mut State| {
             s.signup_values = SignupValues::default();
             s.signup_status = SignupStatus::Idle;
             s.signup_error = None;
-        })])))
+        }))]))
 }
 
 /// The form itself. `error_message` is only chained when there *is* one — the
@@ -290,7 +290,7 @@ fn signup_view(state: &State) -> AnyView<State> {
 
 /// The upload block: the dropzone, the queue, and the demo's stand-ins for the
 /// two things a real host would supply — a file dialog and a transfer.
-fn upload_block(state: &State) -> AnyView<State> {
+fn upload_block(state: &State) -> impl View<State> {
     let variant_buttons: Vec<AnyView<State>> = [
         ("Centered", FileUploadVariant::Centered),
         ("Row", FileUploadVariant::Default),
@@ -309,7 +309,7 @@ fn upload_block(state: &State) -> AnyView<State> {
     })
     .collect();
 
-    any(column()
+    column()
         .child(section("file_upload"))
         .child(gap(6.0))
         .child(caption(
@@ -356,7 +356,7 @@ fn upload_block(state: &State) -> AnyView<State> {
         )
         .child(gap(10.0))
         .child(controls(vec![
-            minor("Advance uploads", |s: &mut State| {
+            any(minor("Advance uploads", |s: &mut State| {
                 // The stand-in for a transfer: a real app steps progress from
                 // its own timer or IO completion, not from a button.
                 for item in &mut s.upload_items {
@@ -368,32 +368,32 @@ fn upload_block(state: &State) -> AnyView<State> {
                         }
                     }
                 }
-            }),
-            minor(
+            })),
+            any(minor(
                 if state.upload_dragging {
                     "Dragging: on"
                 } else {
                     "Dragging: off"
                 },
                 |s: &mut State| s.upload_dragging = !s.upload_dragging,
-            ),
-            minor("Reset queue", |s: &mut State| {
+            )),
+            any(minor("Reset queue", |s: &mut State| {
                 s.upload_items = seed_uploads();
                 s.upload_seq = 0;
-            }),
+            })),
         ]))
         .child(gap(8.0))
         .child(caption(format!(
             "{} of 6 slots used",
             state.upload_items.len()
-        ))))
+        )))
 }
 
 // ---- The feedback widget ---------------------------------------------------
 
 /// The feedback block: the corner trigger and its four panel states.
-fn feedback_block(state: &State) -> AnyView<State> {
-    any(column()
+fn feedback_block(state: &State) -> impl View<State> {
+    column()
         .child(section("feedback_widget"))
         .child(gap(6.0))
         .child(caption(
@@ -426,11 +426,14 @@ fn feedback_block(state: &State) -> AnyView<State> {
             }),
         )
         .child(gap(10.0))
-        .child(controls(vec![minor("Reset attempts", |s: &mut State| {
-            s.feedback_attempts = 0;
-            s.feedback_message.clear();
-            s.feedback_status = FeedbackStatus::Idle;
-        })])))
+        .child(controls(vec![any(minor(
+            "Reset attempts",
+            |s: &mut State| {
+                s.feedback_attempts = 0;
+                s.feedback_message.clear();
+                s.feedback_status = FeedbackStatus::Idle;
+            },
+        ))]))
 }
 
 // ---- The availability scheduler --------------------------------------------
@@ -528,12 +531,15 @@ fn time_panel(state: &State) -> Option<AnyView<State>> {
                 .size(ButtonSize::Sm))
             })
             .collect();
-        rows.push(controls(buttons));
-        rows.push(gap(6.0));
+        rows.push(any(controls(buttons)));
+        rows.push(any(gap(6.0)));
     }
-    rows.push(controls(vec![minor("Close picker", |s: &mut State| {
-        s.open_panel = None;
-    })]));
+    rows.push(any(controls(vec![any(minor(
+        "Close picker",
+        |s: &mut State| {
+            s.open_panel = None;
+        },
+    ))])));
 
     Some(any(Column(
         std::iter::once(any(caption(format!(
@@ -543,7 +549,7 @@ fn time_panel(state: &State) -> Option<AnyView<State>> {
             label_12(&range.start),
             label_12(&range.end)
         ))))
-        .chain(std::iter::once(gap(8.0)))
+        .chain(std::iter::once(any(gap(8.0))))
         .chain(rows)
         .collect::<Vec<_>>(),
     )))
@@ -580,12 +586,12 @@ fn copy_panel(state: &State) -> Option<AnyView<State>> {
         .child(gap(8.0))
         .child(controls(targets))
         .child(gap(6.0))
-        .child(controls(vec![minor(
+        .child(controls(vec![any(minor(
             "Cancel copy",
             |s: &mut State| {
                 s.copy_source = None;
             },
-        )]))))
+        ))]))))
 }
 
 /// How many hours the week currently holds, for the readout under the block.
@@ -624,10 +630,10 @@ fn to_minutes_local(value: &str) -> u32 {
 
 /// The scheduler block: seven day rows, their ranges, and the two panels this
 /// page hosts for it.
-fn scheduler_block(state: &State) -> AnyView<State> {
+fn scheduler_block(state: &State) -> impl View<State> {
     let mut children = vec![
         any(section("availability_scheduler")),
-        gap(6.0),
+        any(gap(6.0)),
         any(caption(
             "One row per weekday, each springing between available and unavailable, its time \
              ranges adding and removing on their own ramps. Per-day time ranges and a \
@@ -635,7 +641,7 @@ fn scheduler_block(state: &State) -> AnyView<State> {
              cells and no drag gesture. The block holds one open time panel for the whole week \
              and reports which; this page mounts the picker and the copy menu below it.",
         )),
-        gap(10.0),
+        any(gap(10.0)),
         any(availability_scheduler(
             state.week.clone(),
             |s: &mut State, week: WeekAvailability| {
@@ -653,16 +659,16 @@ fn scheduler_block(state: &State) -> AnyView<State> {
             s.copy_source = Some(day);
             s.open_panel = None;
         })),
-        gap(12.0),
+        any(gap(12.0)),
     ];
 
     if let Some(panel) = time_panel(state) {
         children.push(panel);
-        children.push(gap(12.0));
+        children.push(any(gap(12.0)));
     }
     if let Some(panel) = copy_panel(state) {
         children.push(panel);
-        children.push(gap(12.0));
+        children.push(any(gap(12.0)));
     }
 
     children.push(any(caption(format!(
@@ -670,15 +676,18 @@ fn scheduler_block(state: &State) -> AnyView<State> {
         weekly_hours(&state.week),
         state.scheduler_log
     ))));
-    children.push(gap(8.0));
-    children.push(controls(vec![minor("Reset week", |s: &mut State| {
-        s.week = default_week();
-        s.open_panel = None;
-        s.copy_source = None;
-        s.scheduler_log = "reset".to_string();
-    })]));
+    children.push(any(gap(8.0)));
+    children.push(any(controls(vec![any(minor(
+        "Reset week",
+        |s: &mut State| {
+            s.week = default_week();
+            s.open_panel = None;
+            s.copy_source = None;
+            s.scheduler_log = "reset".to_string();
+        },
+    ))])));
 
-    any(Column(children))
+    Column(children)
 }
 
 // ---- The page --------------------------------------------------------------
@@ -717,6 +726,6 @@ impl Component for FormsPage {
 }
 
 /// The Blocks · Forms page, hosted over its own retained [`State`].
-pub fn page() -> AnyView<AppState> {
-    any(component(FormsPage))
+pub fn page() -> impl View<AppState> {
+    component(FormsPage)
 }

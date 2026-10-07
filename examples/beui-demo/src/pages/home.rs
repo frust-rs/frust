@@ -2,7 +2,7 @@
 //! category-overview card per section, each a live link into that section's
 //! first page.
 
-use frust::{CrossAxisAlignment, SizedBox, View, any, column, row, text};
+use frust::{CrossAxisAlignment, SizedBox, View, column, row, text};
 use frust_beui::components::button::{ButtonTone, button};
 
 use crate::AppState;
@@ -15,13 +15,13 @@ pub struct State;
 
 /// One category card: a title, a one-line summary, and an "Open" button that
 /// jumps straight to the section's first page.
-fn category_card(title: &str, summary: &str, target: Page) -> frust::AnyView<AppState> {
-    any(column()
+fn category_card(title: &str, summary: &str, target: Page) -> impl frust::View<AppState> {
+    column()
         .child(text(title.to_string()).size(16.0))
         .child(SizedBox(None, Some(4.0)))
         .child(caption(summary.to_string()))
         .child(SizedBox(None, Some(8.0)))
-        .child(button("Open", move |s: &mut AppState| s.page = target).tone(ButtonTone::Outline)))
+        .child(button("Open", move |s: &mut AppState| s.page = target).tone(ButtonTone::Outline))
 }
 
 pub fn page(_state: &mut State) -> impl View<AppState> + use<> {

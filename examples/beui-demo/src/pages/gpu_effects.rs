@@ -37,7 +37,7 @@
 //! calling the opt-in.
 
 use frust::{
-    AnyView, CrossAxisAlignment, Row, SizedBox, Theme, any, column, container, row, text,
+    AnyView, CrossAxisAlignment, Row, SizedBox, Theme, View, any, column, container, row, text,
     use_context,
 };
 use frust_beui::blocks::project_folder::{folder_preview, project_folder};
@@ -63,26 +63,26 @@ fn theme() -> Theme {
 }
 
 /// A vertical spacer.
-fn gap(height: f64) -> AnyView<AppState> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<AppState> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal spacer.
-fn hgap(width: f64) -> AnyView<AppState> {
-    any(SizedBox(Some(width), None))
+fn hgap(width: f64) -> impl View<AppState> {
+    SizedBox(Some(width), None)
 }
 
 /// A muted line of small print.
-fn muted(body: impl Into<String>) -> AnyView<AppState> {
-    any(caption(body.into()).color(theme().scheme().on_surface_variant))
+fn muted(body: impl Into<String>) -> impl View<AppState> {
+    caption(body.into()).color(theme().scheme().on_surface_variant)
 }
 
 /// A placeholder pane, shown when the crate was not compiled with
 /// `gpu-effects` at all. Sized to roughly match its 2D sibling so the pair
 /// still reads as a pair.
 #[cfg(not(feature = "gpu-effects"))]
-fn build_flag_placeholder(width: f64, height: f64, component: &str) -> AnyView<AppState> {
-    any(container(
+fn build_flag_placeholder(width: f64, height: f64, component: &str) -> impl View<AppState> {
+    container(
         column()
             .child(text(format!("{component} \u{b7} 3D")).size(13.0))
             .child(gap(6.0))
@@ -91,7 +91,7 @@ fn build_flag_placeholder(width: f64, height: f64, component: &str) -> AnyView<A
     )
     .size_centered(width, height)
     .radius(12.0)
-    .border(theme().scheme().outline, 1.0))
+    .border(theme().scheme().outline, 1.0)
 }
 
 /// One 2D/3D pair: a title, a note, and the two panes side by side under
@@ -101,8 +101,8 @@ fn pair(
     note: &str,
     two_d: AnyView<AppState>,
     three_d: AnyView<AppState>,
-) -> AnyView<AppState> {
-    any(column()
+) -> impl View<AppState> {
+    column()
         .child(text(title.to_string()).size(16.0))
         .child(gap(4.0))
         .child(muted(note.to_string()))
@@ -127,42 +127,42 @@ fn pair(
                 .cross_axis(CrossAxisAlignment::Start),
         )
         .child(gap(32.0))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 // ---- tilt_card --------------------------------------------------------
 
 /// The tilt card's static body: it needs no state, only a pointer.
-fn tilt_body(label: &str) -> AnyView<AppState> {
-    any(SizedBox(Some(220.0), Some(140.0)).child(
+fn tilt_body(label: &str) -> impl View<AppState> {
+    SizedBox(Some(220.0), Some(140.0)).child(
         column()
             .child(gap(16.0))
             .child(text(label.to_string()).size(15.0))
             .child(gap(8.0))
             .child(muted("Hover to lean."))
             .cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 #[cfg(feature = "gpu-effects")]
-fn tilt_pane_3d() -> AnyView<AppState> {
+fn tilt_pane_3d() -> impl View<AppState> {
     let theme = theme();
     let scheme = theme.scheme();
-    any(tilt_card(tilt_body("Tilt card"))
+    tilt_card(tilt_body("Tilt card"))
         .shadow(true)
         .gpu_face(QuadFace::Gradient {
             from: scheme.primary_container,
             to: scheme.tertiary_container,
             angle_radians: std::f32::consts::FRAC_PI_4,
-        }))
+        })
 }
 
 #[cfg(not(feature = "gpu-effects"))]
-fn tilt_pane_3d() -> AnyView<AppState> {
+fn tilt_pane_3d() -> impl View<AppState> {
     build_flag_placeholder(220.0, 140.0, "tilt_card")
 }
 
-fn tilt_pair() -> AnyView<AppState> {
+fn tilt_pair() -> impl View<AppState> {
     let two_d = any(tilt_card(tilt_body("Tilt card")).shadow(true));
     pair(
         "tilt_card",
@@ -171,7 +171,7 @@ fn tilt_pair() -> AnyView<AppState> {
          The 3D pane replaces the card's surface (not its text) with a genuinely \
          projected face, so the near corner actually grows into view.",
         two_d,
-        tilt_pane_3d(),
+        any(tilt_pane_3d()),
     )
 }
 
@@ -187,21 +187,21 @@ fn wheel_options() -> Vec<WheelPickerOption> {
 }
 
 #[cfg(feature = "gpu-effects")]
-fn wheel_pane_3d() -> AnyView<AppState> {
-    any(SizedBox(Some(140.0), None).child(
+fn wheel_pane_3d() -> impl View<AppState> {
+    SizedBox(Some(140.0), None).child(
         wheel_picker(wheel_options(), "6", |_: &mut AppState, _| {})
             .label("Row (3D)")
             .disabled(true)
             .gpu_drum(true),
-    ))
+    )
 }
 
 #[cfg(not(feature = "gpu-effects"))]
-fn wheel_pane_3d() -> AnyView<AppState> {
+fn wheel_pane_3d() -> impl View<AppState> {
     build_flag_placeholder(140.0, 180.0, "wheel_picker")
 }
 
-fn wheel_pair() -> AnyView<AppState> {
+fn wheel_pair() -> impl View<AppState> {
     let two_d = any(SizedBox(Some(140.0), None).child(
         wheel_picker(wheel_options(), "6", |_: &mut AppState, _| {})
             .label("Row (2D)")
@@ -213,7 +213,7 @@ fn wheel_pair() -> AnyView<AppState> {
          table. The 3D pane seats the same rows on a genuinely projected \
          cylinder, behind the drum's own text.",
         two_d,
-        wheel_pane_3d(),
+        any(wheel_pane_3d()),
     )
 }
 
@@ -235,8 +235,8 @@ fn carousel_items() -> Vec<AnyView<AppState>> {
 }
 
 #[cfg(feature = "gpu-effects")]
-fn carousel_pane_3d() -> AnyView<AppState> {
-    any(SizedBox(Some(440.0), None).child(
+fn carousel_pane_3d() -> impl View<AppState> {
+    SizedBox(Some(440.0), None).child(
         cylinder_carousel(carousel_items())
             .variant(CylinderCarouselVariant::Concave)
             .item_size(110.0)
@@ -245,15 +245,15 @@ fn carousel_pane_3d() -> AnyView<AppState> {
             .snap(true)
             .default_index(0)
             .gpu_cylinder(true),
-    ))
+    )
 }
 
 #[cfg(not(feature = "gpu-effects"))]
-fn carousel_pane_3d() -> AnyView<AppState> {
+fn carousel_pane_3d() -> impl View<AppState> {
     build_flag_placeholder(440.0, 150.0, "cylinder_carousel")
 }
 
-fn carousel_pair() -> AnyView<AppState> {
+fn carousel_pair() -> impl View<AppState> {
     let two_d = any(SizedBox(Some(440.0), None).child(
         cylinder_carousel(carousel_items())
             .variant(CylinderCarouselVariant::Concave)
@@ -270,7 +270,7 @@ fn carousel_pair() -> AnyView<AppState> {
          plates, each item's own label still painting flat above it. Drag or \
          scroll either one — the position is this page's own.",
         two_d,
-        carousel_pane_3d(),
+        any(carousel_pane_3d()),
     )
 }
 
@@ -284,19 +284,19 @@ fn folder_previews() -> Vec<frust_beui::blocks::project_folder::ProjectFolderPre
 }
 
 #[cfg(feature = "gpu-effects")]
-fn folder_pane_3d() -> AnyView<AppState> {
-    any(project_folder("Case study (3D)", folder_previews())
+fn folder_pane_3d() -> impl View<AppState> {
+    project_folder("Case study (3D)", folder_previews())
         .item_label("file")
         .open(true)
-        .gpu_fan(true))
+        .gpu_fan(true)
 }
 
 #[cfg(not(feature = "gpu-effects"))]
-fn folder_pane_3d() -> AnyView<AppState> {
+fn folder_pane_3d() -> impl View<AppState> {
     build_flag_placeholder(288.0, 224.0, "project_folder")
 }
 
-fn folder_pair() -> AnyView<AppState> {
+fn folder_pair() -> impl View<AppState> {
     let two_d = any(project_folder("Case study (2D)", folder_previews())
         .item_label("file")
         .open(true));
@@ -306,7 +306,7 @@ fn folder_pair() -> AnyView<AppState> {
          pane spreads flat cards; the 3D pane spreads genuinely projected \
          plates, each caption still painting flat above its own sheet.",
         two_d,
-        folder_pane_3d(),
+        any(folder_pane_3d()),
     )
 }
 
@@ -328,18 +328,18 @@ fn wallet_accounts() -> Vec<frust_beui::blocks::wallet_card::WalletAccount> {
 }
 
 #[cfg(feature = "gpu-effects")]
-fn wallet_pane_3d() -> AnyView<AppState> {
-    any(wallet_card(wallet_accounts(), 4_820.5)
+fn wallet_pane_3d() -> impl View<AppState> {
+    wallet_card(wallet_accounts(), 4_820.5)
         .account_id("main")
-        .gpu_fan(true))
+        .gpu_fan(true)
 }
 
 #[cfg(not(feature = "gpu-effects"))]
-fn wallet_pane_3d() -> AnyView<AppState> {
+fn wallet_pane_3d() -> impl View<AppState> {
     build_flag_placeholder(320.0, 220.0, "wallet_card")
 }
 
-fn wallet_pair() -> AnyView<AppState> {
+fn wallet_pair() -> impl View<AppState> {
     let two_d = any(wallet_card(wallet_accounts(), 4_820.5).account_id("main"));
     pair(
         "wallet_card",
@@ -347,14 +347,14 @@ fn wallet_pair() -> AnyView<AppState> {
          rows sit in a flat stack; the 3D pane fans the open rows in real \
          depth, avatars and addresses still painting flat above each one.",
         two_d,
-        wallet_pane_3d(),
+        any(wallet_pane_3d()),
     )
 }
 
 // ---- shader_background ---------------------------------------------------
 
 /// One shader tile — always the engine's own GPU path, feature or not.
-fn shader_tile(variant: ShaderBackgroundVariant, over_card: bool) -> AnyView<AppState> {
+fn shader_tile(variant: ShaderBackgroundVariant, over_card: bool) -> impl View<AppState> {
     let background = shader_background::<AppState>(variant)
         .animate(variant.animates())
         .speed(0.4);
@@ -364,10 +364,10 @@ fn shader_tile(variant: ShaderBackgroundVariant, over_card: bool) -> AnyView<App
     if over_card {
         frame = frame.fill(with_alpha(theme().scheme().tertiary, 0.35));
     }
-    any(frame)
+    frame
 }
 
-fn shader_showcase() -> AnyView<AppState> {
+fn shader_showcase() -> impl View<AppState> {
     let tiles = [
         (ShaderBackgroundVariant::MeshGradient, false),
         (ShaderBackgroundVariant::Waves, false),
@@ -376,7 +376,7 @@ fn shader_showcase() -> AnyView<AppState> {
     let mut row: Vec<AnyView<AppState>> = Vec::new();
     for (index, (variant, over_card)) in tiles.into_iter().enumerate() {
         if index > 0 {
-            row.push(hgap(16.0));
+            row.push(any(hgap(16.0)));
         }
         row.push(any(column()
             .child(shader_tile(variant, over_card))
@@ -385,7 +385,7 @@ fn shader_showcase() -> AnyView<AppState> {
             .cross_axis(CrossAxisAlignment::Start)));
     }
 
-    any(column()
+    column()
         .child(text("shader_background").size(16.0))
         .child(gap(4.0))
         .child(muted(
@@ -398,7 +398,7 @@ fn shader_showcase() -> AnyView<AppState> {
         ))
         .child(gap(12.0))
         .child(Row(row).cross_axis(CrossAxisAlignment::Start))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 // ---- availability ----------------------------------------------------
@@ -430,8 +430,8 @@ fn availability_note() -> String {
 }
 
 /// The GPU Effects page.
-pub fn page() -> AnyView<AppState> {
-    any(column()
+pub fn page() -> impl View<AppState> {
+    column()
         .child(heading("GPU Effects"))
         .child(gap(8.0))
         .child(muted(
@@ -451,5 +451,5 @@ pub fn page() -> AnyView<AppState> {
         .child(wallet_pair())
         .child(gap(4.0))
         .child(shader_showcase())
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }

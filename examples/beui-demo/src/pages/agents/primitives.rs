@@ -348,8 +348,8 @@ fn bubble_name(variant: MessageBubbleVariant) -> &'static str {
 }
 
 /// One labelled bubble specimen.
-fn bubble_sample(variant: MessageBubbleVariant) -> AnyView<State> {
-    any(column()
+fn bubble_sample(variant: MessageBubbleVariant) -> impl View<State> {
+    column()
         .child(caption(bubble_name(variant)))
         .child(SizedBox(None, Some(6.0)))
         .child(
@@ -362,12 +362,12 @@ fn bubble_sample(variant: MessageBubbleVariant) -> AnyView<State> {
             )
             .variant(variant)
             .align(MessageBubbleAlign::Start),
-        ))
+        )
 }
 
 /// `message_bubble`: every variant, both alignments, and the two group
 /// spacings consecutive turns are stacked at.
-fn bubbles() -> AnyView<State> {
+fn bubbles() -> impl View<State> {
     let mut column: Vec<AnyView<State>> = vec![
         any(sub_heading("message_bubble")),
         any(SizedBox(None, Some(6.0))),
@@ -379,7 +379,7 @@ fn bubbles() -> AnyView<State> {
         any(SizedBox(None, Some(12.0))),
     ];
     for variant in MessageBubbleVariant::ALL {
-        column.push(bubble_sample(variant));
+        column.push(any(bubble_sample(variant)));
         column.push(any(SizedBox(None, Some(10.0))));
     }
 
@@ -411,13 +411,13 @@ fn bubbles() -> AnyView<State> {
     ])
     .spacing(MessageBubbleSpacing::Default)));
 
-    any(Column(column))
+    Column(column)
 }
 
 /// `message`: the row a bubble sits in — avatar, sender metadata, content
 /// slot, footer — plus the centred marker.
-fn message_rows() -> AnyView<State> {
-    any(column()
+fn message_rows() -> impl View<State> {
+    column()
         .child(sub_heading("message"))
         .child(SizedBox(None, Some(6.0)))
         .child(caption(
@@ -457,12 +457,12 @@ fn message_rows() -> AnyView<State> {
                         .size(14.0),
                 ),
             )
-            .avatar_placeholder(true)))
+            .avatar_placeholder(true))
 }
 
 /// `message_scroller`: the pin-to-the-live-edge viewport, in a box with a
 /// finite height so it has something to scroll.
-fn scroller(state: &State) -> AnyView<State> {
+fn scroller(state: &State) -> impl View<State> {
     let rows: Vec<AnyView<State>> = state
         .transcript
         .iter()
@@ -484,7 +484,7 @@ fn scroller(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(column()
+    column()
         .child(sub_heading("message_scroller"))
         .child(SizedBox(None, Some(6.0)))
         .child(caption(
@@ -524,19 +524,19 @@ fn scroller(state: &State) -> AnyView<State> {
             })
             .tone(ButtonTone::Outline)
             .size(ButtonSize::Sm),
-        ))
+        )
 }
 
 /// `prompt_input`: the composer, controlled, with a live send state and a
 /// working stop button.
-fn composer(state: &State) -> AnyView<State> {
+fn composer(state: &State) -> impl View<State> {
     let send_state = PromptInputSend::resolve(&state.draft, false, state.sending);
     let sent = match &state.sent {
         Some(prompt) => format!("Last submission: \u{201c}{prompt}\u{201d}"),
         None => "Nothing submitted yet.".to_string(),
     };
 
-    any(column()
+    column()
         .child(sub_heading("prompt_input"))
         .child(SizedBox(None, Some(6.0)))
         .child(caption(
@@ -570,11 +570,11 @@ fn composer(state: &State) -> AnyView<State> {
             "Send state: {}. {sent}",
             send_state.label()
         )))
-        .child(state.clock.pump(state.sending)))
+        .child(state.clock.pump(state.sending))
 }
 
 /// `streaming_response`: the replay, plus a settled and a failed instance.
-fn streaming(state: &State) -> AnyView<State> {
+fn streaming(state: &State) -> impl View<State> {
     let revealed: String = REPLY.chars().take(state.revealed()).collect();
     let status = if state.streaming {
         StreamingResponseStatus::Streaming
@@ -582,7 +582,7 @@ fn streaming(state: &State) -> AnyView<State> {
         StreamingResponseStatus::Complete
     };
 
-    any(column()
+    column()
         .child(sub_heading("streaming_response"))
         .child(SizedBox(None, Some(6.0)))
         .child(caption(
@@ -625,12 +625,12 @@ fn streaming(state: &State) -> AnyView<State> {
                 .status(StreamingResponseStatus::Error)
                 .size(14.0),
         )
-        .child(state.clock.pump(state.streaming)))
+        .child(state.clock.pump(state.streaming))
 }
 
 /// `loading_states`: all four variants, running.
-fn loading() -> AnyView<State> {
-    any(column()
+fn loading() -> impl View<State> {
+    column()
         .child(sub_heading("loading_states"))
         .child(SizedBox(None, Some(6.0)))
         .child(caption(
@@ -676,7 +676,7 @@ fn loading() -> AnyView<State> {
                     "Working through the details",
                     "Preparing the answer",
                 ]),
-        ))
+        )
 }
 
 // ---- The page --------------------------------------------------------------
@@ -723,6 +723,6 @@ impl Component for Primitives {
 }
 
 /// The Agents · Primitives page.
-pub fn page() -> AnyView<AppState> {
-    any(component(Primitives))
+pub fn page() -> impl View<AppState> {
+    component(Primitives)
 }

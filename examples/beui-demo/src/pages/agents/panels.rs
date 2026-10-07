@@ -339,7 +339,7 @@ impl State {
 
 /// `code_block`: the streamed snippet, syntax-coloured through the caller's own
 /// span list, with a collapse morph and a copy affordance.
-fn code_panel(state: &State) -> AnyView<State> {
+fn code_panel(state: &State) -> impl View<State> {
     let lines = snippet();
     let visible = state.code_lines().min(lines.len());
     let code = lines[..visible]
@@ -354,7 +354,7 @@ fn code_panel(state: &State) -> AnyView<State> {
         CodeBlockStatus::Complete
     };
 
-    any(column()
+    column()
         .child(sub_heading("code_block"))
         .child(SizedBox(None, Some(6.0)))
         .child(caption(
@@ -379,11 +379,11 @@ fn code_panel(state: &State) -> AnyView<State> {
                 .on_collapse_change(|s: &mut State, collapsed| s.code_collapsed = collapsed)
                 .on_copy(|s: &mut State| s.copied = Some("code_block")),
         )
-        .child(state.clock.pump(state.replaying)))
+        .child(state.clock.pump(state.replaying))
 }
 
 /// `file_diff`: a synthetic diff model, streamed row by row.
-fn diff_panel(state: &State) -> AnyView<State> {
+fn diff_panel(state: &State) -> impl View<State> {
     let rows = diff_rows();
     let visible = state.diff_visible().min(rows.len());
     let model = file_diff_model(
@@ -402,7 +402,7 @@ fn diff_panel(state: &State) -> AnyView<State> {
         visible
     );
 
-    any(column()
+    column()
         .child(sub_heading("file_diff"))
         .child(SizedBox(None, Some(6.0)))
         .child(caption(
@@ -430,7 +430,7 @@ fn diff_panel(state: &State) -> AnyView<State> {
         )
         .child(SizedBox(None, Some(8.0)))
         .child(caption(counts))
-        .child(state.clock.pump(state.replaying)))
+        .child(state.clock.pump(state.replaying))
 }
 
 /// A monospace payload block, the shape every tool result's output takes.
@@ -440,7 +440,7 @@ fn output(body: impl Into<String>) -> frust::TextView {
 
 /// `tool_result`: a run that streams to success, plus a failed and a cancelled
 /// instance.
-fn result_panels(state: &State) -> AnyView<State> {
+fn result_panels(state: &State) -> impl View<State> {
     let visible = state.output_lines().min(OUTPUT.len());
     let running = visible < OUTPUT.len();
     let body = OUTPUT[..visible].join("\n");
@@ -471,7 +471,7 @@ fn result_panels(state: &State) -> AnyView<State> {
         live.duration(Duration::from_millis(2900))
     };
 
-    any(column()
+    column()
         .child(sub_heading("tool_result"))
         .child(SizedBox(None, Some(6.0)))
         .child(caption(
@@ -503,17 +503,17 @@ fn result_panels(state: &State) -> AnyView<State> {
             .kind(ToolResultKind::Terminal)
             .status(ToolResultStatus::Cancelled)
             .max_height(150.0))
-        .child(state.clock.pump(state.replaying)))
+        .child(state.clock.pump(state.replaying))
 }
 
 /// `tool_approval`: the real consent surface, reporting its identity.
-fn approval_panel(state: &State) -> AnyView<State> {
+fn approval_panel(state: &State) -> impl View<State> {
     let decision = match &state.decision {
         Some(line) => line.clone(),
         None => "No decision yet.".to_string(),
     };
 
-    any(column()
+    column()
         .child(sub_heading("tool_approval"))
         .child(SizedBox(None, Some(6.0)))
         .child(caption(
@@ -588,12 +588,12 @@ fn approval_panel(state: &State) -> AnyView<State> {
                 )
                 .cross_axis(CrossAxisAlignment::Center),
         )
-        .child(state.clock.pump(state.approval_running)))
+        .child(state.clock.pump(state.approval_running))
 }
 
 /// `approval_card`: the review surface, with the keyed detail block that is
 /// what makes it answerable at all.
-fn card_panel(state: &State) -> AnyView<State> {
+fn card_panel(state: &State) -> impl View<State> {
     let note = match &state.card_note {
         Some(line) => line.clone(),
         None => "No action yet.".to_string(),
@@ -605,7 +605,7 @@ fn card_panel(state: &State) -> AnyView<State> {
         .child(SizedBox::<State>(None, Some(4.0)))
         .child(caption("Visibility  \u{b7}  Public registry"));
 
-    any(column()
+    column()
         .child(sub_heading("approval_card"))
         .child(SizedBox(None, Some(6.0)))
         .child(caption(
@@ -671,11 +671,11 @@ fn card_panel(state: &State) -> AnyView<State> {
         )
         .child(SizedBox(None, Some(10.0)))
         .child(caption(format!("{note} Status: {}.", state.card.label())))
-        .child(state.clock.pump(state.card_pending.is_some())))
+        .child(state.clock.pump(state.card_pending.is_some()))
 }
 
 /// `citations`: the numbered chip row, its preview, and the reference list.
-fn citation_panel(state: &State) -> AnyView<State> {
+fn citation_panel(state: &State) -> impl View<State> {
     let items = sources();
     let preview: AnyView<State> = match state.hovered.and_then(|index| {
         items
@@ -690,7 +690,7 @@ fn citation_panel(state: &State) -> AnyView<State> {
         None => "Nothing pressed yet.".to_string(),
     };
 
-    any(column()
+    column()
         .child(sub_heading("citations"))
         .child(SizedBox(None, Some(6.0)))
         .child(caption(
@@ -728,7 +728,7 @@ fn citation_panel(state: &State) -> AnyView<State> {
                 .on_activate(|s: &mut State, index| s.activated = Some(index + 1)),
         )
         .child(SizedBox(None, Some(8.0)))
-        .child(caption(activated)))
+        .child(caption(activated))
 }
 
 // ---- The page --------------------------------------------------------------
@@ -789,6 +789,6 @@ impl Component for Panels {
 }
 
 /// The Agents · Panels page.
-pub fn page() -> AnyView<AppState> {
-    any(component(Panels))
+pub fn page() -> impl View<AppState> {
+    component(Panels)
 }
