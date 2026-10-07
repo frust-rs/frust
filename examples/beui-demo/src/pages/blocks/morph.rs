@@ -133,7 +133,7 @@ fn tab_menu(rows: &[&str]) -> AnyView<State> {
                     text((*row).to_string()).size(14.0),
                 ))
             })
-            .collect(),
+            .collect::<Vec<_>>(),
     )))
 }
 

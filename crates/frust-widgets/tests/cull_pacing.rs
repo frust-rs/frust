@@ -101,7 +101,7 @@ fn build_column(classes: [TickClass; ROWS]) -> (FlexWidgetHandle, [Rc<Cell<u32>>
                     paint_count: count.clone(),
                 })
             })
-            .collect(),
+            .collect::<Vec<_>>(),
     );
     let mut counter = 0u64;
     let mut ctx = BuildCtx::new(&mut counter);

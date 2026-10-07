@@ -367,7 +367,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                                                             text(format!("Line {i}")).size(13.0),
                                                         )
                                                     })
-                                                    .collect(),
+                                                    .collect::<Vec<_>>(),
                                             )),
                                         ),
                                     )),
