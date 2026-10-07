@@ -919,6 +919,7 @@ mod tests {
             frust::SizedBox::<S>(Some(200.0), Some(100.0))
         }
 
+        // erasure: keep test root is RenderRoot<S, AnyView<S>>, whose rebuild needs an AnyView-returning view fn
         fn view(s: &mut S) -> AnyView<S> {
             any(frust::column()
                 .child(

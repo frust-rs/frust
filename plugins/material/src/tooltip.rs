@@ -873,6 +873,7 @@ impl TooltipView {
     /// calls back into an app, and keeping the pod state-free is what lets
     /// [`TooltipView`] stay non-generic — its `View::Element` cannot depend on
     /// `State`, and `tooltip`'s signature is public API.
+    // erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn content_view(&self) -> AnyView<()> {
         any(RampedPanel {
             content: any(PlainPanel {
@@ -1217,6 +1218,7 @@ impl<State: 'static> RichTooltipView<State> {
     /// `actions` row's callbacks take `&mut State` and must reach the same
     /// state every other widget sees, which is what
     /// [`OverlaySlot::event_ambient`] routes them over.
+    // erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn content_view(&self) -> AnyView<State> {
         any(RampedPanel {
             content: any(RichPanel {

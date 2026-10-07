@@ -143,13 +143,13 @@ const ISLAND_INK: Color = Color::from_rgb8(0x75, 0x75, 0x75);
 
 /// A fixed vertical gap, at whatever state the surrounding case is bound to —
 /// the state-generic mirror of `crate::beui`'s own `()`-bound helper.
-fn gap_y<State: 'static>(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn gap_y<State: 'static>(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A fixed horizontal gap, likewise.
-fn gap_x<State: 'static>(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn gap_x<State: 'static>(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 // ---- chat -------------------------------------------------------------------

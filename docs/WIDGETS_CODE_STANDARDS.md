@@ -14,6 +14,20 @@ conventions, and the widget-authoring rules (erasure at the API boundary, the
   `debug_assert!`s and falls back to positional matching in release (never panics live). A
   matched reorder relocates the existing widget rather than rebuilding it.
 
+- **Children are a sequence; write tuples for mixed types.** `Column`/`Row`/`Stack`, the
+  builders' `.children(..)` and every catalog list parameter take `impl ViewSeq<State, M>`
+  (declare the marker generic `M` on the API; callers never name it). Pass a tuple of up to 12
+  views when the children differ in type (`Column((app_bar(), body, footer))`), nest a tuple
+  beyond 12, and keep `Vec<V>` for homogeneous or dynamic lists. A tuple reconciles by position;
+  `keyed(..)` identity needs a `Vec`. An optional child is `.when(cond, || v)` /
+  `.when_some(opt, |x| v)` — or an `Option` element in a tuple, which drops its slot the same way.
+  An iterator goes through `views(iter)`; a bare `.collect()` passed to a sequence API needs
+  `.collect::<Vec<_>>()`, and a turbofish caller of such an API writes `::<State, _>`.
+- **A catalog list helper erases once, inside.** `fn items<M>(seq: impl ViewSeq<S, M>)` calls
+  `seq.extend_views(&mut self.children)`; never ask callers for `Vec<AnyView>` or wrap elements
+  in `any()` at the call site. A list that must stay erased (a `Vec<AnyView>` field, a
+  `ChildPod`-fed helper) is marked `// erasure: keep <why>` for the tripwire.
+
 ## Theming & Animation Conventions
 
 - **Paint-time resolution is always safe; layout-time-baked resolution is only safe under

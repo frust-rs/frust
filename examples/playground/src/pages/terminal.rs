@@ -118,9 +118,9 @@ use frust::authoring::{
     Widget,
 };
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, Padding, RwSignal, Set, SizedBox, Theme, any, button, component, inflexible,
-    on_cleanup, spawn_blocking, spawn_local, text, use_context,
+    Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
+    Padding, RwSignal, Set, SizedBox, Theme, any, button, component, inflexible, on_cleanup,
+    spawn_blocking, spawn_local, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -782,8 +782,8 @@ async fn run_feed(
 
 /// See the page-fn contract in [`crate::pages`]. The Terminal section reads no
 /// shared signal — it only mounts [`TerminalPage`]'s own retained state.
-pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
-    any(component(TerminalPage))
+pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
+    component(TerminalPage)
 }
 
 /// The Terminal section's own [`Component`]: owns the emulator, the generation
@@ -1067,25 +1067,25 @@ fn muted() -> Color {
 }
 
 /// A demo heading in the accent role.
-fn label(s: impl Into<String>) -> AnyView<TerminalPageState> {
-    any(text(s).size(13.0).color(accent()))
+fn label(s: impl Into<String>) -> impl View<TerminalPageState> {
+    text(s).size(13.0).color(accent())
 }
 
 /// A muted per-demo caption.
-fn caption(s: impl Into<String>) -> AnyView<TerminalPageState> {
-    any(text(s).size(11.0).color(muted()))
+fn caption(s: impl Into<String>) -> impl View<TerminalPageState> {
+    text(s).size(11.0).color(muted())
 }
 
 /// One monospace diagnostic line, so the readout's numbers stay column-aligned
 /// as they change.
-fn mono_line(s: impl Into<String>) -> AnyView<TerminalPageState> {
-    any(text(s)
+fn mono_line(s: impl Into<String>) -> impl View<TerminalPageState> {
+    text(s)
         .size(11.0)
         .color(muted())
         .family(FontFamily::stack_with_generic(
             ["IBM Plex Mono"],
             GenericSlot::Monospace,
-        )))
+        ))
 }
 
 /// A fixed-height vertical spacer between demo blocks.

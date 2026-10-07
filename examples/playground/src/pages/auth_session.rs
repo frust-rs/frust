@@ -84,7 +84,7 @@ use std::time::Duration;
 
 use frust::{
     AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Padding,
-    RwSignal, Set, SizedBox, Theme, any, button, checkbox, deep_links, inflexible, row,
+    RwSignal, Set, SizedBox, Theme, View, any, button, checkbox, deep_links, inflexible, row,
     spawn_local, text, text_input, use_context,
 };
 use frust_auth_session::{
@@ -437,7 +437,7 @@ fn fire_cancel_loopback(_state: &mut PlaygroundState) {
 /// [`PlaygroundState`] signal — the call status, base URL and ephemeral
 /// toggle live in this module's own screen-local signals, and the deep-link
 /// readout comes straight from [`frust::deep_links`].
-pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
+pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
     let base_url = base_url_sig().get();
     let ephemeral = ephemeral_sig().get();
     let status = status_sig().get();
@@ -645,11 +645,11 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
         ]);
     }
 
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         FlexView::new(
             Axis::Vertical,
             children.into_iter().map(inflexible).collect(),
         ),
-    ))
+    )
 }

@@ -48,7 +48,7 @@ use frust::authoring::{PaintCtx, PaintScene, PointerEvent, PointerPhase};
 use frust::kurbo::{Point, Size, Vec2};
 use frust::{
     AnyView, ButtonStyle, Color, EdgeInsets, Get, Padding, PanZoomTransform, Set, SizedBox, Stack,
-    Theme, any, button, canvas, column, pan_zoom, row, text, use_context,
+    Theme, View, any, button, canvas, column, pan_zoom, row, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -156,7 +156,7 @@ fn paint_graph(
 }
 
 /// See the page-fn contract in [`crate::pages`].
-pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
+pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
     let selected = state.graph_selected.get();
     let transform = state.graph_transform.get();
     let nodes = node_positions();
@@ -229,7 +229,7 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
     .style(ButtonStyle::Secondary)
     .small();
 
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         column()
             .child(text("Graph").size(13.0).color(accent))
@@ -251,7 +251,7 @@ pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState> {
                     .child(SizedBox(Some(12.0), None))
                     .child(text(readout).size(12.0)),
             ),
-    ))
+    )
 }
 
 #[cfg(test)]

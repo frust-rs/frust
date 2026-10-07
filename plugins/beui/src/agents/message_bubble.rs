@@ -69,8 +69,8 @@ use std::time::Duration;
 use frust::Theme;
 use frust::authoring::{
     Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, View, Widget,
-    any, build_child, rebuild_child, rebuild_children, route_event, route_event_single,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, View, ViewSeq,
+    Widget, any, build_child, rebuild_child, rebuild_children, route_event, route_event_single,
     teardown_child, visit_children,
 };
 
@@ -575,11 +575,13 @@ pub struct MessageBubbleGroupView<State: 'static> {
 
 /// Stack `bubbles` in a column, [`Compact`](MessageBubbleSpacing::Compact)
 /// apart — the spacing consecutive messages from one sender wear.
-pub fn message_bubble_group<State: 'static>(
-    bubbles: impl IntoIterator<Item = impl View<State>>,
+pub fn message_bubble_group<State: 'static, M>(
+    bubbles: impl ViewSeq<State, M>,
 ) -> MessageBubbleGroupView<State> {
+    let mut erased = Vec::new();
+    bubbles.extend_views(&mut erased);
     MessageBubbleGroupView {
-        bubbles: bubbles.into_iter().map(AnyView::new).collect(),
+        bubbles: erased,
         spacing: MessageBubbleSpacing::default(),
     }
 }
@@ -922,7 +924,7 @@ mod tests {
         assert_eq!(MessageBubbleSpacing::Default.gap(), 12.0);
 
         for spacing in [MessageBubbleSpacing::Compact, MessageBubbleSpacing::Default] {
-            let view = message_bubble_group::<()>(vec![
+            let view = message_bubble_group::<(), _>(vec![
                 any(message_bubble::<(), _>(text("one"))),
                 any(message_bubble::<(), _>(text("two"))),
             ])

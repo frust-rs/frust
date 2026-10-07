@@ -40,8 +40,8 @@ impl Default for State {
 
 const MINI_ITEMS: [&str; 3] = ["Inbox", "Drafts", "Archive"];
 
-fn gap() -> AnyView<AppState> {
-    any(SizedBox(None, Some(16.0)))
+fn gap() -> impl View<AppState> {
+    SizedBox(None, Some(16.0))
 }
 
 /// One carousel slide: a card with a large ordinal.

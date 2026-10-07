@@ -135,27 +135,27 @@ impl Component for NavigationRailPlayground {
 /// The whole page body: preview/snippet/controls, plus both enum-menu
 /// popups mounted at this page's own outer [`Stack`] — the kept-mounted
 /// pattern the kit's own module docs document.
-fn body(state: &RailState) -> AnyView<RailState> {
+fn body(state: &RailState) -> impl View<RailState> {
     let theme = ambient_theme();
     let content = playground_body(
         vec![play_preview_card("Navigation rail", preview(&theme, state))],
         vec![play_snippet("Navigation rail", snippet_code(state))],
         vec![appearance_panel(state)],
     );
-    any(stack()
+    stack()
         .child(content)
         .child(type_menu_panel(state))
-        .child(label_menu_panel(state)))
+        .child(label_menu_panel(state))
 }
 
 /// Frame `child` in an outlined, rounded box — the reference's `_framed`
 /// helper (duplicated per playground page upstream, so this port does the
 /// same rather than sharing one across files).
-fn framed(theme: &Theme, child: impl View<RailState>) -> AnyView<RailState> {
+fn framed(theme: &Theme, child: impl View<RailState>) -> impl View<RailState> {
     let outline = theme.scheme().outline_variant;
-    any(container(child)
+    container(child)
         .radius(MaterialDimensions::RADIUS_LARGE)
-        .border(outline, 1.0))
+        .border(outline, 1.0)
 }
 
 /// The one section of four destinations — the reference's own `_sections`.
@@ -177,7 +177,7 @@ fn apply_rail_type(state: &mut RailState, next: NavigationRailType) {
     state.rail_type = next;
 }
 
-fn preview(theme: &Theme, state: &RailState) -> AnyView<RailState> {
+fn preview(theme: &Theme, state: &RailState) -> impl View<RailState> {
     let mut rail = navigation_rail(sections(), state.selected, |s: &mut RailState, index| {
         s.selected = index
     })
@@ -221,7 +221,7 @@ fn appearance_panel(state: &RailState) -> AnyView<RailState> {
     )
 }
 
-fn type_menu_panel(state: &RailState) -> AnyView<RailState> {
+fn type_menu_panel(state: &RailState) -> impl View<RailState> {
     play_enum_menu_panel::<RailState, NavigationRailType>(
         state.rail_type,
         &RAIL_TYPES,
@@ -233,7 +233,7 @@ fn type_menu_panel(state: &RailState) -> AnyView<RailState> {
     )
 }
 
-fn label_menu_panel(state: &RailState) -> AnyView<RailState> {
+fn label_menu_panel(state: &RailState) -> impl View<RailState> {
     play_enum_menu_panel::<RailState, RailLabelBehavior>(
         state.label_behavior,
         &LABEL_BEHAVIORS,

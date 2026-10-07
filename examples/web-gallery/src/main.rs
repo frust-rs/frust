@@ -487,13 +487,13 @@ mod app {
         content: impl Into<String>,
         fill: Color,
         on_tap: F,
-    ) -> frust::AnyView<AppState> {
-        any(GestureDetector(
+    ) -> impl frust::View<AppState> {
+        GestureDetector(
             container(Padding(EdgeInsets::symmetric(12.0, 8.0), label(content)))
                 .fill(fill)
                 .radius(8.0),
         )
-        .on_tap(on_tap))
+        .on_tap(on_tap)
     }
 
     /// Hosts one case constructor (a plain `fn() -> frust::AnyView<()>`, per
@@ -549,7 +549,7 @@ mod app {
     /// would still resolve no glyphs there; its shapes, images, layout and
     /// theme colour render regardless, and its interaction handling
     /// (hover/press/focus/keyboard) runs exactly as elsewhere.
-    fn case_view(case: &'static Case) -> frust::AnyView<AppState> {
+    fn case_view(case: &'static Case) -> impl frust::View<AppState> {
         let header = row()
             .child(nav_row(
                 "< Index",
@@ -559,7 +559,7 @@ mod app {
                 },
             ))
             .child(label(format!("{}  [{}]", case.title, case.slug)));
-        any(column()
+        column()
             .child(Padding(EdgeInsets::all(12.0), header))
             .flex(
                 1,
@@ -568,7 +568,7 @@ mod app {
                     component(CaseHost(case_constructor(case))),
                 )),
             )
-            .cross_axis(CrossAxisAlignment::Stretch))
+            .cross_axis(CrossAxisAlignment::Stretch)
     }
 
     /// The `?case=<slug>&embed=1` page: the hosted case, and *nothing*
@@ -584,8 +584,8 @@ mod app {
     /// nothing it renders can ever set [`AppState::case`] back to `None` —
     /// the only way out of an embedded frame is the host page itself (e.g.
     /// navigating the iframe's own `src`), never a tap inside it.
-    fn embedded_case_view(case: &'static Case) -> frust::AnyView<AppState> {
-        any(component(CaseHost(case_constructor(case))))
+    fn embedded_case_view(case: &'static Case) -> impl frust::View<AppState> {
+        component(CaseHost(case_constructor(case)))
     }
 
     /// The fallback/landing page: a live filter box (keyboard text-entry
@@ -595,7 +595,7 @@ mod app {
     /// clickable [`nav_row`] — mouse/touch-tap exercise), the ticking-counter
     /// line ([`start_ticker`]'s zero-input-event proof), and the current
     /// [`WindowMetrics`] as in-UI evidence for the resize/DPR milestone.
-    fn index_view(state: &AppState) -> frust::AnyView<AppState> {
+    fn index_view(state: &AppState) -> impl frust::View<AppState> {
         let filter_lower = state.filter.to_lowercase();
         let matches: Vec<&'static Case> = frust_gallery::cases()
             .iter()
@@ -661,10 +661,10 @@ mod app {
             )
         });
 
-        any(column()
+        column()
             .child(Padding(EdgeInsets::all(16.0), header))
             .flex(1, Padding(EdgeInsets::symmetric(16.0, 0.0), list))
-            .cross_axis(CrossAxisAlignment::Stretch))
+            .cross_axis(CrossAxisAlignment::Stretch)
     }
 
     /// `web_app!`'s build closure: dispatches to
@@ -673,10 +673,11 @@ mod app {
     /// between the two case pages — a missing/unknown `?case=` still falls
     /// back to the index page exactly as before this task, `embed` or not.
     fn view(state: &mut AppState) -> frust::AnyView<AppState> {
+        // erasure: keep three arms of distinct view types
         match state.case {
-            Some(case) if state.embed => embedded_case_view(case),
-            Some(case) => case_view(case),
-            None => index_view(state),
+            Some(case) if state.embed => any(embedded_case_view(case)),
+            Some(case) => any(case_view(case)),
+            None => any(index_view(state)),
         }
     }
 

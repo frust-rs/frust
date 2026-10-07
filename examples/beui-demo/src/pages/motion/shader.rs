@@ -27,7 +27,7 @@
 
 use frust::{
     AnyView, Color, CrossAxisAlignment, Get, GetUntracked, Row, RwSignal, Set, SizedBox, Theme,
-    any, container, text, use_context,
+    View, any, container, text, use_context,
 };
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 use frust_beui::components::shader_background::{
@@ -98,13 +98,13 @@ fn card_tint() -> Color {
 }
 
 /// A muted line of small print.
-fn muted(body: impl Into<String>) -> AnyView<AppState> {
-    any(caption(body.into()).color(theme().scheme().on_surface_variant))
+fn muted(body: impl Into<String>) -> impl View<AppState> {
+    caption(body.into()).color(theme().scheme().on_surface_variant)
 }
 
 /// A fixed spacer.
-fn gap(height: f64) -> AnyView<AppState> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<AppState> {
+    SizedBox(None, Some(height))
 }
 
 /// One shader tile: the background at `variant`, framed at `size`, optionally
@@ -115,7 +115,7 @@ fn tile(
     speed: f32,
     size: (f64, f64),
     over_card: bool,
-) -> AnyView<AppState> {
+) -> impl View<AppState> {
     let background = shader_background::<AppState>(variant)
         .animate(animate)
         .speed(speed);
@@ -128,11 +128,11 @@ fn tile(
         // whole point of the engine's premultiplied-alpha contract.
         frame = frame.fill(card_tint());
     }
-    any(frame)
+    frame
 }
 
 /// The featured section: a tab per variant, each showing the live tile.
-fn featured() -> AnyView<AppState> {
+fn featured() -> impl View<AppState> {
     let variant = variant_sig();
     let animate = animate_sig();
     let speed = speed_sig();
@@ -160,7 +160,7 @@ fn featured() -> AnyView<AppState> {
         })
         .collect();
 
-    any(tabs(
+    tabs(
         ShaderBackgroundVariant::ALL[active].slug(),
         panels,
         move |_: &mut AppState, value: String| {
@@ -172,11 +172,11 @@ fn featured() -> AnyView<AppState> {
             }
         },
     )
-    .variant(TabsVariant::Pill))
+    .variant(TabsVariant::Pill)
 }
 
 /// The control row under the featured tile.
-fn controls() -> AnyView<AppState> {
+fn controls() -> impl View<AppState> {
     let animate = animate_sig();
     let speed = speed_sig();
     let over_card = over_card_sig();
@@ -222,11 +222,11 @@ fn controls() -> AnyView<AppState> {
     })
     .label("Show the tile over a tinted card")));
 
-    any(Row(row).cross_axis(CrossAxisAlignment::Center))
+    Row(row).cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The contact sheet: every ported variant at once, frozen.
-fn contact_sheet() -> AnyView<AppState> {
+fn contact_sheet() -> impl View<AppState> {
     let mut row: Vec<AnyView<AppState>> = Vec::new();
     for (index, variant) in ShaderBackgroundVariant::ALL.into_iter().enumerate() {
         if index > 0 {
@@ -238,12 +238,12 @@ fn contact_sheet() -> AnyView<AppState> {
             .child(text(variant.label().to_string()).size(12.0))
             .child(muted(variant.slug().to_string()))));
     }
-    any(Row(row).cross_axis(CrossAxisAlignment::Start))
+    Row(row).cross_axis(CrossAxisAlignment::Start)
 }
 
 /// The Shader page.
-pub fn page() -> AnyView<AppState> {
-    any(frust::column()
+pub fn page() -> impl View<AppState> {
+    frust::column()
         .child(heading("Motion \u{b7} Shader"))
         .child(gap(8.0))
         .child(muted(
@@ -284,5 +284,5 @@ pub fn page() -> AnyView<AppState> {
             "Escape hatch: {SHADER_EFFECTS_KILL_SWITCH}=1 turns the engine's shader-effect path \
              off entirely; every tile above then degrades to a flat fill of its own backdrop \
              token (and to nothing at all where that backdrop is transparent).",
-        ))))
+        )))
 }

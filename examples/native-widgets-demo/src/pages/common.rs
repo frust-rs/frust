@@ -89,19 +89,19 @@ pub fn muted() -> Color {
 }
 
 /// A demo heading in the accent role.
-pub fn label(s: impl Into<String>) -> AnyView<S> {
-    any(text(s).size(13.0).color(accent()))
+pub fn label(s: impl Into<String>) -> impl View<S> {
+    text(s).size(13.0).color(accent())
 }
 
 /// A muted per-demo caption.
-pub fn caption(s: impl Into<String>) -> AnyView<S> {
-    any(text(s).size(11.0).color(muted()))
+pub fn caption(s: impl Into<String>) -> impl View<S> {
+    text(s).size(11.0).color(muted())
 }
 
 /// A readout line in the body-text role — the "visible frust state" half of
 /// every round trip, so it reads as data rather than commentary.
-pub fn readout(s: impl Into<String>) -> AnyView<S> {
-    any(text(s).size(12.0).color(theme().scheme().on_surface))
+pub fn readout(s: impl Into<String>) -> impl View<S> {
+    text(s).size(12.0).color(theme().scheme().on_surface)
 }
 
 /// A fixed-height vertical spacer.
@@ -123,17 +123,18 @@ pub fn block(children: Vec<FlexChild<S>>) -> FlexChild<S> {
 }
 
 /// A horizontal row of children, vertically centered.
-pub fn row(children: Vec<FlexChild<S>>) -> AnyView<S> {
-    any(FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center))
+pub fn row(children: Vec<FlexChild<S>>) -> impl View<S> {
+    FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A small secondary chip button — the page-local toggles and triggers.
-pub fn chip(title: impl Into<String>, handler: impl Fn(&mut S) + 'static) -> AnyView<S> {
-    any(button(title, handler).style(ButtonStyle::Secondary).small())
+pub fn chip(title: impl Into<String>, handler: impl Fn(&mut S) + 'static) -> impl View<S> {
+    button(title, handler).style(ButtonStyle::Secondary).small()
 }
 
 /// The page's outer column: 16 px of padding around `children`. The shell
 /// already wraps every page in a scroll view, so a page never nests its own.
+// erasure: keep every page fn tails through here into the eight-arm section dispatch
 pub fn page_column(children: Vec<FlexChild<S>>) -> AnyView<S> {
     any(Padding(
         EdgeInsets::all(16.0),
@@ -335,7 +336,7 @@ pub enum CellFit {
 
 /// One pair cell: a fixed `w` x `h` box, so both columns are literally the
 /// same size and the difference a reader sees is the widget, not the box.
-pub fn cell(fit: CellFit, w: f64, h: f64, content: AnyView<S>) -> AnyView<S> {
+pub fn cell(fit: CellFit, w: f64, h: f64, content: impl View<S>) -> AnyView<S> {
     match fit {
         CellFit::Stretch => any(SizedBox(Some(w), Some(h)).child(content)),
         // `Align` loosens the constraints it hands its child — the only way
@@ -355,8 +356,8 @@ pub fn pair_row(
     note: &str,
     fit: CellFit,
     height: f64,
-    native: AnyView<S>,
-    drawn: AnyView<S>,
+    native: impl View<S>,
+    drawn: impl View<S>,
 ) -> FlexChild<S> {
     pair_row_sized(
         title,
@@ -386,8 +387,8 @@ pub fn pair_row_sized(
     fit: CellFit,
     (native_width, drawn_width): (f64, f64),
     height: f64,
-    native: AnyView<S>,
-    drawn: AnyView<S>,
+    native: impl View<S>,
+    drawn: impl View<S>,
 ) -> FlexChild<S> {
     block(vec![
         inflexible(label(title)),

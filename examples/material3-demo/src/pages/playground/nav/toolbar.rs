@@ -93,7 +93,7 @@ impl Component for ToolbarPlayground {
 /// arrangement. No overlay is mounted here — unlike its `nav` siblings that
 /// pick from an enum menu, every control on this page is a segmented button
 /// or a switch.
-fn body(state: &ToolbarState) -> AnyView<ToolbarState> {
+fn body(state: &ToolbarState) -> impl View<ToolbarState> {
     playground_body(
         vec![play_preview_card(
             "Toolbar",
@@ -135,17 +135,17 @@ fn actions(state: &ToolbarState) -> Vec<ToolbarAction<ToolbarState>> {
 /// single opaque view (see the toolbar module docs' "who owns the toggle").
 /// Add while collapsed (press to expand), close while expanded (press to
 /// collapse).
-fn fab_view(state: &ToolbarState) -> AnyView<ToolbarState> {
+fn fab_view(state: &ToolbarState) -> impl View<ToolbarState> {
     let (source, label) = if state.expanded {
         (icons::CLOSE, "Collapse")
     } else {
         (icons::ADD, "Expand")
     };
-    any(fab(icon(source), |s: &mut ToolbarState| {
+    fab(icon(source), |s: &mut ToolbarState| {
         s.expanded = !s.expanded;
     })
     .size(FabSize::Medium)
-    .label(label))
+    .label(label)
 }
 
 fn toolbar_view(state: &ToolbarState) -> AnyView<ToolbarState> {

@@ -228,7 +228,7 @@ fn run_baseline(n: usize, frames: usize) -> Vec<f64> {
                         height: ITEM_EXTENT,
                     })
                 })
-                .collect(),
+                .collect::<Vec<_>>(),
         ))
     };
 
@@ -536,7 +536,7 @@ fn ten_thousand_rows_scrolled_midlist_materializes_only_the_window() {
                         rebuilt: rebuilt_for_logic.clone(),
                     })
                 })
-                .collect(),
+                .collect::<Vec<_>>(),
         ))
     };
     drive_frame(&mut root, &mut logic, &mut state, win, 0.0);

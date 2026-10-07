@@ -553,6 +553,7 @@ impl<State: 'static> AgentActivityView<State> {
 
     /// The shimmering status line the working row composes — the catalog's own
     /// loading-state primitive rather than a second shimmer authored here.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn working_row(&self) -> AnyView<State> {
         any(loading_states()
             .variant(LoadingStatesVariant::Shimmer)

@@ -91,36 +91,36 @@ fn caption(body: impl Into<String>) -> TextView {
 }
 
 /// A vertical gap.
-fn gap(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal gap.
-fn hgap(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn hgap(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 /// A centred row of controls.
-fn controls(children: Vec<AnyView<State>>) -> AnyView<State> {
+fn controls(children: Vec<AnyView<State>>) -> impl View<State> {
     let mut spaced = Vec::with_capacity(children.len() * 2);
     for (index, child) in children.into_iter().enumerate() {
         if index > 0 {
-            spaced.push(hgap(8.0));
+            spaced.push(any(hgap(8.0)));
         }
         spaced.push(child);
     }
-    any(FlexView::new(
+    FlexView::new(
         Axis::Horizontal,
         spaced.into_iter().map(inflexible).collect(),
     )
-    .cross_axis(CrossAxisAlignment::Center))
+    .cross_axis(CrossAxisAlignment::Center)
 }
 
 // ---- The expandable tab shell ----------------------------------------------
 
 /// One tab's disclosed menu, upstream's own `Menu` of labelled rows.
-fn tab_menu(rows: &[&str]) -> AnyView<State> {
-    any(SizedBox(Some(274.0), None).child(Column(
+fn tab_menu(rows: &[&str]) -> impl View<State> {
+    SizedBox(Some(274.0), None).child(Column(
         rows.iter()
             .map(|row| {
                 any(Padding(
@@ -133,13 +133,13 @@ fn tab_menu(rows: &[&str]) -> AnyView<State> {
                     text((*row).to_string()).size(14.0),
                 ))
             })
-            .collect(),
-    )))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// The expandable-tabs block: an icon bar whose active tab grows into a
 /// labelled pill, disclosing its panel above.
-fn expandable_tabs_block(state: &State) -> AnyView<State> {
+fn expandable_tabs_block(state: &State) -> impl View<State> {
     let items = vec![
         expandable_tabs_item(
             "launch",
@@ -184,7 +184,7 @@ fn expandable_tabs_block(state: &State) -> AnyView<State> {
         ),
     ];
 
-    any(column()
+    column()
         .child(section("expandable_tabs"))
         .child(gap(6.0))
         .child(caption(
@@ -202,7 +202,7 @@ fn expandable_tabs_block(state: &State) -> AnyView<State> {
         .child(caption(format!(
             "Open tab: {}",
             state.tabs_value.as_deref().unwrap_or("(closed)")
-        ))))
+        )))
 }
 
 // ---- The morphing tabs -----------------------------------------------------
@@ -231,8 +231,8 @@ const ROOMS: [(&str, &str, &str, &str); 3] = [
 ];
 
 /// One room's panel.
-fn room_panel(eyebrow: &str, title: &str, detail: &str) -> AnyView<State> {
-    any(Padding(
+fn room_panel(eyebrow: &str, title: &str, detail: &str) -> impl View<State> {
+    Padding(
         EdgeInsets {
             left: 28.0,
             top: 28.0,
@@ -247,12 +247,12 @@ fn room_panel(eyebrow: &str, title: &str, detail: &str) -> AnyView<State> {
             .child(SizedBox(Some(360.0), None).child(text(detail.to_string()).size(14.0)))
             .child(gap(20.0))
             .child(text("drag any room to reorder").size(12.0)),
-    ))
+    )
 }
 
 /// The morphing-tabs block: the selected tab grows into the room's surface, and
 /// a pointer drag reorders the rail.
-fn morphing_tabs_block(state: &State) -> AnyView<State> {
+fn morphing_tabs_block(state: &State) -> impl View<State> {
     let items = state
         .morph_order
         .iter()
@@ -265,7 +265,7 @@ fn morphing_tabs_block(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(column()
+    column()
         .child(section("morphing_tabs"))
         .child(gap(6.0))
         .child(caption(
@@ -306,14 +306,14 @@ fn morphing_tabs_block(state: &State) -> AnyView<State> {
             .tone(ButtonTone::Secondary)
             .size(ButtonSize::Sm)),
             any(caption(state.morph_log.clone())),
-        ])))
+        ]))
 }
 
 // ---- The notification stack ------------------------------------------------
 
 /// The notification-stack block: a stacked summary that springs into a readable
 /// list and animates its own height doing it.
-fn notification_block(state: &State) -> AnyView<State> {
+fn notification_block(state: &State) -> impl View<State> {
     let items = vec![
         notification("import-failed", "Orders import failed")
             .description("42s \u{b7} TimeoutError at Step 2")
@@ -326,7 +326,7 @@ fn notification_block(state: &State) -> AnyView<State> {
             .trailing("new"),
     ];
 
-    any(column()
+    column()
         .child(section("notification_stack"))
         .child(gap(6.0))
         .child(caption(
@@ -355,7 +355,7 @@ fn notification_block(state: &State) -> AnyView<State> {
             .on_view_all(|s: &mut State| s.notifications_log = "view all pressed".to_string()),
         )
         .child(gap(8.0))
-        .child(caption(format!("Stack: {}", state.notifications_log))))
+        .child(caption(format!("Stack: {}", state.notifications_log)))
 }
 
 // ---- The dynamic island ----------------------------------------------------
@@ -365,7 +365,7 @@ const ISLAND_STATES: [(&str, &str); 3] = [("call", "Call"), ("timer", "Timer"), 
 
 /// The island block: a pill that morphs between the caller's live-activity
 /// views, springing its shell and crossfading its content.
-fn island_block(state: &State) -> AnyView<State> {
+fn island_block(state: &State) -> impl View<State> {
     // The shell paints `on_surface`, so its content is inked in `surface` — the
     // island is inverted chrome and a child paints its own text.
     let ink = use_context::<Theme>()
@@ -424,7 +424,7 @@ fn island_block(state: &State) -> AnyView<State> {
         .size(ButtonSize::Sm)));
     }
 
-    any(column()
+    column()
         .child(section("dynamic_island"))
         .child(gap(6.0))
         .child(caption(
@@ -436,14 +436,14 @@ fn island_block(state: &State) -> AnyView<State> {
         .child(gap(10.0))
         .child(dynamic_island(state.island_view.clone(), compact, slots).label("Live activity"))
         .child(gap(10.0))
-        .child(controls(buttons)))
+        .child(controls(buttons))
 }
 
 // ---- The swipeable list ----------------------------------------------------
 
 /// A row's leading mark.
-fn row_mark(glyph: IconSource) -> AnyView<State> {
-    any(SizedBox(Some(40.0), Some(40.0)).child(icon(glyph).size(18.0)))
+fn row_mark(glyph: IconSource) -> impl View<State> {
+    SizedBox(Some(40.0), Some(40.0)).child(icon(glyph).size(18.0))
 }
 
 /// The leading rail: what a drag to the right reveals.
@@ -465,7 +465,7 @@ fn right_actions() -> Vec<SwipeAction<State>> {
 }
 
 /// The swipeable-list block: an inbox whose rows open onto their rails.
-fn swipeable_block(state: &State) -> AnyView<State> {
+fn swipeable_block(state: &State) -> impl View<State> {
     let rows = [
         (
             "brief",
@@ -502,7 +502,7 @@ fn swipeable_block(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(column()
+    column()
         .child(section("swipeable_list"))
         .child(gap(6.0))
         .child(caption(
@@ -523,7 +523,7 @@ fn swipeable_block(state: &State) -> AnyView<State> {
             }),
         )
         .child(gap(8.0))
-        .child(caption(format!("Last action: {}", state.swipe_log))))
+        .child(caption(format!("Last action: {}", state.swipe_log)))
 }
 
 // ---- The page --------------------------------------------------------------
@@ -562,6 +562,6 @@ impl Component for MorphPage {
 }
 
 /// The Blocks · Morph page, hosted over its own retained [`State`].
-pub fn page() -> AnyView<AppState> {
-    any(component(MorphPage))
+pub fn page() -> impl View<AppState> {
+    component(MorphPage)
 }

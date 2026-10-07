@@ -50,7 +50,7 @@
 use frust::motion::AnimatedOpacity;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, Padding, PlatformViewView, RwSignal, Set, SizedBox, Theme, any, button,
+    GetUntracked, Padding, PlatformViewView, RwSignal, Set, SizedBox, Theme, View, any, button,
     inflexible, platform_view, row, stack, text, use_context,
 };
 
@@ -134,13 +134,13 @@ fn muted() -> Color {
 }
 
 /// A demo heading in the accent role.
-fn label(s: impl Into<String>) -> AnyView<PlaygroundState> {
-    any(text(s).size(13.0).color(accent()))
+fn label(s: impl Into<String>) -> impl View<PlaygroundState> {
+    text(s).size(13.0).color(accent())
 }
 
 /// A muted per-demo caption.
-fn caption(s: impl Into<String>) -> AnyView<PlaygroundState> {
-    any(text(s).size(11.0).color(muted()))
+fn caption(s: impl Into<String>) -> impl View<PlaygroundState> {
+    text(s).size(11.0).color(muted())
 }
 
 /// A fixed-height vertical spacer between demo blocks.
@@ -170,7 +170,7 @@ fn block(children: Vec<FlexChild<PlaygroundState>>) -> FlexChild<PlaygroundState
 /// device-viewport lesson: a shorter filler barely exceeded a tall device's
 /// body height, so scrolling read as broken on-device while the same filler
 /// scrolled generously in a shorter headless test viewport, masking the bug).
-fn filler_rows() -> AnyView<PlaygroundState> {
+fn filler_rows() -> impl View<PlaygroundState> {
     let rows: Vec<AnyView<PlaygroundState>> = (1..=64)
         .map(|i| {
             any(Padding(
@@ -179,10 +179,7 @@ fn filler_rows() -> AnyView<PlaygroundState> {
             ))
         })
         .collect();
-    any(FlexView::new(
-        Axis::Vertical,
-        rows.into_iter().map(inflexible).collect(),
-    ))
+    FlexView::new(Axis::Vertical, rows.into_iter().map(inflexible).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +213,7 @@ fn maybe_debug_fill(view: PlatformViewView) -> PlatformViewView {
 /// fringing probe, static so it doesn't cost a
 /// frame request at rest). `bump` feeds the slot's `params_json` — the
 /// updateParams stress toggle's payload.
-fn mode_b_slot(bump: u32) -> AnyView<PlaygroundState> {
+fn mode_b_slot(bump: u32) -> impl View<PlaygroundState> {
     let params = format!("{{\"bump\":{bump}}}");
     let slot = maybe_debug_fill(
         platform_view(DEMO_STREAM_VIEW_TYPE)
@@ -235,10 +232,10 @@ fn mode_b_slot(bump: u32) -> AnyView<PlaygroundState> {
             .small(),
     );
 
-    any(stack()
+    stack()
         .child(slot)
         .child(Align(Alignment::TOP_LEFT, opaque_btn))
-        .child(Align(Alignment::BOTTOM_RIGHT, alpha_btn)))
+        .child(Align(Alignment::BOTTOM_RIGHT, alpha_btn))
 }
 
 /// The second, independent slot (multi-slot stress toggle) — smaller, no
@@ -248,14 +245,13 @@ fn mode_b_slot(bump: u32) -> AnyView<PlaygroundState> {
 /// section — so reusing the same [`DEMO_STREAM_VIEW_TYPE`] factory for both is
 /// fine: it's resolved/cached once per `viewType` on the native side, then
 /// instantiated once per slot).
-fn second_slot() -> AnyView<PlaygroundState> {
-    let slot = maybe_debug_fill(
+fn second_slot() -> impl View<PlaygroundState> {
+    maybe_debug_fill(
         platform_view(DEMO_STREAM_VIEW_TYPE)
             .size(SECOND_SLOT_W, SECOND_SLOT_H)
             .params_json("{\"slot\":\"second\"}")
             .semantics_label("Second demo native stream slot"),
-    );
-    any(slot)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +260,7 @@ fn second_slot() -> AnyView<PlaygroundState> {
 
 /// See the page-fn contract in [`crate::pages`]. See the [module docs](self)
 /// for the full section breakdown.
-pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
+pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
     let slot_visible = slot_visible_sig().get();
     let bump = params_bump_sig().get();
     let second_visible = second_slot_visible_sig().get();
@@ -364,8 +360,8 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
     children.push(gap(12.0));
     children.push(inflexible(filler_rows()));
 
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         FlexView::new(Axis::Vertical, children),
-    ))
+    )
 }

@@ -5,7 +5,7 @@
 
 use std::any::Any;
 
-use frust::{AnyView, GetUntracked, RwSignal, any, component};
+use frust::{AnyView, ComponentView, GetUntracked, RwSignal, any, component};
 use frust_core::{
     FrameTime, InputEvent, PaintScene, PointerButton, PointerEvent, PointerPhase, RenderRoot, View,
 };
@@ -94,7 +94,7 @@ fn tap<S: 'static, V: View<S>>(root: &mut RenderRoot<S, V>, state: &mut S, rect:
     root.event(state, &pointer(PointerPhase::Up, center));
 }
 
-type AppRoot = RenderRoot<(), AnyView<()>>;
+type AppRoot = RenderRoot<(), ComponentView<ShadertoyApp>>;
 
 fn mounted_app() -> (Owner, AppRoot, (), TextContext) {
     let owner = setup();
@@ -102,8 +102,8 @@ fn mounted_app() -> (Owner, AppRoot, (), TextContext) {
     (owner, root, (), TextContext::new())
 }
 
-fn build(_s: &mut ()) -> AnyView<()> {
-    any(component(ShadertoyApp))
+fn build(_s: &mut ()) -> ComponentView<ShadertoyApp> {
+    component(ShadertoyApp)
 }
 
 #[test]

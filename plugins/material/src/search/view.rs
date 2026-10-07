@@ -353,6 +353,7 @@ impl<State: 'static> SearchViewContentView<State> {
     /// The header's live editable: the framework's baseline field with its own
     /// border and focus ring suppressed, spanning the header band, its glyphs
     /// inset clear of the back slot.
+    // erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn field_view(&self) -> AnyView<State> {
         let on_change = self.on_query_changed.clone();
         let (hpad, _) = self.mode.header_padding();

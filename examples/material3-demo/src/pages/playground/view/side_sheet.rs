@@ -91,7 +91,7 @@ fn content(
     title: &str,
     body: &str,
     show_actions: bool,
-) -> AnyView<Knobs> {
+) -> impl View<Knobs> + use<> {
     playground_body(
         vec![trigger_preview(
             nav.clone(),
@@ -110,7 +110,7 @@ fn trigger_preview(
     body: String,
     show_actions: bool,
 ) -> AnyView<Knobs> {
-    any(play_preview_card(
+    play_preview_card(
         "Trigger",
         tonal_button("Show side sheet", move |_: &mut Knobs| {
             let title = title.clone();
@@ -131,19 +131,16 @@ fn trigger_preview(
                 |_state: &mut Knobs, _result: PopResult| {},
             );
         }),
-    ))
+    )
 }
 
 /// The sheet's own body — a single padded paragraph, the reference's
 /// `Padding(EdgeInsets.all(24), Text(_body))`.
-fn sheet_body<State: 'static>(body: &str) -> AnyView<State> {
+fn sheet_body<State: 'static>(body: &str) -> impl View<State> {
     let theme = ambient_theme();
     let mut style = theme.type_scale.body_large.clone();
     style.color = theme.scheme().on_surface;
-    any(Padding(
-        EdgeInsets::all(24.0),
-        text(body.to_string()).style(style),
-    ))
+    Padding(EdgeInsets::all(24.0), text(body.to_string()).style(style))
 }
 
 /// The optional Reset/Apply footer — the reference's own two `M3EButton`s,
@@ -169,7 +166,7 @@ fn sheet_actions<State: 'static>(
 }
 
 fn controls(title: &str, body: &str, show_actions: bool) -> AnyView<Knobs> {
-    any(control_panel::<Knobs>(
+    control_panel::<Knobs>(
         "Sheet",
         vec![
             play_text_field::<Knobs>(
@@ -188,7 +185,7 @@ fn controls(title: &str, body: &str, show_actions: bool) -> AnyView<Knobs> {
                 |state: &mut Knobs, next: bool| state.show_actions.set(next),
             ),
         ],
-    ))
+    )
 }
 
 fn snippet(title: &str, body: &str, show_actions: bool) -> PlaySnippet {

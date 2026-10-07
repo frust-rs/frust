@@ -106,7 +106,7 @@ fn preview_row(
     value: Option<bool>,
     tristate: bool,
     error: bool,
-) -> AnyView<CheckboxPlaygroundState> {
+) -> impl View<CheckboxPlaygroundState> {
     let theme = ambient_theme();
     let mut body = theme.type_scale.body_large.clone();
     body.color = theme.scheme().on_surface;
@@ -130,11 +130,11 @@ fn preview_row(
         .error(error))
     };
 
-    any(row()
+    row()
         .child(control)
         .child(SizedBox::<CheckboxPlaygroundState>(Some(12.0), None))
         .child(text(label).style(body))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The paste-ready Frust equivalent of the current preview state.

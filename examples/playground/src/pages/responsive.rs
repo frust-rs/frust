@@ -58,8 +58,8 @@
 //! corner footprints for human verification.
 
 use frust::{
-    AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, Orientation, Padding, SizedBox,
-    Theme, WindowMetrics, any, column, inflexible, row, text, use_context,
+    Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, Orientation, Padding, SizedBox, Theme,
+    View, WindowMetrics, column, inflexible, row, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -159,65 +159,65 @@ fn orientation_label(orientation: Orientation) -> &'static str {
 /// One article's title + body, stacked — the unit both layouts below are
 /// built from (the narrow column repeats it top-to-bottom; the wide detail
 /// pane repeats it the same way in its own pane).
-fn article_body(article: &Article, muted: Color) -> AnyView<PlaygroundState> {
-    any(Padding(
+fn article_body(article: &Article, muted: Color) -> impl View<PlaygroundState> {
+    Padding(
         EdgeInsets::symmetric(0.0, 8.0),
         column()
             .child(text(article.title.to_string()).size(13.0))
             .child(text(article.body.to_string()).size(11.0).color(muted))
             .cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 /// Narrow layout: a single scrolling column with every article's title and
 /// body stacked in order — the shape any window under [`WIDE_BREAKPOINT_PX`]
 /// gets, including the `WindowMetrics`-absent fallback.
-fn narrow_layout(muted: Color) -> AnyView<PlaygroundState> {
+fn narrow_layout(muted: Color) -> impl View<PlaygroundState> {
     let items = ARTICLES
         .iter()
         .map(|article| inflexible(article_body(article, muted)))
         .collect();
-    any(Padding(
+    Padding(
         EdgeInsets::symmetric(16.0, 8.0),
         FlexView::new(Axis::Vertical, items).cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 /// Wide layout's master pane: just the article titles, narrow — a table of
 /// contents for the detail pane beside it.
-fn master_pane() -> AnyView<PlaygroundState> {
+fn master_pane() -> impl View<PlaygroundState> {
     let items = ARTICLES
         .iter()
         .map(|article| inflexible(text(article.title.to_string()).size(13.0)))
         .collect();
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         FlexView::new(Axis::Vertical, items).cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 /// Wide layout's detail pane: every article's full title + body, stacked.
-fn detail_pane(muted: Color) -> AnyView<PlaygroundState> {
+fn detail_pane(muted: Color) -> impl View<PlaygroundState> {
     let items = ARTICLES
         .iter()
         .map(|article| inflexible(article_body(article, muted)))
         .collect();
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         FlexView::new(Axis::Vertical, items).cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 /// Wide layout: a two-pane master/detail split — a **structural** switch from
 /// [`narrow_layout`]'s single column, not merely a padding/font tweak. Left
 /// pane (flex 1) is the titles-only master list; right pane (flex 2, wider)
 /// is the full detail content, side by side.
-fn wide_layout(muted: Color) -> AnyView<PlaygroundState> {
-    any(row().flex(1, master_pane()).flex(2, detail_pane(muted)))
+fn wide_layout(muted: Color) -> impl View<PlaygroundState> {
+    row().flex(1, master_pane()).flex(2, detail_pane(muted))
 }
 
 /// See the page-fn contract in [`crate::pages`].
-pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
+pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
     // Live theme read for the muted caption color, the same pattern every
     // other section page uses.
     let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
@@ -231,44 +231,38 @@ pub fn page(_state: &PlaygroundState) -> AnyView<PlaygroundState> {
         .map(|m| m.size.width >= WIDE_BREAKPOINT_PX)
         .unwrap_or(false);
 
-    let mut children: Vec<AnyView<PlaygroundState>> = Vec::new();
-    children.push(any(Padding(
-        EdgeInsets::symmetric(16.0, 12.0),
-        column()
-            .child(text("Responsive").size(24.0))
-            .child(
-                text(
-                    "Structurally reshapes between a single column and a two-pane \
-                     master/detail split, driven by WindowMetrics read live in build. \
-                     Resize the window across the breakpoint below to see it switch.",
+    column()
+        .child(Padding(
+            EdgeInsets::symmetric(16.0, 12.0),
+            column()
+                .child(text("Responsive").size(24.0))
+                .child(
+                    text(
+                        "Structurally reshapes between a single column and a two-pane \
+                         master/detail split, driven by WindowMetrics read live in build. \
+                         Resize the window across the breakpoint below to see it switch.",
+                    )
+                    .size(11.0)
+                    .color(muted),
                 )
-                .size(11.0)
-                .color(muted),
-            )
-            .child(SizedBox(None, Some(6.0)))
-            .child(text(status_line(metrics)).size(10.5).color(muted))
-            .child(text(corner_line(metrics)).size(10.5).color(muted))
-            .child(
-                text(
-                    "Orientation is derived from size (portrait when height >= width), \
-                     never platform-sourced — on a desktop window it flips as you resize \
-                     past square, independent of the breakpoint above. Expected, not a bug.",
+                .child(SizedBox(None, Some(6.0)))
+                .child(text(status_line(metrics)).size(10.5).color(muted))
+                .child(text(corner_line(metrics)).size(10.5).color(muted))
+                .child(
+                    text(
+                        "Orientation is derived from size (portrait when height >= width), \
+                         never platform-sourced — on a desktop window it flips as you resize \
+                         past square, independent of the breakpoint above. Expected, not a bug.",
+                    )
+                    .size(10.0)
+                    .color(muted),
                 )
-                .size(10.0)
-                .color(muted),
-            )
-            .cross_axis(CrossAxisAlignment::Start),
-    )));
-
-    children.push(if is_wide {
-        wide_layout(muted)
-    } else {
-        narrow_layout(muted)
-    });
-
-    any(FlexView::new(
-        Axis::Vertical,
-        children.into_iter().map(inflexible).collect(),
-    )
-    .cross_axis(CrossAxisAlignment::Start))
+                .cross_axis(CrossAxisAlignment::Start),
+        ))
+        .child(frust::either(
+            is_wide,
+            || wide_layout(muted),
+            || narrow_layout(muted),
+        ))
+        .cross_axis(CrossAxisAlignment::Start)
 }

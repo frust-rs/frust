@@ -195,14 +195,14 @@ impl Default for Knobs {
 }
 
 /// The "Calendar" preview: the inline calendar bound to `picker`.
-fn calendar_preview(picker: &DatePickerState) -> AnyView<Knobs> {
-    any(calendar_date_picker(
+fn calendar_preview(picker: &DatePickerState) -> impl View<Knobs> {
+    calendar_date_picker(
         picker.clone(),
         first_date(),
         last_date(),
         |s: &mut Knobs, next: DatePickerState| s.picker.set(next),
     )
-    .today(today()))
+    .today(today())
 }
 
 /// The "Pick date" trigger's pushed dialog — what [`show_date_picker`]'s
@@ -229,7 +229,7 @@ fn dialogs_preview(
     nav: NavigatorController<Knobs>,
     picker: RwSignal<DatePickerState>,
     confirmed: Option<MaterialDate>,
-) -> AnyView<Knobs> {
+) -> impl View<Knobs> {
     let theme = ambient_theme();
     let mut body_style = theme.type_scale.body_medium.clone();
     body_style.color = theme.scheme().on_surface_variant;
@@ -249,11 +249,11 @@ fn dialogs_preview(
         );
     });
 
-    any(column()
+    column()
         .child(trigger)
         .child(SizedBox::<Knobs>(None, Some(12.0)))
         .child(text(format!("Date: {date_label}")).style(body_style))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// The paste-ready "Calendar" snippet for the current picker state.
@@ -333,7 +333,7 @@ fn entry_mode_menu_panel(
     value: DatePickerEntryMode,
     anchor: &OverlayAnchor,
     open: bool,
-) -> AnyView<Knobs> {
+) -> impl View<Knobs> {
     play_enum_menu_panel(
         value,
         &ENTRY_MODES,
@@ -353,7 +353,7 @@ fn calendar_mode_menu_panel(
     value: DatePickerMode,
     anchor: &OverlayAnchor,
     open: bool,
-) -> AnyView<Knobs> {
+) -> impl View<Knobs> {
     play_enum_menu_panel(
         value,
         &CALENDAR_MODES,
@@ -383,7 +383,7 @@ fn content(
     entry_mode_open: bool,
     calendar_mode_anchor: &OverlayAnchor,
     calendar_mode_open: bool,
-) -> AnyView<Knobs> {
+) -> impl View<Knobs> + use<> {
     let picker_value = picker.get();
     let playground = playground_body(
         vec![
@@ -402,7 +402,7 @@ fn content(
             calendar_mode_open,
         )],
     );
-    any(stack()
+    stack()
         .child(playground)
         .child(entry_mode_menu_panel(
             picker_value.entry_mode,
@@ -413,7 +413,7 @@ fn content(
             picker_value.mode,
             calendar_mode_anchor,
             calendar_mode_open,
-        )))
+        ))
 }
 
 struct DatePickersPlayground;

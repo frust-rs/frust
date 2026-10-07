@@ -134,9 +134,7 @@ impl Default for RouteObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust_core::{
-        AnyView, BuildCtx, ChangeFlags, FrameTime, PaintScene, RenderRoot, View, any,
-    };
+    use frust_core::{BuildCtx, ChangeFlags, FrameTime, PaintScene, RenderRoot, View};
     use frust_reactive::ReactiveRuntime;
     use frust_widgets::{NavigatorController, NavigatorView, PushOptions, navigator};
     use kurbo::Size;
@@ -173,10 +171,10 @@ mod tests {
         }
         fn paint(&mut self, _ctx: &mut frust_core::PaintCtx, _scene: &mut dyn PaintScene) {}
     }
-    fn sized(w: f64, h: f64) -> AnyView<()> {
-        any(SizedLeaf {
+    fn sized(w: f64, h: f64) -> impl View<()> {
+        SizedLeaf {
             size: Size::new(w, h),
-        })
+        }
     }
 
     // A minimal `PaintScene` that just needs to exist for `paint` to run —

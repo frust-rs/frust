@@ -214,6 +214,7 @@ pub(super) fn placeholder<State: 'static>(
 /// [`SEGMENTED_ARM`]), which refuses for a different reason and so says a
 /// different thing. Logging is the caller's: each refusal reason logs once
 /// under its own `Once`.
+// erasure: keep result is a child of mixed-type if/else arms and AnyView-returning builders
 fn banner_placeholder<State: 'static>(
     size: Option<(f64, f64)>,
     label: String,
@@ -2310,6 +2311,7 @@ impl NativeTabBarView {
     /// Every branch — banner, translucency placeholder, native slot — sits
     /// inside the same inset-aware [`TabBarSlot`], so the bar's footprint is
     /// identical whichever one renders.
+    // erasure: keep result feeds the AnyView-typed slot builders and build_any call sites
     fn build_for_arm(
         &self,
         slot: SlotId,

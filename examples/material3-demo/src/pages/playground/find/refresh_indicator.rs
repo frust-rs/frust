@@ -194,13 +194,13 @@ fn on_refresh(state: &mut Knobs) {
 
 /// The scrollable content every kind wraps — the reference's `_listChild`
 /// (`M3ECardList.builder`, 12 rows). See the module docs' Content section.
-fn refresh_list_content() -> AnyView<Knobs> {
+fn refresh_list_content() -> impl View<Knobs> {
     let items = (1..=12).map(|n| {
         list_item::<Knobs>(format!("Item {n}"))
             .supporting("Pull down to refresh")
             .leading(icon(icons::REFRESH))
     });
-    any(card_list_items(items))
+    card_list_items(items)
 }
 
 /// Build the indicator `kind` selects, wired to the shared [`on_refresh`]
@@ -237,7 +237,7 @@ fn snippet_code(state: &Knobs) -> String {
 /// The playground body for the current knob state: [`playground_body`]'s
 /// scrollable content, plus the type picker's anchored panel at the outer
 /// `Stack` — see the module docs.
-fn body(state: &mut Knobs) -> AnyView<Knobs> {
+fn body(state: &mut Knobs) -> impl View<Knobs> {
     let theme = ambient_theme();
     let refreshing = state.refreshing.get();
     let refresh_count = state.refresh_count.get();
@@ -272,7 +272,7 @@ fn body(state: &mut Knobs) -> AnyView<Knobs> {
         |s: &mut Knobs, next: RefreshKind| s.kind = next,
     );
 
-    any(stack().child(content).child(panel))
+    stack().child(content).child(panel)
 }
 
 /// The nested [`Component`] this page owns its knobs in. See the page

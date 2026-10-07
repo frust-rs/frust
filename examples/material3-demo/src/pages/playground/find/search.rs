@@ -93,7 +93,7 @@ fn matches(query: &str) -> Vec<&'static str> {
 
 /// The suggestion list a docked/open view shows — tapping a row picks it and
 /// closes the view, the reference's `controller.closeView(name)`.
-fn suggestions(query: &str) -> AnyView<Knobs> {
+fn suggestions(query: &str) -> impl View<Knobs> {
     let rows: Vec<AnyView<Knobs>> = matches(query)
         .into_iter()
         .map(|name| {
@@ -103,7 +103,7 @@ fn suggestions(query: &str) -> AnyView<Knobs> {
             }))
         })
         .collect();
-    any(Column(rows))
+    Column(rows)
 }
 
 /// The FRUST snippet text for the current knob state — the reference's
@@ -143,17 +143,15 @@ fn preview(state: &Knobs) -> AnyView<Knobs> {
 
 /// The docked view itself, mounted at this page's own outer `Stack` — see
 /// the module docs.
-fn docked_panel(state: &Knobs) -> AnyView<Knobs> {
+fn docked_panel(state: &Knobs) -> impl View<Knobs> {
     let query = state.query.clone();
     let hint = state.hint.clone();
-    any(
-        search_view(query.clone(), |s: &mut Knobs, v: String| s.query = v)
-            .hint(hint)
-            .suggestions(suggestions(&query))
-            .on_dismiss(|s: &mut Knobs| s.open = false)
-            .docked(&state.anchor)
-            .open(state.open),
-    )
+    search_view(query.clone(), |s: &mut Knobs, v: String| s.query = v)
+        .hint(hint)
+        .suggestions(suggestions(&query))
+        .on_dismiss(|s: &mut Knobs| s.open = false)
+        .docked(&state.anchor)
+        .open(state.open)
 }
 
 /// The playground body for the current knob state.
@@ -187,7 +185,7 @@ fn body(state: &mut Knobs) -> AnyView<Knobs> {
     if state.use_anchor {
         any(stack().child(content).child(docked_panel(state)))
     } else {
-        content
+        any(content)
     }
 }
 

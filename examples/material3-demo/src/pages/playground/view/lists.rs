@@ -145,13 +145,13 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 /// The page body: the playground content plus the `Kind` dropdown panel it
 /// anchors, stacked so the menu paints above the scrollable content (the
 /// two-piece control's own contract — see [`crate::widgets::playground`]).
-fn body(state: &Knobs) -> AnyView<Knobs> {
+fn body(state: &Knobs) -> impl View<Knobs> {
     let content = playground_body(
         vec![any(play_preview_card("List", preview(state)))],
         vec![snippet(state)],
         vec![controls(state)],
     );
-    any(stack().child(content).child(kind_menu_panel(state)))
+    stack().child(content).child(kind_menu_panel(state))
 }
 
 /// The preview for the selected [`ListKind`] — the reference's own `switch`.
@@ -165,6 +165,7 @@ fn preview(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// One interactive row — the reference's `_ItemPreview`.
+// erasure: keep match-arm value in preview's four-arm match
 fn item_preview(state: &Knobs) -> AnyView<Knobs> {
     let mut row = list_item(state.headline.clone())
         .supporting(state.supporting.clone())
@@ -179,6 +180,7 @@ fn item_preview(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// Three card-backed rows — the reference's `_CardListPreview`.
+// erasure: keep match-arm value in preview's four-arm match
 fn card_list_preview(state: &Knobs) -> AnyView<Knobs> {
     let rows = (0..PREVIEW_ROWS).map(|index| {
         let mut row =
@@ -196,6 +198,7 @@ fn card_list_preview(state: &Knobs) -> AnyView<Knobs> {
 
 /// Three swipe-to-dismiss rows plus the commit caption — the reference's
 /// `_DismissiblePreview` (see the module docs for both divergences).
+// erasure: keep match-arm value in preview's four-arm match
 fn dismissible_preview(state: &Knobs) -> AnyView<Knobs> {
     let theme = ambient_theme();
     let semantic = theme
@@ -249,6 +252,7 @@ fn dismissed_caption(state: &Knobs) -> String {
 
 /// Two disclosure items in accordion mode — the reference's
 /// `_ExpandablePreview`.
+// erasure: keep match-arm value in preview's four-arm match
 fn expandable_preview(state: &Knobs) -> AnyView<Knobs> {
     let theme = ambient_theme();
     let mut body_style = theme.type_scale.body_medium.clone();
@@ -278,7 +282,7 @@ fn expandable_preview(state: &Knobs) -> AnyView<Knobs> {
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {
-    any(control_panel::<Knobs>(
+    control_panel::<Knobs>(
         "Content",
         vec![
             play_enum_menu_field::<Knobs, ListKind>(
@@ -311,11 +315,11 @@ fn controls(state: &Knobs) -> AnyView<Knobs> {
                 |state: &mut Knobs, next: bool| state.show_trailing = next,
             ),
         ],
-    ))
+    )
 }
 
 /// The "Kind" menu's popup half — mounted at this page's outer [`Stack`].
-fn kind_menu_panel(state: &Knobs) -> AnyView<Knobs> {
+fn kind_menu_panel(state: &Knobs) -> impl View<Knobs> {
     play_enum_menu_panel::<Knobs, ListKind>(
         state.kind,
         &KINDS,

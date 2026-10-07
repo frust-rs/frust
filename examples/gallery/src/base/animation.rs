@@ -59,7 +59,7 @@
 //! recorder's per-variant `surface` clear stays visible around it (see
 //! [`super`]'s "The variant has to reach the pixels").
 
-use frust_core::{AnyView, any};
+use frust_core::{AnyView, View, any};
 use frust_widgets::motion::patterns::FadeThrough;
 use frust_widgets::motion::switcher::pattern_switcher;
 use frust_widgets::motion::{animated_opacity, animated_scale};
@@ -79,7 +79,7 @@ use crate::case::{Case, Design};
 const SCROLL_VIEWPORT: (f64, f64) = (280.0, 196.0);
 
 fn animated_opacity_case() -> AnyView<()> {
-    framed(animated_opacity(
+    any(framed(animated_opacity(
         0.55,
         container(
             text("AnimatedOpacity — target 0.55")
@@ -89,11 +89,11 @@ fn animated_opacity_case() -> AnyView<()> {
         .fill(Color::from_rgb8(0x3B, 0x82, 0xF6))
         .radius(16.0)
         .size_centered(300.0, 160.0),
-    ))
+    )))
 }
 
 fn animated_scale_case() -> AnyView<()> {
-    framed(animated_scale(
+    any(framed(animated_scale(
         1.15,
         container(
             text("AnimatedScale — target 1.15x")
@@ -103,11 +103,11 @@ fn animated_scale_case() -> AnyView<()> {
         .fill(Color::from_rgb8(0x22, 0xC5, 0x5E))
         .radius(16.0)
         .size_centered(240.0, 140.0),
-    ))
+    )))
 }
 
 fn pattern_switcher_case() -> AnyView<()> {
-    framed(pattern_switcher(
+    any(framed(pattern_switcher(
         "gallery-card",
         FadeThrough,
         container(
@@ -118,14 +118,14 @@ fn pattern_switcher_case() -> AnyView<()> {
         .fill(Color::from_rgb8(0xA8, 0x55, 0xF7))
         .radius(16.0)
         .size_centered(280.0, 150.0),
-    ))
+    )))
 }
 
-fn physics_row(label: &'static str, tint: Color) -> AnyView<()> {
-    any(container(text(label).color(Color::WHITE).size(14.0))
+fn physics_row(label: &'static str, tint: Color) -> impl View<()> {
+    container(text(label).color(Color::WHITE).size(14.0))
         .fill(tint)
         .radius(8.0)
-        .size_centered(280.0, 44.0))
+        .size_centered(280.0, 44.0)
 }
 
 fn physics_case() -> AnyView<()> {
@@ -137,10 +137,10 @@ fn physics_case() -> AnyView<()> {
         physics_row("Row 5", Color::from_rgb8(0x33, 0x41, 0x55)),
         physics_row("Row 6", Color::from_rgb8(0x3B, 0x82, 0xF6)),
     ];
-    framed(
+    any(framed(
         SizedBox(Some(SCROLL_VIEWPORT.0), Some(SCROLL_VIEWPORT.1))
             .child(scroll_view(Column(rows)).physics(Bouncing::new())),
-    )
+    ))
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.

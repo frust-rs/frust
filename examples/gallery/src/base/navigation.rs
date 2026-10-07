@@ -21,7 +21,7 @@ const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 /// shows the "before" state: a tagged avatar swatch a `navigator` push/pop
 /// would later morph, painted exactly as it renders at rest.
 fn hero_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(hero(
                 "preview-avatar",
@@ -33,7 +33,7 @@ fn hero_case() -> AnyView<()> {
             .child(SizedBox(None, Some(12.0)))
             .child(text("hero(\"preview-avatar\", ..) — morphs across a matching tag").size(12.0))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 /// A `navigator` is a retained page stack (see its own docs); a single pure

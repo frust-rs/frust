@@ -52,7 +52,7 @@
 //! their own retained widget (S1's `BubbleChartWidget` owns the physics), so a
 //! new scenario needs no `BenchState` field of its own.
 
-use frust::{AnyView, Get, RwSignal, Set, any, deep_links, text};
+use frust::{AnyView, Get, RwSignal, Set, View, deep_links, text};
 
 #[cfg(feature = "db")]
 pub mod d1_db_write;
@@ -297,13 +297,13 @@ pub fn index_from_id(id: &str) -> Option<usize> {
 
 /// A shared labeled placeholder view for a not-yet-implemented scenario
 /// stub — a centered title so a desktop run visibly switches to it.
-pub fn placeholder(scenario: &dyn Scenario) -> AnyView<BenchState> {
-    any(text(format!(
+pub fn placeholder(scenario: &dyn Scenario) -> impl View<BenchState> {
+    text(format!(
         "{} — {}\n(scenario stub — not yet implemented)",
         scenario.id().to_uppercase(),
         scenario.title(),
     ))
-    .size(20.0))
+    .size(20.0)
 }
 
 #[cfg(test)]

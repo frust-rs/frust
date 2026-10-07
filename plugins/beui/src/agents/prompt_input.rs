@@ -325,6 +325,7 @@ impl<State: 'static> PromptInputView<State> {
 
     /// The wrapped baseline field, configured with its own chrome suppressed
     /// and the Enter contract set.
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn field(&self) -> AnyView<State> {
         let on_change = self.on_change.clone();
         // The prompt and placeholder keep the baseline `text_input`'s own

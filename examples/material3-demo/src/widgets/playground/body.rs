@@ -1,7 +1,7 @@
 //! Scrollable playground body: preview(s), optional code snippets, then
 //! controls — the reference's `PlaygroundBody`.
 
-use frust::{AnyView, Column, EdgeInsets, Padding, SizedBox, any, scroll_view, text};
+use frust::{AnyView, Column, EdgeInsets, Padding, SizedBox, View, any, scroll_view, text};
 use frust_material::MaterialSpacing;
 
 use super::code_snippet::play_code_snippet;
@@ -15,7 +15,7 @@ pub fn playground_body<State: 'static>(
     previews: Vec<AnyView<State>>,
     snippets: Vec<PlaySnippet>,
     controls: Vec<AnyView<State>>,
-) -> AnyView<State> {
+) -> impl View<State> {
     let theme = ambient_theme();
     let mut section = theme.type_scale.title_medium.clone();
     section.color = theme.scheme().on_surface;
@@ -40,7 +40,7 @@ pub fn playground_body<State: 'static>(
         rows.extend(controls);
     }
 
-    any(scroll_view(Padding(
+    scroll_view(Padding(
         EdgeInsets {
             left: MaterialSpacing::LG,
             top: MaterialSpacing::SM,
@@ -48,7 +48,7 @@ pub fn playground_body<State: 'static>(
             bottom: MaterialSpacing::XXL,
         },
         Column(rows),
-    )))
+    ))
 }
 
 #[cfg(test)]

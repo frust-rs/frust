@@ -437,6 +437,7 @@ impl<State: 'static> FeedbackWidgetView<State> {
 
     /// The wrapped message field, configured to match `rows={3}` with its own
     /// chrome suppressed (see the [module docs](self)).
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn field_view(&self) -> AnyView<State> {
         let on_change = self.on_message_change.clone();
         any(
@@ -456,6 +457,7 @@ impl<State: 'static> FeedbackWidgetView<State> {
 
     /// The `Cancel` button — a secondary pill that reports
     /// [`FeedbackStatus::Idle`].
+    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn cancel_view(&self) -> AnyView<State> {
         let on_status = self.on_status_change.clone();
         any(

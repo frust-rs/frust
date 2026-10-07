@@ -19,7 +19,7 @@ use frust::motion::switcher::pattern_switcher;
 use frust::{
     Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
     GetUntracked, MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme,
-    TransitionSpec, Update, any, button, column, inflexible, row, text, use_context,
+    TransitionSpec, Update, View, any, button, column, inflexible, row, text, use_context,
 };
 use frust_glyph::TermLine;
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
@@ -88,13 +88,13 @@ local_sig!(pattern_sig, usize, 3); // 10 pattern picker (default GlyphSlide)
 local_sig!(boot_replay_sig, usize, 0); // 11 boot sequence
 
 /// A demo heading in accent amber.
-fn label(s: impl Into<String>) -> AnyView<CatalogState> {
-    any(text(s).size(13.0).color(amber()))
+fn label(s: impl Into<String>) -> impl View<CatalogState> {
+    text(s).size(13.0).color(amber())
 }
 
 /// A muted per-demo caption (timing notes, reduced-motion pointer).
-fn caption(s: impl Into<String>) -> AnyView<CatalogState> {
-    any(text(s).size(11.0).color(muted()))
+fn caption(s: impl Into<String>) -> impl View<CatalogState> {
+    text(s).size(11.0).color(muted())
 }
 
 /// A fixed-height vertical spacer between demo blocks.
@@ -223,11 +223,11 @@ fn demo_modal() -> FlexChild<CatalogState> {
                     glyph_dialog()
                         .title("Confirm action")
                         .body("Enters at 220ms; exits at 150ms.")
-                        .actions(vec![
-                            any(button("Confirm", |s: &mut CatalogState| s.nav.pop())),
-                            any(button("Cancel", |s: &mut CatalogState| s.nav.pop())
-                                .style(ButtonStyle::Ghost)),
-                        ])
+                        .actions((
+                            button("Confirm", |s: &mut CatalogState| s.nav.pop()),
+                            button("Cancel", |s: &mut CatalogState| s.nav.pop())
+                                .style(ButtonStyle::Ghost),
+                        ))
                 },
                 |_s: &mut CatalogState, _r| {},
             );
@@ -238,12 +238,12 @@ fn demo_modal() -> FlexChild<CatalogState> {
 /// See `overlays.rs`'s twin: bottom-pinned, full width on phones, capped at
 /// 640dp + centered on larger screens (M3/Flutter convention, device-gate
 /// verified). The glyph_card supplies the panel surface.
-fn sheet_scaffold(panel: AnyView<CatalogState>) -> AnyView<CatalogState> {
-    any(Align(
+fn sheet_scaffold(panel: AnyView<CatalogState>) -> impl View<CatalogState> {
+    Align(
         Alignment { x: 0.0, y: 1.0 },
         SizedBox(Some(SHEET_MAX_WIDTH), None)
             .child(frust_glyph::glyph_card::<CatalogState>().desc(panel)),
-    ))
+    )
 }
 
 /// M3 modal-bottom-sheet max width, logical px (m3.material.io specs;
@@ -362,13 +362,13 @@ fn demo_log() -> FlexChild<CatalogState> {
 }
 
 /// A single numbered demo card for the screen-transition switcher (10).
-fn card_view(n: usize) -> AnyView<CatalogState> {
-    any(Padding(
+fn card_view(n: usize) -> impl View<CatalogState> {
+    Padding(
         EdgeInsets::all(24.0),
         text(format!("Demo card {}", n + 1))
             .size(18.0)
             .color(amber()),
-    ))
+    )
 }
 
 /// 10 screen transition: a mini `pattern_switcher` framed as Next/Back between
@@ -467,13 +467,13 @@ fn demo_boot() -> FlexChild<CatalogState> {
 }
 
 /// See the page-fn contract in [`crate::pages`].
-pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
+pub fn page(state: &CatalogState) -> impl View<CatalogState> {
     // Durations/easings come from the canonical Glyph motion scheme (the app
     // forces `frust_glyph::baseline()`; only its `reduce_motion` flag toggles,
     // never these token values).
     let motion = frust_glyph::baseline().motion;
 
-    any(column()
+    column()
         .push(token_table(&motion))
         .push(gap(8.0))
         .push(reduced_motion_note(state))
@@ -498,5 +498,5 @@ pub fn page(state: &CatalogState) -> AnyView<CatalogState> {
         .push(gap(8.0))
         .push(demo_screen())
         .push(gap(8.0))
-        .push(demo_boot()))
+        .push(demo_boot())
 }

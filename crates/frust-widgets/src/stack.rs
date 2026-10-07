@@ -8,7 +8,7 @@
 
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, ViewSeq, Widget, any,
 };
 use kurbo::{Point, Size};
 
@@ -19,11 +19,10 @@ pub struct StackView<State: 'static> {
 
 /// Overlay `children` in a z-order stack (first child at the bottom).
 ///
-/// `children` holds one view type; each item is erased here, so a homogeneous
-/// list needs no `any()`. A mixed-type list still erases per item, and a bare
-/// empty list needs its item type spelled out. The parameter stays a `Vec` so an
-/// un-annotated `.collect()` argument keeps inferring; for any other iterable,
-/// use [`stack`] with `.children(..)`.
+/// `children` is any [`ViewSeq`]: a `Vec`/array of views, a tuple of
+/// mixed view types (positional, up to 12 and nestable), an `Option` (`None`
+/// drops the slot), or `views(iter)` for an iterator. Every element is erased
+/// once, here.
 ///
 /// ```
 /// use frust_core::any;
@@ -36,10 +35,8 @@ pub struct StackView<State: 'static> {
 /// # let _ = demo();
 /// ```
 #[allow(non_snake_case)]
-pub fn Stack<State: 'static, V: View<State>>(children: Vec<V>) -> StackView<State> {
-    StackView {
-        children: children.into_iter().map(any).collect(),
-    }
+pub fn Stack<State: 'static, M>(children: impl ViewSeq<State, M>) -> StackView<State> {
+    stack().children(children)
 }
 
 /// An empty z-order stack, ready for fluent children: no `any()` needed.
@@ -56,13 +53,12 @@ impl<State: 'static> StackView<State> {
         self
     }
 
-    /// Append every item of `iter` as a child, in order.
-    pub fn children<I, V>(mut self, iter: I) -> Self
-    where
-        I: IntoIterator<Item = V>,
-        V: View<State>,
-    {
-        self.children.extend(iter.into_iter().map(any));
+    /// Append every element of `children` on top of the existing ones, in order.
+    ///
+    /// Accepts any [`ViewSeq`] (`Vec`, array, tuple, `Option`, nested, or
+    /// `views(iter)`); tuples are positional and a `None` element drops its slot.
+    pub fn children<M>(mut self, children: impl ViewSeq<State, M>) -> Self {
+        children.extend_views(&mut self.children);
         self
     }
 

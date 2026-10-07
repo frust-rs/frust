@@ -19,6 +19,7 @@ fn value_label(label: &str, value: f64, divisions: Option<u32>) -> String {
 
 /// A row controlling `value` over `range`, continuous unless `divisions`
 /// steps it.
+// erasure: keep element of a heterogeneous Vec<AnyView> list (control_panel children)
 pub fn play_slider<State: 'static>(
     label: impl Into<String>,
     value: f64,

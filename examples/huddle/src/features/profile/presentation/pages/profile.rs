@@ -21,8 +21,8 @@
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Button, CrossAxisAlignment, SizedBox, Theme, any, column, hero, row,
-    text, use_context,
+    Align, Alignment, AnyView, Button, CrossAxisAlignment, SizedBox, Theme, View, any, column,
+    hero, row, text, use_context,
 };
 use frust_material::filled_card;
 
@@ -42,12 +42,12 @@ const AVATAR_FONT: f32 = 28.0;
 /// parsed against the mock dataset's numeric ids).
 pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
     let Some(id) = user_id.parse::<u32>().ok() else {
-        return unknown_user_screen(&user_id);
+        return any(unknown_user_screen(&user_id));
     };
     let repo = use_context::<Arc<dyn ProfileRepository + Send + Sync>>()
         .expect("ProfileRepository is provided by lib.rs's composition root");
     let Some(profile) = ProfileController::load(repo.as_ref(), id) else {
-        return unknown_user_screen(&user_id);
+        return any(unknown_user_screen(&user_id));
     };
 
     // Status-dot color from the theme's semantic roles (never a hardcoded
@@ -103,7 +103,7 @@ pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
         .child(actions)
         .cross_axis(CrossAxisAlignment::Center));
 
-    scaffold(profile.user.name, body)
+    any(scaffold(profile.user.name, body))
 }
 
 /// A rounded, theme-colored initials tile — the avatar/workspace-tile visual
@@ -115,16 +115,20 @@ pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
 /// `frust` widget vocabulary (only [`filled_card`]'s uniform corner
 /// radius), so this is a uniformly-rounded square tile rather than a true
 /// circular avatar — a documented simplification, not an oversight.
-fn initials_tile<State: 'static>(initials: &str, tile_size: f64, font_size: f32) -> AnyView<State> {
-    any(filled_card(
+fn initials_tile<State: 'static>(
+    initials: &str,
+    tile_size: f64,
+    font_size: f32,
+) -> impl View<State> {
+    filled_card(
         SizedBox(Some(tile_size), Some(tile_size))
             .child(Align(Alignment::CENTER, text(initials).size(font_size))),
-    ))
+    )
 }
 
 /// Fallback for an id that doesn't resolve against the mock dataset (an
 /// invalid `/user/:id` deep link/param) — renders instead of panicking.
-fn unknown_user_screen(user_id: &str) -> AnyView<HuddleState> {
+fn unknown_user_screen(user_id: &str) -> impl View<HuddleState> {
     scaffold(
         "Profile",
         placeholder_body(&format!("No such user: {user_id}")),

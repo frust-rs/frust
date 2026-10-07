@@ -563,6 +563,7 @@ impl Widget for SheetWidget {
 /// `filled_card`, wrapped in a [`GestureDetector`] firing `on_tap`. Used for the
 /// long-press context menu and the attachment sheet. Meant to sit inside a
 /// [`CrossAxisAlignment::Stretch`] column so the card fills the panel width.
+// erasure: keep rows feed a caller-built Vec<AnyView<State>> of sheet rows (stored, heterogeneous callers)
 pub fn sheet_action_row<State, F>(
     leading: IconSource,
     label: impl Into<String>,
@@ -592,7 +593,7 @@ where
 /// tappable text cells over [`REACTION_EMOJI`]. Tapping a cell calls
 /// `on_pick(state, emoji)` — the caller toggles the reaction (or inserts the
 /// emoji into the composer) and closes the sheet.
-pub fn emoji_grid<State, F>(on_pick: F) -> AnyView<State>
+pub fn emoji_grid<State, F>(on_pick: F) -> impl View<State>
 where
     State: 'static,
     F: Fn(&mut State, &'static str) + Clone + 'static,
@@ -626,10 +627,10 @@ where
             FlexView::new(Axis::Horizontal, cells).cross_axis(CrossAxisAlignment::Center),
         ));
     }
-    any(Padding(
+    Padding(
         EdgeInsets::symmetric(0.0, 8.0),
         FlexView::new(Axis::Vertical, rows).cross_axis(CrossAxisAlignment::Stretch),
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -872,15 +873,15 @@ impl Widget for DragUpDismissWidget {
 /// Assemble sheet rows into the stretched column the [`sheet`] panel expects
 /// (each row fills the panel width). A small convenience over building the
 /// [`FlexView`] inline at every call site.
-pub fn action_menu<State: 'static>(rows: Vec<AnyView<State>>) -> AnyView<State> {
-    any(Padding(
+pub fn action_menu<State: 'static>(rows: Vec<AnyView<State>>) -> impl View<State> {
+    Padding(
         EdgeInsets::symmetric(0.0, 8.0),
         FlexView::new(
             Axis::Vertical,
             rows.into_iter().map(inflexible).collect::<Vec<_>>(),
         )
         .cross_axis(CrossAxisAlignment::Stretch),
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------

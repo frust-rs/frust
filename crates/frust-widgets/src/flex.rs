@@ -12,7 +12,7 @@
 
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, ViewSeq, Widget, any,
 };
 use kurbo::{Point, Rect, Size};
 
@@ -199,13 +199,23 @@ impl<State: 'static> FlexView<State> {
         self
     }
 
-    /// Append every item of `iter` as an inflexible child.
-    pub fn children<I, V>(mut self, iter: I) -> Self
-    where
-        I: IntoIterator<Item = V>,
-        V: View<State>,
-    {
-        self.children.extend(iter.into_iter().map(inflexible));
+    /// Append every element of `children` as an inflexible child.
+    ///
+    /// Accepts any [`ViewSeq`]: a `Vec`/array of views, a tuple of mixed view
+    /// types, an `Option`, nested sequences, or `views(iter)` for an iterator.
+    /// Tuples are positional: a `None` element drops its slot and nested
+    /// sequences flatten in order. For a keyed list use [`FlexView::keyed`] per
+    /// child (the all-or-nothing rule of [`keyed`] still applies; a tuple does
+    /// not carry keys).
+    pub fn children<M>(mut self, children: impl ViewSeq<State, M>) -> Self {
+        let mut erased = Vec::new();
+        children.extend_views(&mut erased);
+        self.children
+            .extend(erased.into_iter().map(|view| FlexChild {
+                view,
+                flex: 0,
+                key: None,
+            }));
         self
     }
 
@@ -266,12 +276,11 @@ pub fn row<State: 'static>() -> FlexView<State> {
 /// A horizontal flex (`Axis::Horizontal`) of inflexible children — the common
 /// sugar. Use [`FlexView::new`] with [`flexible`] children when some should expand.
 ///
-/// `children` holds one view type; each item is erased here, so a homogeneous
-/// list needs no `any()`. A mixed-type list still erases per item
-/// (`vec![any(a), any(b)]`), and a bare empty list needs its item type spelled
-/// out (`Vec::<AnyView<State>>::new()`). The parameter stays a `Vec` so an
-/// un-annotated `.collect()` argument keeps inferring; for any other iterable,
-/// use [`row`] with `.children(..)`.
+/// `children` is any [`ViewSeq`]: a `Vec`/array of views, a tuple of
+/// mixed view types (`(a, b, c)`, positional, up to 12 and nestable), an
+/// `Option` (`None` drops the slot), or `views(iter)` for an iterator. Every
+/// element is erased once, here. A bare empty list needs its item type spelled
+/// out (`Vec::<AnyView<State>>::new()`).
 ///
 /// ```
 /// use frust_core::any;
@@ -284,22 +293,18 @@ pub fn row<State: 'static>() -> FlexView<State> {
 /// # let _ = demo();
 /// ```
 #[allow(non_snake_case)]
-pub fn Row<State: 'static, V: View<State>>(children: Vec<V>) -> FlexView<State> {
-    FlexView::new(
-        Axis::Horizontal,
-        children.into_iter().map(inflexible).collect(),
-    )
+pub fn Row<State: 'static, M>(children: impl ViewSeq<State, M>) -> FlexView<State> {
+    FlexView::new(Axis::Horizontal, Vec::new()).children(children)
 }
 
 /// A vertical flex (`Axis::Vertical`) of inflexible children — the common sugar.
 /// Use [`FlexView::new`] with [`flexible`] children when some should expand.
 ///
-/// `children` holds one view type; each item is erased here, so a homogeneous
-/// list needs no `any()`. A mixed-type list still erases per item
-/// (`vec![any(a), any(b)]`), and a bare empty list needs its item type spelled
-/// out (`Vec::<AnyView<State>>::new()`). The parameter stays a `Vec` so an
-/// un-annotated `.collect()` argument keeps inferring; for any other iterable,
-/// use [`column`] with `.children(..)`.
+/// `children` is any [`ViewSeq`]: a `Vec`/array of views, a tuple of
+/// mixed view types (`(a, b, c)`, positional, up to 12 and nestable), an
+/// `Option` (`None` drops the slot), or `views(iter)` for an iterator. Every
+/// element is erased once, here. A bare empty list needs its item type spelled
+/// out (`Vec::<AnyView<State>>::new()`).
 ///
 /// ```
 /// use frust_core::any;
@@ -312,11 +317,8 @@ pub fn Row<State: 'static, V: View<State>>(children: Vec<V>) -> FlexView<State> 
 /// # let _ = demo();
 /// ```
 #[allow(non_snake_case)]
-pub fn Column<State: 'static, V: View<State>>(children: Vec<V>) -> FlexView<State> {
-    FlexView::new(
-        Axis::Vertical,
-        children.into_iter().map(inflexible).collect(),
-    )
+pub fn Column<State: 'static, M>(children: impl ViewSeq<State, M>) -> FlexView<State> {
+    FlexView::new(Axis::Vertical, Vec::new()).children(children)
 }
 
 /// The retained widget for a [`FlexView`]. Holds a parallel `children`/`flex`
@@ -904,7 +906,7 @@ mod tests {
                         painted: counts[i].clone(),
                     })
                 })
-                .collect(),
+                .collect::<Vec<_>>(),
         );
         let mut counter = 0u64;
         let mut w = view.build(&mut ctx(&mut counter));
@@ -1127,8 +1129,8 @@ mod tests {
     }
 
     /// Erase a [`Captor`] tagged `id` into an `AnyView<Vec<u32>>`.
-    fn captor(id: u32) -> AnyView<Vec<u32>> {
-        any(Captor { id })
+    fn captor(id: u32) -> impl View<Vec<u32>> {
+        Captor { id }
     }
 
     impl View<Vec<u32>> for Captor {

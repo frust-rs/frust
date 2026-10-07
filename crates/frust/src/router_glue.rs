@@ -299,7 +299,7 @@ pub fn router_with_deep_links<State: 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust_core::{AnyView, FrameTime, PaintScene, RenderRoot, View, any};
+    use frust_core::{FrameTime, PaintScene, RenderRoot, View};
     use frust_reactive::{ReactiveRuntime, push_deep_link};
     use frust_widgets::{NavigatorView, Route, navigator};
     use kurbo::{Point, Size};
@@ -343,10 +343,10 @@ mod tests {
             scene.fill_rect(ctx.origin(), ctx.size(), peniko::Color::BLACK);
         }
     }
-    fn sized(w: f64, h: f64) -> AnyView<()> {
-        any(SizedLeaf {
+    fn sized(w: f64, h: f64) -> impl View<()> {
+        SizedLeaf {
             size: Size::new(w, h),
-        })
+        }
     }
 
     #[derive(Default)]

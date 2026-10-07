@@ -30,7 +30,7 @@ use frust::authoring::text::TextStyle;
 use frust::authoring::{
     Action, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Role,
-    SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, Widget, any,
+    SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, ViewSeq, Widget, any,
 };
 use frust::{Theme, text};
 use kurbo::{Line, Shape};
@@ -60,12 +60,15 @@ pub struct BreadcrumbListView<State: 'static> {
 
 /// `BreadcrumbList`: the row itself, `gap-1.5`, `items-center`.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn breadcrumb_list<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn breadcrumb_list<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> BreadcrumbListView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     BreadcrumbListView {
         children,
         is_nav: false,
@@ -75,12 +78,15 @@ pub fn breadcrumb_list<State: 'static, V: View<State>>(
 /// `Breadcrumb`: the same row, with an `aria-label="breadcrumb"`
 /// `Role::Navigation` semantics wrapper.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn breadcrumb<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn breadcrumb<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> BreadcrumbListView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     BreadcrumbListView {
         children,
         is_nav: true,
@@ -714,11 +720,11 @@ mod tests {
     /// glyphs) and the current page (a `text` child).
     #[cfg(feature = "bundled-fonts")]
     fn trail(_: &mut ()) -> BreadcrumbListView<()> {
-        breadcrumb(vec![
-            any(breadcrumb_link::<()>("Home")),
-            any(breadcrumb_separator::<()>()),
-            any(breadcrumb_page("Settings")),
-        ])
+        breadcrumb((
+            breadcrumb_link::<()>("Home"),
+            breadcrumb_separator::<()>(),
+            breadcrumb_page("Settings"),
+        ))
     }
 
     #[cfg(feature = "bundled-fonts")]

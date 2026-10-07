@@ -250,8 +250,8 @@ workspaces excluded from the root one (*Version-Pin Policy*) — the same shape 
 `examples/glyph-catalog`, `examples/web-gallery` and `examples/web-spike` gate under, per their own
 READMEs (the latter two against the wasm32 target). `huddle` and `clean-signals-frust` take
 `clean-signals` from crates.io, so no local sibling checkout is needed. `design-system-sample`
-additionally needs `cargo tree -e features -i frust -p sample-app` (from its own directory) to print
-**no** `frust feature "..."` line — the out-of-tree-realism check that this workspace resolves
+additionally needs `cargo tree -e features -i frust-ui -p sample-app` (from its own directory) to print
+**no** `frust-ui feature "..."` line — the out-of-tree-realism check that this workspace resolves
 `frust` exactly as a real third-party design-system crate would, with nothing re-enabled by feature
 unification. Separate from `frust build apk`/`run`'s pipeline gate (*Run*).
 

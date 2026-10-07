@@ -51,7 +51,7 @@ use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextType,
-    Vec2, View, Widget, any, build_child, rebuild_child, rebuild_children, route_event,
+    Vec2, View, ViewSeq, Widget, any, build_child, rebuild_child, rebuild_children, route_event,
     route_event_single, teardown_child, visit_children,
 };
 
@@ -129,12 +129,15 @@ pub struct MessageGroupView<State: 'static> {
 
 /// Stack `children` (typically [`message`] rows) in a `gap-2` column.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn message_group<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn message_group<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> MessageGroupView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     MessageGroupView { children }
 }
 
@@ -216,12 +219,13 @@ pub struct MessageView<State: 'static> {
 /// A message row over `children` — typically an avatar box and a content
 /// column, in that (measurement) order.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn message<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> MessageView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn message<State: 'static, M>(children: impl ViewSeq<State, M>) -> MessageView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     MessageView {
         children,
         align: MessageAlign::default(),
@@ -478,12 +482,15 @@ pub struct MessageContentView<State: 'static> {
 /// `group-data-[align=end]/message:*:self-end` itself rather than being placed
 /// by this column.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn message_content<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn message_content<State: 'static, M>(
+    children: impl ViewSeq<State, M>,
 ) -> MessageContentView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     MessageContentView { children }
 }
 
@@ -757,13 +764,13 @@ mod tests {
     /// A row of the shape every chat screen builds: the avatar box (fixed) and
     /// the content column (fills the rest).
     fn row(align: MessageAlign) -> MessageView<()> {
-        message(vec![
-            any(message_avatar(avatar::<()>().fallback("ED"))),
-            any(message_content(vec![bubble("hello").align(match align {
+        message((
+            message_avatar(avatar::<()>().fallback("ED")),
+            message_content(vec![bubble("hello").align(match align {
                 MessageAlign::Start => BubbleAlign::Start,
                 MessageAlign::End => BubbleAlign::End,
-            })])),
-        ])
+            })]),
+        ))
         .align(align)
     }
 
@@ -821,14 +828,10 @@ mod tests {
     fn the_row_bottom_aligns_its_children() {
         // A tall content column and a short avatar box: `self-end` puts the
         // avatar's bottom edge on the row's.
-        let view: MessageView<()> = message(vec![
-            any(message_avatar(avatar::<()>().fallback("ED"))),
-            any(message_content(vec![
-                bubble("one"),
-                bubble("two"),
-                bubble("three"),
-            ])),
-        ]);
+        let view: MessageView<()> = message((
+            message_avatar(avatar::<()>().fallback("ED")),
+            message_content(vec![bubble("one"), bubble("two"), bubble("three")]),
+        ));
         let mut widget = build(&view);
         let size = layout(&mut widget, ROW);
         let avatar_pod = &widget.children[0];
@@ -868,11 +871,11 @@ mod tests {
 
     #[test]
     fn the_content_column_stretches_its_blocks_and_gaps_them_by_2_5() {
-        let view: MessageContentView<()> = message_content(vec![
-            any(message_header("Ed")),
-            any(bubble("hello")),
-            any(message_footer("just now")),
-        ]);
+        let view: MessageContentView<()> = message_content((
+            message_header("Ed"),
+            bubble("hello"),
+            message_footer("just now"),
+        ));
         let mut widget = build(&view);
         let size = layout(&mut widget, ROW);
         assert_eq!(size.width, ROW.width);
@@ -951,13 +954,10 @@ mod tests {
         let mut tcx = TextContext::new();
         let mut logic = |_s: &mut AppState| {
             message_group(vec![
-                message(vec![
-                    any(message_avatar(avatar::<AppState>().fallback("ED"))),
-                    any(message_content(vec![
-                        any(message_header("Ed")),
-                        any(message_footer("just now")),
-                    ])),
-                ])
+                message((
+                    message_avatar(avatar::<AppState>().fallback("ED")),
+                    message_content((message_header("Ed"), message_footer("just now"))),
+                ))
                 .align(MessageAlign::End),
             ])
         };
@@ -990,10 +990,10 @@ mod tests {
     /// every painted glyph run is one this module shapes.
     #[cfg(feature = "bundled-fonts")]
     fn meta_lines(_: &mut ()) -> MessageGroupView<()> {
-        message_group(vec![message(vec![message_content(vec![
-            any(message_header("Ed")),
-            any(message_footer("just now")),
-        ])])])
+        message_group(vec![message(vec![message_content((
+            message_header("Ed"),
+            message_footer("just now"),
+        ))])])
     }
 
     #[cfg(feature = "bundled-fonts")]

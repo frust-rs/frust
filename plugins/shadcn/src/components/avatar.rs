@@ -17,7 +17,7 @@
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, Point, Role, SemanticsCtx, Size, ThemeTextColor,
-    ThemeTextType, View, Widget, any,
+    ThemeTextType, View, ViewSeq, Widget, any,
 };
 use frust::{Image, ImageFit, ImageSource, Theme, text};
 use peniko::Color;
@@ -312,12 +312,13 @@ pub struct AvatarGroupView<State: 'static> {
 /// Create an overlapping avatar row from `children` (typically [`avatar`]
 /// views).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn avatar_group<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AvatarGroupView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn avatar_group<State: 'static, M>(children: impl ViewSeq<State, M>) -> AvatarGroupView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     AvatarGroupView { children }
 }
 
@@ -601,10 +602,8 @@ mod tests {
 
     #[test]
     fn group_overlaps_members_by_8px() {
-        let view: AvatarGroupView<()> = avatar_group(vec![
-            any(avatar::<()>().fallback("A")),
-            any(avatar::<()>().fallback("B")),
-        ]);
+        let view: AvatarGroupView<()> =
+            avatar_group((avatar::<()>().fallback("A"), avatar::<()>().fallback("B")));
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         let mut tcx = TextContext::new();

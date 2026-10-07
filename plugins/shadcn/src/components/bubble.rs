@@ -31,8 +31,8 @@
 use frust::Theme;
 use frust::authoring::text::TextStyle;
 use frust::authoring::{
-    AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Point,
-    Role, RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, View, Widget,
+    BoxConstraints, Brush, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Point, Role,
+    RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, View, ViewSeq, Widget,
 };
 use peniko::Color;
 
@@ -308,12 +308,13 @@ const GROUP_GAP: f64 = style::SPACING_UNIT * 2.0;
 
 /// Stack `children` (typically [`bubble`] views) in a column.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn bubble_group<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> BubbleGroupView<State> {
-    let children: Vec<AnyView<State>> = children.into_iter().map(AnyView::new).collect();
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn bubble_group<State: 'static, M>(children: impl ViewSeq<State, M>) -> BubbleGroupView<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    let children = erased;
     BubbleGroupView { children }
 }
 
@@ -505,10 +506,7 @@ mod tests {
     /// Two bubbles, one per alignment, each a run shaped here.
     #[cfg(feature = "bundled-fonts")]
     fn thread(_: &mut ()) -> BubbleGroupView<()> {
-        bubble_group(vec![
-            frust::authoring::any(bubble("Hello there")),
-            frust::authoring::any(bubble("Hi!").align(BubbleAlign::End)),
-        ])
+        bubble_group((bubble("Hello there"), bubble("Hi!").align(BubbleAlign::End)))
     }
 
     #[cfg(feature = "bundled-fonts")]

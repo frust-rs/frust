@@ -143,9 +143,11 @@ Do not silently treat the root workspace as coverage for these — each is a
 standalone workspace excluded from it.
 
 Also run `scripts/ci/erasure-check.sh` (the any-erasure tripwire: no redundant `any()`, literal
-vec-list containers or homogeneous `vec![any(..), ..]` list arguments; fix with
-`scripts/codemod/frust_any_codemod.py --write --t5`, or mark a same-head mixed-type list
-`// erasure: keep <why>`; the same command runs as a CI hygiene step).
+vec-list containers, homogeneous `vec![any(..), ..]` list arguments (T5), fully erased list
+arguments of a sequence API that should be tuples (T6), or single-erasure helpers still returning
+`AnyView` (T7); fix with `scripts/codemod/frust_any_codemod.py --write --t5 --t6 --t7`, or mark a
+site that must stay erased `// erasure: keep <why>` on its line or the line above; the same
+command runs as a CI hygiene step).
 
 `frust-gpu` and `frust-engine` are plain dependencies of `frust-render` (not a cargo feature) —
 their host-only tests already ride the chain above; their real-GPU arms are separate, `--ignored`

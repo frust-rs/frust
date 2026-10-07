@@ -104,8 +104,8 @@ use std::rc::Rc;
 use frust::authoring::text::{FontWeight, LineHeight, TextOverflow};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ThemeTextColor, ThemeTextType, View, Widget,
-    any, build_child, rebuild_child, rebuild_children, route_event, route_event_single,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ThemeTextColor, ThemeTextType, View, ViewSeq,
+    Widget, any, build_child, rebuild_child, rebuild_children, route_event, route_event_single,
     teardown_child, visit_children,
 };
 use frust::{Color, NavigatorController, PopResult, Theme, icon, text};
@@ -602,11 +602,10 @@ impl<State: 'static> DialogView<State> {
 
     /// Replace the trailing action row with `actions` (app-provided buttons,
     /// in reading order — the last one sits closest to the trailing edge).
-    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
-        self.actions = actions
-            .into_iter()
-            .map(|a| Rc::new(AnyView::new(a)))
-            .collect();
+    pub fn actions<M>(mut self, actions: impl ViewSeq<State, M>) -> Self {
+        let mut erased = Vec::new();
+        actions.extend_views(&mut erased);
+        self.actions = erased.into_iter().map(Rc::new).collect();
         self
     }
 
@@ -1346,6 +1345,7 @@ struct FullScreenPanelWidget {
 /// Build the header close affordance's view — [`icon_button`] over
 /// [`crate::icons::CLOSE`], firing `on_dismiss` directly (see the module
 /// docs' *Deliberate v1 scope cuts*).
+// erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
 fn close_view<State: 'static>(on_dismiss: Option<OnDismiss<State>>) -> AnyView<State> {
     any(
         icon_button(icon(crate::icons::CLOSE), move |state: &mut State| {
@@ -1706,11 +1706,11 @@ mod tests {
             }
         }
     }
-    fn tap_action(w: f64, h: f64, on_tap: impl Fn(&mut NavState) + 'static) -> AnyView<NavState> {
-        any(TapView {
+    fn tap_action(w: f64, h: f64, on_tap: impl Fn(&mut NavState) + 'static) -> impl View<NavState> {
+        TapView {
             size: Size::new(w, h),
             on_tap: Rc::new(on_tap),
-        })
+        }
     }
 
     /// The app-logic closure the [`Harness`] rebuilds through.

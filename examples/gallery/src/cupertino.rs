@@ -5,7 +5,7 @@
 //! Cupertino theme. See the crate docs and `crate::base` for the pure-`View`/slug-rule
 //! contract every case in this registry follows.
 
-use frust_core::AnyView;
+use frust_core::{AnyView, any};
 use frust_cupertino::{
     CupertinoActionStyle, CupertinoAlertDialogView, CupertinoButtonSize, CupertinoButtonStyle,
     action, cupertino_activity_indicator, cupertino_button, cupertino_nav_bar, cupertino_switch,
@@ -17,7 +17,7 @@ use super::base::framed;
 use crate::case::{Case, Design};
 
 fn button_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 cupertino_button("Small Filled", |_: &mut ()| {})
@@ -37,15 +37,15 @@ fn button_case() -> AnyView<()> {
                     .style(CupertinoButtonStyle::Glass),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn activity_indicator_case() -> AnyView<()> {
-    framed(cupertino_activity_indicator().animating(false))
+    any(framed(cupertino_activity_indicator().animating(false)))
 }
 
 fn navbar_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 cupertino_nav_bar("Settings")
@@ -55,11 +55,11 @@ fn navbar_case() -> AnyView<()> {
             .child(SizedBox(None, Some(16.0)))
             .child(text("Navbar with leading and trailing content"))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn switch_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 row()
@@ -77,11 +77,11 @@ fn switch_case() -> AnyView<()> {
                     .cross_axis(CrossAxisAlignment::Center),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn tabbar_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(text("Tab bar (selected: 0)"))
             .child(SizedBox(None, Some(12.0)))
@@ -91,12 +91,12 @@ fn tabbar_case() -> AnyView<()> {
                 |_: &mut (), _: usize| {},
             ))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn alert_dialog_case() -> AnyView<()> {
     let controller: NavigatorController<()> = NavigatorController::new();
-    framed(CupertinoAlertDialogView {
+    any(framed(CupertinoAlertDialogView {
         title: "Confirm".into(),
         message: Some("Are you sure?".into()),
         actions: vec![
@@ -104,20 +104,20 @@ fn alert_dialog_case() -> AnyView<()> {
             action("OK").style(CupertinoActionStyle::Default),
         ],
         controller,
-    })
+    }))
 }
 
 fn action_sheet_case() -> AnyView<()> {
     use frust_cupertino::CupertinoActionSheetView;
     let controller: NavigatorController<()> = NavigatorController::new();
-    framed(CupertinoActionSheetView {
+    any(framed(CupertinoActionSheetView {
         actions: vec![
             action("Save"),
             action("Delete").style(CupertinoActionStyle::Destructive),
         ],
         cancel: Some("Cancel".into()),
         controller,
-    })
+    }))
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.

@@ -51,7 +51,7 @@
 //! Material container resolves its own fill from the active
 //! [`frust_material::MaterialTokens`] scheme, which differs by brightness.
 
-use frust_core::{AnyView, any};
+use frust_core::{AnyView, View, any};
 use frust_material::{
     AppBarDensity, ButtonGroupType, ButtonVariant, CardVariant, DatePickerState, DropdownItem,
     FabColor, FabSize, IconButtonVariant, MaterialDate, MenuSelection, NavBarLabelBehavior,
@@ -182,28 +182,28 @@ const BLEED_W: f64 = 344.0;
 
 /// `icon(..)` as an `AnyView<()>` — the shape every Material slot that takes a
 /// leading/trailing glyph expects.
-fn glyph(source: IconSource) -> AnyView<()> {
-    any(icon(source))
+fn glyph(source: IconSource) -> impl View<()> {
+    icon(source)
 }
 
 /// A fixed-width box around a component that would otherwise shrink-wrap; see
 /// [`BLEED_W`].
-fn bleed<V: frust_core::View<()>>(child: V) -> AnyView<()> {
-    any(SizedBox(Some(BLEED_W), None).child(child))
+fn bleed<V: frust_core::View<()>>(child: V) -> impl View<()> {
+    SizedBox(Some(BLEED_W), None).child(child)
 }
 
 /// A vertical gap between stacked rows in a case.
-fn gap(height: f64) -> AnyView<()> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<()> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal gap between side-by-side controls in a case.
-fn hgap(width: f64) -> AnyView<()> {
-    any(SizedBox(Some(width), None))
+fn hgap(width: f64) -> impl View<()> {
+    SizedBox(Some(width), None)
 }
 
 fn app_bar_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         STRIP,
         column()
             .child(bleed(
@@ -227,18 +227,18 @@ fn app_bar_case() -> AnyView<()> {
                     .fab(fab(glyph(icons::ADD), |_: &mut ()| {}).size(FabSize::Small)),
             ))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn button_group_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         STRIP,
         column()
             .child(
                 button_group_actions(vec![
-                    button_group_action("Left").icon(|| glyph(icons::FORMAT_ALIGN_LEFT)),
-                    button_group_action("Center").icon(|| glyph(icons::FORMAT_ALIGN_CENTER)),
-                    button_group_action("Right").icon(|| glyph(icons::FORMAT_ALIGN_RIGHT)),
+                    button_group_action("Left").icon(|| any(glyph(icons::FORMAT_ALIGN_LEFT))),
+                    button_group_action("Center").icon(|| any(glyph(icons::FORMAT_ALIGN_CENTER))),
+                    button_group_action("Right").icon(|| any(glyph(icons::FORMAT_ALIGN_RIGHT))),
                 ])
                 .group_type(ButtonGroupType::Connected)
                 .selected_index(Some(1))
@@ -255,11 +255,11 @@ fn button_group_case() -> AnyView<()> {
                 |_: &mut (), _: Vec<&'static str>| {},
             ))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn button_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 row()
@@ -282,23 +282,23 @@ fn button_case() -> AnyView<()> {
                     ),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 /// One card's body — a headline plus a supporting line, boxed so the three
 /// cards in [`card_case`] measure alike.
-fn card_body(title: &'static str) -> AnyView<()> {
-    any(container(
+fn card_body(title: &'static str) -> impl View<()> {
+    container(
         column()
             .child(text(title).size(14.0))
             .child(text("Body").size(12.0))
             .cross_axis(CrossAxisAlignment::Center),
     )
-    .size_centered(76.0, 64.0))
+    .size_centered(76.0, 64.0)
 }
 
 fn card_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         BAR,
         row()
             .child(card(CardVariant::Elevated, card_body("Elevated")))
@@ -307,11 +307,11 @@ fn card_case() -> AnyView<()> {
             .child(hgap(12.0))
             .child(card(CardVariant::Outlined, card_body("Outlined")).on_press(|_: &mut ()| {}))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn chips_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 row()
@@ -327,13 +327,13 @@ fn chips_case() -> AnyView<()> {
                     .child(suggestion_chip("Reply", |_: &mut ()| {}).elevated(true)),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn date_picker_case() -> AnyView<()> {
     let today = MaterialDate::new(2026, 9, 7);
     let selected = MaterialDate::new(2026, 9, 17);
-    framed_in(
+    any(framed_in(
         PICKER,
         calendar_date_picker(
             DatePickerState::new(Some(selected), today),
@@ -342,7 +342,7 @@ fn date_picker_case() -> AnyView<()> {
             |_: &mut (), _: DatePickerState| {},
         )
         .today(today),
-    )
+    ))
 }
 
 /// The M3 dialog on its `overlay_modal` host, entrance included: the panel
@@ -355,7 +355,7 @@ fn date_picker_case() -> AnyView<()> {
 /// to force that and no longer does; swapping in the builder is a composition
 /// change with its own poster consequences, so it stays a separate question.
 fn dialog_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         TALL,
         overlay_modal(
             Padding(
@@ -377,7 +377,7 @@ fn dialog_case() -> AnyView<()> {
             ),
             OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH),
         ),
-    )
+    ))
 }
 
 /// The option list both dropdown surfaces in [`dropdown_case`] read.
@@ -391,7 +391,7 @@ fn dropdown_items() -> Vec<DropdownItem> {
 }
 
 fn dropdown_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         SURFACE,
         column()
             .child(bleed(
@@ -407,7 +407,7 @@ fn dropdown_case() -> AnyView<()> {
                     .max_height(220.0),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 /// The three FAB sizes and a colour spread. `extended_fab` is deliberately
@@ -417,7 +417,7 @@ fn dropdown_case() -> AnyView<()> {
 /// the same one-frame entrance-ramp limit documented above, reached here
 /// through a widget with no `entrance`-style seam to opt out of.
 fn fab_case() -> AnyView<()> {
-    framed(
+    any(framed(
         row()
             .child(fab(glyph(icons::ADD), |_: &mut ()| {}).size(FabSize::Small))
             .child(hgap(16.0))
@@ -433,11 +433,11 @@ fn fab_case() -> AnyView<()> {
                     .color(FabColor::Secondary),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn icon_button_case() -> AnyView<()> {
-    framed(
+    any(framed(
         row()
             .child(icon_button(glyph(icons::FAVORITE), |_: &mut ()| {}).semantic_label("Favorite"))
             .child(hgap(12.0))
@@ -457,11 +457,11 @@ fn icon_button_case() -> AnyView<()> {
                     .variant(IconButtonVariant::Outlined),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn list_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         STRIP,
         column()
             .child(bleed(
@@ -486,11 +486,11 @@ fn list_case() -> AnyView<()> {
                     .on_press(|_: &mut ()| {}),
             ))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 fn menu_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         TALL,
         menu_panel(
             vec![
@@ -510,11 +510,11 @@ fn menu_case() -> AnyView<()> {
             ],
             |_: &mut (), _: MenuSelection| {},
         ),
-    )
+    ))
 }
 
 fn navigation_bar_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         BAR,
         bleed(
             navigation_bar(
@@ -530,11 +530,11 @@ fn navigation_bar_case() -> AnyView<()> {
             .label_behavior(NavBarLabelBehavior::AlwaysShow)
             .safe_area(false),
         ),
-    )
+    ))
 }
 
 fn navigation_drawer_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         SURFACE,
         navigation_drawer_content(
             vec![
@@ -550,11 +550,11 @@ fn navigation_drawer_case() -> AnyView<()> {
             0,
             |_: &mut (), _: usize| {},
         ),
-    )
+    ))
 }
 
 fn navigation_rail_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         RAIL,
         SizedBox(Some(RAIL_W), Some(440.0)).child(
             navigation_rail(
@@ -570,11 +570,11 @@ fn navigation_rail_case() -> AnyView<()> {
             .rail_type(NavigationRailType::AlwaysCollapse)
             .fab(rail_fab(icons::ADD, "Compose", |_: &mut ()| {})),
         ),
-    )
+    ))
 }
 
 fn selection_controls_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(
                 row()
@@ -612,7 +612,7 @@ fn selection_controls_case() -> AnyView<()> {
                     .cross_axis(CrossAxisAlignment::Center),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 /// The M3 bottom-sheet at-rest chrome, approximated via the `overlay_modal`
@@ -629,7 +629,7 @@ fn selection_controls_case() -> AnyView<()> {
 /// `Slide` is driven in layout, one pass behind the paint that advances it —
 /// see the module docs' entrance-ramp section for the measured result.
 fn sheet_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         TALL,
         overlay_modal(
             Padding(
@@ -661,11 +661,11 @@ fn sheet_case() -> AnyView<()> {
                 .handle(true)
                 .entrance(OverlayEntrance::None),
         ),
-    )
+    ))
 }
 
 fn slider_case() -> AnyView<()> {
-    framed(
+    any(framed(
         column()
             .child(SizedBox(Some(280.0), None).child(slider(0.4, |_: &mut (), _: f64| {})))
             .child(gap(12.0))
@@ -683,7 +683,7 @@ fn slider_case() -> AnyView<()> {
             .child(gap(12.0))
             .child(SizedBox(Some(280.0), None).child(wavy_slider(0.5, |_: &mut (), _: f64| {})))
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 /// The snackbar host with a message already requested — the page's own mount
@@ -695,7 +695,7 @@ fn slider_case() -> AnyView<()> {
 fn snackbar_case() -> AnyView<()> {
     let toasts: SnackbarController<()> = SnackbarController::new();
     toasts.show(snackbar("Message archived").action("Undo", |_: &mut ()| {}));
-    framed_in(
+    any(framed_in(
         STRIP,
         snackbar_host(
             &toasts,
@@ -708,7 +708,7 @@ fn snackbar_case() -> AnyView<()> {
             )
             .size_centered(STRIP.width, STRIP.height),
         ),
-    )
+    ))
 }
 
 /// The three tabs [`tabs_case`] shows, built the way the page's example does.
@@ -721,14 +721,14 @@ fn tab_specs() -> Vec<Tab> {
 }
 
 fn tabs_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         BAR,
         bleed(tabs(tab_specs(), 1, |_: &mut (), _: usize| {}).variant(TabsVariant::Primary)),
-    )
+    ))
 }
 
 fn text_field_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         TALL,
         column()
             .child(
@@ -756,7 +756,7 @@ fn text_field_case() -> AnyView<()> {
                 ),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 /// The time picker's own dial surface. `time_picker(..)` composes an
@@ -764,14 +764,14 @@ fn text_field_case() -> AnyView<()> {
 /// cannot bring on screen (entrance ramp limit — see module docs above);
 /// `time_dial` is the non-modal ring that dialog wraps.
 fn time_picker_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         PICKER,
         time_dial(TimeOfDay::new(10, 30), |_: &mut (), _: TimeOfDay| {}).use_24_hour(false),
-    )
+    ))
 }
 
 fn toolbar_case() -> AnyView<()> {
-    framed_in(
+    any(framed_in(
         STRIP,
         column()
             .child(bleed(docked_toolbar().actions(vec![
@@ -790,7 +790,7 @@ fn toolbar_case() -> AnyView<()> {
                     ]),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    )
+    ))
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates — one

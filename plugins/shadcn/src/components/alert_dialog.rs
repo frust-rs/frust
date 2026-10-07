@@ -32,7 +32,7 @@
 
 use std::rc::Rc;
 
-use frust::authoring::{AnyView, BuildCtx, ChangeFlags, View};
+use frust::authoring::{AnyView, BuildCtx, ChangeFlags, View, ViewSeq};
 use frust::{EdgeInsets, NavigatorController, PopResult};
 
 use crate::overlay::modal::{MAX_WIDTH_LG, MAX_WIDTH_XS};
@@ -83,11 +83,10 @@ fn config(size: AlertDialogSize) -> ModalConfig {
 /// Create an alert dialog whose panel stacks `children` `gap-4` apart inside
 /// `p-6`.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn alert_dialog<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AlertDialogView<State> {
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn alert_dialog<State: 'static, M>(children: impl ViewSeq<State, M>) -> AlertDialogView<State> {
     AlertDialogView {
         inner: modal(
             stack_slots(children, SLOT_GAP, EdgeInsets::all(PANEL_PAD)),
@@ -99,11 +98,10 @@ pub fn alert_dialog<State: 'static, V: View<State>>(
 
 /// A header slot: a `gap-1.5` stack (title, description).
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn alert_dialog_header<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn alert_dialog_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     stack_slots(children, HEADER_GAP, EdgeInsets::all(0.0))
 }
 
@@ -124,11 +122,10 @@ pub fn alert_dialog_description<State: 'static>(description: impl Into<String>) 
 /// keeps the row at every size — a documented simplification, since the row
 /// already trails both buttons together.
 ///
-/// The list takes any iterator of one [`View`] type, so a homogeneous list
-/// needs no `any(..)`; a mixed list keeps `vec![any(..), ..]`.
-pub fn alert_dialog_footer<State: 'static, V: View<State>>(
-    children: impl IntoIterator<Item = V>,
-) -> AnyView<State> {
+/// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
+/// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
+/// so no element needs `any(..)`.
+pub fn alert_dialog_footer<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     trailing_row(children, FOOTER_GAP, EdgeInsets::all(0.0))
 }
 

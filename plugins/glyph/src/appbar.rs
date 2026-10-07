@@ -108,7 +108,7 @@ use frust::authoring::text::{
 };
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget,
+    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, ViewSeq, Widget,
 };
 use frust::{Curve, FrameTime};
 use kurbo::{Affine, Point, Rect, Size};
@@ -544,8 +544,9 @@ pub fn selection_bar<State: 'static, F: Fn(&mut State) + 'static>(
 impl<State: 'static> SelectionBar<State> {
     /// Set the trailing bulk-action views (in reading order — the last sits
     /// closest to the trailing edge).
-    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
-        self.actions = actions.into_iter().map(AnyView::new).collect();
+    pub fn actions<M>(mut self, actions: impl ViewSeq<State, M>) -> Self {
+        self.actions.clear();
+        actions.extend_views(&mut self.actions);
         self
     }
 }
@@ -661,8 +662,9 @@ impl<State: 'static> AppBarView<State> {
 
     /// Set the trailing action slots (0–2, in reading order — the last sits
     /// closest to the trailing edge).
-    pub fn actions(mut self, actions: impl IntoIterator<Item = impl View<State>>) -> Self {
-        self.actions = actions.into_iter().map(AnyView::new).collect();
+    pub fn actions<M>(mut self, actions: impl ViewSeq<State, M>) -> Self {
+        self.actions.clear();
+        actions.extend_views(&mut self.actions);
         self
     }
 
