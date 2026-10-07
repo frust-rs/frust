@@ -204,13 +204,13 @@ fn seed() -> Vec<Person> {
 
 /// The header cell for `column`: a ghost button that cycles ascending →
 /// descending → ascending, carrying the active direction in its label.
-fn sort_button(column: Column, sort: Option<(Column, bool)>) -> frust::AnyView<AppState> {
+fn sort_button(column: Column, sort: Option<(Column, bool)>) -> impl frust::View<AppState> {
     let arrow = match sort {
         Some((active, true)) if active == column => " \u{2191}",
         Some((active, false)) if active == column => " \u{2193}",
         _ => "",
     };
-    any(button(
+    button(
         format!("{}{arrow}", column.title()),
         move |s: &mut AppState| {
             s.data_table.sort = match s.data_table.sort {
@@ -221,7 +221,7 @@ fn sort_button(column: Column, sort: Option<(Column, bool)>) -> frust::AnyView<A
         },
     )
     .variant(ButtonVariant::Ghost)
-    .size(ButtonSize::Sm))
+    .size(ButtonSize::Sm)
 }
 
 pub fn page(state: &mut State) -> impl View<AppState> + use<> {
@@ -292,9 +292,9 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         },
     )
     .indeterminate(some_selected))];
-    header_cells.push(sort_button(Column::Name, sort));
+    header_cells.push(any(sort_button(Column::Name, sort)));
     for column in &visible {
-        header_cells.push(sort_button(*column, sort));
+        header_cells.push(any(sort_button(*column, sort)));
     }
     header_cells.push(any(text("Actions").size(13.0)));
 
@@ -385,7 +385,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     ]);
 
     // --- The two anchored menus, kept mounted so they animate out ---
-    let mut layers: Vec<frust::AnyView<AppState>> = vec![crate::scroll_slot(any(body))];
+    let mut layers: Vec<frust::AnyView<AppState>> = vec![any(crate::scroll_slot(any(body)))];
 
     let column_items = TOGGLEABLE
         .into_iter()
