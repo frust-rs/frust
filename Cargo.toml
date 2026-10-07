@@ -28,6 +28,8 @@ wgpu = { version = "30.0.1", default-features = false, features = [
     "wgsl",
 ] }
 winit = "0.30.13"
+# Exact pin: the hot-patch spike's `dx` is 0.7.10 and runtime/builder must match (spike branch only; not a Version-Pin Policy row).
+subsecond = "=0.7.10"
 
 # --- Browser shell (wasm32-unknown-unknown) rows -------------------------------
 # Exact pin: must equal the host `wasm-bindgen-cli` (0.2.128). wasm-bindgen-futures/js-sys/web-sys and

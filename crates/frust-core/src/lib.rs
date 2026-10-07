@@ -43,6 +43,8 @@ pub mod anim;
 pub mod app;
 pub mod component;
 pub mod event;
+#[cfg(feature = "hotpatch")]
+pub mod hotpatch;
 pub mod input;
 pub mod insets;
 pub mod layout;
@@ -205,6 +207,8 @@ pub use event::{
     has_pending_result_flush, mark_focus_orphaned, mark_pending_result_flush, take_focus_orphaned,
     take_pending_result_flush,
 };
+#[cfg(feature = "hotpatch")]
+pub use hotpatch::set_patch_listener;
 pub use input::{
     FLING_DECAY, FLING_STOP, MOUSE_SLOP, TOUCH_SLOP, VELOCITY_WINDOW_MS, VelocityTracker,
     WHEEL_LINE_PX, fling_decay, fling_displacement,
