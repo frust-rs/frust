@@ -1428,5 +1428,187 @@ class T7DriverTest(DriverFixture, unittest.TestCase):
         self.assertEqual(self.read(self.lib), self.LIB)            # --stats never writes
 
 
+def run6(src: str, t5: bool = False) -> "cm.Result":
+    """Rewrite `src` with the opt-in T6 rule on."""
+    return cm.rewrite(textwrap.dedent(src), APIS, t5=t5, t6=True)
+
+
+def buckets6(res):
+    return [(b, n) for _, b, n, _ in res.excluded6]
+
+
+class T6Test(unittest.TestCase):
+    def test_heterogeneous_elements_become_a_tuple(self):
+        res = run6("""
+            fn f() {
+                sidebar_menu(vec![any(text("a")), any(icon(1)), AnyView::new(b)])
+            }
+            """)
+        self.assertIn("sidebar_menu((text(\"a\"), icon(1), b))", res.text)
+        self.assertEqual([c.rule for c in res.candidates], ["T6"])
+
+    def test_method_seq_api_and_description(self):
+        res = run6("fn f() { x.children(vec![any(a()), any(b())]) }\n")
+        self.assertEqual(res.text, "fn f() { x.children((a(), b())) }\n")
+        self.assertEqual(res.candidates[0].desc, "erased list argument of .children -> tuple")
+
+    def test_single_element_gets_trailing_comma(self):
+        self.assertEqual(run6("fn f() { x.children(vec![any(a())]) }\n").text,
+                         "fn f() { x.children((a(),)) }\n")
+
+    def test_single_element_with_trailing_comma_keeps_it_once(self):
+        self.assertEqual(run6("fn f() { x.children(vec![any(a()),]) }\n").text,
+                         "fn f() { x.children((a(),)) }\n")
+
+    def test_trailing_comma_and_comments_preserved(self):
+        res = run6("""
+            fn f() {
+                x.children(vec![
+                    // first
+                    any(a()), // one
+                    /* two */ any(b()),
+                ])
+            }
+            """)
+        self.assertEqual(res.text, textwrap.dedent("""
+            fn f() {
+                x.children((
+                    // first
+                    a(), // one
+                    /* two */ b(),
+                ))
+            }
+            """))
+
+    def test_keyed_element_listed_not_rewritten(self):
+        src = "fn f() { x.children(vec![any(a()), keyed(2, b())]) }\n"
+        res = run6(src)
+        self.assertEqual(res.text, src)
+        self.assertEqual(buckets6(res), [("T6-keyed", ".children")])
+        self.assertEqual(res.candidates, [])
+
+    def test_more_than_twelve_listed(self):
+        items = ", ".join(f"any(a{i}())" for i in range(13))
+        src = f"fn f() {{ x.children(vec![{items}]) }}\n"
+        res = run6(src)
+        self.assertEqual(res.text, src)
+        self.assertEqual(buckets6(res), [("T6-arity", ".children")])
+        twelve = ", ".join(f"any(a{i}())" for i in range(12))
+        self.assertEqual([c.rule for c in run6(f"fn f() {{ x.children(vec![{twelve}]) }}\n").candidates], ["T6"])
+
+    def test_partially_erased_listed(self):
+        src = "fn f() { x.children(vec![any(a()), b()]) }\n"
+        res = run6(src)
+        self.assertEqual(res.text, src)
+        self.assertEqual(buckets6(res), [("T6-mixed", ".children")])
+
+    def test_list_without_erasure_is_not_listed(self):
+        res = run6("fn f() { x.children(vec![a(), b()]) }\n")
+        self.assertEqual(res.excluded6, [])
+        self.assertEqual(res.candidates, [])
+
+    def test_let_bound_list_untouched(self):
+        src = "fn f() { let v = vec![any(a()), any(b())]; x.children(v) }\n"
+        res = run6(src)
+        self.assertEqual(res.text, src)
+        self.assertEqual(res.excluded6, [])
+
+    def test_turbofish_element_untouched_and_unlisted(self):
+        src = "fn f() { x.children(vec![any::<S, _>(a()), any(b())]) }\n"
+        res = run6(src)
+        self.assertEqual(res.text, src)
+        self.assertEqual(res.excluded6, [])
+
+    def test_callee_not_in_seq_untouched(self):
+        src = "fn f() { other(vec![any(a()), any(b())]) }\n"
+        self.assertEqual(run6(src).text, src)
+
+    def test_idempotent(self):
+        once = run6("fn f() { x.children(vec![any(a()), any(b())]) }\n").text
+        res = run6(once)
+        self.assertEqual(res.text, once)
+        self.assertEqual(res.candidates, [])
+
+    def test_off_by_default(self):
+        src = "fn f() { x.children(vec![any(a()), any(b())]) }\n"
+        self.assertEqual(cm.rewrite(src, APIS).text, src)
+
+    def test_keep_marker_honoured(self):
+        src = "fn f() {\n    // erasure: keep\n    x.children(vec![any(a()), any(b())])\n}\n"
+        res = run6(src)
+        self.assertEqual(res.text, src)
+        self.assertEqual(res.kept, 1)
+
+    def test_t6_wins_over_t5_for_homogeneous_list(self):
+        src = "fn f() { x.children(vec![any(text(a)), any(text(b))]) }\n"
+        res = cm.rewrite(src, APIS, t5=True, t6=True)
+        self.assertEqual(res.text, "fn f() { x.children((text(a), text(b))) }\n")
+        self.assertEqual([c.rule for c in res.candidates], ["T6"])
+        self.assertEqual(cm.rewrite(src, APIS, t5=True).text,
+                         "fn f() { x.children(vec![text(a), text(b)]) }\n")
+
+    def test_t5_still_applies_when_t6_lists_a_list(self):
+        items = ", ".join(f"any(text({i}))" for i in range(13))
+        res = cm.rewrite(f"fn f() {{ x.children(vec![{items}]) }}\n", APIS, t5=True, t6=True)
+        self.assertEqual([c.rule for c in res.candidates], ["T5"])
+        self.assertEqual(buckets6(res), [("T6-arity", ".children")])
+
+    def test_t2_sugar_still_owns_column(self):
+        res = run6("use frust::*;\nfn f() { Column(vec![any(a()), any(b())]) }\n")
+        self.assertEqual([c.rule for c in res.candidates], ["T2"])
+
+    def test_any_import_dropped_when_unused(self):
+        res = run6("use frust::any;\nfn f() { x.children(vec![any(a()), any(b())]) }\n")
+        self.assertNotIn("use frust::any", res.text)
+
+
+class T6DriverTest(DriverFixture, unittest.TestCase):
+    FIXTURE = "fn f() { x.children(vec![any(a()), any(b())]) }\nfn g() { x.children(vec![any(a()), c()]) }\n"
+
+    def test_check_exit_codes(self):
+        code, out = self.main("--check", "--t6", self.path)
+        self.assertEqual(code, 1)
+        self.assertIn("lib.rs:1: T6 erased list argument of .children -> tuple", out)
+        self.assertIn("lib.rs:2: T6-mixed excluded: .children", out)
+        self.assertIn("1 T6 exclusion(s)", out)
+        self.assertEqual(self.main("--check", self.path)[0], 0)
+
+    def test_exclusions_alone_exit_zero(self):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("fn g() { x.children(vec![any(a()), c()]) }\n")
+        code, out = self.main("--check", "--t6", self.path)
+        self.assertEqual(code, 0)
+        self.assertIn("T6-mixed excluded", out)
+
+    def test_missing_seq_section_exits_two(self):
+        apis = os.path.join(self.dir.name, "apis.txt")
+        with open(apis, "w", encoding="utf-8") as fh:
+            fh.write("[slot]\n.child\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, _ = self.main("--check", "--t6", "--apis", apis, self.path)
+        self.assertEqual(code, 2)
+        self.assertIn("[seq]", err.getvalue())
+        self.assertEqual(self.main("--check", "--apis", apis, self.path)[0], 0)
+
+    def test_write_then_check_clean(self):
+        code, _ = self.main("--write", "--t6", self.path)
+        self.assertEqual(code, 0)
+        self.assertIn("x.children((a(), b()))", self.read(self.path))
+        self.assertEqual(self.main("--check", "--t6", self.path)[0], 0)
+
+    def test_stats_counts(self):
+        code, out = self.main("--stats", "--t6", self.path)
+        self.assertEqual(code, 0)
+        self.assertIn("lib.rs: T6 candidates=1", out)
+        self.assertIn("lib.rs: T6 excluded T6-keyed=0 T6-arity=0 T6-mixed=1", out)
+        self.assertIn("total: T6 candidates=1", out)
+        self.assertIn("total: T6 excluded T6-keyed=0 T6-arity=0 T6-mixed=1", out)
+
+    def read(self, path):
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+
 if __name__ == "__main__":
     unittest.main()
