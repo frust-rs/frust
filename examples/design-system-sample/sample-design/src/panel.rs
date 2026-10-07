@@ -62,6 +62,7 @@ pub struct SamplePanelView<State: 'static> {
 
 /// Wrap `child` in a Sample panel.
 pub fn sample_panel<State: 'static, V: View<State>>(child: V) -> SamplePanelView<State> {
+    // erasure: keep stored in the view's non-generic AnyView child field
     SamplePanelView { child: any(child) }
 }
 
