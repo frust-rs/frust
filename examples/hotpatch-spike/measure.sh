@@ -24,12 +24,21 @@
 #                                 sentinel and logs `frust-hotpatch-spike: state-field vN build ran
 #                                 extra=<v>`, so each run records whether the new build ran, the
 #                                 value it read, and whether the app PID survived.
+#                    return-type  wrap HomePage::build's root `column()` in a `stack()`, changing the
+#                                 concrete type behind `impl View<State>` from FlexView to StackView
+#                                 (RESULTS.md row D3). It adds NO new crate reference and NO log line
+#                                 (D2's confound), so "did the patched build run" is judged from the
+#                                 sentinel on screen (AFTER_RUN_HOOK captures it), not from a log line.
+#                                 RETURN_TYPE_WRAP=column wraps in another `column()` instead: FlexView
+#                                 children are type-erased, so that keeps the type (the control).
 #                  A crash, an app exit or a timeout is recorded as a run result, never fatal.
 #   STARTUP_TIMEOUT=<s> overrides the first-frame wait (default 900: a cold dx fat build is slow).
 #   PRE_RUN_PAUSE=<s>   sleeps <s> seconds after the first frame, before the first edit, so the
 #                       counter can be clicked (state-preservation check); default 0.
 #   POST_RUN_PAUSE=<s>  sleeps <s> seconds after the last run, before the app is killed, so the
 #                       patched window can be inspected; default 0.
+#   AFTER_RUN_HOOK=<cmd> run via `bash -c` after each hot run's frame (2 s settle first) as
+#                       `<cmd> <run> <app pid>`, e.g. a screencapture script; its output is echoed.
 #   STATE_FIELD_WRITE=1 with --target state-field, the patched build also WRITES the new field
 #                       (`state.extra = state.extra.wrapping_add(1)`) before reading it; default 0 (read only).
 #
@@ -53,7 +62,9 @@ STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-900}"
 PRE_RUN_PAUSE="${PRE_RUN_PAUSE:-0}"
 POST_RUN_PAUSE="${POST_RUN_PAUSE:-0}"
 STATE_FIELD_WRITE="${STATE_FIELD_WRITE:-0}"
-TARGETS="home|card|helper|state-type|state-field"
+TARGETS="home|card|helper|state-type|state-field|return-type"
+AFTER_RUN_HOOK="${AFTER_RUN_HOOK:-}"
+RETURN_TYPE_WRAP="${RETURN_TYPE_WRAP:-stack}"
 
 # The comment header (line 2 up to the first non-comment line), without the `# ` prefix.
 usage() {
@@ -81,7 +92,7 @@ case "$RUNS" in
   ''|*[!0-9]*|0) echo "error: --runs must be a positive integer, got '$RUNS'" >&2; exit 2 ;;
 esac
 case "$TARGET" in
-  home|helper|state-type|state-field) EDIT_FILE="$HOME_RS" ;;
+  home|helper|state-type|state-field|return-type) EDIT_FILE="$HOME_RS" ;;
   card) EDIT_FILE="$CARD_RS" ;;
   *) echo "error: --target must be ${TARGETS}, got '$TARGET'" >&2; exit 2 ;;
 esac
@@ -133,10 +144,11 @@ PY
 # Apply run `$3`'s edit for target `$2` to `$1` (in place, derived from the pristine copy `$4`),
 # then print the save time in unix ms.
 apply_edit() {
-  python3 - "$1" "$2" "$3" "$4" "$STATE_FIELD_WRITE" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "$STATE_FIELD_WRITE" "$RETURN_TYPE_WRAP" <<'PY'
 import re, sys, time
 path, target, run, orig = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 write_field = sys.argv[5] == "1"
+wrap = sys.argv[6]
 src = open(orig).read().split("\n")
 
 def replace_marked(lines, marker, fn):
@@ -184,6 +196,23 @@ elif target == "state-field":
         f"let sentinel = {{ {write}log::info!(\"frust-hotpatch-spike: state-field v{run} build ran "
         f"extra={{}}\", state.extra); text(format!(\"hotpatch-sentinel: v{run} extra={{}}\", "
         f"state.extra)) }}; // SENTINEL-HOME"))
+elif target == "return-type":
+    # Wrap the root `column()` of `HomePage::build` in another container (RESULTS.md row D3). The
+    # sentinel is bumped too, so a taken patch is visible on screen. No `log` line is added.
+    if wrap not in ("stack", "column"):
+        sys.exit(f"measure.sh: RETURN_TYPE_WRAP must be stack or column, got {wrap}")
+    opens = [i for i, l in enumerate(src) if l == "        column()"]
+    closes = [i for i, l in enumerate(src) if l == "            .cross_axis(CrossAxisAlignment::Center)"]
+    if len(opens) != 1 or len(closes) != 1 or closes[0] < opens[0]:
+        sys.exit("measure.sh: expected one root `column()` ... `.cross_axis(..)` chain in build")
+    src[opens[0]] = f"        {wrap}().child(column()"
+    src[closes[0]] += ")"
+    if wrap == "stack":
+        uses = [i for i, l in enumerate(src) if l.startswith("use frust::{")]
+        if len(uses) != 1:
+            sys.exit("measure.sh: expected one `use frust::{..}` line")
+        src[uses[0]] = src[uses[0]].replace("component, text}", "component, stack, text}")
+    replace_marked(src, "// SENTINEL-HOME", bump)
 new = "\n".join(src)
 with open(path, "r+") as f:
     f.seek(0)
@@ -372,6 +401,10 @@ while [ "$run" -le "$RUNS" ]; do
       | grep -E 'Patch rebuild:|replaying crates:|Hot-patching:|Build failed|Full rebuild' \
       | tr -d '\033' | sed -e 's/\[[0-9;]*m//g' -e 's/^ */    dx: /' | cut -c1-200
     trouble_lines "$from"
+    if [ -n "$AFTER_RUN_HOOK" ]; then
+      sleep 2
+      bash -c "$AFTER_RUN_HOOK" _ "$run" "${APP_PID:-0}" 2>&1 | sed 's/^/    hook: /'
+    fi
   fi
   a_delta="n/a" f_delta="n/a"
   [ -n "$applied" ] && { a_delta=$((applied - stamp)); APPLIED_DELTAS="${APPLIED_DELTAS}${a_delta}"$'\n'; }
@@ -383,6 +416,13 @@ while [ "$run" -le "$RUNS" ]; do
       line="${line}; patched build RAN, read extra=${extra}"
     else
       line="${line}; patched build NOT seen (old build kept?)"
+    fi
+  fi
+  if [ "$TARGET" = "return-type" ] && [ "$MODE" = "hotpatch" ]; then
+    if [ "$status" = "crashed" ]; then
+      line="${line}; no patched frame to judge (app gone)"
+    else
+      line="${line}; patched build seen only on screen (sentinel v${run}; see AFTER_RUN_HOOK)"
     fi
   fi
   echo "$line"
