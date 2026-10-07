@@ -97,42 +97,42 @@ impl Default for State {
 }
 
 /// A vertical spacer.
-fn gap(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal spacer.
-fn hgap(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn hgap(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 /// One component's block: its name, a one-line note (where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> AnyView<State> {
+fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
     let mut children = vec![
         any(text(title.to_string()).size(16.0)),
-        gap(4.0),
+        any(gap(4.0)),
         any(caption(note.to_string())),
-        gap(12.0),
+        any(gap(12.0)),
     ];
     children.extend(body);
-    children.push(gap(32.0));
-    any(Column(children).cross_axis(CrossAxisAlignment::Start))
+    children.push(any(gap(32.0)));
+    Column(children).cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A control beside the visible text upstream renders as a sibling element —
 /// `switch`, `checkbox` and `radio` all paint no label of their own.
-fn labelled(control: AnyView<State>, label: &str) -> AnyView<State> {
-    any(row()
+fn labelled(control: AnyView<State>, label: &str) -> impl View<State> {
+    row()
         .child(control)
         .child(hgap(10.0))
         .child(text(label.to_string()).size(14.0))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A slider row: the control at a fixed width under its own readout.
-fn slider_row(label: &str, readout: String, control: AnyView<State>) -> AnyView<State> {
-    any(column()
+fn slider_row(label: &str, readout: String, control: AnyView<State>) -> impl View<State> {
+    column()
         .child(
             row()
                 .child(text(label.to_string()).size(14.0))
@@ -142,7 +142,7 @@ fn slider_row(label: &str, readout: String, control: AnyView<State>) -> AnyView<
         )
         .child(gap(8.0))
         .child(SizedBox(Some(320.0), None).child(control))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// How many days that month has, so the day drum never strands its value past
@@ -162,7 +162,7 @@ fn days_in(month: &str, year: i32) -> usize {
 }
 
 /// [`switch`], [`checkbox`] and [`radio`] — the three boolean/selection rings.
-fn toggles(state: &State) -> AnyView<State> {
+fn toggles(state: &State) -> impl View<State> {
     let switches = any(column()
         .child(labelled(
             any(switch(state.switch_on, |s: &mut State, v| s.switch_on = v)
@@ -214,18 +214,18 @@ fn toggles(state: &State) -> AnyView<State> {
     let mut radios: Vec<AnyView<State>> = Vec::new();
     for (value, label) in PLANS {
         if !radios.is_empty() {
-            radios.push(gap(12.0));
+            radios.push(any(gap(12.0)));
         }
         let selected = state.plan == value;
         let disabled = value == "legacy";
-        radios.push(labelled(
+        radios.push(any(labelled(
             any(radio(selected, move |s: &mut State| {
                 s.plan = value.to_string();
             })
             .disabled(disabled)
             .label(label)),
             label,
-        ));
+        )));
     }
     let radios = any(Column(radios).cross_axis(CrossAxisAlignment::Start));
 
@@ -248,7 +248,7 @@ fn toggles(state: &State) -> AnyView<State> {
 }
 
 /// [`input`]: label, placeholder, validation, password and success states.
-fn inputs(state: &State) -> AnyView<State> {
+fn inputs(state: &State) -> impl View<State> {
     let email_invalid = !state.email.is_empty() && !state.email.contains('@');
     let mut email = input(state.email.clone(), |s: &mut State, v| s.email = v)
         .label("Email")
@@ -273,8 +273,8 @@ fn inputs(state: &State) -> AnyView<State> {
         .label("Disabled")
         .disabled(true);
 
-    fn field(view: impl View<State>) -> AnyView<State> {
-        any(SizedBox(Some(240.0), None).child(view))
+    fn field(view: impl View<State>) -> impl View<State> {
+        SizedBox(Some(240.0), None).child(view)
     }
 
     demo(
@@ -291,13 +291,13 @@ fn inputs(state: &State) -> AnyView<State> {
                 .child(hgap(24.0))
                 .child(field(password))
                 .cross_axis(CrossAxisAlignment::Start)),
-            gap(16.0),
+            any(gap(16.0)),
             any(row()
                 .child(field(query))
                 .child(hgap(24.0))
                 .child(field(disabled))
                 .cross_axis(CrossAxisAlignment::Start)),
-            gap(12.0),
+            any(gap(12.0)),
             any(button(
                 if state.show_password {
                     "Hide password"
@@ -313,7 +313,7 @@ fn inputs(state: &State) -> AnyView<State> {
 }
 
 /// All five [`range_slider`] designs.
-fn sliders(state: &State) -> AnyView<State> {
+fn sliders(state: &State) -> impl View<State> {
     let default = slider_row(
         "Default \u{b7} tick dots, stretching thumb",
         format!("{:.0}", state.slider_default),
@@ -412,7 +412,7 @@ fn sliders(state: &State) -> AnyView<State> {
 }
 
 /// The [`wheel_picker`] drum, as upstream's date picker.
-fn wheels(state: &State) -> AnyView<State> {
+fn wheels(state: &State) -> impl View<State> {
     let year: i32 = state.year.parse().unwrap_or(2004);
     let day_count = days_in(&state.month, year);
     let days: Vec<WheelPickerOption> = (1..=day_count)
@@ -482,7 +482,7 @@ fn wheels(state: &State) -> AnyView<State> {
                 .child(hgap(48.0))
                 .child(disabled_wheel)
                 .cross_axis(CrossAxisAlignment::Center)),
-            gap(12.0),
+            any(gap(12.0)),
             any(caption(format!(
                 "{} {}, {}",
                 state.month, state.day, state.year
@@ -511,8 +511,8 @@ impl Component for ControlsPage {
     }
 }
 
-pub fn page() -> AnyView<AppState> {
-    any(column()
+pub fn page() -> impl View<AppState> {
+    column()
         .child(heading("Motion \u{b7} Controls"))
         .child(SizedBox(None, Some(8.0)))
         .child(caption(
@@ -522,7 +522,7 @@ pub fn page() -> AnyView<AppState> {
         ))
         .child(SizedBox(None, Some(24.0)))
         .child(component(ControlsPage))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 #[cfg(test)]

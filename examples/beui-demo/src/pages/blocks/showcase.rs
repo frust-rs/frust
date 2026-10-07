@@ -129,36 +129,36 @@ fn caption(body: impl Into<String>) -> TextView {
 }
 
 /// A vertical gap.
-fn gap(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal gap.
-fn hgap(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn hgap(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 /// A centred row of controls.
-fn controls(children: Vec<AnyView<State>>) -> AnyView<State> {
+fn controls(children: Vec<AnyView<State>>) -> impl View<State> {
     let mut spaced = Vec::with_capacity(children.len() * 2);
     for (index, child) in children.into_iter().enumerate() {
         if index > 0 {
-            spaced.push(hgap(8.0));
+            spaced.push(any(hgap(8.0)));
         }
         spaced.push(child);
     }
-    any(FlexView::new(
+    FlexView::new(
         Axis::Horizontal,
         spaced.into_iter().map(inflexible).collect(),
     )
-    .cross_axis(CrossAxisAlignment::Center))
+    .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A small secondary button.
-fn minor(label: impl Into<String>, on_press: impl Fn(&mut State) + 'static) -> AnyView<State> {
-    any(button(label, on_press)
+fn minor(label: impl Into<String>, on_press: impl Fn(&mut State) + 'static) -> impl View<State> {
+    button(label, on_press)
         .tone(ButtonTone::Secondary)
-        .size(ButtonSize::Sm))
+        .size(ButtonSize::Sm)
 }
 
 // ---- The infinite masonry --------------------------------------------------
@@ -218,9 +218,9 @@ fn masonry_block(state: &State) -> AnyView<State> {
         )
         .child(gap(10.0))
         .child(controls(vec![
-            minor("Reset feed", |s: &mut State| {
+            any(minor("Reset feed", |s: &mut State| {
                 s.masonry_count = MASONRY_PAGE * 2;
-            }),
+            })),
             any(caption(format!(
                 "{} of {MASONRY_MAX} cards",
                 state.masonry_count
@@ -231,7 +231,7 @@ fn masonry_block(state: &State) -> AnyView<State> {
 // ---- The project folder ----------------------------------------------------
 
 /// The folder block: a card whose preview sheets fan out on hover.
-fn folder_block(state: &State) -> AnyView<State> {
+fn folder_block(state: &State) -> impl View<State> {
     let previews = [
         "Moodboard",
         "Type study",
@@ -261,7 +261,7 @@ fn folder_block(state: &State) -> AnyView<State> {
         folder = folder.open(open);
     }
 
-    any(column()
+    column()
         .child(section("project_folder"))
         .child(gap(6.0))
         .child(caption(
@@ -272,13 +272,15 @@ fn folder_block(state: &State) -> AnyView<State> {
         .child(folder)
         .child(gap(10.0))
         .child(controls(vec![
-            minor("Toggle open", |s: &mut State| {
+            any(minor("Toggle open", |s: &mut State| {
                 let next = !s.folder_open.unwrap_or(false);
                 s.folder_open = Some(next);
-            }),
-            minor("Release to hover", |s: &mut State| s.folder_open = None),
+            })),
+            any(minor("Release to hover", |s: &mut State| {
+                s.folder_open = None
+            })),
             any(caption(state.folder_log.clone())),
-        ])))
+        ]))
 }
 
 // ---- The knockout bracket --------------------------------------------------
@@ -343,7 +345,7 @@ fn winner_of(home_score: i64, away_score: i64) -> BracketWinner {
 
 /// The bracket block: three rounds plus a play-off, advanced one round at a
 /// time so the reveal animates.
-fn bracket_block(state: &State) -> AnyView<State> {
+fn bracket_block(state: &State) -> impl View<State> {
     let played = state.bracket_played;
 
     let quarters: Vec<BracketMatch> = QUARTERS
@@ -425,7 +427,7 @@ fn bracket_block(state: &State) -> AnyView<State> {
         bracket_round("Grand final", vec![grand_final]),
     ];
 
-    any(column()
+    column()
         .child(section("knockout_bracket"))
         .child(gap(6.0))
         .child(caption(
@@ -445,14 +447,14 @@ fn bracket_block(state: &State) -> AnyView<State> {
         )
         .child(gap(10.0))
         .child(controls(vec![
-            minor("Advance round", |s: &mut State| {
+            any(minor("Advance round", |s: &mut State| {
                 s.bracket_played = (s.bracket_played + 1).min(3);
-            }),
-            minor("Rewind round", |s: &mut State| {
+            })),
+            any(minor("Rewind round", |s: &mut State| {
                 s.bracket_played = s.bracket_played.saturating_sub(1);
-            }),
+            })),
             any(caption(format!("{} of 3 rounds played", played))),
-        ])))
+        ]))
 }
 
 // ---- The swap --------------------------------------------------------------
@@ -469,8 +471,8 @@ fn usdc() -> SwapToken {
 
 /// The swap block: a two-chain ticket with a flip, a quote and an optional
 /// destination row.
-fn swap_block(state: &State) -> AnyView<State> {
-    any(column()
+fn swap_block(state: &State) -> impl View<State> {
+    column()
         .child(section("swap"))
         .child(gap(6.0))
         .child(caption(
@@ -499,19 +501,19 @@ fn swap_block(state: &State) -> AnyView<State> {
                 }),
         )
         .child(gap(8.0))
-        .child(caption(state.swap_log.clone())))
+        .child(caption(state.swap_log.clone()))
 }
 
 // ---- The prediction market -------------------------------------------------
 
 /// The market block: a buy/sell ticket whose prices tick under it.
-fn market_block(state: &State) -> AnyView<State> {
+fn market_block(state: &State) -> impl View<State> {
     let outcomes = vec![
         market_outcome("yes", "Yes", state.market_prices[0]).position(125.0),
         market_outcome("no", "No", state.market_prices[1]).position(48.0),
     ];
 
-    any(column()
+    column()
         .child(section("prediction_market"))
         .child(gap(6.0))
         .child(caption(
@@ -551,28 +553,28 @@ fn market_block(state: &State) -> AnyView<State> {
         )
         .child(gap(10.0))
         .child(controls(vec![
-            minor("Tick prices", |s: &mut State| {
+            any(minor("Tick prices", |s: &mut State| {
                 // A market feed's next print, stood in for by a fixed nudge:
                 // deterministic, and enough to show the ticker roll.
                 let next = (s.market_prices[0] + 0.037).rem_euclid(0.94).max(0.03);
                 s.market_prices = [next, 1.0 - next];
                 s.market_status = MarketStatus::Idle;
-            }),
-            minor("Reset ticket", |s: &mut State| {
+            })),
+            any(minor("Reset ticket", |s: &mut State| {
                 s.market_prices = [0.167, 0.833];
                 s.market_amount = 115.0;
                 s.market_status = MarketStatus::Idle;
                 s.market_log = "(no trade placed)".to_string();
-            }),
+            })),
             any(caption(state.market_log.clone())),
-        ])))
+        ]))
 }
 
 // ---- The wallet card -------------------------------------------------------
 
 /// The wallet block: a balance card with an account switcher and a search
 /// panel that morph into the same box.
-fn wallet_block(state: &State) -> AnyView<State> {
+fn wallet_block(state: &State) -> impl View<State> {
     let accounts = vec![
         wallet_account(
             "main",
@@ -591,7 +593,7 @@ fn wallet_block(state: &State) -> AnyView<State> {
         ),
     ];
 
-    any(column()
+    column()
         .child(section("wallet_card"))
         .child(gap(6.0))
         .child(caption(
@@ -631,16 +633,16 @@ fn wallet_block(state: &State) -> AnyView<State> {
         )
         .child(gap(10.0))
         .child(controls(vec![
-            minor("Simulate balance change", |s: &mut State| {
+            any(minor("Simulate balance change", |s: &mut State| {
                 // A deterministic stand-in for a chain update: alternate a
                 // credit and a debit so the ticker rolls both ways.
                 let up = s.wallet_change <= 0.0;
                 let delta = if up { 268.4 } else { -142.9 };
                 s.wallet_balance = (s.wallet_balance + delta).max(0.0);
                 s.wallet_change = delta;
-            }),
+            })),
             any(caption(state.wallet_log.clone())),
-        ])))
+        ]))
 }
 
 // ---- The 404 pages ---------------------------------------------------------
@@ -657,7 +659,7 @@ fn style_label(style: NotFoundStyle) -> &'static str {
 }
 
 /// The 404 block: one component with five presentations, switched below it.
-fn not_found_block(state: &State) -> AnyView<State> {
+fn not_found_block(state: &State) -> impl View<State> {
     let picker: Vec<AnyView<State>> = NotFoundStyle::ALL
         .into_iter()
         .map(|style| {
@@ -674,7 +676,7 @@ fn not_found_block(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(column()
+    column()
         .child(section("not_found"))
         .child(gap(6.0))
         .child(caption(
@@ -702,7 +704,7 @@ fn not_found_block(state: &State) -> AnyView<State> {
                 }),
         )
         .child(gap(8.0))
-        .child(caption(format!("Last action: {}", state.not_found_log))))
+        .child(caption(format!("Last action: {}", state.not_found_log)))
 }
 
 // ---- The page --------------------------------------------------------------
@@ -745,6 +747,6 @@ impl Component for ShowcasePage {
 }
 
 /// The Blocks · Showcase page, hosted over its own retained [`State`].
-pub fn page() -> AnyView<AppState> {
-    any(component(ShowcasePage))
+pub fn page() -> impl View<AppState> {
+    component(ShowcasePage)
 }

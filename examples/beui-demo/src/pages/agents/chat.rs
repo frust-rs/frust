@@ -189,8 +189,8 @@ impl State {
 // ---- The two panes ---------------------------------------------------------
 
 /// The shell's rail: the workspace's resource tree.
-fn rail(state: &State) -> AnyView<State> {
-    any(column()
+fn rail(state: &State) -> impl View<State> {
+    column()
         .child(text("Agent workspace").size(13.0))
         .child(SizedBox(None, Some(4.0)))
         .child(caption("Alt+Shift+Arrow moves a resource."))
@@ -216,7 +216,7 @@ fn rail(state: &State) -> AnyView<State> {
                         None => s.moved = Some(format!("Refused: {describe}")),
                     }
                 }),
-        ))
+        )
 }
 
 /// The host-owned rows the conversation appends after its transcript: the
@@ -316,7 +316,7 @@ fn workspace_rows(
 }
 
 /// The shell's inset: the assembled conversation, wired to the model.
-fn conversation(state: &State) -> AnyView<State> {
+fn conversation(state: &State) -> impl View<State> {
     let busy = state.model.is_busy();
     let worked = state.worked;
     let plan_open = state.plan_open;
@@ -324,7 +324,7 @@ fn conversation(state: &State) -> AnyView<State> {
     let media = state.media;
     let turns = state.model.messages().len();
 
-    any(chat_conversation::<State>(&state.model)
+    chat_conversation::<State>(&state.model)
         .placeholder("Ask the agent to continue\u{2026}")
         .avatars("You", "AI")
         .extra_rows(move || workspace_rows(busy, worked, plan_open, activity_open, media, turns))
@@ -334,7 +334,7 @@ fn conversation(state: &State) -> AnyView<State> {
         })
         .on_stop(|s: &mut State| {
             s.model.stop();
-        }))
+        })
 }
 
 // ---- The page --------------------------------------------------------------
@@ -421,6 +421,6 @@ impl Component for Chat {
 }
 
 /// The Agents · Chat page.
-pub fn page() -> AnyView<AppState> {
-    any(component(Chat))
+pub fn page() -> impl View<AppState> {
+    component(Chat)
 }

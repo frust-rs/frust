@@ -152,36 +152,36 @@ fn caption(body: impl Into<String>) -> TextView {
 }
 
 /// A vertical gap.
-fn gap(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal gap.
-fn hgap(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn hgap(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 /// A centred row of controls.
-fn controls(children: Vec<AnyView<State>>) -> AnyView<State> {
+fn controls(children: Vec<AnyView<State>>) -> impl View<State> {
     let mut spaced = Vec::with_capacity(children.len() * 2);
     for (index, child) in children.into_iter().enumerate() {
         if index > 0 {
-            spaced.push(hgap(8.0));
+            spaced.push(any(hgap(8.0)));
         }
         spaced.push(child);
     }
-    any(FlexView::new(
+    FlexView::new(
         Axis::Horizontal,
         spaced.into_iter().map(inflexible).collect(),
     )
-    .cross_axis(CrossAxisAlignment::Center))
+    .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A fixed-height mounting box for an overlay host: the bounded constraints
 /// `frust_beui::overlay` requires, and a `Stack` to put the host on top of the
 /// block's own explanatory content. See the [module docs](self).
-fn stage(height: f64, children: Vec<AnyView<State>>) -> AnyView<State> {
-    any(SizedBox(None, Some(height)).child(Stack(children)))
+fn stage(height: f64, children: Vec<AnyView<State>>) -> impl View<State> {
+    SizedBox(None, Some(height)).child(Stack(children))
 }
 
 // ---- The command palette ---------------------------------------------------
@@ -213,7 +213,7 @@ fn palette_items() -> Vec<CommandPaletteItem> {
 
 /// The palette block: an open button, the chord's own readout, and the modal
 /// host itself over a fixed-height stage.
-fn palette_block(state: &State) -> AnyView<State> {
+fn palette_block(state: &State) -> impl View<State> {
     let items = palette_items();
     let labels: Vec<String> = items.iter().map(|item| item.label().to_string()).collect();
     let query = state.palette_query.clone();
@@ -222,7 +222,7 @@ fn palette_block(state: &State) -> AnyView<State> {
     // their two group headings rather than clipping them.
     let mounting_note = any(caption("The palette mounts over this box."));
 
-    any(column()
+    column()
         .child(section("command_palette"))
         .child(gap(6.0))
         .child(caption(
@@ -272,7 +272,7 @@ fn palette_block(state: &State) -> AnyView<State> {
                     }
                 })),
             ],
-        )))
+        ))
 }
 
 // ---- The morphing search ---------------------------------------------------
@@ -300,7 +300,7 @@ fn search_items() -> Vec<MorphingSearchItem> {
 
 /// The morphing-search block: the closed trigger, a shape toggle, and the panel
 /// that morphs out of the trigger's own box.
-fn search_block(state: &State) -> AnyView<State> {
+fn search_block(state: &State) -> impl View<State> {
     let items = search_items();
     let titles: Vec<String> = items.iter().map(|item| item.title().to_string()).collect();
     let query = state.search_query.clone();
@@ -327,7 +327,7 @@ fn search_block(state: &State) -> AnyView<State> {
         .size(ButtonSize::Sm)),
     ])));
 
-    any(column()
+    column()
         .child(section("morphing_search"))
         .child(gap(6.0))
         .child(caption(
@@ -364,14 +364,14 @@ fn search_block(state: &State) -> AnyView<State> {
             ],
         ))
         .child(gap(8.0))
-        .child(caption(format!("Last opened: {}", state.search_log))))
+        .child(caption(format!("Last opened: {}", state.search_log)))
 }
 
 // ---- The expandable action bar ---------------------------------------------
 
 /// The action bar block: upstream's six actions, plus the controlled-expansion
 /// toggle its own preview ships.
-fn action_bar_block(state: &State) -> AnyView<State> {
+fn action_bar_block(state: &State) -> impl View<State> {
     let entries: [(&str, IconSource, Option<&str>); 6] = [
         ("Send", icons::SEND, Some("S")),
         ("Copy", icons::CONTENT_COPY, Some("C")),
@@ -397,7 +397,7 @@ fn action_bar_block(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(column()
+    column()
         .child(section("expandable_action_bar"))
         .child(gap(6.0))
         .child(caption(
@@ -429,14 +429,14 @@ fn action_bar_block(state: &State) -> AnyView<State> {
             .tone(ButtonTone::Secondary)
             .size(ButtonSize::Sm)),
             any(caption(format!("Last action: {}", state.bar_log))),
-        ])))
+        ]))
 }
 
 // ---- The overflow rail -----------------------------------------------------
 
 /// The overflow block: the rail inside a container whose width the demo picks,
 /// which is what makes the collapse visible.
-fn overflow_block(state: &State) -> AnyView<State> {
+fn overflow_block(state: &State) -> impl View<State> {
     let primary = vec![
         overflow_action("Preview"),
         overflow_action("Pin"),
@@ -467,7 +467,7 @@ fn overflow_block(state: &State) -> AnyView<State> {
         })
         .collect();
 
-    any(column()
+    column()
         .child(section("overflow_actions"))
         .child(gap(6.0))
         .child(caption(
@@ -496,14 +496,14 @@ fn overflow_block(state: &State) -> AnyView<State> {
         .child(caption(format!(
             "Container {:.0}px \u{b7} last action: {}",
             state.rail_width, state.overflow_log
-        ))))
+        )))
 }
 
 // ---- The bloom menu --------------------------------------------------------
 
 /// The bloom block: a labelled trigger that irises open into a three-column
 /// grid blooming out of its own centre.
-fn bloom_block(state: &State) -> AnyView<State> {
+fn bloom_block(state: &State) -> impl View<State> {
     let entries: [(&str, IconSource); 6] = [
         ("Document", icons::DESCRIPTION),
         ("Image", icons::IMAGE),
@@ -518,7 +518,7 @@ fn bloom_block(state: &State) -> AnyView<State> {
         .map(|(label, glyph)| bloom_menu_item(icon(*glyph).size(20.0), *label))
         .collect();
 
-    any(column()
+    column()
         .child(section("bloom_menu"))
         .child(gap(6.0))
         .child(caption(
@@ -540,7 +540,7 @@ fn bloom_block(state: &State) -> AnyView<State> {
             .on_open_change(|s: &mut State, open: bool| s.bloom_open = open),
         )
         .child(gap(8.0))
-        .child(caption(format!("Last created: {}", state.bloom_log))))
+        .child(caption(format!("Last created: {}", state.bloom_log)))
 }
 
 // ---- The page --------------------------------------------------------------
@@ -583,8 +583,8 @@ impl Component for CommandPage {
 }
 
 /// The Blocks · Command page, hosted over its own retained [`State`].
-pub fn page() -> AnyView<AppState> {
-    any(component(CommandPage))
+pub fn page() -> impl View<AppState> {
+    component(CommandPage)
 }
 
 // ---- The page's key scope --------------------------------------------------

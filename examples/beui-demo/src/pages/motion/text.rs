@@ -125,47 +125,47 @@ impl Default for State {
 }
 
 /// A vertical spacer.
-fn gap(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal spacer.
-fn hgap(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn hgap(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 /// One component's block: its name, a one-line note (which is where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> AnyView<State> {
+fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
     let mut children = vec![
         any(text(title.to_string()).size(16.0)),
-        gap(4.0),
+        any(gap(4.0)),
         any(caption(note.to_string())),
-        gap(12.0),
+        any(gap(12.0)),
     ];
     children.extend(body);
-    children.push(gap(32.0));
-    any(Column(children).cross_axis(CrossAxisAlignment::Start))
+    children.push(any(gap(32.0)));
+    Column(children).cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A labelled specimen: the live component over its caption.
-fn specimen(label: &str, body: AnyView<State>) -> AnyView<State> {
-    any(column()
+fn specimen(label: &str, body: AnyView<State>) -> impl View<State> {
+    column()
         .child(body)
         .child(gap(6.0))
         .child(caption(label.to_string()))
-        .cross_axis(CrossAxisAlignment::Center))
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// Lay `items` out in rows of `per_row`, `gap`px apart — this workspace has no
 /// flow/wrap primitive, so a long variant grid is chunked by hand (the same
 /// route `examples/material3-demo` takes for upstream's `Wrap`).
-fn grid(items: Vec<AnyView<State>>, per_row: usize, spacing: f64) -> AnyView<State> {
+fn grid(items: Vec<AnyView<State>>, per_row: usize, spacing: f64) -> impl View<State> {
     let mut rows: Vec<AnyView<State>> = Vec::new();
     let mut row: Vec<AnyView<State>> = Vec::new();
     for item in items {
         if !row.is_empty() {
-            row.push(hgap(spacing));
+            row.push(any(hgap(spacing)));
         }
         row.push(item);
         if row.len() >= per_row * 2 - 1 {
@@ -180,23 +180,23 @@ fn grid(items: Vec<AnyView<State>>, per_row: usize, spacing: f64) -> AnyView<Sta
     let mut spaced: Vec<AnyView<State>> = Vec::with_capacity(rows.len() * 2);
     for r in rows {
         if !spaced.is_empty() {
-            spaced.push(gap(spacing));
+            spaced.push(any(gap(spacing)));
         }
         spaced.push(r);
     }
-    any(Column(spaced).cross_axis(CrossAxisAlignment::Start))
+    Column(spaced).cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A small ghost button — the knob every demo on this page is driven by.
-fn knob(label: &str, on_press: impl Fn(&mut State) + 'static) -> AnyView<State> {
-    any(button(label.to_string(), on_press)
+fn knob(label: &str, on_press: impl Fn(&mut State) + 'static) -> impl View<State> {
+    button(label.to_string(), on_press)
         .tone(ButtonTone::Outline)
-        .size(ButtonSize::Sm))
+        .size(ButtonSize::Sm)
 }
 
 /// The `text_animation` block: all five variants over one phrase, plus the
 /// phrase cycler that restarts them.
-fn text_effects(state: &State) -> AnyView<State> {
+fn text_effects(state: &State) -> impl View<State> {
     let phrase = PHRASES[state.phrase % PHRASES.len()];
     let variants = [
         (TextAnimationVariant::Reveal, "Reveal"),
@@ -218,12 +218,12 @@ fn text_effects(state: &State) -> AnyView<State> {
     let mut body: Vec<AnyView<State>> = Vec::new();
     for row in rows {
         body.push(row);
-        body.push(gap(10.0));
+        body.push(any(gap(10.0)));
     }
-    body.push(gap(2.0));
-    body.push(knob("Next phrase", |s: &mut State| {
+    body.push(any(gap(2.0)));
+    body.push(any(knob("Next phrase", |s: &mut State| {
         s.phrase = (s.phrase + 1) % PHRASES.len();
-    }));
+    })));
 
     demo(
         "text_animation",
@@ -237,7 +237,7 @@ fn text_effects(state: &State) -> AnyView<State> {
 }
 
 /// The `number` block: both modes over one live value.
-fn numbers(state: &State) -> AnyView<State> {
+fn numbers(state: &State) -> impl View<State> {
     let value = state.value;
     let revenue = 129_480.0 + value - 48_273.0;
 
@@ -274,7 +274,7 @@ fn numbers(state: &State) -> AnyView<State> {
                 .child(hgap(48.0))
                 .child(padded)
                 .cross_axis(CrossAxisAlignment::Start)),
-            gap(14.0),
+            any(gap(14.0)),
             any(row()
                 .child(knob("+137", |s: &mut State| s.value += 137.0))
                 .child(hgap(8.0))
@@ -291,7 +291,7 @@ fn numbers(state: &State) -> AnyView<State> {
 
 /// The `animated_badge` block: the live state machine plus every tone at both
 /// sizes.
-fn badges(state: &State) -> AnyView<State> {
+fn badges(state: &State) -> impl View<State> {
     let (status, label) = BADGE_STATES[state.badge % BADGE_STATES.len()];
 
     let live = any(row()
@@ -338,21 +338,21 @@ fn badges(state: &State) -> AnyView<State> {
          icon-less below). The roll drops upstream's blur and its \u{2212}8\u{b0} icon \
          rotation; the pill takes its new width immediately rather than \
          gliding, since nothing here layout-animates a container.",
-        vec![live, gap(16.0), grid(tones, 3, 24.0)],
+        vec![live, any(gap(16.0)), any(grid(tones, 3, 24.0))],
     )
 }
 
 /// The `loader` block: all seventeen variants at one size.
-fn loaders(state: &State) -> AnyView<State> {
+fn loaders(state: &State) -> impl View<State> {
     let size = state.loader_size;
     let cells: Vec<AnyView<State>> = LoaderVariant::ALL
         .iter()
         .map(|variant| {
-            specimen(
+            any(specimen(
                 loader_label(*variant),
                 any(SizedBox(Some(size + 24.0), Some(size + 8.0))
                     .child(loader::<State>().variant(*variant).size(size))),
-            )
+            ))
         })
         .collect();
 
@@ -364,8 +364,8 @@ fn loaders(state: &State) -> AnyView<State> {
          bundled Geist Mono glyphs. Reduced motion keeps a calm opacity pulse \
          here rather than freezing \u{2014} upstream's own rule.",
         vec![
-            grid(cells, 6, 16.0),
-            gap(16.0),
+            any(grid(cells, 6, 16.0)),
+            any(gap(16.0)),
             any(row()
                 .child(caption("Size"))
                 .child(hgap(10.0))
@@ -403,7 +403,7 @@ fn loader_label(variant: LoaderVariant) -> &'static str {
 }
 
 /// The `marquee` block: one live ticker, its direction and its edge fade.
-fn marquee_demo(state: &State) -> AnyView<State> {
+fn marquee_demo(state: &State) -> impl View<State> {
     let direction = state.marquee_direction;
     let fade = state.marquee_fade;
     let items: Vec<AnyView<State>> = LOGOS
@@ -453,23 +453,23 @@ fn marquee_demo(state: &State) -> AnyView<State> {
          surface colour rather than upstream's mask, so it is off by default \
          and only exact over a surface-coloured background; items are \
          decorative and take no pointer input.",
-        vec![track, gap(14.0), direction_knobs],
+        vec![track, any(gap(14.0)), direction_knobs],
     )
 }
 
 /// The `theme_toggle` block: four reveals sharing one start origin.
-fn theme_toggles(state: &State) -> AnyView<State> {
+fn theme_toggles(state: &State) -> impl View<State> {
     let (start, start_label) = TOGGLE_STARTS[state.toggle_start % TOGGLE_STARTS.len()];
     let toggles: Vec<AnyView<State>> = TOGGLE_VARIANTS
         .iter()
         .map(|(variant, label)| {
-            specimen(
+            any(specimen(
                 label,
                 any(theme_toggle::<State>()
                     .variant(*variant)
                     .start(start)
                     .size(32.0)),
-            )
+            ))
         })
         .collect();
 
@@ -483,7 +483,7 @@ fn theme_toggles(state: &State) -> AnyView<State> {
          72px tile.",
         vec![
             any(Row(toggles).cross_axis(CrossAxisAlignment::Start)),
-            gap(14.0),
+            any(gap(14.0)),
             any(row()
                 .child(caption(format!("Start \u{b7} {start_label}")))
                 .child(hgap(10.0))
@@ -519,8 +519,8 @@ impl Component for TextPage {
     }
 }
 
-pub fn page() -> AnyView<AppState> {
-    any(column()
+pub fn page() -> impl View<AppState> {
+    column()
         .child(heading("Motion \u{b7} Text"))
         .child(SizedBox(None, Some(8.0)))
         .child(caption(
@@ -530,5 +530,5 @@ pub fn page() -> AnyView<AppState> {
         ))
         .child(SizedBox(None, Some(24.0)))
         .child(component(TextPage))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }

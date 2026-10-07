@@ -145,47 +145,47 @@ impl Default for State {
 }
 
 /// A vertical spacer.
-fn gap(height: f64) -> AnyView<State> {
-    any(SizedBox(None, Some(height)))
+fn gap(height: f64) -> impl View<State> {
+    SizedBox(None, Some(height))
 }
 
 /// A horizontal spacer.
-fn hgap(width: f64) -> AnyView<State> {
-    any(SizedBox(Some(width), None))
+fn hgap(width: f64) -> impl View<State> {
+    SizedBox(Some(width), None)
 }
 
 /// One component's block: its name, a one-line note (where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> AnyView<State> {
+fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
     let mut children = vec![
         any(text(title.to_string()).size(16.0)),
-        gap(4.0),
+        any(gap(4.0)),
         any(caption(note.to_string())),
-        gap(12.0),
+        any(gap(12.0)),
     ];
     children.extend(body);
-    children.push(gap(32.0));
-    any(Column(children).cross_axis(CrossAxisAlignment::Start))
+    children.push(any(gap(32.0)));
+    Column(children).cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A labelled specimen: the caption above the live component.
-fn labelled(label: &str, body: AnyView<State>) -> AnyView<State> {
-    any(column()
+fn labelled(label: &str, body: AnyView<State>) -> impl View<State> {
+    column()
         .child(caption(label.to_string()))
         .child(gap(8.0))
         .child(body)
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A small outline button — this page's knobs.
-fn knob(label: &str, on_press: impl Fn(&mut State) + 'static) -> AnyView<State> {
-    any(button(label.to_string(), on_press)
+fn knob(label: &str, on_press: impl Fn(&mut State) + 'static) -> impl View<State> {
+    button(label.to_string(), on_press)
         .tone(ButtonTone::Outline)
-        .size(ButtonSize::Sm))
+        .size(ButtonSize::Sm)
 }
 
 /// [`tabs`] in all three variants.
-fn tab_sets(state: &State) -> AnyView<State> {
+fn tab_sets(state: &State) -> impl View<State> {
     let pill = any(tabs(
         state.pill_tab.clone(),
         vec![
@@ -253,7 +253,7 @@ fn tab_sets(state: &State) -> AnyView<State> {
 }
 
 /// The [`dock`], with and without its magnification.
-fn docks(state: &State) -> AnyView<State> {
+fn docks(state: &State) -> impl View<State> {
     let glyphs = [
         icons::HOME,
         icons::SEND,
@@ -313,21 +313,21 @@ fn docks(state: &State) -> AnyView<State> {
                 .child(hgap(32.0))
                 .child(labelled("magnify: off \u{b7} 36px items", plain))
                 .cross_axis(CrossAxisAlignment::Start)),
-            gap(14.0),
-            knob(
+            any(gap(14.0)),
+            any(knob(
                 if state.dock_magnify {
                     "Magnify: on"
                 } else {
                     "Magnify: off"
                 },
                 |s: &mut State| s.dock_magnify = !s.dock_magnify,
-            ),
+            )),
         ],
     )
 }
 
 /// [`animated_sidebar`] and [`bounce_sidebar`], side by side.
-fn sidebars(state: &State) -> AnyView<State> {
+fn sidebars(state: &State) -> impl View<State> {
     let glyphs = [
         icons::HOME,
         icons::TAG,
@@ -385,21 +385,21 @@ fn sidebars(state: &State) -> AnyView<State> {
                 .child(hgap(48.0))
                 .child(labelled("Bounce \u{b7} the dot arcs between rows", bounce))
                 .cross_axis(CrossAxisAlignment::Start)),
-            gap(14.0),
-            knob(
+            any(gap(14.0)),
+            any(knob(
                 if state.sidebar_open {
                     "Collapse the rail"
                 } else {
                     "Expand the rail"
                 },
                 |s: &mut State| s.sidebar_open = !s.sidebar_open,
-            ),
+            )),
         ],
     )
 }
 
 /// [`file_tree`] and [`bouncy_accordion`].
-fn disclosure(state: &State) -> AnyView<State> {
+fn disclosure(state: &State) -> impl View<State> {
     let nodes = vec![
         file_tree_folder(
             "app",
@@ -479,7 +479,7 @@ fn disclosure(state: &State) -> AnyView<State> {
 }
 
 /// [`preview_rail`] in both orientations.
-fn rails(state: &State) -> AnyView<State> {
+fn rails(state: &State) -> impl View<State> {
     let items = || {
         SECTIONS
             .iter()
@@ -543,8 +543,8 @@ impl Component for NavigationPage {
     }
 }
 
-pub fn page() -> AnyView<AppState> {
-    any(column()
+pub fn page() -> impl View<AppState> {
+    column()
         .child(heading("Motion \u{b7} Navigation"))
         .child(SizedBox(None, Some(8.0)))
         .child(caption(
@@ -554,5 +554,5 @@ pub fn page() -> AnyView<AppState> {
         ))
         .child(SizedBox(None, Some(24.0)))
         .child(component(NavigationPage))
-        .cross_axis(CrossAxisAlignment::Start))
+        .cross_axis(CrossAxisAlignment::Start)
 }
