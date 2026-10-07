@@ -113,7 +113,7 @@
 //! ```
 
 pub use frust_core::component::{Component, ComponentView, component};
-pub use frust_core::view::{AnyView, View, any};
+pub use frust_core::view::{AnyView, View, ViewSeq, any, views};
 // [`NavigatorController::push_with_options`] (an existing method on the
 // already-flat-re-exported [`NavigatorController`] below) needed its argument
 // type actually constructible from `frust::` — added here as part of the
@@ -688,8 +688,8 @@ pub mod authoring {
         AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, DiscardScene, EventCtx,
         EventOutcome, EventResult, HeroDirective, HeroFrames, InputEvent, Key, KeyEvent, LayoutCtx,
         Modifiers, NamedKey, PaintCtx, PaintOutcome, PaintScene, PointerButton, PointerEvent,
-        PointerPhase, ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, Widget,
-        WidgetId, any,
+        PointerPhase, ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, ViewSeq, Widget,
+        WidgetId, any, views,
     };
 
     /// The clipboard/selection vocabulary an editable widget matches on —
