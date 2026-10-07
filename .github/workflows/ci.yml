@@ -164,6 +164,30 @@ jobs:
         working-directory: ${{ matrix.dir }}
         run: ${{ matrix.gate }}
 
+  hotpatch-feature-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Install Linux build packages
+        run: |
+          pkgs=(
+            # C toolchain helper: build scripts locate system libraries through pkg-config
+            pkg-config
+            # Text: yeslogic-fontconfig-sys (system font discovery) needs a pkg-config sysroot (docs/DEVELOPMENT.md, Test section)
+            libfontconfig1-dev libfreetype-dev
+            # Wayland: wayland-sys (via winit and wgpu-hal) probes wayland-client through pkg-config
+            libwayland-dev libxkbcommon-dev
+            # X11: the desktop shells' windowing and clipboard (x11-dl, x11rb)
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev
+          )
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: bash scripts/ci/hotpatch-feature-gate.sh
+
   hygiene:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -186,7 +210,7 @@ jobs:
   ci-ok:
     # The one required status check (.github/rulesets/main.json).
     if: always()
-    needs: [fmt, clippy, test, standalone, hygiene]
+    needs: [fmt, clippy, test, standalone, hotpatch-feature-gate, hygiene]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
