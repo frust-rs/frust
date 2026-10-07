@@ -1345,6 +1345,7 @@ struct FullScreenPanelWidget {
 /// Build the header close affordance's view — [`icon_button`] over
 /// [`crate::icons::CLOSE`], firing `on_dismiss` directly (see the module
 /// docs' *Deliberate v1 scope cuts*).
+// erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
 fn close_view<State: 'static>(on_dismiss: Option<OnDismiss<State>>) -> AnyView<State> {
     any(
         icon_button(icon(crate::icons::CLOSE), move |state: &mut State| {
@@ -1705,11 +1706,11 @@ mod tests {
             }
         }
     }
-    fn tap_action(w: f64, h: f64, on_tap: impl Fn(&mut NavState) + 'static) -> AnyView<NavState> {
-        any(TapView {
+    fn tap_action(w: f64, h: f64, on_tap: impl Fn(&mut NavState) + 'static) -> impl View<NavState> {
+        TapView {
             size: Size::new(w, h),
             on_tap: Rc::new(on_tap),
-        })
+        }
     }
 
     /// The app-logic closure the [`Harness`] rebuilds through.

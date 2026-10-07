@@ -119,6 +119,7 @@ impl<State: 'static> TimeInputView<State> {
         (self.autovalidate && !valid).then_some(self.strings.invalid_time.as_str())
     }
 
+    // erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn hour_field(&self) -> AnyView<State> {
         let on_change = self.on_change.clone();
         let entry = self.entry.clone();
@@ -135,6 +136,7 @@ impl<State: 'static> TimeInputView<State> {
         any(field)
     }
 
+    // erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn minute_field(&self) -> AnyView<State> {
         let on_change = self.on_change.clone();
         let entry = self.entry.clone();
@@ -153,6 +155,7 @@ impl<State: 'static> TimeInputView<State> {
 
     /// One AM/PM button — filled while selected, outlined otherwise
     /// (`_buildMeridiemRow`).
+    // erasure: keep element of the Vec<AnyView> the period ChildPods are built from
     fn period_button(&self, pm: bool) -> AnyView<State> {
         let on_change = self.on_change.clone();
         let entry = self.entry.clone();

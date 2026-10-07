@@ -377,6 +377,7 @@ impl<State: 'static> ListItem<State> {
 
     /// The headline text view (`on_surface`, default body-large size, family
     /// from the theme's `bodyLarge` role, one ellipsized line).
+    // erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn headline_view(&self) -> AnyView<State> {
         any(text(self.headline.clone())
             .max_lines(HEADLINE_MAX_LINES)
