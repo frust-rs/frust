@@ -2219,6 +2219,7 @@ mod tests {
     }
 
     impl ToolbarHost {
+        // erasure: keep result stored in an AnyView slot and element
         fn pod(&self) -> AnyView<()> {
             any(UnitProbe {
                 log: Rc::clone(&self.log),

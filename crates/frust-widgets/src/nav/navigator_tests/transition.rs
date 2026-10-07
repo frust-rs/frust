@@ -1179,20 +1179,20 @@ impl PaintScene for HeroScene {
 
 /// A page that is a single tagged hero wrapping a fixed-size leaf (hero at
 /// page-local origin).
-fn hero_leaf_page(tag: &'static str, w: f64, h: f64) -> AnyView<()> {
-    any(crate::hero(
+fn hero_leaf_page(tag: &'static str, w: f64, h: f64) -> impl View<()> {
+    crate::hero(
         tag,
         SizedLeaf {
             size: Size::new(w, h),
         },
-    ))
+    )
 }
 
 /// A page whose tagged hero is inset by `(left, top)` — so its page-local
 /// rect differs from a [`hero_leaf_page`]'s, giving the morph a real
 /// translation *and* (with a different size) scale to interpolate.
-fn hero_offset_page(tag: &'static str, w: f64, h: f64, left: f64, top: f64) -> AnyView<()> {
-    any(crate::Padding(
+fn hero_offset_page(tag: &'static str, w: f64, h: f64, left: f64, top: f64) -> impl View<()> {
+    crate::Padding(
         crate::EdgeInsets {
             left,
             top,
@@ -1205,7 +1205,7 @@ fn hero_offset_page(tag: &'static str, w: f64, h: f64, left: f64, top: f64) -> A
                 size: Size::new(w, h),
             },
         ),
-    ))
+    )
 }
 
 fn hero_frame(
