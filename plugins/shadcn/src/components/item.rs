@@ -804,8 +804,7 @@ mod tests {
 
     #[test]
     fn sm_size_uses_a_tighter_gap_and_padding() {
-        let view: ItemView<()> =
-            item(vec![any(leaf(10.0, 10.0)), any(leaf(10.0, 10.0))]).size(ItemSize::Sm);
+        let view: ItemView<()> = item(vec![leaf(10.0, 10.0), leaf(10.0, 10.0)]).size(ItemSize::Sm);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         let size = layout(&mut w, Size::new(400.0, 400.0));
@@ -833,7 +832,7 @@ mod tests {
                 self.strokes += 1;
             }
         }
-        let view: ItemView<()> = item(vec![any(leaf(10.0, 10.0))]).variant(ItemVariant::Outline);
+        let view: ItemView<()> = item(vec![leaf(10.0, 10.0)]).variant(ItemVariant::Outline);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         let size = layout(&mut w, Size::new(400.0, 400.0));
@@ -846,7 +845,7 @@ mod tests {
     #[test]
     fn press_fires_on_up_inside_and_actions_win_hover_over_the_row() {
         use frust::authoring::{PointerButton, PointerEvent};
-        let view: ItemView<Vec<u32>> = item(vec![any(frust_widgets::test_support::probe(0))])
+        let view: ItemView<Vec<u32>> = item(vec![frust_widgets::test_support::probe(0)])
             .on_press(|s: &mut Vec<u32>| s.push(99));
         let mut counter = 0u64;
         let mut w = View::<Vec<u32>>::build(&view, &mut BuildCtx::new(&mut counter));
@@ -870,7 +869,7 @@ mod tests {
 
     #[test]
     fn header_row_distributes_extra_width_between_two_children() {
-        let view: ItemRowView<()> = item_header(vec![any(leaf(20.0, 10.0)), any(leaf(20.0, 10.0))]);
+        let view: ItemRowView<()> = item_header(vec![leaf(20.0, 10.0), leaf(20.0, 10.0)]);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         let size = layout(&mut w, Size::new(200.0, 40.0));
@@ -895,10 +894,10 @@ mod tests {
 
     #[cfg(feature = "bundled-fonts")]
     fn titled(_: &mut ()) -> ItemView<()> {
-        item(vec![any(item_content(vec![
+        item(vec![item_content(vec![
             any(item_title("Two-factor authentication")),
             any(item_description("Verify with a code on every sign-in.")),
-        ]))])
+        ])])
     }
 
     #[cfg(feature = "bundled-fonts")]

@@ -2,7 +2,7 @@
 # scripts/devloop-measure.sh — repeatable desktop dev-loop timing baseline.
 #
 # Measures the desktop dev-loop baseline this repo tracks (see
-# docs/DEVELOPMENT.md's Dev Loop section for the recorded numbers): an
+# docs/PERFORMANCE_BASELINES.md's Dev loop section for the recorded numbers): an
 # app-crate-only incremental `cargo build` wall time (default toolchain
 # config), the same
 # incremental measurement under an alternate linker where one is found on
@@ -254,5 +254,5 @@ fi
 echo
 
 echo "== End of report =="
-echo "See docs/DEVELOPMENT.md's Dev Loop section"
+echo "See docs/PERFORMANCE_BASELINES.md's Dev loop section"
 echo "for the recorded baseline and methodology this script reproduces."

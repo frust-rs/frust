@@ -55,7 +55,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # `frust-plugin` is the only `frust-*` dependency a platform plugin may carry; `jni`
 # is named directly for this crate's own JNI signature calls.
 [target.'cfg(target_os = "android")'.dependencies]
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.0" }
 jni = { workspace = true }
 
 # Storage only: the biometric gate stays `NotAvailable` here. `keyring-core` is the

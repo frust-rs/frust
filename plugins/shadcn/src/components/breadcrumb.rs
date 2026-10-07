@@ -595,8 +595,8 @@ mod tests {
     #[test]
     fn list_lays_out_parts_left_to_right_with_the_1_5_gap() {
         let view: BreadcrumbListView<()> = breadcrumb_list(vec![
-            any(frust_widgets::test_support::leaf(20.0, 14.0)),
-            any(frust_widgets::test_support::leaf(20.0, 14.0)),
+            frust_widgets::test_support::leaf(20.0, 14.0),
+            frust_widgets::test_support::leaf(20.0, 14.0),
         ]);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));

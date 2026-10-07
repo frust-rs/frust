@@ -56,6 +56,8 @@ Members with `publish = false` (`frust-testing`, the demo and gallery packages) 
 6. The tag runs `.github/workflows/release.yml`, which publishes and creates the GitHub release
    (see "First release and Trusted Publishing"). Watch the run; re-run a failed `publish` job.
 7. Edit the GitHub release's generated notes into a summary of the changes since the previous tag.
+   Copy the notes from `CHANGELOG.md`'s section for the tag; the bump commit (step 3) moves the
+   Unreleased heading to the version.
 
 ## Publishing
 

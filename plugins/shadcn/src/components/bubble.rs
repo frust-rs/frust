@@ -490,10 +490,7 @@ mod tests {
 
     #[test]
     fn group_stacks_bubbles_with_an_8px_gap() {
-        let view: BubbleGroupView<()> = bubble_group(vec![
-            frust::authoring::any(bubble("one")),
-            frust::authoring::any(bubble("two")),
-        ]);
+        let view: BubbleGroupView<()> = bubble_group(vec![bubble("one"), bubble("two")]);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         let mut tcx = TextContext::new();

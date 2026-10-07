@@ -21,7 +21,7 @@ log = { workspace = true }
 
 # Unconditional per the platform-plugin charter: no other `frust-*` dependency
 # (`docs/CODE_STANDARDS.md` Plugin Conventions).
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.0" }
 
 # Unconditional, unlike the FFI deps below: `barcode` decodes from a frame,
 # never a camera backend, so it builds on every target (feature trim: root

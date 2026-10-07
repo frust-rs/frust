@@ -2,7 +2,7 @@
 # scripts/size-report.sh — repeatable release-binary size report.
 #
 # Measures the release-binary size numbers this repo tracks (see
-# docs/DEVELOPMENT.md's Build section for the recorded baselines): the
+# docs/PERFORMANCE_BASELINES.md's Measuring section for the recorded baselines): the
 # release arm64-v8a `.so` (unstripped/stripped), any
 # already-built APK/AAB's per-ABI `.so` + dex sizes, and (best-effort) a
 # desktop cargo-bloat top-20 crate breakdown as a host-proxy for the

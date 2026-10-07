@@ -98,10 +98,6 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             row()
                 .child(text("JetBrains Mono:").size(13.0))
                 .child(SizedBox(Some(8.0), None))
-                .child(kbd_group(vec![
-                    any(kbd("Ctrl")),
-                    any(kbd("Shift")),
-                    any(kbd("P")),
-                ])),
+                .child(kbd_group(vec![kbd("Ctrl"), kbd("Shift"), kbd("P")])),
         )
 }

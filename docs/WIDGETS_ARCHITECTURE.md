@@ -538,7 +538,7 @@ every other widget upholds, exercised here against a windowed rather than fixed 
 **Two row-identity models.** `ListView::builder` reconciles rows by raw index — correct for
 append-only, truncate-only, or full-replace data, but a mid-list insert/remove/reorder silently
 reattaches a row's retained state to whatever now sits at that index. `ListView::builder_keyed`
-adds a `ChildKey` per row (the same identity `keyed()` uses for `Flex`, see CODE_STANDARDS.md) so
+adds a `ChildKey` per row (the same identity `keyed()` uses for `Flex`, see WIDGETS_CODE_STANDARDS.md) so
 state follows the row through a mutation instead; a keyed list additionally re-anchors its scroll
 offset in `rebuild`, before windowing, so a prepend/removal above the viewport never visibly jumps
 the content the user is looking at **when the mutation is single-sided** — a same-frame mutation on

@@ -136,14 +136,14 @@ impl Component for Pill {
 fn transcript_row(entry: &Message) -> AnyView<AppState> {
     if entry.mine {
         any(message_scroller_item(
-            message(vec![any(message_content(vec![
+            message(vec![message_content(vec![
                 any(component(Pill {
                     body: entry.body.clone(),
                     variant: BubbleVariant::Default,
                     align: BubbleAlign::End,
                 })),
                 any(message_footer("Sent").align(MessageAlign::End)),
-            ]))])
+            ])])
             .align(MessageAlign::End),
         ))
     } else {
@@ -224,15 +224,15 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             .child(SizedBox::<AppState>(None, Some(12.0)))
             .child(composer)
             .child(SizedBox::<AppState>(None, Some(12.0)))
-            .child(message_group(vec![any(message(vec![any(
-                message_content(vec![any(component(Pill {
+            .child(message_group(vec![message(vec![message_content(vec![
+                component(Pill {
                     body: "message_group / message / message_content compose the \
                                same parts outside the scroller too."
                         .to_string(),
                     variant: BubbleVariant::Outline,
                     align: BubbleAlign::Start,
-                }))]),
-            )]))]))
+                }),
+            ])])]))
             .cross_axis(CrossAxisAlignment::Stretch),
     )
 }

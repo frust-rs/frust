@@ -235,7 +235,7 @@ mod tests {
                 dialog_title("Delete project?"),
                 dialog_description("This cannot be undone."),
             ]),
-            dialog_footer(vec![any(Block(Size::new(80.0, 36.0)))]),
+            dialog_footer(vec![Block(Size::new(80.0, 36.0))]),
         ])
     }
 

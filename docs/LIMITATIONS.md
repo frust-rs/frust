@@ -665,7 +665,8 @@ idempotent `new`), `crates/frust-widgets/src/drag/reorderable.rs` (the only
 in-tree wrapper; the `inner: AnyView<State>` field (:106), and the `type Element = Box<dyn Widget>` in its
 `impl View<State> for ReorderableListView<State>` block),
 `crates/frust-widgets/tests/double_erasure_swap.rs` (tripwire test
-`wrapper_view_erasure_swap_blind`), and `crates/frust-widgets/src/authoring.rs` (swap detection).
+`wrapper_view_erasure_swap_blind`), `crates/frust-widgets/tests/wrapper_view_guard.rs`
+(source-scan guard failing on any new in-tree view of this shape), and `crates/frust-widgets/src/authoring.rs` (swap detection).
 
 ---
 
@@ -697,7 +698,7 @@ typestate on the builder or a release-mode diagnostic channel, neither of
 which is in scope. The codemod's skipped sites are reported (exit status 2) and
 fixed by hand, and its one silent-risk case is compiler-caught.
 
-**Evidence**: `docs/CODE_STANDARDS.md` (keyed-list rule),
+**Evidence**: `docs/WIDGETS_CODE_STANDARDS.md` (keyed-list rule),
 `crates/frust-widgets/src/authoring.rs` (`rebuild_children`'s `debug_assert`), and the Phase 3
 review round of the any-erasure plan (its keyed-equivalence and codemod
 findings).
@@ -5787,7 +5788,7 @@ registering and driving a real `ExternalPass` through its own frame loop.
 ### `external-pass-panic-isolation-dev-only` — a panicking `ExternalPass` is only isolated in a build that unwinds
 
 **Observed** (evidence: root `Cargo.toml`'s `[profile.release]` sets `panic = "abort"` (also recorded
-in `docs/DEVELOPMENT.md`'s Release-profile hardening); `crates/frust-render/src/external_pass.rs`'s
+in `docs/PERFORMANCE_BASELINES.md`'s Release-profile hardening); `crates/frust-render/src/external_pass.rs`'s
 `run_external_passes` wraps each pass's `record` call in `catch_unwind`, reporting the first panic of
 an id at `warn!` and every later one at `debug!`, retiring the pass and queuing its binding for
 unbind): `catch_unwind` keeps a panicking pass from taking the frame's encoder — and every sibling

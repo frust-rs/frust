@@ -19,8 +19,8 @@ path = "src/main.rs"
 clap.workspace = true
 anyhow.workspace = true
 # Shared drive logic; thin clap front-end over it.
-frust-drive = { path = "../frust-drive", version = "0.5.2" }
-frust-tui = { path = "../frust-tui", version = "0.5.2" }
+frust-drive = { path = "../frust-drive", version = "0.6.0" }
+frust-tui = { path = "../frust-tui", version = "0.6.0" }
 # Tokio runtime for frust tui async entry point.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # Watch loop filesystem detection; CLI-orchestration over spawn_streaming seam.
@@ -29,6 +29,6 @@ notify.workspace = true
 ctrlc.workspace = true
 
 [dev-dependencies]
-frust-drive = { path = "../frust-drive", version = "0.5.2", features = ["test-util"] }
+frust-drive = { path = "../frust-drive", version = "0.6.0", features = ["test-util"] }
 # Test-only TOML parsing for profile_sync.rs.
 toml.workspace = true

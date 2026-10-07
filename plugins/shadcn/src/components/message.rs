@@ -759,22 +759,18 @@ mod tests {
     fn row(align: MessageAlign) -> MessageView<()> {
         message(vec![
             any(message_avatar(avatar::<()>().fallback("ED"))),
-            any(message_content(vec![any(bubble("hello").align(
-                match align {
-                    MessageAlign::Start => BubbleAlign::Start,
-                    MessageAlign::End => BubbleAlign::End,
-                },
-            ))])),
+            any(message_content(vec![bubble("hello").align(match align {
+                MessageAlign::Start => BubbleAlign::Start,
+                MessageAlign::End => BubbleAlign::End,
+            })])),
         ])
         .align(align)
     }
 
     #[test]
     fn the_group_stacks_rows_in_a_gap_2_column() {
-        let view: MessageGroupView<()> = message_group(vec![
-            any(row(MessageAlign::Start)),
-            any(row(MessageAlign::End)),
-        ]);
+        let view: MessageGroupView<()> =
+            message_group(vec![row(MessageAlign::Start), row(MessageAlign::End)]);
         let mut widget = build(&view);
         let size = layout(&mut widget, ROW);
         assert_eq!(size.width, ROW.width, "the group fills its width");
@@ -828,9 +824,9 @@ mod tests {
         let view: MessageView<()> = message(vec![
             any(message_avatar(avatar::<()>().fallback("ED"))),
             any(message_content(vec![
-                any(bubble("one")),
-                any(bubble("two")),
-                any(bubble("three")),
+                bubble("one"),
+                bubble("two"),
+                bubble("three"),
             ])),
         ]);
         let mut widget = build(&view);
@@ -926,9 +922,10 @@ mod tests {
         let mut state = AppState::default();
         let mut tcx = TextContext::new();
         let mut logic = |_s: &mut AppState| {
-            message_group(vec![any(message(vec![any(message_content(vec![any(
-                crate::button("send", |s: &mut AppState| s.presses += 1),
-            )]))]))])
+            message_group(vec![message(vec![message_content(vec![crate::button(
+                "send",
+                |s: &mut AppState| s.presses += 1,
+            )])])])
         };
         root.rebuild(&mut logic, &mut state);
         root.layout_with_text(ROW, &mut tcx as &mut dyn Any);
@@ -953,14 +950,16 @@ mod tests {
         let mut state = AppState;
         let mut tcx = TextContext::new();
         let mut logic = |_s: &mut AppState| {
-            message_group(vec![any(message(vec![
-                any(message_avatar(avatar::<AppState>().fallback("ED"))),
-                any(message_content(vec![
-                    any(message_header("Ed")),
-                    any(message_footer("just now")),
-                ])),
+            message_group(vec![
+                message(vec![
+                    any(message_avatar(avatar::<AppState>().fallback("ED"))),
+                    any(message_content(vec![
+                        any(message_header("Ed")),
+                        any(message_footer("just now")),
+                    ])),
+                ])
+                .align(MessageAlign::End),
             ])
-            .align(MessageAlign::End))])
         };
         root.rebuild(&mut logic, &mut state);
         root.layout_with_text(ROW, &mut tcx as &mut dyn Any);
@@ -991,10 +990,10 @@ mod tests {
     /// every painted glyph run is one this module shapes.
     #[cfg(feature = "bundled-fonts")]
     fn meta_lines(_: &mut ()) -> MessageGroupView<()> {
-        message_group(vec![any(message(vec![any(message_content(vec![
+        message_group(vec![message(vec![message_content(vec![
             any(message_header("Ed")),
             any(message_footer("just now")),
-        ]))]))])
+        ])])])
     }
 
     #[cfg(feature = "bundled-fonts")]

@@ -2842,24 +2842,25 @@ mod tests {
     /// rows (the first one active and badged), and a footer.
     fn panel(cfg: Cfg) -> SidebarView<AppState> {
         let menu = sidebar_menu(vec![
-            any(sidebar_menu_item(vec![
+            sidebar_menu_item(vec![
                 any(sidebar_menu_button("Inbox", |s: &mut AppState| {
                     s.presses.push("Inbox".to_string())
                 })
                 .icon(Block(Size::new(16.0, 16.0)))
                 .active(true)),
                 any(sidebar_menu_badge("3")),
-            ])),
-            any(sidebar_menu_item(vec![any(sidebar_menu_button(
-                "Drafts",
-                |s: &mut AppState| s.presses.push("Drafts".to_string()),
-            )
-            .icon(Block(Size::new(16.0, 16.0))))])),
+            ]),
+            sidebar_menu_item(vec![
+                sidebar_menu_button("Drafts", |s: &mut AppState| {
+                    s.presses.push("Drafts".to_string())
+                })
+                .icon(Block(Size::new(16.0, 16.0))),
+            ]),
         ]);
-        sidebar(sidebar_content(vec![any(sidebar_group(vec![
+        sidebar(sidebar_content(vec![sidebar_group(vec![
             any(sidebar_group_label("Platform")),
             menu,
-        ]))]))
+        ])]))
         .header(Block(Size::new(0.0, SLOT_H)))
         .footer(Block(Size::new(0.0, SLOT_H)))
         .side(cfg.side)
@@ -2872,7 +2873,7 @@ mod tests {
         let apply = cfg.apply;
         sidebar_provider(
             panel(cfg),
-            sidebar_inset(vec![any(Block(Size::new(10.0, 10.0)))]),
+            sidebar_inset(vec![Block(Size::new(10.0, 10.0))]),
             open,
             move |s: &mut AppState, next| {
                 s.requests.push(next);
@@ -3249,10 +3250,10 @@ mod tests {
             Size::ZERO
         );
 
-        let mut sub = build_widget(&sidebar_menu_sub(vec![any(sidebar_menu_sub_button(
+        let mut sub = build_widget(&sidebar_menu_sub(vec![sidebar_menu_sub_button(
             "Nested",
             |_: &mut AppState| {},
-        ))]));
+        )]));
         assert!(layout_widget(&mut sub, &wide_bc, Some(&theme)).height > 0.0);
         assert_eq!(layout_widget(&mut sub, &rail_bc, Some(&theme)), Size::ZERO);
     }
@@ -3660,10 +3661,10 @@ mod tests {
     #[test]
     fn the_sub_list_indents_behind_a_rule() {
         let theme = theme_light();
-        let mut w = build_widget(&sidebar_menu_sub(vec![any(sidebar_menu_sub_button(
+        let mut w = build_widget(&sidebar_menu_sub(vec![sidebar_menu_sub_button(
             "Nested",
             |_: &mut AppState| {},
-        ))]));
+        )]));
         let size = layout_widget(
             &mut w,
             &BoxConstraints::new(Size::ZERO, Size::new(SIDEBAR_WIDTH, 200.0)),
@@ -3749,13 +3750,13 @@ mod tests {
                     any(sidebar_menu_button("Inbox", |_: &mut ()| {}).active(true)),
                     any(sidebar_menu_badge("24")),
                 ])),
-                any(sidebar_menu_item(vec![any(sidebar_menu_button(
+                any(sidebar_menu_item(vec![sidebar_menu_button(
                     "Drafts",
                     |_: &mut ()| {},
-                ))])),
-                any(sidebar_menu_sub(vec![any(sidebar_menu_sub_item(vec![
-                    any(sidebar_menu_sub_button("Starred", |_: &mut ()| {})),
-                ]))])),
+                )])),
+                any(sidebar_menu_sub(vec![sidebar_menu_sub_item(vec![
+                    sidebar_menu_sub_button("Starred", |_: &mut ()| {}),
+                ])])),
             ]),
         ]))
     }

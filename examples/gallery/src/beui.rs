@@ -370,19 +370,17 @@ fn message_bubble_case() -> AnyView<()> {
     framed_in(
         Size::new(400.0, 260.0),
         SizedBox(Some(320.0), None).child(message_bubble_group(vec![
-            any(
-                message_bubble(text("How do I freeze a beUI preview?").size(14.0))
-                    .variant(MessageBubbleVariant::Tint)
-                    .align(MessageBubbleAlign::End),
-            ),
-            any(message_bubble(
+            message_bubble(text("How do I freeze a beUI preview?").size(14.0))
+                .variant(MessageBubbleVariant::Tint)
+                .align(MessageBubbleAlign::End),
+            message_bubble(
                 text("Record it in a state that is already at rest on mount.").size(14.0),
             )
             .variant(MessageBubbleVariant::Soft)
-            .align(MessageBubbleAlign::Start)),
-            any(message_bubble(text("Got it \u{2014} thanks.").size(14.0))
+            .align(MessageBubbleAlign::Start),
+            message_bubble(text("Got it \u{2014} thanks.").size(14.0))
                 .variant(MessageBubbleVariant::Outline)
-                .align(MessageBubbleAlign::End)),
+                .align(MessageBubbleAlign::End),
         ])),
     )
 }

@@ -22,9 +22,9 @@ rmcp = { workspace = true }
 # HTTP layer for rmcp's StreamableHttpService.
 axum = { workspace = true }
 # Session engine: process spawning, run pipelines, device discovery (blocking).
-frust-drive = { path = "../frust-drive", version = "0.5.2" }
+frust-drive = { path = "../frust-drive", version = "0.6.0" }
 # Devtools wire-protocol leaf (tooling-isolation charter, docs/ARCHITECTURE.md).
-frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.5.2" }
+frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.6.0" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -45,4 +45,4 @@ tokio = { workspace = true, features = [
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util"] }
-frust-drive = { path = "../frust-drive", version = "0.5.2", features = ["test-util"] }
+frust-drive = { path = "../frust-drive", version = "0.6.0", features = ["test-util"] }

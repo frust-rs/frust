@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn default_horizontal_enforces_the_160px_min_width() {
-        let view: AttachmentView<()> = attachment(vec![any(leaf(10.0, 10.0))]);
+        let view: AttachmentView<()> = attachment(vec![leaf(10.0, 10.0)]);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         let size = layout(&mut w, Size::new(400.0, 400.0));
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn error_state_paints_a_destructive_border() {
         let view: AttachmentView<()> =
-            attachment(vec![any(leaf(10.0, 10.0))]).state(AttachmentState::Error);
+            attachment(vec![leaf(10.0, 10.0)]).state(AttachmentState::Error);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         let size = layout(&mut w, Size::new(400.0, 400.0));
@@ -734,9 +734,8 @@ mod tests {
 
     #[test]
     fn vertical_orientation_stacks_children_top_to_bottom() {
-        let view: AttachmentView<()> =
-            attachment(vec![any(leaf(10.0, 10.0)), any(leaf(10.0, 10.0))])
-                .orientation(AttachmentOrientation::Vertical);
+        let view: AttachmentView<()> = attachment(vec![leaf(10.0, 10.0), leaf(10.0, 10.0)])
+            .orientation(AttachmentOrientation::Vertical);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         layout(&mut w, Size::new(400.0, 400.0));
@@ -759,7 +758,7 @@ mod tests {
     #[test]
     fn actions_row_lays_out_left_to_right() {
         let view: AttachmentRowView<()> =
-            attachment_actions(vec![any(leaf(10.0, 10.0)), any(leaf(10.0, 10.0))]);
+            attachment_actions(vec![leaf(10.0, 10.0), leaf(10.0, 10.0)]);
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         layout(&mut w, Size::new(200.0, 40.0));

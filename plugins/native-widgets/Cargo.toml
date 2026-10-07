@@ -34,7 +34,7 @@ frust-theme = { workspace = true, optional = true }
 
 # Unconditional per the platform-plugin charter; inert (`NotInitialized`) off
 # Android, so it is not target-gated.
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.5.2" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.0" }
 
 # The plugin's own JNI exports and the registry's `Global<JObject>` need `jni` directly.
 [target.'cfg(target_os = "android")'.dependencies]

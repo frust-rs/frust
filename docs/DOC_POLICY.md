@@ -40,5 +40,5 @@ GPU/ENGINE get no spoke of their own — they document inside RENDER's (`RENDER_
 `RENDER_DEVELOPMENT.md`) since the engine plan folds them into that unit's render pipeline.
 Conventions binding more than one unit (sanctioned-unsafe register, interaction/semantics
 conventions, platform-view contract) stay in the shared indexes, not a spoke. `docs/TESTING.md`,
-`docs/LIMITATIONS.md` and `docs/RELEASING.md` (target 200 lines) are auxiliary curated docs outside
-this schema set.
+`docs/LIMITATIONS.md` and `docs/RELEASING.md` (target 200 lines) and `docs/PERFORMANCE_BASELINES.md`
+(target 150 / cap 250) are auxiliary curated docs outside this schema set.

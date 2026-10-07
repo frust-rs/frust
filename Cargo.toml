@@ -9,7 +9,7 @@ members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secu
 exclude = ["examples/huddle", "examples/shadertoy", "examples/web-spike", "examples/web-gallery", "examples/glyph-catalog", "examples/playground", "examples/design-system-sample", "examples/material3-demo", "examples/native-widgets-demo", "plugins/clean-signals-frust"]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -193,27 +193,27 @@ proptest = { version = "1.11.0", default-features = false, features = [
     "bit-set",
 ] }
 # intra-workspace
-frust-core = { path = "crates/frust-core", version = "0.5.2" }
-frust-scene = { path = "crates/frust-scene", version = "0.5.2" }
-frust-render = { path = "crates/frust-render", version = "0.5.2" }
-frust-text = { path = "crates/frust-text", version = "0.5.2" }
-frust-gpu = { path = "crates/frust-gpu", version = "0.5.2" }
-frust-engine = { path = "crates/frust-engine", version = "0.5.2" }
-frust-theme = { path = "crates/frust-theme", version = "0.5.2" }
-frust-widgets = { path = "crates/frust-widgets", version = "0.5.2" }
-frust-reactive = { path = "crates/frust-reactive", version = "0.5.2" }
-frust-plugin = { path = "crates/frust-plugin", version = "0.5.2" }
-frust-paths = { path = "crates/frust-paths", version = "0.5.2" }
-frust-shell-desktop = { path = "crates/frust-shell-desktop", version = "0.5.2" }
-frust-shell-common = { path = "crates/frust-shell-common", version = "0.5.2" }
-frust-shell-android = { path = "crates/frust-shell-android", version = "0.5.2" }
-frust-shell-ios = { path = "crates/frust-shell-ios", version = "0.5.2" }
-frust-shell-macos = { path = "crates/frust-shell-macos", version = "0.5.2" }
-frust-shell-windows = { path = "crates/frust-shell-windows", version = "0.5.2" }
-frust-shell-linux = { path = "crates/frust-shell-linux", version = "0.5.2" }
-frust-shell-web = { path = "crates/frust-shell-web", version = "0.5.2" }
+frust-core = { path = "crates/frust-core", version = "0.6.0" }
+frust-scene = { path = "crates/frust-scene", version = "0.6.0" }
+frust-render = { path = "crates/frust-render", version = "0.6.0" }
+frust-text = { path = "crates/frust-text", version = "0.6.0" }
+frust-gpu = { path = "crates/frust-gpu", version = "0.6.0" }
+frust-engine = { path = "crates/frust-engine", version = "0.6.0" }
+frust-theme = { path = "crates/frust-theme", version = "0.6.0" }
+frust-widgets = { path = "crates/frust-widgets", version = "0.6.0" }
+frust-reactive = { path = "crates/frust-reactive", version = "0.6.0" }
+frust-plugin = { path = "crates/frust-plugin", version = "0.6.0" }
+frust-paths = { path = "crates/frust-paths", version = "0.6.0" }
+frust-shell-desktop = { path = "crates/frust-shell-desktop", version = "0.6.0" }
+frust-shell-common = { path = "crates/frust-shell-common", version = "0.6.0" }
+frust-shell-android = { path = "crates/frust-shell-android", version = "0.6.0" }
+frust-shell-ios = { path = "crates/frust-shell-ios", version = "0.6.0" }
+frust-shell-macos = { path = "crates/frust-shell-macos", version = "0.6.0" }
+frust-shell-windows = { path = "crates/frust-shell-windows", version = "0.6.0" }
+frust-shell-linux = { path = "crates/frust-shell-linux", version = "0.6.0" }
+frust-shell-web = { path = "crates/frust-shell-web", version = "0.6.0" }
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
-frust = { package = "frust-ui", path = "crates/frust", version = "0.5.2" }
+frust = { package = "frust-ui", path = "crates/frust", version = "0.6.0" }
 
 # Shader-stack dev overrides: at opt-level 0 the synchronous launch-time shader compile is slow enough
 # for iOS to SIGKILL a debug `frust run`; app code stays at the dev default. Hand-synced (with the
@@ -244,7 +244,7 @@ opt-level = 2
 [profile.dev.package."*"]
 opt-level = 1
 
-# Fat LTO + codegen-units = 1, global opt-level left at 3 (numbers: docs/DEVELOPMENT.md "Release-profile
+# Fat LTO + codegen-units = 1, global opt-level left at 3 (numbers: docs/PERFORMANCE_BASELINES.md "Release-profile
 # hardening"). Hand-synced across the ten manifests crates/frust-cli/tests/profile_sync.rs lists.
 [profile.release]
 lto = "fat"
@@ -253,7 +253,7 @@ strip = "symbols"
 panic = "abort"
 
 # BEGIN release cold-set opt-level overrides (generated: keep hand-synced)
-# "z" only for crates cold on the per-frame path (numbers: docs/DEVELOPMENT.md). Kept at 3 by design:
+# "z" only for crates cold on the per-frame path (numbers: docs/PERFORMANCE_BASELINES.md). Kept at 3 by design:
 # frust-{engine,gpu,render,text}, harfrust, skrifa, read-fonts, zune-jpeg, parley, wgpu-{core,types,hal},
 # tokio, accesskit*, jni. Hand-synced across the nine manifests crates/frust-cli/tests/profile_sync.rs lists.
 

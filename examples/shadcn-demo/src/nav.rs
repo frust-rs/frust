@@ -77,26 +77,10 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
     let gallery = sidebar_group(vec![
         any(sidebar_group_label("Gallery")),
         sidebar_menu(vec![
-            any(sidebar_menu_item(vec![nav_button(
-                Page::Primitives,
-                active,
-                icons::STAR,
-            )])),
-            any(sidebar_menu_item(vec![nav_button(
-                Page::Controls,
-                active,
-                icons::SETTINGS,
-            )])),
-            any(sidebar_menu_item(vec![nav_button(
-                Page::InputsTable,
-                active,
-                icons::EDIT,
-            )])),
-            any(sidebar_menu_item(vec![nav_button(
-                Page::Layout,
-                active,
-                icons::PANE_MARK,
-            )])),
+            sidebar_menu_item(vec![nav_button(Page::Primitives, active, icons::STAR)]),
+            sidebar_menu_item(vec![nav_button(Page::Controls, active, icons::SETTINGS)]),
+            sidebar_menu_item(vec![nav_button(Page::InputsTable, active, icons::EDIT)]),
+            sidebar_menu_item(vec![nav_button(Page::Layout, active, icons::PANE_MARK)]),
         ]),
     ]);
 
@@ -110,15 +94,13 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
                 active,
                 icons::SCAN_MARK,
             )])),
-            any(sidebar_menu_sub(vec![any(sidebar_menu_sub_item(vec![
-                any(
-                    sidebar_menu_sub_button(Page::Anchored.title(), |s: &mut AppState| {
-                        s.page = Page::Anchored
-                    })
-                    .icon(icon(icons::PUSH_PIN).size(14.0))
-                    .active(active == Page::Anchored),
-                ),
-            ]))])),
+            any(sidebar_menu_sub(vec![sidebar_menu_sub_item(vec![
+                sidebar_menu_sub_button(Page::Anchored.title(), |s: &mut AppState| {
+                    s.page = Page::Anchored
+                })
+                .icon(icon(icons::PUSH_PIN).size(14.0))
+                .active(active == Page::Anchored),
+            ])])),
         ]),
     ]);
 
@@ -138,7 +120,7 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
             )),
         ])),
         sidebar_menu(vec![
-            any(sidebar_menu_item(vec![
+            sidebar_menu_item(vec![
                 nav_button(Page::Chat, active, icons::FORUM),
                 any(sidebar_menu_action(
                     icon(icons::DELETE).size(14.0),
@@ -146,17 +128,17 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
                     |s: &mut AppState| s.chat.messages.clear(),
                 )),
                 any(sidebar_menu_badge(message_count.to_string())),
-            ])),
-            any(sidebar_menu_item(vec![nav_button(
+            ]),
+            sidebar_menu_item(vec![nav_button(
                 Page::Questionnaire,
                 active,
                 icons::DONE_ALL,
-            )])),
-            any(sidebar_menu_item(vec![nav_button(
+            )]),
+            sidebar_menu_item(vec![nav_button(
                 Page::DataTable,
                 active,
                 icons::DESCRIPTION,
-            )])),
+            )]),
         ]),
     ]);
 
@@ -167,16 +149,15 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
         any(sidebar_separator()),
         patterns,
     ]))
-    .header(sidebar_header(vec![sidebar_menu(vec![any(
-        sidebar_menu_item(vec![any(sidebar_menu_button(
-            "shadcn demo",
-            |_: &mut AppState| {},
-        )
-        .icon(icon(icons::PALETTE).size(18.0))
-        .size(SidebarMenuButtonSize::Lg))]),
+    .header(sidebar_header(vec![sidebar_menu(vec![sidebar_menu_item(
+        vec![
+            sidebar_menu_button("shadcn demo", |_: &mut AppState| {})
+                .icon(icon(icons::PALETTE).size(18.0))
+                .size(SidebarMenuButtonSize::Lg),
+        ],
     )])]))
-    .footer(sidebar_footer(vec![sidebar_menu(vec![any(
-        sidebar_menu_item(vec![nav_button(Page::Theming, active, icons::LIGHT_MODE)]),
+    .footer(sidebar_footer(vec![sidebar_menu(vec![sidebar_menu_item(
+        vec![nav_button(Page::Theming, active, icons::LIGHT_MODE)],
     )])]))
     .collapsible(SidebarCollapsible::Icon)
     .rail(true)

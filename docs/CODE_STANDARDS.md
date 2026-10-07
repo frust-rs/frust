@@ -6,7 +6,7 @@ off this index — read this plus the one that covers what you are touching:
 | Unit | Spoke | Holds |
 |------|-------|-------|
 | PLUGINS + NATIVE_WIDGETS | [PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md) | Plugin Conventions — backend gating, JNI attach scope, the platform/facade charter lines, theme-token folding, idempotent project mutation |
-| WIDGETS | [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md) | Theming & Animation Conventions — token resolution/precedence, animation pacing, design-system installation |
+| WIDGETS | [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md) | Child Lists — keyed-list uniqueness; Theming & Animation Conventions — token resolution/precedence (including `ThemeExtensions`), animation pacing, design-system installation |
 | TUI | [TUI_CODE_STANDARDS.md](TUI_CODE_STANDARDS.md) | TUI Conventions — render/update layering, keyboard parity, the single command registry |
 
 ## Language Idioms
@@ -363,11 +363,6 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   and the hand-rolled navbar/tabbar item lists, which never clear or mark a truncated item's own
   focus link (`focus-navbar-item-truncation-unmarked`). See `docs/LIMITATIONS.md`.
 
-- **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key, view)` marks a
-  `Flex` child list for identity-based reconciliation; a mixed or duplicate key set
-  `debug_assert!`s and falls back to positional matching in release (never panics live). A
-  matched reorder relocates the existing widget rather than rebuilding it.
-
 - **Input constants have one source.** Gesture thresholds (`TOUCH_SLOP`, `MOUSE_SLOP`),
   scroll/fling tuning (`WHEEL_LINE_PX`, `FLING_DECAY`, `FLING_STOP`, `VELOCITY_WINDOW_MS`),
   and `VelocityTracker` live in `frust-core::input`; widgets import them rather than
@@ -520,6 +515,13 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
 - **`Component::State` holds `RwSignal`s directly; app code depends on the `frust` facade
   only, never `reactive_graph`/`any_spawner`/`frust-reactive` directly.** A reactive field
   is typed `RwSignal<T>`, read/written through the facade's `Get`/`Set`/`Update` traits.
+- **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
+  untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
+  *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
+  per-frame rebuild. A render-relevant read taken via `*_untracked`/`get_untracked` anywhere
+  in that path never subscribes, so a later write flips no dirty flag and the shell may
+  never repaint — reserve `*_untracked` for genuine non-rendering reads, never a value a
+  `build` return depends on.
 - **An app authors a custom `View`/`Widget` pair through `frust::authoring`, never a direct
   `frust-core`/`frust-scene`/`frust-text`/`accesskit`/`kurbo`/`peniko` dependency.**
   `frust::authoring` (plus its `text`/`scene` submodules) re-exports the full trait
@@ -532,24 +534,11 @@ Conventions for `Widget::semantics` (see `docs/CORE_ARCHITECTURE.md`'s `semantic
   in-repo example apps — `huddle`, `shadertoy`, `glyph-catalog`, `playground`, and
   `examples/native-widgets-demo` — by `crates/frust/tests/authoring_seam_conformance.rs`;
   the plugin tier is exempt ([PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)).
-- **A rebuild must run inside a `TrackedScope` for a signal write to wake it later — an
-  untracked read is a silent wake hazard, not a stale value.** `.get()` subscribes only from
-  *inside* a live `TrackedScope::track` closure; both shells guarantee this for their
-  per-frame rebuild. A render-relevant read taken via `*_untracked`/`get_untracked` anywhere
-  in that path never subscribes, so a later write flips no dirty flag and the shell may
-  never repaint — reserve `*_untracked` for genuine non-rendering reads, never a value a
-  `build` return depends on.
 
 ## Theming & Animation Conventions
 
-Token resolution and precedence, animation pacing, and design-system installation are the
-WIDGETS unit's rules — [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md). The same
-**explicit builder value > theme > fallback constant** precedence binds a `ThemeExtensions`
-payload identically to a plain token: a consumer (a design-system plugin or a fully external
-catalog) checks its own explicit override first, then `Theme::extension::<T>()`, and only then a
-hardcoded fallback — see
-[NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s typeface ladder for the
-shipped instance.
+Token resolution and precedence (including `ThemeExtensions` payloads), animation pacing, and
+design-system installation are the WIDGETS unit's rules — [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md).
 
 ## Testing Patterns
 

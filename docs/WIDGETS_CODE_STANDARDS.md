@@ -1,10 +1,18 @@
 # Frust - WIDGETS Code Standards
 
-Theming and animation conventions for the WIDGETS unit (`frust-widgets`, `frust-theme`) — the
-rules a baseline-widget, catalog, or third-party design-system author writes against.
-Everything shared with the rest of the workspace — language idioms, error handling, naming,
-anti-patterns, interaction semantics, semantics, testing, comment conventions — lives in
-[CODE_STANDARDS.md](CODE_STANDARDS.md) and binds here too.
+Widget child-list, theming and animation conventions for the WIDGETS unit (`frust-widgets`,
+`frust-theme`) — the rules a baseline-widget, catalog, or third-party design-system author
+writes against. Everything shared with the rest of the workspace — language idioms, error
+handling, naming, anti-patterns, interaction semantics, semantics, testing, comment
+conventions, and the widget-authoring rules (erasure at the API boundary, the
+`frust::authoring` seam) — lives in [CODE_STANDARDS.md](CODE_STANDARDS.md) and binds here too.
+
+## Child Lists
+
+- **Keyed lists are all-or-nothing, and keys must be unique.** `keyed(key, view)` marks a
+  `Flex` child list for identity-based reconciliation; a mixed or duplicate key set
+  `debug_assert!`s and falls back to positional matching in release (never panics live). A
+  matched reorder relocates the existing widget rather than rebuilding it.
 
 ## Theming & Animation Conventions
 
@@ -126,6 +134,13 @@ anti-patterns, interaction semantics, semantics, testing, comment conventions �
   contract) or `set_app_theme` (pins brightness, breaking platform dark/light following).**
   Each built-in design-system crate's `install()` is a caller; which of them also register fonts
   is recorded once, in [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s Design-System Plugins.
+
+- The same **explicit builder value > theme > fallback constant** precedence binds a `ThemeExtensions`
+  payload identically to a plain token: a consumer (a design-system plugin or a fully external
+  catalog) checks its own explicit override first, then `Theme::extension::<T>()`, and only then a
+  hardcoded fallback — see
+  [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)'s typeface ladder for the
+  shipped instance.
 
 ## See Also
 

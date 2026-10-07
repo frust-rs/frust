@@ -165,5 +165,6 @@ and `frust-shell-windows` additionally `frust-theme`.
 - [CODE_STANDARDS.md](CODE_STANDARDS.md) — coding conventions and patterns
 - [TESTING.md](TESTING.md) — test strategy and coverage
 - [LIMITATIONS.md](LIMITATIONS.md) — known gaps and constraints
+- [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) — release profile, size and build-time baselines
 - [REVIEW_FOCUS.md](REVIEW_FOCUS.md) — review priorities and hot spots
 - [DOC_POLICY.md](DOC_POLICY.md) — the doc structure/budget decision record

@@ -15,7 +15,7 @@ readme = "README.md"
 thiserror = { workspace = true }
 # Sole `frust-*` dependency (data-dir only); no `frust-plugin`, since both engines reach
 # SQLite storage directly (`lib.rs` charter).
-frust-paths = { path = "../../crates/frust-paths", version = "0.5.2" }
+frust-paths = { path = "../../crates/frust-paths", version = "0.6.0" }
 log = { workspace = true }
 # Default engine (`engine-sqlite`); optional so `--no-default-features` is engine-free.
 rusqlite = { workspace = true, optional = true }

@@ -24,6 +24,38 @@ Rewrites (each one is type-preserving, or changes only an argument's type):
       anything else -> `.push(elem)`. A list mixing literal `keyed(..)` with
       literal `inflexible`/`flexible` children is left alone (keyed flex lists
       are all-or-nothing) and reported as a note.
+  T5  (opt-in, `--t5` only) `api(.., vec![any(E1), .., any(En)], ..)` ->
+      `api(.., vec![E1, .., En], ..)` when the `vec![..]` literal (n >= 1) is a
+      whole argument of a list entry of the name list, of `Column`/`Row`/
+      `Stack` sugar, or of `.children`, every element is one erasure call
+      (`any(E)`, `frust..::any(E)`, `authoring::any(E)`, `AnyView::new(E)`),
+      and all E_i share the same *head*. The rewrite only drops the wrappers:
+      element text, trailing commas and comments between elements are kept.
+      A `Column`/`Row`/`Stack` site T2 already rewrites is not listed again.
+
+T5 heuristic: the head of `E` is the full callee path of its outermost call
+plus the exact sequence of trailing method-call names, so `text(a).size(1)`
+and `text(b).size(2)` match while `text(a)` and `text(b).size(2)` (or
+`text(a)` and `frust::text(b)`) do not. An element that is not
+`path(..)` followed only by `.name(..)` calls (a variable, a macro, a
+turbofish, a field access, `?`, `.await`) has no head, so its list is left
+alone, as is a list with any non-erasure element or with two different heads.
+Failure mode: T5 judges heads, not types. A same-head list whose elements are
+not type-homogeneous — a generic callee whose result type follows its
+arguments (`component(Header{..})` vs `component(Counter{..})`,
+`breadcrumb_item(a)` vs `breadcrumb_item(b)`), or a builder method that
+changes the type — is still flagged, and dropping the `any()` does not compile
+(`Vec<V>` needs one `V`). For such a list keep `any()` and mark the `vec![`
+line with `// erasure: keep <why>`; the alternatives are binding the vec to a
+local or using the fluent builder (`.child(..)` chain).
+
+Opt-out: a line comment `// erasure: keep` (exact text after `//`, optional
+trailing reason) on the same line as the start of a candidate's span, or alone
+on the line immediately above it, exempts that site from every rule (T1-T5).
+Kept sites are never listed by `--check` and never rewritten; `--stats`
+counts them as `kept=N`. T5 applies `Column`/`Row`/`Stack` only when T2
+would resolve them to frust's own sugar (a local `struct Row` or a foreign
+`ui::Row` is left alone).
 
 Erasure calls are bare `any(X)`, `frust..::any(X)`, and `AnyView::new(X)`
 (optionally path-qualified). A turbofish erasure (`any::<S, _>(X)`) is never
@@ -44,7 +76,7 @@ cannot be resolved.
 Usage:
 
     python3 scripts/codemod/frust_any_codemod.py [--check] [--write] [--stats]
-        [--strict] [--apis FILE] [--exclude PATH]... PATH...
+        [--strict] [--t5] [--apis FILE] [--exclude PATH]... PATH...
 
 PATH is a `.rs` file or a directory (recursed for `*.rs`, skipping `target/`).
 `--check` (the default) lists `file:line` of every remaining candidate and
@@ -63,6 +95,10 @@ atomically (temp file in the same directory, mode copied, fsync, then
 `os.replace`), iterating to a fixpoint, so a second run is a no-op. Symlinked
 `.rs` files are skipped in directory walks and refused (exit 2) as explicit
 PATH arguments. `--stats` prints per-file erasure-call counts before/after.
+`--t5` turns rule T5 on for every mode (off by default): `--check --t5` also
+lists `T5 homogeneous list argument of <callee>` candidates, `--write --t5`
+applies them, and `--stats --t5` additionally reports the T5 candidate count
+per file (when non-zero) and in total, separately from the erasure counts.
 
 Known blind spot: a closure parameter typed `AnyView<..>` whose body is
 `any(x)` is still a T1/T4 candidate when the call sits in a slot position; the
@@ -271,11 +307,37 @@ class Source:
         self.group_kind = {o: self._classify_group(o) for o in self.match if t[o].text in OPEN}
         self.line_starts = [0] + [m.end() for m in re.finditer("\n", src)]
         self.line_comment_ends = {tok.end for tok in self.all if tok.kind == LINE_COMMENT}
+        self.keep_lines, self.keep_above = self._keep_markers()
+        self.kept = 0
         self.bare_any_ok = not self._defines_foreign_any()
         self.decls = self._parse_uses()
         self.local_types = self._local_type_names()
         self.local_fns = {t[k + 1].text for k in range(len(t) - 1)
                           if t[k].text == "fn" and t[k + 1].kind == IDENT}
+
+    def _keep_markers(self):
+        """Lines carrying a `// erasure: keep` comment, from the comment tokens.
+
+        Returns (every marker line, marker lines whose comment is the only thing
+        on its line). The marker is the exact text `erasure: keep` right after
+        `//`, ending the comment or followed by whitespace and a reason."""
+        anywhere, alone = set(), set()
+        for tok in self.all:
+            if tok.kind != LINE_COMMENT or not tok.text.startswith("//"):
+                continue
+            body = tok.text[2:].lstrip(" \t")
+            if body != "erasure: keep" and not re.match(r"erasure: keep[ \t]", body):
+                continue
+            line = self.line_of(tok.start)
+            anywhere.add(line)
+            if not self.src[self.line_starts[line - 1]:tok.start].strip():
+                alone.add(line)
+        return anywhere, alone
+
+    def is_kept(self, line: int) -> bool:
+        """True when a site starting on `line` carries the opt-out marker: on
+        that line, or alone on the line immediately above."""
+        return line in self.keep_lines or (line - 1) in self.keep_above
 
     # -- basic helpers -----------------------------------------------------
 
@@ -798,12 +860,16 @@ def _excluded(s: Source, apis: Apis, name: str, qual: list, pos: int) -> bool:
     return any(full[-len(e):] == e for e in apis.exclude if len(e) <= len(full))
 
 
-def find_candidates(s: Source, apis: Apis):
-    """Return (candidates, notes). Candidates may overlap; callers pick outermost."""
+def find_candidates(s: Source, apis: Apis, t5: bool = False):
+    """Return (candidates, notes). Candidates may overlap; callers pick outermost.
+
+    `t5` turns on the opt-in homogeneous list rule T5."""
     t = s.t
     cands: list[Candidate] = []
     notes: list[tuple[int, str]] = []
     first_new = 0
+    first_note = 0
+    s.kept = 0
     for k, tok in enumerate(t):
         if tok.kind != IDENT or not s.is_p(k + 1, "("):
             continue
@@ -811,17 +877,31 @@ def find_candidates(s: Source, apis: Apis):
         if key is None or s.forbidden(k):
             continue
         o = k + 1
-        if key in apis.slot or key in apis.builder:
+        is_list = t5 and (key in apis.lists or key in T5_BUILTIN) and _t5_sugar_resolves(s, k, key, qual)
+        if key in apis.slot or key in apis.builder or is_list:
             if "::" not in key and not key.startswith(".") and _excluded(s, apis, key, qual, tok.start):
                 continue
         if key in apis.slot:
             _t1(s, key, k, o, cands)
         if key in apis.builder:
             _t4(s, key, k, o, cands)
+        before_t2 = len(cands)
         if key in BUILDER_OF:
             _t2(s, key, k, o, qual, cands, notes)
         if key == "FlexView::new":
             _t3(s, k, o, qual, cands, notes)
+        if is_list and len(cands) == before_t2:
+            _t5(s, key, o, cands)
+        if len(cands) > first_new or len(notes) > first_note:
+            # A `// erasure: keep` site is exempt from every rule: neither
+            # listed, rewritten, nor noted; only counted.
+            fresh = cands[first_new:]
+            kept = [c for c in fresh if s.is_kept(s.line_of(c.span[0]))]
+            if kept:
+                s.kept += len(kept)
+                cands[first_new:] = [c for c in fresh if c not in kept]
+            notes[first_note:] = [n for n in notes[first_note:] if not s.is_kept(n[0])]
+            first_note = len(notes)
         if len(cands) > first_new:
             _drop_comment_losers(s, cands, first_new, notes)
             first_new = len(cands)
@@ -839,7 +919,9 @@ def _drop_comment_losers(s: Source, cands: list, first: int, notes: list) -> Non
     """Remove new candidates whose rewrite would lose a comment; note each one."""
     keep = []
     for c in cands[first:]:
-        old = _comment_count(s.src[c.span[0]:c.span[1]])
+        # Compare per replaced range, so comments T5 keeps between elements
+        # (outside every edit) are not mistaken for lost ones.
+        old = sum(_comment_count(s.src[e.start:e.end]) for e in c.edits)
         new = sum(_comment_count(e.text) for e in c.edits)
         if new < old:
             notes.append((c.line, f"note: {c.rule} skipped: comment inside the call head"))
@@ -1084,6 +1166,105 @@ def _t3(s, k, o, qual, cands, notes):
                            (start, end), [Edit(start, end, text)], imports))
 
 
+# Callees whose `vec![..]` argument is always a list of views, whatever the
+# name list says (T5 also uses every [list] entry of `erasing_apis.txt`).
+T5_BUILTIN = frozenset({"Column", "Row", "Stack", ".children"})
+_T5_SUGAR = frozenset({"Column", "Row", "Stack"})
+
+
+def _t5_sugar_resolves(s: Source, k: int, key: str, qual: list) -> bool:
+    """Whether the `Column`/`Row`/`Stack` call at `k` is frust's own sugar.
+
+    Same conditions T2 applies: a frust-rooted qualifier, or a non-aliased
+    frust import (or a glob import); a local type or foreign path declines.
+    `.children` is a method key and always passes."""
+    if key not in _T5_SUGAR:
+        return True
+    if key in s.local_types:
+        return False
+    if qual:
+        return _frust_root(qual[0])
+    pos = s.t[k].start
+    hit = s.decl_for(key, pos)
+    if hit:
+        return not hit[1].aliased and _frust_root(hit[1].path[0])
+    return s.glob_covers(pos)
+# Keywords that can never start a callee path (path roots like `crate` can).
+_T5_NON_PATH = frozenset(KEYWORDS - {"crate", "super", "self", "Self"})
+
+
+def _t5_erasure(s: Source, a: int, b: int):
+    """Like `erasure_call`, also accepting a module-relative `authoring::any(X)`."""
+    o = s.erasure_call(a, b)
+    if o is not None:
+        return o
+    if s.is_id(a, "authoring") and s.is_p(a + 1, "::") and s.is_id(a + 2, "any") \
+            and s.is_p(a + 3, "(") and s.match[a + 3] == b and len(s.split_args(a + 3)) == 1:
+        return a + 3
+    return None
+
+
+def _t5_head(s: Source, a: int, b: int):
+    """Head of the expression a..b: (callee path, trailing method names), or None.
+
+    The expression must be exactly `path(..)` followed by zero or more
+    `.name(..)` method calls; anything else has no head."""
+    k = a
+    segs = []
+    if s.is_p(k, "::"):
+        segs.append("::")
+        k += 1
+    while True:
+        if not s.is_id(k) or s.t[k].text in _T5_NON_PATH:
+            return None
+        segs.append(s.t[k].text)
+        k += 1
+        if s.is_p(k, "::") and s.is_id(k + 1):
+            segs.append("::")
+            k += 1
+            continue
+        break
+    if not s.is_p(k, "("):
+        return None
+    k = s.match[k]
+    methods = []
+    while k < b:
+        if not (s.is_p(k + 1, ".") and s.is_id(k + 2) and s.is_p(k + 3, "(")):
+            return None
+        methods.append(s.t[k + 2].text)
+        k = s.match[k + 3]
+    if k != b:
+        return None
+    return "".join(segs), tuple(methods)
+
+
+def _t5(s, key, o, cands):
+    for a, b in s.split_args(o):
+        lb = _vec_literal(s, a, b)
+        if lb is None:
+            continue
+        elems, _ = _elements(s, lb)
+        if not elems:
+            continue
+        heads, edits = set(), []
+        for ea, eb, _, _ in elems:
+            eo = _t5_erasure(s, ea, eb)
+            if eo is None:
+                break
+            inner = s.split_args(eo)
+            head = _t5_head(s, *inner[0]) if len(inner) == 1 else None
+            if head is None:
+                break
+            heads.add(head)
+            if len(heads) > 1:
+                break
+            edits.append(Edit(s.t[ea].start, s.t[eb].end, s.inner_text(eo)))
+        else:
+            span = (s.t[a].start, s.t[b].end)
+            cands.append(Candidate("T5", s.line_of(span[0]), f"homogeneous list argument of {key}",
+                                   span, edits))
+
+
 def select_outermost(cands: list[Candidate]) -> list[Candidate]:
     chosen, taken = [], []
     for c in sorted(cands, key=lambda c: (c.span[0], -(c.span[1] - c.span[0]))):
@@ -1222,17 +1403,21 @@ class Result:
     after: int
     candidates: list
     notes: list
+    kept: int = 0
 
 
-def rewrite(src: str, apis: Apis) -> Result:
-    """Rewrite `src` to a fixpoint; raises LexError on unparseable input."""
+def rewrite(src: str, apis: Apis, t5: bool = False) -> Result:
+    """Rewrite `src` to a fixpoint; raises LexError on unparseable input.
+
+    `t5` turns on the opt-in homogeneous list rule T5."""
     original = Source(src)
     before = original.erasure_count()
-    cands0, notes0 = find_candidates(original, apis)
+    cands0, notes0 = find_candidates(original, apis, t5)
+    kept0 = original.kept
     text = src
     for _ in range(MAX_PASSES):
         s = Source(text)
-        cands, _ = find_candidates(s, apis)
+        cands, _ = find_candidates(s, apis, t5)
         chosen = select_outermost(cands)
         if not chosen:
             break
@@ -1259,7 +1444,7 @@ def rewrite(src: str, apis: Apis) -> Result:
         if drops:
             text = apply_edits(text, import_edits(final, [], drops))
     after = Source(text).erasure_count() if text != src else before
-    return Result(text, before, after, cands0, sorted(set(notes0)))
+    return Result(text, before, after, cands0, sorted(set(notes0)), kept0)
 
 
 def _norm(p):
@@ -1310,6 +1495,12 @@ def main(argv=None) -> int:
     ap.add_argument("--stats", action="store_true", help="print per-file erasure-call counts before/after")
     ap.add_argument("--strict", action="store_true",
                     help="--check exits 2 when any site was shadow-skipped (candidates still win: 1)")
+    ap.add_argument("--t5", action="store_true",
+                    help="opt in to rule T5: drop any() from vec![..] list arguments whose "
+                         "elements all share one head (callee path + trailing method names); "
+                         "T5 judges heads, not types: for a same-head list whose elements differ "
+                         "in type keep any() and mark the vec![ line with `// erasure: keep <why>` "
+                         "(or bind the vec to a local, or use the fluent builder)")
     ap.add_argument("--exclude", action="append", default=[], metavar="PATH",
                     help="skip PATH, a file or directory, by whole path components (repeatable)")
     ap.add_argument("--apis", default=DEFAULT_APIS, help="name list (default: erasing_apis.txt beside this script)")
@@ -1323,6 +1514,8 @@ def main(argv=None) -> int:
     shadow = 0
     refused = 0
     total_before = total_after = 0
+    total_t5 = 0
+    total_kept = 0
     for path in iter_rs(args.paths):
         if excludes and _path_excluded(path, excludes):
             continue
@@ -1337,7 +1530,7 @@ def main(argv=None) -> int:
         try:
             with open(path, encoding="utf-8", newline="") as fh:
                 src = fh.read()
-            res = rewrite(src, apis)
+            res = rewrite(src, apis, args.t5)
         except (LexError, UnicodeDecodeError) as exc:
             print(f"{path}: skipped, cannot tokenise: {exc}", file=sys.stderr)
             skipped += 1
@@ -1349,7 +1542,7 @@ def main(argv=None) -> int:
         if check:
             if args.write:
                 post = Source(res.text)
-                cands, notes = find_candidates(post, apis)
+                cands, notes = find_candidates(post, apis, args.t5)
                 notes = sorted(set(notes))
             else:
                 cands, notes = res.candidates, res.notes
@@ -1361,8 +1554,19 @@ def main(argv=None) -> int:
             shadow += len(notes)
         if args.stats:
             print(f"{path}: erasure calls before={res.before} after={res.after}")
+            total_kept += res.kept
+            if res.kept:
+                print(f"{path}: kept={res.kept}")
+            if args.t5:
+                n_t5 = sum(1 for c in res.candidates if c.rule == "T5")
+                total_t5 += n_t5
+                if n_t5:
+                    print(f"{path}: T5 candidates={n_t5}")
     if args.stats:
         print(f"total: erasure calls before={total_before} after={total_after}")
+        print(f"total: kept={total_kept}")
+        if args.t5:
+            print(f"total: T5 candidates={total_t5}")
     if check:
         print(f"{shadow} shadow skip(s)")
         print(f"{remaining} candidate(s)" if remaining else "no candidates")
