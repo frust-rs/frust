@@ -217,8 +217,19 @@ fn child_ids_are_stable_across_rebuilds() {
 
 It passes. The root is `WidgetId(1)` (from `alloc_id`); the pods are `281474976710656` and `…657`.
 Ids belong to pods, and pods outlive views. Follow-up: make the second child `if swap {
-any(Column(vec![])) } else { any(SizedBox(..)) }` and flip `swap`. The id stays; `type_name` goes
-`SizedBoxWidget` → `FlexWidget`, because the swap happens *inside* the pod. (The `any()` wrapper is only needed to unify different view types.)
+Either::Left(Column(())) } else { Either::Right(SizedBox(..)) }` and flip `swap` — or more idiomatically, `either(swap, || Column(()), || SizedBox(..))`. The id stays; `type_name` goes
+`SizedBoxWidget` → `FlexWidget`, because the swap happens *inside* the pod. (The `either()` form erases the type at the API boundary, whereas `any()` stays only for stored tables, accumulators into `Vec<AnyView>`, and three-plus-arm bodies; use `either(cond, || a, || b)` for two-arm bodies instead.)
+
+## Child Sequences and Type Erasure
+
+The container APIs that take children accept `impl ViewSeq<State, M>`, erased once inside. Choose the form that fits:
+
+- **Tuples for mixed-type children:** `Column((app_bar, body, footer))` when each child is a different type. Tuples nest beyond 12 items; a 13-child list nests as `Column(((a, b, c), (d, e, f), ..., (x, y, z)))`.
+- **`Vec<V>` for homogeneous or dynamic lists:** `Column(vec![item1, item2, ...])` when every child shares a type, or the count or order changes at runtime. Keyed lists always stay `Vec` via `keyed(id, view)`.
+- **`either(cond, || left, || right)` for two-arm conditionals:** Returns `impl View<State>` and erases at the boundary. The two arms stay typed, an arm swap destroys and rebuilds state.
+- **`any()`/`AnyView` only for irreducible cases:** stored view tables, accumulators pushing into `Vec<AnyView>`, recursive helpers, three-plus-arm bodies (which `any()` handles; anything with exactly two arms uses `either()` instead), trait extension points, and helpers feeding a `ChildPod` directly.
+
+Helper functions return `impl View<State>` (or `impl View<State> + use<>` when the result is stored); the framework erases once at the API boundary, never at the call site.
 
 ## What to notice before moving on
 
