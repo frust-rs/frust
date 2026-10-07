@@ -781,11 +781,11 @@ mod tests {
     /// A title plus both description inks, stacked.
     #[cfg(feature = "bundled-fonts")]
     fn titled(_: &mut ()) -> AttachmentView<()> {
-        attachment(vec![
-            any(attachment_title("report.pdf")),
-            any(attachment_description("2.4 MB", false)),
-            any(attachment_description("Upload failed", true)),
-        ])
+        attachment((
+            attachment_title("report.pdf"),
+            attachment_description("2.4 MB", false),
+            attachment_description("Upload failed", true),
+        ))
         .orientation(AttachmentOrientation::Vertical)
     }
 

@@ -720,11 +720,11 @@ mod tests {
     /// glyphs) and the current page (a `text` child).
     #[cfg(feature = "bundled-fonts")]
     fn trail(_: &mut ()) -> BreadcrumbListView<()> {
-        breadcrumb(vec![
-            any(breadcrumb_link::<()>("Home")),
-            any(breadcrumb_separator::<()>()),
-            any(breadcrumb_page("Settings")),
-        ])
+        breadcrumb((
+            breadcrumb_link::<()>("Home"),
+            breadcrumb_separator::<()>(),
+            breadcrumb_page("Settings"),
+        ))
     }
 
     #[cfg(feature = "bundled-fonts")]

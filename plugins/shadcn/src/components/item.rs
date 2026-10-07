@@ -796,10 +796,10 @@ mod tests {
 
     #[test]
     fn default_row_lays_media_content_actions_left_to_right() {
-        let view: ItemView<()> = item(vec![
-            any(item_media(leaf(20.0, 20.0)).variant(ItemMediaVariant::Icon)),
-            any(item_content::<(), _>(vec![any(item_title("Title"))])),
-        ]);
+        let view: ItemView<()> = item((
+            item_media(leaf(20.0, 20.0)).variant(ItemMediaVariant::Icon),
+            item_content::<(), _>(vec![any(item_title("Title"))]),
+        ));
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         layout(&mut w, Size::new(400.0, 400.0));
@@ -886,8 +886,7 @@ mod tests {
 
     #[test]
     fn content_column_stacks_title_over_description_with_gap_1() {
-        let view: ItemContentView<()> =
-            item_content(vec![any(item_title("T")), any(item_description("D"))]);
+        let view: ItemContentView<()> = item_content((item_title("T"), item_description("D")));
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         layout(&mut w, Size::new(200.0, 200.0));
@@ -899,10 +898,10 @@ mod tests {
 
     #[cfg(feature = "bundled-fonts")]
     fn titled(_: &mut ()) -> ItemView<()> {
-        item(vec![item_content(vec![
-            any(item_title("Two-factor authentication")),
-            any(item_description("Verify with a code on every sign-in.")),
-        ])])
+        item(vec![item_content((
+            item_title("Two-factor authentication"),
+            item_description("Verify with a code on every sign-in."),
+        ))])
     }
 
     #[cfg(feature = "bundled-fonts")]

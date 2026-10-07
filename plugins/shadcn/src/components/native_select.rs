@@ -187,6 +187,7 @@ impl<State: 'static> NativeSelectView<State> {
     /// The label's text child: `text-sm` in the live theme's `BodyMedium`
     /// family, `foreground` for a selected option and `muted-foreground` for the
     /// placeholder.
+    // erasure: keep built into a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn label_view(&self) -> AnyView<State> {
         let (label, is_placeholder) = self.label();
         let role = if is_placeholder {

@@ -125,6 +125,7 @@ impl<State: 'static> TextareaView<State> {
     }
 
     /// The wrapped baseline field in multi-line mode, its own chrome suppressed.
+    // erasure: keep built into a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn control(&self) -> AnyView<State> {
         let on_change = self.on_change.clone();
         any(

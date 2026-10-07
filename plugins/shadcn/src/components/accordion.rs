@@ -152,6 +152,7 @@ impl<State: 'static> AccordionView<State> {
     }
 
     /// The trigger label view for item `index`: `text-sm font-medium`.
+    // erasure: keep built into a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn title_view(&self, index: usize) -> AnyView<State> {
         any(trigger_text(&self.items[index].title))
     }

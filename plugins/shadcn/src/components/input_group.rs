@@ -513,6 +513,7 @@ impl<State: 'static> InputGroupButtonView<State> {
     }
 
     /// The label child: `text-sm` in `foreground`.
+    // erasure: keep built into a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
     fn label_view(&self) -> AnyView<State> {
         any(text(self.label.clone())
             .size(style::TEXT_SM as f32)

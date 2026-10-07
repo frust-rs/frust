@@ -602,10 +602,8 @@ mod tests {
 
     #[test]
     fn group_overlaps_members_by_8px() {
-        let view: AvatarGroupView<()> = avatar_group(vec![
-            any(avatar::<()>().fallback("A")),
-            any(avatar::<()>().fallback("B")),
-        ]);
+        let view: AvatarGroupView<()> =
+            avatar_group((avatar::<()>().fallback("A"), avatar::<()>().fallback("B")));
         let mut counter = 0u64;
         let mut w = View::<()>::build(&view, &mut BuildCtx::new(&mut counter));
         let mut tcx = TextContext::new();

@@ -700,6 +700,7 @@ impl<State: 'static> QuestionnaireView<State> {
     ///
     /// Its typed text keeps the system UI family: `text_input` takes a style
     /// only at build and has no theme-resolved family to opt into.
+    // erasure: keep pushed into a heterogeneous Vec<AnyView> row list
     fn input_view(&self, item: &QuestionnaireItem, placeholder: &str) -> AnyView<State> {
         let on_answer = self.on_answer.clone();
         let index = self.current;
