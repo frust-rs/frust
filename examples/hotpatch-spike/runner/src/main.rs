@@ -9,8 +9,11 @@
 #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
 fn main() {
     // `dioxus-devtools` is a desktop-only dependency; iOS shares this arm only to reach the
-    // `__frust_main` stub `frust::app!` emits there.
-    #[cfg(not(target_os = "ios"))]
+    // `__frust_main` stub `frust::app!` emits there. The devserver connection (and the `apply_patch`
+    // it performs, which loads and jumps into code the devserver sends) must stay debug-only: a
+    // release build never connects. subsecond itself consults its jump table only under
+    // `debug_assertions`, so gating the connection the same way keeps both halves in step.
+    #[cfg(all(debug_assertions, not(target_os = "ios")))]
     dioxus_devtools::connect_subsecond();
     hotpatch_spike_app::__frust_main();
 }
