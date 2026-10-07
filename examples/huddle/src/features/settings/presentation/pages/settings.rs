@@ -6,8 +6,8 @@
 //! through the shared [`NavigatorController`].
 
 use frust::{
-    AnyView, CrossAxisAlignment, EdgeInsets, NavigatorController, Padding, any, column, icon,
-    icons, scroll_view,
+    CrossAxisAlignment, EdgeInsets, NavigatorController, Padding, View, any, column, icon, icons,
+    scroll_view,
 };
 use frust_material::{app_bar, list_item};
 
@@ -16,7 +16,7 @@ use crate::HuddleState;
 use super::{settings_about, settings_appearance, settings_notifications};
 
 /// The settings menu. `controller` pushes each nested page.
-pub fn settings_screen(controller: NavigatorController<HuddleState>) -> AnyView<HuddleState> {
+pub fn settings_screen(controller: NavigatorController<HuddleState>) -> impl View<HuddleState> {
     let c_notif = controller.clone();
     let c_appear = controller.clone();
     let c_about = controller;
@@ -52,8 +52,8 @@ pub fn settings_screen(controller: NavigatorController<HuddleState>) -> AnyView<
 
     let body = any(scroll_view(Padding(EdgeInsets::all(8.0), rows)));
 
-    any(column()
+    column()
         .child(app_bar::<HuddleState>("Settings"))
         .flex(1, body)
-        .cross_axis(CrossAxisAlignment::Stretch))
+        .cross_axis(CrossAxisAlignment::Stretch)
 }

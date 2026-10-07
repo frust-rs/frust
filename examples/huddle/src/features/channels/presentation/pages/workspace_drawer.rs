@@ -52,7 +52,8 @@ use std::time::{Duration, Instant};
 
 use frust::{
     Align, Alignment, AnimationController, AnyView, Column, Curve, EdgeInsets, FrameTime,
-    GestureDetector, Get, GetUntracked, Padding, Row, RwSignal, Set, SizedBox, any, stack, text,
+    GestureDetector, Get, GetUntracked, Padding, Row, RwSignal, Set, SizedBox, View, any, stack,
+    text,
 };
 use frust_material::filled_card;
 
@@ -226,7 +227,7 @@ fn workspace_row(ws: &Workspace) -> AnyView<HuddleState> {
     let unread = ws.unread;
 
     let mut cells: Vec<AnyView<HuddleState>> = vec![
-        initials_tile(ws.initials, 40.0, 16.0),
+        any(initials_tile(ws.initials, 40.0, 16.0)),
         any(SizedBox(Some(12.0), None)),
         any(text(name).size(16.0)),
     ];
@@ -258,9 +259,13 @@ fn workspace_row(ws: &Workspace) -> AnyView<HuddleState> {
 /// Kept as a small, separately-owned duplicate rather than a shared import so
 /// this screen and `profile::presentation::pages::profile` stay disjoint
 /// files per `src/README-phase-c.md`'s feature-slice convention.
-fn initials_tile<State: 'static>(initials: &str, tile_size: f64, font_size: f32) -> AnyView<State> {
-    any(filled_card(
+fn initials_tile<State: 'static>(
+    initials: &str,
+    tile_size: f64,
+    font_size: f32,
+) -> impl View<State> {
+    filled_card(
         SizedBox(Some(tile_size), Some(tile_size))
             .child(Align(Alignment::CENTER, text(initials).size(font_size))),
-    ))
+    )
 }

@@ -46,8 +46,8 @@ use std::sync::Arc;
 
 use frust::{
     Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, GestureDetector, Get, Padding, Set, SizedBox, TextInput, any, column, hero, icon,
-    icons, keyed, row, scroll_view, text, use_context,
+    FlexView, GestureDetector, Get, Padding, Set, SizedBox, TextInput, View, any, column, hero,
+    icon, icons, keyed, row, scroll_view, text, use_context,
 };
 use frust_material::{filled_card, list_item};
 
@@ -70,7 +70,7 @@ const AVATAR_SIZE: f64 = 40.0;
 /// The Search tab root: a fixed two-child outer `Column` — `[search_field,
 /// results_container]` — so a query edit only ever changes content INSIDE
 /// `results_container`, never the outer child count (see the module docs).
-pub fn search_screen() -> AnyView<HuddleState> {
+pub fn search_screen() -> impl View<HuddleState> {
     let controller = SearchController::instance();
     // Recover the repository the composition root published under the root
     // Owner (see `crate::HuddleApp::init`) — a message-hit row's author
@@ -81,8 +81,8 @@ pub fn search_screen() -> AnyView<HuddleState> {
     let results = controller.results.get();
 
     let children: Vec<AnyView<HuddleState>> = vec![
-        search_field(controller, &query),
-        results_container(&query, results, &repo),
+        any(search_field(controller, &query)),
+        any(results_container(&query, results, &repo)),
     ];
 
     scaffold("Search", scroll_view(Column(children)))
@@ -98,7 +98,7 @@ fn results_container(
     query: &str,
     results: SearchResults,
     repo: &Arc<dyn SearchRepository + Send + Sync>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let children: Vec<FlexChild<HuddleState>> = if query.trim().is_empty() {
         vec![keyed("hint", hint_view())]
     } else if results.is_empty() {
@@ -107,7 +107,7 @@ fn results_container(
         keyed_section_views(results, repo)
     };
 
-    any(FlexView::new(Axis::Vertical, children))
+    FlexView::new(Axis::Vertical, children)
 }
 
 /// The search field row: a controlled [`TextInput`] filtering as-you-type,
@@ -129,7 +129,7 @@ fn results_container(
 /// focus/IME path the instant the query crossed the empty/non-empty boundary
 /// (silently swallowing the very next keystroke on the real per-frame
 /// mobile/desktop pipeline).
-fn search_field(controller: SearchController, query: &str) -> AnyView<HuddleState> {
+fn search_field(controller: SearchController, query: &str) -> impl View<HuddleState> {
     let field = TextInput::<HuddleState, _>(
         query.to_string(),
         move |_s: &mut HuddleState, text: String| {
@@ -159,27 +159,27 @@ fn search_field(controller: SearchController, query: &str) -> AnyView<HuddleStat
         )
         .cross_axis(CrossAxisAlignment::Center));
 
-    any(SizedBox::<HuddleState>(None, Some(FIELD_HEIGHT))
-        .child(Padding(EdgeInsets::symmetric(16.0, 0.0), row)))
+    SizedBox::<HuddleState>(None, Some(FIELD_HEIGHT))
+        .child(Padding(EdgeInsets::symmetric(16.0, 0.0), row))
 }
 
 /// The empty-query hint state: `icons::SEARCH` plus a short instruction.
-fn hint_view() -> AnyView<HuddleState> {
-    any(Padding(
+fn hint_view() -> impl View<HuddleState> {
+    Padding(
         EdgeInsets::all(32.0),
         column()
             .child(Align(Alignment::CENTER, icon(icons::SEARCH).size(48.0)))
             .child(SizedBox::<HuddleState>(None, Some(12.0)))
             .child(text("Search channels, people, messages").size(14.0)),
-    ))
+    )
 }
 
 /// The no-results state for a non-empty, non-matching `query`.
-fn no_results_view(query: &str) -> AnyView<HuddleState> {
-    any(Padding(
+fn no_results_view(query: &str) -> impl View<HuddleState> {
+    Padding(
         EdgeInsets::all(32.0),
         text(format!("No results for '{query}'")).size(16.0),
-    ))
+    )
 }
 
 /// The three result sections, in Channels / People / Messages order, each
@@ -223,54 +223,52 @@ fn keyed_section_views(
     views
 }
 
-fn section_header(label: &str) -> AnyView<HuddleState> {
-    any(
-        SizedBox::<HuddleState>(None, Some(SECTION_HEADER_HEIGHT)).child(Padding(
-            EdgeInsets::symmetric(16.0, 8.0),
-            text(label.to_string()).size(13.0),
-        )),
-    )
+fn section_header(label: &str) -> impl View<HuddleState> {
+    SizedBox::<HuddleState>(None, Some(SECTION_HEADER_HEIGHT)).child(Padding(
+        EdgeInsets::symmetric(16.0, 8.0),
+        text(label.to_string()).size(13.0),
+    ))
 }
 
 /// A channel result row — navigates to its `/channel/:id` feed.
-fn channel_row(c: Channel) -> AnyView<HuddleState> {
+fn channel_row(c: Channel) -> impl View<HuddleState> {
     let id = c.id.to_string();
-    any(list_item::<HuddleState>(format!("#{}", c.name))
+    list_item::<HuddleState>(format!("#{}", c.name))
         .supporting(c.topic.to_string())
         .leading(icon(icons::TAG).size(24.0))
         .on_press(move |s: &mut HuddleState| {
             s.nav.router().push(&format!("/channel/{id}"));
-        }))
+        })
 }
 
 /// A person result row — navigates to `/user/:id` through a hero-wrapped
 /// avatar tagged `avatar-{id}` (the shared cross-screen hero convention).
-fn user_row(u: User) -> AnyView<HuddleState> {
+fn user_row(u: User) -> impl View<HuddleState> {
     let id = u.id;
-    any(list_item::<HuddleState>(u.name.to_string())
+    list_item::<HuddleState>(u.name.to_string())
         .supporting(u.status.label().to_string())
         .leading(hero(format!("avatar-{id}"), avatar_badge(u.initials)))
         .on_press(move |s: &mut HuddleState| {
             s.nav.router().push(&format!("/user/{id}"));
-        }))
+        })
 }
 
 /// A message result row — navigates to the message's own `/channel/:id`.
 fn message_row(
     hit: MessageHit,
     repo: &Arc<dyn SearchRepository + Send + Sync>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let channel_id = hit.channel_id.to_string();
     let author = repo
         .user(hit.author_id)
         .map(|u| u.name.to_string())
         .unwrap_or_else(|| "Someone".to_string());
-    any(list_item::<HuddleState>(author)
+    list_item::<HuddleState>(author)
         .supporting(hit.text.to_string())
         .leading(icon(icons::FORUM).size(24.0))
         .on_press(move |s: &mut HuddleState| {
             s.nav.router().push(&format!("/channel/{channel_id}"));
-        }))
+        })
 }
 
 /// A fixed-size initials badge (leading slot of a person row) — an

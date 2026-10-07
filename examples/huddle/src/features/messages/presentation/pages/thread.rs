@@ -56,8 +56,9 @@ use std::sync::Arc;
 
 use frust::{
     Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView,
-    GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, any, column, hero, icon,
-    icons, inflexible, keyed, kurbo::Size, row, scroll_view, stack, text, text_input, use_context,
+    GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, View, any, column, hero,
+    icon, icons, inflexible, keyed, kurbo::Size, row, scroll_view, stack, text, text_input,
+    use_context,
 };
 use frust_material::app_bar;
 
@@ -177,7 +178,7 @@ fn thread_sheet_for(root_id: u32) -> RwSignal<ThreadSheet> {
 /// message's id.
 pub fn thread_screen(thread_id: String) -> AnyView<HuddleState> {
     let Some(root_id) = thread_id.parse::<u32>().ok() else {
-        return missing_thread_screen(&thread_id);
+        return any(missing_thread_screen(&thread_id));
     };
     let repo = use_context::<Arc<dyn MessageRepository + Send + Sync>>()
         .expect("MessageRepository provided by the composition root");
@@ -187,7 +188,7 @@ pub fn thread_screen(thread_id: String) -> AnyView<HuddleState> {
         .chain(repo.firehose_messages())
         .find(|m| m.id == root_id)
     else {
-        return missing_thread_screen(&thread_id);
+        return any(missing_thread_screen(&thread_id));
     };
 
     let title = thread_title(&repo, root_msg.channel_id);
@@ -196,7 +197,11 @@ pub fn thread_screen(thread_id: String) -> AnyView<HuddleState> {
     let sheet_sig = thread_sheet_for(root_id);
 
     if controller.loading.get() {
-        return thread_page(title, placeholder_body("Loading thread\u{2026}"), None);
+        return any(thread_page(
+            title,
+            any(placeholder_body("Loading thread\u{2026}")),
+            None,
+        ));
     }
 
     // Tracked read: subscribes this rebuild to the controller's `messages`
@@ -208,13 +213,13 @@ pub fn thread_screen(thread_id: String) -> AnyView<HuddleState> {
     // from the tracked snapshot is equivalent, just live.
     let messages = controller.feed();
     let Some(root) = messages.into_iter().find(|m| m.id == root_id) else {
-        return missing_thread_screen(&thread_id);
+        return any(missing_thread_screen(&thread_id));
     };
 
     let content = thread_content(&controller, &root, sheet_sig);
     let composer_row = composer_bar(Arc::clone(&controller), root_id, composer);
 
-    let screen = thread_page(title, content, Some(composer_row));
+    let screen = thread_page(title, any(content), Some(any(composer_row)));
     // The message-action sheet mounts in the screen's own `Stack` top layer
     // (see `crate::ui::sheet`); inert (zero-size) when nothing is open.
     let overlay = thread_sheet(&controller, root_id, sheet_sig);
@@ -298,10 +303,10 @@ fn thread_title(repo: &Arc<dyn MessageRepository + Send + Sync>, channel_id: &st
 
 /// The app bar: a back button (pops via `state.nav`, the frozen route's only
 /// navigation surface — see the module docs) plus the title.
-fn thread_app_bar(title: String) -> AnyView<HuddleState> {
+fn thread_app_bar(title: String) -> impl View<HuddleState> {
     let back = GestureDetector(icon(icons::ARROW_BACK).size(24.0))
         .on_tap(|s: &mut HuddleState| s.nav.router().pop());
-    any(app_bar::<HuddleState>(title).leading(Padding(EdgeInsets::symmetric(4.0, 0.0), back)))
+    app_bar::<HuddleState>(title).leading(Padding(EdgeInsets::symmetric(4.0, 0.0), back))
 }
 
 /// Assembles the app bar, scrollable `content`, and an optional `composer`
@@ -310,7 +315,7 @@ fn thread_page(
     title: String,
     content: AnyView<HuddleState>,
     composer: Option<AnyView<HuddleState>>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let mut children: Vec<frust::FlexChild<HuddleState>> = vec![
         inflexible(thread_app_bar(title)),
         frust::flexible(1, content),
@@ -318,16 +323,16 @@ fn thread_page(
     if let Some(composer) = composer {
         children.push(inflexible(composer));
     }
-    any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
+    FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// The fallback for an unresolvable route param (not a number, or no such
 /// message id in the mock dataset) — mirrors
 /// `profile::presentation::pages::profile`'s `unknown_user_screen` fallback.
-fn missing_thread_screen(thread_id: &str) -> AnyView<HuddleState> {
+fn missing_thread_screen(thread_id: &str) -> impl View<HuddleState> {
     thread_page(
         "Thread".to_string(),
-        placeholder_body(&format!("No such thread: {thread_id}")),
+        any(placeholder_body(&format!("No such thread: {thread_id}"))),
         None,
     )
 }
@@ -343,7 +348,7 @@ fn thread_content(
     controller: &Arc<MessagesController>,
     root: &FeedMessage,
     sheet_sig: RwSignal<ThreadSheet>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let mut children: Vec<frust::FlexChild<HuddleState>> =
         vec![inflexible(root_bubble(controller, root, sheet_sig))];
 
@@ -355,7 +360,7 @@ fn thread_content(
     }
 
     let column = FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch);
-    any(scroll_view(Padding(EdgeInsets::all(12.0), column)))
+    scroll_view(Padding(EdgeInsets::all(12.0), column))
 }
 
 /// The keyed reply list — every child keyed by its index (replies are only
@@ -365,13 +370,13 @@ fn reply_list(
     controller: &Arc<MessagesController>,
     replies: &[FeedReply],
     sheet_sig: RwSignal<ThreadSheet>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let children: Vec<frust::FlexChild<HuddleState>> = replies
         .iter()
         .enumerate()
         .map(|(idx, reply)| keyed(idx, reply_bubble(controller, reply, sheet_sig)))
         .collect();
-    any(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
+    FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// The root message, rendered prominently: avatar + author + time header,
@@ -384,7 +389,7 @@ fn root_bubble(
     controller: &Arc<MessagesController>,
     root: &FeedMessage,
     sheet_sig: RwSignal<ThreadSheet>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let author = controller
         .user(root.author_id)
         .map(|u| u.name)
@@ -420,11 +425,9 @@ fn root_bubble(
 
     // Long-press opens the root message's context menu (React/Copy/Delete).
     let id = root.id;
-    any(
-        GestureDetector(inner).on_long_press(move |_st: &mut HuddleState| {
-            sheet_sig.set(ThreadSheet::Menu(Some(id)));
-        }),
-    )
+    GestureDetector(inner).on_long_press(move |_st: &mut HuddleState| {
+        sheet_sig.set(ThreadSheet::Menu(Some(id)));
+    })
 }
 
 /// The root message's body — text, link preview, or file stub (mirrors
@@ -510,7 +513,7 @@ fn reaction_chips(
 /// Wrapped in a `hero("avatar-{author_id}")` shared element + a tap opening
 /// the author's profile (`/user/:id`) — the same "avatar tap anywhere"
 /// contract the feed avatar carries.
-fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> AnyView<HuddleState> {
+fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> impl View<HuddleState> {
     let initials = controller
         .user(author_id)
         .map(|u| u.initials)
@@ -529,33 +532,28 @@ fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> AnyView<Huddl
                     .color(Color::WHITE),
             )),
         ));
-    any(
-        GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
-            move |st: &mut HuddleState| {
-                st.nav.router().push(&format!("/user/{author_id}"));
-            },
-        ),
+    GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
+        move |st: &mut HuddleState| {
+            st.nav.router().push(&format!("/user/{author_id}"));
+        },
     )
 }
 
 /// The "N replies" divider row above the reply list.
-fn divider_row(count: usize) -> AnyView<HuddleState> {
+fn divider_row(count: usize) -> impl View<HuddleState> {
     let label = format!("{count} {}", if count == 1 { "reply" } else { "replies" });
-    any(Padding(
-        EdgeInsets::symmetric(4.0, 12.0),
-        text(label).size(13.0),
-    ))
+    Padding(EdgeInsets::symmetric(4.0, 12.0), text(label).size(13.0))
 }
 
 /// The empty-thread state: "No replies yet — start the thread".
-fn empty_replies_state() -> AnyView<HuddleState> {
-    any(Padding(
+fn empty_replies_state() -> impl View<HuddleState> {
+    Padding(
         EdgeInsets::all(24.0),
         Align(
             Alignment::CENTER,
             text("No replies yet \u{2014} start the thread").size(14.0),
         ),
-    ))
+    )
 }
 
 /// One compact reply row: author + text, no reactions/thread affordance (the
@@ -568,7 +566,7 @@ fn reply_bubble(
     controller: &Arc<MessagesController>,
     reply: &FeedReply,
     sheet_sig: RwSignal<ThreadSheet>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let author = controller
         .user(reply.author_id)
         .map(|u| u.name)
@@ -582,12 +580,10 @@ fn reply_bubble(
     );
     // Long-press opens a Copy/Delete menu (replies carry no reaction model, so
     // no React row — `Menu(None)`).
-    any(
-        GestureDetector(Padding(EdgeInsets::symmetric(0.0, 4.0), inner)).on_long_press(
-            move |_st: &mut HuddleState| {
-                sheet_sig.set(ThreadSheet::Menu(None));
-            },
-        ),
+    GestureDetector(Padding(EdgeInsets::symmetric(0.0, 4.0), inner)).on_long_press(
+        move |_st: &mut HuddleState| {
+            sheet_sig.set(ThreadSheet::Menu(None));
+        },
     )
 }
 
@@ -599,7 +595,7 @@ fn composer_bar(
     controller: Arc<MessagesController>,
     root_id: u32,
     composer: RwSignal<String>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let value = composer.get(); // tracked: drives the send button's enabled look
     let has_text = !value.trim().is_empty();
 
@@ -626,14 +622,14 @@ fn composer_bar(
         any(send_icon)
     };
 
-    any(Padding(
+    Padding(
         EdgeInsets::all(8.0),
         row()
             .flex(1, field)
             .child(SizedBox(Some(8.0), None))
             .child(Padding(EdgeInsets::symmetric(0.0, 6.0), send_btn))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// Appends `text` to the thread (a no-op on empty/blank input) and clears the
