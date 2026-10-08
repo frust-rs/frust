@@ -1,0 +1,12 @@
+[package]
+name = "hotpatch-canary-driver"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The builder API the canary drives, and the runtime whose `JumpTable` the app applies.
+frust-drive = { path = "../../../crates/frust-drive" }
+frust-hotpatch = { path = "../../../crates/frust-hotpatch" }
+anyhow = "1"
+serde_json = "1"
