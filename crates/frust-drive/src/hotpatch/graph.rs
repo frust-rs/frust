@@ -812,6 +812,41 @@ pub fn parse_dep_info(text: &str, cwd: &Path) -> BTreeSet<PathBuf> {
     files
 }
 
+/// The environment variables a dep-info file says the compile read
+/// (`env!`/`option_env!`): the names of its `# env-dep:NAME[=VALUE]`
+/// comment lines, rustc's `\n`/`\r`/`\\` escapes undone. A name read but
+/// unset is listed too (no `=VALUE`).
+pub fn parse_dep_info_env(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("# env-dep:"))
+        .map(|entry| entry.split_once('=').map_or(entry, |(name, _)| name))
+        .map(unescape_dep_env)
+        .collect()
+}
+
+/// Undoes rustc's dep-info escaping of an environment name.
+fn unescape_dep_env(escaped: &str) -> String {
+    let mut out = String::with_capacity(escaped.len());
+    let mut chars = escaped.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// [`parse_dep_info`] over a file.
 pub fn read_dep_info(path: &Path, cwd: &Path) -> Result<BTreeSet<PathBuf>, HotpatchError> {
     let text = std::fs::read_to_string(path)
@@ -1403,5 +1438,28 @@ mod tests {
             1,
             "a drive colon is not the rule separator"
         );
+    }
+
+    #[test]
+    fn dep_info_env_names_are_read_set_or_not_with_escapes_undone() {
+        let text = "/t/deps/app.d: src/main.rs\n\
+                    \n\
+                    src/main.rs:\n\
+                    \n\
+                    # env-dep:APP_BUILD_STAMP=2026-10-08\n\
+                    # env-dep:APP_OPTIONAL\n\
+                    # env-dep:CARGO_PKG_NAME=my-app\n\
+                    # env-dep:ODD\\\\NAME=a=b\n";
+        let names: Vec<String> = parse_dep_info_env(text).into_iter().collect();
+        assert_eq!(
+            names,
+            vec![
+                "APP_BUILD_STAMP",
+                "APP_OPTIONAL",
+                "CARGO_PKG_NAME",
+                "ODD\\NAME"
+            ]
+        );
+        assert!(parse_dep_info_env("/t/deps/app.d: src/main.rs\n").is_empty());
     }
 }

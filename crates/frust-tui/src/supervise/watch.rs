@@ -618,8 +618,12 @@ mod tests {
         assert!(!is_relevant_path(&root.join("src/.main.rs.swp")));
         assert!(!is_relevant_path(&root.join(".git/index")));
         assert!(!is_relevant_path(&root.join("src/main.rs~")));
-        // A nested dir merely *named* `target` inside src/ is still source.
+        // A nested dir merely *named* `target` or `build` inside src/ is
+        // still source: the rule is judged against the package directory
+        // (`start` seeds the roots with it; `resolve_hot_scope` adds the
+        // workspace root and every package directory), never a src/ tree.
         assert!(is_relevant_path(&root.join("src/target/mod.rs")));
+        assert!(is_relevant_path(&root.join("src/build/mod.rs")));
     }
 
     #[test]

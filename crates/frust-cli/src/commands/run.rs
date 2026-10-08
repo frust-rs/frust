@@ -501,7 +501,9 @@ fn run_desktop_watch(
 /// with no `src/` yet) — `--watch` still runs, just with nothing to watch
 /// until the missing path is created (a re-run picks it up).
 fn spawn_fs_watcher(root: &Path, tx: mpsc::Sender<()>) -> Result<notify::RecommendedWatcher> {
-    let roots = vec![root.join("src"), root.join("Cargo.toml")];
+    // Judged relative to the package directory, so `src/build/` is source
+    // and only the package's own `target/`/`build/` would be noise.
+    let roots = vec![root.to_path_buf()];
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
             tick_on_relevant_event(&roots, &event, &tx);
@@ -706,6 +708,10 @@ struct WatchSet {
     /// Manifests, build scripts, the lockfile, cargo config and toolchain
     /// files: any change is a restart.
     build_inputs: Vec<PathBuf>,
+    /// What a changed path is judged relative to ([`is_relevant_path`]):
+    /// the workspace root and every package directory — never a `src/`
+    /// tree, whose own `build/` or `target/` module is source.
+    roots: Vec<PathBuf>,
 }
 
 impl WatchSet {
@@ -716,11 +722,13 @@ impl WatchSet {
 }
 
 /// Derives the [`WatchSet`] from the session's workspace graph: member and
-/// non-member `src/` trees, and each package's manifest and build script plus
-/// the workspace-level build inputs.
+/// non-member `src/` trees, each package's manifest and build script plus
+/// the workspace-level build inputs, and the package directories paths are
+/// judged relative to.
 fn watch_set_from_graph(graph: &WorkspaceGraph) -> WatchSet {
     let mut set = WatchSet::default();
     let mut inputs = BTreeSet::new();
+    set.roots.push(graph.workspace_root().to_path_buf());
     for package in graph.packages() {
         let src = package.dir.join("src");
         if package.member {
@@ -728,6 +736,7 @@ fn watch_set_from_graph(graph: &WorkspaceGraph) -> WatchSet {
         } else {
             set.local_non_member.push(src);
         }
+        set.roots.push(package.dir.clone());
         inputs.insert(package.dir.join("Cargo.toml"));
         inputs.insert(package.dir.join("build.rs"));
     }
@@ -931,11 +940,13 @@ fn relevant_paths(roots: &[PathBuf], event: &notify::Event) -> Option<Vec<PathBu
 }
 
 /// Whether `path` is a source path rather than editor/build noise, judged
-/// relative to the deepest watch root it lies under (so a checkout living
-/// under a hidden directory is not noise): nothing under `target`/`build`
-/// there, no hidden component (`.git`, `.#lib.rs` Emacs locks,
-/// `.foo.rs.swp`) except a cargo config (`.cargo/config`,
-/// `.cargo/config.toml`, a build input), and no `~`-suffixed backup.
+/// relative to the deepest of `roots` it lies under — the workspace root
+/// and the package directories, never a `src/` tree (so a checkout living
+/// under a hidden directory is not noise, and a `src/build/` module is
+/// source): nothing under `target`/`build` there, no hidden component
+/// (`.git`, `.#lib.rs` Emacs locks, `.foo.rs.swp`) except a cargo config
+/// (`.cargo/config`, `.cargo/config.toml`, a build input), and no
+/// `~`-suffixed backup.
 fn is_relevant_path(roots: &[PathBuf], path: &Path) -> bool {
     use std::path::Component;
     let rel = roots
@@ -1000,7 +1011,7 @@ fn spawn_path_watcher(
     set: &WatchSet,
     tx: mpsc::Sender<PathBuf>,
 ) -> Result<notify::RecommendedWatcher> {
-    let roots: Vec<PathBuf> = set.dirs().chain(&set.build_inputs).cloned().collect();
+    let roots = set.roots.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
             forward_relevant_paths(&roots, &event, &tx);
@@ -1406,8 +1417,9 @@ mod tests {
         }
     }
 
+    /// The package directory, as the watchers judge against.
     fn roots() -> Vec<PathBuf> {
-        vec![PathBuf::from("/w/src"), PathBuf::from("/w/Cargo.toml")]
+        vec![PathBuf::from("/w")]
     }
 
     fn watcher_cases() -> Vec<(notify::Event, Option<Vec<PathBuf>>)> {
@@ -1450,8 +1462,20 @@ mod tests {
                 None,
             ),
             (
-                ev(K::Create(CreateKind::File), Some("/w/src/target/x")),
+                ev(K::Create(CreateKind::File), Some("/w/target/debug/x")),
                 None,
+            ),
+            // Modules merely named like build output are source.
+            (
+                ev(K::Create(CreateKind::File), Some("/w/src/target/x.rs")),
+                p("/w/src/target/x.rs"),
+            ),
+            (
+                ev(
+                    K::Modify(ModifyKind::Data(DataChange::Content)),
+                    Some("/w/src/build/mod.rs"),
+                ),
+                p("/w/src/build/mod.rs"),
             ),
             (
                 ev(K::Remove(RemoveKind::File), Some("/w/src/x.rs")),
@@ -1487,6 +1511,8 @@ mod tests {
             got,
             vec![
                 PathBuf::from("/w/src/lib.rs"),
+                PathBuf::from("/w/src/target/x.rs"),
+                PathBuf::from("/w/src/build/mod.rs"),
                 PathBuf::from("/w/src/x.rs"),
                 PathBuf::from("/w/src/lib.rs"),
                 PathBuf::new(),
@@ -2456,6 +2482,30 @@ mod tests {
                 PathBuf::from("/x/material/src")
             ]
         );
+        let mut roots = set.roots.clone();
+        roots.sort();
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from("/w"),
+                PathBuf::from("/w/app"),
+                PathBuf::from("/x/material")
+            ]
+        );
+        // Judged against those roots, a member's `src/build/` module is
+        // source while its `target/` is not.
+        assert!(is_relevant_path(
+            &set.roots,
+            Path::new("/w/app/src/build/mod.rs")
+        ));
+        assert!(!is_relevant_path(
+            &set.roots,
+            Path::new("/w/app/target/debug/app")
+        ));
+        assert!(!is_relevant_path(
+            &set.roots,
+            Path::new("/w/target/debug/app")
+        ));
     }
 
     /// The hot watcher hook receives the backend's whole watch set, and
@@ -2466,6 +2516,11 @@ mod tests {
             replayable: vec![PathBuf::from("/w/app/src")],
             local_non_member: vec![PathBuf::from("/x/material/src")],
             build_inputs: vec![PathBuf::from("/w/Cargo.toml")],
+            roots: vec![
+                PathBuf::from("/w"),
+                PathBuf::from("/w/app"),
+                PathBuf::from("/x/material"),
+            ],
         };
         let mut backend = FakeBackend::new(vec![Ok((
             vec![Outcome::Patched {

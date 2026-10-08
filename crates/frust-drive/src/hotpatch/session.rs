@@ -74,7 +74,7 @@ use crate::manifest::{self, HotpatchSection};
 use crate::process::{ProcessRunner, StreamHandle, TryRecvError};
 
 use super::capture::{
-    self, CAPTURE_ENV, RecordKey, RustcRecord, ScopeInputs, TargetKind, load_records,
+    self, CAPTURE_ENV, RecordKey, RustcRecord, ScopeInputs, TargetKind, WrapperSetup, load_records,
     prepare_scope_dir,
 };
 use super::fat_link::{self, FatLinkRequest, LinkerFlavor};
@@ -453,17 +453,24 @@ pub struct FatBuild {
 /// json-diagnostic-rendered-ansi --features ... -- -Csave-temps=true
 /// -Clink-dead-code -Clinker=<frust>` with `defines` (the desktop plan's
 /// compile-time environment), then `RUSTC_WORKSPACE_WRAPPER` and the
-/// capture variable naming `frust_exe` and `scope_dir`, then `link`'s
-/// variables. The `--` flags reach only the tip bin.
+/// capture variable naming the wrapper's executable and scope, then
+/// `link`'s variables, then [`capture::AMBIENT_ENV`] listing the wrapper's
+/// ambient names (the host's own environment) plus every name added here —
+/// the environment cargo starts from, which the wrapper subtracts to find
+/// cargo's own additions. The `--` flags reach only the tip bin.
 pub fn fat_build_command(
     package: &str,
     bin: &str,
     features: &[&str],
     defines: &[(String, String)],
-    frust_exe: &Path,
-    scope_dir: &Path,
+    wrapper: WrapperSetup<'_>,
     link: &LinkAction,
 ) -> FatBuild {
+    let WrapperSetup {
+        frust_exe,
+        scope_dir,
+        ambient_names,
+    } = wrapper;
     let mut args: Vec<String> = [
         "rustc",
         "-p",
@@ -486,6 +493,14 @@ pub fn fat_build_command(
     let mut env = defines.to_vec();
     env.extend(capture::wrapper_env(frust_exe, scope_dir));
     env.extend(link.env_vars());
+    let ambient = capture::ambient_env_var(
+        ambient_names
+            .iter()
+            .map(String::as_str)
+            .chain(env.iter().map(|(name, _)| name.as_str()))
+            .chain([capture::AMBIENT_ENV]),
+    );
+    env.push(ambient);
     FatBuild {
         program: "cargo".to_string(),
         args,
@@ -1125,8 +1140,11 @@ pub fn start_desktop(
         &tip_bin.target,
         features,
         &defines,
-        &host.frust_exe,
-        &scope_dir,
+        WrapperSetup {
+            frust_exe: &host.frust_exe,
+            scope_dir: &scope_dir,
+            ambient_names: &capture::ambient_env_names(),
+        },
         &link,
     );
     run_fat_build(runner, &fat, start.root, on_line)?;
@@ -1586,9 +1604,13 @@ impl DesktopBuilder {
         Ok(inputs)
     }
 
-    /// Replays the tip bin with its link step intercepted, so the patch
-    /// links its fresh objects. `Ok(Err(diagnostics))` for a compile error.
-    fn replay_tip_bin(&mut self) -> Result<Result<Vec<PathBuf>, Vec<String>>, HotpatchError> {
+    /// Replays the tip bin with its link step intercepted and returns the
+    /// intercepted link's arguments, which name the fresh objects the patch
+    /// links. The caller installs them as `tip_link_args` only once those
+    /// objects are in the ungated ledger, so a failure in between leaves
+    /// the previous link line in place. `Ok(Err(diagnostics))` for a
+    /// compile error.
+    fn replay_tip_bin(&mut self) -> Result<Result<Vec<String>, Vec<String>>, HotpatchError> {
         let key = self.tip_bin.record_key();
         let record = self.records.get(&key).ok_or_else(|| {
             HotpatchError::unsupported(format!("no captured rustc invocation `{key}`"))
@@ -1639,8 +1661,7 @@ impl DesktopBuilder {
             }
             return Ok(Err(diagnostics));
         }
-        self.tip_link_args = read_link_args(&link.args_file)?;
-        Ok(Ok(tip_objects(&self.tip_link_args)))
+        Ok(Ok(read_link_args(&link.args_file)?))
     }
 }
 
@@ -1685,9 +1706,10 @@ impl PatchBuilder for DesktopBuilder {
         }
         if !bins.is_empty() {
             match self.replay_tip_bin()? {
-                Ok(objects) => {
-                    let typed = typed_objects(&objects, &self.crates)?;
+                Ok(link_args) => {
+                    let typed = typed_objects(&tip_objects(&link_args), &self.crates)?;
                     self.ungated.compiled(self.tip_bin.clone(), typed);
+                    self.tip_link_args = link_args;
                 }
                 Err(diagnostics) => return Ok(Compiled::Failed { diagnostics }),
             }
@@ -3317,6 +3339,17 @@ mod tests {
             .join(scope.dir_name().unwrap());
         let render = |path: PathBuf| path.to_string_lossy().into_owned();
         let pair = |k: &str, v: String| (k.to_string(), v);
+        // The ambient list comes last and names this process's whole
+        // environment plus every pair before it.
+        let (ambient, env) = env.split_last().expect("the ambient list");
+        assert_eq!(ambient.0, "FRUST_HOTPATCH_AMBIENT");
+        let ambient_names: Vec<&str> = ambient.1.lines().collect();
+        for name in env.iter().map(|(name, _)| name.as_str()).chain(["PATH"]) {
+            assert!(
+                ambient_names.contains(&name),
+                "{name} missing from {ambient_names:?}"
+            );
+        }
         assert_eq!(
             env,
             vec![
@@ -3399,8 +3432,11 @@ mod tests {
             "app",
             &["frust/hotpatch"],
             &[("APP_FLAVOR".to_string(), "dev".to_string())],
-            Path::new("/bin/frust"),
-            Path::new("/t/scope"),
+            WrapperSetup {
+                frust_exe: Path::new("/bin/frust"),
+                scope_dir: Path::new("/t/scope"),
+                ambient_names: &["PATH".to_string(), "HOME".to_string()],
+            },
             &link,
         );
         assert_eq!(fat.program, "cargo");
@@ -3422,6 +3458,15 @@ mod tests {
                 (
                     "FRUST_HOTPATCH_LINK_ARGS_FILE".to_string(),
                     "/t/fat/link-args.json".to_string()
+                ),
+                // The host's names plus every name added above: what cargo
+                // starts from, so the wrapper can tell its additions apart.
+                (
+                    "FRUST_HOTPATCH_AMBIENT".to_string(),
+                    "APP_FLAVOR\nFRUST_HOTPATCH_AMBIENT\nFRUST_HOTPATCH_CAPTURE\n\
+                     FRUST_HOTPATCH_LINK\nFRUST_HOTPATCH_LINK_ARGS_FILE\nHOME\nPATH\n\
+                     RUSTC_WORKSPACE_WRAPPER"
+                        .to_string()
                 ),
             ]
         );
