@@ -36,6 +36,15 @@
 //! diagnosis (never read back). Every start resets the session dir and
 //! reseeds the sets from the new base, so a relaunch is a new session.
 //!
+//! **Ungated objects.** A patch links every rlib of the cumulative modified
+//! set, so no object may reach a link before its DWARF passed the layout
+//! gate in a candidate the session then accepted. Every object a replay
+//! produces stays in the builder's ungated set (`Ungated`) — through a
+//! round that fails on a later unit or on the tip bin — and each candidate's
+//! layout table is extracted from that whole set, not from the last round's
+//! objects alone. Only the session's acceptance of an applied patch
+//! (`PatchBuilder::accepted`) empties it.
+//!
 //! **Outcome.** A reply lost after `apply_patch` was sent is
 //! `PatchOutcomeUnknown` (the patch may be live). A missed seam key in the
 //! newest patch is a benign patch-image caller; one in the base or an older
@@ -561,8 +570,9 @@ enum Compiled {
     Nothing,
     /// A replayed crate failed to compile.
     Failed { diagnostics: Vec<String> },
-    /// The candidate's layout table (of the freshly compiled objects) and
-    /// seam instances (of everything the patch will carry).
+    /// The candidate's layout table (of every object compiled since the
+    /// last accepted patch: the builder's [`Ungated`] set) and seam
+    /// instances (of everything the patch will carry).
     Candidate {
         layouts: LayoutTable,
         seams: SeamSet,
@@ -601,6 +611,49 @@ trait PatchBuilder: Send {
     /// Links patch number `n` against the process whose anchor is at
     /// `anchor_runtime`.
     fn link(&mut self, n: u32, anchor_runtime: u64) -> Result<LinkedPatch, HotpatchError>;
+    /// The session accepted the last candidate: its patch reported
+    /// `applied: true` with no layout mismatch and its entries were merged
+    /// into the accepted sets. Every object compiled so far has now passed
+    /// the gates, so the builder empties its [`Ungated`] set. Called once
+    /// per accepted patch and on no other path (a refused candidate, a
+    /// failed link, `applied: false`, a lost reply or a layout-mismatch
+    /// record leave the set as it is).
+    fn accepted(&mut self);
+}
+
+/// The objects compiled since the session last accepted a patch, by unit:
+/// a lib's rlib, the tip bin's typed objects. A patch links every one of
+/// them, so each candidate's layout table is extracted from all of them. A
+/// unit enters on its successful replay — whether or not the rest of its
+/// round compiled — replacing its earlier entry; the set is emptied only
+/// by [`Ungated::accept`], which the session reaches through
+/// [`PatchBuilder::accepted`].
+#[derive(Debug, Default)]
+struct Ungated {
+    objects: BTreeMap<ReplayUnit, Vec<PathBuf>>,
+}
+
+impl Ungated {
+    /// Records `unit`'s fresh objects, replacing an earlier compile's.
+    fn compiled(&mut self, unit: ReplayUnit, objects: Vec<PathBuf>) {
+        self.objects.insert(unit, objects);
+    }
+
+    /// Whether `unit` compiled since the last accepted patch.
+    #[cfg(test)]
+    fn contains(&self, unit: &ReplayUnit) -> bool {
+        self.objects.contains_key(unit)
+    }
+
+    /// Every ungated object, in unit order: the layout gate's input.
+    fn inputs(&self) -> Vec<PathBuf> {
+        self.objects.values().flatten().cloned().collect()
+    }
+
+    /// Every ungated object passed the gates in an accepted candidate.
+    fn accept(&mut self) {
+        self.objects.clear();
+    }
 }
 
 /// How the session reaches the app.
@@ -879,6 +932,7 @@ impl HotSession {
         if let Err(err) = self.accepted.accept(layouts, present) {
             return restart(RestartReason::builder(&err));
         }
+        self.builder.accepted();
         self.images.push(symbols);
         let newest = outcome.patches_applied;
         if newest as usize + 1 != self.images.len() {
@@ -1149,6 +1203,7 @@ pub fn start_desktop(
         records,
         modified: super::graph::ModifiedSet::new(),
         dirty: BTreeSet::new(),
+        ungated: Ungated::default(),
         rlibs,
         tip_link_args: link_args,
         tip_env,
@@ -1484,6 +1539,9 @@ struct DesktopBuilder {
     /// are replayed again with the next change, so a patch never links a
     /// stale object after a failed compile.
     dirty: BTreeSet<ReplayUnit>,
+    /// Units compiled since the last accepted patch, with their objects:
+    /// the layout gate's input for every candidate until one is accepted.
+    ungated: Ungated,
     /// The current rlib of each lib unit in the image.
     rlibs: BTreeMap<ReplayUnit, PathBuf>,
     /// The tip's latest captured link: the fat build's until the tip bin is
@@ -1605,9 +1663,11 @@ impl PatchBuilder for DesktopBuilder {
 
         let runner: &dyn ProcessRunner = &*self.runner;
         let outcomes = replay_units(runner, &self.graph, &self.records, &libs)?;
-        let mut fresh = Vec::new();
         for outcome in outcomes {
             if !outcome.success {
+                // The units that compiled before this one keep their new
+                // rlibs and stay ungated: the next candidate's layout
+                // table is extracted from them too.
                 return Ok(Compiled::Failed {
                     diagnostics: outcome.diagnostics,
                 });
@@ -1621,19 +1681,24 @@ impl PatchBuilder for DesktopBuilder {
             }
             self.rlibs.insert(outcome.unit.clone(), rlib.clone());
             self.dirty.remove(&outcome.unit);
-            fresh.push(rlib);
+            self.ungated.compiled(outcome.unit, vec![rlib]);
         }
         if !bins.is_empty() {
             match self.replay_tip_bin()? {
-                Ok(objects) => fresh.extend(typed_objects(&objects, &self.crates)?),
+                Ok(objects) => {
+                    let typed = typed_objects(&objects, &self.crates)?;
+                    self.ungated.compiled(self.tip_bin.clone(), typed);
+                }
                 Err(diagnostics) => return Ok(Compiled::Failed { diagnostics }),
             }
             self.dirty.remove(&self.tip_bin);
         }
 
-        // Only the freshly compiled objects can differ from what the
-        // accepted set already holds: every other input of the patch was
-        // checked, and accepted, with an earlier one.
+        // Every object compiled since the last accepted patch, this round's
+        // and any an earlier round compiled before it failed, is gated here:
+        // the patch links them all. Only an input the session accepted with
+        // an earlier candidate is left out, and the accepted set holds it.
+        let fresh = self.ungated.inputs();
         let layouts = if fresh.is_empty() {
             LayoutTable::default()
         } else {
@@ -1679,6 +1744,10 @@ impl PatchBuilder for DesktopBuilder {
             table,
             symbols,
         })
+    }
+
+    fn accepted(&mut self) {
+        self.ungated.accept();
     }
 }
 
@@ -1788,16 +1857,33 @@ mod tests {
     }
 
     enum FakeCompile {
+        /// The round compiles `app` and yields this candidate.
         Candidate(LayoutTable, SeamSet),
-        Failed(Vec<String>),
+        /// The round compiles the libs named in `compiled`, then a later
+        /// unit fails with `diagnostics`.
+        Failed {
+            compiled: Vec<&'static str>,
+            diagnostics: Vec<String>,
+        },
+    }
+
+    /// The object a fake round `round` produces for `name`.
+    fn fake_rlib(round: u32, name: &str) -> PathBuf {
+        PathBuf::from(format!("/fake/round-{round}/lib{name}.rlib"))
     }
 
     /// A builder whose compiles and links are scripted; `calls` records
-    /// what the session asked of it.
+    /// what the session asked of it (`accepted` for the acceptance hook).
+    /// It keeps the real [`Ungated`] ledger, and `extracted` records the
+    /// objects each candidate's layout table was extracted from.
     struct FakeBuilder {
         graph: Option<WorkspaceGraph>,
         compiles: VecDeque<FakeCompile>,
         calls: Arc<Mutex<Vec<String>>>,
+        ungated: Arc<Mutex<Ungated>>,
+        extracted: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+        rounds: u32,
+        fail_link: bool,
         patch: Vec<u8>,
         /// Where `link` writes `patch-<n>.so` (the rig's session dir),
         /// world-readable, as a linker under a `022` umask would.
@@ -1810,6 +1896,10 @@ mod tests {
                 graph: None,
                 compiles: compiles.into(),
                 calls: Arc::new(Mutex::new(Vec::new())),
+                ungated: Arc::new(Mutex::new(Ungated::default())),
+                extracted: Arc::new(Mutex::new(Vec::new())),
+                rounds: 0,
+                fail_link: false,
                 patch: (0..1000u32).map(|i| (i % 253) as u8).collect(),
                 out_dir: None,
             }
@@ -1831,15 +1921,27 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("compile {}", units.len()));
-            Ok(match self.compiles.pop_front() {
-                Some(FakeCompile::Candidate(layouts, seams)) => {
-                    Compiled::Candidate { layouts, seams }
+            self.rounds += 1;
+            let round = self.rounds;
+            let mut ungated = self.ungated.lock().unwrap();
+            let candidate = match self.compiles.pop_front() {
+                Some(FakeCompile::Failed {
+                    compiled,
+                    diagnostics,
+                }) => {
+                    for name in compiled {
+                        ungated.compiled(ReplayUnit::lib(name, name), vec![fake_rlib(round, name)]);
+                    }
+                    return Ok(Compiled::Failed { diagnostics });
                 }
-                Some(FakeCompile::Failed(diagnostics)) => Compiled::Failed { diagnostics },
-                None => Compiled::Candidate {
-                    layouts: LayoutTable::default(),
-                    seams: home_seam(),
-                },
+                Some(FakeCompile::Candidate(layouts, seams)) => (layouts, seams),
+                None => (LayoutTable::default(), home_seam()),
+            };
+            ungated.compiled(ReplayUnit::lib("app", "app"), vec![fake_rlib(round, "app")]);
+            self.extracted.lock().unwrap().push(ungated.inputs());
+            Ok(Compiled::Candidate {
+                layouts: candidate.0,
+                seams: candidate.1,
             })
         }
 
@@ -1848,6 +1950,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("link {n} {anchor_runtime:#x}"));
+            if self.fail_link {
+                return Err(HotpatchError::unsupported("the thin link failed"));
+            }
             let path = match &self.out_dir {
                 Some(dir) => {
                     let path = dir.join(format!("patch-{n}.so"));
@@ -1873,6 +1978,11 @@ mod tests {
                 },
                 symbols: patch_image(),
             })
+        }
+
+        fn accepted(&mut self) {
+            self.calls.lock().unwrap().push("accepted".to_string());
+            self.ungated.lock().unwrap().accept();
         }
     }
 
@@ -1914,12 +2024,29 @@ mod tests {
         session: HotSession,
         server: FakeServer,
         calls: Arc<Mutex<Vec<String>>>,
+        ungated: Arc<Mutex<Ungated>>,
+        extracted: Arc<Mutex<Vec<Vec<PathBuf>>>>,
         dir: PathBuf,
     }
 
     impl Rig {
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
+        }
+
+        /// How many times the session called the acceptance hook.
+        fn acceptances(&self) -> usize {
+            self.calls().iter().filter(|c| *c == "accepted").count()
+        }
+
+        /// The builder's ungated objects, as the next candidate would read.
+        fn ungated(&self) -> Vec<PathBuf> {
+            self.ungated.lock().unwrap().inputs()
+        }
+
+        /// The objects each candidate's layout table was extracted from.
+        fn extracted(&self) -> Vec<Vec<PathBuf>> {
+            self.extracted.lock().unwrap().clone()
         }
 
         /// The hot-patch requests the app received, beyond the attach.
@@ -1951,6 +2078,8 @@ mod tests {
         let target_dir = temp_dir("rig");
         let accepted = AcceptedSets::begin(&target_dir, "session-app", base, home_seam()).unwrap();
         let calls = Arc::clone(&builder.calls);
+        let ungated = Arc::clone(&builder.ungated);
+        let extracted = Arc::clone(&builder.extracted);
         let dir = accepted.dir().to_path_buf();
         builder.out_dir = Some(dir.clone());
         Rig {
@@ -1965,6 +2094,8 @@ mod tests {
             },
             server,
             calls,
+            ungated,
+            extracted,
             dir,
         }
     }
@@ -2008,7 +2139,10 @@ mod tests {
             matches!(outcome, Outcome::Patched { components: 2, .. }),
             "{outcome:?}"
         );
-        assert_eq!(rig.calls(), vec!["compile 1", "link 1 0x100004000"]);
+        assert_eq!(
+            rig.calls(),
+            vec!["compile 1", "link 1 0x100004000", "accepted"]
+        );
         assert_eq!(
             rig.server.methods(),
             vec![
@@ -2293,7 +2427,7 @@ mod tests {
         assert_eq!(rig.sent(), vec!["patch_chunk", "apply_patch"]);
         assert_eq!(
             rig.calls(),
-            vec!["compile 1", "link 1 0x100004000", "compile 1"]
+            vec!["compile 1", "link 1 0x100004000", "accepted", "compile 1"]
         );
         // Nothing further either.
         assert_eq!(restart_reason(rig.change()), reason);
@@ -2585,9 +2719,14 @@ mod tests {
 
     #[test]
     fn a_compile_error_leaves_the_session_patchable() {
+        // Round 1: `core` compiles, a later unit fails. Round 2 compiles
+        // `app` and is applied; round 3 likewise.
         let mut rig = rig(
-            vec![applied(1, 1, Vec::new())],
-            vec![FakeCompile::Failed(vec!["error[E0308]".into()])],
+            vec![applied(1, 1, Vec::new()), applied(2, 1, Vec::new())],
+            vec![FakeCompile::Failed {
+                compiled: vec!["core"],
+                diagnostics: vec!["error[E0308]".into()],
+            }],
         );
         assert_eq!(
             rig.change(),
@@ -2596,7 +2735,128 @@ mod tests {
             }
         );
         assert!(rig.sent().is_empty());
+        assert_eq!(rig.ungated(), vec![fake_rlib(1, "core")]);
         assert!(matches!(rig.change(), Outcome::Patched { .. }));
+        // The failed round's `core` reached the next candidate's layout
+        // extraction beside that round's own `app`.
+        assert_eq!(
+            rig.extracted(),
+            vec![vec![fake_rlib(2, "app"), fake_rlib(1, "core")]]
+        );
+        assert!(rig.ungated().is_empty(), "the applied patch gated them");
+        assert!(matches!(rig.change(), Outcome::Patched { .. }));
+        assert_eq!(rig.extracted()[1], vec![fake_rlib(3, "app")]);
+        assert_eq!(rig.acceptances(), 2);
+    }
+
+    #[test]
+    fn the_acceptance_hook_runs_once_per_applied_patch_and_never_on_a_refusal() {
+        // Two applied patches: one hook call each, after the link.
+        let mut r = rig(
+            vec![applied(1, 1, Vec::new()), applied(2, 1, Vec::new())],
+            Vec::new(),
+        );
+        assert!(matches!(r.change(), Outcome::Patched { .. }));
+        assert!(matches!(r.change(), Outcome::Patched { .. }));
+        assert_eq!(
+            r.calls(),
+            vec![
+                "compile 1",
+                "link 1 0x100004000",
+                "accepted",
+                "compile 1",
+                "link 2 0x100004000",
+                "accepted"
+            ]
+        );
+        assert!(r.ungated().is_empty());
+
+        // Applied and merged, then a restart for no seam hit: the patch is
+        // live and its entries accepted, so the hook ran.
+        let mut r = rig(vec![applied(1, 0, Vec::new())], Vec::new());
+        assert_eq!(restart_reason(r.change()), RestartReason::NoSeamHit);
+        assert_eq!(r.acceptances(), 1);
+
+        // Every refusal and failure leaves the hook uncalled and the
+        // compiled objects ungated.
+        let mismatch = PatchOutcome {
+            applied: true,
+            seam_hits: 1,
+            seam_fall_throughs: Vec::new(),
+            layout_mismatches: vec!["app::HomeState: 4 -> 8 bytes".into()],
+            patches_applied: 1,
+            patch_bytes_loaded: 1000,
+        };
+        let not_applied = PatchOutcome {
+            applied: false,
+            layout_mismatches: Vec::new(),
+            patches_applied: 0,
+            ..mismatch.clone()
+        };
+        let refused_by_the_gate = vec![FakeCompile::Candidate(
+            table(&[("app::HomeState", 8)]),
+            home_seam(),
+        )];
+        let cases: Vec<(&str, Vec<ApplyReply>, Vec<FakeCompile>, bool)> = vec![
+            ("host layout gate", Vec::new(), refused_by_the_gate, false),
+            ("failed link", Vec::new(), Vec::new(), true),
+            (
+                "layout-mismatch record",
+                vec![ApplyReply::Outcome(mismatch)],
+                Vec::new(),
+                false,
+            ),
+            (
+                "applied: false",
+                vec![ApplyReply::Outcome(not_applied)],
+                Vec::new(),
+                false,
+            ),
+            ("lost reply", vec![ApplyReply::Hangup], Vec::new(), false),
+            (
+                "error reply",
+                vec![ApplyReply::Error(RpcError::new(
+                    RpcError::INTERNAL_ERROR,
+                    "patch not applied",
+                ))],
+                Vec::new(),
+                false,
+            ),
+        ];
+        for (case, applies, compiles, fail_link) in cases {
+            let mut builder = FakeBuilder::new(compiles);
+            builder.fail_link = fail_link;
+            let mut r = rig_with(
+                hot_script(applies),
+                builder,
+                table(&[("app::HomeState", 4)]),
+                Budget::default(),
+            );
+            restart_reason(r.change());
+            assert_eq!(r.acceptances(), 0, "{case}: {:?}", r.calls());
+            assert_eq!(r.ungated(), vec![fake_rlib(1, "app")], "{case}");
+        }
+
+        // A layout mismatch pending in the app before the send.
+        let mut script = hot_script(Vec::new());
+        // The attach reads the first answer, the change the second.
+        script.pending = [
+            Vec::new(),
+            vec!["app::HomeState changed layout".to_string()],
+        ]
+        .into();
+        let mut r = rig_with(
+            script,
+            FakeBuilder::new(Vec::new()),
+            table(&[("app::HomeState", 4)]),
+            Budget::default(),
+        );
+        assert!(matches!(
+            restart_reason(r.change()),
+            RestartReason::LayoutChanged { .. }
+        ));
+        assert_eq!(r.acceptances(), 0);
+        assert_eq!(r.ungated(), vec![fake_rlib(1, "app")]);
     }
 
     #[test]
@@ -2620,7 +2880,7 @@ mod tests {
         assert_eq!(rig.sent(), vec!["patch_chunk", "apply_patch"]);
         assert_eq!(
             rig.calls(),
-            vec!["compile 1", "link 1 0x100004000", "compile 1"]
+            vec!["compile 1", "link 1 0x100004000", "accepted", "compile 1"]
         );
     }
 
@@ -3278,5 +3538,433 @@ mod tests {
                 "restart required: hot-patch builder unsupported: debuginfo off",
             ]
         );
+    }
+
+    #[test]
+    fn the_ungated_ledger_keeps_each_units_latest_objects_until_accepted() {
+        let mut ledger = Ungated::default();
+        let (a, tip) = (ReplayUnit::lib("a", "a"), ReplayUnit::bin("b", "b"));
+        ledger.compiled(a.clone(), vec!["/t/liba-1.rlib".into()]);
+        ledger.compiled(
+            tip.clone(),
+            vec!["/t/b.0.rcgu.o".into(), "/t/b.1.rcgu.o".into()],
+        );
+        ledger.compiled(a.clone(), vec!["/t/liba-2.rlib".into()]);
+        assert!(ledger.contains(&a) && ledger.contains(&tip));
+        let paths = |list: &[&str]| list.iter().map(PathBuf::from).collect::<Vec<_>>();
+        assert_eq!(
+            ledger.inputs(),
+            paths(&["/t/liba-2.rlib", "/t/b.0.rcgu.o", "/t/b.1.rcgu.o"])
+        );
+        ledger.accept();
+        assert!(ledger.inputs().is_empty());
+        assert!(!ledger.contains(&a));
+    }
+
+    /// The real [`DesktopBuilder::compile`] over a scripted rustc whose
+    /// rlibs are fixture builds with real DWARF. Not on Windows, like the
+    /// fixture itself.
+    #[cfg(not(windows))]
+    mod ungated_fixtures {
+        use super::super::super::layout::fixture;
+        use super::super::super::link_intercept::ENV_ARGS_FILE;
+        use super::*;
+
+        /// What one replayed rustc answers.
+        enum Reply {
+            /// A lib compile reporting this rlib, as rustc reports it.
+            Rlib(PathBuf),
+            /// A tip-bin compile whose intercepted link captured no object.
+            Linked,
+            /// A compile error with this rendered diagnostic.
+            Fails(&'static str),
+        }
+
+        /// Answers each replay by its `--crate-name`, in order, and records
+        /// the crate names it replayed.
+        struct ReplayScript {
+            replies: Mutex<HashMap<String, VecDeque<Reply>>>,
+            replayed: Mutex<Vec<String>>,
+        }
+
+        impl ReplayScript {
+            fn new(replies: Vec<(&str, Vec<Reply>)>) -> Arc<Self> {
+                Arc::new(Self {
+                    replies: Mutex::new(
+                        replies
+                            .into_iter()
+                            .map(|(name, list)| (name.to_string(), list.into()))
+                            .collect(),
+                    ),
+                    replayed: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn replayed(&self) -> Vec<String> {
+                self.replayed.lock().unwrap().clone()
+            }
+        }
+
+        impl ProcessRunner for ReplayScript {
+            fn run(&self, cmd: &str, _args: &[&str]) -> anyhow::Result<Output> {
+                anyhow::bail!("unexpected run of `{cmd}`")
+            }
+
+            fn run_streaming(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                cwd: Option<&Path>,
+                env: &[(&str, &str)],
+                on_line: &mut dyn FnMut(&str),
+            ) -> anyhow::Result<Output> {
+                self.run_streaming_scrubbed(cmd, args, cwd, env, &[], on_line)
+            }
+
+            fn run_streaming_scrubbed(
+                &self,
+                _cmd: &str,
+                args: &[&str],
+                _cwd: Option<&Path>,
+                env: &[(&str, &str)],
+                _remove_env: &[&str],
+                _on_line: &mut dyn FnMut(&str),
+            ) -> anyhow::Result<Output> {
+                let name = args
+                    .windows(2)
+                    .find(|pair| pair[0] == "--crate-name")
+                    .map(|pair| pair[1].to_string())
+                    .expect("a replay names its crate");
+                self.replayed.lock().unwrap().push(name.clone());
+                let reply = self
+                    .replies
+                    .lock()
+                    .unwrap()
+                    .get_mut(&name)
+                    .and_then(VecDeque::pop_front)
+                    .ok_or_else(|| anyhow::anyhow!("unscripted replay of `{name}`"))?;
+                let ok = |stderr: String| Output {
+                    success: true,
+                    stdout: String::new(),
+                    stderr,
+                };
+                Ok(match reply {
+                    Reply::Rlib(rlib) => ok(serde_json::json!({
+                        "$message_type": "artifact", "artifact": rlib, "emit": "link"
+                    })
+                    .to_string()),
+                    Reply::Linked => {
+                        let (_, file) = env
+                            .iter()
+                            .find(|(key, _)| *key == ENV_ARGS_FILE)
+                            .expect("the tip replay names its link-args file");
+                        std::fs::write(file, "[]")?;
+                        ok(String::new())
+                    }
+                    Reply::Fails(rendered) => Output {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: serde_json::json!({
+                            "$message_type": "diagnostic", "rendered": rendered
+                        })
+                        .to_string(),
+                    },
+                })
+            }
+
+            fn spawn_streaming(
+                &self,
+                cmd: &str,
+                _args: &[&str],
+                _cwd: Option<&Path>,
+                _env: &[(&str, &str)],
+            ) -> anyhow::Result<StreamHandle> {
+                anyhow::bail!("unexpected spawn of `{cmd}`")
+            }
+        }
+
+        fn lib_a() -> ReplayUnit {
+            ReplayUnit::lib("a", "a")
+        }
+
+        fn lib_b() -> ReplayUnit {
+            ReplayUnit::lib("b", "b")
+        }
+
+        fn tip_bin() -> ReplayUnit {
+            ReplayUnit::bin("b", "b-app")
+        }
+
+        /// A workspace at `/w`: the tip `b` (lib and bin) depends on `a`.
+        fn graph() -> WorkspaceGraph {
+            const A: &str = "path+file:///w/a#0.1.0";
+            const B: &str = "path+file:///w/b#0.1.0";
+            let target = |name: &str, kind: &str, src: &str| serde_json::json!({"name": name, "kind": [kind], "crate_types": [kind], "src_path": src});
+            let json = serde_json::json!({
+                "packages": [
+                    {"id": A, "name": "a", "source": null, "manifest_path": "/w/a/Cargo.toml",
+                     "targets": [target("a", "lib", "/w/a/src/lib.rs")]},
+                    {"id": B, "name": "b", "source": null, "manifest_path": "/w/b/Cargo.toml",
+                     "targets": [target("b", "lib", "/w/b/src/lib.rs"),
+                                 target("b-app", "bin", "/w/b/src/main.rs")]},
+                ],
+                "workspace_members": [A, B],
+                "resolve": {"nodes": [
+                    {"id": A, "deps": []},
+                    {"id": B, "deps": [{"name": "a", "pkg": A,
+                                        "dep_kinds": [{"kind": null, "target": null}]}]},
+                ], "root": B},
+                "workspace_root": "/w",
+            });
+            WorkspaceGraph::from_metadata(&json.to_string(), "b", None).unwrap()
+        }
+
+        fn record(crate_name: &str, crate_type: &str) -> RustcRecord {
+            RustcRecord {
+                args: [
+                    "rustc",
+                    "--crate-name",
+                    crate_name,
+                    "--crate-type",
+                    crate_type,
+                    "--edition=2024",
+                ]
+                .map(str::to_string)
+                .to_vec(),
+                envs: Vec::new(),
+                crate_types: vec![crate_type.to_string()],
+            }
+        }
+
+        /// The fixture has one replayable crate, so each unit's rlib is one
+        /// of its builds: `a` starts as `badge-p1` (`Badge { n }`) and `b`
+        /// as the no-edit build, whose DWARF has no `Badge` at all — as a
+        /// dependent's own objects would not describe a type only `a` uses.
+        struct Setup {
+            builder: DesktopBuilder,
+            accepted: AcceptedSets,
+            script: Arc<ReplayScript>,
+            b_rlib: PathBuf,
+        }
+
+        fn setup(tag: &str, replies: Vec<(&str, Vec<Reply>)>) -> Setup {
+            let a_base = fixture::edited("badge-p1");
+            let b_rlib = fixture::base();
+            let crates = fixture::crates();
+            let dir = temp_dir(tag);
+            let base = [a_base.clone(), b_rlib.clone()];
+            let accepted = AcceptedSets::begin(
+                &dir,
+                "session-b",
+                layout::extract(&base, &crates).unwrap().table,
+                SeamSet::from_inputs(&base).unwrap(),
+            )
+            .unwrap();
+            let script = ReplayScript::new(replies);
+            let image = object(target(), &[Def::Text(ANCHOR_SYMBOL, 4)]);
+            let builder = DesktopBuilder {
+                runner: Arc::clone(&script) as Arc<dyn ProcessRunner + Send + Sync>,
+                graph: graph(),
+                records: [
+                    (lib_a(), record("a", "lib")),
+                    (lib_b(), record("b", "lib")),
+                    (tip_bin(), record("b_app", "bin")),
+                ]
+                .into_iter()
+                .map(|(unit, record)| (unit.record_key(), record))
+                .collect(),
+                modified: super::super::super::graph::ModifiedSet::new(),
+                dirty: BTreeSet::new(),
+                ungated: Ungated::default(),
+                rlibs: [(lib_a(), a_base), (lib_b(), b_rlib.clone())]
+                    .into_iter()
+                    .collect(),
+                tip_link_args: Vec::new(),
+                tip_env: Vec::new(),
+                tip_bin: tip_bin(),
+                cache: SymbolCache::from_bytes("base", &image, target()).unwrap(),
+                target: target(),
+                flavor: LinkerFlavor::for_triple(TRIPLE).unwrap(),
+                linker: "cc".to_string(),
+                target_dir: dir.clone(),
+                session: "session-b".to_string(),
+                session_dir: accepted.dir().to_path_buf(),
+                scope_dir: dir,
+                frust_exe: PathBuf::from("/opt/frust/bin/frust"),
+                crates,
+                tip_replays: 0,
+            };
+            Setup {
+                builder,
+                accepted,
+                script,
+                b_rlib,
+            }
+        }
+
+        fn units(list: &[ReplayUnit]) -> BTreeSet<ReplayUnit> {
+            list.iter().cloned().collect()
+        }
+
+        fn failed(compiled: Result<Compiled, HotpatchError>) -> Vec<String> {
+            match compiled {
+                Ok(Compiled::Failed { diagnostics }) => diagnostics,
+                Ok(Compiled::Candidate { .. }) => {
+                    panic!("expected a failed round, got a candidate")
+                }
+                Ok(Compiled::Nothing) => panic!("expected a failed round, got nothing"),
+                Err(err) => panic!("expected a failed round, got {err:?}"),
+            }
+        }
+
+        fn candidate(compiled: Result<Compiled, HotpatchError>) -> (LayoutTable, SeamSet) {
+            match compiled {
+                Ok(Compiled::Candidate { layouts, seams }) => (layouts, seams),
+                Ok(Compiled::Failed { diagnostics }) => {
+                    panic!("expected a candidate, got a failed round: {diagnostics:?}")
+                }
+                Ok(Compiled::Nothing) => panic!("expected a candidate, got nothing"),
+                Err(err) => panic!("expected a candidate, got {err:?}"),
+            }
+        }
+
+        fn badge_grew() -> RestartReason {
+            RestartReason::LayoutChanged {
+                records: vec![format!(
+                    "{}::Badge changed layout (4 → 8 bytes)",
+                    fixture::APP_CRATE
+                )],
+            }
+        }
+
+        /// The review's counterexample: `a` grows `Badge` and compiles, its
+        /// dependent `b` fails in the same round; the user fixes `b` alone.
+        /// The patch would link `a`'s new rlib, so the candidate must carry
+        /// its DWARF and be refused.
+        #[test]
+        fn a_compiles_b_fails_then_fixing_b_refuses_a_changed_type() {
+            let a_new = fixture::edited("badge-p2");
+            let Setup {
+                mut builder,
+                accepted,
+                script,
+                b_rlib,
+            } = setup(
+                "ungated-lib",
+                vec![
+                    ("a", vec![Reply::Rlib(a_new.clone())]),
+                    (
+                        "b",
+                        vec![
+                            Reply::Fails("error[E0308]: mismatched types\n"),
+                            Reply::Rlib(fixture::base()),
+                        ],
+                    ),
+                ],
+            );
+
+            // Round N: `a` compiles, `b` fails.
+            assert_eq!(
+                failed(builder.compile(&units(&[lib_a()]))),
+                vec!["error[E0308]: mismatched types\n".to_string()]
+            );
+            assert_eq!(builder.rlibs[&lib_a()], a_new);
+            assert!(!builder.dirty.contains(&lib_a()));
+            assert!(builder.dirty.contains(&lib_b()));
+            assert!(builder.ungated.contains(&lib_a()), "`a` is still ungated");
+            assert!(!builder.ungated.contains(&lib_b()));
+
+            // Round N+1: only `b` replays, yet `a`'s objects are extracted.
+            let (layouts, seams) = candidate(builder.compile(&units(&[lib_b()])));
+            assert_eq!(script.replayed(), vec!["a", "b", "b"]);
+            assert_eq!(accepted.check(&layouts, seams.clone()), Err(badge_grew()));
+            assert_eq!(
+                builder.ungated.inputs(),
+                vec![a_new.clone(), b_rlib.clone()]
+            );
+            assert_eq!(
+                builder.modified_rlibs().unwrap(),
+                vec![b_rlib.clone(), a_new],
+                "the patch would link `a`'s new rlib"
+            );
+
+            // Negative control: `b`'s objects alone, the table the gate read
+            // before the ledger, pass — they could never have caught it.
+            let b_only = layout::extract(&[b_rlib], &fixture::crates())
+                .unwrap()
+                .table;
+            assert!(accepted.check(&b_only, seams).is_ok());
+        }
+
+        /// The same through the tip bin: `a` compiles, the tip bin fails;
+        /// the user fixes `main.rs` alone, whose objects describe nothing
+        /// of `a`.
+        #[test]
+        fn a_compiles_the_tip_fails_then_fixing_the_tip_refuses_a_changed_type() {
+            let a_new = fixture::edited("badge-p2");
+            let Setup {
+                mut builder,
+                accepted,
+                script,
+                b_rlib,
+            } = setup(
+                "ungated-tip",
+                vec![
+                    ("a", vec![Reply::Rlib(a_new.clone())]),
+                    ("b", vec![Reply::Rlib(fixture::base())]),
+                    (
+                        "b_app",
+                        vec![Reply::Fails("error[E0425]: x\n"), Reply::Linked],
+                    ),
+                ],
+            );
+
+            failed(builder.compile(&units(&[lib_a(), tip_bin()])));
+            assert!(builder.dirty.contains(&tip_bin()));
+            assert!(builder.ungated.contains(&lib_a()));
+            assert!(builder.ungated.contains(&lib_b()));
+
+            let (layouts, seams) = candidate(builder.compile(&units(&[tip_bin()])));
+            assert_eq!(script.replayed(), vec!["a", "b", "b_app", "b_app"]);
+            assert!(builder.dirty.is_empty());
+            assert_eq!(accepted.check(&layouts, seams), Err(badge_grew()));
+            assert_eq!(builder.ungated.inputs(), vec![a_new, b_rlib]);
+        }
+
+        /// Accepting a candidate empties the set: the next candidate is
+        /// extracted from its own round's objects only.
+        #[test]
+        fn the_acceptance_hook_empties_the_builders_ungated_set() {
+            let a_rlib = fixture::edited("badge-p1");
+            let Setup {
+                mut builder,
+                script,
+                b_rlib,
+                ..
+            } = setup(
+                "ungated-accept",
+                vec![
+                    ("a", vec![Reply::Rlib(a_rlib.clone())]),
+                    (
+                        "b",
+                        vec![Reply::Rlib(fixture::base()), Reply::Rlib(fixture::base())],
+                    ),
+                ],
+            );
+            candidate(builder.compile(&units(&[lib_a()])));
+            assert_eq!(builder.ungated.inputs(), vec![a_rlib, b_rlib.clone()]);
+            builder.accepted();
+            assert!(builder.ungated.inputs().is_empty());
+
+            let (layouts, _) = candidate(builder.compile(&units(&[lib_b()])));
+            assert_eq!(script.replayed(), vec!["a", "b", "b"]);
+            assert_eq!(builder.ungated.inputs(), vec![b_rlib.clone()]);
+            assert_eq!(
+                layouts,
+                layout::extract(&[b_rlib], &fixture::crates())
+                    .unwrap()
+                    .table
+            );
+        }
     }
 }
