@@ -124,16 +124,28 @@ pub enum Command {
         #[command(flatten)]
         build: BuildFlags,
 
-        /// Desktop-only rebuild-relaunch dev loop:
-        /// watches the project's `src/` tree and `Cargo.toml`, and on
-        /// any change kills the running `cargo run` child and relaunches a
-        /// fresh one, streaming its output the whole time. This is
-        /// explicitly a relaunch loop, not state-preserving hot reload —
-        /// app state resets on every relaunch. **Desktop-preview only**:
-        /// combining `--watch` with `-d <device>` is a hard error (the
-        /// watch loop has no device-side kill/rebuild/relaunch story yet).
+        /// Desktop-only dev loop for the project in the current directory.
+        /// A debug run is **hot** by default: the app is fat-built once,
+        /// and each save is compiled and patched into the running process
+        /// (state kept), printing `patched in N ms (k components rebuilt)`.
+        /// A change that cannot be patched (a framework or path-dependency
+        /// edit, a manifest or build-script change, a layout or state-type
+        /// change) prints `restart required: <reason>` and relaunches a
+        /// fresh session; a compile error prints its diagnostics and leaves
+        /// the running app untouched. Profile/release runs, and `--no-hot`,
+        /// use the plain relaunch loop instead: any change to `src/` or
+        /// `Cargo.toml` kills the running `cargo run` child and relaunches
+        /// (app state resets). **Desktop-preview only**: combining `--watch`
+        /// with `-d <device>` is a hard error (the watch loop has no
+        /// device-side kill/rebuild/relaunch story yet).
         #[arg(long)]
         watch: bool,
+
+        /// With `--watch`, use the plain kill-and-relaunch loop instead of
+        /// hot patching. A no-op without `--watch`: nothing else in `run`
+        /// is hot.
+        #[arg(long = "no-hot")]
+        no_hot: bool,
 
         /// With `-d web`, skip opening a browser at the served URL once the
         /// dev server is up. Ignored for every other target — no other
@@ -646,8 +658,10 @@ mod tests {
             Command::Run {
                 build,
                 watch,
+                no_hot,
                 no_open,
             } => {
+                assert!(!no_hot);
                 assert!(!build.build.debug);
                 assert!(!build.build.profile);
                 assert!(!build.build.release);
@@ -655,6 +669,22 @@ mod tests {
                 assert!(!no_open);
             }
             other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_no_hot_parses_with_watch_and_is_a_no_op_without_it() {
+        for (argv, want_watch) in [
+            (vec!["frust", "run", "--watch", "--no-hot"], true),
+            (vec!["frust", "run", "--no-hot"], false),
+        ] {
+            match Cli::parse_from(argv).command.unwrap() {
+                Command::Run { watch, no_hot, .. } => {
+                    assert_eq!(watch, want_watch);
+                    assert!(no_hot);
+                }
+                other => panic!("expected Run, got {other:?}"),
+            }
         }
     }
 
