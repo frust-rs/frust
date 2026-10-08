@@ -26,9 +26,11 @@
 //! applied — or, when the app advertises `patch_file_hand_off`, restricted
 //! to `0600` and named on `apply_patch` by absolute path and SHA-256 instead
 //! of uploaded (the session is loopback-only, so the app reads the very file
-//! the host wrote). One patch is in flight at a time, and nothing is ever sent to a
-//! restart-only session, to a non-loopback endpoint, with pending records
-//! or over budget.
+//! the host wrote). A device session (Android, through `adb forward`;
+//! [`super::android`]) always uploads: the app is not on this host. One
+//! patch is in flight at a time, and nothing is ever sent to a restart-only
+//! session, to a non-loopback endpoint, with pending records or over
+//! budget.
 //!
 //! **Accepted sets.** A candidate's layout and seam entries are merged only
 //! when its `PatchOutcome` reports `applied: true` with no layout mismatch;
@@ -115,7 +117,7 @@ const DISCOVERY_POLL: Duration = Duration::from_millis(20);
 
 /// `<target>/frust-hotpatch/fat/<scope>`: the fat image, its archive and
 /// its captured link arguments, one directory per capture scope.
-const FAT_DIR: &str = "fat";
+pub(super) const FAT_DIR: &str = "fat";
 
 /// How many patches a session may load before it must restart the app.
 /// Patch images are never unloaded, so the budget bounds a long session's
@@ -672,7 +674,7 @@ impl Ungated {
 }
 
 /// How the session reaches the app.
-enum AppLink {
+pub(super) enum AppLink {
     /// Hot patching is off for this process; every change restarts.
     RestartOnly { reason: String },
     Live {
@@ -680,6 +682,12 @@ enum AppLink {
         endpoint: SocketAddr,
         pid: u32,
         anchor_runtime: u64,
+        /// Whether the app runs on this host and so can read a file the
+        /// builder wrote. `false` for a device reached through `adb
+        /// forward`: the endpoint is loopback on this host, but the app is
+        /// another machine, so a patch is always uploaded in chunks there,
+        /// whatever its `patch_file_hand_off` says.
+        same_host: bool,
     },
 }
 
@@ -688,6 +696,21 @@ enum AppLink {
 /// IPv4-mapped IPv6 address counts as non-loopback); an app without
 /// `HotPatch` gives the precondition its `hotpatch_info` refusal names.
 fn attach_app(endpoint: SocketAddr, token: Option<&str>, triple: &str) -> AppLink {
+    attach(endpoint, token, triple, true)
+}
+
+/// [`attach_app`] for an app on a device, reached through a host loopback
+/// port that forwards to it (`adb forward`): the session never hands such
+/// an app a host path, and uploads every patch in chunks.
+pub(super) fn attach_device_app(
+    endpoint: SocketAddr,
+    token: Option<&str>,
+    triple: &str,
+) -> AppLink {
+    attach(endpoint, token, triple, false)
+}
+
+fn attach(endpoint: SocketAddr, token: Option<&str>, triple: &str, same_host: bool) -> AppLink {
     let restart_only = |reason: String| AppLink::RestartOnly { reason };
     if !endpoint.ip().is_loopback() {
         return restart_only(RestartReason::EndpointNotLoopback { endpoint }.to_string());
@@ -730,6 +753,7 @@ fn attach_app(endpoint: SocketAddr, token: Option<&str>, triple: &str) -> AppLin
         endpoint,
         pid: info.pid,
         anchor_runtime: info.anchor_runtime,
+        same_host,
     }
 }
 
@@ -792,7 +816,7 @@ impl HotSession {
     fn change(&mut self, paths: &[PathBuf]) -> Outcome {
         let started = Instant::now();
         let restart = Outcome::RestartRequired;
-        let (client, pid, anchor_runtime) = match &self.app {
+        let (client, pid, anchor_runtime, same_host) = match &self.app {
             AppLink::RestartOnly { reason } => {
                 return restart(RestartReason::HotPatchUnavailable {
                     reason: reason.clone(),
@@ -803,6 +827,7 @@ impl HotSession {
                 endpoint,
                 pid,
                 anchor_runtime,
+                same_host,
             } => {
                 let peer_loopback = client.peer_addr().is_some_and(|a| a.ip().is_loopback());
                 if !endpoint.ip().is_loopback() || !peer_loopback {
@@ -810,7 +835,7 @@ impl HotSession {
                         endpoint: *endpoint,
                     });
                 }
-                (client, *pid, *anchor_runtime)
+                (client, *pid, *anchor_runtime, *same_host)
             }
         };
 
@@ -882,9 +907,11 @@ impl HotSession {
 
         let patch_id = self.next_patch_id;
         self.next_patch_id += 1;
-        // The endpoint and peer were checked loopback above, so an app that
-        // takes the hand-off reads the file this host just wrote.
-        let file = if info.patch_file_hand_off {
+        // The endpoint and peer were checked loopback above, so an app on
+        // this host that takes the hand-off reads the file this host just
+        // wrote. A device app behind `adb forward` is never named a host
+        // path, whatever it advertises.
+        let file = if info.patch_file_hand_off && same_host {
             match hand_off(&linked.path, &linked.bytes) {
                 Ok(file) => file,
                 Err(err) => return restart(RestartReason::builder(&err)),
@@ -1091,7 +1118,7 @@ pub fn start_desktop(
     let budget = Budget::from_section(manifest.as_ref().and_then(|m| m.hotpatch.as_ref()));
 
     let metadata = super::graph::cargo_metadata(runner, &start.root.join("Cargo.toml"), None)?;
-    let mut graph = WorkspaceGraph::from_metadata(&metadata, start.package, start.bin)?;
+    let graph = WorkspaceGraph::from_metadata(&metadata, start.package, start.bin)?;
     check_debuginfo(host.env, start.root, graph.workspace_root())?;
     let target_dir = target_directory(&metadata)?;
 
@@ -1150,51 +1177,24 @@ pub fn start_desktop(
     run_fat_build(runner, &fat, start.root, on_line)?;
 
     let link_args = read_link_args(&link.args_file)?;
-    let records = load_records(&scope_dir)?;
-    let tip_record = records.get(&tip_bin.record_key()).ok_or_else(|| {
-        HotpatchError::unsupported(format!(
-            "the fat build captured no `{}` invocation",
-            tip_bin.record_key()
-        ))
-    })?;
-    let tip_env = replay_env(tip_record);
-    let linker = fat_link::linker_program(custom_linker(host.env, &triple).as_deref())?;
-    let exe = fat_dir.join(&tip_bin.target);
-    let fat_out = fat_link::fat_link(
-        runner,
-        &FatLinkRequest {
+    let base = link_base(
+        host,
+        BaseRequest {
+            graph,
+            link_args,
+            image_unit: tip_bin.clone(),
+            image: fat_dir.join(&tip_bin.target),
+            custom_linker: custom_linker(host.env, &triple),
+            target,
             flavor,
-            linker: &linker,
-            link_args: &link_args,
-            envs: &tip_env,
-            target_dir: &target_dir,
+            target_dir,
             archive_dir: &fat_dir,
-            exe: &exe,
+            scope_dir,
+            session: format!("session-{}", tip_bin.target),
         },
     )?;
 
-    let rlibs = member_rlibs(&link_args, &graph);
-    let tip_objects = tip_objects(&link_args);
-    let crates = replayable_crates(&graph);
-    let typed = typed_objects(&tip_objects, &crates)?;
-    let base_layouts = layout::extract(
-        &rlibs.values().cloned().chain(typed).collect::<Vec<_>>(),
-        &crates,
-    )?
-    .table;
-    let base_seams = SeamSet::from_inputs(
-        &rlibs
-            .values()
-            .cloned()
-            .chain(tip_objects)
-            .collect::<Vec<_>>(),
-    )?;
-    let session = format!("session-{}", tip_bin.target);
-    let accepted = AcceptedSets::begin(&target_dir, &session, base_layouts, base_seams)?;
-    let cache = SymbolCache::load(&fat_out.exe, target)?;
-    seed_dep_info(&mut graph, &records);
-
-    let plan = desktop_run::desktop_exe_plan(start.root, &fat_out.exe, start.info);
+    let plan = desktop_run::desktop_exe_plan(start.root, base.image(), start.info);
     let mut child =
         desktop_run::spawn_desktop_plan(runner, &plan).map_err(|err| StartError::Launch {
             detail: format!("{err:#}"),
@@ -1214,7 +1214,121 @@ pub fn start_desktop(
         }
     };
 
-    let images = vec![cache.symbols().clone()];
+    Ok((open_session(base, app, budget), child))
+}
+
+/// What [`link_base`] links the base image from: the fat build's graph,
+/// captured link line and capture scope, and where the image goes. Shared
+/// by [`start_desktop`] and the Android start
+/// ([`super::android::start_android`]).
+pub(super) struct BaseRequest<'a> {
+    pub graph: WorkspaceGraph,
+    /// The image link's captured arguments (expanded).
+    pub link_args: Vec<String>,
+    /// The unit whose link is the running image: the tip bin on desktop,
+    /// the tip lib (its `cdylib`) on Android.
+    pub image_unit: ReplayUnit,
+    /// Where the fat image is written, under the cargo target dir.
+    pub image: PathBuf,
+    /// The build's configured linker, if any (see
+    /// [`fat_link::linker_program`]).
+    pub custom_linker: Option<PathBuf>,
+    pub target: Target,
+    pub flavor: LinkerFlavor,
+    pub target_dir: PathBuf,
+    /// Where `libdeps-<hash>.a` lives: one directory per capture scope.
+    pub archive_dir: &'a Path,
+    pub scope_dir: PathBuf,
+    /// The session directory's name under `<target>/frust-hotpatch`.
+    pub session: String,
+}
+
+/// A linked base image and the real builder over it, ready for a session
+/// once the app is running.
+pub(super) struct FatBase {
+    builder: DesktopBuilder,
+    accepted: AcceptedSets,
+    image: PathBuf,
+}
+
+impl FatBase {
+    /// The fat image, under the cargo target dir.
+    pub(super) fn image(&self) -> &Path {
+        &self.image
+    }
+
+    /// The file the session's symbol cache was read from: the unstripped
+    /// fat image itself.
+    pub(super) fn symbol_source(&self) -> &Path {
+        self.builder.cache.path()
+    }
+}
+
+/// The fat link and base-image half of a session start, shared by every
+/// target: reads the capture records, links the fat image with the image
+/// unit's captured environment, extracts the base layout table and seam
+/// instances, starts the session's accepted sets, reads the symbol cache
+/// from the image just linked and seeds the graph's dep-info.
+pub(super) fn link_base(
+    host: &SessionHost<'_>,
+    request: BaseRequest<'_>,
+) -> Result<FatBase, HotpatchError> {
+    let runner: &dyn ProcessRunner = &*host.runner;
+    let BaseRequest {
+        mut graph,
+        link_args,
+        image_unit,
+        image,
+        custom_linker,
+        target,
+        flavor,
+        target_dir,
+        archive_dir,
+        scope_dir,
+        session,
+    } = request;
+    let records = load_records(&scope_dir)?;
+    let tip_record = records.get(&image_unit.record_key()).ok_or_else(|| {
+        HotpatchError::unsupported(format!(
+            "the fat build captured no `{}` invocation",
+            image_unit.record_key()
+        ))
+    })?;
+    let tip_env = replay_env(tip_record);
+    let linker = fat_link::linker_program(custom_linker.as_deref())?;
+    let fat_out = fat_link::fat_link(
+        runner,
+        &FatLinkRequest {
+            flavor,
+            linker: &linker,
+            link_args: &link_args,
+            envs: &tip_env,
+            target_dir: &target_dir,
+            archive_dir,
+            exe: &image,
+        },
+    )?;
+
+    let rlibs = member_rlibs(&link_args, &graph);
+    let tip_objects = tip_objects(&link_args);
+    let crates = replayable_crates(&graph);
+    let typed = typed_objects(&tip_objects, &crates)?;
+    let base_layouts = layout::extract(
+        &rlibs.values().cloned().chain(typed).collect::<Vec<_>>(),
+        &crates,
+    )?
+    .table;
+    let base_seams = SeamSet::from_inputs(
+        &rlibs
+            .values()
+            .cloned()
+            .chain(tip_objects)
+            .collect::<Vec<_>>(),
+    )?;
+    let accepted = AcceptedSets::begin(&target_dir, &session, base_layouts, base_seams)?;
+    let cache = SymbolCache::load(&fat_out.exe, target)?;
+    seed_dep_info(&mut graph, &records);
+
     let builder = DesktopBuilder {
         runner: Arc::clone(&host.runner),
         graph,
@@ -1225,7 +1339,7 @@ pub fn start_desktop(
         rlibs,
         tip_link_args: link_args,
         tip_env,
-        tip_bin,
+        tip_bin: image_unit,
         cache,
         target,
         flavor,
@@ -1238,22 +1352,32 @@ pub fn start_desktop(
         crates,
         tip_replays: 0,
     };
-    Ok((
-        HotSession {
-            builder: Box::new(builder),
-            app,
-            accepted,
-            images,
-            budget,
-            restart: None,
-            next_patch_id: 1,
-        },
-        child,
-    ))
+    Ok(FatBase {
+        builder,
+        accepted,
+        image: fat_out.exe,
+    })
+}
+
+/// The session over `base`'s builder and the running app `app`.
+pub(super) fn open_session(base: FatBase, app: AppLink, budget: Budget) -> HotSession {
+    let FatBase {
+        builder, accepted, ..
+    } = base;
+    let images = vec![builder.cache.symbols().clone()];
+    HotSession {
+        builder: Box::new(builder),
+        app,
+        accepted,
+        images,
+        budget,
+        restart: None,
+        next_patch_id: 1,
+    }
 }
 
 /// What the fat image's output announced.
-enum Announced {
+pub(super) enum Announced {
     Endpoint(Discovery),
     /// The devtools service did not start, or said nothing in time.
     Failure(String),
@@ -1262,7 +1386,7 @@ enum Announced {
 
 /// Reads the child's output up to its devtools discovery line, forwarding
 /// every line before it (token redacted) to `on_line`.
-fn read_discovery(child: &mut StreamHandle, on_line: &mut dyn FnMut(&str)) -> Announced {
+pub(super) fn read_discovery(child: &mut StreamHandle, on_line: &mut dyn FnMut(&str)) -> Announced {
     let deadline = Instant::now() + DISCOVERY_DEADLINE;
     loop {
         match child.lines.try_recv() {
@@ -1294,7 +1418,7 @@ fn read_discovery(child: &mut StreamHandle, on_line: &mut dyn FnMut(&str)) -> An
 /// Runs the fat build, forwarding cargo's rendered diagnostics and any
 /// non-JSON line to `on_line`. A failed build is
 /// [`StartError::FatBuildFailed`] with its error diagnostics.
-fn run_fat_build(
+pub(super) fn run_fat_build(
     runner: &dyn ProcessRunner,
     fat: &FatBuild,
     root: &Path,
@@ -1350,7 +1474,7 @@ fn run_fat_build(
 }
 
 /// `cargo metadata`'s `target_directory`.
-fn target_directory(metadata: &str) -> Result<PathBuf, HotpatchError> {
+pub(super) fn target_directory(metadata: &str) -> Result<PathBuf, HotpatchError> {
     let value: serde_json::Value = serde_json::from_str(metadata).map_err(|err| {
         HotpatchError::unsupported(format!("unreadable `cargo metadata` output: {err}"))
     })?;
@@ -1371,7 +1495,7 @@ fn host_triple(rustc_version: &str) -> Result<String, HotpatchError> {
 }
 
 /// The rustflags cargo applies: `CARGO_ENCODED_RUSTFLAGS`, else `RUSTFLAGS`.
-fn rustflags(env: &dyn EnvLookup) -> Vec<String> {
+pub(super) fn rustflags(env: &dyn EnvLookup) -> Vec<String> {
     if let Some(encoded) = env.get("CARGO_ENCODED_RUSTFLAGS") {
         return encoded
             .split('\u{1f}')
@@ -1396,7 +1520,7 @@ fn custom_linker(env: &dyn EnvLookup, triple: &str) -> Option<PathBuf> {
 }
 
 /// Removes a file a previous build left, so a stale one is never read.
-fn remove_stale(path: &Path) -> Result<(), HotpatchError> {
+pub(super) fn remove_stale(path: &Path) -> Result<(), HotpatchError> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1547,7 +1671,9 @@ fn codegen_value(args: &[String], option: &str) -> Option<String> {
 }
 
 /// The real build half: replay through captured invocations, thin link
-/// against the fat image.
+/// against the fat image. Named for the desktop, where the image is the tip
+/// bin; the Android start ([`super::android`]) runs the same builder with
+/// the tip lib's `cdylib` as the image, the unit `tip_bin` then names.
 struct DesktopBuilder {
     runner: Arc<dyn ProcessRunner + Send + Sync>,
     graph: WorkspaceGraph,
@@ -1566,6 +1692,9 @@ struct DesktopBuilder {
     /// replayed.
     tip_link_args: Vec<String>,
     tip_env: Vec<(String, String)>,
+    /// The unit whose link is the running image, replayed with its link
+    /// intercepted: the tip bin on desktop, the tip lib on Android (whose
+    /// code then enters a patch as objects, never as its rlib).
     tip_bin: ReplayUnit,
     cache: SymbolCache,
     target: Target,
@@ -1582,13 +1711,15 @@ struct DesktopBuilder {
 
 impl DesktopBuilder {
     /// Every modified lib's rlib, dependents before their dependencies (the
-    /// order a static link resolves archives in).
+    /// order a static link resolves archives in). A lib that is the image
+    /// unit itself (Android's tip lib) is left out: its objects are on the
+    /// image link line already.
     fn modified_rlibs(&self) -> Result<Vec<PathBuf>, HotpatchError> {
         let order = self.graph.replay_order(self.modified.units())?;
         order
             .iter()
             .rev()
-            .filter(|unit| unit.kind == TargetKind::Lib)
+            .filter(|unit| unit.kind == TargetKind::Lib && **unit != self.tip_bin)
             .map(|unit| {
                 self.rlibs.get(unit).cloned().ok_or_else(|| {
                     HotpatchError::unsupported(format!("no rlib is known for {unit}"))
@@ -1667,7 +1798,26 @@ impl DesktopBuilder {
 
 impl PatchBuilder for DesktopBuilder {
     fn classify(&self, path: &Path) -> PathClass {
-        self.graph.classify(path)
+        let class = self.graph.classify(path);
+        if self.tip_bin.kind == TargetKind::Bin {
+            return class;
+        }
+        // A lib image (Android's cdylib) contains no bin: a file only a bin
+        // compiles is nothing the running image was built from.
+        match class {
+            PathClass::Replayable { units } => {
+                let units: BTreeSet<ReplayUnit> = units
+                    .into_iter()
+                    .filter(|unit| unit.kind == TargetKind::Lib)
+                    .collect();
+                if units.is_empty() {
+                    PathClass::Unaffected
+                } else {
+                    PathClass::Replayable { units }
+                }
+            }
+            other => other,
+        }
     }
 
     fn compile(&mut self, units: &BTreeSet<ReplayUnit>) -> Result<Compiled, HotpatchError> {
@@ -2240,6 +2390,61 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "the hand-off file is owner-only");
         }
+    }
+
+    /// A device app (Android, reached through `adb forward`) is never named
+    /// a host path: the forward makes its endpoint loopback on this host,
+    /// but the app cannot read this host's files, so the patch is uploaded
+    /// in chunks even when the app advertises the hand-off.
+    #[test]
+    fn a_device_session_uploads_even_when_the_app_advertises_the_hand_off() {
+        let mut script = hot_script(vec![applied(1, 2, Vec::new())]);
+        script.info.as_mut().unwrap().patch_file_hand_off = true;
+        let server = test_server::spawn(script);
+        let app = attach_device_app(server.addr, Some(FAKE_TOKEN), TRIPLE);
+        assert!(
+            matches!(
+                app,
+                AppLink::Live {
+                    same_host: false,
+                    ..
+                }
+            ),
+            "a device attach is live and not on this host"
+        );
+        let mut builder = FakeBuilder::new(Vec::new());
+        let calls = Arc::clone(&builder.calls);
+        let accepted = AcceptedSets::begin(
+            &temp_dir("device-hand-off"),
+            "session-app",
+            table(&[("app::HomeState", 4)]),
+            home_seam(),
+        )
+        .unwrap();
+        builder.out_dir = Some(accepted.dir().to_path_buf());
+        let mut session = HotSession {
+            builder: Box::new(builder),
+            app,
+            accepted,
+            images: vec![base_image()],
+            budget: Budget::default(),
+            restart: None,
+            next_patch_id: 1,
+        };
+        let outcome = session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
+        assert!(
+            matches!(outcome, Outcome::Patched { components: 2, .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec!["compile 1", "link 1 0x100004000", "accepted"]
+        );
+        let patch: Vec<u8> = (0..1000u32).map(|i| (i % 253) as u8).collect();
+        assert_eq!(server.uploaded(1), Some(patch));
+        let apply = server.requests().pop().unwrap();
+        let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
+        assert_eq!(params.file, None, "a device app is never named a host path");
     }
 
     #[test]
@@ -3974,6 +4179,53 @@ mod tests {
             assert!(builder.dirty.is_empty());
             assert_eq!(accepted.check(&layouts, seams), Err(badge_grew()));
             assert_eq!(builder.ungated.inputs(), vec![a_new, b_rlib]);
+        }
+
+        /// Android's image is the tip lib's `cdylib`: the builder replays
+        /// the tip lib with its link intercepted (its objects are the image
+        /// link line), links a dependency's rlib but never the tip lib's
+        /// own, gates every object it compiled, and classifies a file only a
+        /// bin compiles as nothing the image was built from. With the tip
+        /// bin as the image (desktop), the bin's root still replays.
+        #[test]
+        fn a_lib_image_replays_the_tip_lib_as_the_image_and_drops_bins() {
+            let a_new = fixture::edited("badge-p2");
+            let Setup {
+                mut builder,
+                accepted,
+                script,
+                ..
+            } = setup(
+                "lib-image",
+                vec![
+                    ("a", vec![Reply::Rlib(a_new.clone())]),
+                    ("b", vec![Reply::Linked]),
+                ],
+            );
+            let main_rs = Path::new("/w/b/src/main.rs");
+            assert_eq!(
+                builder.classify(main_rs),
+                PathClass::Replayable {
+                    units: units(&[tip_bin()])
+                }
+            );
+            builder.tip_bin = lib_b();
+            assert_eq!(builder.classify(main_rs), PathClass::Unaffected);
+            assert_eq!(
+                builder.classify(Path::new("/w/b/src/lib.rs")),
+                PathClass::Replayable {
+                    units: units(&[lib_b()])
+                }
+            );
+
+            let (layouts, seams) = candidate(builder.compile(&units(&[lib_a()])));
+            assert_eq!(script.replayed(), vec!["a", "b"]);
+            assert!(builder.dirty.is_empty());
+            assert!(builder.ungated.contains(&lib_b()));
+            assert_eq!(builder.modified_rlibs().unwrap(), vec![a_new.clone()]);
+            assert_eq!(builder.patch_inputs().unwrap(), vec![a_new.clone()]);
+            assert_eq!(accepted.check(&layouts, seams), Err(badge_grew()));
+            assert_eq!(builder.ungated.inputs(), vec![a_new]);
         }
 
         /// Accepting a candidate empties the set: the next candidate is

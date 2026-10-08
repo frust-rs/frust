@@ -18,7 +18,7 @@ use std::time::{Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 
 use crate::android_build::AndroidArtifact;
-use crate::build_info::BuildInfo;
+use crate::build_info::{BuildInfo, BuildMode};
 use crate::devices::{Device, Platform};
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::process::{ProcessRunner, StreamHandle, tail_lines};
@@ -218,6 +218,49 @@ fn prepare_session(
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
 ) -> Result<Option<PreparedSession>> {
+    prepare_session_with(
+        runner,
+        root,
+        device,
+        info,
+        extra_features,
+        env,
+        on_line,
+        cancel,
+        NativeLib::Gradle,
+    )
+}
+
+/// Builds and stages a hot session's native library ahead of Gradle:
+/// called with the device's ABI and the session's line sink once preflight
+/// has passed and before `./gradlew` runs. The hot-patch builder
+/// (`hotpatch::android`) fat-links the app's `cdylib` and writes it into
+/// `build/android/jniLibs/<abi>/`, where the APK packages it from.
+pub type StageNativeLib<'a> = dyn FnMut(&str, &mut dyn FnMut(&str)) -> Result<()> + 'a;
+
+/// How the app's native library reaches the APK.
+enum NativeLib<'a, 'b> {
+    /// The template's `cargoNdkBuild` task builds it inside Gradle: every
+    /// run but a hot session's.
+    Gradle,
+    /// A hot session stages it first; Gradle then assembles with `-x
+    /// cargoNdkBuild`, so the staged fat library is what gets packaged.
+    Staged(&'a mut StageNativeLib<'b>),
+}
+
+/// [`prepare_session`] with the native library supplied by `native`.
+#[allow(clippy::too_many_arguments)] // `prepare_session`'s inputs plus the native-library source
+fn prepare_session_with(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    extra_features: &[String],
+    env: &dyn EnvLookup,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+    native: NativeLib<'_, '_>,
+) -> Result<Option<PreparedSession>> {
     let project = project::detect(root)?;
     let android_dir = project::require_android_dir(&project.root)?;
 
@@ -277,7 +320,7 @@ fn prepare_session(
     let abi = adb::device_abi(runner, &device.id);
     let target = AndroidArtifact::Apk {
         split_per_abi: false,
-        abis: vec![abi],
+        abis: vec![abi.clone()],
     };
     // Release-lean preflight: drop an undeclared `lean` for a legacy app,
     // warning once through this session's `on_line` sink, so `cargo ndk`
@@ -300,12 +343,32 @@ fn prepare_session(
     // be compared against a file's mtime, which the freshness gate on the
     // legacy-fallback artifact (below) needs.
     let build_start_time = SystemTime::now();
-    let build_out = gradle::assemble(
+    let excluded: &[&str] = match native {
+        NativeLib::Gradle => &[],
+        NativeLib::Staged(stage) => {
+            // A hot session is a Debug build by charter; anything else
+            // would package a library the variant's own cargo-ndk task
+            // should have built.
+            if info.mode != BuildMode::Debug {
+                bail!(
+                    "a hot session stages a debug library, not a {:?} one",
+                    info.mode
+                );
+            }
+            stage(&abi, on_line)?;
+            if cancel.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            &[gradle::CARGO_NDK_BUILD_TASK]
+        }
+    };
+    let build_out = gradle::assemble_excluding(
         runner,
         &project.root,
         &android_dir,
         &outcome.java_home,
         &task,
+        excluded,
         &props,
         on_line,
     )?;
@@ -457,10 +520,87 @@ fn spawn_session_with_env(
     cancel: &AtomicBool,
     env: &dyn EnvLookup,
 ) -> Result<Option<AndroidLaunch>> {
+    spawn_session_inner(
+        runner,
+        root,
+        device,
+        info,
+        on_line,
+        cancel,
+        env,
+        NativeLib::Gradle,
+    )
+}
+
+/// [`spawn_session`] for a hot-patch session: the same build → install →
+/// launch → logcat pipeline, except that `stage` builds and stages the
+/// native library (see [`StageNativeLib`]) after preflight and Gradle then
+/// runs `assemble<Flavor>Debug -x cargoNdkBuild`, so the APK packages the
+/// staged library instead of rebuilding one. A failure inside `stage` ends
+/// the pipeline before Gradle with that error. A non-hot run never reaches
+/// this path: [`run`] and [`spawn_session`] invoke Gradle exactly as before.
+pub fn spawn_hot_session(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+    stage: &mut StageNativeLib<'_>,
+) -> Result<Option<AndroidLaunch>> {
+    spawn_hot_session_with_env(runner, root, device, info, on_line, cancel, stage, &RealEnv)
+}
+
+/// The testable core of [`spawn_hot_session`] (see
+/// [`spawn_session_with_env`]).
+#[allow(clippy::too_many_arguments)] // `spawn_session_with_env`'s inputs plus the stage hook
+pub(crate) fn spawn_hot_session_with_env(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+    stage: &mut StageNativeLib<'_>,
+    env: &dyn EnvLookup,
+) -> Result<Option<AndroidLaunch>> {
+    spawn_session_inner(
+        runner,
+        root,
+        device,
+        info,
+        on_line,
+        cancel,
+        env,
+        NativeLib::Staged(stage),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // the shared core of the two spawn seams
+fn spawn_session_inner(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+    env: &dyn EnvLookup,
+    native: NativeLib<'_, '_>,
+) -> Result<Option<AndroidLaunch>> {
     // The supervisor seam exposes no `--features` flag surface of its own, so
     // the passthrough is empty here — a TUI/MCP-driven session builds exactly
     // what the mode selects, as it did before the passthrough existed.
-    let Some(prepared) = prepare_session(runner, root, device, info, &[], env, on_line, cancel)?
+    let Some(prepared) = prepare_session_with(
+        runner,
+        root,
+        device,
+        info,
+        &[],
+        env,
+        on_line,
+        cancel,
+        native,
+    )?
     else {
         return Ok(None);
     };
@@ -1641,6 +1781,177 @@ mod tests {
             )
             .unwrap();
             assert!(out.is_none());
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// A hot session's stage step runs after preflight with the device
+        /// ABI, before Gradle, and Gradle then assembles with `-x
+        /// cargoNdkBuild` — the only `./gradlew` fixture registered, so the
+        /// plain `assembleDebug` argv would match nothing.
+        #[test]
+        fn a_hot_session_stages_the_library_then_assembles_without_cargo_ndk_build() {
+            let dir = unique_project_dir("hot-stage");
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -x cargoNdkBuild -Pfrust.targetPlatforms=arm64-v8a \
+                         -Pfrust.splitPerAbi=false",
+                    ),
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let mut staged_for = Vec::new();
+            let mut stage = |abi: &str, on_line: &mut dyn FnMut(&str)| -> Result<()> {
+                staged_for.push(abi.to_string());
+                on_line("[stage] fat library staged");
+                Ok(())
+            };
+            let mut lines = Vec::new();
+            let err = prepare_session_with(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |line| lines.push(line.to_string()),
+                &AtomicBool::new(false),
+                NativeLib::Staged(&mut stage),
+            )
+            .err()
+            .expect("the scripted install stops the pipeline");
+            assert!(err.to_string().contains("adb install"), "{err}");
+            assert_eq!(staged_for, vec!["arm64-v8a"]);
+            let building = lines.iter().position(|l| l.starts_with("Building"));
+            let staged = lines.iter().position(|l| l == "[stage] fat library staged");
+            let finished = lines.iter().position(|l| l.starts_with("Build finished"));
+            assert!(
+                building < staged && staged < finished && building.is_some(),
+                "{lines:?}"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// A stage failure (a fat build that did not compile) ends the
+        /// pipeline with that error before Gradle runs: no `./gradlew`
+        /// fixture is registered at all.
+        #[test]
+        fn a_failed_stage_stops_the_hot_session_before_gradle() {
+            let dir = unique_project_dir("hot-stage-fails");
+            let runner = preflight_ok_runner();
+            let mut stage = |_: &str, _: &mut dyn FnMut(&str)| -> Result<()> {
+                bail!("the hot-patch fat build failed")
+            };
+            let err = prepare_session_with(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |_| {},
+                &AtomicBool::new(false),
+                NativeLib::Staged(&mut stage),
+            )
+            .err()
+            .expect("the stage failure ends the pipeline");
+            assert_eq!(err.to_string(), "the hot-patch fat build failed");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// A hot session is Debug-only: a profile run that reached the
+        /// staged path is refused before the stage step runs.
+        #[test]
+        fn a_hot_session_refuses_a_non_debug_variant_before_staging() {
+            let dir = unique_project_dir("hot-stage-profile");
+            let runner = preflight_ok_runner();
+            let mut ran = false;
+            let mut stage = |_: &str, _: &mut dyn FnMut(&str)| -> Result<()> {
+                ran = true;
+                Ok(())
+            };
+            let err = prepare_session_with(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Profile, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |_| {},
+                &AtomicBool::new(false),
+                NativeLib::Staged(&mut stage),
+            )
+            .err()
+            .expect("a profile hot session is refused");
+            assert!(err.to_string().contains("debug library"), "{err}");
+            assert!(!ran);
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The hot spawn seam reaches the same drainable logcat stream as
+        /// [`spawn_session`], through the staged build.
+        #[test]
+        fn spawn_hot_session_reaches_a_drainable_logcat_stream() {
+            let dir = unique_project_dir("hot-spawn");
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+            let runner = preflight_ok_runner()
+                .with(
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -x cargoNdkBuild -Pfrust.targetPlatforms=arm64-v8a \
+                         -Pfrust.splitPerAbi=false",
+                    ),
+                    ok("BUILD SUCCESSFUL"),
+                )
+                .with(
+                    format!("adb -s emulator-5554 install -r {apk_path}"),
+                    ok(""),
+                )
+                .with(
+                    "adb -s emulator-5554 shell am start -n dev.f0x.myapp/.MainActivity",
+                    ok(""),
+                )
+                .with(
+                    "adb -s emulator-5554 shell pidof dev.f0x.myapp",
+                    ok("4242\n"),
+                )
+                .with_stream(
+                    "adb -s emulator-5554 logcat --pid 4242",
+                    ["I/frust: hello"],
+                    true,
+                );
+            let mut stages = 0;
+            let mut stage = |_: &str, _: &mut dyn FnMut(&str)| -> Result<()> {
+                stages += 1;
+                Ok(())
+            };
+            let launch = spawn_hot_session_with_env(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                &mut |_| {},
+                &AtomicBool::new(false),
+                &mut stage,
+                &fake_env(),
+            )
+            .unwrap()
+            .expect("a live logcat handle");
+            assert_eq!(stages, 1);
+            assert_eq!(launch.package, "dev.f0x.myapp");
+            let mut handle = launch.stream;
+            assert_eq!(handle.lines.recv().unwrap(), "I/frust: hello");
+            assert!(handle.wait());
             let _ = fs::remove_dir_all(&dir);
         }
     }

@@ -10,10 +10,13 @@
 //! [`ProcessRunner`](crate::process::ProcessRunner). Every parse surprise in
 //! a rustc or linker argument format fails closed as
 //! [`HotpatchError::BuilderUnsupported`] — a guessed patch is never built.
+//! [`android`] runs the same builder for an Android arm64 app: the fat build
+//! through cargo-ndk outside Gradle, the session through `adb forward`.
 //! See `docs/CLI_ARCHITECTURE.md`.
 
 use std::path::{Path, PathBuf};
 
+pub mod android;
 pub mod capture;
 pub mod fat_link;
 pub mod graph;

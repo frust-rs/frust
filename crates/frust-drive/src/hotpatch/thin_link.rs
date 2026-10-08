@@ -218,11 +218,19 @@ pub fn thin_link_args(request: &ThinLinkRequest<'_>) -> Result<Vec<String>, Hotp
     let mut args: Vec<String> = tip_objects.into_iter().cloned().collect();
     args.extend(request.replayed_rlibs.iter().map(|rlib| render(rlib)));
     args.push(render(request.stub_object));
+    // The `-o` operand is the thin build's own output, not a library it
+    // linked: on Android it is the `cdylib`'s `lib<crate>.so`.
     args.extend(
         captured
             .iter()
-            .filter(|arg| arg.ends_with(".dylib") || arg.ends_with(".so"))
-            .cloned(),
+            .enumerate()
+            .filter(|(index, arg)| {
+                (arg.ends_with(".dylib") || arg.ends_with(".so"))
+                    && !index
+                        .checked_sub(1)
+                        .is_some_and(|prev| captured[prev] == "-o")
+            })
+            .map(|(_, arg)| arg.clone()),
     );
     args.extend(forwarded_args(request.flavor, captured)?);
     args.push(request.flavor.anchor_export_arg());
