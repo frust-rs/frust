@@ -269,15 +269,15 @@ frust seam, those types are:
 2. **`C::State`**, created by the original `init` and stored inline in `ComponentWidget::state`
    (`crates/frust-core/src/component.rs:124`). A patch never re-runs `init`
    (`crates/frust-core/src/hotpatch.rs:15-16`). Row D2 measured new code reading and writing 4 bytes
-   past the old 4-byte value, likely into the `disposed` flag (`component.rs:140`);
+   past the old 4-byte value, likely into the `disposed` flag (`component.rs:162`);
 3. **`build`'s concrete return type `R`**, at two points:
    - **The return slot.** The old `call_build` monomorph receives `F::Return` and erases it as the
      old `R` (`AnyView::new(crate::hotpatch::call_build(..))`, `component.rs:178`, `:223`). The
      patched `call_it` symbol carries no return type (RESULTS.md row D notes), so a new `R` is
      written into the old `R`'s slot and read through the old `R`'s vtable.
-   - **The retained tree.** `prev` (`component.rs:127`) holds the previous `R` behind an `AnyView`,
-     and the child element holds `R::Element` (`component.rs:130`, recovered at `:232-236`).
-     `AnyView::rebuild` downcasts both **by `TypeId`** (`crates/frust-core/src/view.rs:259-277`).
+   - **The retained tree.** `prev` (`component.rs:149`) holds the previous `R` behind an `AnyView`,
+     and the child element holds `R::Element` (`child`, `component.rs:152`).
+     `AnyView::rebuild` downcasts both **by `TypeId`** (`crates/frust-core/src/view.rs:253-273`).
      A type keeps its `TypeId` when a field is added, because `TypeId` is identity, not layout. So
      new code can read an old value of a same-named type through a new layout.
 
@@ -324,13 +324,17 @@ is not always the caller (the nested-component case under L2 below).
     `scripts/ci/erasure-check.sh:9`) would flag `build_erased`. It carries the documented opt-out
     `// erasure: keep hot-patch boundary type must be layout-fixed`
     (`scripts/codemod/frust_any_codemod.py:121`).
-  - **What L1 does not do.** It removes one crossing, the return slot, and nothing else. It
-    **shrinks the D2/D3 hazard to the retained tree rather than eliminating it**: `prev`
-    (`component.rs:127`) still holds the old `R`, the child pod holds the element old code built
-    for it (`component.rs:130`), and patched `dyn_rebuild` downcasts both by `TypeId`
-    (`view.rs:259-266`) and reads them through the new layout. A D3-class edit that keeps `R`'s type
-    path (a field added to an app view struct, a changed closure capture) is still a hazard after
-    L1. Closing D3 depends on L3 and on H0-00 confirming the mechanism.
+  - **What L1 does not do, and what the real crate already does.** L1 removes one crossing, the
+    return slot. The retained tree is erased in the real crate: under the `hotpatch` feature
+    `ComponentWidget<C>` is `#[repr(C)]` and holds `prev: AnyView<C::State>` and
+    `child: ChildPod` (`crates/frust-core/src/component.rs:133-162`, `prev` at `:149`, `child` at
+    `:152`), and `AnyView`'s `dyn_rebuild` compares `TypeId`s and tears the old widget down and
+    builds a fresh one on a mismatch (`crates/frust-core/src/view.rs:253-273`). So a D3-class edit
+    that changes `R`'s type (the root wrapped in one more container) reaches the layout table only
+    as new types, which L3 accepts, and is an ordinary `TypeId` rebuild: patched and surviving
+    (H1-11 measured it: 3/3 plus 2/2 under guard malloc, PID and State kept). The hazard that
+    remains inside `R` is a same-named type changing layout (a field added to an app view struct,
+    a changed closure capture; D2/D4), which keeps its `TypeId` and is L3's job.
 
 - **L2: a creator-image layout witness, checked at every component seam (in-app backstop, no host
   data).**
@@ -1204,17 +1208,23 @@ practice but not by contract:
 **Recommendation in one sentence:** build STAGED, desktop first. **Milestone 1** is H0-00 run and
 H1-11 passing: on macOS, with Linux covered by the CI canary, `frust run --watch` and the TUI's
 Watch hot-patch an unmodified one-package `frust create` app with State kept, every hazard row (D,
-D2, D3, D4, D5, E) answers `restart required` and never `patched`, and the median save→frame is at
+D2, D4, D5, E) answers `restart required` and never `patched`, D3 is patched and survives, and the median save→frame is at
 most 50% of the restart median.
 
 **What makes the hazard rows safe: L1 + L3, on DWARF targets.**
-- L1 removes the return slot but leaves the retained tree (2.c). It shrinks the D2/D3 hazard to the
-  retained tree; it does not eliminate it.
+- L1 removes the return slot. The retained tree is already erased in the real crate (2.c,
+  `component.rs:133-162`, `view.rs:253-273`), so a `build` edit that changes `R`'s type is a
+  `TypeId` rebuild, not a layout hazard.
 - D2, D4 and D5 are closed by L3 against the accepted-layout set. L2's creator-image witness is an
   in-app backstop for State size changes of components hosted in their own erased box, with a
   leak-on-mismatch rule for every host (2.c design (ii)); it is not part of the soundness argument.
-- D3 is closed only if L3 covers it **and** H0-00 confirms the mechanism. That is why H0-00 gates
-  milestone 1 instead of following it.
+- Row D (a State identity change) answers `StateTypeChanged` naming the component: the seam
+  identity check runs before the layout diff, because the identity change also moves the hashed
+  member type of `ComponentWidget<C>`.
+- Hazard rows D, D2, D4, D5 and E answer `restart required` and never `patched`. D3 is **patched
+  and survives**: PID and State kept, guard malloc clean (H1-11: 3/3 plus 2/2). The mechanism is
+  measured, not argued: the erased `prev`/`child` make the new `R` a new type, and `dyn_rebuild`
+  tears down and rebuilds on the `TypeId` mismatch.
 - The guarantee is DWARF-targets-only. Windows applies no patch until H3-02 and H3-03 (section 5).
 
 **Latency: an estimate, to be confirmed by H1-11.**

@@ -1465,16 +1465,11 @@ mod tests {
                 .find(|c| c.type_path == app("HomeState"))
                 .expect("HomeState refused");
             assert_eq!((state.old_size, state.new_size), (4, 8));
+            // RESULTS.md §Milestone 1 row D2: the only record. The state is
+            // boxed in the widget, so its layout is unchanged.
             assert_eq!(
-                changes
-                    .iter()
-                    .map(|c| c.type_path.clone())
-                    .collect::<Vec<_>>(),
-                vec![
-                    format!("frust_core::ComponentWidget<{}>", app("HomePage")),
-                    format!("frust_core::ErasedWidget<{}>", app("HomePage")),
-                    app("HomeState"),
-                ]
+                changes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                vec![format!("{} changed layout (4 → 8 bytes)", app("HomeState"))]
             );
         }
 
@@ -1493,10 +1488,7 @@ mod tests {
                     .iter()
                     .map(|c| c.type_path.clone())
                     .collect::<Vec<_>>(),
-                vec![
-                    format!("frust_core::ComponentWidget<{}>", app("Counter")),
-                    app("CounterState"),
-                ]
+                vec![app("CounterState")]
             );
         }
 
@@ -1509,31 +1501,57 @@ mod tests {
         }
 
         #[test]
-        fn a_return_type_change_is_refused_where_the_view_is_held_by_value() {
-            assert_eq!(
-                changes_against_base("return-type"),
-                vec![format!("frust_core::ComponentWidget<{}>", app("Counter"))]
-            );
+        fn a_return_type_change_passes_where_the_view_is_erased() {
+            assert_eq!(changes_against_base("return-type"), Vec::<String>::new());
         }
 
-        /// The observed row D3 edit: root `column()` wrapped in `stack()`. The
-        /// widget holding the view by value changes layout and is refused. The
-        /// erased holder keeps its layout whatever it holds, and the new
-        /// `StackView<HomeState>` is a new type, so neither is reported: under
-        /// erasure the edit reaches the gate only as new types.
+        /// The observed row D3 edit (root `column()` wrapped in `stack()`) on
+        /// the real-shaped widget: `prev` and `child` are erased, so no record
+        /// is produced and `StackView<HomeState>` reaches the gate only as a
+        /// new type. At runtime that is a `TypeId` mismatch and a rebuild.
         #[test]
-        fn d3_the_observed_stack_wrap_is_refused() {
+        fn d3_the_stack_wrap_passes_as_new_types() {
             let base = table_of(&fixture::base());
             let candidate = table_of(&fixture::edited("d3-stack-wrap"));
             let changes = diff(&candidate, &base);
             let paths: Vec<_> = changes.iter().map(|c| c.type_path.clone()).collect();
-            assert_eq!(
-                paths,
-                vec![format!("frust_core::ComponentWidget<{}>", app("HomePage"))]
+            assert!(
+                !paths
+                    .iter()
+                    .any(|p| p.starts_with("frust_core::ComponentWidget<")),
+                "the erased widget must not be refused: {paths:?}"
             );
             let stack = format!("frust_core::StackView<{}>", app("HomeState"));
             assert!(base.get(&stack).is_none());
             assert!(candidate.get(&stack).is_some());
+        }
+
+        /// The contrast the real crate no longer has: a widget holding the
+        /// view by value moves its layout when the view type changes, so the
+        /// same edit would be refused there.
+        #[test]
+        fn a_by_value_holder_would_be_refused() {
+            let base = table_of(&fixture::base());
+            let candidate = table_of(&fixture::edited("d3-stack-wrap"));
+            let changes = diff(&candidate, &base);
+            let by_value = format!("frust_core::ByValueWidget<{}>", app("HomePage"));
+            let record = changes
+                .iter()
+                .find(|c| c.type_path == by_value)
+                .expect("the by-value holder is refused");
+            // Both views are 32 bytes: the layout moves without growing.
+            assert_eq!(record.old_size, record.new_size, "{record}");
+            assert!(
+                record.to_string().ends_with("bytes, members moved)"),
+                "{record}"
+            );
+            assert_eq!(
+                changes
+                    .iter()
+                    .map(|c| c.type_path.clone())
+                    .collect::<Vec<_>>(),
+                vec![by_value]
+            );
         }
 
         // The false-positive baseline: layout-preserving edits pass.

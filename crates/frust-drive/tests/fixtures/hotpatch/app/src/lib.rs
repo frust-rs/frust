@@ -3,7 +3,7 @@
 //! patch's thin build recompiles the crate. An edit touches only its own
 //! items, so a gate report names exactly the types that edit reached.
 
-use frust_core::{Component, ComponentWidget, ErasedWidget, Text, column, text};
+use frust_core::{ByValueWidget, Component, ComponentWidget, Text, column, text};
 
 // HomePage, the spike app's root: `d2-field-add` adds a State field (row D2),
 // `d3-stack-wrap` is the observed row D3 edit (root `column()` wrapped in
@@ -79,8 +79,10 @@ pub fn mount_home() -> ComponentWidget<HomePage> {
     ComponentWidget::mount(&HomePage)
 }
 
-pub fn mount_home_erased() -> ErasedWidget<HomePage> {
-    ErasedWidget::mount(&HomePage)
+/// The contrast widget: it holds `HomePage`'s view by value, so a view type
+/// change moves its layout (the real crate erases it).
+pub fn mount_home_by_value() -> ByValueWidget<HomePage> {
+    ByValueWidget::mount(&HomePage)
 }
 
 // Counter: `reorder` swaps two same-size State fields, `return-type` wraps

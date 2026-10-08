@@ -525,20 +525,22 @@ impl AcceptedSets {
         &self.seams
     }
 
-    /// The host gates: every type the candidate shares with the accepted
-    /// set keeps its layout, and every component keeps its `State`
-    /// identity. Passing returns the candidate's seam instances.
+    /// The host gates: every component keeps its `State` identity, then every
+    /// type the candidate shares with the accepted set keeps its layout. Passing returns the candidate's seam instances.
     pub fn check(&self, layouts: &LayoutTable, seams: SeamSet) -> Result<SeamSet, RestartReason> {
-        let changed = layout::diff(layouts, &self.layouts);
-        if !changed.is_empty() {
-            return Err(RestartReason::LayoutChanged {
-                records: changed.iter().map(ToString::to_string).collect(),
-            });
-        }
+        // The identity check runs first: a changed `State` type also changes
+        // the hashed member type of its component widget, so after the layout
+        // diff the identity reason would be unreachable on a DWARF target.
         let report = seams::check(seams, &self.seams);
         if !report.changed.is_empty() {
             return Err(RestartReason::StateTypeChanged {
                 changes: report.changed.iter().map(ToString::to_string).collect(),
+            });
+        }
+        let changed = layout::diff(layouts, &self.layouts);
+        if !changed.is_empty() {
+            return Err(RestartReason::LayoutChanged {
+                records: changed.iter().map(ToString::to_string).collect(),
             });
         }
         Ok(report.present)
@@ -2636,6 +2638,28 @@ mod tests {
         );
         assert!(rig.sent().is_empty());
         assert_eq!(rig.server.methods(), vec!["handshake", "hotpatch_info"]);
+    }
+
+    #[test]
+    fn a_state_identity_change_wins_over_layout_records() {
+        // Patch 1 adds `Badge`; patch 2 grows it (a layout record) AND
+        // changes `Home`'s State identity: the identity reason is reported.
+        let changed = seam_set(&[("app::Home", "(&app::Home, &mut app::OtherState)", "_x")]);
+        let mut rig = rig(
+            vec![applied(1, 1, Vec::new())],
+            vec![
+                FakeCompile::Candidate(table(&[("app::Badge", 4)]), home_seam()),
+                FakeCompile::Candidate(table(&[("app::Badge", 8)]), changed),
+            ],
+        );
+        assert!(matches!(rig.change(), Outcome::Patched { .. }));
+        let sent = rig.sent().len();
+        let reason = restart_reason(rig.change());
+        assert!(
+            matches!(reason, RestartReason::StateTypeChanged { .. }),
+            "{reason:?}"
+        );
+        assert_eq!(rig.sent().len(), sent, "nothing is sent for patch 2");
     }
 
     #[test]
