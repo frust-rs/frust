@@ -57,6 +57,12 @@ pub enum PatchError {
     /// attributed to an image. Nothing is installed.
     #[error("cannot determine the address range of a loaded image")]
     ImageRangeUnresolved,
+
+    /// Layout-mismatch records are unreported (see [`report_layout_mismatch`]): no patch is
+    /// applied over a known mismatch. Carries the unreported records; checked under the apply lock
+    /// before anything is loaded, and cleared by [`mark_layout_mismatches_reported`].
+    #[error("{} unreported layout mismatch(es); patch refused", .0.len())]
+    LayoutMismatchPending(Vec<LayoutMismatch>),
 }
 
 /// Register `handler` to run right after each patch library is loaded and its jump table installed.
@@ -144,8 +150,10 @@ pub unsafe fn load_patch_library(path: &Path) -> Result<libloading::Library, Pat
 /// Calls are serialised end to end: a concurrent call waits for the running one to finish,
 /// handlers included. Fails closed, before loading anything: a release-profile build
 /// ([`PatchError::ReleaseBuild`]), no anchor set with [`set_anchor`](crate::set_anchor)
-/// ([`PatchError::AnchorUnresolved`]), or an unlocatable base image
-/// ([`PatchError::ImageRangeUnresolved`]). The patch library must export
+/// ([`PatchError::AnchorUnresolved`]), an unlocatable base image
+/// ([`PatchError::ImageRangeUnresolved`]), or any unreported layout-mismatch record
+/// ([`PatchError::LayoutMismatchPending`], checked under the lock, so every apply entry refuses
+/// the same way until the host calls [`mark_layout_mismatches_reported`]). The patch library must export
 /// [`ANCHOR_SYMBOL`](crate::ANCHOR_SYMBOL), else [`PatchError::Dlopen`]. On any error nothing is
 /// installed and no handler runs.
 ///
@@ -165,6 +173,10 @@ pub unsafe fn load_patch_library(path: &Path) -> Result<libloading::Library, Pat
 /// [`HotFn::current`](crate::HotFn::current) carry their captures as an argument, so a changed
 /// capture is the same hazard. Checking this is the patch builder's job (its L3 gate, the spike's
 /// PORT.md section 2(c)); this function cannot see layouts.
+///
+/// Refuses with [`PatchError::LayoutMismatchPending`] while any layout-mismatch record is
+/// unreported ([`report_layout_mismatch`]); the caller must report the records to the host and call
+/// [`mark_layout_mismatches_reported`] before a patch can apply.
 ///
 /// It loads a library and allocates, so it must not run where the process is stopped (e.g. in a
 /// signal handler), nor from a patch handler (it would wait on its own lock).
@@ -199,8 +211,10 @@ pub struct ApplyReport {
 /// with it and trusts it. That, and an authenticated peer that is the patch builder for this very
 /// build, are the preconditions the devtools layer owes [`apply_patch`]'s safety contract.
 ///
-/// Refuses, loading nothing and answering `applied: false`, while any layout-mismatch record is
-/// unreported (see [`report_layout_mismatch`]): no patch is applied over a known mismatch. A
+/// Refuses, loading nothing and answering `applied: false` with the records, while any
+/// layout-mismatch record is unreported (see [`report_layout_mismatch`]): [`apply_patch`] itself
+/// refuses with [`PatchError::LayoutMismatchPending`] under its lock, and this entry maps that to
+/// the report. A
 /// release-profile build refuses the same way, with [`PatchError::ReleaseBuild`].
 #[cfg(any(unix, windows))]
 pub fn apply_from_devtools(bytes_path: &Path, mut table: JumpTable) -> ApplyReport {
@@ -211,24 +225,27 @@ pub fn apply_from_devtools(bytes_path: &Path, mut table: JumpTable) -> ApplyRepo
             error: Some(PatchError::ReleaseBuild),
         };
     }
-    let pending = pending_layout_mismatches();
-    if !pending.is_empty() {
-        return ApplyReport {
-            applied: false,
-            layout_mismatches: pending,
-            error: None,
-        };
-    }
     table.lib = bytes_path.to_path_buf();
     // SAFETY: this entry's documented contract: `bytes_path` was written by the app from bytes
     // received on the authenticated devtools connection, and the table comes from the same
     // authenticated builder for this running build, which is what `apply_patch` requires. The
     // builder's L3 gate owns the layout precondition.
-    let result = unsafe { apply_patch(table) };
-    ApplyReport {
-        applied: result.is_ok(),
-        layout_mismatches: Vec::new(),
-        error: result.err(),
+    match unsafe { apply_patch(table) } {
+        Ok(()) => ApplyReport {
+            applied: true,
+            layout_mismatches: Vec::new(),
+            error: None,
+        },
+        Err(PatchError::LayoutMismatchPending(records)) => ApplyReport {
+            applied: false,
+            layout_mismatches: records,
+            error: None,
+        },
+        Err(error) => ApplyReport {
+            applied: false,
+            layout_mismatches: Vec::new(),
+            error: Some(error),
+        },
     }
 }
 
@@ -243,6 +260,13 @@ unsafe fn apply_patch_with_anchor(
     anchor: fn() -> usize,
 ) -> Result<(), PatchError> {
     let _serial = APPLY_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+
+    // Under the lock and before any load: a mismatch reported while this call waited is seen, and
+    // none can slip between this check and the install.
+    let pending = pending_layout_mismatches();
+    if !pending.is_empty() {
+        return Err(PatchError::LayoutMismatchPending(pending));
+    }
 
     // The app's anchor symbol anchors both images: the running binary's slide and the patch's load
     // address. The patch builder exports it from every patch library. Rebasing against an
@@ -322,7 +346,8 @@ static LAYOUT_MISMATCHES: Mutex<Vec<LayoutMismatch>> = Mutex::new(Vec::new());
 /// Record that `type_name` has layout `stored` in the image that created a value and `own` in the
 /// image now handling it. The record is kept until it is reported to the host: it is returned by
 /// [`pending_layout_mismatches`] and cleared by [`mark_layout_mismatches_reported`]. Identical
-/// records collapse into one. While any record is unreported, [`apply_from_devtools`] refuses.
+/// records collapse into one. While any record is unreported, every apply entry
+/// ([`apply_patch`], [`apply_from_devtools`]) refuses.
 ///
 /// Callable from any thread, including from a `Drop`; it never panics.
 pub fn report_layout_mismatch(
@@ -700,6 +725,38 @@ mod tests {
 
         test_support::reset();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    #[cfg_attr(not(debug_assertions), ignore = "apply_patch refuses in release")]
+    fn raw_apply_patch_refuses_while_a_mismatch_is_unreported_then_proceeds() {
+        let _serial = test_support::serial();
+        test_support::reset();
+        crate::set_anchor(test_anchor());
+
+        report_layout_mismatch("RawState", 4, 8);
+        let expected = pending_layout_mismatches();
+        // SAFETY: the library path does not exist, so nothing can be loaded.
+        let refused = unsafe { apply_patch(table(&[(1, 2)])) };
+        assert_eq!(
+            refused,
+            Err(PatchError::LayoutMismatchPending(expected.clone()))
+        );
+        // SAFETY: only checked for presence.
+        assert!(unsafe { get_jump_table() }.is_none());
+
+        mark_layout_mismatches_reported(&expected);
+        // SAFETY: as above; the loader is reached and fails on the missing file.
+        let proceeded = unsafe { apply_patch(table(&[(1, 2)])) };
+        assert!(
+            matches!(
+                proceeded,
+                Err(PatchError::Dlopen(_) | PatchError::AndroidMemfd(_))
+            ),
+            "once reported the raw apply reaches the loader: {proceeded:?}"
+        );
+        test_support::reset();
     }
 
     #[cfg(any(unix, windows))]

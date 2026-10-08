@@ -35,7 +35,9 @@ absent from every default dependency graph.
   service calls, so the one `unsafe` call stays in this crate. `bytes_path` must be a file the app
   wrote from bytes received on the authenticated devtools connection, never a wire path. It
   refuses while any layout-mismatch record is unreported: nothing is loaded and the report says
-  `applied: false` with the records.
+  `applied: false` with the records. The refusal lives in `apply_patch` itself, under its lock and
+  before any load (`PatchError::LayoutMismatchPending(records)`), so every apply entry, the raw one
+  included, refuses until the host calls `mark_layout_mismatches_reported`.
 - `report_layout_mismatch(type_name, stored, own)`: records a layout disagreement found at run
   time and keeps it until reported. `pending_layout_mismatches()` reads the list (for
   `hotpatch_info`); `mark_layout_mismatches_reported(&records)` removes the records a

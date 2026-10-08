@@ -7,6 +7,7 @@
 //! (possibly patched) callee compares with its own layout before it touches that state.
 
 use std::any::type_name;
+use std::cell::RefCell;
 use std::fmt;
 use std::sync::Arc;
 
@@ -153,17 +154,28 @@ impl<S: 'static> View<S> for Inert {
 /// The view a root driver hands its shell under the hot-patch feature: the root component's view
 /// from [`build_erased`], or nothing when the seam reported a layout mismatch.
 ///
-/// A mismatch keeps the tree already on screen: the rebuild does nothing (as a nested component's
-/// skipped rebuild does) and the stale tree stays until the session restarts, which the reported
-/// record requests. A first build that mismatches shows an empty root.
+/// A refused frame keeps the tree already on screen: the rebuild does nothing (as a nested
+/// component's skipped rebuild does) and carries the last accepted view forward, so a later
+/// accepted build (after the host acknowledged the mismatch and a corrective or revert patch
+/// matching the stored layout was applied) is diffed against it in place: no replace, nested
+/// component state kept, the normal teardown path. Only a first build that mismatches has nothing
+/// to carry: it shows an empty root, and the first accepted build then replaces that empty root.
 pub struct RootView<S: 'static> {
-    view: Option<AnyView<S>>,
+    /// The accepted view whose tree is on screen when this is the current frame: this frame's own
+    /// view, or (refused frame) the one moved in from the previous frame by `rebuild`.
+    live: RefCell<Option<AnyView<S>>>,
+    /// Whether this frame's build was accepted.
+    accepted: bool,
 }
 
 impl<S: 'static> RootView<S> {
     /// Wrap the result of the root component's [`build_erased`].
     pub fn new(built: Result<AnyView<S>, LayoutMismatch>) -> Self {
-        Self { view: built.ok() }
+        let accepted = built.is_ok();
+        Self {
+            live: RefCell::new(built.ok()),
+            accepted,
+        }
     }
 }
 
@@ -171,9 +183,9 @@ impl<S: 'static> View<S> for RootView<S> {
     type Element = Box<dyn Widget>;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> Box<dyn Widget> {
-        match &self.view {
-            Some(view) => view.build(ctx),
-            None => Box::new(InertWidget),
+        match self.live.borrow().as_ref() {
+            Some(view) if self.accepted => view.build(ctx),
+            _ => Box::new(InertWidget),
         }
     }
 
@@ -183,15 +195,25 @@ impl<S: 'static> View<S> for RootView<S> {
         element: &mut Box<dyn Widget>,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        match (&self.view, &prev.view) {
-            (Some(view), Some(prev)) => view.rebuild(prev, element, ctx),
-            // Refused: leave the live tree exactly as it is.
-            (None, _) => ChangeFlags::NONE,
-            // The previous frame was refused, so no view is left to diff against or to tear the
-            // live tree down through: replace it outright (its widgets' `Drop` still disposes
-            // component owners). Only reachable if a patch is applied over an unreported
-            // mismatch, which the devtools apply entry refuses.
-            (Some(view), None) => {
+        if !self.accepted {
+            // Refused: leave the live tree exactly as it is, and keep the last accepted view so
+            // a later accepted frame can diff against it.
+            let mut live = self.live.borrow_mut();
+            if live.is_none() {
+                *live = prev.live.borrow_mut().take();
+            }
+            return ChangeFlags::NONE;
+        }
+        let live = self.live.borrow();
+        let Some(view) = live.as_ref() else {
+            return ChangeFlags::NONE;
+        };
+        match prev.live.borrow().as_ref() {
+            Some(prev_view) => view.rebuild(prev_view, element, ctx),
+            // No accepted view was ever on screen (the first build was refused), so the element
+            // is the empty stand-in and there is nothing to diff against or tear down: build
+            // the tree outright.
+            None => {
                 if ctx.has_focus() {
                     crate::event::mark_focus_orphaned();
                 }
@@ -202,7 +224,7 @@ impl<S: 'static> View<S> for RootView<S> {
     }
 
     fn teardown(&self, element: &mut Box<dyn Widget>, ctx: &mut BuildCtx<'_>) {
-        if let Some(view) = &self.view {
+        if let Some(view) = self.live.borrow().as_ref() {
             view.teardown(element, ctx);
         }
     }
@@ -337,6 +359,154 @@ mod tests {
         refused.teardown(&mut element, &mut ctx);
         let live: &dyn Any = &*element;
         assert!(live.is::<LeafWidget>());
+    }
+
+    /// Counts what the seam test below must observe on the tree under the root.
+    #[derive(Default)]
+    struct Counts {
+        built: std::cell::Cell<u32>,
+        rebuilt: std::cell::Cell<u32>,
+        torn: std::cell::Cell<u32>,
+        dropped: std::cell::Cell<u32>,
+    }
+
+    struct CountedView(std::rc::Rc<Counts>);
+    struct CountedWidget(std::rc::Rc<Counts>);
+    impl Drop for CountedWidget {
+        fn drop(&mut self) {
+            self.0.dropped.set(self.0.dropped.get() + 1);
+        }
+    }
+    impl Widget for CountedWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(1.0, 1.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+    impl View<RecoveryState> for CountedView {
+        type Element = CountedWidget;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> CountedWidget {
+            self.0.built.set(self.0.built.get() + 1);
+            CountedWidget(self.0.clone())
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut CountedWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            self.0.rebuilt.set(self.0.rebuilt.get() + 1);
+            ChangeFlags::NONE
+        }
+        fn teardown(&self, _element: &mut CountedWidget, _ctx: &mut BuildCtx<'_>) {
+            self.0.torn.set(self.0.torn.get() + 1);
+        }
+    }
+
+    /// A state type named by no other test, so its mismatch record is this test's alone.
+    struct RecoveryState(u32);
+    struct RecoveryRoot(std::rc::Rc<Counts>);
+    impl Component for RecoveryRoot {
+        type State = RecoveryState;
+        fn init(&self) -> RecoveryState {
+            RecoveryState(0)
+        }
+        fn build(&self, state: &mut RecoveryState) -> impl View<RecoveryState> {
+            state.0 += 1;
+            CountedView(self.0.clone())
+        }
+    }
+
+    fn widget_addr(element: &dyn Widget) -> *const () {
+        std::ptr::from_ref(element).cast::<()>()
+    }
+
+    #[test]
+    fn an_accepted_root_after_a_refused_one_diffs_the_retained_tree() {
+        let counts = std::rc::Rc::new(Counts::default());
+        let root = RecoveryRoot(counts.clone());
+        let mut state = root.init();
+        let own = SeamWitness::of::<RecoveryRoot>();
+        let mut id = 0u64;
+        let mut ctx = BuildCtx::new(&mut id);
+
+        // Frame 1: accepted.
+        let first = RootView::new(build_erased(&root, &mut state, own));
+        let mut element = first.build(&mut ctx);
+        let addr = widget_addr(&*element);
+        assert_eq!((counts.built.get(), counts.dropped.get()), (1, 0));
+
+        // Frame 2: refused (a foreign witness): the tree is untouched and one mismatch is
+        // reported.
+        let stored = SeamWitness {
+            size_state: own.size_state + 8,
+            ..own
+        };
+        let second = RootView::new(build_erased(&root, &mut state, stored));
+        assert_eq!(state.0, 1, "the refused build never ran");
+        let ours = |r: &LayoutMismatch| r.type_name == type_name::<RecoveryState>();
+        let reported: Vec<_> = frust_hotpatch::pending_layout_mismatches()
+            .into_iter()
+            .filter(ours)
+            .collect();
+        assert_eq!(reported.len(), 1, "exactly one mismatch is reported");
+        assert_eq!(
+            second.rebuild(&first, &mut element, &mut ctx),
+            ChangeFlags::NONE
+        );
+        assert_eq!(widget_addr(&*element), addr);
+        assert_eq!(
+            (
+                counts.built.get(),
+                counts.rebuilt.get(),
+                counts.dropped.get()
+            ),
+            (1, 0, 0)
+        );
+
+        // The host acknowledges the mismatch; a later accepted frame diffs in place.
+        frust_hotpatch::mark_layout_mismatches_reported(&reported);
+        let third = RootView::new(build_erased(&root, &mut state, own));
+        assert_eq!(state.0, 2);
+        third.rebuild(&second, &mut element, &mut ctx);
+        assert_eq!(widget_addr(&*element), addr, "same widget: no replace");
+        assert_eq!(
+            (
+                counts.built.get(),
+                counts.rebuilt.get(),
+                counts.torn.get(),
+                counts.dropped.get()
+            ),
+            (1, 1, 0, 0),
+            "diffed once: no extra build, nothing disposed"
+        );
+
+        // Teardown goes through the retained view's normal path.
+        third.teardown(&mut element, &mut ctx);
+        assert_eq!(counts.torn.get(), 1);
+        drop(element);
+        assert_eq!(counts.dropped.get(), 1);
+    }
+
+    #[test]
+    fn a_first_refused_root_is_replaced_by_the_first_accepted_one() {
+        let counts = std::rc::Rc::new(Counts::default());
+        let mut id = 0u64;
+        let mut ctx = BuildCtx::new(&mut id);
+        let refused: RootView<RecoveryState> = RootView::new(Err(LayoutMismatch {
+            type_name: "Root".into(),
+            stored: "a".into(),
+            own: "b".into(),
+        }));
+        let mut element = refused.build(&mut ctx);
+        let accepted = RootView::new(Ok(AnyView::new(CountedView(counts.clone()))));
+        assert_eq!(
+            accepted.rebuild(&refused, &mut element, &mut ctx),
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
+        );
+        assert_eq!(counts.built.get(), 1);
+        let live: &dyn Any = &*element;
+        assert!(live.is::<CountedWidget>());
     }
 
     extern "C" fn test_anchor() {}
