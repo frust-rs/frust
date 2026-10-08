@@ -19,7 +19,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use frust_drive::devtools_client::sha256_hex;
 use frust_drive::doctor::{EnvLookup, RealEnv};
 use frust_drive::hotpatch::capture::{
-    self, RecordKey, RustcRecord, ScopeInputs, TargetKind, load_records, prepare_scope_dir,
+    self, RecordKey, RustcRecord, ScopeInputs, TargetKind, WrapperSetup, ambient_env_names,
+    load_records, prepare_scope_dir,
 };
 use frust_drive::hotpatch::fat_link::{self, FatLinkRequest, LinkerFlavor};
 use frust_drive::hotpatch::graph::{self, ModifiedSet, PathClass, ReplayUnit, WorkspaceGraph};
@@ -183,8 +184,11 @@ impl FatSession {
             &tip_bin.target,
             &[],
             &[],
-            driver_exe,
-            &scope_dir,
+            WrapperSetup {
+                frust_exe: driver_exe,
+                scope_dir: &scope_dir,
+                ambient_names: &ambient_env_names(),
+            },
             &link,
         );
         log(&format!(
