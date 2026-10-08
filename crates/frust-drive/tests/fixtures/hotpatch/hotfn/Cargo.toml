@@ -1,0 +1,9 @@
+[package]
+name = "hotpatch-fixture-hotfn"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Named like the real crate so the seam symbol demangles to the real shape.
+[lib]
+name = "frust_hotpatch"

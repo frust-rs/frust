@@ -1,0 +1,29 @@
+[package]
+name = "hotpatch-fixture-app"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+frust_core = { package = "hotpatch-fixture-core", path = "../core" }
+
+# No features is the fat build; each feature is one saved edit (see src/lib.rs).
+[features]
+d2-field-add = []
+reorder = []
+closure-capture = []
+return-type = []
+d3-stack-wrap = []
+d3-column-wrap = []
+sentinel-bump = []
+new-helper = []
+badge-p1 = []
+badge-p2 = []
+token-p1 = []
+token-p2 = []
+token-p3 = []
+settings-p1 = []
+settings-p2 = []
