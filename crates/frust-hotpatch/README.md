@@ -31,6 +31,12 @@ absent from every default dependency graph.
   address as `aslr_reference` and exports the same symbol from every patch, so `apply_patch`
   resolves the patch's anchor by that name (`ANCHOR_SYMBOL`), not `main`: an Android cdylib has no
   `main`. A patch library without the symbol is refused with `PatchError::Dlopen`.
+- Anchor consistency: `apply_patch` checks that `aslr_reference` and `new_base_address` really are
+  the link-time addresses of `__frust_hotpatch_anchor` in the base and patch images (the offset
+  each implies must equal the image's slide) and otherwise refuses with
+  `PatchError::AnchorMismatch`, installing nothing. Today's `dx` 0.7.10 tables are anchored on
+  `main`, so this runtime refuses them; a builder must anchor on the symbol. The patch-side
+  refusal happens after the library is mapped, which is never unloaded.
 - `apply_from_devtools(bytes_path, table) -> ApplyReport`: the safe entry the in-app devtools
   service calls, so the one `unsafe` call stays in this crate. `bytes_path` must be a file the app
   wrote from bytes received on the authenticated devtools connection, never a wire path. It

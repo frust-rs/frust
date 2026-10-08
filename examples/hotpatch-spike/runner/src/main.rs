@@ -86,8 +86,20 @@ fn apply_hot_patch(msg: dioxus_devtools::DevserverMsg) {
     // non-loopback addresses, so the trusted peer is a local process (the `dx serve` that launched
     // us). A malicious local process on that port could still deliver code: debug-only spike.
     if let Err(err) = unsafe { frust_hotpatch::apply_patch(table) } {
-        log::error!("frust-hotpatch: apply_patch failed: {err}");
+        log::error!("frust-hotpatch: apply_patch refused the patch: {err}");
+        // One greppable line on stderr (the log may be filtered), read by measure.sh.
+        eprintln!("frust-hotpatch: refused {}", variant_name(&err));
     }
+}
+
+/// The `PatchError` variant's name: `Debug` output up to the first payload delimiter.
+fn variant_name(err: &frust_hotpatch::PatchError) -> String {
+    let debug = format!("{err:?}");
+    debug
+        .split(['(', ' ', '{'])
+        .next()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 #[cfg(target_os = "android")]
