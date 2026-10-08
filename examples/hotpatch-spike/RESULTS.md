@@ -1390,3 +1390,344 @@ passes. Every existing mode behaves as before; the additions only print more:
     `--define FRUST_LOG=debug`; otherwise the run says it was not logged.
 - The `--frust-run` summary adds the patched median over runs 2..n, so a session's first patch is
   reported on its own.
+
+## Stage 2: Pixel 5 gate (H2-04)
+
+Card H2-04 (tsk_000001a1181b5c74iWmqcYvY), run 2026-10-09 on `task/hb-h2-04`, cut from
+`feature/hotpatch-h2` @ 2a592437: H1 merged, plus H2-01 (Android fat build outside Gradle), H2-02
+(the Android shell's `hotpatch` feature) and H2-03 (`frust run -d <android> --watch`). Every row
+runs `frust run -d <adb-serial> --watch` on a physical Pixel 5. The arm64 emulator is not used.
+
+### Verdict: FAIL
+
+1. **Median save->frame at most 50% of the in-session Android restart median: FAIL.** The restart
+   median is **15338 ms** (row D2's five `restart required` reruns: full build -> install ->
+   launch -> first frame). The bar is therefore 7669 ms. The patched rows land at:
+   - save->applied: A **11966 ms** (n=5), B **12056 ms** (n=5), G **11923 ms** (n=10). That is
+     78.0%, 78.6% and 77.7% of the restart median. The patched frame follows on the next
+     Choreographer tick (*Rig and method*).
+   - save->CLI `patched` line: A 16987 ms, B 17077 ms, G 16937 ms. That is 110.8% of the restart
+     median.
+
+   Against the pooled restart median of D2 and E (14439 ms, n=9), A is 82.9%. No reading of the
+   numbers passes. Two costs no desktop row had dominate (*Latency breakdown*): ~10.4 s to upload
+   the 13.1 MB patch in chunks, and a 5 s answer delay on every apply.
+2. **Zero `patched` lines for D2 and E: PASS.** D2 answers `restart required` 5/5 with
+   `LayoutChanged`, E 4/4 with the path-dependency reason. No `patched` line appears for either.
+3. **PID unchanged across A, B and G: PASS.** A: 15386 throughout, B: 16573, G: 18461 (10/10). In
+   each, count 3 survives every patch.
+4. **Relocation against the base cdylib: proven.** A patched `HomePage::build` calls the unchanged
+   base `frust_widgets::text::text::<&str>` through a stub thunk. The thunk holds the address of the
+   symbol in the fat image plus the slide that `__frust_hotpatch_anchor` gives. All 778 thunks of
+   the stub land inside the base library's `r-xp` mapping (*Relocation evidence*).
+5. **Device re-locked at the end: done.** `svc power stayon false`, then `input keyevent 26`. After
+   that, `isKeyguardShowing=true` and `mWakefulness=Dozing`: the always-on display, not `Asleep`.
+   The test app was uninstalled; it was not installed before the gate.
+
+What holds: the first Android patch linked against a running base cdylib relocates and runs, in
+one process, ten times in a row. State survives every patch. The layout and path-class refusals
+behave as on the desktop. What fails is the bar: on this rig, a patch takes ~78% of the restart
+(applied) or ~111% (CLI line), not 50%.
+
+### Environment
+
+| | |
+|---|---|
+| Device | Pixel 5 (`redfin`), USB serial <adb-serial> |
+| Android | 14 (SDK 34) |
+| `ro.build.fingerprint` | `google/redfin/redfin:14/UP1A.231105.001.B2/11260668:user/release-keys` |
+| App | `dev.frust.gate.hotapp`, debug, arm64-v8a, `untrusted_app` |
+| Host | `Mac16,1`, Apple M4, macOS 27.0.1, rustc/cargo 1.98.1, NDK 28.2.13676358, cargo-ndk 4.1.2, Gradle 9.5.1, JDK 21.0.8 (Android Studio JBR) |
+| Clock | device - host = 1158-1163 ms, measured before every run (min-RTT `adb shell echo $EPOCHREALTIME`, RTT 25-31 ms, so the error is at most ~15 ms) |
+
+### Rig and method
+
+- **frust**: `cargo build --release -p frust-cli` in the worktree (1 m 39 s), `frust 0.6.0`. That
+  binary ran every row: CLI, builder (`RUSTC_WORKSPACE_WRAPPER`, linker proxy) and thin links. The
+  app is a debug arm64-v8a build, which `frust run -d <adb-serial> --watch` makes itself (fat build
+  outside Gradle, `assembleDebug -x cargoNdkBuild`, install, launch, `adb forward`).
+- **App**: `frust create hotapp --frust-path <worktree>/crates/frust --org dev.frust.gate
+  --platforms android` into `<scratch>`, then `measure.sh --prepare-app` (H1-11's overlay:
+  `HomeState { count }`, `CounterCard`, the markers, the root `either(..)`). The cold first session
+  built in 113.4 s and installed in 3.7 s. Warm session starts reached their first frame 11.1-19.1 s
+  after launch.
+- **Runs**: `measure.sh --frust-run --app <scratch>/hotapp --android --target <t> --runs <n> --row
+  <r>`, serial from `ANDROID_SERIAL`, `FRUST=<worktree>/target/release/frust`, `PRE_RUN_HOOK` = three
+  `input tap`s on the FAB (count 0 -> 3), `SCREENCAP_DIR` in `<scratch>`. Each row is its own
+  `frust run` session.
+- **Instruments.** The Android tree has no frame probe: `frust-hotpatch: applied/frame
+  t_unix_ms=` is logged only by `frust-shell-desktop`. The Android shell also never calls
+  `devtools::frame_submitted` (`frust-shell-common/src/devtools.rs`: "Only the desktop shell calls
+  `frame_submitted` today"). So every `apply_patch` parks for its frame, waits out
+  `UI_HOP_DEADLINE` (5 s), logs `frust-devtools: no frame followed the patch within 5s; answering
+  anyway`, and only then answers. That line appeared exactly once per patch (A 5, B 5, G 10, in each
+  patched PID). The script reports:
+  - **save->applied**: the backstop line's device time minus 5000 ms, moved onto the host clock.
+    That is the moment the patch was loaded and its table installed (the attempt runs before the
+    park). The patch listener sets the frame latch at install, so the patched rebuild runs on the
+    next Choreographer tick. This is the closest Android equivalent of the desktop's save->frame.
+    It understates the frame by up to one vsync and is not a direct probe.
+  - **save->CLI line**: the arrival of `patched in N ms` on the host. One clock, an upper bound,
+    and 5 s late by construction.
+  - **restart save->frame**: the relaunched activity's `ActivityTaskManager: Displayed
+    dev.frust.gate.hotapp/.MainActivity` line, device time moved onto the host clock. In the first
+    session it came 2 ms after `frust-render tier=engine`, the renderer's creation for the first
+    frame.
+- **Device evidence per run**: PID (`pidof`), RSS (`VmRSS` of `/proc/<pid>/status`),
+  `/proc/<pid>/maps` through `run-as`, the app's own `hotpatch_info` over a private `adb forward`
+  (counters and `anchor_runtime`), the run's `stub-N.o`, and an `adb exec-out screencap -p`. The
+  device log was captured with `adb logcat -v epoch` from the session start, bounded by the device
+  clock and never cleared, then grepped for `avc: denied` and read from the crash buffer.
+- **Load**: no build ran in parallel with a timed session. The host was not idle: a browser
+  process (Zen `plugin-container`) at ~90% CPU, load averages 3.0-4.5.
+- **Row G's budget**: the first G attempt hit the default budget at the 8th patch (G below). The
+  timed G ran with `[hotpatch] bytes = 268435456` in the scratch app's `frust.toml`, which was
+  restored afterwards.
+
+### Matrix
+
+| Row | Edit | Outcome lines (n) | PID / State | save->applied median (min-max), n | save->CLI line median | Verdict |
+|---|---|---|---|---|---|---|
+| A | home sentinel | `patched in 16453-19577 ms (1 components rebuilt)` (5/5) | 15386 kept; count 3 -> 3, `hotpatch-sentinel: v5` | **11966** (11621-15004), 5 | 16987 | patched; **bar FAIL** |
+| B | card sentinel, `CounterCard` in its own module | `patched in 16448-16738 ms (1 components rebuilt)` (5/5) | 16573 kept; count 3 -> 3, `card-sentinel: v5` | **12056** (11665-12091), 5 | 17077 | patched; **bar FAIL** |
+| D2 | `HomeState` gains `extra1..extraN` | `restart required: hotapp::home_page::HomeState changed layout (4 → 8 bytes); restarting to keep memory safe`, then 8 → 12 ... 20 → 24 (5/5) | new PID each run; relaunch shows `v5 extra1=4242`, count 0 | relaunch first frame **15338** (13432-16781), 5 | outcome line at save+1488-2415 | restart (`LayoutChanged`); **the restart baseline** |
+| E | `PAD_X` 12 -> 48 -> 12 -> 48 -> 12 in `crates/frust-widgets/src/button.rs` | `` restart required: `<worktree>/crates/frust-widgets/src/button.rs` belongs to the path dependency `frust-widgets`, which a patch cannot replay `` (4/4) | new PID each run | relaunch first frame 13614 (12997-16163), 4 | outcome line at save+116-850 | restart (`PathDependencyChanged`) |
+| G | 10 home patches, byte budget 256 MiB | `patched in 16447-18012 ms (1 components rebuilt)` (10/10) | 18461 kept; count 3 -> 3, `v10` | **11923** (11735-13245), 10 | 16937 | no crash; RSS +53.5 MiB; counters below |
+| G (default budget) | same, default budget | 7 × `patched`, then `restart required: the patch budget is spent (8 patches / 105195008 bytes loaded would pass 64 patches or 100663296 bytes)` | 17160 kept for 7 patches | 11603-12353 for patches 1-7 | | budget binds at the 8th patch |
+
+Zero `patched` lines appeared for D2 and E.
+
+### A, B: patched with State kept
+
+Row A run 1 as logged (CLI stream, arrival stamp first; the app's logcat line is device time):
+
+```
+1791496525030 patched in 19577 ms (1 components rebuilt)
+```
+
+The app's own line for the same patch, in the device log (`-v epoch`):
+
+```
+1791496526.171 15386 15593 W frust   : frust_shell_common::devtools: frust-devtools: no frame followed the patch within 5s; answering anyway
+```
+
+On the host clock (offset 1160 ms) the backstop line is at 1791496525011, so the patch was applied
+at 1791496520011 (save+15004 ms). The CLI line arrived 19 ms after the backstop line.
+
+- **A.** save->applied 15004 / 11966 / 11634 / 12368 / 11621 ms; CLI line 20023 / 16987 / 16651 /
+  17386 / 16637 ms. PID 15386 throughout. Before: `count: 3`, `hotpatch-sentinel: v0`. After run
+  5: `count: 3`, `v5`, `card-sentinel: v0`. RSS 161.4 -> 194.6 MiB.
+- **B.** save->applied 11830 / 12056 / 11665 / 12060 / 12091 ms; CLI line 16849 / 17077 / 16682 /
+  17080 / 17109 ms. PID 16573. After: `count: 3`, `card-sentinel: v5`, `hotpatch-sentinel: v0`.
+  RSS 153.2 -> 183.0 MiB.
+- **First patch.** A's run 1 is 15004 ms against 11621-12368 later. Its stub was written at
+  save+4465 ms against 1106-1882 ms later. B's and G's first runs show no comparable penalty
+  (11830, 13245).
+- **Patch image**: 13,149,376 bytes for a sentinel edit, 4.3x the 3,060,304 bytes of the macOS
+  rows. Every `patch-N.so` in the session dir (`session-hotapp-aarch64-linux-android/`) is mode
+  600.
+- **Maps.** After patch k the process maps four `/memfd:frust-hotpatch (deleted)` segments per
+  patch, one of them `r-xp`. Row A after patch 1:
+
+  ```
+  7174079000-71741d8000 r--p 00000000 00:01 5857246                        /memfd:frust-hotpatch (deleted)
+  71741db000-7174294000 r-xp 0015e000 00:01 5857246                        /memfd:frust-hotpatch (deleted)
+  7174297000-71742a3000 r--p 00216000 00:01 5857246                        /memfd:frust-hotpatch (deleted)
+  71742a6000-71742a7000 rw-p 00221000 00:01 5857246                        /memfd:frust-hotpatch (deleted)
+  ```
+
+  After A's run 5: 20 mappings, 5 `r-xp`. After G's run 10: 40 and 10.
+
+### Relocation evidence
+
+Row A, PID 15386, patch 1 (the first patch of this stage linked against a running base cdylib):
+
+- **seam_hits**: the CLI's `patched in 19577 ms (1 components rebuilt)`. The count is the
+  outcome's `seam_hits` (`Outcome::Patched { components: outcome.seam_hits }`), so the patched
+  seam was dispatched once. A zero would have been `restart required` (`NoSeamHit`).
+- **The slide.** The app reports `anchor_runtime=0x71869f62f8` (`hotpatch_info`). In the fat image
+  (`<target>/frust-hotpatch/fat/<scope>/libhotapp.so`, unstripped), `__frust_hotpatch_anchor` is
+  at `0xba22f8`. The slide is therefore `0x7185e54000`, which is exactly where the library's first
+  mapping starts. The base library is mapped straight out of the APK:
+
+  ```
+  7185e54000-7186994000 r--p 00204000 fd:2d 25358                          /data/app/.../base.apk
+  7186997000-71878d8000 r-xp 00d43000 fd:2d 25358                          /data/app/.../base.apk
+  ```
+
+- **The call.** In `patch-1.so`, `<hotapp::home_page::HomePage as Component>::build` calls the
+  stub's thunk for the unchanged base helper:
+
+  ```
+  16a95c:   bl  0x207fb8 <frust_widgets::text::text::<&str>>
+  207fb8:   ldr x16, 0x207fc0
+  207fbc:   br  x16
+  ```
+
+  The literal at `0x207fc0` (from `stub-1.o`, offset `0x168`) is `0x7187258c30`. That equals the
+  fat image's `frust_widgets::text::text::<&str>` at `0x1404c30` plus the slide, and lies inside
+  the base `r-xp` mapping above. The patched frame shows `hotpatch-sentinel: v1`, the text that
+  call built.
+- **Every thunk.** `stub-1.o` has 778 text thunks (`ldr x16, #8; br x16; .quad <addr>`). Checked
+  against the fat image's symbol table and the run's maps: 778/778 equal the fat link address plus
+  the slide, and 778/778 lie inside the base library's `r-xp` mapping. A second process (a sanity
+  run after the matrix, PID 22337, a different install) has slide `0x7185085000` and also 778/778.
+  The stub holds 13 further defined symbols (data/absolute). They were not checked one by one.
+- **SELinux.** Over every session of the gate, 0 `avc: denied` lines had `scontext` `untrusted_app`.
+  The ones logged came from `system_server` and `hal_sensors_default`. The crash buffer stayed
+  empty in every session.
+
+So all three Android-only links of PORT.md §7 hold on this device: the anchor rebase in a
+JNI-loaded cdylib, undefined symbols resolved through thunks to slid base addresses, and the memfd
+load.
+
+### Latency breakdown (why ~12 s to applied and ~17 s to the CLI line)
+
+Host-side mtimes from the `host:` line, plus the backstop-derived apply moment. Steady-state runs
+(A 2-5, B 1-5, G attempt 1's 1-7):
+
+| Phase | ms |
+|---|---|
+| save -> `stub-N.o` written (debounce, thin compile for aarch64, L3 DWARF diff, seam check, stub) | 1106-1882 |
+| `stub-N.o` -> `patch-N.so` linked (NDK clang) | 56-64 |
+| patch linked -> applied (13,149,376 bytes as base64 `patch_chunk`s over `adb forward`, then the memfd write, `android_dlopen_ext`, table install) | **10358-10499** |
+| applied -> the app answers (`UI_HOP_DEADLINE` backstop) | **5016-5021** |
+
+The transport and the load were not separated. The app writes, loads and deletes its copy inside
+the app's cache dir, and polling that through `run-as` would perturb the run. At ~10.4 s for
+13.1 MB the phase runs at ~1.26 MB/s, and it costs more than the restart's whole build step.
+Without the 5 s backstop, the CLI line would still sit ~5 s past `applied` on every patch.
+
+### D2: refused by L3; the restart baseline
+
+Run 1, verbatim: `restart required: hotapp::home_page::HomeState changed layout (4 → 8 bytes);
+restarting to keep memory safe`. Runs 2-5 print 8 → 12, 12 → 16, 16 → 20, 20 → 24.
+
+- PIDs 19300 -> 19492 -> 19709 -> 19872 -> 20013 -> 20161.
+- Each relaunched app reads the new field: the device log holds `frust-hotpatch-spike: state-field
+  vN build ran extra1=4242` for v1..v5. The screen after run 5 shows `hotpatch-sentinel: v5
+  extra1=4242`, `count: 0`.
+- save->first frame per run: 14439 / 13432 / 16495 / 15338 / 16781 ms, median **15338**.
+- Per relaunch: outcome line at save+1488-2415 ms, `Build finished in` 7.9-11.6 s (fat build +
+  Gradle), `Installed in` 2.9-3.1 s, then launch -> `Displayed` in ~0.5 s.
+
+This is the hot session's own restart, which a hazard edit costs. A `--no-hot` relaunch row was not
+measured: `measure.sh --frust-restart` passes `--features`, which `--watch -d` refuses, and that row
+is not needed for the bar.
+
+### E: framework edit
+
+Four edits to the worktree's `crates/frust-widgets/src/button.rs`: `const PAD_X: f64 = 12.0;` ->
+`48.0` -> `12.0` -> `48.0` -> `12.0`. They were made by a scratch driver around its own `frust run
+-d <adb-serial> --watch` session, so `measure.sh` was not involved. Each answered, verbatim apart
+from the path:
+
+```
+restart required: `<worktree>/crates/frust-widgets/src/button.rs` belongs to the path dependency `frust-widgets`, which a patch cannot replay
+```
+
+- Outcome lines arrived at save+116 / 269 / 850 / 271 ms.
+- The relaunch re-fat-built the crate and its dependents: `Build finished in` 9.0-11.6 s.
+- First frames at save+12997 / 14202 / 16163 / 13026 ms. PIDs 20334 -> 20470 -> 20598 -> 20731 ->
+  20849.
+- The file ended byte-identical to its original, and `git status` of the worktree was clean
+  afterwards. That restore was itself a content-identical write. It drew a fifth `restart
+  required` with the same text: the path class refuses on the event, without comparing content.
+
+### G: ten patches, RSS and the budget counters
+
+**Default budget (first attempt).** PID 17160 took 7 patches (save->applied 11603-12353 ms). The
+8th save answered, at save+1305 ms:
+
+```
+restart required: the patch budget is spent (8 patches / 105195008 bytes loaded would pass 64 patches or 100663296 bytes)
+```
+
+At 13,149,376 bytes per sentinel patch, the default 96 MiB byte budget admits 7 patches on this
+app (desktop: 32). The session then relaunched as a restart should. Its next start failed for a
+rig reason (*Known limits*), so this attempt is not latency data past patch 7.
+
+**Timed G** (byte budget 256 MiB): PID 18461, count 3 kept, `hotpatch-sentinel: v10` on screen
+after run 10. save->applied 13245 / 12320 / 11748 / 11917 / 11752 / 12149 / 12029 / 11862 / 11929 /
+11735 ms (median 11923; runs 2-10: 11917). CLI line median 16937. No crash, no trend.
+
+| After | `patches_applied` | `patch_bytes_loaded` | memfd mappings (`r-xp`) | RSS (MiB) |
+|---|---|---|---|---|
+| presses, before patch 1 | 0 | 0 | 0 (0) | 152.1 |
+| patch 1 | 1 | 13149376 | 4 (1) | 167.1 |
+| patch 2 | 2 | 26298752 | 8 (2) | 168.2 |
+| patch 3 | 3 | 39448128 | 12 (3) | 172.8 |
+| patch 4 | 4 | 52597504 | 16 (4) | 177.6 |
+| patch 5 | 5 | 65746880 | 20 (5) | 182.2 |
+| patch 6 | 6 | 78896256 | 24 (6) | 186.9 |
+| patch 7 | 7 | 92045632 | 28 (7) | 191.3 |
+| patch 8 | 8 | 105195008 | 32 (8) | 196.0 |
+| patch 9 | 9 | 118344384 | 36 (9) | 200.9 |
+| patch 10 | 10 | 131493760 | 40 (10) | 205.6 |
+
+The counters are the app's own `hotpatch_info` answers, read after each outcome.
+`patch_bytes_loaded` is exactly k × 13,149,376. RSS grows +15.0 MiB at the first patch and
++1.1-4.9 MiB at each later one, +53.5 MiB over 10. On the desktop (R3-04) each later patch cost
+~0.9 MiB.
+
+### Known limits seen (recorded, not fixed)
+
+- **No frame answer on Android.** The Android shell does not call `devtools::frame_submitted`, so
+  every apply is answered by the 5 s `UI_HOP_DEADLINE` backstop with a warning. This adds 5 s to
+  every `patched` line, and the outcome's seam hits come from whatever ran in those 5 s, not
+  strictly from "the frame after the apply".
+- **No frame probe on Android.** `frust-hotpatch: applied/frame` exist only in
+  `frust-shell-desktop`, so save->frame cannot be measured directly on a device.
+- **Transport.** Chunked base64 upload of a 13.1 MB patch takes ~10.4 s (~1.26 MB/s) over `adb
+  forward`, the largest single cost. (`adb install` of the whole APK takes ~3 s.)
+- **Patch size and budget.** Patch images are 13.1 MB (4.3x macOS). The default byte budget
+  refuses the 8th patch.
+- **A dead hot app goes unnoticed (act_000001a11d6d27b655fJfemp).** `am force-stop` of the watched
+  app (a clean session, PID 21721): `pidof` was empty at once, and the CLI printed nothing in the
+  next 30 s. The `adb logcat --pid` stream does not end when the process dies. The next save (a
+  sentinel edit) answered at save+14151 ms with:
+
+  ```
+  restart required: the devtools connection failed: timed out waiting for a `hotpatch_info` response after 10s
+  ```
+
+  The full pipeline then ran and relaunched PID 22130 (first frame at save+32479 ms). So a dead app
+  is noticed only by the next save, which pays a 10 s timeout before the restart.
+- **Rig incidents, not frust.**
+  - After G's default-budget relaunch the device vanished from `adb devices`, though it was still
+    on USB and not rebooted (uptime 11 days). The new app's discovery line never arrived (`restart
+    required: hot-patch builder unsupported: the app announced no devtools endpoint within 60s;
+    hot reload unavailable, relaunching on change instead`), and later pipeline runs failed with
+    `adb install failed: ... not found`. Restarting the host adb server brought the device back.
+    Separately, `measure.sh` leaked its logcat stream at exit; that is fixed (below).
+  - Google Play Protect held one `adb install` with "Send app for a security check?" until the
+    dialog was dismissed by hand with "Don't send" (`Installed in 628.5s`, the dead-app session's
+    first start). Another install took 21.0 s. Every other install took 2.9-3.7 s. No timed row
+    includes either.
+- Not exercised: the TUI (not required by this card) and a Profile build (refused for `--watch -d`
+  by design).
+
+### measure.sh changes for this card
+
+`bash -n` and `shellcheck -S warning` are clean. The desktop and dx modes behave as before. New:
+
+- `--serial <adb-serial>` / `-d <adb-serial>` / `--android` (serial from `ANDROID_SERIAL`) on
+  `--frust-run` runs `frust run --watch -d <serial>`. The serial is never written outside the log
+  dir. The script refuses an asleep device and refuses `--frust-restart` with a serial.
+  `ANDROID_PACKAGE` overrides the `applicationId` read from `android/app/build.gradle.kts`.
+- Android instruments: `applied` from the 5 s backstop line (device time - 5000 ms) and
+  `Displayed` for first frames. Device times are moved onto the host clock by an offset measured
+  before every run (`clock:` line). Summary lines give save->applied and save->CLI line for patched
+  runs.
+- Device log: `adb logcat -v epoch` from the session start into `logcat.txt`. At exit it reports
+  `avc: denied` lines (split by `untrusted_app`) and the crash buffer. That read is skipped when
+  the device is gone, so the exit no longer hangs.
+- Per run: PID (`pidof`), RSS (`VmRSS`), `maps:` (memfd mappings, saved as `maps-run-N.txt`),
+  `info:` (the app's `hotpatch_info` over a private `adb forward`; `HOTPATCH_INFO=0` skips it), a
+  copy of `stub-N.o`, and `SCREENCAP_DIR` captures (`before.png`, `run-N.png`; outside the
+  repository only). An app still running after the CLI exits is `am force-stop`ped.
+- `PRE_RUN_HOOK=<cmd>` (desktop and Android) runs after the first frame with the app PID.
+- Fixes found on the way:
+  - `grep -q` behind a pipe under `pipefail` failed the discovery wait at random (SIGPIPE).
+  - The device log stream outlived the script, because `$!` named a function's subshell rather
+    than `adb`.
