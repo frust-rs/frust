@@ -40,6 +40,10 @@ pub mod doctor;
 /// resolver, the generated-file paths plugin apply writes, and
 /// (`same_path`/`is_under`) a front-end's own path-identity checks.
 pub mod host_path;
+/// The desktop hot-patch builder: rustc/linker capture with `frust` as
+/// cargo's workspace wrapper, workspace replay, fat/thin linking and the
+/// gates that decide whether a patch may be applied.
+pub mod hotpatch;
 pub mod icons;
 /// Process-wide termination handling (the single SIGINT/SIGTERM/SIGHUP owner
 /// and the secret-file scrub it runs). Internal: it is machinery the pipelines

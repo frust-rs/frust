@@ -25,7 +25,34 @@ fn default_command(stdin_tty: bool, stdout_tty: bool) -> Option<Command> {
     (stdin_tty && stdout_tty).then_some(Command::Tui)
 }
 
+/// `frust` as cargo's `RUSTC_WORKSPACE_WRAPPER` (and rustc's linker) for a
+/// hot-patch fat build: record or intercept this one invocation and exit,
+/// with no CLI parsing at all (`frust_drive::hotpatch::capture`).
+fn run_hotpatch_wrapper(scope_dir: &std::path::Path) -> ExitCode {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let envs: Vec<_> = std::env::vars_os().collect();
+    let result = frust_drive::hotpatch::capture::run_wrapper(
+        &frust_drive::process::RealProcessRunner,
+        scope_dir,
+        &args,
+        &envs,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    );
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(err) => {
+            let _ = writeln!(std::io::stderr(), "frust: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
+    if let Some(scope_dir) = frust_drive::hotpatch::capture::wrapper_scope_from_env() {
+        return run_hotpatch_wrapper(&scope_dir);
+    }
     let mut cli = Cli::parse();
     if cli.command.is_none() {
         cli.command = default_command(
