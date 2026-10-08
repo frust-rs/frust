@@ -31,6 +31,10 @@
 //!
 //! [`Method`] is the typed v1 method set; [`messages`]-derived re-exports
 //! below are each method's typed params/result/notification-payload struct.
+//! `hotpatch_info`, `patch_chunk` and `apply_patch` carry hot patching; like
+//! `screenshot` they are capability-gated (`Capability::HotPatch`) and an
+//! unsupporting server answers them `METHOD_NOT_FOUND`/`NOT_SUPPORTED`. No wire
+//! type carries a filesystem path.
 //! This crate is pure data + pure functions — no I/O, no async, no runtime
 //! state of its own.
 
@@ -57,9 +61,10 @@ pub use discovery::{
     parse_discovery_line, parse_failure_line, redact_discovery_token,
 };
 pub use messages::{
-    AckResult, Capability, FrameStats, HandshakeInfo, HandshakeParams, InputScrollParams,
-    InputTapParams, InputTextParams, MetricsSnapshot, RectPx, ScreenshotResult, WidgetNode,
-    WidgetProps, WidgetPropsParams, WidgetTreeDump,
+    AckResult, ApplyPatchParams, Capability, FrameStats, HandshakeInfo, HandshakeParams,
+    HotpatchInfo, InputScrollParams, InputTapParams, InputTextParams, JumpTableWire,
+    MetricsSnapshot, MissedKey, PatchChunkParams, PatchOutcome, RectPx, ScreenshotResult,
+    WidgetNode, WidgetProps, WidgetPropsParams, WidgetTreeDump,
 };
 pub use method::Method;
 pub use types::{
