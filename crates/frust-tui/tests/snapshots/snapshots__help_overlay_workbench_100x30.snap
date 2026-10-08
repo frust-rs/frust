@@ -12,7 +12,7 @@ expression: "render_to_string(100, 30, &state)"
    none foun│  —   Run on all devices              D   DAP server…                    │▓▓           
             │  x   Stop session                    —   Start/stop DAP server          │▓▓           
  SESSIONS   │  R   Restart session                 ⌥m  Toggle mouse capture           │▓▓           
-   none runn│  W   Watch: restart on save          f   Toggle follow-tail             │▓▓           
+   none runn│  W   Watch: hot patch on save        f   Toggle follow-tail             │▓▓           
             │  X   Close tab                       w   Toggle line wrap               │▓▓           
  ACTIONS    │  b   Build…                          /   Search logs…                   │▓▓           
    New proje│  c   Clean…                          v   Select lines…                  │▓▓           

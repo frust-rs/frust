@@ -5,14 +5,27 @@
 //! the engine's channel, and the [`LaunchPlan`] a spec resolves into before
 //! it is spawned through the drive's `spawn_streaming` seam.
 //!
-//! Everything here is plain data + pure functions — no threads, no tokio, no
-//! process. The moving parts live in [`super::supervisor`].
+//! A watched debug desktop session runs **hot** instead: [`SessionSpec::start_hot`]
+//! resolves it through `frust-drive`'s hot-patch session start
+//! (`hotpatch::session::start_desktop` — the fat build, then the fat image
+//! spawned directly, never `cargo run`), and [`SessionSpec::hot_precondition`]
+//! says which specs qualify. Unwatched sessions keep [`SessionSpec::launch_plan`].
+//!
+//! Everything here is plain data + pure functions — no threads, no tokio —
+//! except `start_hot`, the one blocking entry, which `crate::runner` only
+//! ever calls off the UI thread. The moving parts live in
+//! [`super::supervisor`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use frust_drive::build_info::BuildInfo;
+use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::desktop_run;
 use frust_drive::devices::Device;
+use frust_drive::hotpatch::session::{
+    DesktopStart, HotSession, RestartReason, SessionHost, StartError, start_desktop,
+};
+use frust_drive::process::{ProcessRunner, StreamHandle};
 
 /// A unique per-session identifier, handed out monotonically by a single
 /// [`super::Supervisor`]. Wrapped rather than a bare `u64` so it can't be
@@ -92,6 +105,80 @@ impl SessionSpec {
             env: plan.env,
         }
     }
+
+    /// Whether this spec can run as a hot-patch session, or the failed
+    /// precondition, worded for a toast: only the desktop preview, and only
+    /// a debug build (`start_desktop` refuses every other mode, and a device
+    /// has no hot-patch path at all).
+    pub fn hot_precondition(&self) -> Result<(), String> {
+        if let DeviceTarget::Device(device) = &self.target {
+            return Err(format!(
+                "hot patching is desktop-only, `{}` is a device",
+                device.name
+            ));
+        }
+        if self.build.mode != BuildMode::Debug {
+            return Err(format!(
+                "hot patching needs a debug build, not {:?}",
+                self.build.mode
+            ));
+        }
+        Ok(())
+    }
+
+    /// Start this spec as a hot-patch session: `frust-drive`'s
+    /// `start_desktop` builds the app fat, spawns the fat image directly and
+    /// attaches to its devtools endpoint. **Blocks** for the whole fat build;
+    /// call it off the UI thread. `on_line` receives the build's diagnostics
+    /// and the app's output up to its discovery line; the returned
+    /// [`StreamHandle`] carries the rest of the app's output and its
+    /// lifetime.
+    ///
+    /// The tip package is the project root's own `[package]` (the TUI runs
+    /// a project, not a workspace member of the caller's choosing); its bin
+    /// is left to `start_desktop`, which takes the package's only bin.
+    pub fn start_hot(
+        &self,
+        runner: Arc<dyn ProcessRunner + Send + Sync>,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<(HotSession, StreamHandle), StartError> {
+        let package = package_name(&self.project_root).ok_or_else(|| {
+            StartError::RestartRequired(RestartReason::BuilderUnsupported {
+                detail: format!(
+                    "`{}` names no [package]",
+                    self.project_root.join("Cargo.toml").display()
+                ),
+            })
+        })?;
+        let host = SessionHost::current(runner)?;
+        start_desktop(
+            &host,
+            &DesktopStart {
+                root: &self.project_root,
+                info: &self.build,
+                package: &package,
+                bin: None,
+            },
+            on_line,
+        )
+    }
+}
+
+/// The `[package] name` of `<root>/Cargo.toml`, when it has one — the tip
+/// package a hot session builds and the one a hot watcher resolves the
+/// workspace graph for.
+pub(crate) fn package_name(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    package_name_in(&text)
+}
+
+/// [`package_name`] over a manifest's text.
+fn package_name_in(manifest: &str) -> Option<String> {
+    let doc = manifest.parse::<toml_edit::DocumentMut>().ok()?;
+    doc.get("package")?
+        .get("name")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// A resolved device-session plan: the pieces the multi-phase device pipeline
@@ -396,6 +483,69 @@ mod tests {
             let plan = spec.launch_plan().unwrap();
             assert!(plan.env.is_empty(), "{mode:?} must not inject FRUST_TRACE");
         }
+    }
+
+    #[test]
+    fn only_a_debug_desktop_spec_can_run_hot() {
+        let desktop = |mode| SessionSpec {
+            project_root: PathBuf::from("/tmp/app"),
+            target: DeviceTarget::Desktop,
+            build: build(mode),
+        };
+        assert_eq!(desktop(BuildMode::Debug).hot_precondition(), Ok(()));
+        for mode in [BuildMode::Profile, BuildMode::Release] {
+            let reason = desktop(mode).hot_precondition().unwrap_err();
+            assert!(reason.contains("needs a debug build"), "{reason}");
+        }
+
+        let device = SessionSpec {
+            project_root: PathBuf::from("/tmp/app"),
+            target: DeviceTarget::Device(Device {
+                id: "emulator-5554".into(),
+                name: "Pixel 7".into(),
+                platform: Platform::Android,
+                kind: Kind::Emulator,
+                os_version: None,
+                connection_state: None,
+            }),
+            build: build(BuildMode::Debug),
+        };
+        let reason = device.hot_precondition().unwrap_err();
+        assert!(reason.contains("desktop-only"), "{reason}");
+    }
+
+    #[test]
+    fn the_tip_package_is_the_manifests_own_package_name() {
+        assert_eq!(
+            package_name_in("[package]\nname = \"huddle\"\nversion = \"0.1.0\"\n"),
+            Some("huddle".to_string())
+        );
+        assert_eq!(
+            package_name_in("[workspace]\nmembers = [\"a\"]\n"),
+            None,
+            "a virtual manifest has no tip package"
+        );
+        assert_eq!(package_name_in("not toml ["), None);
+    }
+
+    #[test]
+    fn a_project_without_a_package_refuses_to_start_hot_before_any_build() {
+        let spec = SessionSpec {
+            project_root: PathBuf::from("/nonexistent/frust-tui-hot-start"),
+            target: DeviceTarget::Desktop,
+            build: build(BuildMode::Debug),
+        };
+        let runner: Arc<dyn ProcessRunner + Send + Sync> =
+            Arc::new(frust_drive::process::FakeProcessRunner::new());
+        let err = spec.start_hot(runner, &mut |_| {}).err().expect("refused");
+        assert!(
+            matches!(
+                &err,
+                StartError::RestartRequired(RestartReason::BuilderUnsupported { detail })
+                    if detail.contains("names no [package]")
+            ),
+            "{err}"
+        );
     }
 
     #[test]
