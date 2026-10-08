@@ -8,7 +8,8 @@
 //! [`HotFunction::call_it`] monomorphisation (or, for [`HotFn::from_fn_ptr`], the pointer's own
 //! value), and jumps to the patched version when one is mapped, else runs the original. There is
 //! no stale-call detection and no retry. A patch builder (today `dx` 0.7.10, whose wire format
-//! [`JumpTable`] matches) compiles the changed code into a library and sends the table;
+//! [`JumpTable`] matches, but whose tables are anchored on `main`, which [`apply_patch`] refuses
+//! with [`PatchError::AnchorMismatch`]: a table must be anchored on [`ANCHOR_SYMBOL`]) compiles the changed code into a library and sends the table;
 //! [`apply_patch`] loads that library, rebases the table onto this process, publishes it, and runs
 //! every [`register_handler`] handler. Patches are serialised, and a patch is refused before
 //! anything is loaded in a release build, while no anchor is set ([`set_anchor`]; the app defines

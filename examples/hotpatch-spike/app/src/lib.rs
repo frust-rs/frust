@@ -1,10 +1,10 @@
 //! Hot-patch spike app: the `frust create` counter's `lib.rs` shape, moved into its own lib package so
 //! `dx serve --hot-patch` replays it (see the spike's README.md).
 //!
-//! The root component's `build` is called directly by the desktop driver `frust::app!` generates, so
-//! it never goes through the hot seam: everything a patch should change lives in the `component(..)`
-//! children ([`home_page::HomePage`], [`counter_card::CounterCard`]), whose `build` frust-core routes
-//! through subsecond's jump table under the `hotpatch` feature.
+//! Under the `hotpatch` feature every component's `build`, the root included, goes through the hot
+//! seam: the driver `frust::app!` generates calls `__frust_root_build`, which reaches the root's
+//! `build` via `build_erased`, and the `component(..)` children ([`home_page::HomePage`],
+//! [`counter_card::CounterCard`]) are routed the same way, through the installed jump table.
 
 mod counter_card;
 mod home_page;

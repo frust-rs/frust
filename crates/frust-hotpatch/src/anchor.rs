@@ -101,7 +101,14 @@ pub(crate) fn classify(address: u64) -> (u32, u64) {
 /// The `[start, end)` extent of the loaded image containing `address`, or `None` when the platform
 /// cannot say.
 pub(crate) fn image_range_containing(address: usize) -> Option<(usize, usize)> {
-    platform::image_range_containing(address)
+    platform::image_containing(address).map(|(lo, hi, _)| (lo, hi))
+}
+
+/// The slide (runtime address minus link-time address) of the loaded image containing `address`,
+/// as the platform loader reports it, or `None` when the platform cannot say. Independent of any
+/// jump table: it is what a table's anchor addresses are checked against.
+pub(crate) fn image_slide_containing(address: usize) -> Option<usize> {
+    platform::image_containing(address).map(|(_, _, slide)| slide)
 }
 
 #[cfg(test)]
@@ -128,7 +135,7 @@ mod platform {
 
     struct Probe {
         address: usize,
-        found: Option<(usize, usize)>,
+        found: Option<(usize, usize, usize)>,
     }
 
     unsafe extern "C" fn visit(
@@ -153,13 +160,13 @@ mod platform {
             hi = hi.max(start.wrapping_add(header.p_memsz as usize));
         }
         if lo <= probe.address && probe.address < hi {
-            probe.found = Some((lo, hi));
+            probe.found = Some((lo, hi, base));
             return 1;
         }
         0
     }
 
-    pub(super) fn image_range_containing(address: usize) -> Option<(usize, usize)> {
+    pub(super) fn image_containing(address: usize) -> Option<(usize, usize, usize)> {
         // aarch64 Android tags the top byte of heap pointers; code addresses are untagged but the
         // mask keeps the comparison honest for either.
         #[cfg(target_pointer_width = "64")]
@@ -215,7 +222,7 @@ mod platform {
 
     const LC_SEGMENT_64: u32 = 0x19;
 
-    pub(super) fn image_range_containing(address: usize) -> Option<(usize, usize)> {
+    pub(super) fn image_containing(address: usize) -> Option<(usize, usize, usize)> {
         // SAFETY: the dyld image-list functions may be called from any thread; an index below the
         // count yields a valid header (or null) that stays mapped, since this crate never unloads
         // an image and system images are immortal.
@@ -237,7 +244,7 @@ mod platform {
                 && lo <= address
                 && address < hi
             {
-                return Some((lo, hi));
+                return Some((lo, hi, slide));
             }
         }
         None
@@ -286,7 +293,7 @@ mod platform {
     const FROM_ADDRESS: u32 = 0x4;
     const UNCHANGED_REFCOUNT: u32 = 0x2;
 
-    pub(super) fn image_range_containing(address: usize) -> Option<(usize, usize)> {
+    pub(super) fn image_containing(address: usize) -> Option<(usize, usize, usize)> {
         let mut module: *mut c_void = std::ptr::null_mut();
         // SAFETY: FROM_ADDRESS treats `address` as a pointer to look up and never dereferences it;
         // UNCHANGED_REFCOUNT leaves the module's reference count alone.
@@ -308,7 +315,13 @@ mod platform {
             let e_lfanew = std::ptr::read_unaligned((base + 0x3C) as *const u32) as usize;
             std::ptr::read_unaligned((base + e_lfanew + 24 + 56) as *const u32) as usize
         };
-        Some((base, base + size))
+        // SAFETY: `ImageBase` is the 8 bytes at offset 24 of a PE32+ optional header, itself 24
+        // bytes into the NT headers.
+        let preferred = unsafe {
+            let e_lfanew = std::ptr::read_unaligned((base + 0x3C) as *const u32) as usize;
+            std::ptr::read_unaligned((base + e_lfanew + 24 + 24) as *const u64) as usize
+        };
+        Some((base, base + size, base.wrapping_sub(preferred)))
     }
 }
 
@@ -319,7 +332,7 @@ mod platform {
     windows
 )))]
 mod platform {
-    pub(super) fn image_range_containing(_address: usize) -> Option<(usize, usize)> {
+    pub(super) fn image_containing(_address: usize) -> Option<(usize, usize, usize)> {
         None
     }
 }
@@ -362,6 +375,20 @@ mod tests {
         assert_eq!(register_patch(0x6000, 0x7000, 0), 2);
         assert_eq!(classify(0x6100).0, 2);
         reset_for_test();
+    }
+
+    #[test]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        all(target_vendor = "apple", target_pointer_width = "64"),
+        windows
+    ))]
+    fn the_running_executable_has_a_slide_no_larger_than_its_start() {
+        let address = here as *const () as usize;
+        let slide = image_slide_containing(address).expect("a slide for this test binary");
+        let (lo, _) = image_range_containing(address).expect("a range");
+        assert!(slide <= lo, "slide {slide:#x} above image start {lo:#x}");
     }
 
     #[test]

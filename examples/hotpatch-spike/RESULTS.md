@@ -73,6 +73,13 @@ layout-preserving edits, and all three still hold as measured. The GO stands. D2
 | Window evidence | `screencapture -x -R<window rect>` before the first edit and after the last run |
 | Clicks | AppleScript `tell application "System Events" to tell (first process whose unix id is <PID>) to click at {x, y}`. Accessibility was granted, and the click lands on the AccessKit `button Increment`. The first click after launch returns `missing value` and misses; the next ones land. |
 
+**Measurement baseline (2026-10-08).** Every row below was measured with the `frust-hotpatch`
+runtime at 1c29ba1d and dx 0.7.10, whose jump tables are anchored on `main`. That runtime rebased
+by the offset the table implied and never compared it with the images' slides, so the anchor
+mismatch went unseen. The tip refuses such tables with `PatchError::AnchorMismatch` (the runner
+prints `frust-hotpatch: refused AnchorMismatch`), so these rows reproduce only against the runtime
+at 1c29ba1d, not at the tip.
+
 ## Matrix
 
 Times are milliseconds from the save timestamp (unix ms, stamped by `measure.sh`) to the app's

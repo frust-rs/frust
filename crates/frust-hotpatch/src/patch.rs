@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::JumpTable;
 #[cfg(any(unix, windows))]
 use crate::anchor::{
-    ANCHOR_SYMBOL, aslr_reference, image_range_containing, register_base, register_patch,
+    ANCHOR_SYMBOL, aslr_reference, image_range_containing, image_slide_containing, register_base,
+    register_patch,
 };
 use crate::hot_fn::reset_fall_throughs;
 
@@ -63,6 +64,23 @@ pub enum PatchError {
     /// before anything is loaded, and cleared by [`mark_layout_mismatches_reported`].
     #[error("{} unreported layout mismatch(es); patch refused", .0.len())]
     LayoutMismatchPending(Vec<LayoutMismatch>),
+
+    /// The table's anchor address for `image` (`"base"` or `"patch"`) is not that image's
+    /// `__frust_hotpatch_anchor` link-time address: the offset it implies (`got`) differs from
+    /// the image's real slide (`expected`). A table anchored on another symbol (dx 0.7.10 anchors
+    /// on `main`) is refused rather than rebased by a wrong constant. The `"base"` check runs
+    /// before the library is loaded; for `"patch"` the library is already mapped and leaked
+    /// (never unloaded), as with [`PatchError::ImageRangeUnresolved`] after the load. Nothing is
+    /// registered or installed.
+    #[error("{image} anchor mismatch: table implies offset {got:#x}, image slide is {expected:#x}")]
+    AnchorMismatch {
+        /// Which image's anchor disagrees: `"base"` or `"patch"`.
+        image: &'static str,
+        /// The image's real slide, from the platform loader.
+        expected: u64,
+        /// The offset the table's anchor address implies.
+        got: u64,
+    },
 }
 
 /// Register `handler` to run right after each patch library is loaded and its jump table installed.
@@ -157,11 +175,23 @@ pub unsafe fn load_patch_library(path: &Path) -> Result<libloading::Library, Pat
 /// [`ANCHOR_SYMBOL`](crate::ANCHOR_SYMBOL), else [`PatchError::Dlopen`]. On any error nothing is
 /// installed and no handler runs.
 ///
+/// A table whose anchor addresses are not those of [`ANCHOR_SYMBOL`](crate::ANCHOR_SYMBOL) is
+/// refused with [`PatchError::AnchorMismatch`]: the offset implied by `aslr_reference` must equal
+/// the running image's slide, and the one implied by `new_base_address` the patch image's slide.
+/// The base check runs before the library is loaded; a patch-side refusal leaves the library
+/// mapped and leaked.
+///
 /// # Safety
 ///
 /// This detours live functions to code from another binary. A malformed or mismatched table (one
 /// not built against this exact executable) makes calls jump to arbitrary addresses with the wrong
 /// signatures. Only apply tables produced by the patch builder for this running build.
+///
+/// Two anchor preconditions hold the rebase honest. Both are checked at run time
+/// ([`PatchError::AnchorMismatch`]) but stated here because a table is trusted input:
+/// `table.aslr_reference` must be the link-time address of `__frust_hotpatch_anchor` in the
+/// running base image, and `table.new_base_address` its link-time address in the patch library.
+/// A table anchored on any other symbol (for example `main`, as dx 0.7.10 builds it) is not valid.
 ///
 /// A well-formed table built against this executable is not enough on its own. Entries are matched
 /// by symbol name, and a name does not encode layout, so the caller must also ensure that every
@@ -279,6 +309,16 @@ unsafe fn apply_patch_with_anchor(
     let old_offset = anchor.wrapping_sub(table.aslr_reference as usize);
     let (base_start, base_end) =
         image_range_containing(anchor).ok_or(PatchError::ImageRangeUnresolved)?;
+    // The table's anchor must be this image's anchor symbol, so the offset it implies is exactly
+    // the image's slide. Checked before the load: a wrong table costs nothing.
+    let base_slide = image_slide_containing(anchor).ok_or(PatchError::ImageRangeUnresolved)?;
+    if old_offset != base_slide {
+        return Err(PatchError::AnchorMismatch {
+            image: "base",
+            expected: base_slide as u64,
+            got: old_offset as u64,
+        });
+    }
 
     // SAFETY: the caller guarantees `table.lib` is the patch library built for this process.
     let lib = unsafe { load_patch_library(&table.lib)? };
@@ -300,6 +340,16 @@ unsafe fn apply_patch_with_anchor(
     let new_offset = patch_anchor.wrapping_byte_sub(table.new_base_address as usize) as usize;
     let (patch_start, patch_end) =
         image_range_containing(patch_anchor as usize).ok_or(PatchError::ImageRangeUnresolved)?;
+    // The library is already mapped and leaked here; nothing is registered or installed.
+    let patch_slide =
+        image_slide_containing(patch_anchor as usize).ok_or(PatchError::ImageRangeUnresolved)?;
+    if new_offset != patch_slide {
+        return Err(PatchError::AnchorMismatch {
+            image: "patch",
+            expected: patch_slide as u64,
+            got: new_offset as u64,
+        });
+    }
 
     table.map = table
         .map
@@ -426,13 +476,16 @@ pub(crate) mod test_support {
 mod tests {
     use std::sync::atomic::AtomicU32;
 
+    use crate::anchor::UNKNOWN_IMAGE;
+
     use super::*;
 
     fn table(entries: &[(u64, u64)]) -> JumpTable {
         JumpTable {
             lib: "/nonexistent/frust-hotpatch-test.so".into(),
             map: entries.iter().copied().collect(),
-            aslr_reference: 0x1000,
+            // The test anchor's link-time address in this test binary, as a correct table has it.
+            aslr_reference: (test_anchor() - slide_of_test_anchor()) as u64,
             new_base_address: 0x2000,
             ifunc_count: 0,
         }
@@ -443,6 +496,10 @@ mod tests {
 
     fn test_anchor() -> usize {
         test_anchor_fn as *const () as usize
+    }
+
+    fn slide_of_test_anchor() -> usize {
+        crate::anchor::image_slide_containing(test_anchor()).unwrap_or(0)
     }
 
     fn counting_handler() -> (Arc<AtomicU32>, Handler) {
@@ -702,14 +759,61 @@ mod tests {
         assert!(status.success(), "building the patch library failed");
 
         crate::set_anchor(test_anchor());
-        let mut t = table(&[(0x1100, 0x2100)]);
-        t.lib = lib;
-        t.aslr_reference = 0x1000;
-        t.new_base_address = 0x2000;
-        // SAFETY: the library was just built by this test and has no initialisers.
-        unsafe { apply_patch(t) }.expect("apply through the anchor symbol");
+        // The link-time anchor addresses a correct table carries: runtime address minus slide,
+        // the patch's read by mapping the library (the loader returns the same handle later).
+        let base_slide = crate::anchor::image_slide_containing(test_anchor()).expect("base slide");
+        let good_old = test_anchor().wrapping_sub(base_slide) as u64;
+        // SAFETY: the library was just built by this test and has no initialisers; the handle is
+        // leaked, as `apply_patch` leaks its own.
+        let probe: &'static libloading::Library = Box::leak(Box::new(
+            unsafe { load_patch_library(&lib) }.expect("map patch"),
+        ));
+        // SAFETY: the symbol is only read as an address.
+        let symbol = unsafe { probe.get::<*const ()>(ANCHOR_SYMBOL.as_bytes()) }.expect("anchor");
+        // SAFETY: the library is leaked, so the pointer is only used for address arithmetic.
+        let patch_anchor = unsafe { symbol.try_as_raw_ptr() }.expect("non-null anchor") as usize;
+        let patch_slide = crate::anchor::image_slide_containing(patch_anchor).expect("patch slide");
+        let good_new = patch_anchor.wrapping_sub(patch_slide) as u64;
+        let build = |old: u64, new: u64| {
+            let mut t = table(&[(0x1100, 0x2100)]);
+            t.lib = lib.clone();
+            t.aslr_reference = old;
+            t.new_base_address = new;
+            t
+        };
 
-        let old_offset = test_anchor().wrapping_sub(0x1000);
+        // A table anchored elsewhere (dx anchors on `main`) is refused before anything installs.
+        // SAFETY: the library was just built by this test and has no initialisers.
+        let wrong_base = unsafe { apply_patch(build(good_old + 0x10, good_new)) };
+        assert_eq!(
+            wrong_base,
+            Err(PatchError::AnchorMismatch {
+                image: "base",
+                expected: base_slide as u64,
+                got: base_slide as u64 - 0x10,
+            })
+        );
+        // SAFETY: as above.
+        let wrong_patch = unsafe { apply_patch(build(good_old, good_new + 0x10)) };
+        assert_eq!(
+            wrong_patch,
+            Err(PatchError::AnchorMismatch {
+                image: "patch",
+                expected: patch_slide as u64,
+                got: patch_slide as u64 - 0x10,
+            })
+        );
+        // SAFETY: only checked for presence.
+        assert!(unsafe { get_jump_table() }.is_none(), "nothing installed");
+        assert_eq!(
+            crate::anchor::classify(test_anchor() as u64).0,
+            UNKNOWN_IMAGE
+        );
+
+        // SAFETY: as above.
+        unsafe { apply_patch(build(good_old, good_new)) }.expect("apply through the anchor symbol");
+
+        let old_offset = base_slide;
         // SAFETY: used within this test under the serial lock.
         let installed = unsafe { get_jump_table() }.expect("table installed");
         assert_eq!(installed.map.len(), 1);
