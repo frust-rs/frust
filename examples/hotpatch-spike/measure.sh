@@ -14,7 +14,7 @@
 # against the runtime at 1c29ba1d (before that check), which rebased by the wrong constant.
 #
 # Usage: examples/hotpatch-spike/measure.sh [--hotpatch | --restart | --frust-run | --frust-restart]
-#                                           [--app <dir>] [--runs <n>] [--target <t>]
+#                                           [--app <dir>] [--runs <n>] [--target <t>] [--row <label>]
 #        examples/hotpatch-spike/measure.sh --prepare-app <dir>
 #   --hotpatch     (default) `dx serve --hot-patch --platform desktop --interactive false --verbose`
 #                  from runner/; DX from $DX, else `dx` on PATH (must be dioxus-cli 0.7.10).
@@ -40,6 +40,8 @@
 #                  root `build` hosts `HomePage` in one arm of `either(home_page::SHOW_HOME, ..)`.
 #                  The package, its crate types, `main.rs` and the `frust::app!` line stay generated.
 #   --runs <n>     Edits to measure (default: 5).
+#   --row <label>  A RESULTS.md row label (e.g. `A`, `D3gm`) printed on the header and summary lines,
+#                  so a saved transcript names its row. It changes nothing that runs.
 #   --target <t>   What each run edits (default: home):
 #                    home         bump `hotpatch-sentinel: vN` (app/src/home_page.rs, // SENTINEL-HOME)
 #                    card         bump `card-sentinel: vN` (app/src/counter_card.rs, // SENTINEL-CARD)
@@ -92,6 +94,14 @@
 #   APP_TARGET_DIR=<d>  the app's cargo target dir, where its processes are found by executable path
 #                       (default: <app>/build/rust, the template's `.cargo/config.toml` value).
 #
+# --frust-run also prints, per patched run, the host side of the latency breakdown and the patch
+# transport (R3-04). `host:` gives the mtimes of the session dir's newest `stub-N.o` and
+# `patch-N.dylib` (`<APP_TARGET_DIR>/frust-hotpatch/session-<package>/`) as save offsets, plus the
+# patch's size and mode. `hand-off:` says whether the app logged `frust-devtools: patch file handed
+# off (<len> bytes, checks passed)` after the save. That line is debug level, so it appears only
+# when the app runs with FRUST_LOG=debug (FRUST_RUN_ARGS="--define FRUST_LOG=debug"); without it
+# the run reports "not logged", which is evidence neither way.
+#
 # Every edited file is restored on exit (trap EXIT, Ctrl-C included) and the runner's process group
 # is killed; the summary ends with `git status` of this directory as proof (with --frust-run /
 # --frust-restart: a `cmp` of each restored file against its pristine copy, and any app process of
@@ -123,6 +133,7 @@ TARGETS="home|card|helper|state-type|state-field|return-type|stock-label|badge|e
 AFTER_RUN_HOOK="${AFTER_RUN_HOOK:-}"
 RETURN_TYPE_WRAP="${RETURN_TYPE_WRAP:-stack}"
 AFTER_RUN_CAPTURE_DIR="${AFTER_RUN_CAPTURE_DIR:-}"
+ROW=""
 
 # The comment header (line 2 up to the first non-comment line), without the `# ` prefix.
 usage() {
@@ -151,6 +162,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "error: --target requires ${TARGETS}" >&2; exit 2; }
       TARGET="$2"; shift 2 ;;
     --target=*) TARGET="${1#--target=}"; shift ;;
+    --row)
+      [ $# -ge 2 ] || { echo "error: --row requires a label" >&2; exit 2; }
+      ROW="$2"; shift 2 ;;
+    --row=*) ROW="${1#--row=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument '$1' (see --help)" >&2; exit 2 ;;
   esac
@@ -761,13 +776,54 @@ rss_mb() {
   if [ -n "$kb" ]; then awk -v k="$kb" 'BEGIN { printf "%.1f", k / 1024 }'; else echo "?"; fi
 }
 
+# --frust-run: the session dir's newest `stub-N.o` / `patch-N.<ext>` written after the save at `$1`
+# (unix ms): `host: stub-N.o at save+<ms>, patch-N.dylib at save+<ms> (<bytes> bytes, mode <octal>)`.
+host_artifacts() {
+  python3 - "${APP_TARGET_DIR%/}/frust-hotpatch/session-${APP_BIN}" "$1" <<'PY'
+import os, re, sys
+d, stamp = sys.argv[1], int(sys.argv[2])
+best = {}
+try:
+    names = os.listdir(d)
+except OSError:
+    names = []
+for n in names:
+    m = re.fullmatch(r"(stub|patch)-(\d+)\.(o|dylib|so|dll)", n)
+    if not m:
+        continue
+    st = os.stat(os.path.join(d, n))
+    t = int(st.st_mtime * 1000)
+    if t > stamp and (m.group(1) not in best or int(m.group(2)) > best[m.group(1)][0]):
+        best[m.group(1)] = (int(m.group(2)), n, t, st.st_size, st.st_mode & 0o777)
+parts = []
+if "stub" in best:
+    parts.append(f"{best['stub'][1]} at save+{best['stub'][2] - stamp}")
+if "patch" in best:
+    _, n, t, size, mode = best["patch"]
+    parts.append(f"{n} at save+{t - stamp} ({size} bytes, mode {mode:o})")
+print("host: " + (", ".join(parts) if parts else "no stub/patch written after the save"))
+PY
+}
+
+# --frust-run: whether the app logged the loopback hand-off after log line `$1` (a debug line).
+handoff_line() {
+  local hit
+  hit="$(tail -n +"$(($1 + 1))" "$LOG" \
+    | grep -o 'frust-devtools: patch file handed off ([0-9]* bytes, checks passed)' | head -1)"
+  if [ -n "$hit" ]; then
+    echo "hand-off: file (app logged '${hit}')"
+  else
+    echo "hand-off: not logged (a debug line: FRUST_LOG=debug shows it)"
+  fi
+}
+
 median() {
   sort -n | awk '{ v[NR] = $1 } END {
     if (NR == 0) { print "n/a"; exit }
     if (NR % 2) print v[(NR + 1) / 2]; else print int((v[NR / 2] + v[NR / 2 + 1]) / 2) }'
 }
 
-echo "hotpatch-spike measure: mode=${MODE} target=${TARGET} runs=${RUNS}"
+echo "hotpatch-spike measure: ${ROW:+row=${ROW} }mode=${MODE} target=${TARGET} runs=${RUNS}"
 [ "$MODE" = "hotpatch" ] && echo "dx: ${DX} (${DX_VERSION})"
 [ "$FRUST_MODE" = 1 ] && echo "frust: ${FRUST} ($("$FRUST" --version 2>/dev/null)); app: ${APP} (${APP_BIN})"
 echo "Logs: ${LOG_DIR}"
@@ -834,6 +890,10 @@ while [ "$run" -le "$RUNS" ]; do
       *) status="other" ;;
     esac
     [ -n "$outcome" ] && echo "    cli: ${o_text} [line at save+$((o_ms - stamp)) ms]"
+    if [ "${status%%,*}" = "patched" ]; then
+      echo "    $(host_artifacts "$stamp")"
+      echo "    $(handoff_line "$from")"
+    fi
     [ -n "$outcome" ] && OUTCOMES="${OUTCOMES}${status}"$'\t'"$((o_ms - stamp))"$'\n'
     trouble_lines "$from"
     if [ -n "$APP_PID" ] && ! kill -0 "$APP_PID" 2>/dev/null; then status="crashed"; fi
@@ -907,7 +967,7 @@ if [ "$POST_RUN_PAUSE" != "0" ]; then
 fi
 
 echo
-echo "=== Summary: mode=${MODE} target=${TARGET} ==="
+echo "=== Summary: ${ROW:+row ${ROW}, }mode=${MODE} target=${TARGET} ==="
 printf '%s' "$RESULTS"
 REFUSED_COUNT="$(printf '%s' "$RESULTS" | grep -c '(refused' || true)"
 [ "${REFUSED_COUNT:-0}" -gt 0 ] && echo "refused (anchor mismatch or other): ${REFUSED_COUNT} run(s); these are neither applied nor no-op"
@@ -920,6 +980,9 @@ if [ "$MODE" = "frust-run" ]; then
     "$(printf '%s' "$RESULTS" | grep -c '(restart)' || true) restart required (of ${RUNS})"
   echo "median save->frame, patched runs:  $(printf '%s' "$RESULTS" | grep '(patched)' \
     | sed -n 's/.*save->frame \([0-9]*\) ms.*/\1/p' | median) ms"
+  # Run 1 is the session's first patch, reported on its own: the steady state leaves it out.
+  echo "median save->frame, patched runs 2..${RUNS}: $(printf '%s' "$RESULTS" | grep -v '^run 1:' \
+    | grep '(patched)' | sed -n 's/.*save->frame \([0-9]*\) ms.*/\1/p' | median) ms"
   echo "median save->frame, restart runs (relaunched app's first frame):" \
     "$(printf '%s' "$RESULTS" | grep '(restart)' | sed -n 's/.*save->frame \([0-9]*\) ms.*/\1/p' | median) ms"
   echo "median save->CLI outcome line, restart runs:" \
