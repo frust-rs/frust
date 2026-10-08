@@ -195,6 +195,9 @@ impl AndroidAppHandle {
         let signals_dirty = ReactiveRuntime::get()
             .map(|rt| rt.take_signals_dirty())
             .unwrap_or(false);
+        // A hot patch applied since the last tick: a full rebuild must run without waiting for input.
+        #[cfg(feature = "hotpatch")]
+        let signals_dirty = signals_dirty | super::take_patch_frame_request();
 
         // Gather the remaining inputs from the tree's existing accessors and the
         // handle-side latches, then let the gate decide. `mem::take` clears each

@@ -55,6 +55,10 @@ perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
 devtools = ["frust-shell-common/devtools"]
 # Facade `gpu` forwards here. The `jni_glue` render-thread install site is not wired to it yet (accepted gap, see lib.rs docs).
 gpu = ["frust-shell-common/gpu", "frust-render/gpu"]
+# Opt-in hot patch: forwards frust-core/hotpatch (the `Component::build` jump table) and shell-common's in-app apply arms
+# (implies `devtools`), and registers a patch listener that raises the signals-dirty gate input. Absent, frust-hotpatch is
+# not in the Android graph. The edges sit in the Android-gated block, so the host build stays macro-and-helpers only.
+hotpatch = ["devtools", "frust-core/hotpatch", "frust-shell-common/hotpatch"]
 
 [package.metadata.docs.rs]
 default-target = "aarch64-linux-android"

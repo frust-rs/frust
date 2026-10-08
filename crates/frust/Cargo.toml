@@ -105,8 +105,14 @@ devtools = [
     "frust-shell-ios/devtools",
 ]
 # Opt-in, never default: hot-patch seam (frust-hotpatch's jump table around `Component::build`) plus in-app apply over
-# devtools (`frust-shell-common/hotpatch`). Only the desktop shell answers after the next frame; Android/iOS are not wired.
-hotpatch = ["frust-core/hotpatch", "frust-shell-common/hotpatch", "frust-shell-desktop/hotpatch"]
+# devtools (`frust-shell-common/hotpatch`). The desktop and Android shells redraw on the
+# next frame after a patch applies; iOS is not wired.
+hotpatch = [
+    "frust-core/hotpatch",
+    "frust-shell-common/hotpatch",
+    "frust-shell-desktop/hotpatch",
+    "frust-shell-android/hotpatch",
+]
 # Opt-in `frust::gpu` seam. `frust-shell-common/gpu` is the device slot `with_context` reads; only the
 # desktop shell installs into it yet (Android/iOS: accepted gap, see their crate docs).
 gpu = [
