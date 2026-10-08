@@ -49,9 +49,10 @@ layout-preserving edits, and all three still hold as measured. The GO stands. D2
   component struct itself (props, passed as `&self.component`), its State, and `build`'s
   concrete return type, recursively. A State-only fingerprint is necessary but not sufficient
   (see the Phase 2 requirements).
-- **Return-type-changing `build` edits are untested.** By the same mechanism they are probably a
-  D2-class hazard, not a no-op (row D). A measured row D3 — an edit that wraps the root
-  `column()` in another container — is the first Phase 2 follow-up measurement.
+- **Row D3 (H0-00, measured later): a return-type-changing `build` edit is NOT a no-op.** Wrapping
+  the root `column()` in `stack()` is patched, and the app took SIGSEGV on the first rebuild after the
+  patch in 3/3 plain dx sessions (details in D3). The same wrap in another `column()`, which keeps the
+  type, patched cleanly 3/3.
 - **Row E:** framework crates are never patched. dx does not even see the edit.
 - **Row H:** the `frust create` one-package layout cannot be patched by dx at all (see the
   template implication below).
@@ -72,6 +73,13 @@ layout-preserving edits, and all three still hold as measured. The GO stands. D2
 | Window evidence | `screencapture -x -R<window rect>` before the first edit and after the last run |
 | Clicks | AppleScript `tell application "System Events" to tell (first process whose unix id is <PID>) to click at {x, y}`. Accessibility was granted, and the click lands on the AccessKit `button Increment`. The first click after launch returns `missing value` and misses; the next ones land. |
 
+**Measurement baseline (2026-10-08).** Every row below was measured with the `frust-hotpatch`
+runtime at 1c29ba1d and dx 0.7.10, whose jump tables are anchored on `main`. That runtime rebased
+by the offset the table implied and never compared it with the images' slides, so the anchor
+mismatch went unseen. The tip refuses such tables with `PatchError::AnchorMismatch` (the runner
+prints `frust-hotpatch: refused AnchorMismatch`), so these rows reproduce only against the runtime
+at 1c29ba1d, not at the tip.
+
 ## Matrix
 
 Times are milliseconds from the save timestamp (unix ms, stamped by `measure.sh`) to the app's
@@ -91,6 +99,7 @@ as `hotpatch-spike.<id>/runner.log`. They are not committed, so the relevant lin
 | C | new private fn called from `HomePage::build` | yes | yes: count 2 -> 2 | **482** (475-1694), 5 | `["hotpatch_spike_app"]` | PASS |
 | D | State type identity changed (`type State = u32` -> (N+1)-tuple) | patch "applies", but the old `build` keeps running | count 2 unchanged; the edit never shows | 623 (622-1282), 5, "applied" only | `["hotpatch_spike_app"]` | silent no-op |
 | D2 | field `extra: u32` added to the named `struct HomeState` | yes: the NEW `build` runs (its log line appears), same PID | the new code reads/writes past the old 4-byte value | 481 (473-1227), 3 read; 485 (478-1008), 3 write | `["hotpatch_spike_app"]` | patched over the old layout (UB); survived 6/6 plain runs; crashed in run 1 of 2/2 guard-malloc sessions (confound open) |
+| D3 | `HomePage::build`'s root `column()` wrapped in `stack().child(..)` (`FlexView` -> `StackView` behind `impl View<State>`) | yes: the patch is taken, then the app dies | n/a (app gone) | n/a: SIGSEGV on the first rebuild; save->applied 1723 / 1260 / 1052, n=3 sessions | `["hotpatch_spike_app"]` | crash 3/3 (not a no-op); guard malloc: panic 1/1 (wild call) then SIGSEGV. Control, wrap in `column()` (type kept): 3/3 patched, 583 median |
 | E | `PAD_X` 12 -> 48 in `crates/frust-widgets/src/button.rs` (manual) | no: dx logs nothing | n/a | n/a (no event) | none emitted | NOT patched (expected) |
 | F | restart: kill + `cargo run -p hotpatch-spike` per edit | relaunch | no: count resets to 0 | **1570** (1436-1731), 5 | n/a | baseline |
 | G | 10 consecutive home patches | yes, all 10 | yes: count 2 -> 2 | 493 (490-505), 10 | `["hotpatch_spike_app"]` | no crash; RSS +5.4 MB |
@@ -184,7 +193,7 @@ you so.
 type's path, so the symbol matches and the patch IS taken (row D2). The p1-03b wording "a State
 change is a silent no-op, not UB" was too broad and is withdrawn.
 
-**Return-type-changing `build` edits are untested** (for example, wrapping the root `column()` in another
+**Return-type-changing `build` edits were untested at this point; row D3 below measures them** (for example, wrapping the root `column()` in another
 container changes the concrete type behind `impl View<State>`; `.child(..)`, `.flex(..)` and
 `.when(..)` on a `FlexView` return `Self` and do not). The review asked for them to be recorded as the same
 silent no-op. The D2 crash reports suggest otherwise, so they are recorded here as *untested, and
@@ -193,8 +202,7 @@ probably not a no-op*. The symbols are v0-mangled (rustc 1.98.1's default; the r
 `<<HomePage as Component>::build as HotFunction<(&HomePage, &mut HomeState), Fn2Marker>>::call_it`
 and carries no return type, because `R` is fixed by the fn-item type `F`. If so, a return-type
 change would *match*, and the old caller would read a return value of the new type through the old
-type: a D2-class layout hazard, not a no-op. This needs its own row before either claim is relied
-on.
+type: a D2-class layout hazard, not a no-op. D3 below is that row: it crashed.
 
 ### D2. Field added to a named State struct (`--target state-field --runs 3`)
 
@@ -279,6 +287,104 @@ Verdict for D2: a field added to a named State struct is hot-patched *over the o
 That is memory-unsafe whether or not a given run crashes. Row D2 makes "State layout changed ->
 restart" a hard requirement for any Phase 2 builder. Because the symbol matches, a symbol or
 instance comparison cannot detect this case.
+
+### D3. Return type of `build` changed (`measure.sh --target return-type`)
+
+Card H0-00 (tsk_000001a1181b5c6eQeQDWKjI), run 2026-10-08 on `task/hb-h0-00` cut from main
+1c29ba1d, dx 0.7.10 (57d6794), macOS, desktop, `--hot-patch --platform desktop --interactive false
+--verbose`. The edit wraps the root of `HomePage::build` and bumps the sentinel (`hotpatch-sentinel:
+vN`):
+
+```
+column()                               stack().child(column()
+    .child(..)                  ->         .child(..)
+    .cross_axis(CrossAxisAlignment::Center)    .cross_axis(CrossAxisAlignment::Center))
+```
+
+with `stack` added to the `use frust::{..}` list. `column()` returns `FlexView<State>` and
+`stack()` returns `StackView<State>`, so the concrete type behind `impl View<State>` changes
+`FlexView` -> `StackView`. Wrapping in a second `column()` does NOT change it: `FlexView`
+children are type-erased, so `column().child(column()..)` is still a `FlexView`. That is why
+`measure.sh` defaults to `RETURN_TYPE_WRAP=stack` and offers `RETURN_TYPE_WRAP=column` as the
+control. The edit adds no new crate reference and no log line (D2's confound), so "did the patched
+build run" cannot come from a log line. `AFTER_RUN_HOOK` captures the window instead.
+
+**Stack wrap, three independent `dx serve` sessions** (`PRE_RUN_PAUSE` 40 / 20 / 20 s,
+`POST_RUN_PAUSE=15`, `--runs 3`; `measure.sh` stops at the first crash, so each session has one run):
+
+| Session | save->applied | dx thin build | dx log | App |
+|---|---|---|---|---|
+| 1 (cold, counter clicked to 2 first) | 1723 ms | 1672 ms | `replaying crates: ["hotpatch_spike_app"]`, `Hot-patching: app/src/home_page.rs took 586ms` | `Application [macos] exited with error: signal: 11 (SIGSEGV)` about 20 ms after the patch line; PID gone |
+| 2 | 1260 ms | 693 ms | same, `took 326ms` | `frust-hotpatch: applied` then `exited with error: signal: 11 (SIGSEGV)` in the same millisecond |
+| 3 | 1052 ms | 778 ms | same, `took 345ms` | `frust-hotpatch: applied` then `exited with error: signal: 11 (SIGSEGV)` in the same millisecond |
+
+The before-captures show `hotpatch-sentinel: v0` (session 1: `count: 2`). No after-capture exists: the
+window was gone, so the `AFTER_RUN_HOOK` screencapture could not find the process. So `v1` was
+never seen and the patched `build`'s own output was never observed, in any session.
+
+**Crash reports** (macOS `.ips`, sessions 1-3; sessions 1 and 2 were symbolicated and read, session
+3's log shows the identical `signal: 11`): `EXC_BAD_ACCESS`, `SIGSEGV`, `KERN_INVALID_ADDRESS at
+0x0000000000000020`, the same on both reports read. The faulting frame is
+`<AnyView<HomeState> as View<HomeState>>::rebuild` +104, reached from
+`FlexView::rebuild` -> `rebuild_children` -> `rebuild_children_positional` -> `rebuild_child_tracked`,
+called from `ComponentView<HomePage>::rebuild` (the retained tree). Every frame in the report is in
+the base image and the frames carry no patched-code symbol, so the report does not say whether the
+new `build` ran to completion. A null-ish pointer plus offset 0x20 means a field read through a
+pointer that is not what the old layout expects. The crash is on the first frame after the patch
+in all three sessions: it is deterministic.
+
+**Control, wrap in `column()`** (`RETURN_TYPE_WRAP=column`, `PRE_RUN_PAUSE=20`, `--runs 3`, one
+session, PID 59432): 3/3 patched with no crash, the same PID before and after:
+
+| Run | save->applied / frame submitted | Screen |
+|---|---|---|
+| 1 | 705 / 705 ms | `hotpatch-sentinel: v1` |
+| 2 | 568 / 568 ms | `hotpatch-sentinel: v2` |
+| 3 | 582 / 583 ms | `hotpatch-sentinel: v3` |
+
+The patch pipeline, the sentinel capture and the harness are therefore sound, and the crash follows
+the type change, not the wrap itself. (The control's counter was not clicked, so it shows `count: 0`
+before and after. It makes no state-preservation claim.)
+
+**Guard malloc** (same harness as D2, one `dx serve`, app SIGTERMed and relaunched under
+`DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib`, `GuardMalloc[hotpatch-spike-<pid>]` banner
+confirmed, stack wrap applied once after a `frust-hotpatch: frame`). The app logged
+`frust-hotpatch: applied`, then:
+
+```
+thread 'main' panicked at pxfm-0.1.30/src/logs/log1p_dyadic.rs:98:21:
+index out of bounds: the len is 188 but the index is 2147483647
+```
+
+The backtrace runs `pxfm::logs::log1p_dyadic::log1p_accurate` <- the patched
+`<HomePage as Component>::build` (`call_mut`) <- `HotFunction::call_it`. `HomePage::build` has no
+reason to reach a `log1p` routine, so this is a call through a wrong target, evidence of the new
+code running against data it does not understand. The panic then ended in SIGSEGV
+(`KERN_INVALID_ADDRESS at 0x0000000000000008`) in winit's `EventHandler::handle_event`, which
+looks like unwinding out of an ObjC run-loop callout. I read that second crash as fallout of the
+panic, not as an independent finding. This is one run. Guard malloc, as in D2, guards allocation
+ends, so it is not what caught the corruption; the point of the leg is that the patched `build` does
+run and misbehaves before the crash here, which the plain sessions could not show.
+
+**Verdict for D3: crash.** An edit that changes `build`'s concrete return type is neither a no-op
+(row D) nor silently survivable. dx matches the seam symbol
+`<<HomePage as Component>::build as HotFunction<..>>::call_it`, which names the component and its
+State but not `R`; that symbol is unchanged, so the patch is taken, and the old caller reads the
+value, and the retained old `R` tree, through the wrong layout. It crashed on the first rebuild
+in 3/3 plain sessions and in the guard-malloc session, against 3/3 clean patches when the type is kept.
+What this does not show: which of the two crossings (the return slot or the retained tree `prev`)
+faulted first, since the report has no patched-code frames; and any run where the type changed
+and the app survived (none seen in 4 attempts).
+
+**Does PORT.md 2.c's prediction hold?** Yes, as far as H0-00 can test it. 2.c predicts a
+return-type change is a D2-class layout hazard (patch taken, not a no-op), that L1 removes only the
+return slot, and that a retained-tree read through the new layout stays a hazard until L3 refuses
+the patch. Observed: patch taken, crash on the first rebuild, in a retained-tree walk
+(`AnyView::rebuild` under `FlexView::rebuild`), type kept -> clean. That is not a behaviour 2.c
+fails to predict, so the "stop at phase H0" condition is not triggered. Two limits: dx here has no
+L1 or L3, so this measures the hazard L3 must catch, not that L3 catches it (that is H1-05's
+fixture); and the faulting frames being in the base image does not separate return slot from
+retained tree.
 
 ### E. Framework crate edit (frust-widgets, manual)
 
@@ -632,5 +738,5 @@ creator-image State-size witness as a backstop. PORT.md recommends STAGED delive
 Milestone 1 is `frust run --watch` hot-patching an unmodified one-package `frust create` app on
 macOS, with Linux covered by a CI canary, and rows D, D2, D3, D4, D5 and E must each answer
 "restart required". Android follows once a device gate proves patch relocation against the base
-cdylib. Row D3, a `build` return-type edit, is still unmeasured and is the follow-up plan's first
-card (H0-00).
+cdylib. Row D3, a `build` return-type edit, was measured afterwards by card H0-00 and crashed
+the app (see D3).

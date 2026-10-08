@@ -67,6 +67,15 @@ export DX=<scratch-dir>/bin/dx      # `"$DX" --version` prints `dioxus 0.7.10 (.
 
 `python3` is needed by `measure.sh`.
 
+From the tip that added `PatchError::AnchorMismatch`, `crates/frust-hotpatch` refuses dx 0.7.10's
+jump tables: dx fills both `aslr_reference` and `new_base_address` from `main`, not from
+`__frust_hotpatch_anchor`, so the offsets they imply differ from the images' slides. The runner
+prints `frust-hotpatch: refused AnchorMismatch` and `measure.sh` records the run as "refused
+(anchor mismatch)", which is neither applied nor a silent no-op. Rows D-D3 of `RESULTS.md` were
+measured against the runtime at 1c29ba1d, which rebased every key by that wrong constant without
+noticing, and they reproduce only against that runtime. A patch builder that anchors on
+`__frust_hotpatch_anchor` is needed before the hot rows run again at the tip.
+
 ## Running
 
 Use the dev profile only. frust-hotpatch (like subsecond) reads its jump table only under

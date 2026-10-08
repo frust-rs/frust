@@ -6,6 +6,13 @@
 # `frust-hotpatch: applied` / `frust-hotpatch: frame` lines stamped later than the save. Prints
 # the per-run deltas and their medians. Results are recorded by hand in RESULTS.md.
 #
+# BASELINE: from the tip that added `PatchError::AnchorMismatch` onward, the runtime refuses dx
+# 0.7.10's jump tables: dx anchors both table addresses on `main`, not on `__frust_hotpatch_anchor`,
+# so the offsets they imply disagree with the images' slides. The runner then prints
+# `frust-hotpatch: refused AnchorMismatch`, and this script records the run as "refused (anchor
+# mismatch)", distinct from applied and from a silent no-op. Rows D-D3 of RESULTS.md reproduce only
+# against the runtime at 1c29ba1d (before that check), which rebased by the wrong constant.
+#
 # Usage: examples/hotpatch-spike/measure.sh [--hotpatch | --restart] [--runs <n>] [--target <t>]
 #   --hotpatch     (default) `dx serve --hot-patch --platform desktop --interactive false --verbose`
 #                  from runner/; DX from $DX, else `dx` on PATH (must be dioxus-cli 0.7.10).
@@ -24,12 +31,24 @@
 #                                 sentinel and logs `frust-hotpatch-spike: state-field vN build ran
 #                                 extra=<v>`, so each run records whether the new build ran, the
 #                                 value it read, and whether the app PID survived.
+#                    return-type  wrap HomePage::build's root `column()` in a `stack()`, changing the
+#                                 concrete type behind `impl View<State>` from FlexView to StackView
+#                                 (RESULTS.md row D3). It adds NO new crate reference and NO log line
+#                                 (D2's confound), so "did the patched build run" is judged from the
+#                                 sentinel on screen (AFTER_RUN_HOOK captures it), not from a log line;
+#                                 without a capture file the outcome is reported as unjudged.
+#                                 RETURN_TYPE_WRAP=column wraps in another `column()` instead: FlexView
+#                                 children are type-erased, so that keeps the type (the control).
 #                  A crash, an app exit or a timeout is recorded as a run result, never fatal.
 #   STARTUP_TIMEOUT=<s> overrides the first-frame wait (default 900: a cold dx fat build is slow).
 #   PRE_RUN_PAUSE=<s>   sleeps <s> seconds after the first frame, before the first edit, so the
 #                       counter can be clicked (state-preservation check); default 0.
 #   POST_RUN_PAUSE=<s>  sleeps <s> seconds after the last run, before the app is killed, so the
 #                       patched window can be inspected; default 0.
+#   AFTER_RUN_HOOK=<cmd> run via `bash -c` after each hot run's frame (2 s settle first) as
+#                       `<cmd> <run> <app pid>` (the two values are appended to the command string,
+#                       so a script reads them as $1 and $2); its output is echoed. A capture file
+#                       is whatever the hook writes to $AFTER_RUN_CAPTURE_DIR/run-<run>.png.
 #   STATE_FIELD_WRITE=1 with --target state-field, the patched build also WRITES the new field
 #                       (`state.extra = state.extra.wrapping_add(1)`) before reading it; default 0 (read only).
 #
@@ -53,7 +72,10 @@ STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-900}"
 PRE_RUN_PAUSE="${PRE_RUN_PAUSE:-0}"
 POST_RUN_PAUSE="${POST_RUN_PAUSE:-0}"
 STATE_FIELD_WRITE="${STATE_FIELD_WRITE:-0}"
-TARGETS="home|card|helper|state-type|state-field"
+TARGETS="home|card|helper|state-type|state-field|return-type"
+AFTER_RUN_HOOK="${AFTER_RUN_HOOK:-}"
+RETURN_TYPE_WRAP="${RETURN_TYPE_WRAP:-stack}"
+AFTER_RUN_CAPTURE_DIR="${AFTER_RUN_CAPTURE_DIR:-}"
 
 # The comment header (line 2 up to the first non-comment line), without the `# ` prefix.
 usage() {
@@ -81,7 +103,7 @@ case "$RUNS" in
   ''|*[!0-9]*|0) echo "error: --runs must be a positive integer, got '$RUNS'" >&2; exit 2 ;;
 esac
 case "$TARGET" in
-  home|helper|state-type|state-field) EDIT_FILE="$HOME_RS" ;;
+  home|helper|state-type|state-field|return-type) EDIT_FILE="$HOME_RS" ;;
   card) EDIT_FILE="$CARD_RS" ;;
   *) echo "error: --target must be ${TARGETS}, got '$TARGET'" >&2; exit 2 ;;
 esac
@@ -133,10 +155,11 @@ PY
 # Apply run `$3`'s edit for target `$2` to `$1` (in place, derived from the pristine copy `$4`),
 # then print the save time in unix ms.
 apply_edit() {
-  python3 - "$1" "$2" "$3" "$4" "$STATE_FIELD_WRITE" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "$STATE_FIELD_WRITE" "$RETURN_TYPE_WRAP" <<'PY'
 import re, sys, time
 path, target, run, orig = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 write_field = sys.argv[5] == "1"
+wrap = sys.argv[6]
 src = open(orig).read().split("\n")
 
 def replace_marked(lines, marker, fn):
@@ -184,6 +207,23 @@ elif target == "state-field":
         f"let sentinel = {{ {write}log::info!(\"frust-hotpatch-spike: state-field v{run} build ran "
         f"extra={{}}\", state.extra); text(format!(\"hotpatch-sentinel: v{run} extra={{}}\", "
         f"state.extra)) }}; // SENTINEL-HOME"))
+elif target == "return-type":
+    # Wrap the root `column()` of `HomePage::build` in another container (RESULTS.md row D3). The
+    # sentinel is bumped too, so a taken patch is visible on screen. No `log` line is added.
+    if wrap not in ("stack", "column"):
+        sys.exit(f"measure.sh: RETURN_TYPE_WRAP must be stack or column, got {wrap}")
+    opens = [i for i, l in enumerate(src) if l == "        column()"]
+    closes = [i for i, l in enumerate(src) if l == "            .cross_axis(CrossAxisAlignment::Center)"]
+    if len(opens) != 1 or len(closes) != 1 or closes[0] < opens[0]:
+        sys.exit("measure.sh: expected one root `column()` ... `.cross_axis(..)` chain in build")
+    src[opens[0]] = f"        {wrap}().child(column()"
+    src[closes[0]] += ")"
+    if wrap == "stack":
+        uses = [i for i, l in enumerate(src) if l.startswith("use frust::{")]
+        if len(uses) != 1:
+            sys.exit("measure.sh: expected one `use frust::{..}` line")
+        src[uses[0]] = src[uses[0]].replace("component, text}", "component, stack, text}")
+    replace_marked(src, "// SENTINEL-HOME", bump)
 new = "\n".join(src)
 with open(path, "r+") as f:
     f.seek(0)
@@ -256,11 +296,20 @@ wait_for() {
       | grep -o "frust-hotpatch: ${kind} t_unix_ms=[0-9]*" | sed 's/.*=//' \
       | awk -v s="$after_ms" '$1 > s { print; exit }')"
     if [ -n "$t" ]; then echo "$t"; return 0; fi
+    # A refused apply never produces an `applied` line: stop waiting for one.
+    if [ "$kind" = "applied" ] && [ -n "$(refused_variant "$from_line")" ]; then return 1; fi
     if [ -n "$APP_PID" ] && ! kill -0 "$APP_PID" 2>/dev/null; then return 1; fi
     if ! kill -0 "$RUNNER_PID" 2>/dev/null; then return 1; fi
     sleep 0.1
   done
   return 1
+}
+
+# The variant named by the first `frust-hotpatch: refused <variant>` line after log line `$1`, or
+# nothing.
+refused_variant() {
+  tail -n +"$(($1 + 1))" "$LOG" | grep -o 'frust-hotpatch: refused [A-Za-z]*' | head -1 \
+    | sed 's/.*refused //'
 }
 
 log_lines() {
@@ -359,6 +408,13 @@ while [ "$run" -le "$RUNS" ]; do
     find_app_pid
   else
     applied="$(wait_for applied "$from" "$stamp" "$EDIT_TIMEOUT")" || status="timeout"
+    refused="$(refused_variant "$from")"
+    if [ -n "$refused" ]; then
+      status="refused"
+      [ "$refused" = "AnchorMismatch" ] && status="refused (anchor mismatch)"
+      tail -n +"$((from + 1))" "$LOG" | grep -E 'frust-hotpatch: (refused|apply_patch refused)' \
+        | tr -d '\033' | sed -e 's/\[[0-9;]*m//g' -e 's/^ */    runner: /' | cut -c1-240 | head -3
+    fi
     if [ "$status" = "ok" ]; then
       frame="$(wait_for frame "$from" "$stamp" "$EDIT_TIMEOUT")" || status="timeout"
     fi
@@ -372,6 +428,10 @@ while [ "$run" -le "$RUNS" ]; do
       | grep -E 'Patch rebuild:|replaying crates:|Hot-patching:|Build failed|Full rebuild' \
       | tr -d '\033' | sed -e 's/\[[0-9;]*m//g' -e 's/^ */    dx: /' | cut -c1-200
     trouble_lines "$from"
+    if [ -n "$AFTER_RUN_HOOK" ]; then
+      sleep 2
+      bash -c "${AFTER_RUN_HOOK} \"\$1\" \"\$2\"" _ "$run" "${APP_PID:-0}" 2>&1 | sed 's/^/    hook: /'
+    fi
   fi
   a_delta="n/a" f_delta="n/a"
   [ -n "$applied" ] && { a_delta=$((applied - stamp)); APPLIED_DELTAS="${APPLIED_DELTAS}${a_delta}"$'\n'; }
@@ -383,6 +443,17 @@ while [ "$run" -le "$RUNS" ]; do
       line="${line}; patched build RAN, read extra=${extra}"
     else
       line="${line}; patched build NOT seen (old build kept?)"
+    fi
+  fi
+  if [ "$TARGET" = "return-type" ] && [ "$MODE" = "hotpatch" ]; then
+    if [ "$status" = "crashed" ]; then
+      line="${line}; no patched frame to judge (app gone)"
+    elif [ "${status#refused}" != "$status" ]; then
+      line="${line}; patch refused, nothing patched to judge"
+    elif [ -n "$AFTER_RUN_CAPTURE_DIR" ] && [ -s "${AFTER_RUN_CAPTURE_DIR}/run-${run}.png" ]; then
+      line="${line}; capture run-${run}.png exists: judge sentinel v${run} by eye (not yet judged)"
+    else
+      line="${line}; outcome unjudged (no capture file; set AFTER_RUN_HOOK and AFTER_RUN_CAPTURE_DIR)"
     fi
   fi
   echo "$line"
@@ -399,5 +470,7 @@ fi
 echo
 echo "=== Summary: mode=${MODE} target=${TARGET} ==="
 printf '%s' "$RESULTS"
+REFUSED_COUNT="$(printf '%s' "$RESULTS" | grep -c '(refused' || true)"
+[ "${REFUSED_COUNT:-0}" -gt 0 ] && echo "refused (anchor mismatch or other): ${REFUSED_COUNT} run(s); these are neither applied nor no-op"
 echo "median save->applied: $(printf '%s' "$APPLIED_DELTAS" | grep . | median) ms"
 echo "median save->frame:   $(printf '%s' "$FRAME_DELTAS" | grep . | median) ms"

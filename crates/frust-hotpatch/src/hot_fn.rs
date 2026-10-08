@@ -11,10 +11,14 @@
 //! [`HotFn::from_fn_ptr`]; nothing infers it from a type's size.
 
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::marker::PhantomData;
 use std::mem::transmute;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+
+use serde::{Deserialize, Serialize};
 
 use crate::{AddressMap, get_jump_table};
 
@@ -47,23 +51,84 @@ impl HotFnPtr {
 /// Patched-dispatch misses since the last patch (see [`fall_through_count`]).
 static FALL_THROUGHS: AtomicU64 = AtomicU64::new(0);
 
+/// Patched-dispatch hits since the last patch (see [`seam_hits`]).
+static SEAM_HITS: AtomicU64 = AtomicU64::new(0);
+
+/// Each distinct missed key since the last patch (see [`missed_keys`]).
+static MISSED_KEYS: Mutex<BTreeSet<MissedKey>> = Mutex::new(BTreeSet::new());
+
+/// A jump-table key that missed, located in the image the calling code belongs to.
+///
+/// The key is the calling image's own [`HotFunction::call_it`] address (or, for
+/// [`HotFn::from_fn_ptr`], the pointer's value). `image` is 0 for the base executable and `n` for
+/// the n-th patch library this crate loaded, found from the address ranges of those images;
+/// `link_address` is the key minus that image's slide, the address the image's symbol table
+/// knows. A key in no known image has `image` [`UNKNOWN_IMAGE`](crate::UNKNOWN_IMAGE) and the raw
+/// key as `link_address`. This crate only records; the host decides what a miss means.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MissedKey {
+    /// 0 for the base executable, `n` for the n-th loaded patch.
+    pub image: u32,
+    /// The key minus the image's slide.
+    pub link_address: u64,
+}
+
 thread_local! {
     // Already `const`: the lint misfires on Android, where `thread_local!` expands differently.
     #[allow(clippy::missing_const_for_thread_local)]
     static LAST_FELL_THROUGH: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Record one jump-table lookup's outcome: `missed` means a table was installed but held no entry
-/// for this call's own address, so the original code ran.
-fn record_lookup(missed: bool) {
-    LAST_FELL_THROUGH.with(|c| c.set(missed));
-    if missed {
+/// Record one jump-table lookup's outcome: `Some(key)` means a table was installed but held no
+/// entry for this call's own key, so the original code ran; `hit` means the table mapped the key.
+fn record_lookup(missed_key: Option<u64>, hit: bool) {
+    LAST_FELL_THROUGH.with(|c| c.set(missed_key.is_some()));
+    if hit {
+        SEAM_HITS.fetch_add(1, Ordering::Relaxed);
+    }
+    if let Some(key) = missed_key {
         FALL_THROUGHS.fetch_add(1, Ordering::Relaxed);
+        let (image, link_address) = crate::anchor::classify(key);
+        MISSED_KEYS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(MissedKey {
+                image,
+                link_address,
+            });
     }
 }
 
+/// Zero the per-patch dispatch diagnostics: misses, hits and recorded missed keys.
 pub(crate) fn reset_fall_throughs() {
     FALL_THROUGHS.store(0, Ordering::Relaxed);
+    SEAM_HITS.store(0, Ordering::Relaxed);
+    MISSED_KEYS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+}
+
+/// How many [`HotFn`] calls, on any thread, found their key in the installed jump table (and so
+/// ran the patched version) since the last patch was applied. Reset to zero by every patch.
+pub fn seam_hits() -> u64 {
+    SEAM_HITS.load(Ordering::Relaxed)
+}
+
+/// Every distinct key that missed the jump table since the last patch was applied, each once,
+/// ordered by image then link address. Reset by every patch.
+///
+/// A count cannot tell a stale-code miss from a benign one: a call made from the newest patch's
+/// code computes that patch's own `call_it` address, which is never a table key, so it always
+/// misses although it runs the newest code. The image of each key tells them apart; the host
+/// classifies, this crate only records.
+pub fn missed_keys() -> Vec<MissedKey> {
+    MISSED_KEYS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .copied()
+        .collect()
 }
 
 /// Whether this thread's most recent [`HotFn`] call found a jump table installed but no mapping
@@ -83,8 +148,8 @@ pub(crate) fn reset_fall_throughs() {
 ///   code; one from an older patch's code still reachable through its vtables runs that older
 ///   patch's version.
 ///
-/// This crate records only the outcome, not the missed key, so it cannot tell these apart: read
-/// it for a call made from base-image code that the caller expects the patch to cover.
+/// This flag records only the outcome. The missed key, with the image it lies in, is recorded
+/// separately ([`missed_keys`]); that is what tells these apart.
 pub fn last_call_fell_through() -> bool {
     LAST_FELL_THROUGH.with(Cell::get)
 }
@@ -95,7 +160,7 @@ pub fn last_call_fell_through() -> bool {
 /// The count includes the benign misses of calls made from patch-image code, so after a patch
 /// to an app with nested components it is normally non-zero. It stays a plain count in this
 /// crate; telling a stale-code miss from a benign one needs the missed key (whose address range
-/// names the calling image), which a restart rule built on this diagnostic must record instead.
+/// names the calling image), which [`missed_keys`] records.
 pub fn fall_through_count() -> u64 {
     FALL_THROUGHS.load(Ordering::Relaxed)
 }
@@ -211,7 +276,8 @@ impl<A, M, F: HotFunction<A, M>> HotFn<A, M, F> {
     /// pointer's value, with the aarch64 Android pointer tag stripped) is looked up in the
     /// installed table; a hit calls the patched address, a miss or an empty table calls the
     /// original, and the outcome is recorded for [`last_call_fell_through`] /
-    /// [`fall_through_count`]. A release build calls the function directly.
+    /// [`fall_through_count`] / [`missed_keys`]; a hit is counted by [`seam_hits`]. A release build
+    /// calls the function directly.
     ///
     /// Never fails: the `Result` keeps subsecond's call shape, and the error type is
     /// [`Infallible`].
@@ -224,12 +290,19 @@ impl<A, M, F: HotFunction<A, M>> HotFn<A, M, F> {
         // SAFETY: the table reference is used only within this block, never held across a patch.
         let target = match unsafe { get_jump_table() } {
             None => {
-                record_lookup(false);
+                record_lookup(None, false);
                 None
             }
             Some(table) => {
                 let target = resolve(&table.map, key, STRIP_POINTER_TAG);
-                record_lookup(target.is_none());
+                let missed = target.is_none().then(|| {
+                    if STRIP_POINTER_TAG {
+                        split_pointer_tag(key).0
+                    } else {
+                        key
+                    }
+                });
+                record_lookup(missed, target.is_some());
                 target
             }
         };
@@ -607,5 +680,88 @@ mod tests {
             resolve(&map, 0x0000_7fff_1234_5678, true),
             Some(0x0000_7fff_9999_0000)
         );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "dispatch reads the table only in debug builds; run `cargo test -p frust-hotpatch`"
+    )]
+    fn seam_hits_count_and_reset_per_patch() {
+        let _serial = test_support::serial();
+        test_support::reset();
+
+        let key = call_it_key_of(&add);
+        let target = patched_call_it_of(&add);
+        test_support::install(table(&[(key, target)]));
+        assert_eq!(seam_hits(), 0);
+        HotFn::current(add).call((1, 2));
+        HotFn::current(add).call((1, 2));
+        assert_eq!(seam_hits(), 2);
+        // A miss is not a hit.
+        HotFn::current(mul).call((1, 2));
+        assert_eq!(seam_hits(), 2);
+
+        test_support::install(table(&[(key, target)]));
+        assert_eq!(seam_hits(), 0, "a patch resets the hit count");
+        test_support::reset();
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "dispatch reads the table only in debug builds; run `cargo test -p frust-hotpatch`"
+    )]
+    fn missed_keys_are_recorded_once_with_image_and_link_address() {
+        let _serial = test_support::serial();
+        test_support::reset();
+
+        let add_key = call_it_key_of(&add);
+        let mul_key = call_it_key_of(&mul);
+        // Synthetic ranges: `add`'s key lies in image 0 (slide 0x100), `mul`'s in patch image 2.
+        let base = |key: u64| (key as usize - 0x10, key as usize + 0x10);
+        let (a_lo, a_hi) = base(add_key);
+        let (m_lo, m_hi) = base(mul_key);
+        crate::anchor::register_for_test(0, a_lo, a_hi, 0x100);
+        crate::anchor::register_for_test(2, m_lo, m_hi, 0x40);
+
+        // A table that maps neither, so both miss.
+        test_support::install(table(&[(1, 2)]));
+        for _ in 0..3 {
+            HotFn::current(add).call((1, 2));
+            HotFn::current(mul).call((1, 2));
+        }
+        assert_eq!(
+            fall_through_count(),
+            6,
+            "the count keeps counting every miss"
+        );
+        let mut expected = vec![
+            MissedKey {
+                image: 0,
+                link_address: add_key - 0x100,
+            },
+            MissedKey {
+                image: 2,
+                link_address: mul_key - 0x40,
+            },
+        ];
+        expected.sort();
+        assert_eq!(missed_keys(), expected, "each distinct key once");
+
+        test_support::install(table(&[(1, 2)]));
+        assert!(missed_keys().is_empty(), "a patch resets the recorded keys");
+
+        // A key in no known image is reported as such, with the raw key.
+        crate::anchor::reset_for_test();
+        HotFn::current(add).call((1, 2));
+        assert_eq!(
+            missed_keys(),
+            vec![MissedKey {
+                image: crate::UNKNOWN_IMAGE,
+                link_address: add_key
+            }]
+        );
+        test_support::reset();
     }
 }
