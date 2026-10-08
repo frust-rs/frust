@@ -57,6 +57,12 @@ crossterm = "0.29"
 ansi-to-tui = { version = "8.0.1", default-features = false }
 insta = "1"
 toml_edit = "0.25"
+# Hot-patch builder (frust-drive): stub-object IO, rlib/fat-archive IO, DWARF layout gate, v0 demangling.
+# object/gimli follow dx 0.7.10's addr2line pairing (object 0.37, gimli 0.32).
+object = { version = "0.37.3", default-features = false, features = ["read", "write", "elf", "macho", "coff"] }
+ar = "0.9.0"
+gimli = { version = "0.32.3", default-features = false, features = ["read", "std"] }
+rustc-demangle = "0.1.28"
 # cli
 clap = { version = "4.6", features = ["derive"] }
 minijinja = "2.21"
