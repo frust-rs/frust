@@ -501,11 +501,10 @@ fn run_desktop_watch(
 /// with no `src/` yet) — `--watch` still runs, just with nothing to watch
 /// until the missing path is created (a re-run picks it up).
 fn spawn_fs_watcher(root: &Path, tx: mpsc::Sender<()>) -> Result<notify::RecommendedWatcher> {
+    let roots = vec![root.join("src"), root.join("Cargo.toml")];
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if res.is_ok() {
-            // The receiver may already be gone (loop exited); a send
-            // failure here is not this closure's problem to report.
-            let _ = tx.send(());
+        if let Ok(event) = res {
+            tick_on_relevant_event(&roots, &event, &tx);
         }
     })
     .context("failed to create filesystem watcher")?;
@@ -895,16 +894,116 @@ fn package_name_from_manifest(text: &str) -> Option<String> {
     None
 }
 
+/// The paths of `event` that mean "a source or build input changed", or
+/// `None` when the event is not such a change. Mirrors the TUI watcher's
+/// filter. inotify (notify's Linux backend) reports plain reads as
+/// `Access(Open)` / `Access(Close(Read))`, and a build reads every watched
+/// file, so only content-changing kinds count: `Access(Close(Write))`,
+/// `Any`, `Create`, `Modify` (except `Metadata(AccessTime)`), `Remove` and
+/// `Other`. A path-less event is a rescan (`Some` of an empty vec). Noise
+/// paths (see [`is_relevant_path`]) are dropped.
+fn relevant_paths(roots: &[PathBuf], event: &notify::Event) -> Option<Vec<PathBuf>> {
+    use notify::EventKind;
+    use notify::event::{AccessKind, AccessMode, MetadataKind, ModifyKind};
+    let kind_counts = match event.kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)) => false,
+        EventKind::Any
+        | EventKind::Create(_)
+        | EventKind::Modify(_)
+        | EventKind::Remove(_)
+        | EventKind::Other => true,
+    };
+    if !kind_counts {
+        return None;
+    }
+    if event.paths.is_empty() {
+        return Some(Vec::new());
+    }
+    let paths: Vec<PathBuf> = event
+        .paths
+        .iter()
+        .filter(|path| is_relevant_path(roots, path))
+        .cloned()
+        .collect();
+    (!paths.is_empty()).then_some(paths)
+}
+
+/// Whether `path` is a source path rather than editor/build noise, judged
+/// relative to the deepest watch root it lies under (so a checkout living
+/// under a hidden directory is not noise): nothing under `target`/`build`
+/// there, no hidden component (`.git`, `.#lib.rs` Emacs locks,
+/// `.foo.rs.swp`) except a cargo config (`.cargo/config`,
+/// `.cargo/config.toml`, a build input), and no `~`-suffixed backup.
+fn is_relevant_path(roots: &[PathBuf], path: &Path) -> bool {
+    use std::path::Component;
+    let rel = roots
+        .iter()
+        .filter_map(|root| path.strip_prefix(root).ok())
+        .min_by_key(|rel| rel.components().count())
+        .unwrap_or(path);
+    let names: Vec<String> = rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let Some(first) = names.first() else {
+        // The watch root itself: nothing to judge by name.
+        return true;
+    };
+    if first == "target" || first == "build" {
+        return false;
+    }
+    if let [dir, file] = names.as_slice()
+        && dir == ".cargo"
+        && (file == "config" || file == "config.toml")
+    {
+        return true;
+    }
+    if names.iter().any(|name| name.starts_with('.')) {
+        return false;
+    }
+    !names.last().is_some_and(|last| last.ends_with('~'))
+}
+
+/// The relaunch watcher's handler: one tick per relevant event.
+fn tick_on_relevant_event(roots: &[PathBuf], event: &notify::Event, tx: &mpsc::Sender<()>) {
+    if relevant_paths(roots, event).is_some() {
+        // The receiver may already be gone (loop exited); a send failure
+        // here is not this handler's problem to report.
+        let _ = tx.send(());
+    }
+}
+
+/// The hot watcher's handler: forwards the relevant paths of an event. A
+/// path-less rescan forwards one empty path, which wakes the loop without
+/// naming a file (the session classifies it as unaffected).
+fn forward_relevant_paths(roots: &[PathBuf], event: &notify::Event, tx: &mpsc::Sender<PathBuf>) {
+    match relevant_paths(roots, event) {
+        Some(paths) if paths.is_empty() => {
+            let _ = tx.send(PathBuf::new());
+        }
+        Some(paths) => {
+            for path in paths {
+                let _ = tx.send(path);
+            }
+        }
+        None => {}
+    }
+}
+
 /// A real [`notify`] watcher over a [`WatchSet`], sending every changed path.
 fn spawn_path_watcher(
     set: &WatchSet,
     tx: mpsc::Sender<PathBuf>,
 ) -> Result<notify::RecommendedWatcher> {
+    let roots: Vec<PathBuf> = set.dirs().chain(&set.build_inputs).cloned().collect();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
-            for path in event.paths {
-                let _ = tx.send(path);
-            }
+            forward_relevant_paths(&roots, &event, &tx);
         }
     })
     .context("failed to create filesystem watcher")?;
@@ -1299,6 +1398,115 @@ fn browser_command(url: &str) -> (&'static str, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    fn ev(kind: notify::EventKind, path: Option<&str>) -> notify::Event {
+        let event = notify::Event::new(kind);
+        match path {
+            Some(path) => event.add_path(PathBuf::from(path)),
+            None => event,
+        }
+    }
+
+    fn roots() -> Vec<PathBuf> {
+        vec![PathBuf::from("/w/src"), PathBuf::from("/w/Cargo.toml")]
+    }
+
+    fn watcher_cases() -> Vec<(notify::Event, Option<Vec<PathBuf>>)> {
+        use notify::EventKind as K;
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+        };
+        let p = |s: &str| Some(vec![PathBuf::from(s)]);
+        vec![
+            (
+                ev(
+                    K::Access(AccessKind::Open(AccessMode::Any)),
+                    Some("/w/Cargo.toml"),
+                ),
+                None,
+            ),
+            (
+                ev(
+                    K::Access(AccessKind::Close(AccessMode::Read)),
+                    Some("/w/src/lib.rs"),
+                ),
+                None,
+            ),
+            (
+                ev(
+                    K::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)),
+                    Some("/w/src/lib.rs"),
+                ),
+                None,
+            ),
+            (
+                ev(
+                    K::Modify(ModifyKind::Data(DataChange::Content)),
+                    Some("/w/src/lib.rs"),
+                ),
+                p("/w/src/lib.rs"),
+            ),
+            (
+                ev(K::Create(CreateKind::File), Some("/w/src/.#lib.rs")),
+                None,
+            ),
+            (
+                ev(K::Create(CreateKind::File), Some("/w/src/target/x")),
+                None,
+            ),
+            (
+                ev(K::Remove(RemoveKind::File), Some("/w/src/x.rs")),
+                p("/w/src/x.rs"),
+            ),
+            (
+                ev(
+                    K::Access(AccessKind::Close(AccessMode::Write)),
+                    Some("/w/src/lib.rs"),
+                ),
+                p("/w/src/lib.rs"),
+            ),
+            (ev(K::Any, None), Some(Vec::new())),
+        ]
+    }
+
+    #[test]
+    fn relevant_paths_keeps_content_changes_and_drops_reads_and_noise() {
+        for (event, expected) in watcher_cases() {
+            assert_eq!(relevant_paths(&roots(), &event), expected, "{event:?}");
+        }
+    }
+
+    #[test]
+    fn hot_path_watcher_handler_forwards_only_relevant_paths() {
+        let (tx, rx) = mpsc::channel();
+        for (event, _) in watcher_cases() {
+            forward_relevant_paths(&roots(), &event, &tx);
+        }
+        drop(tx);
+        let got: Vec<PathBuf> = rx.iter().collect();
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("/w/src/lib.rs"),
+                PathBuf::from("/w/src/x.rs"),
+                PathBuf::from("/w/src/lib.rs"),
+                PathBuf::new(),
+            ]
+        );
+    }
+
+    #[test]
+    fn relaunch_watcher_handler_ticks_only_for_relevant_events() {
+        let (tx, rx) = mpsc::channel();
+        for (event, expected) in watcher_cases() {
+            tick_on_relevant_event(&roots(), &event, &tx);
+            assert_eq!(
+                rx.try_iter().count(),
+                usize::from(expected.is_some()),
+                "{event:?}"
+            );
+        }
+    }
+
     use super::*;
     // The clap mirror `BuildFlags` wraps — still the funnel input every
     // `BuildInfo` fixture below is built from.
