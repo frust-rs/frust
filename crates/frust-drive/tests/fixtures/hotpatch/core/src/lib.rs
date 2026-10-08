@@ -122,20 +122,127 @@ impl<S, V: View<S>> View<S> for Padded<V> {
     }
 }
 
-/// A retained component that keeps its last build result by value, so
-/// the concrete view type is part of this widget's layout.
+/// A build result held behind a trait object, like frust-core's `AnyView`: a
+/// new concrete view type changes nothing in the holder's layout.
+pub struct AnyView<S> {
+    inner: Box<dyn View<S>>,
+}
+
+impl<S> AnyView<S> {
+    pub fn new(view: impl View<S> + 'static) -> Self {
+        Self {
+            inner: Box::new(view),
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        self.inner.describe()
+    }
+}
+
+/// The retained child element and its geometry, like frust-core's `ChildPod`.
+pub struct ChildPod {
+    element: AnyView<()>,
+    origin: [f64; 2],
+    size: [f64; 2],
+    captured: bool,
+}
+
+impl ChildPod {
+    fn new() -> Self {
+        Self {
+            element: AnyView::new(Empty),
+            origin: [0.0; 2],
+            size: [0.0; 2],
+            captured: false,
+        }
+    }
+}
+
+struct Empty;
+
+impl View<()> for Empty {
+    fn describe(&self) -> String {
+        String::new()
+    }
+}
+
+/// A reactive owner handle, like frust-core's `Owner`.
+pub struct Owner {
+    id: u64,
+}
+
+/// A retained component with the layout of the real `frust-core`
+/// `ComponentWidget` under the `hotpatch` feature (`crates/frust-core/src/
+/// component.rs:133-162`): `repr(C)`, the seam witness first, the state boxed,
+/// and both the previous view and the child element erased. A new concrete
+/// view type therefore reaches the layout gate only as new types.
+#[repr(C)]
 pub struct ComponentWidget<C: Component> {
-    state: C::State,
-    prev: C::View,
+    witness: hotpatch::SeamWitness,
+    state: Option<Box<C::State>>,
+    prev: AnyView<C::State>,
+    child: ChildPod,
+    owner: Owner,
+    next_id: u64,
     disposed: bool,
 }
 
 impl<C: Component> ComponentWidget<C> {
     pub fn mount(component: &C) -> Self {
-        let mut state = component.init();
-        let prev = hotpatch::build_erased(component, &mut state, hotpatch::SeamWitness::of::<C>());
+        let witness = hotpatch::SeamWitness::of::<C>();
+        let mut state = Box::new(component.init());
+        let prev = hotpatch::build_erased(component, &mut state, witness);
         Self {
-            state,
+            witness,
+            state: Some(state),
+            prev: AnyView::new(prev),
+            child: ChildPod::new(),
+            owner: Owner { id: 1 },
+            next_id: 1,
+            disposed: false,
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "{} disposed={} owner={} next={} captured={} {:?}{:?}",
+            self.prev.describe(),
+            self.disposed,
+            self.owner.id,
+            self.next_id,
+            self.child.captured,
+            (self.child.origin, self.witness),
+            (self.child.size, self.child.element.describe()),
+        )
+    }
+
+    pub fn state(&self) -> &C::State {
+        self.state.as_deref().expect("live widget has state")
+    }
+}
+
+/// The contrast: a component widget that keeps its last build result by
+/// value, so the concrete view type is part of this widget's layout. The real
+/// crate no longer has this shape (its `prev` is an erased `AnyView`); it
+/// stays here to show what the gate would refuse in that world. The state is
+/// boxed as in the real widget, so only the view type moves its layout.
+#[repr(C)]
+pub struct ByValueWidget<C: Component> {
+    witness: hotpatch::SeamWitness,
+    state: Option<Box<C::State>>,
+    prev: C::View,
+    disposed: bool,
+}
+
+impl<C: Component> ByValueWidget<C> {
+    pub fn mount(component: &C) -> Self {
+        let witness = hotpatch::SeamWitness::of::<C>();
+        let mut state = Box::new(component.init());
+        let prev = hotpatch::build_erased(component, &mut state, witness);
+        Self {
+            witness,
+            state: Some(state),
             prev,
             disposed: false,
         }
@@ -146,33 +253,7 @@ impl<C: Component> ComponentWidget<C> {
     }
 
     pub fn state(&self) -> &C::State {
-        &self.state
-    }
-}
-
-/// A retained component that keeps its last build result boxed behind a
-/// trait object, so its layout is the same whatever the view type is.
-pub struct ErasedWidget<C: Component> {
-    state: C::State,
-    prev: Box<dyn View<C::State>>,
-}
-
-impl<C: Component> ErasedWidget<C> {
-    pub fn mount(component: &C) -> Self {
-        let mut state = component.init();
-        let prev = hotpatch::build_erased(component, &mut state, hotpatch::SeamWitness::of::<C>());
-        Self {
-            state,
-            prev: Box::new(prev),
-        }
-    }
-
-    pub fn describe(&self) -> String {
-        self.prev.describe()
-    }
-
-    pub fn state(&self) -> &C::State {
-        &self.state
+        self.state.as_deref().expect("live widget has state")
     }
 }
 
@@ -182,6 +263,7 @@ pub mod hotpatch {
 
     /// The size and alignment of a component's state in the creating image.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(C)]
     pub struct SeamWitness {
         pub size: usize,
         pub align: usize,
