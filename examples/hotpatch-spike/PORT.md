@@ -1228,7 +1228,7 @@ most 50% of the restart median.
   tears down and rebuilds on the `TypeId` mismatch.
 - The guarantee is DWARF-targets-only. Windows applies no patch until H3-02 and H3-03 (section 5).
 
-**Latency: an estimate, to be confirmed by H1-11.**
+**Latency: estimated at ~493 ms, then measured twice by milestone 1 (last bullet).**
 - Measured: Phase 1, 475 / 480 ms through subsecond; Phase 2, 575 / 577 ms through frust-hotpatch;
   the same-day control on the unmodified base (A-ctl), **493 ms**; restart, 1570 ms (RESULTS.md
   rows A and F, "Phase 2: frust-hotpatch runtime").
@@ -1246,6 +1246,15 @@ most 50% of the restart median.
   it. The pass bar (50% of 1570 ms = 785 ms) leaves ~290 ms for the estimate to be wrong.
 - The first patch of a session took 1-2 s in every Phase 1/2 session (RESULTS.md, Surprises).
   Nothing here changes that.
+- **Measured (RESULTS.md, "Milestone 1" and "Milestone 1 re-run").** H1-11, on the first
+  builder: A **2191 ms**, 59.7% of the `frust run --watch --no-hot` restart (3671 ms), a FAIL. The
+  estimate had no transport term (the 3 MB base64 upload cost 801-805 ms), no load term (`dlopen`
+  plus apply, 335-367 ms), and the 300 ms debounce alone was 61% of it. After R3-01 (loopback
+  hand-off by file: transport 27-36 ms) and R3-02 (debounce 100 ms), R3-04 measured A **1397 ms**:
+  26.8% of that run's restart (5218 ms) and 38.1% of H1-11's, a PASS. What remains is the thin
+  compile with its gates (684-819 ms), the link (81-97 ms) and `dlopen` plus apply (316-332 ms);
+  the next levers are the patch image size (3 MB, debug info included) and a single-crate-type thin
+  compile. The first patch of a session is 1.5-1.9 s.
 
 **Why desktop first, stated without overreach.** Round 0 said desktop was "proven end-to-end
 except for the two builder fixes" and had no unproven links. That overstated it. What ran on this
@@ -1269,7 +1278,8 @@ the frust builder replaces or adds on desktop has not run anywhere. Those are mi
    allocations. The accepted-set lifecycle (H1-08) is new.
 4. **H0-00's outcome.** Resolved: H0-00 reproduced the crash under dx; H1-11 showed the erased seam
    turns the same edit into an ordinary rebuild (2.c), so the plan continued past H0. Milestone 1's
-   first run then failed on latency, not on a hazard row (section 7; cards R3-01 to R3-04).
+   first run then failed on latency, not on a hazard row, and the re-run after R3-01 to R3-03
+   passed (R3-04, A 1397 ms; section 7).
 5. **The security preconditions (3.7).** Token provenance and the conditional capability are new
    code in frust-devtools (H1-07). A defect there fails safe only if the capability is absent by
    default, which H1-07's tests must show.
