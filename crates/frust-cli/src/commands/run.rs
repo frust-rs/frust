@@ -3,8 +3,9 @@
 //! `-d web` browser lane that builds for `wasm32` and serves the artifact
 //! directory instead of installing/launching anything.
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -16,11 +17,15 @@ use frust_drive::android_run::{self, DeviceSelection};
 use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::desktop_run::{self, DesktopPlan};
 use frust_drive::devices::{self, Device, Kind, Platform};
+use frust_drive::hotpatch::graph::WorkspaceGraph;
+use frust_drive::hotpatch::session::{
+    DesktopStart, HotSession, Outcome, SessionHost, StartError, start_desktop,
+};
 use frust_drive::ios_run;
 use frust_drive::manifest;
 use frust_drive::packages::CargoLocator;
 use frust_drive::platform_wiring;
-use frust_drive::process::{ProcessRunner, StreamHandle, TryRecvError};
+use frust_drive::process::{ProcessRunner, RealProcessRunner, StreamHandle, TryRecvError};
 use frust_drive::web_build::{self, RequestLog};
 
 /// The testable core of `run`, taking an injected [`ProcessRunner`].
@@ -32,6 +37,7 @@ pub fn run_in(
     build_args: BuildFlags,
     device_id: Option<String>,
     watch: bool,
+    no_hot: bool,
     verbose: bool,
     no_open: bool,
 ) -> Result<u8> {
@@ -40,6 +46,7 @@ pub fn run_in(
         build_args,
         device_id,
         watch,
+        no_hot,
         verbose,
         no_open,
         RunHooks::real(),
@@ -51,11 +58,13 @@ pub fn run_in(
 /// short-circuit and the `-d web` dev-server lane) without ever installing a
 /// real, process-global Ctrl-C handler or filesystem watcher — see
 /// [`RunHooks`]'s doc.
+#[allow(clippy::too_many_arguments)]
 fn run_in_with_hooks(
     runner: &dyn ProcessRunner,
     build_args: BuildFlags,
     device_id: Option<String>,
     watch: bool,
+    no_hot: bool,
     verbose: bool,
     no_open: bool,
     hooks: RunHooks,
@@ -86,7 +95,7 @@ fn run_in_with_hooks(
     // non-deterministic. Reaches the exact call the `Desktop` arm below
     // would make anyway, just one step earlier.
     if watch {
-        return run_desktop_fallback(runner, &info, &extra_features, watch, hooks.watch);
+        return run_desktop_fallback(runner, &info, &extra_features, watch, no_hot, hooks.watch);
     }
 
     // `-d web` is a reserved device id, not a discovered one: `frust-drive`'s
@@ -114,7 +123,7 @@ fn run_in_with_hooks(
 
     match android_run::select_device(&found, device_id.as_deref()) {
         DeviceSelection::Desktop => {
-            run_desktop_fallback(runner, &info, &extra_features, watch, hooks.watch)
+            run_desktop_fallback(runner, &info, &extra_features, watch, no_hot, hooks.watch)
         }
         DeviceSelection::Auto(device) => run_on_device(runner, &device, &info, &extra_features),
         DeviceSelection::Ambiguous(candidates) => {
@@ -204,6 +213,7 @@ fn run_desktop_fallback(
     info: &BuildInfo,
     extra_features: &[String],
     watch: bool,
+    no_hot: bool,
     hooks: WatchHooks,
 ) -> Result<u8> {
     println!("No Android device connected; falling back to `cargo run` (desktop preview).");
@@ -223,6 +233,14 @@ fn run_desktop_fallback(
     let env = desktop_cargo_run_env(&plan);
 
     if watch {
+        // Hot is the default for a debug desktop `--watch`; `--no-hot`, a
+        // Profile/Release build, a `--features` passthrough (the session's
+        // fat build is the mode's own feature list) and a hook set with no
+        // hot backend all keep today's relaunch loop exactly.
+        let hot = !no_hot && info.mode == BuildMode::Debug && extra_features.is_empty();
+        if hot && hooks.hot.is_some() {
+            return run_desktop_hot(runner, info, &plan, &env, &cwd, hooks);
+        }
         return run_desktop_watch(runner, &plan, &env, &cwd, hooks);
     }
 
@@ -276,6 +294,9 @@ struct WatchHooks {
     /// duration and never inspects it (dropping a real `notify` watcher
     /// stops it).
     spawn_watcher: SpawnWatcherHook,
+    /// The hot-session seams; `None` keeps the plain relaunch loop (a test
+    /// that drives the cold loop, or a build that cannot be hot).
+    hot: Option<HotHooks>,
 }
 
 impl WatchHooks {
@@ -287,6 +308,7 @@ impl WatchHooks {
             spawn_watcher: Box::new(|root, tx| {
                 spawn_fs_watcher(root, tx).map(|w| Box::new(w) as Box<dyn std::any::Any>)
             }),
+            hot: Some(HotHooks::real()),
         }
     }
 
@@ -299,6 +321,7 @@ impl WatchHooks {
         Self {
             install_ctrlc: Box::new(|_current| Ok(())),
             spawn_watcher: Box::new(|_root, _tx| Ok(Box::new(()) as Box<dyn std::any::Any>)),
+            hot: None,
         }
     }
 }
@@ -557,7 +580,13 @@ fn watch_loop_with_slot(
     current: &Arc<Mutex<Option<StreamHandle>>>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<u8> {
-    lock_slot(current).replace(spawn_preview(runner, plan, env)?);
+    // A caller that already put a live child in the slot (the hot loop falling
+    // back after its session turned out restart-only) keeps it; the first
+    // change replaces it like any other.
+    if lock_slot(current).is_none() {
+        let handle = spawn_preview(runner, plan, env)?;
+        lock_slot(current).replace(handle);
+    }
 
     loop {
         {
@@ -657,6 +686,467 @@ fn spawn_preview(
 /// [`frust_drive::process::FakeProcessRunner::run_streaming`]).
 fn desktop_cargo_run_env(plan: &DesktopPlan) -> Vec<(String, String)> {
     plan.env.clone()
+}
+
+// ---------------------------------------------------------------------------
+// Hot mode: `frust run --watch` on a debug desktop build drives a
+// `frust_drive::hotpatch::session` instead of relaunching `cargo run`.
+// ---------------------------------------------------------------------------
+
+/// What the hot watcher registers, by the session graph's path classes. The
+/// directories are watched recursively, the files individually; a path that
+/// does not exist is skipped by the real watcher, not an error.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WatchSet {
+    /// `src/` of every workspace member: a thin build can patch these.
+    replayable: Vec<PathBuf>,
+    /// `src/` of every local path package outside the workspace: only a
+    /// fat rebuild picks these up, so the session answers with a restart.
+    local_non_member: Vec<PathBuf>,
+    /// Manifests, build scripts, the lockfile, cargo config and toolchain
+    /// files: any change is a restart.
+    build_inputs: Vec<PathBuf>,
+}
+
+impl WatchSet {
+    /// Every directory to watch recursively.
+    fn dirs(&self) -> impl Iterator<Item = &PathBuf> {
+        self.replayable.iter().chain(&self.local_non_member)
+    }
+}
+
+/// Derives the [`WatchSet`] from the session's workspace graph: member and
+/// non-member `src/` trees, and each package's manifest and build script plus
+/// the workspace-level build inputs.
+fn watch_set_from_graph(graph: &WorkspaceGraph) -> WatchSet {
+    let mut set = WatchSet::default();
+    let mut inputs = BTreeSet::new();
+    for package in graph.packages() {
+        let src = package.dir.join("src");
+        if package.member {
+            set.replayable.push(src);
+        } else {
+            set.local_non_member.push(src);
+        }
+        inputs.insert(package.dir.join("Cargo.toml"));
+        inputs.insert(package.dir.join("build.rs"));
+    }
+    let root = graph.workspace_root();
+    for name in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "frust.toml",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        ".cargo/config",
+        ".cargo/config.toml",
+    ] {
+        inputs.insert(root.join(name));
+    }
+    set.build_inputs = inputs.into_iter().collect();
+    set
+}
+
+/// The session surface the hot loop drives: [`HotSession`] in production, a
+/// scripted fake in tests.
+trait HotSessionHandle {
+    fn on_change(&mut self, paths: &[PathBuf]) -> Outcome;
+    /// Why the session can only restart, when it can.
+    fn restart_only_reason(&self) -> Option<String>;
+}
+
+impl HotSessionHandle for HotSession {
+    fn on_change(&mut self, paths: &[PathBuf]) -> Outcome {
+        HotSession::on_change(self, paths)
+    }
+
+    fn restart_only_reason(&self) -> Option<String> {
+        HotSession::restart_only_reason(self).map(str::to_string)
+    }
+}
+
+/// Why [`HotBackend::start`] produced no session.
+enum HotStartError {
+    /// This project cannot be hot-patched; use the relaunch loop.
+    Unavailable(String),
+    /// The fat build or launch failed; try again on the next change.
+    Failed(Vec<String>),
+}
+
+/// A started hot session and the app child it patches.
+type HotLaunch = (Box<dyn HotSessionHandle>, StreamHandle);
+
+/// Starts fresh fat sessions and reports what to watch. Real:
+/// `hotpatch::session::start_desktop` over the project; fake in tests.
+trait HotBackend {
+    fn watch_set(&mut self) -> Result<WatchSet>;
+    /// Fat-builds and launches a new session. `on_line` receives the build
+    /// diagnostics and the app's early output.
+    fn start(&mut self, on_line: &mut dyn FnMut(&str)) -> Result<HotLaunch, HotStartError>;
+}
+
+/// [`HotBackend`] over the real `frust_drive` session.
+struct DriveHotBackend {
+    runner: Arc<dyn ProcessRunner + Send + Sync>,
+    root: PathBuf,
+    info: BuildInfo,
+    package: String,
+}
+
+impl HotBackend for DriveHotBackend {
+    fn watch_set(&mut self) -> Result<WatchSet> {
+        let graph = WorkspaceGraph::load(
+            &*self.runner,
+            &self.root.join("Cargo.toml"),
+            None,
+            &self.package,
+            None,
+        )
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+        Ok(watch_set_from_graph(&graph))
+    }
+
+    fn start(&mut self, on_line: &mut dyn FnMut(&str)) -> Result<HotLaunch, HotStartError> {
+        let host = SessionHost::current(Arc::clone(&self.runner))
+            .map_err(|err| HotStartError::Unavailable(err.to_string()))?;
+        let start = DesktopStart {
+            root: &self.root,
+            info: &self.info,
+            package: &self.package,
+            bin: None,
+        };
+        match start_desktop(&host, &start, on_line) {
+            Ok((session, handle)) => Ok((Box::new(session), handle)),
+            Err(StartError::RestartRequired(reason)) => {
+                Err(HotStartError::Unavailable(reason.to_string()))
+            }
+            Err(StartError::FatBuildFailed { diagnostics }) => {
+                Err(HotStartError::Failed(diagnostics))
+            }
+            Err(err @ StartError::Launch { .. }) => {
+                Err(HotStartError::Failed(vec![err.to_string()]))
+            }
+        }
+    }
+}
+
+type HotBackendHook = Box<dyn FnOnce(&Path, &BuildInfo) -> Result<Box<dyn HotBackend>>>;
+type SpawnPathWatcherHook =
+    Box<dyn FnOnce(&WatchSet, mpsc::Sender<PathBuf>) -> Result<Box<dyn std::any::Any>>>;
+
+/// The injectable seams of hot mode, beside [`WatchHooks`]' own: the session
+/// backend and a watcher that reports changed *paths* (the session needs
+/// them; the relaunch loop's watcher reports bare ticks).
+struct HotHooks {
+    backend: HotBackendHook,
+    spawn_watcher: SpawnPathWatcherHook,
+}
+
+impl HotHooks {
+    fn real() -> Self {
+        Self {
+            backend: Box::new(|root, info| {
+                let package = read_package_name(root)?;
+                Ok(Box::new(DriveHotBackend {
+                    runner: Arc::new(RealProcessRunner),
+                    root: root.to_path_buf(),
+                    info: info.clone(),
+                    package,
+                }) as Box<dyn HotBackend>)
+            }),
+            spawn_watcher: Box::new(|set, tx| {
+                spawn_path_watcher(set, tx).map(|w| Box::new(w) as Box<dyn std::any::Any>)
+            }),
+        }
+    }
+}
+
+/// The `[package] name` of `root`'s `Cargo.toml`.
+fn read_package_name(root: &Path) -> Result<String> {
+    let manifest = root.join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .with_context(|| format!("reading `{}`", manifest.display()))?;
+    package_name_from_manifest(&text).with_context(|| {
+        format!(
+            "`{}` has no `[package] name` (hot mode needs a package manifest)",
+            manifest.display()
+        )
+    })
+}
+
+fn package_name_from_manifest(text: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("name") {
+            let value = rest.trim_start().strip_prefix('=')?.trim();
+            let value = value.split('#').next()?.trim();
+            return Some(value.trim_matches(['"', '\'']).to_string());
+        }
+    }
+    None
+}
+
+/// A real [`notify`] watcher over a [`WatchSet`], sending every changed path.
+fn spawn_path_watcher(
+    set: &WatchSet,
+    tx: mpsc::Sender<PathBuf>,
+) -> Result<notify::RecommendedWatcher> {
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            for path in event.paths {
+                let _ = tx.send(path);
+            }
+        }
+    })
+    .context("failed to create filesystem watcher")?;
+    for dir in set.dirs().filter(|dir| dir.is_dir()) {
+        watcher
+            .watch(dir, RecursiveMode::Recursive)
+            .with_context(|| format!("watching `{}`", dir.display()))?;
+    }
+    for file in set.build_inputs.iter().filter(|file| file.is_file()) {
+        watcher
+            .watch(file, RecursiveMode::NonRecursive)
+            .with_context(|| format!("watching `{}`", file.display()))?;
+    }
+    Ok(watcher)
+}
+
+/// `frust run --watch`'s hot mode: resolves the backend and the watch set,
+/// then hands both to [`hot_loop`]. A setup failure is printed and answered
+/// with the relaunch loop, never an error — `--watch` always works.
+fn run_desktop_hot(
+    runner: &dyn ProcessRunner,
+    info: &BuildInfo,
+    plan: &DesktopPlan,
+    env: &[(String, String)],
+    root: &Path,
+    hooks: WatchHooks,
+) -> Result<u8> {
+    let WatchHooks {
+        install_ctrlc,
+        spawn_watcher,
+        hot,
+    } = hooks;
+    let hot = hot.expect("run_desktop_hot is reached only with hot hooks");
+    let setup = (hot.backend)(root, info).and_then(|mut backend| {
+        let set = backend.watch_set()?;
+        Ok((backend, set))
+    });
+    let (mut backend, set) = match setup {
+        Ok(ok) => ok,
+        Err(err) => {
+            println!("hot reload unavailable: {err:#}; relaunching on change instead");
+            let cold = WatchHooks {
+                install_ctrlc,
+                spawn_watcher,
+                hot: None,
+            };
+            return run_desktop_watch(runner, plan, env, root, cold);
+        }
+    };
+
+    let (path_tx, path_rx) = mpsc::channel();
+    let _watcher = (hot.spawn_watcher)(&set, path_tx)?;
+    println!(
+        "Watching `{}` for changes with hot reload (Ctrl-C to exit; --no-hot relaunches instead)…",
+        root.display()
+    );
+    let current: Arc<Mutex<Option<StreamHandle>>> = Arc::new(Mutex::new(None));
+    install_ctrlc(Arc::clone(&current))?;
+    let mut on_line = |line: &str| println!("{line}");
+    hot_loop(
+        runner,
+        plan,
+        env,
+        &mut *backend,
+        path_rx,
+        WATCH_DEBOUNCE,
+        &current,
+        &mut on_line,
+    )
+}
+
+/// How a (re)launch of the hot session ended.
+enum Launched {
+    Live(Box<dyn HotSessionHandle>),
+    /// The build failed; nothing runs until the next change.
+    Failed,
+    /// Hot reload is unavailable here; the relaunch loop takes over.
+    Cold,
+}
+
+/// Starts a fresh fat session and parks its child in `current`. A
+/// restart-only session keeps its child (the relaunch loop adopts it) and
+/// prints its failed precondition once.
+fn launch_hot(
+    backend: &mut dyn HotBackend,
+    current: &Arc<Mutex<Option<StreamHandle>>>,
+    on_line: &mut dyn FnMut(&str),
+) -> Launched {
+    match backend.start(on_line) {
+        Ok((session, handle)) => {
+            lock_slot(current).replace(handle);
+            match session.restart_only_reason() {
+                Some(reason) => {
+                    on_line(&format!(
+                        "hot reload unavailable: {reason}; relaunching on change instead"
+                    ));
+                    Launched::Cold
+                }
+                None => Launched::Live(session),
+            }
+        }
+        Err(HotStartError::Unavailable(reason)) => {
+            on_line(&format!(
+                "hot reload unavailable: {reason}; relaunching on change instead"
+            ));
+            Launched::Cold
+        }
+        Err(HotStartError::Failed(diagnostics)) => {
+            for line in &diagnostics {
+                on_line(line);
+            }
+            on_line("hot build failed; watching for a source change to retry…");
+            Launched::Failed
+        }
+    }
+}
+
+/// The hot counterpart of [`watch_loop_with_slot`]: each debounced change set
+/// goes to the session. `Patched` prints its one line and leaves the app
+/// running; a compile error prints its diagnostics and leaves the app
+/// untouched; `RestartRequired` prints its reason verbatim, kills the child
+/// and starts a fresh fat session. When hot reload turns out to be
+/// unavailable the loop becomes the relaunch loop over the same watcher.
+#[allow(clippy::too_many_arguments)]
+fn hot_loop(
+    runner: &dyn ProcessRunner,
+    plan: &DesktopPlan,
+    env: &[(String, String)],
+    backend: &mut dyn HotBackend,
+    changes: mpsc::Receiver<PathBuf>,
+    debounce: Duration,
+    current: &Arc<Mutex<Option<StreamHandle>>>,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<u8> {
+    let mut session = match launch_hot(backend, current, on_line) {
+        Launched::Live(session) => Some(session),
+        Launched::Failed => None,
+        Launched::Cold => {
+            return relaunch_loop(runner, plan, env, changes, debounce, current, on_line);
+        }
+    };
+
+    loop {
+        {
+            let mut slot = lock_slot(current);
+            if drain_available_lines(&mut slot, on_line) {
+                let success = slot.take().expect("handle present in this arm").wait();
+                session = None;
+                if success {
+                    on_line("the app exited; waiting for a source change to relaunch…");
+                } else {
+                    on_line("the app failed; watching for a source change to retry…");
+                }
+            }
+        }
+
+        match changes.recv_timeout(WATCH_POLL_INTERVAL) {
+            Ok(first) => {
+                let mut paths = BTreeSet::from([first]);
+                while let Ok(path) = changes.recv_timeout(debounce) {
+                    paths.insert(path);
+                }
+                let paths: Vec<PathBuf> = paths.into_iter().collect();
+
+                let outcome = match session.as_mut() {
+                    Some(live) => {
+                        drain_available_lines(&mut lock_slot(current), on_line);
+                        live.on_change(&paths)
+                    }
+                    None => {
+                        // No live app: a change is a retry, whatever it touched.
+                        on_line("Change detected; rebuilding and relaunching…");
+                        session = match launch_hot(backend, current, on_line) {
+                            Launched::Live(next) => Some(next),
+                            Launched::Failed => None,
+                            Launched::Cold => {
+                                return relaunch_loop(
+                                    runner, plan, env, changes, debounce, current, on_line,
+                                );
+                            }
+                        };
+                        continue;
+                    }
+                };
+                match outcome {
+                    Outcome::Patched { .. } => on_line(&outcome.to_string()),
+                    Outcome::NoChange => {}
+                    Outcome::CompileFailed { diagnostics } => {
+                        for line in &diagnostics {
+                            on_line(line);
+                        }
+                        on_line("compile failed; the running app is untouched");
+                    }
+                    Outcome::RestartRequired(reason) => {
+                        on_line(&format!("restart required: {reason}"));
+                        if let Some(mut handle) = lock_slot(current).take() {
+                            handle.kill();
+                        }
+                        session = match launch_hot(backend, current, on_line) {
+                            Launched::Live(next) => Some(next),
+                            Launched::Failed => None,
+                            Launched::Cold => {
+                                return relaunch_loop(
+                                    runner, plan, env, changes, debounce, current, on_line,
+                                );
+                            }
+                        };
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if let Some(mut handle) = lock_slot(current).take() {
+                    handle.kill();
+                }
+                return Ok(0);
+            }
+        }
+    }
+}
+
+/// Hands the hot loop's change stream to the plain relaunch loop: a thread
+/// folds each changed path into the bare tick that loop takes, and ends (so
+/// the loop does) when the watcher drops. The slot may already hold a live
+/// child, which the loop keeps until the first change.
+fn relaunch_loop(
+    runner: &dyn ProcessRunner,
+    plan: &DesktopPlan,
+    env: &[(String, String)],
+    changes: mpsc::Receiver<PathBuf>,
+    debounce: Duration,
+    current: &Arc<Mutex<Option<StreamHandle>>>,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<u8> {
+    let (tick_tx, tick_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for _ in changes {
+            if tick_tx.send(()).is_err() {
+                break;
+            }
+        }
+    });
+    watch_loop_with_slot(runner, plan, env, &tick_rx, debounce, current, on_line)
 }
 
 fn select_from_prompt(
@@ -1105,8 +1595,15 @@ mod tests {
                 stderr: String::new(),
             },
         );
-        let out = run_desktop_fallback(&runner, &debug_info(), NO_EXTRA, false, WatchHooks::fake())
-            .unwrap();
+        let out = run_desktop_fallback(
+            &runner,
+            &debug_info(),
+            NO_EXTRA,
+            false,
+            false,
+            WatchHooks::fake(),
+        )
+        .unwrap();
         assert_eq!(out, 0);
     }
 
@@ -1121,6 +1618,7 @@ mod tests {
             &runner,
             BuildFlags::default(),
             Some("emulator-5554".to_string()),
+            true,
             true,
             false,
             false,
@@ -1166,6 +1664,7 @@ mod tests {
             BuildFlags::default(),
             None,
             true,
+            true,
             false,
             false,
             RunHooks::fake(),
@@ -1192,6 +1691,7 @@ mod tests {
             Some("web".to_string()),
             false,
             false,
+            false,
             true,
             RunHooks::fake(),
         )
@@ -1208,6 +1708,7 @@ mod tests {
             &runner,
             BuildFlags::default(),
             Some("WEB".to_string()),
+            false,
             false,
             false,
             true,
@@ -1227,6 +1728,7 @@ mod tests {
             &runner,
             BuildFlags::default(),
             Some("web".to_string()),
+            true,
             true,
             false,
             false,
@@ -1276,6 +1778,7 @@ mod tests {
             &runner,
             build,
             Some("web".to_string()),
+            false,
             false,
             false,
             true,
@@ -1412,6 +1915,437 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("failed") && l.contains("retry")),
             "{lines:?}"
+        );
+    }
+
+    // ---- hot mode -------------------------------------------------------
+
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use frust_drive::hotpatch::session::RestartReason;
+
+    /// One scripted start: a session's outcomes (and restart-only reason), or a failure.
+    type ScriptedStart = Result<(Vec<Outcome>, Option<String>), HotStartError>;
+
+    /// A scripted [`HotSessionHandle`]: answers each `on_change` with the next
+    /// outcome and records the paths it was given.
+    struct FakeSession {
+        outcomes: VecDeque<Outcome>,
+        calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+        restart_only: Option<String>,
+    }
+
+    impl HotSessionHandle for FakeSession {
+        fn on_change(&mut self, paths: &[PathBuf]) -> Outcome {
+            self.calls.lock().unwrap().push(paths.to_vec());
+            self.outcomes.pop_front().expect("scripted outcome")
+        }
+
+        fn restart_only_reason(&self) -> Option<String> {
+            self.restart_only.clone()
+        }
+    }
+
+    /// One scripted `HotBackend::start`: `Ok(outcomes)` is a session answering
+    /// them in order; `Err` is a start failure.
+    struct FakeBackend {
+        runner: FakeProcessRunner,
+        starts: VecDeque<ScriptedStart>,
+        started: Arc<AtomicUsize>,
+        calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+        set: WatchSet,
+    }
+
+    impl FakeBackend {
+        fn new(starts: Vec<ScriptedStart>) -> Self {
+            Self {
+                runner: FakeProcessRunner::new().with_hanging_stream("app", ["up"]),
+                starts: starts.into(),
+                started: Arc::new(AtomicUsize::new(0)),
+                calls: Arc::new(Mutex::new(Vec::new())),
+                set: WatchSet::default(),
+            }
+        }
+    }
+
+    impl HotBackend for FakeBackend {
+        fn watch_set(&mut self) -> Result<WatchSet> {
+            Ok(self.set.clone())
+        }
+
+        fn start(&mut self, _on_line: &mut dyn FnMut(&str)) -> Result<HotLaunch, HotStartError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let (outcomes, restart_only) = self.starts.pop_front().expect("scripted start")?;
+            let handle = self.runner.spawn_streaming("app", &[], None, &[]).unwrap();
+            let session = FakeSession {
+                outcomes: outcomes.into(),
+                calls: Arc::clone(&self.calls),
+                restart_only,
+            };
+            Ok((Box::new(session), handle))
+        }
+    }
+
+    /// Drives [`hot_loop`] over `backend`, sending each `(delay, path)` tick,
+    /// then lets the loop end by dropping the sender. Returns the printed lines.
+    fn drive_hot(backend: &mut FakeBackend, ticks: &[&str]) -> Vec<String> {
+        let runner = FakeProcessRunner::new().with_hanging_stream("cargo run", ["cold"]);
+        let (tx, rx) = mpsc::channel();
+        let ticks: Vec<PathBuf> = ticks.iter().map(PathBuf::from).collect();
+        let sender = std::thread::spawn(move || {
+            for path in ticks {
+                std::thread::sleep(Duration::from_millis(120));
+                tx.send(path).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        let current = Arc::new(Mutex::new(None));
+        let mut lines = Vec::new();
+        let mut on_line = |line: &str| lines.push(line.to_string());
+        let out = hot_loop(
+            &runner,
+            &bare_run_plan(),
+            &[],
+            backend,
+            rx,
+            Duration::from_millis(10),
+            &current,
+            &mut on_line,
+        )
+        .unwrap();
+        sender.join().unwrap();
+        assert_eq!(out, 0);
+        lines
+    }
+
+    fn restart(reason: RestartReason) -> Outcome {
+        Outcome::RestartRequired(reason)
+    }
+
+    /// `Patched` prints its one line and the app is neither killed nor
+    /// relaunched: a single start, the session saw the changed path.
+    #[test]
+    fn hot_patched_prints_one_line_and_does_not_relaunch() {
+        let mut backend = FakeBackend::new(vec![Ok((
+            vec![Outcome::Patched {
+                ms: 41,
+                components: 3,
+            }],
+            None,
+        ))]);
+        let lines = drive_hot(&mut backend, &["/p/src/lib.rs"]);
+        assert_eq!(backend.started.load(Ordering::SeqCst), 1, "{lines:?}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.starts_with("patched in 41 ms (3 components rebuilt)"))
+                .count(),
+            1,
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("rebuilding")), "{lines:?}");
+        assert_eq!(
+            *backend.calls.lock().unwrap(),
+            vec![vec![PathBuf::from("/p/src/lib.rs")]]
+        );
+    }
+
+    /// `RestartRequired` prints its reason verbatim, kills the child and
+    /// starts a fresh fat session through the same backend.
+    #[test]
+    fn hot_restart_required_prints_the_reason_and_relaunches() {
+        let reason = RestartReason::StateTypeChanged {
+            changes: vec!["Counter".to_string()],
+        };
+        let verbatim = format!("restart required: {reason}");
+        let mut backend = FakeBackend::new(vec![
+            Ok((vec![restart(reason)], None)),
+            Ok((Vec::new(), None)),
+        ]);
+        let lines = drive_hot(&mut backend, &["/p/src/state.rs"]);
+        assert_eq!(backend.started.load(Ordering::SeqCst), 2, "{lines:?}");
+        assert!(lines.contains(&verbatim), "{lines:?}");
+    }
+
+    /// A compile error prints the diagnostics and leaves the child running:
+    /// one start, no relaunch.
+    #[test]
+    fn hot_compile_error_keeps_the_running_app() {
+        let mut backend = FakeBackend::new(vec![Ok((
+            vec![Outcome::CompileFailed {
+                diagnostics: vec!["error[E0425]: cannot find value".to_string()],
+            }],
+            None,
+        ))]);
+        let lines = drive_hot(&mut backend, &["/p/src/lib.rs"]);
+        assert_eq!(backend.started.load(Ordering::SeqCst), 1, "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("error[E0425]")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("running app is untouched")),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("rebuilding")), "{lines:?}");
+    }
+
+    /// `NoChange` prints nothing and keeps the app.
+    #[test]
+    fn hot_no_change_is_silent() {
+        let mut backend = FakeBackend::new(vec![Ok((vec![Outcome::NoChange], None))]);
+        let lines = drive_hot(&mut backend, &["/p/README.md"]);
+        assert_eq!(backend.started.load(Ordering::SeqCst), 1);
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("patched") || l.contains("restart")),
+            "{lines:?}"
+        );
+    }
+
+    /// A restart-only session prints its failed precondition once, then the
+    /// relaunch loop takes over: the first change kills the fat child and
+    /// relaunches `cargo run`, and the session is never asked to patch.
+    #[test]
+    fn hot_restart_only_session_prints_the_precondition_once_and_relaunches_cold() {
+        let mut backend = FakeBackend::new(vec![Ok((
+            Vec::new(),
+            Some("the app does not advertise the HotPatch capability".to_string()),
+        ))]);
+        let lines = drive_hot(&mut backend, &["/p/src/lib.rs"]);
+        assert_eq!(backend.started.load(Ordering::SeqCst), 1, "{lines:?}");
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains("hot reload unavailable"))
+                .count(),
+            1,
+            "{lines:?}"
+        );
+        assert!(backend.calls.lock().unwrap().is_empty());
+        assert!(
+            lines.iter().any(|l| l.contains("Change detected")),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|l| l == "cold"), "{lines:?}");
+    }
+
+    /// A project the session cannot build for hot use behaves as today.
+    #[test]
+    fn hot_unavailable_at_start_falls_back_to_the_relaunch_loop() {
+        let mut backend = FakeBackend::new(vec![Err(HotStartError::Unavailable(
+            "restart required: no debuginfo".to_string(),
+        ))]);
+        let lines = drive_hot(&mut backend, &["/p/src/lib.rs"]);
+        assert!(
+            lines.iter().any(|l| l.contains("no debuginfo")),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|l| l == "cold"), "{lines:?}");
+    }
+
+    /// A failed fat build prints its diagnostics, runs nothing, and the next
+    /// change starts a session again.
+    #[test]
+    fn hot_fat_build_failure_retries_on_the_next_change() {
+        let mut backend = FakeBackend::new(vec![
+            Err(HotStartError::Failed(vec!["error: boom".to_string()])),
+            Ok((Vec::new(), None)),
+        ]);
+        let lines = drive_hot(&mut backend, &["/p/src/lib.rs"]);
+        assert_eq!(backend.started.load(Ordering::SeqCst), 2, "{lines:?}");
+        assert!(lines.iter().any(|l| l == "error: boom"), "{lines:?}");
+    }
+
+    /// Debounced bursts reach the session as one deduplicated change set.
+    #[test]
+    fn hot_changes_in_one_burst_reach_the_session_together() {
+        let runner = FakeProcessRunner::new();
+        let mut backend = FakeBackend::new(vec![Ok((vec![Outcome::NoChange], None))]);
+        let (tx, rx) = mpsc::channel();
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            for path in ["/p/b.rs", "/p/a.rs", "/p/b.rs"] {
+                tx.send(PathBuf::from(path)).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        let current = Arc::new(Mutex::new(None));
+        hot_loop(
+            &runner,
+            &bare_run_plan(),
+            &[],
+            &mut backend,
+            rx,
+            Duration::from_millis(50),
+            &current,
+            &mut |_| {},
+        )
+        .unwrap();
+        sender.join().unwrap();
+        assert_eq!(
+            *backend.calls.lock().unwrap(),
+            vec![vec![PathBuf::from("/p/a.rs"), PathBuf::from("/p/b.rs")]]
+        );
+    }
+
+    /// A workspace at `/w` whose member `app` depends on the non-member path
+    /// package `frust-material`.
+    const METADATA: &str = r#"{
+        "packages": [
+            {"id": "path+file:///w/app#0.1.0", "name": "app", "source": null,
+             "manifest_path": "/w/app/Cargo.toml",
+             "targets": [
+                {"name": "app", "kind": ["lib"], "crate_types": ["lib"], "src_path": "/w/app/src/lib.rs"},
+                {"name": "app", "kind": ["bin"], "crate_types": ["bin"], "src_path": "/w/app/src/main.rs"}]},
+            {"id": "path+file:///x/material#0.6.0", "name": "frust-material", "source": null,
+             "manifest_path": "/x/material/Cargo.toml",
+             "targets": [
+                {"name": "frust_material", "kind": ["lib"], "crate_types": ["lib"], "src_path": "/x/material/src/lib.rs"}]}
+        ],
+        "workspace_members": ["path+file:///w/app#0.1.0"],
+        "resolve": {"nodes": [
+            {"id": "path+file:///w/app#0.1.0", "deps": [
+                {"name": "frust_material", "pkg": "path+file:///x/material#0.6.0",
+                 "dep_kinds": [{"kind": null, "target": null}]}]},
+            {"id": "path+file:///x/material#0.6.0", "deps": []}],
+         "root": "path+file:///w/app#0.1.0"},
+        "workspace_root": "/w"
+    }"#;
+
+    /// The watch set classifies the graph into the session's three path
+    /// classes: replayable members, local non-member path packages, and
+    /// build inputs.
+    #[test]
+    fn the_watch_set_has_the_three_path_classes() {
+        let graph = WorkspaceGraph::from_metadata(METADATA, "app", None).unwrap();
+        let set = watch_set_from_graph(&graph);
+        assert_eq!(set.replayable, vec![PathBuf::from("/w/app/src")]);
+        assert_eq!(set.local_non_member, vec![PathBuf::from("/x/material/src")]);
+        for input in [
+            "/w/app/Cargo.toml",
+            "/w/app/build.rs",
+            "/x/material/Cargo.toml",
+            "/w/Cargo.toml",
+            "/w/Cargo.lock",
+            "/w/.cargo/config.toml",
+            "/w/rust-toolchain.toml",
+        ] {
+            assert!(
+                set.build_inputs.contains(&PathBuf::from(input)),
+                "{input} in {:?}",
+                set.build_inputs
+            );
+        }
+        let dirs: Vec<_> = set.dirs().cloned().collect();
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/w/app/src"),
+                PathBuf::from("/x/material/src")
+            ]
+        );
+    }
+
+    /// The hot watcher hook receives the backend's whole watch set, and
+    /// `run_desktop_hot` drives the session from the paths it forwards.
+    #[test]
+    fn run_desktop_hot_registers_the_watch_set_and_feeds_changes_to_the_session() {
+        let set = WatchSet {
+            replayable: vec![PathBuf::from("/w/app/src")],
+            local_non_member: vec![PathBuf::from("/x/material/src")],
+            build_inputs: vec![PathBuf::from("/w/Cargo.toml")],
+        };
+        let mut backend = FakeBackend::new(vec![Ok((
+            vec![Outcome::Patched {
+                ms: 5,
+                components: 1,
+            }],
+            None,
+        ))]);
+        backend.set = set.clone();
+        let calls = Arc::clone(&backend.calls);
+        let registered: Arc<Mutex<Option<WatchSet>>> = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&registered);
+        let hooks = WatchHooks {
+            install_ctrlc: Box::new(|_| Ok(())),
+            spawn_watcher: Box::new(|_, _| unreachable!("the tick watcher is for the cold loop")),
+            hot: Some(HotHooks {
+                backend: Box::new(move |_, _| Ok(Box::new(backend) as Box<dyn HotBackend>)),
+                spawn_watcher: Box::new(move |set, tx| {
+                    *seen.lock().unwrap() = Some(set.clone());
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(150));
+                        tx.send(PathBuf::from("/w/app/src/lib.rs")).unwrap();
+                        std::thread::sleep(Duration::from_millis(400));
+                    });
+                    Ok(Box::new(()) as Box<dyn std::any::Any>)
+                }),
+            }),
+        };
+        let runner = FakeProcessRunner::new();
+        // The sender thread's `tx` clone is the only one: the loop ends when
+        // that thread finishes and drops it.
+        let out = run_desktop_hot(
+            &runner,
+            &debug_info(),
+            &bare_run_plan(),
+            &[],
+            Path::new("/w/app"),
+            hooks,
+        )
+        .unwrap();
+        assert_eq!(out, 0);
+        assert_eq!(registered.lock().unwrap().as_ref(), Some(&set));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![vec![PathBuf::from("/w/app/src/lib.rs")]]
+        );
+    }
+
+    /// `--no-hot` (and profile/release) never touch the hot hooks.
+    #[test]
+    fn no_hot_keeps_the_relaunch_loop_and_never_builds_a_backend() {
+        // No scripted `cargo run`: reaching the relaunch loop is what fails.
+        let runner = FakeProcessRunner::new();
+        let hooks = RunHooks {
+            watch: WatchHooks {
+                install_ctrlc: Box::new(|_| Ok(())),
+                spawn_watcher: Box::new(|_, _tx| {
+                    // Dropping the sender ends the loop immediately.
+                    Ok(Box::new(()) as Box<dyn std::any::Any>)
+                }),
+                hot: Some(HotHooks {
+                    backend: Box::new(|_, _| panic!("--no-hot must not build a hot backend")),
+                    spawn_watcher: Box::new(|_, _| panic!("--no-hot must not watch paths")),
+                }),
+            },
+            web: WebRunHooks::fake(),
+        };
+        let err = run_in_with_hooks(
+            &runner,
+            BuildFlags::default(),
+            None,
+            true,
+            true,
+            false,
+            false,
+            hooks,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("cargo"), "{err:#}");
+    }
+
+    #[test]
+    fn the_package_name_is_read_from_the_package_table() {
+        let text =
+            "[workspace]\nname = \"nope\"\n\n[package]\nversion = \"1\"\nname = \"my-app\" # c\n";
+        assert_eq!(package_name_from_manifest(text).as_deref(), Some("my-app"));
+        assert_eq!(
+            package_name_from_manifest("[workspace]\nmembers = []\n"),
+            None
         );
     }
 }
