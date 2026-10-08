@@ -64,6 +64,13 @@
 //! 1 MiB cap both ends enforce. `apply_patch` is answered only after the
 //! app's next frame, so it waits at least [`APPLY_PATCH_MIN_WAIT`] whatever
 //! the connection's own timeout.
+//!
+//! On a loopback session whose app advertises
+//! [`HotpatchInfo::patch_file_hand_off`], no chunk is sent: `apply_patch`
+//! names the patch the host already wrote instead
+//! ([`ApplyPatchParams::file`]: its absolute path and [`sha256_hex`] of its
+//! bytes), and the app reads it under its own checks (owner-only regular
+//! file, same user, size and digest). No new RPC is involved.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -176,6 +183,14 @@ pub fn encode_base64(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// The SHA-256 of `bytes` as 64 lowercase hex characters — the digest a
+/// patch handed off by file carries ([`frust_devtools_protocol::PatchFile`]),
+/// which the app recomputes over the bytes it reads.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    format!("{:x}", sha2::Sha256::digest(bytes))
 }
 
 /// `bytes` split into the `patch_chunk` requests that carry them, in offset
@@ -399,7 +414,8 @@ impl DevtoolsClient {
     }
 
     /// `apply_patch` — applies the bytes previously uploaded as
-    /// `params.patch_id`. Waits up to the connection timeout or
+    /// `params.patch_id`, or the file `params.file` names (the loopback
+    /// hand-off; then nothing is uploaded first). Waits up to the connection timeout or
     /// [`APPLY_PATCH_MIN_WAIT`], whichever is longer, since the app answers
     /// only after its next frame. An `Err` that is not a
     /// [`DevtoolsRpcError`] (a closed connection, a timeout, an undecodable
@@ -934,7 +950,8 @@ pub(crate) mod test_server {
     /// patch methods `METHOD_NOT_FOUND` without [`Capability::HotPatch`].
     /// Chunks must arrive in offset order and hold at most
     /// [`PATCH_CHUNK_MAX_BYTES`] raw bytes; `apply_patch`'s `len` must
-    /// equal the bytes received. A `frame_stats_subscribe` ack is followed
+    /// equal the bytes received — or, when it names a `file`, the file's
+    /// size, and the file's SHA-256 must match (no chunks are required then). A `frame_stats_subscribe` ack is followed
     /// by one `frame_stats` notification. Deliberately reimplements just
     /// enough JSON-RPC framing to drive the client end-to-end without
     /// depending on the in-app devtools service — this crate may depend on
@@ -1102,11 +1119,18 @@ pub(crate) mod test_server {
             Ok(params) => params,
             Err(e) => return Some(Err(invalid_params(e.to_string()))),
         };
-        let received = uploads
-            .lock()
-            .unwrap()
-            .get(&params.patch_id)
-            .map_or(0, |bytes| bytes.len() as u64);
+        let received = match &params.file {
+            Some(file) => match std::fs::read(&file.path) {
+                Ok(bytes) if super::sha256_hex(&bytes) == file.sha256 => bytes.len() as u64,
+                Ok(_) => return Some(Err(invalid_params("patch file digest mismatch"))),
+                Err(e) => return Some(Err(invalid_params(format!("patch file: {e}")))),
+            },
+            None => uploads
+                .lock()
+                .unwrap()
+                .get(&params.patch_id)
+                .map_or(0, |bytes| bytes.len() as u64),
+        };
         if received != params.len {
             return Some(Err(invalid_params(format!(
                 "patch is {received} bytes, apply_patch says {}",
@@ -1672,6 +1696,7 @@ mod tests {
                 patches_applied: 0,
                 patch_bytes_loaded: 0,
                 pending_layout_mismatches: Vec::new(),
+                patch_file_hand_off: false,
             }),
             ..Script::default()
         }
@@ -1704,7 +1729,49 @@ mod tests {
                 ifunc_count: 0,
             },
             expected_seams: 1,
+            file: None,
         }
+    }
+
+    #[test]
+    fn sha256_hex_matches_the_fips_180_test_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn apply_patch_naming_a_file_needs_no_upload() {
+        let mut script = hot_script();
+        script
+            .applies
+            .push_back(ApplyReply::Outcome(outcome(true, 1)));
+        let server = test_server::spawn(script);
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+
+        let path = std::env::temp_dir().join(format!(
+            "frust-drive-client-handoff-{}.so",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"patch!").unwrap();
+        let mut params = apply_params(6, 6);
+        params.file = Some(frust_devtools_protocol::PatchFile {
+            path: path.to_string_lossy().into_owned(),
+            sha256: sha256_hex(b"patch!"),
+        });
+        assert_eq!(client.apply_patch(&params).unwrap(), outcome(true, 1));
+        assert_eq!(server.methods(), vec!["handshake", "apply_patch"]);
+        let sent: ApplyPatchParams =
+            serde_json::from_value(server.requests().pop().unwrap().params).unwrap();
+        assert_eq!(sent, params);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

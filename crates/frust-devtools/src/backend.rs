@@ -8,7 +8,9 @@
 //! that costs and guarantees.
 
 #[cfg(feature = "hotpatch")]
-use frust_devtools_protocol::{ApplyPatchParams, HotpatchInfo, PatchChunkParams, PatchOutcome};
+use frust_devtools_protocol::{
+    ApplyPatchParams, HotpatchInfo, PatchChunkParams, PatchFile, PatchOutcome,
+};
 use frust_devtools_protocol::{
     Capability, HandshakeInfo, InputScrollParams, InputTapParams, MetricsSnapshot,
     PROTOCOL_VERSION, RpcError, ScreenshotResult, WidgetProps, WidgetTreeDump,
@@ -178,7 +180,7 @@ pub trait DevtoolsBackend: Send + 'static {
         ))
     }
 
-    // The three hot-patch calls (this crate's `hotpatch` feature). A backend
+    // The hot-patch calls (this crate's `hotpatch` feature). A backend
     // that overrides them declares [`Capability::HotPatch`] in
     // [`Self::handshake_info`], and even then the service keeps the capability
     // (and dispatches these) only while every code-execution precondition
@@ -209,12 +211,29 @@ pub trait DevtoolsBackend: Send + 'static {
         ))
     }
 
+    /// Read the patch an `apply_patch` names by file (the loopback hand-off,
+    /// [`ApplyPatchParams::file`]) and return its bytes, which then take the
+    /// same [`Self::apply_patch`] path uploaded chunks do. A backend that
+    /// accepts this advertises [`HotpatchInfo::patch_file_hand_off`] and
+    /// refuses the file unless every check on [`PatchFile`] holds (no symlink,
+    /// a regular file, owned by this process's effective uid, `mode & 0o077 ==
+    /// 0`, size `len`, matching SHA-256); no error or log line carries the
+    /// path. Defaults to a refusal ([`BackendError::InvalidRequest`]).
+    #[cfg(feature = "hotpatch")]
+    fn patch_file(&self, file: &PatchFile, len: u64) -> Result<Vec<u8>, BackendError> {
+        let _ = (file, len);
+        Err(BackendError::invalid_request(
+            "this backend does not accept patch files",
+        ))
+    }
+
     /// Apply a patch whose `bytes` were reassembled from chunks received on
-    /// the requesting, authenticated connection; `bytes.len() == params.len`
-    /// is already checked. The backend still checks `pid` and
-    /// `anchor_runtime` against its own process, and answers after the frame
-    /// that follows the apply. No path ever comes from the wire: a backend
-    /// that needs a file writes one itself. Defaults to
+    /// the requesting, authenticated connection, or read by
+    /// [`Self::patch_file`]; `bytes.len() == params.len` is already checked.
+    /// The backend still checks `pid` and `anchor_runtime` against its own
+    /// process, and answers after the frame that follows the apply. Beyond
+    /// [`Self::patch_file`]'s checked read, no path from the wire is used: a
+    /// backend that needs a file to load writes its own. Defaults to
     /// [`BackendError::NotSupported`].
     #[cfg(feature = "hotpatch")]
     fn apply_patch(

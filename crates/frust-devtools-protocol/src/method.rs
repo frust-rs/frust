@@ -47,6 +47,9 @@ pub enum Method {
     PatchChunk,
     /// Client→server request; params: [`crate::ApplyPatchParams`];
     /// result: [`crate::PatchOutcome`]. Capability-gated like `Screenshot`.
+    /// Applies the `patch_chunk` uploads for `patch_id`, or — on an app that
+    /// advertises [`crate::HotpatchInfo::patch_file_hand_off`] — the
+    /// host-written file named by [`crate::ApplyPatchParams::file`] instead.
     ApplyPatch,
 }
 

@@ -38,6 +38,8 @@ object.workspace = true
 ar.workspace = true
 gimli.workspace = true
 rustc-demangle.workspace = true
+# SHA-256 of a patch handed off by file on a loopback hot-patch session.
+sha2.workspace = true
 
 [dev-dependencies]
 frust-drive = { path = ".", features = ["test-util"] }

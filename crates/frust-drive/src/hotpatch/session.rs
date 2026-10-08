@@ -23,7 +23,10 @@
 //! accepted sets, `hotpatch_info`'s pending layout-mismatch records and the
 //! patch budget are read, and only then is the stub built against the
 //! process's runtime anchor, the patch thin-linked, uploaded in chunks and
-//! applied. One patch is in flight at a time, and nothing is ever sent to a
+//! applied — or, when the app advertises `patch_file_hand_off`, restricted
+//! to `0600` and named on `apply_patch` by absolute path and SHA-256 instead
+//! of uploaded (the session is loopback-only, so the app reads the very file
+//! the host wrote). One patch is in flight at a time, and nothing is ever sent to a
 //! restart-only session, to a non-loopback endpoint, with pending records
 //! or over budget.
 //!
@@ -50,13 +53,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use frust_devtools_protocol::{
-    ApplyPatchParams, Capability, Discovery, JumpTableWire, MissedKey, PatchOutcome,
+    ApplyPatchParams, Capability, Discovery, JumpTableWire, MissedKey, PatchFile, PatchOutcome,
     parse_discovery_line, parse_failure_line, redact_discovery_token,
 };
 
 use crate::build_info::{BuildInfo, BuildMode};
 use crate::desktop_run;
-use crate::devtools_client::{DevtoolsClient, DevtoolsRpcError, is_not_supported};
+use crate::devtools_client::{DevtoolsClient, DevtoolsRpcError, is_not_supported, sha256_hex};
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::manifest::{self, HotpatchSection};
 use crate::process::{ProcessRunner, StreamHandle, TryRecvError};
@@ -566,9 +569,26 @@ enum Compiled {
 
 /// A linked patch, ready to send.
 struct LinkedPatch {
+    /// Where the link wrote it (`patch-<n>` under the session dir).
+    path: PathBuf,
     bytes: Vec<u8>,
     table: JumpTableWire,
     symbols: ImageSymbols,
+}
+
+/// Prepares the loopback hand-off of the patch at `path` whose bytes are
+/// `bytes`: restricts the file to its owner (`0600`, which the app requires)
+/// and names it by absolute path and SHA-256. `None` when the path cannot be
+/// put on the wire (not UTF-8): the session then uploads the patch in chunks.
+/// Public so the CI canary prepares its patch exactly as a session does.
+pub fn hand_off(path: &Path, bytes: &[u8]) -> Result<Option<PatchFile>, HotpatchError> {
+    thin_link::restrict_to_owner(path)?;
+    let absolute = std::path::absolute(path)
+        .map_err(|err| HotpatchError::io(format!("resolving `{}`", path.display()), err))?;
+    Ok(absolute.to_str().map(|path| PatchFile {
+        path: path.to_string(),
+        sha256: sha256_hex(bytes),
+    }))
 }
 
 /// The build half of a session: classification, replay, thin link. A
@@ -792,7 +812,19 @@ impl HotSession {
 
         let patch_id = self.next_patch_id;
         self.next_patch_id += 1;
-        if let Err(err) = client.upload_patch(patch_id, &linked.bytes) {
+        // The endpoint and peer were checked loopback above, so an app that
+        // takes the hand-off reads the file this host just wrote.
+        let file = if info.patch_file_hand_off {
+            match hand_off(&linked.path, &linked.bytes) {
+                Ok(file) => file,
+                Err(err) => return restart(RestartReason::builder(&err)),
+            }
+        } else {
+            None
+        };
+        if file.is_none()
+            && let Err(err) = client.upload_patch(patch_id, &linked.bytes)
+        {
             return restart(RestartReason::DevtoolsFailed {
                 detail: format!("{err:#}"),
             });
@@ -804,6 +836,7 @@ impl HotSession {
             anchor_runtime,
             table: linked.table,
             expected_seams: u32::try_from(present.len()).unwrap_or(u32::MAX),
+            file,
         };
         let outcome = match client.apply_patch(&params) {
             Ok(outcome) => outcome,
@@ -1639,6 +1672,7 @@ impl PatchBuilder for DesktopBuilder {
         )?;
         let table = super::jump_table::create_jump_table(&self.cache, &symbols)?;
         Ok(LinkedPatch {
+            path: linked.patch,
             bytes,
             table,
             symbols,
@@ -1763,6 +1797,9 @@ mod tests {
         compiles: VecDeque<FakeCompile>,
         calls: Arc<Mutex<Vec<String>>>,
         patch: Vec<u8>,
+        /// Where `link` writes `patch-<n>.so` (the rig's session dir),
+        /// world-readable, as a linker under a `022` umask would.
+        out_dir: Option<PathBuf>,
     }
 
     impl FakeBuilder {
@@ -1772,6 +1809,7 @@ mod tests {
                 compiles: compiles.into(),
                 calls: Arc::new(Mutex::new(Vec::new())),
                 patch: (0..1000u32).map(|i| (i % 253) as u8).collect(),
+                out_dir: None,
             }
         }
     }
@@ -1808,7 +1846,22 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("link {n} {anchor_runtime:#x}"));
+            let path = match &self.out_dir {
+                Some(dir) => {
+                    let path = dir.join(format!("patch-{n}.so"));
+                    std::fs::write(&path, &self.patch).unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt as _;
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                            .unwrap();
+                    }
+                    path
+                }
+                None => PathBuf::from(format!("/nonexistent/patch-{n}.so")),
+            };
             Ok(LinkedPatch {
+                path,
                 bytes: self.patch.clone(),
                 table: JumpTableWire {
                     map: [(0x40, 0x0)].into_iter().collect(),
@@ -1829,6 +1882,7 @@ mod tests {
             patches_applied: 0,
             patch_bytes_loaded: 0,
             pending_layout_mismatches: Vec::new(),
+            patch_file_hand_off: false,
         }
     }
 
@@ -1884,13 +1938,19 @@ mod tests {
 
     /// A session against a fake app scripted by `script`, attached the way
     /// [`start_desktop`] attaches, with `base` seeding the accepted sets.
-    fn rig_with(script: Script, builder: FakeBuilder, base: LayoutTable, budget: Budget) -> Rig {
+    fn rig_with(
+        script: Script,
+        mut builder: FakeBuilder,
+        base: LayoutTable,
+        budget: Budget,
+    ) -> Rig {
         let server = test_server::spawn(script);
         let app = attach_app(server.addr, Some(FAKE_TOKEN), TRIPLE);
         let target_dir = temp_dir("rig");
         let accepted = AcceptedSets::begin(&target_dir, "session-app", base, home_seam()).unwrap();
         let calls = Arc::clone(&builder.calls);
         let dir = accepted.dir().to_path_buf();
+        builder.out_dir = Some(dir.clone());
         Rig {
             session: HotSession {
                 builder: Box::new(builder),
@@ -1973,6 +2033,55 @@ mod tests {
         );
         assert!(outcome.to_string().starts_with("patched in "));
         assert!(outcome.to_string().ends_with(" ms (2 components rebuilt)"));
+        assert_eq!(rig.sent(), vec!["patch_chunk", "apply_patch"]);
+        assert_eq!(params.file, None, "no hand-off without the app's flag");
+    }
+
+    #[test]
+    fn an_app_advertising_the_hand_off_is_named_the_patch_file_and_sent_no_chunk() {
+        let mut script = hot_script(vec![applied(1, 2, Vec::new())]);
+        script.info.as_mut().unwrap().patch_file_hand_off = true;
+        let mut rig = rig_with(
+            script,
+            FakeBuilder::new(Vec::new()),
+            table(&[("app::HomeState", 4)]),
+            Budget::default(),
+        );
+        let outcome = rig.change();
+        assert!(
+            matches!(outcome, Outcome::Patched { components: 2, .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(rig.sent(), vec!["apply_patch"]);
+        assert_eq!(rig.server.uploaded(1), None);
+
+        let apply = rig.server.requests().pop().unwrap();
+        let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
+        assert_eq!((params.patch_id, params.len), (1, 1000));
+        let file = params.file.expect("the hand-off names the patch file");
+        let path = PathBuf::from(&file.path);
+        assert!(path.is_absolute(), "{}", file.path);
+        assert_eq!(
+            path,
+            std::path::absolute(rig.dir.join("patch-1.so")).unwrap()
+        );
+        let patch: Vec<u8> = (0..1000u32).map(|i| (i % 253) as u8).collect();
+        assert_eq!(file.sha256.len(), 64);
+        assert!(
+            file.sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{}",
+            file.sha256
+        );
+        assert_eq!(file.sha256, sha256_hex(&patch));
+        assert_eq!(std::fs::read(&path).unwrap(), patch);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the hand-off file is owner-only");
+        }
     }
 
     #[test]

@@ -2265,6 +2265,7 @@ dependencies = [
  "rustc-demangle",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
  "toml 1.1.4+spec-1.1.0",
  "toml_edit 0.25.13+spec-1.1.0",
@@ -2615,8 +2616,10 @@ dependencies = [
  "frust-text",
  "frust-theme",
  "kurbo",
+ "libc",
  "log",
  "reactive_graph",
+ "sha2",
 ]
 
 [[package]]
