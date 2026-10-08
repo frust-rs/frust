@@ -10,6 +10,20 @@
 //! is recognised as a link step and handed to
 //! [`link_intercept`](super::link_intercept).
 //!
+//! **Privacy.** A record holds the invocation's environment, so a scope
+//! directory is created `0700` and a record `0600` from the moment it
+//! exists (unix; no-op elsewhere), and an older scope's records are
+//! tightened once when it is reused. Only the allowlisted environment is
+//! stored ([`env_is_allowlisted`]): cargo (`CARGO*`), the build-script
+//! contract (`OUT_DIR`, `TARGET`, `HOST`, `PROFILE`, `OPT_LEVEL`, `DEBUG`,
+//! `NUM_JOBS`), the toolchain (`RUSTC*`, `RUSTFLAGS`, `RUSTDOC*`, `RUST_*`,
+//! `RUSTUP_*`, the `CC`/`CXX`/`AR`/`LD`/`RANLIB`/`*FLAGS` families and
+//! `*_LINKER`), `PATH`, `HOME`, temp dirs, locale, the Apple and Android
+//! SDK variables, `PKG_CONFIG_*` and the wrapper's own `FRUST_*`. Anything
+//! else (an exported `GITHUB_TOKEN`, cloud keys) is dropped, and so is any
+//! allowlisted name that looks like a credential (`*TOKEN*`, `*SECRET*`,
+//! `*PASSWORD*`, `*CREDENTIAL*`, `*_KEY*`, e.g. `CARGO_REGISTRY_TOKEN`).
+//!
 //! **Record key.** A record is stored as `{crate}.bin.json` iff `bin` is
 //! among the invocation's `--crate-type` values, else `{crate}.lib.json`,
 //! and keeps every type. dioxus-cli 0.7.10 read only the first
@@ -145,7 +159,8 @@ pub struct RustcRecord {
     /// The wrapper's arguments as cargo passed them: the rustc program
     /// first, then rustc's own arguments.
     pub args: Vec<String>,
-    /// The invocation's whole environment, sorted by name.
+    /// The invocation's allowlisted environment ([`env_is_allowlisted`]),
+    /// sorted by name.
     pub envs: Vec<(String, String)>,
     /// Every `--crate-type` value, in order, deduplicated.
     pub crate_types: Vec<String>,
@@ -265,22 +280,62 @@ pub fn write_record(
     key: &RecordKey,
     record: &RustcRecord,
 ) -> Result<PathBuf, HotpatchError> {
+    ensure_private_scope(scope_dir)?;
+    let json = serde_json::to_vec(record).map_err(|err| {
+        HotpatchError::unsupported(format!("cannot serialize the {key} record: {err}"))
+    })?;
+    let path = scope_dir.join(key.file_name());
+    let tmp = scope_dir.join(format!(".{}.tmp-{}", key.file_name(), std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    write_private_file(&tmp, &json)
+        .map_err(|err| HotpatchError::io(format!("writing `{}`", tmp.display()), err))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|err| HotpatchError::io(format!("moving the {key} record into place"), err))?;
+    Ok(path)
+}
+
+/// Creates `scope_dir` (and parents) and makes it owner-only (`0700`); an
+/// existing scope is tightened too, along with its `*.json` records (`0600`).
+/// A no-op beyond `create_dir_all` off unix.
+fn ensure_private_scope(scope_dir: &Path) -> Result<(), HotpatchError> {
     std::fs::create_dir_all(scope_dir).map_err(|err| {
         HotpatchError::io(
             format!("creating capture scope `{}`", scope_dir.display()),
             err,
         )
     })?;
-    let json = serde_json::to_vec(record).map_err(|err| {
-        HotpatchError::unsupported(format!("cannot serialize the {key} record: {err}"))
-    })?;
-    let path = scope_dir.join(key.file_name());
-    let tmp = scope_dir.join(format!(".{}.tmp-{}", key.file_name(), std::process::id()));
-    std::fs::write(&tmp, json)
-        .map_err(|err| HotpatchError::io(format!("writing `{}`", tmp.display()), err))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|err| HotpatchError::io(format!("moving the {key} record into place"), err))?;
-    Ok(path)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let io = |what: &str, path: &Path, err| {
+            HotpatchError::io(format!("{what} `{}`", path.display()), err)
+        };
+        std::fs::set_permissions(scope_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|err| io("restricting capture scope", scope_dir, err))?;
+        let entries = std::fs::read_dir(scope_dir)
+            .map_err(|err| io("listing capture scope", scope_dir, err))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "json")
+                && entry.file_type().is_ok_and(|kind| kind.is_file())
+            {
+                super::thin_link::restrict_to_owner(&path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Writes `bytes` to a new file at `path` that is `0600` from creation.
+fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 /// Reads one record. Malformed JSON, an empty `args`, or a file name whose
@@ -375,7 +430,10 @@ pub fn run_wrapper(
             let key = RecordKey::new(crate_name, &crate_types);
             let record = RustcRecord {
                 args: args.clone(),
-                envs: utf8_envs(envs)?,
+                envs: utf8_envs(envs)?
+                    .into_iter()
+                    .filter(|(name, _)| env_is_allowlisted(name))
+                    .collect(),
                 crate_types,
             };
             write_record(scope_dir, &key, &record)?;
@@ -428,6 +486,75 @@ fn utf8_args(args: &[OsString]) -> Result<Vec<String>, HotpatchError> {
             })
         })
         .collect()
+}
+
+/// Exact names a record keeps beyond the prefix families.
+const ENV_ALLOW_EXACT: &[&str] = &[
+    "CARGO",
+    "OUT_DIR",
+    "TARGET",
+    "HOST",
+    "PROFILE",
+    "OPT_LEVEL",
+    "DEBUG",
+    "NUM_JOBS",
+    "RUSTFLAGS",
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "SDKROOT",
+    "DEVELOPER_DIR",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "IPHONEOS_DEPLOYMENT_TARGET",
+    "CC",
+    "CXX",
+    "AR",
+    "LD",
+    "RANLIB",
+    "CFLAGS",
+    "CXXFLAGS",
+    "LDFLAGS",
+];
+
+/// Prefixes a record keeps (`CARGO_*`, `RUSTC*`, `CC_<triple>`, ...).
+const ENV_ALLOW_PREFIX: &[&str] = &[
+    "CARGO_",
+    "RUSTC",
+    "RUSTDOC",
+    "RUST_",
+    "RUSTUP_",
+    "CC_",
+    "CXX_",
+    "AR_",
+    "LD_",
+    "RANLIB_",
+    "CFLAGS_",
+    "CXXFLAGS_",
+    "LDFLAGS_",
+    "LC_",
+    "ANDROID_",
+    "NDK_",
+    "PKG_CONFIG_",
+    "FRUST_",
+];
+
+/// Substrings that mark a credential; they win over the allowlist.
+const ENV_DENY_SUBSTRING: &[&str] = &["TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "_KEY"];
+
+/// Whether a record keeps the variable `name` (see the module doc).
+pub fn env_is_allowlisted(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if ENV_DENY_SUBSTRING.iter().any(|bad| upper.contains(bad)) {
+        return false;
+    }
+    ENV_ALLOW_EXACT.contains(&name)
+        || ENV_ALLOW_PREFIX
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        || name.ends_with("_LINKER")
 }
 
 fn utf8_envs(envs: &[(OsString, OsString)]) -> Result<Vec<(String, String)>, HotpatchError> {
@@ -558,9 +685,7 @@ pub fn prepare_scope_dir(
     inputs: &ScopeInputs,
 ) -> Result<PathBuf, HotpatchError> {
     let dir = scope_dir(target_dir, inputs)?;
-    std::fs::create_dir_all(&dir).map_err(|err| {
-        HotpatchError::io(format!("creating capture scope `{}`", dir.display()), err)
-    })?;
+    ensure_private_scope(&dir)?;
     host_path::canonicalize_simplified(&dir).map_err(|err| {
         HotpatchError::io(format!("resolving capture scope `{}`", dir.display()), err)
     })
@@ -779,6 +904,96 @@ mod tests {
             ]
         );
         assert!(scope.join("my_app.lib.json").is_file());
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_scope_is_0700_and_its_record_0600() {
+        let scope = temp_dir("private").join("nested").join("scope");
+        let key = RecordKey::new("a", &strings(&["lib"]));
+        let record = RustcRecord {
+            args: strings(&["rustc"]),
+            envs: Vec::new(),
+            crate_types: strings(&["lib"]),
+        };
+        let path = write_record(&scope, &key, &record).unwrap();
+        assert_eq!(mode(&scope), 0o700);
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reusing_an_older_scope_tightens_it_and_its_records() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scope = temp_dir("reuse");
+        fs::set_permissions(&scope, fs::Permissions::from_mode(0o755)).unwrap();
+        let old = scope.join("old.lib.json");
+        fs::write(&old, "{}").unwrap();
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o644)).unwrap();
+        let key = RecordKey::new("new", &strings(&["lib"]));
+        let record = RustcRecord {
+            args: strings(&["rustc"]),
+            envs: Vec::new(),
+            crate_types: strings(&["lib"]),
+        };
+        write_record(&scope, &key, &record).unwrap();
+        assert_eq!(mode(&scope), 0o700);
+        assert_eq!(mode(&old), 0o600);
+        assert_eq!(mode(&scope.join("new.lib.json")), 0o600);
+    }
+
+    #[test]
+    fn secrets_never_reach_the_record_but_the_build_environment_does() {
+        let scope = temp_dir("allowlist");
+        let runner = FakeProcessRunner::new()
+            .with(LIB_COMPILE.join(" "), ok_output("{\"artifact\":\"x\"}\n"));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let env = envs(&[
+            ("SOME_SECRET_TOKEN", "x"),
+            ("AWS_SECRET_ACCESS_KEY", "y"),
+            ("GITHUB_TOKEN", "z"),
+            ("CARGO_REGISTRY_TOKEN", "w"),
+            ("CARGO_PKG_NAME", "my-app"),
+            ("OUT_DIR", "/o"),
+            ("PATH", "/bin"),
+            ("FRUST_HOTPATCH_LINK", "1"),
+            ("CC_aarch64_linux_android", "clang"),
+            ("CARGO_TARGET_X_LINKER", "ld"),
+        ]);
+        run_wrapper(&runner, &scope, &os(LIB_COMPILE), &env, &mut out, &mut err).unwrap();
+        let records = load_records(&scope).unwrap();
+        let names: Vec<&str> = records
+            .values()
+            .next()
+            .unwrap()
+            .envs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        for gone in [
+            "SOME_SECRET_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "CARGO_REGISTRY_TOKEN",
+        ] {
+            assert!(!names.contains(&gone), "{gone} leaked: {names:?}");
+        }
+        for kept in [
+            "CARGO_PKG_NAME",
+            "OUT_DIR",
+            "PATH",
+            "FRUST_HOTPATCH_LINK",
+            "CC_aarch64_linux_android",
+            "CARGO_TARGET_X_LINKER",
+        ] {
+            assert!(names.contains(&kept), "{kept} dropped: {names:?}");
+        }
     }
 
     #[test]
