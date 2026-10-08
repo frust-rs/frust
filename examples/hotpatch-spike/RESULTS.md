@@ -740,3 +740,350 @@ macOS, with Linux covered by a CI canary, and rows D, D2, D3, D4, D5 and E must 
 "restart required". Android follows once a device gate proves patch relocation against the base
 cdylib. Row D3, a `build` return-type edit, was measured afterwards by card H0-00 and crashed
 the app (see D3).
+
+## Milestone 1: `frust run --watch` on a stock `frust create` app (H1-11)
+
+Card H1-11 (tsk_000001a1181b5c72XYnKkX5g), run 2026-10-08 on `task/hb-h1-11`, cut from
+`feature/hotpatch-h1` @ ad69b4d6 (every other H1 card merged: builder, session, CLI hot mode, TUI
+hot path, canary). Same machine, OS and toolchain as the Environment block above (`Mac16,1`, Apple
+M4, macOS 27.0.1, rustc/cargo 1.98.1), logged-in GUI session, screen unlocked throughout. dx is not
+used anywhere in this section.
+
+### Verdict: FAIL
+
+The pass bar (PORT.md §7) has three parts, and two fail:
+
+1. **Median save->frame at most 50% of row F: FAIL.** Row A's median is **2191 ms**. Row F, the
+   restart through `frust run --watch --no-hot`, has a median of **3671 ms** over 10 runs in two
+   sessions (3288 and 3706 ms per session). 2191 ms is 59.7% of the pooled F (66.6% and 59.1% of
+   the per-session medians). The bar is 1836 ms; no hot row's median comes under it (A0, A, B, C,
+   G: 2191-2309 ms).
+2. **Zero `patched` lines for D/D2/D3/D4/D5/E: FAIL, on D3.** D, D2, D4's second edit, D5 and E
+   answer `restart required` on every run (16 runs in total, 2 of them under guard malloc). Row D3,
+   H0-00's stack wrap, prints `patched` 3/3, plus 2/2 under guard malloc. The app neither crashes
+   nor shows a heap error, and its state survives (row D3 below), but the bar says zero.
+3. **Row A against the 493 ms estimate: recorded.** 2191 ms is 1698 ms (4.4x) over the estimate.
+   The ~290 ms margin PORT.md §7 allowed is exceeded almost six times over. Where the time goes
+   is measured below (*Latency breakdown*). The single largest new cost is moving the patch to the
+   app (~800 ms), which no Phase 1/2 row paid.
+
+What holds: a stock one-package `frust create` app hot-patches with no template change. Child,
+second-child and new-function edits land in the same PID with State kept (rows A0, A, B, C, H). Ten
+patches run in one process (G). The State and type layout hazards (D2, D4's second patch, D5)
+and the State identity change (D, see its reason variant) are refused before anything is sent, E
+is refused by path class, and the TUI Watch leg behaves like the CLI. D3 is the exception above.
+
+Per PORT.md §7 a FAIL stops the plan at milestone 1. Neither failure is softened here.
+
+### Rig and method
+
+- **frust**: `cargo build --release -p frust-cli` in the worktree (1 m 49 s), i.e. the optimised
+  `frust` binary a developer installs. Every row used that binary: CLI, builder (`frust` as
+  `RUSTC_WORKSPACE_WRAPPER` and linker) and TUI. The app is a debug build (hot sessions are
+  debug-only).
+- **App**: `frust create hotapp --frust-path <worktree>` into a scratch directory outside the
+  repository (never committed): one package, the template's `crate-type = ["cdylib", "staticlib",
+  "rlib"]`, Material 3, generated `main.rs` and `frust::app!` line. Row A0 ran on it unmodified.
+  Then `measure.sh --prepare-app` rewrote `src/home_page.rs` and `src/lib.rs` and added
+  `src/counter_card.rs` (header of `measure.sh`). It kept the template's scaffold, app bar, FAB
+  and label, and added a named `HomeState { count }`, a `CounterCard` child, the edit markers, and
+  a root `build` that hosts `HomePage` in one arm of `either(home_page::SHOW_HOME, ..)` (row D5's
+  shape). It changed no package, crate type, `main.rs` or `app!` line. Row E ran on a second app
+  whose `--frust-path` is a `git archive` copy of ad69b4d6 in the scratch directory, so the
+  framework edit never touched the worktree.
+- **Runs**: `measure.sh --frust-run --app <app> --target <t> --runs <n>` runs `frust run --watch`
+  from the app directory and logs every output line as `<arrival unix ms> <line>`. It edits in
+  place, stamps the save, and reads the CLI's verbatim `patched in N ms (k components rebuilt)` /
+  `restart required: <reason>` line and the app's unchanged `frust-hotpatch: applied
+  t_unix_ms=` / `frust-hotpatch: frame t_unix_ms=` probes (level info). The app PID comes from the
+  executable path (`ps`), RSS from `ps -o rss=` (reported in MiB, i.e. KiB / 1024). **Times are
+  save->frame submitted** (the probe's definition, see Matrix above). Hazard edits are cumulative,
+  so each run changes the layout against the base the previous run's restart relaunched from.
+- **Row F**: `measure.sh --frust-restart`, which is `frust run --watch --no-hot --features
+  frust/hotpatch` (the CLI's own kill + `cargo run`). The feature only turns on the first-frame
+  probe. Timed to the relaunched process's first frame.
+- **State evidence**: Increment (the FAB) was clicked three times through System Events after the
+  first frame. The first click returns `missing value` and misses, as before, so the count is 2.
+  Then `screencapture` of the window (made frontmost) after every run. Captures and logs stayed in
+  the scratch directory and are quoted here, not committed.
+- **Guard malloc**: `FRUST_RUN_ARGS="--define DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib"`.
+  `frust run`'s `--define` pairs reach the spawned fat image's environment (`desktop_exe_plan`) and
+  the fat build's, so the session drives a guard-malloc app itself. A fat exe launched by hand
+  cannot be driven: the session only attaches to the child it spawned, through that child's
+  discovery line (`read_discovery` in `hotpatch::session`), and has no attach-to-pid entry. The
+  cost of the `--define` route is that the CLI's build and link children run under guard malloc
+  too (`GuardMalloc[frust-<pid>]` banners from the linker step).
+- The machine was otherwise idle during every timed session. No build ran in parallel; the spike
+  gate ran afterwards.
+
+### Matrix
+
+| Row | Edit | Outcome lines (n) | PID / State | save->frame median (min-max), n | Verdict |
+|---|---|---|---|---|---|
+| A0 | template label `...this many times:` -> `... vN` on the **unmodified** generated app | `patched in 1812-2207 ms (1 components rebuilt)` (5/5) | 17422 kept; count 2 -> 2, label `v5` | **2309** (2128-2828), 5 | patched |
+| A | home sentinel (prepared app) | `patched in 1852-2229 ms (1 components rebuilt)` (5/5) | 22039 kept; count 2 -> 2, `hotpatch-sentinel: v5` | **2191** (2172-2623), 5 | patched; **bar FAIL** |
+| B | card sentinel, second child `CounterCard` | `patched in 1840-2002 ms (1 components rebuilt)` (5/5) | 24304 kept; count 2 -> 2, `card-sentinel: v5` | **2210** (2159-2440), 5 | patched |
+| C | new private fn called from `HomePage::build` | `patched in 1874-2036 ms (1 components rebuilt)` (5/5) | 26153 kept; count 2 -> 2, `hotpatch-helper: v5` | **2219** (2195-2392), 5 | patched |
+| D | `HomeState` -> (N+1)-tuple (type identity) | `restart required: ... ComponentWidget<hotapp::home_page::HomePage> changed layout (248 bytes, members moved); ... restarting to keep memory safe` (3/3) | new PID each run | outcome line at save+1236-1402; relaunched first frame 6997 (5567-8456), 3 | restart, but **`LayoutChanged`, not `StateTypeChanged`** |
+| D2 | `HomeState` gains `extra1..extraN` (nested component, root through the seam) | `restart required: hotapp::home_page::HomeState changed layout (4 → 8 bytes); restarting to keep memory safe`, then 8 → 12, 12 → 16 (3/3) | new PID each run; relaunched app logs `extra1=4242` | line at save+1232-1316; relaunch 5384 (5294-6815), 3 | restart (`LayoutChanged`) |
+| D3 | H0-00's edit: root `scaffold(..)` wrapped in N `stack()`s | `patched in 1958-2203 ms (1 components rebuilt)` (3/3; 2/2 under guard malloc) | 39066 kept, `hotpatch-sentinel: v3`; guard malloc: count 2 kept, FAB still counts to 4 | 2307 (2278-2702), 3 | **patched: bar FAIL** (no crash, no heap error) |
+| D4 | pair: patch 1 adds `struct Badge<k> { n: u32 }`, patch 2 adds `m` | patch 1: `patched in 2168 / 1894 ms`; patch 2: `restart required: hotapp::home_page::Badge1 changed layout (4 → 8 bytes); restarting to keep memory safe` (and `Badge2`) | patch 1 keeps the PID, patch 2 relaunches | patch 2: line at save+1018-1019; relaunch 5471 / 5987, 2 pairs | patch 2 refused against the accepted set (`LayoutChanged`) |
+| D5 | `HomeState` gains `extraN` AND `SHOW_HOME` flips the root `either(..)` arm | `restart required: hotapp::home_page::HomeState changed layout (4 → 8 bytes); restarting to keep memory safe`, 8 → 12, 12 → 16 (3/3; 2/2 under guard malloc) | new PID each run; relaunched app shows the other arm | line at save+1231-1339; relaunch 7038 (6061-7517), 3 | restart (`LayoutChanged`); guard malloc: no heap error |
+| E | append a line to `frust-widgets/src/button.rs` of the app's frust path dependency | `` restart required: `<frust copy>/crates/frust-widgets/src/button.rs` belongs to the path dependency `frust-widgets`, which a patch cannot replay `` (3/3) | new PID each run | line at save+320-419; relaunch 7742 (7494-9331), 3 | restart (`PathDependencyChanged`) |
+| F | restart: `frust run --watch --no-hot`, kill + `cargo run` | n/a | new PID each run; count 2 -> 0 | **3671** pooled (2584-4504), 10: session 1 3288, session 2 3706 | baseline |
+| G | 10 consecutive home patches | `patched in 1865-2141 ms` (10/10) | 28144 kept; count 2 -> 2, `v10` | 2276 (2187-2750), 10 | no crash; RSS +21.9 MiB; counters below |
+| H | one-package template app patches | A0 (unmodified app) and A-C (same package shape) | | | **yes** |
+| I | cold fat session vs cold `cargo build`, one `target/` | | | fat: first frame 74.3 s (2nd cold app: 67.4 s); `cargo build`: 63.0 s | fat +18%; one target dir |
+
+Zero `patched` lines appeared for D, D2, D4's second edit, D5 and E. D3 printed three, plus two
+under guard malloc.
+
+### A, A0, B, C, H: patched with State kept
+
+The CLI line and the probe lines of row A run 5, as logged (arrival stamp first):
+
+```
+1791452489677 patched in 1852 ms (1 components rebuilt)
+1791452489677 [frust INFO] frust-hotpatch: applied t_unix_ms=1791452489673
+1791452489677 [frust INFO] frust-hotpatch: frame t_unix_ms=1791452489675
+```
+
+The applied and frame probes land in the same or the next millisecond in every patched run, so
+save->applied and save->frame are interchangeable here. The CLI's `patched` line follows `frame` by a
+few milliseconds (`PatchOutcome` is answered after the next frame). The app's own lines reach the
+CLI's stdout only when `on_change` returns, so their arrival stamps bunch; only the `t_unix_ms`
+values are used.
+
+- **A0 (row H's strongest case).** This was the unmodified `frust create` output, in the same
+  session as row I's cold start (first frame 74.3 s after launch). Per run: 2828 / 2427 / 2141 /
+  2309 / 2128 ms. Before-capture: count 2 and the stock label; after run 5: count 2, label `v5`,
+  PID 17422 throughout.
+- **A.** 2623 / 2542 / 2179 / 2191 / 2172 ms; PID 22039; before `count: 2`, `hotpatch-sentinel:
+  v0`; after `count: 2`, `v5`, `card-sentinel: v0`.
+- **B.** 2440 / 2210 / 2159 / 2323 / 2183 ms; PID 24304; after `count: 2`, `card-sentinel: v5`,
+  `hotpatch-sentinel: v0`. A patch reaches a second `component(..)` child in another module.
+- **C.** 2392 / 2350 / 2201 / 2219 / 2195 ms; PID 26153; after `hotpatch-helper: v5`, `count: 2`.
+- **H.** Answered by A0 and A-C: the frust-owned builder patches the template's one-package
+  `[lib]` with all three crate types. Rows H of Phase 1 (dx, `replaying crates: []`) no longer
+  apply. Patch images are 3,017,952 bytes for a sentinel edit (3,018,096 with a new fn), twice the
+  spike's 1.5 MB.
+- **First patch of a session.** It costs 2.4-2.8 s against 2.2-2.3 s steady (run 1 of A0 / A / B /
+  C / G: 2828 / 2623 / 2440 / 2392 / 2750 ms). The difference sits before the build starts:
+  save->`on_change` is 358-839 ms in those runs, 312-324 ms in steady state. The 1-2 s first-patch
+  penalty of the dx rows is gone.
+
+### Latency breakdown (why 2.2 s, not 493 ms)
+
+Two sources split a steady-state patched run:
+
+- **Host files.** The session dir (`<target>/frust-hotpatch/session-hotapp/`) keeps `stub-N.o` and
+  `patch-N.dylib`. Their mtimes give "stub written" and "patch linked".
+- **App files.** A 2 ms poller on the app's cache dir (`~/Library/Caches/frust-hotpatch/`) gives
+  the moment the app finished writing the uploaded patch (file mtime) and the moment it removed
+  the file after loading it.
+
+Measured over 4 runs in a diagnostic session (median 2260 ms, consistent with A):
+
+| Phase | ms (steady state) |
+|---|---|
+| save -> `on_change` starts (300 ms debounce + file event) | 312-324 |
+| `on_change` -> `stub-N.o` written (thin compile of the tip lib with its three crate types, L3 DWARF read + diff, seam check, symbol work) | 640-900 |
+| `stub-N.o` -> `patch-N.dylib` linked | 75-81 |
+| patch linked -> app's copy fully written (`patch_chunk` upload of 3,017,952 bytes as base64) | **801-805** |
+| app's copy written -> removed = `applied` probe (write, `dlopen`, table install; same ms as `applied`) | 335-367 |
+| `applied` -> `frame` | 0-2 |
+
+A standalone `dlopen` of fresh copies of a patch image (ad-hoc, linker-signed) took 111-329 ms,
+so most of the last phase is the first-map signature check, not frust code. Against PORT.md §7's
+assumptions, the estimate had no ~800 ms transport and no ~340 ms load. It also assumed the tip
+compile would be "used up" by the gates, but compile + gates here are 640-900 ms. The debounce
+(300 ms, `WATCH_DEBOUNCE`) alone is 61% of the 493 ms estimate.
+
+### D: State type identity: refused, but as `LayoutChanged`
+
+All three runs (tuple of 2, 3 and 4 `u32`) answered, verbatim:
+
+```
+restart required: frust_core::component::ComponentWidget<hotapp::home_page::HomePage> changed layout (248 bytes, members moved); frust_core::component::{impl#2}::teardown::{closure_env#0}<(), hotapp::home_page::HomePage> changed layout (32 bytes, members moved); frust_widgets::either::EitherWidget<frust_core::component::ComponentWidget<hotapp::home_page::HomePage>, frust_widgets::text::TextWidget> changed layout (544 bytes, members moved); frust_widgets::either::EitherWidget<frust_core::component::ComponentWidget<hotapp::home_page::HomePage>, frust_widgets::text::TextWidget>::Left changed layout (544 bytes, members moved); restarting to keep memory safe
+```
+
+PIDs 33888 -> 34600 -> 35245 -> 35809. Acceptance criterion 2 expects `StateTypeChanged` here.
+`AcceptedSets::check` runs the L3 diff before the seam identity check, and a State identity change
+also changes the member type of `ComponentWidget<HomePage>` (`state: Option<Box<HomeState>>` ->
+`Option<Box<(u32, u32)>>`). The size stays the same, but the hashed member type does not, so L3
+refuses first. On a DWARF target this edit can never reach `StateTypeChanged`. The edit is safe
+(never patched), but the reason a developer reads is a layout message about framework types, not
+"State type changed".
+
+### D2, D4, D5: refused by L3 against the accepted set
+
+- **D2** (`HomeState` in `HomePage`, a nested component, with the root routed through the seam):
+  4 → 8, 8 → 12, 12 → 16 bytes; PIDs 36501 -> 37037 -> 37574 -> 38128. The relaunched app reads
+  the new field correctly: `frust-hotpatch-spike: state-field v1 build ran extra1=4242`. (Its
+  `build` runs and logs this on every frame, about 41,000 lines in a few seconds, so the log line
+  should not be copied into real code.)
+- **D4**: run 1 adds `Badge1 { n }` -> `patched in 2168 ms`, PID 40432 kept, new type merged into
+  the accepted set. Run 2 adds `m` -> `restart required: hotapp::home_page::Badge1 changed layout
+  (4 → 8 bytes); restarting to keep memory safe`. The second pair (`Badge2`, PID 41202) repeats
+  it exactly. The base table never held `Badge1`, so this refusal comes only from the accepted
+  set.
+- **D5**: the same edit as D2 plus the `either` arm swap in one save. 3/3 `restart required:
+  hotapp::home_page::HomeState changed layout (...)`. After run 1 the relaunched window shows
+  `HomePage is in the other arm (SHOW_HOME = false)`. Nothing was sent to the old process, so the
+  in-app swap never ran over a mismatched state.
+- **D5 under guard malloc** (2 runs): `restart required: hotapp::home_page::HomeState changed
+  layout (4 → 8 bytes)` and `(8 → 12 bytes)`. Three app processes printed
+  `GuardMalloc[hotapp-<pid>]: Allocations will be placed on 16 byte boundaries.` (PIDs 46200,
+  47618, 48945). No `GuardMalloc` error, signal, panic or abort appears in the log. The refusal
+  sends nothing, so no non-creator drop can happen. The in-app leak path is H0-02's test.
+  Guard-malloc timings (outcome line at save+7.1-7.8 s, RSS ~960 MiB) are not latency data.
+
+### D3: H0-00's edit is patched, and survives
+
+Each run wraps the root of `HomePage::build` in one more `stack()` (`stack().child(scaffold(..))`,
+then two, then three). This is a new concrete return type every time, the H0-00 edit on the
+template's scaffold root.
+
+- **Plain** (PID 39066): `patched in 2203 / 1987 / 1958 ms (1 components rebuilt)`, save->frame
+  2702 / 2307 / 2278 ms. Same PID, `hotpatch-sentinel: v3` on screen, no crash.
+- **Guard malloc** (PID 50548, banner confirmed): `patched in 8139 / 3486 ms`. The count was 2
+  before the patches and 2 after. Two clicks after the second patch took it to 4, so the patched
+  tree is live and interactive. No heap error, signal or panic.
+
+**Against H0-00's prediction note.** PORT.md 2.c predicted the following. L1 removes the return
+slot. The retained-tree crossing stays a hazard. L3 refuses the edit (H1-05 fixture
+`d3_the_observed_stack_wrap_is_refused`). Observed instead: L3 reports nothing. In frust-core,
+`ComponentWidget<C>` holds `prev: AnyView<C::State>` and `child: ChildPod`, both erased
+(`crates/frust-core/src/component.rs:133-162`). A new `R` therefore reaches the DWARF table only as
+new types (`StackView<..>`), and a type absent from the accepted set passes. The H1-05 fixture
+refuses the edit only because its mock `ComponentWidget` keeps `prev: C::View` by value
+(`crates/frust-drive/tests/fixtures/hotpatch/core/src/lib.rs:125-131`), a layout the real crate no
+longer has. The edit is survivable because `AnyView`'s rebuild compares `TypeId`s and, on a
+mismatch, tears the old subtree down through the old view and builds a fresh one
+(`crates/frust-core/src/view.rs:253-273`). H0-00's crash came from the return slot and the
+by-value tree that dx-era frust had. The row does not match "refused by L3"; it matches "L1 makes
+a type-changing `R` an ordinary rebuild". That is not a crash, but under the bar's letter it is a
+`patched` line on a hazard row. A same-named type that changes layout inside `R` (a field added to
+an app view struct) remains L3's job and is what D2/D4 exercise.
+
+### E: framework edit
+
+Three appended-comment edits to `crates/frust-widgets/src/button.rs` of the scratch frust copy.
+Each answered `` restart required: `<frust copy>/crates/frust-widgets/src/button.rs` belongs to
+the path dependency `frust-widgets`, which a patch cannot replay `` within 320-419 ms. The relaunch
+re-fat-builds the edited crate and its dependents: first frame at save+7.5-9.3 s, PIDs 56457 ->
+57119 -> 57886 -> 58559. The file was restored byte-identical afterwards (`cmp`).
+
+### F: restart baseline through `frust run --watch`
+
+`--no-hot` relaunch loop, home sentinel edits:
+
+- Session 1: 3707 / 2774 / 2584 / 3288 / 3720 ms (median 3288). Before PID 19259 with `count:
+  2`, after PID 20957 with `count: 0` and `v5`.
+- Session 2: 4054 / 3706 / 3452 / 4504 / 3636 ms (median 3706). PIDs 68724 -> 69569 -> 69890
+  -> 70227 -> 70539 -> 70919.
+
+cargo's `Finished` per relaunch is 1.4-3.5 s. The template's three crate types make every restart
+re-link a cdylib and a staticlib as well as the bin, which is why F here is 2.1-2.3x the spike's
+1570 ms. Pooled F is **3671 ms** (n=10).
+
+For comparison, the hot mode's own restart path (`restart required` -> kill -> fat rebuild ->
+relaunch) costs 5.3-9.3 s to the relaunched first frame (D, D2, D4, D5, budget; pooled median
+6438 ms, n=12). That is roughly twice the `--no-hot` restart a developer would otherwise get.
+
+### G: ten patches, RSS and the budget counters
+
+PID 28144, count 2 kept, `hotpatch-sentinel: v10` after run 10. Per-run save->frame: 2750 / 2187 /
+2351 / 2194 / 2242 / 2368 / 2208 / 2461 / 2310 / 2200 ms. No crash and no trend.
+
+RSS (MiB, sampled each second and after each run):
+
+| Point | RSS |
+|---|---|
+| after the clicks, before patch 1 (settled) | 121.9 |
+| after patch 1 | 135.6 |
+| after patches 2-10 | 136.7, 137.5, 138.5, 139.3, 140.2, 141.1, 142.0, 142.9, 143.8 |
+| 15 s after patch 10 | 143.7 (flat) |
+
+The first patch costs +13.7 MiB, every later one about +0.9 MiB (spike: +0.55 MB). That is +21.9
+MiB over 10 patches.
+
+**Budget counters.** The CLI prints no counters on a `patched` outcome; `patched in N ms (k
+components rebuilt)` is all it says. To read the app's own counters, a session ran with
+`frust.toml` `[hotpatch] patches = 3`. Three patches landed (`patched in 1898 / 1922 / 2032 ms`,
+PID 31777). The fourth save answered, verbatim:
+
+```
+restart required: the patch budget is spent (4 patches / 9053856 bytes loaded would pass 3 patches or 100663296 bytes)
+```
+
+So after three patches the app reported `patches_applied = 3` and `patch_bytes_loaded = 9053856`,
+exactly 3 × 3,017,952. After G's ten patches the same counters are 10 / 30,179,520 (ten 3,017,952-
+byte images in the session dir). At this app's patch size the default budget's **byte** limit (96
+MiB = 100,663,296) binds at the 34th patch, before the 64-patch limit.
+
+### I: cold builds and one `target/`
+
+- **Cold `cargo build`** of the generated app (no features), `build/rust` empty: 63.0 s wall
+  (cargo: `Finished ... in 1m 02s`), 3.1 GiB.
+- **`cargo clean`**, then a cold **`frust run --watch`** (row A0's session): first frame **74.3 s**
+  after launch, +18% over the plain cold build (dx was +7% in Phase 1). The figure includes the
+  fat link, the base L3 table and the launch: the app's logger came up 0.6 s before its first
+  frame. The copy-backed app of row E, also cold: 67.4 s.
+- **One target dir.** After the fat session, `build/rust` holds `debug/` (cargo's tree, 2.7 GiB)
+  and `frust-hotpatch/` (574 MiB). The latter is `fat/<scope>/` (`libdeps-*.a` fat archive
+  532,244,608 B, fat image 53,925,960 B, `link-args.json`) plus `session-hotapp/`
+  (`layout-base.json`, `layouts-accepted.json`, `patch-N.dylib`, `stub-N.o`). There is no second
+  dependency tree. `cargo build --features frust/perf-trace --features frust/devtools --features
+  frust/hotpatch` straight after the fat session compiled only `hotapp` (8.1 s): the fat build's
+  dependency artifacts are cargo's own. The app also writes each uploaded patch to
+  `~/Library/Caches/frust-hotpatch/` and deletes it after loading.
+
+### TUI Watch leg
+
+Bare `frust` in a tmux session (`tmux new-session -d -s h1-11`), project `hotapp` (prepared
+app), Run modal (`r`) -> `[x] desktop`, mode `debug`, Watch unchecked -> Enter. The session
+started as a plain `cargo run` (PID 59667) and the counter was clicked to 2.
+
+| Step | Toast / status (verbatim) | App | save->frame |
+|---|---|---|---|
+| `W` | watch indicator `⟳ watch` in the log pane's status line; tab title `▶ desktop ⟳` | 59667 | |
+| save home `v1` | no toast: the watcher started on a cold session, so the save restarted it into a hot one | 59667 -> 60613 (fat image), count reset | relaunch first frame at save+6351 |
+| save home `v2`, `v3`, `v4` | `✓ patched in 1932 ms`, `✓ patched in 1919 ms`, `✓ patched in 1904 ms` | 60613 kept; count 2 -> 2, `v4` | 2341 / 2351 / 2226 |
+| save D2 (`HomeState` + `extra1`) | `restart required: hotapp::home_page::HomeState changed layout (4 → 8 bytes); restarting to keep memory safe` (on screen by save+1746) | 60613 -> 62805, `v1 extra1=4242` | |
+| `R` (count clicked to 2 first) | `! desktop: stopped`, then a fresh session; `⟳ watch` kept | 62805 -> 63663 (fat image); count 2 -> 0 | |
+| save sentinel after `R` | `✓ patched in 1940 ms` | 63663 kept | toast by save+2421 |
+
+So `W` hot-patches and its `restart required` falls through to the relaunch, as in the CLI. `R`
+is a full restart that resets State, re-fat-builds and keeps Watch on.
+
+### Known limits seen (recorded, not fixed)
+
+- `W` on a session launched without Watch does not hot-patch the first save: the session is not
+  hot, so that save is a plain relaunch into a hot session.
+- The run modal's checkbox still reads `Watch src/ and restart on change (desktop only)`.
+- Killing the TUI's tmux session (SIGHUP) left the hot app (PID 63663) running; it was killed by
+  hand.
+- The other known H1 limits did not show up in these runs: a restart-only session's double
+  launch, a Ctrl-C during the first fat build, a dropped unreferenced function (row C's new
+  function is referenced), and `--features` skipping hot mode (row F uses `--no-hot` anyway).
+
+### measure.sh changes for this card
+
+`bash -n` and `shellcheck -S warning` are clean, and the spike gate (`cargo build && cargo clippy
+--workspace --all-targets -- -D warnings && cargo fmt --check` from `examples/hotpatch-spike`)
+passes. The dx and `--restart` modes are unchanged in behaviour. Additions:
+
+- `--frust-run` / `--frust-restart` with `--app <dir>`, `FRUST`, `FRUST_RUN_ARGS`,
+  `RESTART_TIMEOUT`, `APP_TARGET_DIR`. Output lines are timestamped by a small Python wrapper that
+  leads the runner's process group and turns SIGTERM into the SIGINT the CLI's Ctrl-C handler
+  answers. App processes are found (and, at exit, killed if they outlived the CLI) by their
+  executable path under the app's target dir only.
+- `--prepare-app <dir>` (the overlay above). It refuses an app inside this repository or one
+  already prepared.
+- New targets `stock-label`, `badge`, `either-swap` and `framework`. In frust modes, `state-type`,
+  `state-field` and `return-type` are cumulative. `framework` refuses a `FRAMEWORK_FILE` inside
+  this repository.
+- Per-run outcome line with its save offset, old -> new PID, RSS, and a summary that splits
+  patched from restart runs. Restoration is checked with `cmp` against the pristine copies (every
+  session printed `same:`).
