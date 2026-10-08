@@ -12,8 +12,9 @@
 //! [`apply_patch`] loads that library, rebases the table onto this process, publishes it, and runs
 //! every [`register_handler`] handler. Patches are serialised, and a patch is refused before
 //! anything is loaded in a release build, while no anchor is set ([`set_anchor`]; the app defines
-//! the [`ANCHOR_SYMBOL`] function), and (through [`apply_from_devtools`]) while a layout-mismatch
-//! record is unreported ([`report_layout_mismatch`]).
+//! the [`ANCHOR_SYMBOL`] function), and, in every apply entry ([`apply_patch`] and
+//! [`apply_from_devtools`]), while a layout-mismatch record is unreported
+//! ([`report_layout_mismatch`]; checked under the apply lock, [`PatchError::LayoutMismatchPending`]).
 //!
 //! The layout precondition: every type whose values cross images (a mapped function's arguments,
 //! return and closure captures, a component's state) must keep its layout between the running
