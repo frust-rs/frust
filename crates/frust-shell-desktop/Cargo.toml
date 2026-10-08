@@ -52,8 +52,9 @@ reactive_graph = { workspace = true }
 perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
 # Opt-in in-app devtools service: re-exports frust-shell-common/devtools; the CLI enables it for debug/profile builds only.
 devtools = ["frust-shell-common/devtools"]
-# Opt-in: forwards frust-core/hotpatch and wakes the loop (redraw + probe logs) when a patch is applied.
-hotpatch = ["frust-core/hotpatch"]
+# Opt-in: forwards frust-core/hotpatch, wakes the loop (redraw + probe logs) when a patch is applied, and applies patches sent
+# over devtools (implies `devtools`; `frust-shell-common/hotpatch`), answering each after the frame that follows it.
+hotpatch = ["devtools", "frust-core/hotpatch", "frust-shell-common/hotpatch"]
 # Facade `gpu` forwards here: `frust-render/gpu` re-exports `DeviceHandle`; `frust-shell-common/gpu` holds the slot
 # `render.rs` installs the live device into.
 gpu = ["frust-shell-common/gpu", "frust-render/gpu"]
