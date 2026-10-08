@@ -1,7 +1,10 @@
 //! The hot-patch session minus its transport: `frust_drive::hotpatch`'s
 //! builder pieces driven directly, in the order `hotpatch::session` runs them
 //! (`start_desktop`, then `on_change`'s compile, gate and link), with the
-//! devtools upload replaced by the caller handing the table to the app.
+//! devtools transport replaced by the caller handing the table to the app.
+//! The patch is prepared as the session's loopback hand-off prepares it
+//! (`session::hand_off`: owner-only file, absolute path, SHA-256) and the
+//! table names that path, so the app loads the very file a hand-off names.
 //!
 //! The session keeps a few small helpers private (`tip_objects`,
 //! `typed_objects`, `member_rlibs`, `replayable_crates`, `seed_dep_info`, the
@@ -13,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use frust_drive::devtools_client::sha256_hex;
 use frust_drive::doctor::{EnvLookup, RealEnv};
 use frust_drive::hotpatch::capture::{
     self, RecordKey, RustcRecord, ScopeInputs, TargetKind, load_records, prepare_scope_dir,
@@ -25,7 +29,7 @@ use frust_drive::hotpatch::link_intercept::{LinkAction, LinkMode, read_link_args
 use frust_drive::hotpatch::replay::{replay_env, replay_units};
 use frust_drive::hotpatch::seams::SeamSet;
 use frust_drive::hotpatch::session::{
-    AcceptedSets, RestartReason, check_debuginfo, fat_build_command,
+    AcceptedSets, RestartReason, check_debuginfo, fat_build_command, hand_off,
 };
 use frust_drive::hotpatch::stub::create_undefined_symbol_stub;
 use frust_drive::hotpatch::symbols::{ImageSymbols, SymbolCache, Target};
@@ -366,8 +370,9 @@ impl FatSession {
     }
 
     /// Links patch `n` against the process whose anchor is at
-    /// `anchor_runtime` and builds its jump table, mirrored into the
-    /// runtime's [`JumpTable`] with the patch's path.
+    /// `anchor_runtime`, prepares it as the loopback hand-off does (and checks
+    /// the result as the app would) and builds its jump table, mirrored into
+    /// the runtime's [`JumpTable`] with the hand-off's path.
     pub fn link(&self, n: u32, anchor_runtime: u64) -> Result<LinkedPatch> {
         let inputs = self.patch_inputs()?;
         let stub = create_undefined_symbol_stub(&self.cache, &inputs, anchor_runtime)?;
@@ -391,6 +396,10 @@ impl FatSession {
         )?;
         let bytes = std::fs::read(&linked.patch)
             .with_context(|| format!("reading `{}`", linked.patch.display()))?;
+        let handed = hand_off(&linked.patch, &bytes)?
+            .ok_or_else(|| anyhow!("`{}` is not UTF-8", linked.patch.display()))?;
+        let path = PathBuf::from(&handed.path);
+        check_hand_off(&path, &handed.sha256, bytes.len() as u64, &stub_object)?;
         let symbols = ImageSymbols::parse(
             &bytes,
             self.target,
@@ -401,10 +410,10 @@ impl FatSession {
             bail!("the jump table maps no function");
         }
         Ok(LinkedPatch {
-            path: linked.patch.clone(),
+            path: path.clone(),
             bytes: bytes.len() as u64,
             table: JumpTable {
-                lib: linked.patch,
+                lib: path,
                 map: wire.map.into_iter().collect(),
                 aslr_reference: wire.aslr_reference,
                 new_base_address: wire.new_base_address,
@@ -444,6 +453,50 @@ impl FatSession {
 
 /// Runs the fat build in `root`, forwarding cargo's rendered diagnostics and
 /// any non-JSON line to `log`. A failed build carries its errors.
+/// The app's checks on a handed-off patch, run host-side: a regular file (no
+/// symlink), owned by this process's user (the owner of `own_file`, which
+/// this process just wrote), `mode & 0o077 == 0`, `len` bytes, and a SHA-256
+/// of the bytes read back equal to `sha256`.
+fn check_hand_off(path: &Path, sha256: &str, len: u64, own_file: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspecting `{}`", path.display()))?;
+    if !meta.file_type().is_file() {
+        bail!(
+            "the handed-off patch `{}` is not a regular file",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let own_uid = std::fs::metadata(own_file)
+            .with_context(|| format!("inspecting `{}`", own_file.display()))?
+            .uid();
+        if meta.uid() != own_uid {
+            bail!(
+                "the handed-off patch is owned by uid {}, not {own_uid}",
+                meta.uid()
+            );
+        }
+        if meta.mode() & 0o077 != 0 {
+            bail!(
+                "the handed-off patch has mode {:o}; the app requires owner-only",
+                meta.mode() & 0o777
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = own_file;
+    if meta.len() != len {
+        bail!("the handed-off patch is {} bytes, not {len}", meta.len());
+    }
+    let read = std::fs::read(path).with_context(|| format!("reading `{}`", path.display()))?;
+    if sha256_hex(&read) != sha256 {
+        bail!("the handed-off patch's SHA-256 does not match its bytes");
+    }
+    Ok(())
+}
+
 fn run_fat_build(
     runner: &RealProcessRunner,
     program: &str,

@@ -54,8 +54,10 @@ pub enum Capability {
     /// 1. debug builds only;
     /// 2. a per-session OS-CSPRNG token with `require_token` on;
     /// 3. a loopback-only listener;
-    /// 4. patch bytes arrive over the authenticated channel, never as a path
-    ///    taken from the wire;
+    /// 4. patch bytes arrive over the authenticated channel — or, only on a
+    ///    server that advertises [`HotpatchInfo::patch_file_hand_off`], as
+    ///    the one path the wire may carry ([`ApplyPatchParams::file`]),
+    ///    accepted only under [`PatchFile`]'s five checks;
     /// 5. the patch matches this process and this connection: `patch_id`
     ///    chunks arrived on the same connection, their length equals `len`,
     ///    and `pid` and `anchor_runtime` match.
@@ -205,6 +207,11 @@ pub struct HotpatchInfo {
     pub patches_applied: u32,
     pub patch_bytes_loaded: u64,
     pub pending_layout_mismatches: Vec<String>,
+    /// The app accepts [`ApplyPatchParams::file`] (a loopback hand-off by
+    /// file) in place of `patch_chunk` uploads. Absent from an older app's
+    /// answer, so it defaults to `false` and the client uploads chunks.
+    #[serde(default)]
+    pub patch_file_hand_off: bool,
 }
 
 /// `patch_chunk` params; answered by [`AckResult`]. At most 512 KiB of raw
@@ -218,8 +225,9 @@ pub struct PatchChunkParams {
 }
 
 /// The jump table of an `apply_patch`, mirroring `frust-hotpatch`'s
-/// `JumpTable` minus `lib`: no wire type carries a filesystem path, so a
-/// `lib` field (or any other unknown field) is rejected at decode.
+/// `JumpTable` minus `lib`: the only filesystem path on the wire is
+/// [`ApplyPatchParams::file`]'s, so a `lib` field (or any other unknown
+/// field) is rejected at decode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JumpTableWire {
@@ -230,7 +238,9 @@ pub struct JumpTableWire {
 }
 
 /// `apply_patch` params — applies the bytes previously sent as `patch_id`
-/// chunks. Unknown fields (a path included) are rejected.
+/// chunks, or, when [`Self::file`] is set, the bytes of that host-written
+/// file. `len` is the patch length either way (a named file's size must equal
+/// it). Unknown fields (any other path included) are rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyPatchParams {
@@ -240,6 +250,30 @@ pub struct ApplyPatchParams {
     pub anchor_runtime: u64,
     pub table: JumpTableWire,
     pub expected_seams: u32,
+    /// The loopback hand-off: the patch the host already wrote, named in place
+    /// of `patch_chunk` uploads. The **only** filesystem path any wire type
+    /// carries, sent only to an app advertising
+    /// [`HotpatchInfo::patch_file_hand_off`] and accepted only under
+    /// [`PatchFile`]'s checks. Omitted when `None`, so a chunk-path request is
+    /// byte-for-byte what an older app decodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PatchFile>,
+}
+
+/// A patch handed off by file on a loopback session ([`ApplyPatchParams::file`]).
+///
+/// The app accepts it only when all five checks hold: the path opens with
+/// `O_NOFOLLOW` (no symlink) and the open file is a regular file; it is owned
+/// by the app's effective uid; its mode grants nothing to group or other
+/// (`mode & 0o077 == 0`); its size equals [`ApplyPatchParams::len`]; and the
+/// SHA-256 of the bytes read equals `sha256`. The app never logs `path`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PatchFile {
+    /// Absolute path of the host-written patch.
+    pub path: String,
+    /// SHA-256 of the patch bytes: 64 lowercase hex characters.
+    pub sha256: String,
 }
 
 /// A seam key a patch missed: the image index and link-time address.
@@ -273,6 +307,7 @@ mod tests {
             patches_applied: 2,
             patch_bytes_loaded: 1_500_000,
             pending_layout_mismatches: vec!["Foo".into()],
+            patch_file_hand_off: true,
         };
         let j = serde_json::to_string(&info).unwrap();
         assert_eq!(serde_json::from_str::<HotpatchInfo>(&j).unwrap(), info);
@@ -311,6 +346,68 @@ mod tests {
         assert_eq!(p.table.map.get(&16), Some(&32));
         let back = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<ApplyPatchParams>(&back).unwrap(), p);
+    }
+
+    #[test]
+    fn hotpatch_info_without_the_hand_off_flag_defaults_to_chunks() {
+        let json = r#"{"anchor_runtime":1,"pid":2,"triple":"t","patches_applied":0,
+            "patch_bytes_loaded":0,"pending_layout_mismatches":[]}"#;
+        let info: HotpatchInfo = serde_json::from_str(json).unwrap();
+        assert!(!info.patch_file_hand_off);
+    }
+
+    fn sample_params(file: Option<PatchFile>) -> ApplyPatchParams {
+        ApplyPatchParams {
+            patch_id: 3,
+            len: 4096,
+            pid: 77,
+            anchor_runtime: 0x1000,
+            table: JumpTableWire {
+                map: [(16, 32)].into_iter().collect(),
+                aslr_reference: 1,
+                new_base_address: 2,
+                ifunc_count: 0,
+            },
+            expected_seams: 1,
+            file,
+        }
+    }
+
+    #[test]
+    fn apply_patch_params_round_trip_with_and_without_a_file() {
+        let chunked = sample_params(None);
+        let j = serde_json::to_string(&chunked).unwrap();
+        // The chunk-path shape is unchanged on the wire: no `file` key at all.
+        assert!(!j.contains("\"file\""), "{j}");
+        assert_eq!(
+            serde_json::from_str::<ApplyPatchParams>(&j).unwrap(),
+            chunked
+        );
+
+        let named = sample_params(Some(PatchFile {
+            path: "/tmp/frust-hotpatch/session-x/patch-1.dylib".into(),
+            sha256: "ab".repeat(32),
+        }));
+        let j = serde_json::to_string(&named).unwrap();
+        assert!(j.contains("\"file\":{\"path\""), "{j}");
+        assert_eq!(serde_json::from_str::<ApplyPatchParams>(&j).unwrap(), named);
+    }
+
+    #[test]
+    fn apply_patch_params_without_file_default_to_none() {
+        let json = r#"{"patch_id":1,"len":10,"pid":5,"anchor_runtime":99,
+            "table":{"map":{},"aslr_reference":1,"new_base_address":2,"ifunc_count":0},
+            "expected_seams":2}"#;
+        let p: ApplyPatchParams = serde_json::from_str(json).unwrap();
+        assert_eq!(p.file, None);
+    }
+
+    #[test]
+    fn patch_file_rejects_unknown_fields() {
+        let json = r#"{"patch_id":1,"len":10,"pid":5,"anchor_runtime":99,
+            "table":{"map":{},"aslr_reference":1,"new_base_address":2,"ifunc_count":0},
+            "expected_seams":2,"file":{"path":"/x","sha256":"00","lib":"/y"}}"#;
+        assert!(serde_json::from_str::<ApplyPatchParams>(json).is_err());
     }
 
     #[test]

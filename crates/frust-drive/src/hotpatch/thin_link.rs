@@ -3,7 +3,9 @@
 //! The tip's fresh `.rcgu.o` files (captured from a no-link thin build),
 //! the replayed workspace rlibs and the stub object that binds every symbol
 //! the patch does not define to its address in the running image are
-//! linked into `<target>/frust-hotpatch/<session>/patch-<n>.{dylib,so}`.
+//! linked into `<target>/frust-hotpatch/<session>/patch-<n>.{dylib,so}`,
+//! mode `0600` (the loopback hand-off names this file to the app, which
+//! refuses one that grants group or other access; [`restrict_to_owner`]).
 //! Only the linker flags a patch can use survive from the captured line,
 //! per flavor, and the patch exports
 //! [`ANCHOR_SYMBOL`](super::fat_link::ANCHOR_SYMBOL) so the runtime finds
@@ -66,6 +68,25 @@ pub fn patch_path(
     flavor: LinkerFlavor,
 ) -> Result<PathBuf, HotpatchError> {
     Ok(session_dir(target_dir, session)?.join(format!("patch-{n}.{}", flavor.patch_extension())))
+}
+
+/// Sets `path`'s mode to `0600` (owner read/write, nothing for group or
+/// other) — what the app requires of a patch handed off by file. A no-op
+/// off unix, where no app accepts the hand-off.
+pub fn restrict_to_owner(path: &Path) -> Result<(), HotpatchError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|err| {
+            HotpatchError::io(
+                format!("restricting `{}` to its owner", path.display()),
+                err,
+            )
+        })?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// The captured flags a patch link keeps, after the flavor's own
@@ -223,7 +244,8 @@ pub struct ThinLinkOutput {
     pub linker_output: String,
 }
 
-/// Links the patch through `runner`, then deletes the `deps/` copy of the
+/// Links the patch through `runner`, restricts it to its owner
+/// ([`restrict_to_owner`]), then deletes the `deps/` copy of the
 /// executable the thin build's `-o` names: dioxus-cli found that leaving it
 /// makes later `dlopen`s fail with missing symbols that never existed. A
 /// missing stub object, a failed link or a patch without the anchor is
@@ -253,6 +275,7 @@ pub fn thin_link(
     let removed_deps_copy =
         (deps_copy != request.output && fs::remove_file(&deps_copy).is_ok()).then_some(deps_copy);
     let linker_output = linked?;
+    restrict_to_owner(request.output)?;
     let anchor_address = anchor_address(request.flavor, request.output)?;
     Ok(ThinLinkOutput {
         patch: request.output.to_path_buf(),
@@ -499,6 +522,12 @@ mod tests {
         assert!(fx.output.ends_with("frust-hotpatch/s-1/patch-3.so"));
         assert_eq!(output.removed_deps_copy, Some(fx.deps_copy.clone()));
         assert!(!fx.deps_copy.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&output.patch).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the patch is restricted to its owner");
+        }
     }
 
     #[test]

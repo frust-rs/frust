@@ -59,9 +59,16 @@
 //! not Windows), and owns the per-connection chunk reassembly. Here:
 //!
 //! - `patch_chunk` decodes one chunk's base64 payload;
+//! - `patch_file` (unix; `hotpatch_info` advertises `patch_file_hand_off`)
+//!   reads a patch the loopback host already wrote, named on `apply_patch` by
+//!   path and SHA-256, and refuses it unless all five checks hold: opened
+//!   `O_NOFOLLOW` and a regular file by `fstat`, owned by this process's
+//!   effective uid, `mode & 0o077 == 0`, size equal to `len`, matching
+//!   SHA-256. The bytes then go through `apply_patch` exactly as reassembled
+//!   chunks do; the path is never logged or echoed;
 //! - `apply_patch` checks `pid` and `anchor_runtime` against this process (an
-//!   unset anchor fails closed), writes the bytes it was handed — never a path
-//!   from the wire — to `<cache dir>/frust-hotpatch/patch-<pid>-<id>.<ext>`
+//!   unset anchor fails closed), writes the bytes it was handed — never loading
+//!   a path from the wire — to `<cache dir>/frust-hotpatch/patch-<pid>-<id>.<ext>`
 //!   (directory `0700`, file `0600`, created fresh, never through an existing
 //!   entry), applies it through `frust_hotpatch::apply_from_devtools`, removes
 //!   the file, and answers **after the following frame**: it parks on the frame
@@ -86,6 +93,8 @@ use frust_core::event::{
     InputEvent, Key, KeyEvent, Modifiers, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
 };
 use frust_devtools::{AppInfo, BackendError, DevtoolsBackend, Service, ServiceHandle};
+#[cfg(all(feature = "hotpatch", unix))]
+use frust_devtools_protocol::PatchFile;
 #[cfg(feature = "hotpatch")]
 use frust_devtools_protocol::{
     ApplyPatchParams, Capability, HandshakeInfo, HotpatchInfo, PROTOCOL_VERSION, PatchChunkParams,
@@ -533,6 +542,7 @@ impl DevtoolsBackend for ShellBackend {
             patches_applied: counters.patches_applied,
             patch_bytes_loaded: counters.patch_bytes_loaded,
             pending_layout_mismatches: pending.iter().map(ToString::to_string).collect(),
+            patch_file_hand_off: PATCH_FILE_HAND_OFF,
         })
     }
 
@@ -542,6 +552,20 @@ impl DevtoolsBackend for ShellBackend {
         base64::engine::general_purpose::STANDARD
             .decode(&chunk.data_base64)
             .map_err(|e| BackendError::invalid_request(format!("patch chunk is not base64: {e}")))
+    }
+
+    /// The loopback hand-off: see the module doc's *Hot patching*.
+    #[cfg(all(feature = "hotpatch", unix))]
+    fn patch_file(&self, file: &PatchFile, len: u64) -> Result<Vec<u8>, BackendError> {
+        let dir = self.hot.patch_dir().ok_or_else(|| {
+            BackendError::unavailable("no cache directory to check the patch file's owner against")
+        })?;
+        let own_uid = effective_uid(&dir).map_err(|e| {
+            BackendError::internal(format!("could not determine this process's user: {e}"))
+        })?;
+        let bytes = read_handed_off_patch(file, len, own_uid)?;
+        log::debug!("frust-devtools: patch file handed off ({len} bytes, checks passed)");
+        Ok(bytes)
     }
 
     /// See the module doc's *Hot patching*. Every answer — applied, refused,
@@ -701,6 +725,11 @@ const PATCH_EXT: &str = if cfg!(any(target_os = "macos", target_os = "ios")) {
 } else {
     "so"
 };
+
+/// Whether `hotpatch_info` advertises the loopback patch-file hand-off: exactly
+/// when `ShellBackend::patch_file`'s checked reader is compiled in (unix).
+#[cfg(feature = "hotpatch")]
+const PATCH_FILE_HAND_OFF: bool = cfg!(unix);
 
 /// What [`ShellBackend`] tracks across patches.
 #[cfg(feature = "hotpatch")]
@@ -887,6 +916,96 @@ fn write_patch_file(
     }
     file.write_all(bytes)?;
     Ok(path)
+}
+
+/// This process's effective uid, without `unsafe` (this crate's charter): the
+/// owner of a file a process creates is its effective uid (POSIX `open`), so
+/// a fresh probe file is created in `dir` (the app's own `0700` patch
+/// directory, through [`write_patch_file`]), read back and removed.
+#[cfg(all(feature = "hotpatch", unix))]
+fn effective_uid(dir: &std::path::Path) -> std::io::Result<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    let name = format!(".uid-probe-{}", std::process::id());
+    let path = write_patch_file(dir, &name, &[])?;
+    let uid = std::fs::symlink_metadata(&path).map(|meta| meta.uid());
+    let _ = std::fs::remove_file(&path);
+    uid
+}
+
+/// Reads a patch handed off by file, refusing it unless all five checks hold:
+/// opened with `O_NOFOLLOW` (a symlink fails the open) and `fstat` says a
+/// regular file; owned by `own_uid`; `mode & 0o077 == 0`; exactly `len`
+/// bytes; SHA-256 equal to `file.sha256`. `O_NONBLOCK` keeps a FIFO from
+/// parking the open (`fstat` then refuses it). No error names the path.
+#[cfg(all(feature = "hotpatch", unix))]
+fn read_handed_off_patch(
+    file: &PatchFile,
+    len: u64,
+    own_uid: u32,
+) -> Result<Vec<u8>, BackendError> {
+    use sha2::Digest as _;
+    use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let refuse = |why: String| BackendError::invalid_request(format!("patch file refused: {why}"));
+    let well_formed = file.sha256.len() == 64
+        && file
+            .sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !well_formed {
+        return Err(refuse(
+            "sha256 must be 64 lowercase hex characters".to_string(),
+        ));
+    }
+    let path = std::path::Path::new(&file.path);
+    if !path.is_absolute() {
+        return Err(refuse("the path is not absolute".to_string()));
+    }
+    let mut opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| refuse(format!("it cannot be opened without following a link: {e}")))?;
+    let meta = opened
+        .metadata()
+        .map_err(|e| refuse(format!("it cannot be inspected: {e}")))?;
+    if !meta.file_type().is_file() {
+        return Err(refuse("it is not a regular file".to_string()));
+    }
+    if meta.uid() != own_uid {
+        return Err(refuse(format!(
+            "it is owned by uid {}, this process runs as uid {own_uid}",
+            meta.uid()
+        )));
+    }
+    if meta.mode() & 0o077 != 0 {
+        return Err(refuse(format!(
+            "its mode {:o} grants group or other access",
+            meta.mode() & 0o777
+        )));
+    }
+    if meta.len() != len {
+        return Err(refuse(format!(
+            "it is {} bytes, apply_patch says {len}",
+            meta.len()
+        )));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    (&mut opened)
+        .take(len.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| refuse(format!("it cannot be read: {e}")))?;
+    if bytes.len() as u64 != len {
+        return Err(refuse("its size changed while it was read".to_string()));
+    }
+    let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+    if digest != file.sha256 {
+        return Err(refuse(
+            "its SHA-256 does not match apply_patch's".to_string(),
+        ));
+    }
+    Ok(bytes)
 }
 
 /// `message` with every spelling of the patch file's location masked: its
@@ -1329,6 +1448,7 @@ mod tests {
                     ifunc_count: 0,
                 },
                 expected_seams: 1,
+                file: None,
             }
         }
 
@@ -1570,6 +1690,150 @@ mod tests {
                     .is_symlink()
             );
             assert_eq!(std::fs::read(&path).expect("patch"), b"patch");
+        }
+
+        /// Writes `bytes` to `dir/name` with `mode` and returns the hand-off
+        /// that names it, digest included.
+        #[cfg(unix)]
+        fn handed_off(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> PatchFile {
+            use sha2::Digest as _;
+            use std::os::unix::fs::PermissionsExt as _;
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).expect("write");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("mode");
+            PatchFile {
+                path: path.to_string_lossy().into_owned(),
+                sha256: format!("{:x}", sha2::Sha256::digest(bytes)),
+            }
+        }
+
+        /// The refusal `patch_file` answers `file` with; its message must not
+        /// carry the path.
+        #[cfg(unix)]
+        fn refusal(backend: &ShellBackend, file: &PatchFile, len: u64) -> String {
+            match backend.patch_file(file, len) {
+                Err(BackendError::InvalidRequest(message)) => {
+                    assert!(!message.contains(&file.path), "{message}");
+                    message
+                }
+                other => panic!("expected an invalid_request refusal, got {other:?}"),
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn hotpatch_info_advertises_the_patch_file_hand_off() {
+            let _serial = serial();
+            let info = backend(&scratch("advert")).hotpatch_info().expect("info");
+            assert!(info.patch_file_hand_off);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_private_regular_file_with_the_right_len_and_digest_is_read() {
+            let root = scratch("handoff-ok");
+            let backend = backend(&root);
+            let file = handed_off(&root, "patch-1.so", b"patch bytes", 0o600);
+            assert_eq!(backend.patch_file(&file, 11), Ok(b"patch bytes".to_vec()));
+            let probes = std::fs::read_dir(root.join("frust-hotpatch"))
+                .expect("patch dir")
+                .count();
+            assert_eq!(probes, 0, "the uid probe leaves nothing behind");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_symlink_is_refused_even_to_a_valid_patch() {
+            let root = scratch("handoff-link");
+            let backend = backend(&root);
+            let target = handed_off(&root, "real.so", b"patch", 0o600);
+            let link = root.join("link.so");
+            std::os::unix::fs::symlink(&target.path, &link).expect("symlink");
+            let file = PatchFile {
+                path: link.to_string_lossy().into_owned(),
+                sha256: target.sha256,
+            };
+            let message = refusal(&backend, &file, 5);
+            assert!(message.contains("following a link"), "{message}");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_directory_is_refused() {
+            let root = scratch("handoff-dir");
+            let backend = backend(&root);
+            let dir = root.join("patch-dir.so");
+            std::fs::create_dir(&dir).expect("dir");
+            let file = PatchFile {
+                path: dir.to_string_lossy().into_owned(),
+                sha256: "0".repeat(64),
+            };
+            let message = refusal(&backend, &file, 0);
+            assert!(message.contains("not a regular file"), "{message}");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_group_or_world_readable_file_is_refused() {
+            let root = scratch("handoff-mode");
+            let backend = backend(&root);
+            let file = handed_off(&root, "patch-1.so", b"patch", 0o644);
+            let message = refusal(&backend, &file, 5);
+            assert!(message.contains("mode 644"), "{message}");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_wrong_len_is_refused() {
+            let root = scratch("handoff-len");
+            let backend = backend(&root);
+            let file = handed_off(&root, "patch-1.so", b"patch", 0o600);
+            let message = refusal(&backend, &file, 6);
+            assert!(message.contains("5 bytes, apply_patch says 6"), "{message}");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_wrong_or_malformed_digest_is_refused() {
+            let root = scratch("handoff-digest");
+            let backend = backend(&root);
+            let mut file = handed_off(&root, "patch-1.so", b"patch", 0o600);
+            let good = file.sha256.clone();
+            file.sha256 = "0".repeat(64);
+            let message = refusal(&backend, &file, 5);
+            assert!(message.contains("SHA-256 does not match"), "{message}");
+            file.sha256 = good.to_uppercase();
+            let message = refusal(&backend, &file, 5);
+            assert!(message.contains("lowercase hex"), "{message}");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_file_owned_by_another_uid_is_refused() {
+            use std::os::unix::fs::MetadataExt as _;
+            let root = scratch("handoff-owner");
+            let file = handed_off(&root, "patch-1.so", b"patch", 0o600);
+            let own = std::fs::metadata(&file.path).expect("meta").uid();
+            let Err(BackendError::InvalidRequest(message)) =
+                read_handed_off_patch(&file, 5, own.wrapping_add(1))
+            else {
+                panic!("a foreign owner must be refused");
+            };
+            assert!(message.contains("owned by uid"), "{message}");
+            assert!(!message.contains(&file.path), "{message}");
+            assert_eq!(effective_uid(&root.join("probe")).expect("uid"), own);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_relative_path_is_refused() {
+            let backend = backend(&scratch("handoff-rel"));
+            let file = PatchFile {
+                path: "patch-1.so".to_string(),
+                sha256: "0".repeat(64),
+            };
+            let message = refusal(&backend, &file, 1);
+            assert!(message.contains("not absolute"), "{message}");
         }
 
         #[test]

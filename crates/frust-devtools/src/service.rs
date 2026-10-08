@@ -357,6 +357,13 @@ impl<B: DevtoolsBackend> DevtoolsBackend for SharedBackend<B> {
     ) -> Result<Vec<u8>, crate::BackendError> {
         self.lock().patch_chunk(chunk)
     }
+    fn patch_file(
+        &self,
+        file: &frust_devtools_protocol::PatchFile,
+        len: u64,
+    ) -> Result<Vec<u8>, crate::BackendError> {
+        self.lock().patch_file(file, len)
+    }
     fn apply_patch(
         &self,
         bytes: Vec<u8>,

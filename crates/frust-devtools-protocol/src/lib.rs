@@ -33,8 +33,9 @@
 //! below are each method's typed params/result/notification-payload struct.
 //! `hotpatch_info`, `patch_chunk` and `apply_patch` carry hot patching; like
 //! `screenshot` they are capability-gated (`Capability::HotPatch`) and an
-//! unsupporting server answers them `METHOD_NOT_FOUND`/`NOT_SUPPORTED`. No wire
-//! type carries a filesystem path.
+//! unsupporting server answers them `METHOD_NOT_FOUND`/`NOT_SUPPORTED`. The
+//! only filesystem path on the wire is [`ApplyPatchParams::file`]'s loopback
+//! hand-off, accepted only under [`PatchFile`]'s five checks.
 //! This crate is pure data + pure functions — no I/O, no async, no runtime
 //! state of its own.
 
@@ -63,8 +64,8 @@ pub use discovery::{
 pub use messages::{
     AckResult, ApplyPatchParams, Capability, FrameStats, HandshakeInfo, HandshakeParams,
     HotpatchInfo, InputScrollParams, InputTapParams, InputTextParams, JumpTableWire,
-    MetricsSnapshot, MissedKey, PatchChunkParams, PatchOutcome, RectPx, ScreenshotResult,
-    WidgetNode, WidgetProps, WidgetPropsParams, WidgetTreeDump,
+    MetricsSnapshot, MissedKey, PatchChunkParams, PatchFile, PatchOutcome, RectPx,
+    ScreenshotResult, WidgetNode, WidgetProps, WidgetPropsParams, WidgetTreeDump,
 };
 pub use method::Method;
 pub use types::{

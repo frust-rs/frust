@@ -284,7 +284,10 @@ async fn hot_patch_request(
 ///
 /// `patch_chunk` appends to this connection's reassembly, and `apply_patch`
 /// consumes it: a `patch_id` whose chunks arrived on another connection is
-/// unknown here, and the reassembled length must equal `len`.
+/// unknown here, and the reassembled length must equal `len`. An
+/// `apply_patch` naming a file (the loopback hand-off) instead gets its bytes
+/// from the backend's checked read (`DevtoolsBackend::patch_file`); a
+/// `patch_id` both uploaded and named by file is refused.
 #[cfg(feature = "hotpatch")]
 async fn hot_patch_request(
     ctx: &SessionCtx,
@@ -337,9 +340,46 @@ async fn hot_patch_request(
                 Ok(params) => params,
                 Err(e) => return Response::error(id, invalid_params(req, &e)),
             };
-            let bytes = match conn.patches.take_complete(params.patch_id, params.len) {
-                Ok(bytes) => bytes,
-                Err(e) => return Response::error(id, e),
+            let bytes = match params.file.clone() {
+                None => match conn.patches.take_complete(params.patch_id, params.len) {
+                    Ok(bytes) => bytes,
+                    Err(e) => return Response::error(id, e),
+                },
+                Some(file) => {
+                    if conn.patches.holds(params.patch_id) {
+                        return Response::error(
+                            id,
+                            RpcError::new(
+                                RpcError::INVALID_REQUEST,
+                                format!(
+                                    "patch {} was both uploaded and named by file",
+                                    params.patch_id
+                                ),
+                            ),
+                        );
+                    }
+                    if params.len == 0 || params.len > MAX_PATCH_BYTES {
+                        return Response::error(
+                            id,
+                            invalid(format!("patch len must be 1..={MAX_PATCH_BYTES} bytes")),
+                        );
+                    }
+                    match lane.file(file, params.len).await {
+                        Ok(bytes) if bytes.len() as u64 == params.len => bytes,
+                        Ok(bytes) => {
+                            return Response::error(
+                                id,
+                                invalid(format!(
+                                    "patch {} is {} bytes, apply_patch says {}",
+                                    params.patch_id,
+                                    bytes.len(),
+                                    params.len
+                                )),
+                            );
+                        }
+                        Err(e) => return Response::error(id, e),
+                    }
+                }
             };
             match lane.apply(bytes, params).await {
                 Ok(outcome) => result_response(id, serde_json::to_value(outcome)),
@@ -571,6 +611,13 @@ impl PatchAssembly {
         Ok(())
     }
 
+    /// Whether this connection holds chunks (complete or not) for `patch_id`.
+    pub(crate) fn holds(&self, patch_id: u64) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| p.patch_id == patch_id)
+    }
+
     /// Hands over `patch_id`'s bytes for `apply_patch`: it must have been
     /// assembled on **this** connection, be complete, and be exactly `len`
     /// bytes. A complete patch is consumed whatever the answer (a length
@@ -600,7 +647,7 @@ impl PatchAssembly {
     }
 }
 
-/// The hot-patch lane: where the three hot-patch backend calls run.
+/// The hot-patch lane: where the hot-patch backend calls run.
 ///
 /// Not the backend thread (`crate::hop`): each call runs on its own short-lived
 /// worker thread over the backend shared with that thread
@@ -643,6 +690,19 @@ impl HotpatchLane {
     ) -> Result<Vec<u8>, RpcError> {
         self.run("patch_chunk", self.timeout, None, move |b| {
             b.patch_chunk(&chunk)
+        })
+        .await
+    }
+
+    /// Reads a patch named by file (the loopback hand-off) through the
+    /// backend's checked [`crate::DevtoolsBackend::patch_file`].
+    async fn file(
+        &self,
+        file: frust_devtools_protocol::PatchFile,
+        len: u64,
+    ) -> Result<Vec<u8>, RpcError> {
+        self.run("apply_patch (file)", self.timeout, None, move |b| {
+            b.patch_file(&file, len)
         })
         .await
     }
@@ -1120,7 +1180,8 @@ mod tests {
     mod hot {
         use super::*;
         use frust_devtools_protocol::{
-            ApplyPatchParams, HotpatchInfo, JumpTableWire, PatchChunkParams, PatchOutcome,
+            ApplyPatchParams, HotpatchInfo, JumpTableWire, PatchChunkParams, PatchFile,
+            PatchOutcome,
         };
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1134,6 +1195,11 @@ mod tests {
             applied: Mutex<Vec<Vec<u8>>>,
             /// When set, `apply_patch` parks until a value arrives.
             hold: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+            /// What `patch_file` answers with; `None` refuses like a backend
+            /// that does not accept files.
+            file_bytes: Mutex<Option<Vec<u8>>>,
+            /// Every `(path, len)` `patch_file` was asked for.
+            files_read: Mutex<Vec<(String, u64)>>,
         }
 
         impl crate::DevtoolsBackend for Arc<HotStub> {
@@ -1166,6 +1232,7 @@ mod tests {
                     patches_applied: 0,
                     patch_bytes_loaded: 0,
                     pending_layout_mismatches: Vec::new(),
+                    patch_file_hand_off: false,
                 })
             }
             fn patch_chunk(
@@ -1174,6 +1241,21 @@ mod tests {
             ) -> Result<Vec<u8>, crate::BackendError> {
                 self.chunks_decoded.fetch_add(1, Ordering::SeqCst);
                 Ok(chunk.data_base64.as_bytes().to_vec())
+            }
+            fn patch_file(
+                &self,
+                file: &PatchFile,
+                len: u64,
+            ) -> Result<Vec<u8>, crate::BackendError> {
+                self.files_read
+                    .lock()
+                    .expect("files_read")
+                    .push((file.path.clone(), len));
+                self.file_bytes
+                    .lock()
+                    .expect("file_bytes")
+                    .clone()
+                    .ok_or_else(|| crate::BackendError::invalid_request("no file here"))
             }
             fn apply_patch(
                 &self,
@@ -1198,13 +1280,28 @@ mod tests {
         }
 
         fn enabled_ctx(stub: &Arc<HotStub>) -> SessionCtx {
+            enabled_ctx_with(Arc::clone(stub))
+        }
+
+        fn enabled_ctx_with(backend: impl crate::DevtoolsBackend) -> SessionCtx {
             let mut ctx = ctx_with_token(Some("s3cret"));
-            let shared = crate::service::SharedBackend::new(Arc::clone(stub));
+            let shared = crate::service::SharedBackend::new(backend);
             ctx.hot_patch = HotPatch::Enabled(HotpatchLane::new(
                 Arc::new(shared),
                 std::time::Duration::from_secs(2),
             ));
             ctx
+        }
+
+        /// An `apply_patch` naming `/tmp/patch-<id>.so` as the hand-off file.
+        fn apply_file(patch_id: u64, len: u64) -> Request {
+            let mut req = apply(patch_id, len);
+            req.params["file"] = serde_json::to_value(PatchFile {
+                path: format!("/tmp/patch-{patch_id}.so"),
+                sha256: "0".repeat(64),
+            })
+            .expect("file");
+            req
         }
 
         fn chunk(patch_id: u64, offset: u64, total_len: u64, data: &str) -> Request {
@@ -1237,6 +1334,7 @@ mod tests {
                         ifunc_count: 0,
                     },
                     expected_seams: 0,
+                    file: None,
                 })
                 .expect("apply params"),
             )
@@ -1270,6 +1368,83 @@ mod tests {
             // Consumed: a second apply of the same id has nothing to apply.
             let again = send(&ctx, &mut conn, &apply(7, 6));
             assert_eq!(error_code(&again), RpcError::INVALID_PARAMS);
+            // The chunk path never asks the backend for a file.
+            assert!(stub.files_read.lock().expect("files_read").is_empty());
+        }
+
+        #[test]
+        fn a_file_hand_off_applies_exactly_the_bytes_the_backend_read() {
+            let stub = Arc::new(HotStub::default());
+            *stub.file_bytes.lock().expect("file_bytes") = Some(b"filed!".to_vec());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+
+            let outcome = send(&ctx, &mut conn, &apply_file(12, 6));
+            assert!(is_success(&outcome), "{outcome:?}");
+            assert_eq!(
+                *stub.files_read.lock().expect("files_read"),
+                vec![("/tmp/patch-12.so".to_string(), 6)]
+            );
+            assert_eq!(
+                *stub.applied.lock().expect("applied"),
+                vec![b"filed!".to_vec()]
+            );
+            assert_eq!(stub.chunks_decoded.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        fn a_file_read_of_the_wrong_length_is_refused_before_the_apply() {
+            let stub = Arc::new(HotStub::default());
+            *stub.file_bytes.lock().expect("file_bytes") = Some(b"short".to_vec());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+            let refused = send(&ctx, &mut conn, &apply_file(14, 6));
+            assert_eq!(error_code(&refused), RpcError::INVALID_PARAMS);
+            assert!(stub.applied.lock().expect("applied").is_empty());
+        }
+
+        #[test]
+        fn a_patch_both_uploaded_and_named_by_file_is_refused() {
+            let stub = Arc::new(HotStub::default());
+            *stub.file_bytes.lock().expect("file_bytes") = Some(b"abc".to_vec());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+
+            assert!(is_success(&send(&ctx, &mut conn, &chunk(13, 0, 3, "abc"))));
+            let refused = send(&ctx, &mut conn, &apply_file(13, 3));
+            assert_eq!(error_code(&refused), RpcError::INVALID_REQUEST);
+            assert!(
+                error_message(&refused).contains("both uploaded and named by file"),
+                "{refused:?}"
+            );
+            assert!(stub.files_read.lock().expect("files_read").is_empty());
+            assert!(stub.applied.lock().expect("applied").is_empty());
+        }
+
+        #[test]
+        fn a_file_hand_off_to_a_refusing_backend_is_answered_as_its_error() {
+            // `StubBackend` keeps the trait's default `patch_file`.
+            let ctx = enabled_ctx_with(StubBackend);
+            let mut conn = authed(&ctx);
+            let refused = send(&ctx, &mut conn, &apply_file(15, 3));
+            assert_eq!(error_code(&refused), RpcError::INVALID_PARAMS);
+            assert!(
+                error_message(&refused).contains("does not accept patch files"),
+                "{refused:?}"
+            );
+        }
+
+        #[test]
+        fn a_file_hand_off_outside_the_patch_size_cap_is_refused_unread() {
+            let stub = Arc::new(HotStub::default());
+            *stub.file_bytes.lock().expect("file_bytes") = Some(Vec::new());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+            for len in [0, MAX_PATCH_BYTES + 1] {
+                let refused = send(&ctx, &mut conn, &apply_file(16, len));
+                assert_eq!(error_code(&refused), RpcError::INVALID_PARAMS, "{len}");
+            }
+            assert!(stub.files_read.lock().expect("files_read").is_empty());
         }
 
         #[test]
