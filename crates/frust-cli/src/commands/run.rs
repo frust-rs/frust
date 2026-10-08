@@ -434,12 +434,13 @@ fn install_real_ctrlc_handler(current: Arc<Mutex<Option<StreamHandle>>>) -> Resu
 /// busy-spinning between polls.
 const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Debounce window for [`watch_loop`]: further raw change ticks arriving
-/// within this window of the previous one collapse into a single
-/// kill+relaunch, so a save that fires several raw filesystem events (an
-/// editor's rename-then-write, a formatter's follow-up write, …) triggers one
-/// relaunch, not several.
-const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
+/// Debounce window for [`watch_loop`]: trailing-edge coalescing keeps consuming
+/// raw change ticks arriving within this window before acting, so a save that fires
+/// several raw filesystem events (an editor's rename-then-write, a formatter's
+/// follow-up write, …) triggers one relaunch, not several. 100 ms covers
+/// atomic-save and format-on-save bursts, and measured milestone-1 steady-state
+/// save->`on_change` latency at 312–324 ms.
+const WATCH_DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// `frust run --watch`'s desktop-only file-watch → rebuild → relaunch loop.
 /// Watches `<root>/src` (recursive) and

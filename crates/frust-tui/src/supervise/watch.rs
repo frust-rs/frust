@@ -57,10 +57,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::{SessionId, TEARDOWN_DEADLINE, Teardown, spawn_tracked};
 use crate::engine::Message;
 
-/// The trailing-edge debounce window — `frust run --watch`'s own figure, so a
-/// save-burst restarts a watched TUI session exactly as often as it relaunches
-/// the CLI loop.
-pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(300);
+/// Debounce window for source changes: trailing-edge coalescing keeps consuming
+/// raw change ticks arriving within this window before acting. 100 ms covers
+/// atomic-save and format-on-save bursts, and measured milestone-1 steady-state
+/// save->`on_change` latency at 312–324 ms. Syncs with `frust-cli`'s `WATCH_DEBOUNCE`.
+pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// What the debounce thread receives: a raw filesystem change, or the stop
 /// request [`SourceWatcher::stop`] sends. Stop is explicit rather than the
