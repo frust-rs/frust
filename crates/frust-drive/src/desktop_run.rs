@@ -125,7 +125,29 @@ pub fn spawn_desktop_session(
     root: &Path,
     info: &BuildInfo,
 ) -> Result<StreamHandle> {
-    let plan = desktop_plan(root, info);
+    spawn_desktop_plan(runner, &desktop_plan(root, info))
+}
+
+/// The plan that runs an already-linked desktop executable directly — a
+/// hot-patch session's fat image (`hotpatch::session`) — instead of
+/// `cargo run`: `exe` with no arguments, in `root`, with the same child
+/// environment [`desktop_plan`] gives `info`. Spawning the image directly
+/// is what keeps the process the builder's symbol cache describes; `cargo
+/// run` would relink it.
+pub fn desktop_exe_plan(root: &Path, exe: &Path, info: &BuildInfo) -> DesktopPlan {
+    DesktopPlan {
+        program: exe.to_string_lossy().into_owned(),
+        args: Vec::new(),
+        cwd: root.to_path_buf(),
+        env: desktop_env(info),
+    }
+}
+
+/// Spawns `plan` through `runner`, environment included, handing back the
+/// [`StreamHandle`] over the child's merged stdout/stderr. The shared tail
+/// of [`spawn_desktop_session`] for a plan resolved some other way (e.g.
+/// [`desktop_exe_plan`]).
+pub fn spawn_desktop_plan(runner: &dyn ProcessRunner, plan: &DesktopPlan) -> Result<StreamHandle> {
     let args: Vec<&str> = plan.args.iter().map(String::as_str).collect();
     let env: Vec<(&str, &str)> = plan
         .env
@@ -277,6 +299,36 @@ mod tests {
             vec!["Compiling frust v0.1.0", "Running `target/release/app`"]
         );
         assert!(handle.wait());
+    }
+
+    #[test]
+    fn an_exe_plan_runs_the_image_directly_with_the_modes_env() {
+        let root = PathBuf::from("/tmp/project");
+        let exe = PathBuf::from("/tmp/project/build/rust/frust-hotpatch/fat/app");
+        let mut info = build_info(BuildMode::Debug);
+        info.defines.insert("A_KEY".into(), "2".into());
+        let plan = desktop_exe_plan(&root, &exe, &info);
+        assert_eq!(plan.program, exe.to_string_lossy());
+        assert!(plan.args.is_empty(), "no cargo, no relink: {:?}", plan.args);
+        assert_eq!(plan.cwd, root);
+        assert_eq!(plan.env, desktop_plan(&root, &info).env);
+    }
+
+    #[test]
+    fn an_exe_plan_spawns_through_the_injected_runner() {
+        let root = PathBuf::from("/tmp/project");
+        let exe = PathBuf::from("/tmp/fat/app");
+        let runner = FakeProcessRunner::new().with_stream(
+            "/tmp/fat/app",
+            ["frust-devtools listening on 4000 token abc"],
+            true,
+        );
+        let plan = desktop_exe_plan(&root, &exe, &build_info(BuildMode::Debug));
+        let mut handle = spawn_desktop_plan(&runner, &plan).unwrap();
+        let lines: Vec<String> = handle.lines.iter().collect();
+        assert_eq!(lines, vec!["frust-devtools listening on 4000 token abc"]);
+        assert!(handle.wait());
+        assert_eq!(runner.recorded_cwd(), Some(root));
     }
 
     #[test]
