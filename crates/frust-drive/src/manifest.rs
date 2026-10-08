@@ -2,19 +2,20 @@
 //!
 //! One deserialiser for every manifest section the drive pipelines consume
 //! (`[app]`, `[android]`, `[ios]`, `[signing]`, `[desktop]`, `[macos]`,
-//! `[windows]`, `[linux]`, `[web]`), replacing the two near-identical
-//! `[app]`/`[android]` and `[app]`/`[ios]` structs `android_run::project`
-//! and `ios_run::project` each used to carry — those modules now own only
-//! their id-resolution logic and read the manifest through [`load`].
+//! `[windows]`, `[linux]`, `[web]`, `[hotpatch]`), replacing the two
+//! near-identical `[app]`/`[android]` and `[app]`/`[ios]` structs
+//! `android_run::project` and `ios_run::project` each used to carry — those
+//! modules now own only their id-resolution logic and read the manifest
+//! through [`load`].
 //!
 //! Unknown sections are ignored (`[deeplink]`, `[flavors]` are documentation
 //! for the platform templates, not tooling input), but `[signing]` and its
 //! `[signing.env]` subtable, the desktop-shell sections
-//! (`[desktop]`/`[macos]`/`[windows]`/`[linux]`), and `[web]`, are
-//! `deny_unknown_fields`: a typo in a section that decides whether a release
-//! artifact is really signed, or that feeds the desktop packaging or the
-//! browser build pipeline, must fail loudly rather than silently fall back to
-//! the default.
+//! (`[desktop]`/`[macos]`/`[windows]`/`[linux]`), `[web]` and `[hotpatch]`,
+//! are `deny_unknown_fields`: a typo in a section that decides whether a
+//! release artifact is really signed, that feeds the desktop packaging or the
+//! browser build pipeline, or that bounds a hot-patch session's memory, must
+//! fail loudly rather than silently fall back to the default.
 //!
 //! `ios_build::team` keeps its own deliberately-partial `[ios] team` parse —
 //! it must tolerate manifests this reader rejects (it runs before, and
@@ -46,6 +47,8 @@ pub struct Manifest {
     pub linux: Option<LinuxSection>,
     #[serde(default)]
     pub web: Option<WebSection>,
+    #[serde(default)]
+    pub hotpatch: Option<HotpatchSection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -295,6 +298,21 @@ impl WebSection {
     }
 }
 
+/// `[hotpatch]` — the per-project patch budget of a hot-patch session.
+/// Patch images are never unloaded, so a session restarts the app once the
+/// next patch would take it past either bound. Each absent key keeps the
+/// session's default (`hotpatch::session::Budget::default`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct HotpatchSection {
+    /// The most patches one app process may load.
+    #[serde(default)]
+    pub patches: Option<u32>,
+    /// The most patch-image bytes one app process may load.
+    #[serde(default)]
+    pub bytes: Option<u64>,
+}
+
 /// `<project_root>/frust.toml`.
 pub fn path(project_root: &Path) -> PathBuf {
     project_root.join("frust.toml")
@@ -351,6 +369,36 @@ mod tests {
         assert!(m.windows.is_none());
         assert!(m.linux.is_none());
         assert!(m.web.is_none());
+        assert!(m.hotpatch.is_none());
+    }
+
+    #[test]
+    fn hotpatch_section_parses_both_budget_keys_and_each_is_optional() {
+        let m = parse(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [hotpatch]\npatches = 8\nbytes = 1048576\n",
+        )
+        .unwrap();
+        assert_eq!(
+            m.hotpatch,
+            Some(HotpatchSection {
+                patches: Some(8),
+                bytes: Some(1_048_576),
+            })
+        );
+
+        let m = parse("[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[hotpatch]\npatches = 3\n")
+            .unwrap();
+        let section = m.hotpatch.unwrap();
+        assert_eq!(section.patches, Some(3));
+        assert_eq!(section.bytes, None);
+    }
+
+    #[test]
+    fn a_typo_in_the_hotpatch_section_is_a_hard_error() {
+        let err = parse("[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[hotpatch]\npatch = 3\n")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("patch"), "{err:#}");
     }
 
     #[test]

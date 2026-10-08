@@ -259,6 +259,25 @@ fn unix_ms() -> u128 {
         .map_or(0, |d| d.as_millis())
 }
 
+/// The hot-patch frame hook, run once per frame right after the frame leaves the UI thread
+/// (`hotpatch` feature). Stamps the `frust-hotpatch: frame` probe line on the first frame after
+/// startup and after each applied patch (the two flags), and releases every devtools
+/// `apply_patch` answer parked on the frame gate — the reply a host receives therefore follows a
+/// frame built after the apply.
+#[cfg(feature = "hotpatch")]
+fn hotpatch_frame_handed_off(frame_pending: &mut bool, first_frame_pending: &mut bool) {
+    if *frame_pending || *first_frame_pending {
+        *frame_pending = false;
+        *first_frame_pending = false;
+        // A timing instrument: save->frame timestamp for latency measurement.
+        // The line is parsed by measure.sh and H0-00/H1-11; level, wording and format
+        // are load-bearing. Not a success signal — success requires no L2 mismatch,
+        // seam_hits > 0, and no stale missed key (see PORT.md §2(d)).
+        log::info!("frust-hotpatch: frame t_unix_ms={}", unix_ms());
+    }
+    frust_shell_common::devtools::frame_submitted();
+}
+
 /// User events posted to the desktop event loop from off the UI thread.
 ///
 /// Winit's [`ControlFlow::Wait`] idles the loop until an event arrives, so a
@@ -2528,6 +2547,14 @@ where
             ShellHandler::dispatch(self, &window, event);
         }
     }
+
+    /// This loop idles under `ControlFlow::Wait`, so an answer parked on the
+    /// next frame (a hot-patch outcome) needs one requested.
+    fn request_frame(&mut self) {
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
 }
 
 impl<State, Build, V, E> ApplicationHandler<ShellUserEvent> for ShellHandler<State, Build, V, E>
@@ -3339,17 +3366,13 @@ where
                 );
 
                 // Probe stamp: the UI-thread hand-off of the finished frame, not the GPU
-                // present. Once after startup and once per applied patch, never every frame.
+                // present. Once after startup and once per applied patch, never every frame;
+                // the devtools frame gate is released every frame (a no-op when idle).
                 #[cfg(feature = "hotpatch")]
-                if self.hotpatch_frame_pending || self.hotpatch_first_frame_pending {
-                    self.hotpatch_frame_pending = false;
-                    self.hotpatch_first_frame_pending = false;
-                    // A timing instrument: save->frame timestamp for latency measurement.
-                    // The line is parsed by measure.sh and H0-00/H1-11; level, wording and format
-                    // are load-bearing. Not a success signal — success requires no L2 mismatch,
-                    // seam_hits > 0, and no stale missed key (see PORT.md §2(d)).
-                    log::info!("frust-hotpatch: frame t_unix_ms={}", unix_ms());
-                }
+                hotpatch_frame_handed_off(
+                    &mut self.hotpatch_frame_pending,
+                    &mut self.hotpatch_first_frame_pending,
+                );
 
                 // Hand the platform-view batch to the per-OS host, on this
                 // thread, right after the scene is submitted. One call site
@@ -5661,6 +5684,134 @@ mod tests {
                 None,
                 "a CursorLeft or button event with no OS drag dispatches nothing"
             );
+        }
+    }
+
+    /// In-app hot-patch apply over a real devtools service, with this test as
+    /// the UI thread: the `apply_patch` reply is held until the shell's frame
+    /// hook runs (the fake frame tick), and the capability is offered because
+    /// every precondition holds in a debug unix test build.
+    ///
+    /// The service, bridge and frame gate are once-per-process, so this is the
+    /// only test in this binary that starts devtools.
+    #[cfg(all(feature = "hotpatch", unix))]
+    mod hotpatch_apply {
+        use super::super::hotpatch_frame_handed_off;
+        use frust_core::InspectNode;
+        use frust_core::event::InputEvent;
+        use frust_shell_common::devtools::{self, DevtoolsUi};
+        use std::io::{BufRead, BufReader, ErrorKind, Write};
+        use std::net::TcpStream;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        /// The stand-in shell: records whether the pump asked it for a frame.
+        #[derive(Default)]
+        struct FakeUi {
+            frame_requested: bool,
+        }
+
+        impl DevtoolsUi for FakeUi {
+            fn inspect(&self) -> Vec<InspectNode> {
+                Vec::new()
+            }
+            fn dispatch(&mut self, _event: InputEvent) {}
+            fn request_frame(&mut self) {
+                self.frame_requested = true;
+            }
+        }
+
+        fn send(writer: &mut TcpStream, line: &str) {
+            writer
+                .write_all(format!("{line}\n").as_bytes())
+                .expect("write a request line");
+        }
+
+        fn read(reader: &mut BufReader<TcpStream>) -> std::io::Result<String> {
+            let mut line = String::new();
+            reader.read_line(&mut line)?;
+            Ok(line)
+        }
+
+        #[test]
+        fn the_apply_patch_reply_waits_for_the_following_frame() {
+            let (wake_tx, wake_rx) = mpsc::channel::<()>();
+            let wake_tx = std::sync::Mutex::new(wake_tx);
+            devtools::start(
+                "desktop-hotpatch-test",
+                Some(Box::new(move || {
+                    let _ = wake_tx.lock().map(|tx| tx.send(()));
+                })),
+            );
+            let port = devtools::port().expect("the service starts (is FRUST_DEVTOOLS=0 set?)");
+            let token = devtools::token().expect("the service requires a token");
+
+            let mut writer = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            writer
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("read timeout");
+            let mut reader = BufReader::new(writer.try_clone().expect("clone"));
+
+            send(
+                &mut writer,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":1,"method":"handshake","params":{{"token":"{token}"}}}}"#
+                ),
+            );
+            let handshake = read(&mut reader).expect("handshake reply");
+            assert!(handshake.contains("\"hot_patch\""), "{handshake}");
+
+            send(
+                &mut writer,
+                r#"{"jsonrpc":"2.0","id":2,"method":"patch_chunk","params":{"patch_id":1,"offset":0,"total_len":4,"data_base64":"AAECAw=="}}"#,
+            );
+            let ack = read(&mut reader).expect("chunk reply");
+            assert!(ack.contains("\"result\""), "{ack}");
+
+            // No anchor is set in this test binary, so the apply fails closed;
+            // what is under test is when its answer arrives.
+            let pid = std::process::id();
+            send(
+                &mut writer,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":3,"method":"apply_patch","params":{{"patch_id":1,"len":4,"pid":{pid},"anchor_runtime":1,"table":{{"map":{{}},"aslr_reference":0,"new_base_address":0,"ifunc_count":0}},"expected_seams":1}}}}"#
+                ),
+            );
+
+            // The UI thread's turn: the backend asked for a frame through the
+            // devtools hop.
+            let mut ui = FakeUi::default();
+            for _ in 0..50 {
+                if wake_rx.recv_timeout(Duration::from_millis(100)).is_ok() {
+                    devtools::pump(&mut ui);
+                }
+                if ui.frame_requested {
+                    break;
+                }
+            }
+            assert!(
+                ui.frame_requested,
+                "apply_patch asks the UI thread for a frame"
+            );
+
+            // Before the frame: no answer.
+            writer
+                .set_read_timeout(Some(Duration::from_millis(300)))
+                .expect("short read timeout");
+            match read(&mut reader) {
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                other => panic!("the answer must wait for the frame, got {other:?}"),
+            }
+
+            // The fake frame tick: the desktop's own frame hook.
+            let (mut frame_pending, mut first_frame_pending) = (false, false);
+            hotpatch_frame_handed_off(&mut frame_pending, &mut first_frame_pending);
+            writer
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("read timeout");
+            let answer = read(&mut reader).expect("the frame releases the answer");
+            assert!(answer.contains("\"id\":3"), "{answer}");
+            assert!(answer.contains("anchor"), "{answer}");
         }
     }
 }

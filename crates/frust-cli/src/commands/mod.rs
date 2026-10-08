@@ -70,12 +70,14 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
         Command::Run {
             build,
             watch,
+            no_hot,
             no_open,
         } => run::run_in(
             &*runner,
             build,
             cli.device_id.clone(),
             watch,
+            no_hot,
             verbose,
             no_open,
         ),

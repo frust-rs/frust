@@ -48,7 +48,7 @@ sections.
 | "The dx builder that makes patches is ~3-4k native lines" (plan background). | Measured over the exact hot-patch ranges (section 1): the native builder core is **3,153 lines / 2,023 code**, plus host+app transport (310 lines / 249 code) and platform glue (163 / 139, overlapping). Whole files are much larger because most of `request.rs`/`builder.rs` is bundling. *Confirmed, with the refinement that only ~2.0k lines are code.* |
 | "dx 0.7.10 already replays rustc for modified workspace crates" (plan background). Also dx's own comment: "the final tip might include itself as a lib (lib.rs + main.rs) which gets covered here" (`dx:cli/src/build/link.rs:146-147`). | The replay **excludes the tip package by package name** (`dx:cli/src/build/link.rs:616-623`), and the tip's lib target lives in that package. dx's own comment is contradicted by its code and by row H. *Refuted for the tip package's lib.* |
 | "Android namespace and W^X rules may refuse dlopen of app-written code" (plan risk register). | p2-02b refutes it for loading: on Android 14 (`untrusted_app`), memfd, plain `dlopen` from `files/` and from `cache/` all load and return 42 (RESULTS.md, "Phase 2: Android load probe"). Relocation against the base library remains unproven. |
-| "Changing a State struct's layout under a patch is undefined behaviour or a crash" (plan risk register). | Already split by Phase 1: a type-identity change is a silent no-op (row D); a layout change under the same type path is UB (row D2). PORT.md adds a third case: a `build` **return-type** change is a D2-class hazard by mechanism (requirement (c)). Row D3 is not measured yet. |
+| "Changing a State struct's layout under a patch is undefined behaviour or a crash" (plan risk register). | Already split by Phase 1: a type-identity change is a silent no-op (row D); a layout change under the same type path is UB (row D2). PORT.md adds a third case: a `build` **return-type** change is a D2-class hazard by mechanism (requirement (c)). Row D3 was measured twice: H0-00 crashed it under dx (return slot + by-value tree), H1-11 patched it on the real builder with State kept (the erased seam makes a type-changing `R` an ordinary rebuild, 2.c). It is no longer a hazard row. |
 | (implicit in every hot-patch design so far) frust-hotpatch's ASLR anchor `dlsym(RTLD_DEFAULT, "main")` (`main_address`, `crates/frust-hotpatch/src/patch.rs:231-236`) works on every target. | On Android the app's code is the lib's **cdylib** (`crates/frust-drive/templates/app/Cargo.toml.tmpl:14-15`), entered through JNI, and it defines no `main`. dx's Android tip is different: a `[[bin]]` linked as `libmain.so` that does contain `main` (`dx:cli/src/build/request.rs:2546-2550`). On frust's Android the anchor cannot be the app library's own `main`, so an app-owned anchor is required (section 2.f). |
 | "Nothing rewrites process memory: a call only reaches new code by passing through a `HotFn`" (`crates/frust-hotpatch/src/lib.rs:10-11`, pre-r2-01), which round 0 of this document relied on for L2. | Memory is indeed never rewritten, but a `HotFn` call is only the **first** entry into patch code. Every trait object patch code creates carries a patch-image vtable: an `AnyView` erased in patched code (`crates/frust-core/src/view.rs:316-318`) is later rebuilt by old code through `dyn_rebuild` (`view.rs:253-274`), and a `Box<dyn Widget>` built by patched `dyn_build` (`view.rs:249-251`) runs patch code on every event and paint. A closure from patched code is copied into an old retained element at rebuild (`crates/frust-widgets/src/button.rs:669`) and called from it on press (`:901`). None of these passes through a `HotFn`. *Refuted*; card r2-01 replaced the sentence (now `lib.rs:16-20` at e4c56f21), and 2.c states the real boundary. |
 
@@ -269,15 +269,15 @@ frust seam, those types are:
 2. **`C::State`**, created by the original `init` and stored inline in `ComponentWidget::state`
    (`crates/frust-core/src/component.rs:124`). A patch never re-runs `init`
    (`crates/frust-core/src/hotpatch.rs:15-16`). Row D2 measured new code reading and writing 4 bytes
-   past the old 4-byte value, likely into the `disposed` flag (`component.rs:140`);
+   past the old 4-byte value, likely into the `disposed` flag (`component.rs:162`);
 3. **`build`'s concrete return type `R`**, at two points:
    - **The return slot.** The old `call_build` monomorph receives `F::Return` and erases it as the
      old `R` (`AnyView::new(crate::hotpatch::call_build(..))`, `component.rs:178`, `:223`). The
      patched `call_it` symbol carries no return type (RESULTS.md row D notes), so a new `R` is
      written into the old `R`'s slot and read through the old `R`'s vtable.
-   - **The retained tree.** `prev` (`component.rs:127`) holds the previous `R` behind an `AnyView`,
-     and the child element holds `R::Element` (`component.rs:130`, recovered at `:232-236`).
-     `AnyView::rebuild` downcasts both **by `TypeId`** (`crates/frust-core/src/view.rs:259-277`).
+   - **The retained tree.** `prev` (`component.rs:149`) holds the previous `R` behind an `AnyView`,
+     and the child element holds `R::Element` (`child`, `component.rs:152`).
+     `AnyView::rebuild` downcasts both **by `TypeId`** (`crates/frust-core/src/view.rs:253-273`).
      A type keeps its `TypeId` when a field is added, because `TypeId` is identity, not layout. So
      new code can read an old value of a same-named type through a new layout.
 
@@ -293,13 +293,14 @@ by patch-2 code crosses a boundary too (the two-patch case under L3 below), and 
 is not always the caller (the nested-component case under L2 below).
 
 **Measured status.**
-- Row D (identity change) and row D2 (State layout) are measured.
-- **Row D3** (return-type edit: wrap the root `column()`) is not measured yet. Card H0-00 measures it
-  with dx on the existing spike before any builder work. H0-00 is a **gate on milestone 1**, not a
-  follow-up: H1-11 depends on it, and milestone 1 cannot be declared until H0-00 has run and its
-  observed behaviour (no-op, corruption or crash) is reproduced as an H1-05 fixture. If H0-00 shows
-  a D3 behaviour the L1 + L3 argument below does not predict, the plan stops at phase H0 for a
-  redesign.
+- Row D (identity change), row D2 (State layout) and row D3 (return-type edit) are measured.
+- **Row D3** (wrap the root `column()`): H0-00 measured it with dx on the two-package spike and it
+  crashed 3/3 (SIGSEGV in `AnyView::rebuild`: the return slot and the by-value retained tree of
+  dx-era frust). H1-11 measured the same edit on the real builder with the erased seam (H0-02):
+  `patched` 3/3 plus 2/2 under guard malloc, PID and State kept, the patched tree interactive. L3
+  reports nothing because the real `ComponentWidget` holds `prev` and `child` erased, so a new `R`
+  reaches the DWARF table only as new types (2.c below). The H1-05 fixture mirrors that layout
+  (R3-03); milestone 1's bar treats D3 as "patched and survives" (section 7).
 
 **Why an instance or symbol comparison is insufficient.**
 - dx matches by symbol name (`dx:cli/src/build/patch.rs:420-424`).
@@ -324,13 +325,17 @@ is not always the caller (the nested-component case under L2 below).
     `scripts/ci/erasure-check.sh:9`) would flag `build_erased`. It carries the documented opt-out
     `// erasure: keep hot-patch boundary type must be layout-fixed`
     (`scripts/codemod/frust_any_codemod.py:121`).
-  - **What L1 does not do.** It removes one crossing, the return slot, and nothing else. It
-    **shrinks the D2/D3 hazard to the retained tree rather than eliminating it**: `prev`
-    (`component.rs:127`) still holds the old `R`, the child pod holds the element old code built
-    for it (`component.rs:130`), and patched `dyn_rebuild` downcasts both by `TypeId`
-    (`view.rs:259-266`) and reads them through the new layout. A D3-class edit that keeps `R`'s type
-    path (a field added to an app view struct, a changed closure capture) is still a hazard after
-    L1. Closing D3 depends on L3 and on H0-00 confirming the mechanism.
+  - **What L1 does not do, and what the real crate already does.** L1 removes one crossing, the
+    return slot. The retained tree is erased in the real crate: under the `hotpatch` feature
+    `ComponentWidget<C>` is `#[repr(C)]` and holds `prev: AnyView<C::State>` and
+    `child: ChildPod` (`crates/frust-core/src/component.rs:133-162`, `prev` at `:149`, `child` at
+    `:152`), and `AnyView`'s `dyn_rebuild` compares `TypeId`s and tears the old widget down and
+    builds a fresh one on a mismatch (`crates/frust-core/src/view.rs:253-273`). So a D3-class edit
+    that changes `R`'s type (the root wrapped in one more container) reaches the layout table only
+    as new types, which L3 accepts, and is an ordinary `TypeId` rebuild: patched and surviving
+    (H1-11 measured it: 3/3 plus 2/2 under guard malloc, PID and State kept). The hazard that
+    remains inside `R` is a same-named type changing layout (a field added to an app view struct,
+    a changed closure capture; D2/D4), which keeps its `TypeId` and is L3's job.
 
 - **L2: a creator-image layout witness, checked at every component seam (in-app backstop, no host
   data).**
@@ -910,11 +915,19 @@ precondition failed.
    (`crates/frust-devtools/src/service.rs:104-109`; trust model at `crates/frust-devtools/src/lib.rs:37-49`).
    The host reaches an Android app through `adb forward` (3.3). The host session sends a patch only
    to a loopback endpoint (card H1-08).
-4. **Bytes over the authenticated channel, never a path from the wire.** The app loads **only bytes
-   it received on that connection** (`patch_chunk`) and wrote, mode `0600`, into its own cache dir
-   (4.3). `apply_patch`'s `JumpTableWire` has no `lib` field (4.1), and the app-side entry takes the
-   path it wrote itself, never a client-supplied one. A local process that guesses or plants a path
-   therefore cannot get code loaded.
+4. **Bytes over the authenticated channel, or the one checked loopback hand-off path.** The app
+   loads **only bytes it received on that connection** (`patch_chunk`) or read through the loopback
+   hand-off, and wrote, mode `0600`, into its own cache dir (4.3). `apply_patch`'s `JumpTableWire`
+   has no `lib` field (4.1), and the app-side entry takes the path it wrote itself, never a
+   client-supplied one. The only path on the wire is `ApplyPatchParams.file.path` (amended
+   2026-10-08, R3-01): sent only on a loopback session to an app that advertises
+   `HotpatchInfo.patch_file_hand_off` (unix shells), naming the patch the host already wrote with
+   its SHA-256. The app reads it only when all five checks hold: opened `O_NOFOLLOW` and a regular
+   file by `fstat`; owned by the app's effective uid; `mode & 0o077 == 0`; size equal to `len`;
+   SHA-256 equal to `file.sha256`. It never logs the path. The threat model does not widen: an
+   authenticated client can already send code as chunks, the digest binds the file to what the host
+   linked, and the app refuses any file it does not own outright. A local process that guesses or
+   plants a path therefore still cannot get code loaded.
 5. **The patch matches this process and this connection.** `apply_patch` names a `patch_id` whose
    chunks arrived on the same connection, and the reassembled length must equal `len`. It also
    carries the `pid` and `anchor_runtime` the host built the stub against (from `hotpatch_info`);
@@ -931,16 +944,16 @@ websocket.**
 
 | Method | Direction | Params | Result |
 |---|---|---|---|
-| `hotpatch_info` | client→server request | none | `{ anchor_runtime: u64, pid: u32, triple: String, patches_applied: u32, patch_bytes_loaded: u64, pending_layout_mismatches: Vec<String> }` (L2 records not yet reported, 2.c) |
+| `hotpatch_info` | client→server request | none | `{ anchor_runtime: u64, pid: u32, triple: String, patches_applied: u32, patch_bytes_loaded: u64, pending_layout_mismatches: Vec<String>, patch_file_hand_off: bool }` (L2 records not yet reported, 2.c; `patch_file_hand_off` defaults to `false` when absent) |
 | `patch_chunk` | client→server request | `{ patch_id: u64, offset: u64, total_len: u64, data_base64: String }` (≤ 512 KiB raw per chunk) | `AckResult` |
-| `apply_patch` | client→server request | `{ patch_id: u64, len: u64, pid: u32, anchor_runtime: u64, table: JumpTableWire, expected_seams: u32 }`, where `JumpTableWire` mirrors `crates/frust-hotpatch/src/jump_table.rs:15-33` minus `lib` | `PatchOutcome { applied: bool, seam_hits: u64, seam_fall_throughs: Vec<MissedKey>, layout_mismatches: Vec<String>, patches_applied: u32, patch_bytes_loaded: u64 }` with `MissedKey { image: u32, link_address: u64 }` (2.c), sent **after the next frame**. While L2 records are unreported, the app refuses: `applied: false`, nothing loaded, the records in `layout_mismatches`. The backend hops to the UI thread the way existing calls do (`crates/frust-devtools/src/lib.rs:58-74`). |
+| `apply_patch` | client→server request | `{ patch_id: u64, len: u64, pid: u32, anchor_runtime: u64, table: JumpTableWire, expected_seams: u32, file?: PatchFile }`, where `JumpTableWire` mirrors `crates/frust-hotpatch/src/jump_table.rs:15-33` minus `lib`. Without `file`, the bytes are `patch_id`'s chunks from this connection. With `file: { path: String, sha256: String }` (the loopback hand-off, only to an app advertising `patch_file_hand_off`), no chunk is sent and the app reads the host-written patch under 3.7 item 4's five checks (`O_NOFOLLOW` regular file, same euid, `mode & 0o077 == 0`, size `len`, SHA-256 match); a `patch_id` both uploaded and named by file is refused | `PatchOutcome { applied: bool, seam_hits: u64, seam_fall_throughs: Vec<MissedKey>, layout_mismatches: Vec<String>, patches_applied: u32, patch_bytes_loaded: u64 }` with `MissedKey { image: u32, link_address: u64 }` (2.c), sent **after the next frame**. While L2 records are unreported, the app refuses: `applied: false`, nothing loaded, the records in `layout_mismatches`. The backend hops to the UI thread the way existing calls do (`crates/frust-devtools/src/lib.rs:58-74`). |
 
 - **New pieces.** `Capability::HotPatch` joins the handshake's capability list
   (`crates/frust-devtools-protocol/src/messages.rs:44-56`). The three methods join `Method`
   (`crates/frust-devtools-protocol/src/method.rs:14-42`).
 - **The capability is conditional.** It is advertised only when the five preconditions of 3.7 hold
-  (debug build, OS-CSPRNG token with `require_token` on, loopback bind, bytes never paths, pid and
-  anchor match). It is never advertised on Windows until H3-02 lands and H3-03 passes. The host sends nothing to an
+  (debug build, OS-CSPRNG token with `require_token` on, loopback bind, bytes or the checked loopback
+  hand-off only, pid and anchor match). It is never advertised on Windows until H3-02 lands and H3-03 passes. The host sends nothing to an
   app that does not advertise it. While it is absent, `patch_chunk` and `apply_patch` answer
   `METHOD_NOT_FOUND`, exactly as on a build without the feature.
 - **One patch at a time.** The host sends one patch per session and waits for its
@@ -1091,12 +1104,12 @@ Notation:
 | H1-03 | `hotpatch::fat_link` + `hotpatch::thin_link`: fat archive + force_load/whole-archive, anchor export, Darwin + Gnu thin args, patch naming under `<target>/frust-hotpatch/<session>/` | `crates/frust-drive/src/hotpatch/{fat_link.rs,thin_link.rs}` | complex | H1-01 | `cargo test -p frust-drive hotpatch::fat_link`; `cargo test -p frust-drive hotpatch::thin_link` |
 | H1-04 | `hotpatch::symbols` + `stub` + `jump_table`: symbol cache (ELF/Mach-O, TLS init image), undefined-symbol stub (text thunks aarch64/x86_64, TLS, data), name-matched jump table with anchor rebasing | `crates/frust-drive/src/hotpatch/{symbols.rs,stub.rs,jump_table.rs}` | complex | H1-00 | `cargo test -p frust-drive hotpatch::symbols`; `cargo test -p frust-drive hotpatch::stub`; `cargo test -p frust-drive hotpatch::jump_table` |
 | H1-05 | `hotpatch::layout` (L3 DWARF fingerprint tables: base at fat, candidate per thin, compared with the accepted-layout set = base + every accepted patch, merge on accept, diff → reasons) + `hotpatch::seams` (row D identity via demangled `build_erased` instances, compared with the accepted seam set); proves DWARF presence under the default dev `split-debuginfo` on macOS and Linux | `crates/frust-drive/src/hotpatch/{layout.rs,seams.rs}` | complex | H1-00 | `cargo test -p frust-drive hotpatch::layout` (fixtures: D2 field add, same-size reorder, closure capture change, return-type change, H0-00's observed D3 edit, **add a type in patch 1, change its layout in patch 2, expect `RestartRequired`**, a type dropped in patch 2 and re-added with another layout in patch 3, expect `RestartRequired`); `cargo test -p frust-drive hotpatch::seams` (fixture: a component added in patch 1 whose State identity changes in patch 2, expect `StateTypeChanged`) |
-| H1-06 | Protocol: `hotpatch_info`, `patch_chunk`, `apply_patch` (with `pid` + `anchor_runtime`), `PatchOutcome`, `Capability::HotPatch`, whose doc states the five code-execution preconditions (3.7); no wire type carries a filesystem path | `crates/frust-devtools-protocol/src/{method.rs,messages.rs,lib.rs}` | medium | – | `cargo test -p frust-devtools-protocol` (incl. a serde test that `apply_patch` params and `JumpTableWire` reject or ignore a `lib`/path field) |
+| H1-06 | Protocol: `hotpatch_info`, `patch_chunk`, `apply_patch` (with `pid` + `anchor_runtime`), `PatchOutcome`, `Capability::HotPatch`, whose doc states the five code-execution preconditions (3.7); no wire type carries a filesystem path (amended by R3-01: `ApplyPatchParams.file.path`, under 3.7 item 4's checks) | `crates/frust-devtools-protocol/src/{method.rs,messages.rs,lib.rs}` | medium | – | `cargo test -p frust-devtools-protocol` (incl. a serde test that `apply_patch` params and `JumpTableWire` reject or ignore a `lib`/path field) |
 | H1-07 | In-app apply: frust-devtools dispatch + backend calls; `token::generate` reports its source, and `HotPatch` is advertised (and its methods dispatched) only for an OS-CSPRNG token with `require_token` on, in a `debug_assertions` + `hotpatch` build, never on Windows; frust-shell-common `ShellBackend` reassembles chunks per connection (size cap), checks `pid`/`anchor_runtime`, writes `0600` into the app cache dir, calls the safe frust-hotpatch entry with the path it wrote, replies after the next frame with hits, missed keys and mismatches (or with the entry's `applied: false` refusal while L2 records are unreported), and returns pending L2 records from `hotpatch_info`; facade feature chain | `crates/frust-devtools/src/{dispatch.rs,backend.rs,token.rs,service.rs}`, `crates/frust-shell-common/src/devtools.rs`, `crates/frust-shell-common/Cargo.toml`, `crates/frust-shell-desktop/src/app_handler.rs`, `crates/frust-shell-desktop/Cargo.toml`, `crates/frust/Cargo.toml` | complex | H0-02, H0-03, H1-06 | `cargo test -p frust-devtools`; `cargo test -p frust-shell-common --features devtools,hotpatch`; `cargo test -p frust-shell-desktop --features devtools,hotpatch`; `cargo clippy -p frust-shell-common -p frust-shell-desktop --features devtools,hotpatch --all-targets -- -D warnings` |
 | H1-08 | `hotpatch::session`: fat build (3.2) → spawn exe → discovery + authenticated handshake → `HotPatch` capability present or restart-only session with the reason → `hotpatch_info` → on change: classify (d) → thin build → L3 + identity gates against the accepted sets → pending L2 records from `hotpatch_info` (non-empty → `RestartRequired { LayoutChanged }`, nothing sent) → chunked upload over the loopback/`adb forward` connection (bytes only, one patch in flight) + `apply_patch` → `Outcome`; accepted-set merge on `applied: true` only, `PatchOutcomeUnknown` on a lost reply, reset on every relaunch; missed keys classified by image (newest patch benign; a base or older-patch key on a reported seam instance → restart); patch budget (e); devtools client methods; `frust/hotpatch` feature for Debug hot sessions | `crates/frust-drive/src/hotpatch/session.rs`, `crates/frust-drive/src/devtools_client.rs`, `crates/frust-drive/src/desktop_run.rs`, `crates/frust-drive/src/build_info.rs` | complex | H1-02, H1-03, H1-04, H1-05, H1-07 | `cargo test -p frust-drive hotpatch::session` (fake runner + fake devtools server; cases: no `HotPatch` capability → nothing sent; non-loopback endpoint → nothing sent; merge only on `applied: true`; lost reply → `PatchOutcomeUnknown`; set reset after a relaunch; a late L2 mismatch pending in `hotpatch_info` after an `applied: true` outcome → `RestartRequired { LayoutChanged }`, nothing further sent; an `applied: false` refusal carrying records → `RestartRequired { LayoutChanged }`; missed keys only in the newest patch → `Patched`); `cargo test -p frust-drive devtools_client` |
 | H1-09 | `frust run --watch` hot mode (default for debug desktop, `--no-hot` opt-out), watches all three path classes, prints outcomes, restart path on `RestartRequired` | `crates/frust-cli/src/commands/run.rs`, `crates/frust-cli/src/cli.rs` | medium | H1-08 | `cargo test -p frust-cli` |
 | H1-10 | TUI: `Effect::HotPatch`, `Message::HotPatchOutcome`, toasts, restart fallback, palette rename; `R` stays a full restart | `crates/frust-tui/src/engine/{message.rs,update.rs,palette.rs}`, `crates/frust-tui/src/runner.rs`, `crates/frust-tui/src/supervise/{watch.rs,session.rs}` | complex | H1-08 | `cargo test -p frust-tui` |
-| H1-11 | **Milestone 1 gate (macOS, GUI session):** stock `frust create` app (one package, template crate types) under `frust run --watch`: rows A, B, C (patched, State kept); D, D2 (nested component, root through the seam: the 2.c trace), D3, D4 (type added by patch 1, layout changed by patch 2), D5 (inline-container arm swap under a D2 edit: `HomePage` inside an `either(..)` arm, `HomeState` gains a field, then the arm swaps; with L3 on the host refuses it, and under guard-malloc no heap error appears, i.e. no non-creator drop; the in-app leak path itself is H0-02's test), E (each `restart required`, never `patched`); F (restart median, now through `frust run --watch`); G (10 patches + budget counters); H (one-package now patches); I (cold fat vs cold `cargo build`, one `target/`). Plus the TUI Watch leg. | `examples/hotpatch-spike/measure.sh`, `examples/hotpatch-spike/RESULTS.md` | complex | H0-00, H1-09, H1-10 | `bash -n examples/hotpatch-spike/measure.sh`; the matrix runs; pass bar: median save→frame ≤ 50% of row F, zero `patched` lines for D/D2/D3/D4/D5/E; row A's median recorded against the 493 ms estimate (section 7) |
+| H1-11 | **Milestone 1 gate (macOS, GUI session):** stock `frust create` app (one package, template crate types) under `frust run --watch`: rows A, B, C (patched, State kept); D, D2 (nested component, root through the seam: the 2.c trace), D3, D4 (type added by patch 1, layout changed by patch 2), D5 (inline-container arm swap under a D2 edit: `HomePage` inside an `either(..)` arm, `HomeState` gains a field, then the arm swaps; with L3 on the host refuses it, and under guard-malloc no heap error appears, i.e. no non-creator drop; the in-app leak path itself is H0-02's test), E (each `restart required`, never `patched`); F (restart median, now through `frust run --watch`); G (10 patches + budget counters); H (one-package now patches); I (cold fat vs cold `cargo build`, one `target/`). Plus the TUI Watch leg. | `examples/hotpatch-spike/measure.sh`, `examples/hotpatch-spike/RESULTS.md` | complex | H0-00, H1-09, H1-10 | `bash -n examples/hotpatch-spike/measure.sh`; the matrix runs; pass bar: median save→frame ≤ 50% of row F, zero `patched` lines for D/D2/D3/D4/D5/E; row A's median recorded against the 493 ms estimate (section 7). Amended 2026-10-08 after the first run (FAIL on latency, D3 patched and surviving): R3-03 restates the bar in section 7 and R3-04 re-measures against it |
 | H1-12 | CI canary against the pinned toolchain (`rust-toolchain.toml`: 1.98.1): a headless standalone fixture with a `HotFn` loop, built fat, edited, thin-built and applied in-process, asserting the new return value; plus a D2-shaped edit asserting `RestartRequired` | `scripts/ci/hotpatch-canary.sh`, `testing/hotpatch-canary/**`, `.github/workflows/ci.yml` | complex | H1-08 | `bash scripts/ci/hotpatch-canary.sh` on macOS and on the Linux CI runner |
 
 #### Phase H2: Android arm64
@@ -1196,20 +1209,26 @@ practice but not by contract:
 **Recommendation in one sentence:** build STAGED, desktop first. **Milestone 1** is H0-00 run and
 H1-11 passing: on macOS, with Linux covered by the CI canary, `frust run --watch` and the TUI's
 Watch hot-patch an unmodified one-package `frust create` app with State kept, every hazard row (D,
-D2, D3, D4, D5, E) answers `restart required` and never `patched`, and the median save→frame is at
+D2, D4, D5, E) answers `restart required` and never `patched`, D3 is patched and survives, and the median save→frame is at
 most 50% of the restart median.
 
 **What makes the hazard rows safe: L1 + L3, on DWARF targets.**
-- L1 removes the return slot but leaves the retained tree (2.c). It shrinks the D2/D3 hazard to the
-  retained tree; it does not eliminate it.
+- L1 removes the return slot. The retained tree is already erased in the real crate (2.c,
+  `component.rs:133-162`, `view.rs:253-273`), so a `build` edit that changes `R`'s type is a
+  `TypeId` rebuild, not a layout hazard.
 - D2, D4 and D5 are closed by L3 against the accepted-layout set. L2's creator-image witness is an
   in-app backstop for State size changes of components hosted in their own erased box, with a
   leak-on-mismatch rule for every host (2.c design (ii)); it is not part of the soundness argument.
-- D3 is closed only if L3 covers it **and** H0-00 confirms the mechanism. That is why H0-00 gates
-  milestone 1 instead of following it.
+- Row D (a State identity change) answers `StateTypeChanged` naming the component: the seam
+  identity check runs before the layout diff, because the identity change also moves the hashed
+  member type of `ComponentWidget<C>`.
+- Hazard rows D, D2, D4, D5 and E answer `restart required` and never `patched`. D3 is **patched
+  and survives**: PID and State kept, guard malloc clean (H1-11: 3/3 plus 2/2). The mechanism is
+  measured, not argued: the erased `prev`/`child` make the new `R` a new type, and `dyn_rebuild`
+  tears down and rebuilds on the `TypeId` mismatch.
 - The guarantee is DWARF-targets-only. Windows applies no patch until H3-02 and H3-03 (section 5).
 
-**Latency: an estimate, to be confirmed by H1-11.**
+**Latency: estimated at ~493 ms, then measured twice by milestone 1 (last bullet).**
 - Measured: Phase 1, 475 / 480 ms through subsecond; Phase 2, 575 / 577 ms through frust-hotpatch;
   the same-day control on the unmodified base (A-ctl), **493 ms**; restart, 1570 ms (RESULTS.md
   rows A and F, "Phase 2: frust-hotpatch runtime").
@@ -1227,6 +1246,15 @@ most 50% of the restart median.
   it. The pass bar (50% of 1570 ms = 785 ms) leaves ~290 ms for the estimate to be wrong.
 - The first patch of a session took 1-2 s in every Phase 1/2 session (RESULTS.md, Surprises).
   Nothing here changes that.
+- **Measured (RESULTS.md, "Milestone 1" and "Milestone 1 re-run").** H1-11, on the first
+  builder: A **2191 ms**, 59.7% of the `frust run --watch --no-hot` restart (3671 ms), a FAIL. The
+  estimate had no transport term (the 3 MB base64 upload cost 801-805 ms), no load term (`dlopen`
+  plus apply, 335-367 ms), and the 300 ms debounce alone was 61% of it. After R3-01 (loopback
+  hand-off by file: transport 27-36 ms) and R3-02 (debounce 100 ms), R3-04 measured A **1397 ms**:
+  26.8% of that run's restart (5218 ms) and 38.1% of H1-11's, a PASS. What remains is the thin
+  compile with its gates (684-819 ms), the link (81-97 ms) and `dlopen` plus apply (316-332 ms);
+  the next levers are the patch image size (3 MB, debug info included) and a single-crate-type thin
+  compile. The first patch of a session is 1.5-1.9 s.
 
 **Why desktop first, stated without overreach.** Round 0 said desktop was "proven end-to-end
 except for the two builder fixes" and had no unproven links. That overstated it. What ran on this
@@ -1248,7 +1276,10 @@ the frust builder replaces or adds on desktop has not run anywhere. Those are mi
    is unknown. The identity gate depends on demangling. L2's `repr(C)` `ComponentWidget` with boxed
    State and a leak-on-mismatch `Drop` (H0-02) changes the hot-patch build's layout and
    allocations. The accepted-set lifecycle (H1-08) is new.
-4. **H0-00's outcome.** If D3 does not behave as 2.c predicts, the plan stops at phase H0.
+4. **H0-00's outcome.** Resolved: H0-00 reproduced the crash under dx; H1-11 showed the erased seam
+   turns the same edit into an ordinary rebuild (2.c), so the plan continued past H0. Milestone 1's
+   first run then failed on latency, not on a hazard row, and the re-run after R3-01 to R3-03
+   passed (R3-04, A 1397 ms; section 7).
 5. **The security preconditions (3.7).** Token provenance and the conditional capability are new
    code in frust-devtools (H1-07). A defect there fails safe only if the capability is absent by
    default, which H1-07's tests must show.

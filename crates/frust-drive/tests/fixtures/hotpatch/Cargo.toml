@@ -1,0 +1,4 @@
+# Fixture for frust-drive's hotpatch::layout and hotpatch::seams tests, built from a temp copy.
+[workspace]
+resolver = "3"
+members = ["hotfn", "core", "app"]

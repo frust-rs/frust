@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use frust_dap::ide_config::{ParentIde, WriteMode};
+use frust_drive::hotpatch::session::Outcome as HotOutcome;
 
 use super::add_plugin::{AddPluginAdvance, AddPluginDialog};
 use super::bootstrap::BootstrapWizard;
@@ -45,7 +46,7 @@ pub enum Effect {
     /// effect needs before requesting it.
     RestartSession(SessionId),
     /// Start (`on`) or stop session `id`'s source watcher — the enactment of
-    /// a "Watch: restart on save" flip ([`Message::ToggleWatch`],
+    /// a "Watch: hot patch on save" flip ([`Message::ToggleWatch`],
     /// [`Message::EnableWatch`]). The runner keys its
     /// `crate::supervise::SourceWatchers` by `id`, watching the launch
     /// record's project root; every settled change burst comes back as
@@ -55,6 +56,16 @@ pub enum Effect {
         id: SessionId,
         /// Start (`true`) or stop (`false`).
         on: bool,
+    },
+    /// Offer a watched hot session's settled save-burst to the running app
+    /// as a hot patch — [`Message::WatchTriggered`] on a live hot session.
+    /// The runner hands `paths` to that session's `on_change` off the UI
+    /// thread and posts the answer back as [`Message::HotPatchOutcome`].
+    HotPatch {
+        /// The hot session to patch.
+        session: SessionId,
+        /// The burst's changed paths.
+        paths: Vec<PathBuf>,
     },
     /// Copy text to the system clipboard (the runner emits an OSC 52 sequence).
     Copy(String),
@@ -436,7 +447,12 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             None => Outcome::idle(),
         },
         Message::ToggleWatch => toggle_watch(state),
-        Message::WatchTriggered { session } => watch_triggered(state, session),
+        Message::WatchTriggered {
+            session,
+            paths,
+            hot,
+        } => watch_triggered(state, session, paths, hot),
+        Message::HotPatchOutcome { session, outcome } => hot_patch_outcome(state, session, outcome),
         Message::EnableWatch { session } => enable_watch(state, session),
         Message::WatchFailed { session, reason } => {
             if let Some(idx) = state.session_index(session) {
@@ -2622,12 +2638,16 @@ fn restart_session_at(state: &mut AppState, idx: usize) -> Outcome {
     Outcome::effect(Effect::RestartSession(id))
 }
 
-/// The refusal toast for "Watch: restart on save" on anything but a desktop
+/// The refusal toast for "Watch: hot patch on save" on anything but a desktop
 /// app session — `frust run --watch`'s own reason (`frust-cli`'s `run` docs).
 const WATCH_DESKTOP_ONLY: &str = "Watch is desktop-only: the watch loop has no device-side \
      kill/rebuild/relaunch story yet";
 
-/// Flip "Watch: restart on save" on the active session
+/// The toast for turning watch on: what a save will do from now on.
+const WATCH_ON: &str = "Watching sources — a save hot-patches this session, or restarts it \
+     when it cannot";
+
+/// Flip "Watch: hot patch on save" on the active session
 /// ([`Message::ToggleWatch`]). No active session idles; a session whose
 /// target is not the desktop preview (a device, or an ad-hoc session with no
 /// target) refuses with [`WATCH_DESKTOP_ONLY`] and no effect. Otherwise the
@@ -2644,23 +2664,31 @@ fn toggle_watch(state: &mut AppState) -> Outcome {
     }
     session.watch = !session.watch;
     let (id, on) = (session.id, session.watch);
-    let text = if on {
-        "Watching src/ + Cargo.toml — a save restarts this session"
-    } else {
-        "Watch off"
-    };
+    let text = if on { WATCH_ON } else { "Watch off" };
     state.toasts.push(ToastKind::Info, text.to_string());
     Outcome::effect(Effect::WatchSet { id, on })
 }
 
 /// A watched session's sources settled after a change
-/// ([`Message::WatchTriggered`]): restart it through [`restart_session_at`]
-/// — unless it is gone, has watch off, or already has a restart pending
-/// (`close_on_exit` set by an earlier restart or close that has not landed
-/// yet). That last guard is what keeps one save-burst to one relaunch: a
-/// trigger already in flight when the first restart was requested finds the
-/// replaced tab marked and does nothing.
-fn watch_triggered(state: &mut AppState, session: SessionId) -> Outcome {
+/// ([`Message::WatchTriggered`]) — nothing at all when it is gone, has
+/// watch off, or already has a restart pending (`close_on_exit` set by an
+/// earlier restart or close that has not landed yet). That last guard is
+/// what keeps one save-burst to one relaunch: a trigger already in flight
+/// when the first restart was requested finds the replaced tab marked and
+/// does nothing.
+///
+/// Otherwise a **hot** desktop session that is still live is asked to patch
+/// the burst's `paths` ([`Effect::HotPatch`]); its answer comes back as
+/// [`Message::HotPatchOutcome`]. Everything else — a session that is not
+/// hot, or one that already ended (a build that failed is exactly the
+/// session a save should relaunch) — restarts through
+/// [`restart_session_at`], as before hot patching existed.
+fn watch_triggered(
+    state: &mut AppState,
+    session: SessionId,
+    paths: Vec<PathBuf>,
+    hot: bool,
+) -> Outcome {
     let Some(idx) = state.session_index(session) else {
         return Outcome::idle();
     };
@@ -2668,7 +2696,78 @@ fn watch_triggered(state: &mut AppState, session: SessionId) -> Outcome {
     if !view.watch || view.close_on_exit {
         return Outcome::idle();
     }
+    if hot && view.target == Some(SessionTarget::Desktop) && !view.state.is_terminal() {
+        return Outcome::effect(Effect::HotPatch { session, paths });
+    }
     restart_session_at(state, idx)
+}
+
+/// What a hot session answered for one save-burst
+/// ([`Message::HotPatchOutcome`]), told as a toast: `patched in N ms`, no
+/// change, a compile failure (its diagnostics appended to the session's
+/// log; the running app is untouched) or `restart required: <reason>` with
+/// `frust-drive`'s reason verbatim.
+///
+/// A `RestartRequired` also restarts the session through
+/// [`restart_session_at`] — the same relaunch a non-hot watched session
+/// gets, so the relaunch carries watch over and runs hot again — but only
+/// while the session still has watch on and no restart is pending: a second
+/// answer for the same burst (or one arriving after the tab was closed)
+/// finds `close_on_exit` set and only toasts. An answer for a session that
+/// is gone is dropped.
+fn hot_patch_outcome(state: &mut AppState, session: SessionId, outcome: HotOutcome) -> Outcome {
+    let Some(idx) = state.session_index(session) else {
+        return Outcome::idle();
+    };
+    match outcome {
+        HotOutcome::Patched { ms, .. } => {
+            state
+                .toasts
+                .push(ToastKind::Success, format!("patched in {ms} ms"));
+            Outcome::redraw()
+        }
+        HotOutcome::NoChange => {
+            state
+                .toasts
+                .push(ToastKind::Info, HotOutcome::NoChange.to_string());
+            Outcome::redraw()
+        }
+        HotOutcome::CompileFailed { diagnostics } => {
+            let text = HotOutcome::CompileFailed {
+                diagnostics: Vec::new(),
+            }
+            .to_string();
+            let lines: Vec<String> = diagnostics
+                .iter()
+                .flat_map(|diagnostic| diagnostic.lines().map(str::to_string))
+                .collect();
+            if !lines.is_empty() {
+                on_session_event(
+                    state,
+                    SessionEvent {
+                        id: session,
+                        kind: SessionEventKind::Lines(lines),
+                    },
+                );
+            }
+            state.toasts.push(ToastKind::Error, text);
+            Outcome::redraw()
+        }
+        HotOutcome::RestartRequired(reason) => {
+            state
+                .toasts
+                .push(ToastKind::Warn, format!("restart required: {reason}"));
+            let view = &state.sessions[idx];
+            if !view.watch || view.close_on_exit {
+                return Outcome::redraw();
+            }
+            let out = restart_session_at(state, idx);
+            Outcome {
+                redraw: true,
+                ..out
+            }
+        }
+    }
 }
 
 /// Turn watch on for a freshly launched session the runner says should carry
@@ -2987,6 +3086,7 @@ mod tests {
     use crate::engine::session_view::Scroll;
     use crate::engine::state::Screen;
     use crate::supervise::SessionState;
+    use frust_drive::hotpatch::session::RestartReason;
     use std::path::PathBuf;
 
     fn welcome() -> AppState {
@@ -3606,7 +3706,7 @@ mod tests {
         assert_eq!(st.active_session().map(|s| s.id), Some(first));
     }
 
-    // ── Watch: restart on save ──────────────────────────────────────────────
+    // ── Watch: hot patch on save ────────────────────────────────────────────
 
     /// Every effect `out` carries, flattening one level of `Effect::Batch`.
     fn effects_of(out: &Outcome) -> Vec<Effect> {
@@ -3615,6 +3715,221 @@ mod tests {
             Some(effect) => vec![effect.clone()],
             None => vec![],
         }
+    }
+
+    /// A settled burst on a session the runner did not launch hot.
+    fn cold_trigger(session: SessionId) -> Message {
+        Message::WatchTriggered {
+            session,
+            paths: vec![PathBuf::from("/tmp/huddle/src/main.rs")],
+            hot: false,
+        }
+    }
+
+    /// A settled burst on a hot session, touching `paths`.
+    fn hot_trigger(session: SessionId, paths: &[&str]) -> Message {
+        Message::WatchTriggered {
+            session,
+            paths: paths.iter().map(PathBuf::from).collect(),
+            hot: true,
+        }
+    }
+
+    /// A running, watched desktop session — the shape every hot test starts
+    /// from.
+    fn watched_desktop() -> (AppState, SessionId) {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+        (st, a)
+    }
+
+    fn outcome(session: SessionId, outcome: HotOutcome) -> Message {
+        Message::HotPatchOutcome { session, outcome }
+    }
+
+    #[test]
+    fn watch_triggered_on_a_hot_desktop_session_asks_for_a_hot_patch() {
+        let (mut st, a) = watched_desktop();
+
+        let out = update(
+            &mut st,
+            hot_trigger(a, &["/tmp/huddle/src/a.rs", "/tmp/huddle/src/b.rs"]),
+        );
+        assert_eq!(
+            out.effect,
+            Some(Effect::HotPatch {
+                session: a,
+                paths: vec![
+                    PathBuf::from("/tmp/huddle/src/a.rs"),
+                    PathBuf::from("/tmp/huddle/src/b.rs"),
+                ],
+            })
+        );
+        assert!(
+            !st.sessions[0].close_on_exit && st.sessions[0].watch,
+            "a patch leaves the session running and watched"
+        );
+    }
+
+    #[test]
+    fn watch_triggered_on_a_non_hot_session_still_restarts() {
+        let (mut st, a) = watched_desktop();
+
+        let out = update(&mut st, cold_trigger(a));
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert!(st.sessions[0].close_on_exit);
+    }
+
+    #[test]
+    fn a_hot_trigger_on_an_ended_session_relaunches_instead_of_patching() {
+        // A fat build that failed leaves the session terminal: nothing is
+        // running to patch, so the save relaunches it, exactly as before.
+        let (mut st, a) = watched_desktop();
+        st.sessions[0].state = SessionState::Exited(false);
+
+        let out = update(&mut st, hot_trigger(a, &["/tmp/huddle/src/main.rs"]));
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+    }
+
+    #[test]
+    fn a_hot_trigger_with_watch_off_or_a_restart_pending_does_nothing() {
+        let (mut st, a) = watched_desktop();
+        st.sessions[0].watch = false;
+        let out = update(&mut st, hot_trigger(a, &["/tmp/huddle/src/main.rs"]));
+        assert_eq!(out.effect, None);
+
+        let (mut st, a) = watched_desktop();
+        st.sessions[0].close_on_exit = true;
+        let out = update(&mut st, hot_trigger(a, &["/tmp/huddle/src/main.rs"]));
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn patched_toasts_the_time_and_does_not_restart() {
+        let (mut st, a) = watched_desktop();
+
+        let out = update(
+            &mut st,
+            outcome(
+                a,
+                HotOutcome::Patched {
+                    ms: 42,
+                    components: 3,
+                },
+            ),
+        );
+        assert_eq!(out.effect, None);
+        assert!(out.redraw);
+        assert_eq!(
+            toast_texts(&st, ToastKind::Success),
+            vec!["patched in 42 ms"]
+        );
+        assert!(!st.sessions[0].close_on_exit);
+        assert!(st.sessions[0].watch);
+    }
+
+    #[test]
+    fn restart_required_toasts_the_reason_and_restarts_once_per_burst() {
+        let (mut st, a) = watched_desktop();
+        let reason = RestartReason::BuildInputChanged {
+            package: Some("huddle".to_string()),
+            file: PathBuf::from("/tmp/huddle/Cargo.toml"),
+        };
+        let expected = format!("restart required: {reason}");
+
+        let out = update(
+            &mut st,
+            outcome(a, HotOutcome::RestartRequired(reason.clone())),
+        );
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert_eq!(warn_texts(&st), vec![expected.as_str()]);
+        assert!(st.sessions[0].close_on_exit);
+        assert!(!st.sessions[0].watch, "the relaunch takes the flag over");
+
+        // A second answer for the same burst (or a trigger racing it) finds
+        // the restart pending: one relaunch, never two.
+        let out = update(&mut st, outcome(a, HotOutcome::RestartRequired(reason)));
+        assert_eq!(out.effect, None);
+        let out = update(&mut st, hot_trigger(a, &["/tmp/huddle/src/main.rs"]));
+        assert_eq!(out.effect, None);
+    }
+
+    #[test]
+    fn restart_required_after_watch_was_turned_off_only_toasts() {
+        let (mut st, a) = watched_desktop();
+        update(&mut st, Message::ToggleWatch);
+
+        let out = update(
+            &mut st,
+            outcome(a, HotOutcome::RestartRequired(RestartReason::NoSeamHit)),
+        );
+        assert_eq!(out.effect, None);
+        assert!(!st.sessions[0].close_on_exit);
+        assert_eq!(
+            warn_texts(&st),
+            vec!["restart required: the patch reached no component (no seam hit)"]
+        );
+    }
+
+    #[test]
+    fn compile_failed_logs_the_diagnostics_and_leaves_the_app_running() {
+        let (mut st, a) = watched_desktop();
+        let before = st.sessions[0].log.len();
+
+        let out = update(
+            &mut st,
+            outcome(
+                a,
+                HotOutcome::CompileFailed {
+                    diagnostics: vec![
+                        "error[E0308]: mismatched types\n --> src/main.rs:3:5".into(),
+                    ],
+                },
+            ),
+        );
+        assert_eq!(out.effect, None);
+        assert_eq!(st.sessions[0].log.len(), before + 2);
+        assert_eq!(
+            toast_texts(&st, ToastKind::Error),
+            vec!["compile failed; the running app is untouched"]
+        );
+        assert!(!st.sessions[0].close_on_exit);
+    }
+
+    #[test]
+    fn no_change_toasts_and_an_answer_for_a_gone_session_is_dropped() {
+        let (mut st, a) = watched_desktop();
+        let out = update(&mut st, outcome(a, HotOutcome::NoChange));
+        assert_eq!(out.effect, None);
+        assert_eq!(
+            toast_texts(&st, ToastKind::Info).last().copied(),
+            Some("no change to the running app")
+        );
+
+        let toasts = st.toasts.items.len();
+        let out = update(
+            &mut st,
+            outcome(
+                SessionId(99),
+                HotOutcome::RestartRequired(RestartReason::NoSeamHit),
+            ),
+        );
+        assert_eq!(out.effect, None);
+        assert_eq!(st.toasts.items.len(), toasts);
+    }
+
+    #[test]
+    fn r_on_a_hot_session_is_a_full_restart_never_a_patch() {
+        let (mut st, a) = watched_desktop();
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert!(
+            !matches!(out.effect, Some(Effect::HotPatch { .. })),
+            "R is the reset-state key: it relaunches (and re-fats), never patches"
+        );
     }
 
     #[test]
@@ -3665,17 +3980,12 @@ mod tests {
         let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
         st.sessions[0].state = SessionState::Running;
 
-        let out = update(&mut st, Message::WatchTriggered { session: a });
+        let out = update(&mut st, cold_trigger(a));
         assert_eq!(out.effect, None);
         assert!(!st.sessions[0].close_on_exit);
 
         // An unknown session id is ignored too.
-        let out = update(
-            &mut st,
-            Message::WatchTriggered {
-                session: SessionId(99),
-            },
-        );
+        let out = update(&mut st, cold_trigger(SessionId(99)));
         assert_eq!(out.effect, None);
     }
 
@@ -3686,7 +3996,7 @@ mod tests {
         st.sessions[0].state = SessionState::Running;
         update(&mut st, Message::ToggleWatch);
 
-        let out = update(&mut st, Message::WatchTriggered { session: a });
+        let out = update(&mut st, cold_trigger(a));
         assert_eq!(out.effect, Some(Effect::RestartSession(a)));
         assert!(
             st.sessions[0].close_on_exit,
@@ -3699,7 +4009,7 @@ mod tests {
 
         // A second trigger already in flight for the same burst finds the
         // restart pending and does nothing — one relaunch, never two.
-        let out = update(&mut st, Message::WatchTriggered { session: a });
+        let out = update(&mut st, cold_trigger(a));
         assert_eq!(out.effect, None);
 
         // The terminal event removes the replaced tab exactly once.
@@ -3715,7 +4025,7 @@ mod tests {
         st.sessions[0].watch = true;
         st.sessions[0].close_on_exit = true;
 
-        let out = update(&mut st, Message::WatchTriggered { session: a });
+        let out = update(&mut st, cold_trigger(a));
         assert_eq!(out.effect, None);
     }
 
@@ -3728,7 +4038,7 @@ mod tests {
         update(&mut st, state_event(a, SessionState::Exited(false)));
         assert!(st.sessions[0].watch);
 
-        let out = update(&mut st, Message::WatchTriggered { session: a });
+        let out = update(&mut st, cold_trigger(a));
         assert_eq!(out.effect, Some(Effect::RestartSession(a)));
         assert!(st.sessions.is_empty(), "the terminal tab goes at once");
     }
@@ -3752,7 +4062,7 @@ mod tests {
             "an externally delivered Killed turns watch off"
         );
 
-        let out = update(&mut st, Message::WatchTriggered { session: a });
+        let out = update(&mut st, cold_trigger(a));
         assert_eq!(
             out.effect, None,
             "watch is off, so a leftover trigger does nothing"
@@ -3778,7 +4088,7 @@ mod tests {
         update(&mut st, state_event(s1, SessionState::Killed));
         assert!(!st.sessions[st.session_index(s1).unwrap()].watch);
 
-        let out = update(&mut st, Message::WatchTriggered { session: s1 });
+        let out = update(&mut st, cold_trigger(s1));
         assert_eq!(
             out.effect, None,
             "the stopped session's own leftover trigger is a no-op"
@@ -3810,7 +4120,7 @@ mod tests {
         update(&mut st, Message::ToggleWatch);
         st.active_session = Some(st.session_index(other).unwrap());
 
-        let out = update(&mut st, Message::WatchTriggered { session: watched });
+        let out = update(&mut st, cold_trigger(watched));
         assert_eq!(out.effect, Some(Effect::RestartSession(watched)));
         assert_eq!(st.focus_next_registered, None);
     }
@@ -3821,7 +4131,7 @@ mod tests {
         let old = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
         st.sessions[0].state = SessionState::Running;
         update(&mut st, Message::ToggleWatch);
-        update(&mut st, Message::WatchTriggered { session: old });
+        update(&mut st, cold_trigger(old));
 
         // The runner relaunches the spec (a synthetic registration here) and,
         // because `old` had a watcher, posts `EnableWatch` for the new id

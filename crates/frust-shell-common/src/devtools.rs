@@ -50,6 +50,38 @@
 //! Not supported in v1 — the trait's default (`NOT_SUPPORTED` on the wire),
 //! and the default `handshake_info` capability set that pairs with it, are both
 //! left untouched.
+//!
+//! # Hot patching (`hotpatch` feature)
+//!
+//! [`ShellBackend`] offers `Capability::HotPatch` and answers its three calls;
+//! `frust-devtools` keeps the capability only while every code-execution
+//! precondition holds (debug build, OS-CSPRNG token with `require_token` on,
+//! not Windows), and owns the per-connection chunk reassembly. Here:
+//!
+//! - `patch_chunk` decodes one chunk's base64 payload;
+//! - `patch_file` (unix; `hotpatch_info` advertises `patch_file_hand_off`)
+//!   reads a patch the loopback host already wrote, named on `apply_patch` by
+//!   path and SHA-256, and refuses it unless all five checks hold: opened
+//!   `O_NOFOLLOW` and a regular file by `fstat`, owned by this process's
+//!   effective uid, `mode & 0o077 == 0`, size equal to `len`, matching
+//!   SHA-256. The bytes then go through `apply_patch` exactly as reassembled
+//!   chunks do; the path is never logged or echoed;
+//! - `apply_patch` checks `pid` and `anchor_runtime` against this process (an
+//!   unset anchor fails closed), writes the bytes it was handed — never loading
+//!   a path from the wire — to `<cache dir>/frust-hotpatch/patch-<pid>-<id>.<ext>`
+//!   (directory `0700`, file `0600`, created fresh, never through an existing
+//!   entry), applies it through `frust_hotpatch::apply_from_devtools`, removes
+//!   the file, and answers **after the following frame**: it parks on the frame
+//!   gate, asks the UI thread for a frame ([`DevtoolsUi::request_frame`]), and
+//!   the shell's [`frame_submitted`] releases it, so the outcome's seam hits,
+//!   missed keys and layout mismatches are those of a frame built after the
+//!   apply. No error or outcome names the file;
+//! - `hotpatch_info` reports this process's anchor, pid, target triple,
+//!   counters, and the layout-mismatch records not yet reported (marking them
+//!   reported).
+//!
+//! Only the desktop shell calls [`frame_submitted`] today; elsewhere an apply
+//! answers once the frame wait's [`UI_HOP_DEADLINE`] lapses.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -61,6 +93,13 @@ use frust_core::event::{
     InputEvent, Key, KeyEvent, Modifiers, PointerButton, PointerEvent, PointerPhase, ScrollDelta,
 };
 use frust_devtools::{AppInfo, BackendError, DevtoolsBackend, Service, ServiceHandle};
+#[cfg(all(feature = "hotpatch", unix))]
+use frust_devtools_protocol::PatchFile;
+#[cfg(feature = "hotpatch")]
+use frust_devtools_protocol::{
+    ApplyPatchParams, Capability, HandshakeInfo, HotpatchInfo, PROTOCOL_VERSION, PatchChunkParams,
+    PatchOutcome,
+};
 use frust_devtools_protocol::{
     FrameStats, InputScrollParams, InputTapParams, MetricsSnapshot, RectPx, WidgetNode,
     WidgetProps, WidgetTreeDump,
@@ -101,6 +140,10 @@ enum UiRequest {
     Tree(std::sync::mpsc::Sender<Vec<InspectNode>>),
     /// Deliver synthetic input events, in order, through the real event path.
     Events(Vec<InputEvent>, std::sync::mpsc::Sender<()>),
+    /// Render a frame soon: a hot-patch answer is parked on the frame gate
+    /// until the shell's next [`frame_submitted`].
+    #[cfg(feature = "hotpatch")]
+    RequestFrame,
 }
 
 /// The process-wide hop queue plus each shell's optional wake mechanism.
@@ -172,6 +215,12 @@ pub trait DevtoolsUi {
     /// bypass hit-testing, capture and focus routing, which is the whole reason
     /// injection is expressed as an event rather than a call.
     fn dispatch(&mut self, event: InputEvent);
+
+    /// Schedule a frame, for an answer that waits on the next one (a hot-patch
+    /// outcome, released by [`frame_submitted`]). The default does nothing,
+    /// right for a shell whose loop ticks continuously while resumed; a shell
+    /// that idles until woken (desktop) requests a redraw here.
+    fn request_frame(&mut self) {}
 }
 
 /// Drain every queued devtools request, answering each against `ui`.
@@ -214,7 +263,68 @@ pub fn pump(ui: &mut dyn DevtoolsUi) {
                 }
                 let _ = reply.send(());
             }
+            #[cfg(feature = "hotpatch")]
+            UiRequest::RequestFrame => ui.request_frame(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// The frame gate (hot-patch answers)
+// ---------------------------------------------------------------------
+
+/// Answers parked until the shell hands off its next frame.
+#[cfg(feature = "hotpatch")]
+struct FrameGate {
+    /// Fast path for [`frame_submitted`]: anything parked at all.
+    waiting: std::sync::atomic::AtomicBool,
+    parked: Mutex<Vec<std::sync::mpsc::Sender<()>>>,
+}
+
+#[cfg(feature = "hotpatch")]
+static FRAME_GATE: FrameGate = FrameGate {
+    waiting: std::sync::atomic::AtomicBool::new(false),
+    parked: Mutex::new(Vec::new()),
+};
+
+/// Park on the frame gate: the receiver gets `()` from the first
+/// [`frame_submitted`] that runs after this call.
+#[cfg(feature = "hotpatch")]
+fn park_until_next_frame() -> std::sync::mpsc::Receiver<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut parked = FRAME_GATE
+        .parked
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    parked.push(tx);
+    FRAME_GATE.waiting.store(true, Ordering::Release);
+    rx
+}
+
+/// Tell devtools that this shell just handed a finished frame off (`hotpatch`
+/// feature): releases every answer parked on the frame gate — a hot-patch
+/// outcome waits for the frame after its apply, so its seam hits and layout
+/// records are those of a rebuild that ran the patched code.
+///
+/// Call it once per frame, right after the frame leaves the UI thread. With
+/// nothing parked (every frame of a session not applying a patch) it is one
+/// atomic load; it never blocks beyond a briefly held lock, and only sends.
+#[cfg(feature = "hotpatch")]
+pub fn frame_submitted() {
+    if !FRAME_GATE.waiting.load(Ordering::Acquire) {
+        return;
+    }
+    let parked = {
+        let mut parked = FRAME_GATE
+            .parked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        FRAME_GATE.waiting.store(false, Ordering::Release);
+        std::mem::take(&mut *parked)
+    };
+    for answer in parked {
+        // A gone receiver (the waiter's deadline lapsed) is expected.
+        let _ = answer.send(());
     }
 }
 
@@ -257,6 +367,8 @@ pub fn start(app_name: impl Into<String>, wake: Option<Box<dyn Fn() + Send + Syn
     let backend = ShellBackend {
         bridge,
         started: Instant::now(),
+        #[cfg(feature = "hotpatch")]
+        hot: HotState::default(),
     };
     let info = AppInfo::new(app_name, env!("CARGO_PKG_VERSION"));
     match Service::start(backend, info) {
@@ -376,6 +488,9 @@ struct ShellBackend {
     /// as far as devtools is concerned (the shell starts the service during
     /// its own init).
     started: Instant,
+    /// Hot-patch counters and the patch directory override.
+    #[cfg(feature = "hotpatch")]
+    hot: HotState,
 }
 
 impl ShellBackend {
@@ -395,6 +510,122 @@ impl ShellBackend {
 }
 
 impl DevtoolsBackend for ShellBackend {
+    /// The default capability set plus [`Capability::HotPatch`]; the service
+    /// strips it again unless every precondition holds.
+    #[cfg(feature = "hotpatch")]
+    fn handshake_info(&self, app: &AppInfo) -> HandshakeInfo {
+        HandshakeInfo {
+            app_name: app.app_name.clone(),
+            frust_version: app.frust_version.clone(),
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: vec![
+                Capability::WidgetTree,
+                Capability::FrameStats,
+                Capability::Input,
+                Capability::Metrics,
+                Capability::HotPatch,
+            ],
+        }
+    }
+
+    #[cfg(feature = "hotpatch")]
+    fn hotpatch_info(&self) -> Result<HotpatchInfo, BackendError> {
+        let pending = frust_hotpatch::pending_layout_mismatches();
+        // Carried by this answer, so reported (only these: one recorded after
+        // the read stays pending).
+        frust_hotpatch::mark_layout_mismatches_reported(&pending);
+        let counters = self.hot.lock();
+        Ok(HotpatchInfo {
+            anchor_runtime: frust_hotpatch::aslr_reference() as u64,
+            pid: std::process::id(),
+            triple: target_triple(),
+            patches_applied: counters.patches_applied,
+            patch_bytes_loaded: counters.patch_bytes_loaded,
+            pending_layout_mismatches: pending.iter().map(ToString::to_string).collect(),
+            patch_file_hand_off: PATCH_FILE_HAND_OFF,
+        })
+    }
+
+    #[cfg(feature = "hotpatch")]
+    fn patch_chunk(&self, chunk: &PatchChunkParams) -> Result<Vec<u8>, BackendError> {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode(&chunk.data_base64)
+            .map_err(|e| BackendError::invalid_request(format!("patch chunk is not base64: {e}")))
+    }
+
+    /// The loopback hand-off: see the module doc's *Hot patching*.
+    #[cfg(all(feature = "hotpatch", unix))]
+    fn patch_file(&self, file: &PatchFile, len: u64) -> Result<Vec<u8>, BackendError> {
+        let dir = self.hot.patch_dir().ok_or_else(|| {
+            BackendError::unavailable("no cache directory to check the patch file's owner against")
+        })?;
+        let own_uid = effective_uid(&dir).map_err(|e| {
+            BackendError::internal(format!("could not determine this process's user: {e}"))
+        })?;
+        let bytes = read_handed_off_patch(file, len, own_uid)?;
+        log::debug!("frust-devtools: patch file handed off ({len} bytes, checks passed)");
+        Ok(bytes)
+    }
+
+    /// See the module doc's *Hot patching*. Every answer — applied, refused,
+    /// failed — is sent after the frame that follows the attempt, so a reply
+    /// always means the app has rendered since.
+    #[cfg(feature = "hotpatch")]
+    fn apply_patch(
+        &self,
+        bytes: Vec<u8>,
+        params: ApplyPatchParams,
+    ) -> Result<PatchOutcome, BackendError> {
+        // Held across the attempt and the frame wait: one patch at a time.
+        let mut counters = self.hot.lock();
+        let attempt = self.hot.attempt(&mut counters, bytes, params);
+
+        let frame = park_until_next_frame();
+        if !self.bridge.submit(UiRequest::RequestFrame) {
+            log::warn!("frust-devtools: could not ask the UI thread for a frame");
+        }
+        if frame.recv_timeout(UI_HOP_DEADLINE).is_err() {
+            log::warn!(
+                "frust-devtools: no frame followed the patch within {}s; answering anyway",
+                UI_HOP_DEADLINE.as_secs()
+            );
+        }
+
+        let Attempt {
+            applied,
+            records: mut refusal,
+        } = attempt?;
+        // Records the attempt refused over, plus any the following frame met.
+        for record in frust_hotpatch::pending_layout_mismatches() {
+            if !refusal.contains(&record) {
+                refusal.push(record);
+            }
+        }
+        frust_hotpatch::mark_layout_mismatches_reported(&refusal);
+        let (seam_hits, seam_fall_throughs) = if applied {
+            let missed = frust_hotpatch::missed_keys()
+                .into_iter()
+                .map(|key| frust_devtools_protocol::MissedKey {
+                    image: key.image,
+                    link_address: key.link_address,
+                })
+                .collect();
+            (frust_hotpatch::seam_hits(), missed)
+        } else {
+            // The counters still describe the previous patch: not this answer's.
+            (0, Vec::new())
+        };
+        Ok(PatchOutcome {
+            applied,
+            seam_hits,
+            seam_fall_throughs,
+            layout_mismatches: refusal.iter().map(ToString::to_string).collect(),
+            patches_applied: counters.patches_applied,
+            patch_bytes_loaded: counters.patch_bytes_loaded,
+        })
+    }
+
     fn widget_tree(&self) -> WidgetTreeDump {
         // Infallible by contract: an unanswered hop reports an empty tree, the
         // same thing a not-yet-built app reports.
@@ -479,6 +710,377 @@ impl ShellBackend {
             )),
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// Hot-patch apply
+// ---------------------------------------------------------------------
+
+/// The patch library's file extension on this target.
+#[cfg(feature = "hotpatch")]
+const PATCH_EXT: &str = if cfg!(any(target_os = "macos", target_os = "ios")) {
+    "dylib"
+} else if cfg!(windows) {
+    "dll"
+} else {
+    "so"
+};
+
+/// Whether `hotpatch_info` advertises the loopback patch-file hand-off: exactly
+/// when `ShellBackend::patch_file`'s checked reader is compiled in (unix).
+#[cfg(feature = "hotpatch")]
+const PATCH_FILE_HAND_OFF: bool = cfg!(unix);
+
+/// What [`ShellBackend`] tracks across patches.
+#[cfg(feature = "hotpatch")]
+#[derive(Default)]
+struct HotState {
+    /// Replaces `frust_paths::cache_dir()` as the patch file's base (tests).
+    cache_root: Option<std::path::PathBuf>,
+    counters: Mutex<HotCounters>,
+}
+
+#[cfg(feature = "hotpatch")]
+#[derive(Default)]
+struct HotCounters {
+    patches_applied: u32,
+    patch_bytes_loaded: u64,
+    /// Every `patch_id` that reached the file stage. A loader keys loaded
+    /// images by path, so a reused id would get the earlier library back.
+    used_ids: HashSet<u64>,
+}
+
+/// One attempt's result short of the frame wait: applied, or refused over
+/// these unreported layout-mismatch records.
+#[cfg(feature = "hotpatch")]
+struct Attempt {
+    applied: bool,
+    records: Vec<frust_hotpatch::LayoutMismatch>,
+}
+
+#[cfg(feature = "hotpatch")]
+impl HotState {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HotCounters> {
+        self.counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `<cache dir>/frust-hotpatch`, or `None` when the platform has no cache
+    /// dir (yet — Android installs it from its first surface).
+    fn patch_dir(&self) -> Option<std::path::PathBuf> {
+        self.cache_root
+            .clone()
+            .or_else(frust_paths::cache_dir)
+            .map(|root| root.join("frust-hotpatch"))
+    }
+
+    /// Check, write, apply, remove: everything `apply_patch` does before its
+    /// frame wait. Refusals load nothing.
+    fn attempt(
+        &self,
+        counters: &mut HotCounters,
+        bytes: Vec<u8>,
+        params: ApplyPatchParams,
+    ) -> Result<Attempt, BackendError> {
+        check_target(
+            (params.pid, params.anchor_runtime),
+            (std::process::id(), frust_hotpatch::aslr_reference() as u64),
+        )?;
+        let len = bytes.len() as u64;
+        if len != params.len {
+            return Err(BackendError::invalid_request(format!(
+                "patch is {len} bytes, apply_patch says {}",
+                params.len
+            )));
+        }
+        if counters.used_ids.contains(&params.patch_id) {
+            return Err(BackendError::invalid_request(format!(
+                "patch_id {} was already used in this process; send a fresh id",
+                params.patch_id
+            )));
+        }
+        let dir = self.patch_dir().ok_or_else(|| {
+            BackendError::unavailable("no cache directory to write the patch into")
+        })?;
+        counters.used_ids.insert(params.patch_id);
+        let name = format!(
+            "patch-{}-{}.{PATCH_EXT}",
+            std::process::id(),
+            params.patch_id
+        );
+        let path = write_patch_file(&dir, &name, &bytes).map_err(|e| {
+            BackendError::internal(redact(
+                &format!("could not write the patch: {e}"),
+                &dir,
+                &name,
+            ))
+        })?;
+        log::debug!(
+            "frust-devtools: patch {} written to {}",
+            params.patch_id,
+            path.display()
+        );
+
+        let table = frust_hotpatch::JumpTable {
+            lib: path.clone(),
+            map: params.table.map.into_iter().collect(),
+            aslr_reference: params.table.aslr_reference,
+            new_base_address: params.table.new_base_address,
+            ifunc_count: params.table.ifunc_count,
+        };
+        log::debug!(
+            "frust-devtools: applying patch {} ({len} bytes, {} expected seams)",
+            params.patch_id,
+            params.expected_seams
+        );
+        let report = frust_hotpatch::apply_from_devtools(&path, table);
+        // A loaded library stays mapped; the file has done its job either way.
+        if let Err(e) = std::fs::remove_file(&path) {
+            log::debug!("frust-devtools: could not remove {}: {e}", path.display());
+        }
+
+        if let Some(error) = report.error {
+            return Err(patch_error(&error, &dir, &name));
+        }
+        if report.applied {
+            counters.patches_applied = counters.patches_applied.saturating_add(1);
+            counters.patch_bytes_loaded = counters.patch_bytes_loaded.saturating_add(len);
+        }
+        Ok(Attempt {
+            applied: report.applied,
+            records: report.layout_mismatches,
+        })
+    }
+}
+
+/// `apply_patch`'s `(pid, anchor_runtime)` against this process's. An unset
+/// anchor (0) fails closed: nothing could rebase the patch.
+#[cfg(feature = "hotpatch")]
+fn check_target(requested: (u32, u64), own: (u32, u64)) -> Result<(), BackendError> {
+    let ((pid, anchor), (own_pid, own_anchor)) = (requested, own);
+    if pid != own_pid {
+        return Err(BackendError::invalid_request(format!(
+            "patch targets pid {pid}, this process is {own_pid}"
+        )));
+    }
+    if own_anchor == 0 {
+        return Err(BackendError::unavailable(
+            "no hot-patch anchor is set in this process; a patch cannot be rebased",
+        ));
+    }
+    if anchor != own_anchor {
+        return Err(BackendError::invalid_request(format!(
+            "patch targets anchor {anchor:#x}, this process's is {own_anchor:#x}"
+        )));
+    }
+    Ok(())
+}
+
+/// Writes `bytes` to `dir/name`: `dir` created `0700`, the file created fresh
+/// with mode `0600`. An existing entry (a stale file, a planted symlink) is
+/// removed first and the file opened `create_new`, so nothing is ever written
+/// through a pre-existing path.
+#[cfg(feature = "hotpatch")]
+fn write_patch_file(
+    dir: &std::path::Path,
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write as _;
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let path = dir.join(name);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    // Exact, whatever the umask took away.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(bytes)?;
+    Ok(path)
+}
+
+/// This process's effective uid, without `unsafe` (this crate's charter): the
+/// owner of a file a process creates is its effective uid (POSIX `open`), so
+/// a fresh probe file is created in `dir` (the app's own `0700` patch
+/// directory, through [`write_patch_file`]), read back and removed.
+#[cfg(all(feature = "hotpatch", unix))]
+fn effective_uid(dir: &std::path::Path) -> std::io::Result<u32> {
+    use std::os::unix::fs::MetadataExt as _;
+    let name = format!(".uid-probe-{}", std::process::id());
+    let path = write_patch_file(dir, &name, &[])?;
+    let uid = std::fs::symlink_metadata(&path).map(|meta| meta.uid());
+    let _ = std::fs::remove_file(&path);
+    uid
+}
+
+/// Reads a patch handed off by file, refusing it unless all five checks hold:
+/// opened with `O_NOFOLLOW` (a symlink fails the open) and `fstat` says a
+/// regular file; owned by `own_uid`; `mode & 0o077 == 0`; exactly `len`
+/// bytes; SHA-256 equal to `file.sha256`. `O_NONBLOCK` keeps a FIFO from
+/// parking the open (`fstat` then refuses it). No error names the path.
+#[cfg(all(feature = "hotpatch", unix))]
+fn read_handed_off_patch(
+    file: &PatchFile,
+    len: u64,
+    own_uid: u32,
+) -> Result<Vec<u8>, BackendError> {
+    use sha2::Digest as _;
+    use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let refuse = |why: String| BackendError::invalid_request(format!("patch file refused: {why}"));
+    let well_formed = file.sha256.len() == 64
+        && file
+            .sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !well_formed {
+        return Err(refuse(
+            "sha256 must be 64 lowercase hex characters".to_string(),
+        ));
+    }
+    let path = std::path::Path::new(&file.path);
+    if !path.is_absolute() {
+        return Err(refuse("the path is not absolute".to_string()));
+    }
+    let mut opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| refuse(format!("it cannot be opened without following a link: {e}")))?;
+    let meta = opened
+        .metadata()
+        .map_err(|e| refuse(format!("it cannot be inspected: {e}")))?;
+    if !meta.file_type().is_file() {
+        return Err(refuse("it is not a regular file".to_string()));
+    }
+    if meta.uid() != own_uid {
+        return Err(refuse(format!(
+            "it is owned by uid {}, this process runs as uid {own_uid}",
+            meta.uid()
+        )));
+    }
+    if meta.mode() & 0o077 != 0 {
+        return Err(refuse(format!(
+            "its mode {:o} grants group or other access",
+            meta.mode() & 0o777
+        )));
+    }
+    if meta.len() != len {
+        return Err(refuse(format!(
+            "it is {} bytes, apply_patch says {len}",
+            meta.len()
+        )));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    (&mut opened)
+        .take(len.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| refuse(format!("it cannot be read: {e}")))?;
+    if bytes.len() as u64 != len {
+        return Err(refuse("its size changed while it was read".to_string()));
+    }
+    let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+    if digest != file.sha256 {
+        return Err(refuse(
+            "its SHA-256 does not match apply_patch's".to_string(),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// `message` with every spelling of the patch file's location masked: its
+/// directory (as given and canonicalised — a loader may report either) and its
+/// file name. The path never reaches the wire.
+#[cfg(feature = "hotpatch")]
+fn redact(message: &str, dir: &std::path::Path, name: &str) -> String {
+    let mut dirs = vec![dir.to_path_buf()];
+    if let Ok(canonical) = std::fs::canonicalize(dir) {
+        dirs.push(canonical);
+    }
+    let mut out = message.to_string();
+    for dir in &dirs {
+        let dir = dir.to_string_lossy();
+        if !dir.is_empty() {
+            out = out.replace(dir.as_ref(), "<patch dir>");
+        }
+    }
+    out.replace(name, "<patch file>")
+}
+
+/// A `frust-hotpatch` refusal as the backend error the client receives, the
+/// patch file's location redacted.
+#[cfg(feature = "hotpatch")]
+fn patch_error(
+    error: &frust_hotpatch::PatchError,
+    dir: &std::path::Path,
+    name: &str,
+) -> BackendError {
+    use frust_hotpatch::PatchError;
+    let message = redact(&format!("patch not applied: {error}"), dir, name);
+    match error {
+        PatchError::AnchorMismatch { .. } => BackendError::invalid_request(message),
+        PatchError::AnchorUnresolved => BackendError::unavailable(message),
+        PatchError::ReleaseBuild => BackendError::not_supported(message),
+        _ => BackendError::internal(message),
+    }
+}
+
+/// This build's target triple, best effort from `cfg` (no build script): arch
+/// plus the vendor/OS/env spelling rustc uses for the shipped targets.
+#[cfg(feature = "hotpatch")]
+fn target_triple() -> String {
+    let arch = std::env::consts::ARCH;
+    let rest = if cfg!(target_os = "macos") {
+        "apple-darwin"
+    } else if cfg!(target_os = "ios") {
+        "apple-ios"
+    } else if cfg!(target_os = "android") {
+        if arch == "arm" {
+            "linux-androideabi"
+        } else {
+            "linux-android"
+        }
+    } else if cfg!(target_os = "linux") {
+        if cfg!(target_env = "musl") {
+            "unknown-linux-musl"
+        } else {
+            "unknown-linux-gnu"
+        }
+    } else if cfg!(windows) {
+        if cfg!(target_env = "gnu") {
+            "pc-windows-gnu"
+        } else {
+            "pc-windows-msvc"
+        }
+    } else {
+        std::env::consts::OS
+    };
+    let arch = if arch == "arm" && cfg!(target_os = "android") {
+        "armv7"
+    } else {
+        arch
+    };
+    format!("{arch}-{rest}")
 }
 
 /// Validate an injected logical-px coordinate. A non-finite coordinate would
@@ -781,5 +1383,485 @@ mod tests {
             }
         }
         pump(&mut NoUi);
+    }
+
+    #[cfg(feature = "hotpatch")]
+    mod hot {
+        use super::*;
+        use frust_devtools_protocol::JumpTableWire;
+        use std::path::{Path, PathBuf};
+
+        /// The anchor, layout-mismatch records and frame gate are
+        /// process-global: every test touching them holds this.
+        static SERIAL: Mutex<()> = Mutex::new(());
+
+        fn serial() -> std::sync::MutexGuard<'static, ()> {
+            SERIAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        extern "C" fn test_anchor() {}
+
+        fn anchor() -> u64 {
+            test_anchor as extern "C" fn() as usize as u64
+        }
+
+        /// A fresh, empty scratch directory for one test.
+        fn scratch(tag: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "frust-shell-common-hot-{tag}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            dir
+        }
+
+        /// A backend whose patch files go under `root`, with a bridge no UI
+        /// thread drains (the tests tick the frame gate themselves).
+        fn backend(root: &Path) -> ShellBackend {
+            ShellBackend {
+                bridge: Arc::new(Bridge {
+                    queue: Mutex::new(VecDeque::new()),
+                    wake: None,
+                }),
+                started: Instant::now(),
+                hot: HotState {
+                    cache_root: Some(root.to_path_buf()),
+                    counters: Mutex::default(),
+                },
+            }
+        }
+
+        fn params(patch_id: u64, len: u64, pid: u32, anchor_runtime: u64) -> ApplyPatchParams {
+            ApplyPatchParams {
+                patch_id,
+                len,
+                pid,
+                anchor_runtime,
+                table: JumpTableWire {
+                    map: std::collections::HashMap::new(),
+                    // Not this image's anchor address: a base AnchorMismatch.
+                    aslr_reference: 0,
+                    new_base_address: 0,
+                    ifunc_count: 0,
+                },
+                expected_seams: 1,
+                file: None,
+            }
+        }
+
+        /// Runs `apply_patch` on a worker while this thread plays the shell:
+        /// reports whether an answer existed before the fake frame tick, then
+        /// ticks and returns the answer.
+        fn apply_with_frame_tick(
+            backend: ShellBackend,
+            bytes: Vec<u8>,
+            params: ApplyPatchParams,
+        ) -> (bool, Result<PatchOutcome, BackendError>) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let _ = tx.send(backend.apply_patch(bytes, params));
+            });
+            let early = rx.recv_timeout(Duration::from_millis(300)).is_ok();
+            frame_submitted();
+            let answer = rx
+                .recv_timeout(Duration::from_secs(4))
+                .expect("the frame tick releases the answer");
+            worker.join().expect("worker");
+            (early, answer)
+        }
+
+        #[test]
+        fn the_frame_gate_releases_only_waiters_parked_before_the_tick() {
+            let _serial = serial();
+            let before = park_until_next_frame();
+            assert!(before.try_recv().is_err(), "nothing before a frame");
+            frame_submitted();
+            assert!(before.try_recv().is_ok(), "the next frame releases it");
+
+            let after = park_until_next_frame();
+            assert!(after.try_recv().is_err(), "an earlier tick does not count");
+            frame_submitted();
+            assert!(after.try_recv().is_ok());
+        }
+
+        #[test]
+        fn a_frame_with_nothing_parked_is_inert() {
+            let _serial = serial();
+            frame_submitted();
+            frame_submitted();
+        }
+
+        #[test]
+        fn the_shell_backend_offers_hot_patch() {
+            let info = backend(&scratch("offer")).handshake_info(&AppInfo::new("a", "0"));
+            assert!(info.capabilities.contains(&Capability::HotPatch));
+            assert!(info.capabilities.contains(&Capability::WidgetTree));
+        }
+
+        #[test]
+        fn pid_and_anchor_must_match_and_a_missing_anchor_fails_closed() {
+            assert!(check_target((7, 0x10), (7, 0x10)).is_ok());
+            assert!(matches!(
+                check_target((8, 0x10), (7, 0x10)),
+                Err(BackendError::InvalidRequest(_))
+            ));
+            assert!(matches!(
+                check_target((7, 0x11), (7, 0x10)),
+                Err(BackendError::InvalidRequest(_))
+            ));
+            // An unset anchor refuses even a request that "matches" it.
+            assert!(matches!(
+                check_target((7, 0), (7, 0)),
+                Err(BackendError::Unavailable(_))
+            ));
+        }
+
+        #[test]
+        fn a_wrong_pid_is_refused_writes_nothing_and_still_answers_after_the_frame() {
+            let _serial = serial();
+            frust_hotpatch::set_anchor(anchor() as usize);
+            let root = scratch("pid");
+            let wrong_pid = std::process::id().wrapping_add(1);
+            let (early, answer) = apply_with_frame_tick(
+                backend(&root),
+                vec![1, 2, 3],
+                params(1, 3, wrong_pid, anchor()),
+            );
+            assert!(!early, "the answer waits for the frame");
+            assert!(matches!(answer, Err(BackendError::InvalidRequest(_))));
+            assert!(!root.join("frust-hotpatch").exists(), "nothing written");
+        }
+
+        #[test]
+        fn a_wrong_anchor_runtime_is_refused() {
+            let _serial = serial();
+            frust_hotpatch::set_anchor(anchor() as usize);
+            let root = scratch("anchor");
+            let (_, answer) = apply_with_frame_tick(
+                backend(&root),
+                vec![1, 2, 3],
+                params(1, 3, std::process::id(), anchor() + 1),
+            );
+            assert!(matches!(answer, Err(BackendError::InvalidRequest(_))));
+            assert!(!root.join("frust-hotpatch").exists());
+        }
+
+        #[test]
+        fn a_refused_load_names_no_path_and_leaves_no_file() {
+            let _serial = serial();
+            frust_hotpatch::set_anchor(anchor() as usize);
+            let root = scratch("redact");
+            let (early, answer) = apply_with_frame_tick(
+                backend(&root),
+                vec![0xde, 0xad],
+                params(42, 2, std::process::id(), anchor()),
+            );
+            assert!(!early);
+            let Err(error) = answer else {
+                panic!("a table not anchored on this image must be refused");
+            };
+            let wire = error.to_rpc_error();
+            let line = frust_devtools_protocol::encode_line(
+                &frust_devtools_protocol::Response::error(1, wire),
+            );
+            let root_text = root.to_string_lossy().into_owned();
+            assert!(!line.contains(&root_text), "{line}");
+            assert!(!line.contains("frust-hotpatch/"), "{line}");
+            assert!(!line.contains("patch-"), "{line}");
+            let dir = root.join("frust-hotpatch");
+            assert_eq!(
+                std::fs::read_dir(&dir).expect("patch dir").count(),
+                0,
+                "the patch file is removed after the attempt"
+            );
+        }
+
+        #[test]
+        fn a_reused_patch_id_is_refused() {
+            let _serial = serial();
+            frust_hotpatch::set_anchor(anchor() as usize);
+            let root = scratch("reuse");
+            let backend = Arc::new(backend(&root));
+            for expect_reuse_refusal in [false, true] {
+                let b = Arc::clone(&backend);
+                let worker = std::thread::spawn(move || {
+                    b.apply_patch(vec![1], params(5, 1, std::process::id(), anchor()))
+                });
+                std::thread::sleep(Duration::from_millis(100));
+                frame_submitted();
+                let answer = worker.join().expect("worker");
+                let reused = matches!(&answer, Err(BackendError::InvalidRequest(m)) if m.contains("already used"));
+                assert_eq!(reused, expect_reuse_refusal, "{answer:?}");
+            }
+        }
+
+        #[test]
+        fn unreported_layout_records_refuse_with_applied_false_and_are_then_reported() {
+            let _serial = serial();
+            frust_hotpatch::set_anchor(anchor() as usize);
+            frust_hotpatch::report_layout_mismatch("HotTestState", 4, 8);
+            let root = scratch("l2");
+            let (early, answer) = apply_with_frame_tick(
+                backend(&root),
+                vec![1, 2, 3, 4],
+                params(9, 4, std::process::id(), anchor()),
+            );
+            assert!(!early);
+            let outcome = answer.expect("a refusal is an outcome, not an error");
+            assert!(!outcome.applied);
+            assert_eq!(
+                outcome.layout_mismatches,
+                vec!["HotTestState: stored 4, own 8"]
+            );
+            assert_eq!(outcome.seam_hits, 0);
+            assert_eq!(outcome.patches_applied, 0);
+            assert!(frust_hotpatch::pending_layout_mismatches().is_empty());
+        }
+
+        #[test]
+        fn hotpatch_info_reports_this_process_and_carries_pending_records_once() {
+            let _serial = serial();
+            frust_hotpatch::set_anchor(anchor() as usize);
+            frust_hotpatch::report_layout_mismatch("InfoTestState", 1, 2);
+            let backend = backend(&scratch("info"));
+            let info = backend.hotpatch_info().expect("info");
+            assert_eq!(info.pid, std::process::id());
+            assert_eq!(info.anchor_runtime, anchor());
+            assert!(info.triple.starts_with(std::env::consts::ARCH));
+            assert_eq!(info.patches_applied, 0);
+            assert_eq!(
+                info.pending_layout_mismatches,
+                vec!["InfoTestState: stored 1, own 2"]
+            );
+            let again = backend.hotpatch_info().expect("info");
+            assert!(again.pending_layout_mismatches.is_empty(), "reported once");
+        }
+
+        #[test]
+        fn patch_chunk_decodes_base64_and_rejects_anything_else() {
+            let backend = backend(&scratch("chunk"));
+            let chunk = |data: &str| PatchChunkParams {
+                patch_id: 1,
+                offset: 0,
+                total_len: 4,
+                data_base64: data.to_string(),
+            };
+            assert_eq!(
+                backend.patch_chunk(&chunk("AAECAw==")),
+                Ok(vec![0, 1, 2, 3])
+            );
+            assert!(matches!(
+                backend.patch_chunk(&chunk("not base64!")),
+                Err(BackendError::InvalidRequest(_))
+            ));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn the_patch_file_is_0600_in_a_0700_dir() {
+            use std::os::unix::fs::PermissionsExt as _;
+            let dir = scratch("mode").join("frust-hotpatch");
+            let path = write_patch_file(&dir, "patch-1-1.so", b"bytes").expect("write");
+            let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(&dir), 0o700);
+            assert_eq!(std::fs::read(&path).expect("read"), b"bytes");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_planted_entry_is_replaced_never_written_through() {
+            let root = scratch("plant");
+            let dir = root.join("frust-hotpatch");
+            std::fs::create_dir_all(&dir).expect("dir");
+            let victim = root.join("victim");
+            std::fs::write(&victim, b"untouched").expect("victim");
+            std::os::unix::fs::symlink(&victim, dir.join("patch-1-2.so")).expect("symlink");
+
+            let path = write_patch_file(&dir, "patch-1-2.so", b"patch").expect("write");
+            assert_eq!(std::fs::read(&victim).expect("victim"), b"untouched");
+            assert!(
+                !std::fs::symlink_metadata(&path)
+                    .expect("meta")
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(std::fs::read(&path).expect("patch"), b"patch");
+        }
+
+        /// Writes `bytes` to `dir/name` with `mode` and returns the hand-off
+        /// that names it, digest included.
+        #[cfg(unix)]
+        fn handed_off(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> PatchFile {
+            use sha2::Digest as _;
+            use std::os::unix::fs::PermissionsExt as _;
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).expect("write");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("mode");
+            PatchFile {
+                path: path.to_string_lossy().into_owned(),
+                sha256: format!("{:x}", sha2::Sha256::digest(bytes)),
+            }
+        }
+
+        /// The refusal `patch_file` answers `file` with; its message must not
+        /// carry the path.
+        #[cfg(unix)]
+        fn refusal(backend: &ShellBackend, file: &PatchFile, len: u64) -> String {
+            match backend.patch_file(file, len) {
+                Err(BackendError::InvalidRequest(message)) => {
+                    assert!(!message.contains(&file.path), "{message}");
+                    message
+                }
+                other => panic!("expected an invalid_request refusal, got {other:?}"),
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn hotpatch_info_advertises_the_patch_file_hand_off() {
+            let _serial = serial();
+            let info = backend(&scratch("advert")).hotpatch_info().expect("info");
+            assert!(info.patch_file_hand_off);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_private_regular_file_with_the_right_len_and_digest_is_read() {
+            let root = scratch("handoff-ok");
+            let backend = backend(&root);
+            let file = handed_off(&root, "patch-1.so", b"patch bytes", 0o600);
+            assert_eq!(backend.patch_file(&file, 11), Ok(b"patch bytes".to_vec()));
+            let probes = std::fs::read_dir(root.join("frust-hotpatch"))
+                .expect("patch dir")
+                .count();
+            assert_eq!(probes, 0, "the uid probe leaves nothing behind");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_symlink_is_refused_even_to_a_valid_patch() {
+            let root = scratch("handoff-link");
+            let backend = backend(&root);
+            let target = handed_off(&root, "real.so", b"patch", 0o600);
+            let link = root.join("link.so");
+            std::os::unix::fs::symlink(&target.path, &link).expect("symlink");
+            let file = PatchFile {
+                path: link.to_string_lossy().into_owned(),
+                sha256: target.sha256,
+            };
+            let message = refusal(&backend, &file, 5);
+            assert!(message.contains("following a link"), "{message}");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_directory_is_refused() {
+            let root = scratch("handoff-dir");
+            let backend = backend(&root);
+            let dir = root.join("patch-dir.so");
+            std::fs::create_dir(&dir).expect("dir");
+            let file = PatchFile {
+                path: dir.to_string_lossy().into_owned(),
+                sha256: "0".repeat(64),
+            };
+            let message = refusal(&backend, &file, 0);
+            assert!(message.contains("not a regular file"), "{message}");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_group_or_world_readable_file_is_refused() {
+            let root = scratch("handoff-mode");
+            let backend = backend(&root);
+            let file = handed_off(&root, "patch-1.so", b"patch", 0o644);
+            let message = refusal(&backend, &file, 5);
+            assert!(message.contains("mode 644"), "{message}");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_wrong_len_is_refused() {
+            let root = scratch("handoff-len");
+            let backend = backend(&root);
+            let file = handed_off(&root, "patch-1.so", b"patch", 0o600);
+            let message = refusal(&backend, &file, 6);
+            assert!(message.contains("5 bytes, apply_patch says 6"), "{message}");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_wrong_or_malformed_digest_is_refused() {
+            let root = scratch("handoff-digest");
+            let backend = backend(&root);
+            let mut file = handed_off(&root, "patch-1.so", b"patch", 0o600);
+            let good = file.sha256.clone();
+            file.sha256 = "0".repeat(64);
+            let message = refusal(&backend, &file, 5);
+            assert!(message.contains("SHA-256 does not match"), "{message}");
+            file.sha256 = good.to_uppercase();
+            let message = refusal(&backend, &file, 5);
+            assert!(message.contains("lowercase hex"), "{message}");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_file_owned_by_another_uid_is_refused() {
+            use std::os::unix::fs::MetadataExt as _;
+            let root = scratch("handoff-owner");
+            let file = handed_off(&root, "patch-1.so", b"patch", 0o600);
+            let own = std::fs::metadata(&file.path).expect("meta").uid();
+            let Err(BackendError::InvalidRequest(message)) =
+                read_handed_off_patch(&file, 5, own.wrapping_add(1))
+            else {
+                panic!("a foreign owner must be refused");
+            };
+            assert!(message.contains("owned by uid"), "{message}");
+            assert!(!message.contains(&file.path), "{message}");
+            assert_eq!(effective_uid(&root.join("probe")).expect("uid"), own);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_relative_path_is_refused() {
+            let backend = backend(&scratch("handoff-rel"));
+            let file = PatchFile {
+                path: "patch-1.so".to_string(),
+                sha256: "0".repeat(64),
+            };
+            let message = refusal(&backend, &file, 1);
+            assert!(message.contains("not absolute"), "{message}");
+        }
+
+        #[test]
+        fn redaction_masks_the_dir_in_every_spelling_and_the_file_name() {
+            let dir = scratch("mask").join("frust-hotpatch");
+            std::fs::create_dir_all(&dir).expect("dir");
+            let canonical = std::fs::canonicalize(&dir).expect("canonical");
+            let message = format!(
+                "dlopen({}/patch-1-3.so) failed; also {}/patch-1-3.so",
+                dir.display(),
+                canonical.display()
+            );
+            let masked = redact(&message, &dir, "patch-1-3.so");
+            assert!(!masked.contains(&*dir.to_string_lossy()), "{masked}");
+            assert!(!masked.contains(&*canonical.to_string_lossy()), "{masked}");
+            assert!(!masked.contains("patch-1-3.so"), "{masked}");
+        }
+
+        #[test]
+        fn the_target_triple_names_this_arch_and_os_family() {
+            let triple = target_triple();
+            assert!(triple.starts_with(std::env::consts::ARCH), "{triple}");
+            if cfg!(target_os = "macos") {
+                assert!(triple.ends_with("-apple-darwin"), "{triple}");
+            }
+            if cfg!(all(target_os = "linux", target_env = "gnu")) {
+                assert!(triple.ends_with("-unknown-linux-gnu"), "{triple}");
+            }
+        }
     }
 }

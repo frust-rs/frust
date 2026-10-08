@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use frust_drive::devices::Device;
 use frust_drive::doctor::DoctorReport;
+use frust_drive::hotpatch::session::Outcome as HotOutcome;
 use frust_drive::metrics::MetricsSample;
 use frust_drive::plugin::AddReport;
 
@@ -413,23 +414,45 @@ pub enum Message {
     /// restarts — a crashed session must be relaunchable, not just a running
     /// one. The relaunch's tab becomes active when it registers.
     RestartSession,
-    /// Toggle "Watch: restart on save" on the active session (the palette's
-    /// "Watch: restart on save" row, `W`): while on, any change under the
-    /// project's `src/` or its `Cargo.toml` restarts the session through the
-    /// [`Self::RestartSession`] path, once per save-burst. Desktop sessions
-    /// only — a device (or ad-hoc) session refuses with a toast, the
-    /// `frust run --watch` rule. Routed to the runner as
+    /// Toggle "Watch: hot patch on save" on the active session (the
+    /// palette's "Watch: hot patch on save" row, `W`): while on, a settled
+    /// save-burst is offered to the running app as a hot patch
+    /// ([`super::Effect::HotPatch`]) when the session runs hot, and restarts
+    /// it through the [`Self::RestartSession`] path otherwise, once per
+    /// burst. A watched session's relaunch runs hot (the runner launches a
+    /// watched debug desktop session through the hot-patch session start).
+    /// Desktop sessions only — a device (or ad-hoc) session refuses with a
+    /// toast, the `frust run --watch` rule. Routed to the runner as
     /// [`super::Effect::WatchSet`], which starts/stops the session's
     /// `crate::supervise::SourceWatchers` entry.
     ToggleWatch,
-    /// A watched session's source tree settled after a change burst (posted
-    /// by its `crate::supervise::SourceWatchers` debounce thread, already
-    /// debounced to one per burst). Restarts `session` through the shared
-    /// restart path when it still has watch on and no restart is already
-    /// pending for it; otherwise a no-op.
+    /// A watched session's sources settled after a change burst (posted by
+    /// its `crate::supervise::SourceWatchers` debounce thread, already
+    /// debounced to one per burst). A live hot session is asked to patch
+    /// `paths` ([`super::Effect::HotPatch`]); anything else restarts through
+    /// the shared restart path. Either way only while the session still has
+    /// watch on and no restart is already pending for it; otherwise a no-op.
     WatchTriggered {
         /// The session whose sources changed.
         session: SessionId,
+        /// Every path the burst touched, deduplicated and sorted — what a
+        /// hot session's `on_change` classifies and replays.
+        paths: Vec<PathBuf>,
+        /// Whether the session runs as a hot-patch session, as the runner
+        /// told the watcher when it started it.
+        hot: bool,
+    },
+    /// What a hot session's `on_change` answered for one save-burst (posted
+    /// by the runner, which runs `on_change` off the UI thread). Toasts
+    /// `patched in N ms`, `restart required: <reason>` and so on; a
+    /// `RestartRequired` additionally restarts the session through the
+    /// shared restart path (once per burst: a restart already pending
+    /// absorbs it).
+    HotPatchOutcome {
+        /// The session the patch was offered to.
+        session: SessionId,
+        /// `frust-drive`'s answer, verbatim.
+        outcome: HotOutcome,
     },
     /// Turn watch on for a just-registered desktop session without a toggle
     /// — posted by the runner right after a launch that should carry the

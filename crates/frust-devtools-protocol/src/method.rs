@@ -39,6 +39,18 @@ pub enum Method {
     /// `RpcError::NOT_SUPPORTED` on a server with no `Screenshot`
     /// capability.
     Screenshot,
+    /// Client→server request; result: [`crate::HotpatchInfo`], or
+    /// `RpcError::NOT_SUPPORTED` on a server with no `HotPatch` capability.
+    HotpatchInfo,
+    /// Client→server request; params: [`crate::PatchChunkParams`];
+    /// result: [`crate::AckResult`]. Capability-gated like `Screenshot`.
+    PatchChunk,
+    /// Client→server request; params: [`crate::ApplyPatchParams`];
+    /// result: [`crate::PatchOutcome`]. Capability-gated like `Screenshot`.
+    /// Applies the `patch_chunk` uploads for `patch_id`, or — on an app that
+    /// advertises [`crate::HotpatchInfo::patch_file_hand_off`] — the
+    /// host-written file named by [`crate::ApplyPatchParams::file`] instead.
+    ApplyPatch,
 }
 
 impl Method {
@@ -55,6 +67,9 @@ impl Method {
             Method::InputScroll => "input_scroll",
             Method::InputText => "input_text",
             Method::Screenshot => "screenshot",
+            Method::HotpatchInfo => "hotpatch_info",
+            Method::PatchChunk => "patch_chunk",
+            Method::ApplyPatch => "apply_patch",
         }
     }
 
@@ -82,6 +97,9 @@ impl Method {
             "input_scroll" => Method::InputScroll,
             "input_text" => Method::InputText,
             "screenshot" => Method::Screenshot,
+            "hotpatch_info" => Method::HotpatchInfo,
+            "patch_chunk" => Method::PatchChunk,
+            "apply_patch" => Method::ApplyPatch,
             _ => return None,
         })
     }
@@ -97,7 +115,7 @@ impl std::fmt::Display for Method {
 mod tests {
     use super::*;
 
-    const ALL: [Method; 10] = [
+    const ALL: [Method; 13] = [
         Method::Handshake,
         Method::WidgetTree,
         Method::WidgetProps,
@@ -108,6 +126,9 @@ mod tests {
         Method::InputScroll,
         Method::InputText,
         Method::Screenshot,
+        Method::HotpatchInfo,
+        Method::PatchChunk,
+        Method::ApplyPatch,
     ];
 
     #[test]
@@ -115,6 +136,16 @@ mod tests {
         for m in ALL {
             assert_eq!(Method::from_str(m.as_str()), Some(m));
         }
+    }
+
+    #[test]
+    fn hotpatch_methods_use_their_wire_names() {
+        assert_eq!(
+            Method::from_str("hotpatch_info"),
+            Some(Method::HotpatchInfo)
+        );
+        assert_eq!(Method::from_str("patch_chunk"), Some(Method::PatchChunk));
+        assert_eq!(Method::from_str("apply_patch"), Some(Method::ApplyPatch));
     }
 
     #[test]

@@ -53,12 +53,28 @@
 //! lagging consumer. Calling `subscribe_frame_stats` again replaces the
 //! prior subscription (its relay thread exits once the caller drops the old
 //! `Receiver`, which fails the relay's next `send`).
+//!
+//! # Hot patching
+//!
+//! [`DevtoolsClient::hotpatch_info`], [`DevtoolsClient::patch_chunk`] and
+//! [`DevtoolsClient::apply_patch`] are the three hot-patch methods, gated
+//! on [`Capability::HotPatch`]. A patch travels as base64 chunks of at most
+//! [`PATCH_CHUNK_MAX_BYTES`] raw bytes ([`patch_chunks`], sent in order by
+//! [`DevtoolsClient::upload_patch`]), so each request line stays under the
+//! 1 MiB cap both ends enforce. `apply_patch` is answered only after the
+//! app's next frame, so it waits at least [`APPLY_PATCH_MIN_WAIT`] whatever
+//! the connection's own timeout.
+//!
+//! On a loopback session whose app advertises
+//! [`HotpatchInfo::patch_file_hand_off`], no chunk is sent: `apply_patch`
+//! names the patch the host already wrote instead
+//! ([`ApplyPatchParams::file`]: its absolute path and [`sha256_hex`] of its
+//! bytes), and the app reads it under its own checks (owner-only regular
+//! file, same user, size and digest). No new RPC is involved.
 
 use std::collections::HashMap;
-#[cfg(test)]
-use std::io::{BufRead, BufReader};
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
@@ -67,10 +83,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use frust_devtools_protocol::{
-    AckResult, Capability, FrameStats, HandshakeInfo, HandshakeParams, Incoming, InputScrollParams,
-    InputTapParams, InputTextParams, Method, MetricsSnapshot, Request, Response, ResponseOutcome,
-    RpcError, ScreenshotResult, WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line,
-    encode_line,
+    AckResult, ApplyPatchParams, Capability, FrameStats, HandshakeInfo, HandshakeParams,
+    HotpatchInfo, Incoming, InputScrollParams, InputTapParams, InputTextParams, Method,
+    MetricsSnapshot, PatchChunkParams, PatchOutcome, Request, Response, ResponseOutcome, RpcError,
+    ScreenshotResult, WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line, encode_line,
 };
 use serde_json::Value;
 
@@ -124,6 +140,73 @@ pub fn is_unauthorized(err: &anyhow::Error) -> bool {
 pub fn is_not_supported(err: &anyhow::Error) -> bool {
     err.downcast_ref::<DevtoolsRpcError>()
         .is_some_and(DevtoolsRpcError::is_not_supported)
+}
+
+/// Whether `err` is a devtools rejection because the server does not know
+/// the method at all (`METHOD_NOT_FOUND`) — what a hot-patch method answers
+/// on an app built without the capability.
+pub fn is_method_not_found(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<DevtoolsRpcError>()
+        .is_some_and(|rpc| rpc.code == RpcError::METHOD_NOT_FOUND)
+}
+
+/// The most raw patch bytes one `patch_chunk` carries — the app refuses a
+/// larger chunk. 512 KiB is about 683 KiB as base64, well under the 1 MiB
+/// line cap.
+pub const PATCH_CHUNK_MAX_BYTES: usize = 512 * 1024;
+
+/// The least time [`DevtoolsClient::apply_patch`] waits for its answer. The
+/// app replies after the frame that follows the attempt and gives up waiting
+/// for that frame after 5 s, so a shorter connection timeout would turn every
+/// slow-but-successful apply into an unknown outcome.
+pub const APPLY_PATCH_MIN_WAIT: Duration = Duration::from_secs(15);
+
+/// `bytes` as standard, padded base64 (RFC 4648 §4) — the encoding
+/// `patch_chunk` carries. Hand-rolled because this crate otherwise has no
+/// use for a base64 dependency.
+pub fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for (i, shift) in [18u32, 12, 6, 0].into_iter().enumerate() {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[((n >> shift) & 0x3f) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The SHA-256 of `bytes` as 64 lowercase hex characters — the digest a
+/// patch handed off by file carries ([`frust_devtools_protocol::PatchFile`]),
+/// which the app recomputes over the bytes it reads.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+/// `bytes` split into the `patch_chunk` requests that carry them, in offset
+/// order, each at most [`PATCH_CHUNK_MAX_BYTES`] raw.
+pub fn patch_chunks(patch_id: u64, bytes: &[u8]) -> Vec<PatchChunkParams> {
+    let total_len = bytes.len() as u64;
+    bytes
+        .chunks(PATCH_CHUNK_MAX_BYTES)
+        .enumerate()
+        .map(|(index, data)| PatchChunkParams {
+            patch_id,
+            offset: (index * PATCH_CHUNK_MAX_BYTES) as u64,
+            total_len,
+            data_base64: encode_base64(data),
+        })
+        .collect()
 }
 
 /// A blocking client over one devtools TCP connection. See the module doc
@@ -298,6 +381,62 @@ impl DevtoolsClient {
         self.typed_call(Method::InputText, params)
     }
 
+    /// `hotpatch_info` — what a patch builder needs to target this process
+    /// (its runtime anchor and pid) and the app's patch counters, plus the
+    /// layout-mismatch records the app has not reported yet. A server
+    /// without [`Capability::HotPatch`] rejects it ([`is_not_supported`],
+    /// its message naming the failed precondition, or
+    /// [`is_method_not_found`] on a build without the feature).
+    pub fn hotpatch_info(&self) -> Result<HotpatchInfo> {
+        self.typed_call(Method::HotpatchInfo, Value::Null)
+    }
+
+    /// `patch_chunk` — one slice of a patch's bytes (see [`patch_chunks`]).
+    pub fn patch_chunk(&self, params: &PatchChunkParams) -> Result<AckResult> {
+        let params = serde_json::to_value(params).context("encoding `patch_chunk` params")?;
+        self.typed_call(Method::PatchChunk, params)
+    }
+
+    /// Sends every chunk of `bytes` as `patch_id`, in order, stopping at the
+    /// first failure. A chunk the server acknowledges with `ok: false` is an
+    /// error too: the app would refuse the `apply_patch` that follows.
+    pub fn upload_patch(&self, patch_id: u64, bytes: &[u8]) -> Result<()> {
+        for chunk in patch_chunks(patch_id, bytes) {
+            let ack = self.patch_chunk(&chunk)?;
+            if !ack.ok {
+                bail!(
+                    "the app refused patch {patch_id}'s chunk at offset {}",
+                    chunk.offset
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// `apply_patch` — applies the bytes previously uploaded as
+    /// `params.patch_id`, or the file `params.file` names (the loopback
+    /// hand-off; then nothing is uploaded first). Waits up to the connection timeout or
+    /// [`APPLY_PATCH_MIN_WAIT`], whichever is longer, since the app answers
+    /// only after its next frame. An `Err` that is not a
+    /// [`DevtoolsRpcError`] (a closed connection, a timeout, an undecodable
+    /// reply) leaves the outcome unknown: the patch may have been applied.
+    pub fn apply_patch(&self, params: &ApplyPatchParams) -> Result<PatchOutcome> {
+        let params = serde_json::to_value(params).context("encoding `apply_patch` params")?;
+        let wait = self.timeout.max(APPLY_PATCH_MIN_WAIT);
+        let result = self.call_waiting(Method::ApplyPatch, params, wait)?;
+        serde_json::from_value(result).context("decoding `apply_patch` result")
+    }
+
+    /// The remote address this connection is open to, when the socket can
+    /// still report it.
+    pub fn peer_addr(&self) -> Option<SocketAddr> {
+        self.write_stream
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .peer_addr()
+            .ok()
+    }
+
     /// Arms the server's `frame_stats` push (`frame_stats_subscribe`) and
     /// returns a receiver for the notifications that follow. See the module
     /// doc for the bounded, drop-oldest delivery mechanism. Calling this
@@ -322,6 +461,11 @@ impl DevtoolsClient {
     /// response, returning the raw `result` value on success or an `Err` for
     /// an RPC-level error, a decode failure, or a timeout.
     fn call(&self, method: Method, params: Value) -> Result<Value> {
+        self.call_waiting(method, params, self.timeout)
+    }
+
+    /// [`call`](Self::call) waiting up to `wait` for the response.
+    fn call_waiting(&self, method: Method, params: Value, wait: Duration) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel::<Response>();
         self.pending
@@ -341,7 +485,7 @@ impl DevtoolsClient {
                 .with_context(|| format!("failed to flush a `{method}` request"))?;
         }
 
-        let response = rx.recv_timeout(self.timeout).map_err(|err| {
+        let response = rx.recv_timeout(wait).map_err(|err| {
             // Not coming — stop the reader thread from ever routing a late
             // response into a channel nobody is listening on any more.
             self.pending
@@ -369,10 +513,9 @@ impl DevtoolsClient {
                         ),
                     }
                 }
-                mpsc::RecvTimeoutError::Timeout => anyhow!(
-                    "timed out waiting for a `{method}` response after {:?}",
-                    self.timeout
-                ),
+                mpsc::RecvTimeoutError::Timeout => {
+                    anyhow!("timed out waiting for a `{method}` response after {wait:?}")
+                }
             }
         })?;
 
@@ -720,95 +863,181 @@ fn parse_forward_port(stdout: &str) -> Option<u16> {
     stdout.trim().lines().next()?.trim().parse().ok()
 }
 
+/// The hand-rolled fake devtools server the client tests (and
+/// `hotpatch::session`'s) drive, scripted per test.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::process::{FakeProcessRunner, Output};
-    use frust_devtools_protocol::{Capability, Notification, PROTOCOL_VERSION, RectPx, WidgetNode};
+pub(crate) mod test_server {
+    use std::collections::{HashMap, VecDeque};
+    use std::io::{BufRead, BufReader, Write};
     use std::net::{SocketAddr, TcpListener};
-    use std::time::Instant;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
 
-    /// The token [`spawn_fake_server`] requires at handshake — the stand-in
-    /// for one recovered from a discovery line.
-    const FAKE_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    use frust_devtools_protocol::{
+        AckResult, ApplyPatchParams, Capability, FrameStats, HandshakeInfo, HandshakeParams,
+        HotpatchInfo, Notification, PROTOCOL_VERSION, PatchChunkParams, PatchOutcome, RectPx,
+        Request, Response, RpcError, ScreenshotResult, WidgetNode, WidgetTreeDump, encode_line,
+    };
 
-    /// A hand-rolled NDJSON fake devtools server: accepts one connection,
-    /// enforces the same auth gate the real service does (`handshake` with
-    /// [`FAKE_TOKEN`] first, `UNAUTHORIZED` for anything else until then),
-    /// replies to `handshake`/`widget_tree`/`input_tap`/
-    /// `frame_stats_subscribe` with canned success responses, then pushes
-    /// one `frame_stats` notification right after acking the subscribe.
-    /// Deliberately reimplements just enough JSON-RPC framing to drive the
-    /// client end-to-end without depending on the in-app devtools service —
-    /// this crate may depend on `frust-devtools-protocol` only
-    /// (`docs/ARCHITECTURE.md`'s tooling-isolation charter).
-    fn spawn_fake_server() -> (SocketAddr, thread::JoinHandle<()>) {
-        spawn_fake_server_with_capabilities(vec![
-            Capability::WidgetTree,
-            Capability::FrameStats,
-            Capability::Input,
-        ])
+    use super::PATCH_CHUNK_MAX_BYTES;
+
+    /// The token the fake requires at handshake — the stand-in for one
+    /// recovered from a discovery line.
+    pub(crate) const FAKE_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    /// How the fake answers one `apply_patch`.
+    #[derive(Debug, Clone)]
+    pub(crate) enum ApplyReply {
+        /// Answer with this outcome; `hotpatch_info`'s counters follow it.
+        Outcome(PatchOutcome),
+        /// Answer with this RPC error.
+        Error(RpcError),
+        /// Answer with this outcome after sleeping this long (an app
+        /// waiting for its next frame).
+        Delayed(std::time::Duration, PatchOutcome),
+        /// Close the connection without answering: the reply is lost.
+        Hangup,
     }
 
-    /// Like [`spawn_fake_server`], but the handshake declares exactly
-    /// `capabilities` — lets a test control whether `screenshot` should
-    /// succeed or answer `NOT_SUPPORTED`.
-    fn spawn_fake_server_with_capabilities(
-        capabilities: Vec<Capability>,
-    ) -> (SocketAddr, thread::JoinHandle<()>) {
+    /// What the fake declares and how it answers the hot-patch methods.
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct Script {
+        pub capabilities: Vec<Capability>,
+        /// The `hotpatch_info` answer (its pending list is replaced per call
+        /// from `pending`).
+        pub info: Option<HotpatchInfo>,
+        /// `pending_layout_mismatches` for successive `hotpatch_info` calls;
+        /// empty once exhausted.
+        pub pending: VecDeque<Vec<String>>,
+        /// Answers for successive `apply_patch` calls; an unscripted one
+        /// hangs up.
+        pub applies: VecDeque<ApplyReply>,
+        /// The `NOT_SUPPORTED` message `hotpatch_info` answers without
+        /// [`Capability::HotPatch`].
+        pub unsupported_reason: String,
+    }
+
+    /// A running fake: its address plus what it received.
+    pub(crate) struct FakeServer {
+        pub addr: SocketAddr,
+        log: Arc<Mutex<Vec<Request>>>,
+        uploads: Arc<Mutex<HashMap<u64, Vec<u8>>>>,
+        _handle: thread::JoinHandle<()>,
+    }
+
+    impl FakeServer {
+        /// Every request method received, in order.
+        pub fn methods(&self) -> Vec<String> {
+            self.requests().into_iter().map(|r| r.method).collect()
+        }
+
+        /// Every request received, in order.
+        pub fn requests(&self) -> Vec<Request> {
+            self.log.lock().unwrap().clone()
+        }
+
+        /// The bytes reassembled for `patch_id`.
+        pub fn uploaded(&self, patch_id: u64) -> Option<Vec<u8>> {
+            self.uploads.lock().unwrap().get(&patch_id).cloned()
+        }
+    }
+
+    /// Accepts one connection and answers it per `script`, enforcing the
+    /// same auth gate the real service does (`handshake` with [`FAKE_TOKEN`]
+    /// first, `UNAUTHORIZED` for anything else until then) and the same
+    /// capability gates: `screenshot` is `NOT_SUPPORTED` without
+    /// [`Capability::Screenshot`], `hotpatch_info` `NOT_SUPPORTED` and the
+    /// patch methods `METHOD_NOT_FOUND` without [`Capability::HotPatch`].
+    /// Chunks must arrive in offset order and hold at most
+    /// [`PATCH_CHUNK_MAX_BYTES`] raw bytes; `apply_patch`'s `len` must
+    /// equal the bytes received — or, when it names a `file`, the file's
+    /// size, and the file's SHA-256 must match (no chunks are required then). A `frame_stats_subscribe` ack is followed
+    /// by one `frame_stats` notification. Deliberately reimplements just
+    /// enough JSON-RPC framing to drive the client end-to-end without
+    /// depending on the in-app devtools service — this crate may depend on
+    /// `frust-devtools-protocol` only (`docs/ARCHITECTURE.md`'s
+    /// tooling-isolation charter).
+    pub(crate) fn spawn(script: Script) -> FakeServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let handle = thread::spawn(move || {
-            let Ok((stream, _)) = listener.accept() else {
-                return;
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let uploads = Arc::new(Mutex::new(HashMap::new()));
+        let (server_log, server_uploads) = (Arc::clone(&log), Arc::clone(&uploads));
+        let handle = thread::spawn(move || serve(listener, script, server_log, server_uploads));
+        FakeServer {
+            addr,
+            log,
+            uploads,
+            _handle: handle,
+        }
+    }
+
+    fn serve(
+        listener: TcpListener,
+        mut script: Script,
+        log: Arc<Mutex<Vec<Request>>>,
+        uploads: Arc<Mutex<HashMap<u64, Vec<u8>>>>,
+    ) {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        let mut authenticated = false;
+        let hot = script.capabilities.contains(&Capability::HotPatch);
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            let Ok(req) = serde_json::from_str::<Request>(line.trim_end()) else {
+                continue;
             };
-            let mut writer = stream.try_clone().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            let mut authenticated = false;
-            loop {
-                line.clear();
-                let n = reader.read_line(&mut line).unwrap_or(0);
-                if n == 0 {
-                    break;
-                }
-                let Ok(req) = serde_json::from_str::<Request>(line.trim_end()) else {
-                    continue;
-                };
+            log.lock().unwrap().push(req.clone());
 
-                if req.method == "handshake" {
-                    let presented = serde_json::from_value::<HandshakeParams>(req.params.clone())
-                        .ok()
-                        .and_then(|p| p.token);
-                    authenticated = presented.as_deref() == Some(FAKE_TOKEN);
-                }
-                if !authenticated {
-                    let response = Response::error(
-                        req.id,
-                        RpcError::unauthorized("present the devtools token at handshake"),
-                    );
-                    writeln!(writer, "{}", encode_line(&response)).unwrap();
-                    continue;
-                }
-
-                if req.method == "screenshot" && !capabilities.contains(&Capability::Screenshot) {
-                    let response = Response::error(
-                        req.id,
-                        RpcError::not_supported("this backend declares no Screenshot capability"),
-                    );
-                    writeln!(writer, "{}", encode_line(&response)).unwrap();
-                    continue;
-                }
-
-                let result = match req.method.as_str() {
-                    "handshake" => serde_json::to_value(HandshakeInfo {
+            if req.method == "handshake" {
+                let presented = serde_json::from_value::<HandshakeParams>(req.params.clone())
+                    .ok()
+                    .and_then(|p| p.token);
+                authenticated = presented.as_deref() == Some(FAKE_TOKEN);
+            }
+            let reply = if !authenticated {
+                Err(RpcError::unauthorized(
+                    "present the devtools token at handshake",
+                ))
+            } else {
+                match req.method.as_str() {
+                    "handshake" => Ok(serde_json::to_value(HandshakeInfo {
                         app_name: "fake-app".into(),
                         frust_version: "0.0.0".into(),
                         protocol_version: PROTOCOL_VERSION,
-                        capabilities: capabilities.clone(),
+                        capabilities: script.capabilities.clone(),
                     })
-                    .unwrap(),
-                    "widget_tree" => serde_json::to_value(WidgetTreeDump {
+                    .unwrap()),
+                    "screenshot" if !script.capabilities.contains(&Capability::Screenshot) => Err(
+                        RpcError::not_supported("this backend declares no Screenshot capability"),
+                    ),
+                    "hotpatch_info" if !hot => {
+                        Err(RpcError::not_supported(script.unsupported_reason.clone()))
+                    }
+                    "patch_chunk" | "apply_patch" if !hot => Err(RpcError::new(
+                        RpcError::METHOD_NOT_FOUND,
+                        format!("unknown method `{}`", req.method),
+                    )),
+                    "hotpatch_info" => {
+                        let mut info = script.info.clone().expect("a scripted hotpatch_info");
+                        info.pending_layout_mismatches =
+                            script.pending.pop_front().unwrap_or_default();
+                        Ok(serde_json::to_value(info).unwrap())
+                    }
+                    "patch_chunk" => chunk(&req, &uploads),
+                    "apply_patch" => match apply(&req, &uploads, &mut script) {
+                        Some(reply) => reply,
+                        None => break,
+                    },
+                    "widget_tree" => Ok(serde_json::to_value(WidgetTreeDump {
                         roots: vec![WidgetNode {
                             id: 1,
                             type_name: "Root".into(),
@@ -822,37 +1051,178 @@ mod tests {
                             children: vec![],
                         }],
                     })
-                    .unwrap(),
-                    "screenshot" => serde_json::to_value(ScreenshotResult {
+                    .unwrap()),
+                    "screenshot" => Ok(serde_json::to_value(ScreenshotResult {
                         png_base64: "ZmFrZS1wbmc=".into(),
                     })
-                    .unwrap(),
-                    _ => serde_json::to_value(AckResult { ok: true }).unwrap(),
-                };
-                let response = Response::success(req.id, result);
-                writeln!(writer, "{}", encode_line(&response)).unwrap();
+                    .unwrap()),
+                    _ => Ok(serde_json::to_value(AckResult { ok: true }).unwrap()),
+                }
+            };
+            let response = match reply {
+                Ok(result) => Response::success(req.id, result),
+                Err(error) => Response::error(req.id, error),
+            };
+            writeln!(writer, "{}", encode_line(&response)).unwrap();
 
-                if req.method == "frame_stats_subscribe" {
-                    let notif = Notification::new(
-                        "frame_stats",
-                        serde_json::to_value(FrameStats {
-                            n: 1,
-                            total_us: 1_000,
-                            rebuild_us: 100,
-                            layout_us: 100,
-                            paint_us: 100,
-                            encode_us: 100,
-                            acquire_us: 100,
-                            submit_us: 100,
-                            skipped: false,
-                        })
-                        .unwrap(),
-                    );
-                    writeln!(writer, "{}", encode_line(&notif)).unwrap();
+            if authenticated && req.method == "frame_stats_subscribe" {
+                let notif = Notification::new(
+                    "frame_stats",
+                    serde_json::to_value(FrameStats {
+                        n: 1,
+                        total_us: 1_000,
+                        rebuild_us: 100,
+                        layout_us: 100,
+                        paint_us: 100,
+                        encode_us: 100,
+                        acquire_us: 100,
+                        submit_us: 100,
+                        skipped: false,
+                    })
+                    .unwrap(),
+                );
+                writeln!(writer, "{}", encode_line(&notif)).unwrap();
+            }
+        }
+    }
+
+    fn chunk(
+        req: &Request,
+        uploads: &Mutex<HashMap<u64, Vec<u8>>>,
+    ) -> Result<serde_json::Value, RpcError> {
+        let params: PatchChunkParams = serde_json::from_value(req.params.clone())
+            .map_err(|e| invalid_params(e.to_string()))?;
+        let data = decode_base64(&params.data_base64)
+            .ok_or_else(|| invalid_params("patch chunk is not base64"))?;
+        if data.len() > PATCH_CHUNK_MAX_BYTES {
+            return Err(invalid_params("patch chunk over 512 KiB"));
+        }
+        let mut uploads = uploads.lock().unwrap();
+        let bytes = uploads.entry(params.patch_id).or_default();
+        if params.offset != bytes.len() as u64 {
+            return Err(invalid_params("patch chunk out of order"));
+        }
+        bytes.extend_from_slice(&data);
+        if bytes.len() as u64 > params.total_len {
+            return Err(invalid_params("patch chunks exceed total_len"));
+        }
+        Ok(serde_json::to_value(AckResult { ok: true }).unwrap())
+    }
+
+    /// `None` hangs up.
+    fn apply(
+        req: &Request,
+        uploads: &Mutex<HashMap<u64, Vec<u8>>>,
+        script: &mut Script,
+    ) -> Option<Result<serde_json::Value, RpcError>> {
+        let params: ApplyPatchParams = match serde_json::from_value(req.params.clone()) {
+            Ok(params) => params,
+            Err(e) => return Some(Err(invalid_params(e.to_string()))),
+        };
+        let received = match &params.file {
+            Some(file) => match std::fs::read(&file.path) {
+                Ok(bytes) if super::sha256_hex(&bytes) == file.sha256 => bytes.len() as u64,
+                Ok(_) => return Some(Err(invalid_params("patch file digest mismatch"))),
+                Err(e) => return Some(Err(invalid_params(format!("patch file: {e}")))),
+            },
+            None => uploads
+                .lock()
+                .unwrap()
+                .get(&params.patch_id)
+                .map_or(0, |bytes| bytes.len() as u64),
+        };
+        if received != params.len {
+            return Some(Err(invalid_params(format!(
+                "patch is {received} bytes, apply_patch says {}",
+                params.len
+            ))));
+        }
+        match script.applies.pop_front().unwrap_or(ApplyReply::Hangup) {
+            ApplyReply::Outcome(outcome) => {
+                if let Some(info) = script.info.as_mut() {
+                    info.patches_applied = outcome.patches_applied;
+                    info.patch_bytes_loaded = outcome.patch_bytes_loaded;
+                }
+                Some(Ok(serde_json::to_value(outcome).unwrap()))
+            }
+            ApplyReply::Delayed(wait, outcome) => {
+                thread::sleep(wait);
+                Some(Ok(serde_json::to_value(outcome).unwrap()))
+            }
+            ApplyReply::Error(error) => Some(Err(error)),
+            ApplyReply::Hangup => None,
+        }
+    }
+
+    fn invalid_params(message: impl Into<String>) -> RpcError {
+        RpcError::new(RpcError::INVALID_PARAMS, message)
+    }
+
+    /// Standard padded base64 back to bytes; `None` for anything else.
+    pub(crate) fn decode_base64(text: &str) -> Option<Vec<u8>> {
+        let value = |c: u8| -> Option<u32> {
+            Some(match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => return None,
+            } as u32)
+        };
+        let bytes = text.as_bytes();
+        if !bytes.len().is_multiple_of(4) {
+            return None;
+        }
+        let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+        for quad in bytes.chunks(4) {
+            let pad = quad.iter().rev().take_while(|c| **c == b'=').count();
+            let mut n = 0u32;
+            for (i, c) in quad.iter().enumerate() {
+                n <<= 6;
+                if i < 4 - pad {
+                    n |= value(*c)?;
                 }
             }
+            let decoded = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+            out.extend_from_slice(&decoded[..3 - pad]);
+        }
+        Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_server::{self, ApplyReply, FAKE_TOKEN, FakeServer, Script};
+    use super::*;
+    use crate::process::{FakeProcessRunner, Output};
+    use frust_devtools_protocol::{
+        ApplyPatchParams, Capability, HotpatchInfo, JumpTableWire, MissedKey, PROTOCOL_VERSION,
+        PatchOutcome, WidgetNode,
+    };
+    use std::net::{SocketAddr, TcpListener};
+    use std::time::Instant;
+
+    /// [`test_server::spawn`] declaring the read-only capabilities.
+    fn spawn_fake_server() -> (SocketAddr, FakeServer) {
+        spawn_fake_server_with_capabilities(vec![
+            Capability::WidgetTree,
+            Capability::FrameStats,
+            Capability::Input,
+        ])
+    }
+
+    /// Like [`spawn_fake_server`], but the handshake declares exactly
+    /// `capabilities` — lets a test control whether `screenshot` should
+    /// succeed or answer `NOT_SUPPORTED`.
+    fn spawn_fake_server_with_capabilities(
+        capabilities: Vec<Capability>,
+    ) -> (SocketAddr, FakeServer) {
+        let server = test_server::spawn(Script {
+            capabilities,
+            ..Script::default()
         });
-        (addr, handle)
+        (server.addr, server)
     }
 
     #[test]
@@ -1314,5 +1684,243 @@ mod tests {
             },
         );
         assert!(adb_forward_remove(&runner, "emulator-5554", 39217).is_err());
+    }
+
+    fn hot_script() -> Script {
+        Script {
+            capabilities: vec![Capability::WidgetTree, Capability::HotPatch],
+            info: Some(HotpatchInfo {
+                anchor_runtime: 0x1_0000_4000,
+                pid: 4242,
+                triple: "aarch64-apple-darwin".into(),
+                patches_applied: 0,
+                patch_bytes_loaded: 0,
+                pending_layout_mismatches: Vec::new(),
+                patch_file_hand_off: false,
+            }),
+            ..Script::default()
+        }
+    }
+
+    fn outcome(applied: bool, patches_applied: u32) -> PatchOutcome {
+        PatchOutcome {
+            applied,
+            seam_hits: 2,
+            seam_fall_throughs: vec![MissedKey {
+                image: 1,
+                link_address: 0x40,
+            }],
+            layout_mismatches: Vec::new(),
+            patches_applied,
+            patch_bytes_loaded: 3,
+        }
+    }
+
+    fn apply_params(patch_id: u64, len: u64) -> ApplyPatchParams {
+        ApplyPatchParams {
+            patch_id,
+            len,
+            pid: 4242,
+            anchor_runtime: 0x1_0000_4000,
+            table: JumpTableWire {
+                map: [(0x10, 0x20)].into_iter().collect(),
+                aslr_reference: 0x4000,
+                new_base_address: 0x8000,
+                ifunc_count: 0,
+            },
+            expected_seams: 1,
+            file: None,
+        }
+    }
+
+    #[test]
+    fn sha256_hex_matches_the_fips_180_test_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn apply_patch_naming_a_file_needs_no_upload() {
+        let mut script = hot_script();
+        script
+            .applies
+            .push_back(ApplyReply::Outcome(outcome(true, 1)));
+        let server = test_server::spawn(script);
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+
+        let path = std::env::temp_dir().join(format!(
+            "frust-drive-client-handoff-{}.so",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"patch!").unwrap();
+        let mut params = apply_params(6, 6);
+        params.file = Some(frust_devtools_protocol::PatchFile {
+            path: path.to_string_lossy().into_owned(),
+            sha256: sha256_hex(b"patch!"),
+        });
+        assert_eq!(client.apply_patch(&params).unwrap(), outcome(true, 1));
+        assert_eq!(server.methods(), vec!["handshake", "apply_patch"]);
+        let sent: ApplyPatchParams =
+            serde_json::from_value(server.requests().pop().unwrap().params).unwrap();
+        assert_eq!(sent, params);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn base64_matches_the_rfc_4648_test_vectors() {
+        for (raw, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(encode_base64(raw.as_bytes()), encoded);
+            assert_eq!(test_server::decode_base64(encoded).unwrap(), raw.as_bytes());
+        }
+        let all: Vec<u8> = (0..=255).collect();
+        assert_eq!(
+            test_server::decode_base64(&encode_base64(&all)).unwrap(),
+            all
+        );
+    }
+
+    #[test]
+    fn patch_chunks_are_ordered_and_capped_at_512_kib_raw() {
+        let bytes: Vec<u8> = (0..(PATCH_CHUNK_MAX_BYTES * 2 + 7))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let chunks = patch_chunks(9, &bytes);
+        assert_eq!(chunks.len(), 3);
+        let mut reassembled = Vec::new();
+        for (index, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.patch_id, 9);
+            assert_eq!(chunk.total_len, bytes.len() as u64);
+            assert_eq!(chunk.offset, (index * PATCH_CHUNK_MAX_BYTES) as u64);
+            let raw = test_server::decode_base64(&chunk.data_base64).unwrap();
+            assert!(raw.len() <= PATCH_CHUNK_MAX_BYTES);
+            reassembled.extend(raw);
+        }
+        assert_eq!(reassembled, bytes);
+        assert_eq!(chunks[2].data_base64.len(), encode_base64(&[0; 7]).len());
+    }
+
+    #[test]
+    fn hotpatch_info_upload_and_apply_round_trip_against_a_capable_server() {
+        let mut script = hot_script();
+        script
+            .pending
+            .push_back(vec!["HomeState changed layout".into()]);
+        script
+            .applies
+            .push_back(ApplyReply::Outcome(outcome(true, 1)));
+        let server = test_server::spawn(script);
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+
+        let info = client.hotpatch_info().unwrap();
+        assert_eq!(info.anchor_runtime, 0x1_0000_4000);
+        assert_eq!(info.pid, 4242);
+        assert_eq!(
+            info.pending_layout_mismatches,
+            vec!["HomeState changed layout".to_string()]
+        );
+
+        let bytes: Vec<u8> = (0..(PATCH_CHUNK_MAX_BYTES + 100))
+            .map(|i| (i % 7) as u8)
+            .collect();
+        client.upload_patch(5, &bytes).unwrap();
+        assert_eq!(server.uploaded(5), Some(bytes.clone()));
+
+        let result = client
+            .apply_patch(&apply_params(5, bytes.len() as u64))
+            .unwrap();
+        assert_eq!(result, outcome(true, 1));
+        assert_eq!(
+            server.methods(),
+            vec![
+                "handshake",
+                "hotpatch_info",
+                "patch_chunk",
+                "patch_chunk",
+                "apply_patch"
+            ]
+        );
+        assert_eq!(client.hotpatch_info().unwrap().patches_applied, 1);
+        assert!(client.peer_addr().unwrap().ip().is_loopback());
+    }
+
+    #[test]
+    fn hot_patch_methods_without_the_capability_are_typed_rejections() {
+        let server = test_server::spawn(Script {
+            capabilities: vec![Capability::WidgetTree],
+            unsupported_reason: "hot patching is off: the devtools token is not OS-sourced".into(),
+            ..Script::default()
+        });
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+
+        let err = client.hotpatch_info().unwrap_err();
+        assert!(is_not_supported(&err), "{err}");
+        assert!(format!("{err}").contains("not OS-sourced"), "{err}");
+
+        let err = client.upload_patch(1, b"abc").unwrap_err();
+        assert!(is_method_not_found(&err), "{err}");
+        let err = client.apply_patch(&apply_params(1, 3)).unwrap_err();
+        assert!(is_method_not_found(&err), "{err}");
+        assert!(!is_not_supported(&err));
+    }
+
+    #[test]
+    fn apply_patch_outlives_a_short_connection_timeout() {
+        let mut script = hot_script();
+        script.applies.push_back(ApplyReply::Delayed(
+            Duration::from_millis(600),
+            outcome(true, 1),
+        ));
+        let server = test_server::spawn(script);
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_millis(200), Some(FAKE_TOKEN))
+                .unwrap();
+        client.handshake().unwrap();
+        client.upload_patch(1, b"abc").unwrap();
+        assert_eq!(
+            client.apply_patch(&apply_params(1, 3)).unwrap(),
+            outcome(true, 1)
+        );
+    }
+
+    #[test]
+    fn a_lost_apply_patch_reply_is_an_error_but_not_an_rpc_rejection() {
+        let mut script = hot_script();
+        script.applies.push_back(ApplyReply::Hangup);
+        let server = test_server::spawn(script);
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+        client.upload_patch(1, b"abc").unwrap();
+        let start = Instant::now();
+        let err = client.apply_patch(&apply_params(1, 3)).unwrap_err();
+        assert!(
+            err.downcast_ref::<DevtoolsRpcError>().is_none(),
+            "a closed connection leaves the outcome unknown, not refused: {err}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
     }
 }
