@@ -2604,9 +2604,12 @@ dependencies = [
 name = "frust-shell-common"
 version = "0.6.0"
 dependencies = [
+ "base64",
  "frust-core",
  "frust-devtools",
  "frust-devtools-protocol",
+ "frust-hotpatch",
+ "frust-paths",
  "frust-reactive",
  "frust-scene",
  "frust-text",

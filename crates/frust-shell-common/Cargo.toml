@@ -18,6 +18,9 @@ perf-trace = []
 # Opt-in in-app devtools service (loopback server, `DevtoolsBackend`, UI-thread hop). Off, the module and both `frust-devtools*`
 # deps are absent entirely; the gate is the feature, never a `debug_assertions` check (CLI enables for debug/profile builds).
 devtools = ["dep:frust-devtools", "dep:frust-devtools-protocol"]
+# Opt-in in-app hot-patch apply over devtools (`ShellBackend`'s three hot-patch calls); never default. Capability-gated at
+# run time by `frust-devtools` (debug build, OS-CSPRNG token); the one `unsafe` call stays inside `frust-hotpatch`.
+hotpatch = ["devtools", "frust-devtools/hotpatch", "dep:base64", "dep:frust-hotpatch", "dep:frust-paths"]
 # Opt-in process-wide GPU-device slot (`install_gpu_handle`/`gpu_handle`); type-erased, so it adds no dependency.
 gpu = []
 
@@ -36,6 +39,10 @@ log = { workspace = true }
 # so there is no layering cycle.
 frust-devtools = { path = "../frust-devtools", version = "0.6.0", optional = true }
 frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.6.0", optional = true }
+# Optional, `hotpatch`-only: chunk decoding (the root pin), the safe apply entry, and the cache dir the patch is written to.
+base64 = { workspace = true, optional = true }
+frust-hotpatch = { workspace = true, optional = true }
+frust-paths = { workspace = true, optional = true }
 
 # DEV-ONLY (the shipped crate stays reactive-free, docs/ARCHITECTURE.md Layer Dependencies). `reactive_graph` drives the
 # root-owner test; `frust-reactive` drives the tracked-rebuild test of the `rt.with_owner(|| scope.track(|| app.rebuild()))`

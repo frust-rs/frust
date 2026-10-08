@@ -34,6 +34,10 @@
 //! is 128 output bits an *unprivileged co-resident peer cannot enumerate*,
 //! which is the property this secret needs — it guards a loopback debug port on
 //! a debug/profile build, for the lifetime of one process, against guessing.
+//!
+//! [`generate`] reports which path it took ([`TokenSource`]). That is enough
+//! for inspecting an app, not for loading code into it: the service offers the
+//! `HotPatch` capability only behind an [`TokenSource::Os`] token.
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
@@ -44,19 +48,51 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 /// that answers one connection at a time.
 const TOKEN_BYTES: usize = 16;
 
+/// Where a token's bytes came from. Reading a widget tree is fine behind
+/// either; loading code is not, so the `HotPatch` capability is offered only
+/// behind an [`TokenSource::Os`] token (`crate::service`'s hot-patch gate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenSource {
+    /// `/dev/urandom` was read: a kernel CSPRNG.
+    Os,
+    /// The non-cryptographic [`fallback_random_bytes`] composition (Windows
+    /// always; a unix sandbox that cannot open `/dev/urandom`).
+    Fallback,
+}
+
+/// One minted token and where its entropy came from.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Token {
+    pub(crate) value: String,
+    pub(crate) source: TokenSource,
+}
+
+impl std::fmt::Debug for Token {
+    /// Hand-written so a `{:?}` can never print the secret itself.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Token")
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Mints this process's devtools token: `2 * TOKEN_BYTES` lowercase hex
 /// characters, containing no whitespace (the discovery line is
-/// whitespace-delimited — see `frust_devtools_protocol::format_discovery_line`).
-pub(crate) fn generate() -> String {
-    let bytes = os_random_bytes().unwrap_or_else(fallback_random_bytes);
-    let mut token = String::with_capacity(TOKEN_BYTES * 2);
+/// whitespace-delimited — see `frust_devtools_protocol::format_discovery_line`),
+/// together with the [`TokenSource`] its bytes came from.
+pub(crate) fn generate() -> Token {
+    let (bytes, source) = match os_random_bytes() {
+        Some(bytes) => (bytes, TokenSource::Os),
+        None => (fallback_random_bytes(), TokenSource::Fallback),
+    };
+    let mut value = String::with_capacity(TOKEN_BYTES * 2);
     for byte in bytes {
         use std::fmt::Write as _;
         // Writing into a String is infallible; the result is discarded rather
         // than unwrapped so a token can never be the reason a service dies.
-        let _ = write!(token, "{byte:02x}");
+        let _ = write!(value, "{byte:02x}");
     }
-    token
+    Token { value, source }
 }
 
 /// Whether `presented` is the expected token, compared in a length-checked,
@@ -142,7 +178,7 @@ mod tests {
 
     #[test]
     fn a_token_is_hex_of_the_declared_width_and_carries_no_whitespace() {
-        let token = generate();
+        let token = generate().value;
         assert_eq!(token.len(), TOKEN_BYTES * 2);
         assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(!token.chars().any(char::is_whitespace));
@@ -150,8 +186,26 @@ mod tests {
 
     #[test]
     fn tokens_do_not_repeat() {
-        let tokens: HashSet<String> = (0..64).map(|_| generate()).collect();
+        let tokens: HashSet<String> = (0..64).map(|_| generate().value).collect();
         assert_eq!(tokens.len(), 64, "a repeated token means no entropy at all");
+    }
+
+    #[test]
+    fn the_token_reports_its_source() {
+        // Unix reads /dev/urandom (the hosts this suite runs on); anything else
+        // takes the fallback, Windows always.
+        let expected = if cfg!(unix) && std::path::Path::new("/dev/urandom").exists() {
+            TokenSource::Os
+        } else {
+            TokenSource::Fallback
+        };
+        assert_eq!(generate().source, expected);
+    }
+
+    #[test]
+    fn a_token_debug_print_never_carries_the_secret() {
+        let token = generate();
+        assert!(!format!("{token:?}").contains(&token.value));
     }
 
     #[test]
@@ -166,7 +220,7 @@ mod tests {
 
     #[test]
     fn matches_only_the_exact_token() {
-        let token = generate();
+        let token = generate().value;
         assert!(matches(&token, &token.clone()));
         assert!(!matches(&token, ""));
         assert!(!matches(&token, &token[..token.len() - 1]));

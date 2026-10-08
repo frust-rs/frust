@@ -7,6 +7,8 @@
 //! (`crate::hop`). See the crate doc's *Threading & blocking model* for what
 //! that costs and guarantees.
 
+#[cfg(feature = "hotpatch")]
+use frust_devtools_protocol::{ApplyPatchParams, HotpatchInfo, PatchChunkParams, PatchOutcome};
 use frust_devtools_protocol::{
     Capability, HandshakeInfo, InputScrollParams, InputTapParams, MetricsSnapshot,
     PROTOCOL_VERSION, RpcError, ScreenshotResult, WidgetProps, WidgetTreeDump,
@@ -119,6 +121,8 @@ pub trait DevtoolsBackend: Send + 'static {
     /// The default answers with everything except
     /// [`Capability::Screenshot`], matching the default [`Self::screenshot`]
     /// below — override this together with `screenshot`, never one alone.
+    /// [`Capability::HotPatch`] is likewise absent by default; a backend that
+    /// declares it is still subject to the service's hot-patch gate.
     fn handshake_info(&self, app: &AppInfo) -> HandshakeInfo {
         HandshakeInfo {
             app_name: app.app_name.clone(),
@@ -171,6 +175,56 @@ pub trait DevtoolsBackend: Send + 'static {
     fn screenshot(&self) -> Result<ScreenshotResult, BackendError> {
         Err(BackendError::not_supported(
             "screenshot capture is not implemented by this backend",
+        ))
+    }
+
+    // The three hot-patch calls (this crate's `hotpatch` feature). A backend
+    // that overrides them declares [`Capability::HotPatch`] in
+    // [`Self::handshake_info`], and even then the service keeps the capability
+    // (and dispatches these) only while every code-execution precondition
+    // holds: a debug build, an OS-CSPRNG token with `require_token` on, not
+    // Windows (`crate::service`'s hot-patch gate). They run on a hot-patch
+    // worker thread, never the backend thread, one at a time.
+
+    /// What a patch builder needs to target this process (`anchor_runtime`,
+    /// `pid`, `triple`), the apply counters, and the layout-mismatch records
+    /// not yet reported. Defaults to [`BackendError::NotSupported`].
+    #[cfg(feature = "hotpatch")]
+    fn hotpatch_info(&self) -> Result<HotpatchInfo, BackendError> {
+        Err(BackendError::not_supported(
+            "hot patching is not implemented by this backend",
+        ))
+    }
+
+    /// Decode one `patch_chunk`'s payload into raw bytes. The service owns
+    /// reassembly (per connection, keyed by `patch_id`, size-capped) and the
+    /// offset/length checks; the backend owns the transfer encoding, so this
+    /// crate needs no codec dependency. Defaults to
+    /// [`BackendError::NotSupported`].
+    #[cfg(feature = "hotpatch")]
+    fn patch_chunk(&self, chunk: &PatchChunkParams) -> Result<Vec<u8>, BackendError> {
+        let _ = chunk;
+        Err(BackendError::not_supported(
+            "hot patching is not implemented by this backend",
+        ))
+    }
+
+    /// Apply a patch whose `bytes` were reassembled from chunks received on
+    /// the requesting, authenticated connection; `bytes.len() == params.len`
+    /// is already checked. The backend still checks `pid` and
+    /// `anchor_runtime` against its own process, and answers after the frame
+    /// that follows the apply. No path ever comes from the wire: a backend
+    /// that needs a file writes one itself. Defaults to
+    /// [`BackendError::NotSupported`].
+    #[cfg(feature = "hotpatch")]
+    fn apply_patch(
+        &self,
+        bytes: Vec<u8>,
+        params: ApplyPatchParams,
+    ) -> Result<PatchOutcome, BackendError> {
+        let _ = (bytes, params);
+        Err(BackendError::not_supported(
+            "hot patching is not implemented by this backend",
         ))
     }
 }

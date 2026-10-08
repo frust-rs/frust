@@ -25,3 +25,8 @@ tokio = { workspace = true, features = [
     "macros",
 ] }
 log = { workspace = true }
+
+[features]
+# Opt-in hot-patch transport: the three backend calls, per-connection chunk reassembly and their dispatch. No dependency of
+# its own; the capability is still offered only in a debug build behind an OS-CSPRNG token (`service.rs`'s hot-patch gate).
+hotpatch = []
