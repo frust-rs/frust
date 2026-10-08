@@ -37,6 +37,25 @@ mod platform_view;
 mod render;
 mod surface;
 
+/// The hot-patch frame request: raised by the patch listener (on whichever thread applied the patch), drained into
+/// `FrameInputs::signals_dirty` by the next Choreographer tick so a patch never waits for a touch. The reactive
+/// runtime's own latch has no public entry for a non-signal caller, so this is the shell-side twin ORed in at the
+/// gather site in [`frame`].
+#[cfg(feature = "hotpatch")]
+static PATCH_FRAME_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Signals only (an atomic store): the patch listener's whole job.
+#[cfg(feature = "hotpatch")]
+pub(crate) fn request_patch_frame() {
+    PATCH_FRAME_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Drains the latch: `true` once per request, then `false`.
+#[cfg(feature = "hotpatch")]
+pub(crate) fn take_patch_frame_request() -> bool {
+    PATCH_FRAME_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
 pub(crate) use executor::{FrameExecutor, InlineExecutor, PaintedScene, SplitExecutor};
 pub(crate) use render::{RenderSignals, render_scene};
 
@@ -893,6 +912,36 @@ impl AndroidAppHandle {
 /// identical to the desktop copies the twin tests exercise.
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "hotpatch")]
+    #[test]
+    fn a_patch_request_runs_the_next_idle_frame_once() {
+        use frust_core::FrameTime;
+        use frust_shell_common::{FrameGate, FrameInputs, FramePacing};
+        use std::time::Duration;
+        let pacing = || FramePacing {
+            now: FrameTime::from_nanos(0),
+            interval: Duration::from_millis(16),
+            requested_interval: None,
+        };
+        let inputs = |signals_dirty| FrameInputs {
+            signals_dirty,
+            ..FrameInputs::default()
+        };
+        let mut gate = FrameGate::with_flags(true, true);
+        // Settle past warm-up so an idle tick skips.
+        for _ in 0..16 {
+            gate.decide_paced(inputs(false), pacing());
+        }
+        assert!(gate.decide_paced(inputs(false), pacing()).is_skip());
+        assert!(!super::take_patch_frame_request());
+        super::request_patch_frame();
+        assert!(
+            gate.decide_paced(inputs(super::take_patch_frame_request()), pacing())
+                .is_run()
+        );
+        assert!(!super::take_patch_frame_request(), "one request, one frame");
+    }
+
     use super::{
         app_is_dark, base_theme, effective_reduce_motion, follow_platform_brightness,
         theme_after_override_poll,
