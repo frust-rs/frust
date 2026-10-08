@@ -127,7 +127,25 @@ impl BuildMode {
             BuildMode::Release => &["lean"],
         }
     }
+
+    /// [`cargo_features`](Self::cargo_features) for a session that is (or is
+    /// not) hot-patched: a **Debug** hot session adds [`HOTPATCH_FEATURE`]
+    /// (the seam plus the in-app apply over devtools); every other
+    /// combination is the mode's own list. Profile inherits the release
+    /// profile, so it has no `debug_assertions` and the runtime would never
+    /// consult a jump table, and Release ships no devtools listener to carry
+    /// a patch at all — so neither ever compiles the feature in.
+    pub fn session_cargo_features(&self, hot: bool) -> &'static [&'static str] {
+        match self {
+            BuildMode::Debug if hot => &["frust/perf-trace", "frust/devtools", HOTPATCH_FEATURE],
+            _ => self.cargo_features(),
+        }
+    }
 }
+
+/// The facade feature a Debug hot session compiles in (see
+/// [`BuildMode::session_cargo_features`]).
+pub const HOTPATCH_FEATURE: &str = "frust/hotpatch";
 
 /// Plain (clap-free) build flags shared by every command that produces a
 /// build. The `frust-cli` clap layer's `build_args::BuildArgs` mirrors this
@@ -425,6 +443,31 @@ mod tests {
             &["frust/perf-trace", "frust/devtools"]
         );
         assert_eq!(BuildMode::Release.cargo_features(), &["lean"]);
+    }
+
+    #[test]
+    fn session_cargo_features_add_hotpatch_for_debug_hot_sessions_only() {
+        assert_eq!(
+            BuildMode::Debug.session_cargo_features(true),
+            &["frust/perf-trace", "frust/devtools", "frust/hotpatch"]
+        );
+        assert_eq!(HOTPATCH_FEATURE, "frust/hotpatch");
+        for mode in [BuildMode::Debug, BuildMode::Profile, BuildMode::Release] {
+            assert_eq!(
+                mode.session_cargo_features(false),
+                mode.cargo_features(),
+                "a cold {mode:?} session is the mode's own list"
+            );
+            assert!(!mode.cargo_features().contains(&HOTPATCH_FEATURE));
+        }
+        for mode in [BuildMode::Profile, BuildMode::Release] {
+            assert!(
+                !mode
+                    .session_cargo_features(true)
+                    .contains(&HOTPATCH_FEATURE),
+                "{mode:?} must never compile the hot-patch feature in"
+            );
+        }
     }
 
     #[test]
