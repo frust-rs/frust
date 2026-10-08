@@ -219,6 +219,29 @@ pub(crate) async fn handle_request(
             Ok(p) => no_effect(backend_response(ctx, id, Call::InputText(p.text)).await),
             Err(e) => no_effect(Response::error(id, invalid_params(req, &e))),
         },
+
+        // Placeholder arms for H1-06b; replaced by H1-07 with real dispatch.
+        Method::HotpatchInfo => no_effect(Response::error(
+            id,
+            RpcError::new(
+                RpcError::NOT_SUPPORTED,
+                "hot-patch methods not available in this build",
+            ),
+        )),
+        Method::PatchChunk => no_effect(Response::error(
+            id,
+            RpcError::new(
+                RpcError::NOT_SUPPORTED,
+                "hot-patch methods not available in this build",
+            ),
+        )),
+        Method::ApplyPatch => no_effect(Response::error(
+            id,
+            RpcError::new(
+                RpcError::NOT_SUPPORTED,
+                "hot-patch methods not available in this build",
+            ),
+        )),
     }
 }
 
@@ -392,6 +415,9 @@ mod tests {
             Method::InputText,
             Method::Screenshot,
             Method::FrameStats,
+            Method::HotpatchInfo,
+            Method::PatchChunk,
+            Method::ApplyPatch,
         ] {
             let req = Request::new(1, method.as_str(), Value::Null);
             let (response, effect) = block_on(handle_request(&ctx, &mut conn, &req));
@@ -600,5 +626,35 @@ mod tests {
         let notif = frame_stats_notification(stats);
         assert_eq!(notif.method, Method::FrameStats.as_str());
         assert_eq!(notif.params["n"], 3);
+    }
+
+    #[test]
+    fn hotpatch_methods_return_not_supported_when_authenticated() {
+        let ctx = ctx_with_token(Some("s3cret"));
+        let mut conn = ConnState::new(&ctx);
+
+        // Authenticate the connection first.
+        let (auth_response, _) = block_on(handle_request(
+            &ctx,
+            &mut conn,
+            &handshake_request(0, Some("s3cret")),
+        ));
+        assert!(is_success(&auth_response));
+
+        // Each hot-patch method should return NOT_SUPPORTED, not UNAUTHORIZED.
+        for method in [Method::HotpatchInfo, Method::PatchChunk, Method::ApplyPatch] {
+            let req = Request::new(1, method.as_str(), Value::Null);
+            let (response, effect) = block_on(handle_request(&ctx, &mut conn, &req));
+            assert_eq!(
+                error_code(&response),
+                RpcError::NOT_SUPPORTED,
+                "{method} must return NOT_SUPPORTED"
+            );
+            assert_eq!(
+                effect,
+                SideEffect::None,
+                "{method} must have no side effect"
+            );
+        }
     }
 }
