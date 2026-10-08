@@ -100,7 +100,7 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     // (`crate::runner`'s `translate_key`), so exactly one of the two rows
     // below carries the `R` hint at a time.
     let has_app_session = state.active_session().is_some_and(|s| s.target.is_some());
-    // "Watch: restart on save" is the `frust run --watch` loop, which is
+    // "Watch: hot patch on save" is the `frust run --watch` loop, which is
     // desktop-preview only — a device (or ad-hoc) session gates it off.
     let has_desktop_session = state
         .active_session()
@@ -174,9 +174,10 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
         ),
         // A toggle: the same row turns it off again. Enabled only for a
         // desktop app session (`Message::ToggleWatch`'s own refusal covers
-        // the `W` key on anything else).
+        // the `W` key on anything else). A save hot-patches a session that
+        // runs hot and restarts any other.
         gated(
-            "Watch: restart on save",
+            "Watch: hot patch on save",
             "W",
             Message::ToggleWatch,
             has_desktop_session,
@@ -539,7 +540,7 @@ mod tests {
         let by_title = |state: &AppState| {
             commands(state)
                 .into_iter()
-                .find(|c| c.title == "Watch: restart on save")
+                .find(|c| c.title == "Watch: hot patch on save")
                 .expect("command present")
         };
         let with_session = |target: Option<SessionTarget>| {
@@ -570,6 +571,12 @@ mod tests {
         assert!(row.enabled);
         assert_eq!(row.message, Message::ToggleWatch);
         assert_eq!(row.hint, "W");
+        assert!(
+            commands(&workbench())
+                .iter()
+                .all(|c| c.title != "Watch: restart on save"),
+            "the row was renamed, not duplicated"
+        );
     }
 
     #[test]
