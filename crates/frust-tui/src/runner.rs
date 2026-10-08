@@ -22,8 +22,10 @@ use crossterm::event::{
     MouseButton as CtMouseButton, MouseEventKind,
 };
 use frust_drive::android_build::{self, AndroidArtifact};
+use frust_drive::android_run;
 use frust_drive::desktop_build;
 use frust_drive::devices::{Platform, default_discoverers, discover_all};
+use frust_drive::devtools_client::adb_forward_remove;
 use frust_drive::doctor::{self, DoctorCtx, RealEnv};
 use frust_drive::hotpatch::session::{
     HotSession, Outcome as HotOutcome, RestartReason, StartError,
@@ -162,11 +164,12 @@ async fn run_loop(terminal: &mut DefaultTerminal) -> Result<()> {
     // stopped only through `apply_effect`; dropped (every thread stopped and
     // bounded-joined against one deadline) when this loop returns.
     let mut watchers = SourceWatchers::new(msg_tx.clone());
-    // The hot sessions (`HotSessions`): every watched debug desktop session,
-    // launched through the hot-patch session start instead of the
-    // supervisor, with its `on_change` run off this thread. Dropped (every
-    // app killed, every worker given one bounded wait) when this loop
-    // returns.
+    // The hot sessions (`HotSessions`): every watched debug desktop or
+    // Android device session, launched through the hot-patch session start
+    // instead of the supervisor, with its `on_change` run off this thread.
+    // Dropped (every app killed — a device app's forward removed and its
+    // package force-stopped — every worker given one bounded wait) when this
+    // loop returns.
     let mut hot = HotSessions::new(Arc::new(RealProcessRunner));
     // The embedded servers' two deferred-answer registries (see
     // `crate::supervise::session_feeds`): the open session-event feeds a DAP
@@ -529,8 +532,9 @@ struct EffectCtx<'a> {
     /// The per-session "Watch: hot patch on save" source watchers, keyed by
     /// session id alongside `records` (whose spec gives a watcher its root).
     watchers: &'a mut SourceWatchers,
-    /// The hot sessions — watched debug desktop sessions the runner launched
-    /// through the hot-patch session start, keyed by session id.
+    /// The hot sessions — watched debug desktop and Android device sessions
+    /// the runner launched through the hot-patch session start, keyed by
+    /// session id.
     hot: &'a mut HotSessions,
     /// The one [`TuiSessionBackend`] both embedded servers are started over —
     /// built once per run, so an MCP agent and a DAP client drive the same
@@ -1515,13 +1519,14 @@ struct LaunchCtx<'a> {
 /// modal's watch checkbox and every relaunch of a watched session.
 ///
 /// A spec that can run hot ([`SessionSpec::hot_precondition`]: a debug
-/// desktop build) becomes a [`HotSessions`] entry: registered, recorded and
-/// sent `EnableWatch` here, synchronously and in that order, and only then
-/// started, so the engine has the tab (and its watch flag) before the
-/// worker's first event. Its start — the fat build, the fat image spawned
-/// directly — runs on the worker's own thread. Anything else launches
+/// desktop or Android device build) becomes a [`HotSessions`] entry:
+/// registered, recorded and sent `EnableWatch` here, synchronously and in
+/// that order, and only then started, so the engine has the tab (and its
+/// watch flag) before the worker's first event. Its start — the fat build,
+/// then the fat image spawned directly or, on Android, packaged, installed
+/// and launched — runs on the worker's own thread. Anything else launches
 /// exactly as [`launch_sessions`] does and keeps restart-on-save, with an
-/// Info toast naming the precondition that kept it cold.
+/// Info toast naming the precondition that kept a watchable target cold.
 fn launch_watched_sessions(specs: Vec<SessionSpec>, ctx: &mut LaunchCtx<'_>) {
     let mut cold = Vec::new();
     for spec in specs {
@@ -1546,7 +1551,7 @@ fn launch_watched_sessions(specs: Vec<SessionSpec>, ctx: &mut LaunchCtx<'_>) {
                 }
             }
             Err(reason) => {
-                if matches!(spec.target, DeviceTarget::Desktop) {
+                if SessionTarget::of(&spec.target).supports_watch() {
                     let _ = ctx.tx.send(Message::Notify {
                         level: ToastKind::Info,
                         text: format!("Watch restarts this session on save: {reason}"),
@@ -2466,10 +2471,13 @@ enum HotStart {
     /// The app is up: `patcher` answers its changes and `child`, when there
     /// is one, carries its output and lifetime. `notice` is toasted once —
     /// why this session can only restart, when it can only restart.
+    /// `teardown` runs once the app's stream has ended (stopped or on its
+    /// own): a device app's `adb forward --remove` and `am force-stop`.
     Running {
         patcher: Box<dyn HotPatcher>,
         child: Option<StreamHandle>,
         notice: Option<String>,
+        teardown: Option<AppTeardown>,
     },
     /// Nothing is running: `detail` is logged and the session ends
     /// `Exited(false)`.
@@ -2477,8 +2485,35 @@ enum HotStart {
 }
 
 /// The blocking start a hot worker runs first ([`real_hot_start`] in
-/// production), handed the line sink its output goes to.
-type HotStarter = Box<dyn FnOnce(&mut dyn FnMut(&str)) -> HotStart + Send>;
+/// production), handed the line sink its output goes to and the session's
+/// stop flag, which a device start honours at each pipeline phase boundary.
+type HotStarter = Box<dyn FnOnce(&mut dyn FnMut(&str), &AtomicBool) -> HotStart + Send>;
+
+/// What ending a hot session's app takes beyond killing its stream (see
+/// [`HotStart::Running`]'s `teardown`).
+type AppTeardown = Box<dyn FnOnce() + Send>;
+
+/// The teardown of an app launched on the Android device `serial`: remove
+/// the hot session's `adb forward` (when one was allocated) and force-stop
+/// the launched package. Best-effort throughout, like the supervisor's own
+/// stop: a device that went away or an app that already exited is a normal
+/// end.
+fn device_teardown(
+    runner: Arc<dyn ProcessRunner + Send + Sync>,
+    serial: String,
+    package: String,
+    forward_port: Option<u16>,
+) -> AppTeardown {
+    Box::new(move || {
+        if let Some(port) = forward_port {
+            let _ = adb_forward_remove(&*runner, &serial, port);
+        }
+        let _ = runner.run(
+            "adb",
+            &["-s", &serial, "shell", "am", "force-stop", &package],
+        );
+    })
+}
 
 /// The toast for a session that runs but can only restart.
 fn hot_unavailable_notice(reason: &str) -> String {
@@ -2486,32 +2521,83 @@ fn hot_unavailable_notice(reason: &str) -> String {
 }
 
 /// The production [`HotStarter`]: [`SessionSpec::start_hot`] (the fat build,
-/// then the fat image spawned directly), falling back to the spec's cold
-/// `cargo run` when the start refuses before building anything.
+/// then the fat image spawned directly — or, on an Android device, packaged,
+/// installed and launched), falling back to the spec's cold launch when the
+/// start refuses before building anything: `cargo run` on the desktop, the
+/// non-hot device pipeline on a device. A device app carries a teardown
+/// (forward removal, force-stop) the session runs when it ends.
 fn real_hot_start(spec: SessionSpec, runner: Arc<dyn ProcessRunner + Send + Sync>) -> HotStarter {
     Box::new(
-        move |on_line| match spec.start_hot(Arc::clone(&runner), on_line) {
-            Ok((session, child)) => {
-                let notice = session.restart_only_reason().map(hot_unavailable_notice);
+        move |on_line, cancel| match spec.start_hot(Arc::clone(&runner), on_line, cancel) {
+            Ok(launch) => {
+                let notice = launch
+                    .session
+                    .restart_only_reason()
+                    .map(hot_unavailable_notice);
+                let teardown = launch.device.map(|app| {
+                    device_teardown(
+                        Arc::clone(&runner),
+                        app.serial,
+                        app.package,
+                        app.forward_port,
+                    )
+                });
                 HotStart::Running {
-                    patcher: Box::new(session),
-                    child: Some(child),
+                    patcher: Box::new(launch.session),
+                    child: Some(launch.child),
                     notice,
+                    teardown,
                 }
             }
-            Err(StartError::RestartRequired(reason)) => {
-                on_line(&format!(
-                    "hot patching unavailable ({reason}); running `cargo run` instead"
-                ));
-                match spawn_cold(&*runner, &spec) {
-                    Ok(child) => HotStart::Running {
-                        notice: Some(hot_unavailable_notice(&reason.to_string())),
-                        patcher: Box::new(RestartOnly(reason)),
-                        child: Some(child),
-                    },
-                    Err(err) => HotStart::Failed(format!("{err:#}")),
+            Err(StartError::RestartRequired(reason)) => match &spec.target {
+                DeviceTarget::Desktop => {
+                    on_line(&format!(
+                        "hot patching unavailable ({reason}); running `cargo run` instead"
+                    ));
+                    match spawn_cold(&*runner, &spec) {
+                        Ok(child) => HotStart::Running {
+                            notice: Some(hot_unavailable_notice(&reason.to_string())),
+                            patcher: Box::new(RestartOnly(reason)),
+                            child: Some(child),
+                            teardown: None,
+                        },
+                        Err(err) => HotStart::Failed(format!("{err:#}")),
+                    }
                 }
-            }
+                // `hot_precondition` keeps every other device off this path.
+                DeviceTarget::Device(device) if device.platform != Platform::Android => {
+                    HotStart::Failed(reason.to_string())
+                }
+                DeviceTarget::Device(device) => {
+                    on_line(&format!(
+                        "hot patching unavailable ({reason}); running the device pipeline instead"
+                    ));
+                    match android_run::spawn_session(
+                        &*runner,
+                        &spec.project_root,
+                        device,
+                        &spec.build,
+                        on_line,
+                        cancel,
+                    ) {
+                        Ok(Some(launch)) => HotStart::Running {
+                            notice: Some(hot_unavailable_notice(&reason.to_string())),
+                            patcher: Box::new(RestartOnly(reason)),
+                            child: Some(launch.stream),
+                            teardown: Some(device_teardown(
+                                Arc::clone(&runner),
+                                device.id.clone(),
+                                launch.package,
+                                None,
+                            )),
+                        },
+                        Ok(None) => HotStart::Failed(
+                            "the session was stopped before the app launched".to_string(),
+                        ),
+                        Err(err) => HotStart::Failed(format!("{err:#}")),
+                    }
+                }
+            },
             Err(err @ (StartError::FatBuildFailed { .. } | StartError::Launch { .. })) => {
                 HotStart::Failed(err.to_string())
             }
@@ -2539,12 +2625,13 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// What the UI thread and one hot worker share: the stop flag and the app's
-/// stream once it is up.
+/// What the UI thread and one hot worker share: the stop flag, the app's
+/// stream once it is up, and the app's teardown until it has run.
 #[derive(Default)]
 struct HotControl {
     stopped: AtomicBool,
     child: Mutex<Option<Arc<Mutex<StreamHandle>>>>,
+    teardown: Mutex<Option<AppTeardown>>,
 }
 
 impl HotControl {
@@ -2577,6 +2664,20 @@ impl HotControl {
         *slot = Some(Arc::clone(&child));
         Some(child)
     }
+
+    /// Hold the app's teardown until [`Self::finish`] runs it.
+    fn set_teardown(&self, teardown: Option<AppTeardown>) {
+        *lock_unpoisoned(&self.teardown) = teardown;
+    }
+
+    /// Run the app's teardown, once: called off the UI thread when the app's
+    /// stream has ended (stopped or on its own) and when the worker ends.
+    fn finish(&self) {
+        let teardown = lock_unpoisoned(&self.teardown).take();
+        if let Some(teardown) = teardown {
+            teardown();
+        }
+    }
 }
 
 /// One hot session: the request queue into its worker, the shared stop
@@ -2597,9 +2698,12 @@ struct HotWorker {
 /// blocking start and then the patch loop: each [`Self::patch`] only queues
 /// the burst, the worker runs `on_change` and posts
 /// [`Message::HotPatchOutcome`]. A second thread per session drains the
-/// app's output into the session's log and reports its end. Stopping kills
-/// the app; a worker inside `on_change` finishes that call, drops its
-/// answer and returns.
+/// app's output into the session's log, runs a device app's teardown
+/// (`adb forward --remove`, `am force-stop`) once the output ends, and
+/// reports its end; the worker joins it before returning, so the teardown
+/// falls inside the worker's bounded wait at quit. Stopping kills the app's
+/// stream (and cancels a device start at its next phase boundary); a worker
+/// inside `on_change` finishes that call, drops its answer and returns.
 struct HotSessions {
     /// Runs the starts' processes (and a refused start's cold fallback).
     runner: Arc<dyn ProcessRunner + Send + Sync>,
@@ -2727,7 +2831,8 @@ impl Drop for HotSessions {
 /// A hot worker's whole life: run the blocking start (its lines into the
 /// session's log), hand the app's output to a drain thread, then answer
 /// every queued burst with `on_change` until the queue closes or the session
-/// is stopped.
+/// is stopped. Whichever way it ends, the drain thread is joined (a stop has
+/// already killed the stream it drains) and the app's teardown has run.
 fn run_hot_session(
     id: SessionId,
     starter: HotStarter,
@@ -2735,13 +2840,30 @@ fn run_hot_session(
     control: &Arc<HotControl>,
     tx: &UnboundedSender<Message>,
 ) {
+    let drain = serve_hot_session(id, starter, inbox, control, tx);
+    if let Some(drain) = drain {
+        let _ = drain.join();
+    }
+    control.finish();
+}
+
+/// [`run_hot_session`]'s body, returning the drain thread (when one was
+/// started) for it to join.
+fn serve_hot_session(
+    id: SessionId,
+    starter: HotStarter,
+    inbox: &mpsc::Receiver<Vec<PathBuf>>,
+    control: &Arc<HotControl>,
+    tx: &UnboundedSender<Message>,
+) -> Option<JoinHandle<()>> {
     let _ = tx.send(session_state(id, SessionState::Building));
     let started = {
         let mut on_line = |line: &str| {
             let _ = tx.send(session_line(id, line.to_string()));
         };
-        starter(&mut on_line)
+        starter(&mut on_line, &control.stopped)
     };
+    let mut drain_thread = None;
     let mut patcher = match started {
         HotStart::Failed(detail) => {
             let _ = tx.send(session_line(id, format!("error: {detail}")));
@@ -2751,17 +2873,19 @@ fn run_hot_session(
                 SessionState::Exited(false)
             };
             let _ = tx.send(session_state(id, end));
-            return;
+            return None;
         }
         HotStart::Running {
             patcher,
             child,
             notice,
+            teardown,
         } => {
+            control.set_teardown(teardown);
             if let Some(child) = child {
                 let Some(child) = control.install(child) else {
                     let _ = tx.send(session_state(id, SessionState::Killed));
-                    return;
+                    return None;
                 };
                 let drain = {
                     let control = Arc::clone(control);
@@ -2771,14 +2895,17 @@ fn run_hot_session(
                         .name(format!("frust-tui-hot-drain-{}", id.0))
                         .spawn(move || drain_hot_child(id, &child, &control, &tx))
                 };
-                if let Err(err) = drain {
-                    lock_unpoisoned(&child).kill();
-                    let _ = tx.send(session_line(
-                        id,
-                        format!("error: spawning the output thread failed: {err}"),
-                    ));
-                    let _ = tx.send(session_state(id, SessionState::Exited(false)));
-                    return;
+                match drain {
+                    Ok(drain) => drain_thread = Some(drain),
+                    Err(err) => {
+                        lock_unpoisoned(&child).kill();
+                        let _ = tx.send(session_line(
+                            id,
+                            format!("error: spawning the output thread failed: {err}"),
+                        ));
+                        let _ = tx.send(session_state(id, SessionState::Exited(false)));
+                        return None;
+                    }
                 }
             }
             let _ = tx.send(session_state(id, SessionState::Running));
@@ -2793,24 +2920,25 @@ fn run_hot_session(
     };
     while let Ok(paths) = inbox.recv() {
         if control.is_stopped() {
-            return;
+            break;
         }
         let outcome = patcher.on_change(&paths);
         if control.is_stopped() {
             // Stopped (restarted, closed) while patching: nobody is waiting
             // for this answer any more.
-            return;
+            break;
         }
         let _ = tx.send(Message::HotPatchOutcome {
             session: id,
             outcome,
         });
     }
+    drain_thread
 }
 
 /// Forward a hot session's app output into its log (batched like the
-/// supervisor's drain), then report how it ended: `Killed` when it was
-/// stopped, its own exit status otherwise.
+/// supervisor's drain), run the app's teardown, then report how it ended:
+/// `Killed` when it was stopped, its own exit status otherwise.
 fn drain_hot_child(
     id: SessionId,
     child: &Mutex<StreamHandle>,
@@ -2832,6 +2960,7 @@ fn drain_hot_child(
         }));
     }
     let success = lock_unpoisoned(child).wait();
+    control.finish();
     let end = if control.is_stopped() {
         SessionState::Killed
     } else {
@@ -4807,10 +4936,11 @@ mod tests {
         rig.hot
             .start_with(
                 SessionId(9),
-                Box::new(move |_| HotStart::Running {
+                Box::new(move |_, _| HotStart::Running {
                     patcher: Box::new(patcher),
                     child: None,
                     notice: None,
+                    teardown: None,
                 }),
                 &rig.tx.clone(),
             )
@@ -4887,10 +5017,11 @@ mod tests {
         rig.hot
             .start_with(
                 SessionId(2),
-                Box::new(move |_| HotStart::Running {
+                Box::new(move |_, _| HotStart::Running {
                     patcher: Box::new(patcher),
                     child: None,
                     notice: None,
+                    teardown: None,
                 }),
                 &rig.tx.clone(),
             )
@@ -4973,6 +5104,249 @@ mod tests {
             ),
             "{outcome:?}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A debug Android device spec whose serial is a fake.
+    fn watch_android_spec(root: &Path) -> SessionSpec {
+        SessionSpec {
+            target: DeviceTarget::Device(frust_drive::devices::Device {
+                id: "FAKE-SERIAL".to_string(),
+                name: "Fake Phone".to_string(),
+                platform: Platform::Android,
+                kind: frust_drive::devices::Kind::PhysicalDevice,
+                os_version: None,
+                connection_state: None,
+            }),
+            ..watch_desktop_spec(root)
+        }
+    }
+
+    /// A hot start whose app is `runner`'s scripted `app` stream and whose
+    /// teardown counts into `teardowns`.
+    fn device_starter(
+        runner: &frust_drive::process::FakeProcessRunner,
+        teardowns: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> HotStarter {
+        let child = runner.spawn_streaming("app", &[], None, &[]).unwrap();
+        let teardowns = Arc::clone(teardowns);
+        Box::new(move |_, _| HotStart::Running {
+            patcher: Box::new(SlowPatcher {
+                delay: Duration::ZERO,
+                ran_on: Arc::new(Mutex::new(None)),
+            }),
+            child: Some(child),
+            notice: None,
+            teardown: Some(Box::new(move || {
+                teardowns.fetch_add(1, Ordering::SeqCst);
+            })),
+        })
+    }
+
+    /// Stopping a hot device session tears its app down once — the
+    /// forward removal and force-stop run off the UI thread after the
+    /// stream is killed — and the session lands `Killed`.
+    #[test]
+    fn stopping_a_hot_device_session_tears_its_app_down() {
+        use frust_drive::process::FakeProcessRunner;
+        use std::sync::atomic::AtomicUsize;
+
+        let mut rig = HotRig::new(Arc::new(FakeProcessRunner::new()));
+        let apps = FakeProcessRunner::new().with_hanging_stream("app", ["up"]);
+        let teardowns = Arc::new(AtomicUsize::new(0));
+        rig.hot
+            .start_with(
+                SessionId(3),
+                device_starter(&apps, &teardowns),
+                &rig.tx.clone(),
+            )
+            .unwrap();
+        rig.wait_for(|msg| match msg {
+            Message::Session(SessionEvent {
+                kind: SessionEventKind::State(SessionState::Running),
+                ..
+            }) => Some(()),
+            _ => None,
+        });
+        assert_eq!(teardowns.load(Ordering::SeqCst), 0, "not while running");
+
+        rig.apply(Effect::StopSession(SessionId(3)));
+        rig.wait_for(|msg| match msg {
+            Message::Session(SessionEvent {
+                kind: SessionEventKind::State(SessionState::Killed),
+                ..
+            }) => Some(()),
+            _ => None,
+        });
+        assert_eq!(teardowns.load(Ordering::SeqCst), 1);
+        // Quit joins the worker; the teardown never runs twice.
+        drop(rig);
+        assert_eq!(teardowns.load(Ordering::SeqCst), 1);
+    }
+
+    /// A device app whose stream ends on its own (the device went away) is
+    /// torn down too, and the session reports its own exit.
+    #[test]
+    fn a_hot_device_app_that_ends_on_its_own_is_torn_down() {
+        use frust_drive::process::FakeProcessRunner;
+        use std::sync::atomic::AtomicUsize;
+
+        let mut rig = HotRig::new(Arc::new(FakeProcessRunner::new()));
+        let apps = FakeProcessRunner::new().with_stream("app", ["bye"], true);
+        let teardowns = Arc::new(AtomicUsize::new(0));
+        rig.hot
+            .start_with(
+                SessionId(5),
+                device_starter(&apps, &teardowns),
+                &rig.tx.clone(),
+            )
+            .unwrap();
+        rig.wait_for(|msg| match msg {
+            Message::Session(SessionEvent {
+                kind: SessionEventKind::State(SessionState::Exited(true)),
+                ..
+            }) => Some(()),
+            _ => None,
+        });
+        assert_eq!(teardowns.load(Ordering::SeqCst), 1);
+    }
+
+    /// Records every `run` invocation (answered by the inner fake).
+    struct RecordingRunner {
+        inner: frust_drive::process::FakeProcessRunner,
+        runs: Mutex<Vec<String>>,
+    }
+
+    impl ProcessRunner for RecordingRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> Result<frust_drive::process::Output> {
+            let key = std::iter::once(cmd)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            lock_unpoisoned(&self.runs).push(key);
+            self.inner.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> Result<frust_drive::process::Output> {
+            self.inner.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+        ) -> Result<StreamHandle> {
+            self.inner.spawn_streaming(cmd, args, cwd, env)
+        }
+    }
+
+    /// A device app's teardown removes the hot session's `adb forward`
+    /// (when one was allocated) and force-stops the launched package on the
+    /// resolved device; a cold fallback (no forward) only force-stops.
+    #[test]
+    fn a_device_teardown_removes_the_forward_and_force_stops_the_package() {
+        for (port, expected) in [
+            (
+                Some(41234),
+                vec![
+                    "adb -s FAKE-SERIAL forward --remove tcp:41234",
+                    "adb -s FAKE-SERIAL shell am force-stop it.example.fake",
+                ],
+            ),
+            (
+                None,
+                vec!["adb -s FAKE-SERIAL shell am force-stop it.example.fake"],
+            ),
+        ] {
+            let runner = Arc::new(RecordingRunner {
+                inner: frust_drive::process::FakeProcessRunner::new(),
+                runs: Mutex::new(Vec::new()),
+            });
+            device_teardown(
+                runner.clone(),
+                "FAKE-SERIAL".to_string(),
+                "it.example.fake".to_string(),
+                port,
+            )();
+            assert_eq!(*lock_unpoisoned(&runner.runs), expected);
+        }
+    }
+
+    /// A watched debug Android launch runs hot, never through the
+    /// supervisor; a start refused before building (no `[package]`) falls
+    /// back to the non-hot device pipeline rather than `cargo run` (here
+    /// the pipeline fails — the fixture is no Frust project — and the
+    /// session ends `Exited(false)`). `R` on it relaunches through the hot
+    /// start again — a fresh fat start, the full restart it always was.
+    // `#[tokio::test]`: the restart's watcher teardown goes through
+    // `spawn_teardown`'s `spawn_blocking`.
+    #[tokio::test]
+    async fn a_watched_debug_android_launch_runs_hot_and_r_restarts_it_hot() {
+        use frust_drive::process::FakeProcessRunner;
+
+        let root = watch_scratch_dir("android-hot-launch");
+        let mut rig = HotRig::new(Arc::new(FakeProcessRunner::new()));
+        rig.apply(Effect::LaunchWatchedSessions(vec![watch_android_spec(
+            &root,
+        )]));
+
+        let id = match rig.rx.try_recv() {
+            Ok(Message::RegisterSession { id, target, .. }) => {
+                assert!(
+                    matches!(target, Some(SessionTarget::Device { ref id, .. }) if id == "FAKE-SERIAL"),
+                    "{target:?}"
+                );
+                id
+            }
+            other => panic!("expected RegisterSession first, got {other:?}"),
+        };
+        assert!(matches!(
+            rig.rx.try_recv(),
+            Ok(Message::EnableWatch { session }) if session == id
+        ));
+        assert!(rig.hot.contains(id));
+        assert_eq!(rig.supervisor.session_ids().count(), 0);
+
+        let fallback = rig.wait_for(|msg| match msg {
+            Message::Session(SessionEvent {
+                kind: SessionEventKind::Lines(lines),
+                ..
+            }) => lines
+                .into_iter()
+                .find(|l| l.contains("running the device pipeline instead")),
+            _ => None,
+        });
+        assert!(fallback.contains("names no [package]"), "{fallback}");
+        rig.wait_for(|msg| match msg {
+            Message::Session(SessionEvent {
+                id: ended,
+                kind: SessionEventKind::State(SessionState::Exited(false)),
+            }) if ended == id => Some(()),
+            _ => None,
+        });
+
+        // `R` on the watched session: relaunched through the hot start.
+        let (started, _replaced) = rig.watchers.start(id, &root, rig.hot.contains(id));
+        started.expect("a real fs watcher starts for the session being restarted");
+        rig.apply(Effect::RestartSession(id));
+        assert!(!rig.hot.contains(id));
+        let relaunched = rig.wait_for(|msg| match msg {
+            Message::RegisterSession { id, .. } => Some(id),
+            _ => None,
+        });
+        assert_ne!(relaunched, id);
+        assert!(rig.hot.contains(relaunched), "R re-runs the fat hot start");
+        assert_eq!(rig.supervisor.session_ids().count(), 0);
+        rig.apply(Effect::StopSession(relaunched));
         let _ = std::fs::remove_dir_all(&root);
     }
 
