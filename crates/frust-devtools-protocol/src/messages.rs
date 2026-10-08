@@ -47,6 +47,19 @@ pub enum Capability {
     Input,
     Metrics,
     Screenshot,
+    /// The server can apply a hot patch (`hotpatch_info`, `patch_chunk`,
+    /// `apply_patch`) — it executes code a client sends, so a server declares
+    /// it only when all five preconditions hold:
+    ///
+    /// 1. debug builds only;
+    /// 2. a per-session OS-CSPRNG token with `require_token` on;
+    /// 3. a loopback-only listener;
+    /// 4. patch bytes arrive over the authenticated channel, never as a path
+    ///    taken from the wire;
+    /// 5. the patch matches this process and this connection: `patch_id`
+    ///    chunks arrived on the same connection, their length equals `len`,
+    ///    and `pid` and `anchor_runtime` match.
+    HotPatch,
     /// A capability name introduced by a newer protocol version than this
     /// crate knows about. Deserializing an unrecognized capability must not
     /// fail the whole handshake — forward compatibility, at the cost of not
@@ -182,9 +195,147 @@ pub struct ScreenshotResult {
     pub png_base64: String,
 }
 
+/// `hotpatch_info` result — what a patch builder needs to target this
+/// process and what the apply state currently is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotpatchInfo {
+    pub anchor_runtime: u64,
+    pub pid: u32,
+    pub triple: String,
+    pub patches_applied: u32,
+    pub patch_bytes_loaded: u64,
+    pub pending_layout_mismatches: Vec<String>,
+}
+
+/// `patch_chunk` params; answered by [`AckResult`]. At most 512 KiB of raw
+/// bytes per chunk (the base64 text stays under the 1 MiB line cap).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchChunkParams {
+    pub patch_id: u64,
+    pub offset: u64,
+    pub total_len: u64,
+    pub data_base64: String,
+}
+
+/// The jump table of an `apply_patch`, mirroring `frust-hotpatch`'s
+/// `JumpTable` minus `lib`: no wire type carries a filesystem path, so a
+/// `lib` field (or any other unknown field) is rejected at decode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JumpTableWire {
+    pub map: std::collections::HashMap<u64, u64>,
+    pub aslr_reference: u64,
+    pub new_base_address: u64,
+    pub ifunc_count: u64,
+}
+
+/// `apply_patch` params — applies the bytes previously sent as `patch_id`
+/// chunks. Unknown fields (a path included) are rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyPatchParams {
+    pub patch_id: u64,
+    pub len: u64,
+    pub pid: u32,
+    pub anchor_runtime: u64,
+    pub table: JumpTableWire,
+    pub expected_seams: u32,
+}
+
+/// A seam key a patch missed: the image index and link-time address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissedKey {
+    pub image: u32,
+    pub link_address: u64,
+}
+
+/// `apply_patch` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchOutcome {
+    pub applied: bool,
+    pub seam_hits: u64,
+    pub seam_fall_throughs: Vec<MissedKey>,
+    pub layout_mismatches: Vec<String>,
+    pub patches_applied: u32,
+    pub patch_bytes_loaded: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hotpatch_types_round_trip() {
+        let info = HotpatchInfo {
+            anchor_runtime: 0x1000,
+            pid: 42,
+            triple: "aarch64-apple-darwin".into(),
+            patches_applied: 2,
+            patch_bytes_loaded: 1_500_000,
+            pending_layout_mismatches: vec!["Foo".into()],
+        };
+        let j = serde_json::to_string(&info).unwrap();
+        assert_eq!(serde_json::from_str::<HotpatchInfo>(&j).unwrap(), info);
+
+        let chunk = PatchChunkParams {
+            patch_id: 7,
+            offset: 524_288,
+            total_len: 2_000_000,
+            data_base64: "AAEC".into(),
+        };
+        let j = serde_json::to_string(&chunk).unwrap();
+        assert_eq!(serde_json::from_str::<PatchChunkParams>(&j).unwrap(), chunk);
+
+        let out = PatchOutcome {
+            applied: true,
+            seam_hits: 9,
+            seam_fall_throughs: vec![MissedKey {
+                image: 1,
+                link_address: 0xdead,
+            }],
+            layout_mismatches: vec![],
+            patches_applied: 3,
+            patch_bytes_loaded: 10,
+        };
+        let j = serde_json::to_string(&out).unwrap();
+        assert_eq!(serde_json::from_str::<PatchOutcome>(&j).unwrap(), out);
+    }
+
+    #[test]
+    fn apply_patch_params_decode_string_keyed_map() {
+        let json = r#"{"patch_id":1,"len":10,"pid":5,"anchor_runtime":99,
+            "table":{"map":{"4096":8192,"16":32},"aslr_reference":1,
+            "new_base_address":2,"ifunc_count":0},"expected_seams":2}"#;
+        let p: ApplyPatchParams = serde_json::from_str(json).unwrap();
+        assert_eq!(p.table.map.get(&4096), Some(&8192));
+        assert_eq!(p.table.map.get(&16), Some(&32));
+        let back = serde_json::to_string(&p).unwrap();
+        assert_eq!(serde_json::from_str::<ApplyPatchParams>(&back).unwrap(), p);
+    }
+
+    #[test]
+    fn apply_patch_rejects_lib_and_path_fields() {
+        let with_lib = r#"{"patch_id":1,"len":10,"pid":5,"anchor_runtime":99,
+            "table":{"lib":"/tmp/evil.dylib","map":{},"aslr_reference":1,
+            "new_base_address":2,"ifunc_count":0},"expected_seams":2}"#;
+        assert!(serde_json::from_str::<ApplyPatchParams>(with_lib).is_err());
+        let with_path = r#"{"patch_id":1,"len":10,"pid":5,"anchor_runtime":99,"path":"/x",
+            "table":{"map":{},"aslr_reference":1,"new_base_address":2,"ifunc_count":0},
+            "expected_seams":2}"#;
+        assert!(serde_json::from_str::<ApplyPatchParams>(with_path).is_err());
+    }
+
+    #[test]
+    fn hot_patch_capability_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&Capability::HotPatch).unwrap(),
+            "\"hot_patch\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Capability>("\"hot_patch\"").unwrap(),
+            Capability::HotPatch
+        );
+    }
 
     #[test]
     fn handshake_params_round_trip_with_and_without_a_token() {
