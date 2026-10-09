@@ -16,15 +16,21 @@
 //! 1.86+ `-B`/`-fuse-ld=lld` forwarding on Gnu, its fixed Msvc line
 //! (`/DLL`, `/DEBUG` so the patch has the PDB its jump table is read from,
 //! the anchor's `/EXPORT:`, `/HIGHENTROPYVA:NO`, `/OUT:`) and its deletion
-//! of the fat build's `deps/` copy after each patch. See
-//! `docs/CLI_ARCHITECTURE.md`.
+//! of the fat build's `deps/` copy after each patch. An Msvc patch links
+//! through the same linker as the fat image
+//! ([`flavor_linker_program`](super::fat_link::flavor_linker_program):
+//! `rust-lld -flavor link` by default) and is `patch-<n>.dll` with its own
+//! `patch-<n>.pdb` beside it, which the session reads the patch's symbols
+//! and its candidate layout table from. See `docs/CLI_ARCHITECTURE.md`.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::process::ProcessRunner;
 
-use super::fat_link::{HIGH_ENTROPY_VA_OFF, LinkerFlavor, anchor_address, render, run_linker};
+use super::fat_link::{
+    HIGH_ENTROPY_VA_OFF, LinkerFlavor, anchor_address, linker_driver_args, render, run_linker,
+};
 use super::link_intercept::output_path;
 use super::{HotpatchError, hotpatch_root};
 
@@ -62,7 +68,7 @@ pub fn reset_session_dir(target_dir: &Path, session: &str) -> Result<PathBuf, Ho
     Ok(dir)
 }
 
-/// `<target_dir>/frust-hotpatch/<session>/patch-<n>.<dylib|so>`.
+/// `<target_dir>/frust-hotpatch/<session>/patch-<n>.<dylib|so|dll>`.
 pub fn patch_path(
     target_dir: &Path,
     session: &str,
@@ -199,7 +205,7 @@ const MSVC_THIN_ARGS: [&str; 11] = [
 #[derive(Debug, Clone, Copy)]
 pub struct ThinLinkRequest<'a> {
     pub flavor: LinkerFlavor,
-    /// From [`linker_program`](super::fat_link::linker_program).
+    /// From [`flavor_linker_program`](super::fat_link::flavor_linker_program).
     pub linker: &'a str,
     /// The tip's linker arguments captured from this thin build (not the
     /// fat build's): its `.rcgu.o` files and flags.
@@ -307,7 +313,8 @@ pub struct ThinLinkOutput {
 /// makes later `dlopen`s fail with missing symbols that never existed. A
 /// missing stub object, a failed link or a patch without the anchor is
 /// [`HotpatchError::BuilderUnsupported`]; a linker that cannot be spawned is
-/// [`HotpatchError::Process`].
+/// [`HotpatchError::Process`]. The linker's
+/// [`linker_driver_args`] lead the line.
 pub fn thin_link(
     runner: &dyn ProcessRunner,
     request: &ThinLinkRequest<'_>,
@@ -328,7 +335,9 @@ pub fn thin_link(
         fs::create_dir_all(parent)
             .map_err(|err| HotpatchError::io(format!("creating `{}`", parent.display()), err))?;
     }
-    let linked = run_linker(runner, request.linker, &args, request.envs, "thin link");
+    let mut argv = linker_driver_args(request.flavor, request.linker);
+    argv.extend(args);
+    let linked = run_linker(runner, request.linker, &argv, request.envs, "thin link");
     let removed_deps_copy =
         (deps_copy != request.output && fs::remove_file(&deps_copy).is_ok()).then_some(deps_copy);
     let linker_output = linked?;
@@ -650,6 +659,27 @@ mod tests {
             &cc_style,
             &[],
         )));
+    }
+
+    #[test]
+    fn an_msvc_link_through_rust_lld_leads_with_the_link_flavor() {
+        let fx = fixture("thin-msvc-lld", LinkerFlavor::Msvc);
+        let capture = strings(&[
+            "C:/t/deps/app.app.aaaa-cgu.0.rcgu.o",
+            "/OUT:C:/t/deps/app.exe",
+        ]);
+        let mut req = request(&fx, LinkerFlavor::Msvc, &capture, &[]);
+        let lld = "/rust/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe";
+        req.linker = lld;
+        let runner = RecordingRunner::linking(b"MZ stand-in".to_vec());
+        unsupported(thin_link(&runner, &req));
+        let link = runner.only_call(lld);
+        assert_eq!(link.args[..2], ["-flavor".to_string(), "link".to_string()]);
+        assert_eq!(
+            link.args[2..],
+            thin_link_args(&req).unwrap()[..],
+            "the link line itself is unchanged"
+        );
     }
 
     #[test]

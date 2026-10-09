@@ -95,10 +95,19 @@ pub struct PdbImage {
     pub records: Vec<PdbRecord>,
 }
 
+/// Link markers of the MSVC CRT: a compiler references one to make the
+/// linker pull in a CRT feature, and nothing reads its value. A patch's own
+/// link supplies its copy (`/defaultlib:msvcrt`), so the base's is entered
+/// as undefined and the stub leaves the reference to that link, as for a
+/// symbol the base imports. `_fltused` is referenced by every object that
+/// uses floating point, and the base's copy sits wherever ASLR loaded the
+/// exe — above 4 GiB, where the stub refuses a data symbol.
+pub const CRT_LINK_MARKERS: &[&str] = &["_fltused"];
+
 /// dx's cache rule over PDB records: each named record becomes an entry at
 /// its RVA (undefined at 0 without one), text when it is a public function
 /// and data otherwise. A public wins over a data record of the same name.
-/// `target` must be a PE target.
+/// A [`CRT_LINK_MARKERS`] name is undefined. `target` must be a PE target.
 pub fn image_symbols_from_records(
     target: Target,
     records: &[PdbRecord],
@@ -114,11 +123,14 @@ pub fn image_symbols_from_records(
             RecordKind::Public { function: true } => SymbolKind::Text,
             RecordKind::Public { function: false } | RecordKind::Data => SymbolKind::Data,
         };
+        let rva = record
+            .rva
+            .filter(|_| !CRT_LINK_MARKERS.contains(&record.name.as_str()));
         let cached = CachedSymbol {
-            address: u64::from(record.rva.unwrap_or(0)),
+            address: u64::from(rva.unwrap_or(0)),
             size: 0,
             kind,
-            placement: if record.rva.is_some() {
+            placement: if rva.is_some() {
                 Placement::Section
             } else {
                 Placement::Undefined
@@ -732,6 +744,33 @@ mod tests {
         assert!(find(&File::parse(&*stub).unwrap(), "__imp_ghost").is_none());
     }
 
+    #[test]
+    fn a_crt_link_marker_is_left_to_the_patch_link_wherever_the_base_loaded() {
+        let mut records = base_records();
+        records.push(public("_fltused", 0x9100, false));
+        let symbols = image_symbols_from_records(target(X86_64), &records).unwrap();
+        let cache = SymbolCache::from_symbols("app.exe", symbols).unwrap();
+        assert!(cache.symbols().get("_fltused").unwrap().is_undefined());
+
+        // A base loaded above 4 GiB: the marker does not refuse the stub,
+        // and the stub does not define it; real data still refuses.
+        let runtime = cache.anchor_address() + 0x7ff7_0000_0000;
+        let marker = UndefinedSymbols {
+            strong: ["_fltused".to_string()].into(),
+            weak: BTreeSet::new(),
+        };
+        let stub = build_stub(&cache, &marker, runtime).unwrap();
+        assert!(find(&File::parse(&*stub).unwrap(), "_fltused").is_none());
+        let data = UndefinedSymbols {
+            strong: ["BAR_DATA".to_string(), "_fltused".to_string()].into(),
+            weak: BTreeSet::new(),
+        };
+        assert!(matches!(
+            build_stub(&cache, &data, runtime),
+            Err(HotpatchError::BuilderUnsupported { detail }) if detail.contains("32 bits")
+        ));
+    }
+
     /// A minimal PE32+ image: one `.rdata` section holding a debug directory
     /// whose CodeView record names `app.pdb`.
     fn pe_image(machine: u16, guid: [u8; 16], age: u32) -> Vec<u8> {
@@ -835,6 +874,23 @@ mod tests {
         }
     }
 
+    /// The generic loaders hand a PE target's image to the PDB reader rather
+    /// than `object`, which reads no linked PE image here.
+    #[cfg(not(windows))]
+    #[test]
+    fn off_windows_the_generic_loaders_route_a_pe_image_to_the_pdb_reader() {
+        let image = Path::new("C:/app/app.exe");
+        for err in [
+            SymbolCache::load(image, target(X86_64)).unwrap_err(),
+            ImageSymbols::load(image, target(AARCH64)).unwrap_err(),
+        ] {
+            assert!(
+                matches!(&err, HotpatchError::BuilderUnsupported { detail } if detail.contains("Windows host")),
+                "{err:?}"
+            );
+        }
+    }
+
     /// Fixture builds with the pinned toolchain, under the test binary's own
     /// target dir (built binaries run in place there).
     #[cfg(windows)]
@@ -922,6 +978,10 @@ pub extern "C" fn probe_text() -> u64 { 42 }
             let dir = fixture_dir("cache");
             let exe = rustc(&dir, "pe_probe", "bin", BIN_SOURCE);
             let cache = load_symbol_cache(&exe, host()).unwrap();
+            // The generic loader reads the same PDB.
+            let generic = SymbolCache::load(&exe, host()).unwrap();
+            assert_eq!(generic.anchor_address(), cache.anchor_address());
+            assert_eq!(generic.symbols().len(), cache.symbols().len());
             let symbols = cache.symbols();
             let text = symbols.get("probe_text").expect("probe_text public");
             assert_eq!(text.kind, SymbolKind::Text);
@@ -984,6 +1044,11 @@ pub extern "C" fn probe_text() -> u64 { 42 }
             let dll = rustc(&dir, "pe_patch", "cdylib", DLL_SOURCE);
             let cache = load_symbol_cache(&exe, host()).unwrap();
             let patch = load_image_symbols(&dll, host()).unwrap();
+            let generic = ImageSymbols::load(&dll, host()).unwrap();
+            assert_eq!(
+                generic.defined_address("probe_text"),
+                patch.defined_address("probe_text")
+            );
             let table = create_jump_table(&cache, &patch).unwrap();
             let old = cache.symbols().defined_address("probe_text").unwrap();
             let new = patch.defined_address("probe_text").unwrap();
