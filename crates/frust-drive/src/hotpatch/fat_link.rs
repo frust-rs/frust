@@ -6,16 +6,19 @@
 //! every rlib. The builder then links for real: every `.rcgu.o` inside the
 //! rlibs cargo built under the target dir is packed into one
 //! `libdeps-<hash>.a` that the linker force-loads (`-force_load` on Darwin,
-//! `--whole-archive` on Gnu), so no function a later patch may reference is
+//! `--whole-archive` on Gnu, `/WHOLEARCHIVE:` on Msvc), so no function a
+//! later patch may reference is
 //! dropped, and the image exports [`ANCHOR_SYMBOL`] instead of dioxus-cli's
 //! `main`. Toolchain rlibs (std) pass through unchanged.
 //!
 //! The argument rules are dioxus-cli 0.7.10's `build/link.rs`
 //! (`run_fat_link`, `linker_flavor`, `select_linker`) without
 //! `target-lexicon`: the flavor comes from the target triple string, and an
-//! unknown one is [`HotpatchError::BuilderUnsupported`]. Every argument is
-//! in the `cc`-driver form rustc emits for a linker it does not recognise
-//! by name. See `docs/CLI_ARCHITECTURE.md`.
+//! unknown one is [`HotpatchError::BuilderUnsupported`]. Darwin and Gnu
+//! arguments are in the `cc`-driver form rustc emits for a linker it does
+//! not recognise by name; Msvc arguments are link.exe's (`/OUT:`), and an
+//! Msvc image's symbols come from its PDB ([`super::pe`]). See
+//! `docs/CLI_ARCHITECTURE.md`.
 
 use std::fs;
 use std::io::Read;
@@ -44,6 +47,10 @@ const RAW_LINKERS: &[&str] = &[
     "lld-link", "link", "wasm-ld", "rust-lld",
 ];
 
+/// The link.exe flag both Msvc images (the fat exe and every patch DLL)
+/// carry: dx's "Prevent alsr from overflowing 32 bits".
+pub const HIGH_ENTROPY_VA_OFF: &str = "/HIGHENTROPYVA:NO";
+
 /// Which linker argument dialect a target needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkerFlavor {
@@ -51,13 +58,16 @@ pub enum LinkerFlavor {
     Darwin,
     /// ELF through `cc` and a GNU-compatible linker (Linux, Android).
     Gnu,
+    /// PE/COFF through link.exe-style arguments (`pc-windows-msvc`).
+    Msvc,
 }
 
 impl LinkerFlavor {
     /// The flavor for a target `triple` (`aarch64-apple-darwin`,
     /// `x86_64-unknown-linux-gnu`, `aarch64-linux-android`, ...), following
-    /// rustc's own environment-then-OS order. Windows (MSVC and GNU), wasm
-    /// and anything unrecognised are [`HotpatchError::BuilderUnsupported`].
+    /// rustc's own environment-then-OS order. `<arch>-pc-windows-msvc` is
+    /// [`LinkerFlavor::Msvc`]; GNU-environment Windows, UWP, wasm and
+    /// anything unrecognised are [`HotpatchError::BuilderUnsupported`].
     pub fn for_triple(triple: &str) -> Result<Self, HotpatchError> {
         let parts: Vec<&str> = triple.split('-').collect();
         let [arch, rest @ ..] = parts.as_slice() else {
@@ -76,7 +86,10 @@ impl LinkerFlavor {
             return unsupported("wasm is not hot-patched by the native builder");
         }
         if has("windows") || has("msvc") || has("uwp") {
-            return unsupported("Windows linking is not supported");
+            if rest == ["pc", "windows", "msvc"] {
+                return Ok(Self::Msvc);
+            }
+            return unsupported("only the `pc-windows-msvc` Windows targets are hot-patched");
         }
         let apple_os = ["darwin", "macos", "ios", "tvos", "watchos", "visionos"];
         if has("apple") || rest.iter().any(|part| apple_os.contains(part)) {
@@ -91,11 +104,12 @@ impl LinkerFlavor {
         unsupported("unknown operating system or environment")
     }
 
-    /// The file extension of a patch library: `dylib` or `so`.
+    /// The file extension of a patch library: `dylib`, `so` or `dll`.
     pub fn patch_extension(self) -> &'static str {
         match self {
             Self::Darwin => "dylib",
             Self::Gnu => "so",
+            Self::Msvc => "dll",
         }
     }
 
@@ -104,7 +118,7 @@ impl LinkerFlavor {
     pub fn object_symbol(self, name: &str) -> String {
         match self {
             Self::Darwin => format!("_{name}"),
-            Self::Gnu => name.to_string(),
+            Self::Gnu | Self::Msvc => name.to_string(),
         }
     }
 
@@ -116,6 +130,7 @@ impl LinkerFlavor {
         match self {
             Self::Darwin => format!("-Wl,-exported_symbol,{}", self.object_symbol(ANCHOR_SYMBOL)),
             Self::Gnu => format!("-Wl,--export-dynamic-symbol,{ANCHOR_SYMBOL}"),
+            Self::Msvc => format!("/EXPORT:{ANCHOR_SYMBOL}"),
         }
     }
 
@@ -129,6 +144,7 @@ impl LinkerFlavor {
                 archive,
                 "-Wl,--no-whole-archive".to_string(),
             ],
+            Self::Msvc => vec![format!("/WHOLEARCHIVE:{archive}")],
         }
     }
 }
@@ -341,6 +357,12 @@ fn remove_stale_archives(archive_dir: &Path, keep_stem: &str) {
 /// to `exe`. With no archive the rlibs stay as captured. No object
 /// argument, or a missing or repeated `-o`, is
 /// [`HotpatchError::BuilderUnsupported`].
+///
+/// Msvc follows dx (`link.rs`): `/WHOLEARCHIVE:<archive>` and the kept
+/// rlibs go right *before* the last object, then `/HIGHENTROPYVA:NO` (dx:
+/// "Prevent alsr from overflowing 32 bits"), the anchor's `/EXPORT:` and
+/// `/OUT:<exe>` replace the captured `/OUT:`. A `-o` in an Msvc capture is
+/// [`HotpatchError::BuilderUnsupported`].
 pub fn fat_link_args(
     flavor: LinkerFlavor,
     link_args: &[String],
@@ -352,7 +374,13 @@ pub fn fat_link_args(
             "no captured linker arguments for the fat link",
         ));
     }
-    if link_args.iter().any(|arg| arg.starts_with("/OUT:")) {
+    if flavor == LinkerFlavor::Msvc {
+        if link_args.iter().any(|arg| arg == "-o") {
+            return Err(HotpatchError::unsupported(
+                "captured linker arguments are not MSVC-style (`-o`)",
+            ));
+        }
+    } else if link_args.iter().any(|arg| arg.starts_with("/OUT:")) {
         return Err(HotpatchError::unsupported(
             "captured linker arguments are MSVC-style (`/OUT:`)",
         ));
@@ -375,7 +403,19 @@ pub fn fat_link_args(
             skip_value = true;
             continue;
         }
+        if flavor == LinkerFlavor::Msvc && arg.starts_with("/OUT:") {
+            continue;
+        }
         if archive.is_some() && arg.ends_with(".rlib") {
+            continue;
+        }
+        if flavor == LinkerFlavor::Msvc
+            && index == last_object
+            && let Some(archive) = archive
+        {
+            args.extend(flavor.force_load_args(&archive.path));
+            args.extend(archive.kept_rlibs.iter().map(|rlib| render(rlib)));
+            args.push(arg.clone());
             continue;
         }
         args.push(arg.clone());
@@ -386,9 +426,15 @@ pub fn fat_link_args(
             args.extend(archive.kept_rlibs.iter().map(|rlib| render(rlib)));
         }
     }
-    args.push(flavor.anchor_export_arg());
-    args.push("-o".to_string());
-    args.push(render(exe));
+    if flavor == LinkerFlavor::Msvc {
+        args.push(HIGH_ENTROPY_VA_OFF.to_string());
+        args.push(flavor.anchor_export_arg());
+        args.push(format!("/OUT:{}", render(exe)));
+    } else {
+        args.push(flavor.anchor_export_arg());
+        args.push("-o".to_string());
+        args.push(render(exe));
+    }
     Ok(args)
 }
 
@@ -494,10 +540,16 @@ pub(crate) fn run_linker(
 }
 
 /// The address of the global definition of [`ANCHOR_SYMBOL`] in the image
-/// at `path`, read from its symbol table. An unreadable image, or none such
-/// symbol, is [`HotpatchError::BuilderUnsupported`].
+/// at `path`, read from its symbol table — for Msvc, the anchor's RVA from
+/// the image's own PDB ([`super::pe::anchor_address`], Windows hosts only).
+/// An unreadable image, or none such symbol, is
+/// [`HotpatchError::BuilderUnsupported`].
 pub fn anchor_address(flavor: LinkerFlavor, path: &Path) -> Result<u64, HotpatchError> {
     use object::{Object, ObjectSymbol};
+
+    if flavor == LinkerFlavor::Msvc {
+        return super::pe::anchor_address(path);
+    }
 
     let bytes = fs::read(path).map_err(|err| {
         HotpatchError::io(format!("reading linked image `{}`", path.display()), err)
@@ -648,6 +700,12 @@ pub(crate) mod test_support {
             if let (Some(image), Some(pos)) = (&self.image, args.iter().position(|a| *a == "-o")) {
                 fs::write(args[pos + 1], image)?;
             }
+            if let (Some(image), Some(out)) = (
+                &self.image,
+                args.iter().find_map(|a| a.strip_prefix("/OUT:")),
+            ) {
+                fs::write(out, image)?;
+            }
             Ok(output)
         }
 
@@ -671,6 +729,7 @@ pub(crate) mod test_support {
         let format = match flavor {
             LinkerFlavor::Darwin => object::BinaryFormat::MachO,
             LinkerFlavor::Gnu => object::BinaryFormat::Elf,
+            LinkerFlavor::Msvc => object::BinaryFormat::Coff,
         };
         let mut obj = Object::new(
             format,
@@ -842,8 +901,9 @@ mod tests {
         for triple in [
             "",
             "x86_64",
-            "x86_64-pc-windows-msvc",
             "x86_64-pc-windows-gnu",
+            "aarch64-pc-windows-gnullvm",
+            "x86_64-uwp-windows-msvc",
             "wasm32-unknown-unknown",
             "riscv32imc-unknown-none-elf",
             "x86_64-unknown-freebsd",
@@ -1082,6 +1142,138 @@ mod tests {
             "the captured -o is replaced"
         );
         assert!(runner.calls().iter().all(|call| call.cmd != "ranlib"));
+    }
+
+    #[test]
+    fn msvc_flavor_is_the_pc_windows_msvc_targets() {
+        for triple in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] {
+            assert_eq!(
+                LinkerFlavor::for_triple(triple).unwrap(),
+                LinkerFlavor::Msvc,
+                "{triple}"
+            );
+        }
+        let msvc = LinkerFlavor::Msvc;
+        assert_eq!(msvc.patch_extension(), "dll");
+        assert_eq!(msvc.object_symbol(ANCHOR_SYMBOL), ANCHOR_SYMBOL);
+        assert_eq!(msvc.anchor_export_arg(), "/EXPORT:__frust_hotpatch_anchor");
+    }
+
+    /// A captured MSVC fat-build line: rustc's `symbols.o`, the tip's
+    /// objects, the rlibs, std's import libraries and `/OUT:`.
+    fn msvc_link_args(fx: &Fixture) -> Vec<String> {
+        let deps = fx.target.join("debug").join("deps");
+        vec![
+            "/NOLOGO".to_string(),
+            "C:/t/rustcXYZ/symbols.o".to_string(),
+            render(&deps.join("app-4444.app.aaaa-cgu.0.rcgu.o")),
+            render(&deps.join("app-4444.app.bbbb-cgu.1.rcgu.o")),
+            render(&fx.dep_a),
+            render(&fx.dep_native),
+            render(&fx.std_rlib),
+            "kernel32.lib".to_string(),
+            "/defaultlib:msvcrt".to_string(),
+            "/NXCOMPAT".to_string(),
+            format!("/LIBPATH:{}", render(&deps)),
+            format!("/OUT:{}", render(&deps.join("app-4444.exe"))),
+            "/OPT:NOREF,NOICF".to_string(),
+            "/DEBUG".to_string(),
+            "/PDBALTPATH:%_PDB%".to_string(),
+        ]
+    }
+
+    #[test]
+    fn msvc_fat_link_whole_archives_before_the_last_object_and_exports_the_anchor() {
+        let fx = fixture("msvc");
+        let link_args = msvc_link_args(&fx);
+        let exe = fx.target.join("debug").join("app.exe");
+        let runner = RecordingRunner::linking(b"MZ stand-in".to_vec());
+        let request = FatLinkRequest {
+            flavor: LinkerFlavor::Msvc,
+            linker: "link.exe",
+            link_args: &link_args,
+            envs: &[],
+            target_dir: &fx.target,
+            archive_dir: &fx.archive_dir,
+            exe: &exe,
+        };
+        // The stand-in image has no PDB, so reading its anchor is refused
+        // (off Windows: no PDB reader at all) after the link ran.
+        unsupported(fat_link(&runner, &request));
+        let link = runner.only_call("link.exe");
+        let archive = fs::read_dir(&fx.archive_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "a"))
+            .expect("the fat archive was written");
+        assert_eq!(
+            link.args,
+            vec![
+                "/NOLOGO".to_string(),
+                "C:/t/rustcXYZ/symbols.o".to_string(),
+                link_args[2].clone(),
+                format!("/WHOLEARCHIVE:{}", render(&archive)),
+                render(&fx.dep_native),
+                render(&fx.std_rlib),
+                link_args[3].clone(),
+                "kernel32.lib".to_string(),
+                "/defaultlib:msvcrt".to_string(),
+                "/NXCOMPAT".to_string(),
+                link_args[10].clone(),
+                "/OPT:NOREF,NOICF".to_string(),
+                "/DEBUG".to_string(),
+                "/PDBALTPATH:%_PDB%".to_string(),
+                "/HIGHENTROPYVA:NO".to_string(),
+                "/EXPORT:__frust_hotpatch_anchor".to_string(),
+                format!("/OUT:{}", render(&exe)),
+            ]
+        );
+        assert!(fs::read(&exe).is_ok(), "the link wrote /OUT:");
+        assert!(
+            runner.calls().iter().all(|call| call.cmd != "ranlib"),
+            "only Darwin archives are ranlib'd"
+        );
+    }
+
+    #[test]
+    fn msvc_and_cc_dialects_do_not_mix() {
+        let exe = Path::new("C:/t/app.exe");
+        let detail = unsupported(fat_link_args(
+            LinkerFlavor::Msvc,
+            &strings(&["a.o", "-o", "/t/x"]),
+            None,
+            exe,
+        ));
+        assert!(detail.contains("-o"), "{detail}");
+        unsupported(fat_link_args(
+            LinkerFlavor::Msvc,
+            &strings(&["a.o", "/OUT:a.exe", "/OUT:b.exe"]),
+            None,
+            exe,
+        ));
+        unsupported(fat_link_args(
+            LinkerFlavor::Msvc,
+            &strings(&["lib.rlib", "/OUT:a.exe"]),
+            None,
+            exe,
+        ));
+        let args = fat_link_args(
+            LinkerFlavor::Msvc,
+            &strings(&["a.o", "libdep.rlib", "/OUT:a.exe"]),
+            None,
+            exe,
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            strings(&[
+                "a.o",
+                "libdep.rlib",
+                "/HIGHENTROPYVA:NO",
+                "/EXPORT:__frust_hotpatch_anchor",
+                "/OUT:C:/t/app.exe",
+            ])
+        );
     }
 
     #[test]
