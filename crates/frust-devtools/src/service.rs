@@ -202,7 +202,8 @@ pub(crate) enum HotPatchUnavailable {
     ReleaseBuild,
     /// `ServiceConfig::require_token` is off, so there is no token at all.
     TokenNotRequired,
-    /// The token came from the non-CSPRNG fallback.
+    /// The token came from the non-CSPRNG fallback: a unix sandbox that
+    /// cannot read `/dev/urandom`, or a failed `BCryptGenRandom` on Windows.
     FallbackToken,
 }
 

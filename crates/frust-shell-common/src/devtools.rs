@@ -55,25 +55,31 @@
 //!
 //! [`ShellBackend`] offers `Capability::HotPatch` and answers its three calls;
 //! `frust-devtools` keeps the capability only while every code-execution
-//! precondition holds (debug build, OS-CSPRNG token with `require_token` on,
-//! not Windows), and owns the per-connection chunk reassembly. Here:
+//! precondition holds (debug build, OS-CSPRNG token with `require_token` on;
+//! the same gate on every host, Windows included), and owns the
+//! per-connection chunk reassembly. Here:
 //!
 //! - `patch_chunk` decodes one chunk's base64 payload;
-//! - `patch_file` (unix; `hotpatch_info` advertises `patch_file_hand_off`)
-//!   reads a patch the loopback host already wrote, named on `apply_patch` by
-//!   path and SHA-256, and refuses it unless all five checks hold: opened
-//!   `O_NOFOLLOW` and a regular file by `fstat`, owned by this process's
+//! - `patch_file` (unix only, so a Windows host always uploads chunks;
+//!   `hotpatch_info` advertises `patch_file_hand_off`) reads a patch the
+//!   loopback host already wrote, named on `apply_patch` by path and SHA-256,
+//!   and refuses it unless all five checks hold: opened `O_NOFOLLOW` and a
+//!   regular file by `fstat`, owned by this process's
 //!   effective uid, `mode & 0o077 == 0`, size equal to `len`, matching
 //!   SHA-256. The bytes then go through `apply_patch` exactly as reassembled
 //!   chunks do; the path is never logged or echoed;
 //! - `apply_patch` checks `pid` and `anchor_runtime` against this process (an
 //!   unset anchor fails closed), writes the bytes it was handed — never loading
 //!   a path from the wire — to `<cache dir>/frust-hotpatch/patch-<pid>-<id>.<ext>`
-//!   (directory `0700`, file `0600`, created fresh, never through an existing
-//!   entry), applies it through `frust_hotpatch::apply_from_devtools`, removes
-//!   the file, and answers **after the following frame**: it parks on the frame
-//!   gate, asks the UI thread for a frame ([`DevtoolsUi::request_frame`]), and
-//!   the shell's [`frame_submitted`] releases it, so the outcome's seam hits,
+//!   (created fresh, never through an existing entry; on unix the directory is
+//!   `0700` and the file `0600`, while on Windows both keep the ACL inherited
+//!   from the per-user `%LOCALAPPDATA%`, see `docs/LIMITATIONS.md`'s
+//!   `hotpatch-windows-patch-file-acl`), applies it through
+//!   `frust_hotpatch::apply_from_devtools`, removes the file (which Windows
+//!   refuses for a loaded DLL, so that copy stays), and answers **after the
+//!   following frame**: it parks on the frame gate, asks the UI thread for a
+//!   frame ([`DevtoolsUi::request_frame`]), and the shell's
+//!   [`frame_submitted`] releases it, so the outcome's seam hits,
 //!   missed keys and layout mismatches are those of a frame built after the
 //!   apply. No error or outcome names the file;
 //! - `hotpatch_info` reports this process's anchor, pid, target triple,
@@ -879,10 +885,12 @@ fn check_target(requested: (u32, u64), own: (u32, u64)) -> Result<(), BackendErr
     Ok(())
 }
 
-/// Writes `bytes` to `dir/name`: `dir` created `0700`, the file created fresh
-/// with mode `0600`. An existing entry (a stale file, a planted symlink) is
-/// removed first and the file opened `create_new`, so nothing is ever written
-/// through a pre-existing path.
+/// Writes `bytes` to `dir/name`: on unix `dir` created `0700` and the file
+/// created fresh with mode `0600`; on Windows both keep the ACL they inherit
+/// (`docs/LIMITATIONS.md`'s `hotpatch-windows-patch-file-acl`). An existing
+/// entry (a stale file, a planted symlink) is removed first and the file
+/// opened `create_new`, so nothing is ever written through a pre-existing
+/// path.
 #[cfg(feature = "hotpatch")]
 fn write_patch_file(
     dir: &std::path::Path,

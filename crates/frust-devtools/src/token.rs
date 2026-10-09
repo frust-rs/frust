@@ -136,10 +136,12 @@ fn os_random_bytes() -> Option<[u8; TOKEN_BYTES]> {
 /// `None` when it answers a failure `NTSTATUS`, which routes the caller to
 /// [`fallback_random_bytes`].
 ///
-/// The crate's one `unsafe` block, a sanctioned-unsafe zone
-/// (`docs/CODE_STANDARDS.md`): a direct `extern "system"` declaration against
-/// `bcrypt.lib` (Windows SDK) rather than a bindings crate, so no new
-/// dependency.
+/// The crate's one `unsafe` block, registered as the sanctioned-unsafe zone
+/// `frust-devtools`'s `token::os_random_bytes` (Windows only) in
+/// `docs/CODE_STANDARDS.md`'s Language Idioms: one `BCryptGenRandom` call
+/// through a direct `extern "system"` declaration linking the Windows SDK's
+/// `bcrypt` rather than a bindings crate, so no new dependency. A non-zero
+/// status yields [`TokenSource::Fallback`], which the hot-patch gate refuses.
 ///
 /// # Safety
 ///
