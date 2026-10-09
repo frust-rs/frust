@@ -16,8 +16,8 @@
 # Usage: examples/hotpatch-spike/measure.sh [--hotpatch | --restart | --frust-run | --frust-restart]
 #                                           [--app <dir>] [--runs <n>] [--target <t>] [--row <label>]
 #                                           [--serial <adb-serial> | -d <adb-serial> | --android]
-#                                           [--ios-sim | --udid <udid>]
-#        examples/hotpatch-spike/measure.sh --prepare-app <dir>
+#                                           [--ios-sim | --udid <udid>] [--windows <ssh-alias>]
+#        examples/hotpatch-spike/measure.sh --prepare-app <dir> [--windows <ssh-alias>]
 #   --hotpatch     (default) `dx serve --hot-patch --platform desktop --interactive false --verbose`
 #                  from runner/; DX from $DX, else `dx` on PATH (must be dioxus-cli 0.7.10).
 #   --restart      Baseline: `cargo run -p hotpatch-spike`, killed and relaunched by this script
@@ -165,6 +165,46 @@
 #     CLI exits is `simctl terminate`d (this bundle only). IOS_BUNDLE_ID overrides the bundle id read
 #     from ios/Runner.xcodeproj/project.pbxproj.
 #
+# WINDOWS (H3-03): `--frust-run --windows <ssh-alias>` (`--windows-host` is the same flag; with no
+# alias after it, the alias comes from $WINDOWS_HOST) drives a Windows x64 rig over
+# ssh from this host: `--app` and FRUST are paths ON THE RIG (e.g. `--app 'C:\scratch\hotapp'`,
+# FRUST='C:\...\frust.exe'), and `--prepare-app <dir> --windows <alias>` prepares an app there.
+# The rig's shell is cmd.exe; every remote step is one ssh call running PowerShell from
+# `-EncodedCommand` (no Unix tools there, nothing copied onto it but the edited sources). What changes:
+#   - runner: `frust run --watch` cannot hold a window from an ssh logon, so the script writes
+#     `<WINDOWS_ROOT>\run.cmd` (`cd /d <app> || exit /b 1`, then the CLI redirected into
+#     `<WINDOWS_ROOT>\watch-<row>-<n>.log`) and starts it as a one-shot scheduled task (WINDOWS_TASK,
+#     default h3gate: `schtasks /create /sc once` + `/run`), on the interactive desktop.
+#   - clocks: one clock, the rig's. A save is written by PowerShell (`WriteAllBytes` of the edited
+#     file, no BOM, same path) and stamped by `[DateTimeOffset]::UtcNow` in the same call, so
+#     save->frame = the app's `frame t_unix_ms=` minus that stamp, both on the rig's clock.
+#   - log: a PowerShell tailer (one long-lived ssh call) reads the redirected log every 20 ms and
+#     streams each new line prefixed with the rig's unix ms at the read, into <log dir>/runner.log;
+#     the CLI's outcome line is timed by that stamp (late by at most ~20 ms plus the flush).
+#   - probe source: a patched run reads `applied` / `frame` from the app's probe lines; without an
+#     `applied` line within 10 s it falls back to the 5 s frame-wait backstop line (`applied` = the
+#     line's stamp - 5000 ms, no frame), and says which (`source: probe|backstop`, `backstop:
+#     none|PRESENT`), as the Android leg does.
+#   - per run: PID and working set (RSS) of the app (`Get-Process`: image `<package>.exe` under
+#     APP_TARGET_DIR), `host:` (the session dir's stub/patch-N.dll on the rig, stamped on its clock),
+#     `counters:` and `ui:` (below), and with SCREENCAP_DIR a desktop capture made by the task
+#     `<WINDOWS_TASK>shot`, copied back into SCREENCAP_DIR.
+#   - stop: `taskkill /T /F` of the frust.exe at FRUST and of the app's processes under
+#     APP_TARGET_DIR, then the scheduled task is deleted. Any devtools token is redacted in the rig's
+#     log and in runner.log.
+#   - restore: the pristine sources are written back on the rig and compared by SHA-256.
+#   - state: WINDOWS_PRESSES=<n> presses the app's `Increment` button n times after the first frame
+#     (UI Automation InvokePattern, run on the desktop by the task `<WINDOWS_TASK>ui`; no pointer
+#     input), and a `ui:` line before run 1 and after each run lists the window's text elements as
+#     UI Automation reports them (the counter, the sentinels): the State evidence when the rig's
+#     user session is disconnected or locked and a desktop capture comes out blank.
+#   - counters: the CLI redacts the devtools token, so the app's `hotpatch_info` is not asked from
+#     here; `counters:` gives the app's own `applying patch <n> (<len> bytes` lines (debug level:
+#     FRUST_RUN_ARGS="--define FRUST_LOG=debug") and the session dir's patch-N.dll count and bytes.
+#   WINDOWS_ROOT  scratch dir on the rig (default `C:\Dev\h3-gate`): run.cmd, watch logs, shots.
+#   APP_TARGET_DIR  the app's target dir on the rig (default `<app>\build\rust`).
+#   Rig paths may not hold spaces or any of `"'%&|<>^`. --target framework is refused here.
+#
 # Every edited file is restored on exit (trap EXIT, Ctrl-C included) and the runner's process group
 # is killed; the summary ends with `git status` of this directory as proof (with --frust-run /
 # --frust-restart: a `cmp` of each restored file against its pristine copy, and any app process of
@@ -213,6 +253,14 @@ IOS_BUNDLE_ID="${IOS_BUNDLE_ID:-}"
 SIM_VMMAP="${SIM_VMMAP:-1}"
 # The app's Cargo.toml while --frust-restart adds the probe feature on the simulator.
 SIM_CARGO_TOML=""
+# Windows leg (--windows <ssh-alias>): see the header.
+WINDOWS=0
+WINDOWS_HOST="${WINDOWS_HOST:-}"
+WINDOWS_ROOT="${WINDOWS_ROOT:-C:\\Dev\\h3-gate}"
+WINDOWS_TASK="${WINDOWS_TASK:-h3gate}"
+WINDOWS_PRESSES="${WINDOWS_PRESSES:-0}"
+WIN_LOG=""
+WIN_MIRROR=""
 
 # The comment header (line 2 up to the first non-comment line), without the `# ` prefix.
 usage() {
@@ -255,6 +303,11 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "error: --udid requires a simulator udid" >&2; exit 2; }
       IOS_SIM=1; UDID="$2"; shift 2 ;;
     --udid=*) IOS_SIM=1; UDID="${1#--udid=}"; shift ;;
+    --windows|--windows-host)
+      # A bare flag (no alias after it) takes the alias from $WINDOWS_HOST.
+      WINDOWS=1
+      if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then WINDOWS_HOST="$2"; shift 2; else shift; fi ;;
+    --windows=*|--windows-host=*) WINDOWS=1; WINDOWS_HOST="${1#*=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument '$1' (see --help)" >&2; exit 2 ;;
   esac
@@ -281,6 +334,170 @@ outside_repo() {
   repo="$(cd "$REPO_ROOT" && pwd -P)"
   case "${real%/}/" in "${repo%/}/"*) return 1 ;; esac
   return 0
+}
+
+# ---- Windows leg helpers (--windows) ------------------------------------------------------------
+# Every remote step is one `ssh <alias> powershell -EncodedCommand <script>` call: the script is
+# UTF-16LE base64, so cmd.exe never parses it. Values reach it as `$A[0]`, `$A[1]`, ... (prepended
+# as PowerShell single-quoted literals), never spliced into the script text.
+
+# Whether `$1` is a rig path the script may also hand to cmd.exe and schtasks: drive-absolute, no
+# spaces, no quotes and no cmd metacharacters.
+win_path_ok() {
+  case "$1" in [A-Za-z]:\\*) ;; *) return 1 ;; esac
+  case "$1" in *[[:space:]\"\'%\&\|\<\>^]*) return 1 ;; esac
+  return 0
+}
+
+# A PowerShell single-quoted literal of `$1`.
+ps_q() {
+  local q="'"
+  printf "'%s'" "${1//$q/$q$q}"
+}
+
+# Runs PowerShell script `$1` on the rig with `$A` = the remaining arguments; stdin and stdout pass
+# through byte for byte.
+win_ps_raw() {
+  local script="$1" pre="\$ProgressPreference = 'SilentlyContinue'; \$A = @(" sep="" a b64
+  shift
+  for a in "$@"; do pre="${pre}${sep}$(ps_q "$a")"; sep=", "; done
+  b64="$(printf '%s); %s' "$pre" "$script" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')"
+  # cmd.exe's command-line limit is 8191 characters.
+  if [ "${#b64}" -gt 8000 ]; then echo "error: PowerShell script too long for one ssh call" >&2; return 2; fi
+  ssh -o BatchMode=yes "$WINDOWS_HOST" \
+    "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${b64}"
+}
+
+# win_ps_raw with the CRs of PowerShell's text output removed.
+win_ps() {
+  win_ps_raw "$@" | tr -d '\r'
+}
+
+# Copies rig file `$1` to stdout, byte for byte.
+win_get() {
+  win_ps_raw '$b = [IO.File]::ReadAllBytes($A[0]); $o = [Console]::OpenStandardOutput()
+    $o.Write($b, 0, $b.Length); $o.Flush()' "$1" < /dev/null
+}
+
+# Writes stdin to rig file `$1` (WriteAllBytes: truncated in place, no BOM added), then prints the
+# rig's unix ms taken right after the write in the same process: the save stamp.
+win_put() {
+  win_ps '$m = New-Object IO.MemoryStream; [Console]::OpenStandardInput().CopyTo($m)
+    [IO.File]::WriteAllBytes($A[0], $m.ToArray()); [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()' "$1"
+}
+
+# The rig's clock in unix ms.
+win_now_ms() {
+  win_ps '[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()' < /dev/null
+}
+
+# The rig path of mirror file `$1` (a source of --app, kept locally in WIN_MIRROR).
+win_rig_path_of() {
+  printf '%s\\src\\%s' "$APP" "$(basename "$1")"
+}
+
+# The app's processes on the rig, oldest first, as `<pid> <working set bytes>`: image name
+# `<package>.exe` AND an image path under APP_TARGET_DIR, so only this scratch app's processes match.
+win_app_procs() {
+  win_ps 'Get-Process -Name $A[0] -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and $_.Path.StartsWith($A[1] + "\", [StringComparison]::OrdinalIgnoreCase) } |
+    Sort-Object StartTime | ForEach-Object { "$($_.Id) $($_.WorkingSet64)" }' \
+    "$APP_BIN" "$APP_TARGET_DIR" < /dev/null
+}
+
+# The log tailer, run on the rig for the whole session: reads `$A[0]` (the CLI's redirected output)
+# every 20 ms and writes each new complete line to stdout as `<rig unix ms at the read> <line>`;
+# exits once `$A[1]` exists.
+WIN_TAIL_PS='$o = [Console]::OpenStandardOutput(); $enc = New-Object Text.UTF8Encoding $false
+$dec = $enc.GetDecoder(); $buf = New-Object byte[] 65536; $chars = New-Object char[] 65536
+$pend = ""; $k = 0
+while (-not (Test-Path -LiteralPath $A[0])) {
+  if (Test-Path -LiteralPath $A[1]) { exit 0 }; Start-Sleep -Milliseconds 50 }
+$fs = [IO.File]::Open($A[0], "Open", "Read", "ReadWrite, Delete")
+while ($true) {
+  $n = $fs.Read($buf, 0, $buf.Length)
+  if ($n -gt 0) {
+    $t = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $c = $dec.GetChars($buf, 0, $n, $chars, 0); $pend += New-Object string($chars, 0, $c)
+    $i = $pend.LastIndexOf("`n")
+    if ($i -ge 0) {
+      $sb = New-Object Text.StringBuilder
+      foreach ($l in $pend.Substring(0, $i).Split("`n")) {
+        [void]$sb.Append("$t ").Append($l.TrimEnd("`r")).Append("`n") }
+      $bytes = $enc.GetBytes($sb.ToString()); $o.Write($bytes, 0, $bytes.Length); $o.Flush()
+      $pend = $pend.Substring($i + 1)
+    }
+  } else {
+    $k++; if ($k % 25 -eq 0 -and (Test-Path -LiteralPath $A[1])) { exit 0 }
+    Start-Sleep -Milliseconds 20
+  }
+}'
+
+# The desktop capture script written to <WINDOWS_ROOT>\shot.ps1 (run by a scheduled task, on the
+# interactive desktop): the whole virtual screen, DPI-aware, saved via a temp name so a reader never
+# sees a half-written PNG.
+WIN_SHOT_PS='param([string]$Out)
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type -Name Dpi -Namespace MeasureSh -MemberDefinition @"
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+"@
+[void][MeasureSh.Dpi]::SetProcessDPIAware()
+Start-Sleep -Milliseconds 700
+$b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+$bmp.Save("$Out.tmp", [System.Drawing.Imaging.ImageFormat]::Png)
+$g.Dispose(); $bmp.Dispose()
+Move-Item -Force -LiteralPath "$Out.tmp" -Destination $Out
+'
+
+# The UI Automation reader written to <WINDOWS_ROOT>\ui.ps1 (see win_ui).
+WIN_UI_PS='param([int]$TargetPid, [int]$Presses, [string]$Out)
+$lines = @()
+try {
+  Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+  $h = (Get-Process -Id $TargetPid -ErrorAction Stop).MainWindowHandle
+  if ($h -eq [IntPtr]::Zero) { throw "pid $TargetPid has no main window" }
+  $root = [System.Windows.Automation.AutomationElement]::FromHandle($h)
+  $any = [System.Windows.Automation.Condition]::TrueCondition
+  $scope = [System.Windows.Automation.TreeScope]::Descendants
+  if ($Presses -gt 0) {
+    $btn = $root.FindAll($scope, $any) | Where-Object { $_.Current.Name -eq "Increment" } | Select-Object -First 1
+    if (-not $btn) { throw "no Increment button" }
+    $ip = $btn.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    for ($i = 0; $i -lt $Presses; $i++) { $ip.Invoke(); Start-Sleep -Milliseconds 400 }
+    Start-Sleep -Milliseconds 800
+    $lines += "pressed Increment x$Presses (UI Automation Invoke)"
+  }
+  $text = [System.Windows.Automation.ControlType]::Text
+  $names = $root.FindAll($scope, $any) | Where-Object { $_.Current.ControlType -eq $text } |
+    ForEach-Object { [char]39 + $_.Current.Name + [char]39 }
+  $lines += "pid ${TargetPid} texts: " + ($names -join " | ")
+} catch { $lines += "failed: $($_.Exception.Message)" }
+[IO.File]::WriteAllText("$Out.tmp", ($lines -join "`n") + "`n")
+Move-Item -Force -LiteralPath "$Out.tmp" -Destination $Out
+'
+
+# `--prepare-app <dir> --windows <alias>`: prepare_app on a local mirror of the rig app's sources,
+# then write the three rewritten files back on the rig.
+win_prepare_app() {
+  local dir="$1" mirror f
+  win_path_ok "$dir" || { echo "error: '${dir}' is not a usable rig path (see --help)" >&2; return 2; }
+  [ "$(win_ps 'Test-Path -LiteralPath $A[0]' "${dir}\\src\\counter_card.rs" < /dev/null)" = "False" ] \
+    || { echo "error: '${dir}' is already prepared (or the rig is unreachable)" >&2; return 2; }
+  mirror="$(mktemp -d "${TMPDIR:-/tmp}/hotpatch-spike-prep.XXXXXX")" || return 2
+  mkdir -p "${mirror}/src"
+  for f in Cargo.toml src/lib.rs src/home_page.rs; do
+    win_get "${dir}\\${f//\//\\}" > "${mirror}/${f}"
+    [ -s "${mirror}/${f}" ] || { echo "error: could not read ${dir}\\${f//\//\\} on the rig" >&2; return 2; }
+  done
+  prepare_app "$mirror" || return $?
+  for f in src/lib.rs src/home_page.rs src/counter_card.rs; do
+    win_put "${dir}\\${f//\//\\}" < "${mirror}/${f}" > /dev/null \
+      || { echo "error: could not write ${dir}\\${f//\//\\} on the rig" >&2; return 2; }
+  done
+  echo "Prepared ${dir} on the Windows rig (local mirror: ${mirror})."
 }
 
 # `--prepare-app <dir>`: rewrite a freshly generated `frust create` app into the measured layout
@@ -410,8 +627,11 @@ PY
   return "$status"
 }
 
+if [ "$WINDOWS" = 1 ] && [ -z "$WINDOWS_HOST" ]; then
+  echo "error: --windows needs an ssh alias (argument or WINDOWS_HOST)" >&2; exit 2
+fi
 if [ -n "$PREPARE_APP" ]; then
-  prepare_app "$PREPARE_APP"
+  if [ "$WINDOWS" = 1 ]; then win_prepare_app "$PREPARE_APP"; else prepare_app "$PREPARE_APP"; fi
   exit $?
 fi
 
@@ -421,7 +641,36 @@ esac
 
 FRUST_MODE=0
 case "$MODE" in frust-run|frust-restart) FRUST_MODE=1 ;; esac
-if [ "$FRUST_MODE" = 1 ]; then
+if [ "$WINDOWS" = 1 ]; then
+  [ "$FRUST_MODE" = 1 ] || { echo "error: --windows drives only --frust-run / --frust-restart" >&2; exit 2; }
+  [ "$ANDROID" = 0 ] || { echo "error: --windows and --serial/--android exclude each other" >&2; exit 2; }
+  [ "$IOS_SIM" = 0 ] || { echo "error: --windows and --ios-sim/--udid exclude each other" >&2; exit 2; }
+  [ "$TARGET" != "framework" ] || { echo "error: --target framework is not supported with --windows" >&2; exit 2; }
+  command -v iconv >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1 \
+    || { echo "error: --windows needs iconv and base64" >&2; exit 2; }
+  for v in APP FRUST WINDOWS_ROOT; do
+    win_path_ok "${!v:-}" || { echo "error: ${v} '${!v:-}' is not a usable rig path (see --help)" >&2; exit 2; }
+  done
+  APP_TARGET_DIR="${APP_TARGET_DIR:-${APP}\\build\\rust}"
+  win_path_ok "$APP_TARGET_DIR" \
+    || { echo "error: APP_TARGET_DIR '${APP_TARGET_DIR}' is not a usable rig path" >&2; exit 2; }
+  # A local mirror of the app's edited sources: apply_edit rewrites the mirror, win_put saves it on
+  # the rig.
+  WIN_MIRROR="$(mktemp -d "${TMPDIR:-/tmp}/hotpatch-spike-win.XXXXXX")" || exit 2
+  mkdir -p "${WIN_MIRROR}/src"
+  win_get "${APP}\\Cargo.toml" > "${WIN_MIRROR}/Cargo.toml"
+  [ -s "${WIN_MIRROR}/Cargo.toml" ] \
+    || { echo "error: no ${APP}\\Cargo.toml on the rig (or the rig is unreachable)" >&2; exit 2; }
+  for f in home_page.rs counter_card.rs; do
+    win_get "${APP}\\src\\${f}" > "${WIN_MIRROR}/src/${f}" 2>/dev/null
+    [ -s "${WIN_MIRROR}/src/${f}" ] || rm -f "${WIN_MIRROR}/src/${f}"
+  done
+  HOME_RS="${WIN_MIRROR}/src/home_page.rs"
+  CARD_RS="${WIN_MIRROR}/src/counter_card.rs"
+  APP_BIN="$(awk -F'"' '/^\[/ { p = ($0 == "[package]") } p && /^name *=/ { print $2; exit }' \
+    "${WIN_MIRROR}/Cargo.toml")"
+  [ -n "$APP_BIN" ] || { echo "error: no package name in ${APP}\\Cargo.toml" >&2; exit 2; }
+elif [ "$FRUST_MODE" = 1 ]; then
   if [ -z "$APP" ] || [ ! -f "${APP}/Cargo.toml" ]; then
     echo "error: --${MODE} needs --app <dir>, a scratch frust create app" >&2
     exit 2
@@ -515,8 +764,9 @@ for devs in json.load(sys.stdin).get("devices", {}).values():
   SESSION_DIR_NAME="session-${APP_BIN//-/_}-${SIM_TRIPLE}-${UDID}"
 fi
 if [ -n "$SCREENCAP_DIR" ]; then
-  [ "$ANDROID" = 1 ] || [ "$IOS_SIM" = 1 ] \
-    || { echo "error: SCREENCAP_DIR needs --serial (adb screencap) or --ios-sim (simctl io)" >&2; exit 2; }
+  [ "$ANDROID" = 1 ] || [ "$IOS_SIM" = 1 ] || [ "$WINDOWS" = 1 ] \
+    || { echo "error: SCREENCAP_DIR needs --serial (adb screencap), --ios-sim (simctl io) or" \
+      "--windows" >&2; exit 2; }
   [ -d "$SCREENCAP_DIR" ] || { echo "error: SCREENCAP_DIR '${SCREENCAP_DIR}' is not a directory" >&2; exit 2; }
   outside_repo "$SCREENCAP_DIR" || { echo "error: SCREENCAP_DIR must lie outside this repository" >&2; exit 2; }
 fi
@@ -593,10 +843,13 @@ device_pids() {
   adb_ shell pidof "$ANDROID_PACKAGE" 2>/dev/null | tr -d '\r' | tr ' ' '\n' | grep '^[0-9][0-9]*$'
 }
 
-# Whether pid `$1` of the app is alive: `kill -0` on the desktop, `pidof` on the device.
+# Whether pid `$1` of the app is alive: `kill -0` on the desktop, `pidof` on the device,
+# `Get-Process` on the Windows rig.
 app_alive() {
   if [ "$ANDROID" = 1 ]; then
     device_pids | grep -x "$1" >/dev/null
+  elif [ "$WINDOWS" = 1 ]; then
+    win_app_procs | awk -v p="$1" '$1 == p { hit = 1 } END { exit !hit }'
   else
     kill -0 "$1" 2>/dev/null
   fi
@@ -772,7 +1025,8 @@ finally:
 PY
 }
 
-# `adb exec-out screencap -p` into SCREENCAP_DIR/<$1>.png, when SCREENCAP_DIR is set.
+# `adb exec-out screencap -p` (simulator: `simctl io screenshot`; Windows: win_screencap) into
+# SCREENCAP_DIR/<$1>.png, when SCREENCAP_DIR is set.
 screencap() {
   [ -n "$SCREENCAP_DIR" ] || return 0
   if [ "$IOS_SIM" = 1 ]; then
@@ -783,6 +1037,7 @@ screencap() {
     fi
     return 0
   fi
+  if [ "$WINDOWS" = 1 ]; then win_screencap "$1"; return 0; fi
   if adb_ exec-out screencap -p > "${SCREENCAP_DIR%/}/$1.png" 2>/dev/null; then
     echo "screencap: ${SCREENCAP_DIR%/}/$1.png"
   else
@@ -834,6 +1089,166 @@ redact_log_tokens() {
   [ -f "$1" ] || return 0
   sed -E 's/(listening on [0-9]+ token )[0-9a-fA-F]+/\1<redacted>/' "$1" > "${1}.redacted" \
     && mv "${1}.redacted" "$1"
+}
+
+# ---- Windows leg session helpers (--windows) ----------------------------------------------------
+WIN_RUN_N=0
+
+# Runs `<WINDOWS_ROOT>\<script>.ps1 <args...> <out>` as the one-shot scheduled task `$1` (on the
+# interactive desktop: the ssh logon has none), waits up to 30 s for rig file `$2` (the script's last
+# argument) and prints `ok` or `missing`. `$3` is the script, the rest its leading arguments.
+win_desktop_task() {
+  local task="$1" out="$2" script="$3"
+  shift 3
+  win_ps '$tr = "powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File " + $A[2]
+    for ($i = 3; $i -lt $A.Count; $i++) { $tr += " " + $A[$i] }
+    $tr += " " + $A[1]
+    Remove-Item -LiteralPath $A[1] -ErrorAction SilentlyContinue
+    & schtasks.exe /create /sc once /st 23:59 /f /tn $A[0] /tr $tr 2>&1 | Out-Null
+    & schtasks.exe /run /tn $A[0] 2>&1 | Out-Null
+    $d = (Get-Date).AddSeconds(30)
+    while (-not (Test-Path -LiteralPath $A[1]) -and (Get-Date) -lt $d) { Start-Sleep -Milliseconds 200 }
+    & schtasks.exe /delete /tn $A[0] /f 2>&1 | Out-Null
+    if (Test-Path -LiteralPath $A[1]) { "ok" } else { "missing" }' \
+    "$task" "$out" "${WINDOWS_ROOT}\\${script}" "$@" < /dev/null
+}
+
+# A desktop capture of the rig into SCREENCAP_DIR/<$1>.png (shot.ps1, then copied back). A rig whose
+# user session is disconnected or locked captures a blank screen: the `ui:` line is then the
+# evidence of what the window shows.
+win_screencap() {
+  local out="${WINDOWS_ROOT}\\shots\\$1-$$.png"
+  if [ "$(win_desktop_task "${WINDOWS_TASK}shot" "$out" shot.ps1)" = "ok" ] \
+    && win_get "$out" > "${SCREENCAP_DIR%/}/$1.png" && [ -s "${SCREENCAP_DIR%/}/$1.png" ]; then
+    echo "screencap: ${SCREENCAP_DIR%/}/$1.png"
+  else
+    echo "screencap: failed"
+  fi
+}
+
+# `ui: ...`: the text elements of pid `$1`'s window as UI Automation reports them (the app's
+# AccessKit tree: the counter, the sentinels), read by ui.ps1 on the interactive desktop; with `$2`
+# > 0 it first presses the `Increment` button that many times (InvokePattern, no pointer input).
+win_ui() {
+  local out="${WINDOWS_ROOT}\\ui-$$.txt"
+  if [ "$(win_desktop_task "${WINDOWS_TASK}ui" "$out" ui.ps1 "$1" "${2:-0}")" = "ok" ]; then
+    win_get "$out" | tr -d '\r' | sed 's/^/ui: /'
+  else
+    echo "ui: no answer from ui.ps1 within 30 s"
+  fi
+}
+
+# `counters: ...`: what the rig shows of the app's patch counters. The CLI echoes the discovery
+# line with its token redacted, so `hotpatch_info` cannot be asked from outside. Instead: the app's
+# own `frust-devtools: applying patch <n> (<len> bytes, ...)` lines (debug level: FRUST_LOG=debug,
+# counted after log line `$1`, so a fresh run's from 0), and the session dir's patch-N.dll images.
+win_patch_counters() {
+  local app
+  app="$(tail -n +"$((${1:-0} + 1))" "$LOG" | awk '
+    match($0, /frust-devtools: applying patch [0-9]+ \([0-9]+ bytes/) {
+      split(substr($0, RSTART, RLENGTH), w, /[ (]+/); n++; last = w[4]; sum += w[5] }
+    END { if (n) printf "app (debug lines): %d applying lines, last patch %s, %.0f bytes in all", n, last, sum
+          else printf "app: no applying lines (debug level: FRUST_LOG=debug shows them)" }')"
+  echo "counters: ${app}; $(win_ps '$d = Join-Path $A[0] ("frust-hotpatch\" + $A[1])
+    $f = @(Get-ChildItem -LiteralPath $d -Filter "patch-*.dll" -File -ErrorAction SilentlyContinue)
+    "session dir: $($f.Count) patch-N.dll, $(($f | Measure-Object Length -Sum).Sum + 0) bytes in all"' \
+    "$APP_TARGET_DIR" "$SESSION_DIR_NAME" < /dev/null)"
+}
+
+# --frust-run on the rig: the session dir's newest `stub-N.o` / `patch-N.dll` written after the save
+# at `$1` (the rig's unix ms), stamped on the rig's clock.
+win_host_artifacts() {
+  win_ps '$d = Join-Path $A[0] ("frust-hotpatch\" + $A[1]); $s = [int64]$A[2]; $best = @{}
+    foreach ($f in @(Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue)) {
+      if ($f.Name -match "^(stub|patch)-(\d+)\.(o|dll)$") {
+        $t = [DateTimeOffset]::new($f.LastWriteTimeUtc).ToUnixTimeMilliseconds()
+        $k = $Matches[1]; $n = [int]$Matches[2]
+        if ($t -gt $s -and (-not $best.ContainsKey($k) -or $n -gt $best[$k][0])) { $best[$k] = @($n, $f.Name, $t, $f.Length) }
+      }
+    }
+    $parts = @()
+    if ($best.ContainsKey("stub")) { $parts += "$($best.stub[1]) at save+$($best.stub[2] - $s)" }
+    if ($best.ContainsKey("patch")) { $parts += "$($best.patch[1]) at save+$($best.patch[2] - $s) ($($best.patch[3]) bytes)" }
+    if ($parts.Count) { "host: " + ($parts -join ", ") } else { "host: no stub/patch written after the save" }' \
+    "$APP_TARGET_DIR" "$SESSION_DIR_NAME" "$1" < /dev/null
+}
+
+# The stamp of the first log line after line `$1` matching ERE `$2` whose stamp is later than `$3`,
+# waiting at most `$4` s (0: look once). On the Windows leg the stamp is the tailer's read time.
+log_line_ms() {
+  local deadline=$(( $(date +%s) + $4 )) t
+  while :; do
+    t="$(tail -n +"$(($1 + 1))" "$LOG" | awk -v re="$2" -v s="$3" '$0 ~ re && $1 + 0 > s + 0 { print $1; exit }')"
+    if [ -n "$t" ]; then echo "$t"; return 0; fi
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 0.2
+  done
+}
+
+# Starts `frust run --watch` on the rig's interactive desktop (run.cmd as a one-shot scheduled task)
+# and the log tailer here; RUNNER_PID is the tailer's local process group.
+win_start_runner() {
+  local mode_args="" cmd_text
+  WIN_RUN_N=$((WIN_RUN_N + 1))
+  local row="${ROW:-run}"
+  WIN_LOG="${WINDOWS_ROOT}\\watch-${row//[^A-Za-z0-9_-]/_}-$$-${WIN_RUN_N}.log"
+  [ "$MODE" = "frust-restart" ] && mode_args=" --no-hot --features frust/hotpatch"
+  cmd_text="@echo off"$'\r\n'"cd /d ${APP} || exit /b 1"$'\r\n'
+  cmd_text="${cmd_text}${FRUST} run --watch${mode_args}${FRUST_RUN_ARGS:+ ${FRUST_RUN_ARGS}} > ${WIN_LOG} 2>&1"$'\r\n'
+  win_ps 'New-Item -ItemType Directory -Force -Path $A[0], (Join-Path $A[0] "shots") | Out-Null
+    Remove-Item -LiteralPath $A[1], ($A[1] + ".stop") -ErrorAction SilentlyContinue' \
+    "$WINDOWS_ROOT" "$WIN_LOG" < /dev/null
+  printf '%s' "$cmd_text" | win_put "${WINDOWS_ROOT}\\run.cmd" > /dev/null
+  printf '%s' "$WIN_UI_PS" | win_put "${WINDOWS_ROOT}\\ui.ps1" > /dev/null
+  [ -n "$SCREENCAP_DIR" ] && printf '%s' "$WIN_SHOT_PS" | win_put "${WINDOWS_ROOT}\\shot.ps1" > /dev/null
+  echo "runner: run.cmd as scheduled task ${WINDOWS_TASK}: $(printf '%s' "$cmd_text" | tail -1 | tr -d '\r')" >> "$LOG"
+  win_ps '& schtasks.exe /create /sc once /st 23:59 /f /tn $A[0] /tr ("cmd /c " + $A[1]) 2>&1 | Out-Null
+    & schtasks.exe /run /tn $A[0]' "$WINDOWS_TASK" "${WINDOWS_ROOT}\\run.cmd" < /dev/null >> "$LOG"
+  set -m
+  win_ps_raw "$WIN_TAIL_PS" "$WIN_LOG" "${WIN_LOG}.stop" < /dev/null >> "$LOG" 2>&1 &
+  RUNNER_PID=$!
+  set +m
+}
+
+# Kills the CLI at FRUST and the app's processes under APP_TARGET_DIR on the rig (`taskkill /T /F`,
+# the watch loop's own kill route), deletes the scheduled task, stops the tailer and redacts the
+# devtools token in the rig's copy of the log.
+win_stop_runner() {
+  win_ps 'foreach ($p in @(Get-Process -Name frust -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $A[0] })) {
+      & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null }
+    foreach ($p in @(Get-Process -Name $A[1] -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and $_.Path.StartsWith($A[2] + "\", [StringComparison]::OrdinalIgnoreCase) })) {
+      & taskkill.exe /T /F /PID $p.Id 2>&1 | Out-Null }
+    & schtasks.exe /delete /tn $A[3] /f 2>&1 | Out-Null
+    New-Item -ItemType File -Force -Path ($A[4] + ".stop") | Out-Null
+    Start-Sleep -Milliseconds 1500
+    if (Test-Path -LiteralPath $A[4]) {
+      $t = [IO.File]::ReadAllText($A[4])
+      [IO.File]::WriteAllText($A[4], ($t -replace "(listening on [0-9]+ token )[0-9a-fA-F]+", "`$1<redacted>")) }' \
+    "$FRUST" "$APP_BIN" "$APP_TARGET_DIR" "$WINDOWS_TASK" "$WIN_LOG" < /dev/null
+  local i=0
+  while kill -0 "$RUNNER_PID" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  kill -0 "$RUNNER_PID" 2>/dev/null && kill -TERM -- "-${RUNNER_PID}" 2>/dev/null
+  wait "$RUNNER_PID" 2>/dev/null
+  if [ -n "$(win_app_procs)" ]; then echo "warning: an app process under ${APP_TARGET_DIR} is still running" >&2; fi
+  RUNNER_PID=""
+  APP_PID=""
+}
+
+# Writes every restored mirror source back on the rig and compares it there by SHA-256.
+win_restore_sources() {
+  local file copy want got
+  while IFS=$'\t' read -r file copy; do
+    win_put "$(win_rig_path_of "$file")" < "$copy" > /dev/null
+    want="$(shasum -a 256 "$copy" | cut -c1-64)"
+    got="$(win_ps '(Get-FileHash -Algorithm SHA256 -LiteralPath $A[0]).Hash.ToLower()' \
+      "$(win_rig_path_of "$file")" < /dev/null)"
+    if [ "$want" = "$got" ]; then
+      echo "  same: $(win_rig_path_of "$file")"
+    else
+      echo "  DIFFERS: $(win_rig_path_of "$file")"
+    fi
+  done < "$RESTORE_LIST"
 }
 
 # Rewrite `$1` in place with the content of `$2` (same inode, no rename: dx watches for in-place
@@ -1008,6 +1423,7 @@ sys.exit(child.wait())
 
 # Start the runner in its own process group (so one kill reaches dx/cargo and the app they spawn).
 start_runner() {
+  if [ "$WINDOWS" = 1 ]; then win_start_runner; return 0; fi
   set -m
   if [ "$MODE" = "hotpatch" ]; then
     (cd "$RUNNER_DIR" && exec "$DX" serve --hot-patch --platform desktop --interactive false \
@@ -1041,6 +1457,7 @@ start_runner() {
 frust_app_pids() {
   if [ "$ANDROID" = 1 ]; then device_pids; return 0; fi
   if [ "$IOS_SIM" = 1 ]; then sim_app_pids; return 0; fi
+  if [ "$WINDOWS" = 1 ]; then win_app_procs | awk '{ print $1 }'; return 0; fi
   ps -axo pid=,command= | awk -v pre="${APP_TARGET_DIR%/}/" -v bin="/${APP_BIN}" -v app="$APP" '
     { exe = $2; if (substr(exe, 1, 1) != "/") exe = app "/" exe }
     index(exe, pre) == 1 && substr(exe, length(exe) - length(bin) + 1) == bin { print $1 }'
@@ -1053,6 +1470,7 @@ frust_app_pids() {
 # process group (`ps -o pgid=`) — a stale or reused PID from the log is never killed.
 stop_runner() {
   [ -n "$RUNNER_PID" ] || return 0
+  if [ "$WINDOWS" = 1 ]; then win_stop_runner; return 0; fi
   if [ "$FRUST_MODE" = 1 ]; then
     # SIGINT to the CLI (its Ctrl-C handler kills the app it spawned), via the timestamper.
     kill -TERM "$RUNNER_PID" 2>/dev/null
@@ -1145,7 +1563,12 @@ cleanup() {
     write_in_place "$file" "$copy"
   done < "$RESTORE_LIST"
   echo
-  if [ "$FRUST_MODE" = 1 ]; then
+  if [ "$WINDOWS" = 1 ]; then
+    # Belt and braces: the CLI already redacts the discovery line's token.
+    redact_log_tokens "$LOG"
+    echo "Restored edited sources on the rig (SHA-256 against the pristine copies):"
+    win_restore_sources
+  elif [ "$FRUST_MODE" = 1 ]; then
     echo "Restored edited sources (cmp against the pristine copies):"
     while IFS=$'\t' read -r file copy; do
       if cmp -s "$file" "$copy"; then echo "  same: ${file}"; else echo "  DIFFERS: ${file}"; fi
@@ -1171,7 +1594,8 @@ wait_for() {
     if [ -n "$t" ]; then echo "$t"; return 0; fi
     # A refused apply never produces an `applied` line: stop waiting for one.
     if [ "$kind" = "applied" ] && [ -n "$(refused_variant "$from_line")" ]; then return 1; fi
-    if [ -n "$APP_PID" ] && ! app_alive "$APP_PID"; then return 1; fi
+    # (On the Windows rig a liveness probe is an ssh call: the timeout bounds the wait instead.)
+    if [ "$WINDOWS" != 1 ] && [ -n "$APP_PID" ] && ! app_alive "$APP_PID"; then return 1; fi
     if ! kill -0 "$RUNNER_PID" 2>/dev/null; then return 1; fi
     sleep 0.1
   done
@@ -1259,6 +1683,9 @@ rss_mb() {
   local kb
   if [ "$ANDROID" = 1 ]; then
     kb="$(adb_ shell cat "/proc/$1/status" 2>/dev/null | tr -d '\r' | awk '/^VmRSS:/ { print $2 }')"
+  elif [ "$WINDOWS" = 1 ]; then
+    # The working set (`WorkingSet64`), Windows' resident set.
+    kb="$(win_app_procs | awk -v p="$1" '$1 == p { printf "%d", $2 / 1024 }')"
   else
     kb="$(ps -o rss= -p "$1" 2>/dev/null | tr -d ' ')"
   fi
@@ -1317,7 +1744,14 @@ median() {
 
 echo "hotpatch-spike measure: ${ROW:+row=${ROW} }mode=${MODE} target=${TARGET} runs=${RUNS}"
 [ "$MODE" = "hotpatch" ] && echo "dx: ${DX} (${DX_VERSION})"
-[ "$FRUST_MODE" = 1 ] && echo "frust: ${FRUST} ($("$FRUST" --version 2>/dev/null)); app: ${APP} (${APP_BIN})"
+if [ "$WINDOWS" = 1 ]; then
+  echo "frust: ${FRUST} ($(win_ps '& $A[0] --version' "$FRUST" < /dev/null)); app: ${APP} (${APP_BIN}), on the Windows rig"
+  echo "windows rig: $(win_ps '$o = Get-CimInstance Win32_OperatingSystem
+    $g = (Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join ", "
+    "$($o.Caption) build $($o.BuildNumber), $($o.OSArchitecture); GPU $g"' < /dev/null)"
+elif [ "$FRUST_MODE" = 1 ]; then
+  echo "frust: ${FRUST} ($("$FRUST" --version 2>/dev/null)); app: ${APP} (${APP_BIN})"
+fi
 if [ "$ANDROID" = 1 ]; then
   echo "device: $(adb_ shell getprop ro.product.model | tr -d '\r'), Android" \
     "$(adb_ shell getprop ro.build.version.release | tr -d '\r')" \
@@ -1339,13 +1773,15 @@ echo "Logs: ${LOG_DIR}"
 echo "If this script dies without its EXIT trap, restore the sources in place with:"
 while IFS=$'\t' read -r file copy; do
   echo "  cat '${copy}' > '${file}'"
+  # On the Windows rig, the mirror file is then written back over ssh.
+  [ "$WINDOWS" = 1 ] && echo "    (rig: $(win_rig_path_of "$file"), e.g. measure.sh's win_put)"
 done < "$RESTORE_LIST"
 
 if [ "$ANDROID" = 1 ]; then
   measure_clock_offset 7
   start_devlog
 fi
-START_MS="$(now_ms)"
+if [ "$WINDOWS" = 1 ]; then START_MS="$(win_now_ms)"; else START_MS="$(now_ms)"; fi
 start_runner
 echo "Waiting up to ${STARTUP_TIMEOUT}s for the first frame (a cold build compiles frust and wgpu)..."
 if [ "$ANDROID" = 1 ]; then
@@ -1378,6 +1814,12 @@ if [ "$IOS_SIM" = 1 ] && [ -n "$APP_PID" ]; then
   [ "$SIM_VMMAP" = 1 ] && echo "    $(sim_images "$APP_PID" 0)"
   echo "    $(screencap before)"
 fi
+if [ "$WINDOWS" = 1 ] && [ -n "$APP_PID" ]; then
+  echo "before run 1: pid ${APP_PID}; rss $(rss_mb "$APP_PID") MB"
+  win_ui "$APP_PID" "$WINDOWS_PRESSES" | sed 's/^/    /'
+  [ "$MODE" = "frust-run" ] && echo "    $(win_patch_counters)"
+  [ -n "$SCREENCAP_DIR" ] && echo "    $(screencap before)"
+fi
 
 APPLIED_DELTAS=""
 FRAME_DELTAS=""
@@ -1396,6 +1838,13 @@ while [ "$run" -le "$RUNS" ]; do
     RESULTS="${RESULTS}run ${run}: edit failed"$'\n'
     break
   fi
+  if [ "$WINDOWS" = 1 ]; then
+    # The save happens on the rig, stamped by its clock right after the write (see the header).
+    stamp="$(win_put "$(win_rig_path_of "$EDIT_FILE")" < "$EDIT_FILE")"
+    case "$stamp" in
+      ''|*[!0-9]*) RESULTS="${RESULTS}run ${run}: save on the rig failed"$'\n'; break ;;
+    esac
+  fi
   applied="" frame="" status="ok" outcome="" old_pid="$APP_PID" detail="" source_note=""
   if [ "$MODE" = "restart" ]; then
     stop_runner
@@ -1409,6 +1858,8 @@ while [ "$run" -le "$RUNS" ]; do
     find_app_pid
     detail="; pid ${old_pid:-?} -> ${APP_PID:-?}; rss $(rss_mb "${APP_PID:-0}") MB"
     if [ "$IOS_SIM" = 1 ]; then sleep 2; echo "    $(screencap "run-${run}")"; fi
+    # The relaunched window's texts (State reset, new sentinel), after the measured frame.
+    if [ "$WINDOWS" = 1 ] && [ -n "$APP_PID" ]; then sleep 2; win_ui "$APP_PID" 0 | sed 's/^/    /'; fi
   elif [ "$MODE" = "frust-run" ]; then
     outcome="$(wait_outcome "$from" 180)" || status="timeout"
     o_ms="${outcome%% *}" o_text="${outcome#* }"
@@ -1448,6 +1899,25 @@ while [ "$run" -le "$RUNS" ]; do
           else
             source_note="${source_note}; backstop: none"
           fi
+        elif [ "$WINDOWS" = 1 ]; then
+          # The app's probe lines first; the 5 s frame-wait backstop line (its read stamp - 5000
+          # ms, no frame) is the fallback, as on Android.
+          if applied="$(wait_for applied "$from" "$stamp" 10)"; then
+            source_note="; source: probe"
+            frame="$(wait_for frame "$from" "$stamp" 10)" || status="patched, no frame probe line"
+          else
+            source_note="; source: backstop"
+            if backstop="$(log_line_ms "$from" "$BACKSTOP_RE" "$stamp" 10)"; then
+              applied=$((backstop - 5000))
+            else
+              applied="" status="patched, no applied probe or backstop line"
+            fi
+          fi
+          if backstop="$(log_line_ms "$from" "$BACKSTOP_RE" "$stamp" 0)"; then
+            source_note="${source_note}; backstop: PRESENT at save+$((backstop - stamp)) ms"
+          else
+            source_note="${source_note}; backstop: none"
+          fi
         else
           applied="$(wait_for applied "$from" "$stamp" "$EDIT_TIMEOUT")" || status="patched, no applied line"
           frame="$(wait_for frame "$from" "$stamp" "$EDIT_TIMEOUT")" || status="patched, no frame line"
@@ -1472,7 +1942,7 @@ while [ "$run" -le "$RUNS" ]; do
     esac
     [ -n "$outcome" ] && echo "    cli: ${o_text} [line at save+$((o_ms - stamp)) ms]"
     if [ "${status%%,*}" = "patched" ]; then
-      echo "    $(host_artifacts "$stamp")"
+      if [ "$WINDOWS" = 1 ]; then echo "    $(win_host_artifacts "$stamp")"; else echo "    $(host_artifacts "$stamp")"; fi
       if [ "$ANDROID" = 1 ]; then
         echo "    transport: patch_chunk uploads of patch-N.upload.so (a device session never hands off a file)"
       elif [ "$IOS_SIM" = 1 ]; then
@@ -1503,6 +1973,12 @@ while [ "$run" -le "$RUNS" ]; do
       [ "$SIM_VMMAP" = 1 ] && echo "    $(sim_images "$APP_PID" "$run")"
       sleep 2
       echo "    $(screencap "run-${run}")"
+    fi
+    if [ "$WINDOWS" = 1 ] && [ -n "$APP_PID" ]; then
+      echo "    $(win_patch_counters)"
+      sleep 2
+      win_ui "$APP_PID" 0 | sed 's/^/    /'
+      [ -n "$SCREENCAP_DIR" ] && echo "    $(screencap "run-${run}")"
     fi
     if [ -n "$AFTER_RUN_HOOK" ] && [ -n "$APP_PID" ]; then
       sleep 2
@@ -1590,10 +2066,11 @@ if [ "$MODE" = "frust-run" ]; then
     "$(printf '%s' "$RESULTS" | grep '(restart)' | sed -n 's/.*save->frame \([0-9]*\) ms.*/\1/p' | median) ms"
   echo "median save->CLI outcome line, restart runs:" \
     "$(printf '%s' "$OUTCOMES" | awk -F'\t' '$1 == "restart" { print $2 }' | median) ms"
-  if [ "$ANDROID" = 1 ]; then
+  if [ "$ANDROID" = 1 ] || [ "$WINDOWS" = 1 ]; then
     # A patched run's applied/frame come from the app's probe lines, or from the backstop line
-    # (- 5 s, applied only) as the fallback; the CLI's own line is on the host clock.
-    echo "android: patched runs' applied/frame source:" \
+    # (- 5 s, applied only) as the fallback; the CLI's own line is on the host clock (Android) or
+    # the rig's (Windows: the tailer's read stamp).
+    echo "$([ "$WINDOWS" = 1 ] && echo windows || echo android): patched runs' applied/frame source:" \
       "$(printf '%s' "$RESULTS" | grep -c 'source: probe' || true) probe," \
       "$(printf '%s' "$RESULTS" | grep -c 'source: backstop' || true) backstop fallback;" \
       "backstop line after the save in $(printf '%s' "$RESULTS" | grep -c 'backstop: PRESENT' || true) run(s)"
@@ -1603,7 +2080,9 @@ if [ "$MODE" = "frust-run" ]; then
       | grep '(patched)' | sed -n 's/.*save->applied \([0-9]*\) ms.*/\1/p' | median) ms"
     echo "median save->CLI outcome line, patched runs:" \
       "$(printf '%s' "$OUTCOMES" | awk -F'\t' '$1 == "patched" { print $2 }' | median) ms"
-    echo "restart runs: save->frame is the relaunched activity's 'Displayed' line"
+    if [ "$ANDROID" = 1 ]; then
+      echo "restart runs: save->frame is the relaunched activity's 'Displayed' line"
+    fi
   fi
   if [ "$IOS_SIM" = 1 ]; then
     echo "ios-sim: patched runs' applied/frame source:" \
