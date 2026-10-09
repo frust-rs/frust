@@ -283,12 +283,29 @@ pub fn init(
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> *mut c_void {
     init_logger_once();
+    // App first, devtools second. `make_app` (run inside `create_handle`) is the
+    // `app!` init closure, which registers the hot-patch anchor; the CLI attaches
+    // as soon as the discovery line below appears and reads the anchor once, so
+    // announcing before the anchor exists makes every attach restart-only. The
+    // logger is already installed, so `create_handle`'s own log lines and the
+    // discovery line all reach stderr. A failed or panicking `create_handle`
+    // still falls through to the devtools start, exactly as before.
+    let handle = guard("frust_init", std::ptr::null_mut(), || {
+        match create_handle(metal_layer, width, height, scale, make_app) {
+            Ok(handle) => handle,
+            Err(err) => {
+                log::error!("frust-shell-ios: frust_init failed: {err:#}");
+                std::ptr::null_mut()
+            }
+        }
+    });
     // Devtools, compiled in only under this crate's `devtools` feature. Started
-    // here — after `init_logger_once` above, never before it — because the
-    // service's discovery line (`frust-devtools listening on <port>`) is a
-    // `log::info!` call that must reach this shell's stderr logger for tooling
-    // to recover the port. No wake callback: the `CADisplayLink` loop drains
-    // the hop queue every tick (see `IosAppHandle::frame`).
+    // after `init_logger_once` above, never before it, because the service's
+    // discovery line (`frust-devtools listening on <port>`) is a `log::info!`
+    // call that must reach this shell's stderr logger for tooling to recover the
+    // port. Idempotent: a re-entered `frust_init` finds the service running and
+    // returns. No wake callback: the `CADisplayLink` loop drains the hop queue
+    // every tick (see `IosAppHandle::frame`).
     #[cfg(feature = "devtools")]
     frust_shell_common::devtools::start(
         frust_shell_common::devtools::app_name_from_process(),
@@ -298,7 +315,8 @@ pub fn init(
     // `CADisplayLink` tick's gate reads the latch (`app::request_patch_frame`). Registered here,
     // beside the devtools start, exactly once per process: `set_patch_listener` appends, and Swift
     // can re-enter `frust_init` (see `ReactiveRuntime::init` in `create_handle`). No wake: the
-    // display link ticks every vsync while foregrounded.
+    // display link ticks every vsync while foregrounded, and no patch can arrive before the
+    // service above is listening.
     #[cfg(feature = "hotpatch")]
     {
         static PATCH_LISTENER: std::sync::Once = std::sync::Once::new();
@@ -306,15 +324,7 @@ pub fn init(
             frust_core::set_patch_listener(std::sync::Arc::new(crate::app::request_patch_frame));
         });
     }
-    guard("frust_init", std::ptr::null_mut(), || {
-        match create_handle(metal_layer, width, height, scale, make_app) {
-            Ok(handle) => handle,
-            Err(err) => {
-                log::error!("frust-shell-ios: frust_init failed: {err:#}");
-                std::ptr::null_mut()
-            }
-        }
-    })
+    handle
 }
 
 /// `frust_init_accessibility`: attach the accesskit adapter to the app's
