@@ -200,8 +200,6 @@ pub(crate) enum HotPatchUnavailable {
     NotOffered,
     /// Not a `debug_assertions` build.
     ReleaseBuild,
-    /// Windows: its token always takes the non-CSPRNG fallback.
-    Windows,
     /// `ServiceConfig::require_token` is off, so there is no token at all.
     TokenNotRequired,
     /// The token came from the non-CSPRNG fallback.
@@ -216,9 +214,6 @@ impl std::fmt::Display for HotPatchUnavailable {
             HotPatchUnavailable::ReleaseBuild => {
                 "this is not a debug build (hot patching needs debug_assertions)"
             }
-            HotPatchUnavailable::Windows => {
-                "hot patching is not offered on Windows (no OS-CSPRNG devtools token there yet)"
-            }
             HotPatchUnavailable::TokenNotRequired => {
                 "the devtools service runs with require_token off"
             }
@@ -231,7 +226,7 @@ impl std::fmt::Display for HotPatchUnavailable {
 
 /// Everything the hot-patch gate decides on, gathered so the decision itself
 /// is a pure function a test can drive through every combination (a test
-/// binary is neither a release build nor a Windows build).
+/// binary is never a release build).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HotPatchFacts {
     /// `frust-devtools`'s `hotpatch` feature is compiled in.
@@ -240,8 +235,6 @@ pub(crate) struct HotPatchFacts {
     pub(crate) offered: bool,
     /// `cfg(debug_assertions)`.
     pub(crate) debug_assertions: bool,
-    /// `cfg(windows)`.
-    pub(crate) windows: bool,
     /// The token's source, `None` with `require_token` off.
     pub(crate) token: Option<TokenSource>,
 }
@@ -253,15 +246,15 @@ impl HotPatchFacts {
             feature: cfg!(feature = "hotpatch"),
             offered,
             debug_assertions: cfg!(debug_assertions),
-            windows: cfg!(windows),
             token,
         }
     }
 }
 
 /// `Ok` only when every code-execution precondition holds: the feature, a
-/// backend that offers it, `debug_assertions`, not Windows (until it has an
-/// OS-CSPRNG token source), and an OS-sourced token with `require_token` on.
+/// backend that offers it, `debug_assertions`, and an OS-sourced token
+/// (`/dev/urandom` on unix, `BCryptGenRandom` on Windows) with `require_token`
+/// on. The host OS is not a precondition: every host answers the same gate.
 /// The listener's loopback-only bind is unconditional (see
 /// [`Service::start_with_config`]), so it is not a fact here. The first failed
 /// precondition, in that order, is the reason reported.
@@ -274,9 +267,6 @@ pub(crate) fn hot_patch_gate(facts: HotPatchFacts) -> Result<(), HotPatchUnavail
     }
     if !facts.debug_assertions {
         return Err(HotPatchUnavailable::ReleaseBuild);
-    }
-    if facts.windows {
-        return Err(HotPatchUnavailable::Windows);
     }
     match facts.token {
         None => Err(HotPatchUnavailable::TokenNotRequired),
@@ -472,7 +462,6 @@ mod tests {
             feature: true,
             offered: true,
             debug_assertions: true,
-            windows: false,
             token: Some(TokenSource::Os),
         }
     }
@@ -528,16 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn hot_patch_is_absent_under_windows() {
-        // Even with an OS token: Windows waits for its own CSPRNG source.
-        let facts = HotPatchFacts {
-            windows: true,
-            ..all_hold()
-        };
-        assert_eq!(hot_patch_gate(facts), Err(HotPatchUnavailable::Windows));
-    }
-
-    #[test]
     fn hot_patch_is_absent_when_the_backend_does_not_offer_it() {
         let facts = HotPatchFacts {
             offered: false,
@@ -551,7 +530,6 @@ mod tests {
         let facts = HotPatchFacts::of_this_build(true, Some(TokenSource::Os));
         assert_eq!(facts.feature, cfg!(feature = "hotpatch"));
         assert_eq!(facts.debug_assertions, cfg!(debug_assertions));
-        assert_eq!(facts.windows, cfg!(windows));
     }
 
     #[test]
@@ -560,7 +538,6 @@ mod tests {
             HotPatchUnavailable::FeatureOff,
             HotPatchUnavailable::NotOffered,
             HotPatchUnavailable::ReleaseBuild,
-            HotPatchUnavailable::Windows,
             HotPatchUnavailable::TokenNotRequired,
             HotPatchUnavailable::FallbackToken,
         ] {
@@ -637,20 +614,22 @@ mod tests {
     #[test]
     fn a_service_strips_an_offered_hot_patch_unless_every_precondition_holds() {
         let caps = handshake_capabilities(ServiceConfig::default());
-        // Unix hosts read /dev/urandom; this suite runs in debug.
-        let expected = cfg!(all(feature = "hotpatch", debug_assertions, unix))
-            && std::path::Path::new("/dev/urandom").exists();
+        // Unix hosts read /dev/urandom, Windows calls BCryptGenRandom; this
+        // suite runs in debug.
+        let os_token =
+            cfg!(windows) || (cfg!(unix) && std::path::Path::new("/dev/urandom").exists());
+        let expected = cfg!(all(feature = "hotpatch", debug_assertions)) && os_token;
         assert_eq!(caps.contains(&Capability::HotPatch), expected, "{caps:?}");
         // Everything else the backend declared is untouched.
         assert!(caps.contains(&Capability::WidgetTree));
     }
 
-    /// Windows now mints its token from the OS (`BCryptGenRandom`), yet stays
-    /// excluded from `HotPatch` until its gate run passes: the `windows`
-    /// fact alone refuses it, with every other precondition held.
+    /// Windows mints its token from the OS (`BCryptGenRandom`), so it answers
+    /// the same gate as every other host: offered with every precondition
+    /// held, refused behind the fallback source.
     #[cfg(windows)]
     #[test]
-    fn a_windows_build_with_an_os_token_still_does_not_offer_hot_patch() {
+    fn a_windows_build_with_an_os_token_offers_hot_patch() {
         let source = token::generate().source;
         assert_eq!(source, TokenSource::Os);
         let facts = HotPatchFacts {
@@ -659,11 +638,24 @@ mod tests {
             debug_assertions: true,
             ..HotPatchFacts::of_this_build(true, Some(source))
         };
-        assert!(facts.windows);
-        assert_eq!(hot_patch_gate(facts), Err(HotPatchUnavailable::Windows));
-        let caps = handshake_capabilities(ServiceConfig::default());
+        assert_eq!(hot_patch_gate(facts), Ok(()));
+        let fallback = HotPatchFacts {
+            token: Some(TokenSource::Fallback),
+            ..facts
+        };
+        assert_eq!(
+            hot_patch_gate(fallback),
+            Err(HotPatchUnavailable::FallbackToken)
+        );
         assert!(ServiceConfig::default().require_token);
-        assert!(!caps.contains(&Capability::HotPatch), "{caps:?}");
+        let caps = handshake_capabilities(ServiceConfig::default());
+        // The real service carries the capability whenever this build has the
+        // feature (the suite runs in debug).
+        assert_eq!(
+            caps.contains(&Capability::HotPatch),
+            cfg!(all(feature = "hotpatch", debug_assertions)),
+            "{caps:?}"
+        );
         assert!(caps.contains(&Capability::WidgetTree));
     }
 
