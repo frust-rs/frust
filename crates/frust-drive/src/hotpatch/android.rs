@@ -41,7 +41,10 @@
 //! The devtools discovery line is read from that stream; the device port is
 //! forwarded to an ephemeral host loopback port (`adb forward`), which is
 //! the only endpoint a patch is ever sent to, and always in chunks — never
-//! as a host path ([`session::attach_device_app`](super::session)).
+//! as a host path ([`session::attach_device_app`](super::session)). A
+//! start cancelled after `am start` leaves nothing behind: the logcat
+//! stream is killed, a forward it allocated removed and the app
+//! force-stopped ([`start_android`]).
 //!
 //! **Keys.** The capture scope (`<tip>-<triple>-<profile>-<hash16>`), the
 //! fat dir and the session dir all carry the target triple, so a desktop and
@@ -75,13 +78,13 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::android_run::{self, AndroidLaunch};
 use crate::build_dirs::BuildLayout;
 use crate::build_info::{BuildInfo, BuildMode};
 use crate::devices::Device;
-use crate::devtools_client::{adb_forward_ephemeral, sha256_hex};
+use crate::devtools_client::{adb_forward_ephemeral, adb_forward_remove, sha256_hex};
 use crate::doctor::EnvLookup;
 use crate::host_path;
 use crate::manifest;
@@ -528,10 +531,18 @@ pub struct AndroidHotStart {
 }
 
 /// Builds the app fat outside Gradle, packages and launches it on `device`
-/// and attaches a session through `adb forward`. `Ok(None)` when `cancel`
-/// was observed before the app was running. `on_line` receives every
+/// and attaches a session through `adb forward`. `on_line` receives every
 /// pipeline line, the build's rendered diagnostics, and the app's logcat
 /// up to its discovery line (token redacted).
+///
+/// `Ok(None)` when `cancel` was observed before the session was attached:
+/// at a pipeline phase boundary, during the discovery wait, or once the
+/// forward and attach are done. Whatever the start had launched by then is
+/// torn down first, best-effort: the logcat stream is killed, the forward
+/// removed and the launched package force-stopped. A cancel observed by the
+/// pipeline after `am start` but before its logcat (the pid lookup) reports
+/// no package; its `Launching <package>…` line names it
+/// ([`launched_package`]).
 pub fn start_android(
     host: &SessionHost<'_>,
     start: &AndroidStart<'_>,
@@ -554,7 +565,14 @@ pub fn start_android(
 
     let mut staged: Option<FatBase> = None;
     let mut failure: Option<StartError> = None;
+    let mut launching: Option<String> = None;
     let launched = {
+        let mut on_line = |line: &str| {
+            if let Some(package) = launched_package(line) {
+                launching = Some(package.to_string());
+            }
+            on_line(line);
+        };
         let mut stage = |abi: &str, on_line: &mut dyn FnMut(&str)| -> anyhow::Result<()> {
             match build_and_stage(host, start, &ndk, abi, on_line) {
                 Ok(base) => {
@@ -573,7 +591,7 @@ pub fn start_android(
             start.root,
             start.device,
             start.info,
-            on_line,
+            &mut on_line,
             cancel,
             &mut stage,
             host.env,
@@ -581,7 +599,12 @@ pub fn start_android(
     };
     let mut launch = match launched {
         Ok(Some(launch)) => launch,
-        Ok(None) => return Ok(None),
+        Ok(None) => {
+            if let Some(package) = &launching {
+                force_stop(runner, &start.device.id, package);
+            }
+            return Ok(None);
+        }
         Err(err) => {
             return Err(failure.unwrap_or_else(|| StartError::Launch {
                 detail: format!("{err:#}"),
@@ -595,10 +618,41 @@ pub fn start_android(
         });
     };
 
+    let Some((app, forward_port)) =
+        attach_launched(runner, &start.device.id, &mut launch, on_line, cancel)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(AndroidHotStart {
+        session: session::open_session(base, app, budget),
+        launch,
+        forward_port,
+    }))
+}
+
+/// The package the Android run pipeline's `Launching <package>…` line names:
+/// the installed package it is about to `am start`.
+pub fn launched_package(line: &str) -> Option<&str> {
+    let package = line.strip_prefix("Launching ")?.strip_suffix('…')?;
+    (!package.is_empty() && !package.contains(char::is_whitespace)).then_some(package)
+}
+
+/// Waits for the launched app's discovery line and attaches through an
+/// `adb forward` on `serial`, answering the link and the forwarded host
+/// port. `Ok(None)` when `cancel` was observed during the wait, the forward
+/// or the attach: the stream is killed, the forward removed and the app
+/// force-stopped first ([`unwind`]).
+fn attach_launched(
+    runner: &dyn ProcessRunner,
+    serial: &str,
+    launch: &mut AndroidLaunch,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<Option<(AppLink, Option<u16>)>, StartError> {
     let mut forward_port = None;
-    let app = match session::read_discovery(&mut launch.stream, on_line) {
+    let app = match session::read_discovery(&mut launch.stream, on_line, Some(cancel)) {
         Announced::Endpoint(discovery) => {
-            match adb_forward_ephemeral(runner, &start.device.id, discovery.port) {
+            match adb_forward_ephemeral(runner, serial, discovery.port) {
                 Ok(port) => {
                     forward_port = Some(port);
                     session::attach_device_app(
@@ -613,6 +667,10 @@ pub fn start_android(
             }
         }
         Announced::Failure(reason) => AppLink::RestartOnly { reason },
+        Announced::Cancelled => {
+            unwind(runner, serial, launch, None);
+            return Ok(None);
+        }
         Announced::Exited => {
             launch.stream.kill();
             return Err(StartError::Launch {
@@ -620,11 +678,34 @@ pub fn start_android(
             });
         }
     };
-    Ok(Some(AndroidHotStart {
-        session: session::open_session(base, app, budget),
-        launch,
-        forward_port,
-    }))
+    if cancel.load(Ordering::SeqCst) {
+        // The devtools link goes before its forward does.
+        drop(app);
+        unwind(runner, serial, launch, forward_port);
+        return Ok(None);
+    }
+    Ok(Some((app, forward_port)))
+}
+
+/// Tears down what a cancelled start launched, best-effort (a device that
+/// went away or an app already gone is a normal end): kill the logcat
+/// stream, remove the forward when one was allocated, force-stop the app.
+fn unwind(
+    runner: &dyn ProcessRunner,
+    serial: &str,
+    launch: &mut AndroidLaunch,
+    forward_port: Option<u16>,
+) {
+    launch.stream.kill();
+    if let Some(port) = forward_port {
+        let _ = adb_forward_remove(runner, serial, port);
+    }
+    force_stop(runner, serial, &launch.package);
+}
+
+/// `adb -s <serial> shell am force-stop <package>`, best-effort.
+fn force_stop(runner: &dyn ProcessRunner, serial: &str, package: &str) {
+    let _ = runner.run("adb", &["-s", serial, "shell", "am", "force-stop", package]);
 }
 
 /// The staging step [`start_android`] hands the run pipeline: the fat
@@ -1514,5 +1595,185 @@ mod tests {
             other => panic!("expected BuilderUnsupported, got {other:?}"),
         }
         assert!(runner.recorded_cwd().is_none(), "nothing ran");
+    }
+
+    /// Records every `run` invocation (answered by the inner fake), calling
+    /// `on_run` with it first: a Ctrl-C landing during that call.
+    struct RecordingRunner {
+        inner: FakeProcessRunner,
+        runs: std::sync::Mutex<Vec<String>>,
+        on_run: Box<dyn Fn(&str) + Send + Sync>,
+    }
+
+    impl RecordingRunner {
+        fn new(inner: FakeProcessRunner) -> Self {
+            Self {
+                inner,
+                runs: std::sync::Mutex::new(Vec::new()),
+                on_run: Box::new(|_| {}),
+            }
+        }
+
+        fn runs(&self) -> Vec<String> {
+            self.runs.lock().unwrap().clone()
+        }
+    }
+
+    impl ProcessRunner for RecordingRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<Output> {
+            let key = std::iter::once(cmd)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            (self.on_run)(&key);
+            self.runs.lock().unwrap().push(key);
+            self.inner.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<Output> {
+            self.inner.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+        ) -> anyhow::Result<crate::process::StreamHandle> {
+            self.inner.spawn_streaming(cmd, args, cwd, env)
+        }
+    }
+
+    const SERIAL: &str = "FAKE-SERIAL";
+    const PACKAGE: &str = "it.example.fake";
+    const LOGCAT: &str = "adb -s FAKE-SERIAL logcat --pid 4242";
+    const FORCE_STOP: &str = "adb -s FAKE-SERIAL shell am force-stop it.example.fake";
+
+    /// The launched app: its logcat stream (hanging after `lines`).
+    fn launched(runner: &dyn ProcessRunner) -> AndroidLaunch {
+        AndroidLaunch {
+            stream: runner.spawn_streaming(LOGCAT, &[], None, &[]).unwrap(),
+            package: PACKAGE.to_string(),
+        }
+    }
+
+    /// A loopback port nothing listens on (bound, then released).
+    fn closed_port() -> u16 {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    /// Criterion 1: a cancel raised during the discovery wait ends it at
+    /// once; the logcat stream is killed and the app force-stopped (no
+    /// forward was allocated yet), and the start answers `Ok(None)`.
+    #[test]
+    fn a_cancel_during_the_discovery_wait_kills_the_stream_and_force_stops_the_app() {
+        let runner = RecordingRunner::new(
+            FakeProcessRunner::new().with_hanging_stream(LOGCAT, ["I/app: starting"]),
+        );
+        let mut launch = launched(&runner);
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let raiser = {
+            let cancel = std::sync::Arc::clone(&cancel);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                cancel.store(true, Ordering::SeqCst);
+            })
+        };
+        let attached = attach_launched(&runner, SERIAL, &mut launch, &mut |_| {}, &cancel)
+            .expect("a cancel is not an error");
+        raiser.join().unwrap();
+        assert!(attached.is_none());
+        assert_eq!(runner.runs(), vec![FORCE_STOP]);
+        assert!(
+            matches!(
+                launch.stream.lines.try_recv(),
+                Err(crate::process::TryRecvError::Disconnected)
+            ),
+            "the logcat stream is killed"
+        );
+    }
+
+    /// Criterion 1: a cancel landing during the `adb forward` (after the
+    /// discovery line) is observed once the attach returns: the forward is
+    /// removed and the app force-stopped. Without the cancel the same start
+    /// attaches and keeps its forward (the negative control).
+    #[test]
+    fn a_cancel_during_the_forward_removes_it_and_force_stops_the_app() {
+        for cancelled in [true, false] {
+            let port = closed_port();
+            let discovery = frust_devtools_protocol::format_discovery_line(7777, None);
+            let forward = format!("adb -s {SERIAL} forward tcp:0 tcp:7777");
+            let mut runner = RecordingRunner::new(
+                FakeProcessRunner::new()
+                    .with_hanging_stream(LOGCAT, [discovery.as_str()])
+                    .with(
+                        forward.as_str(),
+                        Output {
+                            success: true,
+                            stdout: format!("{port}\n"),
+                            stderr: String::new(),
+                        },
+                    )
+                    .with(format!("adb -s {SERIAL} forward --remove"), ok())
+                    .with(FORCE_STOP, ok()),
+            );
+            let cancel = std::sync::Arc::new(AtomicBool::new(false));
+            if cancelled {
+                let cancel = std::sync::Arc::clone(&cancel);
+                let forward = forward.clone();
+                runner.on_run = Box::new(move |key| {
+                    if key == forward {
+                        cancel.store(true, Ordering::SeqCst);
+                    }
+                });
+            }
+            let mut launch = launched(&runner);
+            let attached = attach_launched(&runner, SERIAL, &mut launch, &mut |_| {}, &cancel)
+                .expect("no launch error");
+            if cancelled {
+                assert!(attached.is_none());
+                assert_eq!(
+                    runner.runs(),
+                    vec![
+                        forward.clone(),
+                        format!("adb -s {SERIAL} forward --remove tcp:{port}"),
+                        FORCE_STOP.to_string(),
+                    ]
+                );
+            } else {
+                let (_app, forward_port) = attached.expect("attached");
+                assert_eq!(forward_port, Some(port));
+                assert_eq!(runner.runs(), vec![forward.clone()]);
+                launch.stream.kill();
+            }
+        }
+    }
+
+    /// The run pipeline's `Launching <package>…` line names the package it
+    /// is about to `am start`; nothing else does.
+    #[test]
+    fn the_launching_line_names_the_launched_package() {
+        assert_eq!(
+            launched_package("Launching dev.f0x.myapp.dev…"),
+            Some("dev.f0x.myapp.dev")
+        );
+        for line in [
+            "Launching dev.f0x.myapp",
+            "Launching …",
+            "Launching the app on Pixel 7…",
+            "Installing on Pixel 7…",
+            "D/frust: Launching dev.f0x.myapp…",
+        ] {
+            assert_eq!(launched_package(line), None, "{line}");
+        }
     }
 }

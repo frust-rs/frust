@@ -64,6 +64,7 @@ use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use frust_devtools_protocol::{
@@ -1241,7 +1242,7 @@ pub fn start_desktop(
         desktop_run::spawn_desktop_plan(runner, &plan).map_err(|err| StartError::Launch {
             detail: format!("{err:#}"),
         })?;
-    let app = match read_discovery(&mut child, on_line) {
+    let app = match read_discovery(&mut child, on_line, None) {
         Announced::Endpoint(discovery) => attach_app(
             SocketAddr::from((Ipv4Addr::LOCALHOST, discovery.port)),
             discovery.token.as_deref(),
@@ -1254,6 +1255,7 @@ pub fn start_desktop(
                 detail: "the app exited before announcing its devtools endpoint".to_string(),
             });
         }
+        Announced::Cancelled => unreachable!("the desktop start passes no cancel flag"),
     };
 
     Ok((open_session(base, app, budget), child))
@@ -1436,13 +1438,24 @@ pub(super) enum Announced {
     /// The devtools service did not start, or said nothing in time.
     Failure(String),
     Exited,
+    /// `cancel` was raised before the line arrived.
+    Cancelled,
 }
 
 /// Reads the child's output up to its devtools discovery line, forwarding
-/// every line before it (token redacted) to `on_line`.
-pub(super) fn read_discovery(child: &mut StreamHandle, on_line: &mut dyn FnMut(&str)) -> Announced {
+/// every line before it (token redacted) to `on_line`. A raised `cancel` is
+/// observed at every poll and ends the wait with [`Announced::Cancelled`];
+/// the child is the caller's to stop.
+pub(super) fn read_discovery(
+    child: &mut StreamHandle,
+    on_line: &mut dyn FnMut(&str),
+    cancel: Option<&AtomicBool>,
+) -> Announced {
     let deadline = Instant::now() + DISCOVERY_DEADLINE;
     loop {
+        if cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst)) {
+            return Announced::Cancelled;
+        }
         match child.lines.try_recv() {
             Ok(line) => {
                 on_line(&redact_discovery_token(&line));
@@ -4695,5 +4708,34 @@ mod tests {
                     .table
             );
         }
+    }
+
+    /// The discovery wait observes a raised `cancel` at its next poll —
+    /// well inside the deadline — and leaves the child to the caller.
+    #[test]
+    fn the_discovery_wait_ends_when_cancel_is_raised() {
+        let runner = crate::process::FakeProcessRunner::new()
+            .with_hanging_stream("app", ["I/app: starting"]);
+        let mut child = runner.spawn_streaming("app", &[], None, &[]).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let raiser = {
+            let cancel = Arc::clone(&cancel);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                cancel.store(true, Ordering::SeqCst);
+            })
+        };
+        let begun = Instant::now();
+        let mut lines = Vec::new();
+        let announced = read_discovery(
+            &mut child,
+            &mut |line| lines.push(line.to_string()),
+            Some(&cancel),
+        );
+        raiser.join().unwrap();
+        assert!(matches!(announced, Announced::Cancelled));
+        assert!(begun.elapsed() < Duration::from_secs(5));
+        assert_eq!(lines, vec!["I/app: starting"]);
+        child.kill();
     }
 }
