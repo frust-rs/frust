@@ -645,6 +645,28 @@ mod tests {
         assert!(caps.contains(&Capability::WidgetTree));
     }
 
+    /// Windows now mints its token from the OS (`BCryptGenRandom`), yet stays
+    /// excluded from `HotPatch` until its gate run passes: the `windows`
+    /// fact alone refuses it, with every other precondition held.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_build_with_an_os_token_still_does_not_offer_hot_patch() {
+        let source = token::generate().source;
+        assert_eq!(source, TokenSource::Os);
+        let facts = HotPatchFacts {
+            feature: true,
+            offered: true,
+            debug_assertions: true,
+            ..HotPatchFacts::of_this_build(true, Some(source))
+        };
+        assert!(facts.windows);
+        assert_eq!(hot_patch_gate(facts), Err(HotPatchUnavailable::Windows));
+        let caps = handshake_capabilities(ServiceConfig::default());
+        assert!(ServiceConfig::default().require_token);
+        assert!(!caps.contains(&Capability::HotPatch), "{caps:?}");
+        assert!(caps.contains(&Capability::WidgetTree));
+    }
+
     #[test]
     fn a_service_with_require_token_off_never_offers_hot_patch() {
         let caps = handshake_capabilities(ServiceConfig {
