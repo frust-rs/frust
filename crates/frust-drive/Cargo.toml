@@ -41,6 +41,10 @@ rustc-demangle.workspace = true
 # SHA-256 of a patch handed off by file on a loopback hot-patch session.
 sha2.workspace = true
 
+# PE symbol cache and PDB type records for the Windows hot-patch builder; MSVC builds only run on Windows hosts.
+[target.'cfg(windows)'.dependencies]
+pdb.workspace = true
+
 [dev-dependencies]
 frust-drive = { path = ".", features = ["test-util"] }
 
