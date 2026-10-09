@@ -60,6 +60,7 @@
 //! `docs/CLI_ARCHITECTURE.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -1242,7 +1243,7 @@ pub fn start_desktop(
         desktop_run::spawn_desktop_plan(runner, &plan).map_err(|err| StartError::Launch {
             detail: format!("{err:#}"),
         })?;
-    let app = match read_discovery(&mut child, on_line, None) {
+    let app = match read_discovery(&mut child, on_line) {
         Announced::Endpoint(discovery) => attach_app(
             SocketAddr::from((Ipv4Addr::LOCALHOST, discovery.port)),
             discovery.token.as_deref(),
@@ -1255,7 +1256,6 @@ pub fn start_desktop(
                 detail: "the app exited before announcing its devtools endpoint".to_string(),
             });
         }
-        Announced::Cancelled => unreachable!("the desktop start passes no cancel flag"),
     };
 
     Ok((open_session(base, app, budget), child))
@@ -1438,46 +1438,68 @@ pub(super) enum Announced {
     /// The devtools service did not start, or said nothing in time.
     Failure(String),
     Exited,
-    /// `cancel` was raised before the line arrived.
-    Cancelled,
 }
 
+/// A raised cancel flag ended [`read_discovery_cancellable`]'s wait.
+pub(super) struct Cancelled;
+
 /// Reads the child's output up to its devtools discovery line, forwarding
-/// every line before it (token redacted) to `on_line`. A raised `cancel` is
-/// observed at every poll and ends the wait with [`Announced::Cancelled`];
-/// the child is the caller's to stop.
-pub(super) fn read_discovery(
+/// every line before it (token redacted) to `on_line`. Nothing cancels
+/// this wait (the desktop start has no cancel seam).
+pub(super) fn read_discovery(child: &mut StreamHandle, on_line: &mut dyn FnMut(&str)) -> Announced {
+    match wait_for_discovery(child, on_line, || None::<Infallible>) {
+        Ok(announced) => announced,
+        Err(never) => match never {},
+    }
+}
+
+/// [`read_discovery`] that also observes `cancel` at every poll: a raised
+/// flag ends the wait with [`Cancelled`], and the child is the caller's to
+/// stop.
+pub(super) fn read_discovery_cancellable(
     child: &mut StreamHandle,
     on_line: &mut dyn FnMut(&str),
-    cancel: Option<&AtomicBool>,
-) -> Announced {
+    cancel: &AtomicBool,
+) -> Result<Announced, Cancelled> {
+    wait_for_discovery(child, on_line, || {
+        cancel.load(Ordering::SeqCst).then_some(Cancelled)
+    })
+}
+
+/// The discovery wait both readers share; `cancelled` is polled before
+/// every read and its `Some` ends the wait.
+fn wait_for_discovery<C>(
+    child: &mut StreamHandle,
+    on_line: &mut dyn FnMut(&str),
+    mut cancelled: impl FnMut() -> Option<C>,
+) -> Result<Announced, C> {
     let deadline = Instant::now() + DISCOVERY_DEADLINE;
     loop {
-        if cancel.is_some_and(|cancel| cancel.load(Ordering::SeqCst)) {
-            return Announced::Cancelled;
+        if let Some(cancelled) = cancelled() {
+            return Err(cancelled);
         }
         match child.lines.try_recv() {
             Ok(line) => {
                 on_line(&redact_discovery_token(&line));
                 if let Some(discovery) = parse_discovery_line(&line) {
-                    return Announced::Endpoint(discovery);
+                    return Ok(Announced::Endpoint(discovery));
                 }
                 if let Some(reason) = parse_failure_line(&line) {
-                    return Announced::Failure(format!(
+                    return Ok(Announced::Failure(format!(
                         "the devtools service did not start: {reason}"
-                    ));
+                    )));
                 }
             }
             Err(TryRecvError::Empty) if Instant::now() < deadline => {
                 std::thread::sleep(DISCOVERY_POLL);
             }
             Err(TryRecvError::Empty) => {
-                return Announced::Failure(format!(
+                return Ok(Announced::Failure(format!(
                     "the app announced no devtools endpoint within {}s",
                     DISCOVERY_DEADLINE.as_secs()
-                ));
+                )));
             }
-            Err(TryRecvError::Disconnected) => return Announced::Exited,
+            Err(TryRecvError::Disconnected) => return Ok(Announced::Exited),
         }
     }
 }
@@ -4710,31 +4732,27 @@ mod tests {
         }
     }
 
-    /// The discovery wait observes a raised `cancel` at its next poll —
-    /// well inside the deadline — and leaves the child to the caller.
+    /// The cancellable discovery wait observes a raised `cancel` at its
+    /// next poll and leaves the child to the caller. Deterministic: the
+    /// cancel is raised by the line the fake sends, so the wait forwards
+    /// that line and then ends on the flag (not the deadline, which would
+    /// answer `Failure`).
     #[test]
     fn the_discovery_wait_ends_when_cancel_is_raised() {
         let runner = crate::process::FakeProcessRunner::new()
             .with_hanging_stream("app", ["I/app: starting"]);
         let mut child = runner.spawn_streaming("app", &[], None, &[]).unwrap();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let raiser = {
-            let cancel = Arc::clone(&cancel);
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100));
-                cancel.store(true, Ordering::SeqCst);
-            })
-        };
-        let begun = Instant::now();
+        let cancel = AtomicBool::new(false);
         let mut lines = Vec::new();
-        let announced = read_discovery(
+        let announced = read_discovery_cancellable(
             &mut child,
-            &mut |line| lines.push(line.to_string()),
-            Some(&cancel),
+            &mut |line| {
+                lines.push(line.to_string());
+                cancel.store(true, Ordering::SeqCst);
+            },
+            &cancel,
         );
-        raiser.join().unwrap();
-        assert!(matches!(announced, Announced::Cancelled));
-        assert!(begun.elapsed() < Duration::from_secs(5));
+        assert!(matches!(announced, Err(Cancelled)));
         assert_eq!(lines, vec!["I/app: starting"]);
         child.kill();
     }
