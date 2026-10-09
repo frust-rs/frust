@@ -20,6 +20,7 @@ pub mod android;
 pub mod capture;
 pub mod fat_link;
 pub mod graph;
+pub mod ios_sim;
 pub mod jump_table;
 pub mod layout;
 pub mod link_intercept;

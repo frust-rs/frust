@@ -1,9 +1,9 @@
 //! `simctl install`/`launch`/`terminate` command construction and execution
 //! (mirrors `android_run::adb`).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-use crate::process::{Output, ProcessRunner};
+use crate::process::{Output, ProcessRunner, StreamHandle};
 
 /// `xcrun simctl install <udid> <app_path>`.
 pub fn install(runner: &dyn ProcessRunner, udid: &str, app_path: &str) -> Result<Output> {
@@ -28,6 +28,26 @@ pub fn launch(
         &[],
         on_line,
     )
+}
+
+/// [`launch`] spawned through the cancellable
+/// [`ProcessRunner::spawn_streaming`] seam: the same argv, the app's console
+/// as a killable [`StreamHandle`]. A hot run reads the app's devtools
+/// discovery line from it. Killing the handle stops the `simctl` bridge,
+/// not the app ([`terminate`] does that).
+pub fn spawn_launch(
+    runner: &dyn ProcessRunner,
+    udid: &str,
+    bundle_id: &str,
+) -> Result<StreamHandle> {
+    runner
+        .spawn_streaming(
+            "xcrun",
+            &["simctl", "launch", "--console-pty", udid, bundle_id],
+            None,
+            &[],
+        )
+        .with_context(|| format!("spawning `simctl launch {bundle_id}`"))
 }
 
 /// Best-effort `xcrun simctl terminate <udid> <bundle_id>` — failure is
@@ -78,6 +98,19 @@ mod tests {
         .unwrap();
         assert!(out.success);
         assert_eq!(lines, vec!["hello from app"]);
+    }
+
+    #[test]
+    fn spawn_launch_streams_the_console_pty_launch() {
+        let runner = FakeProcessRunner::new().with_stream(
+            "xcrun simctl launch --console-pty AAAA dev.f0x.myapp",
+            ["dev.f0x.myapp: 4242", "hello from app"],
+            true,
+        );
+        let mut stream = spawn_launch(&runner, "AAAA", "dev.f0x.myapp").unwrap();
+        let lines: Vec<String> = stream.lines.iter().collect();
+        assert_eq!(lines, vec!["dev.f0x.myapp: 4242", "hello from app"]);
+        assert!(stream.wait());
     }
 
     #[test]

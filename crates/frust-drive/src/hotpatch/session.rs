@@ -1327,6 +1327,24 @@ pub(super) fn link_base(
     host: &SessionHost<'_>,
     request: BaseRequest<'_>,
 ) -> Result<FatBase, HotpatchError> {
+    base(host, request, true)
+}
+
+/// [`link_base`] over an image another tool already linked from the fat
+/// build (Xcode's `Runner` on the iOS simulator, [`super::ios_sim`]): no
+/// fat link, and the symbol cache is read from `request.image` as it is.
+pub(super) fn adopt_base(
+    host: &SessionHost<'_>,
+    request: BaseRequest<'_>,
+) -> Result<FatBase, HotpatchError> {
+    base(host, request, false)
+}
+
+fn base(
+    host: &SessionHost<'_>,
+    request: BaseRequest<'_>,
+    relink: bool,
+) -> Result<FatBase, HotpatchError> {
     let runner: &dyn ProcessRunner = &*host.runner;
     let BaseRequest {
         mut graph,
@@ -1351,18 +1369,23 @@ pub(super) fn link_base(
     })?;
     let tip_env = replay_env(tip_record);
     let linker = fat_link::linker_program(custom_linker.as_deref())?;
-    let fat_out = fat_link::fat_link(
-        runner,
-        &FatLinkRequest {
-            flavor,
-            linker: &linker,
-            link_args: &link_args,
-            envs: &tip_env,
-            target_dir: &target_dir,
-            archive_dir,
-            exe: &image,
-        },
-    )?;
+    let image = if relink {
+        fat_link::fat_link(
+            runner,
+            &FatLinkRequest {
+                flavor,
+                linker: &linker,
+                link_args: &link_args,
+                envs: &tip_env,
+                target_dir: &target_dir,
+                archive_dir,
+                exe: &image,
+            },
+        )?
+        .exe
+    } else {
+        image
+    };
 
     let rlibs = member_rlibs(&link_args, &graph);
     let tip_objects = tip_objects(&link_args);
@@ -1381,7 +1404,7 @@ pub(super) fn link_base(
             .collect::<Vec<_>>(),
     )?;
     let accepted = AcceptedSets::begin(&target_dir, &session, base_layouts, base_seams)?;
-    let cache = SymbolCache::load(&fat_out.exe, target)?;
+    let cache = SymbolCache::load(&image, target)?;
     seed_dep_info(&mut graph, &records);
 
     let builder = DesktopBuilder {
@@ -1411,7 +1434,7 @@ pub(super) fn link_base(
     Ok(FatBase {
         builder,
         accepted,
-        image: fat_out.exe,
+        image,
     })
 }
 
