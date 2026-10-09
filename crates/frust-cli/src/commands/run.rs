@@ -4537,6 +4537,10 @@ mod tests {
     /// desktop nor the Android one is, and the changed path reaches the
     /// session. The relaunch loop is never run, and the app is torn down
     /// when the loop ends.
+    // Simulator discovery answers nothing off macOS (`IosSimulatorDiscovery`
+    // consults `xcrun simctl` only there), so the fake listing is read on
+    // macOS hosts only — as `watch_d_resolves_a_simulator_devicectl_also_lists_to_the_simulator`.
+    #[cfg(target_os = "macos")]
     #[test]
     fn run_in_with_watch_and_an_ios_simulator_starts_a_hot_session() {
         let mut backend = FakeBackend::on_device(vec![Ok((
@@ -4611,6 +4615,7 @@ mod tests {
     /// and runs the relaunch loop over the simulator's relaunch target
     /// instead: the pipeline at start, then again on a change, the previous
     /// app torn down each time.
+    #[cfg(target_os = "macos")]
     #[test]
     fn no_hot_on_a_simulator_runs_the_relaunch_loop_and_never_builds_a_backend() {
         let relauncher = FakeDeviceRelauncher::new();
@@ -4669,6 +4674,7 @@ mod tests {
     /// hot-patch builder unsupported: ...` line) and the simulator relaunch
     /// loop takes over — the first change tears the adopted hot app down
     /// and reruns the simulator pipeline.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_simulator_app_without_hot_patch_prints_builder_unsupported_once_and_relaunch_loops() {
         let backend = FakeBackend::on_device(vec![Ok((
@@ -5012,6 +5018,7 @@ mod tests {
     /// start tears down what it launched (`start_ios_sim` kills the console
     /// stream and terminates the app) and the watch ends with 0 — no patch,
     /// no relaunch, no retry.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_ctrl_c_during_the_simulator_hot_start_tears_it_down_and_ends_the_watch() {
         let captured: Arc<Mutex<Option<AppSlot>>> = Arc::new(Mutex::new(None));
