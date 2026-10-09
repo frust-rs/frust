@@ -91,8 +91,8 @@ pub const DYNAMIC_BASE_OFF: &str = "/DYNAMICBASE:NO";
 
 /// The Msvc fat exe's fixed image base (256 MiB): above the low region
 /// Windows reserves. The fat exe owns the 256 MiB from here to
-/// [`PATCH_IMAGE_BASE_FIRST`]: `FAT_IMAGE_BASE + SizeOfImage` must stay
-/// below that, which [`fat_link`] checks on the linked exe
+/// [`PATCH_IMAGE_BASE_FIRST`]: `FAT_IMAGE_BASE + SizeOfImage` must not
+/// exceed that, which [`fat_link`] checks on the linked exe
 /// ([`check_fat_image_fits`]; a stock app's is ~36 MB).
 pub const FAT_IMAGE_BASE: u64 = 0x1000_0000;
 
@@ -699,7 +699,7 @@ pub fn fat_link(
             (_, _, err) => err,
         })?;
     if request.flavor == LinkerFlavor::Msvc {
-        let bytes = fs::read(request.exe).map_err(|err| {
+        let bytes = read_image_prefix(request.exe).map_err(|err| {
             HotpatchError::io(
                 format!("reading linked image `{}`", request.exe.display()),
                 err,
@@ -719,8 +719,8 @@ pub fn fat_link(
 /// Checks that the Msvc fat exe `bytes` (`what` names it in errors) fits
 /// its fixed-base window: linked at [`FAT_IMAGE_BASE`], the image spans
 /// its PE32+ `SizeOfImage` ([`super::pe::size_of_image`]), so
-/// `FAT_IMAGE_BASE + SizeOfImage` (the image's exclusive end) must stay
-/// below [`PATCH_IMAGE_BASE_FIRST`], where patch 1 loads: at most 256 MiB.
+/// `FAT_IMAGE_BASE + SizeOfImage` (the image's exclusive end) must not
+/// exceed [`PATCH_IMAGE_BASE_FIRST`], where patch 1 loads: at most 256 MiB.
 /// An image past it, or one whose headers do not read, is
 /// [`HotpatchError::BuilderUnsupported`].
 pub fn check_fat_image_fits(bytes: &[u8], what: &str) -> Result<(), HotpatchError> {
@@ -730,10 +730,25 @@ pub fn check_fat_image_fits(bytes: &[u8], what: &str) -> Result<(), HotpatchErro
         return Ok(());
     }
     Err(HotpatchError::unsupported(format!(
-        "{what} is too large for its fixed base: FAT_IMAGE_BASE + SizeOfImage must stay below \
+        "{what} is too large for its fixed base: FAT_IMAGE_BASE + SizeOfImage must not exceed \
          PATCH_IMAGE_BASE_FIRST ({FAT_IMAGE_BASE:#x} + {size:#x} = {end:#x}, past \
          {PATCH_IMAGE_BASE_FIRST:#x}, where patch 1 loads); the fat exe has 256 MiB"
     )))
+}
+
+/// How much of a linked image [`fat_link`] reads for the size check: the
+/// DOS header, `e_lfanew` and the PE32+ optional header all lie well inside.
+const IMAGE_HEADER_PREFIX: u64 = 64 * 1024;
+
+/// The first [`IMAGE_HEADER_PREFIX`] bytes of `path` (all of a shorter
+/// file): the headers [`check_fat_image_fits`] reads, without pulling a fat
+/// exe of tens or hundreds of MB into memory.
+fn read_image_prefix(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(IMAGE_HEADER_PREFIX)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Whether a linker's failure `detail` names the archive at `archive` (by
@@ -1789,7 +1804,7 @@ mod tests {
             assert!(
                 detail.starts_with("fat exe `app.exe` is too large")
                     && detail.contains(
-                        "FAT_IMAGE_BASE + SizeOfImage must stay below PATCH_IMAGE_BASE_FIRST"
+                        "FAT_IMAGE_BASE + SizeOfImage must not exceed PATCH_IMAGE_BASE_FIRST"
                     )
                     && detail.contains(&format!("{size:#x}")),
                 "{detail}"
@@ -1816,7 +1831,7 @@ mod tests {
             },
         ));
         assert!(
-            detail.contains("FAT_IMAGE_BASE + SizeOfImage must stay below PATCH_IMAGE_BASE_FIRST"),
+            detail.contains("FAT_IMAGE_BASE + SizeOfImage must not exceed PATCH_IMAGE_BASE_FIRST"),
             "{detail}"
         );
         runner.only_call("lld-link");
