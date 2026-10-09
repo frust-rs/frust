@@ -644,9 +644,11 @@ device_hotpatch_info() {
   port="$(echo "$line" | sed -n 's/.*listening on \([0-9][0-9]*\) token .*/\1/p')"
   token="$(echo "$line" | sed -n 's/.*listening on [0-9][0-9]* token \([0-9a-f][0-9a-f]*\).*/\1/p')"
   if [ -z "$port" ] || [ -z "$token" ]; then echo "info: no discovery line for pid $1"; return 0; fi
-  python3 - "$SERIAL" "$port" "$token" <<'PY'
-import json, socket, subprocess, sys
-serial, port, token = sys.argv[1], sys.argv[2], sys.argv[3]
+  # The token travels in the environment of this one process, never argv (visible in `ps`).
+  HOTPATCH_TOKEN="$token" python3 - "$SERIAL" "$port" <<'PY'
+import json, os, socket, subprocess, sys
+serial, port = sys.argv[1], sys.argv[2]
+token = os.environ["HOTPATCH_TOKEN"]
 fwd = subprocess.run(["adb", "-s", serial, "forward", "tcp:0", f"tcp:{port}"],
                      capture_output=True, text=True).stdout.strip()
 try:
@@ -947,12 +949,21 @@ stop_runner() {
   APP_PID=""
 }
 
+# Replaces the devtools token of every discovery line in the saved logcat (the port stays), so
+# the kept log dir holds no live credential.
+redact_devlog_tokens() {
+  [ -f "$DEVLOG" ] || return 0
+  sed -E 's/(listening on [0-9]+ token )[0-9a-fA-F]+/\1<redacted>/' "$DEVLOG" > "${DEVLOG}.redacted" \
+    && mv "${DEVLOG}.redacted" "$DEVLOG"
+}
+
 cleanup() {
   stop_runner
   if [ -n "$DEVLOG_PID" ]; then
     kill "$DEVLOG_PID" 2>/dev/null
     wait "$DEVLOG_PID" 2>/dev/null
     DEVLOG_PID=""
+    redact_devlog_tokens
     echo
     echo "Device log since ${DEVLOG_SINCE} (device clock): ${DEVLOG}"
     # The app runs as untrusted_app; other domains' denials (adb's shell, system_server) are
