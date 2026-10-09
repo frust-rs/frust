@@ -51,11 +51,14 @@ pub enum Os {
     MacOs,
     Linux,
     Android,
+    /// The iOS simulator (Mach-O, Darwin names). A physical iOS device is
+    /// not a target: it stays restart-only.
+    IosSim,
 }
 
 /// A target the builder can produce stubs and jump tables for. Anything else
-/// (PE, iOS, 32-bit, other architectures) is refused when the triple is
-/// parsed, never guessed at.
+/// (PE, a physical iOS device, 32-bit, other architectures) is refused when
+/// the triple is parsed, never guessed at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Target {
     pub arch: Arch,
@@ -64,7 +67,9 @@ pub struct Target {
 
 impl Target {
     /// Parse a rustc target triple such as `aarch64-apple-darwin`,
-    /// `x86_64-unknown-linux-gnu` or `aarch64-linux-android`.
+    /// `x86_64-unknown-linux-gnu`, `aarch64-linux-android` or the iOS
+    /// simulator's `aarch64-apple-ios-sim` (`x86_64-apple-ios` on an Intel
+    /// host, where that triple only ever names the simulator).
     pub fn from_triple(triple: &str) -> Result<Self, HotpatchError> {
         let refuse = || {
             HotpatchError::unsupported(format!(
@@ -82,6 +87,8 @@ impl Target {
             ["apple", "darwin"] => Os::MacOs,
             ["linux", "android"] => Os::Android,
             ["unknown", "linux", "gnu" | "musl"] => Os::Linux,
+            ["apple", "ios", "sim"] if arch == Arch::Aarch64 => Os::IosSim,
+            ["apple", "ios"] if arch == Arch::X86_64 => Os::IosSim,
             _ => return Err(refuse()),
         };
         Ok(Self { arch, os })
@@ -90,7 +97,7 @@ impl Target {
     /// The target's object format.
     pub fn format(self) -> Format {
         match self.os {
-            Os::MacOs => Format::MachO,
+            Os::MacOs | Os::IosSim => Format::MachO,
             Os::Linux | Os::Android => Format::Elf,
         }
     }
@@ -672,7 +679,6 @@ mod tests {
         for triple in [
             "x86_64-pc-windows-msvc",
             "aarch64-apple-ios",
-            "aarch64-apple-ios-sim",
             "riscv64gc-unknown-linux-gnu",
             "i686-unknown-linux-gnu",
             "armv7-linux-androideabi",

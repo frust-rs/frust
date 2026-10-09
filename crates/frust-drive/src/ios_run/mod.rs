@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 
-use crate::build_info::BuildInfo;
+use crate::build_info::{BuildInfo, HOTPATCH_FEATURE};
 use crate::devices::Device;
 use crate::ios_build::{self, IosArtifact};
 use crate::process::{ProcessRunner, RealProcessRunner, StreamHandle, tail_lines};
@@ -112,6 +112,20 @@ struct PreparedIosSession {
     udid: String,
 }
 
+/// The staging step of a hot run ([`HotBuild::stage`]): called with the
+/// built `Runner.app` once the fat build succeeded and before `simctl
+/// install`, with the run's line sink. An error stops the run before
+/// anything is installed or launched.
+pub type StageHotImage<'a> = dyn FnMut(&Path, &mut dyn FnMut(&str)) -> Result<()> + 'a;
+
+/// What turns the simulator run into a hot-patch run ([`spawn_hot_session`]).
+pub struct HotBuild<'a> {
+    /// Extra `xcodebuild` build settings, in order
+    /// ([`xcodebuild::build_hot`]): the fat link and the capture.
+    pub settings: &'a [(String, String)],
+    pub stage: &'a mut StageHotImage<'a>,
+}
+
 /// The shared preflight → build → install core of the iOS-simulator run
 /// pipeline, feeding each phase line to `on_line` and checking `cancel` at
 /// each boundary (see `android_run`'s `prepare_session` for the cancel-latency
@@ -124,6 +138,33 @@ fn prepare_simulator_session(
     extra_features: &[String],
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
+) -> Result<Option<PreparedIosSession>> {
+    prepare_simulator_core(
+        runner,
+        root,
+        device,
+        info,
+        extra_features,
+        on_line,
+        cancel,
+        None,
+    )
+}
+
+/// [`prepare_simulator_session`], where `hot` makes the build the hot-patch
+/// fat build: the Debug hot-session features in place of `extra_features`,
+/// its settings on the `xcodebuild` line, and its staging step between the
+/// build and the install.
+#[allow(clippy::too_many_arguments)] // the run inputs plus the hot build
+fn prepare_simulator_core(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    extra_features: &[String],
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+    mut hot: Option<&mut HotBuild<'_>>,
 ) -> Result<Option<PreparedIosSession>> {
     let project = project::detect(root)?;
     project::require_ios_dir(&project.root)?;
@@ -144,6 +185,13 @@ fn prepare_simulator_session(
     // build never threads `--features lean` down to `cargo`. This path
     // calls `encode_features` directly (bypassing `ios_build::build`), so it
     // needs its own resolve.
+    // A hot build adds the hot-patch feature: the Debug hot-session set.
+    let hot_features = [HOTPATCH_FEATURE.to_string()];
+    let extra_features = if hot.is_some() {
+        &hot_features[..]
+    } else {
+        extra_features
+    };
     let (features, warning) =
         crate::cargo_manifest::resolve_release_features(&project.root, info.mode, extra_features);
     if let Some(warning) = warning {
@@ -154,14 +202,25 @@ fn prepare_simulator_session(
 
     on_line(&format!("Building `{}`…", project.bundle_id));
     let build_start = Instant::now();
-    let build_out = xcodebuild::build(
-        runner,
-        &project.root,
-        &device.id,
-        configuration,
-        features_b64.as_deref(),
-        on_line,
-    )?;
+    let build_out = match hot.as_deref() {
+        Some(hot) => xcodebuild::build_hot(
+            runner,
+            &project.root,
+            &device.id,
+            configuration,
+            features_b64.as_deref(),
+            hot.settings,
+            on_line,
+        )?,
+        None => xcodebuild::build(
+            runner,
+            &project.root,
+            &device.id,
+            configuration,
+            features_b64.as_deref(),
+            on_line,
+        )?,
+    };
     if !build_out.success {
         bail!("{}", xcodebuild_failure_message(&build_out));
     }
@@ -176,6 +235,9 @@ fn prepare_simulator_session(
             "app bundle not found at `{}` after `xcodebuild build`",
             app_path.display()
         );
+    }
+    if let Some(hot) = hot.as_mut() {
+        (hot.stage)(&app_path, on_line)?;
     }
     let app_path = app_path.to_string_lossy().into_owned();
 
@@ -254,6 +316,39 @@ pub fn spawn_session(
             &[],
         )
         .with_context(|| format!("spawning `simctl launch {}`", prepared.bundle_id))?;
+    Ok(Some(IosLaunch {
+        stream,
+        bundle_id: prepared.bundle_id,
+    }))
+}
+
+/// The hot-patch counterpart of [`spawn_session`] (`hotpatch::ios_sim`
+/// drives it): the same preflight → build → install core with the build
+/// made the fat build and `hot`'s staging step run on the built bundle
+/// before the install, the Debug hot-session features compiled in, then
+/// the `simctl launch --console-pty` stream ([`simctl::spawn_launch`]),
+/// from which the caller reads the app's devtools discovery line. Returns
+/// `Ok(None)` when `cancel` was observed at a phase boundary before the
+/// launch; nothing was launched then.
+pub fn spawn_hot_session(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    hot: &mut HotBuild<'_>,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<Option<IosLaunch>> {
+    let Some(prepared) =
+        prepare_simulator_core(runner, root, device, info, &[], on_line, cancel, Some(hot))?
+    else {
+        return Ok(None);
+    };
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    on_line(&format!("Launching {}…", prepared.bundle_id));
+    let stream = simctl::spawn_launch(runner, &prepared.udid, &prepared.bundle_id)?;
     Ok(Some(IosLaunch {
         stream,
         bundle_id: prepared.bundle_id,
@@ -1271,6 +1366,134 @@ mod tests {
             1,
             "exactly one fallback warning: {lines:?}"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The hot pipeline: the fat `xcodebuild` (hot-session features, the
+    /// settings before `build`), the staging step on the built bundle before
+    /// `simctl install`, then the `--console-pty` launch stream.
+    #[test]
+    fn spawn_hot_session_builds_fat_stages_before_install_then_streams_the_launch() {
+        let dir = unique_project_dir("hot");
+        let app_dir = dir.join("build/ios/Build/Products/Debug-iphonesimulator/Runner.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let app_path = app_dir.to_string_lossy().into_owned();
+        let features = crate::ios_build::encode_features(&[
+            "frust/perf-trace",
+            "frust/devtools",
+            HOTPATCH_FEATURE,
+        ])
+        .unwrap();
+        let settings = vec![
+            ("DEAD_CODE_STRIPPING".to_string(), "NO".to_string()),
+            ("FRUST_HOTPATCH_CAPTURE".to_string(), "/t/scope".to_string()),
+        ];
+        let pipeline = |install_ok: bool| {
+            FakeProcessRunner::new()
+                .with(
+                    "xcode-select -p",
+                    ok("/Applications/Xcode.app/Contents/Developer\n"),
+                )
+                .with(
+                    "rustup target list --installed",
+                    ok("aarch64-apple-ios-sim\n"),
+                )
+                .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
+                .with(
+                    format!(
+                        "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES={features} DEAD_CODE_STRIPPING=NO FRUST_HOTPATCH_CAPTURE=/t/scope build",
+                        host_sim_arch()
+                    ),
+                    ok("Build succeeded"),
+                )
+                .with(
+                    format!("xcrun simctl install AAAA {app_path}"),
+                    Output {
+                        success: install_ok,
+                        stdout: String::new(),
+                        stderr: "INSTALL_FAILED_TEST_STOP".to_string(),
+                    },
+                )
+                .with_stream(
+                    "xcrun simctl launch --console-pty AAAA dev.f0x.myapp",
+                    ["dev.f0x.myapp: 4242"],
+                    true,
+                )
+        };
+        let never = std::sync::atomic::AtomicBool::new(false);
+
+        // The stage sees the bundle; a failed install proves it ran first.
+        let runner = pipeline(false);
+        let mut staged = Vec::new();
+        let mut stage = |app: &Path, _: &mut dyn FnMut(&str)| -> Result<()> {
+            staged.push(app.to_path_buf());
+            Ok(())
+        };
+        let mut hot = HotBuild {
+            settings: &settings,
+            stage: &mut stage,
+        };
+        let err = spawn_hot_session(
+            &runner,
+            &dir,
+            &device(),
+            &debug_info(),
+            &mut hot,
+            &mut |_| {},
+            &never,
+        )
+        .err()
+        .expect("the install fails after the stage");
+        assert!(err.to_string().contains("simctl install"), "{err}");
+        assert_eq!(staged, vec![app_dir.clone()]);
+
+        // A failed stage stops the run before the install.
+        let runner = pipeline(true);
+        let mut stage = |_: &Path, _: &mut dyn FnMut(&str)| -> Result<()> {
+            anyhow::bail!("no anchor in Runner")
+        };
+        let mut hot = HotBuild {
+            settings: &settings,
+            stage: &mut stage,
+        };
+        let err = spawn_hot_session(
+            &runner,
+            &dir,
+            &device(),
+            &debug_info(),
+            &mut hot,
+            &mut |_| {},
+            &never,
+        )
+        .err()
+        .expect("the stage refuses");
+        assert_eq!(err.to_string(), "no anchor in Runner");
+
+        // A clean run hands back the console stream and the bundle id.
+        let runner = pipeline(true);
+        let mut stage = |_: &Path, _: &mut dyn FnMut(&str)| -> Result<()> { Ok(()) };
+        let mut hot = HotBuild {
+            settings: &settings,
+            stage: &mut stage,
+        };
+        let mut launch = spawn_hot_session(
+            &runner,
+            &dir,
+            &device(),
+            &debug_info(),
+            &mut hot,
+            &mut |_| {},
+            &never,
+        )
+        .unwrap()
+        .expect("launched");
+        assert_eq!(launch.bundle_id, "dev.f0x.myapp");
+        assert_eq!(
+            launch.stream.lines.iter().collect::<Vec<_>>(),
+            vec!["dev.f0x.myapp: 4242"]
+        );
+        assert!(launch.stream.wait());
 
         let _ = fs::remove_dir_all(&dir);
     }
