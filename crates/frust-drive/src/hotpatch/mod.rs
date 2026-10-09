@@ -23,6 +23,7 @@ pub mod graph;
 pub mod jump_table;
 pub mod layout;
 pub mod link_intercept;
+pub mod pe;
 pub mod replay;
 pub mod seams;
 pub mod session;

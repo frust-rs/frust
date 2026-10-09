@@ -7,6 +7,11 @@
 //! `main`. Names are kept raw, exactly as the symbol table spells them, so a
 //! Darwin name carries its leading `_` (`___frust_hotpatch_anchor`).
 //!
+//! A Windows (PE) image's symbol table is stripped, so its entries come from
+//! the image's PDB instead ([`super::pe`], through [`ImageSymbols::from_entries`]);
+//! [`ImageSymbols::parse`] reads only the relocatable COFF objects a PE patch
+//! is linked from.
+//!
 //! TLS initializers are resolved per symbol at parse time. On ELF a TLS
 //! symbol's value is its offset into its section's initialization image and
 //! its size is recorded; on Mach-O the variable is a descriptor in
@@ -36,6 +41,8 @@ pub const TLV_INIT_SUFFIX: &str = "$tlv$init";
 pub enum Format {
     Elf,
     MachO,
+    /// Windows: PE images, COFF relocatable objects.
+    Pe,
 }
 
 /// The architecture of a supported target.
@@ -51,11 +58,13 @@ pub enum Os {
     MacOs,
     Linux,
     Android,
+    /// Windows with the MSVC environment.
+    Windows,
 }
 
 /// A target the builder can produce stubs and jump tables for. Anything else
-/// (PE, iOS, 32-bit, other architectures) is refused when the triple is
-/// parsed, never guessed at.
+/// (iOS, GNU-environment Windows, 32-bit, other architectures) is refused
+/// when the triple is parsed, never guessed at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Target {
     pub arch: Arch,
@@ -64,11 +73,12 @@ pub struct Target {
 
 impl Target {
     /// Parse a rustc target triple such as `aarch64-apple-darwin`,
-    /// `x86_64-unknown-linux-gnu` or `aarch64-linux-android`.
+    /// `x86_64-unknown-linux-gnu`, `aarch64-linux-android` or
+    /// `x86_64-pc-windows-msvc`.
     pub fn from_triple(triple: &str) -> Result<Self, HotpatchError> {
         let refuse = || {
             HotpatchError::unsupported(format!(
-                "hot-patch target `{triple}` is not supported (ELF or Mach-O on aarch64/x86_64 only)"
+                "hot-patch target `{triple}` is not supported (ELF, Mach-O or MSVC PE on aarch64/x86_64 only)"
             ))
         };
         let parts: Vec<&str> = triple.split('-').collect();
@@ -82,6 +92,7 @@ impl Target {
             ["apple", "darwin"] => Os::MacOs,
             ["linux", "android"] => Os::Android,
             ["unknown", "linux", "gnu" | "musl"] => Os::Linux,
+            ["pc", "windows", "msvc"] => Os::Windows,
             _ => return Err(refuse()),
         };
         Ok(Self { arch, os })
@@ -92,15 +103,16 @@ impl Target {
         match self.os {
             Os::MacOs => Format::MachO,
             Os::Linux | Os::Android => Format::Elf,
+            Os::Windows => Format::Pe,
         }
     }
 
     /// The prefix the platform's symbol tables put on a C-level name: `_` on
-    /// Darwin, nothing on ELF.
+    /// Darwin, nothing on ELF or on 64-bit PE/COFF.
     pub fn symbol_prefix(self) -> &'static str {
         match self.format() {
             Format::MachO => "_",
-            Format::Elf => "",
+            Format::Elf | Format::Pe => "",
         }
     }
 
@@ -123,6 +135,9 @@ impl Target {
         match self.format() {
             Format::Elf => object::BinaryFormat::Elf,
             Format::MachO => object::BinaryFormat::MachO,
+            // The relocatable objects; a linked PE image is read through its
+            // PDB, never through `object`.
+            Format::Pe => object::BinaryFormat::Coff,
         }
     }
 
@@ -244,7 +259,7 @@ impl ImageSymbols {
         let file = parse_object(bytes, what)?;
         target.check(&file, what)?;
 
-        let mut by_name: HashMap<String, CachedSymbol> = HashMap::new();
+        let mut entries = Vec::new();
         for symbol in file.symbols() {
             let Ok(name) = symbol.name() else { continue };
             if name.is_empty() {
@@ -270,10 +285,34 @@ impl ImageSymbols {
                     _ => RawFlags::None,
                 },
             };
-            match by_name.get(name) {
+            entries.push((name.to_string(), cached));
+        }
+
+        let tls_inits = match target.format() {
+            Format::Elf => elf_tls_inits(&file),
+            Format::MachO => macho_tls_inits(&file),
+            // COFF thread-locals are not resolved; a stub that needs one
+            // refuses it for want of an initializer.
+            Format::Pe => HashMap::new(),
+        };
+        Ok(Self::from_entries(target, entries, tls_inits))
+    }
+
+    /// An image's symbol table from entries read elsewhere: a PE image's
+    /// PDB ([`super::pe`]). When a name repeats, the entry ranked first
+    /// (section-defined global, then local, absolute, other, undefined)
+    /// wins, the earliest among equals.
+    pub fn from_entries(
+        target: Target,
+        entries: impl IntoIterator<Item = (String, CachedSymbol)>,
+        tls_inits: HashMap<String, Vec<u8>>,
+    ) -> Self {
+        let mut by_name: HashMap<String, CachedSymbol> = HashMap::new();
+        for (name, cached) in entries {
+            match by_name.get(&name) {
                 Some(existing) if existing.rank() <= cached.rank() => {}
                 _ => {
-                    by_name.insert(name.to_string(), cached);
+                    by_name.insert(name, cached);
                 }
             }
         }
@@ -286,17 +325,12 @@ impl ImageSymbols {
         text_by_address.sort();
         text_by_address.dedup_by_key(|(address, _, _)| *address);
 
-        let tls_inits = match target.format() {
-            Format::Elf => elf_tls_inits(&file),
-            Format::MachO => macho_tls_inits(&file),
-        };
-
-        Ok(Self {
+        Self {
             target,
             by_name,
             text_by_address,
             tls_inits,
-        })
+        }
     }
 
     pub fn target(&self) -> Target {
@@ -468,7 +502,18 @@ impl SymbolCache {
         let path = path.into();
         let what = format!("base image `{}`", path.display());
         let symbols = ImageSymbols::parse(bytes, target, &what)?;
-        let anchor = target.anchor_symbol();
+        Self::from_symbols(path, symbols)
+    }
+
+    /// The cache over a symbol table already read (a PE image's, from its
+    /// PDB); `path` names the image.
+    pub fn from_symbols(
+        path: impl Into<PathBuf>,
+        symbols: ImageSymbols,
+    ) -> Result<Self, HotpatchError> {
+        let path = path.into();
+        let what = format!("base image `{}`", path.display());
+        let anchor = symbols.target().anchor_symbol();
         let anchor_address = symbols
             .get(&anchor)
             .filter(|s| s.is_section_defined() && s.kind == SymbolKind::Text)
@@ -670,7 +715,7 @@ mod tests {
     #[test]
     fn unknown_triples_are_builder_unsupported() {
         for triple in [
-            "x86_64-pc-windows-msvc",
+            "x86_64-pc-windows-gnu",
             "aarch64-apple-ios",
             "aarch64-apple-ios-sim",
             "riscv64gc-unknown-linux-gnu",
