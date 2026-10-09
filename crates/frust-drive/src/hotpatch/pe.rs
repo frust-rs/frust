@@ -5,11 +5,16 @@
 //! the PDB's global symbol stream, as in dioxus-cli 0.7.10's
 //! `HotpatchModuleCache::new` and `create_windows_jump_table`
 //! (`build/patch.rs`): every public (`S_PUB32`) and data (`S_*DATA32`)
-//! record, keyed by name, addressed by RVA (a record with no RVA is
-//! undefined). A public flagged as a function is text, anything else data.
-//! Addresses stay RVAs, so the anchor's RVA is the link-time reference and
-//! the runtime's slide is the image's load address; the fat exe and every
-//! patch DLL link with `/HIGHENTROPYVA:NO`
+//! record, keyed by name (a record with no RVA is undefined). A public
+//! flagged as a function is text, anything else data. Every address is a
+//! VA: the image's preferred `ImageBase` (from its PE32+ optional header,
+//! [`image_base`]) plus the record's RVA, the link-time address the runtime
+//! measures a slide from (`frust_hotpatch` registers a PE image's slide as
+//! its load base minus its preferred `ImageBase`, as for ELF and Mach-O).
+//! The anchor's VA is therefore the jump table's `aslr_reference` for the
+//! fat exe and its `new_base_address` for a patch DLL; an x64 fat exe,
+//! linked at its fixed base with ASLR off, has slide 0. The fat exe and
+//! every patch DLL link with `/HIGHENTROPYVA:NO`
 //! ([`HIGH_ENTROPY_VA_OFF`](super::fat_link::HIGH_ENTROPY_VA_OFF)).
 //!
 //! Unlike dx, the PDB is opened only after checking it is the image's own:
@@ -22,12 +27,10 @@
 //! PDB is opened; the PDB reader is a Windows-host dependency, so off
 //! Windows every reader here answers `BuilderUnsupported`.
 //!
-//! The record-to-cache rule ([`image_symbols_from_records`]), the CodeView
-//! reader ([`codeview`]), the stub's PE arms and the jump table (which
-//! matches PDB-built tables by name, anchored on [`ANCHOR_SYMBOL`] exactly
-//! as for ELF and Mach-O) work on every host. Windows hot patching stays
-//! apply-disabled: the app does not advertise the `HotPatch` capability on
-//! Windows, so a session there never applies a patch.
+//! The record-to-cache rule ([`image_symbols_from_records`]), the header
+//! readers ([`codeview`], [`image_base`]), the stub's PE arms and the jump
+//! table (which matches PDB-built tables by name, anchored on
+//! [`ANCHOR_SYMBOL`] exactly as for ELF and Mach-O) work on every host.
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +51,8 @@ pub const MACHINE_ARM64: u16 = 0xaa64;
 const DEBUG_TYPE_CODEVIEW: u32 = 2;
 /// The PE32+ optional-header magic.
 const PE32_PLUS_MAGIC: u16 = 0x20b;
+/// `ImageBase`'s offset in a PE32+ optional header.
+const IMAGE_BASE_OFFSET: usize = 24;
 /// The debug directory's index among the optional header's data directories.
 const DEBUG_DIRECTORY_INDEX: usize = 6;
 /// One `IMAGE_DEBUG_DIRECTORY` entry.
@@ -87,11 +92,14 @@ pub struct PdbRecord {
     pub kind: RecordKind,
 }
 
-/// The records of one image's PDB and the image's machine.
+/// The records of one image's PDB, the image's machine and its preferred
+/// base.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PdbImage {
     /// The COFF machine of the image ([`MACHINE_AMD64`], [`MACHINE_ARM64`]).
     pub machine: u16,
+    /// The image's preferred `ImageBase`, added to every record's RVA.
+    pub image_base: u64,
     pub records: Vec<PdbRecord>,
 }
 
@@ -100,16 +108,19 @@ pub struct PdbImage {
 /// link supplies its copy (`/defaultlib:msvcrt`), so the base's is entered
 /// as undefined and the stub leaves the reference to that link, as for a
 /// symbol the base imports. `_fltused` is referenced by every object that
-/// uses floating point, and the base's copy sits wherever ASLR loaded the
-/// exe — above 4 GiB, where the stub refuses a data symbol.
+/// uses floating point, and the base's copy sits wherever the exe loaded —
+/// above 4 GiB for an exe that keeps ASLR, where the stub refuses a data
+/// symbol.
 pub const CRT_LINK_MARKERS: &[&str] = &["_fltused"];
 
 /// dx's cache rule over PDB records: each named record becomes an entry at
-/// its RVA (undefined at 0 without one), text when it is a public function
-/// and data otherwise. A public wins over a data record of the same name.
-/// A [`CRT_LINK_MARKERS`] name is undefined. `target` must be a PE target.
+/// its VA, `image_base` plus its RVA (undefined at 0 without an RVA), text
+/// when it is a public function and data otherwise. A public wins over a
+/// data record of the same name. A [`CRT_LINK_MARKERS`] name is undefined.
+/// `target` must be a PE target.
 pub fn image_symbols_from_records(
     target: Target,
+    image_base: u64,
     records: &[PdbRecord],
 ) -> Result<ImageSymbols, HotpatchError> {
     if target.format() != Format::Pe {
@@ -118,19 +129,25 @@ pub fn image_symbols_from_records(
             target.format()
         )));
     }
+    if image_base.checked_add(u64::from(u32::MAX)).is_none() {
+        return Err(HotpatchError::unsupported(format!(
+            "image base {image_base:#x} leaves no room for the image's RVAs"
+        )));
+    }
     let entry = |record: &PdbRecord| {
         let kind = match record.kind {
             RecordKind::Public { function: true } => SymbolKind::Text,
             RecordKind::Public { function: false } | RecordKind::Data => SymbolKind::Data,
         };
-        let rva = record
+        let address = record
             .rva
-            .filter(|_| !CRT_LINK_MARKERS.contains(&record.name.as_str()));
+            .filter(|_| !CRT_LINK_MARKERS.contains(&record.name.as_str()))
+            .map(|rva| image_base + u64::from(rva));
         let cached = CachedSymbol {
-            address: u64::from(rva.unwrap_or(0)),
+            address: address.unwrap_or(0),
             size: 0,
             kind,
-            placement: if rva.is_some() {
+            placement: if address.is_some() {
                 Placement::Section
             } else {
                 Placement::Undefined
@@ -156,11 +173,14 @@ pub fn image_symbols_from_records(
     ))
 }
 
-/// The CodeView (`RSDS`) record a PE image keeps for its PDB.
+/// The CodeView (`RSDS`) record a PE image keeps for its PDB, with the
+/// image's machine and preferred base.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeView {
     /// The image's COFF machine.
     pub machine: u16,
+    /// The image's preferred `ImageBase` ([`image_base`]).
+    pub image_base: u64,
     /// The PDB GUID as its fields: `Data1`, `Data2`, `Data3`, `Data4`.
     pub guid: (u32, u16, u16, [u8; 8]),
     pub age: u32,
@@ -168,39 +188,88 @@ pub struct CodeView {
     pub pdb_name: String,
 }
 
-/// Reads the CodeView record of the PE32+ image `bytes` (`what` names it in
-/// errors): DOS header, PE signature, COFF header, optional header, the
-/// debug data directory and its `IMAGE_DEBUG_TYPE_CODEVIEW` entry. Anything
-/// out of bounds or missing is [`HotpatchError::BuilderUnsupported`].
-pub fn codeview(bytes: &[u8], what: &str) -> Result<CodeView, HotpatchError> {
+fn le_at<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
+    bytes.get(offset..offset.checked_add(N)?)?.try_into().ok()
+}
+
+fn u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
+    le_at(bytes, offset).map(u16::from_le_bytes)
+}
+
+fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+    le_at(bytes, offset).map(u32::from_le_bytes)
+}
+
+fn u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
+    le_at(bytes, offset).map(u64::from_le_bytes)
+}
+
+/// Where a PE32+ image's headers sit, and the two fields every reader here
+/// needs.
+struct Headers {
+    machine: u16,
+    sections: usize,
+    /// File offset of the optional header.
+    optional: usize,
+    optional_size: usize,
+    image_base: u64,
+}
+
+/// Walks the DOS header, PE signature, COFF header and PE32+ optional
+/// header of `bytes` (`what` names it in errors).
+fn headers(bytes: &[u8], what: &str) -> Result<Headers, HotpatchError> {
     let bad =
         |why: &str| HotpatchError::unsupported(format!("{what} is not a usable PE image: {why}"));
-    let u16_at = |offset: usize| {
-        bytes
-            .get(offset..offset + 2)
-            .map(|b| u16::from_le_bytes([b[0], b[1]]))
-    };
-    let u32_at = |offset: usize| {
-        bytes
-            .get(offset..offset + 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
-
     if bytes.get(..2) != Some(b"MZ") {
         return Err(bad("no DOS header"));
     }
-    let pe = u32_at(0x3c).ok_or_else(|| bad("truncated DOS header"))? as usize;
+    let pe = u32_at(bytes, 0x3c).ok_or_else(|| bad("truncated DOS header"))? as usize;
     if bytes.get(pe..pe + 4) != Some(b"PE\0\0") {
         return Err(bad("no PE signature"));
     }
     let coff = pe + 4;
-    let machine = u16_at(coff).ok_or_else(|| bad("truncated COFF header"))?;
-    let sections = u16_at(coff + 2).ok_or_else(|| bad("truncated COFF header"))? as usize;
-    let optional_size = u16_at(coff + 16).ok_or_else(|| bad("truncated COFF header"))? as usize;
+    let truncated_coff = || bad("truncated COFF header");
+    let machine = u16_at(bytes, coff).ok_or_else(truncated_coff)?;
+    let sections = u16_at(bytes, coff + 2).ok_or_else(truncated_coff)? as usize;
+    let optional_size = u16_at(bytes, coff + 16).ok_or_else(truncated_coff)? as usize;
     let optional = coff + 20;
-    if u16_at(optional) != Some(PE32_PLUS_MAGIC) {
+    if u16_at(bytes, optional) != Some(PE32_PLUS_MAGIC) {
         return Err(bad("not a PE32+ (64-bit) image"));
     }
+    let image_base = u64_at(bytes, optional + IMAGE_BASE_OFFSET)
+        .ok_or_else(|| bad("truncated optional header"))?;
+    Ok(Headers {
+        machine,
+        sections,
+        optional,
+        optional_size,
+        image_base,
+    })
+}
+
+/// The preferred `ImageBase` of the PE32+ image `bytes` (`what` names it in
+/// errors): the address its RVAs are offsets from at link time, so a VA is
+/// `ImageBase + RVA`. Anything out of bounds is
+/// [`HotpatchError::BuilderUnsupported`].
+pub fn image_base(bytes: &[u8], what: &str) -> Result<u64, HotpatchError> {
+    headers(bytes, what).map(|headers| headers.image_base)
+}
+
+/// Reads the CodeView record of the PE32+ image `bytes` (`what` names it in
+/// errors): the headers ([`image_base`]), the debug data directory and its
+/// `IMAGE_DEBUG_TYPE_CODEVIEW` entry. Anything out of bounds or missing is
+/// [`HotpatchError::BuilderUnsupported`].
+pub fn codeview(bytes: &[u8], what: &str) -> Result<CodeView, HotpatchError> {
+    let bad =
+        |why: &str| HotpatchError::unsupported(format!("{what} is not a usable PE image: {why}"));
+    let u32_at = |offset: usize| u32_at(bytes, offset);
+    let Headers {
+        machine,
+        sections,
+        optional,
+        optional_size,
+        image_base,
+    } = headers(bytes, what)?;
     let directories = u32_at(optional + 108).ok_or_else(|| bad("truncated optional header"))?;
     if (directories as usize) <= DEBUG_DIRECTORY_INDEX
         || 112 + 8 * (DEBUG_DIRECTORY_INDEX + 1) > optional_size
@@ -253,6 +322,7 @@ pub fn codeview(bytes: &[u8], what: &str) -> Result<CodeView, HotpatchError> {
         let name = &name[..name.iter().position(|b| *b == 0).unwrap_or(name.len())];
         return Ok(CodeView {
             machine,
+            image_base,
             guid: (
                 field(4),
                 u16::from_le_bytes([record[8], record[9]]),
@@ -308,7 +378,8 @@ pub fn open_pdb(
     Ok((view, pdb))
 }
 
-/// Reads the public and data records of `image`'s own PDB ([`open_pdb`]).
+/// Reads the public and data records of `image`'s own PDB ([`open_pdb`]),
+/// with the image's preferred base from its headers.
 #[cfg(windows)]
 pub fn read_pdb(image: &Path) -> Result<PdbImage, HotpatchError> {
     use pdb::FallibleIterator;
@@ -341,6 +412,7 @@ pub fn read_pdb(image: &Path) -> Result<PdbImage, HotpatchError> {
     }
     Ok(PdbImage {
         machine: view.machine,
+        image_base: view.image_base,
         records,
     })
 }
@@ -367,16 +439,17 @@ pub fn load_image_symbols(image: &Path, target: Target) -> Result<ImageSymbols, 
             target.arch
         )));
     }
-    image_symbols_from_records(target, &pdb.records)
+    image_symbols_from_records(target, pdb.image_base, &pdb.records)
 }
 
 /// The session's patch cache over the base PE image `image`, read from its
-/// own PDB; the anchor's RVA is its link-time address.
+/// own PDB; the anchor's VA is its link-time address.
 pub fn load_symbol_cache(image: &Path, target: Target) -> Result<SymbolCache, HotpatchError> {
     SymbolCache::from_symbols(image, load_image_symbols(image, target)?)
 }
 
-/// The RVA of the [`ANCHOR_SYMBOL`] public function in `image`'s own PDB.
+/// The VA (preferred `ImageBase` + RVA) of the [`ANCHOR_SYMBOL`] public
+/// function in `image`'s own PDB.
 pub fn anchor_address(image: &Path) -> Result<u64, HotpatchError> {
     anchor_in(&read_pdb(image)?, image)
 }
@@ -386,7 +459,7 @@ fn anchor_in(pdb: &PdbImage, image: &Path) -> Result<u64, HotpatchError> {
         .iter()
         .find_map(|record| match (record.kind, record.rva) {
             (RecordKind::Public { function: true }, Some(rva)) if record.name == ANCHOR_SYMBOL => {
-                Some(u64::from(rva))
+                pdb.image_base.checked_add(u64::from(rva))
             }
             _ => None,
         })
@@ -415,6 +488,9 @@ mod tests {
 
     const X86_64: &str = "x86_64-pc-windows-msvc";
     const AARCH64: &str = "aarch64-pc-windows-msvc";
+    /// The fat exe's preferred base, and an lld-linked DLL's default one.
+    const EXE_BASE: u64 = super::super::fat_link::FAT_IMAGE_BASE;
+    const DLL_BASE: u64 = 0x1_8000_0000;
 
     fn target(triple: &str) -> Target {
         Target::from_triple(triple).unwrap()
@@ -458,7 +534,8 @@ mod tests {
     }
 
     fn base_cache(triple: &str) -> SymbolCache {
-        let symbols = image_symbols_from_records(target(triple), &base_records()).unwrap();
+        let symbols =
+            image_symbols_from_records(target(triple), EXE_BASE, &base_records()).unwrap();
         SymbolCache::from_symbols("app.exe", symbols).unwrap()
     }
 
@@ -490,39 +567,57 @@ mod tests {
     }
 
     #[test]
-    fn pdb_records_build_the_cache_and_find_the_anchor() {
+    fn pdb_records_build_the_cache_at_their_vas_and_find_the_anchor() {
         let cache = base_cache(X86_64);
         let symbols = cache.symbols();
-        assert_eq!(cache.anchor_address(), 0x1080);
+        assert_eq!(cache.anchor_address(), EXE_BASE + 0x1080);
         assert_eq!(cache.path(), Path::new("app.exe"));
 
         let foo = symbols.get("foo_fn").unwrap();
         assert_eq!(
             (foo.kind, foo.address, foo.placement),
-            (SymbolKind::Text, 0x1040, Placement::Section),
+            (SymbolKind::Text, EXE_BASE + 0x1040, Placement::Section),
             "the public wins over the same-named data record"
         );
         let bar = symbols.get("BAR_DATA").unwrap();
-        assert_eq!((bar.kind, bar.address), (SymbolKind::Data, 0x8000));
+        assert_eq!(
+            (bar.kind, bar.address),
+            (SymbolKind::Data, EXE_BASE + 0x8000)
+        );
         let debug_name = symbols.get("app::BAR_DATA").unwrap();
         assert_eq!(debug_name.kind, SymbolKind::Data);
         let unplaced = symbols.get("unplaced").unwrap();
         assert!(unplaced.is_undefined());
-        assert_eq!(unplaced.address, 0);
-        assert_eq!(symbols.symbol_at(0x1044), Some("foo_fn"));
+        assert_eq!(unplaced.address, 0, "no RVA, no VA");
+        assert_eq!(symbols.symbol_at(EXE_BASE + 0x1044), Some("foo_fn"));
+        assert_eq!(symbols.symbol_at(0x1044), None, "an RVA is not an address");
 
-        // The anchor helper reads the same record.
+        // The anchor helper reads the same record at the same VA.
         let pdb = PdbImage {
             machine: MACHINE_AMD64,
+            image_base: EXE_BASE,
             records: base_records(),
         };
-        assert_eq!(anchor_in(&pdb, Path::new("app.exe")).unwrap(), 0x1080);
+        assert_eq!(
+            anchor_in(&pdb, Path::new("app.exe")).unwrap(),
+            cache.anchor_address()
+        );
+
+        // A DLL's records sit above its own base, past 4 GiB.
+        let dll = image_symbols_from_records(target(X86_64), DLL_BASE, &base_records()).unwrap();
+        assert_eq!(dll.defined_address("foo_fn"), Some(DLL_BASE + 0x1040));
+
+        // A base with no room for a 32-bit RVA is refused, never wrapped.
+        assert!(matches!(
+            image_symbols_from_records(target(X86_64), u64::MAX - 0x1000, &base_records()),
+            Err(HotpatchError::BuilderUnsupported { .. })
+        ));
     }
 
     #[test]
     fn a_pdb_without_the_anchor_or_for_another_format_is_refused() {
         let records = vec![public("main", 0x1000, true)];
-        let symbols = image_symbols_from_records(target(X86_64), &records).unwrap();
+        let symbols = image_symbols_from_records(target(X86_64), EXE_BASE, &records).unwrap();
         let err = SymbolCache::from_symbols("app.exe", symbols).unwrap_err();
         assert!(
             matches!(&err, HotpatchError::BuilderUnsupported { detail } if detail.contains(ANCHOR_SYMBOL)),
@@ -530,6 +625,7 @@ mod tests {
         );
         let pdb = PdbImage {
             machine: MACHINE_AMD64,
+            image_base: EXE_BASE,
             records: vec![
                 // A data public or an unplaced function is not the anchor.
                 public(ANCHOR_SYMBOL, 0x1000, false),
@@ -547,13 +643,13 @@ mod tests {
 
         let elf = Target::from_triple("x86_64-unknown-linux-gnu").unwrap();
         assert!(matches!(
-            image_symbols_from_records(elf, &base_records()),
+            image_symbols_from_records(elf, EXE_BASE, &base_records()),
             Err(HotpatchError::BuilderUnsupported { .. })
         ));
     }
 
     #[test]
-    fn the_pe_jump_table_matches_names_and_rebases_on_the_anchor() {
+    fn the_pe_jump_table_carries_anchor_vas_whose_offsets_are_the_runtime_slides() {
         let cache = base_cache(X86_64);
         let patch_records = vec![
             public("bar_fn", 0x2000, true),
@@ -562,30 +658,37 @@ mod tests {
             public("foo_fn", 0x20c0, true),
             public("BAR_DATA", 0x3000, false),
         ];
-        let patch = image_symbols_from_records(target(X86_64), &patch_records).unwrap();
+        let patch = image_symbols_from_records(target(X86_64), DLL_BASE, &patch_records).unwrap();
         let table = create_jump_table(&cache, &patch).unwrap();
 
-        assert_eq!(table.aslr_reference, 0x1080);
-        assert_eq!(table.new_base_address, 0x2080);
-        let expected: HashMap<u64, u64> =
-            [(0x1040, 0x20c0), (0x1080, 0x2080), (0x8000, 0x3000)].into();
+        assert_eq!(table.aslr_reference, EXE_BASE + 0x1080);
+        assert_eq!(table.new_base_address, DLL_BASE + 0x2080);
+        let expected: HashMap<u64, u64> = [
+            (EXE_BASE + 0x1040, DLL_BASE + 0x20c0),
+            (EXE_BASE + 0x1080, DLL_BASE + 0x2080),
+            (EXE_BASE + 0x8000, DLL_BASE + 0x3000),
+        ]
+        .into();
         assert_eq!(table.map, expected);
 
-        // The runtime adds each image's anchor slide: with the exe at
-        // 0x1_4000_0000 and the DLL at 0x1_8000_0000 (RVAs are link-time
-        // addresses at base 0), foo_fn's runtime address maps to the patch's.
-        let (exe_base, dll_base) = (0x1_4000_0000_u64, 0x1_8000_0000_u64);
-        let old_offset = (exe_base + 0x1080) - table.aslr_reference;
-        let new_offset = (dll_base + 0x2080) - table.new_base_address;
-        assert_eq!((old_offset, new_offset), (exe_base, dll_base));
+        // The runtime's check: each image's implied offset (its runtime
+        // anchor minus the table's) must be its slide, load base minus
+        // preferred `ImageBase`. The fat exe loads at its fixed base (slide
+        // 0); the DLL wherever the loader put it.
+        let dll_load = 0x7ffa_1230_0000_u64;
+        let exe_anchor_runtime = EXE_BASE + 0x1080;
+        let dll_anchor_runtime = dll_load + 0x2080;
+        let old_offset = exe_anchor_runtime.wrapping_sub(table.aslr_reference);
+        let new_offset = dll_anchor_runtime.wrapping_sub(table.new_base_address);
+        assert_eq!((old_offset, new_offset), (0, dll_load - DLL_BASE));
         let rebased: HashMap<u64, u64> = table
             .map
             .iter()
             .map(|(old, new)| (old + old_offset, new + new_offset))
             .collect();
         assert_eq!(
-            rebased.get(&(exe_base + 0x1040)),
-            Some(&(dll_base + 0x20c0))
+            rebased.get(&(EXE_BASE + 0x1040)),
+            Some(&(dll_load + 0x20c0))
         );
     }
 
@@ -676,8 +779,11 @@ mod tests {
             assert_eq!(file.architecture(), target.object_architecture());
 
             // `__imp_X` is an 8-byte data slot holding X's runtime address.
-            assert_eq!(slot_value(&file, "__imp_BAR_DATA"), 0x8000 + SLIDE);
-            assert_eq!(slot_value(&file, "__imp_foo_fn"), 0x1040 + SLIDE);
+            assert_eq!(
+                slot_value(&file, "__imp_BAR_DATA"),
+                EXE_BASE + 0x8000 + SLIDE
+            );
+            assert_eq!(slot_value(&file, "__imp_foo_fn"), EXE_BASE + 0x1040 + SLIDE);
             // The base imports GetLastError itself: the patch's own link
             // resolves it through the import libraries.
             assert!(find(&file, "__imp_GetLastError").is_none(), "{triple}");
@@ -691,7 +797,7 @@ mod tests {
                 .section_by_index(thunk.section_index().unwrap())
                 .unwrap();
             let start = (thunk.address() - section.address()) as usize;
-            let expected = windows_thunk_code(target.arch, 0x1040 + SLIDE);
+            let expected = windows_thunk_code(target.arch, EXE_BASE + 0x1040 + SLIDE);
             assert_eq!(
                 &section.data().unwrap()[start..start + expected.len()],
                 &expected[..],
@@ -724,14 +830,21 @@ mod tests {
             strong: ["BAR_DATA".to_string()].into(),
             weak: BTreeSet::new(),
         };
-        let stub = build_stub(&cache, &low, anchor + 0x10_0000).unwrap();
         // `object` reports no address for a COFF absolute symbol: read the
         // raw value.
         use object::read::coff::ImageSymbol as _;
-        let coff = object::read::coff::CoffFile::<&[u8]>::parse(&*stub).unwrap();
-        let bar = coff.symbols().find(|s| s.name() == Ok("BAR_DATA")).unwrap();
-        assert_eq!(bar.section(), object::SymbolSection::Absolute);
-        assert_eq!(bar.coff_symbol().value(), 0x8000 + 0x10_0000);
+        let absolute = |stub: &[u8]| {
+            let coff = object::read::coff::CoffFile::<&[u8]>::parse(stub).unwrap();
+            let bar = coff.symbols().find(|s| s.name() == Ok("BAR_DATA")).unwrap();
+            assert_eq!(bar.section(), object::SymbolSection::Absolute);
+            bar.coff_symbol().value()
+        };
+        // At the fixed base (slide 0) the runtime address is the VA itself.
+        let stub = build_stub(&cache, &low, anchor).unwrap();
+        assert_eq!(u64::from(absolute(&stub)), EXE_BASE + 0x8000);
+        // Relocated a little, still below 4 GiB.
+        let stub = build_stub(&cache, &low, anchor + 0x10_0000).unwrap();
+        assert_eq!(u64::from(absolute(&stub)), EXE_BASE + 0x8000 + 0x10_0000);
         let detail = refused(&["BAR_DATA"], anchor + 0x1_4000_0000);
         assert!(detail.contains("32 bits"), "{detail}");
 
@@ -748,7 +861,7 @@ mod tests {
     fn a_crt_link_marker_is_left_to_the_patch_link_wherever_the_base_loaded() {
         let mut records = base_records();
         records.push(public("_fltused", 0x9100, false));
-        let symbols = image_symbols_from_records(target(X86_64), &records).unwrap();
+        let symbols = image_symbols_from_records(target(X86_64), EXE_BASE, &records).unwrap();
         let cache = SymbolCache::from_symbols("app.exe", symbols).unwrap();
         assert!(cache.symbols().get("_fltused").unwrap().is_undefined());
 
@@ -771,8 +884,11 @@ mod tests {
         ));
     }
 
-    /// A minimal PE32+ image: one `.rdata` section holding a debug directory
-    /// whose CodeView record names `app.pdb`.
+    /// The preferred base [`pe_image`] records.
+    const FIXTURE_BASE: u64 = 0x1_4000_0000;
+
+    /// A minimal PE32+ image at [`FIXTURE_BASE`]: one `.rdata` section
+    /// holding a debug directory whose CodeView record names `app.pdb`.
     fn pe_image(machine: u16, guid: [u8; 16], age: u32) -> Vec<u8> {
         let mut image = vec![0u8; 0x400];
         let put16 = |image: &mut Vec<u8>, at: usize, v: u16| {
@@ -789,6 +905,7 @@ mod tests {
         put16(&mut image, 0x54, 240); // PE32+ optional header, 16 directories
         let optional = 0x58;
         put16(&mut image, optional, PE32_PLUS_MAGIC);
+        image[optional + 24..optional + 32].copy_from_slice(&FIXTURE_BASE.to_le_bytes());
         put32(&mut image, optional + 108, 16);
         put32(&mut image, optional + 112 + 8 * 6, 0x1000); // debug directory RVA
         put32(&mut image, optional + 112 + 8 * 6 + 4, 28);
@@ -815,11 +932,13 @@ mod tests {
         let guid = [
             0x78, 0x56, 0x34, 0x12, 0xbc, 0x9a, 0xf0, 0xde, 1, 2, 3, 4, 5, 6, 7, 8,
         ];
-        let view = codeview(&pe_image(MACHINE_ARM64, guid, 3), "app.exe").unwrap();
+        let image = pe_image(MACHINE_ARM64, guid, 3);
+        let view = codeview(&image, "app.exe").unwrap();
         assert_eq!(
             view,
             CodeView {
                 machine: MACHINE_ARM64,
+                image_base: FIXTURE_BASE,
                 guid: (0x1234_5678, 0x9abc, 0xdef0, [1, 2, 3, 4, 5, 6, 7, 8]),
                 age: 3,
                 pdb_name: "app.pdb".to_string(),
@@ -837,11 +956,17 @@ mod tests {
         let mut pe32 = pe_image(MACHINE_AMD64, guid, 1);
         pe32[0x58] = 0x0b;
         pe32[0x59] = 0x01;
+        // The base needs only the headers, not a debug directory.
+        assert_eq!(image_base(&image, "app.exe").unwrap(), FIXTURE_BASE);
+        assert_eq!(image_base(&no_debug, "app.exe").unwrap(), FIXTURE_BASE);
+        let mut short_header = image.clone();
+        short_header.truncate(0x58 + 28);
         for (case, bytes) in [
             ("garbage", b"definitely not a PE image".to_vec()),
             ("no debug directory", no_debug),
             ("truncated", truncated),
-            ("PE32", pe32),
+            ("PE32", pe32.clone()),
+            ("short optional header", short_header.clone()),
         ] {
             assert!(
                 matches!(
@@ -849,6 +974,19 @@ mod tests {
                     Err(HotpatchError::BuilderUnsupported { .. })
                 ),
                 "{case}"
+            );
+        }
+        for (case, bytes) in [
+            ("garbage", b"definitely not a PE image".to_vec()),
+            ("PE32", pe32),
+            ("short optional header", short_header),
+        ] {
+            assert!(
+                matches!(
+                    image_base(&bytes, "app.exe"),
+                    Err(HotpatchError::BuilderUnsupported { .. })
+                ),
+                "image_base: {case}"
             );
         }
     }
@@ -973,11 +1111,30 @@ pub extern "C" fn probe_text() -> u64 { 42 }
             })
         }
 
+        /// The image's preferred base read from its headers, and its PDB's
+        /// anchor RVA: the two halves of the anchor's VA.
+        fn base_and_anchor_rva(image: &Path) -> (u64, u64) {
+            let base = image_base(&std::fs::read(image).unwrap(), "fixture").unwrap();
+            let pdb = read_pdb(image).unwrap();
+            assert_eq!(pdb.image_base, base, "{image:?}");
+            let rva = pdb
+                .records
+                .iter()
+                .find(|r| {
+                    r.name == ANCHOR_SYMBOL && r.kind == RecordKind::Public { function: true }
+                })
+                .and_then(|r| r.rva)
+                .expect("the anchor's RVA");
+            (base, u64::from(rva))
+        }
+
         #[test]
-        fn a_rustc_built_exe_pdb_feeds_the_cache_at_the_running_rvas() {
+        fn a_rustc_built_exe_pdb_feeds_the_cache_at_the_image_vas() {
             let dir = fixture_dir("cache");
             let exe = rustc(&dir, "pe_probe", "bin", BIN_SOURCE);
             let cache = load_symbol_cache(&exe, host()).unwrap();
+            let (base, anchor_rva) = base_and_anchor_rva(&exe);
+            assert_eq!(cache.anchor_address(), base + anchor_rva, "{base:#x}");
             // The generic loader reads the same PDB.
             let generic = SymbolCache::load(&exe, host()).unwrap();
             assert_eq!(generic.anchor_address(), cache.anchor_address());
@@ -1011,7 +1168,7 @@ pub extern "C" fn probe_text() -> u64 { 42 }
             );
 
             // The running image puts the two functions as far apart as their
-            // PDB RVAs: the cache's addresses are the image's own.
+            // PDB VAs: the cache's addresses are the image's own.
             let run = std::process::Command::new(&exe).output().unwrap();
             assert!(run.status.success(), "{run:?}");
             let stdout = String::from_utf8(run.stdout).unwrap();
@@ -1024,16 +1181,17 @@ pub extern "C" fn probe_text() -> u64 { 42 }
             assert_eq!(
                 text_rt.wrapping_sub(anchor_rt),
                 text.address.wrapping_sub(cache.anchor_address()),
-                "runtime distance equals PDB RVA distance"
+                "runtime distance equals PDB VA distance"
             );
             assert_eq!(
                 data_rt.wrapping_sub(anchor_rt),
                 data.address.wrapping_sub(cache.anchor_address()),
-                "{data_name}: runtime distance equals PDB RVA distance"
+                "{data_name}: runtime distance equals PDB VA distance"
             );
-            // The slide the stub applies is the image's load address.
-            let slide = anchor_rt - cache.anchor_address();
-            assert_eq!(slide & 0xffff, 0, "a 64 KiB-aligned image base: {slide:#x}");
+            // The slide is load base minus preferred base, the runtime's:
+            // both 64 KiB-aligned.
+            let slide = anchor_rt.wrapping_sub(cache.anchor_address());
+            assert_eq!(slide & 0xffff, 0, "a 64 KiB-aligned slide: {slide:#x}");
             let _ = std::fs::remove_dir_all(&dir);
         }
 
@@ -1055,6 +1213,12 @@ pub extern "C" fn probe_text() -> u64 { 42 }
             assert_eq!(table.map.get(&old), Some(&new));
             assert_eq!(table.aslr_reference, cache.anchor_address());
             assert_eq!(table.new_base_address, anchor_address(&dll).unwrap());
+            // Both anchors are VAs: preferred base plus RVA.
+            let (exe_base, exe_rva) = base_and_anchor_rva(&exe);
+            let (dll_base, dll_rva) = base_and_anchor_rva(&dll);
+            assert_eq!(table.aslr_reference, exe_base + exe_rva);
+            assert_eq!(table.new_base_address, dll_base + dll_rva);
+            assert!(dll_base > u64::from(u32::MAX), "a DLL base: {dll_base:#x}");
             let _ = std::fs::remove_dir_all(&dir);
         }
 

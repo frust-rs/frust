@@ -17,7 +17,9 @@
 //! differ, as in dx: a text thunk loads the address into a scratch register
 //! and jumps through it (`movabs rax` / `movz`+`movk` into `x16`), and an
 //! `__imp_<name>` reference — link.exe's import-address slot — becomes an
-//! 8-byte data slot holding `<name>`'s runtime address. A COFF absolute
+//! 8-byte data slot holding `<name>`'s runtime address. The cache's PE
+//! addresses are VAs (preferred `ImageBase` + RVA, [`super::pe`]), so the
+//! slide is 0 for an exe loaded at its preferred base. A COFF absolute
 //! symbol holds only 32 bits: the fat exe links at a fixed base below 4 GiB
 //! with ASLR off ([`FAT_IMAGE_BASE`](super::fat_link::FAT_IMAGE_BASE)) so
 //! base data fits, and a data symbol whose runtime address still does not
