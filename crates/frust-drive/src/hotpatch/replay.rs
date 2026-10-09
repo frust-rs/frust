@@ -1,12 +1,16 @@
 //! Workspace replay: recompile modified (package, target) units by running
 //! their captured rustc invocations again.
 //!
-//! Each captured invocation runs unchanged, with every crate type it was
-//! captured with, except that `-Clinker` is stripped (a replayed crate must
-//! produce real outputs, not re-enter the no-link interception) and
-//! `--json=artifacts` is forced when absent. Replay writes at the same
-//! paths cargo originally wrote to, so anything that must read the fat
-//! build's outputs (the base DWARF) reads them before the first replay.
+//! Each captured invocation runs again with `-Clinker` stripped (a replayed
+//! crate must produce real outputs, not re-enter the no-link interception)
+//! and `--json=artifacts` forced when absent ([`replay_args`], which the
+//! image unit's intercepted replay uses as is). A lib replayed here
+//! ([`replay_unit`]) emits only its rlib ([`replay_args_rlib_only`]): the
+//! hot run reads nothing else from it, and the cdylib link (MSVC
+//! `link.exe`, ~3 s) and staticlib archive it was captured with are most of
+//! a Windows change's compile time. Replay writes at the same paths cargo
+//! originally wrote to, so anything that must read the fat build's outputs
+//! (the base DWARF) reads them before the first replay.
 //!
 //! Outputs are read from rustc's artifact notifications
 //! (`{"artifact": <path>, "emit": "link"}` on stderr), the parse
@@ -14,8 +18,9 @@
 //! artifact ending in `.rlib`, whatever its name: dioxus-cli's
 //! `-C extra-filename` path and `lib<crate>-*.rlib` glob both miss the
 //! `lib<crate>.rlib` cargo writes for a `["cdylib", "staticlib", "rlib"]`
-//! lib. A missing capture or an unparsable notification is
-//! [`HotpatchError::BuilderUnsupported`]. See `docs/CLI_ARCHITECTURE.md`.
+//! lib, and the rlib-only replay keeps that name. A missing capture or an
+//! unparsable notification is [`HotpatchError::BuilderUnsupported`]. See
+//! `docs/CLI_ARCHITECTURE.md`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -149,6 +154,68 @@ pub fn replay_args(record: &RustcRecord) -> Result<Vec<String>, HotpatchError> {
     Ok(args)
 }
 
+/// [`replay_args`] narrowed to the rlib a lib replay is read for: a `Lib`
+/// record whose `--crate-type` values hold `rlib` or `lib` beside other
+/// types keeps one `--crate-type rlib` (space or `=` form, at the first
+/// such occurrence) and drops every other `--crate-type` flag, comma lists
+/// included. `--emit`, `-C extra-filename`, `--out-dir` and the rest are
+/// untouched, so the rlib keeps its name. A `Bin` record, a single-type
+/// lib, and a lib with no rlib/lib type (it has no rlib to narrow to, and
+/// [`replay_units`] refuses its outcome) are returned as [`replay_args`]
+/// builds them.
+pub fn replay_args_rlib_only(record: &RustcRecord) -> Result<Vec<String>, HotpatchError> {
+    let args = replay_args(record)?;
+    if TargetKind::of(&record.crate_types) == TargetKind::Bin {
+        return Ok(args);
+    }
+    let mut types: Vec<String> = Vec::new();
+    for value in flag_values(&args, CRATE_TYPE)? {
+        for ty in value.split(',').map(str::trim) {
+            if !types.iter().any(|known| known == ty) {
+                types.push(ty.to_string());
+            }
+        }
+    }
+    if types.len() < 2 || !types.iter().any(|ty| is_rlib_type(ty)) {
+        return Ok(args);
+    }
+
+    let equals_prefix = format!("{CRATE_TYPE}=");
+    let mut narrowed = Vec::with_capacity(args.len());
+    let mut kept = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let (value, equals_form) = if arg == CRATE_TYPE {
+            // `flag_values` above refused a trailing `--crate-type`.
+            let Some(value) = iter.next() else { break };
+            (value, false)
+        } else if let Some(value) = arg.strip_prefix(&equals_prefix) {
+            (value.to_string(), true)
+        } else {
+            narrowed.push(arg);
+            continue;
+        };
+        if kept || !value.split(',').map(str::trim).any(is_rlib_type) {
+            continue;
+        }
+        kept = true;
+        if equals_form {
+            narrowed.push(format!("{CRATE_TYPE}=rlib"));
+        } else {
+            narrowed.push(CRATE_TYPE.to_string());
+            narrowed.push("rlib".to_string());
+        }
+    }
+    Ok(narrowed)
+}
+
+const CRATE_TYPE: &str = "--crate-type";
+
+/// `rlib`, or `lib` (rustc's default library type, an rlib).
+fn is_rlib_type(ty: &str) -> bool {
+    ty == "rlib" || ty == "lib"
+}
+
 /// `linker=<path>`, the codegen option being stripped (`linker-flavor=`
 /// and the rest are kept).
 fn is_linker_value(option: Option<&str>) -> bool {
@@ -242,7 +309,9 @@ pub fn parse_notifications(
 }
 
 /// Replays one unit's captured compile in `cwd` (see
-/// [`WorkspaceGraph::replay_cwd`]). A spawn failure is
+/// [`WorkspaceGraph::replay_cwd`]) with [`replay_args_rlib_only`], so a lib
+/// emits only its rlib. Not for the image unit, whose intercepted link
+/// needs every captured crate type. A spawn failure is
 /// [`HotpatchError::Process`]; a successful compile that reports no link
 /// artifact is [`HotpatchError::BuilderUnsupported`].
 pub fn replay_unit(
@@ -254,7 +323,7 @@ pub fn replay_unit(
     let rustc = record.rustc().ok_or_else(|| {
         HotpatchError::unsupported(format!("the {unit} capture has no rustc program"))
     })?;
-    let args = replay_args(record)?;
+    let args = replay_args_rlib_only(record)?;
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     let env = replay_env(record);
     let env: Vec<(&str, &str)> = env
@@ -287,7 +356,8 @@ pub fn replay_unit(
 /// `replay`). Every unit's capture is looked up before anything runs, so a
 /// missing one refuses the whole replay with nothing rewritten. Stops after
 /// the first failed compile, whose outcome is the last one returned. A
-/// successful lib replay must report exactly one rlib.
+/// successful lib replay must report exactly one rlib, the only output it
+/// emits ([`replay_unit`]).
 pub fn replay_units(
     runner: &dyn ProcessRunner,
     graph: &WorkspaceGraph,
@@ -490,14 +560,12 @@ mod tests {
         ReplayUnit::lib("my-app", "my_app")
     }
 
-    /// rustc's stderr for the template lib: dep-info, a warning, then one
-    /// link artifact per crate type.
+    /// rustc's stderr for the template lib's rlib-only replay: dep-info, a
+    /// warning, then the rlib's link artifact.
     fn lib_stderr() -> String {
         [
             format!(r#"{{"$message_type":"artifact","artifact":"{OUT}/my_app.d","emit":"dep-info"}}"#),
             r#"{"$message_type":"diagnostic","message":"unused","level":"warning","rendered":"warning: unused\n"}"#.to_string(),
-            format!(r#"{{"$message_type":"artifact","artifact":"{OUT}/libmy_app.dylib","emit":"link"}}"#),
-            format!(r#"{{"$message_type":"artifact","artifact":"{OUT}/libmy_app.a","emit":"link"}}"#),
             format!(r#"{{"$message_type":"artifact","artifact":"{OUT}/libmy_app.rlib","emit":"link"}}"#),
         ]
         .join("\n")
@@ -519,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn the_template_lib_replays_all_crate_types_without_the_linker_and_finds_its_rlib() {
+    fn the_template_lib_replays_only_its_rlib_without_the_linker_and_finds_it() {
         let graph = template_graph();
         let record = template_lib_record();
         assert!(
@@ -548,10 +616,6 @@ mod tests {
                 "src/lib.rs",
                 "--error-format=json",
                 "--json=diagnostic-rendered-ansi,future-incompat",
-                "--crate-type",
-                "cdylib",
-                "--crate-type",
-                "staticlib",
                 "--crate-type",
                 "rlib",
                 "--emit=dep-info,link",
@@ -585,12 +649,178 @@ mod tests {
             outcome.rlib().unwrap(),
             Path::new("/p/my-app/target/debug/deps/libmy_app.rlib")
         );
-        assert_eq!(outcome.link_artifacts().count(), 3);
+        assert_eq!(outcome.link_artifacts().count(), 1);
         assert_eq!(
             outcome.dep_info(),
             Some(Path::new("/p/my-app/target/debug/deps/my_app.d"))
         );
         assert_eq!(outcome.diagnostics, vec!["warning: unused\n".to_string()]);
+    }
+
+    /// The image unit's replay (`replay_args`, which the session's
+    /// intercepted tip replay runs) keeps every captured crate type; the
+    /// same record through the libs path (`replay_units`) carries one
+    /// `--crate-type rlib` and nothing else differs.
+    #[test]
+    fn the_image_path_keeps_every_crate_type_and_the_libs_path_only_the_rlib() {
+        let record = template_lib_record();
+        let image = replay_args(&record).unwrap();
+        assert_eq!(
+            image,
+            strings(&[
+                "--crate-name",
+                "my_app",
+                "--edition=2024",
+                "src/lib.rs",
+                "--error-format=json",
+                "--json=diagnostic-rendered-ansi,future-incompat",
+                "--crate-type",
+                "cdylib",
+                "--crate-type",
+                "staticlib",
+                "--crate-type",
+                "rlib",
+                "--emit=dep-info,link",
+                "-C",
+                "metadata=70ca96c8873de460",
+                "--out-dir",
+                OUT,
+                "-C",
+                "linker-flavor=gcc",
+                "--json=artifacts",
+            ])
+        );
+
+        let runner = RecordingRunner::new(vec![ok(lib_stderr())]);
+        replay_units(
+            &runner,
+            &template_graph(),
+            &records(&[(&lib_unit(), record)]),
+            &[lib_unit()],
+        )
+        .unwrap();
+        let libs = runner.calls().remove(0).args;
+        let crate_types: Vec<&str> = libs
+            .windows(2)
+            .filter(|pair| pair[0] == "--crate-type")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(crate_types, vec!["rlib"]);
+        assert!(!libs.iter().any(|arg| arg.starts_with("--crate-type=")));
+        let mut expected = image.clone();
+        expected.drain(6..10);
+        assert_eq!(
+            libs, expected,
+            "only the cdylib/staticlib flags are dropped"
+        );
+    }
+
+    fn lib_record(args: &[&str]) -> RustcRecord {
+        let mut argv = vec!["rustc", "--crate-name", "x"];
+        argv.extend_from_slice(args);
+        argv.push("--json=artifacts");
+        RustcRecord {
+            args: strings(&argv),
+            envs: Vec::new(),
+            crate_types: crate::hotpatch::capture::crate_types(&strings(&argv)).unwrap(),
+        }
+    }
+
+    /// The narrowed argv, minus the `--crate-name x` prefix and the
+    /// trailing `--json=artifacts`.
+    fn narrowed(args: &[&str]) -> Vec<String> {
+        let all = replay_args_rlib_only(&lib_record(args)).unwrap();
+        all[2..all.len() - 1].to_vec()
+    }
+
+    #[test]
+    fn comma_lists_and_the_equals_form_narrow_to_one_rlib() {
+        let emit = "--emit=dep-info,link";
+        assert_eq!(
+            narrowed(&["--crate-type=cdylib,rlib", emit]),
+            strings(&["--crate-type=rlib", emit])
+        );
+        assert_eq!(
+            narrowed(&["--crate-type", "staticlib,rlib,cdylib", emit]),
+            strings(&["--crate-type", "rlib", emit])
+        );
+        assert_eq!(
+            narrowed(&[
+                "--crate-type",
+                "cdylib,staticlib",
+                emit,
+                "--crate-type=lib",
+                "--crate-type",
+                "dylib",
+            ]),
+            strings(&[emit, "--crate-type=rlib"]),
+            "the first rlib/lib occurrence keeps its position and form"
+        );
+        assert_eq!(
+            narrowed(&[
+                "--crate-type=staticlib",
+                "--crate-type",
+                "rlib",
+                "--crate-type=cdylib",
+                "--crate-type=rlib",
+            ]),
+            strings(&["--crate-type", "rlib"])
+        );
+        assert_eq!(
+            narrowed(&[
+                "--crate-type",
+                "dylib",
+                "-C",
+                "extra-filename=-abc",
+                "--crate-type",
+                "lib"
+            ]),
+            strings(&["-C", "extra-filename=-abc", "--crate-type", "rlib"])
+        );
+    }
+
+    #[test]
+    fn a_bin_a_single_type_lib_and_a_lib_without_an_rlib_replay_as_captured() {
+        for args in [
+            &["--crate-type", "bin", "--emit=dep-info,link"][..],
+            &[
+                "--crate-type",
+                "bin",
+                "--crate-type=rlib",
+                "--crate-type=cdylib",
+            ][..],
+            &["--crate-type", "cdylib", "--crate-type=staticlib"][..],
+            &["--crate-type=cdylib,staticlib"][..],
+            &["--crate-type", "lib"][..],
+            &["--crate-type=rlib"][..],
+        ] {
+            let record = lib_record(args);
+            assert_eq!(
+                replay_args_rlib_only(&record).unwrap(),
+                replay_args(&record).unwrap(),
+                "{args:?}"
+            );
+        }
+
+        let bin = ReplayUnit::bin("my-app", "my-app");
+        let mut bin_record = template_lib_record();
+        bin_record.crate_types = strings(&["bin"]);
+        let expected = replay_args(&bin_record).unwrap();
+        let bin_stderr =
+            format!(r#"{{"$message_type":"artifact","artifact":"{OUT}/my_app","emit":"link"}}"#);
+        let runner = RecordingRunner::new(vec![ok(bin_stderr)]);
+        replay_units(
+            &runner,
+            &template_graph(),
+            &records(&[(&bin, bin_record)]),
+            &[bin],
+        )
+        .unwrap();
+        assert_eq!(
+            runner.calls()[0].args,
+            expected,
+            "a bin replays byte-identically"
+        );
     }
 
     #[test]
@@ -766,7 +996,8 @@ mod tests {
     /// The real toolchain: a one-package lib captured with three crate
     /// types, no `-C extra-filename`, and a `-C linker=` pointing at a
     /// program that does not exist (the cdylib link would fail if replay
-    /// kept it). The rlib comes back from rustc's own notifications.
+    /// kept it). The replay emits only the rlib, which comes back from
+    /// rustc's own notifications; the out-dir holds no cdylib or staticlib.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_real_rustc_replay_of_a_three_crate_type_lib_reports_its_rlib() {
@@ -821,7 +1052,17 @@ mod tests {
         assert!(outcome.success, "{:?}", outcome.diagnostics);
         assert_eq!(outcome.rlib().unwrap(), out.join("libfixture.rlib"));
         assert!(outcome.rlib().unwrap().is_file());
-        assert_eq!(outcome.link_artifacts().count(), 3);
+        assert_eq!(outcome.link_artifacts().count(), 1);
+        let mut written: Vec<String> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        written.sort();
+        assert_eq!(
+            written,
+            vec!["fixture.d".to_string(), "libfixture.rlib".to_string()],
+            "no cdylib or staticlib output"
+        );
         let dep_info = outcome.dep_info().expect("dep-info is reported");
         let listed = super::super::graph::read_dep_info(dep_info, &root).unwrap();
         assert!(listed.contains(&root.join("src/greeting.txt")));
