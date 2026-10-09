@@ -68,6 +68,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+pub use frust_devtools_protocol::redact_discovery_token as redact_discovery_line;
 use frust_devtools_protocol::{
     ApplyPatchParams, Capability, Discovery, JumpTableWire, MissedKey, PatchFile, PatchOutcome,
     parse_discovery_line, parse_failure_line, redact_discovery_token,

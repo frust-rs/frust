@@ -24,7 +24,8 @@ use frust_drive::hotpatch::android::{AndroidHotStart, AndroidStart, start_androi
 use frust_drive::hotpatch::graph::WorkspaceGraph;
 use frust_drive::hotpatch::ios_sim::{IosSimHotStart, IosSimStart, start_ios_sim};
 use frust_drive::hotpatch::session::{
-    DesktopStart, HotSession, Outcome, RestartReason, SessionHost, StartError, start_desktop,
+    DesktopStart, HotSession, Outcome, RestartReason, SessionHost, StartError,
+    redact_discovery_line, start_desktop,
 };
 use frust_drive::ios_run::{self, IosLaunch, simctl};
 use frust_drive::manifest;
@@ -184,8 +185,8 @@ const WATCH_DEVICE_REJECTION: &str = "--watch runs the desktop preview, an Andro
      watched; drop -d to run the desktop preview, or drop --watch to run on a device";
 
 /// The one device `--watch -d <id>` names, through the same discovery and
-/// `-d` matching a plain `frust run -d` uses, a booted simulator counted
-/// once ([`without_simulator_twins`]).
+/// `-d` matching a plain `frust run -d` uses (discovery already counts a
+/// booted simulator `devicectl` also lists once).
 fn resolve_watch_device(runner: &dyn ProcessRunner, id: &str, verbose: bool) -> Result<Device> {
     let discoverers = devices::default_discoverers();
     let (found, notes) = devices::discover_all(runner, &discoverers);
@@ -194,7 +195,6 @@ fn resolve_watch_device(runner: &dyn ProcessRunner, id: &str, verbose: bool) -> 
             println!("[note] {note}");
         }
     }
-    let found = without_simulator_twins(found);
     match android_run::select_device(&found, Some(id)) {
         DeviceSelection::Auto(device) => Ok(device),
         DeviceSelection::Error(message) => bail!(message),
@@ -204,25 +204,6 @@ fn resolve_watch_device(runner: &dyn ProcessRunner, id: &str, verbose: bool) -> 
             bail!("no single device matches `{id}`")
         }
     }
-}
-
-/// `found` without the iOS *device* entries that share a booted
-/// simulator's udid: `devicectl` lists a booted simulator as a connected
-/// device under the same identifier, so discovery reports it twice and
-/// every `-d` naming it would be ambiguous. A simulator udid never names a
-/// physical device, so the simulator entry is the one kept.
-fn without_simulator_twins(found: Vec<Device>) -> Vec<Device> {
-    let simulators: BTreeSet<String> = found
-        .iter()
-        .filter(|d| d.platform == Platform::Ios && d.kind == Kind::Simulator)
-        .map(|d| d.id.clone())
-        .collect();
-    found
-        .into_iter()
-        .filter(|d| {
-            d.platform != Platform::Ios || d.kind == Kind::Simulator || !simulators.contains(&d.id)
-        })
-        .collect()
 }
 
 /// A device `--watch -d` drives: what the device kind decides, never the
@@ -430,7 +411,8 @@ fn env_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
 /// `run_in_with_hooks`.
 type InstallCtrlcHook = Box<dyn FnOnce(AppSlot) -> Result<()>>;
 type SpawnWatcherHook = Box<dyn FnOnce(&Path, mpsc::Sender<()>) -> Result<Box<dyn std::any::Any>>>;
-type DeviceRelauncherHook = Box<dyn FnOnce(&Path, &BuildInfo, &Device) -> Box<dyn Relauncher>>;
+type DeviceRelauncherHook =
+    Box<dyn FnOnce(&Path, &BuildInfo, &Device, WatchedDevice) -> Box<dyn Relauncher>>;
 
 struct WatchHooks {
     /// Installs the Ctrl-C handler over the shared slot ([`on_ctrlc`]):
@@ -445,10 +427,12 @@ struct WatchHooks {
     /// The hot-session seams; `None` keeps the plain relaunch loop (a test
     /// that drives the relaunch loop, or a build that cannot be hot).
     hot: Option<HotHooks>,
-    /// Builds a watched device's relaunch target ([`DeviceRelauncher`] on
-    /// Android, [`SimulatorRelauncher`] on an iOS simulator, in
-    /// production): what `--watch -d <device> --no-hot` relaunches, and
-    /// what a hot session that cannot patch falls back to.
+    /// Builds a watched device's relaunch target from the kind
+    /// [`run_watch_on_device`] resolved ([`DeviceRelauncher`] on Android,
+    /// [`SimulatorRelauncher`] on an iOS simulator, in production): what
+    /// `--watch -d <device> --no-hot` relaunches, and what a hot session
+    /// that cannot patch falls back to. A device `--watch` refuses never
+    /// reaches it.
     device_relauncher: DeviceRelauncherHook,
 }
 
@@ -462,18 +446,17 @@ impl WatchHooks {
                 spawn_fs_watcher(root, tx).map(|w| Box::new(w) as Box<dyn std::any::Any>)
             }),
             hot: Some(HotHooks::real()),
-            device_relauncher: Box::new(|root, info, device| {
+            device_relauncher: Box::new(|root, info, device, watched| {
                 let runner: Arc<dyn ProcessRunner + Send + Sync> = Arc::new(RealProcessRunner);
                 let (root, device, info) = (root.to_path_buf(), device.clone(), info.clone());
-                match WatchedDevice::of(&device) {
-                    Some(WatchedDevice::Simulator) => Box::new(SimulatorRelauncher {
+                match watched {
+                    WatchedDevice::Simulator => Box::new(SimulatorRelauncher {
                         runner,
                         root,
                         device,
                         info,
                     }) as Box<dyn Relauncher>,
-                    // `run_watch_on_device` admits nothing else.
-                    Some(WatchedDevice::Android) | None => Box::new(DeviceRelauncher {
+                    WatchedDevice::Android => Box::new(DeviceRelauncher {
                         runner,
                         root,
                         device,
@@ -495,7 +478,7 @@ impl WatchHooks {
             install_ctrlc: Box::new(|_current| Ok(())),
             spawn_watcher: Box::new(|_root, _tx| Ok(Box::new(()) as Box<dyn std::any::Any>)),
             hot: None,
-            device_relauncher: Box::new(|_, _, _| {
+            device_relauncher: Box::new(|_, _, _, _| {
                 Box::new(NoDevicePipeline) as Box<dyn Relauncher>
             }),
         }
@@ -1225,9 +1208,10 @@ fn lock_slot(slot: &WatchSlot) -> std::sync::MutexGuard<'_, Option<RunningApp>> 
 }
 
 /// Drains every line currently available from `current`'s app (if any),
-/// forwarding each to `on_line`. Returns `true` if the drain ended because
-/// the app's stream disconnected (the process has exited, spontaneously or
-/// via a prior [`StreamHandle::kill`]) rather than simply having nothing more
+/// forwarding each to `on_line` with a devtools discovery line's token
+/// redacted. Returns `true` if the drain ended because the app's stream
+/// disconnected (the process has exited, spontaneously or via a prior
+/// [`StreamHandle::kill`]) rather than simply having nothing more
 /// buffered right now — the caller reads the exit status via
 /// [`RunningApp::wait`] in that case. A no-op (returns `false`) when
 /// `current` is `None`.
@@ -1237,7 +1221,7 @@ fn drain_available_lines(current: &mut Option<RunningApp>, on_line: &mut dyn FnM
     };
     loop {
         match app.handle.lines.try_recv() {
-            Ok(line) => on_line(&line),
+            Ok(line) => on_line(&redact_discovery_line(&line)),
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => return true,
         }
@@ -1810,7 +1794,7 @@ fn run_android_watch(
         hot,
         device_relauncher,
     } = hooks;
-    let mut relauncher = device_relauncher(root, info, device);
+    let mut relauncher = device_relauncher(root, info, device, WatchedDevice::Android);
     match hot.filter(|_| !no_hot) {
         Some(hot) => {
             let backend = (hot.android)(root, info, device);
@@ -1846,7 +1830,7 @@ fn run_simulator_watch(
         hot,
         device_relauncher,
     } = hooks;
-    let mut relauncher = device_relauncher(root, info, device);
+    let mut relauncher = device_relauncher(root, info, device, WatchedDevice::Simulator);
     match hot.filter(|_| !no_hot) {
         Some(hot) => {
             let backend = (hot.ios_sim)(root, info, device);
@@ -3564,7 +3548,7 @@ mod tests {
                     Ok(Box::new(()) as Box<dyn std::any::Any>)
                 }),
             }),
-            device_relauncher: Box::new(|_, _, _| {
+            device_relauncher: Box::new(|_, _, _, _| {
                 unreachable!("a desktop run relaunches no device")
             }),
         };
@@ -3606,7 +3590,9 @@ mod tests {
                     ios_sim: Box::new(|_, _, _| panic!("--no-hot must not build a hot backend")),
                     spawn_watcher: Box::new(|_, _| panic!("--no-hot must not watch paths")),
                 }),
-                device_relauncher: Box::new(|_, _, _| panic!("a desktop run relaunches no device")),
+                device_relauncher: Box::new(|_, _, _, _| {
+                    panic!("a desktop run relaunches no device")
+                }),
             },
             web: WebRunHooks::fake(),
         };
@@ -3784,8 +3770,9 @@ mod tests {
                         Ok(Box::new(()) as Box<dyn std::any::Any>)
                     }),
                 }),
-                device_relauncher: Box::new(move |_, _, device| {
+                device_relauncher: Box::new(move |_, _, device, watched| {
                     assert_eq!(device.id, "FAKE-SERIAL");
+                    assert_eq!(watched, WatchedDevice::Android);
                     Box::new(relauncher) as Box<dyn Relauncher>
                 }),
             },
@@ -3839,7 +3826,7 @@ mod tests {
                     ios_sim: Box::new(|_, _, _| panic!("--no-hot must not build a hot backend")),
                     spawn_watcher: Box::new(|_, _| panic!("--no-hot must not watch paths")),
                 }),
-                device_relauncher: Box::new(move |_, _, _| {
+                device_relauncher: Box::new(move |_, _, _, _| {
                     Box::new(relauncher) as Box<dyn Relauncher>
                 }),
             },
@@ -4325,7 +4312,7 @@ mod tests {
                         Ok(Box::new(()) as Box<dyn std::any::Any>)
                     }),
                 }),
-                device_relauncher: Box::new(move |_, _, _| {
+                device_relauncher: Box::new(move |_, _, _, _| {
                     Box::new(relauncher) as Box<dyn Relauncher>
                 }),
             },
@@ -4589,8 +4576,9 @@ mod tests {
                         Ok(Box::new(()) as Box<dyn std::any::Any>)
                     }),
                 }),
-                device_relauncher: Box::new(move |_, _, device| {
+                device_relauncher: Box::new(move |_, _, device, watched| {
                     assert_eq!(device, &fake_simulator());
+                    assert_eq!(watched, WatchedDevice::Simulator);
                     Box::new(relauncher) as Box<dyn Relauncher>
                 }),
             },
@@ -4645,8 +4633,9 @@ mod tests {
                     ios_sim: Box::new(|_, _, _| panic!("--no-hot must not build a hot backend")),
                     spawn_watcher: Box::new(|_, _| panic!("--no-hot must not watch paths")),
                 }),
-                device_relauncher: Box::new(move |_, _, device| {
+                device_relauncher: Box::new(move |_, _, device, watched| {
                     assert_eq!(device, &fake_simulator());
+                    assert_eq!(watched, WatchedDevice::Simulator);
                     Box::new(relauncher) as Box<dyn Relauncher>
                 }),
             },
@@ -4710,7 +4699,7 @@ mod tests {
                         Ok(Box::new(()) as Box<dyn std::any::Any>)
                     }),
                 }),
-                device_relauncher: Box::new(move |_, _, _| {
+                device_relauncher: Box::new(move |_, _, _, _| {
                     Box::new(relauncher) as Box<dyn Relauncher>
                 }),
             },
@@ -5056,7 +5045,7 @@ mod tests {
                         Ok(Box::new(()) as Box<dyn std::any::Any>)
                     }),
                 }),
-                device_relauncher: Box::new(move |_, _, _| {
+                device_relauncher: Box::new(move |_, _, _, _| {
                     Box::new(relauncher) as Box<dyn Relauncher>
                 }),
             },
@@ -5084,43 +5073,86 @@ mod tests {
     }
 
     /// A booted simulator that `devicectl` also lists as a connected iOS
-    /// device under the same udid is one simulator to `--watch -d`; a
-    /// physical device with its own udid, and an Android device, are kept.
+    /// device under the same udid is one simulator to `--watch -d`:
+    /// discovery keeps the simulator entry (`devices::discover_all`), so
+    /// the udid resolves to it rather than being ambiguous.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn a_simulator_listed_again_as_a_device_resolves_to_the_simulator() {
-        let twin = Device {
-            kind: Kind::PhysicalDevice,
-            connection_state: Some("connected".to_string()),
-            ..fake_simulator()
-        };
-        let found = vec![
-            fake_simulator(),
-            twin.clone(),
-            ios_physical_device(),
-            fake_android(),
-        ];
-        assert_eq!(
-            without_simulator_twins(found),
-            vec![fake_simulator(), ios_physical_device(), fake_android()]
+    fn watch_d_resolves_a_simulator_devicectl_also_lists_to_the_simulator() {
+        const DEVICECTL_TWIN: &str = r#"{"result": {"devices": [{
+            "identifier": "FAKE-UDID",
+            "deviceProperties": {"name": "iPhone 15", "osVersionNumber": "17.5"},
+            "connectionProperties": {"pairingState": "paired", "tunnelState": "connected"}
+        }]}}"#;
+        let runner = simctl_lists_fake_simulator().with_file(
+            "xcrun devicectl list devices --json-output",
+            ok(""),
+            DEVICECTL_TWIN,
         );
-        assert_eq!(
-            without_simulator_twins(vec![twin.clone()]),
-            vec![twin],
-            "a device with no simulator twin is kept"
+        let device = resolve_watch_device(&runner, "FAKE-UDID", false).unwrap();
+        assert_eq!(device, fake_simulator());
+    }
+
+    /// The relaunch loops' console sink sees a devtools discovery line
+    /// with its token redacted; every other line passes through unchanged.
+    #[test]
+    fn drained_app_lines_reach_the_sink_with_the_discovery_token_redacted() {
+        let runner = FakeProcessRunner::new().with_stream(
+            "app",
+            [
+                "frust-devtools listening on 54321 token s3cret",
+                "app: ready",
+            ],
+            true,
         );
-        assert!(matches!(
-            android_run::select_device(
-                &without_simulator_twins(vec![
-                    fake_simulator(),
-                    Device {
-                        kind: Kind::PhysicalDevice,
-                        ..fake_simulator()
-                    },
-                ]),
-                Some("FAKE-UDID"),
-            ),
-            DeviceSelection::Auto(device) if device == fake_simulator()
+        let mut current = Some(RunningApp::from(
+            runner.spawn_streaming("app", &[], None, &[]).unwrap(),
         ));
+        let mut lines = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !drain_available_lines(&mut current, &mut |line| lines.push(line.to_string())) {
+            assert!(std::time::Instant::now() < deadline, "the stream ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            lines,
+            vec![
+                "frust-devtools listening on 54321 token <redacted>",
+                "app: ready",
+            ]
+        );
+    }
+
+    /// A physical iOS device is refused before any watch hook runs: no
+    /// relauncher, hot backend, watcher or Ctrl-C handler is built for it,
+    /// with or without `--no-hot`.
+    #[test]
+    fn a_physical_ios_device_never_reaches_a_relauncher() {
+        for no_hot in [false, true] {
+            let hooks = WatchHooks {
+                install_ctrlc: Box::new(|_| panic!("a refused device installs no handler")),
+                spawn_watcher: Box::new(|_, _| panic!("a refused device is not watched")),
+                hot: Some(HotHooks {
+                    backend: Box::new(|_, _| panic!("a refused device builds no backend")),
+                    android: Box::new(|_, _, _| panic!("a refused device builds no backend")),
+                    ios_sim: Box::new(|_, _, _| panic!("a refused device builds no backend")),
+                    spawn_watcher: Box::new(|_, _| panic!("a refused device is not watched")),
+                }),
+                device_relauncher: Box::new(|_, _, _, _| {
+                    panic!("a physical iOS device never reaches a relauncher")
+                }),
+            };
+            let err = run_watch_on_device(
+                &FakeProcessRunner::new(),
+                &ios_physical_device(),
+                &debug_info(),
+                NO_EXTRA,
+                no_hot,
+                hooks,
+            )
+            .unwrap_err();
+            assert_eq!(err.to_string(), WATCH_DEVICE_REJECTION, "no_hot {no_hot}");
+        }
     }
 
     /// A simulator app's teardown terminates the launched bundle on the

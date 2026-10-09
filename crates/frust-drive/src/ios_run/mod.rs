@@ -237,6 +237,11 @@ fn prepare_simulator_core(
         );
     }
     if let Some(hot) = hot.as_mut() {
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        // The stage's link-capture replay is synchronous: a cancel raised
+        // during it is seen only once it returns.
         (hot.stage)(&app_path, on_line)?;
     }
     let app_path = app_path.to_string_lossy().into_owned();
@@ -326,6 +331,8 @@ pub fn spawn_session(
 /// drives it): the same preflight → build → install core with the build
 /// made the fat build and `hot`'s staging step run on the built bundle
 /// before the install, the Debug hot-session features compiled in, then
+/// [`simctl::terminate`] on any running instance of the bundle (a stale
+/// one would otherwise be adopted against the freshly linked base) and
 /// the `simctl launch --console-pty` stream ([`simctl::spawn_launch`]),
 /// from which the caller reads the app's devtools discovery line. Returns
 /// `Ok(None)` when `cancel` was observed at a phase boundary before the
@@ -347,6 +354,7 @@ pub fn spawn_hot_session(
     if cancel.load(Ordering::SeqCst) {
         return Ok(None);
     }
+    simctl::terminate(runner, &prepared.udid, &prepared.bundle_id);
     on_line(&format!("Launching {}…", prepared.bundle_id));
     let stream = simctl::spawn_launch(runner, &prepared.udid, &prepared.bundle_id)?;
     Ok(Some(IosLaunch {
@@ -1470,8 +1478,10 @@ mod tests {
         .expect("the stage refuses");
         assert_eq!(err.to_string(), "no anchor in Runner");
 
-        // A clean run hands back the console stream and the bundle id.
-        let runner = pipeline(true);
+        // A clean run terminates a running instance of the bundle once,
+        // after the install and before the launch, and hands back the
+        // console stream and the bundle id.
+        let runner = RecordingRunner::new(pipeline(true).with(TERMINATE, ok("")));
         let mut stage = |_: &Path, _: &mut dyn FnMut(&str)| -> Result<()> { Ok(()) };
         let mut hot = HotBuild {
             settings: &settings,
@@ -1488,12 +1498,162 @@ mod tests {
         )
         .unwrap()
         .expect("launched");
+        assert_eq!(
+            runner.simctl_calls(),
+            vec![
+                format!("xcrun simctl install AAAA {app_path}"),
+                TERMINATE.to_string(),
+                LAUNCH.to_string(),
+            ]
+        );
         assert_eq!(launch.bundle_id, "dev.f0x.myapp");
         assert_eq!(
             launch.stream.lines.iter().collect::<Vec<_>>(),
             vec!["dev.f0x.myapp: 4242"]
         );
         assert!(launch.stream.wait());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    const TERMINATE: &str = "xcrun simctl terminate AAAA dev.f0x.myapp";
+    const LAUNCH: &str = "xcrun simctl launch --console-pty AAAA dev.f0x.myapp";
+
+    /// Records every invocation, `run`, `run_streaming` and
+    /// `spawn_streaming` alike (answered by the inner fake), calling
+    /// `on_call` with it first: a Ctrl-C landing during that call.
+    struct RecordingRunner {
+        inner: FakeProcessRunner,
+        calls: std::sync::Mutex<Vec<String>>,
+        on_call: Box<dyn Fn(&str) + Send + Sync>,
+    }
+
+    impl RecordingRunner {
+        fn new(inner: FakeProcessRunner) -> Self {
+            Self {
+                inner,
+                calls: std::sync::Mutex::new(Vec::new()),
+                on_call: Box::new(|_| {}),
+            }
+        }
+
+        fn record(&self, cmd: &str, args: &[&str]) {
+            let key = std::iter::once(cmd)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            (self.on_call)(&key);
+            self.calls.lock().unwrap().push(key);
+        }
+
+        /// The recorded `xcrun simctl` invocations other than the
+        /// preflight's device listing, in order.
+        fn simctl_calls(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.starts_with("xcrun simctl ") && !c.contains(" list "))
+                .cloned()
+                .collect()
+        }
+    }
+
+    impl ProcessRunner for RecordingRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> Result<Output> {
+            self.record(cmd, args);
+            self.inner.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> Result<Output> {
+            self.record(cmd, args);
+            self.inner.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+        ) -> Result<StreamHandle> {
+            self.record(cmd, args);
+            self.inner.spawn_streaming(cmd, args, cwd, env)
+        }
+    }
+
+    /// A cancel raised during the fat build is observed before the staging
+    /// step: the stage never runs, nothing is installed or launched, and
+    /// the start answers `Ok(None)`.
+    #[test]
+    fn a_cancel_raised_during_the_hot_build_skips_the_stage() {
+        let dir = unique_project_dir("hot-cancel");
+        let app_dir = dir.join("build/ios/Build/Products/Debug-iphonesimulator/Runner.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let features = crate::ios_build::encode_features(&[
+            "frust/perf-trace",
+            "frust/devtools",
+            HOTPATCH_FEATURE,
+        ])
+        .unwrap();
+        let build = format!(
+            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES={features} build",
+            host_sim_arch()
+        );
+        let mut runner = RecordingRunner::new(
+            FakeProcessRunner::new()
+                .with(
+                    "xcode-select -p",
+                    ok("/Applications/Xcode.app/Contents/Developer\n"),
+                )
+                .with(
+                    "rustup target list --installed",
+                    ok("aarch64-apple-ios-sim\n"),
+                )
+                .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
+                .with(build.as_str(), ok("Build succeeded")),
+        );
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let cancel = std::sync::Arc::clone(&cancel);
+            runner.on_call = Box::new(move |key| {
+                if key == build {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+            });
+        }
+        let mut staged = 0;
+        let mut stage = |_: &Path, _: &mut dyn FnMut(&str)| -> Result<()> {
+            staged += 1;
+            Ok(())
+        };
+        let mut hot = HotBuild {
+            settings: &[],
+            stage: &mut stage,
+        };
+        let launched = spawn_hot_session(
+            &runner,
+            &dir,
+            &device(),
+            &debug_info(),
+            &mut hot,
+            &mut |_| {},
+            &cancel,
+        )
+        .unwrap();
+        assert!(launched.is_none());
+        assert_eq!(staged, 0, "the stage never runs");
+        assert!(
+            runner.simctl_calls().is_empty(),
+            "nothing installed or launched"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

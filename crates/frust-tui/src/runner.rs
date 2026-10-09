@@ -1520,12 +1520,14 @@ struct LaunchCtx<'a> {
 /// modal's watch checkbox and every relaunch of a watched session.
 ///
 /// A spec that can run hot ([`SessionSpec::hot_precondition`]: a debug
-/// desktop or Android device build) becomes a [`HotSessions`] entry:
-/// registered, recorded and sent `EnableWatch` here, synchronously and in
-/// that order, and only then started, so the engine has the tab (and its
-/// watch flag) before the worker's first event. Its start — the fat build,
-/// then the fat image spawned directly or, on Android, packaged, installed
-/// and launched — runs on the worker's own thread. Anything else launches
+/// desktop, Android device or iOS simulator build) becomes a
+/// [`HotSessions`] entry: registered, recorded and sent `EnableWatch` here,
+/// synchronously and in that order, and only then started, so the engine
+/// has the tab (and its watch flag) before the worker's first event. Its
+/// start — the fat build, then the fat image spawned directly, on Android
+/// packaged, installed and launched, or on an iOS simulator built through
+/// the Xcode fat build, `simctl install`ed and `simctl launch`ed — runs on
+/// the worker's own thread. Anything else launches
 /// exactly as [`launch_sessions`] does and keeps restart-on-save, with an
 /// Info toast naming the precondition that kept a watchable target cold.
 fn launch_watched_sessions(specs: Vec<SessionSpec>, ctx: &mut LaunchCtx<'_>) {

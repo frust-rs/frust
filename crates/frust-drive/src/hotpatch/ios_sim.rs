@@ -23,10 +23,10 @@
 //! and on a stock app `-Csave-temps` on every crate left 11 GB in `deps/`
 //! and a 910 MB staticlib (1.9 GB and 485 MB without it). Intercepting the
 //! link in the script is no better: the bin links after the lib's `cdylib`
-//! and overwrites the captured line. So the Xcode build carries the wrapper only, and the
-//! fat flags ([`FAT_RUSTFLAGS`]) reach the tip alone afterwards: they are
-//! added to its record ([`with_fat_flags`], with the simulator SDK as an
-//! `-isysroot` link argument), whose replay (rustc, the
+//! and overwrites the captured line. So the Xcode build carries the wrapper
+//! only, and the fat flags ([`FAT_RUSTFLAGS`]) reach the tip alone
+//! afterwards: they are added to its record ([`with_fat_flags`], with the
+//! simulator SDK as an `-isysroot` link argument), whose replay (rustc, the
 //! `cdylib` link intercepted as no-link) captures the image unit's link
 //! line — the tip's saved objects and the rlibs — exactly as a desktop or
 //! Android thin build does. Every later replay of the tip reads the same
@@ -57,12 +57,13 @@
 //!
 //! **Launch.** `ios_run::spawn_hot_session` runs the simulator pipeline
 //! with the fat build and the base adopted between the build and `simctl
-//! install`, then streams `simctl launch --console-pty`. The app's
-//! devtools discovery line is read from that stream; the simulator shares
-//! the host's loopback, so the session connects to `127.0.0.1:<port>`
-//! directly, and uploads every patch in chunks: the app writes it into its
-//! own data container. A start cancelled after the launch kills the stream
-//! and terminates the app.
+//! install`, terminates any running instance of the bundle, then streams
+//! `simctl launch --console-pty`. The app's devtools discovery line is
+//! read from that stream; the simulator shares the host's loopback, so the
+//! session connects to `127.0.0.1:<port>` directly, and uploads every
+//! patch in chunks: the app writes it into its own data container. A start
+//! that ends after the launch without a session (`attach_launched`)
+//! kills the stream and terminates the app.
 //!
 //! **Keys.** The scope and the fat dir carry the simulator triple; the
 //! session dir (`session-<crate>-<triple>-<udid>`, [`session_name`]) also
@@ -570,9 +571,42 @@ pub fn start_ios_sim(
             }));
         }
     };
-    let udid = &start.device.id;
+    let Some((base, app)) = attach_launched(
+        runner,
+        &start.device.id,
+        triple,
+        staged,
+        &mut launch,
+        on_line,
+        cancel,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(IosSimHotStart {
+        session: session::open_session(base, app, budget),
+        launch,
+    }))
+}
+
+/// The post-launch half of [`start_ios_sim`]: waits for the launched app's
+/// discovery line on its console and attaches on the host's loopback,
+/// answering the staged base with the link. Every exit without a session
+/// is [`unwind`]: no staged base and an app console that ended before the
+/// discovery line are [`StartError::Launch`]; a cancel observed during the
+/// wait or the attach is `Ok(None)`. Generic over the base so a test needs
+/// no linked image.
+fn attach_launched<B>(
+    runner: &dyn ProcessRunner,
+    udid: &str,
+    triple: &str,
+    staged: Option<B>,
+    launch: &mut IosLaunch,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<Option<(B, AppLink)>, StartError> {
     let Some(base) = staged else {
-        unwind(runner, udid, &mut launch);
+        unwind(runner, udid, launch);
         return Err(StartError::Launch {
             detail: "the app was launched without a staged hot-patch base".to_string(),
         });
@@ -580,7 +614,7 @@ pub fn start_ios_sim(
     let announced = match session::read_discovery_cancellable(&mut launch.stream, on_line, cancel) {
         Ok(announced) => announced,
         Err(Cancelled) => {
-            unwind(runner, udid, &mut launch);
+            unwind(runner, udid, launch);
             return Ok(None);
         }
     };
@@ -592,7 +626,7 @@ pub fn start_ios_sim(
         ),
         Announced::Failure(reason) => AppLink::RestartOnly { reason },
         Announced::Exited => {
-            unwind(runner, udid, &mut launch);
+            unwind(runner, udid, launch);
             return Err(StartError::Launch {
                 detail: "the app's console ended before it announced its devtools endpoint"
                     .to_string(),
@@ -601,13 +635,10 @@ pub fn start_ios_sim(
     };
     if cancel.load(Ordering::SeqCst) {
         drop(app);
-        unwind(runner, udid, &mut launch);
+        unwind(runner, udid, launch);
         return Ok(None);
     }
-    Ok(Some(IosSimHotStart {
-        session: session::open_session(base, app, budget),
-        launch,
-    }))
+    Ok(Some((base, app)))
 }
 
 /// The staging step: checks the built image, captures the tip's link line
@@ -743,13 +774,14 @@ mod tests {
 
     #[test]
     fn simulator_triples_are_mach_o_targets_and_a_device_is_not() {
-        for (triple, flavor) in [(TRIPLE_ARM64, true), (TRIPLE_X86_64, true)] {
+        for triple in [TRIPLE_ARM64, TRIPLE_X86_64] {
             let target = Target::from_triple(triple).unwrap();
             assert_eq!((target.os, target.format()), (Os::IosSim, Format::MachO));
             assert_eq!(target.anchor_symbol(), "___frust_hotpatch_anchor");
             assert_eq!(
-                LinkerFlavor::for_triple(triple).unwrap() == LinkerFlavor::Darwin,
-                flavor
+                LinkerFlavor::for_triple(triple).unwrap(),
+                LinkerFlavor::Darwin,
+                "{triple}"
             );
         }
         for device in [
@@ -765,6 +797,10 @@ mod tests {
                 "{device}"
             );
         }
+    }
+
+    #[test]
+    fn the_triple_follows_the_host_arch() {
         assert_eq!(
             triple(),
             if cfg!(target_arch = "x86_64") {
@@ -773,6 +809,10 @@ mod tests {
                 TRIPLE_ARM64
             }
         );
+    }
+
+    #[test]
+    fn the_session_name_carries_the_crate_triple_and_udid() {
         assert_eq!(
             session_name("hotapp", TRIPLE_ARM64, "AAAA-BBBB"),
             "session-hotapp-aarch64-apple-ios-sim-AAAA-BBBB"
@@ -1146,5 +1186,222 @@ mod tests {
             }
             assert!(runner.recorded_cwd().is_none(), "nothing ran");
         }
+    }
+
+    /// Records every `run` invocation (answered by the inner fake): the
+    /// `simctl terminate` calls a teardown issues.
+    struct RecordingRunner {
+        inner: FakeProcessRunner,
+        runs: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingRunner {
+        fn new(inner: FakeProcessRunner) -> Self {
+            Self {
+                inner,
+                runs: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn runs(&self) -> Vec<String> {
+            self.runs.lock().unwrap().clone()
+        }
+    }
+
+    impl ProcessRunner for RecordingRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> anyhow::Result<crate::process::Output> {
+            let key = std::iter::once(cmd)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.runs.lock().unwrap().push(key);
+            self.inner.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<crate::process::Output> {
+            self.inner.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+        ) -> anyhow::Result<crate::process::StreamHandle> {
+            self.inner.spawn_streaming(cmd, args, cwd, env)
+        }
+    }
+
+    const UDID: &str = "AAAA";
+    const BUNDLE: &str = "it.example.fake";
+    const CONSOLE: &str = "xcrun simctl launch --console-pty AAAA it.example.fake";
+    const TERMINATE: &str = "xcrun simctl terminate AAAA it.example.fake";
+
+    fn terminating(stream: FakeProcessRunner) -> RecordingRunner {
+        RecordingRunner::new(stream.with(
+            TERMINATE,
+            crate::process::Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        ))
+    }
+
+    /// The launched app: its `simctl launch --console-pty` stream.
+    fn launched(runner: &dyn ProcessRunner) -> IosLaunch {
+        IosLaunch {
+            stream: simctl::spawn_launch(runner, UDID, BUNDLE).unwrap(),
+            bundle_id: BUNDLE.to_string(),
+        }
+    }
+
+    /// Whether the console stream is closed once its buffered lines are
+    /// read (a hanging stream closes only when killed).
+    fn stream_is_killed(launch: &IosLaunch) -> bool {
+        loop {
+            match launch.stream.lines.try_recv() {
+                Ok(_) => continue,
+                Err(err) => return matches!(err, crate::process::TryRecvError::Disconnected),
+            }
+        }
+    }
+
+    /// A cancel raised during the discovery wait ends it at once: the
+    /// console stream is killed, the app terminated once, and the start
+    /// answers `Ok(None)`.
+    #[test]
+    fn a_cancel_during_the_discovery_wait_kills_the_stream_and_terminates_the_app() {
+        let runner =
+            terminating(FakeProcessRunner::new().with_hanging_stream(CONSOLE, ["app: starting"]));
+        let mut launch = launched(&runner);
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let raiser = {
+            let cancel = std::sync::Arc::clone(&cancel);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                cancel.store(true, Ordering::SeqCst);
+            })
+        };
+        let attached = attach_launched(
+            &runner,
+            UDID,
+            TRIPLE_ARM64,
+            Some(()),
+            &mut launch,
+            &mut |_| {},
+            &cancel,
+        );
+        raiser.join().unwrap();
+        assert!(matches!(attached, Ok(None)), "a cancel is not an error");
+        assert_eq!(runner.runs(), vec![TERMINATE]);
+        assert!(stream_is_killed(&launch), "the console stream is killed");
+    }
+
+    /// An app console that ends before the discovery line is a launch
+    /// failure; the stream is killed and the app terminated once.
+    #[test]
+    fn a_console_that_ends_before_discovery_kills_the_stream_and_terminates_the_app() {
+        let runner =
+            terminating(FakeProcessRunner::new().with_stream(CONSOLE, ["app: starting"], false));
+        let mut launch = launched(&runner);
+        let attached = attach_launched(
+            &runner,
+            UDID,
+            TRIPLE_ARM64,
+            Some(()),
+            &mut launch,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        );
+        match attached {
+            Err(StartError::Launch { detail }) => {
+                assert!(detail.contains("console ended"), "{detail}")
+            }
+            Err(other) => panic!("expected a launch failure, got {other:?}"),
+            Ok(_) => panic!("expected a launch failure"),
+        }
+        assert_eq!(runner.runs(), vec![TERMINATE]);
+        assert!(stream_is_killed(&launch), "the console stream is killed");
+    }
+
+    /// A cancel landing while the app's announcement is handled (a
+    /// restart-only link here, so no socket is needed) is observed once
+    /// the attach returns: the link is dropped, the stream killed and the
+    /// app terminated once. Without the cancel the same start keeps its
+    /// app (the negative control).
+    #[test]
+    fn a_cancel_after_the_attach_kills_the_stream_and_terminates_the_app() {
+        let failure = frust_devtools_protocol::format_failure_line("no port");
+        for cancelled in [true, false] {
+            let runner = terminating(
+                FakeProcessRunner::new().with_hanging_stream(CONSOLE, [failure.as_str()]),
+            );
+            let mut launch = launched(&runner);
+            let cancel = AtomicBool::new(false);
+            let mut on_line = |line: &str| {
+                if cancelled && line == failure {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+            };
+            let attached = attach_launched(
+                &runner,
+                UDID,
+                TRIPLE_ARM64,
+                Some(()),
+                &mut launch,
+                &mut on_line,
+                &cancel,
+            );
+            if cancelled {
+                assert!(matches!(attached, Ok(None)), "a cancel is not an error");
+                assert_eq!(runner.runs(), vec![TERMINATE]);
+                assert!(stream_is_killed(&launch), "the console stream is killed");
+            } else {
+                match attached {
+                    Ok(Some(((), AppLink::RestartOnly { reason }))) => {
+                        assert!(reason.contains("no port"), "{reason}")
+                    }
+                    _ => panic!("expected a restart-only attach"),
+                }
+                assert!(runner.runs().is_empty(), "the app keeps running");
+                launch.stream.kill();
+            }
+        }
+    }
+
+    /// An app launched without a staged base is refused before the
+    /// discovery wait; the stream is killed and the app terminated once.
+    #[test]
+    fn a_launch_without_a_staged_base_is_refused_and_terminates_the_app() {
+        let runner =
+            terminating(FakeProcessRunner::new().with_hanging_stream(CONSOLE, ["app: starting"]));
+        let mut launch = launched(&runner);
+        let attached = attach_launched::<()>(
+            &runner,
+            UDID,
+            TRIPLE_ARM64,
+            None,
+            &mut launch,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        );
+        match attached {
+            Err(StartError::Launch { detail }) => {
+                assert!(detail.contains("without a staged"), "{detail}")
+            }
+            Err(other) => panic!("expected a launch failure, got {other:?}"),
+            Ok(_) => panic!("expected a launch failure"),
+        }
+        assert_eq!(runner.runs(), vec![TERMINATE]);
+        assert!(stream_is_killed(&launch), "the console stream is killed");
     }
 }
