@@ -49,9 +49,17 @@
 //! share one. Thin links run the desktop builder unchanged with the tip lib
 //! as the image unit: NDK clang, Gnu thin arguments, anchor exported.
 //!
+//! **Upload.** The host reads each patch's symbols and builds its jump table
+//! from the unstripped `patch-<n>.so`, which stays in the session dir; the
+//! app is sent `patch-<n>.upload.so`, a `0600` copy the NDK's `llvm-strip
+//! --strip-unneeded` writes beside it ([`strip_for_upload`]). The device's
+//! loader needs `.dynsym` only, and DWARF and `.symtab` are most of a debug
+//! patch, so this shrinks every `adb forward` upload several-fold.
+//!
 //! Every surprise fails closed as
-//! [`HotpatchError::BuilderUnsupported`]: another ABI, no NDK, no `cdylib`
-//! lib, no anchor. See `docs/CLI_ARCHITECTURE.md`.
+//! [`HotpatchError::BuilderUnsupported`]: another ABI, no NDK (or one
+//! without `llvm-strip`), no `cdylib` lib, no anchor. See
+//! `docs/CLI_ARCHITECTURE.md`.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -68,7 +76,7 @@ use crate::manifest;
 use crate::process::ProcessRunner;
 
 use super::capture::{self, ScopeInputs, WrapperSetup, prepare_scope_dir};
-use super::fat_link::LinkerFlavor;
+use super::fat_link::{LinkerFlavor, render, run_linker};
 use super::graph::WorkspaceGraph;
 use super::link_intercept::{LinkAction, LinkMode, linker_arg, output_path, read_link_args};
 use super::session::{
@@ -76,6 +84,7 @@ use super::session::{
     RestartReason, SessionHost, StartError, check_debuginfo,
 };
 use super::symbols::Target;
+use super::thin_link::restrict_to_owner;
 use super::{HotpatchError, hotpatch_root};
 
 /// The one Android target a hot session builds.
@@ -101,6 +110,9 @@ pub struct NdkToolchain {
     /// the proxied linker of the fat build, and the fat and thin links'
     /// driver.
     pub clang: PathBuf,
+    /// `llvm-strip` beside [`clang`](Self::clang): writes the copy of each
+    /// patch the app is sent ([`strip_for_upload`]).
+    pub strip: PathBuf,
 }
 
 impl NdkToolchain {
@@ -112,26 +124,30 @@ impl NdkToolchain {
     }
 
     /// The toolchain of the NDK at `home` for prebuilt host `host_tag`
-    /// (`darwin-x86_64`, `linux-x86_64`). A missing clang wrapper is
-    /// [`HotpatchError::BuilderUnsupported`].
+    /// (`darwin-x86_64`, `linux-x86_64`). A missing clang wrapper or
+    /// `llvm-strip` is [`HotpatchError::BuilderUnsupported`] naming it.
     pub fn at(home: &Path, host_tag: &str) -> Result<Self, HotpatchError> {
-        let clang = home
+        let bin = home
             .join("toolchains")
             .join("llvm")
             .join("prebuilt")
             .join(host_tag)
-            .join("bin")
-            .join(format!("{TRIPLE}{API_LEVEL}-clang"));
-        if !clang.is_file() {
-            return Err(HotpatchError::unsupported(format!(
-                "the NDK at `{}` has no `{}`",
-                home.display(),
-                clang.display()
-            )));
+            .join("bin");
+        let clang = bin.join(format!("{TRIPLE}{API_LEVEL}-clang"));
+        let strip = bin.join(format!("llvm-strip{}", std::env::consts::EXE_SUFFIX));
+        for tool in [&clang, &strip] {
+            if !tool.is_file() {
+                return Err(HotpatchError::unsupported(format!(
+                    "the NDK at `{}` has no `{}`",
+                    home.display(),
+                    tool.display()
+                )));
+            }
         }
         Ok(Self {
             home: home.to_path_buf(),
             clang,
+            strip,
         })
     }
 }
@@ -336,6 +352,35 @@ pub fn stage_fat_image(
             )
         })?;
     Ok(staged)
+}
+
+/// `patch-<n>.upload.so` beside the linked `patch-<n>.so`: the copy the app
+/// is sent.
+pub fn upload_path(patch: &Path) -> PathBuf {
+    patch.with_extension("upload.so")
+}
+
+/// Writes [`upload_path`]`(patch)`: `strip --strip-unneeded` drops DWARF and
+/// `.symtab` (the host keeps reading both from `patch`) and keeps the
+/// `.dynsym` the device's loader needs; the copy is restricted to its owner
+/// like the patch. A failed strip is [`HotpatchError::BuilderUnsupported`],
+/// one that cannot be spawned [`HotpatchError::Process`]: the session never
+/// falls back to sending the unstripped image.
+pub fn strip_for_upload(
+    runner: &dyn ProcessRunner,
+    strip: &Path,
+    patch: &Path,
+) -> Result<PathBuf, HotpatchError> {
+    let upload = upload_path(patch);
+    let args = vec![
+        "--strip-unneeded".to_string(),
+        "-o".to_string(),
+        render(&upload),
+        render(patch),
+    ];
+    run_linker(runner, &render(strip), &args, &[], "stripping the patch")?;
+    restrict_to_owner(&upload)?;
+    Ok(upload)
 }
 
 /// The rustflags a scope is keyed on: cargo's global ones, else the
@@ -647,6 +692,7 @@ fn build_and_stage(
             image_unit,
             image: fat_dir.join(&file_name),
             custom_linker: Some(ndk.clang.clone()),
+            upload_strip: Some(ndk.strip.clone()),
             target,
             flavor,
             target_dir: target_dir.clone(),
@@ -660,6 +706,10 @@ fn build_and_stage(
     on_line(&format!(
         "Staged the hot-patch image `{}` for packaging.",
         staged.display()
+    ));
+    on_line(&format!(
+        "Patches are sent stripped by `{}`; each unstripped `patch-<n>.so` stays on this host.",
+        ndk.strip.display()
     ));
     Ok(base)
 }
@@ -694,11 +744,13 @@ mod tests {
         Target::from_triple(TRIPLE).unwrap()
     }
 
-    /// An NDK tree holding only the per-API clang wrapper.
+    /// An NDK tree holding only the per-API clang wrapper and `llvm-strip`.
     fn fake_ndk(root: &Path) -> NdkToolchain {
         let bin = root.join("toolchains/llvm/prebuilt/darwin-x86_64/bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("aarch64-linux-android21-clang"), "#!/bin/sh\n").unwrap();
+        let strip = format!("llvm-strip{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(bin.join(strip), "#!/bin/sh\n").unwrap();
         NdkToolchain::at(root, "darwin-x86_64").unwrap()
     }
 
@@ -743,6 +795,82 @@ mod tests {
         );
     }
 
+    /// An NDK without `llvm-strip` fails closed, naming the missing tool,
+    /// rather than leaving the session to send unstripped patches.
+    #[test]
+    fn an_ndk_without_llvm_strip_is_refused_naming_the_tool() {
+        let dir = temp_dir("no-strip");
+        let ndk = fake_ndk(&dir.join("ndk"));
+        assert_eq!(
+            ndk.strip,
+            ndk.clang
+                .with_file_name(format!("llvm-strip{}", std::env::consts::EXE_SUFFIX))
+        );
+        std::fs::remove_file(&ndk.strip).unwrap();
+        let err = NdkToolchain::at(&dir.join("ndk"), "darwin-x86_64").unwrap_err();
+        match &err {
+            HotpatchError::BuilderUnsupported { detail } => {
+                assert!(
+                    detail.contains(&ndk.strip.display().to_string()),
+                    "{detail}"
+                )
+            }
+            other => panic!("expected BuilderUnsupported, got {other:?}"),
+        }
+    }
+
+    /// The upload copy is `llvm-strip --strip-unneeded -o
+    /// patch-<n>.upload.so patch-<n>.so`, left owner-only; the linked patch
+    /// is untouched. A failed strip is refused, never skipped.
+    #[test]
+    fn the_upload_copy_is_strip_unneeded_beside_the_patch_and_owner_only() {
+        let dir = temp_dir("strip");
+        let ndk = fake_ndk(&dir.join("ndk"));
+        let patch = dir.join("session").join("patch-3.so");
+        std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
+        std::fs::write(&patch, b"unstripped").unwrap();
+        let upload = upload_path(&patch);
+        assert_eq!(upload, dir.join("session").join("patch-3.upload.so"));
+        // What llvm-strip leaves under a `022` umask.
+        std::fs::write(&upload, b"stripped").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&upload, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let path = |p: &Path| p.to_string_lossy().into_owned();
+        let argv = format!(
+            "{} --strip-unneeded -o {} {}",
+            path(&ndk.strip),
+            path(&upload),
+            path(&patch)
+        );
+        let runner = FakeProcessRunner::new().with(argv.clone(), ok());
+        assert_eq!(
+            strip_for_upload(&runner, &ndk.strip, &patch).unwrap(),
+            upload
+        );
+        assert_eq!(std::fs::read(&patch).unwrap(), b"unstripped");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&upload).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the upload copy is owner-only");
+        }
+
+        let failed = Output {
+            success: false,
+            stdout: String::new(),
+            stderr: "llvm-strip: error: truncated file".to_string(),
+        };
+        let runner = FakeProcessRunner::new().with(argv, failed);
+        let err = strip_for_upload(&runner, &ndk.strip, &patch).unwrap_err();
+        assert!(
+            matches!(err, HotpatchError::BuilderUnsupported { .. }),
+            "{err:?}"
+        );
+    }
+
     /// The fat build runs cargo-ndk's `rustc` passthrough (the verified
     /// form in the module doc) with the capture wrapper and the link
     /// proxied to the NDK clang.
@@ -751,6 +879,7 @@ mod tests {
         let ndk = NdkToolchain {
             home: PathBuf::from("/sdk/ndk/28.2.13676358"),
             clang: PathBuf::from("/sdk/ndk/28.2.13676358/bin/aarch64-linux-android21-clang"),
+            strip: PathBuf::from("/sdk/ndk/28.2.13676358/bin/llvm-strip"),
         };
         let link = LinkAction {
             mode: LinkMode::Proxy {
