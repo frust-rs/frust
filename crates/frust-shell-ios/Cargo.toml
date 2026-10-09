@@ -54,6 +54,10 @@ frust-widgets = { workspace = true }
 perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
 # Opt-in devtools service: re-exports shell-common `devtools`; a no-op off-iOS (the edge is in the gated block).
 devtools = ["frust-shell-common/devtools"]
+# Opt-in hot patch: forwards frust-core/hotpatch (the `Component::build` jump table) and shell-common's in-app apply arms
+# (implies `devtools`), and registers a patch listener that raises the signals-dirty gate input. Absent, frust-hotpatch is
+# not in the iOS graph. The edges sit in the iOS-gated block, so the host build stays macro-and-helpers only.
+hotpatch = ["devtools", "frust-core/hotpatch", "frust-shell-common/hotpatch"]
 # Facade `gpu` forwards here. The `ffi_glue`/`app` render-thread install site is not wired to it yet (accepted gap, see lib.rs docs).
 gpu = ["frust-shell-common/gpu", "frust-render/gpu"]
 
