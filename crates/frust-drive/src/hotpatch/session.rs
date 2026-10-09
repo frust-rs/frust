@@ -2167,7 +2167,17 @@ impl PatchBuilder for DesktopBuilder {
         })?;
         let output = thin_link::patch_path(&self.target_dir, &self.session, n, self.flavor)?;
         let rlibs = self.modified_rlibs()?;
-        let linked = thin_link::thin_link(
+        // An Msvc patch links at its own fixed base: the runtime sees every
+        // Windows image's slide as 0, so only an unrelocated DLL passes.
+        let fixed_base = match self.flavor {
+            LinkerFlavor::Msvc => Some(fat_link::patch_image_base(n).ok_or_else(|| {
+                HotpatchError::unsupported(format!(
+                    "patch {n} has no fixed Windows image base below the end of user space"
+                ))
+            })?),
+            LinkerFlavor::Darwin | LinkerFlavor::Gnu => None,
+        };
+        let linked = thin_link::thin_link_with_base(
             &*self.runner,
             &ThinLinkRequest {
                 flavor: self.flavor,
@@ -2178,6 +2188,7 @@ impl PatchBuilder for DesktopBuilder {
                 output: &output,
                 envs: &self.tip_env,
             },
+            fixed_base,
         )?;
         if self.flavor == LinkerFlavor::Msvc {
             let extraction =
@@ -5455,6 +5466,67 @@ fn main() {
         (base, u64::from(rva))
     }
 
+    /// `IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE`: the image may be relocated
+    /// by ASLR.
+    const DYNAMIC_BASE: u16 = 0x0040;
+
+    /// The PE32+ optional header's `DllCharacteristics` of `image`.
+    fn dll_characteristics(image: &Path) -> u16 {
+        let bytes = std::fs::read(image).unwrap();
+        let at = |offset: usize, len: usize| &bytes[offset..offset + len];
+        let pe = u32::from_le_bytes(at(0x3c, 4).try_into().unwrap()) as usize;
+        assert_eq!(at(pe, 4), b"PE\0\0");
+        let optional = pe + 4 + 20;
+        assert_eq!(at(optional, 2), 0x20bu16.to_le_bytes(), "a PE32+ image");
+        u16::from_le_bytes(at(optional + 70, 2).try_into().unwrap())
+    }
+
+    /// Loads `dll` (which exports the anchor) into a fresh process: a small
+    /// exe linked against the DLL's import library, beside it, that prints
+    /// the anchor's runtime address in the loaded DLL.
+    fn anchor_runtime_when_loaded(dll: &Path) -> u64 {
+        let dir = dll.parent().unwrap();
+        let stem = dll.file_stem().unwrap().to_str().unwrap();
+        assert!(
+            dir.join(format!("{stem}.lib")).is_file(),
+            "lld-link wrote the import library"
+        );
+        let source = dir.join("load-patch.rs");
+        // Edition 2021: a plain extern block; taking the address calls
+        // nothing.
+        std::fs::write(
+            &source,
+            format!(
+                "#[link(name = \"{stem}\")]\nextern \"C\" {{\n    fn __frust_hotpatch_anchor();\n}}\n\
+                 fn main() {{\n    println!(\"{{}}\", __frust_hotpatch_anchor as usize);\n}}\n"
+            ),
+        )
+        .unwrap();
+        let loader = dir.join("load-patch.exe");
+        let dir_text = dir.display().to_string();
+        let out = RealProcessRunner
+            .run(
+                &rustc(),
+                &[
+                    "--edition=2021",
+                    "-L",
+                    &format!("native={dir_text}"),
+                    "-o",
+                    &loader.display().to_string(),
+                    &source.display().to_string(),
+                ],
+            )
+            .unwrap();
+        assert!(out.success, "rustc load-patch.rs: {}", out.stderr);
+        let run = std::process::Command::new(&loader).output().unwrap();
+        assert!(run.status.success(), "{run:?}");
+        String::from_utf8(run.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
     /// Replays the saved edit and links `patch-1.dll` against the running
     /// fat exe; the candidate's seams and its post-link table.
     fn patch(fat: &mut Fat) -> (LinkedPatch, SeamSet, LayoutTable) {
@@ -5556,7 +5628,7 @@ fn main() {
         // Both table anchors are VAs (preferred base + anchor RVA), so the
         // runtime's anchor check passes: the exe's implied offset is its
         // slide (0 at the fixed x64 base) and the DLL's is its load base
-        // minus its preferred base.
+        // minus its preferred base, 0 at its own fixed x64 base.
         let (exe_base, exe_rva) = base_and_anchor_rva(fat.base.image());
         let (dll_base, dll_rva) = base_and_anchor_rva(&linked.path);
         assert_eq!(linked.table.aslr_reference, exe_base + exe_rva);
@@ -5568,6 +5640,34 @@ fn main() {
             assert_eq!(implied, 0, "base anchor implies offset {implied:#x}");
         } else {
             assert_eq!(implied & 0xffff, 0, "{implied:#x}");
+        }
+        let characteristics = dll_characteristics(&linked.path);
+        eprintln!(
+            "patch-1.dll: ImageBase {dll_base:#x}, DllCharacteristics {characteristics:#06x}, \
+             anchor RVA {dll_rva:#x}, new_base_address {:#x}",
+            linked.table.new_base_address
+        );
+        if cfg!(target_arch = "x86_64") {
+            // Patch 1 links at its fixed base with ASLR off, and loads there:
+            // its anchor runs at its VA, the slide the runtime reports (0).
+            assert_eq!(Some(dll_base), fat_link::patch_image_base(1));
+            assert_eq!(
+                characteristics & DYNAMIC_BASE,
+                0,
+                "DYNAMICBASE is clear: {characteristics:#06x}"
+            );
+            assert_eq!(
+                linked.table.new_base_address,
+                fat_link::PATCH_IMAGE_BASE_FIRST + dll_rva
+            );
+            let loaded = anchor_runtime_when_loaded(&linked.path);
+            eprintln!("patch-1.dll loaded: anchor at {loaded:#x}");
+            assert_eq!(
+                loaded.wrapping_sub(linked.table.new_base_address),
+                0,
+                "patch-1.dll loaded at {loaded:#x}, linked for {:#x}",
+                linked.table.new_base_address
+            );
         }
         assert_eq!(table.get(&app("HomeState")).map(|e| e.size), Some(4));
         let present = fat

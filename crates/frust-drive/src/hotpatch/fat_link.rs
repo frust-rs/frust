@@ -34,6 +34,17 @@
 //! **The Msvc fat exe links at a fixed base** ([`FAT_IMAGE_BASE`], ASLR off
 //! through [`DYNAMIC_BASE_OFF`]) so the base data a patch references sits
 //! below 4 GiB, where the stub's 32-bit COFF absolute symbols reach it.
+//!
+//! **Every Msvc patch DLL links at its own fixed base too**
+//! ([`patch_image_base`]: [`PATCH_IMAGE_BASE_FIRST`] plus
+//! [`PATCH_IMAGE_STRIDE`] per earlier patch, ASLR off), so it loads at its
+//! link-time base and its VAs are its runtime addresses. The runtime cannot
+//! see a relocated Windows image's slide: the loader rewrites the in-memory
+//! `ImageBase` to the load address, so the runtime reports a slide of 0 for
+//! every image. A DLL linked at a fixed base makes that 0 true. When the
+//! loader relocates one anyway (its range is taken), the table's anchor
+//! implies the real offset while the runtime still reports 0, so the apply
+//! is refused and the hot run restarts the app: fail closed, never a guess.
 
 use std::fs;
 use std::io::Read;
@@ -71,15 +82,35 @@ pub const HIGH_ENTROPY_VA_OFF: &str = "/HIGHENTROPYVA:NO";
 /// patch references into a COFF absolute symbol, whose value holds 32 bits
 /// ([`super::stub`]); `/HIGHENTROPYVA:NO` alone leaves the x64 default base
 /// (`0x140000000`) and ASLR placing the image above 4 GiB, where every such
-/// symbol is refused. Only the fat exe of a debug hot run carries it; patch
-/// DLLs stay relocatable. lld-link refuses it for ARM machines, where ASLR
-/// is mandatory, so an ARM fat line omits it ([`fixed_base_args`]).
+/// symbol is refused. The fat exe of a debug hot run and every patch DLL
+/// carry it, each with its own `/BASE:` ([`FAT_IMAGE_BASE`],
+/// [`patch_image_base`]). lld-link refuses it for ARM machines, where ASLR
+/// is mandatory, so an ARM line omits it ([`fixed_base_args_at`]) and the
+/// runtime's anchor check refuses that target's patches.
 pub const DYNAMIC_BASE_OFF: &str = "/DYNAMICBASE:NO";
 
 /// The Msvc fat exe's fixed image base (256 MiB): above the low region
 /// Windows reserves, and leaving the image (hundreds of MB for a large app)
 /// almost 4 GiB of room below the 32-bit limit.
 pub const FAT_IMAGE_BASE: u64 = 0x1000_0000;
+
+/// The fixed image base of Msvc patch 1 (512 MiB): [`FAT_IMAGE_BASE`]
+/// plus 256 MiB, which no fat exe reaches (a stock app's is ~36 MB).
+pub const PATCH_IMAGE_BASE_FIRST: u64 = 0x2000_0000;
+
+/// The distance between consecutive Msvc patch bases (256 MiB): each patch
+/// DLL owns that much address space, far more than an unstripped patch
+/// (~13 MB for a stock app), so no two patches of one process collide. A
+/// DLL's own base may lie above 4 GiB; only the base data the stub
+/// references must not.
+pub const PATCH_IMAGE_STRIDE: u64 = 0x1000_0000;
+
+// The fat exe keeps a whole stride below patch 1.
+const _: () = assert!(FAT_IMAGE_BASE + PATCH_IMAGE_STRIDE <= PATCH_IMAGE_BASE_FIRST);
+
+/// The top of x64 user-mode address space: a patch window must end below
+/// it ([`patch_image_base`]).
+const USER_SPACE_END: u64 = 0x7fff_ffff_0000;
 
 /// COFF machines lld-link links with mandatory ASLR (`/DYNAMICBASE:NO` is
 /// an error): ARMNT, ARM64EC, ARM64X and ARM64.
@@ -545,18 +576,34 @@ pub fn fat_link_args(
     Ok(args)
 }
 
-/// The Msvc fat exe's fixed-base flags, [`DYNAMIC_BASE_OFF`] and
-/// `/BASE:0x10000000` ([`FAT_IMAGE_BASE`]), unless `object` (the line's
-/// last object) is a COFF object for one of [`ASLR_ONLY_MACHINES`]. An
-/// unreadable object keeps the flags; the link itself reports it.
+/// The Msvc fat exe's fixed-base flags: [`fixed_base_args_at`]
+/// [`FAT_IMAGE_BASE`] (`/DYNAMICBASE:NO /BASE:0x10000000`).
 pub fn fixed_base_args(object: &Path) -> Vec<String> {
+    fixed_base_args_at(FAT_IMAGE_BASE, object)
+}
+
+/// The fixed-base flags of an Msvc image linked at `base`,
+/// [`DYNAMIC_BASE_OFF`] and `/BASE:<base>` (lower-case hex), unless
+/// `object` (one of the line's objects) is a COFF object for one of
+/// [`ASLR_ONLY_MACHINES`]. An unreadable object keeps the flags; the link
+/// itself reports it.
+pub fn fixed_base_args_at(base: u64, object: &Path) -> Vec<String> {
     if coff_machine(object).is_some_and(|machine| ASLR_ONLY_MACHINES.contains(&machine)) {
         return Vec::new();
     }
-    vec![
-        DYNAMIC_BASE_OFF.to_string(),
-        format!("/BASE:{FAT_IMAGE_BASE:#x}"),
-    ]
+    vec![DYNAMIC_BASE_OFF.to_string(), format!("/BASE:{base:#x}")]
+}
+
+/// The fixed image base of Msvc patch `n` (counted from 1):
+/// [`PATCH_IMAGE_BASE_FIRST`] + (`n` - 1) × [`PATCH_IMAGE_STRIDE`], so
+/// patch 1 is at `0x20000000`, patch 2 at `0x30000000`, patch 64 (the
+/// default budget) at `0x410000000`. Every window lies above the fat exe's
+/// and none overlaps another. `None` for `n` 0, or when the window would
+/// reach past x64 user-mode address space.
+pub fn patch_image_base(n: u32) -> Option<u64> {
+    let index = u64::from(n.checked_sub(1)?);
+    let base = PATCH_IMAGE_BASE_FIRST + index * PATCH_IMAGE_STRIDE;
+    (base + PATCH_IMAGE_STRIDE <= USER_SPACE_END).then_some(base)
 }
 
 /// The machine field of the COFF object at `path`: offset 0, or offset 6
@@ -1643,6 +1690,37 @@ mod tests {
             assert!(!args.iter().any(|a| fixed.contains(a)), "{args:?}");
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn msvc_patch_bases_step_by_the_stride_above_the_fat_exe_without_overlap() {
+        assert_eq!(patch_image_base(0), None, "patches count from 1");
+        assert_eq!(patch_image_base(1), Some(0x2000_0000));
+        assert_eq!(patch_image_base(2), Some(0x3000_0000));
+        assert_eq!(patch_image_base(64), Some(0x4_1000_0000));
+        let mut last_end = PATCH_IMAGE_BASE_FIRST;
+        for n in 1..=64 {
+            let base = patch_image_base(n).unwrap();
+            assert_eq!(base, last_end, "patch {n} starts where {} ends", n - 1);
+            assert_eq!(base % 0x1_0000, 0, "64 KiB-aligned");
+            last_end = base + PATCH_IMAGE_STRIDE;
+        }
+        // No window reaches past x64 user-mode address space.
+        let last = (USER_SPACE_END - PATCH_IMAGE_BASE_FIRST) / PATCH_IMAGE_STRIDE;
+        let last = u32::try_from(last).unwrap();
+        assert!(patch_image_base(last).unwrap() + PATCH_IMAGE_STRIDE <= USER_SPACE_END);
+        assert_eq!(patch_image_base(last + 1), None);
+        assert_eq!(patch_image_base(u32::MAX), None);
+
+        let object = Path::new("C:/t/missing.o");
+        assert_eq!(
+            fixed_base_args_at(patch_image_base(2).unwrap(), object),
+            strings(&["/DYNAMICBASE:NO", "/BASE:0x30000000"])
+        );
+        assert_eq!(
+            fixed_base_args(object),
+            fixed_base_args_at(FAT_IMAGE_BASE, object)
+        );
     }
 
     #[test]
