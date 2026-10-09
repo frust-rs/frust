@@ -45,10 +45,10 @@
 //! set, so no object may reach a link before its DWARF passed the layout
 //! gate in a candidate the session then accepted. Every object a replay
 //! produces stays in the builder's ungated set (`Ungated`) — through a
-//! round that fails on a later unit or on the tip bin — and each candidate's
-//! layout table is extracted from that whole set, not from the last round's
-//! objects alone. Only the session's acceptance of an applied patch
-//! (`PatchBuilder::accepted`) empties it.
+//! round that fails on a later unit or on the image unit — and each
+//! candidate's layout table is extracted from that whole set, not from the
+//! last round's objects alone. Only the session's acceptance of an applied
+//! patch (`PatchBuilder::accepted`) empties it.
 //!
 //! **Outcome.** A reply lost after `apply_patch` was sent is
 //! `PatchOutcomeUnknown` (the patch may be live). A missed seam key in the
@@ -680,7 +680,7 @@ trait PatchBuilder: Send {
 }
 
 /// The objects compiled since the session last accepted a patch, by unit:
-/// a lib's rlib, the tip bin's typed objects. A patch links every one of
+/// a lib's rlib, the image unit's typed objects. A patch links every one of
 /// them, so each candidate's layout table is extracted from all of them. A
 /// unit enters on its successful replay — whether or not the rest of its
 /// round compiled — replacing its earlier entry; the set is emptied only
@@ -1232,7 +1232,7 @@ pub fn start_desktop(
             target_dir,
             archive_dir: &fat_dir,
             scope_dir,
-            session: format!("session-{}", tip_bin.target),
+            session: desktop_session_name(&tip_bin.target),
         },
     )?;
 
@@ -1257,6 +1257,13 @@ pub fn start_desktop(
     };
 
     Ok((open_session(base, app, budget), child))
+}
+
+/// The desktop session directory's name, `session-<bin>`: one running
+/// desktop app per bin on this host. The Android name also carries the
+/// triple and the device ([`super::android::session_name`]).
+pub(super) fn desktop_session_name(bin: &str) -> String {
+    format!("session-{bin}")
 }
 
 /// What [`link_base`] links the base image from: the fat build's graph,
@@ -1385,7 +1392,7 @@ pub(super) fn link_base(
         rlibs,
         tip_link_args: link_args,
         tip_env,
-        tip_bin: image_unit,
+        image_unit,
         cache,
         target,
         flavor,
@@ -1578,7 +1585,8 @@ pub(super) fn remove_stale(path: &Path) -> Result<(), HotpatchError> {
     }
 }
 
-/// The `.rcgu.o` objects a captured tip link names: the tip bin's own code.
+/// The `.rcgu.o` objects a captured tip link names: the image unit's own
+/// code.
 fn tip_objects(link_args: &[String]) -> Vec<PathBuf> {
     link_args
         .iter()
@@ -1718,9 +1726,9 @@ fn codegen_value(args: &[String], option: &str) -> Option<String> {
 }
 
 /// The real build half: replay through captured invocations, thin link
-/// against the fat image. Named for the desktop, where the image is the tip
-/// bin; the Android start ([`super::android`]) runs the same builder with
-/// the tip lib's `cdylib` as the image, the unit `tip_bin` then names.
+/// against the fat image. Named for the desktop, where the image unit is the
+/// tip bin; the Android start ([`super::android`]) runs the same builder with
+/// the tip lib's `cdylib` as the image unit.
 struct DesktopBuilder {
     runner: Arc<dyn ProcessRunner + Send + Sync>,
     graph: WorkspaceGraph,
@@ -1735,14 +1743,14 @@ struct DesktopBuilder {
     ungated: Ungated,
     /// The current rlib of each lib unit in the image.
     rlibs: BTreeMap<ReplayUnit, PathBuf>,
-    /// The tip's latest captured link: the fat build's until the tip bin is
-    /// replayed.
+    /// The tip's latest captured link: the fat build's until the image unit
+    /// is replayed.
     tip_link_args: Vec<String>,
     tip_env: Vec<(String, String)>,
     /// The unit whose link is the running image, replayed with its link
     /// intercepted: the tip bin on desktop, the tip lib on Android (whose
     /// code then enters a patch as objects, never as its rlib).
-    tip_bin: ReplayUnit,
+    image_unit: ReplayUnit,
     cache: SymbolCache,
     target: Target,
     flavor: LinkerFlavor,
@@ -1768,7 +1776,7 @@ impl DesktopBuilder {
         order
             .iter()
             .rev()
-            .filter(|unit| unit.kind == TargetKind::Lib && **unit != self.tip_bin)
+            .filter(|unit| unit.kind == TargetKind::Lib && **unit != self.image_unit)
             .map(|unit| {
                 self.rlibs.get(unit).cloned().ok_or_else(|| {
                     HotpatchError::unsupported(format!("no rlib is known for {unit}"))
@@ -1784,14 +1792,14 @@ impl DesktopBuilder {
         Ok(inputs)
     }
 
-    /// Replays the tip bin with its link step intercepted and returns the
+    /// Replays the image unit with its link step intercepted and returns the
     /// intercepted link's arguments, which name the fresh objects the patch
     /// links. The caller installs them as `tip_link_args` only once those
     /// objects are in the ungated ledger, so a failure in between leaves
     /// the previous link line in place. `Ok(Err(diagnostics))` for a
     /// compile error.
-    fn replay_tip_bin(&mut self) -> Result<Result<Vec<String>, Vec<String>>, HotpatchError> {
-        let key = self.tip_bin.record_key();
+    fn replay_image_unit(&mut self) -> Result<Result<Vec<String>, Vec<String>>, HotpatchError> {
+        let key = self.image_unit.record_key();
         let record = self.records.get(&key).ok_or_else(|| {
             HotpatchError::unsupported(format!("no captured rustc invocation `{key}`"))
         })?;
@@ -1820,7 +1828,7 @@ impl DesktopBuilder {
             .copied()
             .filter(|name| !env.iter().any(|(set, _)| set == name))
             .collect();
-        let cwd = self.graph.replay_cwd(&self.tip_bin);
+        let cwd = self.graph.replay_cwd(&self.image_unit);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let env_refs: Vec<(&str, &str)> =
             env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -1830,7 +1838,7 @@ impl DesktopBuilder {
             .map_err(|err| HotpatchError::Process {
                 detail: format!(
                     "failed to spawn `{rustc}` to replay {}: {err:#}",
-                    self.tip_bin
+                    self.image_unit
                 ),
             })?;
         let (_, mut diagnostics) = parse_notifications(&output.stderr, &cwd)?;
@@ -1848,7 +1856,7 @@ impl DesktopBuilder {
 impl PatchBuilder for DesktopBuilder {
     fn classify(&self, path: &Path) -> PathClass {
         let class = self.graph.classify(path);
-        if self.tip_bin.kind == TargetKind::Bin {
+        if self.image_unit.kind == TargetKind::Bin {
             return class;
         }
         // A lib image (Android's cdylib) contains no bin: a file only a bin
@@ -1878,8 +1886,8 @@ impl PatchBuilder for DesktopBuilder {
         }
         self.dirty = pending.clone();
         let order = self.graph.replay_order(&pending)?;
-        let (bins, libs): (Vec<ReplayUnit>, Vec<ReplayUnit>) =
-            order.into_iter().partition(|unit| *unit == self.tip_bin);
+        let (image, libs): (Vec<ReplayUnit>, Vec<ReplayUnit>) =
+            order.into_iter().partition(|unit| *unit == self.image_unit);
 
         let runner: &dyn ProcessRunner = &*self.runner;
         let outcomes = replay_units(runner, &self.graph, &self.records, &libs)?;
@@ -1903,16 +1911,16 @@ impl PatchBuilder for DesktopBuilder {
             self.dirty.remove(&outcome.unit);
             self.ungated.compiled(outcome.unit, vec![rlib]);
         }
-        if !bins.is_empty() {
-            match self.replay_tip_bin()? {
+        if !image.is_empty() {
+            match self.replay_image_unit()? {
                 Ok(link_args) => {
                     let typed = typed_objects(&tip_objects(&link_args), &self.crates)?;
-                    self.ungated.compiled(self.tip_bin.clone(), typed);
+                    self.ungated.compiled(self.image_unit.clone(), typed);
                     self.tip_link_args = link_args;
                 }
                 Err(diagnostics) => return Ok(Compiled::Failed { diagnostics }),
             }
-            self.dirty.remove(&self.tip_bin);
+            self.dirty.remove(&self.image_unit);
         }
 
         // Every object compiled since the last accepted patch, this round's
@@ -2486,6 +2494,81 @@ mod tests {
         let apply = server.requests().pop().unwrap();
         let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
         assert_eq!(params.file, None, "a device app is never named a host path");
+    }
+
+    /// Two sessions of one project on two devices (two TUI tabs, or two
+    /// `frust run --watch -d <serial>`): each has its own session dir,
+    /// starting the second leaves the first's patches in place, and each
+    /// app is sent the patch linked against its own `anchor_runtime`.
+    #[test]
+    fn two_device_sessions_of_one_project_never_share_a_session_dir() {
+        let target_dir = temp_dir("two-devices");
+        let start = |serial: &str, anchor: u64, patch: Vec<u8>| {
+            let mut script = hot_script(vec![applied(1, 2, Vec::new())]);
+            script.info.as_mut().unwrap().anchor_runtime = anchor;
+            let server = test_server::spawn(script);
+            let app = attach_device_app(server.addr, Some(FAKE_TOKEN), TRIPLE);
+            let mut builder = FakeBuilder::new(Vec::new());
+            builder.patch = patch;
+            let calls = Arc::clone(&builder.calls);
+            let accepted = AcceptedSets::begin(
+                &target_dir,
+                &super::super::android::session_name("app", serial),
+                table(&[("app::HomeState", 4)]),
+                home_seam(),
+            )
+            .unwrap();
+            builder.out_dir = Some(accepted.dir().to_path_buf());
+            let session = HotSession {
+                builder: Box::new(builder),
+                app,
+                accepted,
+                images: vec![base_image()],
+                budget: Budget::default(),
+                restart: None,
+                next_patch_id: 1,
+            };
+            (session, server, calls)
+        };
+        let change = |session: &mut HotSession| {
+            let outcome = session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
+            assert!(matches!(outcome, Outcome::Patched { .. }), "{outcome:?}");
+        };
+        let patch_a: Vec<u8> = (0..1000u32).map(|i| (i % 253) as u8).collect();
+        let patch_b: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+
+        let (mut a, server_a, calls_a) = start("0A1B2C3D4E5F", ANCHOR, patch_a.clone());
+        let dir_a = a.accepted.dir().to_path_buf();
+        change(&mut a);
+        assert_eq!(std::fs::read(dir_a.join("patch-1.so")).unwrap(), patch_a);
+
+        let (mut b, server_b, calls_b) =
+            start("192.168.1.5:5555", ANCHOR + 0x8000, patch_b.clone());
+        let dir_b = b.accepted.dir().to_path_buf();
+        assert_ne!(dir_a, dir_b);
+        assert_eq!(dir_a.parent(), dir_b.parent());
+        assert_eq!(
+            std::fs::read(dir_a.join("patch-1.so")).unwrap(),
+            patch_a,
+            "starting the second session leaves the first's dir intact"
+        );
+        assert!(dir_a.join(layout::LAYOUT_BASE_FILE).exists());
+        assert!(dir_a.join(LAYOUTS_ACCEPTED_FILE).exists());
+        assert!(!dir_b.join("patch-1.so").exists());
+
+        change(&mut b);
+        assert_eq!(std::fs::read(dir_a.join("patch-1.so")).unwrap(), patch_a);
+        assert_eq!(std::fs::read(dir_b.join("patch-1.so")).unwrap(), patch_b);
+        assert_eq!(
+            calls_a.lock().unwrap().clone(),
+            vec!["compile 1", "link 1 0x100004000", "accepted"]
+        );
+        assert_eq!(
+            calls_b.lock().unwrap().clone(),
+            vec!["compile 1", "link 1 0x10000c000", "accepted"]
+        );
+        assert_eq!(server_a.uploaded(1), Some(patch_a));
+        assert_eq!(server_b.uploaded(1), Some(patch_b));
     }
 
     /// What the stand-in `llvm-strip` writes: no symbol table at all, so a
@@ -4379,7 +4462,7 @@ mod tests {
                     .collect(),
                 tip_link_args: Vec::new(),
                 tip_env: Vec::new(),
-                tip_bin: tip_bin(),
+                image_unit: tip_bin(),
                 cache: SymbolCache::from_bytes("base", &image, target()).unwrap(),
                 target: target(),
                 flavor: LinkerFlavor::for_triple(TRIPLE).unwrap(),
@@ -4558,7 +4641,7 @@ mod tests {
                     units: units(&[tip_bin()])
                 }
             );
-            builder.tip_bin = lib_b();
+            builder.image_unit = lib_b();
             assert_eq!(builder.classify(main_rs), PathClass::Unaffected);
             assert_eq!(
                 builder.classify(Path::new("/w/b/src/lib.rs")),

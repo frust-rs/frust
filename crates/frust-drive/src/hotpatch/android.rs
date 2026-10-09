@@ -44,10 +44,22 @@
 //! as a host path ([`session::attach_device_app`](super::session)).
 //!
 //! **Keys.** The capture scope (`<tip>-<triple>-<profile>-<hash16>`), the
-//! fat dir and the session dir (`session-<crate>-<triple>`) all carry the
-//! target triple, so a desktop and an Android session of one project never
-//! share one. Thin links run the desktop builder unchanged with the tip lib
-//! as the image unit: NDK clang, Gnu thin arguments, anchor exported.
+//! fat dir and the session dir all carry the target triple, so a desktop and
+//! an Android session of one project never share one. The session dir
+//! (`session-<crate>-<triple>-<serial>`, [`session_name`]) also carries the
+//! device's adb serial as one safe path component ([`serial_component`]),
+//! so it belongs to one running app: every `stub-<n>.o`, `patch-<n>.so` and
+//! `patch-<n>.upload.so` in it is linked against that app's
+//! `anchor_runtime` (its ASLR slide), and a session start empties it. Two
+//! sessions of one project on two devices sharing it would wipe each
+//! other's patches and could send one app a patch whose thunks point into
+//! the other's address space, which `apply_patch` cannot detect. The fat
+//! dir, the capture scope and the staged `jniLibs/arm64-v8a/lib<crate>.so`
+//! stay shared between such sessions: they are keyed on the build inputs
+//! alone, identical inputs give identical bytes, and cargo's build lock
+//! serializes the fat builds. Thin links run the desktop builder unchanged
+//! with the tip lib as the image unit: NDK clang, Gnu thin arguments,
+//! anchor exported.
 //!
 //! **Upload.** The host reads each patch's symbols and builds its jump table
 //! from the unstripped `patch-<n>.so`, which stays in the session dir; the
@@ -69,7 +81,7 @@ use crate::android_run::{self, AndroidLaunch};
 use crate::build_dirs::BuildLayout;
 use crate::build_info::{BuildInfo, BuildMode};
 use crate::devices::Device;
-use crate::devtools_client::adb_forward_ephemeral;
+use crate::devtools_client::{adb_forward_ephemeral, sha256_hex};
 use crate::doctor::EnvLookup;
 use crate::host_path;
 use crate::manifest;
@@ -311,9 +323,38 @@ pub fn library_file_name(crate_name: &str) -> String {
 }
 
 /// The session directory's name: the crate and the triple, so a desktop
-/// session of the same project (`session-<bin>`) never shares it.
-pub fn session_name(crate_name: &str) -> String {
-    format!("session-{crate_name}-{TRIPLE}")
+/// session of the same project (`session-<bin>`) never shares it, and the
+/// device's serial ([`serial_component`]), so a session of the same project
+/// on another device never shares it either.
+pub fn session_name(crate_name: &str, serial: &str) -> String {
+    format!("session-{crate_name}-{TRIPLE}-{}", serial_component(serial))
+}
+
+/// The longest [`serial_component`].
+pub const SERIAL_COMPONENT_MAX: usize = 48;
+
+/// An adb serial as one safe path component: non-empty, at most
+/// [`SERIAL_COMPONENT_MAX`] bytes, only `[A-Za-z0-9_-]`. A serial already of
+/// that form is kept as is (USB `0A1B2C3D`, `emulator-5554`). Otherwise
+/// (`192.168.1.5:5555`, an over-long mDNS name) every other character
+/// becomes `-`, the result is cut to fit, and the first 8 hex digits of the
+/// serial's SHA-256 are appended, so two serials that map alike still name
+/// two directories. An empty serial is `no-serial`.
+pub fn serial_component(serial: &str) -> String {
+    if serial.is_empty() {
+        return "no-serial".to_string();
+    }
+    let safe = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    if serial.len() <= SERIAL_COMPONENT_MAX && serial.chars().all(safe) {
+        return serial.to_string();
+    }
+    let digest = sha256_hex(serial.as_bytes());
+    let mapped: String = serial
+        .chars()
+        .map(|c| if safe(c) { c } else { '-' })
+        .take(SERIAL_COMPONENT_MAX - 9)
+        .collect();
+    format!("{mapped}-{}", &digest[..8])
 }
 
 /// Refuses a symbol-cache source that is not under the cargo target dir:
@@ -698,7 +739,7 @@ fn build_and_stage(
             target_dir: target_dir.clone(),
             archive_dir: &fat_dir,
             scope_dir,
-            session: session_name(&crate_name),
+            session: session_name(&crate_name, &start.device.id),
         },
     )?;
     ensure_symbol_source(base.symbol_source(), &target_dir)?;
@@ -1134,12 +1175,13 @@ mod tests {
             "-shared".into(),
             "-nodefaultlibs".into(),
         ];
-        let session_dir = target_dir.join("frust-hotpatch").join(session_name("app"));
+        let session = session_name("app", "emulator-5554");
+        let session_dir = target_dir.join("frust-hotpatch").join(&session);
         std::fs::create_dir_all(&session_dir).unwrap();
         let stub = session_dir.join("stub-1.o");
         std::fs::write(&stub, b"stub").unwrap();
         let flavor = LinkerFlavor::for_triple(TRIPLE).unwrap();
-        let output = thin_link::patch_path(&target_dir, &session_name("app"), 1, flavor).unwrap();
+        let output = thin_link::patch_path(&target_dir, &session, 1, flavor).unwrap();
         assert_eq!(output, session_dir.join("patch-1.so"));
         std::fs::write(
             &output,
@@ -1248,8 +1290,13 @@ mod tests {
     fn keys_carry_the_triple_and_the_cdylib_name() {
         assert_eq!(library_file_name("my_app"), "libmy_app.so");
         assert_eq!(
-            session_name("my_app"),
-            "session-my_app-aarch64-linux-android"
+            session_name("my_app", "0A1B2C3D4E5F"),
+            "session-my_app-aarch64-linux-android-0A1B2C3D4E5F"
+        );
+        assert_ne!(
+            session_name("my_app", "0A1B2C3D4E5F"),
+            session_name("my_app", "emulator-5554"),
+            "two devices never share a session dir"
         );
         let scope = ScopeInputs {
             tip: "my-app".into(),
@@ -1270,6 +1317,64 @@ mod tests {
                 .starts_with("my_app-aarch64-linux-android-dev-")
         );
         assert_ne!(scope.dir_name().unwrap(), desktop.dir_name().unwrap());
+    }
+
+    /// Desktop session dirs keep their name: `session-<bin>`, no triple and
+    /// no serial, so an Android session dir of the same project is another.
+    #[test]
+    fn the_desktop_session_name_is_unchanged() {
+        assert_eq!(session::desktop_session_name("my-app"), "session-my-app");
+        assert_ne!(
+            session::desktop_session_name("my_app"),
+            session_name("my_app", "emulator-5554")
+        );
+    }
+
+    /// Every serial form adb lists becomes one component `session_dir`
+    /// accepts, and distinct serials stay distinct.
+    #[test]
+    fn serials_become_one_safe_path_component() {
+        let long = format!("adb-{}._adb-tls-connect._tcp", "R5CT".repeat(16));
+        let serials = [
+            "0A1B2C3D4E5F",
+            "emulator-5554",
+            "192.168.1.5:5555",
+            "192-168-1-5-5555",
+            "",
+            "..",
+            "a/b\\c",
+            long.as_str(),
+        ];
+        let target_dir = Path::new("/t");
+        let mut seen = std::collections::BTreeSet::new();
+        for serial in serials {
+            let component = serial_component(serial);
+            assert!(!component.is_empty(), "{serial:?}");
+            assert!(component.len() <= SERIAL_COMPONENT_MAX, "{component}");
+            assert!(
+                component
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "{component}"
+            );
+            let session = session_name("app", serial);
+            assert_eq!(
+                thin_link::session_dir(target_dir, &session).unwrap(),
+                target_dir.join("frust-hotpatch").join(&session),
+                "{serial:?}"
+            );
+            assert!(seen.insert(component), "{serial:?} collides");
+        }
+        assert_eq!(serial_component("0A1B2C3D4E5F"), "0A1B2C3D4E5F");
+        assert_eq!(serial_component("emulator-5554"), "emulator-5554");
+        assert_eq!(serial_component(""), "no-serial");
+        let tcp = serial_component("192.168.1.5:5555");
+        assert!(tcp.starts_with("192-168-1-5-5555-"), "{tcp}");
+        assert_eq!(tcp.len(), "192-168-1-5-5555-".len() + 8);
+        assert_eq!(tcp, serial_component("192.168.1.5:5555"), "stable");
+        let cut = serial_component(&long);
+        assert_eq!(cut.len(), SERIAL_COMPONENT_MAX);
+        assert!(cut.starts_with("adb-R5CT"), "{cut}");
     }
 
     #[test]
