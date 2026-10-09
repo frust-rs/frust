@@ -1035,6 +1035,41 @@ mod tests {
         assert!(!probe.take_frame_due(), "one request, one frame line");
     }
 
+    // `DevtoolsUi::request_frame` sets `events_since_last_frame` (not the patch latch): an idle gate
+    // Runs on it, and the probe sees no request, so a refused apply logs no `applied` line.
+    #[cfg(feature = "hotpatch")]
+    #[test]
+    fn a_frame_request_runs_an_idle_tick_without_an_applied_line() {
+        use frust_core::FrameTime;
+        use frust_shell_common::{FrameGate, FrameInputs, FramePacing};
+        use std::time::Duration;
+        let pacing = || FramePacing {
+            now: FrameTime::from_nanos(0),
+            interval: Duration::from_millis(16),
+            requested_interval: None,
+        };
+        let mut gate = FrameGate::with_flags(true, true);
+        for _ in 0..16 {
+            gate.decide_paced(FrameInputs::default(), pacing());
+        }
+        assert!(
+            gate.decide_paced(FrameInputs::default(), pacing())
+                .is_skip()
+        );
+        let forced = FrameInputs {
+            events_since_last_frame: true,
+            ..FrameInputs::default()
+        };
+        assert!(gate.decide_paced(forced, pacing()).is_run());
+        let mut probe = super::PatchFrameProbe::new();
+        assert!(probe.take_frame_due());
+        assert!(
+            !probe.note_request(false),
+            "no patch installed, no applied line"
+        );
+        assert!(!probe.take_frame_due(), "and no pending frame line");
+    }
+
     use super::{
         app_is_dark, base_theme, effective_reduce_motion, follow_platform_brightness,
         theme_after_override_poll,
