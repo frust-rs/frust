@@ -28,7 +28,8 @@
 //! Windows every reader here answers `BuilderUnsupported`.
 //!
 //! The record-to-cache rule ([`image_symbols_from_records`]), the header
-//! readers ([`codeview`], [`image_base`]), the stub's PE arms and the jump
+//! readers ([`codeview`], [`image_base`], [`size_of_image`]), the stub's PE
+//! arms and the jump
 //! table (which matches PDB-built tables by name, anchored on
 //! [`ANCHOR_SYMBOL`] exactly as for ELF and Mach-O) work on every host.
 
@@ -53,6 +54,8 @@ const DEBUG_TYPE_CODEVIEW: u32 = 2;
 const PE32_PLUS_MAGIC: u16 = 0x20b;
 /// `ImageBase`'s offset in a PE32+ optional header.
 const IMAGE_BASE_OFFSET: usize = 24;
+/// `SizeOfImage`'s offset in a PE32+ optional header.
+const SIZE_OF_IMAGE_OFFSET: usize = 56;
 /// The debug directory's index among the optional header's data directories.
 const DEBUG_DIRECTORY_INDEX: usize = 6;
 /// One `IMAGE_DEBUG_DIRECTORY` entry.
@@ -253,6 +256,19 @@ fn headers(bytes: &[u8], what: &str) -> Result<Headers, HotpatchError> {
 /// [`HotpatchError::BuilderUnsupported`].
 pub fn image_base(bytes: &[u8], what: &str) -> Result<u64, HotpatchError> {
     headers(bytes, what).map(|headers| headers.image_base)
+}
+
+/// The `SizeOfImage` of the PE32+ image `bytes` (`what` names it in
+/// errors): the bytes of address space the loaded image spans from its
+/// `ImageBase`. Anything out of bounds is
+/// [`HotpatchError::BuilderUnsupported`].
+pub fn size_of_image(bytes: &[u8], what: &str) -> Result<u32, HotpatchError> {
+    let headers = headers(bytes, what)?;
+    u32_at(bytes, headers.optional + SIZE_OF_IMAGE_OFFSET).ok_or_else(|| {
+        HotpatchError::unsupported(format!(
+            "{what} is not a usable PE image: truncated optional header"
+        ))
+    })
 }
 
 /// Reads the CodeView record of the PE32+ image `bytes` (`what` names it in
@@ -886,6 +902,8 @@ mod tests {
 
     /// The preferred base [`pe_image`] records.
     const FIXTURE_BASE: u64 = 0x1_4000_0000;
+    /// The `SizeOfImage` [`pe_image`] records.
+    const FIXTURE_SIZE: u32 = 0x2000;
 
     /// A minimal PE32+ image at [`FIXTURE_BASE`]: one `.rdata` section
     /// holding a debug directory whose CodeView record names `app.pdb`.
@@ -906,6 +924,7 @@ mod tests {
         let optional = 0x58;
         put16(&mut image, optional, PE32_PLUS_MAGIC);
         image[optional + 24..optional + 32].copy_from_slice(&FIXTURE_BASE.to_le_bytes());
+        put32(&mut image, optional + 56, FIXTURE_SIZE);
         put32(&mut image, optional + 108, 16);
         put32(&mut image, optional + 112 + 8 * 6, 0x1000); // debug directory RVA
         put32(&mut image, optional + 112 + 8 * 6 + 4, 28);
@@ -959,6 +978,11 @@ mod tests {
         // The base needs only the headers, not a debug directory.
         assert_eq!(image_base(&image, "app.exe").unwrap(), FIXTURE_BASE);
         assert_eq!(image_base(&no_debug, "app.exe").unwrap(), FIXTURE_BASE);
+        assert_eq!(size_of_image(&image, "app.exe").unwrap(), FIXTURE_SIZE);
+        assert_eq!(size_of_image(&no_debug, "app.exe").unwrap(), FIXTURE_SIZE);
+        let mut short_size = image.clone();
+        short_size.truncate(0x58 + 58);
+        assert_eq!(image_base(&short_size, "app.exe").unwrap(), FIXTURE_BASE);
         let mut short_header = image.clone();
         short_header.truncate(0x58 + 28);
         for (case, bytes) in [
@@ -988,7 +1012,18 @@ mod tests {
                 ),
                 "image_base: {case}"
             );
+            assert!(
+                matches!(
+                    size_of_image(&bytes, "app.exe"),
+                    Err(HotpatchError::BuilderUnsupported { .. })
+                ),
+                "size_of_image: {case}"
+            );
         }
+        assert!(matches!(
+            size_of_image(&short_size, "app.exe"),
+            Err(HotpatchError::BuilderUnsupported { .. })
+        ));
     }
 
     #[cfg(not(windows))]

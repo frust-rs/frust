@@ -217,12 +217,17 @@ jobs:
         run: bash scripts/ci/hotpatch-canary.sh
 
   hotpatch-windows:
-    # The Windows (MSVC) hot-patch builder mechanics: PE/PDB symbol cache, jump
-    # table, stub and link lines (`hotpatch::pe`, and `hotpatch::pdb_layout` once
-    # it exists), whose PDB fixtures need a Windows host, plus the devtools service
-    # that keeps `HotPatch` unadvertised there; Windows stays apply-disabled. The
-    # runner's minutes are the owner's call: drop this job from `ci-ok`'s needs, or
-    # give it a path filter, to stop it gating every pull request.
+    # The Windows (MSVC) hot-patch builder mechanics, whose PDB fixtures need a
+    # Windows host: PE/PDB symbol cache, jump table, stub and PDB layout gate
+    # (`hotpatch::pe`, `hotpatch::pdb_layout`), the fixed-base fat and thin links
+    # (`hotpatch::fat_link`, `hotpatch::thin_link`) and the real session over them
+    # (`hotpatch::session::windows`). The filter names modules rather than all of
+    # `hotpatch::` because five known Windows-host failures live outside them
+    # (act_000001a12096ed6445DWzpgI). The devtools service runs with its
+    # `hotpatch` feature: Windows applies hot patches and answers the same gate as
+    # every other host. A filter that matches no test fails the job. The runner's
+    # minutes are the owner's call: drop this job from `ci-ok`'s needs, or give it
+    # a path filter, to stop it gating every pull request.
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -230,10 +235,27 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: PE/PDB builder tests
-        run: cargo test -p frust-drive --lib -- hotpatch::pe hotpatch::pdb_layout
+      - name: Hot-patch builder tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p frust-drive --lib -- hotpatch::pe hotpatch::pdb_layout hotpatch::fat_link hotpatch::thin_link hotpatch::session::windows 2>&1 | tee "$RUNNER_TEMP/frust-drive-tests.log"
       - name: Devtools service tests
-        run: cargo test -p frust-devtools
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p frust-devtools --features hotpatch 2>&1 | tee "$RUNNER_TEMP/frust-devtools-tests.log"
+      - name: Every filter ran tests
+        shell: bash
+        run: |
+          for log in frust-drive-tests frust-devtools-tests; do
+            passed=$(awk '/test result:/ { for (i = 2; i <= NF; i++) if ($i == "passed;") sum += $(i - 1) } END { print sum + 0 }' "$RUNNER_TEMP/$log.log")
+            echo "$log: $passed passed"
+            if [ "$passed" -eq 0 ]; then
+              echo "::error::$log ran no tests: its filter matches nothing"
+              exit 1
+            fi
+          done
 
   hygiene:
     runs-on: ubuntu-latest
