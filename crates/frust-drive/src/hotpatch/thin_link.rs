@@ -21,7 +21,10 @@
 //! ([`flavor_linker_program`](super::fat_link::flavor_linker_program):
 //! `rust-lld -flavor link` by default) and is `patch-<n>.dll` with its own
 //! `patch-<n>.pdb` beside it, which the session reads the patch's symbols
-//! and its candidate layout table from. See `docs/CLI_ARCHITECTURE.md`.
+//! and its candidate layout table from. Beyond dx, an Msvc patch links at
+//! its own fixed base with ASLR off ([`thin_link_with_base`],
+//! [`patch_image_base`](super::fat_link::patch_image_base)), so it loads
+//! at its link-time VAs. See `docs/CLI_ARCHITECTURE.md`.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -29,7 +32,8 @@ use std::path::{Component, Path, PathBuf};
 use crate::process::ProcessRunner;
 
 use super::fat_link::{
-    HIGH_ENTROPY_VA_OFF, LinkerFlavor, anchor_address, linker_driver_args, render, run_linker,
+    HIGH_ENTROPY_VA_OFF, LinkerFlavor, anchor_address, fixed_base_args_at, linker_driver_args,
+    render, run_linker,
 };
 use super::link_intercept::output_path;
 use super::{HotpatchError, hotpatch_root};
@@ -242,8 +246,20 @@ fn is_output_operand(captured: &[String], index: usize) -> bool {
 /// [`forwarded_args`], the anchor export, and `-o <output>` (Msvc:
 /// `/HIGHENTROPYVA:NO` after the export, then `/OUT:<output>`). A capture
 /// with no `.rcgu.o`, or in the other dialect (`/OUT:` for Darwin/Gnu, `-o`
-/// for Msvc), is [`HotpatchError::BuilderUnsupported`].
+/// for Msvc), is [`HotpatchError::BuilderUnsupported`]. No fixed base:
+/// [`thin_link_args_with_base`] with `None`.
 pub fn thin_link_args(request: &ThinLinkRequest<'_>) -> Result<Vec<String>, HotpatchError> {
+    thin_link_args_with_base(request, None)
+}
+
+/// [`thin_link_args`], with an Msvc line linked at `fixed_base`: after
+/// `/HIGHENTROPYVA:NO` come `/DYNAMICBASE:NO /BASE:<fixed_base>`
+/// ([`fixed_base_args_at`], omitted for an ARM tip object, where lld-link
+/// refuses them), then `/OUT:`. Darwin and Gnu lines ignore `fixed_base`.
+pub fn thin_link_args_with_base(
+    request: &ThinLinkRequest<'_>,
+    fixed_base: Option<u64>,
+) -> Result<Vec<String>, HotpatchError> {
     let captured = request.tip_link_args;
     if request.flavor == LinkerFlavor::Msvc {
         if captured.iter().any(|arg| arg == "-o") {
@@ -266,6 +282,11 @@ pub fn thin_link_args(request: &ThinLinkRequest<'_>) -> Result<Vec<String>, Hotp
         ));
     }
     tip_objects.sort();
+    let machine_object = tip_objects[tip_objects.len() - 1];
+    let fixed_base_args = fixed_base
+        .filter(|_| request.flavor == LinkerFlavor::Msvc)
+        .map(|base| fixed_base_args_at(base, Path::new(machine_object)))
+        .unwrap_or_default();
 
     let mut args: Vec<String> = tip_objects.into_iter().cloned().collect();
     args.extend(request.replayed_rlibs.iter().map(|rlib| render(rlib)));
@@ -286,6 +307,7 @@ pub fn thin_link_args(request: &ThinLinkRequest<'_>) -> Result<Vec<String>, Hotp
     args.push(request.flavor.anchor_export_arg());
     if request.flavor == LinkerFlavor::Msvc {
         args.push(HIGH_ENTROPY_VA_OFF.to_string());
+        args.extend(fixed_base_args);
         args.push(format!("/OUT:{}", render(request.output)));
     } else {
         args.push("-o".to_string());
@@ -314,12 +336,24 @@ pub struct ThinLinkOutput {
 /// missing stub object, a failed link or a patch without the anchor is
 /// [`HotpatchError::BuilderUnsupported`]; a linker that cannot be spawned is
 /// [`HotpatchError::Process`]. The linker's
-/// [`linker_driver_args`] lead the line.
+/// [`linker_driver_args`] lead the line. No fixed base:
+/// [`thin_link_with_base`] with `None`.
 pub fn thin_link(
     runner: &dyn ProcessRunner,
     request: &ThinLinkRequest<'_>,
 ) -> Result<ThinLinkOutput, HotpatchError> {
-    let args = thin_link_args(request)?;
+    thin_link_with_base(runner, request, None)
+}
+
+/// [`thin_link`] through [`thin_link_args_with_base`]: an Msvc patch links
+/// at `fixed_base` with ASLR off, so it loads there and its anchor's VA is
+/// its runtime address.
+pub fn thin_link_with_base(
+    runner: &dyn ProcessRunner,
+    request: &ThinLinkRequest<'_>,
+    fixed_base: Option<u64>,
+) -> Result<ThinLinkOutput, HotpatchError> {
+    let args = thin_link_args_with_base(request, fixed_base)?;
     let deps_copy = output_path(request.tip_link_args)?;
     if !request.stub_object.is_file() {
         return Err(HotpatchError::unsupported(format!(
@@ -353,8 +387,9 @@ pub fn thin_link(
 
 #[cfg(test)]
 mod tests {
-    use super::super::fat_link::ANCHOR_SYMBOL;
     use super::super::fat_link::test_support::*;
+    use super::super::fat_link::{ANCHOR_SYMBOL, patch_image_base};
+    use super::super::pe;
     use super::*;
 
     struct Fixture {
@@ -596,12 +631,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn msvc_thin_link_args_are_dx_dll_line_with_the_anchor_export() {
-        let fx = fixture("thin-msvc", LinkerFlavor::Msvc);
-        let deps_copy = fx.deps_copy.with_extension("exe");
-        fs::write(&deps_copy, b"no-link stand-in").unwrap();
-        let capture = strings(&[
+    fn msvc_capture(deps_copy: &Path) -> Vec<String> {
+        strings(&[
             "/NOLOGO",
             "C:/t/rustcXYZ/symbols.o",
             "C:/t/deps/app-4444.app.bbbb-cgu.1.rcgu.o",
@@ -610,39 +641,56 @@ mod tests {
             "kernel32.lib",
             "/defaultlib:msvcrt",
             "/LIBPATH:C:/t/deps",
-            &format!("/OUT:{}", render(&deps_copy)),
+            &format!("/OUT:{}", render(deps_copy)),
             "/DEBUG",
-        ]);
+        ])
+    }
+
+    /// dx's Msvc DLL line for [`msvc_capture`], with `fixed_base` (the
+    /// `/DYNAMICBASE:NO /BASE:` pair) between `/HIGHENTROPYVA:NO` and
+    /// `/OUT:`.
+    fn msvc_line(fx: &Fixture, fixed_base: &[&str]) -> Vec<String> {
+        let mut line = vec![
+            "C:/t/deps/app-4444.app.aaaa-cgu.0.rcgu.o".to_string(),
+            "C:/t/deps/app-4444.app.bbbb-cgu.1.rcgu.o".to_string(),
+            render(&fx.rlibs[0]),
+            render(&fx.rlibs[1]),
+            render(&fx.stub),
+            "shlwapi.lib".to_string(),
+            "kernel32.lib".to_string(),
+            "advapi32.lib".to_string(),
+            "ntdll.lib".to_string(),
+            "userenv.lib".to_string(),
+            "ws2_32.lib".to_string(),
+            "dbghelp.lib".to_string(),
+            "/defaultlib:msvcrt".to_string(),
+            "/DLL".to_string(),
+            "/DEBUG".to_string(),
+            "/PDBALTPATH:%_PDB%".to_string(),
+            "/EXPORT:__frust_hotpatch_anchor".to_string(),
+            "/HIGHENTROPYVA:NO".to_string(),
+        ];
+        line.extend(strings(fixed_base));
+        line.push(format!("/OUT:{}", render(&fx.output)));
+        line
+    }
+
+    #[test]
+    fn msvc_thin_link_args_are_dx_dll_line_at_the_patch_fixed_base() {
+        let fx = fixture("thin-msvc", LinkerFlavor::Msvc);
+        let deps_copy = fx.deps_copy.with_extension("exe");
+        fs::write(&deps_copy, b"no-link stand-in").unwrap();
+        let capture = msvc_capture(&deps_copy);
         let mut req = request(&fx, LinkerFlavor::Msvc, &capture, &[]);
         req.linker = "link.exe";
         let runner = RecordingRunner::linking(b"MZ stand-in".to_vec());
         // The stand-in DLL has no PDB, so its anchor is refused after the
         // link ran.
-        unsupported(thin_link(&runner, &req));
+        unsupported(thin_link_with_base(&runner, &req, patch_image_base(1)));
         let link = runner.only_call("link.exe");
         assert_eq!(
             link.args,
-            vec![
-                "C:/t/deps/app-4444.app.aaaa-cgu.0.rcgu.o".to_string(),
-                "C:/t/deps/app-4444.app.bbbb-cgu.1.rcgu.o".to_string(),
-                render(&fx.rlibs[0]),
-                render(&fx.rlibs[1]),
-                render(&fx.stub),
-                "shlwapi.lib".to_string(),
-                "kernel32.lib".to_string(),
-                "advapi32.lib".to_string(),
-                "ntdll.lib".to_string(),
-                "userenv.lib".to_string(),
-                "ws2_32.lib".to_string(),
-                "dbghelp.lib".to_string(),
-                "/defaultlib:msvcrt".to_string(),
-                "/DLL".to_string(),
-                "/DEBUG".to_string(),
-                "/PDBALTPATH:%_PDB%".to_string(),
-                "/EXPORT:__frust_hotpatch_anchor".to_string(),
-                "/HIGHENTROPYVA:NO".to_string(),
-                format!("/OUT:{}", render(&fx.output)),
-            ]
+            msvc_line(&fx, &["/DYNAMICBASE:NO", "/BASE:0x20000000"])
         );
         assert!(fx.output.ends_with("frust-hotpatch/s-1/patch-3.dll"));
         assert!(fs::read(&fx.output).is_ok(), "the link wrote /OUT:");
@@ -650,6 +698,13 @@ mod tests {
             !deps_copy.exists(),
             "the thin build's /OUT: copy is deleted"
         );
+
+        // Patch 2 links one stride higher; without a base the line is dx's.
+        assert_eq!(
+            thin_link_args_with_base(&req, patch_image_base(2)).unwrap(),
+            msvc_line(&fx, &["/DYNAMICBASE:NO", "/BASE:0x30000000"])
+        );
+        assert_eq!(thin_link_args(&req).unwrap(), msvc_line(&fx, &[]));
 
         // A `-o` capture is not an Msvc line.
         let cc_style = strings(&["a.rcgu.o", "-o", "/t/x"]);
@@ -659,6 +714,35 @@ mod tests {
             &cc_style,
             &[],
         )));
+    }
+
+    #[test]
+    fn an_arm_msvc_patch_keeps_aslr_and_cc_lines_ignore_the_base() {
+        let fx = fixture("thin-msvc-arm", LinkerFlavor::Msvc);
+        let mut header = pe::MACHINE_ARM64.to_le_bytes().to_vec();
+        header.resize(64, 0);
+        let arm64 = fx.target.join("app.app.aaaa-cgu.0.rcgu.o");
+        fs::write(&arm64, header).unwrap();
+        let capture = vec![render(&arm64), "/OUT:C:/t/deps/app.exe".to_string()];
+        let req = request(&fx, LinkerFlavor::Msvc, &capture, &[]);
+        // lld-link refuses `/DYNAMICBASE:NO` on ARM: the DLL stays
+        // relocatable, and the runtime's anchor check refuses it.
+        assert_eq!(
+            thin_link_args_with_base(&req, patch_image_base(1)).unwrap(),
+            thin_link_args(&req).unwrap()
+        );
+
+        for (flavor, capture) in [
+            (LinkerFlavor::Darwin, darwin_capture(&fx.deps_copy)),
+            (LinkerFlavor::Gnu, gnu_capture(&fx.deps_copy)),
+        ] {
+            let req = request(&fx, flavor, &capture, &[]);
+            assert_eq!(
+                thin_link_args_with_base(&req, patch_image_base(1)).unwrap(),
+                thin_link_args(&req).unwrap(),
+                "{flavor:?}"
+            );
+        }
     }
 
     #[test]
