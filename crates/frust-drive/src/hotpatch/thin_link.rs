@@ -193,6 +193,18 @@ pub struct ThinLinkRequest<'a> {
     pub envs: &'a [(String, String)],
 }
 
+/// Whether `captured[index]` is the linker's output operand: the value after
+/// `-o` / `--output`, or a joined `-o<path>` / `--output=<path>` spelling.
+fn is_output_operand(captured: &[String], index: usize) -> bool {
+    let arg = &captured[index];
+    if (arg.len() > 2 && arg.starts_with("-o")) || arg.starts_with("--output=") {
+        return true;
+    }
+    index
+        .checked_sub(1)
+        .is_some_and(|prev| matches!(captured[prev].as_str(), "-o" | "--output"))
+}
+
 /// The patch link line: the tip's `.rcgu.o` files (sorted), the replayed
 /// rlibs, the stub object, any shared libraries the tip linked, the
 /// [`forwarded_args`], the anchor export, and `-o <output>`. A capture with
@@ -218,7 +230,7 @@ pub fn thin_link_args(request: &ThinLinkRequest<'_>) -> Result<Vec<String>, Hotp
     let mut args: Vec<String> = tip_objects.into_iter().cloned().collect();
     args.extend(request.replayed_rlibs.iter().map(|rlib| render(rlib)));
     args.push(render(request.stub_object));
-    // The `-o` operand is the thin build's own output, not a library it
+    // The output operand is the thin build's own output, not a library it
     // linked: on Android it is the `cdylib`'s `lib<crate>.so`.
     args.extend(
         captured
@@ -226,9 +238,7 @@ pub fn thin_link_args(request: &ThinLinkRequest<'_>) -> Result<Vec<String>, Hotp
             .enumerate()
             .filter(|(index, arg)| {
                 (arg.ends_with(".dylib") || arg.ends_with(".so"))
-                    && !index
-                        .checked_sub(1)
-                        .is_some_and(|prev| captured[prev] == "-o")
+                    && !is_output_operand(captured, *index)
             })
             .map(|(_, arg)| arg.clone()),
     );
@@ -549,6 +559,60 @@ mod tests {
         ));
         assert!(detail.contains("undefined symbol: foo"), "{detail}");
         assert!(!fx.deps_copy.exists());
+    }
+
+    fn shared_libs_in(args: &[String]) -> Vec<&str> {
+        args.iter()
+            .map(String::as_str)
+            .filter(|arg| arg.ends_with(".so") || arg.ends_with(".dylib"))
+            .collect()
+    }
+
+    fn thin_args(flavor: LinkerFlavor, tail: &[&str]) -> Vec<String> {
+        let fx = fixture("thin-output-operand", flavor);
+        let mut capture = strings(&["a.rcgu.o"]);
+        capture.extend(strings(tail));
+        thin_link_args(&request(&fx, flavor, &capture, &[])).unwrap()
+    }
+
+    #[test]
+    fn the_android_cdylib_output_is_not_relinked_but_other_so_libs_pass() {
+        let args = thin_args(
+            LinkerFlavor::Gnu,
+            &["/ndk/libc++_shared.so", "-o", "/t/deps/libapp.so"],
+        );
+        let libs = shared_libs_in(&args[..args.len() - 2]);
+        assert_eq!(libs, ["/ndk/libc++_shared.so"]);
+    }
+
+    #[test]
+    fn the_desktop_dylib_output_is_not_relinked() {
+        let args = thin_args(
+            LinkerFlavor::Darwin,
+            &["/t/libdep.dylib", "-o", "/t/deps/x.dylib"],
+        );
+        assert_eq!(shared_libs_in(&args[..args.len() - 2]), ["/t/libdep.dylib"]);
+    }
+
+    #[test]
+    fn joined_output_spellings_are_skipped_not_linked() {
+        for tail in [
+            &["-o/t/deps/libapp.so"][..],
+            &["--output=/t/deps/libapp.so"][..],
+            &["--output", "/t/deps/libapp.so"][..],
+        ] {
+            let args = thin_args(LinkerFlavor::Gnu, tail);
+            assert!(
+                shared_libs_in(&args[..args.len() - 2]).is_empty(),
+                "{tail:?} leaked the output into the link"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_output_so_passes_through() {
+        let args = thin_args(LinkerFlavor::Gnu, &["/ndk/liblog.so", "-o", "/t/x"]);
+        assert_eq!(shared_libs_in(&args[..args.len() - 2]), ["/ndk/liblog.so"]);
     }
 
     #[test]
