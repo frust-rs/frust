@@ -24,13 +24,14 @@ use crossterm::event::{
 use frust_drive::android_build::{self, AndroidArtifact};
 use frust_drive::android_run;
 use frust_drive::desktop_build;
-use frust_drive::devices::{Platform, default_discoverers, discover_all};
+use frust_drive::devices::{Device, Kind, Platform, default_discoverers, discover_all};
 use frust_drive::devtools_client::adb_forward_remove;
 use frust_drive::doctor::{self, DoctorCtx, RealEnv};
 use frust_drive::hotpatch::session::{
     HotSession, Outcome as HotOutcome, RestartReason, StartError,
 };
 use frust_drive::ios_build::{self, IosArtifact};
+use frust_drive::ios_run;
 use frust_drive::process::{ProcessRunner, RealProcessRunner, StreamHandle};
 use frust_drive::scaffold::{self, TemplateContext};
 use frust_mcp::SharedBackend;
@@ -532,9 +533,9 @@ struct EffectCtx<'a> {
     /// The per-session "Watch: hot patch on save" source watchers, keyed by
     /// session id alongside `records` (whose spec gives a watcher its root).
     watchers: &'a mut SourceWatchers,
-    /// The hot sessions — watched debug desktop and Android device sessions
-    /// the runner launched through the hot-patch session start, keyed by
-    /// session id.
+    /// The hot sessions — watched debug desktop, Android device and iOS
+    /// simulator sessions the runner launched through the hot-patch session
+    /// start, keyed by session id.
     hot: &'a mut HotSessions,
     /// The one [`TuiSessionBackend`] both embedded servers are started over —
     /// built once per run, so an MCP agent and a DAP client drive the same
@@ -1519,12 +1520,14 @@ struct LaunchCtx<'a> {
 /// modal's watch checkbox and every relaunch of a watched session.
 ///
 /// A spec that can run hot ([`SessionSpec::hot_precondition`]: a debug
-/// desktop or Android device build) becomes a [`HotSessions`] entry:
-/// registered, recorded and sent `EnableWatch` here, synchronously and in
-/// that order, and only then started, so the engine has the tab (and its
-/// watch flag) before the worker's first event. Its start — the fat build,
-/// then the fat image spawned directly or, on Android, packaged, installed
-/// and launched — runs on the worker's own thread. Anything else launches
+/// desktop, Android device or iOS simulator build) becomes a
+/// [`HotSessions`] entry: registered, recorded and sent `EnableWatch` here,
+/// synchronously and in that order, and only then started, so the engine
+/// has the tab (and its watch flag) before the worker's first event. Its
+/// start — the fat build, then the fat image spawned directly, on Android
+/// packaged, installed and launched, or on an iOS simulator built through
+/// the Xcode fat build, `simctl install`ed and `simctl launch`ed — runs on
+/// the worker's own thread. Anything else launches
 /// exactly as [`launch_sessions`] does and keeps restart-on-save, with an
 /// Info toast naming the precondition that kept a watchable target cold.
 fn launch_watched_sessions(specs: Vec<SessionSpec>, ctx: &mut LaunchCtx<'_>) {
@@ -2515,17 +2518,36 @@ fn device_teardown(
     })
 }
 
+/// The teardown of an app launched on the iOS simulator `udid`: `simctl
+/// terminate` the bundle (killing the console stream stops only the
+/// `simctl` bridge). Best-effort, like [`device_teardown`].
+fn simulator_teardown(
+    runner: Arc<dyn ProcessRunner + Send + Sync>,
+    udid: String,
+    bundle_id: String,
+) -> AppTeardown {
+    Box::new(move || ios_run::simctl::terminate(&*runner, &udid, &bundle_id))
+}
+
+/// Whether `device` is an iOS simulator: its app stops with `simctl
+/// terminate`, not an Android teardown.
+fn is_simulator(device: &Device) -> bool {
+    device.platform == Platform::Ios && device.kind == Kind::Simulator
+}
+
 /// The toast for a session that runs but can only restart.
 fn hot_unavailable_notice(reason: &str) -> String {
     format!("Hot patch unavailable, saves restart this session: {reason}")
 }
 
 /// The production [`HotStarter`]: [`SessionSpec::start_hot`] (the fat build,
-/// then the fat image spawned directly — or, on an Android device, packaged,
-/// installed and launched), falling back to the spec's cold launch when the
-/// start refuses before building anything: `cargo run` on the desktop, the
-/// non-hot device pipeline on a device. A device app carries a teardown
-/// (forward removal, force-stop) the session runs when it ends.
+/// then the fat image spawned directly — or, on an Android device or an iOS
+/// simulator, installed and launched), falling back to the spec's cold
+/// launch when the start refuses before building anything: `cargo run` on
+/// the desktop, the non-hot device or simulator pipeline on a device. A
+/// device app carries a teardown (forward removal and force-stop on
+/// Android, `simctl terminate` on a simulator) the session runs when it
+/// ends.
 fn real_hot_start(spec: SessionSpec, runner: Arc<dyn ProcessRunner + Send + Sync>) -> HotStarter {
     Box::new(
         move |on_line, cancel| match spec.start_hot(Arc::clone(&runner), on_line, cancel) {
@@ -2534,13 +2556,19 @@ fn real_hot_start(spec: SessionSpec, runner: Arc<dyn ProcessRunner + Send + Sync
                     .session
                     .restart_only_reason()
                     .map(hot_unavailable_notice);
+                let simulator =
+                    matches!(&spec.target, DeviceTarget::Device(device) if is_simulator(device));
                 let teardown = launch.device.map(|app| {
-                    device_teardown(
-                        Arc::clone(&runner),
-                        app.serial,
-                        app.package,
-                        app.forward_port,
-                    )
+                    if simulator {
+                        simulator_teardown(Arc::clone(&runner), app.serial, app.package)
+                    } else {
+                        device_teardown(
+                            Arc::clone(&runner),
+                            app.serial,
+                            app.package,
+                            app.forward_port,
+                        )
+                    }
                 });
                 HotStart::Running {
                     patcher: Box::new(launch.session),
@@ -2561,6 +2589,35 @@ fn real_hot_start(spec: SessionSpec, runner: Arc<dyn ProcessRunner + Send + Sync
                             child: Some(child),
                             teardown: None,
                         },
+                        Err(err) => HotStart::Failed(format!("{err:#}")),
+                    }
+                }
+                DeviceTarget::Device(device) if is_simulator(device) => {
+                    on_line(&format!(
+                        "hot patching unavailable ({reason}); running the simulator pipeline \
+                         instead"
+                    ));
+                    match ios_run::spawn_session(
+                        &*runner,
+                        &spec.project_root,
+                        device,
+                        &spec.build,
+                        on_line,
+                        cancel,
+                    ) {
+                        Ok(Some(launch)) => HotStart::Running {
+                            notice: Some(hot_unavailable_notice(&reason.to_string())),
+                            patcher: Box::new(RestartOnly(reason)),
+                            child: Some(launch.stream),
+                            teardown: Some(simulator_teardown(
+                                Arc::clone(&runner),
+                                device.id.clone(),
+                                launch.bundle_id,
+                            )),
+                        },
+                        Ok(None) => HotStart::Failed(
+                            "the session was stopped before the app launched".to_string(),
+                        ),
                         Err(err) => HotStart::Failed(format!("{err:#}")),
                     }
                 }
@@ -5279,6 +5336,93 @@ mod tests {
             )();
             assert_eq!(*lock_unpoisoned(&runner.runs), expected);
         }
+    }
+
+    /// A simulator app's teardown terminates the launched bundle on the
+    /// simulator — no `adb` at all.
+    #[test]
+    fn a_simulator_teardown_terminates_the_bundle() {
+        let runner = Arc::new(RecordingRunner {
+            inner: frust_drive::process::FakeProcessRunner::new(),
+            runs: Mutex::new(Vec::new()),
+        });
+        simulator_teardown(
+            runner.clone(),
+            "FAKE-UDID".to_string(),
+            "it.example.fake".to_string(),
+        )();
+        assert_eq!(
+            *lock_unpoisoned(&runner.runs),
+            vec!["xcrun simctl terminate FAKE-UDID it.example.fake"]
+        );
+    }
+
+    /// A booted iOS simulator spec whose udid is a fake.
+    fn watch_simulator_spec(root: &Path) -> SessionSpec {
+        SessionSpec {
+            target: DeviceTarget::Device(frust_drive::devices::Device {
+                id: "FAKE-UDID".to_string(),
+                name: "iPhone 15".to_string(),
+                platform: Platform::Ios,
+                kind: frust_drive::devices::Kind::Simulator,
+                os_version: None,
+                connection_state: None,
+            }),
+            ..watch_desktop_spec(root)
+        }
+    }
+
+    /// A watched debug iOS simulator launch runs hot, never through the
+    /// supervisor, and registers a simulator target; a start refused before
+    /// building (no `[package]`) falls back to the non-hot simulator
+    /// pipeline rather than `cargo run` or the Android one (here the
+    /// pipeline fails — the fixture is no Frust project — and the session
+    /// ends `Exited(false)`).
+    #[test]
+    fn a_watched_debug_simulator_launch_runs_hot_and_falls_back_to_the_simulator_pipeline() {
+        use frust_drive::process::FakeProcessRunner;
+
+        let root = watch_scratch_dir("simulator-hot-launch");
+        let mut rig = HotRig::new(Arc::new(FakeProcessRunner::new()));
+        rig.apply(Effect::LaunchWatchedSessions(vec![watch_simulator_spec(
+            &root,
+        )]));
+
+        let id = match rig.rx.try_recv() {
+            Ok(Message::RegisterSession { id, target, .. }) => {
+                assert!(
+                    matches!(target, Some(SessionTarget::Simulator { ref id, .. }) if id == "FAKE-UDID"),
+                    "{target:?}"
+                );
+                id
+            }
+            other => panic!("expected RegisterSession first, got {other:?}"),
+        };
+        assert!(matches!(
+            rig.rx.try_recv(),
+            Ok(Message::EnableWatch { session }) if session == id
+        ));
+        assert!(rig.hot.contains(id));
+        assert_eq!(rig.supervisor.session_ids().count(), 0);
+
+        let fallback = rig.wait_for(|msg| match msg {
+            Message::Session(SessionEvent {
+                kind: SessionEventKind::Lines(lines),
+                ..
+            }) => lines
+                .into_iter()
+                .find(|l| l.contains("running the simulator pipeline instead")),
+            _ => None,
+        });
+        assert!(fallback.contains("names no [package]"), "{fallback}");
+        rig.wait_for(|msg| match msg {
+            Message::Session(SessionEvent {
+                id: ended,
+                kind: SessionEventKind::State(SessionState::Exited(false)),
+            }) if ended == id => Some(()),
+            _ => None,
+        });
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A watched debug Android launch runs hot, never through the

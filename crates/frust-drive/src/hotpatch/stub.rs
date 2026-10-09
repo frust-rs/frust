@@ -37,6 +37,12 @@ const MISSING_LISTED: usize = 8;
 /// nibbles (11.0.0, the first release with arm64).
 const MACOS_MIN_VERSION: u32 = 11 << 16;
 
+/// The iOS simulator version the stub's `LC_BUILD_VERSION` declares (14.0.0,
+/// rustc's default deployment target for `aarch64-apple-ios-sim`). ld refuses
+/// to link a macOS-platform object into a simulator image, and an object
+/// newer than the patch's own deployment target draws a warning.
+pub(crate) const IOS_SIMULATOR_MIN_VERSION: u32 = 14 << 16;
+
 /// `ldr x16, #8` — load the 64-bit literal that follows the next instruction.
 const AARCH64_LDR_X16_LITERAL: [u8; 4] = [0x50, 0x00, 0x00, 0x58];
 /// `br x16`.
@@ -206,10 +212,17 @@ pub fn build_stub(
         Endianness::Little,
     );
     if target.format() == Format::MachO {
+        let (platform, min_version) = match target.os {
+            Os::IosSim => (
+                object::macho::PLATFORM_IOSSIMULATOR,
+                IOS_SIMULATOR_MIN_VERSION,
+            ),
+            _ => (object::macho::PLATFORM_MACOS, MACOS_MIN_VERSION),
+        };
         let mut version = MachOBuildVersion::default();
-        version.platform = object::macho::PLATFORM_MACOS;
-        version.minos = MACOS_MIN_VERSION;
-        version.sdk = MACOS_MIN_VERSION;
+        version.platform = platform;
+        version.minos = min_version;
+        version.sdk = min_version;
         obj.set_macho_build_version(version);
     }
 

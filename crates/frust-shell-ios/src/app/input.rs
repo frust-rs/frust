@@ -241,6 +241,14 @@ impl frust_shell_common::devtools::DevtoolsUi for IosAppHandle {
         let app = &mut self.app;
         let _ = under_root_owner(|| app.event(&event));
     }
+
+    /// Force the next `CADisplayLink` tick to Run and hand off a frame, so a parked `apply_patch`
+    /// answer is released by `frame_submitted` even when the attempt installed nothing. Uses the
+    /// frame gate's `events_since_last_frame` input, not the patch latch: the latch drives the
+    /// `applied` probe line, which a refused apply must not log.
+    fn request_frame(&mut self) {
+        self.events_since_last_frame = true;
+    }
 }
 
 // This whole module is `#[cfg(target_os = "ios")]` (see `crate`'s `lib.rs`),
