@@ -698,8 +698,8 @@ pub(crate) fn run_linker(
 }
 
 /// The address of the global definition of [`ANCHOR_SYMBOL`] in the image
-/// at `path`, read from its symbol table — for Msvc, the anchor's RVA from
-/// the image's own PDB ([`super::pe::anchor_address`], Windows hosts only).
+/// at `path`, read from its symbol table — for Msvc, the anchor's VA
+/// (preferred `ImageBase` + RVA) from the image's own PDB ([`super::pe::anchor_address`], Windows hosts only).
 /// An unreadable image, or none such symbol, is
 /// [`HotpatchError::BuilderUnsupported`].
 pub fn anchor_address(flavor: LinkerFlavor, path: &Path) -> Result<u64, HotpatchError> {
@@ -2012,8 +2012,8 @@ mod windows {
         );
         assert!(image_base + u64::from(image_size) <= u64::from(u32::MAX));
 
-        // And it loads there: the anchor sits at base + its RVA, and base
-        // data at a 32-bit address.
+        // And it loads there: the anchor sits at its link-time VA (slide 0),
+        // and base data at a 32-bit address.
         let ran = Command::new(&exe).output().unwrap();
         assert!(ran.status.success(), "{ran:?}");
         let stdout = String::from_utf8(ran.stdout).unwrap();
@@ -2024,11 +2024,7 @@ mod windows {
         let [anchor, table] = printed[..] else {
             panic!("{stdout:?}");
         };
-        assert_eq!(
-            anchor,
-            FAT_IMAGE_BASE + output.anchor_address,
-            "{anchor:#x}"
-        );
+        assert_eq!(anchor, output.anchor_address, "{anchor:#x}");
         assert!(u32::try_from(table).is_ok(), "base data at {table:#x}");
         let _ = fs::remove_dir_all(&dir);
     }

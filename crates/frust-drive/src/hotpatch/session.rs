@@ -5122,6 +5122,7 @@ mod windows {
 
     use super::super::capture::{RecordKey, RustcRecord, write_record};
     use super::super::pe;
+    use super::super::symbols::ANCHOR_SYMBOL;
     use super::*;
     use crate::process::RealProcessRunner;
 
@@ -5439,6 +5440,21 @@ fn main() {
         format!("{APP_CRATE}::{path}")
     }
 
+    /// `image`'s preferred base from its headers and its PDB's anchor RVA.
+    fn base_and_anchor_rva(image: &Path) -> (u64, u64) {
+        let base = pe::image_base(&std::fs::read(image).unwrap(), "fixture").unwrap();
+        let pdb = pe::read_pdb(image).unwrap();
+        let rva = pdb
+            .records
+            .iter()
+            .find(|r| {
+                r.name == ANCHOR_SYMBOL && r.kind == pe::RecordKind::Public { function: true }
+            })
+            .and_then(|r| r.rva)
+            .expect("the anchor's RVA");
+        (base, u64::from(rva))
+    }
+
     /// Replays the saved edit and links `patch-1.dll` against the running
     /// fat exe; the candidate's seams and its post-link table.
     fn patch(fat: &mut Fat) -> (LinkedPatch, SeamSet, LayoutTable) {
@@ -5512,9 +5528,16 @@ fn main() {
         assert_eq!(base_table.get(&app("HomeState")).map(|e| e.size), Some(4));
         assert_eq!(base_table.get(&app("HomeState")).map(|e| e.align), Some(0));
 
-        // The fat exe runs, loaded at a 64 KiB-aligned base.
-        let slide = fat.anchor_runtime() - cache.anchor_address();
+        // The anchor is a VA, and the fat exe runs loaded at a 64 KiB-aligned
+        // base: on x64 its fixed preferred base, so its slide is 0.
+        let (image_base, anchor_rva) = base_and_anchor_rva(&image);
+        assert_eq!(cache.anchor_address(), image_base + anchor_rva);
+        let slide = fat.anchor_runtime().wrapping_sub(cache.anchor_address());
         assert_eq!(slide & 0xffff, 0, "{slide:#x}");
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(image_base, fat_link::FAT_IMAGE_BASE, "{image_base:#x}");
+            assert_eq!(slide, 0, "the fat exe loaded at its preferred base");
+        }
     }
 
     #[test]
@@ -5529,6 +5552,23 @@ fn main() {
             !linked.table.map.is_empty(),
             "the jump table maps the patch"
         );
+
+        // Both table anchors are VAs (preferred base + anchor RVA), so the
+        // runtime's anchor check passes: the exe's implied offset is its
+        // slide (0 at the fixed x64 base) and the DLL's is its load base
+        // minus its preferred base.
+        let (exe_base, exe_rva) = base_and_anchor_rva(fat.base.image());
+        let (dll_base, dll_rva) = base_and_anchor_rva(&linked.path);
+        assert_eq!(linked.table.aslr_reference, exe_base + exe_rva);
+        assert_eq!(linked.table.new_base_address, dll_base + dll_rva);
+        let implied = fat
+            .anchor_runtime()
+            .wrapping_sub(linked.table.aslr_reference);
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(implied, 0, "base anchor implies offset {implied:#x}");
+        } else {
+            assert_eq!(implied & 0xffff, 0, "{implied:#x}");
+        }
         assert_eq!(table.get(&app("HomeState")).map(|e| e.size), Some(4));
         let present = fat
             .base
