@@ -125,7 +125,8 @@ pub enum Command {
         build: BuildFlags,
 
         /// Dev loop for the project in the current directory: the desktop
-        /// preview, or an Android device with `-d <serial>`.
+        /// preview, or an Android device or a booted iOS simulator with
+        /// `-d <serial|udid>`.
         /// A Debug run is **hot** by default: the app is fat-built once,
         /// and each save is compiled and patched into the running process
         /// (state kept), printing `patched in N ms (k components rebuilt)`.
@@ -137,16 +138,19 @@ pub enum Command {
         /// untouched. Profile/release runs, and `--no-hot`, use the plain
         /// relaunch loop instead: any change to `src/` or `Cargo.toml`
         /// kills the running app and relaunches it (app state resets).
-        /// With `-d <android serial>` the device must be Android and the
-        /// build Debug: `-d web`, iOS and every other device are refused,
-        /// as are `--profile`/`--release` and `--features` with a device.
-        /// Ctrl-C removes the port forward and force-stops the app.
+        /// With `-d` the device must be Android or an iOS simulator and the
+        /// build Debug: `-d web`, a physical iOS device and every other
+        /// device are refused, as are `--profile`/`--release` and
+        /// `--features` with a device. Ctrl-C removes the port forward and
+        /// force-stops an Android app, and terminates a simulator app.
         #[arg(long)]
         watch: bool,
 
         /// With `--watch`, use the plain kill-and-relaunch loop instead of
-        /// hot patching, on desktop (the `cargo run` child) and on Android
-        /// (`am force-stop` plus the full device pipeline on every change).
+        /// hot patching, on desktop (the `cargo run` child), on Android
+        /// (`am force-stop` plus the full device pipeline on every change)
+        /// and on an iOS simulator (`simctl terminate` plus the full
+        /// simulator pipeline).
         /// A no-op without `--watch`: nothing else in `run` is hot.
         #[arg(long = "no-hot")]
         no_hot: bool,

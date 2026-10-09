@@ -1,0 +1,14 @@
+# The code library the iOS simulator load probe delivers at runtime (see ../README.md). Its own
+# workspace so it builds alone with `cargo build --release --target aarch64-apple-ios-sim`, outside
+# both the root graph and the hotpatch-spike workspace.
+[package]
+name = "frust-probe-patch"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]

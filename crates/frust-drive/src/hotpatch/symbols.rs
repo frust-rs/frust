@@ -62,11 +62,14 @@ pub enum Os {
     Android,
     /// Windows with the MSVC environment.
     Windows,
+    /// The iOS simulator (Mach-O, Darwin names). A physical iOS device is
+    /// not a target: it stays restart-only.
+    IosSim,
 }
 
 /// A target the builder can produce stubs and jump tables for. Anything else
-/// (iOS, GNU-environment Windows, 32-bit, other architectures) is refused
-/// when the triple is parsed, never guessed at.
+/// (a physical iOS device, GNU-environment Windows, 32-bit, other
+/// architectures) is refused when the triple is parsed, never guessed at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Target {
     pub arch: Arch,
@@ -75,8 +78,10 @@ pub struct Target {
 
 impl Target {
     /// Parse a rustc target triple such as `aarch64-apple-darwin`,
-    /// `x86_64-unknown-linux-gnu`, `aarch64-linux-android` or
-    /// `x86_64-pc-windows-msvc`.
+    /// `x86_64-unknown-linux-gnu`, `aarch64-linux-android`,
+    /// `x86_64-pc-windows-msvc` or the iOS simulator's `aarch64-apple-ios-sim`
+    /// (`x86_64-apple-ios` on an Intel host, where that triple only ever names
+    /// the simulator).
     pub fn from_triple(triple: &str) -> Result<Self, HotpatchError> {
         let refuse = || {
             HotpatchError::unsupported(format!(
@@ -95,6 +100,8 @@ impl Target {
             ["linux", "android"] => Os::Android,
             ["unknown", "linux", "gnu" | "musl"] => Os::Linux,
             ["pc", "windows", "msvc"] => Os::Windows,
+            ["apple", "ios", "sim"] if arch == Arch::Aarch64 => Os::IosSim,
+            ["apple", "ios"] if arch == Arch::X86_64 => Os::IosSim,
             _ => return Err(refuse()),
         };
         Ok(Self { arch, os })
@@ -103,7 +110,7 @@ impl Target {
     /// The target's object format.
     pub fn format(self) -> Format {
         match self.os {
-            Os::MacOs => Format::MachO,
+            Os::MacOs | Os::IosSim => Format::MachO,
             Os::Linux | Os::Android => Format::Elf,
             Os::Windows => Format::Pe,
         }
@@ -727,7 +734,6 @@ mod tests {
         for triple in [
             "x86_64-pc-windows-gnu",
             "aarch64-apple-ios",
-            "aarch64-apple-ios-sim",
             "riscv64gc-unknown-linux-gnu",
             "i686-unknown-linux-gnu",
             "armv7-linux-androideabi",

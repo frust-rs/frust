@@ -84,6 +84,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+pub use frust_devtools_protocol::redact_discovery_token as redact_discovery_line;
 use frust_devtools_protocol::{
     ApplyPatchParams, Capability, Discovery, JumpTableWire, MissedKey, PatchFile, PatchOutcome,
     parse_discovery_line, parse_failure_line, redact_discovery_token,
@@ -1377,6 +1378,24 @@ pub(super) fn link_base(
     host: &SessionHost<'_>,
     request: BaseRequest<'_>,
 ) -> Result<FatBase, HotpatchError> {
+    base(host, request, true)
+}
+
+/// [`link_base`] over an image another tool already linked from the fat
+/// build (Xcode's `Runner` on the iOS simulator, [`super::ios_sim`]): no
+/// fat link, and the symbol cache is read from `request.image` as it is.
+pub(super) fn adopt_base(
+    host: &SessionHost<'_>,
+    request: BaseRequest<'_>,
+) -> Result<FatBase, HotpatchError> {
+    base(host, request, false)
+}
+
+fn base(
+    host: &SessionHost<'_>,
+    request: BaseRequest<'_>,
+    relink: bool,
+) -> Result<FatBase, HotpatchError> {
     let runner: &dyn ProcessRunner = &*host.runner;
     let BaseRequest {
         mut graph,
@@ -1404,18 +1423,23 @@ pub(super) fn link_base(
         let libdir = host_target_libdir(runner, tip_record, &graph.replay_cwd(&image_unit))?;
         fat_link::bundled_lld(&libdir)
     })?;
-    let fat_out = fat_link::fat_link(
-        runner,
-        &FatLinkRequest {
-            flavor,
-            linker: &linker,
-            link_args: &link_args,
-            envs: &tip_env,
-            target_dir: &target_dir,
-            archive_dir,
-            exe: &image,
-        },
-    )?;
+    let image = if relink {
+        fat_link::fat_link(
+            runner,
+            &FatLinkRequest {
+                flavor,
+                linker: &linker,
+                link_args: &link_args,
+                envs: &tip_env,
+                target_dir: &target_dir,
+                archive_dir,
+                exe: &image,
+            },
+        )?
+        .exe
+    } else {
+        image
+    };
 
     let rlibs = member_rlibs(&link_args, &graph);
     let tip_objects = tip_objects(&link_args);
@@ -1423,7 +1447,7 @@ pub(super) fn link_base(
     let base_layouts = if flavor == LinkerFlavor::Msvc {
         // CodeView type records are readable from a PDB only: the fat
         // exe's, which `/WHOLEARCHIVE` made cover every member object.
-        pdb_layout::extract(std::slice::from_ref(&fat_out.exe), &crates)?.table
+        pdb_layout::extract(std::slice::from_ref(&image), &crates)?.table
     } else {
         let typed = typed_objects(&tip_objects, &crates)?;
         layout::extract(
@@ -1441,7 +1465,7 @@ pub(super) fn link_base(
             .collect::<Vec<_>>(),
     )?;
     let accepted = AcceptedSets::begin(&target_dir, &session, base_layouts, base_seams)?;
-    let cache = SymbolCache::load(&fat_out.exe, target)?;
+    let cache = SymbolCache::load(&image, target)?;
     seed_dep_info(&mut graph, &records);
 
     let builder = DesktopBuilder {
@@ -1472,7 +1496,7 @@ pub(super) fn link_base(
     Ok(FatBase {
         builder,
         accepted,
-        image: fat_out.exe,
+        image,
     })
 }
 

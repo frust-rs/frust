@@ -2622,3 +2622,386 @@ What remains unproven on Windows:
 #### measure.sh
 
 Unchanged. Its `--windows` leg ran all five rows as written.
+
+## Phase 2: iOS simulator load probe
+
+Card H4-01 (tsk_000001a1181b5c76gzfNweMx), the iOS counterpart of p2-02b's Android load probe
+above, and the gate for stage 4 (iOS simulator). Can a Frust app launched with
+`xcrun simctl launch` load a code library that arrives after install, from its own data
+container, unsigned or only ad-hoc signed? `ios-probe/probe.sh` scaffolds a throwaway
+`frust create --platforms ios` app (in a mktemp dir, never committed), overlays
+`ios-probe/app_lib.rs`, builds it with the `xcodebuild` invocation `frust run` uses, installs it
+with `simctl install`, builds `ios-probe/patch/` (exports `frust_probe_value() -> u32 { 42 }`) for
+`aarch64-apple-ios-sim` and copies four variants of it into the app's data container. It then
+launches the app once per strategy, so every load runs in a fresh process, and reads the
+`--console-pty` stream. See `ios-probe/README.md`.
+
+**This probe tests loading only.** As on Android, the library is self-contained: no jump table is
+installed and nothing in it is relocated against the running app. Physical iOS devices are not
+covered at all.
+
+### Verdict: GO for stage 4
+
+A dylib delivered into the app's data container after install loads and returns 42 when it
+carries an ad-hoc signature, either the one the linker writes (`linker-signed`) or one applied
+with `codesign -s -` (`adhoc-signed`). A dylib with no signature at all is refused by dyld. No
+signing identity, team id or provisioning is needed on the simulator. Stage 4 stays open:
+H4-02 onward can be dispatched, and the NO-GO routing to D-04 does not apply.
+
+### Run
+
+`probe.sh --log-dir <scratch>` (no `--keep`: the app was uninstalled and the temp dir removed at
+the end), base `main` @ 3414525d plus this card's files, 2026-10-09. Two earlier runs gave the
+same three-strategy results before `linker-signed` was added.
+
+| | |
+|---|---|
+| Simulator | iPhone 18 Pro, udid `<udid>`, runtime iOS 27.0 (24A434), booted before the run and left booted |
+| Host | macOS 27.0.1, arm64 (Apple Silicon); Xcode 27.0 (27A266a), no Simulator.app (`xcrun simctl` only) |
+| App | `dev.frust.probe.probeapp`, `Debug-iphonesimulator`, `ARCHS=arm64`, Xcode signing off (`CODE_SIGNING_ALLOWED = NO` in the template); `Runner.app/Runner` carries only the linker's ad-hoc signature (`flags=0x20002(adhoc,linker-signed)`) |
+| Patch | `cargo build --release --target aarch64-apple-ios-sim`, rustc 1.98.1; `LC_BUILD_VERSION` platform `IOSSIMULATOR`, minos 14.0 |
+| Container | `xcrun simctl get_app_container <udid> dev.frust.probe.probeapp data`, run right after `simctl install` and before any launch, printed `~/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/<container-uuid>`. The container already existed, so the probe's fallback (one launch first) was not needed. Files went to its `Library/Application Support/`, which is `frust_paths::data_dir()` (`$HOME/Library/Application Support`) inside the app |
+| Delivery | plain host `cp` into that directory: the simulator's data container is an ordinary host directory owned by the user |
+
+The four files, as `codesign -dv` and `file` describe them:
+
+| Strategy | File | Signature |
+|---|---|---|
+| `plain-dlopen` | `libfrust_probe_unsigned.dylib` (16464 bytes) | none: `codesign --remove-signature` ("code object is not signed at all") |
+| `linker-signed` | `libfrust_probe_linker.dylib` (16768 bytes) | the cargo output unchanged: `flags=0x20002(adhoc,linker-signed)` |
+| `adhoc-signed` | `libfrust_probe_adhoc.dylib` (16816 bytes) | `codesign -f -s -`: `flags=0x2(adhoc)`, `TeamIdentifier=not set` |
+| `negative-control` | `libfrust_probe_control.dylib` (11 bytes) | ASCII text `not a dylib` |
+
+Every strategy goes through `frust_hotpatch::load_patch_library`, which off Android is plain
+`dlopen` via `libloading::Library::new`.
+
+| Strategy | Outcome | `vmmap -w <pid>` |
+|---|---|---|
+| `plain-dlopen` (unsigned) | **refused by dyld**: "Trying to load an unsigned library" | no `libfrust_probe` image |
+| `linker-signed` | **loaded, returned 42** | `__TEXT` `r-x/rwx` and `__LINKEDIT` mapped from `.../Application Support/libfrust_probe_linker.dylib` |
+| `adhoc-signed` | **loaded, returned 42** | `__TEXT` `r-x/rwx` and `__LINKEDIT` mapped from `.../Application Support/libfrust_probe_adhoc.dylib` |
+| `negative-control` | **refused, error visible**: "slice is not valid mach-o file" | no `libfrust_probe` image |
+
+### Verbatim lines
+
+All `frust-probe:` lines came through `xcrun simctl launch --console-pty`. They are the iOS
+shell's stderr logger (`[frust INFO]` prefix). The Swift side's `NSLog` lines arrive on the same
+stream. `log stream` was not needed. One launch per strategy:
+
+```
+[frust INFO] frust-probe: strategy=plain-dlopen error=Failed to load library: dlopen(/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_unsigned.dylib, 0x0005): tried: '/Library/Developer/CoreSimulator/Volumes/iOS_24A434/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_unsigned.dylib' (no such file), '/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_unsigned.dylib' (code signature in <A308B4B9-BDD9-395D-BF08-66BF7FA57B5C> '/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_unsigned.dylib' not valid for use in process: Trying to load an unsigned library)
+[frust INFO] frust-probe: strategy=linker-signed result=42
+[frust INFO] frust-probe: strategy=adhoc-signed result=42
+[frust INFO] frust-probe: strategy=negative-control error=Failed to load library: dlopen(/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_control.dylib, 0x0005): tried: '/Library/Developer/CoreSimulator/Volumes/iOS_24A434/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_control.dylib' (no such file), '/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_control.dylib' (slice is not valid mach-o file)
+```
+
+dyld first tries the path under the simulator runtime root (`RuntimeRoot/...`, "no such file") and
+then the host path, which is the one that loads.
+
+`vmmap -w` on the live `linker-signed` process (pid 72003), the image lines:
+
+```
+__TEXT                     1051f8000-1051fc000   [   16K    16K     0K     0K] r-x/rwx SM=COW          /Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_linker.dylib
+__LINKEDIT                 1051fc000-105200000   [   16K    16K     0K     0K] r--/rwx SM=COW          /Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_linker.dylib
+```
+
+The `adhoc-signed` process (pid 72083) shows the same two lines for `libfrust_probe_adhoc.dylib`
+at `1027c8000`. The `plain-dlopen` and `negative-control` processes map no `libfrust_probe` image.
+
+**Negative control.** The 11-byte text file produced dyld's own error ("slice is not valid mach-o
+file") in the log, so a failed load is visible, and it is a different error from the unsigned
+dylib's. Then the four files were removed and the app was launched once more with no strategy
+filter. All four strategies logged
+`error=patch file missing: <container>/Library/Application Support/libfrust_probe_<variant>.dylib`.
+
+**Host unified log.** `log show --predicate 'eventMessage CONTAINS "libfrust_probe"'` over the
+run has one line, from `amfid`, about the `codesign -s -` file only, and that file loaded anyway:
+
+```
+2026-10-09 18:16:57.964 Df amfid[67827:8832d1] /Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_adhoc.dylib not valid: Error Domain=AppleMobileFileIntegrityError Code=-423 "The file is adhoc signed or signed by an unknown certificate chain" UserInfo={...}
+```
+
+Nothing was logged for the linker-signed file.
+
+### Interpretation
+
+- **Signature: required, but ad hoc is enough.** The simulator process enforces that a
+  dynamically loaded image is code-signed, and rejects an unsigned one before mapping it. It does
+  not require a trusted identity: the linker's own signature passes. `ld` on arm64 writes that
+  signature by default, so a thin patch linked the normal way loads without a `codesign` step.
+  dx signs nothing either (`apple.rs:282-365`). A builder that rewrites a patch after linking it
+  (strip, `install_name_tool`, any byte edit) invalidates the signature and must run
+  `codesign -f -s -` afterwards. That was verified to load.
+- **Delivery: write into the data container from the host.** `xcrun simctl get_app_container
+  <udid> <bundle-id> data` resolves the container right after install. It has the shape
+  `~/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/<uuid>`, and
+  the app sees it as `$HOME`. A host-side copy into `Library/Application Support/` (or any
+  directory under it) is enough. Unlike Android, no `run-as` or push step is needed. The `<uuid>`
+  changes on every install, so H4-02 must resolve it per install and not cache it.
+- **Load path: plain `dlopen` (`frust_hotpatch::load_patch_library`) works as is.** The library
+  must be addressed by its host path. Inside the simulator process, dyld also tries a
+  `RuntimeRoot`-prefixed path first and falls back to the host path.
+
+**Fact for H4-02 (not a probe strategy).** In this Debug simulator build, the app's code is not in
+the executable. `vmmap` shows `Runner.app/Runner` as a 16 KB `__TEXT` stub next to
+`Runner.app/Runner.debug.dylib` with 22.5 MB of `__TEXT`. Judged by size, that dylib holds the
+Rust staticlib and the Swift code; its symbols were not listed. The split is most likely Xcode's
+debug-dylib split (`ENABLE_DEBUG_DYLIB`, on by default for Debug). A symbol cache "from the
+built executable" has to read `Runner.debug.dylib`, or the build has to turn the split off.
+
+### Not covered
+
+- **Relocation against the base image.** The probe library is self-contained. Whether a thin patch
+  linked against `Runner.debug.dylib`'s addresses resolves and runs is H4-02's question.
+- **Physical iOS devices.** Not tried. On a device, an image needs a trusted signature to be
+  mapped executable (PORT.md 5), so devices stay restart-only.
+- **Other runtimes.** Only iOS 27.0 was run. The iOS 18.6 and 26.2 runtimes are installed on this
+  host but were not booted. Only arm64 was run: no x86_64 simulator (Intel host or Rosetta).
+- **Library validation off a Debug build.** Only the template's Debug configuration, unsigned by
+  Xcode, was run. An app signed with a team identity and the hardened runtime might enforce
+  library validation. Hot patching is debug-only, so that combination does not arise for it.
+- **Leftovers outside the temp dir.** `xcodebuild` leaves SwiftPM lock files and a
+  `TemporaryDirectory.*` dir in `$TMPDIR`, outside the probe's `mktemp` dir. The probe does not
+  remove them.
+
+## Stage 4: iOS simulator gate (H4-03)
+
+Card H4-03 (tsk_000001a1181b5c76Rr3ntpVD), run 2026-10-09 on `task/hb-h4-03`, cut from
+`feature/hotpatch-h4` @ 70d4ce2e. That is `main` @ 3414525d plus the whole H4 phase: H4-01 (the
+load probe above), H4-02 (the simulator fat build through Xcode and the symbol cache from
+`Runner`), H4-04 (the iOS shell's `hotpatch` feature and its probe lines), H4-05 (`frust run -d
+<simulator> --watch`) and the remediation cards R0-01..R0-04. Rows A, B and D2, with H1-11's pass
+bar: the median save->frame of a patched row must be at most 50% of the simulator restart median
+measured in the same hot run, and D2 must answer `restart required`, never `patched`.
+
+### Verdict: PASS
+
+1. **Median save->frame at most 50% of the in-session simulator restart median: PASS.** The
+   restart median is **4395 ms** (n=5, `frust run --watch -d <udid> --no-hot`: save -> the
+   relaunched app's first `frame` probe line, through `xcodebuild` -> `simctl install` -> `simctl
+   launch`), so the bar is 2197 ms. save->frame, read from the app's own probe lines:
+   - A **1694 ms** (n=5), B **1685 ms** (n=5): **38.5%** and **38.3%** of the restart median,
+     ~500 ms under the bar.
+   - save->applied sits 0-1 ms before the frame (A 1694, B 1684 ms). The CLI's `patched` line
+     arrives 1-2 ms after it (medians A 1695, B 1686 ms: 38.6% / 38.4%).
+   - All 10 patched runs report `source: probe` and `backstop: none`. The backstop fallback was
+     never used.
+2. **Rows A and B patched in the same PID, State kept: PASS.** A: PID 200 throughout, count 3 -> 3,
+   `hotpatch-sentinel: v0` -> `v5`. B: PID 2859 throughout, count 3 -> 3, `card-sentinel: v0` ->
+   `v5`. After run N, `vmmap` of that same PID lists N patch images, `patch-<pid>-1.dylib` ..
+   `patch-<pid>-N.dylib`, each with an `r-x` `__TEXT` region.
+3. **D2 answers `restart required` on every run, zero `patched` lines: PASS.** 5/5 `restart
+   required: hotapp::home_page::HomeState changed layout (4 → 8 bytes); restarting to keep memory
+   safe` (then 8 → 12 ... 20 → 24), the host's L3 `LayoutChanged` over the DWARF of the Mach-O
+   objects. `grep -c 'patched in'` over the run's whole CLI log is 0, and no relaunched process
+   holds a patch image.
+
+The bar is tighter here than on Android, because the simulator restart is fast (4.4 s against the
+Pixel 5's 13.5 s). A passes with less margin than on Android (38.5% against 21.4%) but in less
+absolute time (1694 against 2883 ms).
+
+### Environment
+
+| | |
+|---|---|
+| Simulator | iPhone 18 Pro, udid `<udid>`, iOS 27.0 (24A434), booted before the gate and left booted |
+| Host | `Mac16,1`, Apple M4, macOS 27.0.1 (26A434), Xcode 27.0 (27A266a), no Simulator.app (`xcrun simctl` only); rustc/cargo 1.98.1 |
+| App | `dev.frust.gate.hotapp`, Debug, `Debug-iphonesimulator`, arm64 (`aarch64-apple-ios-sim`); in a hot run Xcode links with `ENABLE_DEBUG_DYLIB=NO`, so `Runner.app/Runner` is the real image |
+| Clock | one: the simulator app is a host process and stamps its probe lines with the host clock, so no offset is measured (the Android leg's `clock:` step does not apply) |
+
+### Rig and method
+
+- **frust**: `cargo build --release -p frust-cli` in the H4-03 worktree (1 m 33 s), `frust
+  0.6.0`, `<worktree>/target/release/frust`. That binary ran every row.
+- **App**: `frust create hotapp --frust-path <worktree>/crates/frust --org dev.frust.gate
+  --platforms ios` into `<scratch>`, then `measure.sh --prepare-app`. An untimed warm-up hot run
+  (the cold fat build, 2 patches) reached its first frame 90.1 s after the CLI started. Each row's
+  own hot start reached its first frame in 12.8-15.2 s (`Build finished in` 8.8-11.4 s, then the
+  tip's link-line capture ~1.5 s, install ~0.3 s, launch).
+- **Runs**: `measure.sh --frust-run --app <scratch>/hotapp --ios-sim --target <t> --runs 5 --row
+  <r>` (the new simulator leg, below), udid from `SIMULATOR_UDID`, `FRUST=<worktree>/target/
+  release/frust`, `SCREENCAP_DIR` in `<scratch>`, `PRE_RUN_PAUSE=3`. `PRE_RUN_HOOK` = three `idb ui
+  tap` on the FAB (points 357, 795), count 0 -> 3. Xcode 27 has no Simulator.app and idb needs
+  SimulatorKit under `Developer/Library/PrivateFrameworks`, so idb ran with `DEVELOPER_DIR` at a
+  scratch symlink copy of `Xcode.app/Contents` that links it there. All 12 taps landed (`tap N
+  ok`, and every `before.png` shows `count: 3`). Each row is its own `frust run` process.
+- **Instruments.** The CLI echoes the app's `simctl launch --console-pty` stream, so the app's
+  `[frust INFO] frust-hotpatch: applied/frame t_unix_ms=` lines (H4-04) are read from the CLI's
+  output, as on the desktop. `applied` is stamped when a display-link tick drains the patch latch;
+  `frame` right after that tick's frame is handed to the render-path executor (frame submitted, not
+  presented). The backstop fallback (the 5 s frame-wait line's arrival - 5000 ms) stays in the
+  script as on Android, and was never used.
+- **PID**: the host process whose executable is `Runner.app/Runner` in this simulator's bundle
+  container (`ps`), confirmed by the app's own `Runner[<pid>:...]` NSLog prefix (A: `Runner[200`, B:
+  `Runner[2859`).
+- **Restart baseline**: `measure.sh --frust-restart --ios-sim --target home --runs 5`. `frust run
+  --watch -d` refuses `--features` (a first attempt with the desktop leg's `--features
+  frust/hotpatch` answered `Error: --watch on an iOS simulator does not support --features yet
+  (requested: frust/hotpatch); the device session seam (ios_run::spawn_session) carries no
+  parameter for it` and timed nothing). So for that run only, the app's `frust` dependency gains
+  `features = ["hotpatch"]` in its Cargo.toml (restored afterwards, `cmp` same), which turns on the
+  first-frame probe line, as `--features frust/hotpatch` does on the desktop. The relaunch is the
+  stock simulator pipeline, not the hot one (no fat build, Xcode's default debug-dylib split).
+- **Quiet machine**: no build of mine ran during a timed row. Before each row the script waited
+  until the 1-minute load average was below 6 on two polls 30 s apart. At the start of the rows
+  it was: restart 3.13, A 2.68, B 2.15, D2 2.88 (polls 3.36/3.13, 3.44/2.68, 2.61/2.15,
+  3.30/2.88).
+- **Budget**: the default; the scratch app's `frust.toml` has no `[hotpatch]` section.
+
+### Restart median (in-session)
+
+| Run | save->first frame (ms) | PID | Phases (from the CLI's lines) |
+|---|---|---|---|
+| 1 | 4686 | 96340 -> 96877 | `Build finished in 3.2s`, install 265 ms, launch -> frame 598 ms |
+| 2 | 4333 | 96877 -> 97349 | 3.2 s, 259 ms, 479 ms |
+| 3 | 4395 | 97349 -> 97813 | 3.3 s, 279 ms, 495 ms |
+| 4 | 4488 | 97813 -> 98271 | 3.4 s, 255 ms, 482 ms |
+| 5 | 4277 | 98271 -> 98720 | 3.2 s, 255 ms, 476 ms |
+| **median** | **4395** (4277-4686), n=5 | new PID each run | bar = 2197 ms |
+
+Save -> `Change detected; rebuilding and relaunching…` took 112-339 ms (it includes the 100 ms
+debounce and the terminate). The screen before run 1 shows `count: 3`, `hotpatch-sentinel: v0`;
+after run 5 `count: 0`, `v5`: each relaunch drops the state.
+
+### Matrix
+
+| Row | Edit | Outcome lines (n) | PID / State | save->frame median (min-max), n | save->applied median | save->CLI line median | Source | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| A | home sentinel | `patched in 1565-1794 ms (1 components rebuilt)` (5/5) | 200 kept; count 3 -> 3, `hotpatch-sentinel: v5` | **1694** (1680-1914), 5 | 1694 | 1695 | probe 5/5, backstop 0 | patched; **bar PASS** (38.5%) |
+| B | card sentinel, `CounterCard` in its own module | `patched in 1556-1570 ms (1 components rebuilt)` (5/5) | 2859 kept; count 3 -> 3, `card-sentinel: v5` | **1685** (1676-1831), 5 | 1684 | 1686 | probe 5/5, backstop 0 | patched; **bar PASS** (38.3%) |
+| D2 | `HomeState` gains `extra1..extraN` | `restart required: hotapp::home_page::HomeState changed layout (4 → 8 bytes); restarting to keep memory safe`, then 8 → 12 ... 20 → 24 (5/5) | new PID each run; relaunch shows `v5 extra1=4242`, count 0 | relaunch first frame 9357 (8981-11505), 5 | | outcome line at save+1086-1227 | | restart (`LayoutChanged`) |
+
+Zero `patched` lines appeared in D2's CLI stream. Zero frame-wait backstop lines appeared in any
+row's log.
+
+### A, B: patched with State kept
+
+Row A run 1 as logged (CLI stream, arrival stamp first):
+
+```
+1791558330304 patched in 1651 ms (1 components rebuilt)
+1791558330304 [frust INFO] frust-hotpatch: applied t_unix_ms=1791558330301
+1791558330304 [frust INFO] frust-hotpatch: frame t_unix_ms=1791558330302
+```
+
+The save was stamped at 1791558328426: applied at save+1875, frame at save+1876, and the CLI line
+arrived at save+1878 ms.
+
+- **A.** save->frame 1876 / 1914 / 1686 / 1694 / 1680 ms. save->applied 1875 / 1914 / 1685 / 1694
+  / 1679. CLI line 1878 / 1916 / 1687 / 1695 / 1681. PID 200 throughout. Before: `count: 3`,
+  `hotpatch-sentinel: v0`. After run 5: `count: 3`, `v5`, `card-sentinel: v0`. RSS 181.7 -> 195.4
+  MB.
+- **B.** save->frame 1831 / 1676 / 1691 / 1682 / 1685 ms. save->applied 1831 / 1676 / 1690 / 1682
+  / 1684. CLI line 1833 / 1677 / 1692 / 1683 / 1686. PID 2859 throughout. After run 5: `count: 3`,
+  `card-sentinel: v5`, `hotpatch-sentinel: v0`. RSS 181.6 -> 195.4 MB.
+- **Patch images.** Every patch of A and B: `patch-N.dylib` 2,627,360 bytes, mode 600, in the
+  host's session dir. After run N, `vmmap -w <pid>` lists `__TEXT` regions (`r-x/rwx`, 1024K) of
+  `<container>/Library/Caches/frust-hotpatch/patch-<pid>-1.dylib` .. `patch-<pid>-N.dylib`: 1..5 in
+  PID 200, 1..5 in PID 2859. The app named each file after its own PID, so the patch was loaded by
+  the process that kept the state.
+
+### Latency breakdown (why ~1.7 s)
+
+Host-side mtimes from the `host:` line, plus the probe lines. All 10 runs of A and B:
+
+| Phase | ms |
+|---|---|
+| save -> `stub-N.o` written (debounce, thin compile for `aarch64-apple-ios-sim`, L3 DWARF diff, seam check, stub) | 811-1049 (runs 2-5 of B: 812-831) |
+| `stub-N.o` -> `patch-N.dylib` linked | 106-112 |
+| `patch-N.dylib` -> applied (2,627,360 bytes as `patch_chunk`s over 127.0.0.1, the app's write into its container, `dlopen`, table install, the next display-link tick draining the latch) | **750-767** |
+| applied -> frame handed off | 0-1 |
+| frame -> the CLI's `patched` line on the host | 1-2 |
+
+The chunked upload phase is ~45% of save->frame. These runs cannot split it into transport and
+load. On the desktop, R3-01's file hand-off cut the same phase to 27-36 ms; the simulator still
+sends chunks, although its data container is a host directory (see *Not covered*).
+
+### D2: refused by L3
+
+Run 1, verbatim: `restart required: hotapp::home_page::HomeState changed layout (4 → 8 bytes);
+restarting to keep memory safe`. Runs 2-5 print 8 → 12, 12 → 16, 16 → 20, 20 → 24.
+
+- Outcome lines at save+1227 / 1086 / 1140 / 1104 / 1107 ms, before any patch is linked or
+  uploaded: the host's L3 gate (`layout.rs`, DWARF read from the thin build's Mach-O objects)
+  refused each one. The in-app L2 backstop was not reached.
+- PIDs 5239 -> 6102 -> 7018 -> 7852 -> 8671 -> 9613. `vmmap` lists 0 patch images in each.
+- Each relaunched app reads the new field: its console holds `frust-hotpatch-spike: state-field vN
+  build ran extra1=4242` for v1..v5, from its own `Runner[<pid>` process. The screen after run 5
+  shows `hotpatch-sentinel: v5 extra1=4242`, `count: 0`.
+- save->first frame of the relaunched app: 9357 / 10555 / 8981 / 9006 / 11505 ms (median 9357).
+  This is a *hot* restart: the fat Xcode build (`Build finished in` 4.9-7.2 s), the tip's link-line
+  capture (1.46-1.51 s) and the install (0.26-0.27 s). It costs about twice the `--no-hot` restart,
+  which is why the bar uses the latter, the stricter of the two. Against the D2 restart median, A
+  would be 18.1%.
+
+### Comparison with Android (H2-07) and milestone 1 (R3-04, desktop)
+
+| | Simulator (H4-03) | Pixel 5 (H2-07) | macOS desktop (R3-04) |
+|---|---|---|---|
+| Restart baseline, median (n) | **4395 ms** (5), `--no-hot` relaunch | 13458 ms (5), D2's hot restart to `Displayed` | 5218 ms (10, pooled), `--no-hot` relaunch |
+| Bar (50%) | 2197 ms | 6729 ms | 2609 ms |
+| A save->frame median (n) | **1694 ms** (5) | 2883 ms (5) | 1397 ms (5) |
+| B save->frame median (n) | **1685 ms** (5) | 2862 ms (5) | 1406 ms (3) |
+| A / restart | **38.5%** | 21.4% | 26.8% |
+| save -> stub written | 811-1049 ms | 1001-1173 ms (steady) | |
+| Transport | `patch_chunk`s over 127.0.0.1 | `patch_chunk`s over `adb forward` | file hand-off |
+| patch linked/uploaded -> applied | 750-767 ms (2.6 MB) | 1757-1791 ms (2.2 MB stripped) | 27-36 ms (transport only) |
+| D2 | `restart required` 5/5, line at save+1086-1227 | 5/5, save+1536-1735 | 2/2, save+1170-1372 |
+| Clock | host's (no offset) | device - host offset per run | host's |
+| Verdict | **PASS** | PASS | PASS |
+
+### Known limits seen (recorded, not fixed)
+
+- **Frame gate (act_000001a11f45ee77fIN2XGxg).** The gate may release on a frame begun before the
+  apply. Its symptom was not seen: every `patched` line reported 1 component rebuilt, applied ->
+  frame was 0-1 ms, and every after-run screenshot showed the new sentinel. One gate cannot rule
+  it out.
+- **A dead app is noticed only at the next save (act_000001a11d6d27b655fJfemp).** Not exercised:
+  no app died during the gate.
+- **Each hot start replays the tip once more (H4-02).** Seen as `Capturing the hotapp/hotapp.lib
+  link line…`, 1.46-1.51 s per hot start on the warm tree (all eight hot starts: A, B, D2 and D2's
+  five relaunches), not the ~30 s of a colder tree. It is part of D2's 9.4 s hot restart.
+- **Phantom shut-down simulators in `frust devices` (act_000001a120fd922d0eA2javB).** Not
+  exercised: every run named its simulator by udid.
+- **The CLI redacts the devtools token in its echo.** So, unlike the Android leg, `measure.sh`
+  cannot call the app's `hotpatch_info`; the PID and patch-image evidence comes from `ps`, the
+  NSLog prefix and `vmmap` instead.
+- **Observation, not investigated.** A relaunched D2 app logs its `build ran` line ~20 times in its
+  first ~0.4 s, so `HomePage::build` runs on many early frames. Rows A and B do not depend on it.
+
+### Not covered
+
+- **Physical iOS devices.** Restart-only by design (PORT.md 5); not run.
+- **Rows not run on the simulator**: C, D, D3, D4, D5, E, G (ten patches, RSS and the budget) and
+  the TUI Watch leg. The card asks for A, B and D2 only.
+- **The Intel simulator** (`x86_64-apple-ios`, an Intel host or Rosetta): not run. Only arm64 on
+  Apple silicon.
+- **Other runtimes**: only iOS 27.0. The 18.6 and 26.2 runtimes are installed but were not booted.
+- **Transport split**: the 750-767 ms from patch linked to applied is not split into upload, write
+  and `dlopen`. A file hand-off into the data container (as R3-01 does on the desktop) was not
+  tried.
+- **Presentation**: the `frame` probe is frame handed off, not presented on the simulator's
+  display.
+
+### measure.sh changes for this card
+
+`bash -n` and `shellcheck -S warning` are clean. The desktop and Android legs are unchanged. New
+simulator leg, `--frust-run` / `--frust-restart` with `--ios-sim` (or `--udid <udid>`):
+
+- The udid comes from `--udid`, else `SIMULATOR_UDID`, else the only booted simulator. It must be
+  booted, and it is never printed: the header names the model and runtime (`simulator: iPhone 18
+  Pro, iOS 27.0; bundle ...`). The bundle id is read from `ios/Runner.xcodeproj`
+  (`IOS_BUNDLE_ID` overrides). The runner is `frust run --watch -d <udid>`.
+- A patched run reads `applied` / `frame` from the probe lines in the CLI's output, with the
+  Android leg's fallback (backstop line arrival - 5000 ms) and its `source: probe|backstop` and
+  `backstop: none|PRESENT` reporting. The summary adds the source counts, the save->applied medians
+  and the save->CLI line median. A restart run waits for the relaunched app's first `frame` line.
+- Per run: the PID (`ps`: `Runner.app/Runner` in this simulator's bundle container), RSS,
+  `images:` (the patch images `vmmap -w` lists, saved as `vmmap-run-N.txt`; `SIM_VMMAP=0` skips),
+  and `SCREENCAP_DIR` screenshots through `xcrun simctl io <udid> screenshot` (before and after
+  each run, restart runs included). `host:` finds `session-<crate>-<triple>-<udid>`.
+- `--frust-restart`: `--no-hot` without `--features`; the app's `frust` dependency gains the
+  `hotpatch` feature in Cargo.toml for that run, restored on exit with the edited sources.
+- At exit, discovery-line tokens in the saved CLI log are redacted, and an app that outlived the
+  CLI is `simctl terminate`d (this bundle only). A simulator app, which is not in the runner's
+  process group, is never signalled directly.

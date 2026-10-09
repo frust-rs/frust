@@ -1063,7 +1063,7 @@ fn target_triple() -> String {
     let rest = if cfg!(target_os = "macos") {
         "apple-darwin"
     } else if cfg!(target_os = "ios") {
-        "apple-ios"
+        ios_suffix(cfg!(target_abi = "sim"), cfg!(target_arch = "aarch64"))
     } else if cfg!(target_os = "android") {
         if arch == "arm" {
             "linux-androideabi"
@@ -1091,6 +1091,18 @@ fn target_triple() -> String {
         arch
     };
     format!("{arch}-{rest}")
+}
+
+/// The iOS vendor/OS spelling: only the arm64 simulator carries `-sim`
+/// (`aarch64-apple-ios-sim`); the Intel simulator's triple is
+/// `x86_64-apple-ios`, the same spelling as a device.
+#[cfg(feature = "hotpatch")]
+fn ios_suffix(simulator: bool, aarch64: bool) -> &'static str {
+    if simulator && aarch64 {
+        "apple-ios-sim"
+    } else {
+        "apple-ios"
+    }
 }
 
 /// Validate an injected logical-px coordinate. A non-finite coordinate would
@@ -1875,6 +1887,17 @@ mod tests {
             }
             if cfg!(all(target_os = "linux", target_env = "gnu")) {
                 assert!(triple.ends_with("-unknown-linux-gnu"), "{triple}");
+            }
+        }
+
+        #[test]
+        fn only_the_arm64_simulator_spells_the_ios_suffix_with_sim() {
+            assert_eq!(ios_suffix(true, true), "apple-ios-sim");
+            assert_eq!(ios_suffix(false, true), "apple-ios");
+            assert_eq!(ios_suffix(true, false), "apple-ios");
+            assert_eq!(ios_suffix(false, false), "apple-ios");
+            if cfg!(not(target_os = "ios")) {
+                assert!(!target_triple().contains("apple-ios"));
             }
         }
     }

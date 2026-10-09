@@ -169,6 +169,12 @@ impl IosAppHandle {
         // the `FRUST_NO_FRAME_GATE` kill switch internally (always `Run` when
         // disabled). Correctness over savings: every input defaults toward "run".
         let signals_dirty = ReactiveRuntime::get().is_some_and(|rt| rt.take_signals_dirty());
+        // A hot patch applied since the last tick: a full rebuild must run without waiting for
+        // input. Drained past the ready/paused gate like `signals_dirty`, so a patch applied while
+        // backgrounded lands on the first tick after foregrounding. The drain stamps the `applied`
+        // probe line and marks this frame as the one that stamps `frame`.
+        #[cfg(feature = "hotpatch")]
+        let signals_dirty = signals_dirty | self.patch_probe.take_request();
         // The focus/IME session's EDGE input, PEEKED here and committed only
         // past the skip return below (on a frame that actually runs), so
         // `focus_or_ime_changed` reports "the session moved since the last tick
@@ -523,6 +529,12 @@ impl IosAppHandle {
         let encode_time =
             self.executor
                 .submit_frame(&mut self.scene, base_color, ui, meta_time, size, perf_on);
+
+        // The frame has left the UI thread (either executor arm): release any `apply_patch`
+        // answer parked on the devtools frame gate and stamp the `frame` probe line when due. The
+        // early returns above (paused/not ready, gate Skip) submit nothing and never reach this.
+        #[cfg(feature = "hotpatch")]
+        self.patch_probe.frame_handed_off();
 
         // Deadline-aware pacing overrun: this frame's *work*
         // (everything but the vsync `present` wait, which is expected to block)
