@@ -294,6 +294,18 @@ pub fn init(
         frust_shell_common::devtools::app_name_from_process(),
         None,
     );
+    // Hot patch: the listener runs on the thread that applied the patch and only signals; the next
+    // `CADisplayLink` tick's gate reads the latch (`app::request_patch_frame`). Registered here,
+    // beside the devtools start, exactly once per process: `set_patch_listener` appends, and Swift
+    // can re-enter `frust_init` (see `ReactiveRuntime::init` in `create_handle`). No wake: the
+    // display link ticks every vsync while foregrounded.
+    #[cfg(feature = "hotpatch")]
+    {
+        static PATCH_LISTENER: std::sync::Once = std::sync::Once::new();
+        PATCH_LISTENER.call_once(|| {
+            frust_core::set_patch_listener(std::sync::Arc::new(crate::app::request_patch_frame));
+        });
+    }
     guard("frust_init", std::ptr::null_mut(), || {
         match create_handle(metal_layer, width, height, scale, make_app) {
             Ok(handle) => handle,
