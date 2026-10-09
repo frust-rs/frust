@@ -15,14 +15,12 @@ use anyhow::{Context, Result, bail};
 use notify::{RecursiveMode, Watcher};
 
 use crate::cli::BuildFlags;
-use frust_drive::android_run::{self, AndroidLaunch, DeviceSelection};
+use frust_drive::android_run::{self, AndroidLaunch, DeviceSelection, StoppedShort, force_stop};
 use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::desktop_run::{self, DesktopPlan};
 use frust_drive::devices::{self, Device, Kind, Platform};
 use frust_drive::devtools_client::adb_forward_remove;
-use frust_drive::hotpatch::android::{
-    AndroidHotStart, AndroidStart, launched_package, start_android,
-};
+use frust_drive::hotpatch::android::{AndroidHotStart, AndroidStart, start_android};
 use frust_drive::hotpatch::graph::WorkspaceGraph;
 use frust_drive::hotpatch::session::{
     DesktopStart, HotSession, Outcome, RestartReason, SessionHost, StartError, start_desktop,
@@ -548,7 +546,7 @@ fn install_real_ctrlc_handler(current: AppSlot) -> Result<()> {
 /// first Ctrl-C during a cancellable start ([`WatchSlot::begin_start`]),
 /// which then tears down what it launched and ends the loop itself; a
 /// second Ctrl-C exits at once. Decided under the slot's lock, so it cannot
-/// fall between a start parking its app and ending ([`WatchSlot::end_start`]).
+/// fall between a start parking its app and ending ([`StartInFlight::end`]).
 fn on_ctrlc(current: &WatchSlot) -> bool {
     let mut slot = lock_slot(current);
     let repeated = current.cancel.swap(true, Ordering::SeqCst);
@@ -590,30 +588,60 @@ type AppSlot = Arc<WatchSlot>;
 
 impl WatchSlot {
     /// Marks a cancellable start in flight: one that observes
-    /// [`Self::cancel`] and tears down what it launched. Until
-    /// [`Self::end_start`], a first Ctrl-C cancels it instead of exiting.
-    fn begin_start(&self) {
+    /// [`Self::cancel`] and tears down what it launched. Until the returned
+    /// mark ends ([`StartInFlight::end`]), a first Ctrl-C cancels the start
+    /// instead of exiting; only a start that took the mark can end it.
+    fn begin_start(&self) -> StartInFlight<'_> {
         let _slot = lock_slot(self);
         self.starting.store(true, Ordering::SeqCst);
+        StartInFlight { slot: self }
     }
+}
 
-    /// Ends a start: parks the app it launched (if any) and answers
-    /// `Continue`, or — when a Ctrl-C landed meanwhile — stops that app and
-    /// answers `Break`, ending the loop.
-    fn end_start(&self, app: Option<RunningApp>) -> ControlFlow<()> {
-        let mut slot = lock_slot(self);
-        self.starting.store(false, Ordering::SeqCst);
-        if self.cancel.load(Ordering::SeqCst) {
-            drop(slot);
-            if let Some(app) = app {
-                app.stop();
-            }
-            return ControlFlow::Break(());
+/// A cancellable start in flight ([`WatchSlot::begin_start`]). Dropped
+/// without [`Self::end`] (an early return, a panic), it only clears the
+/// mark.
+#[must_use = "a cancellable start ends through `StartInFlight::end`"]
+struct StartInFlight<'a> {
+    slot: &'a WatchSlot,
+}
+
+impl StartInFlight<'_> {
+    /// Ends the start: parks the app it launched (if any) and answers
+    /// `Continue`, or — when a Ctrl-C landed meanwhile — answers `Break`
+    /// with that app, unparked, for the caller to stop once whatever links
+    /// to it is gone ([`launch_hot`] drops the session first).
+    fn end(self, app: Option<RunningApp>) -> ControlFlow<Option<RunningApp>> {
+        let mut slot = lock_slot(self.slot);
+        self.slot.starting.store(false, Ordering::SeqCst);
+        if self.slot.cancel.load(Ordering::SeqCst) {
+            return ControlFlow::Break(app);
         }
         if let Some(app) = app {
             slot.replace(app);
         }
         ControlFlow::Continue(())
+    }
+
+    /// [`Self::end`] for an app nothing else links to: on `Break` it is
+    /// stopped at once.
+    fn end_or_stop(self, app: Option<RunningApp>) -> ControlFlow<()> {
+        match self.end(app) {
+            ControlFlow::Continue(()) => ControlFlow::Continue(()),
+            ControlFlow::Break(app) => {
+                if let Some(app) = app {
+                    app.stop();
+                }
+                ControlFlow::Break(())
+            }
+        }
+    }
+}
+
+impl Drop for StartInFlight<'_> {
+    fn drop(&mut self) {
+        let _slot = lock_slot(self.slot);
+        self.slot.starting.store(false, Ordering::SeqCst);
     }
 }
 
@@ -671,11 +699,6 @@ fn device_app(
             force_stop(&*runner, &serial, &package);
         })),
     }
-}
-
-/// `adb -s <serial> shell am force-stop <package>`, best-effort.
-fn force_stop(runner: &dyn ProcessRunner, serial: &str, package: &str) {
-    let _ = runner.run("adb", &["-s", serial, "shell", "am", "force-stop", package]);
 }
 
 /// What a relaunch loop restarts on every change: `cargo run` on the
@@ -751,62 +774,52 @@ impl Relauncher for DeviceRelauncher {
         if let Some(app) = previous {
             app.stop();
         }
-        current.begin_start();
-        let mut launching = None;
-        let launched = android_run::spawn_session(
+        let start = current.begin_start();
+        let launched = android_run::spawn_session_outcome(
             &*self.runner,
             &self.root,
             &self.device,
             &self.info,
-            &mut |line: &str| {
-                if let Some(package) = launched_package(line) {
-                    launching = Some(package.to_string());
-                }
-                on_line(line);
-            },
+            on_line,
             &current.cancel,
         );
         Ok(settle_device_launch(
             Arc::clone(&self.runner),
             &self.device.id,
             launched,
-            launching.as_deref(),
-            current,
+            start,
             on_line,
         ))
     }
 }
 
 /// Ends [`DeviceRelauncher`]'s start over the pipeline's answer: a launched
-/// app is parked (or stopped, after a Ctrl-C); a failure is reported unless
-/// a Ctrl-C ends the loop anyway. `Ok(None)` is a cancel at a phase
-/// boundary: past `am start` the app is up although the pipeline reports no
-/// package, so `launching` (its `Launching <package>…` line) names what to
-/// force-stop.
+/// app is parked, or stopped when a Ctrl-C landed meanwhile. A run that
+/// ended without a stream is reported as a failure the next change may fix
+/// — unless a Ctrl-C landed, which ends the loop after force-stopping the
+/// package the run issued `am start` for ([`StoppedShort::stop_launched`]),
+/// whether it answered a cancel or a failure (the Ctrl-C's SIGINT also
+/// reaches an in-flight `adb shell am start`).
 fn settle_device_launch(
     runner: Arc<dyn ProcessRunner + Send + Sync>,
     serial: &str,
-    launched: Result<Option<AndroidLaunch>>,
-    launching: Option<&str>,
-    current: &WatchSlot,
+    launched: Result<AndroidLaunch, StoppedShort>,
+    start: StartInFlight<'_>,
     on_line: &mut dyn FnMut(&str),
 ) -> ControlFlow<()> {
-    let (app, failure) = match launched {
-        Ok(Some(launch)) => (Some(device_app(runner, serial, launch, None)), None),
-        Ok(None) => {
-            if let Some(package) = launching {
-                force_stop(&*runner, serial, package);
-            }
-            (None, None)
-        }
-        Err(err) => (None, Some(err)),
+    let stopped = match launched {
+        Ok(launch) => return start.end_or_stop(Some(device_app(runner, serial, launch, None))),
+        Err(stopped) => stopped,
     };
-    let flow = current.end_start(app);
-    if let (ControlFlow::Continue(()), Some(err)) = (flow, failure) {
+    if start.end(None).is_break() {
+        stopped.stop_launched(&*runner, serial);
+        return ControlFlow::Break(());
+    }
+    if let Some(err) = stopped.error {
         on_line(&format!("error: {err:#}"));
         on_line("the device pipeline failed; watching for a source change to retry…");
     }
-    flow
+    ControlFlow::Continue(())
 }
 
 /// Poll cadence for [`watch_loop`]'s inner loop — bounds both output latency
@@ -1645,22 +1658,36 @@ fn cold_fallback_line(reason: &RestartReason) -> String {
 /// keeps its app (the relaunch loop adopts it) and prints its failed
 /// precondition once, as `restart required: hot-patch builder unsupported:
 /// <precondition>`. A cancellable start is bracketed by
-/// [`WatchSlot::begin_start`]/[`WatchSlot::end_start`], so a Ctrl-C during
-/// it ends in [`Launched::Cancelled`].
+/// [`WatchSlot::begin_start`]/[`StartInFlight::end`], so a Ctrl-C during
+/// it ends in [`Launched::Cancelled`]; one that ignores the cancel flag
+/// (the desktop start) parks its app whatever the flag says.
 fn launch_hot(
     backend: &mut dyn HotBackend,
     current: &AppSlot,
     on_line: &mut dyn FnMut(&str),
 ) -> Launched {
-    if backend.cancellable() {
-        current.begin_start();
-    }
+    let start = backend.cancellable().then(|| current.begin_start());
     let (started, app) = match backend.start(on_line, &current.cancel) {
         Ok((session, app)) => (Ok(session), Some(app)),
         Err(err) => (Err(err), None),
     };
-    if current.end_start(app).is_break() {
-        return Launched::Cancelled;
+    match start {
+        Some(start) => {
+            if let ControlFlow::Break(app) = start.end(app) {
+                // The session (and its devtools socket) goes before its app
+                // and forward do, as on a restart.
+                drop(started);
+                if let Some(app) = app {
+                    app.stop();
+                }
+                return Launched::Cancelled;
+            }
+        }
+        None => {
+            if let Some(app) = app {
+                lock_slot(current).replace(app);
+            }
+        }
     }
     match started {
         Ok(session) => match session.restart_only_reason() {
@@ -2771,6 +2798,17 @@ mod tests {
         outcomes: VecDeque<Outcome>,
         calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
         restart_only: Option<String>,
+        /// Which start (1-based) opened it, and the backend's event log its
+        /// drop is recorded in.
+        start: usize,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Drop for FakeSession {
+        fn drop(&mut self) {
+            let event = format!("session {} dropped", self.start);
+            self.events.lock().unwrap().push(event);
+        }
     }
 
     impl HotSessionHandle for FakeSession {
@@ -2799,6 +2837,8 @@ mod tests {
         cancellable: bool,
         /// A Ctrl-C one start fires mid-way.
         interrupt: Option<Interrupt>,
+        /// Session drops and (device) app stops, in order.
+        events: Arc<Mutex<Vec<String>>>,
     }
 
     /// A Ctrl-C a scripted start fires mid-way, through [`on_ctrlc`] over
@@ -2824,6 +2864,7 @@ mod tests {
                 teardowns: None,
                 cancellable: false,
                 interrupt: None,
+                events: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -2862,12 +2903,16 @@ mod tests {
                 outcomes: outcomes.into(),
                 calls: Arc::clone(&self.calls),
                 restart_only,
+                start: n,
+                events: Arc::clone(&self.events),
             };
             let mut app = RunningApp::from(handle);
             if let Some(count) = &self.teardowns {
                 let count = Arc::clone(count);
+                let events = Arc::clone(&self.events);
                 app.teardown = Some(Box::new(move || {
                     count.fetch_add(1, Ordering::SeqCst);
+                    events.lock().unwrap().push(format!("app {n} stopped"));
                 }));
             }
             if let Some(interrupt) = self.interrupt.as_ref().filter(|i| i.at_start == n) {
@@ -3348,7 +3393,7 @@ mod tests {
         }
 
         /// Shaped like [`DeviceRelauncher::relaunch`]: a cancellable start
-        /// that parks its app through [`WatchSlot::end_start`]. With
+        /// that parks its app through [`StartInFlight::end`]. With
         /// `ctrl_c_at` set, that relaunch (1-based) is interrupted by a
         /// Ctrl-C landing after its app launched.
         fn relaunch(
@@ -3360,7 +3405,7 @@ mod tests {
             if let Some(app) = previous {
                 app.stop();
             }
-            current.begin_start();
+            let start = current.begin_start();
             let n = self.relaunches.fetch_add(1, Ordering::SeqCst) + 1;
             let teardowns = Arc::clone(&self.teardowns);
             let app = RunningApp {
@@ -3372,7 +3417,7 @@ mod tests {
             if self.ctrl_c_at == Some(n) {
                 assert!(!on_ctrlc(current), "the exit is left to the loop");
             }
-            Ok(current.end_start(Some(app)))
+            Ok(start.end_or_stop(Some(app)))
         }
     }
 
@@ -3802,11 +3847,14 @@ mod tests {
         );
     }
 
-    /// Criterion 1/2: a device pipeline cancelled past `am start` (it
-    /// answers `Ok(None)`, naming no package) force-stops the package its
-    /// `Launching <package>…` line named, then ends the loop; one cancelled
-    /// before the launch stops nothing; one that launched hands its app to
-    /// [`WatchSlot::end_start`], which stops it (logcat killed, force-stop).
+    /// Criterion 1/2 (`--no-hot`): with a Ctrl-C landed during the start, a
+    /// device pipeline that issued `am start` and then answered a cancel
+    /// or a failure (the SIGINT also killed the in-flight `adb shell am
+    /// start`) force-stops the package it launched and ends the loop,
+    /// reporting no retry; one stopped before `am start` stops nothing.
+    /// Without the Ctrl-C a failure is reported for a retry and stops
+    /// nothing (the negative control). One that launched hands its app to
+    /// [`StartInFlight::end`], which stops it (logcat killed, force-stop).
     #[test]
     fn a_cancelled_device_launch_force_stops_what_it_launched() {
         let recording = || {
@@ -3816,30 +3864,50 @@ mod tests {
             })
         };
         let force_stop = "adb -s FAKE-SERIAL shell am force-stop it.example.fake";
-        let cancelled = || {
-            let current = AppSlot::default();
-            current.begin_start();
-            assert!(!on_ctrlc(&current), "the start in flight is cancelled");
-            current
-        };
+        let am_start_failed = || Some(anyhow::anyhow!("`adb shell am start` failed: killed"));
 
-        for (launching, expected) in [(Some("it.example.fake"), vec![force_stop]), (None, vec![])] {
+        for (ctrl_c, error, launched, stops) in [
+            (true, None, Some("it.example.fake"), true),
+            (true, am_start_failed(), Some("it.example.fake"), true),
+            (true, None, None, false),
+            (false, am_start_failed(), Some("it.example.fake"), false),
+        ] {
+            let failed = error.is_some();
             let runner = recording();
-            let current = cancelled();
+            let current = AppSlot::default();
+            let start = current.begin_start();
+            if ctrl_c {
+                assert!(!on_ctrlc(&current), "the start in flight is cancelled");
+            }
+            let mut lines = Vec::new();
             let flow = settle_device_launch(
                 runner.clone(),
                 "FAKE-SERIAL",
-                Ok(None),
-                launching,
-                &current,
-                &mut |_| {},
+                Err(StoppedShort {
+                    error,
+                    launched: launched.map(str::to_string),
+                }),
+                start,
+                &mut |line| lines.push(line.to_string()),
             );
-            assert_eq!(flow, ControlFlow::Break(()));
-            assert_eq!(*runner.runs.lock().unwrap(), expected);
+            let case = format!("ctrl_c {ctrl_c}, failed {failed}, launched {launched:?}");
+            let expected: Vec<&str> = if stops { vec![force_stop] } else { vec![] };
+            assert_eq!(*runner.runs.lock().unwrap(), expected, "{case}");
+            assert_eq!(flow.is_break(), ctrl_c, "{case}");
+            assert_eq!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("watching for a source change")),
+                failed && !ctrl_c,
+                "{case}: {lines:?}"
+            );
+            assert!(!current.starting.load(Ordering::SeqCst), "{case}: ended");
         }
 
         let runner = recording();
-        let current = cancelled();
+        let current = AppSlot::default();
+        let start = current.begin_start();
+        assert!(!on_ctrlc(&current));
         let launch = AndroidLaunch {
             stream: runner.spawn_streaming("logcat", &[], None, &[]).unwrap(),
             package: "it.example.fake".to_string(),
@@ -3847,14 +3915,30 @@ mod tests {
         let flow = settle_device_launch(
             runner.clone(),
             "FAKE-SERIAL",
-            Ok(Some(launch)),
-            Some("it.example.fake"),
-            &current,
+            Ok(launch),
+            start,
             &mut |_| {},
         );
         assert_eq!(flow, ControlFlow::Break(()));
         assert!(lock_slot(&current).is_none(), "nothing parked");
         assert_eq!(*runner.runs.lock().unwrap(), vec![force_stop]);
+    }
+
+    /// Criterion 3: a start that ignores the cancel flag (the desktop one)
+    /// takes no start mark, so a raised flag cannot end it: its app is
+    /// parked and its session is live.
+    #[test]
+    fn a_start_that_ignores_cancel_parks_its_app_whatever_the_flag_says() {
+        let current = AppSlot::default();
+        current.cancel.store(true, Ordering::SeqCst);
+        let mut backend = FakeBackend::new(vec![Ok((Vec::new(), None))]);
+        let launched = launch_hot(&mut backend, &current, &mut |_| {});
+        assert!(matches!(launched, Launched::Live(_)));
+        assert!(lock_slot(&current).is_some(), "the app is parked");
+        assert!(!current.starting.load(Ordering::SeqCst));
+        if let Some(app) = lock_slot(&current).take() {
+            app.stop();
+        }
     }
 
     /// The handler outside a start stops the live app and exits at once;
@@ -3877,10 +3961,15 @@ mod tests {
         assert!(lock_slot(&current).is_none());
 
         let current = AppSlot::default();
-        current.begin_start();
+        let start = current.begin_start();
         assert!(!on_ctrlc(&current), "first Ctrl-C during a start");
         assert!(current.cancel.load(Ordering::SeqCst));
         assert!(on_ctrlc(&current), "a second Ctrl-C exits at once");
+        drop(start);
+        assert!(
+            !current.starting.load(Ordering::SeqCst),
+            "a dropped mark clears"
+        );
     }
 
     /// Criterion 1: a Ctrl-C during the Android hot start, wired through
@@ -3948,7 +4037,9 @@ mod tests {
     /// Criterion 1: a Ctrl-C during a hot restart's fresh start that lands
     /// after the start's last cancel check — the start hands its app back —
     /// stops that app before the loop ends with 0: the restarted app and
-    /// the fresh one are both torn down.
+    /// the fresh one are both torn down, each after its session is
+    /// dropped. Deterministic: the one change is queued before the loop
+    /// runs and its sender outlives the loop, so only the Ctrl-C ends it.
     #[test]
     fn a_ctrl_c_during_an_android_hot_restart_stops_the_fresh_app_and_ends_the_loop() {
         let current = AppSlot::default();
@@ -3961,16 +4052,11 @@ mod tests {
             slot: Arc::new(Mutex::new(Some(Arc::clone(&current)))),
             unwound_by_start: false,
         });
+        let events = Arc::clone(&backend.events);
         let mut relauncher = FakeDeviceRelauncher::new();
         let (tx, rx) = mpsc::channel();
-        let sender = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(120));
-            tx.send(PathBuf::from("/w/app/src/a.rs")).unwrap();
-            // Held past the loop's end: only the Ctrl-C can end it.
-            std::thread::sleep(Duration::from_millis(600));
-        });
+        tx.send(PathBuf::from("/w/app/src/a.rs")).unwrap();
         let mut lines = Vec::new();
-        let begun = std::time::Instant::now();
         let out = hot_loop_with(
             &mut relauncher,
             &mut backend,
@@ -3980,8 +4066,7 @@ mod tests {
             &mut |line| lines.push(line.to_string()),
         )
         .unwrap();
-        assert!(begun.elapsed() < Duration::from_millis(600), "{lines:?}");
-        sender.join().unwrap();
+        drop(tx);
 
         assert_eq!(out, 0);
         assert_eq!(backend.started.load(Ordering::SeqCst), 2, "{lines:?}");
@@ -3990,25 +4075,31 @@ mod tests {
             2,
             "the restarted app and the fresh one"
         );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "session 1 dropped",
+                "app 1 stopped",
+                "session 2 dropped",
+                "app 2 stopped"
+            ],
+            "criterion 6: each session goes before its app"
+        );
         assert!(lock_slot(&current).is_none());
         assert_eq!(relauncher.relaunches.load(Ordering::SeqCst), 0);
     }
 
     /// Criterion 2: a Ctrl-C during a `--no-hot` device relaunch cancels it
     /// instead of exiting, and the relaunch loop ends with 0 once the
-    /// relaunch has stopped what it launched.
+    /// relaunch has stopped what it launched. Deterministic as above: the
+    /// change is queued up front and its sender outlives the loop.
     #[test]
     fn a_ctrl_c_during_a_no_hot_device_relaunch_ends_the_relaunch_loop() {
         let current = AppSlot::default();
         let mut relauncher = FakeDeviceRelauncher::new();
         relauncher.ctrl_c_at = Some(2);
         let (tx, rx) = mpsc::channel();
-        let sender = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(120));
-            tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(600));
-        });
-        let begun = std::time::Instant::now();
+        tx.send(()).unwrap();
         let out = relaunch_loop_with(
             &mut relauncher,
             &rx,
@@ -4017,8 +4108,7 @@ mod tests {
             &mut |_| {},
         )
         .unwrap();
-        assert!(begun.elapsed() < Duration::from_millis(600));
-        sender.join().unwrap();
+        drop(tx);
 
         assert_eq!(out, 0);
         assert_eq!(relauncher.relaunches.load(Ordering::SeqCst), 2);

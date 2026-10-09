@@ -80,7 +80,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::android_run::{self, AndroidLaunch};
+use crate::android_run::{self, AndroidLaunch, StoppedShort, force_stop};
 use crate::build_dirs::BuildLayout;
 use crate::build_info::{BuildInfo, BuildMode};
 use crate::devices::Device;
@@ -95,8 +95,8 @@ use super::fat_link::{LinkerFlavor, render, run_linker};
 use super::graph::WorkspaceGraph;
 use super::link_intercept::{LinkAction, LinkMode, linker_arg, output_path, read_link_args};
 use super::session::{
-    self, Announced, AppLink, BaseRequest, Budget, FAT_DIR, FatBase, FatBuild, HotSession,
-    RestartReason, SessionHost, StartError, check_debuginfo,
+    self, Announced, AppLink, BaseRequest, Budget, Cancelled, FAT_DIR, FatBase, FatBuild,
+    HotSession, RestartReason, SessionHost, StartError, check_debuginfo,
 };
 use super::symbols::Target;
 use super::thin_link::restrict_to_owner;
@@ -539,10 +539,11 @@ pub struct AndroidHotStart {
 /// at a pipeline phase boundary, during the discovery wait, or once the
 /// forward and attach are done. Whatever the start had launched by then is
 /// torn down first, best-effort: the logcat stream is killed, the forward
-/// removed and the launched package force-stopped. A cancel observed by the
-/// pipeline after `am start` but before its logcat (the pid lookup) reports
-/// no package; its `Launching <package>…` line names it
-/// ([`launched_package`]).
+/// removed and the launched package force-stopped. A pipeline that issued
+/// `am start` and then ended without a stream — at a later phase boundary,
+/// or failing because the Ctrl-C that raised `cancel` also killed the
+/// in-flight `adb` — names the package it launched ([`StoppedShort`]),
+/// which is force-stopped when `cancel` is raised ([`settle_pipeline`]).
 pub fn start_android(
     host: &SessionHost<'_>,
     start: &AndroidStart<'_>,
@@ -565,14 +566,7 @@ pub fn start_android(
 
     let mut staged: Option<FatBase> = None;
     let mut failure: Option<StartError> = None;
-    let mut launching: Option<String> = None;
     let launched = {
-        let mut on_line = |line: &str| {
-            if let Some(package) = launched_package(line) {
-                launching = Some(package.to_string());
-            }
-            on_line(line);
-        };
         let mut stage = |abi: &str, on_line: &mut dyn FnMut(&str)| -> anyhow::Result<()> {
             match build_and_stage(host, start, &ndk, abi, on_line) {
                 Ok(base) => {
@@ -591,25 +585,15 @@ pub fn start_android(
             start.root,
             start.device,
             start.info,
-            &mut on_line,
+            on_line,
             cancel,
             &mut stage,
             host.env,
         )
     };
-    let mut launch = match launched {
-        Ok(Some(launch)) => launch,
-        Ok(None) => {
-            if let Some(package) = &launching {
-                force_stop(runner, &start.device.id, package);
-            }
-            return Ok(None);
-        }
-        Err(err) => {
-            return Err(failure.unwrap_or_else(|| StartError::Launch {
-                detail: format!("{err:#}"),
-            }));
-        }
+    let Some(mut launch) = settle_pipeline(runner, &start.device.id, launched, failure, cancel)?
+    else {
+        return Ok(None);
     };
     let Some(base) = staged else {
         launch.stream.kill();
@@ -630,11 +614,31 @@ pub fn start_android(
     }))
 }
 
-/// The package the Android run pipeline's `Launching <package>…` line names:
-/// the installed package it is about to `am start`.
-pub fn launched_package(line: &str) -> Option<&str> {
-    let package = line.strip_prefix("Launching ")?.strip_suffix('…')?;
-    (!package.is_empty() && !package.contains(char::is_whitespace)).then_some(package)
+/// The run pipeline's answer to a hot start: the launched app, `Ok(None)`
+/// for a cancel, or the failure (`failure`, the staging step's own error,
+/// when that is what stopped it). With `cancel` raised, a package the
+/// pipeline issued `am start` for but never streamed is force-stopped
+/// first, whether it answered a cancel or a failure.
+fn settle_pipeline(
+    runner: &dyn ProcessRunner,
+    serial: &str,
+    launched: Result<AndroidLaunch, StoppedShort>,
+    failure: Option<StartError>,
+    cancel: &AtomicBool,
+) -> Result<Option<AndroidLaunch>, StartError> {
+    let stopped = match launched {
+        Ok(launch) => return Ok(Some(launch)),
+        Err(stopped) => stopped,
+    };
+    if cancel.load(Ordering::SeqCst) {
+        stopped.stop_launched(runner, serial);
+    }
+    match stopped.error {
+        None => Ok(None),
+        Some(err) => Err(failure.unwrap_or_else(|| StartError::Launch {
+            detail: format!("{err:#}"),
+        })),
+    }
 }
 
 /// Waits for the launched app's discovery line and attaches through an
@@ -650,7 +654,14 @@ fn attach_launched(
     cancel: &AtomicBool,
 ) -> Result<Option<(AppLink, Option<u16>)>, StartError> {
     let mut forward_port = None;
-    let app = match session::read_discovery(&mut launch.stream, on_line, Some(cancel)) {
+    let announced = match session::read_discovery_cancellable(&mut launch.stream, on_line, cancel) {
+        Ok(announced) => announced,
+        Err(Cancelled) => {
+            unwind(runner, serial, launch, None);
+            return Ok(None);
+        }
+    };
+    let app = match announced {
         Announced::Endpoint(discovery) => {
             match adb_forward_ephemeral(runner, serial, discovery.port) {
                 Ok(port) => {
@@ -667,10 +678,6 @@ fn attach_launched(
             }
         }
         Announced::Failure(reason) => AppLink::RestartOnly { reason },
-        Announced::Cancelled => {
-            unwind(runner, serial, launch, None);
-            return Ok(None);
-        }
         Announced::Exited => {
             launch.stream.kill();
             return Err(StartError::Launch {
@@ -701,11 +708,6 @@ fn unwind(
         let _ = adb_forward_remove(runner, serial, port);
     }
     force_stop(runner, serial, &launch.package);
-}
-
-/// `adb -s <serial> shell am force-stop <package>`, best-effort.
-fn force_stop(runner: &dyn ProcessRunner, serial: &str, package: &str) {
-    let _ = runner.run("adb", &["-s", serial, "shell", "am", "force-stop", package]);
 }
 
 /// The staging step [`start_android`] hands the run pipeline: the fat
@@ -1758,22 +1760,48 @@ mod tests {
         }
     }
 
-    /// The run pipeline's `Launching <package>…` line names the package it
-    /// is about to `am start`; nothing else does.
+    /// Criterion 1 (hot start): with `cancel` raised, a pipeline that issued
+    /// `am start` and then answered a failure (the Ctrl-C's SIGINT also
+    /// killed the in-flight `adb shell am start`) or a cancel force-stops
+    /// the package it launched. Without the cancel a failure stops nothing
+    /// (the negative control), and a run stopped before `am start` names no
+    /// package.
     #[test]
-    fn the_launching_line_names_the_launched_package() {
-        assert_eq!(
-            launched_package("Launching dev.f0x.myapp.dev…"),
-            Some("dev.f0x.myapp.dev")
-        );
-        for line in [
-            "Launching dev.f0x.myapp",
-            "Launching …",
-            "Launching the app on Pixel 7…",
-            "Installing on Pixel 7…",
-            "D/frust: Launching dev.f0x.myapp…",
+    fn a_cancelled_hot_start_force_stops_what_the_pipeline_launched_on_a_failure_too() {
+        let am_start_failed = || Some(anyhow::anyhow!("`adb shell am start` failed: killed"));
+        for (raised, error, launched, stops) in [
+            (true, am_start_failed(), Some(PACKAGE), true),
+            (true, None, Some(PACKAGE), true),
+            (false, am_start_failed(), Some(PACKAGE), false),
+            (true, None, None, false),
         ] {
-            assert_eq!(launched_package(line), None, "{line}");
+            let failed = error.is_some();
+            let runner = RecordingRunner::new(FakeProcessRunner::new().with(FORCE_STOP, ok()));
+            let settled = settle_pipeline(
+                &runner,
+                SERIAL,
+                Err(StoppedShort {
+                    error,
+                    launched: launched.map(str::to_string),
+                }),
+                None,
+                &AtomicBool::new(raised),
+            );
+            let expected: Vec<String> = if stops {
+                vec![FORCE_STOP.to_string()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(runner.runs(), expected, "raised {raised}, failed {failed}");
+            match settled {
+                Err(StartError::Launch { detail }) => {
+                    assert!(failed, "{detail}");
+                    assert!(detail.contains("am start"), "{detail}");
+                }
+                Ok(None) => assert!(!failed),
+                Err(other) => panic!("unexpected {other:?}"),
+                Ok(Some(_)) => panic!("nothing was streamed"),
+            }
         }
     }
 }
