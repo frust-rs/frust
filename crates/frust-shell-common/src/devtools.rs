@@ -80,7 +80,7 @@
 //!   counters, and the layout-mismatch records not yet reported (marking them
 //!   reported).
 //!
-//! Only the desktop shell calls [`frame_submitted`] today; elsewhere an apply
+//! The desktop and Android shells call [`frame_submitted`]; elsewhere an apply
 //! answers once the frame wait's [`UI_HOP_DEADLINE`] lapses.
 
 use std::collections::{HashMap, HashSet, VecDeque};

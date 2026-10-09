@@ -56,6 +56,69 @@ pub(crate) fn take_patch_frame_request() -> bool {
     PATCH_FRAME_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Milliseconds since the UNIX epoch for the `frust-hotpatch:` probe lines (0 if the clock is
+/// before the epoch).
+#[cfg(feature = "hotpatch")]
+fn unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis())
+}
+
+/// The UI-thread half of the hot patch, owned by the handle: drains the latch, stamps the
+/// `frust-hotpatch: applied` / `frame` probe lines, and releases the devtools frame gate.
+///
+/// `applied` is stamped here, when a ready tick drains the latch, not in the listener: the
+/// listener runs on the patching thread and must only signal (`frust_core::set_patch_listener`),
+/// and the desktop shell likewise stamps it when its UI thread observes the patch. `frame` is
+/// stamped once on the first handed-off frame and once on the frame that consumed a request; both
+/// lines' wording and format are parsed by the hot-patch latency tooling and are load-bearing.
+#[cfg(feature = "hotpatch")]
+pub(crate) struct PatchFrameProbe {
+    frame_pending: bool,
+    first_frame_pending: bool,
+}
+
+#[cfg(feature = "hotpatch")]
+impl PatchFrameProbe {
+    pub(crate) const fn new() -> Self {
+        Self {
+            frame_pending: false,
+            first_frame_pending: true,
+        }
+    }
+
+    /// Drain the latch for this tick; the result ORs into `FrameInputs::signals_dirty`.
+    pub(crate) fn take_request(&mut self) -> bool {
+        self.note_request(take_patch_frame_request())
+    }
+
+    fn note_request(&mut self, requested: bool) -> bool {
+        if requested {
+            log::info!("frust-hotpatch: applied t_unix_ms={}", unix_ms());
+            self.frame_pending = true;
+        }
+        requested
+    }
+
+    /// Run once per frame, right after it is handed to the render-path executor, and never on a
+    /// skipped tick: stamps the `frame` line when one is due, then releases every parked
+    /// `apply_patch` answer (one atomic load when nothing is parked; never blocks).
+    pub(crate) fn frame_handed_off(&mut self) {
+        if self.take_frame_due() {
+            log::info!("frust-hotpatch: frame t_unix_ms={}", unix_ms());
+        }
+        frust_shell_common::devtools::frame_submitted();
+    }
+
+    fn take_frame_due(&mut self) -> bool {
+        let due = self.frame_pending || self.first_frame_pending;
+        self.frame_pending = false;
+        self.first_frame_pending = false;
+        due
+    }
+}
+
 pub(crate) use executor::{FrameExecutor, InlineExecutor, PaintedScene, SplitExecutor};
 pub(crate) use render::{RenderSignals, render_scene};
 
@@ -326,6 +389,10 @@ pub struct AndroidAppHandle {
     /// (`frust-perf deadline`) behind `perf::enabled`; it never drops or
     /// reshapes work.
     deadline_overruns: u64,
+    /// The hot-patch latch drain, probe lines and devtools frame-gate release (see
+    /// [`PatchFrameProbe`]).
+    #[cfg(feature = "hotpatch")]
+    patch_probe: PatchFrameProbe,
     /// The differ turning this handle's
     /// published `PlatformViewFrame`s into the idempotent `ViewCommand`
     /// backlog `nativePlatformViewCommands` serves to Kotlin's per-frame
@@ -671,6 +738,8 @@ impl AndroidAppHandle {
             pointer_scratch: Vec::new(),
             last_frame_time_nanos: None,
             deadline_overruns: 0,
+            #[cfg(feature = "hotpatch")]
+            patch_probe: PatchFrameProbe::new(),
             platform_view_state: PlatformViewState::new(),
             platform_view_due: FramePairing::new(),
             sync_tail: ScrollSyncTail::new(),
@@ -940,6 +1009,30 @@ mod tests {
                 .is_run()
         );
         assert!(!super::take_patch_frame_request(), "one request, one frame");
+    }
+
+    // The probe's flag halves are driven directly (`note_request` / `take_frame_due`), not through
+    // the process-wide latch, so they cannot race the latch test above.
+    #[cfg(feature = "hotpatch")]
+    #[test]
+    fn the_first_handed_off_frame_stamps_the_frame_line_once() {
+        let mut probe = super::PatchFrameProbe::new();
+        assert!(!probe.note_request(false));
+        assert!(probe.take_frame_due(), "the first frame is stamped");
+        assert!(!probe.take_frame_due(), "a second frame logs nothing");
+    }
+
+    #[cfg(feature = "hotpatch")]
+    #[test]
+    fn a_patch_request_marks_exactly_the_next_handed_off_frame() {
+        let mut probe = super::PatchFrameProbe::new();
+        assert!(probe.take_frame_due());
+        assert!(probe.note_request(true), "a request forces the Run");
+        // A skipped or not-ready tick hands nothing off, so it never reaches `take_frame_due`: the
+        // pending flag survives any number of those ticks.
+        assert!(!probe.note_request(false));
+        assert!(probe.take_frame_due(), "the consuming frame is stamped");
+        assert!(!probe.take_frame_due(), "one request, one frame line");
     }
 
     use super::{
