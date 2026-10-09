@@ -27,7 +27,10 @@
 //! to `0600` and named on `apply_patch` by absolute path and SHA-256 instead
 //! of uploaded (the session is loopback-only, so the app reads the very file
 //! the host wrote). A device session (Android, through `adb forward`;
-//! [`super::android`]) always uploads: the app is not on this host. One
+//! [`super::android`]) always uploads, and uploads a stripped copy of the
+//! patch: the app is not on this host, and the host alone reads the
+//! patch's symbols, from the unstripped image. `len`, the byte budget and
+//! any digest describe the bytes the app receives. One
 //! patch is in flight at a time, and nothing is ever sent to a restart-only
 //! session, to a non-loopback endpoint, with pending records or over
 //! budget.
@@ -598,11 +601,49 @@ enum Compiled {
 
 /// A linked patch, ready to send.
 struct LinkedPatch {
-    /// Where the link wrote it (`patch-<n>` under the session dir).
+    /// The file the app is sent or named: the linked `patch-<n>` under the
+    /// session dir, or its stripped upload copy beside it.
     path: PathBuf,
+    /// `path`'s contents.
     bytes: Vec<u8>,
     table: JumpTableWire,
+    /// The symbols of the linked, unstripped image.
     symbols: ImageSymbols,
+}
+
+/// Reads the thin-linked image at `patch`, builds its jump table against
+/// `cache` and, when `upload_strip` names a strip tool, writes the stripped
+/// copy the app is sent ([`super::android::strip_for_upload`]). Symbols and
+/// table always come from `patch` itself; without a strip tool the patch is
+/// sent as linked.
+fn read_linked(
+    runner: &dyn ProcessRunner,
+    cache: &SymbolCache,
+    target: Target,
+    patch: PathBuf,
+    upload_strip: Option<&Path>,
+) -> Result<LinkedPatch, HotpatchError> {
+    let read = |path: &Path| {
+        std::fs::read(path)
+            .map_err(|err| HotpatchError::io(format!("reading `{}`", path.display()), err))
+    };
+    let bytes = read(&patch)?;
+    let symbols = ImageSymbols::parse(&bytes, target, &format!("patch `{}`", patch.display()))?;
+    let table = super::jump_table::create_jump_table(cache, &symbols)?;
+    let (path, bytes) = match upload_strip {
+        None => (patch, bytes),
+        Some(strip) => {
+            let upload = super::android::strip_for_upload(runner, strip, &patch)?;
+            let bytes = read(&upload)?;
+            (upload, bytes)
+        }
+    };
+    Ok(LinkedPatch {
+        path,
+        bytes,
+        table,
+        symbols,
+    })
 }
 
 /// Prepares the loopback hand-off of the patch at `path` whose bytes are
@@ -1185,6 +1226,7 @@ pub fn start_desktop(
             image_unit: tip_bin.clone(),
             image: fat_dir.join(&tip_bin.target),
             custom_linker: custom_linker(host.env, &triple),
+            upload_strip: None,
             target,
             flavor,
             target_dir,
@@ -1233,6 +1275,9 @@ pub(super) struct BaseRequest<'a> {
     /// The build's configured linker, if any (see
     /// [`fat_link::linker_program`]).
     pub custom_linker: Option<PathBuf>,
+    /// The tool that strips each patch into the copy the app is sent (the
+    /// NDK's `llvm-strip` on Android); `None` sends the linked patch.
+    pub upload_strip: Option<PathBuf>,
     pub target: Target,
     pub flavor: LinkerFlavor,
     pub target_dir: PathBuf,
@@ -1280,6 +1325,7 @@ pub(super) fn link_base(
         image_unit,
         image,
         custom_linker,
+        upload_strip,
         target,
         flavor,
         target_dir,
@@ -1344,6 +1390,7 @@ pub(super) fn link_base(
         target,
         flavor,
         linker,
+        upload_strip,
         target_dir,
         session,
         session_dir: accepted.dir().to_path_buf(),
@@ -1700,6 +1747,8 @@ struct DesktopBuilder {
     target: Target,
     flavor: LinkerFlavor,
     linker: String,
+    /// See [`BaseRequest::upload_strip`].
+    upload_strip: Option<PathBuf>,
     target_dir: PathBuf,
     session: String,
     session_dir: PathBuf,
@@ -1901,21 +1950,13 @@ impl PatchBuilder for DesktopBuilder {
                 envs: &self.tip_env,
             },
         )?;
-        let bytes = std::fs::read(&linked.patch).map_err(|err| {
-            HotpatchError::io(format!("reading `{}`", linked.patch.display()), err)
-        })?;
-        let symbols = ImageSymbols::parse(
-            &bytes,
+        read_linked(
+            &*self.runner,
+            &self.cache,
             self.target,
-            &format!("patch `{}`", linked.patch.display()),
-        )?;
-        let table = super::jump_table::create_jump_table(&self.cache, &symbols)?;
-        Ok(LinkedPatch {
-            path: linked.patch,
-            bytes,
-            table,
-            symbols,
-        })
+            linked.patch,
+            self.upload_strip.as_deref(),
+        )
     }
 
     fn accepted(&mut self) {
@@ -2445,6 +2486,313 @@ mod tests {
         let apply = server.requests().pop().unwrap();
         let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
         assert_eq!(params.file, None, "a device app is never named a host path");
+    }
+
+    /// What the stand-in `llvm-strip` writes: no symbol table at all, so a
+    /// jump table could never be built from it.
+    const STRIPPED: &[u8] = b"stripped upload copy";
+
+    /// A runner standing in for `llvm-strip`: writes [`STRIPPED`] to the
+    /// path after `-o`, world-readable as under a `022` umask, and records
+    /// every argv.
+    #[derive(Default)]
+    struct FakeStrip {
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl ProcessRunner for FakeStrip {
+        fn run(&self, cmd: &str, _args: &[&str]) -> anyhow::Result<Output> {
+            anyhow::bail!("FakeStrip does not run `{cmd}`")
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            _cwd: Option<&Path>,
+            _env: &[(&str, &str)],
+            _on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<Output> {
+            let argv: Vec<String> = std::iter::once(cmd)
+                .chain(args.iter().copied())
+                .map(str::to_string)
+                .collect();
+            let out = args
+                .iter()
+                .position(|arg| *arg == "-o")
+                .map(|i| PathBuf::from(args[i + 1]))
+                .expect("llvm-strip is given -o");
+            std::fs::write(&out, STRIPPED)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o644))?;
+            }
+            self.calls.lock().unwrap().push(argv);
+            Ok(Output {
+                success: true,
+                ..Output::default()
+            })
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&Path>,
+            _env: &[(&str, &str)],
+        ) -> anyhow::Result<StreamHandle> {
+            anyhow::bail!("FakeStrip does not spawn `{cmd}`")
+        }
+    }
+
+    fn android() -> Target {
+        Target::from_triple("aarch64-linux-android").unwrap()
+    }
+
+    /// An unstripped Android patch: the seam the base also defines, moved.
+    fn android_patch() -> Vec<u8> {
+        object(
+            android(),
+            &[Def::Text("seam_home", 32), Def::Text(ANCHOR_SYMBOL, 4)],
+        )
+    }
+
+    /// A builder whose link step is the real [`read_linked`] over a
+    /// scripted thin link: `link` writes [`android_patch`] to `patch-<n>.so`
+    /// owner-only, as `thin_link` leaves it.
+    struct ReadLinkedBuilder {
+        runner: Arc<FakeStrip>,
+        cache: SymbolCache,
+        dir: PathBuf,
+        upload_strip: Option<PathBuf>,
+    }
+
+    impl PatchBuilder for ReadLinkedBuilder {
+        fn classify(&self, _path: &Path) -> PathClass {
+            PathClass::Replayable {
+                units: [ReplayUnit::lib("app", "app")].into_iter().collect(),
+            }
+        }
+
+        fn compile(&mut self, _units: &BTreeSet<ReplayUnit>) -> Result<Compiled, HotpatchError> {
+            Ok(Compiled::Candidate {
+                layouts: LayoutTable::default(),
+                seams: home_seam(),
+            })
+        }
+
+        fn link(&mut self, n: u32, _anchor_runtime: u64) -> Result<LinkedPatch, HotpatchError> {
+            let patch = self.dir.join(format!("patch-{n}.so"));
+            std::fs::write(&patch, android_patch()).unwrap();
+            thin_link::restrict_to_owner(&patch)?;
+            read_linked(
+                &*self.runner,
+                &self.cache,
+                android(),
+                patch,
+                self.upload_strip.as_deref(),
+            )
+        }
+
+        fn accepted(&mut self) {}
+    }
+
+    /// A session over a [`ReadLinkedBuilder`] whose base is an Android
+    /// image, attached to a fake app on this host or (`same_host: false`)
+    /// on a device.
+    struct LinkedRig {
+        session: HotSession,
+        server: FakeServer,
+        runner: Arc<FakeStrip>,
+        dir: PathBuf,
+        /// The jump table the unstripped patch gives against the base.
+        expected_table: JumpTableWire,
+    }
+
+    fn linked_rig(
+        script: Script,
+        same_host: bool,
+        upload_strip: Option<PathBuf>,
+        budget: Budget,
+    ) -> LinkedRig {
+        let target_dir = temp_dir("read-linked");
+        let base = target_dir.join("libapp.so");
+        std::fs::write(
+            &base,
+            object(
+                android(),
+                &[
+                    Def::Text("pad", 64),
+                    Def::Text("seam_home", 16),
+                    Def::Text(ANCHOR_SYMBOL, 4),
+                ],
+            ),
+        )
+        .unwrap();
+        let cache = SymbolCache::load(&base, android()).unwrap();
+        let patch = ImageSymbols::parse(&android_patch(), android(), "patch").unwrap();
+        let expected_table = super::super::jump_table::create_jump_table(&cache, &patch).unwrap();
+        let server = test_server::spawn(script);
+        let app = attach(server.addr, Some(FAKE_TOKEN), TRIPLE, same_host);
+        let accepted = AcceptedSets::begin(
+            &target_dir,
+            "session-app",
+            LayoutTable::default(),
+            home_seam(),
+        )
+        .unwrap();
+        let dir = accepted.dir().to_path_buf();
+        let runner = Arc::new(FakeStrip::default());
+        let images = vec![cache.symbols().clone()];
+        let builder = ReadLinkedBuilder {
+            runner: Arc::clone(&runner),
+            cache,
+            dir: dir.clone(),
+            upload_strip,
+        };
+        LinkedRig {
+            session: HotSession {
+                builder: Box::new(builder),
+                app,
+                accepted,
+                images,
+                budget,
+                restart: None,
+                next_patch_id: 1,
+            },
+            server,
+            runner,
+            dir,
+            expected_table,
+        }
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// An Android session uploads the stripped copy; the jump table and the
+    /// image symbols the session keeps come from the unstripped patch,
+    /// which stays in the session dir. Both are owner-only. `len` and the
+    /// byte budget count the uploaded bytes: a budget the stripped copy
+    /// exactly fills admits the patch, though the unstripped image is over.
+    #[test]
+    fn a_device_session_uploads_the_stripped_copy_and_keeps_the_unstripped_patch() {
+        let budget = Budget {
+            patches: DEFAULT_BUDGET_PATCHES,
+            bytes: STRIPPED.len() as u64,
+        };
+        assert!(android_patch().len() as u64 > budget.bytes);
+        let strip = PathBuf::from("/ndk/bin/llvm-strip");
+        let mut rig = linked_rig(
+            hot_script(vec![applied(1, 2, Vec::new())]),
+            false,
+            Some(strip.clone()),
+            budget,
+        );
+        let outcome = rig.session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
+        assert!(
+            matches!(outcome, Outcome::Patched { components: 2, .. }),
+            "{outcome:?}"
+        );
+
+        let patch = rig.dir.join("patch-1.so");
+        let upload = rig.dir.join("patch-1.upload.so");
+        let path = |p: &Path| p.to_string_lossy().into_owned();
+        assert_eq!(
+            rig.runner.calls.lock().unwrap().clone(),
+            vec![vec![
+                path(&strip),
+                "--strip-unneeded".to_string(),
+                "-o".to_string(),
+                path(&upload),
+                path(&patch),
+            ]]
+        );
+        assert_eq!(rig.server.uploaded(1), Some(STRIPPED.to_vec()));
+        let apply = rig.server.requests().pop().unwrap();
+        let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
+        assert_eq!(params.len, STRIPPED.len() as u64);
+        assert_eq!(params.file, None);
+        assert_eq!(params.table, rig.expected_table);
+        let kept = &rig.session.images[1];
+        let unstripped = ImageSymbols::parse(&android_patch(), android(), "patch").unwrap();
+        assert!(kept.defined_address("seam_home").is_some());
+        assert_eq!(
+            kept.defined_address("seam_home"),
+            unstripped.defined_address("seam_home")
+        );
+
+        assert_eq!(std::fs::read(&patch).unwrap(), android_patch());
+        assert_eq!(std::fs::read(&upload).unwrap(), STRIPPED);
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&patch), 0o600, "the unstripped patch is owner-only");
+            assert_eq!(mode(&upload), 0o600, "the upload copy is owner-only");
+        }
+    }
+
+    /// Any digest describes the bytes the app is sent: a hand-off of a
+    /// stripped patch names the upload copy and its SHA-256.
+    #[test]
+    fn a_hand_off_of_a_stripped_patch_names_and_digests_the_upload_copy() {
+        let mut script = hot_script(vec![applied(1, 2, Vec::new())]);
+        script.info.as_mut().unwrap().patch_file_hand_off = true;
+        let mut rig = linked_rig(
+            script,
+            true,
+            Some(PathBuf::from("/ndk/bin/llvm-strip")),
+            Budget::default(),
+        );
+        let outcome = rig.session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
+        assert!(matches!(outcome, Outcome::Patched { .. }), "{outcome:?}");
+        let apply = rig.server.requests().pop().unwrap();
+        let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
+        let file = params.file.expect("the hand-off names a file");
+        assert_eq!(
+            PathBuf::from(&file.path),
+            std::path::absolute(rig.dir.join("patch-1.upload.so")).unwrap()
+        );
+        assert_eq!(file.sha256, sha256_hex(STRIPPED));
+        assert_eq!(params.len, STRIPPED.len() as u64);
+    }
+
+    /// Without a strip tool (every desktop session) nothing is run and the
+    /// linked patch itself is uploaded, or named and digested on a
+    /// hand-off, exactly as linked.
+    #[test]
+    fn without_a_strip_tool_the_linked_patch_is_sent_as_linked() {
+        for hand_off in [false, true] {
+            let mut script = hot_script(vec![applied(1, 2, Vec::new())]);
+            script.info.as_mut().unwrap().patch_file_hand_off = hand_off;
+            let mut rig = linked_rig(script, true, None, Budget::default());
+            let outcome = rig.session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
+            assert!(matches!(outcome, Outcome::Patched { .. }), "{outcome:?}");
+            assert!(rig.runner.calls.lock().unwrap().is_empty());
+            assert!(!rig.dir.join("patch-1.upload.so").exists());
+            let apply = rig.server.requests().pop().unwrap();
+            let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
+            assert_eq!(params.len, android_patch().len() as u64);
+            assert_eq!(params.table, rig.expected_table);
+            match params.file {
+                Some(file) => {
+                    assert!(hand_off);
+                    assert_eq!(
+                        PathBuf::from(&file.path),
+                        std::path::absolute(rig.dir.join("patch-1.so")).unwrap()
+                    );
+                    assert_eq!(file.sha256, sha256_hex(&android_patch()));
+                    assert_eq!(rig.server.uploaded(1), None);
+                }
+                None => {
+                    assert!(!hand_off);
+                    assert_eq!(rig.server.uploaded(1), Some(android_patch()));
+                }
+            }
+        }
     }
 
     #[test]
@@ -4036,6 +4384,7 @@ mod tests {
                 target: target(),
                 flavor: LinkerFlavor::for_triple(TRIPLE).unwrap(),
                 linker: "cc".to_string(),
+                upload_strip: None,
                 target_dir: dir.clone(),
                 session: "session-b".to_string(),
                 session_dir: accepted.dir().to_path_buf(),
