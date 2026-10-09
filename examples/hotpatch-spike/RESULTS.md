@@ -2402,3 +2402,223 @@ New: `--windows <ssh-alias>` (also `--windows-host`; with no alias after it, the
   probe|backstop; backstop: none|PRESENT`, as on Android. The summary prints the Android-style
   source counts and the save->applied and save->CLI line medians under `windows:`.
 - `--target framework` is refused with `--windows`.
+
+### Stage 3 re-run (H3-03b)
+
+Card H3-03b (tsk_000001a121d8eda2Ac6syszo), run 2026-10-09 on `task/hb-h3-03b`, cut from
+`feature/hotpatch-h3` @ 9ecb4748: H3-03's base plus H3-05, whose thin replay of a lib unit emits
+only its rlib, so a change no longer links the cdylib through MSVC `link.exe` or archives the
+staticlib. Rig, method, rows and bar are H3-03's. Only A, B, G and the restart leg are re-run.
+
+#### Verdict: PASS
+
+1. **Median save->frame at most 50% of the in-session restart median: PASS for A and B.** The
+   restart median is **10861 ms** (row F's shape, n=5, measured in this sitting), so the bar is
+   5430 ms. save->frame, read from the app's own probe lines:
+   - A **1468 ms** (n=5): **13.5%**. **PASS.**
+   - B **1472 ms** (n=5): **13.6%**. **PASS.**
+   - G **1470 ms** (n=10): 13.5%.
+   - Steady state (runs 2..n): A 1453, B 1450, G 1459 ms.
+   - Against H3-03's restart median (7703 ms, the earlier sitting), A is 19.1% and B 19.1%, so the
+     verdict does not hang on this sitting's slower restart (*F* below).
+   - The first patch of each hot run is slow: A 5278, B 5512, G 5522 ms (G-debug 5588). It is
+     kept in every median. On its own it is 48.6-50.8% of this restart, so the median, not the
+     first edit, passes the bar.
+2. **PID and State kept across A, B and G: PASS.** A: 17252 throughout, B: 9484, G: 14716 (10/10),
+   G-debug: 4912 (10/10). Count 3, raised before the first patch, is in the window after every
+   patch.
+3. **Row G: PASS.** Ten patches, no crash. The app's own counters reach 10 patches / 12,774,400
+   bytes, and the working set stays within 371.6-378.9 MB.
+4. **D2 and D4 were not re-run.** H3-05 changed one file, `crates/frust-drive/src/hotpatch/replay.rs`
+   (the crate types the thin rustc emits). `pdb_layout.rs` and `session.rs`, the PDB layout gate
+   and its wiring, match this base by SHA-256, the same bytes H3-03 measured. H3-03's refusals
+   therefore stand: D2 3/3 and D4 2/2 `restart required` (*D2* and *D4* above).
+
+**Windows keeps `Capability::HotPatch`** (H3-04 stays merged). Milestone 3 is met on this rig.
+
+#### Rig, binary and method
+
+- **Rig.** The same as H3-03: Windows 11 Pro build 26200, x64, Intel UHD Graphics 730, MSVC
+  14.44.35207, Windows Kits 10.0.26100, rust-lld as the patch linker. Smart App Control is still
+  Off (`VerifiedAndReputablePolicyState` = 0).
+- **Same content as the base.** The rig's tree has no `.git`. Its copies of the 16 source,
+  manifest and lockfile paths the H3 phase changed match 9ecb4748 by SHA-256: H3-03's 15 plus
+  H3-05's `replay.rs`.
+- **Binary.** `cargo build --release -p frust-cli` was rebuilt in place from that tree before the
+  gate (`Finished` in 2 m 26 s, `frust 0.6.0`). The measured `frust.exe` has SHA-256 `0d44724a…`;
+  H3-03's had `5bdab26d…`. That binary ran every row.
+- **App.** H3-03's prepared app was reused, not re-scaffolded. Its sources were back at
+  `v0` (H3-03's restore checks, re-confirmed by this gate's), and its `rust-toolchain.toml` still
+  pins rustc 1.98.1.
+- **One sitting.** A, F, B, G, then G-debug, in about 20 minutes. The app's build was warm, so no
+  warm-up hot run was made. Each hot run reached its first frame 26.5-28.3 s after launch, and F
+  18.9 s.
+- **Runs.** Commands are H3-03's: `FRUST=<rig frust.exe> WINDOWS_PRESSES=3 measure.sh --frust-run
+  --windows <ssh-alias> --app <scratch>\hotapp --target home|card --runs 5|10 --row A|B|G`, and
+  `--frust-restart` for F. G-debug adds `FRUST_RUN_ARGS="--define FRUST_LOG=debug"` for the app's
+  `applying patch` lines and is not latency data.
+- **Instruments and State.** These are H3-03's. All 30 patched runs report `source: probe` and
+  `backstop: none`. State is read through UI Automation (`ui:` lines). The rig's user session is
+  still disconnected and locked, so no pixel capture was attempted.
+- **Load.** No build ran on the rig during a timed run (CPU load 1-2% between rows). The driving
+  host ran only ssh.
+- **Restore.** After every row, both edited sources on the rig were `same` by SHA-256.
+
+#### Matrix
+
+| Row | Edit | Outcome lines (n) | PID / State | save->frame median (min-max), n | save->applied median | save->CLI line median | Verdict |
+|---|---|---|---|---|---|---|---|
+| A | home sentinel | `patched in 1313-5167 ms (1 components rebuilt)` (5/5) | 17252 kept; count 3 -> 3, `hotpatch-sentinel: v5` | **1468** (1436-5278), 5 | 1467 | 1476 | patched; **bar PASS** (13.5%) |
+| B | card sentinel, `CounterCard` in its own module | `patched in 1310-5402 ms (1 components rebuilt)` (5/5) | 9484 kept; count 3 -> 3, `card-sentinel: v5` | **1472** (1418-5512), 5 | 1471 | 1497 | patched; **bar PASS** (13.6%) |
+| F | restart: `--no-hot --features frust/hotpatch`, kill + `cargo run` | n/a | new PID each run; count 0, `hotpatch-sentinel: vN` | **10861** (10105-13913), 5 | | | **the restart baseline** |
+| G | 10 home patches, default budget | `patched in 1316-5410 ms (1 components rebuilt)` (10/10) | 14716 kept; count 3 -> 3, `v10` | **1470** (1426-5522), 10 | 1470 | 1482 | no crash; all 10 admitted (13.5%) |
+| G-debug | as G, `FRUST_LOG=debug` | `patched in 1334-5480 ms` (10/10; 2 components rebuilt in runs 1, 3, 6) | 4912 kept; count 3 -> 3, `v10` | 1487 (1439-5588), 10 | 1486 | 1492 | counters only |
+
+#### F: the restart baseline
+
+`--no-hot --features frust/hotpatch`, home sentinel edits, n=5. The phases come from the tailer's
+read stamps of cargo's lines, on the rig clock.
+
+| Run | save->first frame (ms) | save -> `Change detected` | -> `Compiling hotapp` | `Compiling` -> `Finished` | `Running` -> first frame | PID | Window after |
+|---|---|---|---|---|---|---|---|
+| 1 | 10266 | 104 | 1947 | 7075 | 1077 | 2780 -> 7924 | `count: 0`, `v1` |
+| 2 | 10105 | 126 | 1919 | 7011 | 986 | 7924 -> 15096 | `count: 0`, `v2` |
+| 3 | 13913 | 110 | 5722 | 6892 | 1126 | 15096 -> 21384 | `count: 0`, `v3` |
+| 4 | 10861 | 110 | 2694 | 7004 | 989 | 21384 -> 4792 | `count: 0`, `v4` |
+| 5 | 13779 | 126 | 5567 | 6952 | 1071 | 4792 -> 12072 | `count: 0`, `v5` |
+
+- The median is **10861 ms** (runs 2-5: 12320).
+- Cargo's own `Finished dev ... in` reads 8.72 / 8.74 / 12.43 / 9.54 / 12.30 s.
+- **This restart is ~3.2 s slower than H3-03's 7703 ms.** The difference sits in two cargo phases:
+  - `Updating crates.io index` up to `Compiling`: 1.9-5.7 s here, against 1.2-3.0 s in H3-03.
+  - `Compiling` -> `Finished`: 6.9-7.1 s here, against 5.2-5.4 s in H3-03.
+  - `Running` -> first frame is the same (1.0-1.1 s).
+- H3-05 does not touch this path (`--no-hot` is a plain `cargo run`). The cause is not attributed
+  beyond those two phases, and the verdict holds against either restart median.
+
+#### A, B: patched with State kept
+
+Row A run 3 in the CLI stream (rig-clock read stamp first):
+
+```
+1791569638186 patched in 1327 ms (1 components rebuilt)
+1791569638186 [frust INFO] frust-hotpatch: applied t_unix_ms=1791569638183
+1791569638186 [frust INFO] frust-hotpatch: frame t_unix_ms=1791569638184
+```
+
+Per run (ms after the rig-side save stamp; source `probe` and `backstop: none` in every run):
+
+| Row | Run | save->frame | save->applied | CLI line read | `patched in` | `stub-N.o` | `patch-N.dll` | PID | working set (MB) | `ui:` after the run |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A | before | | | | | | | 17252 | 366.6 | `count: 3`, `hotpatch-sentinel: v0`, `card-sentinel: v0` |
+| A | 1 | 5278 | 5277 | 5287 | 5167 | 4627 | 4694 | 17252 | 371.5 | `count: 3`, `v1` |
+| A | 2 | 1599 | 1598 | 1603 | 1473 | 967 | 1011 | 17252 | 372.8 | `count: 3`, `v2` |
+| A | 3 | 1436 | 1435 | 1438 | 1327 | 816 | 865 | 17252 | 374.4 | `count: 3`, `v3` |
+| A | 4 | 1438 | 1438 | 1443 | 1313 | 818 | 866 | 17252 | 374.9 | `count: 3`, `v4` |
+| A | 5 | 1468 | 1467 | 1476 | 1359 | 828 | 882 | 17252 | 376.1 | `count: 3`, `v5`, `card-sentinel: v0` |
+| B | before | | | | | | | 9484 | 366.5 | `count: 3`, `hotpatch-sentinel: v0`, `card-sentinel: v0` |
+| B | 1 | 5512 | 5511 | 5522 | 5402 | 4856 | 4921 | 9484 | 372.8 | `count: 3`, `card-sentinel: v1` |
+| B | 2 | 1587 | 1586 | 1615 | 1479 | 945 | 992 | 9484 | 373.5 | `count: 3`, `card-sentinel: v2` |
+| B | 3 | 1472 | 1471 | 1497 | 1359 | 829 | 889 | 9484 | 374.1 | `count: 3`, `card-sentinel: v3` |
+| B | 4 | 1428 | 1428 | 1458 | 1320 | 793 | 840 | 9484 | 374.6 | `count: 3`, `card-sentinel: v4` |
+| B | 5 | 1418 | 1418 | 1427 | 1310 | 799 | 847 | 9484 | 375.8 | `count: 3`, `card-sentinel: v5`, `hotpatch-sentinel: v0` |
+
+Every `patch-N.dll` of every row is 1,277,440 bytes, the same as in H3-03.
+
+#### Latency breakdown (why ~1.45 s)
+
+Host-side mtimes from `host:` (rig clock) and the probe lines. Steady state is runs 2..n of A, B
+and G (17 patches); run 1 is the first patch of A, B and G.
+
+| Phase | steady (ms) | run 1 (ms) | H3-03 steady (ms) |
+|---|---|---|---|
+| save -> `stub-N.o` written (debounce, thin compile, stub) | 793-967 | 4627-4856 | 5239-5754 |
+| `stub-N.o` -> `patch-N.dll` linked (rust-lld, then the PDB L3 gate) | 44-60 | 65-141 | 126-158 |
+| `patch-N.dll` -> applied (1.28 MB as base64 `patch_chunk`s over loopback, the app's copy, `LoadLibrary`, table install) | 566-615 | 583-590 | 579-644 |
+| applied -> frame | 0-1 | 0-1 | 1-2 |
+
+- **The thin compile.** save -> `stub-N.o` fell from 5.2-5.8 s to 0.8-1.0 s. That is H3-05's
+  ~4.4 s (no `link.exe` cdylib link, no staticlib archive), as H3-03's breakdown predicted. A came
+  in at 1468 ms, against the ~1.8 s H3-03 computed.
+- **Transport.** It is now the largest single phase, ~0.57-0.62 s of ~1.45 s. `patch_file` hand-off
+  is unix-only, so Windows still uploads base64 `patch_chunk`s over loopback.
+- **The first patch.** Each hot run's first patch costs ~3.8-4.0 s more than the steady patches,
+  all of it in save -> `stub-1.o`. H3-05's smoke saw the same (5030 ms, then 1398 and 1248 ms).
+  This gate did not time the processes inside that phase, so the extra is not attributed. It does
+  not move a median of 5.
+
+#### G: ten patches, RSS and the budget counters
+
+**Default budget**, no override. PID 14716 took all 10 patches. Count 3 was kept, and `v10` was in
+the window after run 10. No crash, no trend after patch 1.
+
+| After | save->frame, G (ms) | `patched in`, G | `patches_applied` (app, G-debug) | `patch_bytes_loaded` (app, G-debug) | `patch-N.dll` in the session dir, G (count / bytes) | working set, G (MB) | working set, G-debug (MB) |
+|---|---|---|---|---|---|---|---|
+| presses, before patch 1 | | | 0 | 0 | 0 / 0 | 366.9 | 294.8 |
+| patch 1 | 5522 | 5410 | 1 | 1,277,440 | 1 / 1,277,440 | 371.6 | 372.8 |
+| patch 2 | 1564 | 1453 | 2 | 2,554,880 | 2 / 2,554,880 | 372.9 | 373.1 |
+| patch 3 | 1527 | 1407 | 3 | 3,832,320 | 3 / 3,832,320 | 373.9 | 374.0 |
+| patch 4 | 1482 | 1358 | 4 | 5,109,760 | 4 / 5,109,760 | 375.3 | 374.2 |
+| patch 5 | 1446 | 1337 | 5 | 6,387,200 | 5 / 6,387,200 | 376.3 | 375.0 |
+| patch 6 | 1426 | 1316 | 6 | 7,664,640 | 6 / 7,664,640 | 377.2 | 375.2 |
+| patch 7 | 1451 | 1340 | 7 | 8,942,080 | 7 / 8,942,080 | 377.6 | 375.8 |
+| patch 8 | 1450 | 1343 | 8 | 10,219,520 | 8 / 10,219,520 | 378.2 | 376.4 |
+| patch 9 | 1495 | 1387 | 9 | 11,496,960 | 9 / 11,496,960 | 378.9 | 373.9 |
+| patch 10 | 1459 | 1346 | 10 | 12,774,400 | 10 / 12,774,400 | 374.1 | 367.2 |
+
+- save->frame median 1470 ms (runs 2-10: 1459). G-debug: 5588 / 1555 / 1445 / 1486 / 1455 / 1439 /
+  1488 / 1473 / 1501 / 1510 ms (median 1487).
+- **The counters' source** is H3-03's: the app's own `frust-devtools: applying patch <k> (1277440
+  bytes, 3 expected seams)` lines of G-debug, k = 1..10, summed. The session dir's count and bytes
+  are G's own.
+- **Working set.** +4.7 MB at the first patch, then within 371.6-378.9 MB. Windows trims it
+  (patch 10: 374.1). G-debug's working set before its first patch read 294.8 MB, then 372.8 at
+  patch 1. That is one `Get-Process` sample, not investigated.
+- **Base addresses.** Patches past the 14th (the 4 GiB line of the fixed bases) were not
+  exercised.
+
+#### Comparison
+
+| | Milestone 1, desktop (R3-04) | Stage 2, Android (H2-07) | Stage 4, iOS simulator | Stage 3, Windows (H3-03) | **Stage 3, Windows re-run (this)** |
+|---|---|---|---|---|---|
+| Restart median (shape) | 5218 ms (F, `--no-hot`, n=10) | 13458 ms (D2 relaunch, `Displayed`, n=5) | 4395 ms | 7703 ms (F, `--no-hot`, n=5) | **10861 ms** (F, `--no-hot`, n=5) |
+| Bar (50%) | 2609 ms | 6729 ms | 2198 ms | 3851 ms | **5430 ms** |
+| Row A save->frame | 1397 ms | 2883 ms | 1694 ms | 6263 ms | **1468 ms** |
+| A / restart | 26.8% | 21.4% | 38.5% | 81.3% | **13.5%** (19.1% of H3-03's restart) |
+| Row B save->frame | | | | 6169 ms (80.1%) | **1472 ms (13.6%)** |
+| Patch image | 3,060,304 bytes (`.dylib`) | 2,237,184 bytes (upload copy) | (see Stage 4) | 1,277,440 bytes (`.dll`) | 1,277,440 bytes (`.dll`) |
+| Verdict | PASS | PASS | PASS | FAIL | **PASS** |
+
+The Windows ratio is the lowest of the four hosts. Part of that is its slow restart: only
+Android's relaunch is slower in this table. In absolute terms, A (1468 ms) is close to the
+desktop's 1397 ms.
+
+#### Rig notes and known limits (recorded, not fixed)
+
+- **Patch copies still accumulate** (H3-03's finding). `%LOCALAPPDATA%\frust-hotpatch` holds 78
+  files, 99,393,024 bytes after this gate, 30 of them from this gate's patches. Every patch still
+  logs `could not remove ...: Access is denied. (os error 5)`.
+- **Rendering backend.** G-debug's debug log shows wgpu sorting the UHD 730's Vulkan adapter ahead
+  of its DX12 one and choosing Vulkan for this debug app. H3-03's *Environment* calls it the DX12
+  adapter. Hot patching does not depend on the backend. Recorded for accuracy, not investigated.
+- **Components rebuilt.** A, B and G report 1 component rebuilt in every run. G-debug reports 2 in
+  runs 1, 3 and 6, with the same outcome (as H3-03 saw).
+- **Rig left clean.** No `frust`, `hotapp`, `cargo` or `rustc` process is left, and no `h3gate*`
+  scheduled task. The scratch root (`C:\Dev\h3-gate`, the prepared app, watch logs, `ui-*.txt`)
+  stays, as after H3-03.
+- H3-03's other limits stand unchanged: the token is unreadable from outside the CLI, the PDB gate
+  is blind to align-only edits, the pre-existing Windows-host `hotpatch::` test failures, fixed
+  bases without ASLR, frame-gate ordering, and a dead app noticed only at the next save.
+
+What remains unproven on Windows:
+
+- ARM64 Windows (refused by design).
+- Smart App Control in Enforce mode (Off here).
+- A live pixel capture of a patched frame (the rig's user session is disconnected and locked).
+- Patches past the 14th (the 4 GiB line of the fixed bases).
+- The TUI Watch leg, and rows C, D, D3, D5 and E (not required by H3-03 or by this card).
+- The first patch's extra ~3.8 s (not attributed).
+
+#### measure.sh
+
+Unchanged. Its `--windows` leg ran all five rows as written.
