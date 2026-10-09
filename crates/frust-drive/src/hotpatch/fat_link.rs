@@ -90,12 +90,16 @@ pub const HIGH_ENTROPY_VA_OFF: &str = "/HIGHENTROPYVA:NO";
 pub const DYNAMIC_BASE_OFF: &str = "/DYNAMICBASE:NO";
 
 /// The Msvc fat exe's fixed image base (256 MiB): above the low region
-/// Windows reserves, and leaving the image (hundreds of MB for a large app)
-/// almost 4 GiB of room below the 32-bit limit.
+/// Windows reserves. The fat exe owns the 256 MiB from here to
+/// [`PATCH_IMAGE_BASE_FIRST`]: `FAT_IMAGE_BASE + SizeOfImage` must stay
+/// below that, which [`fat_link`] checks on the linked exe
+/// ([`check_fat_image_fits`]; a stock app's is ~36 MB).
 pub const FAT_IMAGE_BASE: u64 = 0x1000_0000;
 
 /// The fixed image base of Msvc patch 1 (512 MiB): [`FAT_IMAGE_BASE`]
-/// plus 256 MiB, which no fat exe reaches (a stock app's is ~36 MB).
+/// plus the fat exe's 256 MiB window. [`fat_link`] refuses a fat exe whose
+/// `FAT_IMAGE_BASE + SizeOfImage` passes it ([`check_fat_image_fits`]).
+/// Each patch from here owns [`PATCH_IMAGE_STRIDE`] (256 MiB).
 pub const PATCH_IMAGE_BASE_FIRST: u64 = 0x2000_0000;
 
 /// The distance between consecutive Msvc patch bases (256 MiB): each patch
@@ -654,9 +658,11 @@ pub struct FatLinkOutput {
 /// Packs the archive, runs the fat link through `runner`, and checks that
 /// the image defines [`ANCHOR_SYMBOL`]. A failed link or a missing anchor
 /// is [`HotpatchError::BuilderUnsupported`] (the session restarts instead);
-/// on Msvc, a failure naming the archive says the archive was rejected. The
-/// linker's [`linker_driver_args`] lead the line. A linker that cannot be
-/// spawned is [`HotpatchError::Process`].
+/// on Msvc, a failure naming the archive says the archive was rejected, and
+/// an exe too large for its fixed-base window ([`check_fat_image_fits`]) is
+/// refused before its anchor is read. The linker's [`linker_driver_args`]
+/// lead the line. A linker that cannot be spawned is
+/// [`HotpatchError::Process`].
 pub fn fat_link(
     runner: &dyn ProcessRunner,
     request: &FatLinkRequest<'_>,
@@ -692,6 +698,15 @@ pub fn fat_link(
             }
             (_, _, err) => err,
         })?;
+    if request.flavor == LinkerFlavor::Msvc {
+        let bytes = fs::read(request.exe).map_err(|err| {
+            HotpatchError::io(
+                format!("reading linked image `{}`", request.exe.display()),
+                err,
+            )
+        })?;
+        check_fat_image_fits(&bytes, &format!("fat exe `{}`", request.exe.display()))?;
+    }
     let anchor_address = anchor_address(request.flavor, request.exe)?;
     Ok(FatLinkOutput {
         exe: request.exe.to_path_buf(),
@@ -699,6 +714,26 @@ pub fn fat_link(
         anchor_address,
         linker_output,
     })
+}
+
+/// Checks that the Msvc fat exe `bytes` (`what` names it in errors) fits
+/// its fixed-base window: linked at [`FAT_IMAGE_BASE`], the image spans
+/// its PE32+ `SizeOfImage` ([`super::pe::size_of_image`]), so
+/// `FAT_IMAGE_BASE + SizeOfImage` (the image's exclusive end) must stay
+/// below [`PATCH_IMAGE_BASE_FIRST`], where patch 1 loads: at most 256 MiB.
+/// An image past it, or one whose headers do not read, is
+/// [`HotpatchError::BuilderUnsupported`].
+pub fn check_fat_image_fits(bytes: &[u8], what: &str) -> Result<(), HotpatchError> {
+    let size = super::pe::size_of_image(bytes, what)?;
+    let end = FAT_IMAGE_BASE + u64::from(size);
+    if end <= PATCH_IMAGE_BASE_FIRST {
+        return Ok(());
+    }
+    Err(HotpatchError::unsupported(format!(
+        "{what} is too large for its fixed base: FAT_IMAGE_BASE + SizeOfImage must stay below \
+         PATCH_IMAGE_BASE_FIRST ({FAT_IMAGE_BASE:#x} + {size:#x} = {end:#x}, past \
+         {PATCH_IMAGE_BASE_FIRST:#x}, where patch 1 loads); the fat exe has 256 MiB"
+    )))
 }
 
 /// Whether a linker's failure `detail` names the archive at `archive` (by
@@ -1561,8 +1596,8 @@ mod tests {
             archive_dir: &fx.archive_dir,
             exe: &exe,
         };
-        // The stand-in image has no PDB, so reading its anchor is refused
-        // (off Windows: no PDB reader at all) after the link ran.
+        // The stand-in image is no PE32+ image, so the size check refuses
+        // it after the link ran.
         unsupported(fat_link(&runner, &request));
         let link = runner.only_call("link.exe");
         let archive = fs::read_dir(&fx.archive_dir)
@@ -1721,6 +1756,70 @@ mod tests {
             fixed_base_args(object),
             fixed_base_args_at(FAT_IMAGE_BASE, object)
         );
+    }
+
+    /// A PE32+ header of an image at [`FAT_IMAGE_BASE`] spanning `size`.
+    fn fat_exe_header(size: u32) -> Vec<u8> {
+        let mut image = vec![0u8; 0x200];
+        image[..2].copy_from_slice(b"MZ");
+        image[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        image[0x40..0x44].copy_from_slice(b"PE\0\0");
+        image[0x44..0x46].copy_from_slice(&pe::MACHINE_AMD64.to_le_bytes());
+        image[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
+        let optional = 0x58;
+        image[optional..optional + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+        image[optional + 24..optional + 32].copy_from_slice(&FAT_IMAGE_BASE.to_le_bytes());
+        image[optional + 56..optional + 60].copy_from_slice(&size.to_le_bytes());
+        image
+    }
+
+    #[test]
+    fn the_fat_exe_must_end_at_or_below_patch_one() {
+        let window = u32::try_from(PATCH_IMAGE_BASE_FIRST - FAT_IMAGE_BASE).unwrap();
+        assert_eq!(window, 256 << 20, "the fat exe owns 256 MiB");
+        for size in [0x1000, 36 << 20, window] {
+            check_fat_image_fits(&fat_exe_header(size), "fat exe `app.exe`")
+                .unwrap_or_else(|err| panic!("{size:#x}: {err}"));
+        }
+        for size in [window + 0x1000, u32::MAX] {
+            let detail = unsupported(check_fat_image_fits(
+                &fat_exe_header(size),
+                "fat exe `app.exe`",
+            ));
+            assert!(
+                detail.starts_with("fat exe `app.exe` is too large")
+                    && detail.contains(
+                        "FAT_IMAGE_BASE + SizeOfImage must stay below PATCH_IMAGE_BASE_FIRST"
+                    )
+                    && detail.contains(&format!("{size:#x}")),
+                "{detail}"
+            );
+        }
+        let detail = unsupported(check_fat_image_fits(b"MZ stand-in", "fat exe `app.exe`"));
+        assert!(detail.contains("not a usable PE image"), "{detail}");
+
+        // The Msvc fat link refuses such an exe once the linker wrote it.
+        let fx = fixture("msvc-too-large");
+        let link_args = msvc_link_args(&fx);
+        let exe = fx.target.join("debug").join("app.exe");
+        let runner = RecordingRunner::linking(fat_exe_header(window + 0x1000));
+        let detail = unsupported(fat_link(
+            &runner,
+            &FatLinkRequest {
+                flavor: LinkerFlavor::Msvc,
+                linker: "lld-link",
+                link_args: &link_args,
+                envs: &[],
+                target_dir: &fx.target,
+                archive_dir: &fx.archive_dir,
+                exe: &exe,
+            },
+        ));
+        assert!(
+            detail.contains("FAT_IMAGE_BASE + SizeOfImage must stay below PATCH_IMAGE_BASE_FIRST"),
+            "{detail}"
+        );
+        runner.only_call("lld-link");
     }
 
     #[test]
