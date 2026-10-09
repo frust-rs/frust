@@ -2066,3 +2066,144 @@ Android leg only:
   in the device log.
 - `host:` also names `patch-N.upload.so` (the stripped copy sent to the app) with its save
   offset, size and mode, beside `patch-N.so`.
+
+## Phase 2: iOS simulator load probe
+
+Card H4-01 (tsk_000001a1181b5c76gzfNweMx), the iOS counterpart of p2-02b's Android load probe
+above, and the gate for stage 4 (iOS simulator). Can a Frust app launched with
+`xcrun simctl launch` load a code library that arrives after install, from its own data
+container, unsigned or only ad-hoc signed? `ios-probe/probe.sh` scaffolds a throwaway
+`frust create --platforms ios` app (in a mktemp dir, never committed), overlays
+`ios-probe/app_lib.rs`, builds it with the `xcodebuild` invocation `frust run` uses, installs it
+with `simctl install`, builds `ios-probe/patch/` (exports `frust_probe_value() -> u32 { 42 }`) for
+`aarch64-apple-ios-sim` and copies four variants of it into the app's data container. It then
+launches the app once per strategy, so every load runs in a fresh process, and reads the
+`--console-pty` stream. See `ios-probe/README.md`.
+
+**This probe tests loading only.** As on Android, the library is self-contained: no jump table is
+installed and nothing in it is relocated against the running app. Physical iOS devices are not
+covered at all.
+
+### Verdict: GO for stage 4
+
+A dylib delivered into the app's data container after install loads and returns 42 when it
+carries an ad-hoc signature, either the one the linker writes (`linker-signed`) or one applied
+with `codesign -s -` (`adhoc-signed`). A dylib with no signature at all is refused by dyld. No
+signing identity, team id or provisioning is needed on the simulator. Stage 4 stays open:
+H4-02 onward can be dispatched, and the NO-GO routing to D-04 does not apply.
+
+### Run
+
+`probe.sh --log-dir <scratch>` (no `--keep`: the app was uninstalled and the temp dir removed at
+the end), base `main` @ 3414525d plus this card's files, 2026-10-09. Two earlier runs gave the
+same three-strategy results before `linker-signed` was added.
+
+| | |
+|---|---|
+| Simulator | iPhone 18 Pro, udid `<udid>`, runtime iOS 27.0 (24A434), booted before the run and left booted |
+| Host | macOS 27.0.1, arm64 (Apple Silicon); Xcode 27.0 (27A266a), no Simulator.app (`xcrun simctl` only) |
+| App | `dev.frust.probe.probeapp`, `Debug-iphonesimulator`, `ARCHS=arm64`, Xcode signing off (`CODE_SIGNING_ALLOWED = NO` in the template); `Runner.app/Runner` carries only the linker's ad-hoc signature (`flags=0x20002(adhoc,linker-signed)`) |
+| Patch | `cargo build --release --target aarch64-apple-ios-sim`, rustc 1.98.1; `LC_BUILD_VERSION` platform `IOSSIMULATOR`, minos 14.0 |
+| Container | `xcrun simctl get_app_container <udid> dev.frust.probe.probeapp data`, run right after `simctl install` and before any launch, printed `~/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/<container-uuid>`. The container already existed, so the probe's fallback (one launch first) was not needed. Files went to its `Library/Application Support/`, which is `frust_paths::data_dir()` (`$HOME/Library/Application Support`) inside the app |
+| Delivery | plain host `cp` into that directory: the simulator's data container is an ordinary host directory owned by the user |
+
+The four files, as `codesign -dv` and `file` describe them:
+
+| Strategy | File | Signature |
+|---|---|---|
+| `plain-dlopen` | `libfrust_probe_unsigned.dylib` (16464 bytes) | none: `codesign --remove-signature` ("code object is not signed at all") |
+| `linker-signed` | `libfrust_probe_linker.dylib` (16768 bytes) | the cargo output unchanged: `flags=0x20002(adhoc,linker-signed)` |
+| `adhoc-signed` | `libfrust_probe_adhoc.dylib` (16816 bytes) | `codesign -f -s -`: `flags=0x2(adhoc)`, `TeamIdentifier=not set` |
+| `negative-control` | `libfrust_probe_control.dylib` (11 bytes) | ASCII text `not a dylib` |
+
+Every strategy goes through `frust_hotpatch::load_patch_library`, which off Android is plain
+`dlopen` via `libloading::Library::new`.
+
+| Strategy | Outcome | `vmmap -w <pid>` |
+|---|---|---|
+| `plain-dlopen` (unsigned) | **refused by dyld**: "Trying to load an unsigned library" | no `libfrust_probe` image |
+| `linker-signed` | **loaded, returned 42** | `__TEXT` `r-x/rwx` and `__LINKEDIT` mapped from `.../Application Support/libfrust_probe_linker.dylib` |
+| `adhoc-signed` | **loaded, returned 42** | `__TEXT` `r-x/rwx` and `__LINKEDIT` mapped from `.../Application Support/libfrust_probe_adhoc.dylib` |
+| `negative-control` | **refused, error visible**: "slice is not valid mach-o file" | no `libfrust_probe` image |
+
+### Verbatim lines
+
+All `frust-probe:` lines came through `xcrun simctl launch --console-pty`. They are the iOS
+shell's stderr logger (`[frust INFO]` prefix). The Swift side's `NSLog` lines arrive on the same
+stream. `log stream` was not needed. One launch per strategy:
+
+```
+[frust INFO] frust-probe: strategy=plain-dlopen error=Failed to load library: dlopen(/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_unsigned.dylib, 0x0005): tried: '/Library/Developer/CoreSimulator/Volumes/iOS_24A434/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_unsigned.dylib' (no such file), '/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_unsigned.dylib' (code signature in <A308B4B9-BDD9-395D-BF08-66BF7FA57B5C> '/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_unsigned.dylib' not valid for use in process: Trying to load an unsigned library)
+[frust INFO] frust-probe: strategy=linker-signed result=42
+[frust INFO] frust-probe: strategy=adhoc-signed result=42
+[frust INFO] frust-probe: strategy=negative-control error=Failed to load library: dlopen(/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_control.dylib, 0x0005): tried: '/Library/Developer/CoreSimulator/Volumes/iOS_24A434/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_control.dylib' (no such file), '/Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_control.dylib' (slice is not valid mach-o file)
+```
+
+dyld first tries the path under the simulator runtime root (`RuntimeRoot/...`, "no such file") and
+then the host path, which is the one that loads.
+
+`vmmap -w` on the live `linker-signed` process (pid 72003), the image lines:
+
+```
+__TEXT                     1051f8000-1051fc000   [   16K    16K     0K     0K] r-x/rwx SM=COW          /Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_linker.dylib
+__LINKEDIT                 1051fc000-105200000   [   16K    16K     0K     0K] r--/rwx SM=COW          /Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_linker.dylib
+```
+
+The `adhoc-signed` process (pid 72083) shows the same two lines for `libfrust_probe_adhoc.dylib`
+at `1027c8000`. The `plain-dlopen` and `negative-control` processes map no `libfrust_probe` image.
+
+**Negative control.** The 11-byte text file produced dyld's own error ("slice is not valid mach-o
+file") in the log, so a failed load is visible, and it is a different error from the unsigned
+dylib's. Then the four files were removed and the app was launched once more with no strategy
+filter. All four strategies logged
+`error=patch file missing: <container>/Library/Application Support/libfrust_probe_<variant>.dylib`.
+
+**Host unified log.** `log show --predicate 'eventMessage CONTAINS "libfrust_probe"'` over the
+run has one line, from `amfid`, about the `codesign -s -` file only, and that file loaded anyway:
+
+```
+2026-10-09 18:16:57.964 Df amfid[67827:8832d1] /Users/ed/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/715B9AB7-ABEE-41F1-9FFC-1600EEFDF3C1/Library/Application Support/libfrust_probe_adhoc.dylib not valid: Error Domain=AppleMobileFileIntegrityError Code=-423 "The file is adhoc signed or signed by an unknown certificate chain" UserInfo={...}
+```
+
+Nothing was logged for the linker-signed file.
+
+### Interpretation
+
+- **Signature: required, but ad hoc is enough.** The simulator process enforces that a
+  dynamically loaded image is code-signed, and rejects an unsigned one before mapping it. It does
+  not require a trusted identity: the linker's own signature passes. `ld` on arm64 writes that
+  signature by default, so a thin patch linked the normal way loads without a `codesign` step.
+  dx signs nothing either (`apple.rs:282-365`). A builder that rewrites a patch after linking it
+  (strip, `install_name_tool`, any byte edit) invalidates the signature and must run
+  `codesign -f -s -` afterwards. That was verified to load.
+- **Delivery: write into the data container from the host.** `xcrun simctl get_app_container
+  <udid> <bundle-id> data` resolves the container right after install. It has the shape
+  `~/Library/Developer/CoreSimulator/Devices/<udid>/data/Containers/Data/Application/<uuid>`, and
+  the app sees it as `$HOME`. A host-side copy into `Library/Application Support/` (or any
+  directory under it) is enough. Unlike Android, no `run-as` or push step is needed. The `<uuid>`
+  changes on every install, so H4-02 must resolve it per install and not cache it.
+- **Load path: plain `dlopen` (`frust_hotpatch::load_patch_library`) works as is.** The library
+  must be addressed by its host path. Inside the simulator process, dyld also tries a
+  `RuntimeRoot`-prefixed path first and falls back to the host path.
+
+**Fact for H4-02 (not a probe strategy).** In this Debug simulator build, the app's code is not in
+the executable. `vmmap` shows `Runner.app/Runner` as a 16 KB `__TEXT` stub next to
+`Runner.app/Runner.debug.dylib` with 22.5 MB of `__TEXT`. Judged by size, that dylib holds the
+Rust staticlib and the Swift code; its symbols were not listed. The split is most likely Xcode's
+debug-dylib split (`ENABLE_DEBUG_DYLIB`, on by default for Debug). A symbol cache "from the
+built executable" has to read `Runner.debug.dylib`, or the build has to turn the split off.
+
+### Not covered
+
+- **Relocation against the base image.** The probe library is self-contained. Whether a thin patch
+  linked against `Runner.debug.dylib`'s addresses resolves and runs is H4-02's question.
+- **Physical iOS devices.** Not tried. On a device, an image needs a trusted signature to be
+  mapped executable (PORT.md 5), so devices stay restart-only.
+- **Other runtimes.** Only iOS 27.0 was run. The iOS 18.6 and 26.2 runtimes are installed on this
+  host but were not booted. Only arm64 was run: no x86_64 simulator (Intel host or Rosetta).
+- **Library validation off a Debug build.** Only the template's Debug configuration, unsigned by
+  Xcode, was run. An app signed with a team identity and the hardened runtime might enforce
+  library validation. Hot patching is debug-only, so that combination does not arise for it.
+- **Leftovers outside the temp dir.** `xcodebuild` leaves SwiftPM lock files and a
+  `TemporaryDirectory.*` dir in `$TMPDIR`, outside the probe's `mktemp` dir. The probe does not
+  remove them.

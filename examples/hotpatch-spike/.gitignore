@@ -1,3 +1,5 @@
 /target
 /android-probe/patch/target
 /android-probe/patch/Cargo.lock
+/ios-probe/patch/target
+/ios-probe/patch/Cargo.lock
