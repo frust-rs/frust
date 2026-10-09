@@ -5,7 +5,9 @@
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -13,13 +15,15 @@ use anyhow::{Context, Result, bail};
 use notify::{RecursiveMode, Watcher};
 
 use crate::cli::BuildFlags;
-use frust_drive::android_run::{self, DeviceSelection};
+use frust_drive::android_run::{self, AndroidLaunch, DeviceSelection, StoppedShort, force_stop};
 use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::desktop_run::{self, DesktopPlan};
 use frust_drive::devices::{self, Device, Kind, Platform};
+use frust_drive::devtools_client::adb_forward_remove;
+use frust_drive::hotpatch::android::{AndroidHotStart, AndroidStart, start_android};
 use frust_drive::hotpatch::graph::WorkspaceGraph;
 use frust_drive::hotpatch::session::{
-    DesktopStart, HotSession, Outcome, SessionHost, StartError, start_desktop,
+    DesktopStart, HotSession, Outcome, RestartReason, SessionHost, StartError, start_desktop,
 };
 use frust_drive::ios_run;
 use frust_drive::manifest;
@@ -69,15 +73,16 @@ fn run_in_with_hooks(
     no_open: bool,
     hooks: RunHooks,
 ) -> Result<u8> {
-    // `--watch` is desktop-preview only — its
-    // kill/rebuild/relaunch loop only knows how to drive a local `cargo
-    // run` child, not an installed device app. Reject the combination up
-    // front rather than silently ignoring `--watch` or `-d`.
-    if watch && device_id.is_some() {
-        bail!(
-            "--watch is desktop-preview only and cannot be combined with -d/--device-id; \
-             drop -d to run the desktop preview, or drop --watch to run on a device"
-        );
+    // `--watch -d web` has no watch loop at all (the browser lane serves
+    // files; nothing relaunches it), so it is refused up front, before
+    // anything runs. Every other `-d` is refused after discovery unless it
+    // names an Android device (`run_watch_on_device`).
+    if watch
+        && device_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("web"))
+    {
+        bail!(WATCH_DEVICE_REJECTION);
     }
 
     // The `--features` passthrough is resolved before the funnel and travels
@@ -88,14 +93,23 @@ fn run_in_with_hooks(
     let info = BuildInfo::from_args(build_args.build.into_drive(), BuildMode::Debug)
         .map_err(|err| anyhow::anyhow!(err))?;
 
-    // `--watch` always means the desktop preview (the bail above already
-    // rejected the genuine `-d` + `--watch` contradiction) — short-circuit
-    // here, before device discovery runs, so an attached-but-unselected
-    // device (e.g. a charging phone) never makes `--watch`'s target
-    // non-deterministic. Reaches the exact call the `Desktop` arm below
-    // would make anyway, just one step earlier.
+    // `--watch` without `-d` always means the desktop preview —
+    // short-circuit here, before device discovery runs, so an
+    // attached-but-unselected device (e.g. a charging phone) never makes
+    // `--watch`'s target non-deterministic. Reaches the exact call the
+    // `Desktop` arm below would make anyway, just one step earlier. With an
+    // explicit `-d`, the device is resolved and only an Android one is
+    // watched (hot in a debug build, the device relaunch loop otherwise).
     if watch {
-        return run_desktop_fallback(runner, &info, &extra_features, watch, no_hot, hooks.watch);
+        return match device_id.as_deref() {
+            None => {
+                run_desktop_fallback(runner, &info, &extra_features, watch, no_hot, hooks.watch)
+            }
+            Some(id) => {
+                let device = resolve_watch_device(runner, id, verbose)?;
+                run_watch_on_device(runner, &device, &info, &extra_features, no_hot, hooks.watch)
+            }
+        };
     }
 
     // `-d web` is a reserved device id, not a discovered one: `frust-drive`'s
@@ -156,6 +170,70 @@ fn run_on_device(
             unreachable!("iOS devices are never discovered as Kind::Emulator")
         }
     }
+}
+
+/// The refusal for `--watch` with a `-d` that is not an Android device (an
+/// iOS simulator or device, or `-d web`): their pipelines have no watch
+/// loop.
+const WATCH_DEVICE_REJECTION: &str = "--watch runs the desktop preview or an Android device in a \
+     debug build; web, iOS and other devices are not watched; drop -d to run the desktop \
+     preview, or drop --watch to run on a device";
+
+/// The one device `--watch -d <id>` names, through the same discovery and
+/// `-d` matching a plain `frust run -d` uses.
+fn resolve_watch_device(runner: &dyn ProcessRunner, id: &str, verbose: bool) -> Result<Device> {
+    let discoverers = devices::default_discoverers();
+    let (found, notes) = devices::discover_all(runner, &discoverers);
+    if verbose {
+        for note in &notes {
+            println!("[note] {note}");
+        }
+    }
+    match android_run::select_device(&found, Some(id)) {
+        DeviceSelection::Auto(device) => Ok(device),
+        DeviceSelection::Error(message) => bail!(message),
+        // `select_device` answers a `-d` pattern with one device or an
+        // error; these two arms are for the no-`-d` case.
+        DeviceSelection::Desktop | DeviceSelection::Ambiguous(_) => {
+            bail!("no single device matches `{id}`")
+        }
+    }
+}
+
+/// `frust run --watch -d <device>`: an Android device is watched — a hot
+/// session in a debug build ([`run_android_watch`]), the device relaunch
+/// loop under `--no-hot` — and every other platform is refused with
+/// [`WATCH_DEVICE_REJECTION`] before anything runs. Only a debug build
+/// without `--features` is accepted: the device session seams build what
+/// the mode selects and nothing else, and hot patching needs a debug build.
+fn run_watch_on_device(
+    runner: &dyn ProcessRunner,
+    device: &Device,
+    info: &BuildInfo,
+    extra_features: &[String],
+    no_hot: bool,
+    hooks: WatchHooks,
+) -> Result<u8> {
+    if device.platform != Platform::Android {
+        bail!(WATCH_DEVICE_REJECTION);
+    }
+    if info.mode != BuildMode::Debug {
+        bail!(
+            "--watch on an Android device needs a debug build, not {:?}; drop --profile/--release, \
+             or drop --watch to run the build once",
+            info.mode
+        );
+    }
+    if !extra_features.is_empty() {
+        bail!(
+            "--watch on an Android device does not support --features yet (requested: {}); \
+             the device session seam (`android_run::spawn_session`) carries no parameter for it",
+            extra_features.join(", ")
+        );
+    }
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    refresh_platform_wiring(runner, &cwd, &mut |line| println!("{line}"));
+    run_android_watch(&cwd, device, info, no_hot, hooks)
 }
 
 /// Points `project_dir`'s `android/gradle.properties` and `ios/FrustEmbedding`
@@ -272,21 +350,22 @@ fn env_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// Injectable seams for [`run_desktop_watch`]'s two process-wide side
+/// Injectable seams for the watch loops' two process-wide side
 /// effects — installing a Ctrl-C handler and starting a filesystem watcher —
 /// each of which is a process-global, install-once resource: `ctrlc::set_handler`
 /// outright errors on a second call anywhere in the same process, and a real
 /// [`notify`] watcher touches the actual filesystem under the caller's cwd.
-/// Production always uses [`WatchHooks::real`] (installed exactly once, by
-/// `run_desktop_watch`, per `frust run --watch` process); a test injects a
+/// Production always uses [`WatchHooks::real`] (installed exactly once per
+/// `frust run --watch` process); a test injects a
 /// no-op pair instead of ever reaching either real side effect — see
 /// `run_in_with_hooks`.
-type InstallCtrlcHook = Box<dyn FnOnce(Arc<Mutex<Option<StreamHandle>>>) -> Result<()>>;
+type InstallCtrlcHook = Box<dyn FnOnce(AppSlot) -> Result<()>>;
 type SpawnWatcherHook = Box<dyn FnOnce(&Path, mpsc::Sender<()>) -> Result<Box<dyn std::any::Any>>>;
+type DeviceRelauncherHook = Box<dyn FnOnce(&Path, &BuildInfo, &Device) -> Box<dyn Relauncher>>;
 
 struct WatchHooks {
-    /// Installs the Ctrl-C handler that group-kills the shared `current`
-    /// slot's live child before exiting.
+    /// Installs the Ctrl-C handler over the shared slot ([`on_ctrlc`]):
+    /// it stops the live app and exits, or cancels a start in flight.
     install_ctrlc: InstallCtrlcHook,
     /// Starts a filesystem watcher over `root`, forwarding a `()` tick into
     /// the given sender for every raw change. The returned box is a
@@ -295,13 +374,17 @@ struct WatchHooks {
     /// stops it).
     spawn_watcher: SpawnWatcherHook,
     /// The hot-session seams; `None` keeps the plain relaunch loop (a test
-    /// that drives the cold loop, or a build that cannot be hot).
+    /// that drives the relaunch loop, or a build that cannot be hot).
     hot: Option<HotHooks>,
+    /// Builds an Android device's relaunch target ([`DeviceRelauncher`] in
+    /// production): what `--watch -d <android> --no-hot` relaunches, and
+    /// what a hot session that cannot patch falls back to.
+    device_relauncher: DeviceRelauncherHook,
 }
 
 impl WatchHooks {
-    /// The production defaults: a real [`install_real_ctrlc_handler`] and a
-    /// real [`spawn_fs_watcher`].
+    /// The production defaults: a real [`install_real_ctrlc_handler`], a
+    /// real [`spawn_fs_watcher`] and the real device pipeline.
     fn real() -> Self {
         Self {
             install_ctrlc: Box::new(install_real_ctrlc_handler),
@@ -309,20 +392,51 @@ impl WatchHooks {
                 spawn_fs_watcher(root, tx).map(|w| Box::new(w) as Box<dyn std::any::Any>)
             }),
             hot: Some(HotHooks::real()),
+            device_relauncher: Box::new(|root, info, device| {
+                Box::new(DeviceRelauncher {
+                    runner: Arc::new(RealProcessRunner),
+                    root: root.to_path_buf(),
+                    device: device.clone(),
+                    info: info.clone(),
+                }) as Box<dyn Relauncher>
+            }),
         }
     }
 
     /// A no-op pair for tests: skips the real Ctrl-C install and hands back
     /// an inert keep-alive handle instead of starting a real filesystem
     /// watcher — reaching `run_desktop_watch` in a test must never touch
-    /// either real process-global side effect.
+    /// either real process-global side effect. The device relauncher fails
+    /// every launch instead of running a device pipeline.
     #[cfg(test)]
     fn fake() -> Self {
         Self {
             install_ctrlc: Box::new(|_current| Ok(())),
             spawn_watcher: Box::new(|_root, _tx| Ok(Box::new(()) as Box<dyn std::any::Any>)),
             hot: None,
+            device_relauncher: Box::new(|_, _, _| {
+                Box::new(NoDevicePipeline) as Box<dyn Relauncher>
+            }),
         }
+    }
+}
+
+/// [`WatchHooks::fake`]'s device relauncher: every launch is an error.
+#[cfg(test)]
+struct NoDevicePipeline;
+
+#[cfg(test)]
+impl Relauncher for NoDevicePipeline {
+    fn label(&self) -> &str {
+        "the device app"
+    }
+
+    fn relaunch(
+        &mut self,
+        _current: &AppSlot,
+        _on_line: &mut dyn FnMut(&str),
+    ) -> Result<ControlFlow<()>> {
+        bail!("no device pipeline in this test")
     }
 }
 
@@ -403,29 +517,309 @@ fn wait_for_ctrlc() -> Result<()> {
     Ok(())
 }
 
-/// Installs the real, process-wide Ctrl-C handler that group-kills
-/// `current`'s live child before exiting `frust run --watch`.
+/// Installs the real, process-wide Ctrl-C handler over `current`
+/// ([`on_ctrlc`]): it stops the live app (group-kills a desktop child; kills
+/// the logcat stream, removes the `adb forward` and force-stops a device
+/// app) and exits `frust run --watch` — except during a cancellable start,
+/// which it cancels instead, leaving the exit to the loop.
 ///
 /// **Warning: one handler per process.** `ctrlc::set_handler` can only be
 /// installed once per process — a second call anywhere (e.g. a second
 /// `--watch` invocation reached in the same process) errors outright. This
-/// function is reached only through [`WatchHooks::real`], which
-/// [`run_desktop_watch`] calls exactly once per production `--watch`
-/// invocation; a test must go through [`WatchHooks::fake`] instead of ever
+/// function is reached only through [`WatchHooks::real`], whose hook the
+/// watch loop calls exactly once per production `--watch` invocation; a
+/// test must go through [`WatchHooks::fake`] instead of ever
 /// calling this directly (see
 /// `run_in_with_watch_skips_device_discovery_even_when_a_device_is_present`).
-fn install_real_ctrlc_handler(current: Arc<Mutex<Option<StreamHandle>>>) -> Result<()> {
+fn install_real_ctrlc_handler(current: AppSlot) -> Result<()> {
     ctrlc::set_handler(move || {
-        if let Some(mut handle) = current
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            handle.kill();
+        if on_ctrlc(&current) {
+            std::process::exit(0);
         }
-        std::process::exit(0);
+        println!("Stopping the launch in progress (Ctrl-C again to exit now)…");
     })
     .context("failed to install Ctrl-C handler")
+}
+
+/// A Ctrl-C's effect on `current`, the exit aside: raise the cancel flag
+/// and stop the live app. Answers whether to exit now: `false` only for the
+/// first Ctrl-C during a cancellable start ([`WatchSlot::begin_start`]),
+/// which then tears down what it launched and ends the loop itself; a
+/// second Ctrl-C exits at once. Decided under the slot's lock, so it cannot
+/// fall between a start parking its app and ending ([`StartInFlight::end`]).
+fn on_ctrlc(current: &WatchSlot) -> bool {
+    let mut slot = lock_slot(current);
+    let repeated = current.cancel.swap(true, Ordering::SeqCst);
+    if let Some(app) = slot.take() {
+        app.stop();
+    }
+    repeated || !current.starting.load(Ordering::SeqCst)
+}
+
+/// The live app a watch loop owns: the stream its output arrives on, plus —
+/// for a device app — what stopping it means beyond killing that stream.
+struct RunningApp {
+    handle: StreamHandle,
+    /// Run once, after the stream is killed or has ended: `adb forward
+    /// --remove` for a hot session's devtools port and `am force-stop` for
+    /// the app. `None` for a desktop child, which killing already stops.
+    teardown: Option<Teardown>,
+}
+
+/// A device app's teardown (see [`RunningApp::teardown`]).
+type Teardown = Box<dyn FnOnce() + Send>;
+
+/// What a watch loop shares with its Ctrl-C handler ([`on_ctrlc`]): the
+/// live app, and the cancel flag a start in flight observes.
+#[derive(Default)]
+struct WatchSlot {
+    app: Mutex<Option<RunningApp>>,
+    /// Raised by Ctrl-C, never lowered. A cancellable start (the device
+    /// pipeline, the Android hot start) observes it, tears down what it
+    /// launched and returns; the loop then ends.
+    cancel: AtomicBool,
+    /// Whether a cancellable start is in flight. Written and read only
+    /// under `app`'s lock.
+    starting: AtomicBool,
+}
+
+/// The slot a watch loop shares with its Ctrl-C handler.
+type AppSlot = Arc<WatchSlot>;
+
+impl WatchSlot {
+    /// Marks a cancellable start in flight: one that observes
+    /// [`Self::cancel`] and tears down what it launched. Until the returned
+    /// mark ends ([`StartInFlight::end`]), a first Ctrl-C cancels the start
+    /// instead of exiting; only a start that took the mark can end it.
+    fn begin_start(&self) -> StartInFlight<'_> {
+        let _slot = lock_slot(self);
+        self.starting.store(true, Ordering::SeqCst);
+        StartInFlight { slot: self }
+    }
+}
+
+/// A cancellable start in flight ([`WatchSlot::begin_start`]). Dropped
+/// without [`Self::end`] (an early return, a panic), it only clears the
+/// mark.
+#[must_use = "a cancellable start ends through `StartInFlight::end`"]
+struct StartInFlight<'a> {
+    slot: &'a WatchSlot,
+}
+
+impl StartInFlight<'_> {
+    /// Ends the start: parks the app it launched (if any) and answers
+    /// `Continue`, or — when a Ctrl-C landed meanwhile — answers `Break`
+    /// with that app, unparked, for the caller to stop once whatever links
+    /// to it is gone ([`launch_hot`] drops the session first).
+    fn end(self, app: Option<RunningApp>) -> ControlFlow<Option<RunningApp>> {
+        let mut slot = lock_slot(self.slot);
+        self.slot.starting.store(false, Ordering::SeqCst);
+        if self.slot.cancel.load(Ordering::SeqCst) {
+            return ControlFlow::Break(app);
+        }
+        if let Some(app) = app {
+            slot.replace(app);
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// [`Self::end`] for an app nothing else links to: on `Break` it is
+    /// stopped at once.
+    fn end_or_stop(self, app: Option<RunningApp>) -> ControlFlow<()> {
+        match self.end(app) {
+            ControlFlow::Continue(()) => ControlFlow::Continue(()),
+            ControlFlow::Break(app) => {
+                if let Some(app) = app {
+                    app.stop();
+                }
+                ControlFlow::Break(())
+            }
+        }
+    }
+}
+
+impl Drop for StartInFlight<'_> {
+    fn drop(&mut self) {
+        let _slot = lock_slot(self.slot);
+        self.slot.starting.store(false, Ordering::SeqCst);
+    }
+}
+
+impl RunningApp {
+    /// Kill the stream, then run the teardown.
+    fn stop(mut self) {
+        self.handle.kill();
+        self.finish();
+    }
+
+    /// Wait for the (already ended) stream's exit status, then run the
+    /// teardown.
+    fn wait(mut self) -> bool {
+        let success = self.handle.wait();
+        self.finish();
+        success
+    }
+
+    fn finish(&mut self) {
+        if let Some(teardown) = self.teardown.take() {
+            teardown();
+        }
+    }
+}
+
+impl From<StreamHandle> for RunningApp {
+    fn from(handle: StreamHandle) -> Self {
+        Self {
+            handle,
+            teardown: None,
+        }
+    }
+}
+
+/// An Android app launched for a watch loop: its logcat stream, torn down by
+/// removing `forward_port`'s `adb forward` (a hot session's devtools port,
+/// when one was allocated) and force-stopping the launched package. The
+/// serial is the resolved [`Device`]'s; nothing here derives it.
+fn device_app(
+    runner: Arc<dyn ProcessRunner + Send + Sync>,
+    serial: &str,
+    launch: AndroidLaunch,
+    forward_port: Option<u16>,
+) -> RunningApp {
+    let serial = serial.to_string();
+    let package = launch.package;
+    RunningApp {
+        handle: launch.stream,
+        teardown: Some(Box::new(move || {
+            // Best-effort, like the TUI supervisor's stop: a device that went
+            // away or an app that already exited is a normal end.
+            if let Some(port) = forward_port {
+                let _ = adb_forward_remove(&*runner, &serial, port);
+            }
+            force_stop(&*runner, &serial, &package);
+        })),
+    }
+}
+
+/// What a relaunch loop restarts on every change: `cargo run` on the
+/// desktop ([`DesktopRelauncher`]), the whole device pipeline on Android
+/// ([`DeviceRelauncher`]).
+trait Relauncher {
+    /// How the status lines name the app's stream (`` `cargo run` ``).
+    fn label(&self) -> &str;
+    /// Stop the app in `current` (if any) and launch a fresh one into it. An
+    /// error ends the loop; a launch the next change may fix (a device
+    /// pipeline failure) is reported through `on_line` and leaves the slot
+    /// empty. `Break` ends the loop too: a Ctrl-C cancelled the launch.
+    fn relaunch(
+        &mut self,
+        current: &AppSlot,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<ControlFlow<()>>;
+}
+
+/// The desktop preview: kill and respawn `cargo run` from `plan`.
+struct DesktopRelauncher<'a> {
+    runner: &'a dyn ProcessRunner,
+    plan: &'a DesktopPlan,
+    env: &'a [(String, String)],
+}
+
+impl Relauncher for DesktopRelauncher<'_> {
+    fn label(&self) -> &str {
+        "`cargo run`"
+    }
+
+    /// Kill and respawn under one hold of the slot's lock (the spawn is
+    /// instant), so a Ctrl-C can never land between the two and orphan the
+    /// new child.
+    fn relaunch(
+        &mut self,
+        current: &AppSlot,
+        _on_line: &mut dyn FnMut(&str),
+    ) -> Result<ControlFlow<()>> {
+        let mut slot = lock_slot(current);
+        if let Some(app) = slot.take() {
+            app.stop();
+        }
+        slot.replace(spawn_preview(self.runner, self.plan, self.env)?.into());
+        Ok(ControlFlow::Continue(()))
+    }
+}
+
+/// An Android device: stop the app, then rerun the non-hot device pipeline
+/// (`android_run::spawn_session`: Gradle build, install, launch, logcat).
+struct DeviceRelauncher {
+    runner: Arc<dyn ProcessRunner + Send + Sync>,
+    root: PathBuf,
+    device: Device,
+    info: BuildInfo,
+}
+
+impl Relauncher for DeviceRelauncher {
+    fn label(&self) -> &str {
+        "the app's log stream"
+    }
+
+    /// The pipeline runs for minutes, so the slot's lock is not held across
+    /// it. It is a cancellable start ([`WatchSlot::begin_start`]): a Ctrl-C
+    /// meanwhile cancels it at its next phase boundary, the app it launched
+    /// by then is stopped, and the loop ends.
+    fn relaunch(
+        &mut self,
+        current: &AppSlot,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<ControlFlow<()>> {
+        let previous = lock_slot(current).take();
+        if let Some(app) = previous {
+            app.stop();
+        }
+        let start = current.begin_start();
+        let launched = android_run::spawn_session_outcome(
+            &*self.runner,
+            &self.root,
+            &self.device,
+            &self.info,
+            on_line,
+            &current.cancel,
+        );
+        Ok(settle_device_launch(
+            Arc::clone(&self.runner),
+            &self.device.id,
+            launched,
+            start,
+            on_line,
+        ))
+    }
+}
+
+/// Ends [`DeviceRelauncher`]'s start over the pipeline's answer: a launched
+/// app is parked, or stopped when a Ctrl-C landed meanwhile. A run that
+/// ended without a stream is reported as a failure the next change may fix
+/// — unless a Ctrl-C landed, which ends the loop after force-stopping the
+/// package the run issued `am start` for ([`StoppedShort::stop_launched`]),
+/// whether it answered a cancel or a failure (the Ctrl-C's SIGINT also
+/// reaches an in-flight `adb shell am start`).
+fn settle_device_launch(
+    runner: Arc<dyn ProcessRunner + Send + Sync>,
+    serial: &str,
+    launched: Result<AndroidLaunch, StoppedShort>,
+    start: StartInFlight<'_>,
+    on_line: &mut dyn FnMut(&str),
+) -> ControlFlow<()> {
+    let stopped = match launched {
+        Ok(launch) => return start.end_or_stop(Some(device_app(runner, serial, launch, None))),
+        Err(stopped) => stopped,
+    };
+    if start.end(None).is_break() {
+        stopped.stop_launched(&*runner, serial);
+        return ControlFlow::Break(());
+    }
+    if let Some(err) = stopped.error {
+        on_line(&format!("error: {err:#}"));
+        on_line("the device pipeline failed; watching for a source change to retry…");
+    }
+    ControlFlow::Continue(())
 }
 
 /// Poll cadence for [`watch_loop`]'s inner loop — bounds both output latency
@@ -442,15 +836,15 @@ const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// save->`on_change` latency at 312–324 ms.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(100);
 
-/// `frust run --watch`'s desktop-only file-watch → rebuild → relaunch loop.
+/// `frust run --watch`'s desktop file-watch → rebuild → relaunch loop.
 /// Watches `<root>/src` (recursive) and
 /// `<root>/Cargo.toml` via `hooks.spawn_watcher`, wiring its every raw event
-/// straight into [`watch_loop`], the testable core that owns debouncing,
-/// spawning, and kill+relaunch; `hooks.install_ctrlc` installs the Ctrl-C
-/// handler described below. Production always calls this with
-/// [`WatchHooks::real`] (via [`run_in`]/`run_desktop_fallback`); a test
-/// drives it with [`WatchHooks::fake`] instead so neither process-global
-/// side effect is ever touched by `cargo test`.
+/// straight into [`relaunch_loop_with`], the testable core that owns
+/// debouncing, spawning, and kill+relaunch; `hooks.install_ctrlc` installs
+/// the Ctrl-C handler described in [`run_relaunch_watch`]. Production always
+/// calls this with [`WatchHooks::real`] (via [`run_in`]/`run_desktop_fallback`);
+/// a test drives it with [`WatchHooks::fake`] instead so neither
+/// process-global side effect is ever touched by `cargo test`.
 fn run_desktop_watch(
     runner: &dyn ProcessRunner,
     plan: &DesktopPlan,
@@ -458,37 +852,44 @@ fn run_desktop_watch(
     root: &Path,
     hooks: WatchHooks,
 ) -> Result<u8> {
+    let mut relauncher = DesktopRelauncher { runner, plan, env };
+    run_relaunch_watch(
+        &mut relauncher,
+        root,
+        hooks.install_ctrlc,
+        hooks.spawn_watcher,
+    )
+}
+
+/// The relaunch watch over any [`Relauncher`]: the tick watcher over `root`,
+/// the Ctrl-C handler, then [`relaunch_loop_with`].
+fn run_relaunch_watch(
+    relauncher: &mut dyn Relauncher,
+    root: &Path,
+    install_ctrlc: InstallCtrlcHook,
+    spawn_watcher: SpawnWatcherHook,
+) -> Result<u8> {
     let (raw_tx, raw_rx) = mpsc::channel();
-    let _watcher = (hooks.spawn_watcher)(root, raw_tx)?;
+    let _watcher = spawn_watcher(root, raw_tx)?;
     println!(
         "Watching `{}` for changes (Ctrl-C to exit)…",
         root.display()
     );
 
-    // The streamed `cargo run` child is now spawned into its own process
-    // group (`frust_drive::process::spawn_streaming`), so a kill reaches the
-    // compiled preview binary it forks too — the orphaned-preview fix. That
-    // same arrangement removes the child from this terminal's foreground
-    // process group, so a bare Ctrl-C's SIGINT no longer reaches it: without
-    // an explicit handler, exiting the watch loop would just orphan the live
-    // preview (trading a kill-on-relaunch orphan for a Ctrl-C-to-exit orphan).
-    // Share the live handle with a Ctrl-C handler that group-kills the current
-    // child before exiting. Unlike `android_run`/`ios_run`'s handlers (whose
-    // device-side child is unaffected by this group), this one MUST kill
-    // before `exit`.
-    let current: Arc<Mutex<Option<StreamHandle>>> = Arc::new(Mutex::new(None));
-    (hooks.install_ctrlc)(Arc::clone(&current))?;
+    // The app's stream — the desktop `cargo run` child, a device app's `adb
+    // logcat` — is spawned into its own process group
+    // (`frust_drive::process::spawn_streaming`), so a kill reaches the
+    // compiled preview binary `cargo run` forks too — the orphaned-preview
+    // fix. That same arrangement removes the child from this terminal's
+    // foreground process group, so a bare Ctrl-C's SIGINT no longer reaches
+    // it: without an explicit handler, exiting the watch loop would just
+    // orphan the live app. Share the slot with a Ctrl-C handler that stops
+    // the app before exiting, or cancels a device pipeline in flight.
+    let current = AppSlot::default();
+    install_ctrlc(Arc::clone(&current))?;
 
     let mut on_line = |line: &str| println!("{line}");
-    watch_loop_with_slot(
-        runner,
-        plan,
-        env,
-        &raw_rx,
-        WATCH_DEBOUNCE,
-        &current,
-        &mut on_line,
-    )
+    relaunch_loop_with(relauncher, &raw_rx, WATCH_DEBOUNCE, &current, &mut on_line)
 }
 
 /// Starts a real [`notify`] watcher over `root`'s `src/` tree (recursive) and
@@ -526,7 +927,7 @@ fn spawn_fs_watcher(root: &Path, tx: mpsc::Sender<()>) -> Result<notify::Recomme
     Ok(watcher)
 }
 
-/// The testable core of `frust run --watch`'s rebuild-relaunch loop: drives
+/// The desktop entry of `frust run --watch`'s rebuild-relaunch loop: drives
 /// `cargo run` through [`ProcessRunner::spawn_streaming`], killing and
 /// relaunching it every time `raw_changes` reports a source change (after
 /// debouncing bursts within `debounce` of each other). `on_line` receives
@@ -548,13 +949,14 @@ fn spawn_fs_watcher(root: &Path, tx: mpsc::Sender<()>) -> Result<notify::Recomme
 /// **Ctrl-C is no longer self-handling.** The streamed `cargo run` child now
 /// runs in its own process group (`frust_drive::process::spawn_streaming`, so a
 /// kill reaches the compiled preview binary it forks too), which also means the
-/// terminal's SIGINT no longer reaches it — [`run_desktop_watch`] installs a
-/// Ctrl-C handler over a shared handle slot to group-kill the current child
-/// before exiting. This standalone `watch_loop` owns a private slot (no shared
-/// handler); production drives [`watch_loop_with_slot`] with the shared one.
+/// terminal's SIGINT no longer reaches it — [`run_relaunch_watch`] installs a
+/// Ctrl-C handler over a shared app slot to stop the current app before
+/// exiting. This standalone `watch_loop` owns a private slot (no shared
+/// handler); production drives [`relaunch_loop_with`] with the shared one,
+/// over the desktop or the device [`Relauncher`].
 ///
 /// Test-only: it exists purely as the fixed-signature entry the loop's unit
-/// tests drive; the shipped binary always goes through `watch_loop_with_slot`.
+/// tests drive; the shipped binary always goes through `relaunch_loop_with`.
 #[cfg(test)]
 fn watch_loop(
     runner: &dyn ProcessRunner,
@@ -564,41 +966,46 @@ fn watch_loop(
     debounce: Duration,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<u8> {
-    let current: Arc<Mutex<Option<StreamHandle>>> = Arc::new(Mutex::new(None));
-    watch_loop_with_slot(runner, plan, env, raw_changes, debounce, &current, on_line)
+    let current = AppSlot::default();
+    let mut relauncher = DesktopRelauncher { runner, plan, env };
+    relaunch_loop_with(&mut relauncher, raw_changes, debounce, &current, on_line)
 }
 
-/// [`watch_loop`]'s body, parameterized on a shared `current`-handle slot so a
-/// Ctrl-C handler installed by [`run_desktop_watch`] can group-kill the live
-/// child before the process exits (see [`watch_loop`]'s doc). Holds the slot's
-/// lock only for the brief drain/kill/respawn steps — never across the blocking
-/// `recv_timeout` — so the handler can always acquire it promptly.
-fn watch_loop_with_slot(
-    runner: &dyn ProcessRunner,
-    plan: &DesktopPlan,
-    env: &[(String, String)],
+/// [`watch_loop`]'s body over any [`Relauncher`], parameterized on a shared
+/// `current` slot so a Ctrl-C handler installed by [`run_relaunch_watch`]
+/// can stop the live app before the process exits (see [`watch_loop`]'s
+/// doc). Holds the slot's lock only for the brief drain steps — never across
+/// the blocking `recv_timeout` — so the handler can always acquire it
+/// promptly; how a relaunch locks is the [`Relauncher`]'s own business. A
+/// relaunch a Ctrl-C cancelled ends the loop.
+fn relaunch_loop_with(
+    relauncher: &mut dyn Relauncher,
     raw_changes: &mpsc::Receiver<()>,
     debounce: Duration,
-    current: &Arc<Mutex<Option<StreamHandle>>>,
+    current: &AppSlot,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<u8> {
-    // A caller that already put a live child in the slot (the hot loop falling
+    // A caller that already put a live app in the slot (the hot loop falling
     // back after its session turned out restart-only) keeps it; the first
     // change replaces it like any other.
-    if lock_slot(current).is_none() {
-        let handle = spawn_preview(runner, plan, env)?;
-        lock_slot(current).replace(handle);
+    if lock_slot(current).is_none() && relauncher.relaunch(current, on_line)?.is_break() {
+        return Ok(0);
     }
 
     loop {
         {
             let mut slot = lock_slot(current);
             if drain_available_lines(&mut slot, on_line) {
-                let success = slot.take().expect("handle present in this arm").wait();
+                let success = slot.take().expect("app present in this arm").wait();
+                let label = relauncher.label();
                 if success {
-                    on_line("`cargo run` exited; waiting for a source change to relaunch…");
+                    on_line(&format!(
+                        "{label} exited; waiting for a source change to relaunch…"
+                    ));
                 } else {
-                    on_line("`cargo run` failed; watching for a source change to retry…");
+                    on_line(&format!(
+                        "{label} failed; watching for a source change to retry…"
+                    ));
                 }
             }
         }
@@ -608,21 +1015,20 @@ fn watch_loop_with_slot(
                 // Trailing-edge debounce: keep consuming ticks that arrive
                 // within `debounce` of the previous one before acting.
                 while raw_changes.recv_timeout(debounce).is_ok() {}
-                let mut slot = lock_slot(current);
-                // Flush whatever the about-to-be-killed process already
-                // produced before killing it, so a burst of output right
-                // before the kill isn't silently dropped.
-                drain_available_lines(&mut slot, on_line);
+                // Flush whatever the about-to-be-stopped app already
+                // produced before stopping it, so a burst of output right
+                // before the stop isn't silently dropped.
+                drain_available_lines(&mut lock_slot(current), on_line);
                 on_line("Change detected; rebuilding and relaunching…");
-                if let Some(mut handle) = slot.take() {
-                    handle.kill();
+                if relauncher.relaunch(current, on_line)?.is_break() {
+                    return Ok(0);
                 }
-                slot.replace(spawn_preview(runner, plan, env)?);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                if let Some(mut handle) = lock_slot(current).take() {
-                    handle.kill();
+                let app = lock_slot(current).take();
+                if let Some(app) = app {
+                    app.stop();
                 }
                 return Ok(0);
             }
@@ -630,31 +1036,28 @@ fn watch_loop_with_slot(
     }
 }
 
-/// Locks the shared `current`-handle slot, recovering from poisoning rather
+/// Locks the shared `current`-app slot, recovering from poisoning rather
 /// than propagating a panic (a poisoned lock just means a prior holder panicked
-/// mid-update; the loop can still drive the handle inside).
-fn lock_slot(
-    slot: &Arc<Mutex<Option<StreamHandle>>>,
-) -> std::sync::MutexGuard<'_, Option<StreamHandle>> {
-    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+/// mid-update; the loop can still drive the app inside).
+fn lock_slot(slot: &WatchSlot) -> std::sync::MutexGuard<'_, Option<RunningApp>> {
+    slot.app
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Drains every line currently available from `current`'s child (if any),
+/// Drains every line currently available from `current`'s app (if any),
 /// forwarding each to `on_line`. Returns `true` if the drain ended because
-/// the child's stdout disconnected (the process has exited, spontaneously or
+/// the app's stream disconnected (the process has exited, spontaneously or
 /// via a prior [`StreamHandle::kill`]) rather than simply having nothing more
 /// buffered right now — the caller reads the exit status via
-/// [`StreamHandle::wait`] in that case. A no-op (returns `false`) when
+/// [`RunningApp::wait`] in that case. A no-op (returns `false`) when
 /// `current` is `None`.
-fn drain_available_lines(
-    current: &mut Option<StreamHandle>,
-    on_line: &mut dyn FnMut(&str),
-) -> bool {
-    let Some(handle) = current.as_mut() else {
+fn drain_available_lines(current: &mut Option<RunningApp>, on_line: &mut dyn FnMut(&str)) -> bool {
+    let Some(app) = current.as_mut() else {
         return false;
     };
     loop {
-        match handle.lines.try_recv() {
+        match app.handle.lines.try_recv() {
             Ok(line) => on_line(&line),
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => return true,
@@ -776,25 +1179,55 @@ impl HotSessionHandle for HotSession {
 
 /// Why [`HotBackend::start`] produced no session.
 enum HotStartError {
-    /// This project cannot be hot-patched; use the relaunch loop.
-    Unavailable(String),
+    /// This project cannot be hot-patched (the start's own
+    /// `RestartRequired` reason); use the relaunch loop.
+    Unavailable(RestartReason),
     /// The fat build or launch failed; try again on the next change.
     Failed(Vec<String>),
 }
 
-/// A started hot session and the app child it patches.
-type HotLaunch = (Box<dyn HotSessionHandle>, StreamHandle);
+impl From<StartError> for HotStartError {
+    fn from(err: StartError) -> Self {
+        match err {
+            StartError::RestartRequired(reason) => Self::Unavailable(reason),
+            StartError::FatBuildFailed { diagnostics } => Self::Failed(diagnostics),
+            err @ StartError::Launch { .. } => Self::Failed(vec![err.to_string()]),
+        }
+    }
+}
+
+/// A started hot session and the app it patches.
+type HotLaunch = (Box<dyn HotSessionHandle>, RunningApp);
 
 /// Starts fresh fat sessions and reports what to watch. Real:
-/// `hotpatch::session::start_desktop` over the project; fake in tests.
+/// `hotpatch::session::start_desktop` over the project ([`DriveHotBackend`])
+/// or `hotpatch::android::start_android` on a device
+/// ([`AndroidHotBackend`]); fake in tests.
 trait HotBackend {
     fn watch_set(&mut self) -> Result<WatchSet>;
     /// Fat-builds and launches a new session. `on_line` receives the build
-    /// diagnostics and the app's early output.
-    fn start(&mut self, on_line: &mut dyn FnMut(&str)) -> Result<HotLaunch, HotStartError>;
+    /// diagnostics and the app's early output. A [`Self::cancellable`]
+    /// start observes `cancel` and tears down what it launched.
+    fn start(
+        &mut self,
+        on_line: &mut dyn FnMut(&str),
+        cancel: &AtomicBool,
+    ) -> Result<HotLaunch, HotStartError>;
+    /// Whether [`Self::start`] honours `cancel`, so a Ctrl-C during it
+    /// cancels it rather than exiting ([`WatchSlot::begin_start`]).
+    fn cancellable(&self) -> bool {
+        false
+    }
 }
 
-/// [`HotBackend`] over the real `frust_drive` session.
+/// The [`WatchSet`] of `root`'s workspace graph, tipped at `package`.
+fn load_watch_set(runner: &dyn ProcessRunner, root: &Path, package: &str) -> Result<WatchSet> {
+    let graph = WorkspaceGraph::load(runner, &root.join("Cargo.toml"), None, package, None)
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    Ok(watch_set_from_graph(&graph))
+}
+
+/// [`HotBackend`] over the real `frust_drive` desktop session.
 struct DriveHotBackend {
     runner: Arc<dyn ProcessRunner + Send + Sync>,
     root: PathBuf,
@@ -804,50 +1237,97 @@ struct DriveHotBackend {
 
 impl HotBackend for DriveHotBackend {
     fn watch_set(&mut self) -> Result<WatchSet> {
-        let graph = WorkspaceGraph::load(
-            &*self.runner,
-            &self.root.join("Cargo.toml"),
-            None,
-            &self.package,
-            None,
-        )
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
-        Ok(watch_set_from_graph(&graph))
+        load_watch_set(&*self.runner, &self.root, &self.package)
     }
 
-    fn start(&mut self, on_line: &mut dyn FnMut(&str)) -> Result<HotLaunch, HotStartError> {
-        let host = SessionHost::current(Arc::clone(&self.runner))
-            .map_err(|err| HotStartError::Unavailable(err.to_string()))?;
+    /// `start_desktop` has no cancel seam: a Ctrl-C during it exits at once.
+    fn start(
+        &mut self,
+        on_line: &mut dyn FnMut(&str),
+        _cancel: &AtomicBool,
+    ) -> Result<HotLaunch, HotStartError> {
+        let host = SessionHost::current(Arc::clone(&self.runner)).map_err(StartError::from)?;
         let start = DesktopStart {
             root: &self.root,
             info: &self.info,
             package: &self.package,
             bin: None,
         };
-        match start_desktop(&host, &start, on_line) {
-            Ok((session, handle)) => Ok((Box::new(session), handle)),
-            Err(StartError::RestartRequired(reason)) => {
-                Err(HotStartError::Unavailable(reason.to_string()))
+        let (session, handle) = start_desktop(&host, &start, on_line)?;
+        Ok((Box::new(session), handle.into()))
+    }
+}
+
+/// [`HotBackend`] over the real `frust_drive` Android session: the fat
+/// build outside Gradle, `assembleDebug -x cargoNdkBuild`, install, launch
+/// and an `adb forward` to the app's devtools endpoint. The app it hands
+/// back tears down by removing that forward and force-stopping the
+/// package ([`device_app`]).
+struct AndroidHotBackend {
+    runner: Arc<dyn ProcessRunner + Send + Sync>,
+    root: PathBuf,
+    info: BuildInfo,
+    package: String,
+    device: Device,
+}
+
+impl HotBackend for AndroidHotBackend {
+    fn watch_set(&mut self) -> Result<WatchSet> {
+        load_watch_set(&*self.runner, &self.root, &self.package)
+    }
+
+    fn start(
+        &mut self,
+        on_line: &mut dyn FnMut(&str),
+        cancel: &AtomicBool,
+    ) -> Result<HotLaunch, HotStartError> {
+        let host = SessionHost::current(Arc::clone(&self.runner)).map_err(StartError::from)?;
+        let start = AndroidStart {
+            root: &self.root,
+            info: &self.info,
+            package: &self.package,
+            device: &self.device,
+        };
+        match start_android(&host, &start, on_line, cancel)? {
+            Some(AndroidHotStart {
+                session,
+                launch,
+                forward_port,
+            }) => {
+                let app = device_app(
+                    Arc::clone(&self.runner),
+                    &self.device.id,
+                    launch,
+                    forward_port,
+                );
+                Ok((Box::new(session), app))
             }
-            Err(StartError::FatBuildFailed { diagnostics }) => {
-                Err(HotStartError::Failed(diagnostics))
-            }
-            Err(err @ StartError::Launch { .. }) => {
-                Err(HotStartError::Failed(vec![err.to_string()]))
-            }
+            // A Ctrl-C cancelled it; `start_android` has torn down what it
+            // launched, and the loop ends ([`launch_hot`]).
+            None => Err(HotStartError::Failed(vec![
+                "the hot start was cancelled".to_string(),
+            ])),
         }
+    }
+
+    fn cancellable(&self) -> bool {
+        true
     }
 }
 
 type HotBackendHook = Box<dyn FnOnce(&Path, &BuildInfo) -> Result<Box<dyn HotBackend>>>;
+type AndroidBackendHook =
+    Box<dyn FnOnce(&Path, &BuildInfo, &Device) -> Result<Box<dyn HotBackend>>>;
 type SpawnPathWatcherHook =
     Box<dyn FnOnce(&WatchSet, mpsc::Sender<PathBuf>) -> Result<Box<dyn std::any::Any>>>;
 
 /// The injectable seams of hot mode, beside [`WatchHooks`]' own: the session
-/// backend and a watcher that reports changed *paths* (the session needs
-/// them; the relaunch loop's watcher reports bare ticks).
+/// backends (desktop, Android device) and a watcher that reports changed
+/// *paths* (the session needs them; the relaunch loop's watcher reports bare
+/// ticks).
 struct HotHooks {
     backend: HotBackendHook,
+    android: AndroidBackendHook,
     spawn_watcher: SpawnPathWatcherHook,
 }
 
@@ -861,6 +1341,16 @@ impl HotHooks {
                     root: root.to_path_buf(),
                     info: info.clone(),
                     package,
+                }) as Box<dyn HotBackend>)
+            }),
+            android: Box::new(|root, info, device| {
+                let package = read_package_name(root)?;
+                Ok(Box::new(AndroidHotBackend {
+                    runner: Arc::new(RealProcessRunner),
+                    root: root.to_path_buf(),
+                    info: info.clone(),
+                    package,
+                    device: device.clone(),
                 }) as Box<dyn HotBackend>)
             }),
             spawn_watcher: Box::new(|set, tx| {
@@ -1031,9 +1521,10 @@ fn spawn_path_watcher(
     Ok(watcher)
 }
 
-/// `frust run --watch`'s hot mode: resolves the backend and the watch set,
-/// then hands both to [`hot_loop`]. A setup failure is printed and answered
-/// with the relaunch loop, never an error — `--watch` always works.
+/// `frust run --watch`'s desktop hot mode: resolves the backend and the
+/// watch set, then hands both to [`hot_loop_with`] over the `cargo run`
+/// relaunch target. A setup failure is printed and answered with the
+/// relaunch loop, never an error — `--watch` always works.
 fn run_desktop_hot(
     runner: &dyn ProcessRunner,
     info: &BuildInfo,
@@ -1046,9 +1537,70 @@ fn run_desktop_hot(
         install_ctrlc,
         spawn_watcher,
         hot,
+        device_relauncher: _,
     } = hooks;
     let hot = hot.expect("run_desktop_hot is reached only with hot hooks");
-    let setup = (hot.backend)(root, info).and_then(|mut backend| {
+    let backend = (hot.backend)(root, info);
+    let mut relauncher = DesktopRelauncher { runner, plan, env };
+    run_hot_watch(
+        &mut relauncher,
+        backend,
+        root,
+        install_ctrlc,
+        spawn_watcher,
+        hot.spawn_watcher,
+    )
+}
+
+/// `frust run --watch -d <android>` (a debug build, checked by
+/// [`run_watch_on_device`]): hot by default — the Android session backend
+/// over the device relaunch target, so a session that cannot patch falls
+/// back to rerunning the device pipeline — and the plain device relaunch
+/// loop under `--no-hot` (or a hook set with no hot backend). Hot mode is
+/// never reached without the explicit `-d`.
+fn run_android_watch(
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    no_hot: bool,
+    hooks: WatchHooks,
+) -> Result<u8> {
+    let WatchHooks {
+        install_ctrlc,
+        spawn_watcher,
+        hot,
+        device_relauncher,
+    } = hooks;
+    let mut relauncher = device_relauncher(root, info, device);
+    match hot.filter(|_| !no_hot) {
+        Some(hot) => {
+            let backend = (hot.android)(root, info, device);
+            run_hot_watch(
+                &mut *relauncher,
+                backend,
+                root,
+                install_ctrlc,
+                spawn_watcher,
+                hot.spawn_watcher,
+            )
+        }
+        None => run_relaunch_watch(&mut *relauncher, root, install_ctrlc, spawn_watcher),
+    }
+}
+
+/// The hot watch over any backend and relaunch target: resolve the watch
+/// set, start the path watcher and the Ctrl-C handler, then
+/// [`hot_loop_with`]. A setup failure is printed and answered with the
+/// relaunch loop over `relauncher`.
+fn run_hot_watch(
+    relauncher: &mut dyn Relauncher,
+    backend: Result<Box<dyn HotBackend>>,
+    root: &Path,
+    install_ctrlc: InstallCtrlcHook,
+    spawn_watcher: SpawnWatcherHook,
+    spawn_path_watcher: SpawnPathWatcherHook,
+) -> Result<u8> {
+    let setup = backend.and_then(|mut backend| {
         let set = backend.watch_set()?;
         Ok((backend, set))
     });
@@ -1056,28 +1608,21 @@ fn run_desktop_hot(
         Ok(ok) => ok,
         Err(err) => {
             println!("hot reload unavailable: {err:#}; relaunching on change instead");
-            let cold = WatchHooks {
-                install_ctrlc,
-                spawn_watcher,
-                hot: None,
-            };
-            return run_desktop_watch(runner, plan, env, root, cold);
+            return run_relaunch_watch(relauncher, root, install_ctrlc, spawn_watcher);
         }
     };
 
     let (path_tx, path_rx) = mpsc::channel();
-    let _watcher = (hot.spawn_watcher)(&set, path_tx)?;
+    let _watcher = spawn_path_watcher(&set, path_tx)?;
     println!(
         "Watching `{}` for changes with hot reload (Ctrl-C to exit; --no-hot relaunches instead)…",
         root.display()
     );
-    let current: Arc<Mutex<Option<StreamHandle>>> = Arc::new(Mutex::new(None));
+    let current = AppSlot::default();
     install_ctrlc(Arc::clone(&current))?;
     let mut on_line = |line: &str| println!("{line}");
-    hot_loop(
-        runner,
-        plan,
-        env,
+    hot_loop_with(
+        relauncher,
         &mut *backend,
         path_rx,
         WATCH_DEBOUNCE,
@@ -1093,33 +1638,69 @@ enum Launched {
     Failed,
     /// Hot reload is unavailable here; the relaunch loop takes over.
     Cold,
+    /// A Ctrl-C landed during the start: what it launched is stopped, and
+    /// the loop ends.
+    Cancelled,
 }
 
-/// Starts a fresh fat session and parks its child in `current`. A
-/// restart-only session keeps its child (the relaunch loop adopts it) and
-/// prints its failed precondition once.
+/// The one line a session that cannot patch prints before the relaunch loop
+/// takes over: `restart required: <reason>`, the reason naming the failed
+/// precondition.
+fn cold_fallback_line(reason: &RestartReason) -> String {
+    format!(
+        "{}; hot reload unavailable, relaunching on change instead",
+        Outcome::RestartRequired(reason.clone())
+    )
+}
+
+/// Starts a fresh fat session and parks its app in `current`. A
+/// restart-only session (no `Capability::HotPatch`, or no devtools link)
+/// keeps its app (the relaunch loop adopts it) and prints its failed
+/// precondition once, as `restart required: hot-patch builder unsupported:
+/// <precondition>`. A cancellable start is bracketed by
+/// [`WatchSlot::begin_start`]/[`StartInFlight::end`], so a Ctrl-C during
+/// it ends in [`Launched::Cancelled`]; one that ignores the cancel flag
+/// (the desktop start) parks its app whatever the flag says.
 fn launch_hot(
     backend: &mut dyn HotBackend,
-    current: &Arc<Mutex<Option<StreamHandle>>>,
+    current: &AppSlot,
     on_line: &mut dyn FnMut(&str),
 ) -> Launched {
-    match backend.start(on_line) {
-        Ok((session, handle)) => {
-            lock_slot(current).replace(handle);
-            match session.restart_only_reason() {
-                Some(reason) => {
-                    on_line(&format!(
-                        "hot reload unavailable: {reason}; relaunching on change instead"
-                    ));
-                    Launched::Cold
+    let start = backend.cancellable().then(|| current.begin_start());
+    let (started, app) = match backend.start(on_line, &current.cancel) {
+        Ok((session, app)) => (Ok(session), Some(app)),
+        Err(err) => (Err(err), None),
+    };
+    match start {
+        Some(start) => {
+            if let ControlFlow::Break(app) = start.end(app) {
+                // The session (and its devtools socket) goes before its app
+                // and forward do, as on a restart.
+                drop(started);
+                if let Some(app) = app {
+                    app.stop();
                 }
-                None => Launched::Live(session),
+                return Launched::Cancelled;
             }
         }
+        None => {
+            if let Some(app) = app {
+                lock_slot(current).replace(app);
+            }
+        }
+    }
+    match started {
+        Ok(session) => match session.restart_only_reason() {
+            Some(reason) => {
+                on_line(&cold_fallback_line(&RestartReason::BuilderUnsupported {
+                    detail: reason,
+                }));
+                Launched::Cold
+            }
+            None => Launched::Live(session),
+        },
         Err(HotStartError::Unavailable(reason)) => {
-            on_line(&format!(
-                "hot reload unavailable: {reason}; relaunching on change instead"
-            ));
+            on_line(&cold_fallback_line(&reason));
             Launched::Cold
         }
         Err(HotStartError::Failed(diagnostics)) => {
@@ -1132,12 +1713,9 @@ fn launch_hot(
     }
 }
 
-/// The hot counterpart of [`watch_loop_with_slot`]: each debounced change set
-/// goes to the session. `Patched` prints its one line and leaves the app
-/// running; a compile error prints its diagnostics and leaves the app
-/// untouched; `RestartRequired` prints its reason verbatim, kills the child
-/// and starts a fresh fat session. When hot reload turns out to be
-/// unavailable the loop becomes the relaunch loop over the same watcher.
+/// [`hot_loop_with`] over the desktop `cargo run` relaunch target — the
+/// fixed-signature entry the desktop hot tests drive.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn hot_loop(
     runner: &dyn ProcessRunner,
@@ -1146,22 +1724,51 @@ fn hot_loop(
     backend: &mut dyn HotBackend,
     changes: mpsc::Receiver<PathBuf>,
     debounce: Duration,
-    current: &Arc<Mutex<Option<StreamHandle>>>,
+    current: &AppSlot,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<u8> {
+    let mut relauncher = DesktopRelauncher { runner, plan, env };
+    hot_loop_with(
+        &mut relauncher,
+        backend,
+        changes,
+        debounce,
+        current,
+        on_line,
+    )
+}
+
+/// The hot counterpart of [`relaunch_loop_with`]: each debounced change set
+/// goes to the session. `Patched` prints its one line and leaves the app
+/// running; a compile error prints its diagnostics and leaves the app
+/// untouched; `RestartRequired` prints its reason verbatim, stops the app
+/// (a device app's forward is removed and its package force-stopped) and
+/// starts a fresh fat session — on Android the whole device pipeline again.
+/// When hot reload turns out to be unavailable the loop becomes the relaunch
+/// loop over `relauncher` and the same watcher. A start a Ctrl-C cancelled
+/// ends the loop.
+fn hot_loop_with(
+    relauncher: &mut dyn Relauncher,
+    backend: &mut dyn HotBackend,
+    changes: mpsc::Receiver<PathBuf>,
+    debounce: Duration,
+    current: &AppSlot,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<u8> {
     let mut session = match launch_hot(backend, current, on_line) {
         Launched::Live(session) => Some(session),
         Launched::Failed => None,
         Launched::Cold => {
-            return relaunch_loop(runner, plan, env, changes, debounce, current, on_line);
+            return relaunch_loop(relauncher, changes, debounce, current, on_line);
         }
+        Launched::Cancelled => return Ok(0),
     };
 
     loop {
         {
             let mut slot = lock_slot(current);
             if drain_available_lines(&mut slot, on_line) {
-                let success = slot.take().expect("handle present in this arm").wait();
+                let success = slot.take().expect("app present in this arm").wait();
                 session = None;
                 if success {
                     on_line("the app exited; waiting for a source change to relaunch…");
@@ -1192,9 +1799,10 @@ fn hot_loop(
                             Launched::Failed => None,
                             Launched::Cold => {
                                 return relaunch_loop(
-                                    runner, plan, env, changes, debounce, current, on_line,
+                                    relauncher, changes, debounce, current, on_line,
                                 );
                             }
+                            Launched::Cancelled => return Ok(0),
                         };
                         continue;
                     }
@@ -1210,25 +1818,31 @@ fn hot_loop(
                     }
                     Outcome::RestartRequired(reason) => {
                         on_line(&format!("restart required: {reason}"));
-                        if let Some(mut handle) = lock_slot(current).take() {
-                            handle.kill();
+                        // The old session (and its devtools socket) goes
+                        // before its app and forward do.
+                        drop(session.take());
+                        let app = lock_slot(current).take();
+                        if let Some(app) = app {
+                            app.stop();
                         }
                         session = match launch_hot(backend, current, on_line) {
                             Launched::Live(next) => Some(next),
                             Launched::Failed => None,
                             Launched::Cold => {
                                 return relaunch_loop(
-                                    runner, plan, env, changes, debounce, current, on_line,
+                                    relauncher, changes, debounce, current, on_line,
                                 );
                             }
+                            Launched::Cancelled => return Ok(0),
                         };
                     }
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                if let Some(mut handle) = lock_slot(current).take() {
-                    handle.kill();
+                let app = lock_slot(current).take();
+                if let Some(app) = app {
+                    app.stop();
                 }
                 return Ok(0);
             }
@@ -1239,14 +1853,12 @@ fn hot_loop(
 /// Hands the hot loop's change stream to the plain relaunch loop: a thread
 /// folds each changed path into the bare tick that loop takes, and ends (so
 /// the loop does) when the watcher drops. The slot may already hold a live
-/// child, which the loop keeps until the first change.
+/// app, which the loop keeps until the first change.
 fn relaunch_loop(
-    runner: &dyn ProcessRunner,
-    plan: &DesktopPlan,
-    env: &[(String, String)],
+    relauncher: &mut dyn Relauncher,
     changes: mpsc::Receiver<PathBuf>,
     debounce: Duration,
-    current: &Arc<Mutex<Option<StreamHandle>>>,
+    current: &AppSlot,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<u8> {
     let (tick_tx, tick_rx) = mpsc::channel();
@@ -1257,7 +1869,7 @@ fn relaunch_loop(
             }
         }
     });
-    watch_loop_with_slot(runner, plan, env, &tick_rx, debounce, current, on_line)
+    relaunch_loop_with(relauncher, &tick_rx, debounce, current, on_line)
 }
 
 fn select_from_prompt(
@@ -1842,26 +2454,43 @@ mod tests {
         assert_eq!(out, 0);
     }
 
-    /// `--watch` combined with an explicit `-d <device>` is a hard error,
-    /// before any device discovery/build happens (`FakeProcessRunner::new()`
-    /// has no registered responses, so any discovery/build call would fail
-    /// loudly and prove this check didn't run first).
+    /// `--watch` combined with an explicit `-d <device>` that is not an
+    /// Android device (an iOS simulator or physical device) is a hard error
+    /// with the original wording, before any build or watch happens
+    /// (`FakeProcessRunner::new()` has no registered responses, so any build
+    /// call would fail loudly and prove this check didn't run first). An
+    /// Android `-d` is accepted instead
+    /// (`run_in_with_watch_and_an_android_device_starts_a_hot_session`).
     #[test]
     fn run_in_rejects_watch_combined_with_device_id() {
         let runner = FakeProcessRunner::new();
-        let err = run_in(
-            &runner,
-            BuildFlags::default(),
-            Some("emulator-5554".to_string()),
-            true,
-            true,
-            false,
-            false,
-        )
-        .unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("--watch"), "{message}");
-        assert!(message.contains("device"), "{message}");
+        let simulator = Device {
+            id: "FAKE-UDID".to_string(),
+            name: "iPhone 15".to_string(),
+            platform: Platform::Ios,
+            kind: Kind::Simulator,
+            os_version: None,
+            connection_state: None,
+        };
+        for device in [ios_physical_device(), simulator] {
+            let err = run_watch_on_device(
+                &runner,
+                &device,
+                &debug_info(),
+                NO_EXTRA,
+                false,
+                WatchHooks::fake(),
+            )
+            .unwrap_err();
+            let message = err.to_string();
+            assert_eq!(message, WATCH_DEVICE_REJECTION, "{device:?}");
+            assert!(message.contains("--watch"), "{message}");
+            assert!(message.contains("device"), "{message}");
+            assert!(message.contains("Android"), "{message}");
+            assert!(!message.contains("desktop-preview only"), "{message}");
+            assert!(message.contains("drop -d"), "{message}");
+            assert!(message.contains("drop --watch"), "{message}");
+        }
     }
 
     /// `--watch` must short-circuit to the desktop preview
@@ -2169,6 +2798,17 @@ mod tests {
         outcomes: VecDeque<Outcome>,
         calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
         restart_only: Option<String>,
+        /// Which start (1-based) opened it, and the backend's event log its
+        /// drop is recorded in.
+        start: usize,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Drop for FakeSession {
+        fn drop(&mut self) {
+            let event = format!("session {} dropped", self.start);
+            self.events.lock().unwrap().push(event);
+        }
     }
 
     impl HotSessionHandle for FakeSession {
@@ -2190,6 +2830,27 @@ mod tests {
         started: Arc<AtomicUsize>,
         calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
         set: WatchSet,
+        /// Set for a device backend: every app it starts counts its
+        /// teardown (forward removal + force-stop) here.
+        teardowns: Option<Arc<AtomicUsize>>,
+        /// Whether its starts honour `cancel` (a device backend's do).
+        cancellable: bool,
+        /// A Ctrl-C one start fires mid-way.
+        interrupt: Option<Interrupt>,
+        /// Session drops and (device) app stops, in order.
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    /// A Ctrl-C a scripted start fires mid-way, through [`on_ctrlc`] over
+    /// the slot the fake `install_ctrlc` hook captured.
+    struct Interrupt {
+        /// Which start (1-based) it lands in.
+        at_start: usize,
+        slot: Arc<Mutex<Option<AppSlot>>>,
+        /// Whether the start observes it and tears its app down itself
+        /// (`start_android`'s cancel), or it lands after the start's last
+        /// check and the start hands the app back.
+        unwound_by_start: bool,
     }
 
     impl FakeBackend {
@@ -2200,7 +2861,28 @@ mod tests {
                 started: Arc::new(AtomicUsize::new(0)),
                 calls: Arc::new(Mutex::new(Vec::new())),
                 set: WatchSet::default(),
+                teardowns: None,
+                cancellable: false,
+                interrupt: None,
+                events: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        /// The backend of an Android device: its apps have a teardown, and
+        /// its starts honour `cancel`.
+        fn on_device(starts: Vec<ScriptedStart>) -> Self {
+            Self {
+                teardowns: Some(Arc::new(AtomicUsize::new(0))),
+                cancellable: true,
+                ..Self::new(starts)
+            }
+        }
+
+        fn teardowns(&self) -> usize {
+            self.teardowns
+                .as_ref()
+                .expect("a device backend")
+                .load(Ordering::SeqCst)
         }
     }
 
@@ -2209,16 +2891,52 @@ mod tests {
             Ok(self.set.clone())
         }
 
-        fn start(&mut self, _on_line: &mut dyn FnMut(&str)) -> Result<HotLaunch, HotStartError> {
-            self.started.fetch_add(1, Ordering::SeqCst);
+        fn start(
+            &mut self,
+            _on_line: &mut dyn FnMut(&str),
+            cancel: &AtomicBool,
+        ) -> Result<HotLaunch, HotStartError> {
+            let n = self.started.fetch_add(1, Ordering::SeqCst) + 1;
             let (outcomes, restart_only) = self.starts.pop_front().expect("scripted start")?;
             let handle = self.runner.spawn_streaming("app", &[], None, &[]).unwrap();
             let session = FakeSession {
                 outcomes: outcomes.into(),
                 calls: Arc::clone(&self.calls),
                 restart_only,
+                start: n,
+                events: Arc::clone(&self.events),
             };
-            Ok((Box::new(session), handle))
+            let mut app = RunningApp::from(handle);
+            if let Some(count) = &self.teardowns {
+                let count = Arc::clone(count);
+                let events = Arc::clone(&self.events);
+                app.teardown = Some(Box::new(move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    events.lock().unwrap().push(format!("app {n} stopped"));
+                }));
+            }
+            if let Some(interrupt) = self.interrupt.as_ref().filter(|i| i.at_start == n) {
+                let slot = interrupt
+                    .slot
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("handler installed");
+                assert!(
+                    !on_ctrlc(&slot),
+                    "a first Ctrl-C during a cancellable start leaves the exit to the loop"
+                );
+                assert!(cancel.load(Ordering::SeqCst), "the start sees the cancel");
+                if interrupt.unwound_by_start {
+                    app.stop();
+                    return Err(HotStartError::Failed(vec!["cancelled".to_string()]));
+                }
+            }
+            Ok((Box::new(session), app))
+        }
+
+        fn cancellable(&self) -> bool {
+            self.cancellable
         }
     }
 
@@ -2235,7 +2953,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(250));
         });
-        let current = Arc::new(Mutex::new(None));
+        let current = AppSlot::default();
         let mut lines = Vec::new();
         let mut on_line = |line: &str| lines.push(line.to_string());
         let out = hot_loop(
@@ -2359,6 +3077,13 @@ mod tests {
             1,
             "{lines:?}"
         );
+        assert!(
+            lines.iter().any(|l| l.starts_with(
+                "restart required: hot-patch builder unsupported: the app does not advertise \
+                 the HotPatch capability"
+            )),
+            "{lines:?}"
+        );
         assert!(backend.calls.lock().unwrap().is_empty());
         assert!(
             lines.iter().any(|l| l.contains("Change detected")),
@@ -2371,11 +3096,15 @@ mod tests {
     #[test]
     fn hot_unavailable_at_start_falls_back_to_the_relaunch_loop() {
         let mut backend = FakeBackend::new(vec![Err(HotStartError::Unavailable(
-            "restart required: no debuginfo".to_string(),
+            RestartReason::BuilderUnsupported {
+                detail: "debuginfo off: no debuginfo".to_string(),
+            },
         ))]);
         let lines = drive_hot(&mut backend, &["/p/src/lib.rs"]);
         assert!(
-            lines.iter().any(|l| l.contains("no debuginfo")),
+            lines.iter().any(|l| l.starts_with(
+                "restart required: hot-patch builder unsupported: debuginfo off: no debuginfo"
+            )),
             "{lines:?}"
         );
         assert!(lines.iter().any(|l| l == "cold"), "{lines:?}");
@@ -2407,7 +3136,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(250));
         });
-        let current = Arc::new(Mutex::new(None));
+        let current = AppSlot::default();
         hot_loop(
             &runner,
             &bare_run_plan(),
@@ -2535,9 +3264,12 @@ mod tests {
         let seen = Arc::clone(&registered);
         let hooks = WatchHooks {
             install_ctrlc: Box::new(|_| Ok(())),
-            spawn_watcher: Box::new(|_, _| unreachable!("the tick watcher is for the cold loop")),
+            spawn_watcher: Box::new(|_, _| {
+                unreachable!("the tick watcher is for the relaunch loop")
+            }),
             hot: Some(HotHooks {
                 backend: Box::new(move |_, _| Ok(Box::new(backend) as Box<dyn HotBackend>)),
+                android: Box::new(|_, _, _| unreachable!("a desktop run builds no device backend")),
                 spawn_watcher: Box::new(move |set, tx| {
                     *seen.lock().unwrap() = Some(set.clone());
                     std::thread::spawn(move || {
@@ -2547,6 +3279,9 @@ mod tests {
                     });
                     Ok(Box::new(()) as Box<dyn std::any::Any>)
                 }),
+            }),
+            device_relauncher: Box::new(|_, _, _| {
+                unreachable!("a desktop run relaunches no device")
             }),
         };
         let runner = FakeProcessRunner::new();
@@ -2583,8 +3318,10 @@ mod tests {
                 }),
                 hot: Some(HotHooks {
                     backend: Box::new(|_, _| panic!("--no-hot must not build a hot backend")),
+                    android: Box::new(|_, _, _| panic!("--no-hot must not build a hot backend")),
                     spawn_watcher: Box::new(|_, _| panic!("--no-hot must not watch paths")),
                 }),
+                device_relauncher: Box::new(|_, _, _| panic!("a desktop run relaunches no device")),
             },
             web: WebRunHooks::fake(),
         };
@@ -2600,6 +3337,787 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("cargo"), "{err:#}");
+    }
+
+    // ---- Android `--watch -d` -------------------------------------------
+
+    /// An Android phone as discovery reports it. The serial is a fake.
+    fn fake_android() -> Device {
+        Device {
+            id: "FAKE-SERIAL".to_string(),
+            name: "Fake Phone".to_string(),
+            platform: Platform::Android,
+            kind: Kind::PhysicalDevice,
+            os_version: None,
+            connection_state: None,
+        }
+    }
+
+    /// A runner whose `adb devices -l` lists [`fake_android`].
+    fn adb_lists_fake_android() -> FakeProcessRunner {
+        FakeProcessRunner::new().with(
+            "adb devices -l",
+            Output {
+                success: true,
+                stdout: "List of devices attached\n\
+                         FAKE-SERIAL  device product:fake model:Fake_Phone device:fake transport_id:1\n"
+                    .to_string(),
+                stderr: String::new(),
+            },
+        )
+    }
+
+    /// A scripted device relaunch target: each relaunch stops the slot's app
+    /// and parks a fresh one whose teardown is counted.
+    struct FakeDeviceRelauncher {
+        runner: FakeProcessRunner,
+        relaunches: Arc<AtomicUsize>,
+        teardowns: Arc<AtomicUsize>,
+        ctrl_c_at: Option<usize>,
+    }
+
+    impl FakeDeviceRelauncher {
+        fn new() -> Self {
+            Self {
+                runner: FakeProcessRunner::new().with_hanging_stream("logcat", ["cold app"]),
+                relaunches: Arc::new(AtomicUsize::new(0)),
+                teardowns: Arc::new(AtomicUsize::new(0)),
+                ctrl_c_at: None,
+            }
+        }
+    }
+
+    impl Relauncher for FakeDeviceRelauncher {
+        fn label(&self) -> &str {
+            "the app's log stream"
+        }
+
+        /// Shaped like [`DeviceRelauncher::relaunch`]: a cancellable start
+        /// that parks its app through [`StartInFlight::end`]. With
+        /// `ctrl_c_at` set, that relaunch (1-based) is interrupted by a
+        /// Ctrl-C landing after its app launched.
+        fn relaunch(
+            &mut self,
+            current: &AppSlot,
+            _on_line: &mut dyn FnMut(&str),
+        ) -> Result<ControlFlow<()>> {
+            let previous = lock_slot(current).take();
+            if let Some(app) = previous {
+                app.stop();
+            }
+            let start = current.begin_start();
+            let n = self.relaunches.fetch_add(1, Ordering::SeqCst) + 1;
+            let teardowns = Arc::clone(&self.teardowns);
+            let app = RunningApp {
+                handle: self.runner.spawn_streaming("logcat", &[], None, &[])?,
+                teardown: Some(Box::new(move || {
+                    teardowns.fetch_add(1, Ordering::SeqCst);
+                })),
+            };
+            if self.ctrl_c_at == Some(n) {
+                assert!(!on_ctrlc(current), "the exit is left to the loop");
+            }
+            Ok(start.end_or_stop(Some(app)))
+        }
+    }
+
+    /// Drives [`hot_loop_with`] over a device backend and `relauncher`, sending
+    /// each path tick, then lets the loop end. Returns the printed lines.
+    fn drive_device_hot(
+        backend: &mut FakeBackend,
+        relauncher: &mut FakeDeviceRelauncher,
+        ticks: &[&str],
+    ) -> Vec<String> {
+        let (tx, rx) = mpsc::channel();
+        let ticks: Vec<PathBuf> = ticks.iter().map(PathBuf::from).collect();
+        let sender = std::thread::spawn(move || {
+            for path in ticks {
+                std::thread::sleep(Duration::from_millis(120));
+                tx.send(path).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        let current = AppSlot::default();
+        let mut lines = Vec::new();
+        let mut on_line = |line: &str| lines.push(line.to_string());
+        let out = hot_loop_with(
+            relauncher,
+            backend,
+            rx,
+            Duration::from_millis(10),
+            &current,
+            &mut on_line,
+        )
+        .unwrap();
+        sender.join().unwrap();
+        assert_eq!(out, 0);
+        lines
+    }
+
+    /// Criterion 1: `frust run -d <serial> --watch` (debug) resolves the
+    /// Android device through discovery and starts a hot session on it — the
+    /// Android backend is built for exactly that device, the desktop one never
+    /// is, and the changed path reaches the session. The device relaunch
+    /// loop is never run, and the app is torn down (forward removed,
+    /// force-stopped) when the loop ends.
+    #[test]
+    fn run_in_with_watch_and_an_android_device_starts_a_hot_session() {
+        let mut backend = FakeBackend::on_device(vec![Ok((
+            vec![Outcome::Patched {
+                ms: 5,
+                components: 1,
+            }],
+            None,
+        ))]);
+        backend.set.roots = vec![PathBuf::from("/w/app")];
+        let calls = Arc::clone(&backend.calls);
+        let teardowns = Arc::clone(backend.teardowns.as_ref().unwrap());
+        let seen_device: Arc<Mutex<Option<Device>>> = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&seen_device);
+        let relauncher = FakeDeviceRelauncher::new();
+        let relaunches = Arc::clone(&relauncher.relaunches);
+        let hooks = RunHooks {
+            watch: WatchHooks {
+                install_ctrlc: Box::new(|_| Ok(())),
+                spawn_watcher: Box::new(|_, _| unreachable!("the tick watcher is for --no-hot")),
+                hot: Some(HotHooks {
+                    backend: Box::new(|_, _| panic!("a device run builds no desktop backend")),
+                    android: Box::new(move |_, info, device| {
+                        assert_eq!(info.mode, BuildMode::Debug);
+                        *seen.lock().unwrap() = Some(device.clone());
+                        Ok(Box::new(backend) as Box<dyn HotBackend>)
+                    }),
+                    spawn_watcher: Box::new(|_, tx| {
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(150));
+                            tx.send(PathBuf::from("/w/app/src/lib.rs")).unwrap();
+                            std::thread::sleep(Duration::from_millis(400));
+                        });
+                        Ok(Box::new(()) as Box<dyn std::any::Any>)
+                    }),
+                }),
+                device_relauncher: Box::new(move |_, _, device| {
+                    assert_eq!(device.id, "FAKE-SERIAL");
+                    Box::new(relauncher) as Box<dyn Relauncher>
+                }),
+            },
+            web: WebRunHooks::fake(),
+        };
+
+        let out = run_in_with_hooks(
+            &adb_lists_fake_android(),
+            BuildFlags::default(),
+            Some("FAKE-SERIAL".to_string()),
+            true,
+            false,
+            false,
+            false,
+            hooks,
+        )
+        .unwrap();
+
+        assert_eq!(out, 0);
+        assert_eq!(seen_device.lock().unwrap().clone(), Some(fake_android()));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![vec![PathBuf::from("/w/app/src/lib.rs")]]
+        );
+        assert_eq!(relaunches.load(Ordering::SeqCst), 0);
+        assert_eq!(teardowns.load(Ordering::SeqCst), 1, "the app is torn down");
+    }
+
+    /// Criterion 1: `--no-hot` on Android never builds a hot backend and runs
+    /// the device relaunch loop instead: the pipeline at start, then again on
+    /// a change, the previous app torn down each time.
+    #[test]
+    fn no_hot_on_android_runs_the_device_relaunch_loop_and_never_builds_a_backend() {
+        let relauncher = FakeDeviceRelauncher::new();
+        let relaunches = Arc::clone(&relauncher.relaunches);
+        let teardowns = Arc::clone(&relauncher.teardowns);
+        let hooks = RunHooks {
+            watch: WatchHooks {
+                install_ctrlc: Box::new(|_| Ok(())),
+                spawn_watcher: Box::new(|_, tx| {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(150));
+                        tx.send(()).unwrap();
+                        std::thread::sleep(Duration::from_millis(300));
+                    });
+                    Ok(Box::new(()) as Box<dyn std::any::Any>)
+                }),
+                hot: Some(HotHooks {
+                    backend: Box::new(|_, _| panic!("--no-hot must not build a hot backend")),
+                    android: Box::new(|_, _, _| panic!("--no-hot must not build a hot backend")),
+                    spawn_watcher: Box::new(|_, _| panic!("--no-hot must not watch paths")),
+                }),
+                device_relauncher: Box::new(move |_, _, _| {
+                    Box::new(relauncher) as Box<dyn Relauncher>
+                }),
+            },
+            web: WebRunHooks::fake(),
+        };
+
+        let out = run_in_with_hooks(
+            &adb_lists_fake_android(),
+            BuildFlags::default(),
+            Some("FAKE".to_string()),
+            true,
+            true,
+            false,
+            false,
+            hooks,
+        )
+        .unwrap();
+
+        assert_eq!(out, 0);
+        assert_eq!(relaunches.load(Ordering::SeqCst), 2, "start + one change");
+        assert_eq!(
+            teardowns.load(Ordering::SeqCst),
+            2,
+            "the replaced app and the last one are both torn down"
+        );
+    }
+
+    /// Criterion 1: an Android app without `Capability::HotPatch` (a
+    /// restart-only session) prints `restart required: hot-patch builder
+    /// unsupported: <precondition>` once, is never asked to patch, and the
+    /// device relaunch loop takes over: the first change tears the adopted
+    /// hot app down (its forward included) and reruns the device pipeline.
+    #[test]
+    fn an_android_app_without_hot_patch_prints_builder_unsupported_once_and_relaunch_loops() {
+        let mut backend = FakeBackend::on_device(vec![Ok((
+            Vec::new(),
+            Some("the app does not advertise the HotPatch capability".to_string()),
+        ))]);
+        let mut relauncher = FakeDeviceRelauncher::new();
+        let lines = drive_device_hot(&mut backend, &mut relauncher, &["/w/app/src/lib.rs"]);
+
+        let expected = "restart required: hot-patch builder unsupported: the app does not \
+                        advertise the HotPatch capability; hot reload unavailable, relaunching \
+                        on change instead";
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.starts_with("restart required"))
+                .count(),
+            1,
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|l| l == expected), "{lines:?}");
+        assert!(backend.calls.lock().unwrap().is_empty());
+        assert_eq!(backend.started.load(Ordering::SeqCst), 1);
+        assert_eq!(relauncher.relaunches.load(Ordering::SeqCst), 1, "{lines:?}");
+        assert_eq!(backend.teardowns(), 1, "the adopted hot app is torn down");
+        assert!(lines.iter().any(|l| l == "cold app"), "{lines:?}");
+    }
+
+    /// Criterion 2: a `RestartRequired` prints its reason verbatim, tears the
+    /// app down (forward removed, package force-stopped) and reruns the full
+    /// device pipeline through the backend (a fresh fat session), never the
+    /// cold relaunch.
+    #[test]
+    fn an_android_restart_required_reruns_the_device_pipeline() {
+        let reason = RestartReason::LayoutChanged {
+            records: vec!["HomeState changed layout (4 → 8 bytes)".to_string()],
+        };
+        let mut backend = FakeBackend::on_device(vec![
+            Ok((vec![restart(reason)], None)),
+            Ok((Vec::new(), None)),
+        ]);
+        let mut relauncher = FakeDeviceRelauncher::new();
+        let lines = drive_device_hot(&mut backend, &mut relauncher, &["/w/app/src/home.rs"]);
+
+        assert!(
+            lines.iter().any(|l| l
+                == "restart required: HomeState changed layout (4 → 8 bytes); restarting to \
+                    keep memory safe"),
+            "{lines:?}"
+        );
+        assert_eq!(backend.started.load(Ordering::SeqCst), 2, "{lines:?}");
+        assert_eq!(
+            backend.teardowns(),
+            2,
+            "the restarted app at the restart, the fresh one at the end"
+        );
+        assert_eq!(relauncher.relaunches.load(Ordering::SeqCst), 0);
+    }
+
+    /// Criterion 2: `patched in N ms (...)` is printed only for the
+    /// session's own `Patched` answer — a patch with no seam hit comes back
+    /// as `RestartRequired(NoSeamHit)` and prints `restart required: ...`,
+    /// relaunching through the device pipeline.
+    #[test]
+    fn an_android_session_prints_patched_only_for_a_patched_answer() {
+        let mut backend = FakeBackend::on_device(vec![
+            Ok((
+                vec![
+                    Outcome::Patched {
+                        ms: 41,
+                        components: 3,
+                    },
+                    restart(RestartReason::NoSeamHit),
+                ],
+                None,
+            )),
+            Ok((Vec::new(), None)),
+        ]);
+        let mut relauncher = FakeDeviceRelauncher::new();
+        let lines = drive_device_hot(
+            &mut backend,
+            &mut relauncher,
+            &["/w/app/src/a.rs", "/w/app/src/b.rs"],
+        );
+
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with("patched in")).count(),
+            1,
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&"patched in 41 ms (3 components rebuilt)".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(&format!("restart required: {}", RestartReason::NoSeamHit)),
+            "{lines:?}"
+        );
+        assert_eq!(backend.started.load(Ordering::SeqCst), 2, "{lines:?}");
+    }
+
+    /// `--watch -d <android>` accepts only a debug build without
+    /// `--features`, refusing before anything runs.
+    #[test]
+    fn android_watch_refuses_a_non_debug_build_and_a_features_passthrough() {
+        let runner = FakeProcessRunner::new();
+        for info in [profile_info(), release_info()] {
+            let err = run_watch_on_device(
+                &runner,
+                &fake_android(),
+                &info,
+                NO_EXTRA,
+                false,
+                WatchHooks::fake(),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("needs a debug build"), "{err}");
+        }
+        let err = run_watch_on_device(
+            &runner,
+            &fake_android(),
+            &debug_info(),
+            &["extra".to_string()],
+            false,
+            WatchHooks::fake(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--features"), "{err}");
+    }
+
+    /// Records every `run` invocation (answered by the inner fake).
+    struct RecordingRunner {
+        inner: FakeProcessRunner,
+        runs: Mutex<Vec<String>>,
+    }
+
+    impl ProcessRunner for RecordingRunner {
+        fn run(&self, cmd: &str, args: &[&str]) -> Result<Output> {
+            let key = std::iter::once(cmd)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.runs.lock().unwrap().push(key);
+            self.inner.run(cmd, args)
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+            on_line: &mut dyn FnMut(&str),
+        ) -> Result<Output> {
+            self.inner.run_streaming(cmd, args, cwd, env, on_line)
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+            env: &[(&str, &str)],
+        ) -> Result<StreamHandle> {
+            self.inner.spawn_streaming(cmd, args, cwd, env)
+        }
+    }
+
+    /// A device app's teardown removes the hot session's `adb forward` (when
+    /// one was allocated) and force-stops the launched package, addressed by
+    /// the resolved device's serial; a cold app (no forward) only
+    /// force-stops.
+    #[test]
+    fn a_device_app_teardown_removes_the_forward_and_force_stops_the_package() {
+        for (port, expected) in [
+            (
+                Some(41234),
+                vec![
+                    "adb -s FAKE-SERIAL forward --remove tcp:41234",
+                    "adb -s FAKE-SERIAL shell am force-stop it.example.fake",
+                ],
+            ),
+            (
+                None,
+                vec!["adb -s FAKE-SERIAL shell am force-stop it.example.fake"],
+            ),
+        ] {
+            let runner = Arc::new(RecordingRunner {
+                inner: FakeProcessRunner::new().with_hanging_stream("logcat", ["log"]),
+                runs: Mutex::new(Vec::new()),
+            });
+            let launch = AndroidLaunch {
+                stream: runner.spawn_streaming("logcat", &[], None, &[]).unwrap(),
+                package: "it.example.fake".to_string(),
+            };
+            let app = device_app(runner.clone(), "FAKE-SERIAL", launch, port);
+            app.stop();
+            assert_eq!(*runner.runs.lock().unwrap(), expected);
+        }
+    }
+
+    /// The real device relauncher stops the previous app before rerunning
+    /// the pipeline, and a pipeline failure (here: no project at the root)
+    /// is reported and leaves the loop running with nothing launched.
+    #[test]
+    fn the_device_relauncher_stops_the_previous_app_and_survives_a_pipeline_failure() {
+        let runner = FakeProcessRunner::new().with_hanging_stream("app", ["up"]);
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&stopped);
+        let current = AppSlot::default();
+        lock_slot(&current).replace(RunningApp {
+            handle: runner.spawn_streaming("app", &[], None, &[]).unwrap(),
+            teardown: Some(Box::new(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+            })),
+        });
+        let mut relauncher = DeviceRelauncher {
+            runner: Arc::new(FakeProcessRunner::new()),
+            root: PathBuf::from("/nonexistent/frust-cli-device-watch"),
+            device: fake_android(),
+            info: debug_info(),
+        };
+        let mut lines = Vec::new();
+        let flow = relauncher
+            .relaunch(&current, &mut |line| lines.push(line.to_string()))
+            .unwrap();
+        assert_eq!(flow, ControlFlow::Continue(()));
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+        assert!(lock_slot(&current).is_none());
+        assert!(!current.starting.load(Ordering::SeqCst), "the start ended");
+        assert!(
+            lines.iter().any(|l| l.contains("device pipeline failed")),
+            "{lines:?}"
+        );
+    }
+
+    /// Criterion 2: the real device relauncher runs the pipeline under the
+    /// slot's shared cancel flag — a Ctrl-C raised it, so the relaunch ends
+    /// the loop (`Break`) with nothing parked, and a failure the cancel
+    /// caused is not reported as a retry.
+    #[test]
+    fn a_cancelled_device_relaunch_ends_the_loop() {
+        let current = AppSlot::default();
+        assert!(on_ctrlc(&current), "no start in flight: exit at once");
+        let mut relauncher = DeviceRelauncher {
+            runner: Arc::new(FakeProcessRunner::new()),
+            root: PathBuf::from("/nonexistent/frust-cli-device-watch"),
+            device: fake_android(),
+            info: debug_info(),
+        };
+        let mut lines = Vec::new();
+        let flow = relauncher
+            .relaunch(&current, &mut |line| lines.push(line.to_string()))
+            .unwrap();
+        assert_eq!(flow, ControlFlow::Break(()));
+        assert!(lock_slot(&current).is_none());
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.contains("watching for a source change")),
+            "{lines:?}"
+        );
+    }
+
+    /// Criterion 1/2 (`--no-hot`): with a Ctrl-C landed during the start, a
+    /// device pipeline that issued `am start` and then answered a cancel
+    /// or a failure (the SIGINT also killed the in-flight `adb shell am
+    /// start`) force-stops the package it launched and ends the loop,
+    /// reporting no retry; one stopped before `am start` stops nothing.
+    /// Without the Ctrl-C a failure is reported for a retry and stops
+    /// nothing (the negative control). One that launched hands its app to
+    /// [`StartInFlight::end`], which stops it (logcat killed, force-stop).
+    #[test]
+    fn a_cancelled_device_launch_force_stops_what_it_launched() {
+        let recording = || {
+            Arc::new(RecordingRunner {
+                inner: FakeProcessRunner::new().with_hanging_stream("logcat", ["log"]),
+                runs: Mutex::new(Vec::new()),
+            })
+        };
+        let force_stop = "adb -s FAKE-SERIAL shell am force-stop it.example.fake";
+        let am_start_failed = || Some(anyhow::anyhow!("`adb shell am start` failed: killed"));
+
+        for (ctrl_c, error, launched, stops) in [
+            (true, None, Some("it.example.fake"), true),
+            (true, am_start_failed(), Some("it.example.fake"), true),
+            (true, None, None, false),
+            (false, am_start_failed(), Some("it.example.fake"), false),
+        ] {
+            let failed = error.is_some();
+            let runner = recording();
+            let current = AppSlot::default();
+            let start = current.begin_start();
+            if ctrl_c {
+                assert!(!on_ctrlc(&current), "the start in flight is cancelled");
+            }
+            let mut lines = Vec::new();
+            let flow = settle_device_launch(
+                runner.clone(),
+                "FAKE-SERIAL",
+                Err(StoppedShort {
+                    error,
+                    launched: launched.map(str::to_string),
+                }),
+                start,
+                &mut |line| lines.push(line.to_string()),
+            );
+            let case = format!("ctrl_c {ctrl_c}, failed {failed}, launched {launched:?}");
+            let expected: Vec<&str> = if stops { vec![force_stop] } else { vec![] };
+            assert_eq!(*runner.runs.lock().unwrap(), expected, "{case}");
+            assert_eq!(flow.is_break(), ctrl_c, "{case}");
+            assert_eq!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("watching for a source change")),
+                failed && !ctrl_c,
+                "{case}: {lines:?}"
+            );
+            assert!(!current.starting.load(Ordering::SeqCst), "{case}: ended");
+        }
+
+        let runner = recording();
+        let current = AppSlot::default();
+        let start = current.begin_start();
+        assert!(!on_ctrlc(&current));
+        let launch = AndroidLaunch {
+            stream: runner.spawn_streaming("logcat", &[], None, &[]).unwrap(),
+            package: "it.example.fake".to_string(),
+        };
+        let flow = settle_device_launch(
+            runner.clone(),
+            "FAKE-SERIAL",
+            Ok(launch),
+            start,
+            &mut |_| {},
+        );
+        assert_eq!(flow, ControlFlow::Break(()));
+        assert!(lock_slot(&current).is_none(), "nothing parked");
+        assert_eq!(*runner.runs.lock().unwrap(), vec![force_stop]);
+    }
+
+    /// Criterion 3: a start that ignores the cancel flag (the desktop one)
+    /// takes no start mark, so a raised flag cannot end it: its app is
+    /// parked and its session is live.
+    #[test]
+    fn a_start_that_ignores_cancel_parks_its_app_whatever_the_flag_says() {
+        let current = AppSlot::default();
+        current.cancel.store(true, Ordering::SeqCst);
+        let mut backend = FakeBackend::new(vec![Ok((Vec::new(), None))]);
+        let launched = launch_hot(&mut backend, &current, &mut |_| {});
+        assert!(matches!(launched, Launched::Live(_)));
+        assert!(lock_slot(&current).is_some(), "the app is parked");
+        assert!(!current.starting.load(Ordering::SeqCst));
+        if let Some(app) = lock_slot(&current).take() {
+            app.stop();
+        }
+    }
+
+    /// The handler outside a start stops the live app and exits at once;
+    /// during a cancellable start the first Ctrl-C raises the cancel flag
+    /// and leaves the exit to the loop, and a second exits at once.
+    #[test]
+    fn ctrl_c_exits_at_once_except_during_a_cancellable_start() {
+        let runner = FakeProcessRunner::new().with_hanging_stream("app", ["up"]);
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&stopped);
+        let current = AppSlot::default();
+        lock_slot(&current).replace(RunningApp {
+            handle: runner.spawn_streaming("app", &[], None, &[]).unwrap(),
+            teardown: Some(Box::new(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+            })),
+        });
+        assert!(on_ctrlc(&current), "an attached app: exit at once");
+        assert_eq!(stopped.load(Ordering::SeqCst), 1, "after stopping it");
+        assert!(lock_slot(&current).is_none());
+
+        let current = AppSlot::default();
+        let start = current.begin_start();
+        assert!(!on_ctrlc(&current), "first Ctrl-C during a start");
+        assert!(current.cancel.load(Ordering::SeqCst));
+        assert!(on_ctrlc(&current), "a second Ctrl-C exits at once");
+        drop(start);
+        assert!(
+            !current.starting.load(Ordering::SeqCst),
+            "a dropped mark clears"
+        );
+    }
+
+    /// Criterion 1: a Ctrl-C during the Android hot start, wired through
+    /// the `install_ctrlc` hook, cancels the start instead of exiting; the
+    /// start tears down what it launched (`start_android`'s unwind) and the
+    /// watch ends with 0 — no patch, no relaunch, no retry.
+    #[test]
+    fn a_ctrl_c_during_the_android_hot_start_tears_it_down_and_ends_the_watch() {
+        let captured: Arc<Mutex<Option<AppSlot>>> = Arc::new(Mutex::new(None));
+        let mut backend = FakeBackend::on_device(vec![Ok((Vec::new(), None))]);
+        backend.interrupt = Some(Interrupt {
+            at_start: 1,
+            slot: Arc::clone(&captured),
+            unwound_by_start: true,
+        });
+        let calls = Arc::clone(&backend.calls);
+        let started = Arc::clone(&backend.started);
+        let teardowns = Arc::clone(backend.teardowns.as_ref().unwrap());
+        let relauncher = FakeDeviceRelauncher::new();
+        let relaunches = Arc::clone(&relauncher.relaunches);
+        // The watcher outlives the loop: only the Ctrl-C can end it.
+        let (keep_tx, keep_rx) = mpsc::channel::<mpsc::Sender<PathBuf>>();
+        let hooks = RunHooks {
+            watch: WatchHooks {
+                install_ctrlc: Box::new(move |slot| {
+                    *captured.lock().unwrap() = Some(slot);
+                    Ok(())
+                }),
+                spawn_watcher: Box::new(|_, _| unreachable!("the tick watcher is for --no-hot")),
+                hot: Some(HotHooks {
+                    backend: Box::new(|_, _| panic!("a device run builds no desktop backend")),
+                    android: Box::new(move |_, _, _| Ok(Box::new(backend) as Box<dyn HotBackend>)),
+                    spawn_watcher: Box::new(move |_, tx| {
+                        keep_tx.send(tx).unwrap();
+                        Ok(Box::new(()) as Box<dyn std::any::Any>)
+                    }),
+                }),
+                device_relauncher: Box::new(move |_, _, _| {
+                    Box::new(relauncher) as Box<dyn Relauncher>
+                }),
+            },
+            web: WebRunHooks::fake(),
+        };
+
+        let out = run_in_with_hooks(
+            &adb_lists_fake_android(),
+            BuildFlags::default(),
+            Some("FAKE-SERIAL".to_string()),
+            true,
+            false,
+            false,
+            false,
+            hooks,
+        )
+        .unwrap();
+        drop(keep_rx);
+
+        assert_eq!(out, 0);
+        assert_eq!(started.load(Ordering::SeqCst), 1, "no retry");
+        assert_eq!(teardowns.load(Ordering::SeqCst), 1, "the launched app");
+        assert!(calls.lock().unwrap().is_empty());
+        assert_eq!(relaunches.load(Ordering::SeqCst), 0);
+    }
+
+    /// Criterion 1: a Ctrl-C during a hot restart's fresh start that lands
+    /// after the start's last cancel check — the start hands its app back —
+    /// stops that app before the loop ends with 0: the restarted app and
+    /// the fresh one are both torn down, each after its session is
+    /// dropped. Deterministic: the one change is queued before the loop
+    /// runs and its sender outlives the loop, so only the Ctrl-C ends it.
+    #[test]
+    fn a_ctrl_c_during_an_android_hot_restart_stops_the_fresh_app_and_ends_the_loop() {
+        let current = AppSlot::default();
+        let mut backend = FakeBackend::on_device(vec![
+            Ok((vec![restart(RestartReason::NoSeamHit)], None)),
+            Ok((Vec::new(), None)),
+        ]);
+        backend.interrupt = Some(Interrupt {
+            at_start: 2,
+            slot: Arc::new(Mutex::new(Some(Arc::clone(&current)))),
+            unwound_by_start: false,
+        });
+        let events = Arc::clone(&backend.events);
+        let mut relauncher = FakeDeviceRelauncher::new();
+        let (tx, rx) = mpsc::channel();
+        tx.send(PathBuf::from("/w/app/src/a.rs")).unwrap();
+        let mut lines = Vec::new();
+        let out = hot_loop_with(
+            &mut relauncher,
+            &mut backend,
+            rx,
+            Duration::from_millis(10),
+            &current,
+            &mut |line| lines.push(line.to_string()),
+        )
+        .unwrap();
+        drop(tx);
+
+        assert_eq!(out, 0);
+        assert_eq!(backend.started.load(Ordering::SeqCst), 2, "{lines:?}");
+        assert_eq!(
+            backend.teardowns(),
+            2,
+            "the restarted app and the fresh one"
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "session 1 dropped",
+                "app 1 stopped",
+                "session 2 dropped",
+                "app 2 stopped"
+            ],
+            "criterion 6: each session goes before its app"
+        );
+        assert!(lock_slot(&current).is_none());
+        assert_eq!(relauncher.relaunches.load(Ordering::SeqCst), 0);
+    }
+
+    /// Criterion 2: a Ctrl-C during a `--no-hot` device relaunch cancels it
+    /// instead of exiting, and the relaunch loop ends with 0 once the
+    /// relaunch has stopped what it launched. Deterministic as above: the
+    /// change is queued up front and its sender outlives the loop.
+    #[test]
+    fn a_ctrl_c_during_a_no_hot_device_relaunch_ends_the_relaunch_loop() {
+        let current = AppSlot::default();
+        let mut relauncher = FakeDeviceRelauncher::new();
+        relauncher.ctrl_c_at = Some(2);
+        let (tx, rx) = mpsc::channel();
+        tx.send(()).unwrap();
+        let out = relaunch_loop_with(
+            &mut relauncher,
+            &rx,
+            Duration::from_millis(10),
+            &current,
+            &mut |_| {},
+        )
+        .unwrap();
+        drop(tx);
+
+        assert_eq!(out, 0);
+        assert_eq!(relauncher.relaunches.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            relauncher.teardowns.load(Ordering::SeqCst),
+            2,
+            "the replaced app and the cancelled relaunch's app"
+        );
+        assert!(lock_slot(&current).is_none());
     }
 
     #[test]

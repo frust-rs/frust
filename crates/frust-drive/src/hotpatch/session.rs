@@ -26,9 +26,14 @@
 //! applied — or, when the app advertises `patch_file_hand_off`, restricted
 //! to `0600` and named on `apply_patch` by absolute path and SHA-256 instead
 //! of uploaded (the session is loopback-only, so the app reads the very file
-//! the host wrote). One patch is in flight at a time, and nothing is ever sent to a
-//! restart-only session, to a non-loopback endpoint, with pending records
-//! or over budget.
+//! the host wrote). A device session (Android, through `adb forward`;
+//! [`super::android`]) always uploads, and uploads a stripped copy of the
+//! patch: the app is not on this host, and the host alone reads the
+//! patch's symbols, from the unstripped image. `len`, the byte budget and
+//! any digest describe the bytes the app receives. One
+//! patch is in flight at a time, and nothing is ever sent to a restart-only
+//! session, to a non-loopback endpoint, with pending records or over
+//! budget.
 //!
 //! **Accepted sets.** A candidate's layout and seam entries are merged only
 //! when its `PatchOutcome` reports `applied: true` with no layout mismatch;
@@ -40,10 +45,10 @@
 //! set, so no object may reach a link before its DWARF passed the layout
 //! gate in a candidate the session then accepted. Every object a replay
 //! produces stays in the builder's ungated set (`Ungated`) — through a
-//! round that fails on a later unit or on the tip bin — and each candidate's
-//! layout table is extracted from that whole set, not from the last round's
-//! objects alone. Only the session's acceptance of an applied patch
-//! (`PatchBuilder::accepted`) empties it.
+//! round that fails on a later unit or on the image unit — and each
+//! candidate's layout table is extracted from that whole set, not from the
+//! last round's objects alone. Only the session's acceptance of an applied
+//! patch (`PatchBuilder::accepted`) empties it.
 //!
 //! **Outcome.** A reply lost after `apply_patch` was sent is
 //! `PatchOutcomeUnknown` (the patch may be live). A missed seam key in the
@@ -55,10 +60,12 @@
 //! `docs/CLI_ARCHITECTURE.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use frust_devtools_protocol::{
@@ -115,7 +122,7 @@ const DISCOVERY_POLL: Duration = Duration::from_millis(20);
 
 /// `<target>/frust-hotpatch/fat/<scope>`: the fat image, its archive and
 /// its captured link arguments, one directory per capture scope.
-const FAT_DIR: &str = "fat";
+pub(super) const FAT_DIR: &str = "fat";
 
 /// How many patches a session may load before it must restart the app.
 /// Patch images are never unloaded, so the budget bounds a long session's
@@ -596,11 +603,49 @@ enum Compiled {
 
 /// A linked patch, ready to send.
 struct LinkedPatch {
-    /// Where the link wrote it (`patch-<n>` under the session dir).
+    /// The file the app is sent or named: the linked `patch-<n>` under the
+    /// session dir, or its stripped upload copy beside it.
     path: PathBuf,
+    /// `path`'s contents.
     bytes: Vec<u8>,
     table: JumpTableWire,
+    /// The symbols of the linked, unstripped image.
     symbols: ImageSymbols,
+}
+
+/// Reads the thin-linked image at `patch`, builds its jump table against
+/// `cache` and, when `upload_strip` names a strip tool, writes the stripped
+/// copy the app is sent ([`super::android::strip_for_upload`]). Symbols and
+/// table always come from `patch` itself; without a strip tool the patch is
+/// sent as linked.
+fn read_linked(
+    runner: &dyn ProcessRunner,
+    cache: &SymbolCache,
+    target: Target,
+    patch: PathBuf,
+    upload_strip: Option<&Path>,
+) -> Result<LinkedPatch, HotpatchError> {
+    let read = |path: &Path| {
+        std::fs::read(path)
+            .map_err(|err| HotpatchError::io(format!("reading `{}`", path.display()), err))
+    };
+    let bytes = read(&patch)?;
+    let symbols = ImageSymbols::parse(&bytes, target, &format!("patch `{}`", patch.display()))?;
+    let table = super::jump_table::create_jump_table(cache, &symbols)?;
+    let (path, bytes) = match upload_strip {
+        None => (patch, bytes),
+        Some(strip) => {
+            let upload = super::android::strip_for_upload(runner, strip, &patch)?;
+            let bytes = read(&upload)?;
+            (upload, bytes)
+        }
+    };
+    Ok(LinkedPatch {
+        path,
+        bytes,
+        table,
+        symbols,
+    })
 }
 
 /// Prepares the loopback hand-off of the patch at `path` whose bytes are
@@ -637,7 +682,7 @@ trait PatchBuilder: Send {
 }
 
 /// The objects compiled since the session last accepted a patch, by unit:
-/// a lib's rlib, the tip bin's typed objects. A patch links every one of
+/// a lib's rlib, the image unit's typed objects. A patch links every one of
 /// them, so each candidate's layout table is extracted from all of them. A
 /// unit enters on its successful replay — whether or not the rest of its
 /// round compiled — replacing its earlier entry; the set is emptied only
@@ -672,7 +717,7 @@ impl Ungated {
 }
 
 /// How the session reaches the app.
-enum AppLink {
+pub(super) enum AppLink {
     /// Hot patching is off for this process; every change restarts.
     RestartOnly { reason: String },
     Live {
@@ -680,6 +725,12 @@ enum AppLink {
         endpoint: SocketAddr,
         pid: u32,
         anchor_runtime: u64,
+        /// Whether the app runs on this host and so can read a file the
+        /// builder wrote. `false` for a device reached through `adb
+        /// forward`: the endpoint is loopback on this host, but the app is
+        /// another machine, so a patch is always uploaded in chunks there,
+        /// whatever its `patch_file_hand_off` says.
+        same_host: bool,
     },
 }
 
@@ -688,6 +739,21 @@ enum AppLink {
 /// IPv4-mapped IPv6 address counts as non-loopback); an app without
 /// `HotPatch` gives the precondition its `hotpatch_info` refusal names.
 fn attach_app(endpoint: SocketAddr, token: Option<&str>, triple: &str) -> AppLink {
+    attach(endpoint, token, triple, true)
+}
+
+/// [`attach_app`] for an app on a device, reached through a host loopback
+/// port that forwards to it (`adb forward`): the session never hands such
+/// an app a host path, and uploads every patch in chunks.
+pub(super) fn attach_device_app(
+    endpoint: SocketAddr,
+    token: Option<&str>,
+    triple: &str,
+) -> AppLink {
+    attach(endpoint, token, triple, false)
+}
+
+fn attach(endpoint: SocketAddr, token: Option<&str>, triple: &str, same_host: bool) -> AppLink {
     let restart_only = |reason: String| AppLink::RestartOnly { reason };
     if !endpoint.ip().is_loopback() {
         return restart_only(RestartReason::EndpointNotLoopback { endpoint }.to_string());
@@ -730,6 +796,7 @@ fn attach_app(endpoint: SocketAddr, token: Option<&str>, triple: &str) -> AppLin
         endpoint,
         pid: info.pid,
         anchor_runtime: info.anchor_runtime,
+        same_host,
     }
 }
 
@@ -792,7 +859,7 @@ impl HotSession {
     fn change(&mut self, paths: &[PathBuf]) -> Outcome {
         let started = Instant::now();
         let restart = Outcome::RestartRequired;
-        let (client, pid, anchor_runtime) = match &self.app {
+        let (client, pid, anchor_runtime, same_host) = match &self.app {
             AppLink::RestartOnly { reason } => {
                 return restart(RestartReason::HotPatchUnavailable {
                     reason: reason.clone(),
@@ -803,6 +870,7 @@ impl HotSession {
                 endpoint,
                 pid,
                 anchor_runtime,
+                same_host,
             } => {
                 let peer_loopback = client.peer_addr().is_some_and(|a| a.ip().is_loopback());
                 if !endpoint.ip().is_loopback() || !peer_loopback {
@@ -810,7 +878,7 @@ impl HotSession {
                         endpoint: *endpoint,
                     });
                 }
-                (client, *pid, *anchor_runtime)
+                (client, *pid, *anchor_runtime, *same_host)
             }
         };
 
@@ -882,9 +950,11 @@ impl HotSession {
 
         let patch_id = self.next_patch_id;
         self.next_patch_id += 1;
-        // The endpoint and peer were checked loopback above, so an app that
-        // takes the hand-off reads the file this host just wrote.
-        let file = if info.patch_file_hand_off {
+        // The endpoint and peer were checked loopback above, so an app on
+        // this host that takes the hand-off reads the file this host just
+        // wrote. A device app behind `adb forward` is never named a host
+        // path, whatever it advertises.
+        let file = if info.patch_file_hand_off && same_host {
             match hand_off(&linked.path, &linked.bytes) {
                 Ok(file) => file,
                 Err(err) => return restart(RestartReason::builder(&err)),
@@ -1091,7 +1161,7 @@ pub fn start_desktop(
     let budget = Budget::from_section(manifest.as_ref().and_then(|m| m.hotpatch.as_ref()));
 
     let metadata = super::graph::cargo_metadata(runner, &start.root.join("Cargo.toml"), None)?;
-    let mut graph = WorkspaceGraph::from_metadata(&metadata, start.package, start.bin)?;
+    let graph = WorkspaceGraph::from_metadata(&metadata, start.package, start.bin)?;
     check_debuginfo(host.env, start.root, graph.workspace_root())?;
     let target_dir = target_directory(&metadata)?;
 
@@ -1150,51 +1220,25 @@ pub fn start_desktop(
     run_fat_build(runner, &fat, start.root, on_line)?;
 
     let link_args = read_link_args(&link.args_file)?;
-    let records = load_records(&scope_dir)?;
-    let tip_record = records.get(&tip_bin.record_key()).ok_or_else(|| {
-        HotpatchError::unsupported(format!(
-            "the fat build captured no `{}` invocation",
-            tip_bin.record_key()
-        ))
-    })?;
-    let tip_env = replay_env(tip_record);
-    let linker = fat_link::linker_program(custom_linker(host.env, &triple).as_deref())?;
-    let exe = fat_dir.join(&tip_bin.target);
-    let fat_out = fat_link::fat_link(
-        runner,
-        &FatLinkRequest {
+    let base = link_base(
+        host,
+        BaseRequest {
+            graph,
+            link_args,
+            image_unit: tip_bin.clone(),
+            image: fat_dir.join(&tip_bin.target),
+            custom_linker: custom_linker(host.env, &triple),
+            upload_strip: None,
+            target,
             flavor,
-            linker: &linker,
-            link_args: &link_args,
-            envs: &tip_env,
-            target_dir: &target_dir,
+            target_dir,
             archive_dir: &fat_dir,
-            exe: &exe,
+            scope_dir,
+            session: desktop_session_name(&tip_bin.target),
         },
     )?;
 
-    let rlibs = member_rlibs(&link_args, &graph);
-    let tip_objects = tip_objects(&link_args);
-    let crates = replayable_crates(&graph);
-    let typed = typed_objects(&tip_objects, &crates)?;
-    let base_layouts = layout::extract(
-        &rlibs.values().cloned().chain(typed).collect::<Vec<_>>(),
-        &crates,
-    )?
-    .table;
-    let base_seams = SeamSet::from_inputs(
-        &rlibs
-            .values()
-            .cloned()
-            .chain(tip_objects)
-            .collect::<Vec<_>>(),
-    )?;
-    let session = format!("session-{}", tip_bin.target);
-    let accepted = AcceptedSets::begin(&target_dir, &session, base_layouts, base_seams)?;
-    let cache = SymbolCache::load(&fat_out.exe, target)?;
-    seed_dep_info(&mut graph, &records);
-
-    let plan = desktop_run::desktop_exe_plan(start.root, &fat_out.exe, start.info);
+    let plan = desktop_run::desktop_exe_plan(start.root, base.image(), start.info);
     let mut child =
         desktop_run::spawn_desktop_plan(runner, &plan).map_err(|err| StartError::Launch {
             detail: format!("{err:#}"),
@@ -1214,7 +1258,132 @@ pub fn start_desktop(
         }
     };
 
-    let images = vec![cache.symbols().clone()];
+    Ok((open_session(base, app, budget), child))
+}
+
+/// The desktop session directory's name, `session-<bin>`: one running
+/// desktop app per bin on this host. The Android name also carries the
+/// triple and the device ([`super::android::session_name`]).
+pub(super) fn desktop_session_name(bin: &str) -> String {
+    format!("session-{bin}")
+}
+
+/// What [`link_base`] links the base image from: the fat build's graph,
+/// captured link line and capture scope, and where the image goes. Shared
+/// by [`start_desktop`] and the Android start
+/// ([`super::android::start_android`]).
+pub(super) struct BaseRequest<'a> {
+    pub graph: WorkspaceGraph,
+    /// The image link's captured arguments (expanded).
+    pub link_args: Vec<String>,
+    /// The unit whose link is the running image: the tip bin on desktop,
+    /// the tip lib (its `cdylib`) on Android.
+    pub image_unit: ReplayUnit,
+    /// Where the fat image is written, under the cargo target dir.
+    pub image: PathBuf,
+    /// The build's configured linker, if any (see
+    /// [`fat_link::linker_program`]).
+    pub custom_linker: Option<PathBuf>,
+    /// The tool that strips each patch into the copy the app is sent (the
+    /// NDK's `llvm-strip` on Android); `None` sends the linked patch.
+    pub upload_strip: Option<PathBuf>,
+    pub target: Target,
+    pub flavor: LinkerFlavor,
+    pub target_dir: PathBuf,
+    /// Where `libdeps-<hash>.a` lives: one directory per capture scope.
+    pub archive_dir: &'a Path,
+    pub scope_dir: PathBuf,
+    /// The session directory's name under `<target>/frust-hotpatch`.
+    pub session: String,
+}
+
+/// A linked base image and the real builder over it, ready for a session
+/// once the app is running.
+pub(super) struct FatBase {
+    builder: DesktopBuilder,
+    accepted: AcceptedSets,
+    image: PathBuf,
+}
+
+impl FatBase {
+    /// The fat image, under the cargo target dir.
+    pub(super) fn image(&self) -> &Path {
+        &self.image
+    }
+
+    /// The file the session's symbol cache was read from: the unstripped
+    /// fat image itself.
+    pub(super) fn symbol_source(&self) -> &Path {
+        self.builder.cache.path()
+    }
+}
+
+/// The fat link and base-image half of a session start, shared by every
+/// target: reads the capture records, links the fat image with the image
+/// unit's captured environment, extracts the base layout table and seam
+/// instances, starts the session's accepted sets, reads the symbol cache
+/// from the image just linked and seeds the graph's dep-info.
+pub(super) fn link_base(
+    host: &SessionHost<'_>,
+    request: BaseRequest<'_>,
+) -> Result<FatBase, HotpatchError> {
+    let runner: &dyn ProcessRunner = &*host.runner;
+    let BaseRequest {
+        mut graph,
+        link_args,
+        image_unit,
+        image,
+        custom_linker,
+        upload_strip,
+        target,
+        flavor,
+        target_dir,
+        archive_dir,
+        scope_dir,
+        session,
+    } = request;
+    let records = load_records(&scope_dir)?;
+    let tip_record = records.get(&image_unit.record_key()).ok_or_else(|| {
+        HotpatchError::unsupported(format!(
+            "the fat build captured no `{}` invocation",
+            image_unit.record_key()
+        ))
+    })?;
+    let tip_env = replay_env(tip_record);
+    let linker = fat_link::linker_program(custom_linker.as_deref())?;
+    let fat_out = fat_link::fat_link(
+        runner,
+        &FatLinkRequest {
+            flavor,
+            linker: &linker,
+            link_args: &link_args,
+            envs: &tip_env,
+            target_dir: &target_dir,
+            archive_dir,
+            exe: &image,
+        },
+    )?;
+
+    let rlibs = member_rlibs(&link_args, &graph);
+    let tip_objects = tip_objects(&link_args);
+    let crates = replayable_crates(&graph);
+    let typed = typed_objects(&tip_objects, &crates)?;
+    let base_layouts = layout::extract(
+        &rlibs.values().cloned().chain(typed).collect::<Vec<_>>(),
+        &crates,
+    )?
+    .table;
+    let base_seams = SeamSet::from_inputs(
+        &rlibs
+            .values()
+            .cloned()
+            .chain(tip_objects)
+            .collect::<Vec<_>>(),
+    )?;
+    let accepted = AcceptedSets::begin(&target_dir, &session, base_layouts, base_seams)?;
+    let cache = SymbolCache::load(&fat_out.exe, target)?;
+    seed_dep_info(&mut graph, &records);
+
     let builder = DesktopBuilder {
         runner: Arc::clone(&host.runner),
         graph,
@@ -1225,11 +1394,12 @@ pub fn start_desktop(
         rlibs,
         tip_link_args: link_args,
         tip_env,
-        tip_bin,
+        image_unit,
         cache,
         target,
         flavor,
         linker,
+        upload_strip,
         target_dir,
         session,
         session_dir: accepted.dir().to_path_buf(),
@@ -1238,55 +1408,98 @@ pub fn start_desktop(
         crates,
         tip_replays: 0,
     };
-    Ok((
-        HotSession {
-            builder: Box::new(builder),
-            app,
-            accepted,
-            images,
-            budget,
-            restart: None,
-            next_patch_id: 1,
-        },
-        child,
-    ))
+    Ok(FatBase {
+        builder,
+        accepted,
+        image: fat_out.exe,
+    })
+}
+
+/// The session over `base`'s builder and the running app `app`.
+pub(super) fn open_session(base: FatBase, app: AppLink, budget: Budget) -> HotSession {
+    let FatBase {
+        builder, accepted, ..
+    } = base;
+    let images = vec![builder.cache.symbols().clone()];
+    HotSession {
+        builder: Box::new(builder),
+        app,
+        accepted,
+        images,
+        budget,
+        restart: None,
+        next_patch_id: 1,
+    }
 }
 
 /// What the fat image's output announced.
-enum Announced {
+pub(super) enum Announced {
     Endpoint(Discovery),
     /// The devtools service did not start, or said nothing in time.
     Failure(String),
     Exited,
 }
 
+/// A raised cancel flag ended [`read_discovery_cancellable`]'s wait.
+pub(super) struct Cancelled;
+
 /// Reads the child's output up to its devtools discovery line, forwarding
-/// every line before it (token redacted) to `on_line`.
-fn read_discovery(child: &mut StreamHandle, on_line: &mut dyn FnMut(&str)) -> Announced {
+/// every line before it (token redacted) to `on_line`. Nothing cancels
+/// this wait (the desktop start has no cancel seam).
+pub(super) fn read_discovery(child: &mut StreamHandle, on_line: &mut dyn FnMut(&str)) -> Announced {
+    match wait_for_discovery(child, on_line, || None::<Infallible>) {
+        Ok(announced) => announced,
+        Err(never) => match never {},
+    }
+}
+
+/// [`read_discovery`] that also observes `cancel` at every poll: a raised
+/// flag ends the wait with [`Cancelled`], and the child is the caller's to
+/// stop.
+pub(super) fn read_discovery_cancellable(
+    child: &mut StreamHandle,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<Announced, Cancelled> {
+    wait_for_discovery(child, on_line, || {
+        cancel.load(Ordering::SeqCst).then_some(Cancelled)
+    })
+}
+
+/// The discovery wait both readers share; `cancelled` is polled before
+/// every read and its `Some` ends the wait.
+fn wait_for_discovery<C>(
+    child: &mut StreamHandle,
+    on_line: &mut dyn FnMut(&str),
+    mut cancelled: impl FnMut() -> Option<C>,
+) -> Result<Announced, C> {
     let deadline = Instant::now() + DISCOVERY_DEADLINE;
     loop {
+        if let Some(cancelled) = cancelled() {
+            return Err(cancelled);
+        }
         match child.lines.try_recv() {
             Ok(line) => {
                 on_line(&redact_discovery_token(&line));
                 if let Some(discovery) = parse_discovery_line(&line) {
-                    return Announced::Endpoint(discovery);
+                    return Ok(Announced::Endpoint(discovery));
                 }
                 if let Some(reason) = parse_failure_line(&line) {
-                    return Announced::Failure(format!(
+                    return Ok(Announced::Failure(format!(
                         "the devtools service did not start: {reason}"
-                    ));
+                    )));
                 }
             }
             Err(TryRecvError::Empty) if Instant::now() < deadline => {
                 std::thread::sleep(DISCOVERY_POLL);
             }
             Err(TryRecvError::Empty) => {
-                return Announced::Failure(format!(
+                return Ok(Announced::Failure(format!(
                     "the app announced no devtools endpoint within {}s",
                     DISCOVERY_DEADLINE.as_secs()
-                ));
+                )));
             }
-            Err(TryRecvError::Disconnected) => return Announced::Exited,
+            Err(TryRecvError::Disconnected) => return Ok(Announced::Exited),
         }
     }
 }
@@ -1294,7 +1507,7 @@ fn read_discovery(child: &mut StreamHandle, on_line: &mut dyn FnMut(&str)) -> An
 /// Runs the fat build, forwarding cargo's rendered diagnostics and any
 /// non-JSON line to `on_line`. A failed build is
 /// [`StartError::FatBuildFailed`] with its error diagnostics.
-fn run_fat_build(
+pub(super) fn run_fat_build(
     runner: &dyn ProcessRunner,
     fat: &FatBuild,
     root: &Path,
@@ -1350,7 +1563,7 @@ fn run_fat_build(
 }
 
 /// `cargo metadata`'s `target_directory`.
-fn target_directory(metadata: &str) -> Result<PathBuf, HotpatchError> {
+pub(super) fn target_directory(metadata: &str) -> Result<PathBuf, HotpatchError> {
     let value: serde_json::Value = serde_json::from_str(metadata).map_err(|err| {
         HotpatchError::unsupported(format!("unreadable `cargo metadata` output: {err}"))
     })?;
@@ -1371,7 +1584,7 @@ fn host_triple(rustc_version: &str) -> Result<String, HotpatchError> {
 }
 
 /// The rustflags cargo applies: `CARGO_ENCODED_RUSTFLAGS`, else `RUSTFLAGS`.
-fn rustflags(env: &dyn EnvLookup) -> Vec<String> {
+pub(super) fn rustflags(env: &dyn EnvLookup) -> Vec<String> {
     if let Some(encoded) = env.get("CARGO_ENCODED_RUSTFLAGS") {
         return encoded
             .split('\u{1f}')
@@ -1396,7 +1609,7 @@ fn custom_linker(env: &dyn EnvLookup, triple: &str) -> Option<PathBuf> {
 }
 
 /// Removes a file a previous build left, so a stale one is never read.
-fn remove_stale(path: &Path) -> Result<(), HotpatchError> {
+pub(super) fn remove_stale(path: &Path) -> Result<(), HotpatchError> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1407,7 +1620,8 @@ fn remove_stale(path: &Path) -> Result<(), HotpatchError> {
     }
 }
 
-/// The `.rcgu.o` objects a captured tip link names: the tip bin's own code.
+/// The `.rcgu.o` objects a captured tip link names: the image unit's own
+/// code.
 fn tip_objects(link_args: &[String]) -> Vec<PathBuf> {
     link_args
         .iter()
@@ -1547,7 +1761,9 @@ fn codegen_value(args: &[String], option: &str) -> Option<String> {
 }
 
 /// The real build half: replay through captured invocations, thin link
-/// against the fat image.
+/// against the fat image. Named for the desktop, where the image unit is the
+/// tip bin; the Android start ([`super::android`]) runs the same builder with
+/// the tip lib's `cdylib` as the image unit.
 struct DesktopBuilder {
     runner: Arc<dyn ProcessRunner + Send + Sync>,
     graph: WorkspaceGraph,
@@ -1562,15 +1778,20 @@ struct DesktopBuilder {
     ungated: Ungated,
     /// The current rlib of each lib unit in the image.
     rlibs: BTreeMap<ReplayUnit, PathBuf>,
-    /// The tip's latest captured link: the fat build's until the tip bin is
-    /// replayed.
+    /// The tip's latest captured link: the fat build's until the image unit
+    /// is replayed.
     tip_link_args: Vec<String>,
     tip_env: Vec<(String, String)>,
-    tip_bin: ReplayUnit,
+    /// The unit whose link is the running image, replayed with its link
+    /// intercepted: the tip bin on desktop, the tip lib on Android (whose
+    /// code then enters a patch as objects, never as its rlib).
+    image_unit: ReplayUnit,
     cache: SymbolCache,
     target: Target,
     flavor: LinkerFlavor,
     linker: String,
+    /// See [`BaseRequest::upload_strip`].
+    upload_strip: Option<PathBuf>,
     target_dir: PathBuf,
     session: String,
     session_dir: PathBuf,
@@ -1582,13 +1803,15 @@ struct DesktopBuilder {
 
 impl DesktopBuilder {
     /// Every modified lib's rlib, dependents before their dependencies (the
-    /// order a static link resolves archives in).
+    /// order a static link resolves archives in). A lib that is the image
+    /// unit itself (Android's tip lib) is left out: its objects are on the
+    /// image link line already.
     fn modified_rlibs(&self) -> Result<Vec<PathBuf>, HotpatchError> {
         let order = self.graph.replay_order(self.modified.units())?;
         order
             .iter()
             .rev()
-            .filter(|unit| unit.kind == TargetKind::Lib)
+            .filter(|unit| unit.kind == TargetKind::Lib && **unit != self.image_unit)
             .map(|unit| {
                 self.rlibs.get(unit).cloned().ok_or_else(|| {
                     HotpatchError::unsupported(format!("no rlib is known for {unit}"))
@@ -1604,14 +1827,14 @@ impl DesktopBuilder {
         Ok(inputs)
     }
 
-    /// Replays the tip bin with its link step intercepted and returns the
+    /// Replays the image unit with its link step intercepted and returns the
     /// intercepted link's arguments, which name the fresh objects the patch
     /// links. The caller installs them as `tip_link_args` only once those
     /// objects are in the ungated ledger, so a failure in between leaves
     /// the previous link line in place. `Ok(Err(diagnostics))` for a
     /// compile error.
-    fn replay_tip_bin(&mut self) -> Result<Result<Vec<String>, Vec<String>>, HotpatchError> {
-        let key = self.tip_bin.record_key();
+    fn replay_image_unit(&mut self) -> Result<Result<Vec<String>, Vec<String>>, HotpatchError> {
+        let key = self.image_unit.record_key();
         let record = self.records.get(&key).ok_or_else(|| {
             HotpatchError::unsupported(format!("no captured rustc invocation `{key}`"))
         })?;
@@ -1640,7 +1863,7 @@ impl DesktopBuilder {
             .copied()
             .filter(|name| !env.iter().any(|(set, _)| set == name))
             .collect();
-        let cwd = self.graph.replay_cwd(&self.tip_bin);
+        let cwd = self.graph.replay_cwd(&self.image_unit);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let env_refs: Vec<(&str, &str)> =
             env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -1650,7 +1873,7 @@ impl DesktopBuilder {
             .map_err(|err| HotpatchError::Process {
                 detail: format!(
                     "failed to spawn `{rustc}` to replay {}: {err:#}",
-                    self.tip_bin
+                    self.image_unit
                 ),
             })?;
         let (_, mut diagnostics) = parse_notifications(&output.stderr, &cwd)?;
@@ -1667,7 +1890,26 @@ impl DesktopBuilder {
 
 impl PatchBuilder for DesktopBuilder {
     fn classify(&self, path: &Path) -> PathClass {
-        self.graph.classify(path)
+        let class = self.graph.classify(path);
+        if self.image_unit.kind == TargetKind::Bin {
+            return class;
+        }
+        // A lib image (Android's cdylib) contains no bin: a file only a bin
+        // compiles is nothing the running image was built from.
+        match class {
+            PathClass::Replayable { units } => {
+                let units: BTreeSet<ReplayUnit> = units
+                    .into_iter()
+                    .filter(|unit| unit.kind == TargetKind::Lib)
+                    .collect();
+                if units.is_empty() {
+                    PathClass::Unaffected
+                } else {
+                    PathClass::Replayable { units }
+                }
+            }
+            other => other,
+        }
     }
 
     fn compile(&mut self, units: &BTreeSet<ReplayUnit>) -> Result<Compiled, HotpatchError> {
@@ -1679,8 +1921,8 @@ impl PatchBuilder for DesktopBuilder {
         }
         self.dirty = pending.clone();
         let order = self.graph.replay_order(&pending)?;
-        let (bins, libs): (Vec<ReplayUnit>, Vec<ReplayUnit>) =
-            order.into_iter().partition(|unit| *unit == self.tip_bin);
+        let (image, libs): (Vec<ReplayUnit>, Vec<ReplayUnit>) =
+            order.into_iter().partition(|unit| *unit == self.image_unit);
 
         let runner: &dyn ProcessRunner = &*self.runner;
         let outcomes = replay_units(runner, &self.graph, &self.records, &libs)?;
@@ -1704,16 +1946,16 @@ impl PatchBuilder for DesktopBuilder {
             self.dirty.remove(&outcome.unit);
             self.ungated.compiled(outcome.unit, vec![rlib]);
         }
-        if !bins.is_empty() {
-            match self.replay_tip_bin()? {
+        if !image.is_empty() {
+            match self.replay_image_unit()? {
                 Ok(link_args) => {
                     let typed = typed_objects(&tip_objects(&link_args), &self.crates)?;
-                    self.ungated.compiled(self.tip_bin.clone(), typed);
+                    self.ungated.compiled(self.image_unit.clone(), typed);
                     self.tip_link_args = link_args;
                 }
                 Err(diagnostics) => return Ok(Compiled::Failed { diagnostics }),
             }
-            self.dirty.remove(&self.tip_bin);
+            self.dirty.remove(&self.image_unit);
         }
 
         // Every object compiled since the last accepted patch, this round's
@@ -1751,21 +1993,13 @@ impl PatchBuilder for DesktopBuilder {
                 envs: &self.tip_env,
             },
         )?;
-        let bytes = std::fs::read(&linked.patch).map_err(|err| {
-            HotpatchError::io(format!("reading `{}`", linked.patch.display()), err)
-        })?;
-        let symbols = ImageSymbols::parse(
-            &bytes,
+        read_linked(
+            &*self.runner,
+            &self.cache,
             self.target,
-            &format!("patch `{}`", linked.patch.display()),
-        )?;
-        let table = super::jump_table::create_jump_table(&self.cache, &symbols)?;
-        Ok(LinkedPatch {
-            path: linked.patch,
-            bytes,
-            table,
-            symbols,
-        })
+            linked.patch,
+            self.upload_strip.as_deref(),
+        )
     }
 
     fn accepted(&mut self) {
@@ -2239,6 +2473,443 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "the hand-off file is owner-only");
+        }
+    }
+
+    /// A device app (Android, reached through `adb forward`) is never named
+    /// a host path: the forward makes its endpoint loopback on this host,
+    /// but the app cannot read this host's files, so the patch is uploaded
+    /// in chunks even when the app advertises the hand-off.
+    #[test]
+    fn a_device_session_uploads_even_when_the_app_advertises_the_hand_off() {
+        let mut script = hot_script(vec![applied(1, 2, Vec::new())]);
+        script.info.as_mut().unwrap().patch_file_hand_off = true;
+        let server = test_server::spawn(script);
+        let app = attach_device_app(server.addr, Some(FAKE_TOKEN), TRIPLE);
+        assert!(
+            matches!(
+                app,
+                AppLink::Live {
+                    same_host: false,
+                    ..
+                }
+            ),
+            "a device attach is live and not on this host"
+        );
+        let mut builder = FakeBuilder::new(Vec::new());
+        let calls = Arc::clone(&builder.calls);
+        let accepted = AcceptedSets::begin(
+            &temp_dir("device-hand-off"),
+            "session-app",
+            table(&[("app::HomeState", 4)]),
+            home_seam(),
+        )
+        .unwrap();
+        builder.out_dir = Some(accepted.dir().to_path_buf());
+        let mut session = HotSession {
+            builder: Box::new(builder),
+            app,
+            accepted,
+            images: vec![base_image()],
+            budget: Budget::default(),
+            restart: None,
+            next_patch_id: 1,
+        };
+        let outcome = session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
+        assert!(
+            matches!(outcome, Outcome::Patched { components: 2, .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec!["compile 1", "link 1 0x100004000", "accepted"]
+        );
+        let patch: Vec<u8> = (0..1000u32).map(|i| (i % 253) as u8).collect();
+        assert_eq!(server.uploaded(1), Some(patch));
+        let apply = server.requests().pop().unwrap();
+        let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
+        assert_eq!(params.file, None, "a device app is never named a host path");
+    }
+
+    /// Two sessions of one project on two devices (two TUI tabs, or two
+    /// `frust run --watch -d <serial>`): each has its own session dir,
+    /// starting the second leaves the first's patches in place, and each
+    /// app is sent the patch linked against its own `anchor_runtime`.
+    #[test]
+    fn two_device_sessions_of_one_project_never_share_a_session_dir() {
+        let target_dir = temp_dir("two-devices");
+        let start = |serial: &str, anchor: u64, patch: Vec<u8>| {
+            let mut script = hot_script(vec![applied(1, 2, Vec::new())]);
+            script.info.as_mut().unwrap().anchor_runtime = anchor;
+            let server = test_server::spawn(script);
+            let app = attach_device_app(server.addr, Some(FAKE_TOKEN), TRIPLE);
+            let mut builder = FakeBuilder::new(Vec::new());
+            builder.patch = patch;
+            let calls = Arc::clone(&builder.calls);
+            let accepted = AcceptedSets::begin(
+                &target_dir,
+                &super::super::android::session_name("app", serial),
+                table(&[("app::HomeState", 4)]),
+                home_seam(),
+            )
+            .unwrap();
+            builder.out_dir = Some(accepted.dir().to_path_buf());
+            let session = HotSession {
+                builder: Box::new(builder),
+                app,
+                accepted,
+                images: vec![base_image()],
+                budget: Budget::default(),
+                restart: None,
+                next_patch_id: 1,
+            };
+            (session, server, calls)
+        };
+        let change = |session: &mut HotSession| {
+            let outcome = session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
+            assert!(matches!(outcome, Outcome::Patched { .. }), "{outcome:?}");
+        };
+        let patch_a: Vec<u8> = (0..1000u32).map(|i| (i % 253) as u8).collect();
+        let patch_b: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+
+        let (mut a, server_a, calls_a) = start("0A1B2C3D4E5F", ANCHOR, patch_a.clone());
+        let dir_a = a.accepted.dir().to_path_buf();
+        change(&mut a);
+        assert_eq!(std::fs::read(dir_a.join("patch-1.so")).unwrap(), patch_a);
+
+        let (mut b, server_b, calls_b) =
+            start("192.168.1.5:5555", ANCHOR + 0x8000, patch_b.clone());
+        let dir_b = b.accepted.dir().to_path_buf();
+        assert_ne!(dir_a, dir_b);
+        assert_eq!(dir_a.parent(), dir_b.parent());
+        assert_eq!(
+            std::fs::read(dir_a.join("patch-1.so")).unwrap(),
+            patch_a,
+            "starting the second session leaves the first's dir intact"
+        );
+        assert!(dir_a.join(layout::LAYOUT_BASE_FILE).exists());
+        assert!(dir_a.join(LAYOUTS_ACCEPTED_FILE).exists());
+        assert!(!dir_b.join("patch-1.so").exists());
+
+        change(&mut b);
+        assert_eq!(std::fs::read(dir_a.join("patch-1.so")).unwrap(), patch_a);
+        assert_eq!(std::fs::read(dir_b.join("patch-1.so")).unwrap(), patch_b);
+        assert_eq!(
+            calls_a.lock().unwrap().clone(),
+            vec!["compile 1", "link 1 0x100004000", "accepted"]
+        );
+        assert_eq!(
+            calls_b.lock().unwrap().clone(),
+            vec!["compile 1", "link 1 0x10000c000", "accepted"]
+        );
+        assert_eq!(server_a.uploaded(1), Some(patch_a));
+        assert_eq!(server_b.uploaded(1), Some(patch_b));
+    }
+
+    /// What the stand-in `llvm-strip` writes: no symbol table at all, so a
+    /// jump table could never be built from it.
+    const STRIPPED: &[u8] = b"stripped upload copy";
+
+    /// A runner standing in for `llvm-strip`: writes [`STRIPPED`] to the
+    /// path after `-o`, world-readable as under a `022` umask, and records
+    /// every argv.
+    #[derive(Default)]
+    struct FakeStrip {
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl ProcessRunner for FakeStrip {
+        fn run(&self, cmd: &str, _args: &[&str]) -> anyhow::Result<Output> {
+            anyhow::bail!("FakeStrip does not run `{cmd}`")
+        }
+
+        fn run_streaming(
+            &self,
+            cmd: &str,
+            args: &[&str],
+            _cwd: Option<&Path>,
+            _env: &[(&str, &str)],
+            _on_line: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<Output> {
+            let argv: Vec<String> = std::iter::once(cmd)
+                .chain(args.iter().copied())
+                .map(str::to_string)
+                .collect();
+            let out = args
+                .iter()
+                .position(|arg| *arg == "-o")
+                .map(|i| PathBuf::from(args[i + 1]))
+                .expect("llvm-strip is given -o");
+            std::fs::write(&out, STRIPPED)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o644))?;
+            }
+            self.calls.lock().unwrap().push(argv);
+            Ok(Output {
+                success: true,
+                ..Output::default()
+            })
+        }
+
+        fn spawn_streaming(
+            &self,
+            cmd: &str,
+            _args: &[&str],
+            _cwd: Option<&Path>,
+            _env: &[(&str, &str)],
+        ) -> anyhow::Result<StreamHandle> {
+            anyhow::bail!("FakeStrip does not spawn `{cmd}`")
+        }
+    }
+
+    fn android() -> Target {
+        Target::from_triple("aarch64-linux-android").unwrap()
+    }
+
+    /// An unstripped Android patch: the seam the base also defines, moved.
+    fn android_patch() -> Vec<u8> {
+        object(
+            android(),
+            &[Def::Text("seam_home", 32), Def::Text(ANCHOR_SYMBOL, 4)],
+        )
+    }
+
+    /// A builder whose link step is the real [`read_linked`] over a
+    /// scripted thin link: `link` writes [`android_patch`] to `patch-<n>.so`
+    /// owner-only, as `thin_link` leaves it.
+    struct ReadLinkedBuilder {
+        runner: Arc<FakeStrip>,
+        cache: SymbolCache,
+        dir: PathBuf,
+        upload_strip: Option<PathBuf>,
+    }
+
+    impl PatchBuilder for ReadLinkedBuilder {
+        fn classify(&self, _path: &Path) -> PathClass {
+            PathClass::Replayable {
+                units: [ReplayUnit::lib("app", "app")].into_iter().collect(),
+            }
+        }
+
+        fn compile(&mut self, _units: &BTreeSet<ReplayUnit>) -> Result<Compiled, HotpatchError> {
+            Ok(Compiled::Candidate {
+                layouts: LayoutTable::default(),
+                seams: home_seam(),
+            })
+        }
+
+        fn link(&mut self, n: u32, _anchor_runtime: u64) -> Result<LinkedPatch, HotpatchError> {
+            let patch = self.dir.join(format!("patch-{n}.so"));
+            std::fs::write(&patch, android_patch()).unwrap();
+            thin_link::restrict_to_owner(&patch)?;
+            read_linked(
+                &*self.runner,
+                &self.cache,
+                android(),
+                patch,
+                self.upload_strip.as_deref(),
+            )
+        }
+
+        fn accepted(&mut self) {}
+    }
+
+    /// A session over a [`ReadLinkedBuilder`] whose base is an Android
+    /// image, attached to a fake app on this host or (`same_host: false`)
+    /// on a device.
+    struct LinkedRig {
+        session: HotSession,
+        server: FakeServer,
+        runner: Arc<FakeStrip>,
+        dir: PathBuf,
+        /// The jump table the unstripped patch gives against the base.
+        expected_table: JumpTableWire,
+    }
+
+    fn linked_rig(
+        script: Script,
+        same_host: bool,
+        upload_strip: Option<PathBuf>,
+        budget: Budget,
+    ) -> LinkedRig {
+        let target_dir = temp_dir("read-linked");
+        let base = target_dir.join("libapp.so");
+        std::fs::write(
+            &base,
+            object(
+                android(),
+                &[
+                    Def::Text("pad", 64),
+                    Def::Text("seam_home", 16),
+                    Def::Text(ANCHOR_SYMBOL, 4),
+                ],
+            ),
+        )
+        .unwrap();
+        let cache = SymbolCache::load(&base, android()).unwrap();
+        let patch = ImageSymbols::parse(&android_patch(), android(), "patch").unwrap();
+        let expected_table = super::super::jump_table::create_jump_table(&cache, &patch).unwrap();
+        let server = test_server::spawn(script);
+        let app = attach(server.addr, Some(FAKE_TOKEN), TRIPLE, same_host);
+        let accepted = AcceptedSets::begin(
+            &target_dir,
+            "session-app",
+            LayoutTable::default(),
+            home_seam(),
+        )
+        .unwrap();
+        let dir = accepted.dir().to_path_buf();
+        let runner = Arc::new(FakeStrip::default());
+        let images = vec![cache.symbols().clone()];
+        let builder = ReadLinkedBuilder {
+            runner: Arc::clone(&runner),
+            cache,
+            dir: dir.clone(),
+            upload_strip,
+        };
+        LinkedRig {
+            session: HotSession {
+                builder: Box::new(builder),
+                app,
+                accepted,
+                images,
+                budget,
+                restart: None,
+                next_patch_id: 1,
+            },
+            server,
+            runner,
+            dir,
+            expected_table,
+        }
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// An Android session uploads the stripped copy; the jump table and the
+    /// image symbols the session keeps come from the unstripped patch,
+    /// which stays in the session dir. Both are owner-only. `len` and the
+    /// byte budget count the uploaded bytes: a budget the stripped copy
+    /// exactly fills admits the patch, though the unstripped image is over.
+    #[test]
+    fn a_device_session_uploads_the_stripped_copy_and_keeps_the_unstripped_patch() {
+        let budget = Budget {
+            patches: DEFAULT_BUDGET_PATCHES,
+            bytes: STRIPPED.len() as u64,
+        };
+        assert!(android_patch().len() as u64 > budget.bytes);
+        let strip = PathBuf::from("/ndk/bin/llvm-strip");
+        let mut rig = linked_rig(
+            hot_script(vec![applied(1, 2, Vec::new())]),
+            false,
+            Some(strip.clone()),
+            budget,
+        );
+        let outcome = rig.session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
+        assert!(
+            matches!(outcome, Outcome::Patched { components: 2, .. }),
+            "{outcome:?}"
+        );
+
+        let patch = rig.dir.join("patch-1.so");
+        let upload = rig.dir.join("patch-1.upload.so");
+        let path = |p: &Path| p.to_string_lossy().into_owned();
+        assert_eq!(
+            rig.runner.calls.lock().unwrap().clone(),
+            vec![vec![
+                path(&strip),
+                "--strip-unneeded".to_string(),
+                "-o".to_string(),
+                path(&upload),
+                path(&patch),
+            ]]
+        );
+        assert_eq!(rig.server.uploaded(1), Some(STRIPPED.to_vec()));
+        let apply = rig.server.requests().pop().unwrap();
+        let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
+        assert_eq!(params.len, STRIPPED.len() as u64);
+        assert_eq!(params.file, None);
+        assert_eq!(params.table, rig.expected_table);
+        let kept = &rig.session.images[1];
+        let unstripped = ImageSymbols::parse(&android_patch(), android(), "patch").unwrap();
+        assert!(kept.defined_address("seam_home").is_some());
+        assert_eq!(
+            kept.defined_address("seam_home"),
+            unstripped.defined_address("seam_home")
+        );
+
+        assert_eq!(std::fs::read(&patch).unwrap(), android_patch());
+        assert_eq!(std::fs::read(&upload).unwrap(), STRIPPED);
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&patch), 0o600, "the unstripped patch is owner-only");
+            assert_eq!(mode(&upload), 0o600, "the upload copy is owner-only");
+        }
+    }
+
+    /// Any digest describes the bytes the app is sent: a hand-off of a
+    /// stripped patch names the upload copy and its SHA-256.
+    #[test]
+    fn a_hand_off_of_a_stripped_patch_names_and_digests_the_upload_copy() {
+        let mut script = hot_script(vec![applied(1, 2, Vec::new())]);
+        script.info.as_mut().unwrap().patch_file_hand_off = true;
+        let mut rig = linked_rig(
+            script,
+            true,
+            Some(PathBuf::from("/ndk/bin/llvm-strip")),
+            Budget::default(),
+        );
+        let outcome = rig.session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
+        assert!(matches!(outcome, Outcome::Patched { .. }), "{outcome:?}");
+        let apply = rig.server.requests().pop().unwrap();
+        let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
+        let file = params.file.expect("the hand-off names a file");
+        assert_eq!(
+            PathBuf::from(&file.path),
+            std::path::absolute(rig.dir.join("patch-1.upload.so")).unwrap()
+        );
+        assert_eq!(file.sha256, sha256_hex(STRIPPED));
+        assert_eq!(params.len, STRIPPED.len() as u64);
+    }
+
+    /// Without a strip tool (every desktop session) nothing is run and the
+    /// linked patch itself is uploaded, or named and digested on a
+    /// hand-off, exactly as linked.
+    #[test]
+    fn without_a_strip_tool_the_linked_patch_is_sent_as_linked() {
+        for hand_off in [false, true] {
+            let mut script = hot_script(vec![applied(1, 2, Vec::new())]);
+            script.info.as_mut().unwrap().patch_file_hand_off = hand_off;
+            let mut rig = linked_rig(script, true, None, Budget::default());
+            let outcome = rig.session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
+            assert!(matches!(outcome, Outcome::Patched { .. }), "{outcome:?}");
+            assert!(rig.runner.calls.lock().unwrap().is_empty());
+            assert!(!rig.dir.join("patch-1.upload.so").exists());
+            let apply = rig.server.requests().pop().unwrap();
+            let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
+            assert_eq!(params.len, android_patch().len() as u64);
+            assert_eq!(params.table, rig.expected_table);
+            match params.file {
+                Some(file) => {
+                    assert!(hand_off);
+                    assert_eq!(
+                        PathBuf::from(&file.path),
+                        std::path::absolute(rig.dir.join("patch-1.so")).unwrap()
+                    );
+                    assert_eq!(file.sha256, sha256_hex(&android_patch()));
+                    assert_eq!(rig.server.uploaded(1), None);
+                }
+                None => {
+                    assert!(!hand_off);
+                    assert_eq!(rig.server.uploaded(1), Some(android_patch()));
+                }
+            }
         }
     }
 
@@ -3826,11 +4497,12 @@ mod tests {
                     .collect(),
                 tip_link_args: Vec::new(),
                 tip_env: Vec::new(),
-                tip_bin: tip_bin(),
+                image_unit: tip_bin(),
                 cache: SymbolCache::from_bytes("base", &image, target()).unwrap(),
                 target: target(),
                 flavor: LinkerFlavor::for_triple(TRIPLE).unwrap(),
                 linker: "cc".to_string(),
+                upload_strip: None,
                 target_dir: dir.clone(),
                 session: "session-b".to_string(),
                 session_dir: accepted.dir().to_path_buf(),
@@ -3976,6 +4648,53 @@ mod tests {
             assert_eq!(builder.ungated.inputs(), vec![a_new, b_rlib]);
         }
 
+        /// Android's image is the tip lib's `cdylib`: the builder replays
+        /// the tip lib with its link intercepted (its objects are the image
+        /// link line), links a dependency's rlib but never the tip lib's
+        /// own, gates every object it compiled, and classifies a file only a
+        /// bin compiles as nothing the image was built from. With the tip
+        /// bin as the image (desktop), the bin's root still replays.
+        #[test]
+        fn a_lib_image_replays_the_tip_lib_as_the_image_and_drops_bins() {
+            let a_new = fixture::edited("badge-p2");
+            let Setup {
+                mut builder,
+                accepted,
+                script,
+                ..
+            } = setup(
+                "lib-image",
+                vec![
+                    ("a", vec![Reply::Rlib(a_new.clone())]),
+                    ("b", vec![Reply::Linked]),
+                ],
+            );
+            let main_rs = Path::new("/w/b/src/main.rs");
+            assert_eq!(
+                builder.classify(main_rs),
+                PathClass::Replayable {
+                    units: units(&[tip_bin()])
+                }
+            );
+            builder.image_unit = lib_b();
+            assert_eq!(builder.classify(main_rs), PathClass::Unaffected);
+            assert_eq!(
+                builder.classify(Path::new("/w/b/src/lib.rs")),
+                PathClass::Replayable {
+                    units: units(&[lib_b()])
+                }
+            );
+
+            let (layouts, seams) = candidate(builder.compile(&units(&[lib_a()])));
+            assert_eq!(script.replayed(), vec!["a", "b"]);
+            assert!(builder.dirty.is_empty());
+            assert!(builder.ungated.contains(&lib_b()));
+            assert_eq!(builder.modified_rlibs().unwrap(), vec![a_new.clone()]);
+            assert_eq!(builder.patch_inputs().unwrap(), vec![a_new.clone()]);
+            assert_eq!(accepted.check(&layouts, seams), Err(badge_grew()));
+            assert_eq!(builder.ungated.inputs(), vec![a_new]);
+        }
+
         /// Accepting a candidate empties the set: the next candidate is
         /// extracted from its own round's objects only.
         #[test]
@@ -4011,5 +4730,30 @@ mod tests {
                     .table
             );
         }
+    }
+
+    /// The cancellable discovery wait observes a raised `cancel` at its
+    /// next poll and leaves the child to the caller. Deterministic: the
+    /// cancel is raised by the line the fake sends, so the wait forwards
+    /// that line and then ends on the flag (not the deadline, which would
+    /// answer `Failure`).
+    #[test]
+    fn the_discovery_wait_ends_when_cancel_is_raised() {
+        let runner = crate::process::FakeProcessRunner::new()
+            .with_hanging_stream("app", ["I/app: starting"]);
+        let mut child = runner.spawn_streaming("app", &[], None, &[]).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let announced = read_discovery_cancellable(
+            &mut child,
+            &mut |line| {
+                lines.push(line.to_string());
+                cancel.store(true, Ordering::SeqCst);
+            },
+            &cancel,
+        );
+        assert!(matches!(announced, Err(Cancelled)));
+        assert_eq!(lines, vec!["I/app: starting"]);
+        child.kill();
     }
 }

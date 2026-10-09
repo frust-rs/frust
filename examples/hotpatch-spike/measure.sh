@@ -15,6 +15,7 @@
 #
 # Usage: examples/hotpatch-spike/measure.sh [--hotpatch | --restart | --frust-run | --frust-restart]
 #                                           [--app <dir>] [--runs <n>] [--target <t>] [--row <label>]
+#                                           [--serial <adb-serial> | -d <adb-serial> | --android]
 #        examples/hotpatch-spike/measure.sh --prepare-app <dir>
 #   --hotpatch     (default) `dx serve --hot-patch --platform desktop --interactive false --verbose`
 #                  from runner/; DX from $DX, else `dx` on PATH (must be dioxus-cli 0.7.10).
@@ -102,6 +103,44 @@
 # when the app runs with FRUST_LOG=debug (FRUST_RUN_ARGS="--define FRUST_LOG=debug"); without it
 # the run reports "not logged", which is evidence neither way.
 #
+# ANDROID (H2-04): `--frust-run --serial <adb-serial>` (or `-d <adb-serial>`, or `--android` with the
+# serial taken from $ANDROID_SERIAL) runs `frust run --watch -d <serial>` instead: the hot session
+# on a physical device. The serial is never written anywhere but the log dir. The device must be
+# awake and unlocked (checked; the script never touches the power state). What changes:
+#   - instruments (H2-07): the Android shell logs `frust-hotpatch: applied t_unix_ms=<ms>` when a
+#     UI tick drains the patch latch and `frust-hotpatch: frame t_unix_ms=<ms>` on the frame that
+#     consumed it (H2-05). Per patched run the script reads `applied` and `frame` from those probe
+#     lines of the app's pid in the device log (t_unix_ms is the device clock, moved onto the
+#     host's). A tree without them falls back to the 5 s frame-wait backstop line (`frust-devtools:
+#     no frame followed the patch within 5s; answering anyway`): `applied` = its device time -
+#     5000 ms, no `frame`. Each run line names its source (`source: probe` / `source: backstop`)
+#     and whether a backstop line followed the save (`backstop: none` / `PRESENT`); the exit
+#     report counts every backstop line. The CLI's `patched` line (host clock) is reported beside
+#     them. A restart run's first frame is the relaunched activity's `ActivityTaskManager:
+#     Displayed <package>/...` line. `host:` also names `patch-N.upload.so`, the stripped copy the
+#     app is sent (H2-06), with its size.
+#   - clocks: device times are moved onto the host clock by an offset measured before every run
+#     (`clock:` line: the min-RTT sample of `adb shell echo $EPOCHREALTIME`, error <= rtt/2).
+#   - device log: `adb logcat -v epoch` from the session start into <log dir>/logcat.txt (bounded
+#     by the device clock, never `logcat -c`); its `avc: denied` lines and the crash buffer are
+#     printed at exit.
+#   - per run: the app PID (`pidof <package>`), RSS (VmRSS of /proc/<pid>/status), `maps:` the
+#     `/memfd:frust-hotpatch (deleted)` mappings of /proc/<pid>/maps (read through `run-as`, saved
+#     as maps-run-N.txt), `info:` the app's own `hotpatch_info` counters (patches_applied,
+#     patch_bytes_loaded, anchor_runtime) over a private `adb forward` to the devtools port of the
+#     discovery line (HOTPATCH_INFO=0 skips it), and a copy of the run's stub-N.o (relocation
+#     evidence: its thunks hold the slid base addresses).
+#   - SCREENCAP_DIR=<dir> (outside this repo): `adb exec-out screencap -p` into before.png (after
+#     PRE_RUN_HOOK) and run-N.png (2 s after each run).
+#   - ANDROID_PACKAGE overrides the package read from android/app/build.gradle.kts.
+#   - an app still running after the CLI exits is `am force-stop`ped (that package only).
+#   --frust-restart is refused with --serial: it passes `--features frust/hotpatch`, which
+#   `frust run --watch -d` refuses, and its timing reads the desktop probe. The device restart
+#   baseline is the hot session's own `restart required` rerun (a hazard target such as
+#   state-field), timed to `Displayed`.
+#   PRE_RUN_HOOK=<cmd>  run via `bash -c` after the first frame, before PRE_RUN_PAUSE, as `<cmd> <app
+#                       pid>` (e.g. taps that raise the counter), desktop and Android alike.
+#
 # Every edited file is restored on exit (trap EXIT, Ctrl-C included) and the runner's process group
 # is killed; the summary ends with `git status` of this directory as proof (with --frust-run /
 # --frust-restart: a `cmp` of each restored file against its pristine copy, and any app process of
@@ -133,7 +172,16 @@ TARGETS="home|card|helper|state-type|state-field|return-type|stock-label|badge|e
 AFTER_RUN_HOOK="${AFTER_RUN_HOOK:-}"
 RETURN_TYPE_WRAP="${RETURN_TYPE_WRAP:-stack}"
 AFTER_RUN_CAPTURE_DIR="${AFTER_RUN_CAPTURE_DIR:-}"
+PRE_RUN_HOOK="${PRE_RUN_HOOK:-}"
 ROW=""
+# Android leg (--serial / -d / --android): see the header.
+ANDROID=0
+SERIAL=""
+ANDROID_PACKAGE="${ANDROID_PACKAGE:-}"
+SCREENCAP_DIR="${SCREENCAP_DIR:-}"
+HOTPATCH_INFO="${HOTPATCH_INFO:-1}"
+# Device clock minus host clock, in ms (0 on the desktop: one clock).
+CLOCK_OFFSET_MS=0
 
 # The comment header (line 2 up to the first non-comment line), without the `# ` prefix.
 usage() {
@@ -166,6 +214,11 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { echo "error: --row requires a label" >&2; exit 2; }
       ROW="$2"; shift 2 ;;
     --row=*) ROW="${1#--row=}"; shift ;;
+    -d|--serial)
+      [ $# -ge 2 ] || { echo "error: $1 requires an adb serial" >&2; exit 2; }
+      ANDROID=1; SERIAL="$2"; shift 2 ;;
+    --serial=*) ANDROID=1; SERIAL="${1#--serial=}"; shift ;;
+    --android) ANDROID=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument '$1' (see --help)" >&2; exit 2 ;;
   esac
@@ -373,6 +426,36 @@ case "$TARGET" in
 esac
 [ -f "$EDIT_FILE" ] || { echo "error: ${EDIT_FILE} does not exist (--prepare-app first?)" >&2; exit 2; }
 
+# The session dir of the host side (`host:` lines): `session-<package>` on the desktop.
+SESSION_DIR_NAME="session-${APP_BIN:-}"
+if [ "$ANDROID" = 1 ]; then
+  SERIAL="${SERIAL:-${ANDROID_SERIAL:-}}"
+  [ -n "$SERIAL" ] || { echo "error: --android needs --serial <adb-serial> or ANDROID_SERIAL" >&2; exit 2; }
+  if [ "$MODE" != "frust-run" ]; then
+    echo "error: --serial drives only --frust-run (--frust-restart passes --features, which" \
+      "\`frust run --watch -d\` refuses; time a device restart with a hazard target instead)" >&2
+    exit 2
+  fi
+  command -v adb >/dev/null 2>&1 || { echo "error: adb is required" >&2; exit 2; }
+  [ "$(adb -s "$SERIAL" get-state 2>/dev/null)" = "device" ] \
+    || { echo "error: the device given by --serial/ANDROID_SERIAL is not attached" >&2; exit 2; }
+  adb -s "$SERIAL" shell dumpsys power 2>/dev/null | grep 'mWakefulness=Awake' >/dev/null \
+    || { echo "error: the device is asleep; wake and unlock it first (keyevent 26 toggles)" >&2; exit 2; }
+  if [ -z "$ANDROID_PACKAGE" ]; then
+    ANDROID_PACKAGE="$(sed -n 's/^ *applicationId = "\(.*\)"$/\1/p' \
+      "${APP}/android/app/build.gradle.kts" 2>/dev/null | head -1)"
+  fi
+  [ -n "$ANDROID_PACKAGE" ] \
+    || { echo "error: no applicationId in ${APP}/android/app/build.gradle.kts; set ANDROID_PACKAGE" >&2; exit 2; }
+  # `session-<crate>-<triple>` (hotpatch::android): the lib crate name, `-` folded to `_`.
+  SESSION_DIR_NAME="session-${APP_BIN//-/_}-aarch64-linux-android"
+fi
+if [ -n "$SCREENCAP_DIR" ]; then
+  [ "$ANDROID" = 1 ] || { echo "error: SCREENCAP_DIR needs --serial (adb screencap)" >&2; exit 2; }
+  [ -d "$SCREENCAP_DIR" ] || { echo "error: SCREENCAP_DIR '${SCREENCAP_DIR}' is not a directory" >&2; exit 2; }
+  outside_repo "$SCREENCAP_DIR" || { echo "error: SCREENCAP_DIR must lie outside this repository" >&2; exit 2; }
+fi
+
 if [ "$MODE" = "hotpatch" ]; then
   DX="${DX:-$(command -v dx 2>/dev/null || true)}"
   if [ -z "$DX" ] || [ ! -x "$DX" ]; then
@@ -407,6 +490,209 @@ APP_PID=""
 
 now_ms() {
   python3 -c 'import time;print(int(time.time()*1000))'
+}
+
+# ---- Android leg helpers (--serial) -------------------------------------------------------------
+DEVLOG="${LOG_DIR}/logcat.txt"
+DEVLOG_PID=""
+DEVLOG_SINCE=""
+
+adb_() {
+  adb -s "$SERIAL" "$@"
+}
+
+# The package's PIDs on the device, one per line (none when it is not running).
+device_pids() {
+  adb_ shell pidof "$ANDROID_PACKAGE" 2>/dev/null | tr -d '\r' | tr ' ' '\n' | grep '^[0-9][0-9]*$'
+}
+
+# Whether pid `$1` of the app is alive: `kill -0` on the desktop, `pidof` on the device.
+app_alive() {
+  if [ "$ANDROID" = 1 ]; then
+    device_pids | grep -x "$1" >/dev/null
+  else
+    kill -0 "$1" 2>/dev/null
+  fi
+}
+
+# Sets CLOCK_OFFSET_MS (device minus host) from the min-RTT sample of `$1` (default 5)
+# `adb shell echo $EPOCHREALTIME` round trips and prints `clock: ...`. Keeps the old offset when no
+# sample parses.
+measure_clock_offset() {
+  local out
+  out="$(python3 - "$SERIAL" "${1:-5}" <<'PY'
+import subprocess, sys, time
+serial, n = sys.argv[1], int(sys.argv[2])
+best = None
+for _ in range(n):
+    t0 = time.time() * 1000
+    out = subprocess.run(["adb", "-s", serial, "shell", "echo $EPOCHREALTIME"],
+                         capture_output=True, text=True).stdout.strip()
+    t1 = time.time() * 1000
+    try:
+        dev = float(out) * 1000
+    except ValueError:
+        continue
+    if best is None or t1 - t0 < best[1]:
+        best = (dev - (t0 + t1) / 2, t1 - t0)
+if best is None:
+    sys.exit(1)
+print("%d %d" % (round(best[0]), round(best[1])))
+PY
+)" || { echo "clock: offset not measured (keeping ${CLOCK_OFFSET_MS} ms)"; return 0; }
+  CLOCK_OFFSET_MS="${out%% *}"
+  echo "clock: device - host = ${CLOCK_OFFSET_MS} ms (rtt ${out##* } ms, error <= rtt/2)"
+}
+
+# Starts `adb logcat -v epoch` from the device's current time into DEVLOG (bounded by the device
+# clock: the device log is never cleared).
+start_devlog() {
+  DEVLOG_SINCE="$(adb_ shell 'echo $EPOCHREALTIME' | tr -d '\r')"
+  # `adb` itself, not the adb_ function: `$!` must be the adb process, or the kill at exit only
+  # reaches a subshell and leaves the stream running.
+  adb -s "$SERIAL" logcat -v epoch -T "$DEVLOG_SINCE" > "$DEVLOG" 2>&1 < /dev/null &
+  DEVLOG_PID=$!
+}
+
+# The host-clock ms of the first DEVLOG line matching ERE `$1` whose device time, moved onto the
+# host clock, is later than `$2`; with `$3`, only lines of that pid. Prints nothing when none.
+devlog_first() {
+  awk -v re="$1" -v s="$2" -v o="$CLOCK_OFFSET_MS" -v p="${3:-}" '
+    $1 ~ /^[0-9]+\.[0-9]+$/ && $0 ~ re && (p == "" || $2 == p) {
+      t = $1 * 1000 - o; if (t > s) { printf "%.0f\n", t; exit } }' "$DEVLOG" 2>/dev/null
+}
+
+# Waits up to `$3` s for devlog_first `$1` `$2` (`$4`: pid filter); prints its host ms.
+wait_devlog() {
+  local deadline=$(( $(date +%s) + $3 )) t
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    t="$(devlog_first "$1" "$2" "${4:-}")"
+    if [ -n "$t" ]; then echo "$t"; return 0; fi
+    if ! kill -0 "$RUNNER_PID" 2>/dev/null; then return 1; fi
+    sleep 0.1
+  done
+  return 1
+}
+
+# The relaunched activity's first frame: `ActivityTaskManager: Displayed <package>/...`.
+displayed_re() {
+  echo "ActivityTaskManager: Displayed ${ANDROID_PACKAGE//./\\.}/"
+}
+
+# The fallback apply moment of pid `$2`'s patch after host ms `$1`: its 5 s frame-wait backstop
+# line, minus 5000 ms (see the header). Waits up to `$3` s.
+BACKSTOP_RE='no frame followed the patch within 5s'
+wait_applied_backstop() {
+  local t
+  t="$(wait_devlog "$BACKSTOP_RE" "$1" "$3" "$2")" || return 1
+  echo $((t - 5000))
+}
+
+# The host-clock ms of the first `frust-hotpatch: <$1> t_unix_ms=<ms>` probe line in DEVLOG (with
+# `$3`, of that pid only) whose stamp, moved onto the host clock, is later than `$2`. The stamp is
+# the device's unix clock at the log call, not logcat's. Prints nothing when none.
+devlog_probe() {
+  awk -v k="frust-hotpatch: $1 t_unix_ms=" -v s="$2" -v o="$CLOCK_OFFSET_MS" -v p="${3:-}" '
+    $1 ~ /^[0-9]+\.[0-9]+$/ && (p == "" || $2 == p) && index($0, k) {
+      v = substr($0, index($0, k) + length(k)); sub(/[^0-9].*/, "", v)
+      if (v == "") next
+      t = v - o; if (t > s) { printf "%.0f\n", t; exit } }' "$DEVLOG" 2>/dev/null
+}
+
+# Waits up to `$3` s for devlog_probe `$1` `$2` (`$4`: pid filter); prints its host ms.
+wait_probe() {
+  local deadline=$(( $(date +%s) + $3 )) t
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    t="$(devlog_probe "$1" "$2" "${4:-}")"
+    if [ -n "$t" ]; then echo "$t"; return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
+
+# Waits up to `$2` s for a devtools discovery line in the CLI's output after log line `$1`: the
+# relaunched session is live once its endpoint is announced.
+wait_discovery() {
+  local from_line="$1" deadline=$(( $(date +%s) + $2 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    # No `grep -q` behind a pipe: under pipefail its early exit fails the pipeline (SIGPIPE).
+    awk -v f="$from_line" 'NR > f && /frust-devtools listening on [0-9]/ { hit = 1 } END { exit !hit }' \
+      "$LOG" && return 0
+    if ! kill -0 "$RUNNER_PID" 2>/dev/null; then return 1; fi
+    sleep 0.2
+  done
+  return 1
+}
+
+# `maps: ...` for pid `$1` after run `$2`: its `/memfd:frust-hotpatch (deleted)` mappings (all and
+# r-xp), the file saved as maps-run-<run>.txt in the log dir. `run-as` reads it as the app's uid.
+device_maps() {
+  local f="${LOG_DIR}/maps-run-$2.txt"
+  adb_ shell run-as "$ANDROID_PACKAGE" cat "/proc/$1/maps" 2>/dev/null | tr -d '\r' > "$f"
+  if [ ! -s "$f" ]; then echo "maps: unreadable (run-as needs a debuggable app)"; return 0; fi
+  echo "maps: $(grep -c 'memfd:frust-hotpatch (deleted)' "$f") /memfd:frust-hotpatch (deleted)" \
+    "mappings, $(grep 'memfd:frust-hotpatch (deleted)' "$f" | grep -c ' r-xp ') r-xp" \
+    "(maps-run-$2.txt)"
+}
+
+# `info: ...`: the app's own `hotpatch_info` for pid `$1`, over a private `adb forward` to the
+# devtools port and token of that pid's discovery line in DEVLOG (removed again at once).
+device_hotpatch_info() {
+  local line port token
+  line="$(awk -v p="$1" '$2 == p && /frust-devtools listening on [0-9]+ token / { l = $0 } END { print l }' \
+    "$DEVLOG" 2>/dev/null)"
+  port="$(echo "$line" | sed -n 's/.*listening on \([0-9][0-9]*\) token .*/\1/p')"
+  token="$(echo "$line" | sed -n 's/.*listening on [0-9][0-9]* token \([0-9a-f][0-9a-f]*\).*/\1/p')"
+  if [ -z "$port" ] || [ -z "$token" ]; then echo "info: no discovery line for pid $1"; return 0; fi
+  # The token travels in the environment of this one process, never argv (visible in `ps`).
+  HOTPATCH_TOKEN="$token" python3 - "$SERIAL" "$port" <<'PY'
+import json, os, socket, subprocess, sys
+serial, port = sys.argv[1], sys.argv[2]
+token = os.environ["HOTPATCH_TOKEN"]
+fwd = subprocess.run(["adb", "-s", serial, "forward", "tcp:0", f"tcp:{port}"],
+                     capture_output=True, text=True).stdout.strip()
+try:
+    local = int(fwd)
+except ValueError:
+    sys.exit(print("info: adb forward failed"))
+try:
+    s = socket.create_connection(("127.0.0.1", local), timeout=10)
+    f = s.makefile("rwb")
+    def call(i, method, params):
+        f.write((json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params})
+                 + "\n").encode())
+        f.flush()
+        while True:
+            raw = f.readline()
+            if not raw:
+                raise RuntimeError("connection closed")
+            msg = json.loads(raw)
+            if msg.get("id") == i:
+                if "error" in msg:
+                    raise RuntimeError(msg["error"].get("message"))
+                return msg.get("result")
+    call(1, "handshake", {"token": token})
+    r = call(2, "hotpatch_info", None)
+    s.close()
+    print(f"info: patches_applied={r['patches_applied']} patch_bytes_loaded={r['patch_bytes_loaded']}"
+          f" anchor_runtime=0x{r['anchor_runtime']:x} pid={r['pid']}"
+          f" pending_layout_mismatches={len(r['pending_layout_mismatches'])}")
+except Exception as e:  # a failed read is a result, never fatal
+    print(f"info: hotpatch_info failed: {e}")
+finally:
+    subprocess.run(["adb", "-s", serial, "forward", "--remove", f"tcp:{local}"],
+                   capture_output=True)
+PY
+}
+
+# `adb exec-out screencap -p` into SCREENCAP_DIR/<$1>.png, when SCREENCAP_DIR is set.
+screencap() {
+  [ -n "$SCREENCAP_DIR" ] || return 0
+  if adb_ exec-out screencap -p > "${SCREENCAP_DIR%/}/$1.png" 2>/dev/null; then
+    echo "screencap: ${SCREENCAP_DIR%/}/$1.png"
+  else
+    echo "screencap: failed"
+  fi
 }
 
 # Rewrite `$1` in place with the content of `$2` (same inode, no rename: dx watches for in-place
@@ -590,6 +876,7 @@ start_runner() {
   else
     local -a cmd=("$FRUST" run --watch)
     [ "$MODE" = "frust-restart" ] && cmd+=(--no-hot --features frust/hotpatch)
+    [ "$ANDROID" = 1 ] && cmd+=(-d "$SERIAL")
     # Word-split on purpose: FRUST_RUN_ARGS holds plain words (e.g. `--define KEY=VALUE`).
     # shellcheck disable=SC2206
     [ -n "$FRUST_RUN_ARGS" ] && cmd+=($FRUST_RUN_ARGS)
@@ -605,6 +892,7 @@ start_runner() {
 # mode, `debug/<name>` with --no-hot), matched by its command's first word, so only this scratch
 # app's processes are ever found. `cargo run` starts it by a path relative to the app dir.
 frust_app_pids() {
+  if [ "$ANDROID" = 1 ]; then device_pids; return 0; fi
   ps -axo pid=,command= | awk -v pre="${APP_TARGET_DIR%/}/" -v bin="/${APP_BIN}" -v app="$APP" '
     { exe = $2; if (substr(exe, 1, 1) != "/") exe = app "/" exe }
     index(exe, pre) == 1 && substr(exe, length(exe) - length(bin) + 1) == bin { print $1 }'
@@ -627,7 +915,8 @@ stop_runner() {
   local i=0
   while kill -0 -- "-${RUNNER_PID}" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
   if kill -0 -- "-${RUNNER_PID}" 2>/dev/null; then kill -KILL -- "-${RUNNER_PID}" 2>/dev/null; fi
-  if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
+  # (A device PID is not a host process: the Android leg never signals it.)
+  if [ "$ANDROID" != 1 ] && [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
     local pgid
     pgid="$(ps -o pgid= -p "$APP_PID" 2>/dev/null | tr -d ' ')"
     if [ -z "$pgid" ]; then
@@ -640,7 +929,14 @@ stop_runner() {
     fi
   fi
   wait "$RUNNER_PID" 2>/dev/null
-  if [ "$FRUST_MODE" = 1 ]; then
+  if [ "$ANDROID" = 1 ]; then
+    # The CLI's Ctrl-C force-stops the package; a device app that outlived it is stopped here
+    # (this scratch package only).
+    if [ -n "$(device_pids)" ]; then
+      echo "note: ${ANDROID_PACKAGE} outlived the CLI; am force-stop" >&2
+      adb_ shell am force-stop "$ANDROID_PACKAGE" >/dev/null 2>&1
+    fi
+  elif [ "$FRUST_MODE" = 1 ]; then
     # The app runs in its own process group; anything the CLI did not take down (e.g. a child of
     # an interrupted first fat build) is this scratch app's executable, so kill it by path.
     local pid
@@ -653,8 +949,40 @@ stop_runner() {
   APP_PID=""
 }
 
+# Replaces the devtools token of every discovery line in the saved logcat (the port stays), so
+# the kept log dir holds no live credential.
+redact_devlog_tokens() {
+  [ -f "$DEVLOG" ] || return 0
+  sed -E 's/(listening on [0-9]+ token )[0-9a-fA-F]+/\1<redacted>/' "$DEVLOG" > "${DEVLOG}.redacted" \
+    && mv "${DEVLOG}.redacted" "$DEVLOG"
+}
+
 cleanup() {
   stop_runner
+  if [ -n "$DEVLOG_PID" ]; then
+    kill "$DEVLOG_PID" 2>/dev/null
+    wait "$DEVLOG_PID" 2>/dev/null
+    DEVLOG_PID=""
+    redact_devlog_tokens
+    echo
+    echo "Device log since ${DEVLOG_SINCE} (device clock): ${DEVLOG}"
+    # The app runs as untrusted_app; other domains' denials (adb's shell, system_server) are
+    # counted but not the app's.
+    echo "Frame-wait backstop lines ('${BACKSTOP_RE}') in it: $(grep -c "$BACKSTOP_RE" "$DEVLOG")"
+    echo "SELinux denials in it: $(grep -c 'avc: *denied' "$DEVLOG") line(s), of which" \
+      "$(grep 'avc: *denied' "$DEVLOG" | grep -c 'scontext=u:r:untrusted_app') with" \
+      "scontext untrusted_app (first 5 of those):"
+    grep 'avc: *denied' "$DEVLOG" | grep 'scontext=u:r:untrusted_app' | cut -c1-240 | head -5 \
+      | sed 's/^ */  /'
+    echo "Crash buffer since then:"
+    # `-d` returns at once while the device is attached; with it gone, adb would wait for it.
+    if [ "$(adb_ get-state 2>/dev/null)" != "device" ]; then
+      echo "  (device not attached: crash buffer not read)"
+    else
+      adb_ logcat -d -b crash -v epoch -T "$DEVLOG_SINCE" 2>/dev/null | grep -v '^-----' \
+        | cut -c1-240 | head -10 | sed 's/^ */  /' | grep . || echo "  (empty)"
+    fi
+  fi
   local file copy
   while IFS=$'\t' read -r file copy; do
     write_in_place "$file" "$copy"
@@ -686,7 +1014,7 @@ wait_for() {
     if [ -n "$t" ]; then echo "$t"; return 0; fi
     # A refused apply never produces an `applied` line: stop waiting for one.
     if [ "$kind" = "applied" ] && [ -n "$(refused_variant "$from_line")" ]; then return 1; fi
-    if [ -n "$APP_PID" ] && ! kill -0 "$APP_PID" 2>/dev/null; then return 1; fi
+    if [ -n "$APP_PID" ] && ! app_alive "$APP_PID"; then return 1; fi
     if ! kill -0 "$RUNNER_PID" 2>/dev/null; then return 1; fi
     sleep 0.1
   done
@@ -772,14 +1100,18 @@ wait_outcome() {
 # Resident set size of pid `$1` in MB (one decimal), or `?`.
 rss_mb() {
   local kb
-  kb="$(ps -o rss= -p "$1" 2>/dev/null | tr -d ' ')"
+  if [ "$ANDROID" = 1 ]; then
+    kb="$(adb_ shell cat "/proc/$1/status" 2>/dev/null | tr -d '\r' | awk '/^VmRSS:/ { print $2 }')"
+  else
+    kb="$(ps -o rss= -p "$1" 2>/dev/null | tr -d ' ')"
+  fi
   if [ -n "$kb" ]; then awk -v k="$kb" 'BEGIN { printf "%.1f", k / 1024 }'; else echo "?"; fi
 }
 
 # --frust-run: the session dir's newest `stub-N.o` / `patch-N.<ext>` written after the save at `$1`
 # (unix ms): `host: stub-N.o at save+<ms>, patch-N.dylib at save+<ms> (<bytes> bytes, mode <octal>)`.
 host_artifacts() {
-  python3 - "${APP_TARGET_DIR%/}/frust-hotpatch/session-${APP_BIN}" "$1" <<'PY'
+  python3 - "${APP_TARGET_DIR%/}/frust-hotpatch/${SESSION_DIR_NAME}" "$1" <<'PY'
 import os, re, sys
 d, stamp = sys.argv[1], int(sys.argv[2])
 best = {}
@@ -788,19 +1120,22 @@ try:
 except OSError:
     names = []
 for n in names:
-    m = re.fullmatch(r"(stub|patch)-(\d+)\.(o|dylib|so|dll)", n)
+    # `patch-N.upload.so`: the stripped copy an Android session sends (H2-06).
+    m = re.fullmatch(r"(stub|patch)-(\d+)\.(o|dylib|so|dll|upload\.so)", n)
     if not m:
         continue
+    kind = "upload" if m.group(3) == "upload.so" else m.group(1)
     st = os.stat(os.path.join(d, n))
     t = int(st.st_mtime * 1000)
-    if t > stamp and (m.group(1) not in best or int(m.group(2)) > best[m.group(1)][0]):
-        best[m.group(1)] = (int(m.group(2)), n, t, st.st_size, st.st_mode & 0o777)
+    if t > stamp and (kind not in best or int(m.group(2)) > best[kind][0]):
+        best[kind] = (int(m.group(2)), n, t, st.st_size, st.st_mode & 0o777)
 parts = []
 if "stub" in best:
     parts.append(f"{best['stub'][1]} at save+{best['stub'][2] - stamp}")
-if "patch" in best:
-    _, n, t, size, mode = best["patch"]
-    parts.append(f"{n} at save+{t - stamp} ({size} bytes, mode {mode:o})")
+for kind in ("patch", "upload"):
+    if kind in best:
+        _, n, t, size, mode = best[kind]
+        parts.append(f"{n} at save+{t - stamp} ({size} bytes, mode {mode:o})")
 print("host: " + (", ".join(parts) if parts else "no stub/patch written after the save"))
 PY
 }
@@ -826,24 +1161,49 @@ median() {
 echo "hotpatch-spike measure: ${ROW:+row=${ROW} }mode=${MODE} target=${TARGET} runs=${RUNS}"
 [ "$MODE" = "hotpatch" ] && echo "dx: ${DX} (${DX_VERSION})"
 [ "$FRUST_MODE" = 1 ] && echo "frust: ${FRUST} ($("$FRUST" --version 2>/dev/null)); app: ${APP} (${APP_BIN})"
+if [ "$ANDROID" = 1 ]; then
+  echo "device: $(adb_ shell getprop ro.product.model | tr -d '\r'), Android" \
+    "$(adb_ shell getprop ro.build.version.release | tr -d '\r')" \
+    "(sdk $(adb_ shell getprop ro.build.version.sdk | tr -d '\r')), $(adb_ shell getprop ro.build.fingerprint | tr -d '\r');" \
+    "package ${ANDROID_PACKAGE}"
+fi
 echo "Logs: ${LOG_DIR}"
 echo "If this script dies without its EXIT trap, restore the sources in place with:"
 while IFS=$'\t' read -r file copy; do
   echo "  cat '${copy}' > '${file}'"
 done < "$RESTORE_LIST"
 
+if [ "$ANDROID" = 1 ]; then
+  measure_clock_offset 7
+  start_devlog
+fi
 START_MS="$(now_ms)"
 start_runner
 echo "Waiting up to ${STARTUP_TIMEOUT}s for the first frame (a cold build compiles frust and wgpu)..."
-if ! FIRST_FRAME="$(wait_for frame 0 0 "$STARTUP_TIMEOUT")"; then
+if [ "$ANDROID" = 1 ]; then
+  if ! FIRST_FRAME="$(wait_devlog "$(displayed_re)" "$START_MS" "$STARTUP_TIMEOUT")"; then
+    echo "error: no 'Displayed ${ANDROID_PACKAGE}/' line in ${DEVLOG}; see ${LOG}" >&2
+    exit 1
+  fi
+  wait_discovery 0 120 || { echo "error: no devtools discovery line; see ${LOG}" >&2; exit 1; }
+elif ! FIRST_FRAME="$(wait_for frame 0 0 "$STARTUP_TIMEOUT")"; then
   echo "error: no first 'frust-hotpatch: frame' line; see ${LOG}" >&2
   exit 1
 fi
 find_app_pid
 echo "First frame after $((FIRST_FRAME - START_MS)) ms (app pid ${APP_PID:-?})."
+if [ -n "$PRE_RUN_HOOK" ]; then
+  bash -c "${PRE_RUN_HOOK} \"\$1\"" _ "${APP_PID:-0}" 2>&1 | sed 's/^/hook: /'
+fi
 if [ "$PRE_RUN_PAUSE" != "0" ]; then
   echo "Pausing ${PRE_RUN_PAUSE}s before the first edit (PRE_RUN_PAUSE)..."
   sleep "$PRE_RUN_PAUSE"
+fi
+if [ "$ANDROID" = 1 ] && [ -n "$APP_PID" ]; then
+  echo "before run 1: pid ${APP_PID}; rss $(rss_mb "$APP_PID") MB"
+  echo "    $(device_maps "$APP_PID" 0)"
+  [ "$HOTPATCH_INFO" = 1 ] && echo "    $(device_hotpatch_info "$APP_PID")"
+  echo "    $(screencap before)"
 fi
 
 APPLIED_DELTAS=""
@@ -852,13 +1212,18 @@ RESULTS=""
 OUTCOMES=""
 run=1
 while [ "$run" -le "$RUNS" ]; do
+  if [ "$ANDROID" = 1 ]; then
+    # Not in a subshell: it sets CLOCK_OFFSET_MS for this run.
+    measure_clock_offset 5 > "${LOG_DIR}/clock.line"
+    sed 's/^/    /' "${LOG_DIR}/clock.line"
+  fi
   sleep 1
   from="$(log_lines)"
   if ! stamp="$(apply_edit "$EDIT_FILE" "$TARGET" "$run" "$EDIT_ORIG")"; then
     RESULTS="${RESULTS}run ${run}: edit failed"$'\n'
     break
   fi
-  applied="" frame="" status="ok" outcome="" old_pid="$APP_PID" detail=""
+  applied="" frame="" status="ok" outcome="" old_pid="$APP_PID" detail="" source_note=""
   if [ "$MODE" = "restart" ]; then
     stop_runner
     start_runner
@@ -876,14 +1241,39 @@ while [ "$run" -le "$RUNS" ]; do
     case "$o_text" in
       "patched in "*)
         status="patched"
-        applied="$(wait_for applied "$from" "$stamp" "$EDIT_TIMEOUT")" || status="patched, no applied line"
-        frame="$(wait_for frame "$from" "$stamp" "$EDIT_TIMEOUT")" || status="patched, no frame line"
+        if [ "$ANDROID" = 1 ]; then
+          # The app's probe lines first (H2-05); the 5 s frame-wait backstop line is the fallback.
+          if applied="$(wait_probe applied "$stamp" 10 "$APP_PID")"; then
+            source_note="; source: probe"
+            frame="$(wait_probe frame "$stamp" 10 "$APP_PID")" || status="patched, no frame probe line"
+          else
+            source_note="; source: backstop"
+            applied="$(wait_applied_backstop "$stamp" "$APP_PID" 10)" \
+              || { applied=""; status="patched, no applied probe or backstop line"; }
+          fi
+          backstop="$(devlog_first "$BACKSTOP_RE" "$stamp" "$APP_PID")"
+          if [ -n "$backstop" ]; then
+            source_note="${source_note}; backstop: PRESENT at save+$((backstop - stamp)) ms"
+          else
+            source_note="${source_note}; backstop: none"
+          fi
+        else
+          applied="$(wait_for applied "$from" "$stamp" "$EDIT_TIMEOUT")" || status="patched, no applied line"
+          frame="$(wait_for frame "$from" "$stamp" "$EDIT_TIMEOUT")" || status="patched, no frame line"
+        fi
         ;;
       "restart required: "*)
         status="restart"
         # The CLI kills the app and starts a fresh fat session: wait for the new process's frame.
         APP_PID=""
-        frame="$(wait_for frame "$from" "$stamp" "$RESTART_TIMEOUT")" || status="restart, no relaunch frame"
+        if [ "$ANDROID" = 1 ]; then
+          # The whole device pipeline again; the relaunched activity's first frame is `Displayed`.
+          frame="$(wait_devlog "$(displayed_re)" "$stamp" "$RESTART_TIMEOUT")" \
+            || status="restart, no relaunch frame"
+          wait_discovery "$from" 120 || status="${status}, no relaunch endpoint"
+        else
+          frame="$(wait_for frame "$from" "$stamp" "$RESTART_TIMEOUT")" || status="restart, no relaunch frame"
+        fi
         find_app_pid
         ;;
       "") ;;
@@ -892,15 +1282,30 @@ while [ "$run" -le "$RUNS" ]; do
     [ -n "$outcome" ] && echo "    cli: ${o_text} [line at save+$((o_ms - stamp)) ms]"
     if [ "${status%%,*}" = "patched" ]; then
       echo "    $(host_artifacts "$stamp")"
-      echo "    $(handoff_line "$from")"
+      if [ "$ANDROID" = 1 ]; then
+        echo "    transport: patch_chunk uploads of patch-N.upload.so (a device session never hands off a file)"
+      else
+        echo "    $(handoff_line "$from")"
+      fi
     fi
     [ -n "$outcome" ] && OUTCOMES="${OUTCOMES}${status}"$'\t'"$((o_ms - stamp))"$'\n'
     trouble_lines "$from"
-    if [ -n "$APP_PID" ] && ! kill -0 "$APP_PID" 2>/dev/null; then status="crashed"; fi
+    if [ -n "$APP_PID" ] && ! app_alive "$APP_PID"; then status="crashed"; fi
     if [ "$status" = "patched" ] && [ "$old_pid" != "$APP_PID" ]; then
       status="patched, but the app pid changed"
     fi
     detail="; pid ${old_pid:-?} -> ${APP_PID:-?}; rss $(rss_mb "${APP_PID:-0}") MB"
+    if [ "$ANDROID" = 1 ] && [ -n "$APP_PID" ]; then
+      echo "    $(device_maps "$APP_PID" "$run")"
+      [ "$HOTPATCH_INFO" = 1 ] && echo "    $(device_hotpatch_info "$APP_PID")"
+      if [ "${status%%,*}" = "patched" ]; then
+        # The stub's thunks hold this process's slid base addresses (relocation evidence).
+        stub="$(ls -t "${APP_TARGET_DIR%/}/frust-hotpatch/${SESSION_DIR_NAME}"/stub-*.o 2>/dev/null | head -1)"
+        [ -n "$stub" ] && cp "$stub" "${LOG_DIR}/run-${run}-$(basename "$stub")"
+      fi
+      sleep 2
+      echo "    $(screencap "run-${run}")"
+    fi
     if [ -n "$AFTER_RUN_HOOK" ] && [ -n "$APP_PID" ]; then
       sleep 2
       bash -c "${AFTER_RUN_HOOK} \"\$1\" \"\$2\"" _ "$run" "$APP_PID" 2>&1 | sed 's/^/    hook: /'
@@ -935,7 +1340,7 @@ while [ "$run" -le "$RUNS" ]; do
   a_delta="n/a" f_delta="n/a"
   [ -n "$applied" ] && { a_delta=$((applied - stamp)); APPLIED_DELTAS="${APPLIED_DELTAS}${a_delta}"$'\n'; }
   [ -n "$frame" ] && { f_delta=$((frame - stamp)); FRAME_DELTAS="${FRAME_DELTAS}${f_delta}"$'\n'; }
-  line="run ${run}: save->applied ${a_delta} ms, save->frame ${f_delta} ms (${status})${detail}"
+  line="run ${run}: save->applied ${a_delta} ms, save->frame ${f_delta} ms (${status})${detail}${source_note}"
   if [ "$MODE" = "hotpatch" ]; then line="${line}; $(pid_state)"; fi
   if [ "$TARGET" = "state-field" ] && [ "$MODE" = "hotpatch" ]; then
     if [ -n "$extra" ]; then
@@ -987,4 +1392,19 @@ if [ "$MODE" = "frust-run" ]; then
     "$(printf '%s' "$RESULTS" | grep '(restart)' | sed -n 's/.*save->frame \([0-9]*\) ms.*/\1/p' | median) ms"
   echo "median save->CLI outcome line, restart runs:" \
     "$(printf '%s' "$OUTCOMES" | awk -F'\t' '$1 == "restart" { print $2 }' | median) ms"
+  if [ "$ANDROID" = 1 ]; then
+    # A patched run's applied/frame come from the app's probe lines, or from the backstop line
+    # (- 5 s, applied only) as the fallback; the CLI's own line is on the host clock.
+    echo "android: patched runs' applied/frame source:" \
+      "$(printf '%s' "$RESULTS" | grep -c 'source: probe' || true) probe," \
+      "$(printf '%s' "$RESULTS" | grep -c 'source: backstop' || true) backstop fallback;" \
+      "backstop line after the save in $(printf '%s' "$RESULTS" | grep -c 'backstop: PRESENT' || true) run(s)"
+    echo "median save->applied, patched runs:  $(printf '%s' "$RESULTS" | grep '(patched)' \
+      | sed -n 's/.*save->applied \([0-9]*\) ms.*/\1/p' | median) ms"
+    echo "median save->applied, patched runs 2..${RUNS}: $(printf '%s' "$RESULTS" | grep -v '^run 1:' \
+      | grep '(patched)' | sed -n 's/.*save->applied \([0-9]*\) ms.*/\1/p' | median) ms"
+    echo "median save->CLI outcome line, patched runs:" \
+      "$(printf '%s' "$OUTCOMES" | awk -F'\t' '$1 == "patched" { print $2 }' | median) ms"
+    echo "restart runs: save->frame is the relaunched activity's 'Displayed' line"
+  fi
 fi

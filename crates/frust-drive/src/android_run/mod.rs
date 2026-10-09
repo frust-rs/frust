@@ -18,7 +18,7 @@ use std::time::{Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 
 use crate::android_build::AndroidArtifact;
-use crate::build_info::BuildInfo;
+use crate::build_info::{BuildInfo, BuildMode};
 use crate::devices::{Device, Platform};
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::process::{ProcessRunner, StreamHandle, tail_lines};
@@ -218,6 +218,54 @@ fn prepare_session(
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
 ) -> Result<Option<PreparedSession>> {
+    prepare_session_with(
+        runner,
+        root,
+        device,
+        info,
+        extra_features,
+        env,
+        on_line,
+        cancel,
+        NativeLib::Gradle,
+        &mut None,
+    )
+}
+
+/// Builds and stages a hot session's native library ahead of Gradle:
+/// called with the device's ABI and the session's line sink once preflight
+/// has passed and before `./gradlew` runs. The hot-patch builder
+/// (`hotpatch::android`) fat-links the app's `cdylib` and writes it into
+/// `build/android/jniLibs/<abi>/`, where the APK packages it from.
+pub type StageNativeLib<'a> = dyn FnMut(&str, &mut dyn FnMut(&str)) -> Result<()> + 'a;
+
+/// How the app's native library reaches the APK.
+enum NativeLib<'a, 'b> {
+    /// The template's `cargoNdkBuild` task builds it inside Gradle: every
+    /// run but a hot session's.
+    Gradle,
+    /// A hot session stages it first; Gradle then assembles with `-x
+    /// cargoNdkBuild`, so the staged fat library is what gets packaged.
+    Staged(&'a mut StageNativeLib<'b>),
+}
+
+/// [`prepare_session`] with the native library supplied by `native`.
+/// `launched` is set to the installed package just before `am start` is
+/// issued for it, so it names the app on every answer from then on — a
+/// failed launch or pid lookup included ([`StoppedShort::launched`]).
+#[allow(clippy::too_many_arguments)] // `prepare_session`'s inputs, the native source and the launched sink
+fn prepare_session_with(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    extra_features: &[String],
+    env: &dyn EnvLookup,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+    native: NativeLib<'_, '_>,
+    launched: &mut Option<String>,
+) -> Result<Option<PreparedSession>> {
     let project = project::detect(root)?;
     let android_dir = project::require_android_dir(&project.root)?;
 
@@ -277,7 +325,7 @@ fn prepare_session(
     let abi = adb::device_abi(runner, &device.id);
     let target = AndroidArtifact::Apk {
         split_per_abi: false,
-        abis: vec![abi],
+        abis: vec![abi.clone()],
     };
     // Release-lean preflight: drop an undeclared `lean` for a legacy app,
     // warning once through this session's `on_line` sink, so `cargo ndk`
@@ -300,12 +348,32 @@ fn prepare_session(
     // be compared against a file's mtime, which the freshness gate on the
     // legacy-fallback artifact (below) needs.
     let build_start_time = SystemTime::now();
-    let build_out = gradle::assemble(
+    let excluded: &[&str] = match native {
+        NativeLib::Gradle => &[],
+        NativeLib::Staged(stage) => {
+            // A hot session is a Debug build by charter; anything else
+            // would package a library the variant's own cargo-ndk task
+            // should have built.
+            if info.mode != BuildMode::Debug {
+                bail!(
+                    "a hot session stages a debug library, not a {:?} one",
+                    info.mode
+                );
+            }
+            stage(&abi, on_line)?;
+            if cancel.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            &[gradle::CARGO_NDK_BUILD_TASK]
+        }
+    };
+    let build_out = gradle::assemble_excluding(
         runner,
         &project.root,
         &android_dir,
         &outcome.java_home,
         &task,
+        excluded,
         &props,
         on_line,
     )?;
@@ -390,6 +458,7 @@ fn prepare_session(
     };
 
     on_line(&format!("Launching {package}…"));
+    *launched = Some(package.clone());
     let launch_out = adb::launch(runner, &device.id, &component)?;
     if !launch_out.success {
         bail!("`adb shell am start` failed: {}", launch_out.stderr.trim());
@@ -416,6 +485,45 @@ fn prepare_session(
 pub struct AndroidLaunch {
     pub stream: StreamHandle,
     pub package: String,
+}
+
+/// A device pipeline run that ended without a logcat stream
+/// ([`spawn_session_outcome`]): cancelled at a phase boundary, or failed.
+#[derive(Debug)]
+pub struct StoppedShort {
+    /// The failure; `None` when `cancel` was observed at a phase boundary.
+    pub error: Option<anyhow::Error>,
+    /// The installed package `am start` was issued for, when the run got
+    /// that far: the app it may have left running. The same
+    /// grammar-validated value [`AndroidLaunch::package`] carries (badging-
+    /// or `frust.toml`-resolved), never parsed out of a log line.
+    pub launched: Option<String>,
+}
+
+impl StoppedShort {
+    /// Force-stops [`Self::launched`] (best-effort; nothing when the run
+    /// stopped before `am start`): the teardown a cancelled run owes the
+    /// app it launched on `serial`.
+    pub fn stop_launched(&self, runner: &dyn ProcessRunner, serial: &str) {
+        if let Some(package) = &self.launched {
+            force_stop(runner, serial, package);
+        }
+    }
+
+    /// The `Result<Option<_>>` shape of [`spawn_session`]: `Ok(None)` for a
+    /// cancel, `Err` for a failure.
+    fn into_option(self) -> Result<Option<AndroidLaunch>> {
+        self.error.map_or(Ok(None), Err)
+    }
+}
+
+/// `adb -s <serial> shell am force-stop <package>`, best-effort: a device
+/// that went away or an app already gone is a normal end. `package` is
+/// interpolated into a device-shell command line, so it must be a
+/// grammar-validated installed package ([`AndroidLaunch::package`],
+/// [`StoppedShort::launched`]).
+pub fn force_stop(runner: &dyn ProcessRunner, serial: &str, package: &str) {
+    let _ = runner.run("adb", &["-s", serial, "shell", "am", "force-stop", package]);
 }
 
 /// The streaming, cancellable variant of [`run`] for a front-end that
@@ -446,6 +554,30 @@ pub fn spawn_session(
     spawn_session_with_env(runner, root, device, info, on_line, cancel, &RealEnv)
 }
 
+/// [`spawn_session`] answering a run that ended without a stream as a
+/// [`StoppedShort`], which names the package `am start` was issued for —
+/// so a caller tearing down a cancelled run can force-stop an app the
+/// pipeline launched but never streamed.
+pub fn spawn_session_outcome(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<AndroidLaunch, StoppedShort> {
+    spawn_session_inner(
+        runner,
+        root,
+        device,
+        info,
+        on_line,
+        cancel,
+        &RealEnv,
+        NativeLib::Gradle,
+    )
+}
+
 /// The testable core of [`spawn_session`], taking an injected [`EnvLookup`]
 /// so `JAVA_HOME` resolution can be exercised with a `crate::doctor::FakeEnv`.
 fn spawn_session_with_env(
@@ -457,10 +589,131 @@ fn spawn_session_with_env(
     cancel: &AtomicBool,
     env: &dyn EnvLookup,
 ) -> Result<Option<AndroidLaunch>> {
+    spawn_session_inner(
+        runner,
+        root,
+        device,
+        info,
+        on_line,
+        cancel,
+        env,
+        NativeLib::Gradle,
+    )
+    .map_or_else(StoppedShort::into_option, |launch| Ok(Some(launch)))
+}
+
+/// [`spawn_session`] for a hot-patch session: the same build → install →
+/// launch → logcat pipeline, except that `stage` builds and stages the
+/// native library (see [`StageNativeLib`]) after preflight and Gradle then
+/// runs `assemble<Flavor>Debug -x cargoNdkBuild`, so the APK packages the
+/// staged library instead of rebuilding one. A failure inside `stage` ends
+/// the pipeline before Gradle with that error. A non-hot run never reaches
+/// this path: [`run`] and [`spawn_session`] invoke Gradle exactly as before.
+pub fn spawn_hot_session(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+    stage: &mut StageNativeLib<'_>,
+) -> Result<Option<AndroidLaunch>> {
+    spawn_hot_session_with_env(runner, root, device, info, on_line, cancel, stage, &RealEnv)
+        .map_or_else(StoppedShort::into_option, |launch| Ok(Some(launch)))
+}
+
+/// The testable core of [`spawn_hot_session`] (see
+/// [`spawn_session_with_env`]), answering a run that ended without a
+/// stream as a [`StoppedShort`] ([`spawn_session_outcome`]).
+#[allow(clippy::too_many_arguments)] // `spawn_session_with_env`'s inputs plus the stage hook
+pub(crate) fn spawn_hot_session_with_env(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+    stage: &mut StageNativeLib<'_>,
+    env: &dyn EnvLookup,
+) -> Result<AndroidLaunch, StoppedShort> {
+    spawn_session_inner(
+        runner,
+        root,
+        device,
+        info,
+        on_line,
+        cancel,
+        env,
+        NativeLib::Staged(stage),
+    )
+}
+
+/// The shared core of the spawn seams: [`stream_session`], with a run that
+/// ended without a stream answered as a [`StoppedShort`].
+#[allow(clippy::too_many_arguments)] // the shared core of the two spawn seams
+fn spawn_session_inner(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+    env: &dyn EnvLookup,
+    native: NativeLib<'_, '_>,
+) -> Result<AndroidLaunch, StoppedShort> {
+    let mut launched = None;
+    match stream_session(
+        runner,
+        root,
+        device,
+        info,
+        on_line,
+        cancel,
+        env,
+        native,
+        &mut launched,
+    ) {
+        Ok(Some(launch)) => Ok(launch),
+        Ok(None) => Err(StoppedShort {
+            error: None,
+            launched,
+        }),
+        Err(error) => Err(StoppedShort {
+            error: Some(error),
+            launched,
+        }),
+    }
+}
+
+/// The pipeline up to the live logcat stream; `launched` as
+/// [`prepare_session_with`]'s.
+#[allow(clippy::too_many_arguments)] // `spawn_session_inner`'s inputs plus the launched sink
+fn stream_session(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    device: &Device,
+    info: &BuildInfo,
+    on_line: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+    env: &dyn EnvLookup,
+    native: NativeLib<'_, '_>,
+    launched: &mut Option<String>,
+) -> Result<Option<AndroidLaunch>> {
     // The supervisor seam exposes no `--features` flag surface of its own, so
     // the passthrough is empty here — a TUI/MCP-driven session builds exactly
     // what the mode selects, as it did before the passthrough existed.
-    let Some(prepared) = prepare_session(runner, root, device, info, &[], env, on_line, cancel)?
+    let Some(prepared) = prepare_session_with(
+        runner,
+        root,
+        device,
+        info,
+        &[],
+        env,
+        on_line,
+        cancel,
+        native,
+        launched,
+    )?
     else {
         return Ok(None);
     };
@@ -1641,6 +1894,331 @@ mod tests {
             )
             .unwrap();
             assert!(out.is_none());
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// Answers through `inner` and records every `run`, raising `cancel`
+        /// as an invocation containing `trigger` runs: a Ctrl-C landing
+        /// during that call. (`trigger` names the subcommand, never a word a
+        /// fixture's temp path could carry.)
+        struct CancelDuring<'a> {
+            inner: FakeProcessRunner,
+            trigger: &'static str,
+            cancel: &'a AtomicBool,
+            runs: std::sync::Mutex<Vec<String>>,
+        }
+
+        impl ProcessRunner for CancelDuring<'_> {
+            fn run(&self, cmd: &str, args: &[&str]) -> Result<Output> {
+                let key = std::iter::once(cmd)
+                    .chain(args.iter().copied())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if key.contains(self.trigger) {
+                    self.cancel.store(true, Ordering::SeqCst);
+                }
+                self.runs.lock().unwrap().push(key);
+                self.inner.run(cmd, args)
+            }
+
+            fn run_streaming(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                cwd: Option<&Path>,
+                env: &[(&str, &str)],
+                on_line: &mut dyn FnMut(&str),
+            ) -> Result<Output> {
+                self.inner.run_streaming(cmd, args, cwd, env, on_line)
+            }
+
+            fn spawn_streaming(
+                &self,
+                cmd: &str,
+                args: &[&str],
+                cwd: Option<&Path>,
+                env: &[(&str, &str)],
+            ) -> Result<StreamHandle> {
+                self.inner.spawn_streaming(cmd, args, cwd, env)
+            }
+        }
+
+        /// Runs the pipeline (plain or hot) over a fixture that builds and
+        /// installs, raising `cancel` during the invocation containing
+        /// `trigger`; `launch_ok` registers `am start` and `pidof` (without
+        /// it `am start` answers an error, as when SIGINT kills `adb`).
+        fn stopped_short(
+            tag: &str,
+            hot: bool,
+            trigger: &'static str,
+            launch_ok: bool,
+        ) -> (StoppedShort, Vec<String>) {
+            let dir = unique_project_dir(tag);
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+            let task = if hot {
+                "assembleDebug -x cargoNdkBuild -Pfrust.targetPlatforms=arm64-v8a \
+                 -Pfrust.splitPerAbi=false"
+            } else {
+                "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false"
+            };
+            let mut inner = preflight_ok_runner()
+                .with(gradlew_key(&dir, task), ok("BUILD SUCCESSFUL"))
+                .with(
+                    format!("adb -s emulator-5554 install -r {apk_path}"),
+                    ok(""),
+                )
+                .with(
+                    "adb -s emulator-5554 shell am force-stop dev.f0x.myapp",
+                    ok(""),
+                );
+            if launch_ok {
+                inner = inner
+                    .with(
+                        "adb -s emulator-5554 shell am start -n dev.f0x.myapp/.MainActivity",
+                        ok(""),
+                    )
+                    .with(
+                        "adb -s emulator-5554 shell pidof dev.f0x.myapp",
+                        ok("4242\n"),
+                    );
+            }
+            let cancel = AtomicBool::new(false);
+            let runner = CancelDuring {
+                inner,
+                trigger,
+                cancel: &cancel,
+                runs: std::sync::Mutex::new(Vec::new()),
+            };
+            let mut stage = |_: &str, _: &mut dyn FnMut(&str)| -> Result<()> { Ok(()) };
+            let native = if hot {
+                NativeLib::Staged(&mut stage)
+            } else {
+                NativeLib::Gradle
+            };
+            let answered = spawn_session_inner(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                &mut |_| {},
+                &cancel,
+                &fake_env(),
+                native,
+            );
+            let Err(stopped) = answered else {
+                panic!("the run streamed");
+            };
+            stopped.stop_launched(&runner, "emulator-5554");
+            let _ = fs::remove_dir_all(&dir);
+            (stopped, runner.runs.into_inner().unwrap())
+        }
+
+        /// The producer side of the typed launched package: a run that ends
+        /// without a stream after `am start` names the installed package
+        /// it launched — whether `am start` itself failed (plain and hot
+        /// pipelines) or a cancel was observed after the pid lookup — and
+        /// [`StoppedShort::stop_launched`] force-stops exactly that package.
+        /// A run cancelled before `am start` names none and stops nothing.
+        #[test]
+        fn a_run_stopped_after_am_start_names_the_package_it_launched() {
+            let force_stop = "adb -s emulator-5554 shell am force-stop dev.f0x.myapp";
+            for (tag, hot, trigger, launch_ok, failed) in [
+                ("stopped-launch", false, "shell am start", false, true),
+                ("stopped-launch-hot", true, "shell am start", false, true),
+                ("stopped-after-pid", false, "shell pidof", true, false),
+            ] {
+                let (stopped, runs) = stopped_short(tag, hot, trigger, launch_ok);
+                assert_eq!(stopped.error.is_some(), failed, "{tag}: {stopped:?}");
+                assert_eq!(
+                    stopped.launched.as_deref(),
+                    Some("dev.f0x.myapp"),
+                    "{tag}: {runs:?}"
+                );
+                assert_eq!(runs.last().map(String::as_str), Some(force_stop), "{tag}");
+            }
+
+            let (stopped, runs) = stopped_short("stopped-before-launch", false, "install -r", true);
+            assert!(stopped.error.is_none(), "{stopped:?}");
+            assert_eq!(stopped.launched, None);
+            assert!(
+                !runs.iter().any(|run| run.contains("am ")),
+                "neither launched nor force-stopped: {runs:?}"
+            );
+        }
+
+        /// A hot session's stage step runs after preflight with the device
+        /// ABI, before Gradle, and Gradle then assembles with `-x
+        /// cargoNdkBuild` — the only `./gradlew` fixture registered, so the
+        /// plain `assembleDebug` argv would match nothing.
+        #[test]
+        fn a_hot_session_stages_the_library_then_assembles_without_cargo_ndk_build() {
+            let dir = unique_project_dir("hot-stage");
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -x cargoNdkBuild -Pfrust.targetPlatforms=arm64-v8a \
+                         -Pfrust.splitPerAbi=false",
+                    ),
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let mut staged_for = Vec::new();
+            let mut stage = |abi: &str, on_line: &mut dyn FnMut(&str)| -> Result<()> {
+                staged_for.push(abi.to_string());
+                on_line("[stage] fat library staged");
+                Ok(())
+            };
+            let mut lines = Vec::new();
+            let err = prepare_session_with(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |line| lines.push(line.to_string()),
+                &AtomicBool::new(false),
+                NativeLib::Staged(&mut stage),
+                &mut None,
+            )
+            .err()
+            .expect("the scripted install stops the pipeline");
+            assert!(err.to_string().contains("adb install"), "{err}");
+            assert_eq!(staged_for, vec!["arm64-v8a"]);
+            let building = lines.iter().position(|l| l.starts_with("Building"));
+            let staged = lines.iter().position(|l| l == "[stage] fat library staged");
+            let finished = lines.iter().position(|l| l.starts_with("Build finished"));
+            assert!(
+                building < staged && staged < finished && building.is_some(),
+                "{lines:?}"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// A stage failure (a fat build that did not compile) ends the
+        /// pipeline with that error before Gradle runs: no `./gradlew`
+        /// fixture is registered at all.
+        #[test]
+        fn a_failed_stage_stops_the_hot_session_before_gradle() {
+            let dir = unique_project_dir("hot-stage-fails");
+            let runner = preflight_ok_runner();
+            let mut stage = |_: &str, _: &mut dyn FnMut(&str)| -> Result<()> {
+                bail!("the hot-patch fat build failed")
+            };
+            let err = prepare_session_with(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |_| {},
+                &AtomicBool::new(false),
+                NativeLib::Staged(&mut stage),
+                &mut None,
+            )
+            .err()
+            .expect("the stage failure ends the pipeline");
+            assert_eq!(err.to_string(), "the hot-patch fat build failed");
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// A hot session is Debug-only: a profile run that reached the
+        /// staged path is refused before the stage step runs.
+        #[test]
+        fn a_hot_session_refuses_a_non_debug_variant_before_staging() {
+            let dir = unique_project_dir("hot-stage-profile");
+            let runner = preflight_ok_runner();
+            let mut ran = false;
+            let mut stage = |_: &str, _: &mut dyn FnMut(&str)| -> Result<()> {
+                ran = true;
+                Ok(())
+            };
+            let err = prepare_session_with(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Profile, None),
+                NO_EXTRA,
+                &fake_env(),
+                &mut |_| {},
+                &AtomicBool::new(false),
+                NativeLib::Staged(&mut stage),
+                &mut None,
+            )
+            .err()
+            .expect("a profile hot session is refused");
+            assert!(err.to_string().contains("debug library"), "{err}");
+            assert!(!ran);
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// The hot spawn seam reaches the same drainable logcat stream as
+        /// [`spawn_session`], through the staged build.
+        #[test]
+        fn spawn_hot_session_reaches_a_drainable_logcat_stream() {
+            let dir = unique_project_dir("hot-spawn");
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+            let runner = preflight_ok_runner()
+                .with(
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -x cargoNdkBuild -Pfrust.targetPlatforms=arm64-v8a \
+                         -Pfrust.splitPerAbi=false",
+                    ),
+                    ok("BUILD SUCCESSFUL"),
+                )
+                .with(
+                    format!("adb -s emulator-5554 install -r {apk_path}"),
+                    ok(""),
+                )
+                .with(
+                    "adb -s emulator-5554 shell am start -n dev.f0x.myapp/.MainActivity",
+                    ok(""),
+                )
+                .with(
+                    "adb -s emulator-5554 shell pidof dev.f0x.myapp",
+                    ok("4242\n"),
+                )
+                .with_stream(
+                    "adb -s emulator-5554 logcat --pid 4242",
+                    ["I/frust: hello"],
+                    true,
+                );
+            let mut stages = 0;
+            let mut stage = |_: &str, _: &mut dyn FnMut(&str)| -> Result<()> {
+                stages += 1;
+                Ok(())
+            };
+            let launch = spawn_hot_session_with_env(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                &mut |_| {},
+                &AtomicBool::new(false),
+                &mut stage,
+                &fake_env(),
+            )
+            .expect("a live logcat handle");
+            assert_eq!(stages, 1);
+            assert_eq!(launch.package, "dev.f0x.myapp");
+            let mut handle = launch.stream;
+            assert_eq!(handle.lines.recv().unwrap(), "I/frust: hello");
+            assert!(handle.wait());
             let _ = fs::remove_dir_all(&dir);
         }
     }

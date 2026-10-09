@@ -1,7 +1,8 @@
 //! Drives `./gradlew assemble<Flavor><Mode>` in `<app>/android/`, mode/flavor
 //! aware. The generated Gradle project's cargo-ndk task does the actual Rust
-//! `.so` build; this module only shells out to Gradle and streams its
-//! output.
+//! `.so` build — except in a hot session, which stages the library itself
+//! and assembles with `-x cargoNdkBuild` ([`assemble_excluding`]); this
+//! module only shells out to Gradle and streams its output.
 
 use std::path::{Path, PathBuf};
 
@@ -113,12 +114,50 @@ pub fn assemble(
     props: &[String],
     on_line: &mut dyn FnMut(&str),
 ) -> Result<Output> {
+    assemble_excluding(
+        runner,
+        project_dir,
+        android_dir,
+        java_home,
+        task,
+        &[],
+        props,
+        on_line,
+    )
+}
+
+/// The generated Gradle project's task that builds the Rust `.so` with
+/// `cargo ndk` before every build (`build.gradle.kts.tmpl`'s
+/// `cargoNdkBuild`, hooked into `preBuild`). A hot session builds and
+/// stages the library itself and excludes this task.
+pub const CARGO_NDK_BUILD_TASK: &str = "cargoNdkBuild";
+
+/// [`assemble`] with each of `excluded` skipped through Gradle's own `-x
+/// <task>`, placed right after `task`:
+/// `./gradlew --project-cache-dir <dir> <task> -x <excluded>... [-P...]`.
+/// An empty `excluded` is exactly [`assemble`]'s invocation.
+#[allow(clippy::too_many_arguments)] // `assemble`'s inputs plus the exclusions
+pub fn assemble_excluding(
+    runner: &dyn ProcessRunner,
+    project_dir: &Path,
+    android_dir: &Path,
+    java_home: &str,
+    task: &str,
+    excluded: &[&str],
+    props: &[String],
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Output> {
     let leading = leading_args(project_dir);
-    let mut args: Vec<&str> = Vec::with_capacity(leading.len() + 1 + props.len());
+    let mut args: Vec<&str> =
+        Vec::with_capacity(leading.len() + 1 + 2 * excluded.len() + props.len());
     for arg in &leading {
         args.push(arg.as_str());
     }
     args.push(task);
+    for excluded_task in excluded {
+        args.push("-x");
+        args.push(excluded_task);
+    }
     for prop in props {
         args.push(prop.as_str());
     }
@@ -331,6 +370,49 @@ mod tests {
             "{}",
             cache.display()
         );
+    }
+
+    /// A hot session's assemble skips the template's cargo-ndk task with
+    /// `-x cargoNdkBuild` right after the task name, the cache flag still
+    /// leading and the `-P` properties still trailing; only the exact argv
+    /// is registered, so any other shape finds no fixture.
+    #[test]
+    fn assemble_excluding_skips_the_cargo_ndk_task_after_the_task_name() {
+        let project_dir = fake_project_dir("assemble-excluding");
+        let runner = FakeProcessRunner::new().with(
+            gradlew_argv(
+                &project_dir,
+                "assembleDebug",
+                &[
+                    "-x",
+                    "cargoNdkBuild",
+                    "-Pfrust.targetPlatforms=arm64-v8a",
+                    "-Pfrust.splitPerAbi=false",
+                ],
+            ),
+            Output {
+                success: true,
+                stdout: "BUILD SUCCESSFUL".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let props = vec![
+            "-Pfrust.targetPlatforms=arm64-v8a".to_string(),
+            "-Pfrust.splitPerAbi=false".to_string(),
+        ];
+        let out = assemble_excluding(
+            &runner,
+            &project_dir,
+            &project_dir.join("android"),
+            "/opt/jdk17",
+            "assembleDebug",
+            &[CARGO_NDK_BUILD_TASK],
+            &props,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(out.success);
+        assert_eq!(CARGO_NDK_BUILD_TASK, "cargoNdkBuild");
     }
 
     #[test]

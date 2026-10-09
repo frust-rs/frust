@@ -80,7 +80,7 @@
 //!   counters, and the layout-mismatch records not yet reported (marking them
 //!   reported).
 //!
-//! Only the desktop shell calls [`frame_submitted`] today; elsewhere an apply
+//! The desktop and Android shells call [`frame_submitted`]; elsewhere an apply
 //! answers once the frame wait's [`UI_HOP_DEADLINE`] lapses.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -727,9 +727,11 @@ const PATCH_EXT: &str = if cfg!(any(target_os = "macos", target_os = "ios")) {
 };
 
 /// Whether `hotpatch_info` advertises the loopback patch-file hand-off: exactly
-/// when `ShellBackend::patch_file`'s checked reader is compiled in (unix).
+/// when `ShellBackend::patch_file`'s checked reader is compiled in (unix) and
+/// the host can share a filesystem with the app. Never on Android: host and
+/// device are different machines, so a host path means nothing there.
 #[cfg(feature = "hotpatch")]
-const PATCH_FILE_HAND_OFF: bool = cfg!(unix);
+const PATCH_FILE_HAND_OFF: bool = cfg!(all(unix, not(target_os = "android")));
 
 /// What [`ShellBackend`] tracks across patches.
 #[cfg(feature = "hotpatch")]
@@ -1725,7 +1727,11 @@ mod tests {
         fn hotpatch_info_advertises_the_patch_file_hand_off() {
             let _serial = serial();
             let info = backend(&scratch("advert")).hotpatch_info().expect("info");
-            assert!(info.patch_file_hand_off);
+            assert_eq!(
+                info.patch_file_hand_off,
+                !cfg!(target_os = "android"),
+                "advertised on a shared-filesystem host, never on Android"
+            );
         }
 
         #[cfg(unix)]

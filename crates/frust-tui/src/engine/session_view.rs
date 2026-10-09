@@ -276,6 +276,18 @@ impl SessionTarget {
         }
     }
 
+    /// Whether "Watch: hot patch on save" can run here: the desktop preview
+    /// or an Android device (a debug build of either runs hot; any other
+    /// build restarts on save). An iOS device has neither story. The one
+    /// gate the watch toggle, the palette row and the runner's watched
+    /// launch all read.
+    pub fn supports_watch(&self) -> bool {
+        match self {
+            Self::Desktop => true,
+            Self::Device { platform, .. } => *platform == Platform::Android,
+        }
+    }
+
     /// How to name this target to the user (`desktop`, or the device's own
     /// name) — the subject of the "already running here" toast and of the
     /// MCP refusal.

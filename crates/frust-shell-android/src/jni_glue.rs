@@ -1003,6 +1003,10 @@ pub fn native_init(
         frust_shell_common::devtools::app_name_from_process(),
         None,
     );
+    // Hot patch: the listener runs on the thread that applied the patch and only signals; the next Choreographer
+    // tick's gate reads the latch (`app::request_patch_frame`). Registered once, here, beside the devtools start.
+    #[cfg(feature = "hotpatch")]
+    frust_core::set_patch_listener(std::sync::Arc::new(crate::app::request_patch_frame));
     guard("nativeInit", 0, || {
         let cache_dir = env
             .with_env(|env| cache_dir.try_to_string(env))

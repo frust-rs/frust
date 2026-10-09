@@ -100,11 +100,14 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     // (`crate::runner`'s `translate_key`), so exactly one of the two rows
     // below carries the `R` hint at a time.
     let has_app_session = state.active_session().is_some_and(|s| s.target.is_some());
-    // "Watch: hot patch on save" is the `frust run --watch` loop, which is
-    // desktop-preview only — a device (or ad-hoc) session gates it off.
-    let has_desktop_session = state
-        .active_session()
-        .is_some_and(|s| s.target == Some(super::session_view::SessionTarget::Desktop));
+    // "Watch: hot patch on save" is the `frust run --watch` loop, which runs
+    // on the desktop preview and on Android devices — an iOS device (or
+    // ad-hoc) session gates it off.
+    let has_watchable_session = state.active_session().is_some_and(|s| {
+        s.target
+            .as_ref()
+            .is_some_and(super::session_view::SessionTarget::supports_watch)
+    });
     let has_selection = state
         .active_session()
         .is_some_and(|s| s.selection.is_some());
@@ -173,15 +176,15 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             "no session to restart",
         ),
         // A toggle: the same row turns it off again. Enabled only for a
-        // desktop app session (`Message::ToggleWatch`'s own refusal covers
-        // the `W` key on anything else). A save hot-patches a session that
-        // runs hot and restarts any other.
+        // desktop or Android app session (`Message::ToggleWatch`'s own
+        // refusal covers the `W` key on anything else). A save hot-patches a
+        // session that runs hot and restarts any other.
         gated(
             "Watch: hot patch on save",
             "W",
             Message::ToggleWatch,
-            has_desktop_session,
-            "desktop app sessions only",
+            has_watchable_session,
+            "desktop and Android app sessions only",
         ),
         gated(
             "Close tab",
@@ -532,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn watch_row_is_enabled_only_for_a_desktop_app_session() {
+    fn watch_row_is_enabled_only_for_a_desktop_or_android_app_session() {
         use crate::engine::{DevtoolsLaunch, SessionTarget, SessionView};
         use crate::supervise::SessionId;
         use frust_drive::devices::Platform;
@@ -558,14 +561,24 @@ mod tests {
 
         let row = by_title(&workbench());
         assert!(!row.enabled);
-        assert_eq!(row.disabled_reason, Some("desktop app sessions only"));
+        assert_eq!(
+            row.disabled_reason,
+            Some("desktop and Android app sessions only")
+        );
         assert!(!by_title(&with_session(None)).enabled, "ad-hoc session");
-        let device = with_session(Some(SessionTarget::Device {
+        let ios = with_session(Some(SessionTarget::Device {
+            id: "FAKE-UDID".into(),
+            name: "iPhone".into(),
+            platform: Platform::Ios,
+        }));
+        assert!(!by_title(&ios).enabled, "iOS device session");
+        let android = by_title(&with_session(Some(SessionTarget::Device {
             id: "emu-1".into(),
             name: "Pixel".into(),
             platform: Platform::Android,
-        }));
-        assert!(!by_title(&device).enabled, "device session");
+        })));
+        assert!(android.enabled, "Android device session");
+        assert_eq!(android.message, Message::ToggleWatch);
 
         let row = by_title(&with_session(Some(SessionTarget::Desktop)));
         assert!(row.enabled);

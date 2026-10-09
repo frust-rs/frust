@@ -2639,9 +2639,10 @@ fn restart_session_at(state: &mut AppState, idx: usize) -> Outcome {
 }
 
 /// The refusal toast for "Watch: hot patch on save" on anything but a desktop
-/// app session — `frust run --watch`'s own reason (`frust-cli`'s `run` docs).
-const WATCH_DESKTOP_ONLY: &str = "Watch is desktop-only: the watch loop has no device-side \
-     kill/rebuild/relaunch story yet";
+/// or Android app session — the targets `frust run --watch` drives (`frust
+/// run --watch -d` refuses every other device the same way).
+const WATCH_UNSUPPORTED: &str = "Watch runs on desktop and Android app sessions only: this \
+     target has no hot-patch or relaunch-on-save story yet";
 
 /// The toast for turning watch on: what a save will do from now on.
 const WATCH_ON: &str = "Watching sources — a save hot-patches this session, or restarts it \
@@ -2649,17 +2650,23 @@ const WATCH_ON: &str = "Watching sources — a save hot-patches this session, or
 
 /// Flip "Watch: hot patch on save" on the active session
 /// ([`Message::ToggleWatch`]). No active session idles; a session whose
-/// target is not the desktop preview (a device, or an ad-hoc session with no
-/// target) refuses with [`WATCH_DESKTOP_ONLY`] and no effect. Otherwise the
-/// flag flips and the runner is told to start/stop the watcher.
+/// target cannot be watched ([`SessionTarget::supports_watch`]: an iOS
+/// device, or an ad-hoc session with no target) refuses with
+/// [`WATCH_UNSUPPORTED`] and no effect. Otherwise — the desktop preview or
+/// an Android device — the flag flips and the runner is told to start/stop
+/// the watcher.
 fn toggle_watch(state: &mut AppState) -> Outcome {
     let Some(session) = state.active_session_mut() else {
         return Outcome::idle();
     };
-    if session.target != Some(SessionTarget::Desktop) {
+    if !session
+        .target
+        .as_ref()
+        .is_some_and(SessionTarget::supports_watch)
+    {
         state
             .toasts
-            .push(ToastKind::Warn, WATCH_DESKTOP_ONLY.to_string());
+            .push(ToastKind::Warn, WATCH_UNSUPPORTED.to_string());
         return Outcome::redraw();
     }
     session.watch = !session.watch;
@@ -2677,8 +2684,9 @@ fn toggle_watch(state: &mut AppState) -> Outcome {
 /// when the first restart was requested finds the replaced tab marked and
 /// does nothing.
 ///
-/// Otherwise a **hot** desktop session that is still live is asked to patch
-/// the burst's `paths` ([`Effect::HotPatch`]); its answer comes back as
+/// Otherwise a **hot** desktop or Android session that is still live is
+/// asked to patch the burst's `paths` ([`Effect::HotPatch`]); its answer
+/// comes back as
 /// [`Message::HotPatchOutcome`]. Everything else — a session that is not
 /// hot, or one that already ended (a build that failed is exactly the
 /// session a save should relaunch) — restarts through
@@ -2696,7 +2704,11 @@ fn watch_triggered(
     if !view.watch || view.close_on_exit {
         return Outcome::idle();
     }
-    if hot && view.target == Some(SessionTarget::Desktop) && !view.state.is_terminal() {
+    let watchable = view
+        .target
+        .as_ref()
+        .is_some_and(SessionTarget::supports_watch);
+    if hot && watchable && !view.state.is_terminal() {
         return Outcome::effect(Effect::HotPatch { session, paths });
     }
     restart_session_at(state, idx)
@@ -2772,14 +2784,19 @@ fn hot_patch_outcome(state: &mut AppState, session: SessionId, outcome: HotOutco
 
 /// Turn watch on for a freshly launched session the runner says should carry
 /// it ([`Message::EnableWatch`] — a watched session's relaunch, or a
-/// watch-checked desktop launch). Only a desktop app session takes it;
-/// anything else, an unknown id, or a session already watching idles.
+/// watch-checked desktop launch). Only a desktop or Android app session
+/// takes it; anything else, an unknown id, or a session already watching
+/// idles.
 fn enable_watch(state: &mut AppState, session: SessionId) -> Outcome {
     let Some(idx) = state.session_index(session) else {
         return Outcome::idle();
     };
     let view = &mut state.sessions[idx];
-    if view.watch || view.target != Some(SessionTarget::Desktop) {
+    let watchable = view
+        .target
+        .as_ref()
+        .is_some_and(SessionTarget::supports_watch);
+    if view.watch || !watchable {
         return Outcome::idle();
     }
     view.watch = true;
@@ -3932,19 +3949,30 @@ mod tests {
         );
     }
 
+    /// An Android device session is watchable (`frust run --watch -d
+    /// <android>`'s hot loop, mirrored); an iOS device session still refuses.
     #[test]
     fn toggle_watch_on_a_device_session_refuses_with_the_cli_wording() {
         let mut st = workbench_with_project();
-        register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        let a = register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
 
+        let out = update(&mut st, Message::ToggleWatch);
+        assert_eq!(out.effect, Some(Effect::WatchSet { id: a, on: true }));
+        assert!(st.sessions[0].watch, "an Android session is watched");
+        assert!(warn_texts(&st).is_empty());
+        let out = update(&mut st, Message::ToggleWatch);
+        assert_eq!(out.effect, Some(Effect::WatchSet { id: a, on: false }));
+        assert!(!st.sessions[0].watch);
+
+        let mut st = workbench_with_project();
+        register_on(&mut st, 0, "/tmp/huddle", iphone_target());
         let out = update(&mut st, Message::ToggleWatch);
         assert_eq!(out.effect, None);
         assert!(!st.sessions[0].watch);
-        assert_eq!(warn_texts(&st), vec![WATCH_DESKTOP_ONLY]);
+        assert_eq!(warn_texts(&st), vec![WATCH_UNSUPPORTED]);
         assert!(
-            WATCH_DESKTOP_ONLY
-                .contains("the watch loop has no device-side kill/rebuild/relaunch story yet"),
-            "reuses `frust run --watch`'s wording"
+            WATCH_UNSUPPORTED.contains("desktop and Android app sessions only"),
+            "names the targets `frust run --watch` drives"
         );
 
         // An ad-hoc (targetless) session refuses the same way.
@@ -4154,15 +4182,48 @@ mod tests {
         );
     }
 
+    /// A watched Android session's relaunch carries watch over like a
+    /// desktop one; an iOS device session never takes it.
     #[test]
     fn enable_watch_is_refused_for_a_device_session() {
         let mut st = workbench_with_project();
-        let a = register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        let a = register_on(&mut st, 0, "/tmp/huddle", iphone_target());
         assert_eq!(
             update(&mut st, Message::EnableWatch { session: a }).effect,
             None
         );
         assert!(!st.sessions[0].watch);
+
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        assert_eq!(
+            update(&mut st, Message::EnableWatch { session: a }).effect,
+            Some(Effect::WatchSet { id: a, on: true })
+        );
+        assert!(st.sessions[0].watch);
+    }
+
+    /// A settled burst on a live hot Android session is offered as a hot
+    /// patch, exactly like a desktop one; `R` on it stays the full restart
+    /// (a fresh fat start), never a patch.
+    #[test]
+    fn a_hot_android_session_patches_on_save_and_r_still_restarts() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", pixel_7_target());
+        st.sessions[0].state = SessionState::Running;
+        update(&mut st, Message::ToggleWatch);
+
+        let out = update(&mut st, hot_trigger(a, &["/tmp/huddle/src/lib.rs"]));
+        assert_eq!(
+            out.effect,
+            Some(Effect::HotPatch {
+                session: a,
+                paths: vec![PathBuf::from("/tmp/huddle/src/lib.rs")],
+            })
+        );
+
+        let out = update(&mut st, Message::RestartSession);
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
     }
 
     #[test]
@@ -4888,6 +4949,16 @@ mod tests {
     /// The identity of [`pixel_7`].
     fn pixel_7_target() -> SessionTarget {
         SessionTarget::of(&DeviceTarget::Device(pixel_7()))
+    }
+
+    /// An iOS device's identity; its udid is a fake.
+    fn iphone_target() -> SessionTarget {
+        SessionTarget::of(&DeviceTarget::Device(dev(
+            "FAKE-UDID",
+            "iPhone 15",
+            Platform::Ios,
+            Kind::PhysicalDevice,
+        )))
     }
 
     /// Load `devices`, select them all in the panel, and open the run-config
