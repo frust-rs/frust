@@ -29,9 +29,9 @@
 //!
 //! The record-to-cache rule ([`image_symbols_from_records`]), the header
 //! readers ([`codeview`], [`image_base`], [`size_of_image`]), the stub's PE
-//! arms and the jump
-//! table (which matches PDB-built tables by name, anchored on
-//! [`ANCHOR_SYMBOL`] exactly as for ELF and Mach-O) work on every host.
+//! arms and the jump table (which matches PDB-built tables by name,
+//! anchored on [`ANCHOR_SYMBOL`] exactly as for ELF and Mach-O) work on
+//! every host.
 
 use std::path::{Path, PathBuf};
 

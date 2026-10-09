@@ -225,9 +225,10 @@ jobs:
     # `hotpatch::` because five known Windows-host failures live outside them
     # (act_000001a12096ed6445DWzpgI). The devtools service runs with its
     # `hotpatch` feature: Windows applies hot patches and answers the same gate as
-    # every other host. A filter that matches no test fails the job. The runner's
-    # minutes are the owner's call: drop this job from `ci-ok`'s needs, or give it
-    # a path filter, to stop it gating every pull request.
+    # every other host. The job fails when any of the five module filters matched
+    # no test or the devtools crate ran none. The runner's minutes are the owner's
+    # call: drop this job from `ci-ok`'s needs, or give it a path filter, to stop
+    # it gating every pull request.
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -245,17 +246,24 @@ jobs:
         run: |
           set -o pipefail
           cargo test -p frust-devtools --features hotpatch 2>&1 | tee "$RUNNER_TEMP/frust-devtools-tests.log"
-      - name: Every filter ran tests
+      - name: Each module filter ran tests
         shell: bash
         run: |
-          for log in frust-drive-tests frust-devtools-tests; do
-            passed=$(awk '/test result:/ { for (i = 2; i <= NF; i++) if ($i == "passed;") sum += $(i - 1) } END { print sum + 0 }' "$RUNNER_TEMP/$log.log")
-            echo "$log: $passed passed"
-            if [ "$passed" -eq 0 ]; then
-              echo "::error::$log ran no tests: its filter matches nothing"
+          drive="$RUNNER_TEMP/frust-drive-tests.log"
+          for module in hotpatch::pe hotpatch::pdb_layout hotpatch::fat_link hotpatch::thin_link hotpatch::session::windows; do
+            count=$(grep -c "^test ${module}::" "$drive" || true)
+            echo "$module: $count tests"
+            if [ "$count" -eq 0 ]; then
+              echo "::error::the frust-drive filter $module matched no test"
               exit 1
             fi
           done
+          passed=$(awk '/test result:/ { for (i = 2; i <= NF; i++) if ($i == "passed;") sum += $(i - 1) } END { print sum + 0 }' "$RUNNER_TEMP/frust-devtools-tests.log")
+          echo "frust-devtools: $passed passed"
+          if [ "$passed" -eq 0 ]; then
+            echo "::error::frust-devtools ran no tests"
+            exit 1
+          fi
 
   hygiene:
     runs-on: ubuntu-latest
