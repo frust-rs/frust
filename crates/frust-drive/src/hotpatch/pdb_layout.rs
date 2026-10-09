@@ -32,7 +32,10 @@
 //! line keeps `/DEBUG` for this), after the link and before the upload,
 //! where the DWARF gate reads the objects before the link. The base table is
 //! the fat exe's PDB, which `/WHOLEARCHIVE` makes cover every replayable
-//! object.
+//! object. The session (`session::link_base` for the base, the builder's
+//! post-link table for each candidate) runs the accepted-set check on that
+//! table right after the thin link and before anything is sent, so on
+//! Windows a refused patch costs one link.
 //!
 //! **Fail closed.** A missing, foreign or unreadable PDB is
 //! [`HotpatchError::BuilderUnsupported`] (from `open_pdb`), and so is a PDB

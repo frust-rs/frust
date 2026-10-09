@@ -8,9 +8,11 @@
 //! Darwin name carries its leading `_` (`___frust_hotpatch_anchor`).
 //!
 //! A Windows (PE) image's symbol table is stripped, so its entries come from
-//! the image's PDB instead ([`super::pe`], through [`ImageSymbols::from_entries`]);
-//! [`ImageSymbols::parse`] reads only the relocatable COFF objects a PE patch
-//! is linked from.
+//! the image's PDB instead ([`super::pe`], through [`ImageSymbols::from_entries`]):
+//! [`ImageSymbols::load`] and [`SymbolCache::load`] route a PE target's image
+//! there (its own PDB, GUID/age-checked), while [`ImageSymbols::parse`] and
+//! [`SymbolCache::from_bytes`] read only the relocatable COFF objects a PE
+//! patch is linked from.
 //!
 //! TLS initializers are resolved per symbol at parse time. On ELF a TLS
 //! symbol's value is its offset into its section's initialization image and
@@ -247,8 +249,12 @@ pub struct ImageSymbols {
 }
 
 impl ImageSymbols {
-    /// Read and parse the image at `path`.
+    /// Read and parse the image at `path`; a PE target's linked image is read
+    /// from its own PDB ([`super::pe::load_image_symbols`]).
     pub fn load(path: &Path, target: Target) -> Result<Self, HotpatchError> {
+        if target.format() == Format::Pe {
+            return super::pe::load_image_symbols(path, target);
+        }
         let bytes = std::fs::read(path)
             .map_err(|err| HotpatchError::io(format!("reading `{}`", path.display()), err))?;
         Self::parse(&bytes, target, &format!("`{}`", path.display()))
@@ -486,8 +492,12 @@ pub struct SymbolCache {
 }
 
 impl SymbolCache {
-    /// Parse the base image at `path` once.
+    /// Parse the base image at `path` once; a PE target's linked image is
+    /// read from its own PDB ([`super::pe::load_symbol_cache`]).
     pub fn load(path: &Path, target: Target) -> Result<Self, HotpatchError> {
+        if target.format() == Format::Pe {
+            return super::pe::load_symbol_cache(path, target);
+        }
         let bytes = std::fs::read(path)
             .map_err(|err| HotpatchError::io(format!("reading `{}`", path.display()), err))?;
         Self::from_bytes(path, &bytes, target)

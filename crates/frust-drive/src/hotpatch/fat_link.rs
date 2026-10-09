@@ -17,8 +17,19 @@
 //! unknown one is [`HotpatchError::BuilderUnsupported`]. Darwin and Gnu
 //! arguments are in the `cc`-driver form rustc emits for a linker it does
 //! not recognise by name; Msvc arguments are link.exe's (`/OUT:`), and an
-//! Msvc image's symbols come from its PDB ([`super::pe`]). See
-//! `docs/CLI_ARCHITECTURE.md`.
+//! Msvc image's symbols come from its PDB ([`super::pe`]).
+//!
+//! **The Msvc linker** ([`flavor_linker_program`]) is the toolchain's own
+//! `rust-lld`, run as `rust-lld -flavor link` (lld-link, as dx runs its
+//! `gcc-ld/lld-link` wrapper), unless the build configured `lld-link` or
+//! `rust-lld` itself. The fat build's link line never names a linker
+//! (`frust` stands in for it), rustc's own `link.exe` lookup and its `LIB`
+//! setup reach only rustc's linker child, never the capture, and link.exe
+//! does not read the archive the builder writes (a BSD-style `ar` archive
+//! with no linker member), which lld-link takes under `/WHOLEARCHIVE:`.
+//! lld-link finds the MSVC and Windows SDK libraries itself when `LIB` is
+//! unset. A configured linker of any other name is
+//! [`HotpatchError::BuilderUnsupported`]. See `docs/CLI_ARCHITECTURE.md`.
 
 use std::fs;
 use std::io::Read;
@@ -50,6 +61,14 @@ const RAW_LINKERS: &[&str] = &[
 /// The link.exe flag both Msvc images (the fat exe and every patch DLL)
 /// carry: dx's "Prevent alsr from overflowing 32 bits".
 pub const HIGH_ENTROPY_VA_OFF: &str = "/HIGHENTROPYVA:NO";
+
+/// The LLD the Rust toolchain bundles in `<sysroot>/lib/rustlib/<host>/bin`.
+pub const RUST_LLD: &str = "rust-lld";
+
+/// The linkers an Msvc link runs: they take link.exe arguments and read the
+/// fat archive. `rust-lld` needs `-flavor link` first
+/// ([`linker_driver_args`]).
+const MSVC_LINKERS: &[&str] = &["lld-link", RUST_LLD];
 
 /// Which linker argument dialect a target needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,19 +176,82 @@ pub fn linker_program(custom: Option<&Path>) -> Result<String, HotpatchError> {
     let Some(custom) = custom else {
         return Ok(DEFAULT_LINKER.to_string());
     };
-    let name = custom
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.to_ascii_lowercase())
-        .unwrap_or_default();
-    let stem = name.strip_suffix(".exe").unwrap_or(&name);
-    if stem.is_empty() || RAW_LINKERS.contains(&stem) {
+    let stem = linker_stem(custom);
+    if stem.is_empty() || RAW_LINKERS.contains(&stem.as_str()) {
         return Err(HotpatchError::unsupported(format!(
             "linker `{}` is not a `cc`-compatible driver",
             custom.display()
         )));
     }
     Ok(render(custom))
+}
+
+/// The linker program for `flavor`, which [`fat_link`] and
+/// [`thin_link`](super::thin_link::thin_link) run. Darwin and Gnu:
+/// [`linker_program`]. Msvc: `custom` when it is `lld-link` or `rust-lld`,
+/// else the toolchain's own `rust-lld` that `bundled_lld` locates
+/// ([`bundled_lld`]); asked only when needed. A configured linker of any
+/// other name (`link.exe`, a `cc` driver) is
+/// [`HotpatchError::BuilderUnsupported`] naming it.
+pub fn flavor_linker_program(
+    flavor: LinkerFlavor,
+    custom: Option<&Path>,
+    bundled_lld: impl FnOnce() -> Result<PathBuf, HotpatchError>,
+) -> Result<String, HotpatchError> {
+    if flavor != LinkerFlavor::Msvc {
+        return linker_program(custom);
+    }
+    match custom {
+        Some(custom) if MSVC_LINKERS.contains(&linker_stem(custom).as_str()) => Ok(render(custom)),
+        Some(custom) => Err(HotpatchError::unsupported(format!(
+            "linker `{}` is not one the MSVC hot-patch builder runs (`lld-link` or `{RUST_LLD}`): \
+             the patch links read a BSD-style archive under /WHOLEARCHIVE",
+            custom.display()
+        ))),
+        None => Ok(render(&bundled_lld()?)),
+    }
+}
+
+/// `rust-lld` in the host's rustlib `bin` directory, the sibling of the
+/// host's `target_libdir` (`rustc --print target-libdir`). A missing file is
+/// [`HotpatchError::BuilderUnsupported`]: no linker is guessed.
+pub fn bundled_lld(target_libdir: &Path) -> Result<PathBuf, HotpatchError> {
+    let lld = target_libdir
+        .parent()
+        .map(|rustlib_host| {
+            rustlib_host
+                .join("bin")
+                .join(format!("{RUST_LLD}{}", std::env::consts::EXE_SUFFIX))
+        })
+        .filter(|lld| lld.is_file())
+        .ok_or_else(|| {
+            HotpatchError::unsupported(format!(
+                "the toolchain has no `{RUST_LLD}` beside `{}`; the MSVC hot-patch builder links \
+                 with it",
+                target_libdir.display()
+            ))
+        })?;
+    Ok(lld)
+}
+
+/// What `linker` needs ahead of `flavor`'s link line: `-flavor link` for an
+/// Msvc link through `rust-lld`, nothing otherwise.
+pub fn linker_driver_args(flavor: LinkerFlavor, linker: &str) -> Vec<String> {
+    if flavor == LinkerFlavor::Msvc && linker_stem(Path::new(linker)) == RUST_LLD {
+        vec!["-flavor".to_string(), "link".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// `linker`'s file name, lowercased, without `.exe`.
+fn linker_stem(linker: &Path) -> String {
+    let name = linker
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
+        .unwrap_or_default();
+    name.strip_suffix(".exe").unwrap_or(&name).to_string()
 }
 
 /// The packed `libdeps-<hash>.a` and what the link line still needs beside
@@ -442,7 +524,7 @@ pub fn fat_link_args(
 #[derive(Debug, Clone, Copy)]
 pub struct FatLinkRequest<'a> {
     pub flavor: LinkerFlavor,
-    /// From [`linker_program`].
+    /// From [`flavor_linker_program`].
     pub linker: &'a str,
     /// The tip's captured linker arguments
     /// ([`read_link_args`](super::link_intercept::read_link_args)).
@@ -473,7 +555,9 @@ pub struct FatLinkOutput {
 /// Packs the archive, runs the fat link through `runner`, and checks that
 /// the image defines [`ANCHOR_SYMBOL`]. A failed link or a missing anchor
 /// is [`HotpatchError::BuilderUnsupported`] (the session restarts instead);
-/// a linker that cannot be spawned is [`HotpatchError::Process`].
+/// on Msvc, a failure naming the archive says the archive was rejected. The
+/// linker's [`linker_driver_args`] lead the line. A linker that cannot be
+/// spawned is [`HotpatchError::Process`].
 pub fn fat_link(
     runner: &dyn ProcessRunner,
     request: &FatLinkRequest<'_>,
@@ -495,7 +579,20 @@ pub fn fat_link(
         fs::create_dir_all(parent)
             .map_err(|err| HotpatchError::io(format!("creating `{}`", parent.display()), err))?;
     }
-    let linker_output = run_linker(runner, request.linker, &args, request.envs, "fat link")?;
+    let mut argv = linker_driver_args(request.flavor, request.linker);
+    argv.extend(args);
+    let linker_output = run_linker(runner, request.linker, &argv, request.envs, "fat link")
+        .map_err(|err| match (request.flavor, &archive, err) {
+            (LinkerFlavor::Msvc, Some(archive), HotpatchError::BuilderUnsupported { detail })
+                if names_archive(&detail, &archive.path) =>
+            {
+                HotpatchError::unsupported(format!(
+                    "the linker rejected the fat archive `{}` under /WHOLEARCHIVE: {detail}",
+                    archive.path.display()
+                ))
+            }
+            (_, _, err) => err,
+        })?;
     let anchor_address = anchor_address(request.flavor, request.exe)?;
     Ok(FatLinkOutput {
         exe: request.exe.to_path_buf(),
@@ -503,6 +600,15 @@ pub fn fat_link(
         anchor_address,
         linker_output,
     })
+}
+
+/// Whether a linker's failure `detail` names the archive at `archive` (by
+/// file name: linkers print it in their own path spelling).
+fn names_archive(detail: &str, archive: &Path) -> bool {
+    archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| detail.contains(name))
 }
 
 /// Runs `linker args` with `envs` added and returns its combined output. A
@@ -927,6 +1033,163 @@ mod tests {
         ] {
             unsupported(linker_program(Some(Path::new(raw))));
         }
+    }
+
+    #[test]
+    fn msvc_links_through_lld_link_or_the_bundled_rust_lld_and_refuses_other_linkers() {
+        let bundled = || Ok(PathBuf::from("/rust/lib/rustlib/host/bin/rust-lld.exe"));
+        assert_eq!(
+            flavor_linker_program(LinkerFlavor::Msvc, None, bundled).unwrap(),
+            "/rust/lib/rustlib/host/bin/rust-lld.exe"
+        );
+        for configured in [
+            "C:/llvm/bin/lld-link.exe",
+            "/opt/llvm/lld-link",
+            "/t/rust-lld",
+        ] {
+            assert_eq!(
+                flavor_linker_program(LinkerFlavor::Msvc, Some(Path::new(configured)), || {
+                    panic!("a configured lld is used as is")
+                })
+                .unwrap(),
+                configured
+            );
+        }
+        for unknown in ["C:/VS/bin/link.exe", "cc", "clang", "/t/mold"] {
+            let detail = unsupported(flavor_linker_program(
+                LinkerFlavor::Msvc,
+                Some(Path::new(unknown)),
+                bundled,
+            ));
+            assert!(
+                detail.contains(unknown) && detail.contains("lld-link"),
+                "{detail}"
+            );
+        }
+        let missing = unsupported(flavor_linker_program(LinkerFlavor::Msvc, None, || {
+            Err(HotpatchError::unsupported("no rust-lld"))
+        }));
+        assert_eq!(missing, "no rust-lld");
+
+        // Darwin and Gnu are `linker_program`'s, and never look for an lld.
+        for flavor in [LinkerFlavor::Darwin, LinkerFlavor::Gnu] {
+            let never = || -> Result<PathBuf, HotpatchError> { panic!("no lld lookup") };
+            assert_eq!(flavor_linker_program(flavor, None, never).unwrap(), "cc");
+            unsupported(flavor_linker_program(
+                flavor,
+                Some(Path::new("/t/rust-lld")),
+                never,
+            ));
+        }
+    }
+
+    #[test]
+    fn rust_lld_takes_the_link_flavor_and_other_linkers_take_nothing() {
+        let lld = "/rust/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe";
+        assert_eq!(
+            linker_driver_args(LinkerFlavor::Msvc, lld),
+            strings(&["-flavor", "link"])
+        );
+        assert_eq!(
+            linker_driver_args(LinkerFlavor::Msvc, "/t/RUST-LLD"),
+            strings(&["-flavor", "link"])
+        );
+        assert!(linker_driver_args(LinkerFlavor::Msvc, "/llvm/lld-link.exe").is_empty());
+        assert!(linker_driver_args(LinkerFlavor::Gnu, lld).is_empty());
+        assert!(linker_driver_args(LinkerFlavor::Darwin, "cc").is_empty());
+    }
+
+    #[test]
+    fn the_bundled_lld_is_the_host_rustlib_bin_rust_lld() {
+        let root = temp_dir("bundled-lld");
+        let libdir = root.join("lib").join("rustlib").join("host").join("lib");
+        fs::create_dir_all(&libdir).unwrap();
+        let detail = unsupported(bundled_lld(&libdir));
+        assert!(detail.contains(RUST_LLD), "{detail}");
+        let bin = libdir.parent().unwrap().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let lld = bin.join(format!("rust-lld{}", std::env::consts::EXE_SUFFIX));
+        fs::write(&lld, b"lld").unwrap();
+        assert_eq!(bundled_lld(&libdir).unwrap(), lld);
+    }
+
+    #[test]
+    fn an_msvc_fat_link_through_rust_lld_leads_with_the_link_flavor() {
+        let fx = fixture("msvc-lld");
+        let link_args = msvc_link_args(&fx);
+        let exe = fx.target.join("debug").join("app.exe");
+        let lld = "/rust/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe";
+        let runner = RecordingRunner::linking(b"MZ stand-in".to_vec());
+        let request = FatLinkRequest {
+            flavor: LinkerFlavor::Msvc,
+            linker: lld,
+            link_args: &link_args,
+            envs: &[],
+            target_dir: &fx.target,
+            archive_dir: &fx.archive_dir,
+            exe: &exe,
+        };
+        unsupported(fat_link(&runner, &request));
+        let link = runner.only_call(lld);
+        assert_eq!(link.args[..2], strings(&["-flavor", "link"])[..]);
+        let archive = write_fat_archive(
+            &runner,
+            LinkerFlavor::Msvc,
+            &link_args,
+            &fx.target,
+            &fx.archive_dir,
+        )
+        .unwrap();
+        assert_eq!(
+            link.args[2..],
+            fat_link_args(LinkerFlavor::Msvc, &link_args, archive.as_ref(), &exe).unwrap()[..]
+        );
+    }
+
+    #[test]
+    fn an_msvc_link_failure_naming_the_archive_says_the_archive_was_rejected() {
+        let fx = fixture("msvc-rejected");
+        let link_args = msvc_link_args(&fx);
+        let exe = fx.target.join("debug").join("app.exe");
+        let packer = RecordingRunner::linking(Vec::new());
+        let archive = write_fat_archive(
+            &packer,
+            LinkerFlavor::Msvc,
+            &link_args,
+            &fx.target,
+            &fx.archive_dir,
+        )
+        .unwrap()
+        .unwrap();
+        let name = archive.path.file_name().unwrap().to_str().unwrap();
+        let request = |runner: &RecordingRunner| {
+            fat_link(
+                runner,
+                &FatLinkRequest {
+                    flavor: LinkerFlavor::Msvc,
+                    linker: "lld-link",
+                    link_args: &link_args,
+                    envs: &[],
+                    target_dir: &fx.target,
+                    archive_dir: &fx.archive_dir,
+                    exe: &exe,
+                },
+            )
+        };
+        let rejected = RecordingRunner::failing(&format!("lld-link: error: {name}: bad archive"));
+        let detail = unsupported(request(&rejected));
+        assert!(
+            detail.starts_with("the linker rejected the fat archive")
+                && detail.contains("/WHOLEARCHIVE")
+                && detail.contains("bad archive"),
+            "{detail}"
+        );
+        let other = RecordingRunner::failing("lld-link: error: undefined symbol: foo");
+        let detail = unsupported(request(&other));
+        assert!(
+            detail.starts_with("fat link failed") && detail.contains("undefined symbol"),
+            "{detail}"
+        );
     }
 
     #[test]
