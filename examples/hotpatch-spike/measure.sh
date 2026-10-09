@@ -16,6 +16,7 @@
 # Usage: examples/hotpatch-spike/measure.sh [--hotpatch | --restart | --frust-run | --frust-restart]
 #                                           [--app <dir>] [--runs <n>] [--target <t>] [--row <label>]
 #                                           [--serial <adb-serial> | -d <adb-serial> | --android]
+#                                           [--ios-sim | --udid <udid>]
 #        examples/hotpatch-spike/measure.sh --prepare-app <dir>
 #   --hotpatch     (default) `dx serve --hot-patch --platform desktop --interactive false --verbose`
 #                  from runner/; DX from $DX, else `dx` on PATH (must be dioxus-cli 0.7.10).
@@ -141,6 +142,29 @@
 #   PRE_RUN_HOOK=<cmd>  run via `bash -c` after the first frame, before PRE_RUN_PAUSE, as `<cmd> <app
 #                       pid>` (e.g. taps that raise the counter), desktop and Android alike.
 #
+# IOS SIMULATOR (H4-03): `--frust-run --ios-sim` (or `--udid <udid>`) runs `frust run --watch -d
+# <udid>` against a booted simulator; the udid comes from --udid, else $SIMULATOR_UDID, else the
+# only booted simulator, and is never printed (the header names the model and the runtime). What
+# changes against the desktop leg:
+#   - instruments: the iOS shell logs the same `frust-hotpatch: applied/frame t_unix_ms=` probe
+#     lines (H4-04); the CLI echoes the app's `simctl launch --console-pty` stream, so they are read
+#     from the CLI's output, as on the desktop. The simulator app is a host process on the host
+#     clock: no offset is measured. When the applied probe line is absent within 10 s, a patched
+#     run falls back to the frame-wait backstop line's arrival - 5000 ms (applied only), as the
+#     Android leg does; each run line names `source: probe|backstop` and `backstop: none|PRESENT`.
+#   - per run: the app PID (the host process whose executable is `Runner.app/Runner` in this
+#     simulator's bundle container), its RSS, `images:` the patch images `vmmap` lists in it
+#     (SIM_VMMAP=0 skips), and SCREENCAP_DIR screenshots (`xcrun simctl io <udid> screenshot`):
+#     before.png and run-N.png (2 s after). No `info:` line: the CLI echoes the discovery line with
+#     its token redacted, so `hotpatch_info` cannot be called from here.
+#   - --frust-restart is the simulator restart baseline: `frust run --watch -d <udid> --no-hot`,
+#     whose relaunch is `xcodebuild` -> `simctl install` -> `simctl launch`. `frust run --watch -d`
+#     refuses `--features`, so for that run only the app's `frust` dependency gains the `hotpatch`
+#     feature in its Cargo.toml (restored on exit), which turns on the first-frame probe line.
+#   - the devtools token is redacted from the saved CLI log at exit; an app still running after the
+#     CLI exits is `simctl terminate`d (this bundle only). IOS_BUNDLE_ID overrides the bundle id read
+#     from ios/Runner.xcodeproj/project.pbxproj.
+#
 # Every edited file is restored on exit (trap EXIT, Ctrl-C included) and the runner's process group
 # is killed; the summary ends with `git status` of this directory as proof (with --frust-run /
 # --frust-restart: a `cmp` of each restored file against its pristine copy, and any app process of
@@ -182,6 +206,13 @@ SCREENCAP_DIR="${SCREENCAP_DIR:-}"
 HOTPATCH_INFO="${HOTPATCH_INFO:-1}"
 # Device clock minus host clock, in ms (0 on the desktop: one clock).
 CLOCK_OFFSET_MS=0
+# iOS simulator leg (--ios-sim / --udid): see the header. The udid is never printed.
+IOS_SIM=0
+UDID=""
+IOS_BUNDLE_ID="${IOS_BUNDLE_ID:-}"
+SIM_VMMAP="${SIM_VMMAP:-1}"
+# The app's Cargo.toml while --frust-restart adds the probe feature on the simulator.
+SIM_CARGO_TOML=""
 
 # The comment header (line 2 up to the first non-comment line), without the `# ` prefix.
 usage() {
@@ -219,6 +250,11 @@ while [ $# -gt 0 ]; do
       ANDROID=1; SERIAL="$2"; shift 2 ;;
     --serial=*) ANDROID=1; SERIAL="${1#--serial=}"; shift ;;
     --android) ANDROID=1; shift ;;
+    --ios-sim) IOS_SIM=1; shift ;;
+    --udid)
+      [ $# -ge 2 ] || { echo "error: --udid requires a simulator udid" >&2; exit 2; }
+      IOS_SIM=1; UDID="$2"; shift 2 ;;
+    --udid=*) IOS_SIM=1; UDID="${1#--udid=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument '$1' (see --help)" >&2; exit 2 ;;
   esac
@@ -450,8 +486,37 @@ if [ "$ANDROID" = 1 ]; then
   # `session-<crate>-<triple>` (hotpatch::android): the lib crate name, `-` folded to `_`.
   SESSION_DIR_NAME="session-${APP_BIN//-/_}-aarch64-linux-android"
 fi
+if [ "$IOS_SIM" = 1 ]; then
+  [ "$ANDROID" = 0 ] || { echo "error: --ios-sim/--udid and --serial/--android exclude each other" >&2; exit 2; }
+  [ "$FRUST_MODE" = 1 ] || { echo "error: --ios-sim drives only --frust-run / --frust-restart" >&2; exit 2; }
+  command -v xcrun >/dev/null 2>&1 || { echo "error: xcrun is required" >&2; exit 2; }
+  BOOTED="$(xcrun simctl list devices booted -j 2>/dev/null | python3 -c '
+import json, sys
+for devs in json.load(sys.stdin).get("devices", {}).values():
+    for d in devs:
+        if d.get("state") == "Booted":
+            print(d["udid"])')"
+  UDID="${UDID:-${SIMULATOR_UDID:-}}"
+  if [ -z "$UDID" ]; then
+    [ "$(printf '%s\n' "$BOOTED" | grep -c .)" = 1 ] \
+      || { echo "error: --ios-sim needs --udid or SIMULATOR_UDID unless exactly one simulator is booted" >&2; exit 2; }
+    UDID="$BOOTED"
+  fi
+  printf '%s\n' "$BOOTED" | grep -Fx "$UDID" >/dev/null \
+    || { echo "error: the simulator given by --udid/SIMULATOR_UDID is not booted" >&2; exit 2; }
+  if [ -z "$IOS_BUNDLE_ID" ]; then
+    IOS_BUNDLE_ID="$(sed -n 's/^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER = "\{0,1\}\([^";]*\)"\{0,1\};$/\1/p' \
+      "${APP}/ios/Runner.xcodeproj/project.pbxproj" 2>/dev/null | head -1)"
+  fi
+  [ -n "$IOS_BUNDLE_ID" ] \
+    || { echo "error: no PRODUCT_BUNDLE_IDENTIFIER in ${APP}/ios; set IOS_BUNDLE_ID" >&2; exit 2; }
+  # `session-<crate>-<triple>-<udid>` (hotpatch::ios_sim): the lib crate name, `-` folded to `_`.
+  case "$(uname -m)" in x86_64) SIM_TRIPLE="x86_64-apple-ios" ;; *) SIM_TRIPLE="aarch64-apple-ios-sim" ;; esac
+  SESSION_DIR_NAME="session-${APP_BIN//-/_}-${SIM_TRIPLE}-${UDID}"
+fi
 if [ -n "$SCREENCAP_DIR" ]; then
-  [ "$ANDROID" = 1 ] || { echo "error: SCREENCAP_DIR needs --serial (adb screencap)" >&2; exit 2; }
+  [ "$ANDROID" = 1 ] || [ "$IOS_SIM" = 1 ] \
+    || { echo "error: SCREENCAP_DIR needs --serial (adb screencap) or --ios-sim (simctl io)" >&2; exit 2; }
   [ -d "$SCREENCAP_DIR" ] || { echo "error: SCREENCAP_DIR '${SCREENCAP_DIR}' is not a directory" >&2; exit 2; }
   outside_repo "$SCREENCAP_DIR" || { echo "error: SCREENCAP_DIR must lie outside this repository" >&2; exit 2; }
 fi
@@ -484,6 +549,28 @@ for f in "$HOME_RS" "$CARD_RS" "$EDIT_FILE"; do
   printf '%s\t%s\n' "$f" "$copy" >> "$RESTORE_LIST"
 done
 EDIT_ORIG="$(awk -F'\t' -v f="$EDIT_FILE" '$1 == f { print $2; exit }' "$RESTORE_LIST")"
+
+# --frust-restart on the simulator: `frust run --watch -d` refuses `--features`, so the app's own
+# `frust` dependency gains `hotpatch` for this run (the first-frame probe line), restored on exit.
+if [ "$IOS_SIM" = 1 ] && [ "$MODE" = "frust-restart" ]; then
+  SIM_CARGO_TOML="${APP}/Cargo.toml"
+  copy="${LOG_DIR}/$(wc -l < "$RESTORE_LIST" | tr -d ' ')-Cargo.toml.orig"
+  cp "$SIM_CARGO_TOML" "$copy"
+  printf '%s\t%s\n' "$SIM_CARGO_TOML" "$copy" >> "$RESTORE_LIST"
+  python3 - "$SIM_CARGO_TOML" <<'PY' || { echo "error: could not add the probe feature" >&2; exit 2; }
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+dep = re.compile(r'^(frust = \{[^\n}]*?)( \})$', re.M)
+hits = dep.findall(text)
+if len(hits) != 1 or "features" in hits[0][0]:
+    sys.exit("measure.sh: expected one `frust = { .. }` dependency line without features")
+text = dep.sub(lambda m: m.group(1) + ', features = ["hotpatch"]' + m.group(2), text)
+with open(path, "r+") as f:
+    f.write(text)
+    f.truncate()
+PY
+fi
 
 RUNNER_PID=""
 APP_PID=""
@@ -688,11 +775,65 @@ PY
 # `adb exec-out screencap -p` into SCREENCAP_DIR/<$1>.png, when SCREENCAP_DIR is set.
 screencap() {
   [ -n "$SCREENCAP_DIR" ] || return 0
+  if [ "$IOS_SIM" = 1 ]; then
+    if xcrun simctl io "$UDID" screenshot "${SCREENCAP_DIR%/}/$1.png" >/dev/null 2>&1; then
+      echo "screencap: ${SCREENCAP_DIR%/}/$1.png"
+    else
+      echo "screencap: failed"
+    fi
+    return 0
+  fi
   if adb_ exec-out screencap -p > "${SCREENCAP_DIR%/}/$1.png" 2>/dev/null; then
     echo "screencap: ${SCREENCAP_DIR%/}/$1.png"
   else
     echo "screencap: failed"
   fi
+}
+
+# ---- iOS simulator leg helpers (--ios-sim) ------------------------------------------------------
+
+# This simulator's app processes (host processes: the executable `Runner.app/Runner` in its bundle
+# container), oldest first.
+sim_app_pids() {
+  ps -axo pid=,command= | awk -v dev="/Devices/${UDID}/data/Containers/Bundle/Application/" '
+    index($2, dev) && $2 ~ /\/Runner\.app\/Runner$/ { print $1 }'
+}
+
+# The arrival stamp (host ms) of the first CLI log line after log line `$2` matching ERE `$1` and
+# arriving later than `$3`. Prints nothing when none.
+log_first() {
+  tail -n +"$(($2 + 1))" "$LOG" | awk -v re="$1" -v s="$3" '$1 ~ /^[0-9]+$/ && $0 ~ re && $1 > s { print $1; exit }'
+}
+
+# The fallback apply moment after log line `$1` / host ms `$2`: the frame-wait backstop line's
+# arrival, minus 5000 ms (the Android leg's fallback). Waits up to `$3` s.
+wait_log_backstop() {
+  local deadline=$(( $(date +%s) + $3 )) t
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    t="$(log_first "$BACKSTOP_RE" "$1" "$2")"
+    if [ -n "$t" ]; then echo $((t - 5000)); return 0; fi
+    if ! kill -0 "$RUNNER_PID" 2>/dev/null; then return 1; fi
+    sleep 0.1
+  done
+  return 1
+}
+
+# `images: ...` for pid `$1` after run `$2`: the patch images `vmmap -w` lists in the process (their
+# `__TEXT` regions mapped from `.../frust-hotpatch/patch-*`), the output saved as vmmap-run-<run>.txt.
+sim_images() {
+  local f="${LOG_DIR}/vmmap-run-$2.txt"
+  vmmap -w "$1" > "$f" 2>/dev/null
+  if [ ! -s "$f" ]; then echo "images: vmmap unreadable"; return 0; fi
+  echo "images: $(grep '^__TEXT ' "$f" | grep -c '/frust-hotpatch/patch-') patch image(s) with a" \
+    "__TEXT region (vmmap-run-$2.txt)"
+}
+
+# Replaces the devtools token of every discovery line in file `$1` (the port stays), so the kept
+# log dir holds no live credential.
+redact_log_tokens() {
+  [ -f "$1" ] || return 0
+  sed -E 's/(listening on [0-9]+ token )[0-9a-fA-F]+/\1<redacted>/' "$1" > "${1}.redacted" \
+    && mv "${1}.redacted" "$1"
 }
 
 # Rewrite `$1` in place with the content of `$2` (same inode, no rename: dx watches for in-place
@@ -875,8 +1016,14 @@ start_runner() {
     (cd "$RUNNER_DIR" && exec cargo run -p hotpatch-spike) >> "$LOG" 2>&1 < /dev/null &
   else
     local -a cmd=("$FRUST" run --watch)
-    [ "$MODE" = "frust-restart" ] && cmd+=(--no-hot --features frust/hotpatch)
+    # (On the simulator the probe feature rides in the app's Cargo.toml instead: see the header.)
+    if [ "$MODE" = "frust-restart" ] && [ "$IOS_SIM" = 1 ]; then
+      cmd+=(--no-hot)
+    elif [ "$MODE" = "frust-restart" ]; then
+      cmd+=(--no-hot --features frust/hotpatch)
+    fi
     [ "$ANDROID" = 1 ] && cmd+=(-d "$SERIAL")
+    [ "$IOS_SIM" = 1 ] && cmd+=(-d "$UDID")
     # Word-split on purpose: FRUST_RUN_ARGS holds plain words (e.g. `--define KEY=VALUE`).
     # shellcheck disable=SC2206
     [ -n "$FRUST_RUN_ARGS" ] && cmd+=($FRUST_RUN_ARGS)
@@ -893,6 +1040,7 @@ start_runner() {
 # app's processes are ever found. `cargo run` starts it by a path relative to the app dir.
 frust_app_pids() {
   if [ "$ANDROID" = 1 ]; then device_pids; return 0; fi
+  if [ "$IOS_SIM" = 1 ]; then sim_app_pids; return 0; fi
   ps -axo pid=,command= | awk -v pre="${APP_TARGET_DIR%/}/" -v bin="/${APP_BIN}" -v app="$APP" '
     { exe = $2; if (substr(exe, 1, 1) != "/") exe = app "/" exe }
     index(exe, pre) == 1 && substr(exe, length(exe) - length(bin) + 1) == bin { print $1 }'
@@ -915,8 +1063,9 @@ stop_runner() {
   local i=0
   while kill -0 -- "-${RUNNER_PID}" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
   if kill -0 -- "-${RUNNER_PID}" 2>/dev/null; then kill -KILL -- "-${RUNNER_PID}" 2>/dev/null; fi
-  # (A device PID is not a host process: the Android leg never signals it.)
-  if [ "$ANDROID" != 1 ] && [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
+  # (A device PID is not a host process: the Android leg never signals it. A simulator app is a
+  # host process outside the runner's group: `simctl terminate` below stops it.)
+  if [ "$ANDROID" != 1 ] && [ "$IOS_SIM" != 1 ] && [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
     local pgid
     pgid="$(ps -o pgid= -p "$APP_PID" 2>/dev/null | tr -d ' ')"
     if [ -z "$pgid" ]; then
@@ -935,6 +1084,13 @@ stop_runner() {
     if [ -n "$(device_pids)" ]; then
       echo "note: ${ANDROID_PACKAGE} outlived the CLI; am force-stop" >&2
       adb_ shell am force-stop "$ANDROID_PACKAGE" >/dev/null 2>&1
+    fi
+  elif [ "$IOS_SIM" = 1 ]; then
+    # The CLI's Ctrl-C terminates the app it launched; one that outlived it is terminated here
+    # (this bundle only).
+    if [ -n "$(sim_app_pids)" ]; then
+      echo "note: ${IOS_BUNDLE_ID} outlived the CLI; simctl terminate" >&2
+      xcrun simctl terminate "$UDID" "$IOS_BUNDLE_ID" >/dev/null 2>&1
     fi
   elif [ "$FRUST_MODE" = 1 ]; then
     # The app runs in its own process group; anything the CLI did not take down (e.g. a child of
@@ -959,6 +1115,7 @@ redact_devlog_tokens() {
 
 cleanup() {
   stop_runner
+  [ "$IOS_SIM" = 1 ] && redact_log_tokens "$LOG"
   if [ -n "$DEVLOG_PID" ]; then
     kill "$DEVLOG_PID" 2>/dev/null
     wait "$DEVLOG_PID" 2>/dev/null
@@ -1167,6 +1324,17 @@ if [ "$ANDROID" = 1 ]; then
     "(sdk $(adb_ shell getprop ro.build.version.sdk | tr -d '\r')), $(adb_ shell getprop ro.build.fingerprint | tr -d '\r');" \
     "package ${ANDROID_PACKAGE}"
 fi
+if [ "$IOS_SIM" = 1 ]; then
+  echo "simulator: $(xcrun simctl list devices booted -j 2>/dev/null | python3 -c '
+import json, sys
+udid = sys.argv[1]
+for runtime, devs in json.load(sys.stdin).get("devices", {}).items():
+    for d in devs:
+        if d.get("udid") == udid:
+            os = runtime.rsplit(".", 1)[-1].replace("-", " ", 1).replace("-", ".")
+            print(d.get("name") + ", " + os)' "$UDID"); bundle ${IOS_BUNDLE_ID};" \
+    "clock: the host's (the simulator app is a host process: no offset)"
+fi
 echo "Logs: ${LOG_DIR}"
 echo "If this script dies without its EXIT trap, restore the sources in place with:"
 while IFS=$'\t' read -r file copy; do
@@ -1205,6 +1373,11 @@ if [ "$ANDROID" = 1 ] && [ -n "$APP_PID" ]; then
   [ "$HOTPATCH_INFO" = 1 ] && echo "    $(device_hotpatch_info "$APP_PID")"
   echo "    $(screencap before)"
 fi
+if [ "$IOS_SIM" = 1 ] && [ -n "$APP_PID" ]; then
+  echo "before run 1: pid ${APP_PID}; rss $(rss_mb "$APP_PID") MB"
+  [ "$SIM_VMMAP" = 1 ] && echo "    $(sim_images "$APP_PID" 0)"
+  echo "    $(screencap before)"
+fi
 
 APPLIED_DELTAS=""
 FRAME_DELTAS=""
@@ -1235,6 +1408,7 @@ while [ "$run" -le "$RUNS" ]; do
     frame="$(wait_for frame "$from" "$stamp" "$RESTART_TIMEOUT")" || status="timeout"
     find_app_pid
     detail="; pid ${old_pid:-?} -> ${APP_PID:-?}; rss $(rss_mb "${APP_PID:-0}") MB"
+    if [ "$IOS_SIM" = 1 ]; then sleep 2; echo "    $(screencap "run-${run}")"; fi
   elif [ "$MODE" = "frust-run" ]; then
     outcome="$(wait_outcome "$from" 180)" || status="timeout"
     o_ms="${outcome%% *}" o_text="${outcome#* }"
@@ -1252,6 +1426,23 @@ while [ "$run" -le "$RUNS" ]; do
               || { applied=""; status="patched, no applied probe or backstop line"; }
           fi
           backstop="$(devlog_first "$BACKSTOP_RE" "$stamp" "$APP_PID")"
+          if [ -n "$backstop" ]; then
+            source_note="${source_note}; backstop: PRESENT at save+$((backstop - stamp)) ms"
+          else
+            source_note="${source_note}; backstop: none"
+          fi
+        elif [ "$IOS_SIM" = 1 ]; then
+          # The app's probe lines in the CLI's echo of its console (one host clock); the frame-wait
+          # backstop line's arrival - 5 s is the fallback, as on Android.
+          if applied="$(wait_for applied "$from" "$stamp" 10)"; then
+            source_note="; source: probe"
+            frame="$(wait_for frame "$from" "$stamp" 10)" || status="patched, no frame probe line"
+          else
+            source_note="; source: backstop"
+            applied="$(wait_log_backstop "$from" "$stamp" 10)" \
+              || { applied=""; status="patched, no applied probe or backstop line"; }
+          fi
+          backstop="$(log_first "$BACKSTOP_RE" "$from" "$stamp")"
           if [ -n "$backstop" ]; then
             source_note="${source_note}; backstop: PRESENT at save+$((backstop - stamp)) ms"
           else
@@ -1284,6 +1475,8 @@ while [ "$run" -le "$RUNS" ]; do
       echo "    $(host_artifacts "$stamp")"
       if [ "$ANDROID" = 1 ]; then
         echo "    transport: patch_chunk uploads of patch-N.upload.so (a device session never hands off a file)"
+      elif [ "$IOS_SIM" = 1 ]; then
+        echo "    transport: patch_chunk uploads of patch-N.dylib over 127.0.0.1 (the app writes it into its data container)"
       else
         echo "    $(handoff_line "$from")"
       fi
@@ -1303,6 +1496,11 @@ while [ "$run" -le "$RUNS" ]; do
         stub="$(ls -t "${APP_TARGET_DIR%/}/frust-hotpatch/${SESSION_DIR_NAME}"/stub-*.o 2>/dev/null | head -1)"
         [ -n "$stub" ] && cp "$stub" "${LOG_DIR}/run-${run}-$(basename "$stub")"
       fi
+      sleep 2
+      echo "    $(screencap "run-${run}")"
+    fi
+    if [ "$IOS_SIM" = 1 ] && [ -n "$APP_PID" ]; then
+      [ "$SIM_VMMAP" = 1 ] && echo "    $(sim_images "$APP_PID" "$run")"
       sleep 2
       echo "    $(screencap "run-${run}")"
     fi
@@ -1406,5 +1604,18 @@ if [ "$MODE" = "frust-run" ]; then
     echo "median save->CLI outcome line, patched runs:" \
       "$(printf '%s' "$OUTCOMES" | awk -F'\t' '$1 == "patched" { print $2 }' | median) ms"
     echo "restart runs: save->frame is the relaunched activity's 'Displayed' line"
+  fi
+  if [ "$IOS_SIM" = 1 ]; then
+    echo "ios-sim: patched runs' applied/frame source:" \
+      "$(printf '%s' "$RESULTS" | grep -c 'source: probe' || true) probe," \
+      "$(printf '%s' "$RESULTS" | grep -c 'source: backstop' || true) backstop fallback;" \
+      "backstop line after the save in $(printf '%s' "$RESULTS" | grep -c 'backstop: PRESENT' || true) run(s)"
+    echo "median save->applied, patched runs:  $(printf '%s' "$RESULTS" | grep '(patched)' \
+      | sed -n 's/.*save->applied \([0-9]*\) ms.*/\1/p' | median) ms"
+    echo "median save->applied, patched runs 2..${RUNS}: $(printf '%s' "$RESULTS" | grep -v '^run 1:' \
+      | grep '(patched)' | sed -n 's/.*save->applied \([0-9]*\) ms.*/\1/p' | median) ms"
+    echo "median save->CLI outcome line, patched runs:" \
+      "$(printf '%s' "$OUTCOMES" | awk -F'\t' '$1 == "patched" { print $2 }' | median) ms"
+    echo "restart runs: save->frame is the relaunched app's first 'frust-hotpatch: frame' line"
   fi
 fi
