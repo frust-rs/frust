@@ -12,7 +12,10 @@
 //! says which specs qualify. A watched debug Android device session runs hot
 //! the same way through `hotpatch::android::start_android` (the fat build
 //! outside Gradle, install, launch, an `adb forward` to the devtools
-//! endpoint). Unwatched sessions keep [`SessionSpec::launch_plan`].
+//! endpoint), and one on a booted iOS simulator through
+//! `hotpatch::ios_sim::start_ios_sim` (the fat build through Xcode, `simctl
+//! install`, `simctl launch`, the devtools endpoint on the host's
+//! loopback). Unwatched sessions keep [`SessionSpec::launch_plan`].
 //!
 //! Everything here is plain data + pure functions — no threads, no tokio —
 //! except `start_hot`, the one blocking entry, which `crate::runner` only
@@ -25,8 +28,9 @@ use std::sync::atomic::AtomicBool;
 
 use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::desktop_run;
-use frust_drive::devices::{Device, Platform};
+use frust_drive::devices::{Device, Kind, Platform};
 use frust_drive::hotpatch::android::{AndroidHotStart, AndroidStart, start_android};
+use frust_drive::hotpatch::ios_sim::{IosSimHotStart, IosSimStart, start_ios_sim};
 use frust_drive::hotpatch::session::{
     DesktopStart, HotSession, RestartReason, SessionHost, StartError, start_desktop,
 };
@@ -112,13 +116,13 @@ impl SessionSpec {
     }
 
     /// Whether this spec can run as a hot-patch session, or the failed
-    /// precondition, worded for a toast: only the desktop preview or an
-    /// Android device, and only a debug build (`start_desktop` and
-    /// `start_android` refuse every other mode, and an iOS device has no
-    /// hot-patch path at all).
+    /// precondition, worded for a toast: only the desktop preview, an
+    /// Android device or an iOS simulator, and only a debug build
+    /// (`start_desktop`, `start_android` and `start_ios_sim` refuse every
+    /// other mode, and a physical iOS device has no hot-patch path at all).
     pub fn hot_precondition(&self) -> Result<(), String> {
         if let DeviceTarget::Device(device) = &self.target
-            && device.platform != Platform::Android
+            && !has_hot_device_path(device)
         {
             return Err(no_hot_device_path(device));
         }
@@ -136,13 +140,15 @@ impl SessionSpec {
     /// the fat image directly and attaches to its devtools endpoint; on an
     /// Android device, `start_android` builds it fat outside Gradle,
     /// packages, installs and launches it, and attaches through `adb
-    /// forward`; any other device answers
+    /// forward`; on an iOS simulator, `start_ios_sim` builds it fat
+    /// through Xcode, installs and launches it with `simctl`, and attaches
+    /// on the host's loopback; a physical iOS device answers
     /// `RestartRequired(BuilderUnsupported)`. **Blocks** for the whole fat
-    /// build (and, on Android, the device pipeline); call it off the UI
+    /// build (and, on a device, the device pipeline); call it off the UI
     /// thread. `on_line` receives the build's diagnostics and the app's
     /// output up to its discovery line; the returned [`HotLaunch`]'s child
     /// carries the rest of the app's output and its lifetime. `cancel` is
-    /// honoured by the Android start at each pipeline phase boundary (the
+    /// honoured by the device starts at each pipeline phase boundary (the
     /// desktop start has no cancel seam); a cancelled start answers
     /// [`StartError::Launch`].
     ///
@@ -157,7 +163,7 @@ impl SessionSpec {
         cancel: &AtomicBool,
     ) -> Result<HotLaunch, StartError> {
         if let DeviceTarget::Device(device) = &self.target
-            && device.platform != Platform::Android
+            && !has_hot_device_path(device)
         {
             return Err(StartError::RestartRequired(
                 RestartReason::BuilderUnsupported {
@@ -194,6 +200,9 @@ impl SessionSpec {
             }
             DeviceTarget::Device(device) => device,
         };
+        if device.platform == Platform::Ios {
+            return self.start_ios_sim(&host, &package, device, on_line, cancel);
+        }
         let started = start_android(
             &host,
             &AndroidStart {
@@ -225,32 +234,81 @@ impl SessionSpec {
             }),
         })
     }
+
+    /// [`Self::start_hot`] on the iOS simulator `device`.
+    fn start_ios_sim(
+        &self,
+        host: &SessionHost<'_>,
+        package: &str,
+        device: &Device,
+        on_line: &mut dyn FnMut(&str),
+        cancel: &AtomicBool,
+    ) -> Result<HotLaunch, StartError> {
+        let started = start_ios_sim(
+            host,
+            &IosSimStart {
+                root: &self.project_root,
+                info: &self.build,
+                package,
+                device,
+            },
+            on_line,
+            cancel,
+        )?;
+        let Some(IosSimHotStart { session, launch }) = started else {
+            return Err(StartError::Launch {
+                detail: "the hot start was cancelled before the app was running".to_string(),
+            });
+        };
+        Ok(HotLaunch {
+            session,
+            child: launch.stream,
+            device: Some(DeviceApp {
+                serial: device.id.clone(),
+                package: launch.bundle_id,
+                forward_port: None,
+            }),
+        })
+    }
 }
 
-/// The refusal for a hot start on a device with no hot-patch path (iOS:
-/// every platform but Android).
+/// Whether `device` has a hot-patch path: an Android device or an iOS
+/// simulator (a physical iOS device would need its patches code-signed).
+fn has_hot_device_path(device: &Device) -> bool {
+    match device.platform {
+        Platform::Android => true,
+        Platform::Ios => device.kind == Kind::Simulator,
+    }
+}
+
+/// The refusal for a hot start on a device with no hot-patch path (a
+/// physical iOS device).
 fn no_hot_device_path(device: &Device) -> String {
     format!(
-        "hot patching has no iOS device path, `{}` is an iOS device",
+        "hot patching has no iOS device path, `{}` is an iOS device (only an iOS simulator runs hot)",
         device.name
     )
 }
 
 /// A started hot session ([`SessionSpec::start_hot`]): the session, the
 /// app's output stream (its lifetime on the desktop, its logcat on
-/// Android), and — for a device — what stopping the app takes beyond
-/// killing that stream.
+/// Android, its `simctl launch --console-pty` console on an iOS simulator),
+/// and — for a device — what stopping the app takes beyond killing that
+/// stream.
 pub struct HotLaunch {
     pub session: HotSession,
     pub child: StreamHandle,
     pub device: Option<DeviceApp>,
 }
 
-/// A hot session's app on an Android device, as its start reported it: the
-/// resolved device's serial, the *installed* package that was launched, and
-/// the host port `adb forward` allocated for the devtools endpoint (when
-/// one was). Whoever ends the session removes that forward and force-stops
-/// the package (`crate::runner`'s hot sessions do).
+/// A hot session's app on a device, as its start reported it: the
+/// resolved device's id (an Android serial, a simulator udid), the app that
+/// was launched (the *installed* Android package, the simulator bundle id),
+/// and the host port `adb forward` allocated for the devtools endpoint
+/// (when one was; never on a simulator, which shares the host's loopback).
+/// Whoever ends the session stops the app — on Android removing that
+/// forward and force-stopping the package, on a simulator `simctl
+/// terminate` (`crate::runner`'s hot sessions do, by the spec's target).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceApp {
     pub serial: String,
@@ -610,6 +668,86 @@ mod tests {
         };
         let reason = ios.hot_precondition().unwrap_err();
         assert!(reason.contains("no iOS device path"), "{reason}");
+
+        let simulator = |mode| SessionSpec {
+            project_root: PathBuf::from("/tmp/app"),
+            target: DeviceTarget::Device(fake_simulator()),
+            build: build(mode),
+        };
+        assert_eq!(simulator(BuildMode::Debug).hot_precondition(), Ok(()));
+        for mode in [BuildMode::Profile, BuildMode::Release] {
+            let reason = simulator(mode).hot_precondition().unwrap_err();
+            assert!(reason.contains("needs a debug build"), "{reason}");
+        }
+    }
+
+    /// A booted iOS simulator whose udid is a fake.
+    fn fake_simulator() -> Device {
+        Device {
+            id: "FAKE-UDID".into(),
+            name: "iPhone 15".into(),
+            platform: Platform::Ios,
+            kind: Kind::Simulator,
+            os_version: None,
+            connection_state: None,
+        }
+    }
+
+    /// An iOS simulator is dispatched to `start_ios_sim`, not refused like
+    /// a physical iOS device: its own debug precondition answers a profile
+    /// build, and a project with no `[package]` is refused before any
+    /// build, like the desktop.
+    #[test]
+    fn an_ios_simulator_starts_hot_through_the_simulator_start() {
+        let root = std::env::temp_dir().join(format!(
+            "frust-tui-simulator-hot-start-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let runner: Arc<dyn ProcessRunner + Send + Sync> =
+            Arc::new(frust_drive::process::FakeProcessRunner::new());
+        let spec = SessionSpec {
+            project_root: root.clone(),
+            target: DeviceTarget::Device(fake_simulator()),
+            build: build(BuildMode::Profile),
+        };
+        let err = spec
+            .start_hot(Arc::clone(&runner), &mut |_| {}, &AtomicBool::new(false))
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(
+                &err,
+                StartError::RestartRequired(RestartReason::BuilderUnsupported { detail })
+                    if detail.contains("needs a debug build")
+            ),
+            "{err}"
+        );
+
+        let spec = SessionSpec {
+            project_root: PathBuf::from("/nonexistent/frust-tui-hot-start"),
+            build: build(BuildMode::Debug),
+            ..spec
+        };
+        let err = spec
+            .start_hot(runner, &mut |_| {}, &AtomicBool::new(false))
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(
+                &err,
+                StartError::RestartRequired(RestartReason::BuilderUnsupported { detail })
+                    if detail.contains("names no [package]")
+            ),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A device whose serial/udid is a fake.
