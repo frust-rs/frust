@@ -699,7 +699,8 @@ pub(crate) fn run_linker(
 
 /// The address of the global definition of [`ANCHOR_SYMBOL`] in the image
 /// at `path`, read from its symbol table — for Msvc, the anchor's VA
-/// (preferred `ImageBase` + RVA) from the image's own PDB ([`super::pe::anchor_address`], Windows hosts only).
+/// (preferred `ImageBase` + RVA) from the image's own PDB
+/// ([`super::pe::anchor_address`], Windows hosts only).
 /// An unreadable image, or none such symbol, is
 /// [`HotpatchError::BuilderUnsupported`].
 pub fn anchor_address(flavor: LinkerFlavor, path: &Path) -> Result<u64, HotpatchError> {
