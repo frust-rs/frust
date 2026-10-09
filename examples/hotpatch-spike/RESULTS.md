@@ -2066,3 +2066,339 @@ Android leg only:
   in the device log.
 - `host:` also names `patch-N.upload.so` (the stripped copy sent to the app) with its save
   offset, size and mode, beside `patch-N.so`.
+
+## Stage 3: Windows gate (H3-03)
+
+Card H3-03 (tsk_000001a1181b5c75Z3x4eyzM), run 2026-10-09 on `task/hb-h3-03`, cut from
+`feature/hotpatch-h3` @ 84de0c64: main @ 3414525d plus the whole H3 phase. That is the PDB pin,
+the PE symbol cache read from the image's own PDB, the post-link PDB type-record L3 gate
+(`pdb_layout`), rust-lld as the MSVC linker, the fat exe at the fixed base 0x10000000, PE
+addresses as VAs, each patch DLL at its own fixed base (0x20000000 + (n-1)*0x10000000), and
+H3-04's flip of Windows into `Capability::HotPatch`. Every row runs `frust run --watch` on the
+Windows rig. Rows, pass bar and evidence rules are H1-11's.
+
+### Verdict: FAIL
+
+1. **Median save->frame at most 50% of the in-session restart median: FAIL.** The restart median
+   is **7703 ms** (row F's shape: `frust run --watch --no-hot`, save -> the relaunched app's first
+   `frame` line, n=5), so the bar is 3851 ms. save->frame, read from the app's own probe lines:
+   - A **6263 ms** (n=5), B **6169 ms** (n=5), G **6247 ms** (n=10). That is **81.3%**, **80.1%**
+     and **81.1%** of the restart median, ~2.3-2.4 s over the bar.
+   - Steady state (runs 2..n) does not change the answer: A 6232, B 6151, G 6205 ms (80.9%,
+     79.9%, 80.6%).
+   - Against the hot run's own restart path (D2's relaunches, 23333 ms) A would be 26.8%, but the
+     card's bar is row F's shape, so the verdict uses F.
+2. **Zero `patched` lines for the layout-changing saves of D2 and D4: PASS.** D2 answers `restart
+   required` 3/3 with `LayoutChanged` from the PDB gate. D4's second patch of each pair answers
+   `restart required` 2/2, from the accepted set. D4's first patch of each pair adds a new type
+   and is `patched` by design (H1-11's shape).
+3. **PID and State kept across A, B and G: PASS.** A: 15616 throughout, B: 14084, G: 21400
+   (10/10). Count 3, raised before the first patch, is reported by the window after every patch.
+4. **Row G: PASS.** Ten patches, no crash. The app's own counters reach 10 patches / 12,774,400
+   bytes, and the working set stays within 359-375 MB.
+
+The hot path works on Windows: every sentinel patch applied in the same PID with State kept, and
+the PDB gate refused every layout change. It is not fast enough on this rig. **Windows stays
+apply-disabled**: the conductor reverts H3-04's flip, and the latency is the recorded finding
+(*Latency breakdown* below). The likely fix lies in the thin build, not the patch path.
+
+### Environment
+
+| | |
+|---|---|
+| Rig | Windows 11 Pro, build 26200, x64; Intel UHD Graphics 730 (the DX12 adapter) |
+| Toolchain | rustc/cargo 1.98.1 (the repo pin), MSVC 14.44.35207, Windows Kits 10.0.26100; rust-lld is the patch linker |
+| frust | `cargo build --release -p frust-cli` on the rig, from a plain copy of 84de0c64 (`Finished` in 2 m 21 s); `frust 0.6.0`. That binary ran every row |
+| App | `frust create hotapp --frust-path <copy>\crates\frust --org dev.frust.gate`, then `measure.sh --prepare-app` (through the new `--windows` leg); debug, x64 |
+| Driver | this host (macOS) over ssh, `measure.sh --frust-run --windows <ssh-alias>` |
+| Clock | one clock, the rig's: the save stamp, the probe lines and the log stamps are all taken there |
+
+### Rig and method
+
+- **Same content as the base.** The rig's tree has no `.git`. Its copies of the 15 source,
+  manifest and lockfile paths the H3 phase changed (all but CI and docs) match 84de0c64 by
+  SHA-256. The release CLI was rebuilt in place from that tree before the gate.
+- **Toolchain pin.** The rig's rustup default is 1.97.1, and the scratch app lies outside the
+  repository, so it does not inherit the pin. A `rust-toolchain.toml` (`channel = "1.98.1"`) was
+  put in the scratch app before any measured run. The first warm-up (below) ran under 1.97.1 and is
+  not data.
+- **Runs.** Each row is its own `frust run --watch` process:
+
+  ```
+  FRUST='C:\...\frust.exe' WINDOWS_PRESSES=3 measure.sh --frust-run --windows <ssh-alias> \
+    --app '<scratch>\hotapp' --target <t> --runs <n> --row <r>
+  ```
+
+  F is `--frust-restart` (`--no-hot --features frust/hotpatch`). The script's Windows leg works
+  as follows (see *measure.sh changes*):
+  - It starts the CLI as a one-shot scheduled task on the rig's interactive desktop.
+  - It saves each edit on the rig with PowerShell (`WriteAllBytes`, no BOM) and takes the rig's
+    unix ms in the same call.
+  - It streams the CLI's redirected output back through a tailer that stamps each line with the
+    rig's clock (a 20 ms read loop).
+- **Instruments.** save->applied and save->frame are the app's own `frust-hotpatch: applied/frame
+  t_unix_ms=` lines minus the rig-side save stamp, both on the rig's clock. All 32 measured patched
+  runs (A 5, B 5, D4 2, G 10, G-debug 10) report `source: probe`, and all report `backstop: none`.
+  The 5 s backstop fallback stayed in the script and was never used. The CLI's `patched` line is
+  timed by the tailer's read stamp (late by at most ~20 ms). A restart run's save->frame is the
+  relaunched process's first `frame` line.
+- **State evidence.** The rig's user session is disconnected and locked, so the screen cannot be
+  read: a desktop capture (`CopyFromScreen`, run on the session's desktop by a scheduled task)
+  comes out blank white, and `PrintWindow` returns the frame with a black DX12 client area. State
+  is therefore shown through UI Automation instead:
+  - `WINDOWS_PRESSES=3` invokes the app's `Increment` button three times (`InvokePattern`, no
+    pointer input).
+  - A `ui:` line before run 1 and after every run lists the window's text elements, which is the
+    app's AccessKit tree. For example, A after run 5: `'You have pushed the button this many
+    times:' | 'count: 3' | 'hotpatch-sentinel: v5' | 'Counter card' | 'card-sentinel: v0' |
+    'Hotapp'`.
+  - This is the app's view tree, not pixels. The frame lines show that frames were produced.
+- **PID and RSS**: `Get-Process` of `hotapp.exe` under the app's target dir; RSS is the working
+  set (`WorkingSet64`).
+- **Counters.** The CLI echoes the discovery line with its token redacted, so the app's
+  `hotpatch_info` cannot be asked from outside. Row G's counters therefore come from a second G
+  run under `FRUST_LOG=debug`: the app's own `frust-devtools: applying patch <n> (<len> bytes, 3
+  expected seams)` lines, beside the session dir's `patch-N.dll` sizes. That run is not latency
+  data, although its save->frame matched G's (median 6192 ms).
+- **Load.** No build ran on the rig in parallel with a timed run. Another implementor was building
+  on the driving host during the gate, but every timing is taken on the rig, and the driving host
+  only ran ssh.
+- **Diagnostics (not data).** Two diagnostic hot runs of three patches each, with a process poller
+  on the rig (a 100 ms `Get-Process` loop), fed the latency breakdown. The poller slowed each
+  steady patch by ~0.2-0.6 s (6396-6857 ms against G's 6205).
+- **Warm-ups (not data).** First warm-up (rustc 1.97.1): cold first frame 230.1 s, then
+  save->frame 7792 / 5740 ms. Second warm-up (1.98.1, cold rebuild): first frame 235.5 s, then 7967
+  ms. Warm sessions reached their first frame 19.5-24.0 s after launch.
+- **Smart App Control: Off** on the rig (`VerifiedAndReputablePolicyState` = 0). No policy was
+  changed. The unsigned patch DLLs loaded in every session: 41 patch loads in this gate's
+  sessions (rows, warm-ups and diagnostics), no block.
+
+### Matrix
+
+| Row | Edit | Outcome lines (n) | PID / State | save->frame median (min-max), n | save->applied median | save->CLI line median | Verdict |
+|---|---|---|---|---|---|---|---|
+| A | home sentinel | `patched in 5996-6648 ms (1 components rebuilt)` (3/5), `(2 components rebuilt)` (2/5) | 15616 kept; count 3 -> 3, `hotpatch-sentinel: v5` | **6263** (6106-6752), 5 | 6262 | 6274 | patched; **bar FAIL** (81.3%) |
+| B | card sentinel, `CounterCard` in its own module | `patched in 5879-7993 ms (1 components rebuilt)` (4/5), `(2 ...)` (1/5) | 14084 kept; count 3 -> 3, `card-sentinel: v5` | **6169** (5994-8103), 5 | 6168 | 6171 | patched; **bar FAIL** (80.1%) |
+| F | restart: `--no-hot --features frust/hotpatch`, kill + `cargo run` | n/a | new PID each run; count 0, `hotpatch-sentinel: vN` | **7703** (7663-9732), 5 | | | **the restart baseline** |
+| D2 | `HomeState` gains `extra1..extraN` | `restart required: hotapp::home_page::HomeState changed layout (4 → 8 bytes); restarting to keep memory safe`, then 8 → 12, 12 → 16 (3/3) | new PID each run; relaunch shows `v<N> extra1=4242`, count 0 | relaunch first frame 23333 (21733-23692), 3 | | outcome line at save+7976-8986 | restart (`LayoutChanged`, PDB gate) |
+| D4 | pairs: patch 1 adds `Badge<k> { n }`, patch 2 adds `m` | `patched in 8285 / 8080 ms` (odd runs); `restart required: hotapp::home_page::Badge1 changed layout (4 → 8 bytes); ...` and `Badge2` (even runs, 2/2) | odd runs keep the PID (`badge<k>: n=<run>`); even runs relaunch (`badge<k>: n=<run> m=7`, count 0) | patched 8297, 2; relaunch 21505, 2 | | restart line at save+5888-6117 | restart from the accepted set |
+| G | 10 home patches, default budget | `patched in 5905-6994 ms (1 components rebuilt)` (10/10) | 21400 kept; count 3 -> 3, `v10` | **6247** (6013-7094), 10 | 6246 | 6262 | no crash; all 10 admitted; **bar FAIL** (81.1%) |
+
+Zero `patched` lines appeared for a layout-changing save (D2 runs 1-3, D4 runs 2 and 4).
+
+### Comparison
+
+| | Milestone 1, desktop (R3-04) | Stage 2, Android (H2-07) | Stage 4, iOS simulator | **Stage 3, Windows (this)** |
+|---|---|---|---|---|
+| Restart median (shape) | 5218 ms (F, `--no-hot`, n=10) | 13458 ms (D2 relaunch, `Displayed`, n=5) | 4395 ms | **7703 ms** (F, `--no-hot`, n=5) |
+| Bar (50%) | 2609 ms | 6729 ms | 2198 ms | **3851 ms** |
+| Row A save->frame | 1397 ms | 2883 ms | 1694 ms | **6263 ms** |
+| A / restart | 26.8% | 21.4% | 38.5% | **81.3%** |
+| Patch transport | file hand-off (loopback) | stripped `.so`, base64 `patch_chunk`s over `adb forward` | (see Stage 4) | base64 `patch_chunk`s over loopback: `patch_file` hand-off is unix-only |
+| Patch image | 3,060,304 bytes (`.dylib`) | 2,237,184 bytes (upload copy) | (see Stage 4) | 1,277,440 bytes (`.dll`) |
+| Verdict | PASS | PASS | PASS | **FAIL** |
+
+The iOS simulator column is Stage 4's figures as the conductor relayed them; that section lives on
+the H4 branch.
+
+### A, B: patched with State kept
+
+Row A run 4 in the CLI stream (rig-clock read stamp first):
+
+```
+1791563972735 patched in 5996 ms (1 components rebuilt)
+1791563972735 [frust INFO] frust-hotpatch: applied t_unix_ms=1791563972730
+1791563972735 [frust INFO] frust-hotpatch: frame t_unix_ms=1791563972731
+```
+
+The save was stamped at 1791563966625, so applied is at save+6105 ms and the frame at save+6106 ms.
+The CLI's line was read in the same 20 ms poll.
+
+- **A.** save->frame 6752 / 6202 / 6515 / 6106 / 6263 ms. save->applied is 1 ms earlier in each
+  run. CLI line 6781 / 6227 / 6523 / 6110 / 6274 ms. PID 15616 throughout. Before: `count: 3`,
+  `hotpatch-sentinel: v0`. After run N: `count: 3`, `vN`, `card-sentinel: v0`. RSS 366.9 -> 373.4
+  -> 373.9 -> 374.5 -> 374.9 -> 375.3 MB.
+- **B.** save->frame 8103 / 6134 / 6169 / 5994 / 6251 ms. CLI line 8129 / 6137 / 6171 / 6000 /
+  6260 ms. PID 14084. After run N: `count: 3`, `card-sentinel: vN`, `hotpatch-sentinel: v0`. RSS
+  365.8 -> 375.3 MB.
+- **First patch.** Run 1 costs 0.5-2.0 s more than the steady median (A 6752, B 8103, G 7094 ms). The extra sits in
+  save -> `stub-1.o` (A 5969, B 7320 ms, against 5240-5754 later).
+- **Components rebuilt.** Some sentinel patches report 2 components rebuilt instead of 1 (A runs 2
+  and 5, B run 5, G-debug run 5); the outcome is the same. Not investigated.
+- **Patch image.** Every `patch-N.dll` of every row is 1,277,440 bytes.
+
+### Latency breakdown (why ~6.2 s)
+
+Host-side mtimes from `host:` (rig clock) and the probe lines, steady-state runs of A and G:
+
+| Phase | ms |
+|---|---|
+| save -> `stub-N.o` written (debounce, thin compile, stub) | 5239-5754 |
+| `stub-N.o` -> `patch-N.dll` linked (rust-lld, then the PDB L3 gate) | 126-158 |
+| `patch-N.dll` -> applied (1.28 MB as base64 `patch_chunk`s over loopback, the app's copy, `LoadLibrary`, table install) | 579-644 |
+| applied -> frame | 1-2 |
+| frame -> the CLI's `patched` line read | 4-34 |
+
+**Inside the thin compile.** The two diagnostic hot runs timed every `rustc`, `link`,
+`rust-lld` and `cargo` process (start time from the process, end at the poll). Steady patches of
+the second run:
+
+| Phase | run 2 | run 3 |
+|---|---|---|
+| save -> thin `rustc --crate-name hotapp` starts | 112 | 117 |
+| rustc front end and codegen until MSVC `link.exe` starts | 1135 | 1036 |
+| **`link.exe @...linker-arguments`, launched by that rustc** | **3184** | **2921** |
+| `link.exe` exits -> rustc exits | ~1440 | ~1455 |
+| rustc exits -> `rust-lld` (patch link) starts | ~200 | ~170 |
+
+The thin rustc builds every crate type the template declares (`--crate-type cdylib --crate-type
+staticlib --crate-type rlib`). Its cdylib output is linked by the MSVC `link.exe`, not rust-lld,
+and that link alone takes ~3 s, about half of save->frame. Another ~1.4 s passes after
+`link.exe` before rustc exits; that is not attributed further (the staticlib and rlib outputs, by
+elimination). The patch itself uses neither the cdylib nor the staticlib. On macOS the same
+three-crate-type compile with its gates took 684-819 ms (R3-04).
+
+**The restart.** F's `cargo run` rebuilds the same lib (`Finished` in 6.26-6.42 s steady, 8.23 s
+on run 1), and its relaunched app reaches its first frame 1.0-1.1 s after cargo's `Running` line. So the hot path saves only
+the bin link and the process launch, and pays the patch transport instead. That is why the ratio
+sits near 80%.
+
+**Finding (for the follow-up, not fixed here).** The thin compile should not link the cdylib with
+`link.exe` (or build the staticlib) on Windows. Removing those two phases (~4.4 s) would put A
+near 1.8 s, about a quarter of F, assuming F stays as it is. That figure is computed, not measured.
+
+### D2: refused by the PDB gate
+
+Run 1, verbatim: `restart required: hotapp::home_page::HomeState changed layout (4 → 8 bytes);
+restarting to keep memory safe`. Runs 2 and 3 print 8 → 12 and 12 → 16.
+
+- PIDs 11580 -> 10124 -> 436 -> 18216. Count 3 before run 1, `count: 0` after each relaunch.
+- Each relaunched window shows `hotpatch-sentinel: v<N> extra1=4242`: the new field is read with
+  its new layout.
+- The outcome lines arrive at save+8635 / 7976 / 8986 ms. On Windows the candidate's layout table
+  exists only after the thin link, so the refusal waits for the thin compile.
+- First frames at save+21733 / 23333 / 23692 ms: the CLI's relaunch is a fresh fat session.
+
+### D4: refused by the accepted set
+
+- **Pair 1.** Run 1 adds `Badge1 { n }`: `patched in 8285 ms (1 components rebuilt)`, PID 10980
+  kept, the window shows `badge1: n=1` and `count: 3`. Run 2 adds `m`: `restart required:
+  hotapp::home_page::Badge1 changed layout (4 → 8 bytes); restarting to keep memory safe` at
+  save+6117 ms. PID 10980 -> 13452, `badge1: n=2 m=7`, `count: 0`.
+- **Pair 2.** Run 3 adds `Badge2 { n }`: `patched in 8080 ms`, PID 13452 kept, `badge2: n=3`. Run
+  4 grows it: `restart required: hotapp::home_page::Badge2 changed layout (4 → 8 bytes); ...` at
+  save+5888 ms. PID 13452 -> 15260, `badge2: n=4 m=7`.
+
+The base exe's PDB never held `Badge1` or `Badge2`. The PDB gate read each type from patch 1's own
+PDB (the candidate table, taken right after the thin link), and patch 1 joined the accepted set.
+Patch 2's refusal therefore came from comparing against the accepted set, which is the 2.c path.
+
+### F: the restart baseline
+
+`--no-hot --features frust/hotpatch`, home sentinel edits, n=5:
+
+- save->first frame 9732 / 7693 / 7774 / 7663 / 7703 ms, median **7703** (runs 2-5: 7698).
+- PIDs 16328 -> 13444 -> 8728 -> 7220 -> 12744 -> 4004.
+- Each relaunched window shows `count: 0` and the new `hotpatch-sentinel: vN`.
+- `Finished dev` per relaunch: 8.23 / 6.30 / 6.42 / 6.26 / 6.26 s.
+
+### G: ten patches, RSS and the budget counters
+
+**Default budget**, no override. PID 21400 took all 10 patches. Count 3 was kept, and `v10` was in
+the window after run 10. save->frame 7094 / 6113 / 6107 / 6175 / 6013 / 6205 / 6386 / 6438 / 6361
+/ 6289 ms (median 6247; runs 2-10: 6205). No crash, no trend.
+
+| After | `patches_applied` (app, G-debug) | `patch_bytes_loaded` (app, G-debug) | `patch-N.dll` in the session dir | working set, G (MB) |
+|---|---|---|---|---|
+| presses, before patch 1 | 0 | 0 | 0 | 366.0 |
+| patch 1 | 1 | 1,277,440 | 1 | 373.9 |
+| patch 2 | 2 | 2,554,880 | 2 | 374.4 |
+| patch 3 | 3 | 3,832,320 | 3 | 375.2 |
+| patch 4 | 4 | 5,109,760 | 4 | 369.5 |
+| patch 5 | 5 | 6,387,200 | 5 | 370.2 |
+| patch 6 | 6 | 7,664,640 | 6 | 370.8 |
+| patch 7 | 7 | 8,942,080 | 7 | 363.8 |
+| patch 8 | 8 | 10,219,520 | 8 | 363.6 |
+| patch 9 | 9 | 11,496,960 | 9 | 359.3 |
+| patch 10 | 10 | 12,774,400 | 10 | 359.6 |
+
+- **The counters' source.** The app's own lines: `frust-devtools: applying patch <k> (1277440
+  bytes, 3 expected seams)`, one per patch, k = 1..10, summed. The counters advance only when
+  `report.applied` holds.
+- **Cross-checks.** The CLI checks the app's own `patches_applied` before every patch and restarts
+  on a mismatch, so 10/10 `patched` lines also mean the count tracked.
+- **Budget.** 12,774,400 bytes is 12.7% of the default 96 MiB byte budget. At 1,277,440 bytes the
+  64-patch count limit binds before the byte budget. That is computed, not measured.
+- **Base addresses.** Patch n links at 0x10000000 × (n+1), so patch 14 is the last one below
+  4 GiB. Patches past 14 were not exercised.
+- **Working set.** It is not monotonic: Windows trims it. +7.9 MB at the first patch, then within
+  359-375 MB. The G-debug run, with the same patches, stayed within 361-374 MB.
+
+### Known limits seen (recorded, not fixed)
+
+- **Patch copies are not removed (new).** Every patch logs `frust-devtools: could not remove
+  %LOCALAPPDATA%\frust-hotpatch\patch-<pid>-<n>.dll: Access is denied. (os error 5)`, because a
+  loaded DLL cannot be deleted on Windows. Its copies accumulate there: 45 files, 57,368,064 bytes
+  after this gate (its 41 patches plus earlier smoke runs on the rig). Nothing deletes them when
+  the process exits.
+- **Transport.** `patch_file` hand-off is unix-only, so Windows uploads base64 `patch_chunk`s even
+  over loopback (~600 ms per 1.28 MB patch, including the load).
+- **The devtools token is not readable from outside the CLI.** That is by design (redaction), but
+  it means a rig script cannot ask `hotpatch_info`. The counters above come from debug lines.
+- **The PDB layout gate is blind to align-only edits** (act_000001a120bafdbdAny5hSb2). Not
+  exercised by these rows.
+- **Pre-existing Windows-host `hotpatch::` unit-test failures** (5, unrelated to the gate;
+  act_000001a12096ed6445DWzpgI). Not re-run here.
+- **x64 hot runs link the fat exe and every patch DLL at fixed bases without ASLR.** A base
+  collision (loader relocation) refuses the patch and restarts; not seen. ARM Windows is refused.
+- **The frame gate may release on a frame begun before the apply** (act_000001a11f45ee77fIN2XGxg).
+  Its symptom was not seen: applied -> frame was 0-2 ms, and every `ui:` line after a patch showed
+  the new sentinel.
+- **A dead app is noticed only at the next save** (act_000001a11d6d27b655fJfemp). Not re-run.
+- **Rig, not frust.** The user session is disconnected and locked, so pixels cannot be captured.
+  UI Automation stood in (see *Rig and method*).
+
+What remains unproven on Windows:
+
+- ARM64 Windows (refused by design).
+- Smart App Control in Enforce mode: it was Off here, so an unsigned patch DLL under Enforce is
+  untested.
+- A live pixel capture of a patched frame.
+- Patches past the 14th (the 4 GiB line of the fixed bases).
+- The TUI Watch leg, and rows C, D, D3, D5 and E (not required by this card).
+
+### measure.sh changes for this card
+
+`bash -n` and `shellcheck -S warning` are clean. The desktop, dx and Android legs behave as before.
+Shared code gained only `[ "$WINDOWS" = 1 ]` branches (`app_alive`, `frust_app_pids`, `rss_mb`,
+`start_runner`, `stop_runner`, `screencap`, `cleanup`, the run loop, the summary). `wait_for`
+skips its per-poll liveness probe on Windows only, because there that probe is an ssh call.
+`redact_devlog_tokens` takes an optional file argument, defaulting to the device log as before.
+
+New: `--windows <ssh-alias>` (also `--windows-host`; with no alias after it, the alias comes from
+`WINDOWS_HOST`), with `--frust-run` / `--frust-restart` and `--prepare-app`:
+
+- Every remote step is `ssh <alias> powershell -EncodedCommand`. Values are passed as `$A[i]`
+  literals, so cmd.exe never parses the script. `--app`, FRUST, WINDOWS_ROOT (default
+  `C:\Dev\h3-gate`) and APP_TARGET_DIR are rig paths, refused if they hold spaces or cmd
+  metacharacters.
+- **Edits.** Edits are applied to a local mirror of the app's sources, then written on the rig by
+  `WriteAllBytes`. The rig's unix ms is printed right after the write, in the same call, and that
+  is the save stamp.
+- **Runner.** `run.cmd` (`cd /d <app> || exit /b 1`, then the CLI redirected into
+  `watch-<row>-<pid>-<n>.log`) runs as the one-shot scheduled task WINDOWS_TASK (default
+  `h3gate`). A PowerShell tailer streams the log back with rig-clock read stamps.
+- **Stop.** `taskkill /T /F` of the CLI at FRUST and of the app's exe under APP_TARGET_DIR, then
+  the task is deleted. Any devtools token is redacted in the rig's log and in `runner.log`.
+- **Restore.** The pristine sources are written back on the rig and compared by SHA-256.
+- **Per run.** PID and working set (`Get-Process`, matched by image path). `host:` reads
+  `stub-N.o` / `patch-N.dll` on the rig. `counters:` gives the app's `applying patch` debug lines
+  and the session dir's `patch-N.dll` count and bytes. `ui:` lists the window's text elements
+  through UI Automation, run by the task `<WINDOWS_TASK>ui`. With SCREENCAP_DIR, a desktop capture
+  is made by `<WINDOWS_TASK>shot` and copied back.
+- **WINDOWS_PRESSES=<n>** invokes the app's `Increment` button n times after the first frame.
+- **Probe source.** A patched run reads the app's probe lines. Without an `applied` line within
+  10 s it falls back to the backstop line (- 5000 ms), and each run line ends `source:
+  probe|backstop; backstop: none|PRESENT`, as on Android. The summary prints the Android-style
+  source counts and the save->applied and save->CLI line medians under `windows:`.
+- `--target framework` is refused with `--windows`.
