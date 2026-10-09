@@ -18,8 +18,11 @@
 //! and jumps through it (`movabs rax` / `movz`+`movk` into `x16`), and an
 //! `__imp_<name>` reference — link.exe's import-address slot — becomes an
 //! 8-byte data slot holding `<name>`'s runtime address. A COFF absolute
-//! symbol holds only 32 bits, so a data symbol whose runtime address does
-//! not fit refuses the stub rather than being truncated.
+//! symbol holds only 32 bits: the fat exe links at a fixed base below 4 GiB
+//! with ASLR off ([`FAT_IMAGE_BASE`](super::fat_link::FAT_IMAGE_BASE)) so
+//! base data fits, and a data symbol whose runtime address still does not
+//! (a relocated image, an ARM exe that keeps ASLR) refuses the stub rather
+//! than being truncated.
 //!
 //! The stub hard-codes one process's addresses, so it is built only once
 //! that process has reported its anchor. Unlike dx it fails closed: a
@@ -263,7 +266,9 @@ pub fn build_stub(
                 if target.format() == Format::Pe && u32::try_from(address).is_err() {
                     return Err(HotpatchError::unsupported(format!(
                         "data symbol `{name}` lives at {address:#x}, beyond the 32 bits a COFF \
-                         absolute symbol holds"
+                         absolute symbol holds (an x64 fat exe links at the fixed base {:#x}; \
+                         this image was relocated or keeps ASLR)",
+                        super::fat_link::FAT_IMAGE_BASE
                     )));
                 }
                 add_absolute(&mut obj, target, &symbol, stub_name, address);

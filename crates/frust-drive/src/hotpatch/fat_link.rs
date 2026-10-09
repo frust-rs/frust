@@ -30,6 +30,10 @@
 //! lld-link finds the MSVC and Windows SDK libraries itself when `LIB` is
 //! unset. A configured linker of any other name is
 //! [`HotpatchError::BuilderUnsupported`]. See `docs/CLI_ARCHITECTURE.md`.
+//!
+//! **The Msvc fat exe links at a fixed base** ([`FAT_IMAGE_BASE`], ASLR off
+//! through [`DYNAMIC_BASE_OFF`]) so the base data a patch references sits
+//! below 4 GiB, where the stub's 32-bit COFF absolute symbols reach it.
 
 use std::fs;
 use std::io::Read;
@@ -61,6 +65,25 @@ const RAW_LINKERS: &[&str] = &[
 /// The link.exe flag both Msvc images (the fat exe and every patch DLL)
 /// carry: dx's "Prevent alsr from overflowing 32 bits".
 pub const HIGH_ENTROPY_VA_OFF: &str = "/HIGHENTROPYVA:NO";
+
+/// The link.exe flag that turns ASLR off for the Msvc fat exe, which then
+/// loads at [`FAT_IMAGE_BASE`]. The stub resolves a base data symbol a
+/// patch references into a COFF absolute symbol, whose value holds 32 bits
+/// ([`super::stub`]); `/HIGHENTROPYVA:NO` alone leaves the x64 default base
+/// (`0x140000000`) and ASLR placing the image above 4 GiB, where every such
+/// symbol is refused. Only the fat exe of a debug hot run carries it; patch
+/// DLLs stay relocatable. lld-link refuses it for ARM machines, where ASLR
+/// is mandatory, so an ARM fat line omits it ([`fixed_base_args`]).
+pub const DYNAMIC_BASE_OFF: &str = "/DYNAMICBASE:NO";
+
+/// The Msvc fat exe's fixed image base (256 MiB): above the low region
+/// Windows reserves, and leaving the image (hundreds of MB for a large app)
+/// almost 4 GiB of room below the 32-bit limit.
+pub const FAT_IMAGE_BASE: u64 = 0x1000_0000;
+
+/// COFF machines lld-link links with mandatory ASLR (`/DYNAMICBASE:NO` is
+/// an error): ARMNT, ARM64EC, ARM64X and ARM64.
+const ASLR_ONLY_MACHINES: &[u16] = &[0x01c4, 0xa641, 0xa64e, super::pe::MACHINE_ARM64];
 
 /// The LLD the Rust toolchain bundles in `<sysroot>/lib/rustlib/<host>/bin`.
 pub const RUST_LLD: &str = "rust-lld";
@@ -442,9 +465,10 @@ fn remove_stale_archives(archive_dir: &Path, keep_stem: &str) {
 ///
 /// Msvc follows dx (`link.rs`): `/WHOLEARCHIVE:<archive>` and the kept
 /// rlibs go right *before* the last object, then `/HIGHENTROPYVA:NO` (dx:
-/// "Prevent alsr from overflowing 32 bits"), the anchor's `/EXPORT:` and
-/// `/OUT:<exe>` replace the captured `/OUT:`. A `-o` in an Msvc capture is
-/// [`HotpatchError::BuilderUnsupported`].
+/// "Prevent alsr from overflowing 32 bits") and, beyond dx, the fixed base
+/// ([`fixed_base_args`]: `/DYNAMICBASE:NO /BASE:0x10000000`), the anchor's
+/// `/EXPORT:` and `/OUT:<exe>` replace the captured `/OUT:`. A `-o` in an
+/// Msvc capture is [`HotpatchError::BuilderUnsupported`].
 pub fn fat_link_args(
     flavor: LinkerFlavor,
     link_args: &[String],
@@ -510,6 +534,7 @@ pub fn fat_link_args(
     }
     if flavor == LinkerFlavor::Msvc {
         args.push(HIGH_ENTROPY_VA_OFF.to_string());
+        args.extend(fixed_base_args(Path::new(&link_args[last_object])));
         args.push(flavor.anchor_export_arg());
         args.push(format!("/OUT:{}", render(exe)));
     } else {
@@ -518,6 +543,33 @@ pub fn fat_link_args(
         args.push(render(exe));
     }
     Ok(args)
+}
+
+/// The Msvc fat exe's fixed-base flags, [`DYNAMIC_BASE_OFF`] and
+/// `/BASE:0x10000000` ([`FAT_IMAGE_BASE`]), unless `object` (the line's
+/// last object) is a COFF object for one of [`ASLR_ONLY_MACHINES`]. An
+/// unreadable object keeps the flags; the link itself reports it.
+pub fn fixed_base_args(object: &Path) -> Vec<String> {
+    if coff_machine(object).is_some_and(|machine| ASLR_ONLY_MACHINES.contains(&machine)) {
+        return Vec::new();
+    }
+    vec![
+        DYNAMIC_BASE_OFF.to_string(),
+        format!("/BASE:{FAT_IMAGE_BASE:#x}"),
+    ]
+}
+
+/// The machine field of the COFF object at `path`: offset 0, or offset 6
+/// in a `/bigobj` header (which starts `00 00 ff ff`).
+fn coff_machine(path: &Path) -> Option<u16> {
+    let mut header = [0u8; 8];
+    fs::File::open(path).ok()?.read_exact(&mut header).ok()?;
+    let at = if header[..4] == [0, 0, 0xff, 0xff] {
+        6
+    } else {
+        0
+    };
+    Some(u16::from_le_bytes([header[at], header[at + 1]]))
 }
 
 /// Everything one fat link needs.
@@ -908,6 +960,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use super::super::pe;
     use super::test_support::*;
     use super::*;
 
@@ -1487,6 +1540,8 @@ mod tests {
                 "/DEBUG".to_string(),
                 "/PDBALTPATH:%_PDB%".to_string(),
                 "/HIGHENTROPYVA:NO".to_string(),
+                "/DYNAMICBASE:NO".to_string(),
+                "/BASE:0x10000000".to_string(),
                 "/EXPORT:__frust_hotpatch_anchor".to_string(),
                 format!("/OUT:{}", render(&exe)),
             ]
@@ -1533,10 +1588,60 @@ mod tests {
                 "a.o",
                 "libdep.rlib",
                 "/HIGHENTROPYVA:NO",
+                "/DYNAMICBASE:NO",
+                "/BASE:0x10000000",
                 "/EXPORT:__frust_hotpatch_anchor",
                 "/OUT:C:/t/app.exe",
             ])
         );
+    }
+
+    #[test]
+    fn the_msvc_fixed_base_follows_the_last_objects_coff_machine() {
+        let dir = temp_dir("fixed-base");
+        let object = |name: &str, header: &[u8]| {
+            let path = dir.join(name);
+            let mut bytes = header.to_vec();
+            bytes.resize(64, 0);
+            fs::write(&path, bytes).unwrap();
+            render(&path)
+        };
+        let amd64 = object("amd64.o", &pe::MACHINE_AMD64.to_le_bytes());
+        let arm64 = object("arm64.o", &pe::MACHINE_ARM64.to_le_bytes());
+        let arm64ec = object("arm64ec.o", &0xa641u16.to_le_bytes());
+        let mut bigobj = vec![0, 0, 0xff, 0xff, 2, 0];
+        bigobj.extend(pe::MACHINE_ARM64.to_le_bytes());
+        let arm64_bigobj = object("arm64-bigobj.o", &bigobj);
+        let fixed = strings(&["/DYNAMICBASE:NO", "/BASE:0x10000000"]);
+        let exe = Path::new("C:/t/app.exe");
+        let msvc = |last: &str| {
+            fat_link_args(
+                LinkerFlavor::Msvc,
+                &[amd64.clone(), last.to_string(), "/OUT:a.exe".to_string()],
+                None,
+                exe,
+            )
+            .unwrap()
+        };
+
+        // An AMD64 (or unreadable) last object links at the fixed base.
+        for last in [amd64.as_str(), "C:/t/missing.o"] {
+            let args = msvc(last);
+            let at = args.iter().position(|a| a == "/HIGHENTROPYVA:NO").unwrap();
+            assert_eq!(args[at + 1..at + 3], fixed[..], "{last}");
+        }
+        // lld-link refuses `/DYNAMICBASE:NO` on ARM: the line keeps ASLR.
+        for last in [&arm64, &arm64ec, &arm64_bigobj] {
+            let args = msvc(last);
+            assert!(args.contains(&"/HIGHENTROPYVA:NO".to_string()));
+            assert!(!args.iter().any(|a| fixed.contains(a)), "{last}: {args:?}");
+        }
+        // The cc dialects never carry it.
+        for flavor in [LinkerFlavor::Darwin, LinkerFlavor::Gnu] {
+            let args = fat_link_args(flavor, &strings(&["a.o", "-o", "/t/x"]), None, exe).unwrap();
+            assert!(!args.iter().any(|a| fixed.contains(a)), "{args:?}");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1736,5 +1841,195 @@ mod tests {
         );
         let run = runner.run(&render(&exe), &[]).unwrap();
         assert!(run.success, "the fat image runs: {}", run.stderr);
+    }
+}
+
+/// A real Msvc fat link on a Windows host: rustc builds a dependency rlib
+/// and the tip (with the fat build's `-Csave-temps=true -Clink-dead-code`,
+/// linked by rustc's own linker only to print its line), and [`fat_link`]
+/// links the image with the toolchain's `rust-lld`. Everything lives beside
+/// the test binary's `deps`, where built binaries run in place.
+#[cfg(all(test, windows))]
+mod windows {
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
+    use crate::process::RealProcessRunner;
+
+    /// `IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE`: the image may be relocated
+    /// by ASLR.
+    const DYNAMIC_BASE: u16 = 0x0040;
+
+    fn rustc() -> String {
+        let cargo = option_env!("CARGO").unwrap_or("cargo");
+        let sibling = Path::new(cargo).with_file_name("rustc.exe");
+        if sibling.is_file() {
+            sibling.display().to_string()
+        } else {
+            "rustc".to_string()
+        }
+    }
+
+    fn fixture_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let exe = std::env::current_exe().unwrap();
+        let dir = exe.parent().unwrap().parent().unwrap().join(format!(
+            "frust-hotpatch-fat-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The arguments of the command `rustc --print link-args` printed (Rust
+    /// `Debug` strings separated by spaces), linker program dropped.
+    fn parse_link_args(printed: &str) -> Vec<String> {
+        let line = printed
+            .lines()
+            .find(|line| line.starts_with('"'))
+            .unwrap_or_else(|| panic!("no link line in {printed:?}"));
+        let mut args = Vec::new();
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            if c != '"' {
+                continue;
+            }
+            let mut arg = String::new();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => arg.push(chars.next().unwrap()),
+                    '"' => break,
+                    c => arg.push(c),
+                }
+            }
+            args.push(arg);
+        }
+        args.remove(0);
+        args
+    }
+
+    /// The PE32+ optional header's `ImageBase`, `SizeOfImage` and
+    /// `DllCharacteristics` of the image `bytes`.
+    fn optional_header(bytes: &[u8]) -> (u64, u32, u16) {
+        let u16_at = |at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        assert_eq!(&bytes[..2], b"MZ");
+        let pe = u32_at(0x3c) as usize;
+        assert_eq!(&bytes[pe..pe + 4], b"PE\0\0");
+        let optional = pe + 4 + 20;
+        assert_eq!(u16_at(optional), 0x20b, "a PE32+ image");
+        (
+            u64_at(optional + 24),
+            u32_at(optional + 56),
+            u16_at(optional + 70),
+        )
+    }
+
+    #[test]
+    fn the_fat_exe_links_at_the_fixed_low_base_without_aslr_and_loads_there() {
+        let dir = fixture_dir("base");
+        let deps = dir.join("target").join("debug").join("deps");
+        fs::create_dir_all(&deps).unwrap();
+        fs::write(
+            dir.join("dep.rs"),
+            "pub static FRUST_FIXTURE_TABLE: [u32; 4] = [1, 2, 3, 4];\n\
+             #[inline(never)]\npub fn frust_fixture_unreferenced() -> u32 { 7 }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("main.rs"),
+            "extern crate dep;\n#[unsafe(no_mangle)]\npub extern \"C\" fn __frust_hotpatch_anchor() {}\n\
+             fn main() {\n    __frust_hotpatch_anchor();\n    \
+             let table = std::hint::black_box(&dep::FRUST_FIXTURE_TABLE);\n    \
+             println!(\"{} {}\", __frust_hotpatch_anchor as usize, table.as_ptr() as usize);\n}\n",
+        )
+        .unwrap();
+        let runner = RealProcessRunner;
+        let rustc = rustc();
+        let run = |args: &[&str]| {
+            let out = runner.run(&rustc, args).unwrap();
+            assert!(out.success, "rustc {args:?}: {}", out.stderr);
+            out.stdout
+        };
+        let deps_s = render(&deps);
+        let common = ["--edition=2024", "-Cdebuginfo=2", "--out-dir", &deps_s];
+        let dep_src = render(&dir.join("dep.rs"));
+        let mut dep_args = vec![
+            "--crate-type=rlib",
+            "--crate-name=dep",
+            "-Cextra-filename=-1111",
+        ];
+        dep_args.extend(common);
+        dep_args.push(&dep_src);
+        run(&dep_args);
+        let dep_extern = format!("dep={}", render(&deps.join("libdep-1111.rlib")));
+        let main_src = render(&dir.join("main.rs"));
+        let mut bin_args = vec![
+            "--crate-type=bin",
+            "--crate-name=app",
+            "-Cextra-filename=-2222",
+            "-Csave-temps=true",
+            "-Clink-dead-code",
+            "--extern",
+            &dep_extern,
+            "--print",
+            "link-args",
+        ];
+        bin_args.extend(common);
+        bin_args.push(&main_src);
+        let link_args = parse_link_args(&run(&bin_args));
+
+        let libdir = run(&["--print", "target-libdir"]);
+        let linker = render(&bundled_lld(Path::new(libdir.trim())).unwrap());
+        let target = dir.join("target");
+        let exe = target.join("frust-hotpatch").join("fat").join("app.exe");
+        let output = fat_link(
+            &runner,
+            &FatLinkRequest {
+                flavor: LinkerFlavor::Msvc,
+                linker: &linker,
+                link_args: &link_args,
+                envs: &[],
+                target_dir: &target,
+                archive_dir: &target.join("frust-hotpatch").join("fat"),
+                exe: &exe,
+            },
+        )
+        .unwrap();
+        assert!(output.archive.is_some(), "the dep rlib was packed");
+
+        // Linked at the fixed base with ASLR off, the whole image below 4 GiB.
+        let (image_base, image_size, characteristics) = optional_header(&fs::read(&exe).unwrap());
+        assert_eq!(image_base, FAT_IMAGE_BASE, "{image_base:#x}");
+        assert_eq!(
+            characteristics & DYNAMIC_BASE,
+            0,
+            "DYNAMICBASE is clear: {characteristics:#06x}"
+        );
+        assert!(image_base + u64::from(image_size) <= u64::from(u32::MAX));
+
+        // And it loads there: the anchor sits at base + its RVA, and base
+        // data at a 32-bit address.
+        let ran = Command::new(&exe).output().unwrap();
+        assert!(ran.status.success(), "{ran:?}");
+        let stdout = String::from_utf8(ran.stdout).unwrap();
+        let printed: Vec<u64> = stdout
+            .split_whitespace()
+            .map(|n| n.parse().unwrap())
+            .collect();
+        let [anchor, table] = printed[..] else {
+            panic!("{stdout:?}");
+        };
+        assert_eq!(
+            anchor,
+            FAT_IMAGE_BASE + output.anchor_address,
+            "{anchor:#x}"
+        );
+        assert!(u32::try_from(table).is_ok(), "base data at {table:#x}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
