@@ -96,7 +96,7 @@ struct DevicectlConnectionProperties {
     pairing_state: Option<String>,
 }
 
-fn parse_devicectl_output(content: &str) -> Result<DiscoveryResult> {
+pub(super) fn parse_devicectl_output(content: &str) -> Result<DiscoveryResult> {
     let parsed: DevicectlOutput = serde_json::from_str(content)?;
     let mut devices = Vec::new();
     let mut notes = Vec::new();
