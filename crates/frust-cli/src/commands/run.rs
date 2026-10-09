@@ -174,8 +174,9 @@ fn run_on_device(
 /// The refusal for `--watch` with a `-d` that is not an Android device (an
 /// iOS simulator or device, or `-d web`): their pipelines have no watch
 /// loop.
-const WATCH_DEVICE_REJECTION: &str = "--watch is desktop-preview only and cannot be combined with \
-     -d/--device-id; drop -d to run the desktop preview, or drop --watch to run on a device";
+const WATCH_DEVICE_REJECTION: &str = "--watch runs the desktop preview or an Android device in a \
+     debug build; web, iOS and other devices are not watched; drop -d to run the desktop \
+     preview, or drop --watch to run on a device";
 
 /// The one device `--watch -d <id>` names, through the same discovery and
 /// `-d` matching a plain `frust run -d` uses.
@@ -2282,6 +2283,10 @@ mod tests {
             assert_eq!(message, WATCH_DEVICE_REJECTION, "{device:?}");
             assert!(message.contains("--watch"), "{message}");
             assert!(message.contains("device"), "{message}");
+            assert!(message.contains("Android"), "{message}");
+            assert!(!message.contains("desktop-preview only"), "{message}");
+            assert!(message.contains("drop -d"), "{message}");
+            assert!(message.contains("drop --watch"), "{message}");
         }
     }
 

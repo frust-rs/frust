@@ -124,26 +124,30 @@ pub enum Command {
         #[command(flatten)]
         build: BuildFlags,
 
-        /// Desktop-only dev loop for the project in the current directory.
-        /// A debug run is **hot** by default: the app is fat-built once,
+        /// Dev loop for the project in the current directory: the desktop
+        /// preview, or an Android device with `-d <serial>`.
+        /// A Debug run is **hot** by default: the app is fat-built once,
         /// and each save is compiled and patched into the running process
         /// (state kept), printing `patched in N ms (k components rebuilt)`.
         /// A change that cannot be patched (a framework or path-dependency
         /// edit, a manifest or build-script change, a layout or state-type
         /// change) prints `restart required: <reason>` and relaunches a
-        /// fresh session; a compile error prints its diagnostics and leaves
-        /// the running app untouched. Profile/release runs, and `--no-hot`,
-        /// use the plain relaunch loop instead: any change to `src/` or
-        /// `Cargo.toml` kills the running `cargo run` child and relaunches
-        /// (app state resets). **Desktop-preview only**: combining `--watch`
-        /// with `-d <device>` is a hard error (the watch loop has no
-        /// device-side kill/rebuild/relaunch story yet).
+        /// fresh app (on a device, the full install-and-launch pipeline); a
+        /// compile error prints its diagnostics and leaves the running app
+        /// untouched. Profile/release runs, and `--no-hot`, use the plain
+        /// relaunch loop instead: any change to `src/` or `Cargo.toml`
+        /// kills the running app and relaunches it (app state resets).
+        /// With `-d <android serial>` the device must be Android and the
+        /// build Debug: `-d web`, iOS and every other device are refused,
+        /// as are `--profile`/`--release` and `--features` with a device.
+        /// Ctrl-C removes the port forward and force-stops the app.
         #[arg(long)]
         watch: bool,
 
         /// With `--watch`, use the plain kill-and-relaunch loop instead of
-        /// hot patching. A no-op without `--watch`: nothing else in `run`
-        /// is hot.
+        /// hot patching, on desktop (the `cargo run` child) and on Android
+        /// (`am force-stop` plus the full device pipeline on every change).
+        /// A no-op without `--watch`: nothing else in `run` is hot.
         #[arg(long = "no-hot")]
         no_hot: bool,
 
