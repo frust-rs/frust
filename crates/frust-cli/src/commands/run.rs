@@ -179,9 +179,9 @@ fn run_on_device(
 /// nor an iOS simulator (a physical iOS device, or `-d web`): their
 /// pipelines have no watch loop (a patch a physical iOS device loaded would
 /// need code signing).
-const WATCH_DEVICE_REJECTION: &str = "--watch runs the desktop preview or an Android device in a \
-     debug build; web, iOS and other devices are not watched; drop -d to run the desktop \
-     preview, or drop --watch to run on a device";
+const WATCH_DEVICE_REJECTION: &str = "--watch runs the desktop preview, an Android device, or an iOS \
+     simulator in a debug build; web, a physical iOS device and other devices are not \
+     watched; drop -d to run the desktop preview, or drop --watch to run on a device";
 
 /// The one device `--watch -d <id>` names, through the same discovery and
 /// `-d` matching a plain `frust run -d` uses, a booted simulator counted
@@ -2759,6 +2759,8 @@ mod tests {
             assert!(message.contains("--watch"), "{message}");
             assert!(message.contains("device"), "{message}");
             assert!(message.contains("Android"), "{message}");
+            assert!(message.contains("iOS simulator"), "{message}");
+            assert!(message.contains("physical iOS device"), "{message}");
             assert!(!message.contains("desktop-preview only"), "{message}");
             assert!(message.contains("drop -d"), "{message}");
             assert!(message.contains("drop --watch"), "{message}");
@@ -2879,7 +2881,7 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("--watch"), "{err}");
+        assert_eq!(err.to_string(), WATCH_DEVICE_REJECTION);
     }
 
     /// `-d web` refuses `--features` before touching the filesystem at all —
