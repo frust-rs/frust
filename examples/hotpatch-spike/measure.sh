@@ -107,13 +107,18 @@
 # serial taken from $ANDROID_SERIAL) runs `frust run --watch -d <serial>` instead: the hot session
 # on a physical device. The serial is never written anywhere but the log dir. The device must be
 # awake and unlocked (checked; the script never touches the power state). What changes:
-#   - instruments: the Android shell logs no `frust-hotpatch: applied/frame` probe and does not
-#     call `devtools::frame_submitted`, so an apply is answered only when its 5 s frame-wait
-#     backstop lapses (`frust-devtools: no frame followed the patch within 5s; answering anyway`).
-#     Per patched run the script reports `applied` = that line's device time - 5000 ms (the moment
-#     the apply parked for its frame; the patched rebuild runs on the next Choreographer tick) and
-#     the CLI's `patched` line (host clock, an upper bound). A restart run's first frame is the
-#     relaunched activity's `ActivityTaskManager: Displayed <package>/...` line.
+#   - instruments (H2-07): the Android shell logs `frust-hotpatch: applied t_unix_ms=<ms>` when a
+#     UI tick drains the patch latch and `frust-hotpatch: frame t_unix_ms=<ms>` on the frame that
+#     consumed it (H2-05). Per patched run the script reads `applied` and `frame` from those probe
+#     lines of the app's pid in the device log (t_unix_ms is the device clock, moved onto the
+#     host's). A tree without them falls back to the 5 s frame-wait backstop line (`frust-devtools:
+#     no frame followed the patch within 5s; answering anyway`): `applied` = its device time -
+#     5000 ms, no `frame`. Each run line names its source (`source: probe` / `source: backstop`)
+#     and whether a backstop line followed the save (`backstop: none` / `PRESENT`); the exit
+#     report counts every backstop line. The CLI's `patched` line (host clock) is reported beside
+#     them. A restart run's first frame is the relaunched activity's `ActivityTaskManager:
+#     Displayed <package>/...` line. `host:` also names `patch-N.upload.so`, the stripped copy the
+#     app is sent (H2-06), with its size.
 #   - clocks: device times are moved onto the host clock by an offset measured before every run
 #     (`clock:` line: the min-RTT sample of `adb shell echo $EPOCHREALTIME`, error <= rtt/2).
 #   - device log: `adb logcat -v epoch` from the session start into <log dir>/logcat.txt (bounded
@@ -574,13 +579,35 @@ displayed_re() {
   echo "ActivityTaskManager: Displayed ${ANDROID_PACKAGE//./\\.}/"
 }
 
-# The apply moment of pid `$2`'s patch after host ms `$1`: its 5 s frame-wait backstop line, minus
-# 5000 ms (see the header). Waits up to `$3` s.
+# The fallback apply moment of pid `$2`'s patch after host ms `$1`: its 5 s frame-wait backstop
+# line, minus 5000 ms (see the header). Waits up to `$3` s.
 BACKSTOP_RE='no frame followed the patch within 5s'
 wait_applied_backstop() {
   local t
   t="$(wait_devlog "$BACKSTOP_RE" "$1" "$3" "$2")" || return 1
   echo $((t - 5000))
+}
+
+# The host-clock ms of the first `frust-hotpatch: <$1> t_unix_ms=<ms>` probe line in DEVLOG (with
+# `$3`, of that pid only) whose stamp, moved onto the host clock, is later than `$2`. The stamp is
+# the device's unix clock at the log call, not logcat's. Prints nothing when none.
+devlog_probe() {
+  awk -v k="frust-hotpatch: $1 t_unix_ms=" -v s="$2" -v o="$CLOCK_OFFSET_MS" -v p="${3:-}" '
+    $1 ~ /^[0-9]+\.[0-9]+$/ && (p == "" || $2 == p) && index($0, k) {
+      v = substr($0, index($0, k) + length(k)); sub(/[^0-9].*/, "", v)
+      if (v == "") next
+      t = v - o; if (t > s) { printf "%.0f\n", t; exit } }' "$DEVLOG" 2>/dev/null
+}
+
+# Waits up to `$3` s for devlog_probe `$1` `$2` (`$4`: pid filter); prints its host ms.
+wait_probe() {
+  local deadline=$(( $(date +%s) + $3 )) t
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    t="$(devlog_probe "$1" "$2" "${4:-}")"
+    if [ -n "$t" ]; then echo "$t"; return 0; fi
+    sleep 0.1
+  done
+  return 1
 }
 
 # Waits up to `$2` s for a devtools discovery line in the CLI's output after log line `$1`: the
@@ -930,6 +957,7 @@ cleanup() {
     echo "Device log since ${DEVLOG_SINCE} (device clock): ${DEVLOG}"
     # The app runs as untrusted_app; other domains' denials (adb's shell, system_server) are
     # counted but not the app's.
+    echo "Frame-wait backstop lines ('${BACKSTOP_RE}') in it: $(grep -c "$BACKSTOP_RE" "$DEVLOG")"
     echo "SELinux denials in it: $(grep -c 'avc: *denied' "$DEVLOG") line(s), of which" \
       "$(grep 'avc: *denied' "$DEVLOG" | grep -c 'scontext=u:r:untrusted_app') with" \
       "scontext untrusted_app (first 5 of those):"
@@ -1081,19 +1109,22 @@ try:
 except OSError:
     names = []
 for n in names:
-    m = re.fullmatch(r"(stub|patch)-(\d+)\.(o|dylib|so|dll)", n)
+    # `patch-N.upload.so`: the stripped copy an Android session sends (H2-06).
+    m = re.fullmatch(r"(stub|patch)-(\d+)\.(o|dylib|so|dll|upload\.so)", n)
     if not m:
         continue
+    kind = "upload" if m.group(3) == "upload.so" else m.group(1)
     st = os.stat(os.path.join(d, n))
     t = int(st.st_mtime * 1000)
-    if t > stamp and (m.group(1) not in best or int(m.group(2)) > best[m.group(1)][0]):
-        best[m.group(1)] = (int(m.group(2)), n, t, st.st_size, st.st_mode & 0o777)
+    if t > stamp and (kind not in best or int(m.group(2)) > best[kind][0]):
+        best[kind] = (int(m.group(2)), n, t, st.st_size, st.st_mode & 0o777)
 parts = []
 if "stub" in best:
     parts.append(f"{best['stub'][1]} at save+{best['stub'][2] - stamp}")
-if "patch" in best:
-    _, n, t, size, mode = best["patch"]
-    parts.append(f"{n} at save+{t - stamp} ({size} bytes, mode {mode:o})")
+for kind in ("patch", "upload"):
+    if kind in best:
+        _, n, t, size, mode = best[kind]
+        parts.append(f"{n} at save+{t - stamp} ({size} bytes, mode {mode:o})")
 print("host: " + (", ".join(parts) if parts else "no stub/patch written after the save"))
 PY
 }
@@ -1181,7 +1212,7 @@ while [ "$run" -le "$RUNS" ]; do
     RESULTS="${RESULTS}run ${run}: edit failed"$'\n'
     break
   fi
-  applied="" frame="" status="ok" outcome="" old_pid="$APP_PID" detail=""
+  applied="" frame="" status="ok" outcome="" old_pid="$APP_PID" detail="" source_note=""
   if [ "$MODE" = "restart" ]; then
     stop_runner
     start_runner
@@ -1200,8 +1231,21 @@ while [ "$run" -le "$RUNS" ]; do
       "patched in "*)
         status="patched"
         if [ "$ANDROID" = 1 ]; then
-          # No probe on Android: the apply moment comes from the 5 s frame-wait backstop line.
-          applied="$(wait_applied_backstop "$stamp" "$APP_PID" 10)" || status="patched, no backstop line"
+          # The app's probe lines first (H2-05); the 5 s frame-wait backstop line is the fallback.
+          if applied="$(wait_probe applied "$stamp" 10 "$APP_PID")"; then
+            source_note="; source: probe"
+            frame="$(wait_probe frame "$stamp" 10 "$APP_PID")" || status="patched, no frame probe line"
+          else
+            source_note="; source: backstop"
+            applied="$(wait_applied_backstop "$stamp" "$APP_PID" 10)" \
+              || { applied=""; status="patched, no applied probe or backstop line"; }
+          fi
+          backstop="$(devlog_first "$BACKSTOP_RE" "$stamp" "$APP_PID")"
+          if [ -n "$backstop" ]; then
+            source_note="${source_note}; backstop: PRESENT at save+$((backstop - stamp)) ms"
+          else
+            source_note="${source_note}; backstop: none"
+          fi
         else
           applied="$(wait_for applied "$from" "$stamp" "$EDIT_TIMEOUT")" || status="patched, no applied line"
           frame="$(wait_for frame "$from" "$stamp" "$EDIT_TIMEOUT")" || status="patched, no frame line"
@@ -1228,7 +1272,7 @@ while [ "$run" -le "$RUNS" ]; do
     if [ "${status%%,*}" = "patched" ]; then
       echo "    $(host_artifacts "$stamp")"
       if [ "$ANDROID" = 1 ]; then
-        echo "    transport: patch_chunk uploads (a device session never hands off a file)"
+        echo "    transport: patch_chunk uploads of patch-N.upload.so (a device session never hands off a file)"
       else
         echo "    $(handoff_line "$from")"
       fi
@@ -1285,7 +1329,7 @@ while [ "$run" -le "$RUNS" ]; do
   a_delta="n/a" f_delta="n/a"
   [ -n "$applied" ] && { a_delta=$((applied - stamp)); APPLIED_DELTAS="${APPLIED_DELTAS}${a_delta}"$'\n'; }
   [ -n "$frame" ] && { f_delta=$((frame - stamp)); FRAME_DELTAS="${FRAME_DELTAS}${f_delta}"$'\n'; }
-  line="run ${run}: save->applied ${a_delta} ms, save->frame ${f_delta} ms (${status})${detail}"
+  line="run ${run}: save->applied ${a_delta} ms, save->frame ${f_delta} ms (${status})${detail}${source_note}"
   if [ "$MODE" = "hotpatch" ]; then line="${line}; $(pid_state)"; fi
   if [ "$TARGET" = "state-field" ] && [ "$MODE" = "hotpatch" ]; then
     if [ -n "$extra" ]; then
@@ -1338,9 +1382,12 @@ if [ "$MODE" = "frust-run" ]; then
   echo "median save->CLI outcome line, restart runs:" \
     "$(printf '%s' "$OUTCOMES" | awk -F'\t' '$1 == "restart" { print $2 }' | median) ms"
   if [ "$ANDROID" = 1 ]; then
-    # No frame probe on a device: a patched run's figures are the apply moment (backstop line - 5 s,
-    # device clock moved onto the host's) and the CLI's own line (host clock, an upper bound).
-    echo "android: patched save->frame is not probed; the next Choreographer tick follows 'applied'"
+    # A patched run's applied/frame come from the app's probe lines, or from the backstop line
+    # (- 5 s, applied only) as the fallback; the CLI's own line is on the host clock.
+    echo "android: patched runs' applied/frame source:" \
+      "$(printf '%s' "$RESULTS" | grep -c 'source: probe' || true) probe," \
+      "$(printf '%s' "$RESULTS" | grep -c 'source: backstop' || true) backstop fallback;" \
+      "backstop line after the save in $(printf '%s' "$RESULTS" | grep -c 'backstop: PRESENT' || true) run(s)"
     echo "median save->applied, patched runs:  $(printf '%s' "$RESULTS" | grep '(patched)' \
       | sed -n 's/.*save->applied \([0-9]*\) ms.*/\1/p' | median) ms"
     echo "median save->applied, patched runs 2..${RUNS}: $(printf '%s' "$RESULTS" | grep -v '^run 1:' \
