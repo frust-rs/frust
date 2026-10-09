@@ -195,9 +195,10 @@ impl AndroidAppHandle {
         let signals_dirty = ReactiveRuntime::get()
             .map(|rt| rt.take_signals_dirty())
             .unwrap_or(false);
-        // A hot patch applied since the last tick: a full rebuild must run without waiting for input.
+        // A hot patch applied since the last tick: a full rebuild must run without waiting for input. The drain
+        // stamps the `applied` probe line and marks this frame as the one that stamps `frame`.
         #[cfg(feature = "hotpatch")]
-        let signals_dirty = signals_dirty | super::take_patch_frame_request();
+        let signals_dirty = signals_dirty | self.patch_probe.take_request();
 
         // Gather the remaining inputs from the tree's existing accessors and the
         // handle-side latches, then let the gate decide. `mem::take` clears each
@@ -549,6 +550,12 @@ impl AndroidAppHandle {
         let encode_time =
             self.executor
                 .submit_frame(&mut self.scene, base_color, ui, frame_time, size, perf_on);
+
+        // The frame has left the UI thread (either executor arm): release any `apply_patch` answer parked on
+        // the devtools frame gate and stamp the `frame` probe line when due. Both early returns above (surface
+        // not ready, gate Skip) submit nothing and so never reach this.
+        #[cfg(feature = "hotpatch")]
+        self.patch_probe.frame_handed_off();
 
         // Deadline-aware pacing overrun: this frame's *work*
         // (everything but the vsync `present` wait, which is expected to block)
