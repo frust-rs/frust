@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use frust_drive::devices::Platform;
+use frust_drive::devices::{Kind, Platform};
 
 use super::devtools::{DevtoolsLaunch, DevtoolsState};
 use super::logstyle::{
@@ -235,7 +235,7 @@ pub enum SessionTarget {
     /// The desktop `cargo run` preview — one place, so two desktop sessions
     /// of the same project always name the same target.
     Desktop,
-    /// A concrete device. `id` is the identity (`adb` serial / simulator
+    /// A concrete device. `id` is the identity (`adb` serial / iOS device
     /// udid); `name` and `platform` are carried for the messages this target
     /// appears in, and are deliberately **not** part of
     /// [`Self::is_same_place_as`].
@@ -247,6 +247,16 @@ pub enum SessionTarget {
         /// Which mobile platform the device belongs to.
         platform: Platform,
     },
+    /// A booted iOS simulator, apart from [`Self::Device`] because it can
+    /// be watched where a physical iOS device cannot (its app loads an
+    /// unsigned patch). `id` is the simulator's udid, the identity, exactly
+    /// as for a device.
+    Simulator {
+        /// The simulator's udid.
+        id: String,
+        /// The simulator's display name.
+        name: String,
+    },
 }
 
 impl SessionTarget {
@@ -254,11 +264,28 @@ impl SessionTarget {
     pub fn of(target: &DeviceTarget) -> Self {
         match target {
             DeviceTarget::Desktop => Self::Desktop,
+            DeviceTarget::Device(device)
+                if device.platform == Platform::Ios && device.kind == Kind::Simulator =>
+            {
+                Self::Simulator {
+                    id: device.id.clone(),
+                    name: device.name.clone(),
+                }
+            }
             DeviceTarget::Device(device) => Self::Device {
                 id: device.id.clone(),
                 name: device.name.clone(),
                 platform: device.platform,
             },
+        }
+    }
+
+    /// The device id of a device or simulator target; `None` for the
+    /// desktop.
+    fn device_id(&self) -> Option<&str> {
+        match self {
+            Self::Desktop => None,
+            Self::Device { id, .. } | Self::Simulator { id, .. } => Some(id),
         }
     }
 
@@ -271,19 +298,20 @@ impl SessionTarget {
     pub fn is_same_place_as(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Desktop, Self::Desktop) => true,
-            (Self::Device { id, .. }, Self::Device { id: other_id, .. }) => id == other_id,
-            (Self::Desktop, Self::Device { .. }) | (Self::Device { .. }, Self::Desktop) => false,
+            _ => self
+                .device_id()
+                .is_some_and(|id| other.device_id() == Some(id)),
         }
     }
 
-    /// Whether "Watch: hot patch on save" can run here: the desktop preview
-    /// or an Android device (a debug build of either runs hot; any other
-    /// build restarts on save). An iOS device has neither story. The one
-    /// gate the watch toggle, the palette row and the runner's watched
-    /// launch all read.
+    /// Whether "Watch: hot patch on save" can run here: the desktop
+    /// preview, an Android device or an iOS simulator (a debug build of
+    /// any runs hot; any other build restarts on save). A physical iOS
+    /// device has neither story. The one gate the watch toggle, the palette
+    /// row and the runner's watched launch all read.
     pub fn supports_watch(&self) -> bool {
         match self {
-            Self::Desktop => true,
+            Self::Desktop | Self::Simulator { .. } => true,
             Self::Device { platform, .. } => *platform == Platform::Android,
         }
     }
@@ -294,7 +322,7 @@ impl SessionTarget {
     pub fn label(&self) -> String {
         match self {
             Self::Desktop => "desktop".to_string(),
-            Self::Device { name, .. } => name.clone(),
+            Self::Device { name, .. } | Self::Simulator { name, .. } => name.clone(),
         }
     }
 }
@@ -2048,5 +2076,47 @@ mod tests {
         let mut s = sess();
         s.push_line("just some ordinary app output".to_string());
         assert_eq!(s.log.get(0), Some("just some ordinary app output"));
+    }
+
+    fn ios(kind: Kind) -> SessionTarget {
+        SessionTarget::of(&DeviceTarget::Device(frust_drive::devices::Device {
+            id: "FAKE-UDID".to_string(),
+            name: "iPhone 15".to_string(),
+            platform: Platform::Ios,
+            kind,
+            os_version: None,
+            connection_state: None,
+        }))
+    }
+
+    /// An iOS simulator is its own target: watchable where a physical iOS
+    /// device is not, named by its device name, and the same place as
+    /// anything carrying its udid.
+    #[test]
+    fn an_ios_simulator_is_watchable_and_a_physical_ios_device_is_not() {
+        let simulator = ios(Kind::Simulator);
+        assert_eq!(
+            simulator,
+            SessionTarget::Simulator {
+                id: "FAKE-UDID".to_string(),
+                name: "iPhone 15".to_string(),
+            }
+        );
+        assert!(simulator.supports_watch());
+        assert_eq!(simulator.label(), "iPhone 15");
+
+        let device = ios(Kind::PhysicalDevice);
+        assert!(matches!(device, SessionTarget::Device { .. }));
+        assert!(!device.supports_watch());
+
+        assert!(simulator.is_same_place_as(&simulator.clone()));
+        assert!(simulator.is_same_place_as(&device), "matched by udid alone");
+        assert!(!simulator.is_same_place_as(&SessionTarget::Desktop));
+        assert!(!SessionTarget::Desktop.is_same_place_as(&simulator));
+        let other = SessionTarget::Simulator {
+            id: "OTHER-UDID".to_string(),
+            name: "iPhone 15".to_string(),
+        };
+        assert!(!simulator.is_same_place_as(&other), "same name, other udid");
     }
 }

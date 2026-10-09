@@ -101,8 +101,8 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     // below carries the `R` hint at a time.
     let has_app_session = state.active_session().is_some_and(|s| s.target.is_some());
     // "Watch: hot patch on save" is the `frust run --watch` loop, which runs
-    // on the desktop preview and on Android devices — an iOS device (or
-    // ad-hoc) session gates it off.
+    // on the desktop preview, Android devices and iOS simulators — a
+    // physical iOS device (or ad-hoc) session gates it off.
     let has_watchable_session = state.active_session().is_some_and(|s| {
         s.target
             .as_ref()
@@ -176,15 +176,16 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             "no session to restart",
         ),
         // A toggle: the same row turns it off again. Enabled only for a
-        // desktop or Android app session (`Message::ToggleWatch`'s own
-        // refusal covers the `W` key on anything else). A save hot-patches a
-        // session that runs hot and restarts any other.
+        // desktop, Android or iOS simulator app session
+        // (`Message::ToggleWatch`'s own refusal covers the `W` key on
+        // anything else). A save hot-patches a session that runs hot and
+        // restarts any other.
         gated(
             "Watch: hot patch on save",
             "W",
             Message::ToggleWatch,
             has_watchable_session,
-            "desktop and Android app sessions only",
+            "desktop, Android and iOS simulator app sessions only",
         ),
         gated(
             "Close tab",
@@ -563,7 +564,7 @@ mod tests {
         assert!(!row.enabled);
         assert_eq!(
             row.disabled_reason,
-            Some("desktop and Android app sessions only")
+            Some("desktop, Android and iOS simulator app sessions only")
         );
         assert!(!by_title(&with_session(None)).enabled, "ad-hoc session");
         let ios = with_session(Some(SessionTarget::Device {
@@ -571,7 +572,13 @@ mod tests {
             name: "iPhone".into(),
             platform: Platform::Ios,
         }));
-        assert!(!by_title(&ios).enabled, "iOS device session");
+        assert!(!by_title(&ios).enabled, "physical iOS device session");
+        let simulator = by_title(&with_session(Some(SessionTarget::Simulator {
+            id: "FAKE-UDID".into(),
+            name: "iPhone 15".into(),
+        })));
+        assert!(simulator.enabled, "iOS simulator session");
+        assert_eq!(simulator.message, Message::ToggleWatch);
         let android = by_title(&with_session(Some(SessionTarget::Device {
             id: "emu-1".into(),
             name: "Pixel".into(),
