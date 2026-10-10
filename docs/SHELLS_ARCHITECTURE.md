@@ -40,7 +40,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-common::resample` | `PointerResampler` — one lane per `PointerId`, emitting a frame-boundary-interpolated `Move` per contact while passing `Down`/`Up`/`Cancel` through losslessly; shared by both mobile shells |
 | `frust-shell-common` (signal-poll seams) | Small process-global slot-plus-poll seams (surface mode, theme override, fonts, system UI) drained once per frame — surface mode and system UI on mobile only; theme override and fonts on every shell, desktop included |
 | `frust-shell-common::devtools` (feature `devtools`) | Shell-side `DevtoolsBackend` implementation plus the per-frame UI-thread hop and pump each shell drives; see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
-| `frust-shell-common::gpu` (feature `gpu`) | Process-wide install-once slot (`install_gpu_handle`/`gpu_handle`) a shell publishes its live GPU device handle into, read back through the facade's `frust::gpu::with_context` (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam). `frust-shell-desktop` publishes at both of its device-creation sites; the Android and iOS shells forward the feature but do not install a handle yet, so `with_context` answers `None` there |
+| `frust-shell-common::gpu` (feature `gpu`) | Process-wide install-once slot (`install_gpu_handle`/`gpu_handle`) a shell publishes its live GPU device handle into, read back through `frust::gpu::with_context` (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam). `frust-shell-desktop` publishes at both device-creation sites; Android and iOS forward the feature but install no handle yet, so `with_context` answers `None` there |
 | `frust-shell-desktop` | The shared winit core: event loop, UI-thread/render-thread surface split, accessibility adapter, paced wake, pipeline-cache persistence — plus the `DesktopExtensions` seam and the `DesktopConfig`/`MenuSpec` vocabulary the per-OS crates read. Also the zero-config dev-preview entry point |
 | `frust-shell-desktop::platform_view` | The OS-neutral desktop platform-view host: owns the shared differ, ingesting each paint's frames right after `RenderRoot::paint` and draining the batch to the per-OS hook right after the frame is submitted, then acknowledging it; plus the two lifecycle resets (replay on surface re-create, drop-everything on suspend) |
 | `frust-shell-macos` | AppKit integration: the native menu bar (a standard application menu plus the app's own spec), hide-on-close and Dock-reopen lifecycle, the reopen observer in its `appkit_glue` unsafe zone, and the platform-view host below |
@@ -57,12 +57,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-web::logging` | Routes the `log` facade to the browser console (`console_log`/`console_error_panic_hook`), idempotent against the facade's own install, plus a `?log=` query-param level knob |
 
 The Android (`platform/android/frust-embedding`), iOS (`platform/ios/FrustEmbedding`) and web
-(`platform/web`) embeddings ship inside `frust-shell-android`, `frust-shell-ios` and
-`frust-shell-web`, so a project reaches them wherever cargo resolves those crates — a registry
-unpack or a `--frust-path` checkout. `frust-drive`'s `packages::locate` finds the directory and
-`platform_wiring::sync` records it per host: the Android `frust.embedding.dir` key in the project's
-gitignored `local.properties`, the iOS `ios/FrustEmbedding` symlink, and for web a lookup at build
-time by `web_build` (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
+(`platform/web`) embeddings ship inside their shell crates, so a project reaches them wherever cargo
+resolves those crates. `frust-drive`'s `packages::locate` finds the directory and
+`platform_wiring::sync` records it per host: Android's `frust.embedding.dir` key in the gitignored
+`local.properties`, the iOS `ios/FrustEmbedding` symlink, and for web a build-time lookup by
+`web_build` (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)).
 
 ## Layer Dependencies
 
@@ -92,16 +91,29 @@ chosen above it.
 
 `frust-shell-macos` additionally depends on `frust-plugin`, to resolve a slot's `view_type` through
 the desktop view-factory registry: the **second shell → substrate edge** after `frust-shell-android`'s,
-in the same direction and for the same reason — a shell reads the leaf substrate so it can host a
-plugin's native view without depending on any plugin, and the edge only ever points that way (see
-[PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)). Both that edge and the `frust-shell-common`
-one are unconditional rather than macOS-gated, so the host's OS-neutral core stays compiled and
+pointing the same way for the same reason — a shell reads the leaf substrate to host a plugin's
+native view without depending on any plugin (see [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)).
+That edge and the `frust-shell-common` one are unconditional, so the OS-neutral core is compiled and
 unit-tested on every build host.
 
 **`frust-shell-web` depends only on `frust-shell-common`**, never on `frust-shell-desktop`, for the
 Overview's reasons. Its `winit` edge rides the identical workspace pin the desktop tier uses — a
 second `winit` identity between the two shell tiers would be a resolution hazard, not a
 convenience.
+
+**Hot patching is an opt-in feature chain, never default.** `frust`'s `hotpatch` forwards to
+`hotpatch` on `frust-core`, `frust-shell-common`, `frust-shell-desktop`, `frust-shell-android` and
+`frust-shell-ios`; each concrete shell's own `hotpatch` implies `devtools` and forwards
+`frust-core/hotpatch` and `frust-shell-common/hotpatch`. The shared leaf's feature carries the
+in-app apply (chunk decode, the unix loopback patch-file hand-off, a safe entry into
+`frust-hotpatch`) over the devtools transport ([DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md));
+absent the feature `frust-hotpatch` is not in the graph. Each shell registers one
+`frust_core::set_patch_listener` callback, which runs on the thread that applied the patch and must
+only signal: desktop sends `ShellUserEvent::HotPatched` (a `#[non_exhaustive]` enum) through its
+winit proxy, while Android and iOS raise their frame gate's signals-dirty input
+(`request_patch_frame`) for the next Choreographer/`CADisplayLink` tick. The seam itself, the
+layout witness and the app-owned `__frust_hotpatch_anchor` are CORE's
+([CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)).
 
 ### Target gating
 
@@ -121,12 +133,17 @@ only its own host's native bindings: `crates/frust/Cargo.toml`'s `[target.'cfg(n
 | iOS | `frust-shell-ios` only; the desktop core is excluded, keeping winit and `accesskit_winit` out of an iOS build entirely. The `app!` macro still emits a `__frust_main` **stub** on iOS, because the generated `main.rs` binary target Xcode builds calls it — it logs and exits non-zero rather than looking like an app that started and vanished |
 | Web (`wasm32-unknown-unknown`) | `frust-shell-web` only; the desktop core is excluded (see the Overview, and `crates/frust-shell-web/Cargo.toml`'s own header). `frust::web_app!` mirrors `android_app!`/`ios_app!`: an unconditional, self-gating invocation whose generated `#[wasm_bindgen(start)]` shim expands to nothing off `wasm32`, and `app!` emits it under the identical gate |
 
+Hot patching is available on the desktop shells (macOS, Linux, Windows x64 MSVC), the Android
+shell (arm64) and the iOS shell on the simulator; a physical iOS device and the web shell are
+refused — see `no-hot-reload-restart-is-a-rebuild` in [LIMITATIONS.md](LIMITATIONS.md).
+
 ### Sanctioned-unsafe zones
 
 Each concrete shell confines all unsafe/FFI code to one named module — `jni_glue` on Android,
 `ffi_glue` on iOS, `appkit_glue` on macOS, `win32_glue` on Windows — so each platform boundary is
 auditable as a single surface. `frust-shell-common`, `frust-shell-desktop` and
-`frust-shell-linux` hold no `unsafe` at all. The register of what each zone is permitted to do,
+`frust-shell-linux` hold no `unsafe` at all, hot-patch code included (the one `unsafe` lives in
+`frust-hotpatch`; the Android/iOS hot-patch arms add none beyond their zones). The register of what each zone is permitted to do,
 and the `# Safety`/no-unwind rules that govern it, live in
 [CODE_STANDARDS.md](CODE_STANDARDS.md) § Language Idioms.
 
@@ -501,20 +518,17 @@ signal-driven repaint in the browser; see its own README for the milestone evide
   re-dispatches each plain keystroke onto the canvas as a copy — except a `keydown` the browser
   reports as `Unidentified` (what a mobile soft keyboard sends for most of its keys), whose edit is
   taken from the `input` signal behind it and delivered once as a key event instead. A soft
-  keyboard's Backspace is the known gap: the element is emptied every frame, so the deletion has
-  nothing to consume and raises no `input`. Removing the element mid-composition ends the session
-  and retracts the preedit, the same as a blur. The same element is the page's clipboard surface —
-  its verb listeners and the exclusion keeping a clipboard keystroke from reaching a widget twice
-  are the Clipboard bullet above. Not yet wired: the mobile visual-viewport jump when a soft
-  keyboard opens, and multiple simultaneous editables. The bridge is compile- and
-  unit-tested but device-unverified — this build host has no browser rig — see
+  keyboard's Backspace is the known gap: the element is emptied every frame, so the deletion
+  raises no `input`. Removing the element mid-composition retracts the preedit, as a blur does. The
+  same element is the page's clipboard surface (the Clipboard bullet above). Not yet wired: the
+  mobile visual-viewport jump when a soft keyboard opens, and multiple simultaneous editables. The
+  bridge is compile- and unit-tested but device-unverified (no browser rig) — see
   [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`.
 - **Web host signals with no browser counterpart:** accessibility (AccessKit ships no web
-  adapter — a canvas app needs its semantics mirrored into real DOM/ARIA elements) and the in-app
-  devtools UI-thread hop (a `wasm32` build has no sockets for its loopback listener, so
-  `frust-shell-web` forwards no `devtools` cargo feature at all) are each a documented no-op rather
-  than a silent gap (`crates/frust-shell-web/src/app_handler.rs`'s `push_semantics`/`pump_devtools`).
-  See [LIMITATIONS.md](LIMITATIONS.md) `web-a11y-devtools`.
+  adapter) and the in-app devtools UI-thread hop (a `wasm32` build has no sockets, so
+  `frust-shell-web` forwards no `devtools` feature) are each a documented no-op
+  (`push_semantics`/`pump_devtools` in `crates/frust-shell-web/src/app_handler.rs`). See
+  [LIMITATIONS.md](LIMITATIONS.md) `web-a11y-devtools`.
 - **Platform-view embedding:** paint-time view frames feed the `platform_view` differ, which
   exposes an idempotent create/update/dispose backlog. The two mobile shells **poll** it across
   their FFI boundary and apply it frame-paired against present, converting each rect to physical px
@@ -565,10 +579,9 @@ The desktop tier is unevenly proven, and the gap is tracked rather than assumed 
 - **macOS** — runtime-verified on hardware: real windows, the app-named menu bar, ⌘Q by both menu
   and accelerator, Hide/Show All, and close-then-Dock-click reopen.
 - **Windows** — runtime-verified on hardware: titlebar/taskbar icon, AppUserModelID identity,
-  titlebar theming, menu-bar activation delivery, accelerators, and quit. Two Win32 menu rules the
-  pass established are load-bearing and documented at their `menu.rs` sites: muda's predefined quit
-  dead-ends under winit's pump, and an accelerator enters the `HACCEL` only if its submenu is
-  attached before the item is appended.
+  titlebar theming, menu-bar activation delivery, accelerators, and quit. Two Win32 menu rules are
+  documented at their `menu.rs` sites: muda's predefined quit dead-ends under winit's pump, and an
+  accelerator enters the `HACCEL` only if its submenu is attached before the item is appended.
 - **Linux** — proven by cross-target compilation only, plus every native call site read against
   its vendored source. Owed: a non-headless `app_id`/icon pass. See
   [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` and
