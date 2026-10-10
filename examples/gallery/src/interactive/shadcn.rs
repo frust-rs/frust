@@ -69,7 +69,7 @@
 //! Nothing here is a `Case::build`, so none of it reaches the snapshot oracle
 //! and no poster moves.
 
-use frust_core::{AnyView, Component, View, any, component};
+use frust_core::{Component, View, component};
 use frust_shadcn::overlay::{OverlayAlign, OverlayAnchor, anchor};
 use frust_shadcn::{
     ButtonVariant, DrawerSide, QuestionnaireAnswer, QuestionnaireAnswerEvent,
@@ -83,10 +83,11 @@ use frust_shadcn::{
     sidebar_inset, sidebar_menu, sidebar_menu_button, sidebar_menu_item, sidebar_provider, table,
     table_cell, table_row, tabs, tabs_tab, tooltip, tooltip_trigger,
 };
-use frust_widgets::{CrossAxisAlignment, SizedBox, column, icon, icons, row, stack, text};
+use frust_widgets::{CrossAxisAlignment, SizedBox, column, either, icon, icons, row, stack, text};
 use kurbo::Size;
 
 use super::{Entry, framed, framed_in};
+use crate::case::case_build;
 
 /// This catalog's slice of the side table [`super::entries`] concatenates.
 ///
@@ -96,18 +97,18 @@ use super::{Entry, framed, framed_in};
 /// affordances (a button's press feedback, the scroller's offset) are already
 /// widget-owned and live without any of this.
 pub const INTERACTIVE: &[Entry] = &[
-    ("shadcn/dialog", dialog_case),
-    ("shadcn/drawer", drawer_case),
-    ("shadcn/dropdown-menu", dropdown_menu_case),
-    ("shadcn/form-controls", form_controls_case),
-    ("shadcn/input", input_case),
-    ("shadcn/questionnaire", questionnaire_case),
-    ("shadcn/select", select_case),
-    ("shadcn/sheet", sheet_case),
-    ("shadcn/sidebar", sidebar_case),
-    ("shadcn/table", table_case),
-    ("shadcn/tabs", tabs_case),
-    ("shadcn/tooltip", tooltip_case),
+    ("shadcn/dialog", case_build!(dialog_case)),
+    ("shadcn/drawer", case_build!(drawer_case)),
+    ("shadcn/dropdown-menu", case_build!(dropdown_menu_case)),
+    ("shadcn/form-controls", case_build!(form_controls_case)),
+    ("shadcn/input", case_build!(input_case)),
+    ("shadcn/questionnaire", case_build!(questionnaire_case)),
+    ("shadcn/select", case_build!(select_case)),
+    ("shadcn/sheet", case_build!(sheet_case)),
+    ("shadcn/sidebar", case_build!(sidebar_case)),
+    ("shadcn/table", case_build!(table_case)),
+    ("shadcn/tabs", case_build!(tabs_case)),
+    ("shadcn/tooltip", case_build!(tooltip_case)),
 ];
 
 // ---- frame sizes ------------------------------------------------------------
@@ -206,8 +207,8 @@ impl Component for FormControlsCase {
     }
 }
 
-fn form_controls_case() -> AnyView<()> {
-    any(component(FormControlsCase))
+fn form_controls_case() -> impl View<()> {
+    component(FormControlsCase)
 }
 
 // ---- input ------------------------------------------------------------------
@@ -309,8 +310,8 @@ impl Component for InputCase {
     }
 }
 
-fn input_case() -> AnyView<()> {
-    any(component(InputCase))
+fn input_case() -> impl View<()> {
+    component(InputCase)
 }
 
 // ---- tabs -------------------------------------------------------------------
@@ -351,8 +352,8 @@ impl Component for TabsCase {
     }
 }
 
-fn tabs_case() -> AnyView<()> {
-    any(component(TabsCase))
+fn tabs_case() -> impl View<()> {
+    component(TabsCase)
 }
 
 // ---- table ------------------------------------------------------------------
@@ -400,7 +401,7 @@ impl Component for TableCase {
             .iter()
             .enumerate()
             .map(|(index, (name, role))| {
-                table_row(vec![any(table_cell(*name)), any(table_cell(*role))])
+                table_row(vec![table_cell(*name), table_cell(*role)])
                     .selected(state.selected.get(index).copied().unwrap_or(false))
                     .on_click(move |state: &mut TableState| {
                         if let Some(selected) = state.selected.get_mut(index) {
@@ -416,8 +417,8 @@ impl Component for TableCase {
     }
 }
 
-fn table_case() -> AnyView<()> {
-    any(component(TableCase))
+fn table_case() -> impl View<()> {
+    component(TableCase)
 }
 
 // ---- questionnaire ----------------------------------------------------------
@@ -493,8 +494,8 @@ impl Component for QuestionnaireCase {
     }
 }
 
-fn questionnaire_case() -> AnyView<()> {
-    any(component(QuestionnaireCase))
+fn questionnaire_case() -> impl View<()> {
+    component(QuestionnaireCase)
 }
 
 // ---- select -----------------------------------------------------------------
@@ -583,8 +584,8 @@ impl Component for SelectCase {
     }
 }
 
-fn select_case() -> AnyView<()> {
-    any(component(SelectCase))
+fn select_case() -> impl View<()> {
+    component(SelectCase)
 }
 
 // ---- dropdown-menu ----------------------------------------------------------
@@ -675,8 +676,8 @@ impl Component for DropdownMenuCase {
     }
 }
 
-fn dropdown_menu_case() -> AnyView<()> {
-    any(component(DropdownMenuCase))
+fn dropdown_menu_case() -> impl View<()> {
+    component(DropdownMenuCase)
 }
 
 // ---- tooltip ----------------------------------------------------------------
@@ -754,8 +755,8 @@ impl Component for TooltipCase {
     }
 }
 
-fn tooltip_case() -> AnyView<()> {
-    any(component(TooltipCase))
+fn tooltip_case() -> impl View<()> {
+    component(TooltipCase)
 }
 
 // ---- sidebar ----------------------------------------------------------------
@@ -802,24 +803,24 @@ impl Component for SidebarCase {
         framed_in(
             SIDEBAR_WIDE,
             sidebar_provider(
-                sidebar(sidebar_content(vec![sidebar_group(vec![
-                    any(sidebar_group_label("Mail")),
+                sidebar(sidebar_content(vec![sidebar_group((
+                    sidebar_group_label("Mail"),
                     sidebar_menu(
                         SIDEBAR_ITEMS
                             .iter()
                             .enumerate()
                             .map(|(index, label)| {
-                                any(sidebar_menu_item(vec![
+                                sidebar_menu_item(vec![
                                     sidebar_menu_button(*label, move |state: &mut SidebarState| {
                                         state.active = index;
                                     })
                                     .icon(icon(icons::FORUM).size(16.0))
                                     .active(index == active),
-                                ]))
+                                ])
                             })
                             .collect::<Vec<_>>(),
                     ),
-                ])]))
+                ))]))
                 .header(sidebar_header(vec![text("Floating").size(14.0)]))
                 .side(SidebarSide::Right)
                 .variant(SidebarVariant::Floating)
@@ -833,8 +834,8 @@ impl Component for SidebarCase {
     }
 }
 
-fn sidebar_case() -> AnyView<()> {
-    any(component(SidebarCase))
+fn sidebar_case() -> impl View<()> {
+    component(SidebarCase)
 }
 
 // ---- the modal family: dialog, drawer, sheet --------------------------------
@@ -904,28 +905,30 @@ impl Component for DialogCase {
     }
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-        let panel = if state.open {
-            any(dialog(vec![
-                dialog_header(vec![
-                    dialog_title("Delete project?"),
-                    dialog_description("This action cannot be undone."),
-                ]),
-                dialog_footer(vec![
-                    button("Cancel", |state: &mut ModalState| state.open = false)
-                        .variant(ButtonVariant::Outline),
-                ]),
-            ])
-            .label("Delete project?")
-            .on_dismiss(|state: &mut ModalState| state.open = false))
-        } else {
-            any(ModalState::reopen("Open dialog"))
-        };
+        let panel = either(
+            state.open,
+            || {
+                dialog(vec![
+                    dialog_header(vec![
+                        dialog_title("Delete project?"),
+                        dialog_description("This action cannot be undone."),
+                    ]),
+                    dialog_footer(vec![
+                        button("Cancel", |state: &mut ModalState| state.open = false)
+                            .variant(ButtonVariant::Outline),
+                    ]),
+                ])
+                .label("Delete project?")
+                .on_dismiss(|state: &mut ModalState| state.open = false)
+            },
+            || ModalState::reopen("Open dialog"),
+        );
         framed_in(DIALOG_FRAME, stack().child(panel))
     }
 }
 
-fn dialog_case() -> AnyView<()> {
-    any(component(DialogCase))
+fn dialog_case() -> impl View<()> {
+    component(DialogCase)
 }
 
 /// The `drawer` case, with the drag its description promises.
@@ -952,28 +955,30 @@ impl Component for DrawerCase {
     }
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-        let panel = if state.open {
-            any(drawer(
-                DrawerSide::Bottom,
-                vec![drawer_header(vec![
-                    drawer_title("Bottom drawer"),
-                    drawer_description(
-                        "Drag the panel toward its edge: past the halfway point (or with a \
-                             flick) it keeps going and closes; short of it, it springs back open.",
-                    ),
-                ])],
-            )
-            .label("Bottom drawer")
-            .on_dismiss(|state: &mut ModalState| state.open = false))
-        } else {
-            any(ModalState::reopen("Open drawer"))
-        };
+        let panel = either(
+            state.open,
+            || {
+                drawer(
+                    DrawerSide::Bottom,
+                    vec![drawer_header(vec![
+                        drawer_title("Bottom drawer"),
+                        drawer_description(
+                            "Drag the panel toward its edge: past the halfway point (or with a \
+                                 flick) it keeps going and closes; short of it, it springs back open.",
+                        ),
+                    ])],
+                )
+                .label("Bottom drawer")
+                .on_dismiss(|state: &mut ModalState| state.open = false)
+            },
+            || ModalState::reopen("Open drawer"),
+        );
         framed_in(DRAWER_TALL, stack().child(panel))
     }
 }
 
-fn drawer_case() -> AnyView<()> {
-    any(component(DrawerCase))
+fn drawer_case() -> impl View<()> {
+    component(DrawerCase)
 }
 
 /// The `sheet` case, with the three dismissals its footer names.
@@ -1016,27 +1021,29 @@ impl Component for SheetCase {
     }
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-        let panel = if state.open {
-            any(sheet(vec![
-                sheet_header(vec![
-                    sheet_title("Right sheet"),
-                    sheet_description(
-                        "Dismiss it and watch the panel slide back out the edge it came \
-                             from before the page pops.",
-                    ),
-                ]),
-                sheet_footer(vec![text("Escape, the scrim, or the X.")]),
-            ])
-            .side(SheetSide::Right)
-            .label("Right sheet")
-            .on_dismiss(|state: &mut ModalState| state.open = false))
-        } else {
-            any(ModalState::reopen("Open sheet"))
-        };
+        let panel = either(
+            state.open,
+            || {
+                sheet(vec![
+                    sheet_header(vec![
+                        sheet_title("Right sheet"),
+                        sheet_description(
+                            "Dismiss it and watch the panel slide back out the edge it came \
+                                 from before the page pops.",
+                        ),
+                    ]),
+                    sheet_footer(vec![text("Escape, the scrim, or the X.")]),
+                ])
+                .side(SheetSide::Right)
+                .label("Right sheet")
+                .on_dismiss(|state: &mut ModalState| state.open = false)
+            },
+            || ModalState::reopen("Open sheet"),
+        );
         framed_in(SHEET_TALL, stack().child(panel))
     }
 }
 
-fn sheet_case() -> AnyView<()> {
-    any(component(SheetCase))
+fn sheet_case() -> impl View<()> {
+    component(SheetCase)
 }

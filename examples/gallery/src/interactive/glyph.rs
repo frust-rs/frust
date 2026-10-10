@@ -55,28 +55,29 @@
 //! Nothing here is a `Case::build`, so none of it reaches the snapshot oracle
 //! and no poster moves.
 
-use frust_core::{AnyView, Component, View, any, component};
+use frust_core::{Component, View, component};
 use frust_glyph::{
     BadgeVariant, PaletteItem, accordion, badge, command_palette, dots_loader, glyph_dialog,
     glyph_nav_bar, glyph_nav_item, progress, segmented_control, skeleton, tabs, tag, toggle,
 };
 use frust_widgets::{
     Axis, ButtonStyle, CrossAxisAlignment, FlexView, GestureDetector, SizedBox, button, column,
-    inflexible, row, text,
+    either, inflexible, row, text,
 };
 
 use super::{Entry, framed};
+use crate::case::case_build;
 
 /// This catalog's slice of the side table [`super::entries`] concatenates.
 pub const INTERACTIVE: &[Entry] = &[
-    ("glyph/accordion", accordion_case),
-    ("glyph/badge-and-tag", badge_and_tag_case),
-    ("glyph/command-palette", command_palette_case),
-    ("glyph/dialog", dialog_case),
-    ("glyph/loaders", loaders_case),
-    ("glyph/nav-bar", navbar_case),
-    ("glyph/tabs", tabs_case),
-    ("glyph/toggle", toggle_case),
+    ("glyph/accordion", case_build!(accordion_case)),
+    ("glyph/badge-and-tag", case_build!(badge_and_tag_case)),
+    ("glyph/command-palette", case_build!(command_palette_case)),
+    ("glyph/dialog", case_build!(dialog_case)),
+    ("glyph/loaders", case_build!(loaders_case)),
+    ("glyph/nav-bar", case_build!(navbar_case)),
+    ("glyph/tabs", case_build!(tabs_case)),
+    ("glyph/toggle", case_build!(toggle_case)),
 ];
 
 // ---- accordion --------------------------------------------------------------
@@ -141,12 +142,12 @@ impl Component for AccordionCase {
     }
 }
 
-/// The [`super::Build`] the table registers: a `()`-stated `AnyView` around
-/// the stateful component, legal because `ComponentView<C>` implements
-/// `View<Outer>` for every `Outer`. Every constructor below repeats this
-/// three-line shape.
-fn accordion_case() -> AnyView<()> {
-    any(component(AccordionCase))
+/// The constructor the table registers through [`case_build!`], which erases
+/// it to a [`super::Build`]: the stateful component at `()` state, legal
+/// because `ComponentView<C>` implements `View<Outer>` for every `Outer`.
+/// Every constructor below repeats this shape.
+fn accordion_case() -> impl View<()> {
+    component(AccordionCase)
 }
 
 // ---- badge-and-tag ----------------------------------------------------------
@@ -225,8 +226,8 @@ impl Component for BadgeAndTagCase {
     }
 }
 
-fn badge_and_tag_case() -> AnyView<()> {
-    any(component(BadgeAndTagCase))
+fn badge_and_tag_case() -> impl View<()> {
+    component(BadgeAndTagCase)
 }
 
 // ---- command-palette --------------------------------------------------------
@@ -314,8 +315,8 @@ impl Component for CommandPaletteCase {
     }
 }
 
-fn command_palette_case() -> AnyView<()> {
-    any(component(CommandPaletteCase))
+fn command_palette_case() -> impl View<()> {
+    component(CommandPaletteCase)
 }
 
 // ---- dialog -----------------------------------------------------------------
@@ -337,9 +338,10 @@ struct DialogState {
 /// dialog would have had on a real screen.
 ///
 /// Reopening rebuilds the dialog rather than un-hiding it (the two branches
-/// are different view types under one `AnyView`, so the rebuild tears the old
-/// widget down), which is what replays the scale-and-fade entrance instead of
-/// snapping the panel back.
+/// are the two arms of an [`either`], and an arm swap tears the old widget
+/// down and builds the new one fresh, exactly as an `AnyView` type swap did),
+/// which is what replays the scale-and-fade entrance instead of snapping the
+/// panel back.
 struct DialogCase;
 
 impl Component for DialogCase {
@@ -350,37 +352,43 @@ impl Component for DialogCase {
     }
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-        if !state.open {
-            // erasure: keep two return arms differ in type and the swap replays the entrance
-            return any(framed(
-                button("Revoke observer-token", |state: &mut DialogState| {
-                    state.open = true
-                })
-                .style(ButtonStyle::Danger)
-                .small(),
-            ));
-        }
-        any(framed(
-            glyph_dialog::<DialogState>()
-                .title("Revoke observer-token?")
-                .body("Any device using this token loses access immediately. This can't be undone.")
-                .dismissable(false)
-                .action(
-                    button("Cancel", |state: &mut DialogState| state.open = false)
-                        .style(ButtonStyle::Ghost)
-                        .small(),
+        either(
+            state.open,
+            || {
+                framed(
+                    glyph_dialog::<DialogState>()
+                        .title("Revoke observer-token?")
+                        .body(
+                            "Any device using this token loses access immediately. This can't be undone.",
+                        )
+                        .dismissable(false)
+                        .action(
+                            button("Cancel", |state: &mut DialogState| state.open = false)
+                                .style(ButtonStyle::Ghost)
+                                .small(),
+                        )
+                        .action(
+                            button("Revoke token", |state: &mut DialogState| state.open = false)
+                                .style(ButtonStyle::Danger)
+                                .small(),
+                        ),
                 )
-                .action(
-                    button("Revoke token", |state: &mut DialogState| state.open = false)
-                        .style(ButtonStyle::Danger)
-                        .small(),
-                ),
-        ))
+            },
+            || {
+                framed(
+                    button("Revoke observer-token", |state: &mut DialogState| {
+                        state.open = true
+                    })
+                    .style(ButtonStyle::Danger)
+                    .small(),
+                )
+            },
+        )
     }
 }
 
-fn dialog_case() -> AnyView<()> {
-    any(component(DialogCase))
+fn dialog_case() -> impl View<()> {
+    component(DialogCase)
 }
 
 // ---- loaders ----------------------------------------------------------------
@@ -444,8 +452,8 @@ impl Component for LoadersCase {
     }
 }
 
-fn loaders_case() -> AnyView<()> {
-    any(component(LoadersCase))
+fn loaders_case() -> impl View<()> {
+    component(LoadersCase)
 }
 
 // ---- nav-bar ----------------------------------------------------------------
@@ -485,8 +493,8 @@ impl Component for NavBarCase {
     }
 }
 
-fn navbar_case() -> AnyView<()> {
-    any(component(NavBarCase))
+fn navbar_case() -> impl View<()> {
+    component(NavBarCase)
 }
 
 // ---- tabs -------------------------------------------------------------------
@@ -540,8 +548,8 @@ impl Component for TabsCase {
     }
 }
 
-fn tabs_case() -> AnyView<()> {
-    any(component(TabsCase))
+fn tabs_case() -> impl View<()> {
+    component(TabsCase)
 }
 
 // ---- toggle -----------------------------------------------------------------
@@ -592,6 +600,6 @@ impl Component for ToggleCase {
     }
 }
 
-fn toggle_case() -> AnyView<()> {
-    any(component(ToggleCase))
+fn toggle_case() -> impl View<()> {
+    component(ToggleCase)
 }
