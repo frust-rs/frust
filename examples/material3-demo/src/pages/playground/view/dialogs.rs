@@ -113,11 +113,12 @@ impl Component for DialogsPlayground {
 
     fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let snapshot = state.clone();
-        any(navigator(&state.nav, move || content(&snapshot)))
+        navigator(&state.nav, move || content(&snapshot))
     }
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(DialogsPlayground))
 }
@@ -319,20 +320,22 @@ fn dialog_snippet(state: &Knobs) -> PlaySnippet {
         "Dialog",
         format!(
             "let dismiss = ModalDismiss::new();\n\
-             let cancel = dismiss.clone();\n\
-             let confirm = dismiss.clone();\n\
              show_dialog(\n\
-             \u{20}   &state.nav,\n\
-             \u{20}   move || dialog()\n\
-             \u{20}       .title({title:?})\n\
-             \u{20}       .body({body:?})\n\
-             \u{20}       .dismissable({dismissable})\n\
-             \u{20}       .dismiss_handle(dismiss.clone())\n\
-             \u{20}       .actions(vec![\n\
-             \u{20}           any(text_button(\"Cancel\", move |_| cancel.dismiss())),\n\
-             \u{20}           any(filled_button(\"Confirm\", move |_| confirm.dismiss())),\n\
-             \u{20}       ]),\n\
-             \u{20}   |_state, _result| {{}},\n\
+             \u{20}   &app.nav,\n\
+             \u{20}   move || {{\n\
+             \u{20}       let cancel = dismiss.clone();\n\
+             \u{20}       let confirm = dismiss.clone();\n\
+             \u{20}       dialog()\n\
+             \u{20}           .title({title:?})\n\
+             \u{20}           .body({body:?})\n\
+             \u{20}           .dismissable({dismissable})\n\
+             \u{20}           .dismiss_handle(dismiss.clone())\n\
+             \u{20}           .actions((\n\
+             \u{20}               text_button(\"Cancel\", move |_: &mut App| cancel.dismiss()),\n\
+             \u{20}               filled_button(\"Confirm\", move |_: &mut App| confirm.dismiss()),\n\
+             \u{20}           ))\n\
+             \u{20}   }},\n\
+             \u{20}   |_: &mut App, _: PopResult| {{}},\n\
              );",
             title = state.title.get(),
             body = state.content.get(),
@@ -348,18 +351,20 @@ fn selection_snippet(state: &Knobs) -> PlaySnippet {
         "Selection",
         format!(
             "let dismiss = ModalDismiss::new();\n\
-             let confirm = dismiss.clone();\n\
              show_selection_dialog(\n\
-             \u{20}   &state.nav,\n\
-             \u{20}   move || selection_dialog({title:?}, options())\n\
-             \u{20}       .multi_select({multi})\n\
-             \u{20}       .dismissable({dismissable})\n\
-             \u{20}       .selected(selected.get())\n\
-             \u{20}       .confirm_label({confirm:?})\n\
-             \u{20}       .on_toggle(|state, option| state.selected.set(next(option)))\n\
-             \u{20}       .on_confirm(move |_| confirm.dismiss())\n\
-             \u{20}       .dismiss_handle(dismiss.clone()),\n\
-             \u{20}   |_state, _result| {{}},\n\
+             \u{20}   &app.nav,\n\
+             \u{20}   move || {{\n\
+             \u{20}       let confirm = dismiss.clone();\n\
+             \u{20}       selection_dialog({title:?}, options())\n\
+             \u{20}           .multi_select({multi})\n\
+             \u{20}           .dismissable({dismissable})\n\
+             \u{20}           .selected(selected.get())\n\
+             \u{20}           .confirm_label({confirm:?})\n\
+             \u{20}           .on_toggle(|app: &mut App, option: String| app.selected.set(next(option)))\n\
+             \u{20}           .on_confirm(move |_: &mut App| confirm.dismiss())\n\
+             \u{20}           .dismiss_handle(dismiss.clone())\n\
+             \u{20}   }},\n\
+             \u{20}   |_: &mut App, _: PopResult| {{}},\n\
              );",
             title = state.title.get(),
             multi = multi_select,
@@ -373,16 +378,18 @@ fn full_screen_snippet(state: &Knobs) -> PlaySnippet {
         "Full screen",
         format!(
             "let dismiss = ModalDismiss::new();\n\
-             let save = dismiss.clone();\n\
              show_full_screen_dialog(\n\
-             \u{20}   &state.nav,\n\
-             \u{20}   move || full_screen_dialog(\n\
-             \u{20}       {title:?},\n\
-             \u{20}       Padding(EdgeInsets::all(24.0), text({body:?})),\n\
-             \u{20}   )\n\
-             \u{20}   .action(any(text_button(\"Save\", move |_| save.dismiss())))\n\
-             \u{20}   .dismiss_handle(dismiss.clone()),\n\
-             \u{20}   |_state, _result| {{}},\n\
+             \u{20}   &app.nav,\n\
+             \u{20}   move || {{\n\
+             \u{20}       let save = dismiss.clone();\n\
+             \u{20}       full_screen_dialog(\n\
+             \u{20}           {title:?},\n\
+             \u{20}           Padding(EdgeInsets::all(24.0), text({body:?})),\n\
+             \u{20}       )\n\
+             \u{20}       .action(text_button(\"Save\", move |_: &mut App| save.dismiss()))\n\
+             \u{20}       .dismiss_handle(dismiss.clone())\n\
+             \u{20}   }},\n\
+             \u{20}   |_: &mut App, _: PopResult| {{}},\n\
              );",
             title = state.title.get(),
             body = state.content.get(),

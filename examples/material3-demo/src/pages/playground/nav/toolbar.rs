@@ -21,7 +21,7 @@
 //! knob set below. This page mirrors that source rather than inventing a
 //! scroll-hide preview the reference itself does not show.
 
-use frust::{Align, Alignment, AnyView, Component, View, any, component, icon};
+use frust::{Align, Alignment, AnyView, Component, View, any, component, either, icon};
 use frust_material::{
     FabSize, ToolbarAction, ToolbarColorStyle, ToolbarVariant, docked_toolbar, fab,
     floating_toolbar, icons, toolbar_action,
@@ -35,6 +35,7 @@ use crate::widgets::playground::{
 };
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(ToolbarPlayground))
 }
@@ -148,12 +149,15 @@ fn fab_view(state: &ToolbarState) -> impl View<ToolbarState> {
     .label(label)
 }
 
-fn toolbar_view(state: &ToolbarState) -> AnyView<ToolbarState> {
-    match state.placement {
-        ToolbarVariant::Docked => any(docked_toolbar::<ToolbarState>()
-            .color_style(state.color_style)
-            .actions(actions(state))),
-        ToolbarVariant::Floating => {
+fn toolbar_view(state: &ToolbarState) -> impl View<ToolbarState> {
+    either(
+        state.placement == ToolbarVariant::Docked,
+        || {
+            docked_toolbar::<ToolbarState>()
+                .color_style(state.color_style)
+                .actions(actions(state))
+        },
+        || {
             let mut bar = floating_toolbar::<ToolbarState>()
                 .color_style(state.color_style)
                 .expanded(state.expanded)
@@ -161,9 +165,9 @@ fn toolbar_view(state: &ToolbarState) -> AnyView<ToolbarState> {
             if state.show_fab {
                 bar = bar.fab(fab_view(state));
             }
-            any(bar)
-        }
-    }
+            bar
+        },
+    )
 }
 
 fn appearance_panel(state: &ToolbarState) -> AnyView<ToolbarState> {
@@ -191,25 +195,18 @@ fn appearance_panel(state: &ToolbarState) -> AnyView<ToolbarState> {
 /// `Behavior` control panel: Expanded/Show FAB only apply to the floating
 /// placement — the reference's own conditional rows.
 fn behavior_panel(state: &ToolbarState) -> AnyView<ToolbarState> {
-    let mut rows = Vec::new();
-    if state.placement == ToolbarVariant::Floating {
-        rows.push(play_switch::<ToolbarState>(
-            "Expanded",
-            state.expanded,
-            |s, v| s.expanded = v,
-        ));
-        rows.push(play_switch::<ToolbarState>(
-            "Show FAB",
-            state.show_fab,
-            |s, v| s.show_fab = v,
-        ));
-    }
-    rows.push(play_switch::<ToolbarState>(
-        "Labeled selection",
-        state.labeled,
-        |s, v| s.labeled = v,
-    ));
-    control_panel("Behavior", rows)
+    control_panel(
+        "Behavior",
+        (
+            (state.placement == ToolbarVariant::Floating).then(|| {
+                (
+                    play_switch::<ToolbarState>("Expanded", state.expanded, |s, v| s.expanded = v),
+                    play_switch::<ToolbarState>("Show FAB", state.show_fab, |s, v| s.show_fab = v),
+                )
+            }),
+            play_switch::<ToolbarState>("Labeled selection", state.labeled, |s, v| s.labeled = v),
+        ),
+    )
 }
 
 /// The FRUST-equivalent snippet for the current knob state.

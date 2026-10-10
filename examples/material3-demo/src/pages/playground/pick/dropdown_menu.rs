@@ -23,7 +23,7 @@
 //! faked.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, View, any, component, stack, text,
+    AnyView, Component, CrossAxisAlignment, SizedBox, View, any, column, component, stack, text,
 };
 use frust_material::{
     DropdownItem, OverlayAnchor, OverlaySide, dropdown, dropdown_field, dropdown_item,
@@ -180,15 +180,16 @@ fn preview_field(state: &Knobs) -> impl View<Knobs> {
 /// The "Dropdown menu" preview card's content: the trigger, plus the
 /// selection summary line once something is picked.
 fn preview(state: &Knobs) -> impl View<Knobs> {
-    let mut rows: Vec<AnyView<Knobs>> = vec![any(preview_field(state))];
-    if let Some(summary) = selection_summary(&state.selected) {
-        let theme = ambient_theme();
-        let mut style = theme.type_scale.body_medium.clone();
-        style.color = theme.scheme().on_surface_variant;
-        rows.push(any(SizedBox::<Knobs>(None, Some(12.0))));
-        rows.push(any(text(format!("Selected: {summary}")).style(style)));
-    }
-    Column(rows).cross_axis(CrossAxisAlignment::Start)
+    column()
+        .child(preview_field(state))
+        .when_some(selection_summary(&state.selected), |col, summary| {
+            let theme = ambient_theme();
+            let mut style = theme.type_scale.body_medium.clone();
+            style.color = theme.scheme().on_surface_variant;
+            col.child(SizedBox::<Knobs>(None, Some(12.0)))
+                .child(text(format!("Selected: {summary}")).style(style))
+        })
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// The preview's panel half — mounted at this page's outer [`Stack`], pointed
@@ -223,8 +224,8 @@ fn snippet(state: &Knobs) -> PlaySnippet {
              .hint({hint:?})\n    \
              .show_clear({show_clear})\n    \
              .enabled({enabled})\n    \
-             .on_change(|state, values| {{ /* ... */ }});\n\n\
-         dropdown(items, |state, values| {{ /* ... */ }})\n    \
+             .on_change(|app: &mut App, values: Vec<String>| app.selected = values);\n\n\
+         dropdown(items, |app: &mut App, values: Vec<String>| app.selected = values)\n    \
              .multi({multi})\n    \
              .searchable({searchable})\n    \
              .side(OverlaySide::{side:?});",
@@ -320,6 +321,7 @@ impl Component for DropdownMenuPlayground {
 /// See the page contract in [`crate::pages::playground`]. The reference's
 /// `DropdownMenuPlayground` shows no page-level heading of its own, like
 /// every other real playground in this catalog, so `entry` goes unused here.
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(DropdownMenuPlayground))
 }

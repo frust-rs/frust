@@ -138,6 +138,7 @@ fn discrete_value(value: f64) -> f64 {
 }
 
 /// The control this page's "Slider" preview shows for the current `Kind`.
+// erasure: keep match-arm values of a six-arm match over the slider constructors
 fn preview_control(state: &Knobs) -> AnyView<Knobs> {
     match state.kind {
         SliderKind::Continuous => any(slider(state.value, |s: &mut Knobs, v: f64| s.value = v)
@@ -191,13 +192,13 @@ fn preview_control(state: &Knobs) -> AnyView<Knobs> {
 /// The "Slider" preview card's content: the current control, boxed to the
 /// reference's own dimensions per kind (`SizedBox(height: 180, width: 80)`
 /// vertical, `SizedBox(width: 280)` otherwise).
-fn preview(state: &Knobs) -> AnyView<Knobs> {
-    let control = preview_control(state);
-    if state.kind == SliderKind::Vertical {
-        any(SizedBox::<Knobs>(Some(80.0), Some(180.0)).child(control))
+fn preview(state: &Knobs) -> impl View<Knobs> {
+    let (width, height) = if state.kind == SliderKind::Vertical {
+        (Some(80.0), Some(180.0))
     } else {
-        any(SizedBox::<Knobs>(Some(280.0), None).child(control))
-    }
+        (Some(280.0), None)
+    };
+    SizedBox::<Knobs>(width, height).child(preview_control(state))
 }
 
 /// The paste-ready snippet for the current knob state — the reference's
@@ -239,39 +240,39 @@ fn snippet(state: &Knobs) -> PlaySnippet {
 /// "Appearance" controls: kind, track thickness, icon position (vertical
 /// only), enabled.
 fn controls_panel(state: &Knobs) -> AnyView<Knobs> {
-    let mut children: Vec<AnyView<Knobs>> = vec![
-        play_enum_menu_field(
-            "Kind",
-            state.kind,
-            &KINDS,
-            kind_label,
-            &state.kind_anchor,
-            state.kind_open,
-            |s: &mut Knobs, open: bool| s.kind_open = open,
+    control_panel(
+        "Appearance",
+        (
+            play_enum_menu_field(
+                "Kind",
+                state.kind,
+                &KINDS,
+                kind_label,
+                &state.kind_anchor,
+                state.kind_open,
+                |s: &mut Knobs, open: bool| s.kind_open = open,
+            ),
+            play_slider(
+                "Track thickness",
+                state.track_thickness,
+                8.0..=40.0,
+                Some(16),
+                |s: &mut Knobs, v: f64| s.track_thickness = v,
+            ),
+            (state.kind == SliderKind::Vertical).then(|| {
+                play_enum_segmented(
+                    "Icon position",
+                    state.icon_position,
+                    &ICON_POSITIONS,
+                    icon_position_label,
+                    |s: &mut Knobs, next: SliderIconPosition| s.icon_position = next,
+                )
+            }),
+            play_switch("Enabled", state.enabled, |s: &mut Knobs, v: bool| {
+                s.enabled = v
+            }),
         ),
-        play_slider(
-            "Track thickness",
-            state.track_thickness,
-            8.0..=40.0,
-            Some(16),
-            |s: &mut Knobs, v: f64| s.track_thickness = v,
-        ),
-    ];
-    if state.kind == SliderKind::Vertical {
-        children.push(play_enum_segmented(
-            "Icon position",
-            state.icon_position,
-            &ICON_POSITIONS,
-            icon_position_label,
-            |s: &mut Knobs, next: SliderIconPosition| s.icon_position = next,
-        ));
-    }
-    children.push(play_switch(
-        "Enabled",
-        state.enabled,
-        |s: &mut Knobs, v: bool| s.enabled = v,
-    ));
-    control_panel("Appearance", children)
+    )
 }
 
 /// The "Kind" menu's popup half — mounted at this page's outer [`Stack`].
@@ -316,6 +317,7 @@ impl Component for SlidersPlayground {
 /// See the page contract in [`crate::pages::playground`]. The reference's
 /// `SlidersPlayground` shows no page-level heading of its own, like every
 /// other real playground in this catalog, so `entry` goes unused here.
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(SlidersPlayground))
 }
