@@ -5,7 +5,7 @@
 //! The full data-table recipe (sorting, filtering, paging, selection, column
 //! visibility) lives on its own page; the table here is the plain component.
 
-use frust::{Column, Component, ScrollInfo, SizedBox, View, any, column, component, row, text};
+use frust::{Column, Component, ScrollInfo, SizedBox, View, column, component, row, text};
 use frust_shadcn::{
     AttachmentSize, AttachmentState, BubbleAlign, BubbleVariant, FieldOrientation, InputOtpMode,
     attachment, attachment_actions, attachment_content, attachment_description, attachment_media,
@@ -197,7 +197,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         // --- Attachment ---
         .child(
             attachment((
-                attachment_media(any::<AppState, _>(text("\u{1F4C4}"))),
+                attachment_media(text("\u{1F4C4}")),
                 attachment_content((
                     attachment_title("resume.pdf"),
                     attachment_description("240 KB", false),
@@ -222,7 +222,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                 scroll_area(
                     Column(
                         (1..=40)
-                            .map(|i| any::<AppState, _>(text(format!("Row {i}")).size(14.0)))
+                            .map(|i| text(format!("Row {i}")).size(14.0))
                             .collect::<Vec<_>>(),
                     ),
                     |s: &mut AppState, info: ScrollInfo| {
@@ -245,13 +245,13 @@ impl Component for Bubbles {
     fn init(&self) -> Self::State {}
 
     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
-        any(column()
+        column()
             .child(bubble("Hey, is the design ready?").align(BubbleAlign::Start))
             .child(SizedBox(None, Some(8.0)))
             .child(
                 bubble("Yes, just shipped it.")
                     .align(BubbleAlign::End)
                     .variant(BubbleVariant::Default),
-            ))
+            )
     }
 }

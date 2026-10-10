@@ -7,7 +7,7 @@
 //! `answers[e.item]`, `on_navigate` stores `current`, `on_submit` flips
 //! `submitted`. Completion swaps the flow for a summary of what was recorded.
 
-use frust::{Column, SizedBox, View, any, text};
+use frust::{SizedBox, View, column, text};
 use frust_shadcn::{
     ButtonVariant, QuestionnaireAnswer, QuestionnaireAnswerEvent, QuestionnaireItem,
     QuestionnaireShortcuts, QuestionnaireStatus, button, questionnaire, questionnaire_choice,
@@ -106,62 +106,71 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     let current = state.current.min(items.len().saturating_sub(1));
     let answers = state.answers.clone();
 
-    let mut children: Vec<frust::AnyView<AppState>> = vec![
-        any(crate::nav::heading("Questionnaire")),
-        any(SizedBox(None, Some(16.0))),
-        any(crate::nav::caption(
+    let intro = column()
+        .child(crate::nav::heading("Questionnaire"))
+        .child(SizedBox(None, Some(16.0)))
+        .child(crate::nav::caption(
             "Click a choice once so the flow holds focus, then drive it from the \
              keyboard: a/b/c/d select, arrows rove the choices, Enter confirms \
              (including from inside the text field). Next stays blocked until an \
              item is answered or skipped \u{2014} an optional item blocks too, \
              which is why it offers Skip.",
-        )),
-        any(SizedBox(None, Some(16.0))),
-    ];
+        ))
+        .child(SizedBox(None, Some(16.0)));
 
     if state.submitted {
-        let mut lines: Vec<frust::AnyView<AppState>> = vec![
-            any(text("Submitted \u{2014} here is what the callbacks recorded:").size(14.0)),
-            any(SizedBox(None, Some(8.0))),
-        ];
-        for (index, item) in items.iter().enumerate() {
-            let answer = answers.get(index).cloned().unwrap_or_default();
-            lines.push(any(text(summary_line(item, &answer)).size(13.0)));
-            lines.push(any(SizedBox(None, Some(4.0))));
-        }
-        lines.push(any(SizedBox(None, Some(8.0))));
-        lines.push(any(button("Start over", |s: &mut AppState| {
-            s.questionnaire = State::default();
-        })));
-        children.push(any(Column(lines)));
+        let recorded = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let answer = answers.get(index).cloned().unwrap_or_default();
+                (
+                    text(summary_line(item, &answer)).size(13.0),
+                    SizedBox(None, Some(4.0)),
+                )
+            })
+            .collect::<Vec<_>>();
+        intro.child(
+            column()
+                .child(text("Submitted \u{2014} here is what the callbacks recorded:").size(14.0))
+                .child(SizedBox(None, Some(8.0)))
+                .children(recorded)
+                .child(SizedBox(None, Some(8.0)))
+                .child(button("Start over", |s: &mut AppState| {
+                    s.questionnaire = State::default();
+                })),
+        )
     } else {
-        children.push(any(questionnaire(items, current, answers)
-            .shortcuts(QuestionnaireShortcuts::Letters)
-            .on_answer(|s: &mut AppState, e: QuestionnaireAnswerEvent| {
-                if let Some(slot) = s.questionnaire.answers.get_mut(e.item) {
-                    *slot = e.answer;
-                }
-            })
-            .on_navigate(|s: &mut AppState, index: usize| {
-                s.questionnaire.current = index;
-            })
-            .on_submit(|s: &mut AppState| {
-                s.questionnaire.submitted = true;
-            })));
-        children.push(any(SizedBox(None, Some(16.0))));
-        children.push(any(separator()));
-        children.push(any(SizedBox(None, Some(8.0))));
-        children.push(any(crate::nav::caption(format!(
-            "Item {} of {ITEM_COUNT}. The widget never writes state: every choice, \
-             skip and navigation above came back through on_answer/on_navigate.",
-            current + 1
-        ))));
-        children.push(any(SizedBox(None, Some(8.0))));
-        children.push(any(button("Jump to the last item", |s: &mut AppState| {
-            s.questionnaire.current = ITEM_COUNT - 1;
-        })
-        .variant(ButtonVariant::Outline)));
+        intro
+            .child(
+                questionnaire(items, current, answers)
+                    .shortcuts(QuestionnaireShortcuts::Letters)
+                    .on_answer(|s: &mut AppState, e: QuestionnaireAnswerEvent| {
+                        if let Some(slot) = s.questionnaire.answers.get_mut(e.item) {
+                            *slot = e.answer;
+                        }
+                    })
+                    .on_navigate(|s: &mut AppState, index: usize| {
+                        s.questionnaire.current = index;
+                    })
+                    .on_submit(|s: &mut AppState| {
+                        s.questionnaire.submitted = true;
+                    }),
+            )
+            .child(SizedBox(None, Some(16.0)))
+            .child(separator())
+            .child(SizedBox(None, Some(8.0)))
+            .child(crate::nav::caption(format!(
+                "Item {} of {ITEM_COUNT}. The widget never writes state: every choice, \
+                 skip and navigation above came back through on_answer/on_navigate.",
+                current + 1
+            )))
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                button("Jump to the last item", |s: &mut AppState| {
+                    s.questionnaire.current = ITEM_COUNT - 1;
+                })
+                .variant(ButtonVariant::Outline),
+            )
     }
-
-    Column(children)
 }
