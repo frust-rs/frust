@@ -16,13 +16,13 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how DEVTOOLS relates to the other uni
 
 | Module | Responsibility |
 |--------|-----------------|
-| `frust-devtools-protocol` | NDJSON JSON-RPC 2.0 wire types: `Request`/`Response`/`Notification`/`Incoming`, the typed v1 `Method` set with per-method param/result structs, `encode_line`/`decode_line` framing, `HandshakeParams`/`RpcError::UNAUTHORIZED`, and `format_discovery_line`/`parse_discovery_line -> Discovery` — the single source of truth for the discovery-line and handshake-token contract both sides use. `redact_discovery_token(line) -> Cow<str>` masks a discovery line's token (borrowing, no allocation, when there is none to redact) for any caller that must retain the line itself rather than just the parsed `Discovery` |
-| `frust-devtools::backend` | `DevtoolsBackend` trait a shell implements (`widget_tree`, `widget_props`, `metrics_snapshot`, `inject_tap`/`inject_scroll`/`inject_text`, `screenshot` defaulting to `NotSupported`), plus `AppInfo` and `BackendError` |
+| `frust-devtools-protocol` | NDJSON JSON-RPC 2.0 wire types: `Request`/`Response`/`Notification`/`Incoming`, the typed v1 `Method` set with per-method param/result structs, `encode_line`/`decode_line` framing, `HandshakeParams`/`RpcError::UNAUTHORIZED`, and `format_discovery_line`/`parse_discovery_line -> Discovery` — the single source of truth for the discovery-line and handshake-token contract both sides use. `redact_discovery_token(line) -> Cow<str>` masks a discovery line's token (borrowing, no allocation, when there is none to redact) for any caller that must retain the line itself rather than just the parsed `Discovery`. The hot-patch methods (`hotpatch_info`, `patch_chunk`, `apply_patch`) are capability-gated on `Capability::HotPatch`; `ApplyPatchParams::file` is the only filesystem path any wire type carries |
+| `frust-devtools::backend` | `DevtoolsBackend` trait a shell implements (`widget_tree`, `widget_props`, `metrics_snapshot`, `inject_tap`/`inject_scroll`/`inject_text`, `screenshot` defaulting to `NotSupported`; under the `hotpatch` feature `hotpatch_info`, `patch_chunk` (decodes one chunk's base64), `patch_file` (the checked read of a hand-off file) and `apply_patch`, each defaulting to a refusal), plus `AppInfo` and `BackendError` |
 | `frust-devtools::service` | `Service::start`/`ServiceHandle`: binds `127.0.0.1:0`, owns a small internal current-thread tokio runtime, logs the discovery line (with token), and exposes `publish_frame_stats` (bounded, drop-oldest, never blocks the caller) |
 | `frust-devtools::token` | Mints the per-process handshake token from the OS CSPRNG (`/dev/urandom` on unix, `BCryptGenRandom` on Windows), with a documented non-cryptographic fallback when that fails, and reports the source (`TokenSource`) the hot-patch gate reads |
-| `frust-devtools::{server,dispatch,frame_stats,hop}` | The accept loop (rejects any pre-`handshake` method without a valid token), request→backend-call dispatch, the frame-stats broadcast bus, and the backend-thread hop that carries every backend call through one 1s-timeout channel round trip |
-| `frust-shell-common::devtools` (feature `devtools`) | The shell-side `DevtoolsBackend` implementation: maps `RenderRoot::inspect()` output into protocol types, hops backend calls to each shell's UI thread, and drives service start/pump/frame-stats publish |
-| `frust-drive::devtools_client` | The tool-side client: blocking `std::net::TcpStream` request/response plus a frame-stats subscription, token-aware `connect`/`handshake`, `adb_forward_ephemeral`/`adb_forward_remove` for Android, and discovery-line parsing reused from the protocol leaf |
+| `frust-devtools::{server,dispatch,frame_stats,hop}` | The accept loop (rejects any pre-`handshake` method without a valid token), request→backend-call dispatch, the frame-stats broadcast bus, and the backend-thread hop that carries every backend call through one 1s-timeout channel round trip. `dispatch` also owns the per-connection `patch_chunk` reassembly and the hot-patch lane (see Data Flow) |
+| `frust-shell-common::devtools` (feature `devtools`) | The shell-side `DevtoolsBackend` implementation: maps `RenderRoot::inspect()` output into protocol types, hops backend calls to each shell's UI thread, and drives service start/pump/frame-stats publish. Under `hotpatch` it offers `HotPatch` and applies a patch through `frust-hotpatch`, answering after the next frame each shell reports through `frame_submitted` |
+| `frust-drive::devtools_client` | The tool-side client: blocking `std::net::TcpStream` request/response plus a frame-stats subscription, token-aware `connect`/`handshake`, the hot-patch calls (`hotpatch_info`, `upload_patch` over `patch_chunks`, `apply_patch`), `adb_forward_ephemeral`/`adb_forward_remove` for Android, and discovery-line parsing reused from the protocol leaf |
 
 ## Layer Dependencies
 
@@ -112,10 +112,27 @@ loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELin
   bus is bounded and drop-oldest on every hop it crosses (service → client, and again in
   `frust-drive`'s client-side relay), so a slow subscriber never blocks the frame thread and only
   ever loses the *oldest* unread sample.
+- **Hot patch.** With `HotPatch` absent, `patch_chunk`/`apply_patch` answer `METHOD_NOT_FOUND`
+  exactly as an unknown name does, and `hotpatch_info` answers `NOT_SUPPORTED` naming the failed
+  gate condition. A patch arrives as `patch_chunk`s, one patch per connection at a time, in order
+  and contiguous, the whole patch size-capped by the service, or — when `hotpatch_info` advertises
+  `patch_file_hand_off` — as a host-written file named on `apply_patch`. `apply_patch` consumes
+  only its own connection's reassembled bytes (a `patch_id` both uploaded and named is refused)
+  and runs on the hot-patch lane: a worker thread per call over the backend the backend thread
+  shares under one mutex, with its own longer timeout and one apply in flight (a second is
+  refused, never queued). `frust-shell-common::devtools` checks `pid`/`anchor_runtime` against its
+  own process, refuses a reused `patch_id`, writes the bytes itself (never loading a wire path),
+  applies them, then answers only after the next frame, so `PatchOutcome`'s seam hits, missed
+  keys and layout mismatches describe a frame built after the apply. While any in-app
+  layout-mismatch record is unreported the apply refuses — `applied: false`, nothing loaded, the
+  records returned in `layout_mismatches` and marked reported. That in-app record is a backstop:
+  admissibility is decided by the host's own layout and seam gates before anything is sent (see
+  [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)'s `frust-drive::hotpatch`).
 - **Build-mode funnel.** `BuildMode::cargo_features()` (`frust-drive::build_info`) selects
-  `["frust/perf-trace", "frust/devtools"]` for Debug and Profile, `["lean"]` for Release — the
-  same two-layer gate `perf-trace` already established, now covering the devtools feature too.
-  See [DEVELOPMENT.md](DEVELOPMENT.md) and [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
+  `["frust/perf-trace", "frust/devtools"]` for Debug and Profile, `["lean"]` for Release; a
+  Debug hot session alone adds `frust/hotpatch` (`session_cargo_features`), so Profile and
+  Release never compile the hot-patch path in. See [DEVELOPMENT.md](DEVELOPMENT.md) and
+  [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
 
 ## Key Types
 
@@ -126,8 +143,12 @@ loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELin
 | `WidgetTreeDump` / `WidgetNode` / `WidgetProps` | The wire shape of an inspected widget tree and one widget's props |
 | `DevtoolsBackend` | The trait a shell implements to answer every devtools request; the seam decoupling the service from `frust-core` |
 | `Service` / `ServiceHandle` / `ServiceConfig` | The framework-side server: start/stop, `publish_frame_stats`, its 1s backend-call timeout, and (`ServiceConfig::require_token`, `ServiceHandle::token()`) the per-process auth token |
+| `HotpatchInfo` | `hotpatch_info`'s result: `anchor_runtime`, `pid`, `triple`, the `patches_applied`/`patch_bytes_loaded` counters, `pending_layout_mismatches` (marked reported once returned), and `patch_file_hand_off` (defaults `false`, so an older app gets chunks) |
+| `PatchChunkParams` | `{ patch_id, offset, total_len, data_base64 }`, answered by `AckResult`; at most 512 KiB raw per chunk, keeping the base64 under the 1 MiB line cap |
+| `ApplyPatchParams` / `JumpTableWire` / `PatchFile` | `apply_patch`'s `{ patch_id, len, pid, anchor_runtime, table, expected_seams, file }`, rejecting unknown fields; the jump table (`map`, `aslr_reference`, `new_base_address`, `ifunc_count`) carries no library path; `PatchFile { path, sha256 }` is accepted only under five checks — opened `O_NOFOLLOW` as a regular file, owned by the app's effective uid, `mode & 0o077 == 0`, size `len`, matching SHA-256 — and only on unix (see Trust model) |
+| `PatchOutcome` / `MissedKey` | `apply_patch`'s result: `applied`, `seam_hits`, `seam_fall_throughs` (`MissedKey { image, link_address }`), `layout_mismatches`, and the two counters |
 | `DevtoolsUi` | `frust-shell-common`'s per-shell view the hop's per-frame `pump` drains against |
-| `DevtoolsClient` | `frust-drive`'s blocking tool-side client: `connect(addr, timeout, token)`, typed requests including `screenshot`/`capabilities`, a `subscribe_frame_stats` receiver, and `DevtoolsRpcError`/`is_unauthorized`/`is_not_supported` for rejection detection. Shared by `frust-tui` and `frust-mcp` (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)) |
+| `DevtoolsClient` | `frust-drive`'s blocking tool-side client: `connect(addr, timeout, token)`, typed requests including `screenshot`/`capabilities` and the hot-patch calls, a `subscribe_frame_stats` receiver, and `DevtoolsRpcError`/`is_unauthorized`/`is_not_supported`/`is_method_not_found` for rejection detection. Shared by `frust-tui` and `frust-mcp` (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)) |
 
 ## See Also
 
