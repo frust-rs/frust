@@ -1,0 +1,6 @@
+# Pins the edition rustfmt formats with when nothing passes one. `cargo fmt` reads the edition
+# from Cargo.toml, but an editor's format-on-save often runs bare `rustfmt` on one file. That
+# falls back to the 2015 style edition and reorders imports across the repo. The standalone
+# example workspaces inherit this file too: rustfmt searches upward from the file.
+edition = "2024"
+style_edition = "2024"
