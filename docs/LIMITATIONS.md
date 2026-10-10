@@ -1739,8 +1739,9 @@ into five classes:
   a patch no component ran.
 - *Builder refusal*: anything the builder does not recognise fails closed (`BuilderUnsupported`).
 
-The first patch of a hot run is slower than steady state: up to ~1.6 s more on the desktop, and
-~5.3-5.5 s against ~1.45 s on Windows. `R` / 'Restart session', MCP's `restart_app` and DAP's
+The first patch of a hot run is slower than steady state: a few hundred ms more on the desktop
+(run 1 at 1551 ms against a 1362 ms steady median in the milestone-1 re-run), and ~5.3-5.5 s
+against ~1.45 s on Windows. `R` / 'Restart session', MCP's `restart_app` and DAP's
 `frustRestart` are full rebuild + relaunch with State reset (Flutter's hot restart, never
 in-process); a device restart reruns build → install → launch (see
 `tui-device-stop-app-termination-residual` and `mcp-stop-app-termination-in-flight`). `restart_app`
@@ -1757,7 +1758,9 @@ in its own erased `Box<dyn Widget>`; one held inline by a generic container (`Ei
 creator's `Box<C::State>` is leaked (`mem::forget`, never dropped or freed by another image) and the
 run restarts: one `C::State` per mismatched widget, once.
 
-**Applies to**: hot patching on debug builds for macOS and Linux desktop, Windows x64 MSVC, Android
+**Applies to**: hot patching on debug builds for macOS and Linux desktop, Windows x64 MSVC (the
+layout gate reads PDB type records, and the devtools token comes from the OS CSPRNG,
+`BCryptGenRandom`, so `Capability::HotPatch` answers the same gate as on every other host), Android
 arm64-v8a and the iOS simulator. A physical iOS device (a loaded patch would need code signing) and
 the web shell (`frust-hotpatch` is a `compile_error!` on wasm32) are not watched at all; Windows
 ARM64 and other Android ABIs never patch. The Windows residuals are
