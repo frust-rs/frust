@@ -2770,11 +2770,6 @@ impl HotControl {
     }
 }
 
-/// The answer to an `r` whose scan found no file modified since the last
-/// patch: the comparison is by modification time, so the text says exactly
-/// that.
-const NO_FILE_CHANGED: &str = "no file changed since the last patch";
-
 /// One request into a hot worker's queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HotRequest {
@@ -3090,6 +3085,7 @@ fn serve_hot_session(
         // while the scan or the patch runs carries a later mtime and is
         // offered by the next `r`, never lost between the two.
         let before = SystemTime::now();
+        let mut skipped = false;
         let paths = match request {
             HotRequest::Burst(paths) => paths,
             HotRequest::Now => {
@@ -3123,13 +3119,19 @@ fn serve_hot_session(
                         ),
                     ));
                 }
+                // A scan that skipped unreadable entries keeps the watermark,
+                // so an edit inside them is offered once they can be read.
+                skipped = !scan.skipped.is_empty();
                 if scan.changed.is_empty() {
-                    // Nothing to patch: say so without a thin build. The scan
-                    // answered, so the watermark moves on like a `NoChange`.
-                    watermark = before;
-                    let _ = tx.send(Message::Notify {
-                        level: ToastKind::Info,
-                        text: NO_FILE_CHANGED.to_string(),
+                    // Nothing to patch: answer `NoChange` without a thin
+                    // build, through the same outcome every `r` gets, so the
+                    // session's request mark is cleared.
+                    if !skipped {
+                        watermark = before;
+                    }
+                    let _ = tx.send(Message::HotPatchOutcome {
+                        session: id,
+                        outcome: HotOutcome::NoChange,
                     });
                     continue;
                 }
@@ -3142,7 +3144,7 @@ fn serve_hot_session(
             // for this answer any more.
             break;
         }
-        if matches!(outcome, HotOutcome::Patched { .. } | HotOutcome::NoChange) {
+        if !skipped && matches!(outcome, HotOutcome::Patched { .. } | HotOutcome::NoChange) {
             watermark = before;
         }
         let _ = tx.send(Message::HotPatchOutcome {
@@ -5921,11 +5923,10 @@ mod tests {
         rig.apply(Effect::HotPatchNow {
             session: SessionId(3),
         });
-        let text = rig.wait_for(|msg| match msg {
-            Message::Notify { text, .. } => Some(text),
-            _ => None,
-        });
-        assert_eq!(text, "no file changed since the last patch");
+        assert!(
+            matches!(next_outcome(&mut rig), HotOutcome::NoChange),
+            "an empty scan answers through the outcome, clearing the request mark"
+        );
         assert_eq!(calls.lock().unwrap().len(), 2, "no thin build for nothing");
 
         thread::sleep(Duration::from_millis(20));
@@ -6054,7 +6055,10 @@ mod tests {
                         kind: SessionEventKind::Lines(lines),
                         ..
                     }) => warnings += lines.iter().filter(|l| l.contains("cargo said no")).count(),
-                    Message::Notify { .. } => notices += 1,
+                    Message::HotPatchOutcome {
+                        outcome: HotOutcome::NoChange,
+                        ..
+                    } => notices += 1,
                     _ => {}
                 }
             }

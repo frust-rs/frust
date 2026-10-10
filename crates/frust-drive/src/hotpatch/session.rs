@@ -4,15 +4,15 @@
 //!
 //! **Start** ([`start_desktop`], Debug builds only). The workspace graph is
 //! read for the host triple the fat build compiles for (`cargo metadata
-//! --filter-platform`), so a dependency gated to another platform is no
-//! edge of it. The dev profile's resolved debuginfo is checked next
-//! ([`check_debuginfo`]): the layout gate reads DWARF types, so anything
-//! short of full debug info fails closed before any build. The fat build is then `cargo rustc` with the
-//! Debug hot-session features, `-Csave-temps=true -Clink-dead-code
-//! -Clinker=<frust>`, `frust` as the workspace wrapper and the link step
-//! intercepted ([`fat_build_command`]); the builder links the fat image
-//! itself, writes `layout-base.json` and seeds the accepted-layout and
-//! accepted-seam sets from it ([`AcceptedSets`]), builds the symbol cache,
+//! --filter-platform`), so a dependency gated to another platform is no edge
+//! of it. The dev profile's resolved debuginfo is checked next
+//! ([`check_debuginfo`]): the layout gate reads DWARF types, so anything short
+//! of full debug info fails closed before any build. The fat build is then
+//! `cargo rustc` with the Debug hot-session features, `-Csave-temps=true
+//! -Clink-dead-code -Clinker=<frust>`, `frust` as the workspace wrapper and
+//! the link step intercepted ([`fat_build_command`]); the builder links the
+//! fat image itself, writes `layout-base.json` and seeds the accepted-layout
+//! and accepted-seam sets from it ([`AcceptedSets`]), builds the symbol cache,
 //! spawns that image directly (never `cargo run`), reads the devtools
 //! discovery line from its output and connects with the token. An app that
 //! does not advertise `HotPatch`, or whose endpoint is not loopback, gives a
@@ -1291,7 +1291,13 @@ pub fn start_desktop(
     let link_args = read_link_args(&link.args_file)?;
     if !non_members.is_empty() {
         graph.replay_non_members(&load_records(&scope_dir)?);
-        graph.set_linked_crates(linked_crates(&link_args));
+        // An empty set means the link line was not read the way this
+        // expects (a response file, a wrapped archive): keep every local
+        // package in the image rather than drop one silently.
+        let linked = linked_crates(&link_args);
+        if !linked.is_empty() {
+            graph.set_linked_crates(linked);
+        }
     }
     let base = link_base(
         host,

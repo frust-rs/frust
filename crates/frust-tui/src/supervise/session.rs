@@ -7,15 +7,15 @@
 //!
 //! A debug desktop session the workbench launches runs **hot** instead:
 //! [`SessionSpec::start_hot`] resolves it through `frust-drive`'s hot-patch
-//! session start (`hotpatch::session::start_desktop` — the fat build, then the fat image
-//! spawned directly, never `cargo run`), and [`SessionSpec::hot_precondition`]
-//! says which specs qualify. A debug Android device session runs hot
-//! the same way through `hotpatch::android::start_android` (the fat build
-//! outside Gradle, install, launch, an `adb forward` to the devtools
-//! endpoint), and one on a booted iOS simulator through
-//! `hotpatch::ios_sim::start_ios_sim` (the fat build through Xcode, `simctl
-//! install`, `simctl launch`, the devtools endpoint on the host's
-//! loopback). Cold sessions keep [`SessionSpec::launch_plan`], and
+//! session start (`hotpatch::session::start_desktop` — the fat build, then the
+//! fat image spawned directly, never `cargo run`), and
+//! [`SessionSpec::hot_precondition`] says which specs qualify. A debug Android
+//! device session runs hot the same way through
+//! `hotpatch::android::start_android` (the fat build outside Gradle, install,
+//! launch, an `adb forward` to the devtools endpoint), and one on a booted iOS
+//! simulator through `hotpatch::ios_sim::start_ios_sim` (the fat build through
+//! Xcode, `simctl install`, `simctl launch`, the devtools endpoint on the
+//! host's loopback). Cold sessions keep [`SessionSpec::launch_plan`], and
 //! [`SessionSpec::hot_watch_set`] names what a hot session's manual patch
 //! scans.
 //!
