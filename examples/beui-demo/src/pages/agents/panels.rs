@@ -10,9 +10,7 @@
 
 use std::time::Duration;
 
-use frust::{
-    AnyView, Component, CrossAxisAlignment, SizedBox, View, any, column, component, row, text,
-};
+use frust::{Component, CrossAxisAlignment, Either, SizedBox, View, column, component, row, text};
 use frust_beui::agents::approval_card::{ApprovalCardAction, ApprovalCardStatus, approval_card};
 use frust_beui::agents::citations::{
     Citation, citation, citation_list, citation_preview, citations,
@@ -677,13 +675,13 @@ fn card_panel(state: &State) -> impl View<State> {
 /// `citations`: the numbered chip row, its preview, and the reference list.
 fn citation_panel(state: &State) -> impl View<State> {
     let items = sources();
-    let preview: AnyView<State> = match state.hovered.and_then(|index| {
+    let preview = match state.hovered.and_then(|index| {
         items
             .get(index)
             .map(|citation| citation_preview(citation.clone(), index + 1))
     }) {
-        Some(panel) => any(panel),
-        None => any(caption("Hover a chip above to preview its reference here.")),
+        Some(panel) => Either::Left(panel),
+        None => Either::Right(caption("Hover a chip above to preview its reference here.")),
     };
     let activated = match state.activated {
         Some(index) => format!("Last press: source {index}."),
@@ -753,7 +751,7 @@ impl Component for Panels {
             None => "No copy affordance pressed yet.".to_string(),
         };
 
-        any(column()
+        column()
             .child(heading("Agents \u{b7} Panels"))
             .child(SizedBox(None, Some(8.0)))
             .child(caption(
@@ -784,7 +782,7 @@ impl Component for Panels {
             .child(SizedBox(None, Some(BLOCK_GAP)))
             .child(card_panel(state))
             .child(SizedBox(None, Some(BLOCK_GAP)))
-            .child(citation_panel(state)))
+            .child(citation_panel(state))
     }
 }
 

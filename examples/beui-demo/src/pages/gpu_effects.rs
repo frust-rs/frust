@@ -36,10 +36,7 @@
 //! paints its 2D path in the two cases above, same as it would without ever
 //! calling the opt-in.
 
-use frust::{
-    AnyView, CrossAxisAlignment, Row, SizedBox, Theme, View, any, column, container, row, text,
-    use_context,
-};
+use frust::{CrossAxisAlignment, SizedBox, Theme, View, column, container, row, text, use_context};
 use frust_beui::blocks::project_folder::{folder_preview, project_folder};
 use frust_beui::blocks::wallet_card::{wallet_account, wallet_card};
 use frust_beui::components::cylinder_carousel::{CylinderCarouselVariant, cylinder_carousel};
@@ -99,8 +96,8 @@ fn build_flag_placeholder(width: f64, height: f64, component: &str) -> impl View
 fn pair(
     title: &str,
     note: &str,
-    two_d: AnyView<AppState>,
-    three_d: AnyView<AppState>,
+    two_d: impl View<AppState>,
+    three_d: impl View<AppState>,
 ) -> impl View<AppState> {
     column()
         .child(text(title.to_string()).size(16.0))
@@ -163,7 +160,7 @@ fn tilt_pane_3d() -> impl View<AppState> {
 }
 
 fn tilt_pair() -> impl View<AppState> {
-    let two_d = any(tilt_card(tilt_body("Tilt card")).shadow(true));
+    let two_d = tilt_card(tilt_body("Tilt card")).shadow(true);
     pair(
         "tilt_card",
         "The 2D pane leans on the scene's one transform primitive — an affine \
@@ -171,7 +168,7 @@ fn tilt_pair() -> impl View<AppState> {
          The 3D pane replaces the card's surface (not its text) with a genuinely \
          projected face, so the near corner actually grows into view.",
         two_d,
-        any(tilt_pane_3d()),
+        tilt_pane_3d(),
     )
 }
 
@@ -202,18 +199,18 @@ fn wheel_pane_3d() -> impl View<AppState> {
 }
 
 fn wheel_pair() -> impl View<AppState> {
-    let two_d = any(SizedBox(Some(140.0), None).child(
+    let two_d = SizedBox(Some(140.0), None).child(
         wheel_picker(wheel_options(), "6", |_: &mut AppState, _| {})
             .label("Row (2D)")
             .disabled(true),
-    ));
+    );
     pair(
         "wheel_picker",
         "The 2D drum paints each row's curved offset and shrink from a lookup \
          table. The 3D pane seats the same rows on a genuinely projected \
          cylinder, behind the drum's own text.",
         two_d,
-        any(wheel_pane_3d()),
+        wheel_pane_3d(),
     )
 }
 
@@ -223,13 +220,13 @@ fn wheel_pair() -> impl View<AppState> {
 /// contact-sheet scale elsewhere in this gallery.
 const CAROUSEL_ITEMS: [&str; 6] = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"];
 
-fn carousel_items() -> Vec<AnyView<AppState>> {
+fn carousel_items() -> Vec<impl View<AppState>> {
     CAROUSEL_ITEMS
         .iter()
         .map(|label| {
-            any(column()
+            column()
                 .child(text(label.to_string()).size(14.0))
-                .cross_axis(CrossAxisAlignment::Center))
+                .cross_axis(CrossAxisAlignment::Center)
         })
         .collect()
 }
@@ -254,7 +251,7 @@ fn carousel_pane_3d() -> impl View<AppState> {
 }
 
 fn carousel_pair() -> impl View<AppState> {
-    let two_d = any(SizedBox(Some(440.0), None).child(
+    let two_d = SizedBox(Some(440.0), None).child(
         cylinder_carousel(carousel_items())
             .variant(CylinderCarouselVariant::Concave)
             .item_size(110.0)
@@ -262,7 +259,7 @@ fn carousel_pair() -> impl View<AppState> {
             .height(150.0)
             .snap(true)
             .default_index(0),
-    ));
+    );
     pair(
         "cylinder_carousel",
         "The 2D wall scales and dims each item by a lookup curve as it leaves \
@@ -270,7 +267,7 @@ fn carousel_pair() -> impl View<AppState> {
          plates, each item's own label still painting flat above it. Drag or \
          scroll either one — the position is this page's own.",
         two_d,
-        any(carousel_pane_3d()),
+        carousel_pane_3d(),
     )
 }
 
@@ -297,16 +294,16 @@ fn folder_pane_3d() -> impl View<AppState> {
 }
 
 fn folder_pair() -> impl View<AppState> {
-    let two_d = any(project_folder("Case study (2D)", folder_previews())
+    let two_d = project_folder("Case study (2D)", folder_previews())
         .item_label("file")
-        .open(true));
+        .open(true);
     pair(
         "project_folder",
         "Both panes are forced open so the fan shows without a hover. The 2D \
          pane spreads flat cards; the 3D pane spreads genuinely projected \
          plates, each caption still painting flat above its own sheet.",
         two_d,
-        any(folder_pane_3d()),
+        folder_pane_3d(),
     )
 }
 
@@ -340,14 +337,14 @@ fn wallet_pane_3d() -> impl View<AppState> {
 }
 
 fn wallet_pair() -> impl View<AppState> {
-    let two_d = any(wallet_card(wallet_accounts(), 4_820.5).account_id("main"));
+    let two_d = wallet_card(wallet_accounts(), 4_820.5).account_id("main");
     pair(
         "wallet_card",
         "Click the account row to open the switcher on either pane. The 2D \
          rows sit in a flat stack; the 3D pane fans the open rows in real \
          depth, avatars and addresses still painting flat above each one.",
         two_d,
-        any(wallet_pane_3d()),
+        wallet_pane_3d(),
     )
 }
 
@@ -373,17 +370,19 @@ fn shader_showcase() -> impl View<AppState> {
         (ShaderBackgroundVariant::Waves, false),
         (ShaderBackgroundVariant::DotGrid, true),
     ];
-    let mut row: Vec<AnyView<AppState>> = Vec::new();
-    for (index, (variant, over_card)) in tiles.into_iter().enumerate() {
-        if index > 0 {
-            row.push(any(hgap(16.0)));
-        }
-        row.push(any(column()
-            .child(shader_tile(variant, over_card))
-            .child(gap(6.0))
-            .child(caption(variant.label()))
-            .cross_axis(CrossAxisAlignment::Start)));
-    }
+    let strip =
+        tiles
+            .into_iter()
+            .enumerate()
+            .fold(row(), |strip, (index, (variant, over_card))| {
+                strip.when(index > 0, |s| s.child(hgap(16.0))).child(
+                    column()
+                        .child(shader_tile(variant, over_card))
+                        .child(gap(6.0))
+                        .child(caption(variant.label()))
+                        .cross_axis(CrossAxisAlignment::Start),
+                )
+            });
 
     column()
         .child(text("shader_background").size(16.0))
@@ -397,7 +396,7 @@ fn shader_showcase() -> impl View<AppState> {
                  The full five-variant contact sheet lives on Motion \u{b7} Shader.",
         ))
         .child(gap(12.0))
-        .child(Row(row).cross_axis(CrossAxisAlignment::Start))
+        .child(strip.cross_axis(CrossAxisAlignment::Start))
         .cross_axis(CrossAxisAlignment::Start)
 }
 

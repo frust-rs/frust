@@ -25,8 +25,8 @@
 //! what is on when the feature is off.
 
 use frust::{
-    AnyView, CrossAxisAlignment, EdgeInsets, IconSource, Padding, SizedBox, View, column, icon,
-    icons, row, scroll_view, text,
+    CrossAxisAlignment, EdgeInsets, IconSource, Padding, SizedBox, View, column, icon, icons, row,
+    scroll_view, text,
 };
 use frust_beui::components::animated_sidebar::{
     AnimatedSidebarView, SidebarItem, animated_sidebar, sidebar_item,
@@ -223,17 +223,13 @@ pub fn top_bar(page: Page, open: bool) -> impl View<AppState> + use<> {
 
 /// The gallery's ordinary page slot: 24px of padding inside a vertical
 /// scroll view.
-pub fn scroll_slot(content: AnyView<AppState>) -> impl View<AppState> {
+pub fn scroll_slot(content: impl View<AppState>) -> impl View<AppState> {
     scroll_view(Padding(EdgeInsets::all(24.0), content))
 }
 
 /// The inset's whole content: the top bar over the swapped page content,
 /// stretched to the finite height the root row hands it.
-pub fn shell_inset(
-    page: Page,
-    open: bool,
-    content: AnyView<AppState>,
-) -> impl View<AppState> + use<> {
+pub fn shell_inset(page: Page, open: bool, content: impl View<AppState>) -> impl View<AppState> {
     column()
         .child(top_bar(page, open))
         .flex(1, content)

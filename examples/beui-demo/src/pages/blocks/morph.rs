@@ -19,9 +19,8 @@
 //! radius is a constant the paint clamps, never an animated lane.
 
 use frust::{
-    AnyView, Axis, Column, Component, CrossAxisAlignment, EdgeInsets, FlexView, IconSource,
-    Padding, SizedBox, TextView, Theme, View, any, column, component, icon, icons, inflexible,
-    text, use_context,
+    Column, Component, CrossAxisAlignment, EdgeInsets, IconSource, Padding, SizedBox, TextView,
+    Theme, View, ViewSeq, column, component, icon, icons, row, text, use_context,
 };
 use frust_beui::blocks::dynamic_island::{dynamic_island, dynamic_island_slot};
 use frust_beui::blocks::expandable_tabs::{expandable_tabs, expandable_tabs_item};
@@ -100,20 +99,19 @@ fn hgap(width: f64) -> impl View<State> {
     SizedBox(Some(width), None)
 }
 
-/// A centred row of controls.
-fn controls(children: Vec<AnyView<State>>) -> impl View<State> {
-    let mut spaced = Vec::with_capacity(children.len() * 2);
-    for (index, child) in children.into_iter().enumerate() {
-        if index > 0 {
-            spaced.push(any(hgap(8.0)));
-        }
-        spaced.push(child);
-    }
-    FlexView::new(
-        Axis::Horizontal,
-        spaced.into_iter().map(inflexible).collect(),
-    )
-    .cross_axis(CrossAxisAlignment::Center)
+/// A centred row of controls, 8px apart.
+fn controls<M>(children: impl ViewSeq<State, M>) -> impl View<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    erased
+        .into_iter()
+        .enumerate()
+        .fold(row(), |controls, (index, child)| {
+            controls
+                .when(index > 0, |c| c.child(hgap(8.0)))
+                .child(child)
+        })
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 // ---- The expandable tab shell ----------------------------------------------
@@ -123,7 +121,7 @@ fn tab_menu(rows: &[&str]) -> impl View<State> {
     SizedBox(Some(274.0), None).child(Column(
         rows.iter()
             .map(|row| {
-                any(Padding(
+                Padding(
                     EdgeInsets {
                         left: 12.0,
                         top: 8.0,
@@ -131,7 +129,7 @@ fn tab_menu(rows: &[&str]) -> impl View<State> {
                         bottom: 8.0,
                     },
                     text((*row).to_string()).size(14.0),
-                ))
+                )
             })
             .collect::<Vec<_>>(),
     ))
@@ -297,16 +295,16 @@ fn morphing_tabs_block(state: &State) -> impl View<State> {
             }),
         )
         .child(gap(10.0))
-        .child(controls(vec![
-            any(button("Reset rooms", |s: &mut State| {
+        .child(controls((
+            button("Reset rooms", |s: &mut State| {
                 s.morph_order = ROOMS.iter().map(|(id, ..)| id.to_string()).collect();
                 s.morph_value = Some(ROOMS[0].0.to_string());
                 s.morph_log = "reset".to_string();
             })
             .tone(ButtonTone::Secondary)
-            .size(ButtonSize::Sm)),
-            any(caption(state.morph_log.clone())),
-        ]))
+            .size(ButtonSize::Sm),
+            caption(state.morph_log.clone()),
+        )))
 }
 
 // ---- The notification stack ------------------------------------------------
@@ -402,26 +400,30 @@ fn island_block(state: &State) -> impl View<State> {
         ),
     ];
 
-    let mut buttons: Vec<AnyView<State>> = vec![any(button("Compact", |s: &mut State| {
-        s.island_view = None;
-    })
-    .tone(if state.island_view.is_none() {
-        ButtonTone::Primary
-    } else {
-        ButtonTone::Outline
-    })
-    .size(ButtonSize::Sm))];
-    for (id, label) in ISLAND_STATES {
-        let selected = state.island_view.as_deref() == Some(id);
-        buttons.push(any(button(label, move |s: &mut State| {
-            s.island_view = Some(id.to_string());
+    let mut buttons = vec![
+        button("Compact", |s: &mut State| {
+            s.island_view = None;
         })
-        .tone(if selected {
+        .tone(if state.island_view.is_none() {
             ButtonTone::Primary
         } else {
             ButtonTone::Outline
         })
-        .size(ButtonSize::Sm)));
+        .size(ButtonSize::Sm),
+    ];
+    for (id, label) in ISLAND_STATES {
+        let selected = state.island_view.as_deref() == Some(id);
+        buttons.push(
+            button(label, move |s: &mut State| {
+                s.island_view = Some(id.to_string());
+            })
+            .tone(if selected {
+                ButtonTone::Primary
+            } else {
+                ButtonTone::Outline
+            })
+            .size(ButtonSize::Sm),
+        );
     }
 
     column()
@@ -540,7 +542,7 @@ impl Component for MorphPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(column()
+        column()
             .child(heading("Blocks \u{b7} Morph"))
             .child(gap(8.0))
             .child(caption(
@@ -557,7 +559,7 @@ impl Component for MorphPage {
             .child(gap(24.0))
             .child(island_block(state))
             .child(gap(24.0))
-            .child(swipeable_block(state)))
+            .child(swipeable_block(state))
     }
 }
 

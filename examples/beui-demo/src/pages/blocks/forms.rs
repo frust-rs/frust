@@ -45,8 +45,7 @@ use frust_beui::blocks::signup_form::{SignupStatus, SignupValues, default_valida
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 
 use frust::{
-    AnyView, Axis, Column, Component, CrossAxisAlignment, FlexView, SizedBox, TextView, View, any,
-    column, component, inflexible, text,
+    Component, CrossAxisAlignment, SizedBox, TextView, View, ViewSeq, column, component, row, text,
 };
 
 use crate::AppState;
@@ -163,20 +162,19 @@ fn hgap(width: f64) -> impl View<State> {
     SizedBox(Some(width), None)
 }
 
-/// A centred row of controls.
-fn controls(children: Vec<AnyView<State>>) -> impl View<State> {
-    let mut spaced = Vec::with_capacity(children.len() * 2);
-    for (index, child) in children.into_iter().enumerate() {
-        if index > 0 {
-            spaced.push(any(hgap(8.0)));
-        }
-        spaced.push(child);
-    }
-    FlexView::new(
-        Axis::Horizontal,
-        spaced.into_iter().map(inflexible).collect(),
-    )
-    .cross_axis(CrossAxisAlignment::Center)
+/// A centred row of controls, 8px apart.
+fn controls<M>(children: impl ViewSeq<State, M>) -> impl View<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    erased
+        .into_iter()
+        .enumerate()
+        .fold(row(), |controls, (index, child)| {
+            controls
+                .when(index > 0, |c| c.child(hgap(8.0)))
+                .child(child)
+        })
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A small secondary button.
@@ -220,10 +218,10 @@ fn otp_block(state: &State) -> impl View<State> {
             }),
         )
         .child(gap(10.0))
-        .child(controls(vec![any(minor("Clear", |s: &mut State| {
+        .child(controls(minor("Clear", |s: &mut State| {
             s.otp_value.clear();
             s.otp_status = OtpStatus::Idle;
-        }))]))
+        })))
 }
 
 // ---- The sign-up form ------------------------------------------------------
@@ -243,17 +241,17 @@ fn signup_block(state: &State) -> impl View<State> {
         .child(gap(10.0))
         .child(signup_view(state))
         .child(gap(10.0))
-        .child(controls(vec![any(minor("Reset form", |s: &mut State| {
+        .child(controls(minor("Reset form", |s: &mut State| {
             s.signup_values = SignupValues::default();
             s.signup_status = SignupStatus::Idle;
             s.signup_error = None;
-        }))]))
+        })))
 }
 
 /// The form itself. `error_message` is only chained when there *is* one — the
 /// setter wraps whatever it is given in `Some`, so handing it an empty string
 /// would leave the banner permanently mounted.
-fn signup_view(state: &State) -> AnyView<State> {
+fn signup_view(state: &State) -> impl View<State> {
     let form = signup_form(
         state.signup_values.clone(),
         |s: &mut State, values: SignupValues| {
@@ -281,8 +279,8 @@ fn signup_view(state: &State) -> AnyView<State> {
         }
     });
     match &state.signup_error {
-        Some(message) => any(form.error_message(message.clone())),
-        None => any(form),
+        Some(message) => form.error_message(message.clone()),
+        None => form,
     }
 }
 
@@ -291,21 +289,19 @@ fn signup_view(state: &State) -> AnyView<State> {
 /// The upload block: the dropzone, the queue, and the demo's stand-ins for the
 /// two things a real host would supply — a file dialog and a transfer.
 fn upload_block(state: &State) -> impl View<State> {
-    let variant_buttons: Vec<AnyView<State>> = [
+    let variant_buttons: Vec<_> = [
         ("Centered", FileUploadVariant::Centered),
         ("Row", FileUploadVariant::Default),
     ]
     .into_iter()
     .map(|(label, variant)| {
-        any(
-            button(label, move |s: &mut State| s.upload_variant = variant)
-                .tone(if state.upload_variant == variant {
-                    ButtonTone::Primary
-                } else {
-                    ButtonTone::Outline
-                })
-                .size(ButtonSize::Sm),
-        )
+        button(label, move |s: &mut State| s.upload_variant = variant)
+            .tone(if state.upload_variant == variant {
+                ButtonTone::Primary
+            } else {
+                ButtonTone::Outline
+            })
+            .size(ButtonSize::Sm)
     })
     .collect();
 
@@ -355,8 +351,8 @@ fn upload_block(state: &State) -> impl View<State> {
             }),
         )
         .child(gap(10.0))
-        .child(controls(vec![
-            any(minor("Advance uploads", |s: &mut State| {
+        .child(controls((
+            minor("Advance uploads", |s: &mut State| {
                 // The stand-in for a transfer: a real app steps progress from
                 // its own timer or IO completion, not from a button.
                 for item in &mut s.upload_items {
@@ -368,20 +364,20 @@ fn upload_block(state: &State) -> impl View<State> {
                         }
                     }
                 }
-            })),
-            any(minor(
+            }),
+            minor(
                 if state.upload_dragging {
                     "Dragging: on"
                 } else {
                     "Dragging: off"
                 },
                 |s: &mut State| s.upload_dragging = !s.upload_dragging,
-            )),
-            any(minor("Reset queue", |s: &mut State| {
+            ),
+            minor("Reset queue", |s: &mut State| {
                 s.upload_items = seed_uploads();
                 s.upload_seq = 0;
-            })),
-        ]))
+            }),
+        )))
         .child(gap(8.0))
         .child(caption(format!(
             "{} of 6 slots used",
@@ -426,14 +422,11 @@ fn feedback_block(state: &State) -> impl View<State> {
             }),
         )
         .child(gap(10.0))
-        .child(controls(vec![any(minor(
-            "Reset attempts",
-            |s: &mut State| {
-                s.feedback_attempts = 0;
-                s.feedback_message.clear();
-                s.feedback_status = FeedbackStatus::Idle;
-            },
-        ))]))
+        .child(controls(minor("Reset attempts", |s: &mut State| {
+            s.feedback_attempts = 0;
+            s.feedback_message.clear();
+            s.feedback_status = FeedbackStatus::Idle;
+        })))
 }
 
 // ---- The availability scheduler --------------------------------------------
@@ -491,7 +484,7 @@ fn apply_time(state: &mut State, day: DayKey, range_id: &str, edge: TimeEdge, pi
 
 /// The time picker this page mounts for the one panel the scheduler reports
 /// open. See the [module docs](self) for why it is inline rather than anchored.
-fn time_panel(state: &State) -> Option<AnyView<State>> {
+fn time_panel(state: &State) -> Option<impl View<State>> {
     let key = state.open_panel.as_deref()?;
     let (day, range_id, edge) = resolve_panel(&state.week, key)?;
     let range = state
@@ -512,57 +505,55 @@ fn time_panel(state: &State) -> Option<AnyView<State>> {
         TimeEdge::End => range.end.clone(),
     };
 
-    let mut rows: Vec<AnyView<State>> = Vec::new();
-    for chunk in offered.chunks(6) {
-        let buttons: Vec<AnyView<State>> = chunk
-            .iter()
-            .map(|option| {
-                let option = option.clone();
-                let selected = option == current;
-                let range_id = range_id.clone();
-                any(button(label_12(&option), move |s: &mut State| {
-                    apply_time(s, day, &range_id, edge, &option);
+    let rows: Vec<_> = offered
+        .chunks(6)
+        .map(|chunk| {
+            let buttons: Vec<_> = chunk
+                .iter()
+                .map(|option| {
+                    let option = option.clone();
+                    let selected = option == current;
+                    let range_id = range_id.clone();
+                    button(label_12(&option), move |s: &mut State| {
+                        apply_time(s, day, &range_id, edge, &option);
+                    })
+                    .tone(if selected {
+                        ButtonTone::Primary
+                    } else {
+                        ButtonTone::Outline
+                    })
+                    .size(ButtonSize::Sm)
                 })
-                .tone(if selected {
-                    ButtonTone::Primary
-                } else {
-                    ButtonTone::Outline
-                })
-                .size(ButtonSize::Sm))
-            })
-            .collect();
-        rows.push(any(controls(buttons)));
-        rows.push(any(gap(6.0)));
-    }
-    rows.push(any(controls(vec![any(minor(
-        "Close picker",
-        |s: &mut State| {
-            s.open_panel = None;
-        },
-    ))])));
+                .collect();
+            (controls(buttons), gap(6.0))
+        })
+        .collect();
 
-    Some(any(Column(
-        std::iter::once(any(caption(format!(
-            "Picking the {} of {}\u{2019}s {}\u{2013}{}",
-            edge.key(),
-            day.label(),
-            label_12(&range.start),
-            label_12(&range.end)
-        ))))
-        .chain(std::iter::once(any(gap(8.0))))
-        .chain(rows)
-        .collect::<Vec<_>>(),
-    )))
+    Some(
+        column()
+            .child(caption(format!(
+                "Picking the {} of {}\u{2019}s {}\u{2013}{}",
+                edge.key(),
+                day.label(),
+                label_12(&range.start),
+                label_12(&range.end)
+            )))
+            .child(gap(8.0))
+            .children(rows)
+            .child(controls(minor("Close picker", |s: &mut State| {
+                s.open_panel = None;
+            }))),
+    )
 }
 
 /// The copy-to-days menu this page mounts for a reported copy request.
-fn copy_panel(state: &State) -> Option<AnyView<State>> {
+fn copy_panel(state: &State) -> Option<impl View<State>> {
     let from = state.copy_source?;
-    let targets: Vec<AnyView<State>> = DayKey::WEEK
+    let targets: Vec<_> = DayKey::WEEK
         .into_iter()
         .filter(|day| *day != from)
         .map(|day| {
-            any(button(day.label(), move |s: &mut State| {
+            button(day.label(), move |s: &mut State| {
                 let mut seq = s.range_seq;
                 let next = copy_day(&s.week, from, &[day], |target| {
                     seq += 1;
@@ -574,24 +565,23 @@ fn copy_panel(state: &State) -> Option<AnyView<State>> {
                 s.scheduler_log = format!("copied {} to {}", from.label(), day.label());
             })
             .tone(ButtonTone::Outline)
-            .size(ButtonSize::Sm))
+            .size(ButtonSize::Sm)
         })
         .collect();
 
-    Some(any(column()
-        .child(caption(format!(
-            "Copy {}\u{2019}s hours to\u{2026}",
-            from.label()
-        )))
-        .child(gap(8.0))
-        .child(controls(targets))
-        .child(gap(6.0))
-        .child(controls(vec![any(minor(
-            "Cancel copy",
-            |s: &mut State| {
+    Some(
+        column()
+            .child(caption(format!(
+                "Copy {}\u{2019}s hours to\u{2026}",
+                from.label()
+            )))
+            .child(gap(8.0))
+            .child(controls(targets))
+            .child(gap(6.0))
+            .child(controls(minor("Cancel copy", |s: &mut State| {
                 s.copy_source = None;
-            },
-        ))]))))
+            }))),
+    )
 }
 
 /// How many hours the week currently holds, for the readout under the block.
@@ -631,63 +621,55 @@ fn to_minutes_local(value: &str) -> u32 {
 /// The scheduler block: seven day rows, their ranges, and the two panels this
 /// page hosts for it.
 fn scheduler_block(state: &State) -> impl View<State> {
-    let mut children = vec![
-        any(section("availability_scheduler")),
-        any(gap(6.0)),
-        any(caption(
+    column()
+        .child(section("availability_scheduler"))
+        .child(gap(6.0))
+        .child(caption(
             "One row per weekday, each springing between available and unavailable, its time \
              ranges adding and removing on their own ramps. Per-day time ranges and a \
              copy-to-days menu \u{2014} not a drag-select week grid: the source has no time-slot \
              cells and no drag gesture. The block holds one open time panel for the whole week \
              and reports which; this page mounts the picker and the copy menu below it.",
-        )),
-        any(gap(10.0)),
-        any(availability_scheduler(
-            state.week.clone(),
-            |s: &mut State, week: WeekAvailability| {
-                s.week = week;
-                s.scheduler_log = "week edited".to_string();
-            },
+        ))
+        .child(gap(10.0))
+        .child(
+            availability_scheduler(
+                state.week.clone(),
+                |s: &mut State, week: WeekAvailability| {
+                    s.week = week;
+                    s.scheduler_log = "week edited".to_string();
+                },
+            )
+            .step(SCHEDULER_STEP)
+            .open_panel(state.open_panel.clone())
+            .on_panel_open_change(|s: &mut State, key: Option<String>| {
+                s.open_panel = key;
+                s.copy_source = None;
+            })
+            .on_copy_request(|s: &mut State, day: DayKey| {
+                s.copy_source = Some(day);
+                s.open_panel = None;
+            }),
         )
-        .step(SCHEDULER_STEP)
-        .open_panel(state.open_panel.clone())
-        .on_panel_open_change(|s: &mut State, key: Option<String>| {
-            s.open_panel = key;
-            s.copy_source = None;
+        .child(gap(12.0))
+        .when_some(time_panel(state), |c, panel| {
+            c.child(panel).child(gap(12.0))
         })
-        .on_copy_request(|s: &mut State, day: DayKey| {
-            s.copy_source = Some(day);
-            s.open_panel = None;
-        })),
-        any(gap(12.0)),
-    ];
-
-    if let Some(panel) = time_panel(state) {
-        children.push(panel);
-        children.push(any(gap(12.0)));
-    }
-    if let Some(panel) = copy_panel(state) {
-        children.push(panel);
-        children.push(any(gap(12.0)));
-    }
-
-    children.push(any(caption(format!(
-        "{:.1} hours a week \u{b7} {}",
-        weekly_hours(&state.week),
-        state.scheduler_log
-    ))));
-    children.push(any(gap(8.0)));
-    children.push(any(controls(vec![any(minor(
-        "Reset week",
-        |s: &mut State| {
+        .when_some(copy_panel(state), |c, panel| {
+            c.child(panel).child(gap(12.0))
+        })
+        .child(caption(format!(
+            "{:.1} hours a week \u{b7} {}",
+            weekly_hours(&state.week),
+            state.scheduler_log
+        )))
+        .child(gap(8.0))
+        .child(controls(minor("Reset week", |s: &mut State| {
             s.week = default_week();
             s.open_panel = None;
             s.copy_source = None;
             s.scheduler_log = "reset".to_string();
-        },
-    ))])));
-
-    Column(children)
+        })))
 }
 
 // ---- The page --------------------------------------------------------------
@@ -704,7 +686,7 @@ impl Component for FormsPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(column()
+        column()
             .child(heading("Blocks \u{b7} Forms"))
             .child(gap(8.0))
             .child(caption(
@@ -721,7 +703,7 @@ impl Component for FormsPage {
             .child(gap(24.0))
             .child(feedback_block(state))
             .child(gap(24.0))
-            .child(scheduler_block(state)))
+            .child(scheduler_block(state))
     }
 }
 
