@@ -17,7 +17,7 @@ use clean_signals::{
     AsyncState, ControllerCore, Failure, NoParams, RetryPolicy, RunOptions, async_state_signal,
 };
 use clean_signals_frust::{async_view, use_controller};
-use frust::{AnyView, Column, Component, RwSignal, View, any, component, text};
+use frust::{AnyView, Component, RwSignal, View, any, column, component, text, views};
 use frust_core::RenderRoot;
 use frust_text::TextContext;
 use reactive_graph::traits::{Get, GetUntracked};
@@ -40,17 +40,34 @@ type Fixture = AsyncState<Vec<i32>, NetworkFailure>;
 fn render(state: Fixture) -> AnyView<()> {
     async_view(
         state,
-        || any(text("loading")),
+        || text("loading"),
         |values: Vec<i32>| {
-            any(Column(
-                values
-                    .into_iter()
-                    .map(|v| any(text(v.to_string())))
-                    .collect::<Vec<_>>(),
+            column().children(views::<(), _>(
+                values.into_iter().map(|v| text(v.to_string())),
             ))
         },
-        |failure: NetworkFailure| any(text(format!("error: {failure}"))),
+        |failure: NetworkFailure| text(format!("error: {failure}")),
     )
+}
+
+/// Source compatibility: arms that still erase with `any(..)` keep compiling,
+/// because `AnyView::new` is idempotent.
+#[test]
+fn arms_returning_any_view_still_compile_and_render() {
+    let mut logic = |_: &mut ()| {
+        async_view(
+            AsyncState::<i32, NetworkFailure>::Data(7),
+            || any(text("loading")),
+            |v: i32| any(text(format!("value: {v}"))),
+            |failure: NetworkFailure| any(text(format!("error: {failure}"))),
+        )
+    };
+    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+    let mut state = ();
+    let mut tcx = TextContext::new();
+
+    let scene = frame(&mut root, &mut logic, &mut state, &mut tcx);
+    assert_eq!(scene.glyph_runs, 1, "the data arm paints one line");
 }
 
 #[test]
@@ -213,9 +230,9 @@ impl Component for RetryScreen {
         let snapshot = state.value.get();
         async_view(
             snapshot,
-            || any(text("Loading…")),
-            |v: i32| any(text(format!("value: {v}"))),
-            |failure: NetworkFailure| any(text(format!("error: {}", failure.user_message()))),
+            || text("Loading…"),
+            |v: i32| text(format!("value: {v}")),
+            |failure: NetworkFailure| text(format!("error: {}", failure.user_message())),
         )
     }
 }
