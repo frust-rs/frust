@@ -17,13 +17,19 @@
 //! 4. a field is added to `shared`'s type the app's return type holds:
 //!    likewise `RestartRequired { LayoutChanged }` naming it.
 //!
+//! After edit 1 is applied in-process, the same patch also goes through the
+//! real devtools transport (the `wire` module): chunked patch and jump-table
+//! uploads to a `frust-devtools` service in this driver, so a table over the
+//! 1 MiB request line cap that the in-process apply never sees fails the run.
+//!
 //! Every surprise fails the run; the edited sources are restored on exit.
-//! Thin-build and link times are printed per edit. Run it through
+//! Thin-build and link times are printed per edit, and the script bounds them. Run it through
 //! `scripts/ci/hotpatch-canary.sh`.
 
 mod app;
 mod builder;
 mod edit;
+mod wire;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -40,6 +46,7 @@ use crate::edit::{
     D2_EDIT, D2_TYPE, EDITED_VALUE, Edit, SHARED_D2_EDIT, SHARED_D2_TYPE, SHARED_EDITED_VALUE,
     SHARED_VALUE_EDIT, SourceGuard, VALUE_EDIT,
 };
+use crate::wire::WireService;
 
 /// The value the unedited hot function returns.
 const BASE_VALUE: u64 = 1;
@@ -136,6 +143,7 @@ fn run() -> Result<()> {
         );
     }
 
+    let wire = WireService::start()?;
     let mut guard = SourceGuard::new(&source)?;
     let mut shared_guard = SourceGuard::new(&shared_source)?;
 
@@ -151,6 +159,7 @@ fn run() -> Result<()> {
             file: guard.path(),
             value: EDITED_VALUE,
             replays: &[],
+            wire: Some((&wire, ready.pid)),
         },
     )?;
 
@@ -166,6 +175,7 @@ fn run() -> Result<()> {
             file: shared_guard.path(),
             value: SHARED_EDITED_VALUE,
             replays: &[SHARED_PACKAGE],
+            wire: None,
         },
     )?;
 
@@ -194,6 +204,7 @@ fn run() -> Result<()> {
     )?;
 
     app.finish()?;
+    wire.stop();
     drop(guard);
     drop(shared_guard);
     say(&format!(
@@ -214,6 +225,8 @@ struct Applied<'a> {
     value: u64,
     /// Packages besides the tip lib the thin build must replay.
     replays: &'a [&'a str],
+    /// The devtools service to also send the patch through, and the app's pid.
+    wire: Option<(&'a WireService, u32)>,
 }
 
 /// Thin-builds the edit already made to `expect.file`, gates it (L3 must
@@ -230,6 +243,7 @@ fn patch(
         file,
         value,
         replays,
+        wire,
     } = expect;
     say(&format!("edit {n}: {} in `{}`", edit.name, file.display()));
     let started = Instant::now();
@@ -281,6 +295,15 @@ fn patch(
     }
     session.accept(&candidate, &present)?;
     say(&format!("applied: value {value} through the patched HotFn"));
+    if let Some((service, pid)) = wire {
+        let patch = std::fs::read(&linked.path)
+            .with_context(|| format!("reading `{}`", linked.path.display()))?;
+        let (entries, table_bytes) =
+            service.send(u64::from(n), pid, anchor_runtime, patch, &linked.table)?;
+        say(&format!(
+            "wire: applied table_entries={entries} table_bytes={table_bytes}"
+        ));
+    }
     Ok(())
 }
 
@@ -304,6 +327,10 @@ fn refuse(
         units(&candidate.replayed),
         started.elapsed().as_millis(),
         candidate.layouts.len()
+    ));
+    say(&format!(
+        "timing: edit {n}: compile {} ms (refused)",
+        started.elapsed().as_millis()
     ));
     match session.check(&candidate) {
         Ok(_) => bail!(
