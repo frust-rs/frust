@@ -3003,8 +3003,9 @@ fn run_hot_session(
 /// first `r` rather than missed, and advanced — to the time read before the
 /// scan and the `on_change` call — after every `Patched` or `NoChange`
 /// answer (and an empty scan), so a patch's own inputs are never replayed
-/// twice while an edit landing during the scan or that call still is. A compile failure or a restart leaves it where it
-/// was. It is this worker's value alone: the pure core reads no clock.
+/// twice while an edit landing during the scan or that call still is. A
+/// compile failure or a restart leaves it where it was. It is this worker's
+/// value alone: the pure core reads no clock.
 fn serve_hot_session(
     id: SessionId,
     starter: HotStarter,
