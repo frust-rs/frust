@@ -256,7 +256,7 @@ any StoreKit app does.
 
 Every operation except `request_purchase` and `set_purchase_listener`
 blocks its caller (a Play Billing round trip or a StoreKit `async` query).
-Pair each with `frust_reactive::spawn_blocking`, and never call one on the
+Pair each with `frust::spawn_blocking`, and never call one on the
 platform UI thread — every backend fails fast with `IapError::UiThread`
 instead of parking there. `spawn_blocking`'s own doc frames it for CPU-bound
 one-offs (JSON parse, decode, hashing); this plugin's waits are store-bound
@@ -472,7 +472,7 @@ there.
 
 A registered listener must not block, must not write a signal directly, and
 must not call back into any of `Iap`'s blocking API from inside the
-callback — hand the event off (`frust_reactive::use_task`, a channel, or a
+callback — hand the event off (`frust::use_task`, a channel, or a
 signal write scheduled back onto the UI thread) and return immediately.
 Multiple listeners are supported; each sees every event, in registration
 order, and events arrive in the order the store reported them (one consumer,

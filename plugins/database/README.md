@@ -45,7 +45,7 @@ plugin), but all it applies is the Cargo dependency line above.
 Open a database at the standard location (`<data_dir>/databases/<name>.db`),
 create a table, insert, and query. Every [`Database`] operation is a
 **blocking** synchronous call and must run on a background thread via
-`frust_reactive::spawn_blocking`:
+`frust::spawn_blocking`:
 
 ```rust
 use frust::spawn_blocking;
@@ -155,7 +155,7 @@ spawn_blocking(move || {
 Every [`Database`] operation (`execute`, `query`, `transaction`) is a
 **blocking** synchronous call — it runs on the calling thread and blocks until
 the SQL operation completes. Calling it directly on the platform UI thread
-freezes the frame loop. Pair every database call with `frust_reactive::spawn_blocking`
+freezes the frame loop. Pair every database call with `frust::spawn_blocking`
 (an app-tier concern — the plugin itself stays framework-free per the
 platform-plugin charter):
 
@@ -486,7 +486,7 @@ The probe app was never committed.
   discipline is docs-only. There is no shared guard helper in this codebase,
   and adding one would require an FFI dependency this pure-Rust crate
   deliberately carries none of. Respect the pairing with
-  `frust_reactive::spawn_blocking`.
+  `frust::spawn_blocking`.
 - **Turso indexes are experimental upstream.** This crate's own cross-engine
   conformance suite deliberately excludes `CREATE INDEX` from the shared
   behavioral contract for this reason — the sqlite backend has its own

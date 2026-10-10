@@ -102,7 +102,7 @@ worst case a no-op single tick on hardware that lacks it, never a crash.
 - **Android's `Vibrator.vibrate(VibrationEffect)` call is synchronous and
   quick** (the vibration itself plays asynchronously on the vibrator HAL, not
   inside the call) — this backend calls it directly from the caller's thread,
-  no `frust_reactive::spawn_blocking` needed.
+  no `frust::spawn_blocking` needed.
 
 ---
 

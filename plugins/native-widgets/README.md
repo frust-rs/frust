@@ -108,6 +108,7 @@ bare bar stays at the bottom and gets no Liquid Glass — the iPadOS 18 top tab
 bar and the floating glass bar are `UITabBarController` features.
 
 ```rust
+// `Shell` is the app's `Component`; `ShellState` is its `State` (app code, not this crate).
 use frust::{Get, RouteNavigator, RwSignal, Set, View};
 use frust_native_widgets::{TabIcon, TabId, TabItem, native_tab_bar};
 
@@ -188,6 +189,7 @@ a hosted native control — this is inherent to hosting real platform widgets,
 not a gap.
 
 ```rust
+// `Editor` is the app's `Component`; `EditorState` is its `State` (app code, not this crate).
 use frust::{RwSignal, Set, View};
 use frust_native_widgets::native_button;
 
