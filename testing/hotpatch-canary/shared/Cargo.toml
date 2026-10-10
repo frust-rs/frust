@@ -3,3 +3,7 @@ name = "hotpatch-canary-shared"
 version = "0.1.0"
 edition = "2024"
 publish = false
+
+# Its own root: a path dependency of the canary app that is deliberately not a member of the canary
+# workspace, so cargo must not walk up to it (or to the repository root) looking for one.
+[workspace]
