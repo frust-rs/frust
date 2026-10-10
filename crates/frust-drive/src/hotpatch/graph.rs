@@ -1318,6 +1318,49 @@ mod tests {
         assert!(err.contains("frust-material"), "{err}");
     }
 
+    /// A path package in the resolve graph with no lib target (a bin-only
+    /// tool) is never a replay unit, however it was captured: its record
+    /// is a bin's, and only a lib's rlib can enter a patch.
+    #[test]
+    fn a_captured_path_dependency_without_a_lib_target_stays_a_local_non_member() {
+        const TOOLS: &str = "path+file:///x/tools#0.1.0";
+        let metadata = serde_json::json!({
+            "packages": [
+                package(APP, "app", None, "/w/app/Cargo.toml", vec![
+                    target("app", &["lib"], "/w/app/src/lib.rs"),
+                    target("app", &["bin"], "/w/app/src/main.rs"),
+                ]),
+                package(TOOLS, "tools", None, "/x/tools/Cargo.toml", vec![
+                    target("tools", &["bin"], "/x/tools/src/main.rs"),
+                ]),
+            ],
+            "workspace_members": [APP],
+            "resolve": {
+                "nodes": [
+                    {"id": APP, "deps": [normal(TOOLS)]},
+                    {"id": TOOLS, "deps": []},
+                ],
+                "root": null,
+            },
+            "workspace_root": "/w",
+        })
+        .to_string();
+        let mut graph = WorkspaceGraph::from_metadata(&metadata, "app", None).unwrap();
+        let members_only = graph.units();
+        assert!(
+            graph
+                .replay_non_members(&records(&["app.lib", "app.bin", "tools.bin"], &[]))
+                .is_empty(),
+            "a captured bin is not a replayable lib"
+        );
+        let tools = PathClass::LocalNonMember {
+            package: "tools".to_string(),
+        };
+        assert_eq!(graph.classify(Path::new("/x/tools/src/main.rs")), tools);
+        assert_eq!(graph.classify(Path::new("/x/tools/src/cli.rs")), tools);
+        assert_eq!(graph.units(), members_only);
+    }
+
     const WIDGETS: &str = "path+file:///x/frust/widgets#0.6.0";
     const FRAMEWORK_MATERIAL: &str = "path+file:///x/frust/material#0.6.0";
     const MACROS: &str = "path+file:///x/frust/macros#0.6.0";
