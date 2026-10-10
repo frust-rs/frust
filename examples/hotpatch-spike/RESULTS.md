@@ -3145,3 +3145,34 @@ reach. None of them depends on `frust-core`, so this edit is unaffected.
 - Linux and Windows: the canary's CI legs run the same driver on ubuntu; the Windows PDB gate reads
   the linked patch's PDB, which already covers every crate the crate list names, untested here.
 - Android and the iOS simulator stay on `restart required` for a path dependency.
+
+## Large apps: thin replay of the image unit
+
+A scaffolded app's lib declares `["cdylib", "staticlib", "rlib"]`. On Android the image unit is that
+lib, and each save replayed it with every captured crate type (`replay_args`), so rustc also wrote
+the staticlib, which bundles every dependency. The image unit's replay now drops `staticlib`,
+`dylib` and `proc-macro` (`replay_args_image`) and keeps `cdylib` and `rlib`.
+
+- The cdylib stays because the patch reads the objects named by its intercepted link line.
+- The rlib stays because the objects are then exactly what the fat build's three-type compile
+  produces; nothing links the image unit's rlib (`modified_rlibs` excludes it), so dropping it is
+  possible but changes the compile's export set and was not taken.
+
+Method: the demo app (`examples/material3-demo`) lib for `aarch64-linux-android` replayed outside a
+session with its captured record (`-C linker=` stripped, a no-op linker script in place of the
+intercepting link, so no link time is included), in a scratch copy of the source with a new `pub fn`
+appended before each run, the incremental directory copied once and reused, `--out-dir` in
+scratch, and the fat build's dependency rlibs read in place. Runs alternate between the variants on
+an otherwise idle Apple-silicon Mac, one warm-up run discarded, wall clock around the rustc process.
+
+| Crate types replayed | Runs (s) | Mean (s) | Out-dir written |
+|----------------------|----------|----------|-----------------|
+| `cdylib, staticlib, rlib` (before) | 9.0, 9.6, 9.2 | 9.3 | 2095 MB (staticlib 1108 MB, rlib 287 MB) |
+| `cdylib, rlib` (after) | 8.7, 8.7, 8.7, 8.6 | 8.7 | 986 MB |
+| `cdylib` only (not taken) | 8.5, 8.4, 8.6 | 8.5 | 700 MB |
+
+Dropping the staticlib saves about 0.6 s (7%) of compile and 1.1 GB of writes per save on this
+disk; the rest of the compile is the crate's own codegen, which no crate type removes. The ~50 s
+the Pixel 5 run took is therefore not mostly this archive on a fast local disk: the link, the
+cdylib's size and the upload are the remainder, and are not measured here. The I/O saved scales
+with the disk the build directory sits on.
