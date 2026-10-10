@@ -2,10 +2,12 @@
 //! every later source change either offered to it as a patch or answered
 //! with a restart.
 //!
-//! **Start** ([`start_desktop`], Debug builds only). The dev profile's
-//! resolved debuginfo is checked first ([`check_debuginfo`]): the layout
-//! gate reads DWARF types, so anything short of full debug info fails
-//! closed before any build. The fat build is then `cargo rustc` with the
+//! **Start** ([`start_desktop`], Debug builds only). The workspace graph is
+//! read for the host triple the fat build compiles for (`cargo metadata
+//! --filter-platform`), so a dependency gated to another platform is no
+//! edge of it. The dev profile's resolved debuginfo is checked next
+//! ([`check_debuginfo`]): the layout gate reads DWARF types, so anything
+//! short of full debug info fails closed before any build. The fat build is then `cargo rustc` with the
 //! Debug hot-session features, `-Csave-temps=true -Clink-dead-code
 //! -Clinker=<frust>`, `frust` as the workspace wrapper and the link step
 //! intercepted ([`fat_build_command`]); the builder links the fat image
@@ -53,7 +55,9 @@
 //! produces stays in the builder's ungated set (`Ungated`) — through a
 //! round that fails on a later unit or on the image unit — and each
 //! candidate's layout table is extracted from that whole set, not from the
-//! last round's objects alone. Only the session's acceptance of an applied
+//! last round's objects alone, by the base table's input rule (a
+//! replayable non-member's rlib holding no code or data is left out of
+//! both, `gated_inputs`). Only the session's acceptance of an applied
 //! patch (`PatchBuilder::accepted`) empties it.
 //!
 //! **Outcome.** A reply lost after `apply_patch` was sent is
@@ -745,9 +749,18 @@ impl Ungated {
         self.objects.contains_key(unit)
     }
 
-    /// Every ungated object, in unit order: the layout gate's input.
+    /// Every ungated object, in unit order.
+    #[cfg(test)]
     fn inputs(&self) -> Vec<PathBuf> {
-        self.objects.values().flatten().cloned().collect()
+        self.objects().map(|(_, object)| object.clone()).collect()
+    }
+
+    /// Every ungated object with its unit, in unit order: the layout gate's
+    /// input, through [`gated_inputs`].
+    fn objects(&self) -> impl Iterator<Item = (&ReplayUnit, &PathBuf)> {
+        self.objects
+            .iter()
+            .flat_map(|(unit, objects)| objects.iter().map(move |object| (unit, object)))
     }
 
     /// Every ungated object passed the gates in an accepted candidate.
@@ -1209,13 +1222,16 @@ pub fn start_desktop(
         manifest::load_optional(start.root).map_err(|err| unsupported(format!("{err:#}")))?;
     let budget = Budget::from_section(manifest.as_ref().and_then(|m| m.hotpatch.as_ref()));
 
-    let metadata = super::graph::cargo_metadata(runner, &start.root.join("Cargo.toml"), None)?;
+    // The fat build compiles for the host, so the graph is the host's: a
+    // dependency gated to another platform is no edge of it.
+    let rustc_version = capture::rustc_version(runner)?;
+    let triple = host_triple(&rustc_version)?;
+    let metadata =
+        super::graph::cargo_metadata(runner, &start.root.join("Cargo.toml"), Some(&triple))?;
     let mut graph = WorkspaceGraph::from_metadata(&metadata, start.package, start.bin)?;
     check_debuginfo(host.env, start.root, graph.workspace_root())?;
     let target_dir = target_directory(&metadata)?;
 
-    let rustc_version = capture::rustc_version(runner)?;
-    let triple = host_triple(&rustc_version)?;
     let target = Target::from_triple(&triple)?;
     let flavor = LinkerFlavor::for_triple(&triple)?;
     let features = start.info.mode.session_cargo_features(true);
@@ -1275,6 +1291,7 @@ pub fn start_desktop(
     let link_args = read_link_args(&link.args_file)?;
     if !non_members.is_empty() {
         graph.replay_non_members(&load_records(&scope_dir)?);
+        graph.set_linked_crates(linked_crates(&link_args));
     }
     let base = link_base(
         host,
@@ -1465,7 +1482,7 @@ fn base(
     } else {
         let typed = typed_objects(&tip_objects, &crates)?;
         layout::extract(
-            &gated_rlibs(&rlibs, &graph)?
+            &gated_inputs(&rlibs, &graph)?
                 .into_iter()
                 .chain(typed)
                 .collect::<Vec<_>>(),
@@ -1913,23 +1930,44 @@ fn member_rlibs(link_args: &[String], graph: &WorkspaceGraph) -> BTreeMap<Replay
         .collect()
 }
 
-/// The rlibs the base layout table is read from: every lib unit's but a
-/// replayable non-member's that holds neither code nor data
-/// ([`layout::holds_code_or_data`]: a platform shell compiled empty for
-/// this host), which has no DWARF to read and no value to protect. A
-/// member's rlib is always read, so an empty one still fails closed.
-fn gated_rlibs(
-    rlibs: &BTreeMap<ReplayUnit, PathBuf>,
+/// The crate names (rustc spelling) of every rlib a captured link line
+/// names, `lib<crate>.rlib` or `lib<crate>-<hash>.rlib`: what the image
+/// links ([`WorkspaceGraph::set_linked_crates`]).
+fn linked_crates(link_args: &[String]) -> BTreeSet<String> {
+    link_args
+        .iter()
+        .filter_map(|arg| {
+            let name = Path::new(arg).file_name()?.to_str()?;
+            let stem = name.strip_prefix("lib")?.strip_suffix(".rlib")?;
+            Some(
+                stem.split_once('-')
+                    .map_or(stem, |(name, _)| name)
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// The one input rule of the DWARF layout gate, for the base table (each
+/// lib unit's rlib in the image) and every candidate table (each ungated
+/// object): a member unit's input is always read, so an empty one still
+/// fails closed; a replayable non-member's is read only when it holds code
+/// or data ([`layout::holds_code_or_data`]). A platform shell compiled
+/// empty for this host has no DWARF to read and no value to protect, and
+/// leaving it out of one table but not the other would refuse every cascade
+/// that replays it.
+fn gated_inputs<'a>(
+    inputs: impl IntoIterator<Item = (&'a ReplayUnit, &'a PathBuf)>,
     graph: &WorkspaceGraph,
 ) -> Result<Vec<PathBuf>, HotpatchError> {
     let mut gated = Vec::new();
-    for (unit, rlib) in rlibs {
+    for (unit, input) in inputs {
         let member = graph
             .packages()
             .iter()
             .any(|package| package.member && package.name == unit.package);
-        if member || layout::holds_code_or_data(rlib)? {
-            gated.push(rlib.clone());
+        if member || layout::holds_code_or_data(input)? {
+            gated.push(input.clone());
         }
     }
     Ok(gated)
@@ -2210,12 +2248,17 @@ impl PatchBuilder for DesktopBuilder {
         // an earlier candidate is left out, and the accepted set holds it.
         // On Msvc the table is read after the link, from the patch's PDB,
         // which covers every ungated object the patch links
-        // ([`PatchBuilder::linked_layouts`]).
-        let fresh = self.ungated.inputs();
-        let layouts = if fresh.is_empty() || self.flavor == LinkerFlavor::Msvc {
+        // ([`PatchBuilder::linked_layouts`]). The objects read are chosen
+        // by the base table's rule ([`gated_inputs`]).
+        let layouts = if self.flavor == LinkerFlavor::Msvc {
             LayoutTable::default()
         } else {
-            layout::extract(&fresh, &self.crates)?.table
+            let fresh = gated_inputs(self.ungated.objects(), &self.graph)?;
+            if fresh.is_empty() {
+                LayoutTable::default()
+            } else {
+                layout::extract(&fresh, &self.crates)?.table
+            }
         };
         let seams = seam_set(self.flavor, &self.patch_inputs()?)?;
         Ok(Compiled::Candidate { layouts, seams })
@@ -4459,8 +4502,8 @@ mod tests {
         assert!(
             invocations
                 .iter()
-                .all(|call| call.starts_with("cargo metadata")),
-            "nothing but metadata may run: {invocations:?}"
+                .all(|call| call.starts_with("cargo metadata") || call == "rustc -vV"),
+            "nothing but the toolchain probe and metadata may run: {invocations:?}"
         );
     }
 
@@ -4574,12 +4617,13 @@ mod tests {
         assert_eq!(
             runner.invocations()[..2],
             [
+                "rustc -vV".to_string(),
                 format!(
-                    "cargo metadata --format-version 1 --manifest-path {}",
+                    "cargo metadata --format-version 1 --manifest-path {} --filter-platform {TRIPLE}",
                     root.join("Cargo.toml").display()
                 ),
-                "rustc -vV".to_string()
-            ]
+            ],
+            "the graph is the host triple's, read before anything is built"
         );
     }
 
@@ -4809,6 +4853,26 @@ mod tests {
     }
 
     #[test]
+    fn linked_crates_names_every_rlib_on_the_link_line() {
+        let args: Vec<String> = [
+            "/t/debug/deps/app-1.app.a-cgu.0.rcgu.o",
+            "/t/debug/deps/libapp-77.rlib",
+            "/t/debug/deps/libfrust_shell_ios-9.rlib",
+            "/t/debug/deps/libplain.rlib",
+            "/t/debug/deps/libnot_an_rlib-1.rmeta",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        assert_eq!(
+            linked_crates(&args),
+            ["app", "frust_shell_ios", "plain"]
+                .map(str::to_string)
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
     fn an_empty_path_dependency_rlib_is_left_out_of_the_base_table_but_never_a_members() {
         let dir = temp_dir("gated-rlibs");
         let empty = super::super::link_intercept::empty_object(
@@ -4833,7 +4897,7 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(
-            gated_rlibs(&rlibs, &graph).unwrap(),
+            gated_inputs(&rlibs, &graph).unwrap(),
             vec![empty_object.clone()],
             "the member's empty rlib is still read (and refused by the gate)"
         );
@@ -4842,7 +4906,7 @@ mod tests {
                 .into_iter()
                 .collect();
         assert_eq!(
-            gated_rlibs(&rlibs, &graph).unwrap(),
+            gated_inputs(&rlibs, &graph).unwrap(),
             vec![code_object.clone(), code_object]
         );
     }
@@ -5368,6 +5432,133 @@ mod tests {
             assert_eq!(builder.patch_inputs().unwrap(), vec![a_new.clone()]);
             assert_eq!(accepted.check(&layouts, seams), Err(badge_grew()));
             assert_eq!(builder.ungated.inputs(), vec![a_new]);
+        }
+
+        /// An rlib like a platform shell compiled for another target: crate
+        /// metadata and one object holding neither code nor data.
+        fn code_less_rlib(dir: &Path) -> PathBuf {
+            let empty = super::super::super::link_intercept::empty_object(
+                object::BinaryFormat::MachO,
+                object::Architecture::Aarch64,
+            )
+            .unwrap();
+            let rlib = dir.join("libshell-0.rlib");
+            let mut builder = ar::Builder::new(std::fs::File::create(&rlib).unwrap());
+            for (name, bytes) in [
+                ("lib.rmeta", b"rust".to_vec()),
+                ("shell-0.shell.0-cgu.0.rcgu.o", empty),
+            ] {
+                builder
+                    .append(
+                        &ar::Header::new(name.as_bytes().to_vec(), bytes.len() as u64),
+                        bytes.as_slice(),
+                    )
+                    .unwrap();
+            }
+            rlib
+        }
+
+        /// A workspace at `/w` whose tip `b` (lib and bin) depends on the
+        /// non-members `a` and `shell` under `/x`, `shell` on `a` too, both
+        /// captured: an edit to `a` cascades through `shell`.
+        fn graph_through_a_shell() -> WorkspaceGraph {
+            const A: &str = "path+file:///x/a#0.1.0";
+            const SHELL: &str = "path+file:///x/shell#0.1.0";
+            const B: &str = "path+file:///w/b#0.1.0";
+            let target = |name: &str, kind: &str, src: &str| serde_json::json!({"name": name, "kind": [kind], "crate_types": [kind], "src_path": src});
+            let normal = |pkg: &str| serde_json::json!({"name": pkg, "pkg": pkg, "dep_kinds": [{"kind": null, "target": null}]});
+            let json = serde_json::json!({
+                "packages": [
+                    {"id": A, "name": "a", "source": null, "manifest_path": "/x/a/Cargo.toml",
+                     "targets": [target("a", "lib", "/x/a/src/lib.rs")]},
+                    {"id": SHELL, "name": "shell", "source": null,
+                     "manifest_path": "/x/shell/Cargo.toml",
+                     "targets": [target("shell", "lib", "/x/shell/src/lib.rs")]},
+                    {"id": B, "name": "b", "source": null, "manifest_path": "/w/b/Cargo.toml",
+                     "targets": [target("b", "lib", "/w/b/src/lib.rs"),
+                                 target("b-app", "bin", "/w/b/src/main.rs")]},
+                ],
+                "workspace_members": [B],
+                "resolve": {"nodes": [
+                    {"id": A, "deps": []},
+                    {"id": SHELL, "deps": [normal(A)]},
+                    {"id": B, "deps": [normal(A), normal(SHELL)]},
+                ], "root": B},
+                "workspace_root": "/w",
+            });
+            let mut graph = WorkspaceGraph::from_metadata(&json.to_string(), "b", None).unwrap();
+            let records = [
+                RecordKey::parse("a.lib").unwrap(),
+                RecordKey::parse("shell.lib").unwrap(),
+                RecordKey::parse("b.lib").unwrap(),
+                RecordKey::parse("b_app.bin").unwrap(),
+            ]
+            .into_iter()
+            .map(|key| {
+                let record = record(&key.crate_name, key.kind.suffix());
+                (key, record)
+            })
+            .collect();
+            assert_eq!(graph.replay_non_members(&records), vec!["a", "shell"]);
+            graph
+        }
+
+        /// The base table leaves a captured non-member's code-less rlib out
+        /// ([`gated_inputs`]); a cascade that replays it must leave it out
+        /// of the candidate's table too, or every edit below it is refused.
+        #[test]
+        fn a_cascade_through_a_code_less_path_dependency_passes_the_candidate_gate() {
+            let a_rlib = fixture::edited("badge-p1");
+            let Setup {
+                mut builder,
+                accepted,
+                script,
+                b_rlib,
+            } = setup(
+                "code-less-shell",
+                vec![
+                    ("a", vec![Reply::Rlib(a_rlib.clone())]),
+                    ("b", vec![Reply::Rlib(fixture::base())]),
+                ],
+            );
+            let shell_rlib = code_less_rlib(&builder.scope_dir);
+            script
+                .replies
+                .lock()
+                .unwrap()
+                .insert("shell".into(), [Reply::Rlib(shell_rlib.clone())].into());
+            let shell = ReplayUnit::lib("shell", "shell");
+            builder.graph = graph_through_a_shell();
+            builder
+                .records
+                .insert(shell.record_key(), record("shell", "lib"));
+            builder.rlibs.insert(shell.clone(), shell_rlib.clone());
+            assert_eq!(
+                gated_inputs(&builder.rlibs, &builder.graph).unwrap(),
+                vec![a_rlib.clone(), b_rlib.clone()],
+                "the base table's inputs"
+            );
+
+            let (layouts, seams) = candidate(builder.compile(&units(&[lib_a()])));
+            assert_eq!(script.replayed(), vec!["a", "shell", "b"]);
+            assert!(builder.ungated.contains(&shell));
+            let checked = accepted.check(&layouts, seams);
+            assert!(checked.is_ok(), "{checked:?}");
+            assert_eq!(
+                builder.modified_rlibs().unwrap(),
+                vec![b_rlib.clone(), shell_rlib.clone(), a_rlib.clone()],
+                "the shell's rlib is still linked into the patch"
+            );
+
+            // Negative control: the candidate's inputs unfiltered, as the
+            // builder read them before, are refused outright.
+            let unfiltered = builder.ungated.inputs();
+            assert_eq!(unfiltered, vec![a_rlib, b_rlib, shell_rlib]);
+            let refused = layout::extract(&unfiltered, &fixture::crates());
+            assert!(
+                matches!(refused, Err(HotpatchError::BuilderUnsupported { .. })),
+                "{refused:?}"
+            );
         }
 
         /// Accepting a candidate empties the set: the next candidate is
