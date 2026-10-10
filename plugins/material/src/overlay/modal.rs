@@ -843,12 +843,16 @@ impl StagedPop {
 /// let apply = dismiss.clone();
 /// show_side_sheet(
 ///     &nav,
-///     move || side_sheet("Filters", body(), vec![
-///         any(filled_button("Apply", move |_: &mut State| {
-///             apply.dismiss_with(PopResult::of(Filters::current()))
-///         })),
-///     ])
-///     .dismiss_handle(dismiss.clone()),
+///     move || {
+///         side_sheet(
+///             "Filters",
+///             body(),
+///             filled_button("Apply", move |_: &mut State| {
+///                 apply.dismiss_with(PopResult::of(Filters::current()))
+///             }),
+///         )
+///         .dismiss_handle(dismiss.clone())
+///     },
 ///     |state: &mut State, result: PopResult| { /* ... */ },
 /// );
 /// ```

@@ -51,15 +51,43 @@
 //! default-theme slot:
 //!
 //! ```no_run
-//! # use frust::{Component, View, any, text};
-//! # #[derive(Default)]
-//! # struct MyApp;
-//! # impl Component for MyApp {
-//! #     type State = ();
-//! #     fn init(&self) -> Self::State {}
-//! #     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> { any(text("hi")) }
-//! # }
-//! frust::app!(MyApp, setup = { frust_cupertino::install(); });
+//! use frust::{Align, Alignment, Component, CrossAxisAlignment, View, column, scaffold, text};
+//! use frust_cupertino::{cupertino_button, cupertino_nav_bar};
+//!
+//! #[derive(Default)]
+//! pub struct CounterApp;
+//!
+//! impl Component for CounterApp {
+//!     type State = u32;
+//!
+//!     fn init(&self) -> u32 {
+//!         0
+//!     }
+//!
+//!     fn build(&self, count: &mut u32) -> impl View<u32> {
+//!         scaffold(Align(
+//!             Alignment::CENTER,
+//!             column()
+//!                 .child(text(count.to_string()).size(48.0))
+//!                 .child(Self::increment_button())
+//!                 .cross_axis(CrossAxisAlignment::Center),
+//!         ))
+//!         .app_bar(cupertino_nav_bar::<u32>("Counter"))
+//!     }
+//! }
+//!
+//! impl CounterApp {
+//!     fn increment_button() -> impl View<u32> {
+//!         cupertino_button("Increment", |count: &mut u32| *count += 1)
+//!     }
+//! }
+//!
+//! frust::app!(
+//!     CounterApp,
+//!     setup = {
+//!         frust_cupertino::install();
+//!     }
+//! );
 //! # fn main() {}
 //! ```
 //!
