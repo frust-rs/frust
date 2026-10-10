@@ -8,7 +8,7 @@ expression: "render_to_string_at(100, 30, &state, ColorDepth::Xterm256)"
  PROJECTS                │huddle:  1 ⠹ Pixel 7                                                      
   ▸ huddle               │ Compiling frust-core (41/210)                                            
                          │   12:00:00 [app]       Compiling frust-core v0.3.1 (41/210)              
- DEVICES ↻ r             │                                                                          
+ DEVICES ↻ R             │                                                                          
    none found            │                                                                          
                          │                                                                          
  SESSIONS                │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string_at(100, 30, &state, ColorDepth::Xterm256)"
                          │                                                                          
                          │                                                                          
                          │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
-● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]
+● 1 running  │  o run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

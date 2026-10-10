@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │huddle:  1 ▶ desktop                                                      
   ▸ huddle               │ [1] Performance  [2] System  [3] Inspector  [4] Network        ● service 
                          │                              ━━━━━━━━━━━━━                               
- DEVICES ↻ r             │ ▾ ▦ FlexWidget                                           x0 y0 w390 h844 
+ DEVICES ↻ R             │ ▾ ▦ FlexWidget                                           x0 y0 w390 h844 
    none found            │   ▾ ▣ PaddingWidget                                                      
                          │       T TextWidget “Hello”                                               
  SESSIONS                │     ▸ ▦ FlexWidget (2 children)                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │ devtools: inspector │ →← expand · r refresh · Esc back          [mouse ✓]
-● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]
+● 1 running  │  o run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

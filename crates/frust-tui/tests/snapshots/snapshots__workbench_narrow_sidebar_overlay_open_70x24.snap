@@ -9,7 +9,7 @@ expression: "render_to_string(70, 24, &state)"
 │ PROJECTS                    ││                                      
 │  ▸ huddle                   ││                                      
 │                             ││                                      
-│ DEVICES ↻ r                 ││un to open a log tab here.            
+│ DEVICES ↻ R                 ││un to open a log tab here.            
 │   none found                ││                                      
 │                             ││                                      
 │ SESSIONS                    ││                                      
@@ -25,4 +25,4 @@ expression: "render_to_string(70, 24, &state)"
 │   DAP off · D               ││                                      
 │                             ││                                      
 └──────────────────────────────┘                                      
-● ready  │  r run · b build · i doctor · ⌘ palette · ? help ·[mouse ✓]
+● ready  │  o run · b build · i doctor · ⌘ palette · ? help ·[mouse ✓]

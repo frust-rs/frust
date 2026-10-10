@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &devices_panel_state())"
  PROJECTS                │                                                                          
   ▸ huddle               │  Dashboard                                                               
                          │  ━━━━━━━━━━                                                              
- DEVICES (1) ↻ r         │                                                                          
+ DEVICES (1) ↻ R         │                                                                          
     [x] ● OnePlus 9 andr │  No session running — start a run to open a log tab here.                
   ▸ [ ] ● Pixel 7 androi │                                                                          
     [ ] ● iPhone SE ios· │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &devices_panel_state())"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  o run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

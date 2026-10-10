@@ -8,7 +8,7 @@ expression: rendered
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
                   │  Choose a plugin to add to this project  (10-18 of 18)       │▓▓                
- DEVICES ↻ r      │    ( ) oauth-native                                          │▓▓                
+ DEVICES ↻ R      │    ( ) oauth-native                                          │▓▓                
    none found     │        OAuth 2.0 native-app helper: PKCE (S256), state,      │▓▓                
                   │    ( ) iap                                                   │▓▓                
  SESSIONS         │        In-app purchases and subscriptions over Play Billing  │▓▓                
@@ -31,4 +31,4 @@ expression: rendered
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
                   ╰──────────────────────────────────────────────────────────────╯▓▓                
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  o run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

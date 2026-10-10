@@ -5,21 +5,23 @@
 //! the engine's channel, and the [`LaunchPlan`] a spec resolves into before
 //! it is spawned through the drive's `spawn_streaming` seam.
 //!
-//! A watched debug desktop session runs **hot** instead: [`SessionSpec::start_hot`]
-//! resolves it through `frust-drive`'s hot-patch session start
+//! A debug desktop session the workbench launches runs **hot** instead:
+//! [`SessionSpec::start_hot`] resolves it through `frust-drive`'s hot-patch session start
 //! (`hotpatch::session::start_desktop` — the fat build, then the fat image
 //! spawned directly, never `cargo run`), and [`SessionSpec::hot_precondition`]
-//! says which specs qualify. A watched debug Android device session runs hot
+//! says which specs qualify. A debug Android device session runs hot
 //! the same way through `hotpatch::android::start_android` (the fat build
 //! outside Gradle, install, launch, an `adb forward` to the devtools
 //! endpoint), and one on a booted iOS simulator through
 //! `hotpatch::ios_sim::start_ios_sim` (the fat build through Xcode, `simctl
 //! install`, `simctl launch`, the devtools endpoint on the host's
-//! loopback). Unwatched sessions keep [`SessionSpec::launch_plan`].
+//! loopback). Cold sessions keep [`SessionSpec::launch_plan`], and
+//! [`SessionSpec::hot_watch_set`] names what a hot session's manual patch
+//! scans.
 //!
 //! Everything here is plain data + pure functions — no threads, no tokio —
-//! except `start_hot`, the one blocking entry, which `crate::runner` only
-//! ever calls off the UI thread. The moving parts live in
+//! except `start_hot` and `hot_watch_set`, the blocking entries, which
+//! `crate::runner` only ever calls off the UI thread. The moving parts live in
 //! [`super::supervisor`].
 
 use std::path::{Path, PathBuf};
@@ -30,10 +32,12 @@ use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::desktop_run;
 use frust_drive::devices::{Device, Kind, Platform};
 use frust_drive::hotpatch::android::{AndroidHotStart, AndroidStart, start_android};
+use frust_drive::hotpatch::graph::WorkspaceGraph;
 use frust_drive::hotpatch::ios_sim::{IosSimHotStart, IosSimStart, start_ios_sim};
 use frust_drive::hotpatch::session::{
     DesktopStart, HotSession, RestartReason, SessionHost, StartError, start_desktop,
 };
+use frust_drive::hotpatch::watch::{WatchSet, watch_set};
 use frust_drive::process::{ProcessRunner, StreamHandle};
 
 /// A unique per-session identifier, handed out monotonically by a single
@@ -269,6 +273,28 @@ impl SessionSpec {
                 forward_port: None,
             }),
         })
+    }
+
+    /// The watch set a hot session's manual patch (`r`) scans for changed
+    /// files: `frust-drive`'s [`watch_set`] over the project's workspace
+    /// graph — the set a hot session's source watcher widens to — resolved
+    /// with `cargo metadata` through `runner`, so it **blocks**; call it off
+    /// the UI thread. A project cargo cannot describe (no `[package]`, a
+    /// manifest it rejects) falls back to the base scope every watcher
+    /// starts with: the project's `src/` tree and its `Cargo.toml`.
+    pub fn hot_watch_set(&self, runner: &dyn ProcessRunner) -> WatchSet {
+        let root = &self.project_root;
+        package_name(root)
+            .and_then(|package| {
+                WorkspaceGraph::load(runner, &root.join("Cargo.toml"), None, &package, None).ok()
+            })
+            .map(|graph| watch_set(&graph))
+            .unwrap_or_else(|| WatchSet {
+                replayable: vec![root.join("src")],
+                local_non_member: Vec::new(),
+                build_inputs: vec![root.join("Cargo.toml")],
+                roots: vec![root.clone()],
+            })
     }
 }
 
@@ -527,6 +553,26 @@ mod tests {
             build_name: None,
             build_number: None,
         }
+    }
+
+    #[test]
+    fn a_project_cargo_cannot_describe_watches_its_src_tree_and_manifest() {
+        let root = PathBuf::from("/nonexistent/frust-tui-hot-watch-set");
+        let spec = SessionSpec {
+            project_root: root.clone(),
+            target: DeviceTarget::Desktop,
+            build: build(BuildMode::Debug),
+        };
+        let runner = frust_drive::process::FakeProcessRunner::new();
+        assert_eq!(
+            spec.hot_watch_set(&runner),
+            WatchSet {
+                replayable: vec![root.join("src")],
+                local_non_member: Vec::new(),
+                build_inputs: vec![root.join("Cargo.toml")],
+                roots: vec![root],
+            }
+        );
     }
 
     #[test]

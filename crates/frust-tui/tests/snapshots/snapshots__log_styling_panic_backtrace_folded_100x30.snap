@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &panic_backtrace_state())"
  PROJECTS                │huddle:  1 ◌ desktop                                                      
   ▸ huddle               │ E 12:05:02 [app]    thread 'main' panicked at src/main.rs:42:9:          
                          │                     called `Option::unwrap()` on a `None` value          
- DEVICES ↻ r             │                     ▶ 2 frames… (RUST_BACKTRACE=1) — click or z to expand
+ DEVICES ↻ R             │                     ▶ 2 frames… (RUST_BACKTRACE=1) — click or z to expand
    none found            │   12:05:03 [app]    app: recovering                                      
                          │                                                                          
  SESSIONS                │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &panic_backtrace_state())"
                          │                                                                          
                          │                                                                          
                          │● follow  ·  wrap:off       x stop · f follow · w wrap · / search · z fold
-● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]
+● 1 running  │  o run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

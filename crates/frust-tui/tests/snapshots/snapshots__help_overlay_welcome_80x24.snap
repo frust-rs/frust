@@ -5,9 +5,10 @@ expression: "render_to_string(80, 24, &state)"
                                                            toolchain ◌ checking…
   ╭ Keyboard Shortcuts ─────────────────────────────────────────────────────╮   
   │                                                                         │▓▓ 
-  │  r   Run on device(s)…               M   Start/stop MCP server          │▓▓ 
-  │  —   Run on all devices              D   DAP server…                    │▓▓ 
-  │  x   Stop session                    —   Start/stop DAP server          │▓▓ 
+  │  o   Run on device(s)…               m   MCP server…                    │▓▓ 
+  │  —   Run on all devices              M   Start/stop MCP server          │▓▓ 
+  │  x   Stop session                    D   DAP server…                    │▓▓ 
+  │  r   Hot patch now                   —   Start/stop DAP server          │▓▓ 
   │  R   Restart session                 ⌥m  Toggle mouse capture           │▓▓ 
   │  W   Watch: hot patch on save        f   Toggle follow-tail             │▓▓ 
   │  X   Close tab                       w   Toggle line wrap               │▓▓ 
@@ -19,7 +20,6 @@ expression: "render_to_string(80, 24, &state)"
   │  a   Add plugin…                     d   DevTools                       │▓▓ 
   │  ^O  Switch project…                 r   Refresh widget tree            │▓▓ 
   │  R   Refresh devices                 q   Quit                           │▓▓ 
-  │  m   MCP server…                                                        │▓▓ 
   │                                                                         │▓▓ 
   │  — = palette/mouse only                                                 │▓▓ 
   │  Esc close                                                              │▓▓ 

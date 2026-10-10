@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &built_session_state())"
  PROJECTS                │huddle:  1 ✓ build apk                                                    
   ▸ huddle               │   12:00:00 [app]    Building `it.f0x.huddle`…                            
                          │   12:00:01 [app]    Built: /tmp/huddle/android/app/build/outputs/apk/rele
- DEVICES ↻ r             │                                                                          
+ DEVICES ↻ R             │                                                                          
    none found            │                                                                          
                          │                                                                          
  SESSIONS                │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &built_session_state())"
                          │                                                                          
                          │                                                                          
                          │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
-● ready  │  r run · b build · d devtools · ⌘ palette · ? help                              [mouse ✓]
+● ready  │  o run · b build · d devtools · ⌘ palette · ? help                              [mouse ✓]

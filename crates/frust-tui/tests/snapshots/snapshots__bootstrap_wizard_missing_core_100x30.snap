@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &bootstrap_state(missing_core_report(), 0
  PROJECTS                │                                                                          
   ▸ huddle               │  Dashboard                                                               
              ╭ ⚙ Toolchain setup — get this machine building Frust apps ✗ [Esc] Close ╮             
- DEVICES ↻ r │                                                                        │▓▓           
+ DEVICES ↻ R │                                                                        │▓▓           
    none found│  STEPS                  Prerequisites — missing                        │▓▓           
              │  ▸✗ Rust toolchain      ✗ Rust toolchain  not found                    │▓▓           
  SESSIONS    │   ! Platforms ▾                                                        │▓▓           
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &bootstrap_state(missing_core_report(), 0
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  o run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
