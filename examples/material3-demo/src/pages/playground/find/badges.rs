@@ -15,7 +15,7 @@
 //! same idiom `crate::pages::playground::pick::chips`'s "All types" preview
 //! uses) rather than the reference's `Wrap(spacing: 24, runSpacing: 16)`.
 
-use frust::{AnyView, Component, CrossAxisAlignment, Row, SizedBox, View, any, component, icon};
+use frust::{AnyView, Component, CrossAxisAlignment, SizedBox, View, any, component, icon, row};
 use frust_material::{BadgeAlignment, badge, icons};
 
 use crate::AppState;
@@ -87,15 +87,16 @@ fn snippet_code(state: &Knobs) -> String {
 
 /// Lay `items` out horizontally with `gap`px between each pair — see the
 /// module docs' `Wrap` divergence.
-fn spaced_row<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> impl View<State> {
-    let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
-    for item in items {
-        if !children.is_empty() {
-            children.push(any(SizedBox::<State>(Some(gap), None)));
-        }
-        children.push(item);
+fn spaced_row<State: 'static, V: View<State>>(items: Vec<V>, gap: f64) -> impl View<State> {
+    let mut list = row();
+    for (index, item) in items.into_iter().enumerate() {
+        list = list
+            .when(index > 0, |list| {
+                list.child(SizedBox::<State>(Some(gap), None))
+            })
+            .child(item);
     }
-    Row(children).cross_axis(CrossAxisAlignment::Center)
+    list.cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The playground body for the current knob state.
@@ -120,7 +121,7 @@ fn body(state: &mut Knobs) -> impl View<Knobs> {
 
     let preview = play_preview_card(
         "Badge",
-        spaced_row(vec![any(primary), any(dot_only), any(overflowing)], 24.0),
+        spaced_row(vec![primary, dot_only, overflowing], 24.0),
     );
     let snippet = play_snippet("Badge", snippet_code(state));
 
@@ -157,7 +158,7 @@ fn body(state: &mut Knobs) -> impl View<Knobs> {
         ],
     );
 
-    playground_body(vec![preview], vec![snippet], vec![controls])
+    playground_body(preview, vec![snippet], controls)
 }
 
 /// The nested [`Component`] this page owns its knobs in. See the page
@@ -178,6 +179,7 @@ impl Component for BadgesPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(BadgesPlayground))
 }

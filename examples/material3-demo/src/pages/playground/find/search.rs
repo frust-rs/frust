@@ -29,7 +29,7 @@
 //! [`play_enum_menu_field`]: crate::widgets::playground::play_enum_menu_field
 //! [`play_enum_menu_panel`]: crate::widgets::playground::play_enum_menu_panel
 
-use frust::{AnyView, Column, Component, View, any, component, stack};
+use frust::{AnyView, Component, Either, View, any, column, component, stack, views};
 use frust_material::{OverlayAnchor, list_item, overlay_anchor, search_bar, search_view};
 
 use crate::AppState;
@@ -94,16 +94,12 @@ fn matches(query: &str) -> Vec<&'static str> {
 /// The suggestion list a docked/open view shows — tapping a row picks it and
 /// closes the view, the reference's `controller.closeView(name)`.
 fn suggestions(query: &str) -> impl View<Knobs> {
-    let rows: Vec<AnyView<Knobs>> = matches(query)
-        .into_iter()
-        .map(|name| {
-            any(list_item::<Knobs>(name).on_press(move |s: &mut Knobs| {
-                s.query = name.to_string();
-                s.open = false;
-            }))
+    column().children(views(matches(query).into_iter().map(|name| {
+        list_item::<Knobs>(name).on_press(move |s: &mut Knobs| {
+            s.query = name.to_string();
+            s.open = false;
         })
-        .collect();
-    Column(rows)
+    })))
 }
 
 /// The FRUST snippet text for the current knob state — the reference's
@@ -112,20 +108,30 @@ fn suggestions(query: &str) -> impl View<Knobs> {
 fn snippet_code(state: &Knobs) -> String {
     if state.use_anchor {
         format!(
-            "let anchor = OverlayAnchor::new();\noverlay_anchor(&anchor,\n    search_bar(query, on_query_changed)\n        .hint({:?})\n        .on_tap(|s| s.open = true),\n);\nsearch_view(query, on_query_changed)\n    .hint({:?})\n    .suggestions(suggestion_list())\n    .on_dismiss(|s| s.open = false)\n    .docked(&anchor)\n    .open(open);",
-            state.hint, state.hint
+            "let anchor = OverlayAnchor::new();\noverlay_anchor(\n    &anchor,\n    \
+             search_bar(state.query.clone(), |state: &mut State, query: String| {{\n        \
+             state.query = query\n    }})\n    .hint({hint:?})\n    \
+             .on_tap(|state: &mut State| state.open = true),\n);\n\
+             search_view(state.query.clone(), |state: &mut State, query: String| {{\n    \
+             state.query = query\n}})\n.hint({hint:?})\n\
+             .suggestions(Self::suggestions(&state.query))\n\
+             .on_dismiss(|state: &mut State| state.open = false)\n.docked(&anchor)\n\
+             .open(state.open);",
+            hint = state.hint,
         )
     } else {
         format!(
-            "search_bar(query, on_query_changed)\n    .hint({:?})\n    .enabled({});",
-            state.hint, state.enabled
+            "search_bar(state.query.clone(), |state: &mut State, query: String| {{\n    \
+             state.query = query\n}})\n.hint({hint:?})\n.enabled({enabled});",
+            hint = state.hint,
+            enabled = state.enabled,
         )
     }
 }
 
 /// The preview card: the bar alone, or the bar wrapped as the docked view's
 /// anchor.
-fn preview(state: &Knobs) -> AnyView<Knobs> {
+fn preview(state: &Knobs) -> impl View<Knobs> {
     let query = state.query.clone();
     let hint = state.hint.clone();
     if state.use_anchor {
@@ -155,7 +161,7 @@ fn docked_panel(state: &Knobs) -> impl View<Knobs> {
 }
 
 /// The playground body for the current knob state.
-fn body(state: &mut Knobs) -> AnyView<Knobs> {
+fn body(state: &mut Knobs) -> impl View<Knobs> {
     let preview_view = preview(state);
     let snippet_label = if state.use_anchor {
         "Search anchor"
@@ -164,28 +170,24 @@ fn body(state: &mut Knobs) -> AnyView<Knobs> {
     };
     let snippet = play_snippet(snippet_label, snippet_code(state));
 
-    let mut rows: Vec<AnyView<Knobs>> = vec![play_switch(
-        "Use search anchor",
-        state.use_anchor,
-        |s: &mut Knobs, v| s.use_anchor = v,
-    )];
-    if !state.use_anchor {
-        rows.push(play_switch("Enabled", state.enabled, |s: &mut Knobs, v| {
-            s.enabled = v
-        }));
-    }
-    rows.push(play_text_field(
-        "Hint",
-        state.hint.clone(),
-        |s: &mut Knobs, v| s.hint = v,
-    ));
-    let controls = control_panel("Mode", rows);
+    let controls = control_panel(
+        "Mode",
+        (
+            play_switch("Use search anchor", state.use_anchor, |s: &mut Knobs, v| {
+                s.use_anchor = v
+            }),
+            (!state.use_anchor)
+                .then(|| play_switch("Enabled", state.enabled, |s: &mut Knobs, v| s.enabled = v)),
+            play_text_field("Hint", state.hint.clone(), |s: &mut Knobs, v| s.hint = v),
+        ),
+    );
 
-    let content = playground_body(vec![preview_view], vec![snippet], vec![controls]);
+    let content = playground_body(preview_view, vec![snippet], controls);
+    // Both arms share `content`, which `either`'s two closures cannot both move.
     if state.use_anchor {
-        any(stack().child(content).child(docked_panel(state)))
+        Either::Left(stack().child(content).child(docked_panel(state)))
     } else {
-        any(content)
+        Either::Right(content)
     }
 }
 
@@ -207,6 +209,7 @@ impl Component for SearchPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(SearchPlayground))
 }

@@ -36,7 +36,7 @@
 
 use std::rc::Rc;
 
-use frust::{AnyView, Color, Column, Component, SizedBox, View, any, component, icon, stack};
+use frust::{AnyView, Color, Component, SizedBox, View, any, column, component, icon, stack};
 use frust_material::{
     ButtonDecoration, ButtonShape, ButtonSize, ButtonVariant, GradientButtonDecoration,
     LinearGradientSpec, OverlayAnchor, button, button_with_icon, constant_gradient, icons,
@@ -166,14 +166,14 @@ fn styled_button(state: &Knobs) -> impl View<Knobs> {
 /// The "All styles" preview: every [`ButtonVariant`] at the current size and
 /// shape, one per row — see the module docs' `Wrap` divergence (G10).
 fn all_styles(state: &Knobs) -> impl View<Knobs> {
-    let buttons: Vec<AnyView<Knobs>> = STYLES
+    let buttons = STYLES
         .iter()
         .map(|&style| {
-            any(button(style_label(style), |_: &mut Knobs| {})
+            button(style_label(style), |_: &mut Knobs| {})
                 .variant(style)
                 .size(state.size)
                 .shape(state.shape)
-                .enabled(state.enabled))
+                .enabled(state.enabled)
         })
         .collect();
     spaced_column(buttons, 12.0)
@@ -210,17 +210,14 @@ fn gradient_fill(state: &Knobs) -> impl View<Knobs> {
                 Color::from_rgb8(0xFE, 0xCA, 0xCA),
             ]))),
     );
-    let gradient = any(button("Gradient", |_: &mut Knobs| {})
+    let gradient = button("Gradient", |_: &mut Knobs| {})
         .size(state.size)
         .shape(state.shape)
-        .decoration(purple));
-    let gradient_icon =
-        any(
-            button_with_icon(icon(icons::FAVORITE), "Favorite", |_: &mut Knobs| {})
-                .size(state.size)
-                .shape(state.shape)
-                .decoration(red),
-        );
+        .decoration(purple);
+    let gradient_icon = button_with_icon(icon(icons::FAVORITE), "Favorite", |_: &mut Knobs| {})
+        .size(state.size)
+        .shape(state.shape)
+        .decoration(red);
     spaced_column(vec![gradient, gradient_icon], 12.0)
 }
 
@@ -229,7 +226,7 @@ fn gradient_fill(state: &Knobs) -> impl View<Knobs> {
 fn snippet(state: &Knobs) -> PlaySnippet {
     let code = if state.show_icon {
         format!(
-            "button_with_icon(any(icon(icons::ADD)), \"{label}\", on_press)\n    .variant(ButtonVariant::{style:?})\n    .size(ButtonSize::{size:?})\n    .shape(ButtonShape::{shape:?})\n    .enabled({enabled});",
+            "button_with_icon(icon(icons::ADD), \"{label}\", |count: &mut u32| *count += 1)\n    .variant(ButtonVariant::{style:?})\n    .size(ButtonSize::{size:?})\n    .shape(ButtonShape::{shape:?})\n    .enabled({enabled});",
             label = state.label,
             style = state.style,
             size = state.size,
@@ -238,7 +235,7 @@ fn snippet(state: &Knobs) -> PlaySnippet {
         )
     } else {
         format!(
-            "{ctor}(\"{label}\", on_press)\n    .size(ButtonSize::{size:?})\n    .shape(ButtonShape::{shape:?})\n    .enabled({enabled});",
+            "{ctor}(\"{label}\", |count: &mut u32| *count += 1)\n    .size(ButtonSize::{size:?})\n    .shape(ButtonShape::{shape:?})\n    .enabled({enabled});",
             ctor = variant_ctor(state.style),
             label = state.label,
             size = state.size,
@@ -250,7 +247,7 @@ fn snippet(state: &Knobs) -> PlaySnippet {
 }
 
 /// "Appearance" controls: style, shape, size.
-fn appearance_panel(state: &Knobs) -> AnyView<Knobs> {
+fn appearance_panel(state: &Knobs) -> impl View<Knobs> {
     control_panel(
         "Appearance",
         vec![
@@ -284,7 +281,7 @@ fn appearance_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// "Content" controls: label, show-icon, enabled.
-fn content_panel(state: &Knobs) -> AnyView<Knobs> {
+fn content_panel(state: &Knobs) -> impl View<Knobs> {
     control_panel(
         "Content",
         vec![
@@ -332,15 +329,16 @@ fn size_menu_panel(state: &Knobs) -> impl View<Knobs> {
 /// buttons (see the module docs' `Wrap` divergence, G10). `Column` has no
 /// spacing knob of its own, the same interleaved-spacer idiom
 /// `theme_config_page`'s own `spaced_row` uses horizontally.
-fn spaced_column<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> impl View<State> {
-    let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
-    for item in items {
-        if !children.is_empty() {
-            children.push(any(SizedBox::<State>(None, Some(gap))));
-        }
-        children.push(item);
+fn spaced_column<State: 'static, V: View<State>>(items: Vec<V>, gap: f64) -> impl View<State> {
+    let mut list = column();
+    for (index, item) in items.into_iter().enumerate() {
+        list = list
+            .when(index > 0, |list| {
+                list.child(SizedBox::<State>(None, Some(gap)))
+            })
+            .child(item);
     }
-    Column(children)
+    list
 }
 
 /// The page body: the playground content plus the two dropdown panels it
@@ -353,7 +351,7 @@ fn body(state: &Knobs) -> impl View<Knobs> {
             play_preview_card("Gradient fill", gradient_fill(state)),
         ],
         vec![snippet(state)],
-        vec![appearance_panel(state), content_panel(state)],
+        (appearance_panel(state), content_panel(state)),
     );
     stack()
         .child(content)
@@ -377,6 +375,7 @@ impl Component for ButtonsPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(ButtonsPlayground))
 }

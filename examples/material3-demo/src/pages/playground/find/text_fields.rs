@@ -67,17 +67,19 @@ fn variant_label(variant: TextFieldVariant) -> &'static str {
 /// Dart string.
 fn snippet_code(state: &Knobs) -> String {
     let supporting_or_error = if state.show_error {
-        format!("\n    .error_text({:?})", state.error)
+        format!("\n.error_text({:?})", state.error)
     } else {
-        format!("\n    .supporting_text({:?})", state.supporting)
+        format!("\n.supporting_text({:?})", state.supporting)
     };
     let leading = if state.show_leading {
-        "\n    .leading(any(icon(icons::EDIT)))".to_string()
+        "\n.leading(icon(icons::EDIT))".to_string()
     } else {
         String::new()
     };
     format!(
-        "text_field(value, on_change)\n    .label({:?}){supporting_or_error}\n    .variant(TextFieldVariant::{:?})\n    .enabled({}){leading}\n    .obscured({});",
+        "text_field(state.value.clone(), |state: &mut State, value: String| {{\n    \
+         state.value = value\n}})\n.label({:?}){supporting_or_error}\n\
+         .variant(TextFieldVariant::{:?})\n.enabled({}){leading}\n.obscured({});",
         state.label, state.variant, state.enabled, state.obscure
     )
 }
@@ -137,7 +139,7 @@ fn body(state: &mut Knobs) -> impl View<Knobs> {
         ],
     );
 
-    playground_body(vec![preview], vec![snippet], vec![appearance, content])
+    playground_body(preview, vec![snippet], (appearance, content))
 }
 
 /// The nested [`Component`] this page owns its knobs in. See the page
@@ -158,6 +160,7 @@ impl Component for TextFieldsPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(TextFieldsPlayground))
 }

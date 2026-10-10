@@ -163,9 +163,9 @@ fn compact_preview(state: &Knobs) -> impl View<Knobs> {
 /// state, with icon+label actions.
 fn button_group_preview(state: &Knobs) -> impl View<Knobs> {
     button_group_actions(vec![
-        button_group_action("Left").icon(|| any(icon(icons::FORMAT_ALIGN_LEFT))),
-        button_group_action("Center").icon(|| any(icon(icons::FORMAT_ALIGN_CENTER))),
-        button_group_action("Right").icon(|| any(icon(icons::FORMAT_ALIGN_RIGHT))),
+        button_group_action("Left").icon(|| icon(icons::FORMAT_ALIGN_LEFT)),
+        button_group_action("Center").icon(|| icon(icons::FORMAT_ALIGN_CENTER)),
+        button_group_action("Right").icon(|| icon(icons::FORMAT_ALIGN_RIGHT)),
     ])
     .group_type(state.group_type)
     .variant(state.style)
@@ -190,7 +190,7 @@ fn toggle_preview(state: &Knobs) -> impl View<Knobs> {
 
 /// "Group" controls: type, size, style, neighbor squish. See the [module
 /// docs](self) for why there is no "Shape" row.
-fn group_panel(state: &Knobs) -> AnyView<Knobs> {
+fn group_panel(state: &Knobs) -> impl View<Knobs> {
     control_panel(
         "Group",
         vec![
@@ -261,13 +261,14 @@ fn button_group_snippet(state: &Knobs) -> PlaySnippet {
         "Button group",
         format!(
             "button_group_actions(vec![\n    \
-             button_group_action(\"Left\").icon(|| any(icon(icons::FORMAT_ALIGN_LEFT))),\n    \
-             button_group_action(\"Center\").icon(|| any(icon(icons::FORMAT_ALIGN_CENTER))),\n    \
-             button_group_action(\"Right\").icon(|| any(icon(icons::FORMAT_ALIGN_RIGHT))),\n\
-             ])\n    .group_type(ButtonGroupType::{group_type:?})\n    \
-             .variant(ButtonVariant::{style:?})\n    .size(ToggleButtonSize::{size:?})\n    \
-             .neighbor_squish({neighbor_squish})\n    .selected_index(Some({selected}))\n    \
-             .on_selected_index_changed(on_change);",
+             button_group_action(\"Left\").icon(|| icon(icons::FORMAT_ALIGN_LEFT)),\n    \
+             button_group_action(\"Center\").icon(|| icon(icons::FORMAT_ALIGN_CENTER)),\n    \
+             button_group_action(\"Right\").icon(|| icon(icons::FORMAT_ALIGN_RIGHT)),\n\
+             ])\n.group_type(ButtonGroupType::{group_type:?})\n\
+             .variant(ButtonVariant::{style:?})\n.size(ToggleButtonSize::{size:?})\n\
+             .neighbor_squish({neighbor_squish})\n.selected_index(Some({selected}))\n\
+             .on_selected_index_changed(|state: &mut State, next: Option<usize>| {{\n    \
+             if let Some(index) = next {{\n        state.selected = index;\n    }}\n}});",
             group_type = state.group_type,
             style = state.style,
             size = state.size,
@@ -283,9 +284,11 @@ fn toggle_button_snippet(state: &Knobs) -> PlaySnippet {
     play_snippet(
         "Toggle button",
         format!(
-            "toggle_button({checked}, on_checked_change)\n    .icon(any(icon(icons::STAR)))\n    \
-             .checked_icon(any(icon(icons::STAR)))\n    .label(\"Star\")\n    \
-             .variant(ButtonVariant::{style:?})\n    .size(ToggleButtonSize::{size:?});",
+            "toggle_button({checked}, |state: &mut State, checked: bool| {{\n    \
+             state.checked = checked\n}})\n\
+             .icon(icon(icons::STAR))\n\
+             .checked_icon(icon(icons::STAR))\n.label(\"Star\")\n\
+             .variant(ButtonVariant::{style:?})\n.size(ToggleButtonSize::{size:?});",
             checked = state.toggle_checked,
             style = state.style,
             size = state.size,
@@ -303,7 +306,7 @@ fn body(state: &Knobs) -> impl View<Knobs> {
             play_preview_card("Toggle button", toggle_preview(state)),
         ],
         vec![button_group_snippet(state), toggle_button_snippet(state)],
-        vec![group_panel(state)],
+        group_panel(state),
     );
     stack()
         .child(content)
@@ -327,6 +330,7 @@ impl Component for ButtonGroupPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(ButtonGroupPlayground))
 }
