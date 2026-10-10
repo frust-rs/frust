@@ -27,6 +27,7 @@ use frust_drive::hotpatch::session::{
     DesktopStart, HotSession, Outcome, RestartReason, SessionHost, StartError,
     redact_discovery_line, start_desktop,
 };
+use frust_drive::hotpatch::watch::{WATCH_DEBOUNCE, WatchSet, watch_set};
 use frust_drive::ios_run::{self, IosLaunch, simctl};
 use frust_drive::manifest;
 use frust_drive::packages::CargoLocator;
@@ -990,14 +991,6 @@ fn settle_simulator_launch(
 /// busy-spinning between polls.
 const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Debounce window for [`watch_loop`]: trailing-edge coalescing keeps consuming
-/// raw change ticks arriving within this window before acting, so a save that fires
-/// several raw filesystem events (an editor's rename-then-write, a formatter's
-/// follow-up write, …) triggers one relaunch, not several. 100 ms covers
-/// atomic-save and format-on-save bursts, and measured milestone-1 steady-state
-/// save->`on_change` latency at 312–324 ms.
-const WATCH_DEBOUNCE: Duration = Duration::from_millis(100);
-
 /// `frust run --watch`'s desktop file-watch → rebuild → relaunch loop.
 /// Watches `<root>/src` (recursive) and
 /// `<root>/Cargo.toml` via `hooks.spawn_watcher`, wiring its every raw event
@@ -1261,67 +1254,6 @@ fn desktop_cargo_run_env(plan: &DesktopPlan) -> Vec<(String, String)> {
 // `frust_drive::hotpatch::session` instead of relaunching `cargo run`.
 // ---------------------------------------------------------------------------
 
-/// What the hot watcher registers, by the session graph's path classes. The
-/// directories are watched recursively, the files individually; a path that
-/// does not exist is skipped by the real watcher, not an error.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct WatchSet {
-    /// `src/` of every workspace member: a thin build can patch these.
-    replayable: Vec<PathBuf>,
-    /// `src/` of every local path package outside the workspace: only a
-    /// fat rebuild picks these up, so the session answers with a restart.
-    local_non_member: Vec<PathBuf>,
-    /// Manifests, build scripts, the lockfile, cargo config and toolchain
-    /// files: any change is a restart.
-    build_inputs: Vec<PathBuf>,
-    /// What a changed path is judged relative to ([`is_relevant_path`]):
-    /// the workspace root and every package directory — never a `src/`
-    /// tree, whose own `build/` or `target/` module is source.
-    roots: Vec<PathBuf>,
-}
-
-impl WatchSet {
-    /// Every directory to watch recursively.
-    fn dirs(&self) -> impl Iterator<Item = &PathBuf> {
-        self.replayable.iter().chain(&self.local_non_member)
-    }
-}
-
-/// Derives the [`WatchSet`] from the session's workspace graph: member and
-/// non-member `src/` trees, each package's manifest and build script plus
-/// the workspace-level build inputs, and the package directories paths are
-/// judged relative to.
-fn watch_set_from_graph(graph: &WorkspaceGraph) -> WatchSet {
-    let mut set = WatchSet::default();
-    let mut inputs = BTreeSet::new();
-    set.roots.push(graph.workspace_root().to_path_buf());
-    for package in graph.packages() {
-        let src = package.dir.join("src");
-        if package.member {
-            set.replayable.push(src);
-        } else {
-            set.local_non_member.push(src);
-        }
-        set.roots.push(package.dir.clone());
-        inputs.insert(package.dir.join("Cargo.toml"));
-        inputs.insert(package.dir.join("build.rs"));
-    }
-    let root = graph.workspace_root();
-    for name in [
-        "Cargo.toml",
-        "Cargo.lock",
-        "frust.toml",
-        "rust-toolchain",
-        "rust-toolchain.toml",
-        ".cargo/config",
-        ".cargo/config.toml",
-    ] {
-        inputs.insert(root.join(name));
-    }
-    set.build_inputs = inputs.into_iter().collect();
-    set
-}
-
 /// The session surface the hot loop drives: [`HotSession`] in production, a
 /// scripted fake in tests.
 trait HotSessionHandle {
@@ -1388,7 +1320,7 @@ trait HotBackend {
 fn load_watch_set(runner: &dyn ProcessRunner, root: &Path, package: &str) -> Result<WatchSet> {
     let graph = WorkspaceGraph::load(runner, &root.join("Cargo.toml"), None, package, None)
         .map_err(|err| anyhow::anyhow!("{err}"))?;
-    Ok(watch_set_from_graph(&graph))
+    Ok(watch_set(&graph))
 }
 
 /// [`HotBackend`] over the real `frust_drive` desktop session.
@@ -3452,7 +3384,7 @@ mod tests {
     #[test]
     fn the_watch_set_has_the_three_path_classes() {
         let graph = WorkspaceGraph::from_metadata(METADATA, "app", None).unwrap();
-        let set = watch_set_from_graph(&graph);
+        let set = watch_set(&graph);
         assert_eq!(set.replayable, vec![PathBuf::from("/w/app/src")]);
         assert_eq!(set.local_non_member, vec![PathBuf::from("/x/material/src")]);
         for input in [

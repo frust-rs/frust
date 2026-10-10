@@ -32,8 +32,10 @@
 //!   §B12's System/Network tabs), a sibling to `devtools_bridge` rather than
 //!   part of it — see that module's doc for why.
 //! - [`watch`] is the fourth — [`SourceWatchers`] owns one `notify` watcher
-//!   plus debounce thread per session with "Watch: restart on save" on,
+//!   plus debounce thread per session with "Watch: hot patch on save" on,
 //!   posting a debounced `Message::WatchTriggered` into the engine channel.
+//!   Its hot watch set and [`WATCH_DEBOUNCE`] are `frust-drive`'s
+//!   `hotpatch::watch`, the same ones `frust run --watch` uses.
 //!
 //! The desktop `cargo run` path and the multi-phase device pipeline (build →
 //! install → launch → logcat, via `frust-drive`'s `android_run`/`ios_run`
