@@ -1502,18 +1502,14 @@ pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 /// [`Router`]) is a separate opt-in, not automatic here.
 ///
 /// ```no_run
-/// use frust::{Route, Router, View, deep_links, text};
+/// use frust::{Component, Route, Router, View, deep_links, text};
 ///
 /// struct AppState;
 ///
+/// #[derive(Default)]
 /// struct NavDemo;
 ///
-/// fn build_router() -> Router<AppState> {
-///     // A route builder returns any `View`, so it needs no erasure.
-///     Router::new(vec![Route::new("/", |_params| text("home"))])
-/// }
-///
-/// impl frust::Component for NavDemo {
+/// impl Component for NavDemo {
 ///     type State = AppState;
 ///
 ///     fn init(&self) -> AppState {
@@ -1521,13 +1517,20 @@ pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 ///     }
 ///
 ///     fn build(&self, _state: &mut AppState) -> impl View<AppState> {
-///         let _router = build_router();
+///         let _router = Self::router();
 ///         // A late-subscribed read: `initial` sees a cold-start link (if any);
 ///         // `latest` is the live signal a rebuild tracks for warm links.
 ///         let links = deep_links();
 ///         let _ = links.initial;
 ///         let _ = links.latest;
 ///         text("nav demo")
+///     }
+/// }
+///
+/// impl NavDemo {
+///     fn router() -> Router<AppState> {
+///         // A route builder returns any `View`, so it needs no erasure.
+///         Router::new(vec![Route::new("/", |_params| text("home"))])
 ///     }
 /// }
 /// # let _ = NavDemo;
