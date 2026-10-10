@@ -9,7 +9,7 @@
 //! were dropped from `base/mod.rs` once the real category modules landed, so
 //! no second case competes for it.
 
-use frust_core::{AnyView, any};
+use frust_core::View;
 use frust_widgets::{
     ButtonStyle, CrossAxisAlignment, GestureDetector, SizedBox, button, column, container,
     icon_button, icons, row, text,
@@ -17,13 +17,13 @@ use frust_widgets::{
 use peniko::Color;
 
 use super::framed;
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 /// Shared accent used for the gesture-detector's visible target.
 const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 
-fn button_case() -> AnyView<()> {
-    any(framed(
+fn button_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 row()
@@ -61,11 +61,11 @@ fn button_case() -> AnyView<()> {
                     .cross_axis(CrossAxisAlignment::Center),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn gesture_detector_case() -> AnyView<()> {
-    any(framed(
+fn gesture_detector_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 GestureDetector(
@@ -79,11 +79,11 @@ fn gesture_detector_case() -> AnyView<()> {
             .child(SizedBox(None, Some(12.0)))
             .child(text("wraps a target; tap or long-press to fire").size(12.0))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn icon_button_case() -> AnyView<()> {
-    any(framed(
+fn icon_button_case() -> impl View<()> {
+    framed(
         row()
             .child(icon_button(icons::CLOSE, "Close", |_: &mut ()| {}))
             .child(SizedBox(Some(24.0), None))
@@ -91,7 +91,7 @@ fn icon_button_case() -> AnyView<()> {
             .child(SizedBox(Some(24.0), None))
             .child(icon_button(icons::SEND, "Send", |_: &mut ()| {}).ink(ACCENT))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.
@@ -103,7 +103,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: button_case,
+        build: case_build!(button_case),
     },
     Case {
         slug: "gesture-detector",
@@ -112,7 +112,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: gesture_detector_case,
+        build: case_build!(gesture_detector_case),
     },
     Case {
         slug: "icon-button",
@@ -121,6 +121,6 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: icon_button_case,
+        build: case_build!(icon_button_case),
     },
 ];

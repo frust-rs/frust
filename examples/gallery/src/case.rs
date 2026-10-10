@@ -36,7 +36,9 @@ pub enum Design {
 /// `Case` carries no reactive runtime, no owner and no clock (see the
 /// [crate docs](crate) and `crates/frust-testing/src/frame.rs`'s
 /// `record_view`, the pure-`View` recorder every consumer of this registry
-/// records a `Case` through).
+/// records a `Case` through). A case constructor itself returns
+/// `impl View<()>` and is registered through `case_build!`, the one place
+/// that erasure happens.
 #[derive(Clone, Copy)]
 pub struct Case {
     /// The website page's file stem (e.g. `button`, `icon-button`,
@@ -69,6 +71,21 @@ pub struct Case {
     /// rebuild pass, exactly like a `Component::build`.
     pub build: fn() -> frust_core::AnyView<()>,
 }
+
+/// Register a case constructor as a [`Case::build`]: `build:
+/// case_build!(button_case)`, where `fn button_case() -> impl View<()>`.
+///
+/// Expands to a non-capturing closure, `|| AnyView::new(path())`, which
+/// coerces to `Case::build`'s `fn() -> AnyView<()>` pointer type — so it is
+/// usable inside the `const` registry slices, and a constructor never has to
+/// erase its own tree. This macro is the registry's single erasure point.
+macro_rules! case_build {
+    ($build:path) => {
+        // erasure: keep the registry stores heterogeneous cases behind one fn-pointer type (`Case::build`)
+        || ::frust_core::AnyView::new($build())
+    };
+}
+pub(crate) use case_build;
 
 impl Case {
     /// The default logical viewport a case is laid out at when it has no
@@ -192,7 +209,13 @@ pub const WARM_PASS_OPT_INS: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
+    use frust_core::View;
+
     use super::*;
+
+    fn probe() -> impl View<()> {
+        frust_widgets::text("Hello")
+    }
 
     fn case_at(time_ms: u64) -> Case {
         Case {
@@ -202,7 +225,7 @@ mod tests {
             scale: Case::DEFAULT_SCALE,
             time_ms,
             design: Design::Base,
-            build: || frust_core::any(frust_widgets::text("Hello")),
+            build: case_build!(probe),
         }
     }
 

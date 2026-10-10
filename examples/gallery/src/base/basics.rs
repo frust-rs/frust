@@ -10,7 +10,7 @@
 //! straight onto the frame is left at its themed `on_surface` default rather
 //! than hard-coded.
 
-use frust_core::{AnyView, any};
+use frust_core::{AnyView, View, any};
 use frust_widgets::{
     Align, Alignment, Column, CrossAxisAlignment, EdgeInsets, colored_box, container, safe_area,
     scaffold, text,
@@ -18,7 +18,7 @@ use frust_widgets::{
 use peniko::Color;
 
 use super::framed;
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 const CARD_A: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 const CARD_B: Color = Color::from_rgb8(0x10, 0xB9, 0x81);
@@ -27,7 +27,8 @@ const CARD_B: Color = Color::from_rgb8(0x10, 0xB9, 0x81);
 /// differently-decorated `container`s — held in one `Vec<AnyView<()>>`, the
 /// exact erasure a `Column`'s children require (the page's "Why every
 /// container needs it" section).
-fn any_view_case() -> AnyView<()> {
+fn any_view_case() -> impl View<()> {
+    // erasure: keep the `any-view` case demonstrates a heterogeneous `Vec<AnyView<()>>`
     let children: Vec<AnyView<()>> = vec![
         any(text("AnyView erases").size(18.0)),
         any(container(text("child A").color(Color::WHITE))
@@ -37,9 +38,7 @@ fn any_view_case() -> AnyView<()> {
             .fill(CARD_B)
             .radius(6.0)),
     ];
-    any(framed(
-        Column(children).cross_axis(CrossAxisAlignment::Center),
-    ))
+    framed(Column(children).cross_axis(CrossAxisAlignment::Center))
 }
 
 pub(super) const ANY_VIEW: Case = Case {
@@ -49,21 +48,21 @@ pub(super) const ANY_VIEW: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: any_view_case,
+    build: case_build!(any_view_case),
 };
 
 /// `container` / `colored_box`: a filled, rounded, bordered box around a text
 /// child — the page's own swatch idiom (`examples/beui-demo`'s
 /// `gpu_effects.rs`). The swatch is deliberately smaller than the frame so
 /// the box reads as a box rather than as the whole preview.
-fn container_case() -> AnyView<()> {
-    any(framed(
+fn container_case() -> impl View<()> {
+    framed(
         container(text("Hello, Frust").color(Color::WHITE).size(20.0))
             .fill(CARD_A)
             .radius(12.0)
             .border(Color::WHITE, 2.0)
             .size_centered(260.0, 140.0),
-    ))
+    )
 }
 
 pub(super) const CONTAINER: Case = Case {
@@ -73,7 +72,7 @@ pub(super) const CONTAINER: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: container_case,
+    build: case_build!(container_case),
 };
 
 /// `safe_area`: pads a child by a floored per-edge minimum. This pure-`View`
@@ -82,10 +81,10 @@ pub(super) const CONTAINER: Case = Case {
 /// one knob that still shows here, so the case sets it explicitly, floating
 /// the inner panel inward from the frame on every edge. The inset gap is the
 /// cleared surface itself, so it reads light or dark with the variant.
-fn safe_area_case() -> AnyView<()> {
-    any(framed(
+fn safe_area_case() -> impl View<()> {
+    framed(
         safe_area(colored_box().fill(CARD_B).radius(8.0).expand()).minimum(EdgeInsets::all(24.0)),
-    ))
+    )
 }
 
 pub(super) const SAFE_AREA: Case = Case {
@@ -95,7 +94,7 @@ pub(super) const SAFE_AREA: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: safe_area_case,
+    build: case_build!(safe_area_case),
 };
 
 /// `scaffold`: the four fixed chrome slots — an app bar and a bottom bar
@@ -105,15 +104,15 @@ pub(super) const SAFE_AREA: Case = Case {
 /// [`super::framed`] wrapper is needed here. No `.background(..)` is set
 /// either: a scaffold with no background paints none, which leaves the body
 /// slot showing the variant's own cleared surface between the two bars.
-fn scaffold_case() -> AnyView<()> {
-    let app_bar = any(container(text("App Bar").color(Color::WHITE).size(16.0))
+fn scaffold_case() -> impl View<()> {
+    let app_bar = container(text("App Bar").color(Color::WHITE).size(16.0))
         .fill(CARD_A)
-        .size_centered(Case::DEFAULT_SIZE.width, 48.0));
-    let bottom_bar = any(container(text("Bottom Bar").color(Color::WHITE).size(14.0))
+        .size_centered(Case::DEFAULT_SIZE.width, 48.0);
+    let bottom_bar = container(text("Bottom Bar").color(Color::WHITE).size(14.0))
         .fill(CARD_B)
-        .size_centered(Case::DEFAULT_SIZE.width, 40.0));
+        .size_centered(Case::DEFAULT_SIZE.width, 40.0);
     let body = Align(Alignment::CENTER, text("Body").size(18.0));
-    any(scaffold(body).app_bar(app_bar).bottom_bar(bottom_bar))
+    scaffold(body).app_bar(app_bar).bottom_bar(bottom_bar)
 }
 
 pub(super) const SCAFFOLD: Case = Case {
@@ -123,5 +122,5 @@ pub(super) const SCAFFOLD: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: scaffold_case,
+    build: case_build!(scaffold_case),
 };
