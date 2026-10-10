@@ -34,7 +34,7 @@ pub fn render(
 ) {
     // wordmark(1)+blank(1)+"Targets:"(1)+targets+blank(1)+mode(1)+flavor(1)+
     // defines(1)+auto-apply(1)+blank(1)+buttons(1)+hint(1), plus the border (2).
-    let inner_rows = modal.targets.len() as u16 + 10;
+    let inner_rows = modal.targets.len() as u16 + 11;
     let height = (inner_rows + 2).min(area.height);
     let box_ = centered(area, MODAL_WIDTH, height);
 
@@ -173,45 +173,37 @@ pub fn render(
     );
     advance(&mut y);
 
+    // ── Run hot checkbox ─────────────────────────────────────────────────
+    // Off: every target launches cold, whatever it could have done hot.
+    render_checkbox(
+        frame,
+        mouse,
+        row_rect(y),
+        "Run hot",
+        modal.run_hot,
+        modal.focus == RunFocus::RunHot,
+        true,
+        RegionId::RunHotRow,
+        Message::RunConfigToggleRunHot,
+        theme,
+    );
+    advance(&mut y);
+
     // ── Auto-apply checkbox ──────────────────────────────────────────────
     // Every hot-capable target launches hot either way; this only decides
     // whether the runner also arms each hot session's watcher (on) or leaves
-    // applying to `r` (off).
-    let auto_apply_focused = modal.focus == RunFocus::AutoApply;
-    let auto_apply_line = Line::from(vec![
-        Span::styled(
-            if auto_apply_focused {
-                "\u{25b8} "
-            } else {
-                "  "
-            }
-            .to_string(),
-            Style::default().fg(theme.accent()),
-        ),
-        Span::styled(
-            if modal.auto_apply { "[x] " } else { "[ ] " }.to_string(),
-            Style::default().fg(if modal.auto_apply {
-                theme.success()
-            } else {
-                theme.muted()
-            }),
-        ),
-        Span::styled(
-            "Auto-apply on save".to_string(),
-            if auto_apply_focused {
-                Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD)
-            } else if modal.auto_apply {
-                Style::default().fg(theme.fg())
-            } else {
-                Style::default().fg(theme.muted())
-            },
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(auto_apply_line), row_rect(y));
-    mouse.click(
+    // applying to `r` (off). Dimmed while "Run hot" is off.
+    render_checkbox(
+        frame,
+        mouse,
         row_rect(y),
+        "Auto-apply on save",
+        modal.auto_apply,
+        modal.focus == RunFocus::AutoApply,
+        modal.run_hot,
         RegionId::RunAutoApplyRow,
         Message::RunConfigToggleAutoApply,
+        theme,
     );
     advance(&mut y);
 
@@ -279,6 +271,53 @@ fn field_label(label: &str, focused: bool, theme: &Theme) -> Span<'static> {
             Style::default().fg(theme.muted())
         },
     )
+}
+
+/// Render a checkbox row and register its click region. A disabled row is
+/// dimmed throughout (the click still lands, and the engine ignores it).
+#[allow(clippy::too_many_arguments)]
+fn render_checkbox(
+    frame: &mut Frame,
+    mouse: &mut MouseCtx,
+    rect: Rect,
+    label: &str,
+    checked: bool,
+    focused: bool,
+    enabled: bool,
+    id: RegionId,
+    on_click: Message,
+    theme: &Theme,
+) {
+    let line = Line::from(vec![
+        Span::styled(
+            if focused { "\u{25b8} " } else { "  " }.to_string(),
+            Style::default().fg(theme.accent()),
+        ),
+        Span::styled(
+            if checked { "[x] " } else { "[ ] " }.to_string(),
+            Style::default().fg(if checked && enabled {
+                theme.success()
+            } else {
+                theme.muted()
+            }),
+        ),
+        Span::styled(
+            label.to_string(),
+            if !enabled {
+                Style::default()
+                    .fg(theme.muted())
+                    .add_modifier(Modifier::DIM)
+            } else if focused {
+                Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD)
+            } else if checked {
+                Style::default().fg(theme.fg())
+            } else {
+                Style::default().fg(theme.muted())
+            },
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), rect);
+    mouse.click(rect, id, on_click);
 }
 
 /// Render a labeled text field row (flavor/defines) and register its click

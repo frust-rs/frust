@@ -139,7 +139,8 @@ session's watcher and hot session are dropped — starts each spec that passes
 runs the fat build and launch; a spec that fails it launches through the supervisor,
 restart-on-save, with an Info toast naming why it runs cold. The run dialog's 'Auto-apply on save' checkbox
 (`o` opens the dialog; on by default) is `auto_apply`: off, the session still runs hot and `r`
-applies edits on demand; 'Run on all devices' launches with it on. `W` toggles the watcher on a
+applies edits on demand; 'Run on all devices' launches with it on. A 'Run hot' checkbox above it (default on) launches
+everything cold, with no toast, when off. `W` toggles the watcher on a
 running session. `R` on a hot session is a full restart that re-fats and relaunches hot, with a
 watcher only if it had one. MCP's `restart_app` and DAP's
 `frustRestart` bypass `restart_session_at` (the runner stops a hot session they name), so their

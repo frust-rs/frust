@@ -8,18 +8,18 @@ expression: "render_to_string(100, 30, &run_config_modal_state())"
  PROJECTS                │                                                                          
   ▸ huddle               │  Dashboard                                                               
                          │  ━━━━━━━━━━                                                              
- DEVICES (1) ↻ R         │                                                                          
-    [x] ● OnePlus 9╭ Run · huddle ──────────────────────────────────────────────╮re.                
-  ▸ [ ] ● Pixel 7 a│                                                            │▓▓                 
-    [ ] ● iPhone SE│  Targets                                                   │▓▓                 
-                   │    [ ] desktop                                             │▓▓                 
- SESSIONS          │    [x] OnePlus 9                                           │▓▓                 
-   none running    │    [ ] Pixel 7                                             │▓▓                 
-                   │    [ ] iPhone SE                                           │▓▓                 
- ACTIONS           │                                                            │▓▓                 
-   New project · n │  Mode     ‹ release ›                                      │▓▓                 
-   Add plugin · a  │  Flavor   paid                                             │▓▓                 
-   Doctor · i      │  Defines  FRUST_TRACE=1█                                   │▓▓                 
+ DEVICES (1) ↻ R   ╭ Run · huddle ──────────────────────────────────────────────╮                   
+    [x] ● OnePlus 9│                                                            │▓▓.                
+  ▸ [ ] ● Pixel 7 a│  Targets                                                   │▓▓                 
+    [ ] ● iPhone SE│    [ ] desktop                                             │▓▓                 
+                   │    [x] OnePlus 9                                           │▓▓                 
+ SESSIONS          │    [ ] Pixel 7                                             │▓▓                 
+   none running    │    [ ] iPhone SE                                           │▓▓                 
+                   │                                                            │▓▓                 
+ ACTIONS           │  Mode     ‹ release ›                                      │▓▓                 
+   New project · n │  Flavor   paid                                             │▓▓                 
+   Add plugin · a  │  Defines  FRUST_TRACE=1█                                   │▓▓                 
+   Doctor · i      │    [x] Run hot                                             │▓▓                 
    Build · b       │    [x] Auto-apply on save                                  │▓▓                 
    Clean · c       │                                                            │▓▓                 
    MCP off · M     │   Launch (1)     Cancel                                    │▓▓                 
