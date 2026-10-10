@@ -124,17 +124,20 @@ so the `close_on_exit`/re-registration/focus handling above is written once.
 
 A hot session is the runner's, not the supervisor's. `launch_watched_sessions` — reached from the
 run-config modal's watch checkbox (`Effect::LaunchWatchedSessions`, desktop specs only; a device
-session gains watch through `W`) and from every relaunch of a watched session in `apply_effect`'s `RestartSession` arm, after the replaced session's watcher and
-hot session are dropped — starts a spec that passes `SessionSpec::hot_precondition` (a Debug
-desktop, Android-device or iOS-simulator build) as a `HotSessions` entry, sending `RegisterSession`
-then `Message::EnableWatch { session }` before its worker runs the fat build and launch; a spec that
-fails it launches through the supervisor, restart-on-save, with an Info toast naming why. So `R` on
-a hot session is a full restart that re-fats, and the watch flag survives its own relaunch. MCP's
-`restart_app` and DAP's `frustRestart` bypass `restart_session_at` (the runner stops a hot session
-they name), so their replacement starts unwatched through the supervisor. The replaced session's
-own watcher does not linger: `on_session_event` turns `watch` off for any session landing
-`SessionState::Killed` regardless of which path killed it (an `Exited` build failure keeps watch on, so the next save relaunches it; Killed tabs stay parked, see `tui-mcp-sessions-tab-uncapped`), and `close_tab` clears it immediately on
-its own stop paths (see [LIMITATIONS.md](LIMITATIONS.md)'s `no-hot-reload-restart-is-a-rebuild`).
+session gains watch through `W`) and from every relaunch of a watched session in `apply_effect`'s
+`RestartSession` arm, after the replaced session's watcher and hot session are dropped — starts a
+spec that passes `SessionSpec::hot_precondition` (a Debug desktop, Android-device or iOS-simulator
+build) as a `HotSessions` entry, sending `RegisterSession` then `Message::EnableWatch { session }`
+before its worker runs the fat build and launch; a spec that fails it launches through the
+supervisor, restart-on-save, with an Info toast naming why. So `R` on a hot session is a full
+restart that re-fats, and the watch flag survives its own relaunch. MCP's `restart_app` and DAP's
+`frustRestart` bypass `restart_session_at` (the runner stops a hot session they name), so their
+replacement starts unwatched through the supervisor. The replaced session's own watcher does not
+linger: `on_session_event` turns `watch` off for any session landing `SessionState::Killed`
+regardless of which path killed it (an `Exited` build failure keeps watch on, so the next save
+relaunches it; Killed tabs stay parked, see `tui-mcp-sessions-tab-uncapped`), and `close_tab` clears
+it immediately on its own stop paths (see [LIMITATIONS.md](LIMITATIONS.md)'s
+`no-hot-reload-restart-is-a-rebuild`).
 
 `AppState::mcp` holds the running server's handle (`None` = stopped); `mcp_panel_open`/`mcp_error`
 back the MCP panel (§B13) and its retained failure reason. `Engine::start_mcp`/`stop_mcp` bind or
