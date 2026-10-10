@@ -105,6 +105,7 @@ impl Scenario for D1 {
         "DB writes (frust-database)"
     }
 
+    // erasure: keep Scenario::build feeds the dyn SCENARIOS table
     fn build(&self, _state: &mut BenchState) -> AnyView<BenchState> {
         any(component(D1Write))
     }
@@ -262,7 +263,7 @@ impl Component for D1Write {
             AsyncValue::Error(_) => "D1 run task failed".to_string(),
         };
 
-        any(Align(Alignment::new(0.0, 0.0), text(status).size(18.0)))
+        Align(Alignment::new(0.0, 0.0), text(status).size(18.0))
     }
 }
 

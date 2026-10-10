@@ -78,9 +78,9 @@ use std::time::Duration;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use frust::{Align, Alignment, container, stack};
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, Padding, PlatformViewView, SizedBox, Theme, View, any, button, component,
-    inflexible, row, slider, text, use_context,
+    Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
+    Padding, PlatformViewView, SizedBox, Theme, View, button, component, inflexible, row, slider,
+    text, use_context,
 };
 use frust_video_player::api::{VideoPlayerHandle, video_view};
 use frust_video_player::{
@@ -249,10 +249,10 @@ impl Component for VideoPlayerPage {
         children.push(gap(12.0));
         children.push(inflexible(filler_rows()));
 
-        any(Padding(
+        Padding(
             EdgeInsets::all(16.0),
             FlexView::new(Axis::Vertical, children),
-        ))
+        )
     }
 }
 
@@ -311,15 +311,15 @@ fn block(children: Vec<FlexChild<VideoPageState>>) -> FlexChild<VideoPageState> 
 /// the device-viewport lesson behind the row count — duplicated
 /// locally per that module's own precedent.
 fn filler_rows() -> impl View<VideoPageState> {
-    let rows: Vec<AnyView<VideoPageState>> = (1..=64)
+    let rows = (1..=64)
         .map(|i| {
-            any(Padding(
+            inflexible(Padding(
                 EdgeInsets::symmetric(0.0, 8.0),
                 text(format!("row {i:02} \u{2014} video page filler")).size(12.0),
             ))
         })
         .collect();
-    FlexView::new(Axis::Vertical, rows.into_iter().map(inflexible).collect())
+    FlexView::new(Axis::Vertical, rows)
 }
 
 /// Format a [`Duration`] as `mm:ss`, truncating sub-second precision.
@@ -464,11 +464,11 @@ fn slot_block(
     let slot = maybe_debug_fill(video_view(handle, fit).size(VIDEO_W, VIDEO_H));
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    let slot_view: AnyView<VideoPageState> = any(stack()
+    let slot_view = stack()
         .child(slot)
-        .child(mobile_state_chip(_playback_state)));
+        .child(mobile_state_chip(_playback_state));
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let slot_view: AnyView<VideoPageState> = any(slot);
+    let slot_view = slot;
 
     block(vec![
         inflexible(label("Picture")),

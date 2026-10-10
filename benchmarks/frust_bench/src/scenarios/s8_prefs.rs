@@ -43,7 +43,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use frust::{
-    Align, Alignment, AnyView, AsyncValue, Component, Get, Stack, UseTask, View, any, component,
+    Align, Alignment, AnyView, AsyncValue, Component, Get, UseTask, View, any, component, stack,
     text, use_task,
 };
 use frust_shared_preferences::SharedPreferences;
@@ -71,6 +71,7 @@ impl Scenario for S8 {
         "Plugin-call overhead (shared_preferences)"
     }
 
+    // erasure: keep Scenario::build feeds the dyn SCENARIOS table
     fn build(&self, _state: &mut BenchState) -> AnyView<BenchState> {
         any(component(S8Prefs))
     }
@@ -237,17 +238,11 @@ impl Component for S8Prefs {
             AsyncValue::Error(_) => "S8 run task failed".to_string(),
         };
 
-        let mut layers: Vec<AnyView<S8State>> = Vec::new();
-        // Burst variant: an S1-style animation runs on the UI thread while the
-        // plugin loop hammers the boundary off-thread.
-        if state.burst {
-            layers.push(any(SpinBox));
-        }
-        layers.push(any(Align(
-            Alignment::new(0.0, 0.0),
-            text(status).size(18.0),
-        )));
-        any(Stack(layers))
+        stack()
+            // Burst variant: an S1-style animation runs on the UI thread while the
+            // plugin loop hammers the boundary off-thread.
+            .when(state.burst, |layers| layers.child(SpinBox))
+            .child(Align(Alignment::new(0.0, 0.0), text(status).size(18.0)))
     }
 }
 

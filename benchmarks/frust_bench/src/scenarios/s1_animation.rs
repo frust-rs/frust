@@ -55,6 +55,7 @@ impl Scenario for S1 {
         "Animation storm (bubble count derived per play area, perpetual physics)"
     }
 
+    // erasure: keep Scenario::build feeds the dyn SCENARIOS table
     fn build(&self, state: &mut BenchState) -> AnyView<BenchState> {
         let fps = state.fps.get();
         let fps_label = if fps > 0.0 {

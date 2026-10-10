@@ -83,9 +83,9 @@
 use std::time::Duration;
 
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Padding,
-    RwSignal, Set, SizedBox, Theme, View, any, button, checkbox, deep_links, inflexible, row,
-    spawn_local, text, text_input, use_context,
+    ButtonStyle, Color, EdgeInsets, FlexChild, Get, GetUntracked, Padding, RwSignal, Set, SizedBox,
+    Theme, View, button, checkbox, column, deep_links, inflexible, row, spawn_local, text,
+    text_input, use_context,
 };
 use frust_auth_session::{
     AuthSession, AuthSessionError, AuthSessionOutcome, AuthSessionRequest,
@@ -466,72 +466,79 @@ pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
         None => "loopback port: none".to_string(),
     };
 
-    let mut children: Vec<AnyView<PlaygroundState>> = vec![
-        any(text("Auth session").size(13.0).color(accent())),
-        any(text(
-            "frust-auth-session's AuthSession::start, exercised from real button presses \
+    let loopback_supported = LoopbackSession::is_supported();
+    let body = column()
+        .child(text("Auth session").size(13.0).color(accent()))
+        .child(
+            text(
+                "frust-auth-session's AuthSession::start, exercised from real button presses \
                  against the committed gate pages (plugins/auth-session/gate). Callback proves \
                  the successful round trip; Cancel test and Cookie check both open cookie.html \
                  for a manually-dismissed session; Busy proves the process-wide single-session \
                  guard.",
+            )
+            .size(11.0)
+            .color(muted()),
         )
-        .size(11.0)
-        .color(muted())),
-        any(SizedBox(None, Some(12.0))),
-        any(text_input(base_url, |_state: &mut PlaygroundState, value| {
-            base_url_sig().set(value);
-        })
-        .placeholder("https://frust.dev/gate/auth-session/")),
-        any(SizedBox(None, Some(8.0))),
-        any(checkbox(
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            text_input(base_url, |_state: &mut PlaygroundState, value| {
+                base_url_sig().set(value);
+            })
+            .placeholder("https://frust.dev/gate/auth-session/"),
+        )
+        .child(SizedBox(None, Some(8.0)))
+        .child(checkbox(
             ephemeral,
             "Ephemeral",
             |_state: &mut PlaygroundState, requested: bool| {
                 ephemeral_sig().set(requested);
             },
-        )),
-        any(SizedBox(None, Some(12.0))),
-        any(row()
-            .child(
-                button(
-                    "Callback",
-                    fire("Callback", "callback.html?scheme=frustplay"),
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            row()
+                .child(
+                    button(
+                        "Callback",
+                        fire("Callback", "callback.html?scheme=frustplay"),
+                    )
+                    .style(ButtonStyle::Primary)
+                    .small(),
                 )
-                .style(ButtonStyle::Primary)
-                .small(),
-            )
-            .push(gap_h(8.0))
-            .child(
-                button("Cancel test", fire("Cancel test", "cookie.html"))
-                    .style(ButtonStyle::Secondary)
-                    .small(),
-            )),
-        any(SizedBox(None, Some(8.0))),
-        any(row()
-            .child(
-                button("Busy", fire_busy)
-                    .style(ButtonStyle::Secondary)
-                    .small(),
-            )
-            .push(gap_h(8.0))
-            .child(
-                button("Cookie check", fire("Cookie check", "cookie.html"))
-                    .style(ButtonStyle::Secondary)
-                    .small(),
-            )),
-        any(SizedBox(None, Some(8.0))),
-        any(text(status_line).size(12.0)),
-        any(SizedBox(None, Some(12.0))),
-        any(text(latest_line).size(12.0).color(accent())),
-        any(SizedBox(None, Some(4.0))),
-        any(text(supported_line).size(11.0).color(muted())),
-    ];
-
-    if LoopbackSession::is_supported() {
-        children.extend([
-            any(SizedBox(None, Some(16.0))),
-            any(text("Desktop loopback").size(13.0).color(accent())),
-            any(text(
+                .push(gap_h(8.0))
+                .child(
+                    button("Cancel test", fire("Cancel test", "cookie.html"))
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                ),
+        )
+        .child(SizedBox(None, Some(8.0)))
+        .child(
+            row()
+                .child(
+                    button("Busy", fire_busy)
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("Cookie check", fire("Cookie check", "cookie.html"))
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                ),
+        )
+        .child(SizedBox(None, Some(8.0)))
+        .child(text(status_line).size(12.0))
+        .child(SizedBox(None, Some(12.0)))
+        .child(text(latest_line).size(12.0).color(accent()))
+        .child(SizedBox(None, Some(4.0)))
+        .child(text(supported_line).size(11.0).color(muted()))
+        .when(loopback_supported, |col| {
+            col
+                .child(SizedBox(None, Some(16.0)))
+                .child(text("Desktop loopback").size(13.0).color(accent()))
+                .child(text(
                 "frust-auth-session's LoopbackSession (RFC 8252 §7.3) plus frust-oauth-native's \
                  PKCE/state/callback builders, driven against the same gate directory's \
                  loopback.html — a fake authorization server, never a real identity provider. \
@@ -541,9 +548,9 @@ pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
                  single-session slot.",
             )
             .size(11.0)
-            .color(muted())),
-            any(SizedBox(None, Some(8.0))),
-            any(row()
+            .color(muted()))
+                .child(SizedBox(None, Some(8.0)))
+                .child(row()
                 .child(
                     button(
                         "Loopback login",
@@ -572,9 +579,9 @@ pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
                     )
                     .style(ButtonStyle::Secondary)
                     .small(),
-                )),
-            any(SizedBox(None, Some(8.0))),
-            any(row()
+                ))
+                .child(SizedBox(None, Some(8.0)))
+                .child(row()
                 .child(
                     button(
                         "Loopback bad iss",
@@ -603,9 +610,9 @@ pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
                     )
                     .style(ButtonStyle::Secondary)
                     .small(),
-                )),
-            any(SizedBox(None, Some(8.0))),
-            any(row()
+                ))
+                .child(SizedBox(None, Some(8.0)))
+                .child(row()
                 .child(
                     button(
                         "Loopback cancel",
@@ -625,31 +632,25 @@ pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
                     button("Cancel loopback", fire_cancel_loopback)
                         .style(ButtonStyle::Secondary)
                         .small(),
-                )),
-            any(SizedBox(None, Some(8.0))),
-            any(row().child(
+                ))
+                .child(SizedBox(None, Some(8.0)))
+                .child(row().child(
                 button("Loopback busy", fire_loopback_busy)
                     .style(ButtonStyle::Secondary)
                     .small(),
-            )),
-            any(SizedBox(None, Some(8.0))),
-            any(text(loopback_port_line).size(11.0).color(muted())),
-        ]);
-    } else {
-        children.extend([
-            any(SizedBox(None, Some(16.0))),
-            any(text("Desktop loopback").size(13.0).color(accent())),
-            any(text("loopback: not supported on this target")
-                .size(11.0)
-                .color(muted())),
-        ]);
-    }
+            ))
+                .child(SizedBox(None, Some(8.0)))
+                .child(text(loopback_port_line).size(11.0).color(muted()))
+        })
+        .when(!loopback_supported, |col| {
+            col.child(SizedBox(None, Some(16.0)))
+                .child(text("Desktop loopback").size(13.0).color(accent()))
+                .child(
+                    text("loopback: not supported on this target")
+                        .size(11.0)
+                        .color(muted()),
+                )
+        });
 
-    Padding(
-        EdgeInsets::all(16.0),
-        FlexView::new(
-            Axis::Vertical,
-            children.into_iter().map(inflexible).collect(),
-        ),
-    )
+    Padding(EdgeInsets::all(16.0), body)
 }

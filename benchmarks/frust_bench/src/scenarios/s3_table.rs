@@ -70,6 +70,7 @@ impl Scenario for S3 {
         "Table ops (create/update/swap/clear)"
     }
 
+    // erasure: keep Scenario::build feeds the dyn SCENARIOS table
     fn build(&self, _state: &mut BenchState) -> AnyView<BenchState> {
         // The scenario hosts a self-contained component owning the row set and
         // the script cursor; its `State` survives across `BenchState` rebuilds.
@@ -195,6 +196,7 @@ impl Component for S3Table {
 
         let table = list_view(count, ROW_EXTENT, move |i| {
             let item = &rows[i];
+            // erasure: keep list_view's lazy item builder returns AnyView
             any(Padding(
                 EdgeInsets::symmetric(12.0, 4.0),
                 row()
@@ -207,7 +209,7 @@ impl Component for S3Table {
         // The script cycles continuously for the whole capture window (see
         // the module doc), so the ticker stays active forever — it never
         // goes idle the way a run-once script would.
-        any(stack().child(table).child(Ticker { active: true }))
+        stack().child(table).child(Ticker { active: true })
     }
 }
 
