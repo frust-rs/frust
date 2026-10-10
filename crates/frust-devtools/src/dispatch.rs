@@ -397,6 +397,7 @@ async fn hot_patch_request(
             Err(e) => Response::error(id, e),
         },
         Method::PatchChunk | Method::TableChunk => {
+            let handling = std::time::Instant::now();
             let chunk = match serde_json::from_value::<frust_devtools_protocol::PatchChunkParams>(
                 req.params.clone(),
             ) {
@@ -418,7 +419,10 @@ async fn hot_patch_request(
                 Err(e) => return Response::error(id, e),
             };
             match assembly.append(&chunk, bytes) {
-                Ok(()) => result_response(id, serde_json::to_value(AckResult::default())),
+                Ok(()) => {
+                    assembly.handled(handling);
+                    result_response(id, serde_json::to_value(AckResult::default()))
+                }
                 Err(e) => Response::error(id, e),
             }
         }
@@ -451,6 +455,8 @@ async fn hot_patch_request(
             {
                 return Response::error(id, e);
             }
+            let patch_transfer = conn.patches.transfer(params.patch_id);
+            let table_transfer = conn.tables.transfer(params.patch_id);
             let bytes = match params.file.clone() {
                 None => match conn.patches.take_complete(params.patch_id, params.len) {
                     Ok(bytes) => bytes,
@@ -492,6 +498,7 @@ async fn hot_patch_request(
                     }
                 }
             };
+            let table_decoding = std::time::Instant::now();
             if params.table_len == 0 {
                 // No stream: the map is empty, or a pre-chunk host's inline one.
                 conn.tables.discard(params.patch_id);
@@ -506,6 +513,12 @@ async fn hot_patch_request(
                         Err(e) => return Response::error(id, invalid(e)),
                     };
             }
+            log::info!(
+                "frust-hotpatch: transfer timings: patch={} table={} table_decode={}ms",
+                Transfer::describe(patch_transfer),
+                Transfer::describe(table_transfer),
+                table_decoding.elapsed().as_millis()
+            );
             match lane.apply(bytes, params).await {
                 Ok(outcome) => result_response(id, serde_json::to_value(outcome)),
                 Err(e) => Response::error(id, e),
@@ -640,6 +653,42 @@ struct PendingPatch {
     patch_id: u64,
     total_len: u64,
     bytes: Vec<u8>,
+    /// When its first chunk began to be handled, and how many were appended.
+    started: std::time::Instant,
+    chunks: u32,
+    /// Time spent handling its chunks here (params, decode, append), as
+    /// against the wall time the transfer took.
+    handled: std::time::Duration,
+}
+
+/// How one stream's transfer went: the instrument behind the app's permanent
+/// `frust-hotpatch: transfer timings` line, logged at `info` once per
+/// `apply_patch` (`patch=<wall>ms/<chunks> chunks/<handled>ms handled`, the
+/// same for the table, then the table's decode). The wall time from the
+/// first chunk to the last, against the time spent handling chunks here,
+/// tells a slow link or line reader from slow per-chunk work.
+#[cfg(feature = "hotpatch")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Transfer {
+    pub(crate) wall: std::time::Duration,
+    pub(crate) chunks: u32,
+    pub(crate) handled: std::time::Duration,
+}
+
+#[cfg(feature = "hotpatch")]
+impl Transfer {
+    /// `<wall>ms/<n> chunks/<handled>ms handled`, or `none` with no chunk.
+    fn describe(transfer: Option<Self>) -> String {
+        match transfer {
+            None => "none".to_string(),
+            Some(t) => format!(
+                "{}ms/{} chunks/{}ms handled",
+                t.wall.as_millis(),
+                t.chunks,
+                t.handled.as_millis()
+            ),
+        }
+    }
 }
 
 /// A connection's chunk reassembly of one stream (a patch's bytes, or its
@@ -778,12 +827,41 @@ impl PatchAssembly {
                 patch_id: chunk.patch_id,
                 total_len: chunk.total_len,
                 bytes: Vec::new(),
+                started: std::time::Instant::now(),
+                chunks: 0,
+                handled: std::time::Duration::ZERO,
             });
         }
         if let Some(p) = self.pending.as_mut() {
             p.bytes.extend_from_slice(&data);
+            p.chunks += 1;
         }
         Ok(())
+    }
+
+    /// Adds the time since `since`, when the chunk just appended began to
+    /// be handled, to the pending transfer's handling time ([`Transfer`]);
+    /// the transfer's wall clock starts there for its first chunk.
+    pub(crate) fn handled(&mut self, since: std::time::Instant) {
+        if let Some(p) = self.pending.as_mut() {
+            p.handled += since.elapsed();
+            if p.chunks == 1 {
+                p.started = since;
+            }
+        }
+    }
+
+    /// How `patch_id`'s transfer on this connection went so far, when it has
+    /// one.
+    pub(crate) fn transfer(&self, patch_id: u64) -> Option<Transfer> {
+        self.pending
+            .as_ref()
+            .filter(|p| p.patch_id == patch_id)
+            .map(|p| Transfer {
+                wall: p.started.elapsed(),
+                chunks: p.chunks,
+                handled: p.handled,
+            })
     }
 
     /// Whether this connection holds chunks (complete or not) for `patch_id`.
@@ -1623,6 +1701,29 @@ mod tests {
             let mut conn = ConnState::new(ctx);
             authenticate_conn(ctx, &mut conn);
             conn
+        }
+
+        #[test]
+        fn a_transfer_counts_its_chunks_and_handling_until_it_is_applied() {
+            let stub = Arc::new(HotStub::default());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+            assert_eq!(conn.patches.transfer(7), None);
+
+            assert!(is_success(&send(&ctx, &mut conn, &chunk(7, 0, 6, "abc"))));
+            assert!(is_success(&send(&ctx, &mut conn, &chunk(7, 3, 6, "def"))));
+            let transfer = conn
+                .patches
+                .transfer(7)
+                .expect("patch 7 is being assembled");
+            assert_eq!(transfer.chunks, 2);
+            assert!(transfer.wall >= transfer.handled, "{transfer:?}");
+            assert_eq!(conn.patches.transfer(8), None, "another id has none");
+            assert_eq!(conn.tables.transfer(7), None, "the table stream is apart");
+            assert_eq!(Transfer::describe(None), "none");
+
+            assert!(is_success(&send(&ctx, &mut conn, &apply(7, 6))));
+            assert_eq!(conn.patches.transfer(7), None, "consumed by the apply");
         }
 
         #[test]

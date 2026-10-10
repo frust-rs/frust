@@ -87,7 +87,7 @@
 //! capability decides whether a patch is ever sent. See
 //! `docs/CLI_ARCHITECTURE.md`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -131,6 +131,11 @@ use super::{HotpatchError, hotpatch_root};
 /// The accepted-layout set after each merge, written beside
 /// `layout-base.json` for diagnosis and never read back.
 pub const LAYOUTS_ACCEPTED_FILE: &str = "layouts-accepted.json";
+
+/// One [`PatchTimings`] line per attempted patch, appended in the session
+/// directory: the host half of the patch-latency instrument (the app logs
+/// the matching `frust-hotpatch: apply timings` line).
+pub const PATCH_TIMINGS_FILE: &str = "patch-timings.log";
 
 /// cargo's environment override of the dev profile's `debug` setting.
 pub const DEV_DEBUG_ENV: &str = "CARGO_PROFILE_DEV_DEBUG";
@@ -340,6 +345,95 @@ impl fmt::Display for RestartReason {
                 write!(f, "hot-patch builder unsupported: {detail}")
             }
         }
+    }
+}
+
+/// Where one patch attempt spent its time on the host, stage by stage: the
+/// permanent instrument for patch-latency regressions. A session records one
+/// for every change that reached the compile ([`HotSession::last_timings`])
+/// and appends its [`Display`](fmt::Display) line — `hot patch timings:
+/// outcome=… compile=…ms gate=…ms …` — to [`PATCH_TIMINGS_FILE`] in the
+/// session directory. Taking it costs a few `Instant` reads per patch. A
+/// stage the attempt never reached reads 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PatchTimings {
+    /// The replays of the changed units' captured rustc invocations: the
+    /// thin compile, the tip's intercepted link included.
+    pub compile: Duration,
+    /// The candidate's gates read from its objects: the layout table's DWARF
+    /// and the seam instances.
+    pub gate: Duration,
+    /// The accepted-set check and the `hotpatch_info` round trip.
+    pub check: Duration,
+    /// The undefined-symbol stub over the patch's inputs.
+    pub symbols: Duration,
+    /// The thin link (and, on Windows, the patch PDB's layout table).
+    pub link: Duration,
+    /// Reading the linked patch's symbols and building its jump table.
+    pub table: Duration,
+    /// Stripping the upload copy a device is sent.
+    pub strip: Duration,
+    /// Sending the patch bytes (`patch_chunk`s; 0 on a file hand-off).
+    pub upload_patch: Duration,
+    /// Sending the jump table (`table_chunk`s).
+    pub upload_table: Duration,
+    /// `apply_patch` until the app's answer, which follows its next frame.
+    pub apply: Duration,
+    /// The whole attempt, from the change to the answer.
+    pub total: Duration,
+    /// The bytes sent or named (the stripped copy on a device).
+    pub patch_bytes: u64,
+    /// The jump table's entries.
+    pub table_entries: u64,
+}
+
+impl PatchTimings {
+    /// `self` with the stages a [`PatchBuilder`] times taken from `builder`.
+    fn with_builder(self, builder: PatchTimings) -> Self {
+        Self {
+            compile: builder.compile,
+            gate: builder.gate,
+            symbols: builder.symbols,
+            link: builder.link,
+            table: builder.table,
+            strip: builder.strip,
+            ..self
+        }
+    }
+}
+
+impl fmt::Display for PatchTimings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ms = |d: Duration| d.as_millis();
+        write!(
+            f,
+            "compile={}ms gate={}ms check={}ms symbols={}ms link={}ms table={}ms strip={}ms \
+             upload_patch={}ms upload_table={}ms apply={}ms total={}ms patch_bytes={} \
+             table_entries={}",
+            ms(self.compile),
+            ms(self.gate),
+            ms(self.check),
+            ms(self.symbols),
+            ms(self.link),
+            ms(self.table),
+            ms(self.strip),
+            ms(self.upload_patch),
+            ms(self.upload_table),
+            ms(self.apply),
+            ms(self.total),
+            self.patch_bytes,
+            self.table_entries
+        )
+    }
+}
+
+/// The one-word outcome a [`PATCH_TIMINGS_FILE`] line starts with.
+fn outcome_word(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Patched { .. } => "patched",
+        Outcome::NoChange => "no_change",
+        Outcome::CompileFailed { .. } => "compile_failed",
+        Outcome::RestartRequired(_) => "restart",
     }
 }
 
@@ -660,7 +754,9 @@ fn read_linked(
     target: Target,
     patch: PathBuf,
     upload_strip: Option<&Path>,
+    timings: &mut PatchTimings,
 ) -> Result<LinkedPatch, HotpatchError> {
+    let tabling = Instant::now();
     let read = |path: &Path| {
         std::fs::read(path)
             .map_err(|err| HotpatchError::io(format!("reading `{}`", path.display()), err))
@@ -672,6 +768,8 @@ fn read_linked(
         ImageSymbols::parse(&bytes, target, &format!("patch `{}`", patch.display()))?
     };
     let table = super::jump_table::create_jump_table(cache, &symbols)?;
+    timings.table = tabling.elapsed();
+    let stripping = Instant::now();
     let (path, bytes) = match upload_strip {
         None => (patch, bytes),
         Some(strip) => {
@@ -680,6 +778,7 @@ fn read_linked(
             (upload, bytes)
         }
     };
+    timings.strip = stripping.elapsed();
     Ok(LinkedPatch {
         path,
         bytes,
@@ -730,6 +829,12 @@ trait PatchBuilder: Send {
     /// failed link, `applied: false`, a lost reply or a layout-mismatch
     /// record leave the set as it is).
     fn accepted(&mut self);
+    /// The stages this builder timed since the last call ([`PatchTimings`]'s
+    /// `compile`, `gate`, `symbols`, `link`, `table` and `strip`), resetting
+    /// them. Zero by default.
+    fn take_timings(&mut self) -> PatchTimings {
+        PatchTimings::default()
+    }
 }
 
 /// The objects compiled since the session last accepted a patch, by unit:
@@ -872,6 +977,12 @@ pub struct HotSession {
     /// Set by the first restart; every later change answers it.
     restart: Option<RestartReason>,
     next_patch_id: u64,
+    /// The stages the current attempt's session side has timed so far.
+    timings: PatchTimings,
+    /// Whether the current attempt reached the compile.
+    compiled: bool,
+    /// The last attempt that reached the compile ([`Self::last_timings`]).
+    last_timings: Option<PatchTimings>,
 }
 
 impl HotSession {
@@ -902,6 +1013,12 @@ impl HotSession {
         &self.accepted
     }
 
+    /// The stage timings of the last change that reached the compile, as
+    /// appended to [`PATCH_TIMINGS_FILE`]; `None` before the first.
+    pub fn last_timings(&self) -> Option<&PatchTimings> {
+        self.last_timings.as_ref()
+    }
+
     /// Patches the running app with `paths`' changes, or says why it must
     /// be relaunched. `paths` are the changed files as the watcher reports
     /// them.
@@ -909,15 +1026,44 @@ impl HotSession {
         if let Some(reason) = &self.restart {
             return Outcome::RestartRequired(reason.clone());
         }
-        let outcome = self.change(paths);
+        let started = Instant::now();
+        self.timings = PatchTimings::default();
+        let outcome = self.change(paths, started);
+        self.record_timings(&outcome, started);
         if let Outcome::RestartRequired(reason) = &outcome {
             self.restart = Some(reason.clone());
         }
         outcome
     }
 
-    fn change(&mut self, paths: &[PathBuf]) -> Outcome {
-        let started = Instant::now();
+    /// Completes the attempt's [`PatchTimings`] with the builder's stages
+    /// and, when the compile ran, keeps it and appends its line to
+    /// [`PATCH_TIMINGS_FILE`] (best effort: a write failure never changes the
+    /// outcome).
+    fn record_timings(&mut self, outcome: &Outcome, started: Instant) {
+        let timings = PatchTimings {
+            total: started.elapsed(),
+            ..self.timings
+        }
+        .with_builder(self.builder.take_timings());
+        if !std::mem::take(&mut self.compiled) {
+            return;
+        }
+        self.last_timings = Some(timings);
+        let line = format!(
+            "hot patch timings: outcome={} {timings}\n",
+            outcome_word(outcome)
+        );
+        let path = self.accepted.dir().join(PATCH_TIMINGS_FILE);
+        let appended = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
+        drop(appended);
+    }
+
+    fn change(&mut self, paths: &[PathBuf], started: Instant) -> Outcome {
         let restart = Outcome::RestartRequired;
         let (client, pid, anchor_runtime, same_host) = match &self.app {
             AppLink::RestartOnly { reason } => {
@@ -949,18 +1095,22 @@ impl HotSession {
         if units.is_empty() {
             return Outcome::NoChange;
         }
+        self.compiled = true;
         let (layouts, seams) = match self.builder.compile(&units) {
             Ok(Compiled::Nothing) => return Outcome::NoChange,
             Ok(Compiled::Failed { diagnostics }) => return Outcome::CompileFailed { diagnostics },
             Ok(Compiled::Candidate { layouts, seams }) => (layouts, seams),
             Err(err) => return restart(RestartReason::builder(&err)),
         };
+        let checking = Instant::now();
         let present = match self.accepted.check(&layouts, seams) {
             Ok(present) => present,
             Err(reason) => return restart(reason),
         };
 
-        let info = match client.hotpatch_info() {
+        let info = client.hotpatch_info();
+        self.timings.check = checking.elapsed();
+        let info = match info {
             Ok(info) => info,
             Err(err) => {
                 return restart(RestartReason::DevtoolsFailed {
@@ -1010,6 +1160,8 @@ impl HotSession {
             None => layouts,
         };
         let len = linked.bytes.len() as u64;
+        self.timings.patch_bytes = len;
+        self.timings.table_entries = linked.table.map.len() as u64;
         if let Some(reason) = self
             .budget
             .exceeded(n, info.patch_bytes_loaded.saturating_add(len))
@@ -1031,6 +1183,7 @@ impl HotSession {
         } else {
             None
         };
+        let uploading = Instant::now();
         if file.is_none()
             && let Err(err) = client.upload_patch(patch_id, &linked.bytes)
         {
@@ -1038,9 +1191,13 @@ impl HotSession {
                 detail: format!("{err:#}"),
             });
         }
+        self.timings.upload_patch = uploading.elapsed();
         // The jump table travels as chunks on every path, the hand-off too:
         // a large app's table is far past the request line cap.
-        let table_len = match client.upload_table(patch_id, &linked.table) {
+        let uploading = Instant::now();
+        let table_len = client.upload_table(patch_id, &linked.table);
+        self.timings.upload_table = uploading.elapsed();
+        let table_len = match table_len {
             Ok(table_len) => table_len,
             Err(err) => {
                 return restart(RestartReason::DevtoolsFailed {
@@ -1058,7 +1215,10 @@ impl HotSession {
             expected_seams: u32::try_from(present.len()).unwrap_or(u32::MAX),
             file,
         };
-        let outcome = match client.apply_patch(&params) {
+        let applying = Instant::now();
+        let outcome = client.apply_patch(&params);
+        self.timings.apply = applying.elapsed();
+        let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(err) => {
                 let detail = format!("{err:#}");
@@ -1508,14 +1668,14 @@ fn base(
         pdb_layout::extract(std::slice::from_ref(&image), &crates)?.table
     } else {
         let typed = typed_objects(&tip_objects, &crates)?;
-        layout::extract(
-            &gated_inputs(&rlibs, &graph)?
-                .into_iter()
-                .chain(typed)
-                .collect::<Vec<_>>(),
-            &crates,
-        )?
-        .table
+        layout::extract_with(&gated_inputs(&rlibs, &graph)?, typed.reads, &crates)?.table
+    };
+    // Every base tip object's types are in the base table: a replay that
+    // leaves one byte-identical need not read it again.
+    let accepted_objects = if flavor == LinkerFlavor::Msvc {
+        HashSet::new()
+    } else {
+        object_digests(&tip_objects)?.into_iter().collect()
     };
     let base_seams = seam_set(
         flavor,
@@ -1553,6 +1713,11 @@ fn base(
         crates,
         tip_replays: 0,
         linked_layouts: None,
+        timings: PatchTimings::default(),
+        accepted_objects,
+        tip_digests: Vec::new(),
+        image_reads: Vec::new(),
+        seam_names: HashMap::new(),
     };
     Ok(FatBase {
         builder,
@@ -1575,6 +1740,9 @@ pub(super) fn open_session(base: FatBase, app: AppLink, budget: Budget) -> HotSe
         budget,
         restart: None,
         next_patch_id: 1,
+        timings: PatchTimings::default(),
+        compiled: false,
+        last_timings: None,
     }
 }
 
@@ -1888,9 +2056,6 @@ fn tip_objects(link_args: &[String]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The layout gate's refusal of an input whose DWARF holds no type at all.
-const NO_TYPE_INFORMATION: &str = "without type information";
-
 /// The layout gate's refusal of an input with no DWARF at all.
 const NO_DWARF: &str = "carries no DWARF";
 
@@ -1902,31 +2067,96 @@ const NO_DWARF: &str = "carries no DWARF";
 /// At least one object must still carry DWARF, the dev profile's debug
 /// level is checked separately ([`check_debuginfo`]), and every rlib input
 /// is held to the stricter rule.
-fn typed_objects(objects: &[PathBuf], crates: &[String]) -> Result<Vec<PathBuf>, HotpatchError> {
-    let mut typed = Vec::new();
+///
+/// Each object's DWARF is read once, all of them in parallel
+/// ([`layout::read_inputs`]), and the reads come back with the paths so the
+/// layout table is built from them ([`layout::extract_with`]) rather than
+/// from a second read.
+fn typed_objects(objects: &[PathBuf], crates: &[String]) -> Result<TypedObjects, HotpatchError> {
+    typed_objects_among(objects, crates, true)
+}
+
+/// [`typed_objects`], with the "at least one object carries DWARF" rule
+/// applied only when `require_dwarf`: a round whose other tip objects were
+/// skipped as already accepted ([`DesktopBuilder::accepted_objects`]) may
+/// recompile only objects without any.
+fn typed_objects_among(
+    objects: &[PathBuf],
+    crates: &[String],
+    require_dwarf: bool,
+) -> Result<TypedObjects, HotpatchError> {
+    let mut typed = TypedObjects::default();
     let mut with_dwarf = 0usize;
-    for object in objects {
-        match layout::extract(std::slice::from_ref(object), crates) {
-            Ok(_) => {
-                typed.push(object.clone());
+    for (object, read) in objects.iter().zip(layout::read_inputs(objects, crates)) {
+        match read {
+            Ok(read) if read.type_dies() > 0 => {
+                typed.paths.push(object.clone());
+                typed.reads.push(read);
                 with_dwarf += 1;
             }
-            Err(HotpatchError::BuilderUnsupported { detail })
-                if detail.contains(NO_TYPE_INFORMATION) =>
-            {
-                with_dwarf += 1;
-            }
+            // DWARF without a type: nothing to compare.
+            Ok(_) => with_dwarf += 1,
             Err(HotpatchError::BuilderUnsupported { detail }) if detail.contains(NO_DWARF) => {}
             Err(err) => return Err(err),
         }
     }
-    if !objects.is_empty() && with_dwarf == 0 {
+    if require_dwarf && !objects.is_empty() && with_dwarf == 0 {
         return Err(HotpatchError::unsupported(format!(
             "none of the tip's {} objects carries DWARF; the layout gate needs `debug = true`",
             objects.len()
         )));
     }
     Ok(typed)
+}
+
+/// [`typed_objects`]' answer: the typed objects and their DWARF reads, in
+/// the same order.
+#[derive(Debug, Default)]
+struct TypedObjects {
+    paths: Vec<PathBuf>,
+    reads: Vec<layout::InputTypes>,
+}
+
+/// The SHA-256 of an object's or rlib's bytes: what the gates key their
+/// per-object reuse on ([`DesktopBuilder::accepted_objects`],
+/// [`DesktopBuilder::seam_names`]), so a file is reused only when its
+/// content is exactly what was read before, whatever its path or mtime.
+type ObjectDigest = [u8; 32];
+
+/// [`ObjectDigest`] of each of `paths`, in order (in parallel).
+fn object_digests(paths: &[PathBuf]) -> Result<Vec<ObjectDigest>, HotpatchError> {
+    layout::parallel_map(paths, |path| {
+        use sha2::Digest as _;
+        let bytes = std::fs::read(path)
+            .map_err(|err| HotpatchError::io(format!("reading {}", path.display()), err))?;
+        Ok(sha2::Sha256::digest(&bytes).into())
+    })
+    .into_iter()
+    .collect()
+}
+
+/// The defined symbols of `input` (an object, or an rlib's `.o` members)
+/// that [`SeamSet::from_symbols`] does not skip: those whose demangled form
+/// is a seam, or a shape the seam parser refuses. Feeding these, in input
+/// order, to `from_symbols` answers exactly what [`SeamSet::from_inputs`]
+/// answers over every symbol, its refusals included: the symbols left out
+/// are the ones it ignores.
+fn seam_candidates(input: &Path) -> Result<Vec<String>, HotpatchError> {
+    let mut names = Vec::new();
+    layout::for_each_object(input, |_, file| {
+        use object::{Object as _, ObjectSymbol as _};
+        for symbol in file.symbols().filter(|symbol| symbol.is_definition()) {
+            let Ok(name) = symbol.name() else { continue };
+            let Ok(demangled) = rustc_demangle::try_demangle(name) else {
+                continue;
+            };
+            if !matches!(seams::parse_seam(&format!("{demangled:#}")), Ok(None)) {
+                names.push(name.to_string());
+            }
+        }
+        Ok(())
+    })?;
+    Ok(names)
 }
 
 /// The rlib a captured link names for each lib unit in the image (members'
@@ -2104,6 +2334,26 @@ struct DesktopBuilder {
     /// Msvc: the layout table of the patch [`PatchBuilder::link`] just
     /// linked, read from its PDB, until the session takes it.
     linked_layouts: Option<LayoutTable>,
+    /// The stages timed since the session last took them.
+    timings: PatchTimings,
+    /// Digests of image-unit objects whose types the accepted set already
+    /// holds: the base's tip objects, and every tip object of each accepted
+    /// patch. A replayed tip object with one of these digests is the very
+    /// bytes that were gated and accepted (an incremental rebuild leaves
+    /// every untouched codegen unit so), so it adds nothing to the candidate
+    /// and its DWARF is not read again. Dropping it from the candidate is
+    /// what not replaying it would do: the gate still reads every object
+    /// whose bytes are new.
+    accepted_objects: HashSet<ObjectDigest>,
+    /// The current tip objects' digests, joined to `accepted_objects` once
+    /// a candidate built on them is accepted.
+    tip_digests: Vec<ObjectDigest>,
+    /// This round's DWARF reads of the image unit's typed objects, taken by
+    /// the layout table it builds so no object is read twice.
+    image_reads: Vec<(PathBuf, layout::InputTypes)>,
+    /// [`seam_candidates`] per input digest: a patch's inputs are mostly the
+    /// unchanged objects of the previous one.
+    seam_names: HashMap<ObjectDigest, Vec<String>>,
 }
 
 impl DesktopBuilder {
@@ -2218,6 +2468,91 @@ impl PatchBuilder for DesktopBuilder {
     }
 
     fn compile(&mut self, units: &BTreeSet<ReplayUnit>) -> Result<Compiled, HotpatchError> {
+        let compiling = Instant::now();
+        let compiled = self.compile_timed(units, compiling);
+        if self.timings.compile.is_zero() {
+            self.timings.compile = compiling.elapsed();
+        }
+        compiled
+    }
+
+    fn link(&mut self, n: u32, anchor_runtime: u64) -> Result<LinkedPatch, HotpatchError> {
+        self.link_timed(n, anchor_runtime)
+    }
+
+    fn linked_layouts(&mut self) -> Option<LayoutTable> {
+        self.linked_layouts.take()
+    }
+
+    fn accepted(&mut self) {
+        self.ungated.accept();
+        self.accepted_objects
+            .extend(self.tip_digests.iter().copied());
+    }
+
+    fn take_timings(&mut self) -> PatchTimings {
+        std::mem::take(&mut self.timings)
+    }
+}
+
+impl DesktopBuilder {
+    /// The typed objects among the image unit's fresh `objects`, read once:
+    /// an object whose bytes are already accepted
+    /// ([`Self::accepted_objects`]) is left out, the others are read and
+    /// their reads kept for this round's layout table
+    /// ([`Self::image_reads`]). Records the objects' digests for
+    /// [`PatchBuilder::accepted`].
+    fn fresh_typed_objects(&mut self, objects: &[PathBuf]) -> Result<Vec<PathBuf>, HotpatchError> {
+        let digests = object_digests(objects)?;
+        let fresh: Vec<PathBuf> = objects
+            .iter()
+            .zip(&digests)
+            .filter(|(_, digest)| !self.accepted_objects.contains(*digest))
+            .map(|(object, _)| object.clone())
+            .collect();
+        let skipped = objects.len() - fresh.len();
+        let typed = typed_objects_among(&fresh, &self.crates, skipped == 0)?;
+        self.tip_digests = digests;
+        self.image_reads = typed.paths.iter().cloned().zip(typed.reads).collect();
+        Ok(typed.paths)
+    }
+
+    /// [`seam_set`] of [`Self::patch_inputs`], each input's seam candidates
+    /// read once per content ([`Self::seam_names`]). Msvc reads COFF
+    /// symbols every time.
+    fn seam_set(&mut self) -> Result<SeamSet, HotpatchError> {
+        let inputs = self.patch_inputs()?;
+        if self.flavor == LinkerFlavor::Msvc {
+            return seam_set(self.flavor, &inputs);
+        }
+        let digests = object_digests(&inputs)?;
+        let missing: Vec<(PathBuf, ObjectDigest)> = inputs
+            .iter()
+            .zip(&digests)
+            .filter(|(_, digest)| !self.seam_names.contains_key(*digest))
+            .map(|(input, digest)| (input.clone(), *digest))
+            .collect();
+        let read = layout::parallel_map(&missing, |(input, _)| seam_candidates(input));
+        for ((_, digest), names) in missing.iter().zip(read) {
+            self.seam_names.insert(*digest, names?);
+        }
+        SeamSet::from_symbols(
+            digests
+                .iter()
+                .filter_map(|digest| self.seam_names.get(digest))
+                .flatten()
+                .map(String::as_str),
+        )
+    }
+
+    /// [`PatchBuilder::compile`], recording `compile` (the replays, from
+    /// `compiling`) and `gate` (the candidate's DWARF and seam reads) as it
+    /// reaches each.
+    fn compile_timed(
+        &mut self,
+        units: &BTreeSet<ReplayUnit>,
+        compiling: Instant,
+    ) -> Result<Compiled, HotpatchError> {
         let plan = self.modified.record_change(&self.graph, units)?;
         let mut pending: BTreeSet<ReplayUnit> = plan.replay.into_iter().collect();
         pending.extend(self.dirty.iter().cloned());
@@ -2252,14 +2587,16 @@ impl PatchBuilder for DesktopBuilder {
             self.ungated.compiled(outcome.unit, vec![rlib]);
         }
         if !image.is_empty() {
-            match self.replay_image_unit()? {
+            let replayed = self.replay_image_unit()?;
+            self.timings.compile = compiling.elapsed();
+            match replayed {
                 Ok(link_args) => {
                     let typed = if self.flavor == LinkerFlavor::Msvc {
                         // COFF objects carry CodeView, not DWARF: the gate
                         // reads the linked patch's PDB instead.
                         tip_objects(&link_args)
                     } else {
-                        typed_objects(&tip_objects(&link_args), &self.crates)?
+                        self.fresh_typed_objects(&tip_objects(&link_args))?
                     };
                     self.ungated.compiled(self.image_unit.clone(), typed);
                     self.tip_link_args = link_args;
@@ -2277,6 +2614,11 @@ impl PatchBuilder for DesktopBuilder {
         // which covers every ungated object the patch links
         // ([`PatchBuilder::linked_layouts`]). The objects read are chosen
         // by the base table's rule ([`gated_inputs`]).
+        if self.timings.compile.is_zero() {
+            self.timings.compile = compiling.elapsed();
+        }
+        let mut image_reads: BTreeMap<PathBuf, layout::InputTypes> =
+            std::mem::take(&mut self.image_reads).into_iter().collect();
         let layouts = if self.flavor == LinkerFlavor::Msvc {
             LayoutTable::default()
         } else {
@@ -2284,21 +2626,36 @@ impl PatchBuilder for DesktopBuilder {
             if fresh.is_empty() {
                 LayoutTable::default()
             } else {
-                layout::extract(&fresh, &self.crates)?.table
+                // The tip objects this round read already come with their
+                // reads; every other input is read now.
+                let (read, unread): (Vec<PathBuf>, Vec<PathBuf>) = fresh
+                    .into_iter()
+                    .partition(|input| image_reads.contains_key(input));
+                let reads = read
+                    .iter()
+                    .filter_map(|input| image_reads.remove(input))
+                    .collect();
+                layout::extract_with(&unread, reads, &self.crates)?.table
             }
         };
-        let seams = seam_set(self.flavor, &self.patch_inputs()?)?;
+        let seams = self.seam_set()?;
+        self.timings.gate = compiling.elapsed().saturating_sub(self.timings.compile);
         Ok(Compiled::Candidate { layouts, seams })
     }
 
-    fn link(&mut self, n: u32, anchor_runtime: u64) -> Result<LinkedPatch, HotpatchError> {
+    /// [`PatchBuilder::link`], recording `symbols`, `link`, `table` and
+    /// `strip`.
+    fn link_timed(&mut self, n: u32, anchor_runtime: u64) -> Result<LinkedPatch, HotpatchError> {
         self.linked_layouts = None;
+        let stubbing = Instant::now();
         let inputs = self.patch_inputs()?;
         let stub = super::stub::create_undefined_symbol_stub(&self.cache, &inputs, anchor_runtime)?;
         let stub_object = self.session_dir.join(format!("stub-{n}.o"));
         std::fs::write(&stub_object, stub).map_err(|err| {
             HotpatchError::io(format!("writing `{}`", stub_object.display()), err)
         })?;
+        self.timings.symbols = stubbing.elapsed();
+        let linking = Instant::now();
         let output = thin_link::patch_path(&self.target_dir, &self.session, n, self.flavor)?;
         let rlibs = self.modified_rlibs()?;
         // An Msvc patch links at its own fixed base: the runtime sees every
@@ -2329,21 +2686,15 @@ impl PatchBuilder for DesktopBuilder {
                 pdb_layout::extract(std::slice::from_ref(&linked.patch), &self.crates)?;
             self.linked_layouts = Some(extraction.table);
         }
+        self.timings.link = linking.elapsed();
         read_linked(
             &*self.runner,
             &self.cache,
             self.target,
             linked.patch,
             self.upload_strip.as_deref(),
+            &mut self.timings,
         )
-    }
-
-    fn linked_layouts(&mut self) -> Option<LayoutTable> {
-        self.linked_layouts.take()
-    }
-
-    fn accepted(&mut self) {
-        self.ungated.accept();
     }
 }
 
@@ -2693,6 +3044,9 @@ mod tests {
                 budget,
                 restart: None,
                 next_patch_id: 1,
+                timings: PatchTimings::default(),
+                compiled: false,
+                last_timings: None,
             },
             server,
             calls,
@@ -2776,6 +3130,74 @@ mod tests {
         assert!(outcome.to_string().ends_with(" ms (2 components rebuilt)"));
         assert_eq!(rig.sent(), vec!["patch_chunk", "apply_patch"]);
         assert_eq!(params.file, None, "no hand-off without the app's flag");
+    }
+
+    #[test]
+    fn each_compiled_change_appends_one_timings_line_and_an_unaffected_one_none() {
+        let mut builder = FakeBuilder::new(Vec::new());
+        builder.graph = Some(graph_with_path_dependency());
+        let mut rig = rig_with(
+            hot_script(vec![applied(1, 2, Vec::new())]),
+            builder,
+            LayoutTable::default(),
+            Budget::default(),
+        );
+        let log = rig.dir.join(PATCH_TIMINGS_FILE);
+        assert_eq!(
+            rig.session
+                .on_change(&[PathBuf::from("/elsewhere/notes.md")]),
+            Outcome::NoChange
+        );
+        assert!(rig.session.last_timings().is_none());
+        assert!(!log.exists(), "nothing compiled, nothing timed");
+
+        assert!(matches!(rig.change(), Outcome::Patched { .. }));
+        let timings = *rig.session.last_timings().expect("the patch was timed");
+        assert_eq!((timings.patch_bytes, timings.table_entries), (1000, 1));
+        assert!(timings.total >= timings.apply + timings.upload_patch);
+        let text = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(
+            lines[0].starts_with("hot patch timings: outcome=patched compile="),
+            "{}",
+            lines[0]
+        );
+        for field in [
+            " gate=",
+            " check=",
+            " symbols=",
+            " link=",
+            " table=",
+            " strip=",
+            " upload_patch=",
+            " upload_table=",
+            " apply=",
+            " total=",
+            " patch_bytes=1000",
+            " table_entries=1",
+        ] {
+            assert!(lines[0].contains(field), "{field} in {}", lines[0]);
+        }
+    }
+
+    #[test]
+    fn patch_timings_render_every_stage_in_milliseconds() {
+        let timings = PatchTimings {
+            compile: Duration::from_millis(7236),
+            gate: Duration::from_millis(249),
+            upload_patch: Duration::from_micros(1_304_900),
+            total: Duration::from_millis(9858),
+            patch_bytes: 17_843_800,
+            table_entries: 68_692,
+            ..PatchTimings::default()
+        };
+        assert_eq!(
+            timings.to_string(),
+            "compile=7236ms gate=249ms check=0ms symbols=0ms link=0ms table=0ms strip=0ms \
+             upload_patch=1304ms upload_table=0ms apply=0ms total=9858ms patch_bytes=17843800 \
+             table_entries=68692"
+        );
     }
 
     #[test]
@@ -2865,6 +3287,9 @@ mod tests {
             budget: Budget::default(),
             restart: None,
             next_patch_id: 1,
+            timings: PatchTimings::default(),
+            compiled: false,
+            last_timings: None,
         };
         let outcome = session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
         assert!(
@@ -2913,6 +3338,9 @@ mod tests {
                 budget: Budget::default(),
                 restart: None,
                 next_patch_id: 1,
+                timings: PatchTimings::default(),
+                compiled: false,
+                last_timings: None,
             };
             (session, server, calls)
         };
@@ -3061,6 +3489,7 @@ mod tests {
                 android(),
                 patch,
                 self.upload_strip.as_deref(),
+                &mut PatchTimings::default(),
             )
         }
 
@@ -3129,6 +3558,9 @@ mod tests {
                 budget,
                 restart: None,
                 next_patch_id: 1,
+                timings: PatchTimings::default(),
+                compiled: false,
+                last_timings: None,
             },
             server,
             runner,
@@ -3332,6 +3764,9 @@ mod tests {
             budget: Budget::default(),
             restart: None,
             next_patch_id: 1,
+            timings: PatchTimings::default(),
+            compiled: false,
+            last_timings: None,
         };
         let reason = restart_reason(session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]));
         assert!(matches!(reason, RestartReason::HotPatchUnavailable { .. }));
@@ -4151,6 +4586,9 @@ mod tests {
             budget: Budget::default(),
             restart: None,
             next_patch_id: 1,
+            timings: PatchTimings::default(),
+            compiled: false,
+            last_timings: None,
         };
         let change =
             |session: &mut HotSession| session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
@@ -4961,7 +5399,7 @@ mod tests {
         let plain = dir.join("app-1.app.a-cgu.0.rcgu.o");
         std::fs::write(&plain, object(target(), &[Def::Text("main", 8)])).unwrap();
         assert_eq!(
-            typed_objects(&[], &["app".into()]).unwrap(),
+            typed_objects(&[], &["app".into()]).unwrap().paths,
             Vec::<PathBuf>::new()
         );
         let detail = match typed_objects(std::slice::from_ref(&plain), &["app".into()]) {
@@ -5293,6 +5731,11 @@ mod tests {
                 crates,
                 tip_replays: 0,
                 linked_layouts: None,
+                timings: PatchTimings::default(),
+                accepted_objects: HashSet::new(),
+                tip_digests: Vec::new(),
+                image_reads: Vec::new(),
+                seam_names: HashMap::new(),
             };
             Setup {
                 builder,
@@ -5607,6 +6050,96 @@ mod tests {
 
         /// Accepting a candidate empties the set: the next candidate is
         /// extracted from its own round's objects only.
+        #[test]
+        fn the_cached_seam_set_equals_a_full_read_and_is_kept_per_content() {
+            let a_rlib = fixture::edited("badge-p1");
+            let Setup { mut builder, .. } = setup(
+                "seam-cache",
+                vec![
+                    ("a", vec![Reply::Rlib(a_rlib)]),
+                    ("b", vec![Reply::Rlib(fixture::base())]),
+                ],
+            );
+            let (_, seams) = candidate(builder.compile(&units(&[lib_a()])));
+            let inputs = builder.patch_inputs().unwrap();
+            assert_eq!(seams, SeamSet::from_inputs(&inputs).unwrap());
+            assert!(!seams.is_empty(), "the fixture carries a seam");
+            let digests = object_digests(&inputs).unwrap();
+            assert!(digests.iter().all(|d| builder.seam_names.contains_key(d)));
+            assert_eq!(
+                builder.seam_set().unwrap(),
+                seams,
+                "a cached read answers the same"
+            );
+        }
+
+        #[test]
+        fn seam_candidates_keep_exactly_what_the_seam_reader_does_not_skip() {
+            let base = fixture::base();
+            let names = seam_candidates(&base).unwrap();
+            assert!(!names.is_empty());
+            assert_eq!(
+                SeamSet::from_symbols(names.iter().map(String::as_str)).unwrap(),
+                SeamSet::from_inputs(&[base]).unwrap()
+            );
+        }
+
+        #[test]
+        fn a_tip_object_whose_bytes_were_accepted_is_not_read_again() {
+            let Setup { mut builder, .. } = setup("accepted-objects", Vec::new());
+            let dir = temp_dir("accepted-objects-files");
+            let junk = dir.join("b_app-1.b_app.a-cgu.0.rcgu.o");
+            std::fs::write(&junk, b"not an object").unwrap();
+            let junk = vec![junk];
+            // New bytes are read, and these fail closed.
+            assert!(builder.fresh_typed_objects(&junk).is_err());
+            let digest = object_digests(&junk).unwrap()[0];
+            builder.accepted_objects.insert(digest);
+            assert_eq!(
+                builder.fresh_typed_objects(&junk).unwrap(),
+                Vec::<PathBuf>::new()
+            );
+            assert!(builder.image_reads.is_empty());
+            assert_eq!(builder.tip_digests, vec![digest]);
+        }
+
+        #[test]
+        fn an_accepted_candidates_tip_objects_join_the_accepted_bytes() {
+            let Setup { mut builder, .. } = setup("accepted-join", Vec::new());
+            let dir = temp_dir("accepted-join-files");
+            let seen = dir.join("b_app-1.b_app.a-cgu.0.rcgu.o");
+            std::fs::write(&seen, b"bytes gated before").unwrap();
+            let plain = dir.join("b_app-1.b_app.a-cgu.1.rcgu.o");
+            std::fs::write(&plain, object(target(), &[Def::Text("main", 8)])).unwrap();
+            let digests = object_digests(&[seen.clone(), plain.clone()]).unwrap();
+            // No object of a round carries DWARF and none was skipped: the
+            // build's debug level is suspect, and nothing is recorded.
+            assert!(
+                builder
+                    .fresh_typed_objects(std::slice::from_ref(&plain))
+                    .is_err()
+            );
+            assert!(builder.tip_digests.is_empty());
+            // Beside a skipped object, a DWARF-less one is merely untyped.
+            builder.accepted_objects.insert(digests[0]);
+            let both = [seen, plain.clone()];
+            assert_eq!(
+                builder.fresh_typed_objects(&both).unwrap(),
+                Vec::<PathBuf>::new()
+            );
+            assert_eq!(builder.tip_digests, digests);
+            assert!(!builder.accepted_objects.contains(&digests[1]));
+            builder.accepted();
+            assert!(builder.accepted_objects.contains(&digests[1]));
+            assert_eq!(
+                builder
+                    .fresh_typed_objects(std::slice::from_ref(&plain))
+                    .unwrap(),
+                Vec::<PathBuf>::new(),
+                "accepted bytes are skipped"
+            );
+        }
+
         #[test]
         fn the_acceptance_hook_empties_the_builders_ungated_set() {
             let a_rlib = fixture::edited("badge-p1");

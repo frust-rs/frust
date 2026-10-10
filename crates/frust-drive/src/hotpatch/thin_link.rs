@@ -24,7 +24,19 @@
 //! and its candidate layout table from. Beyond dx, an Msvc patch links at
 //! its own fixed base with ASLR off ([`thin_link_with_base`],
 //! [`patch_image_base`](super::fat_link::patch_image_base)), so it loads
-//! at its link-time VAs. See `docs/CLI_ARCHITECTURE.md`.
+//! at its link-time VAs.
+//!
+//! Beyond dx, a Gnu patch exports nothing but its anchor: a version script
+//! ([`gnu_version_script`], written beside the patch as `patch-<n>.exports`)
+//! makes every other symbol local. A shared library exports every
+//! default-visibility global otherwise, which for a large app was tens of
+//! thousands of mangled names: about half the stripped upload was
+//! `.dynstr`, and every internal call went through the PLT. Nothing reads a
+//! patch's dynamic symbols but the runtime's anchor lookup: the jump table
+//! and the host's symbol map come from the unstripped patch's `.symtab`,
+//! which keeps local symbols, and every symbol the patch leaves undefined is
+//! bound by the stub, never by the dynamic linker. See
+//! `docs/CLI_ARCHITECTURE.md`.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -32,8 +44,8 @@ use std::path::{Component, Path, PathBuf};
 use crate::process::ProcessRunner;
 
 use super::fat_link::{
-    HIGH_ENTROPY_VA_OFF, LinkerFlavor, anchor_address, fixed_base_args_at, linker_driver_args,
-    render, run_linker,
+    ANCHOR_SYMBOL, HIGH_ENTROPY_VA_OFF, LinkerFlavor, anchor_address, fixed_base_args_at,
+    linker_driver_args, render, run_linker,
 };
 use super::link_intercept::output_path;
 use super::{HotpatchError, hotpatch_root};
@@ -305,6 +317,12 @@ pub fn thin_link_args_with_base(
     );
     args.extend(forwarded_args(request.flavor, captured)?);
     args.push(request.flavor.anchor_export_arg());
+    if request.flavor == LinkerFlavor::Gnu {
+        args.push(format!(
+            "-Wl,--version-script={}",
+            render(&version_script_path(request.output))
+        ));
+    }
     if request.flavor == LinkerFlavor::Msvc {
         args.push(HIGH_ENTROPY_VA_OFF.to_string());
         args.extend(fixed_base_args);
@@ -314,6 +332,18 @@ pub fn thin_link_args_with_base(
         args.push(render(request.output));
     }
     Ok(args)
+}
+
+/// Where a Gnu patch link's version script is written: `patch-<n>.exports`
+/// beside `output`.
+pub fn version_script_path(output: &Path) -> PathBuf {
+    output.with_extension("exports")
+}
+
+/// The version script of a Gnu patch: the anchor is its only dynamic
+/// export, every other symbol is local (see the module doc).
+pub fn gnu_version_script() -> String {
+    format!("{{\n  global:\n    {ANCHOR_SYMBOL};\n  local:\n    *;\n}};\n")
 }
 
 /// A successful thin link.
@@ -368,6 +398,11 @@ pub fn thin_link_with_base(
     {
         fs::create_dir_all(parent)
             .map_err(|err| HotpatchError::io(format!("creating `{}`", parent.display()), err))?;
+    }
+    if request.flavor == LinkerFlavor::Gnu {
+        let script = version_script_path(request.output);
+        fs::write(&script, gnu_version_script())
+            .map_err(|err| HotpatchError::io(format!("writing `{}`", script.display()), err))?;
     }
     let mut argv = linker_driver_args(request.flavor, request.linker);
     argv.extend(args);
@@ -616,11 +651,20 @@ mod tests {
                 "-L".to_string(),
                 "/t/deps".to_string(),
                 "-Wl,--export-dynamic-symbol,__frust_hotpatch_anchor".to_string(),
+                format!(
+                    "-Wl,--version-script={}",
+                    render(&fx.output.with_extension("exports"))
+                ),
                 "-o".to_string(),
                 render(&fx.output),
             ]
         );
         assert!(fx.output.ends_with("frust-hotpatch/s-1/patch-3.so"));
+        assert_eq!(
+            fs::read_to_string(fx.output.with_extension("exports")).unwrap(),
+            "{\n  global:\n    __frust_hotpatch_anchor;\n  local:\n    *;\n};\n",
+            "the anchor is the patch's only export"
+        );
         assert_eq!(output.removed_deps_copy, Some(fx.deps_copy.clone()));
         assert!(!fx.deps_copy.exists());
         #[cfg(unix)]
