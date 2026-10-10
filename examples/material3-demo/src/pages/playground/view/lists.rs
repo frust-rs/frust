@@ -31,8 +31,8 @@
 use std::collections::BTreeSet;
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, View, any, column, component, icon,
-    stack, text,
+    AnyView, Component, CrossAxisAlignment, SizedBox, View, any, column, component, icon, stack,
+    text,
 };
 use frust_material::{
     DismissDirection, ExpandMode, MaterialSpacing, MaterialTokens, OverlayAnchor, card_list_items,
@@ -138,6 +138,7 @@ impl Component for ListsPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(ListsPlayground))
 }
@@ -147,7 +148,7 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
 /// two-piece control's own contract — see [`crate::widgets::playground`]).
 fn body(state: &Knobs) -> impl View<Knobs> {
     let content = playground_body(
-        vec![any(play_preview_card("List", preview(state)))],
+        vec![play_preview_card("List", preview(state))],
         vec![snippet(state)],
         vec![controls(state)],
     );
@@ -207,11 +208,7 @@ fn dismissible_preview(state: &Knobs) -> AnyView<Knobs> {
     let mut caption = theme.type_scale.body_medium.clone();
     caption.color = theme.scheme().on_surface_variant;
 
-    let mut rows: Vec<AnyView<Knobs>> = Vec::new();
-    for index in 0..PREVIEW_ROWS {
-        if index > 0 {
-            rows.push(any(SizedBox::<Knobs>(None, Some(MaterialSpacing::XS))));
-        }
+    let rows = (0..PREVIEW_ROWS).fold(column(), |col, index| {
         let mut row = list_item(format!("{} {index}", state.headline))
             .supporting(SWIPE_SUPPORTING)
             .contained(true);
@@ -224,19 +221,23 @@ fn dismissible_preview(state: &Knobs) -> AnyView<Knobs> {
             forward = forward.color(colors.success);
             backward = backward.color(colors.danger);
         }
-        rows.push(any(dismissible(row)
-            .background(forward)
-            .secondary_background(backward)
-            .on_dismissed(
-                move |state: &mut Knobs, direction: DismissDirection| {
+        col.when(index > 0, |col| {
+            col.child(SizedBox::<Knobs>(None, Some(MaterialSpacing::XS)))
+        })
+        .child(
+            dismissible(row)
+                .background(forward)
+                .secondary_background(backward)
+                .on_dismissed(move |state: &mut Knobs, direction: DismissDirection| {
                     state.dismissed = Some((index, direction));
-                },
-            )));
-    }
-    rows.push(any(SizedBox::<Knobs>(None, Some(MaterialSpacing::MD))));
-    rows.push(any(text(dismissed_caption(state)).style(caption)));
+                }),
+        )
+    });
 
-    any(Column(rows).cross_axis(CrossAxisAlignment::Stretch))
+    any(rows
+        .child(SizedBox::<Knobs>(None, Some(MaterialSpacing::MD)))
+        .child(text(dismissed_caption(state)).style(caption))
+        .cross_axis(CrossAxisAlignment::Stretch))
 }
 
 /// The caption under the dismissible rows: the last commit `on_dismissed`
@@ -345,7 +346,7 @@ fn snippet(state: &Knobs) -> PlaySnippet {
                 "list_item({headline:?})\n\
                  \u{20}   .supporting({supporting:?})\
                  {leading}{trailing}\n\
-                 \u{20}   .on_press(|_state| {{}});"
+                 \u{20}   .on_press(|_: &mut App| {{}});"
             )
         }
         ListKind::CardList => {
@@ -376,7 +377,9 @@ fn snippet(state: &Knobs) -> PlaySnippet {
                  )\n\
                  .background(dismiss_background().icon(icons::CHECK))\n\
                  .secondary_background(dismiss_background().icon(icons::CLOSE))\n\
-                 .on_dismissed(|state, direction| state.dismissed = Some((index, direction)));"
+                 .on_dismissed(move |app: &mut App, direction: DismissDirection| {{\n\
+                 \u{20}   app.dismissed = Some((index, direction));\n\
+                 }});"
             )
         }
         ListKind::Expandable => {
@@ -392,10 +395,10 @@ fn snippet(state: &Knobs) -> PlaySnippet {
                  expandable_list(vec![\n\
                  \u{20}   expandable_item(header, text({EXPANDED_BODY:?})),\n\
                  ])\n\
-                 .expanded(state.expanded.iter().copied())\n\
-                 .on_toggle(|state, index| {{\n\
-                 \u{20}   state.expanded = toggle_expanded(\n\
-                 \u{20}       &state.expanded,\n\
+                 .expanded(app.expanded.iter().copied())\n\
+                 .on_toggle(|app: &mut App, index: usize| {{\n\
+                 \u{20}   app.expanded = toggle_expanded(\n\
+                 \u{20}       &app.expanded,\n\
                  \u{20}       index,\n\
                  \u{20}       ExpandMode::SingleOpen,\n\
                  \u{20}   );\n\

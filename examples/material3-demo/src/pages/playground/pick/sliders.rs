@@ -113,11 +113,12 @@ impl Default for Knobs {
     }
 }
 
-/// The reference's `_num`: an integral value prints bare, a fractional one
-/// keeps its decimal.
+/// The reference's `_num`, kept a Rust float literal: an integral value keeps
+/// its `.0` so it reads as `f64` (`16.0`, not `16`), a fractional one keeps its
+/// decimal.
 fn num_text(value: f64) -> String {
     if value == value.round() {
-        format!("{}", value as i64)
+        format!("{value:.1}")
     } else {
         format!("{value}")
     }
@@ -138,6 +139,7 @@ fn discrete_value(value: f64) -> f64 {
 }
 
 /// The control this page's "Slider" preview shows for the current `Kind`.
+// erasure: keep match-arm values of a six-arm match over the slider constructors
 fn preview_control(state: &Knobs) -> AnyView<Knobs> {
     match state.kind {
         SliderKind::Continuous => any(slider(state.value, |s: &mut Knobs, v: f64| s.value = v)
@@ -191,13 +193,13 @@ fn preview_control(state: &Knobs) -> AnyView<Knobs> {
 /// The "Slider" preview card's content: the current control, boxed to the
 /// reference's own dimensions per kind (`SizedBox(height: 180, width: 80)`
 /// vertical, `SizedBox(width: 280)` otherwise).
-fn preview(state: &Knobs) -> AnyView<Knobs> {
-    let control = preview_control(state);
-    if state.kind == SliderKind::Vertical {
-        any(SizedBox::<Knobs>(Some(80.0), Some(180.0)).child(control))
+fn preview(state: &Knobs) -> impl View<Knobs> {
+    let (width, height) = if state.kind == SliderKind::Vertical {
+        (Some(80.0), Some(180.0))
     } else {
-        any(SizedBox::<Knobs>(Some(280.0), None).child(control))
-    }
+        (Some(280.0), None)
+    };
+    SizedBox::<Knobs>(width, height).child(preview_control(state))
 }
 
 /// The paste-ready snippet for the current knob state — the reference's
@@ -207,28 +209,28 @@ fn snippet(state: &Knobs) -> PlaySnippet {
     let enabled = state.enabled;
     let code = match state.kind {
         SliderKind::Continuous => format!(
-            "slider({value}, on_changed)\n    .enabled({enabled})\n    .track_thickness({thickness});",
+            "slider({value}, |app: &mut App, value: f64| app.value = value)\n    .enabled({enabled})\n    .track_thickness({thickness});",
             value = num_text(state.value)
         ),
         SliderKind::Wavy => format!(
-            "wavy_slider({value}, on_changed)\n    .enabled({enabled})\n    .track_thickness({thickness});",
+            "wavy_slider({value}, |app: &mut App, value: f64| app.value = value)\n    .enabled({enabled})\n    .track_thickness({thickness});",
             value = num_text(state.value)
         ),
         SliderKind::Centered => format!(
-            "centered_slider({value}, on_changed)\n    .range(-100.0, 100.0)\n    .enabled({enabled})\n    .track_thickness({thickness});",
+            "centered_slider({value}, |app: &mut App, value: f64| app.value = (value + 100.0) / 200.0)\n    .range(-100.0, 100.0)\n    .enabled({enabled})\n    .track_thickness({thickness});",
             value = num_text(centered_value(state.value))
         ),
         SliderKind::Discrete => format!(
-            "slider({value}, on_changed)\n    .range(0.0, 5.0)\n    .divisions(5)\n    .enabled({enabled})\n    .track_thickness({thickness})\n    .haptic(HapticSignal::Light);",
+            "slider({value}, |app: &mut App, value: f64| app.value = value / 5.0)\n    .range(0.0, 5.0)\n    .divisions(5)\n    .enabled({enabled})\n    .track_thickness({thickness})\n    .haptic(HapticSignal::Light);",
             value = num_text(discrete_value(state.value))
         ),
         SliderKind::Vertical => format!(
-            "vertical_slider({value}, on_changed)\n    .enabled({enabled})\n    .track_thickness({thickness})\n    .thumb_length(80.0)\n    .icon(icons::VOLUME_UP)\n    .icon_position(SliderIconPosition::{icon_position:?});",
+            "vertical_slider({value}, |app: &mut App, value: f64| app.value = value)\n    .enabled({enabled})\n    .track_thickness({thickness})\n    .thumb_length(80.0)\n    .icon(icons::VOLUME_UP)\n    .icon_position(SliderIconPosition::{icon_position:?});",
             value = num_text(state.value),
             icon_position = state.icon_position,
         ),
         SliderKind::Range => format!(
-            "range_slider(SliderRange::new({start}, {end}), on_changed)\n    .enabled({enabled})\n    .track_thickness({thickness});",
+            "range_slider(SliderRange::new({start}, {end}), |app: &mut App, range: SliderRange| app.range = range)\n    .enabled({enabled})\n    .track_thickness({thickness});",
             start = num_text(state.range.start),
             end = num_text(state.range.end)
         ),
@@ -239,39 +241,39 @@ fn snippet(state: &Knobs) -> PlaySnippet {
 /// "Appearance" controls: kind, track thickness, icon position (vertical
 /// only), enabled.
 fn controls_panel(state: &Knobs) -> AnyView<Knobs> {
-    let mut children: Vec<AnyView<Knobs>> = vec![
-        play_enum_menu_field(
-            "Kind",
-            state.kind,
-            &KINDS,
-            kind_label,
-            &state.kind_anchor,
-            state.kind_open,
-            |s: &mut Knobs, open: bool| s.kind_open = open,
+    control_panel(
+        "Appearance",
+        (
+            play_enum_menu_field(
+                "Kind",
+                state.kind,
+                &KINDS,
+                kind_label,
+                &state.kind_anchor,
+                state.kind_open,
+                |s: &mut Knobs, open: bool| s.kind_open = open,
+            ),
+            play_slider(
+                "Track thickness",
+                state.track_thickness,
+                8.0..=40.0,
+                Some(16),
+                |s: &mut Knobs, v: f64| s.track_thickness = v,
+            ),
+            (state.kind == SliderKind::Vertical).then(|| {
+                play_enum_segmented(
+                    "Icon position",
+                    state.icon_position,
+                    &ICON_POSITIONS,
+                    icon_position_label,
+                    |s: &mut Knobs, next: SliderIconPosition| s.icon_position = next,
+                )
+            }),
+            play_switch("Enabled", state.enabled, |s: &mut Knobs, v: bool| {
+                s.enabled = v
+            }),
         ),
-        play_slider(
-            "Track thickness",
-            state.track_thickness,
-            8.0..=40.0,
-            Some(16),
-            |s: &mut Knobs, v: f64| s.track_thickness = v,
-        ),
-    ];
-    if state.kind == SliderKind::Vertical {
-        children.push(play_enum_segmented(
-            "Icon position",
-            state.icon_position,
-            &ICON_POSITIONS,
-            icon_position_label,
-            |s: &mut Knobs, next: SliderIconPosition| s.icon_position = next,
-        ));
-    }
-    children.push(play_switch(
-        "Enabled",
-        state.enabled,
-        |s: &mut Knobs, v: bool| s.enabled = v,
-    ));
-    control_panel("Appearance", children)
+    )
 }
 
 /// The "Kind" menu's popup half — mounted at this page's outer [`Stack`].
@@ -316,6 +318,7 @@ impl Component for SlidersPlayground {
 /// See the page contract in [`crate::pages::playground`]. The reference's
 /// `SlidersPlayground` shows no page-level heading of its own, like every
 /// other real playground in this catalog, so `entry` goes unused here.
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(SlidersPlayground))
 }

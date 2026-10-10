@@ -33,6 +33,7 @@ use crate::widgets::playground::{
 /// list's row already carries `entry.title`, and a pushed route's app bar
 /// titles it (`crate::pages::playground_scaffold`) — so `entry` goes unused
 /// here, like every other real playground in this catalog.
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(CheckboxPlayground))
 }
@@ -116,19 +117,20 @@ fn preview_row(
         Some(false) => "unchecked",
     };
 
-    let control: AnyView<CheckboxPlaygroundState> = if tristate {
-        any(tristate_checkbox(
+    // Both constructors build the same `CheckboxView` type, so the two arms
+    // need no erasure and no `either`.
+    let control = if tristate {
+        tristate_checkbox(
             value,
             |s: &mut CheckboxPlaygroundState, next: Option<bool>| s.value.set(next),
         )
-        .error(error))
     } else {
-        any(checkbox(
+        checkbox(
             value.unwrap_or(false),
             |s: &mut CheckboxPlaygroundState, next: bool| s.value.set(Some(next)),
         )
-        .error(error))
-    };
+    }
+    .error(error);
 
     row()
         .child(control)
@@ -145,11 +147,11 @@ fn checkbox_snippet(value: Option<bool>, tristate: bool, error: bool) -> String 
             Some(v) => format!("Some({v})"),
         };
         format!(
-            "frust_material::tristate_checkbox(\n    {value_text},\n    |state, next| state.value = next,\n)\n.error({error});"
+            "tristate_checkbox(\n    {value_text},\n    |app: &mut App, next: Option<bool>| app.value = next,\n)\n.error({error});"
         )
     } else {
         format!(
-            "frust_material::checkbox(\n    {},\n    |state, next| state.checked = next,\n)\n.error({error});",
+            "checkbox(\n    {},\n    |app: &mut App, next: bool| app.checked = next,\n)\n.error({error});",
             value.unwrap_or(false)
         )
     }

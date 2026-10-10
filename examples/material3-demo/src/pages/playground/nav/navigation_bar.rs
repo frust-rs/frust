@@ -22,6 +22,7 @@ use crate::widgets::playground::{
 };
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(NavigationBarPlayground))
 }
@@ -222,9 +223,9 @@ fn indicator_menu_panel(state: &NavBarState) -> impl View<NavBarState> {
 /// The FRUST-equivalent snippet for the current knob state.
 fn snippet_code(state: &NavBarState) -> String {
     let rows = if state.badges {
-        "destinations: vec![\n        nav_item(\"Home\").icon(any(icon(icons::HOME))),\n        nav_item(\"Search\").icon(any(icon(icons::SEARCH))).badge_dot(),\n        nav_item(\"Agenda\").icon(any(icon(icons::CALENDAR_TODAY))).badge_count(3),\n        nav_item(\"Drafts\").icon(any(icon(icons::EDIT))),\n    ],"
+        "vec![\n        nav_item(\"Home\").icon(icon(icons::HOME)),\n        nav_item(\"Search\").icon(icon(icons::SEARCH)).badge_dot(),\n        nav_item(\"Agenda\").icon(icon(icons::CALENDAR_TODAY)).badge_count(3),\n        nav_item(\"Drafts\").icon(icon(icons::EDIT)),\n    ],"
     } else {
-        "destinations: vec![\n        nav_item(\"Home\").icon(any(icon(icons::HOME))),\n        nav_item(\"Search\").icon(any(icon(icons::SEARCH))),\n        nav_item(\"Agenda\").icon(any(icon(icons::CALENDAR_TODAY))),\n        nav_item(\"Drafts\").icon(any(icon(icons::EDIT))),\n    ],"
+        "vec![\n        nav_item(\"Home\").icon(icon(icons::HOME)),\n        nav_item(\"Search\").icon(icon(icons::SEARCH)),\n        nav_item(\"Agenda\").icon(icon(icons::CALENDAR_TODAY)),\n        nav_item(\"Drafts\").icon(icon(icons::EDIT)),\n    ],"
     };
     format!(
         "navigation_bar(\n    {rows}\n    selected,\n    on_select,\n)\n    .size(NavBarSize::{size:?})\n    .label_behavior(NavBarLabelBehavior::{behavior:?})\n    .indicator_style(NavBarIndicatorStyle::{indicator:?})\n    .safe_area(false);\n// preview is embedded mid-screen; a bar docked at the screen bottom omits .safe_area(false)",

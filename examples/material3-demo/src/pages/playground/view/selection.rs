@@ -91,9 +91,9 @@
 use std::collections::BTreeSet;
 
 use frust::{
-    AnyView, Color, ColorScheme, Column, Component, CrossAxisAlignment, EdgeInsets, Get,
+    AnyView, Color, ColorScheme, Column, Component, CrossAxisAlignment, EdgeInsets, Either, Get,
     GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox, View, any, column,
-    component, container, icon, navigator, scroll_view, text,
+    component, container, either, icon, navigator, scroll_view, text, views,
 };
 use frust_material::{
     MaterialDimensions, MaterialSpacing, MaterialTokens, SnackbarController, dismiss_background,
@@ -170,11 +170,12 @@ impl Component for SelectionPlayground {
 
     fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let snapshot = state.clone();
-        any(navigator(&state.nav, move || content(&snapshot)))
+        navigator(&state.nav, move || content(&snapshot))
     }
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(SelectionPlayground))
 }
@@ -261,27 +262,30 @@ fn controls(state: &Knobs) -> AnyView<Knobs> {
 fn snippet(state: &Knobs) -> PlaySnippet {
     let rows = if state.dismissible.get() {
         "// one wrapper per row, host inside (see the page docs)\n\
-         dismissible(selection_host(vec![row], &state.selected, on_toggle))\n\
+         dismissible(selection_host(vec![row], &app.selected, on_toggle))\n\
          \u{20}   .background(dismiss_background().icon(icons::CHECK))\n\
-         \u{20}   .on_dismissed(|state, _direction| { /* remove the row */ });"
+         \u{20}   .on_dismissed(|app: &mut App, direction: DismissDirection| { /* remove the row */ });"
     } else {
-        "selection_host(rows, &state.selected, on_toggle)\n\
-         \u{20}   .on_activate(|state, index| { /* open the row */ });"
+        "selection_host(rows, &app.selected, on_toggle)\n\
+         \u{20}   .on_activate(|app: &mut App, index: usize| { /* open the row */ });"
     };
     play_snippet(
         "Selection",
         format!(
             "selection_app_bar(\n\
-             \u{20}   any(search_app_bar(search_bar(query, on_query).hint({hint:?}))),\n\
-             \u{20}   &state.selected,\n\
+             \u{20}   search_app_bar(search_bar(query, on_query).hint({hint:?})),\n\
+             \u{20}   &app.selected,\n\
              \u{20}   items.len(),\n\
-             \u{20}   |state| state.selected = selection::cleared(),\n\
+             \u{20}   |app: &mut App| app.selected = selection::cleared(),\n\
              )\n\
              .safe_area(false) // mid-page, below the page's own bar\n\
              .show_select_all({select_all})\n\
-             .actions(vec![any(icon_button(any(icon(icons::DELETE)), |_| {{}}))])\n\
-             .on_all_selected(|state, all| {{\n\
-             \u{20}   state.selected = if all {{\n\
+             .actions(vec![\n\
+             \u{20}   icon_button(icon(icons::ARCHIVE), |_: &mut App| {{}}),\n\
+             \u{20}   icon_button(icon(icons::DELETE), |_: &mut App| {{}}),\n\
+             ])\n\
+             .on_all_selected(|app: &mut App, all: bool| {{\n\
+             \u{20}   app.selected = if all {{\n\
              \u{20}       selection::select_all(items.len())\n\
              \u{20}   }} else {{\n\
              \u{20}       selection::cleared()\n\
@@ -334,7 +338,7 @@ impl Component for SelectionDemoHost {
 
     fn build(&self, state: &mut DemoState) -> impl View<DemoState> {
         let controller = state.toasts.clone();
-        any(snackbar_host(
+        snackbar_host(
             &controller,
             demo_content(
                 state,
@@ -342,7 +346,7 @@ impl Component for SelectionDemoHost {
                 self.show_select_all,
                 self.custom_highlight,
             ),
-        ))
+        )
     }
 }
 
@@ -373,7 +377,7 @@ fn demo_content(
 /// reference's `M3ESelectionAppBar(idle: M3EAppBar.search(..), actions: ..)`.
 fn demo_bar(state: &DemoState, show_select_all: bool) -> impl View<DemoState> {
     let back_nav = state.nav.clone();
-    let idle = any(search_app_bar(
+    let idle = search_app_bar(
         search_bar(
             state.query.clone(),
             |state: &mut DemoState, query: String| {
@@ -389,7 +393,7 @@ fn demo_bar(state: &DemoState, show_select_all: bool) -> impl View<DemoState> {
             back_nav.pop();
         })
         .semantic_label("Back"),
-    ));
+    );
 
     selection_app_bar(
         idle,
@@ -415,27 +419,32 @@ fn demo_bar(state: &DemoState, show_select_all: bool) -> impl View<DemoState> {
 
 /// The row list, in whichever of the two compositions the `dismissible` knob
 /// picks — see the module docs.
-fn demo_list(state: &DemoState, dismissible: bool, custom_highlight: bool) -> AnyView<DemoState> {
-    if dismissible {
-        return any(Column(
-            (0..ITEMS.len())
-                .map(|index| dismissible_row(state, index, custom_highlight))
-                .collect::<Vec<_>>(),
-        )
-        .cross_axis(CrossAxisAlignment::Stretch));
-    }
-    let rows = (0..ITEMS.len()).map(|index| row_view(state, index, custom_highlight));
-    any(selection_host(
-        frust::views(rows),
-        &state.selected,
-        |state: &mut DemoState, index| {
-            state.selected = selection::toggle(&state.selected, index);
+fn demo_list(state: &DemoState, dismissible: bool, custom_highlight: bool) -> impl View<DemoState> {
+    either(
+        dismissible,
+        || {
+            Column(
+                (0..ITEMS.len())
+                    .map(|index| dismissible_row(state, index, custom_highlight))
+                    .collect::<Vec<_>>(),
+            )
+            .cross_axis(CrossAxisAlignment::Stretch)
+        },
+        || {
+            let rows = (0..ITEMS.len()).map(|index| row_view(state, index, custom_highlight));
+            selection_host(
+                views(rows),
+                &state.selected,
+                |state: &mut DemoState, index| {
+                    state.selected = selection::toggle(&state.selected, index);
+                },
+            )
+            .on_activate(|state: &mut DemoState, index| {
+                let title = ITEMS[index].0;
+                state.toasts.show(snackbar(format!("Open {title}")));
+            })
         },
     )
-    .on_activate(|state: &mut DemoState, index| {
-        let title = ITEMS[index].0;
-        state.toasts.show(snackbar(format!("Open {title}")));
-    }))
 }
 
 /// One swipe-to-dismiss row: the wrapper *outside*, a single-row selection
@@ -491,12 +500,14 @@ fn row_view(state: &DemoState, index: usize, custom_highlight: bool) -> impl Vie
         .supporting(subtitle)
         .leading(leading_avatar(index, selected));
 
-    let surface: AnyView<DemoState> = if custom_highlight && selected {
-        any(container(row)
-            .fill(CUSTOM_HIGHLIGHT)
-            .radius(MaterialDimensions::RADIUS_MEDIUM))
+    let surface = if custom_highlight && selected {
+        Either::Left(
+            container(row)
+                .fill(CUSTOM_HIGHLIGHT)
+                .radius(MaterialDimensions::RADIUS_MEDIUM),
+        )
     } else {
-        any(row.contained(true).selected(selected))
+        Either::Right(row.contained(true).selected(selected))
     };
 
     Padding(
@@ -513,32 +524,34 @@ fn row_view(state: &DemoState, index: usize, custom_highlight: bool) -> impl Vie
 /// The leading slot: the row's initial on a rotating accent circle, swapped
 /// for a check on `primary` while selected — the reference's
 /// `M3ESelectionLeading` faces, minus its 3D flip (module docs).
-fn leading_avatar(index: usize, selected: bool) -> AnyView<DemoState> {
+fn leading_avatar(index: usize, selected: bool) -> impl View<DemoState> {
     let theme = ambient_theme();
     let scheme = theme.scheme();
     let radius = AVATAR_SIZE / 2.0;
 
-    if selected {
-        return any(
+    either(
+        selected,
+        || {
             container(icon(icons::CHECK).size(20.0).color(scheme.on_primary))
                 .size_centered(AVATAR_SIZE, AVATAR_SIZE)
                 .fill(scheme.primary)
-                .radius(radius),
-        );
-    }
-
-    let mut style = theme.type_scale.title_medium.clone();
-    style.color = scheme.on_primary;
-    let initial = ITEMS[index]
-        .0
-        .chars()
-        .next()
-        .map(String::from)
-        .unwrap_or_default();
-    any(container(text(initial).style(style))
-        .size_centered(AVATAR_SIZE, AVATAR_SIZE)
-        .fill(avatar_color(index, theme.scheme()))
-        .radius(radius))
+                .radius(radius)
+        },
+        || {
+            let mut style = theme.type_scale.title_medium.clone();
+            style.color = scheme.on_primary;
+            let initial = ITEMS[index]
+                .0
+                .chars()
+                .next()
+                .map(String::from)
+                .unwrap_or_default();
+            container(text(initial).style(style))
+                .size_centered(AVATAR_SIZE, AVATAR_SIZE)
+                .fill(avatar_color(index, theme.scheme()))
+                .radius(radius)
+        },
+    )
 }
 
 /// The unselected avatar's fill — the reference's own `_avatarColor`
