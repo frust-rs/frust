@@ -889,10 +889,7 @@ fn home_sheet_overlay(state: &HomeState, design: DesignLanguage) -> impl View<Ho
         HomeSheet::None => Either::Left(SizedBox(None, None)),
         HomeSheet::Create => Either::Right(sheet(create_channel_form(state)).on_dismiss(dismiss)),
         HomeSheet::RowActions { id, label, muted } => Either::Right(
-            sheet(action_menu(row_action_rows(
-                state, id, label, muted, design,
-            )))
-            .on_dismiss(dismiss),
+            sheet(row_action_rows(state, id, label, muted, design)).on_dismiss(dismiss),
         ),
     }
 }
@@ -969,7 +966,7 @@ fn row_action_rows(
     label: String,
     muted: bool,
     design: DesignLanguage,
-) -> Vec<AnyView<HomeState>> {
+) -> impl View<HomeState> {
     let data = state.controller.data;
 
     let mute_id = id.clone();
@@ -1023,7 +1020,7 @@ fn row_action_rows(
         s.sheet = HomeSheet::None;
     });
 
-    vec![mute_row, archive_row, invite_row, cancel_row]
+    action_menu((mute_row, archive_row, invite_row, cancel_row))
 }
 
 /// Push the invite confirmation modal onto the outer app navigator: `dialog`

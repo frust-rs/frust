@@ -92,11 +92,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Axis, ChildKey, Color, CrossAxisAlignment, DesignLanguage,
-    EdgeInsets, Either, FlexView, GestureDetector, Get, GetUntracked, ListView,
-    NavigatorController, Padding, RwSignal, Set, SizedBox, Theme, Update, View, any, column,
-    either, hero, icon, icons, inflexible, kurbo::Size, row, stack, text, text_input, use_context,
-    views,
+    Align, Alignment, AnyView, ChildKey, Color, CrossAxisAlignment, DesignLanguage, EdgeInsets,
+    Either, GestureDetector, Get, GetUntracked, ListView, NavigatorController, Padding, RwSignal,
+    Set, SizedBox, Theme, Update, View, any, column, either, hero, icon, icons, kurbo::Size, row,
+    stack, text, text_input, use_context, views,
 };
 use frust_cupertino::cupertino_activity_indicator;
 use frust_material::{app_bar, assist_chip, filter_chip, loading_indicator};
@@ -302,7 +301,7 @@ fn feed_sheet(
     match sheet_sig.get() {
         FeedSheet::None => Either::Left(SizedBox(None, None)),
         FeedSheet::Menu(id) => {
-            Either::Right(sheet(action_menu(feed_menu_rows(id, sheet_sig))).on_dismiss(dismiss))
+            Either::Right(sheet(feed_menu_rows(id, sheet_sig)).on_dismiss(dismiss))
         }
         FeedSheet::Emoji(target) => {
             let ctrl = Arc::clone(controller);
@@ -315,17 +314,15 @@ fn feed_sheet(
             });
             Either::Right(sheet(picker).on_dismiss(dismiss))
         }
-        FeedSheet::Attach => {
-            Either::Right(sheet(action_menu(attachment_rows(sheet_sig))).on_dismiss(dismiss))
-        }
+        FeedSheet::Attach => Either::Right(sheet(attachment_rows(sheet_sig)).on_dismiss(dismiss)),
     }
 }
 
 /// The long-press context-menu rows for message `id`: React (opens the picker),
 /// Reply in thread (pushes `/thread/:id`), Copy (mock toast), Delete (mock
 /// toast). Each closes the menu.
-fn feed_menu_rows(id: u32, sheet_sig: RwSignal<FeedSheet>) -> Vec<AnyView<HuddleState>> {
-    vec![
+fn feed_menu_rows(id: u32, sheet_sig: RwSignal<FeedSheet>) -> impl View<HuddleState> {
+    action_menu((
         sheet_action_row(icons::MOOD, "React", move |_st: &mut HuddleState| {
             sheet_sig.set(FeedSheet::Emoji(EmojiTarget::Message(id)));
         }),
@@ -345,23 +342,23 @@ fn feed_menu_rows(id: u32, sheet_sig: RwSignal<FeedSheet>) -> Vec<AnyView<Huddle
             sheet_sig.set(FeedSheet::None);
             st.toasts.show("Only admins can delete \u{2014} mock");
         }),
-    ]
+    ))
 }
 
 /// The mock attachment-sheet rows: Photo / File / Poll, each toasting and
 /// closing the sheet.
-fn attachment_rows(sheet_sig: RwSignal<FeedSheet>) -> Vec<AnyView<HuddleState>> {
+fn attachment_rows(sheet_sig: RwSignal<FeedSheet>) -> impl View<HuddleState> {
     let row = |leading, label: &'static str, kind: &'static str| {
         sheet_action_row(leading, label, move |st: &mut HuddleState| {
             sheet_sig.set(FeedSheet::None);
             st.toasts.show(format!("Attached {kind} (mock)"));
         })
     };
-    vec![
+    action_menu((
         row(icons::IMAGE, "Photo", "Photo"),
         row(icons::ATTACH_FILE, "File", "File"),
         row(icons::FORUM, "Poll", "Poll"),
-    ]
+    ))
 }
 
 /// The app bar: a back button, the channel/DM title, and a member-count
@@ -646,33 +643,33 @@ fn reaction_chips(
         return None;
     }
 
-    let mut chips: Vec<frust::FlexChild<HuddleState>> = Vec::new();
-    for reaction in &msg.reactions {
+    let chips = msg.reactions.iter().fold(row(), |chips, reaction| {
         let label = format!("{} {}", reaction.emoji, reaction.count);
         let emoji = reaction.emoji.clone();
         let ctrl = Arc::clone(controller);
         let id = msg.id;
-        chips.push(inflexible(filter_chip::<HuddleState, _>(
-            label,
-            reaction.mine,
-            move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
-        )));
-        chips.push(inflexible(SizedBox(Some(6.0), None)));
-    }
+        chips
+            .child(filter_chip::<HuddleState, _>(
+                label,
+                reaction.mine,
+                move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
+            ))
+            .child(SizedBox(Some(6.0), None))
+    });
 
     // The quick-react add chip.
     let ctrl = Arc::clone(controller);
     let id = msg.id;
-    chips.push(inflexible(
+    let chips = chips.child(
         assist_chip::<HuddleState, _>(QUICK_REACT, move |_st: &mut HuddleState| {
             ctrl.toggle_reaction(id, QUICK_REACT)
         })
         .leading("+"),
-    ));
+    );
 
     Some(Padding(
         EdgeInsets::symmetric(0.0, 6.0),
-        FlexView::new(Axis::Horizontal, chips).cross_axis(CrossAxisAlignment::Center),
+        chips.cross_axis(CrossAxisAlignment::Center),
     ))
 }
 

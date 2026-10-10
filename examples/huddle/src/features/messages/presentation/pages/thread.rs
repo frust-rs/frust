@@ -55,10 +55,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, Either, FlexView,
-    GestureDetector, Get, GetUntracked, Padding, RwSignal, Set, SizedBox, View, column, either,
-    hero, icon, icons, inflexible, keyed, kurbo::Size, row, scroll_view, stack, text, text_input,
-    use_context,
+    Align, Alignment, Color, CrossAxisAlignment, EdgeInsets, Either, FlexView, GestureDetector,
+    Get, GetUntracked, Padding, RwSignal, Set, SizedBox, View, column, either, hero, icon, icons,
+    kurbo::Size, row, scroll_view, stack, text, text_input, use_context,
 };
 use frust_material::app_bar;
 
@@ -241,9 +240,9 @@ fn thread_sheet(
     // content once inside).
     match sheet_sig.get() {
         ThreadSheet::None => Either::Left(SizedBox(None, None)),
-        ThreadSheet::Menu(react) => Either::Right(
-            sheet(action_menu(thread_menu_rows(react, sheet_sig))).on_dismiss(dismiss),
-        ),
+        ThreadSheet::Menu(react) => {
+            Either::Right(sheet(thread_menu_rows(react, sheet_sig)).on_dismiss(dismiss))
+        }
         ThreadSheet::Emoji(id) => {
             let ctrl = Arc::clone(controller);
             let picker = emoji_grid(move |_st: &mut HuddleState, emoji: &'static str| {
@@ -261,32 +260,22 @@ fn thread_sheet(
 fn thread_menu_rows(
     react: Option<u32>,
     sheet_sig: RwSignal<ThreadSheet>,
-) -> Vec<AnyView<HuddleState>> {
-    let mut rows: Vec<AnyView<HuddleState>> = Vec::new();
-    if let Some(id) = react {
-        rows.push(sheet_action_row(
-            icons::MOOD,
-            "React",
-            move |_st: &mut HuddleState| sheet_sig.set(ThreadSheet::Emoji(id)),
-        ));
-    }
-    rows.push(sheet_action_row(
-        icons::DESCRIPTION,
-        "Copy",
-        move |st: &mut HuddleState| {
+) -> impl View<HuddleState> {
+    action_menu((
+        react.map(|id| {
+            sheet_action_row(icons::MOOD, "React", move |_st: &mut HuddleState| {
+                sheet_sig.set(ThreadSheet::Emoji(id))
+            })
+        }),
+        sheet_action_row(icons::DESCRIPTION, "Copy", move |st: &mut HuddleState| {
             sheet_sig.set(ThreadSheet::None);
             st.toasts.show("Copied");
-        },
-    ));
-    rows.push(sheet_action_row(
-        icons::DELETE,
-        "Delete",
-        move |st: &mut HuddleState| {
+        }),
+        sheet_action_row(icons::DELETE, "Delete", move |st: &mut HuddleState| {
             sheet_sig.set(ThreadSheet::None);
             st.toasts.show("Only admins can delete \u{2014} mock");
-        },
-    ));
-    rows
+        }),
+    ))
 }
 
 /// "Thread" plus the channel/DM name, derived from the root message's channel
@@ -347,18 +336,18 @@ fn thread_content(
     root: &FeedMessage,
     sheet_sig: RwSignal<ThreadSheet>,
 ) -> impl View<HuddleState> {
-    let mut children: Vec<frust::FlexChild<HuddleState>> =
-        vec![inflexible(root_bubble(controller, root, sheet_sig))];
-
-    if root.replies.is_empty() {
-        children.push(inflexible(empty_replies_state()));
-    } else {
-        children.push(inflexible(divider_row(root.reply_count())));
-        children.push(inflexible(reply_list(controller, &root.replies, sheet_sig)));
-    }
-
-    let column = FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch);
-    scroll_view(Padding(EdgeInsets::all(12.0), column))
+    let body = column()
+        .child(root_bubble(controller, root, sheet_sig))
+        .when(root.replies.is_empty(), |c| c.child(empty_replies_state()))
+        .when(!root.replies.is_empty(), |c| {
+            c.child(divider_row(root.reply_count())).child(reply_list(
+                controller,
+                &root.replies,
+                sheet_sig,
+            ))
+        })
+        .cross_axis(CrossAxisAlignment::Stretch);
+    scroll_view(Padding(EdgeInsets::all(12.0), body))
 }
 
 /// The keyed reply list — every child keyed by its index (replies are only
@@ -369,12 +358,13 @@ fn reply_list(
     replies: &[FeedReply],
     sheet_sig: RwSignal<ThreadSheet>,
 ) -> impl View<HuddleState> {
-    let children: Vec<frust::FlexChild<HuddleState>> = replies
+    replies
         .iter()
         .enumerate()
-        .map(|(idx, reply)| keyed(idx, reply_bubble(controller, reply, sheet_sig)))
-        .collect();
-    FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch)
+        .fold(column(), |list, (idx, reply)| {
+            list.keyed(idx, reply_bubble(controller, reply, sheet_sig))
+        })
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// The root message, rendered prominently: avatar + author + time header,
@@ -472,25 +462,25 @@ fn reaction_chips(
     controller: &Arc<MessagesController>,
     root: &FeedMessage,
 ) -> Option<impl View<HuddleState>> {
-    let mut chips: Vec<frust::FlexChild<HuddleState>> = Vec::new();
-    for reaction in &root.reactions {
+    if root.reactions.is_empty() {
+        return None;
+    }
+
+    let chips = root.reactions.iter().fold(row(), |chips, reaction| {
         let label = format!("{} {}", reaction.emoji, reaction.count);
         let emoji = reaction.emoji.clone();
         let ctrl = Arc::clone(controller);
         let id = root.id;
-        chips.push(inflexible(frust_material::filter_chip::<HuddleState, _>(
-            label,
-            reaction.mine,
-            move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
-        )));
-        chips.push(inflexible(SizedBox(Some(6.0), None)));
-    }
+        chips
+            .child(frust_material::filter_chip::<HuddleState, _>(
+                label,
+                reaction.mine,
+                move |_st: &mut HuddleState, _on: bool| ctrl.toggle_reaction(id, &emoji),
+            ))
+            .child(SizedBox(Some(6.0), None))
+    });
 
-    if chips.is_empty() {
-        return None;
-    }
-
-    Some(FlexView::new(Axis::Horizontal, chips).cross_axis(CrossAxisAlignment::Center))
+    Some(chips.cross_axis(CrossAxisAlignment::Center))
 }
 
 /// A 40px circular initials avatar — duplicated locally rather than shared
