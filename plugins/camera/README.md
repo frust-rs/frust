@@ -36,7 +36,7 @@ The **only** required Cargo step is the dependency line:
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-camera = { path = "<frust>/plugins/camera" }  # or the crates.io release, e.g. version = "0.5"
+frust-camera = { path = "<frust>/plugins/camera" }  # or the crates.io release, e.g. version = "0.6"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -62,8 +62,11 @@ both platform additions below (permission and still capture work without
 them, but you'll be looking at a black rectangle).
 
 ```rust
+use frust::platform_view;
+
+// in a Component's build
 let view_type = session.preview_view_type(); // target-gated — see the doc below
-frust::platform_view(view_type)
+platform_view(view_type)
     .params_json(session.params_json())
     // size it off `session.preview_aspect_ratio()` once non-zero
 ```
@@ -144,7 +147,7 @@ no capture/permission code of its own.
 the first two refuse to run on the platform's UI thread at all;
 `CameraSession::close` carries no such guard and genuinely blocks it (see
 below the table). Like `frust-secure-storage`'s gated calls, pair each with
-`frust_reactive::spawn_blocking`:
+`frust::spawn_blocking`:
 
 | Call | Blocks until | Deadline (Android / Apple) |
 |---|---|---|
@@ -152,17 +155,19 @@ below the table). Like `frust-secure-storage`'s gated calls, pair each with
 | `CameraSession::take_picture` | the photo has been written to disk, or the capture failed | 15 s / 10 s |
 | `CameraSession::close` (dropping a `CameraSession` without calling it first runs the identical hop) | the capture device is released — Apple parks on the session's serial queue, which may still be working through `open()`'s in-flight `startRunning()` or a just-issued stream-start attach; Android's JNI call only waits for the teardown to be *scheduled*, not finished | doesn't block (Android) / none — no timeout, by design (Apple) |
 
-Pair each with `frust-reactive`'s `spawn_blocking` (an app-tier concern — the
+Pair each with `frust`'s `spawn_blocking` (an app-tier concern — the
 plugin itself stays framework-free per the platform-plugin charter):
 
 ```rust
-let status = frust_reactive::spawn_blocking(Camera::request_permission).await??;
+use frust::spawn_blocking;
+
+let status = spawn_blocking(Camera::request_permission).await??;
 
 // `take_picture` takes `&self`, so hold the session behind a shared handle
 // (e.g. `Arc<CameraSession>`) and move a clone of that into the closure:
 let session = Arc::clone(&session);
 let path = photo_path.clone();
-frust_reactive::spawn_blocking(move || session.take_picture(&path)).await??;
+spawn_blocking(move || session.take_picture(&path)).await??;
 ```
 
 **Never call `request_permission` or `take_picture` on the UI thread.** On
@@ -182,7 +187,7 @@ calling it (or dropping a `CameraSession` without calling it — the same
 queue hop runs either way) on the UI thread is never refused with
 `CameraError::UiThread`; it genuinely blocks the calling thread, by design —
 the release is exactly what a caller reopening right after (a lens switch)
-depends on. Pair it with `frust_reactive::spawn_blocking` anyway, especially
+depends on. Pair it with `frust::spawn_blocking` anyway, especially
 whenever a stream start may still be mid-flight on the session queue.
 
 **The torch is not in the table above.** `set_torch`/`torch_available` (§5)
@@ -296,7 +301,7 @@ it.** Hand detections off the same way `start_image_stream` consumers
 already have to — write into a plain `Arc<Mutex<..>>`/atomic cell from
 `on_detect`, and read it from the UI thread on the next rebuild (a timer or
 another signal write wakes one), or route the value through
-`frust_reactive::use_task`/`spawn_blocking` if it needs async follow-up work:
+`frust::use_task`/`spawn_blocking` if it needs async follow-up work:
 
 ```rust
 let last_detection: Arc<Mutex<Option<Barcode>>> = Arc::new(Mutex::new(None));
@@ -433,7 +438,7 @@ manual test*.
   or consume before returning: a late return stalls the Android stream
   outright (`STRATEGY_KEEP_ONLY_LATEST` holds one image in flight) and drops
   frames on iOS. Never write a signal from inside it — hand work off with
-  `frust_reactive::use_task` (`docs/CODE_STANDARDS.md`'s heavy-work routing).
+  `frust::use_task` (`docs/CODE_STANDARDS.md`'s heavy-work routing).
 - **No torch on most front lenses, and none at all on a device without a
   flash unit.** `torch_available()` (§5) is the check — treat it as a UI
   gate, not a formality, and expect `false` from `Lens::Front` on nearly

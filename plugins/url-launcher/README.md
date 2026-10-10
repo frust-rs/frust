@@ -18,7 +18,7 @@ not re-export it.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-url-launcher = { path = "<frust>/plugins/url-launcher" }  # or the crates.io release, e.g. version = "0.5"
+frust-url-launcher = { path = "<frust>/plugins/url-launcher" }  # or the crates.io release, e.g. version = "0.6"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {

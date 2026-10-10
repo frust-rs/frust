@@ -24,7 +24,7 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-database = "0.5"
+frust-database = "0.6"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -45,14 +45,15 @@ plugin), but all it applies is the Cargo dependency line above.
 Open a database at the standard location (`<data_dir>/databases/<name>.db`),
 create a table, insert, and query. Every [`Database`] operation is a
 **blocking** synchronous call and must run on a background thread via
-`frust_reactive::spawn_blocking`:
+`frust::spawn_blocking`:
 
 ```rust
+use frust::spawn_blocking;
 use frust_database::Database;
 
 let db = Database::open("app")?;
 
-let inserted = frust_reactive::spawn_blocking(move || {
+let inserted = spawn_blocking(move || {
     db.execute(
         "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)",
         (),
@@ -67,11 +68,12 @@ println!("Inserted {inserted} rows");
 A more complex example with a transaction:
 
 ```rust
+use frust::spawn_blocking;
 use frust_database::{Database, Value};
 
 let db = Database::open("app")?;
 
-let result = frust_reactive::spawn_blocking(move || {
+let result = spawn_blocking(move || {
     db.transaction(|txn| {
         txn.execute(
             "INSERT INTO notes (body) VALUES (?1)",
@@ -91,11 +93,12 @@ let result = frust_reactive::spawn_blocking(move || {
 Query and read results:
 
 ```rust
+use frust::spawn_blocking;
 use frust_database::{Database, Value};
 
 let db = Database::open("app")?;
 
-let rows = frust_reactive::spawn_blocking(move || {
+let rows = spawn_blocking(move || {
     db.query("SELECT id, body FROM notes WHERE id = ?1", [1i64])
 })
 .await??;
@@ -117,11 +120,12 @@ that converts into [`Value`] (the five SQL storage classes: `Null`,
 `Integer`, `Real`, `Text`, `Blob`), or an empty tuple `()` for no parameters:
 
 ```rust
+use frust::spawn_blocking;
 use frust_database::{Database, Value};
 
 let db = Database::open("app")?;
 
-frust_reactive::spawn_blocking(move || {
+spawn_blocking(move || {
     db.execute(
         "INSERT INTO items (id, name, price, data) VALUES (?1, ?2, ?3, ?4)",
         [
@@ -151,16 +155,18 @@ frust_reactive::spawn_blocking(move || {
 Every [`Database`] operation (`execute`, `query`, `transaction`) is a
 **blocking** synchronous call — it runs on the calling thread and blocks until
 the SQL operation completes. Calling it directly on the platform UI thread
-freezes the frame loop. Pair every database call with `frust_reactive::spawn_blocking`
+freezes the frame loop. Pair every database call with `frust::spawn_blocking`
 (an app-tier concern — the plugin itself stays framework-free per the
 platform-plugin charter):
 
 ```rust
+use frust::spawn_blocking;
+
 // ✗ Wrong: freezes the UI
 let rows = db.query("SELECT * FROM notes", ())?;
 
 // ✓ Right: runs on a background thread
-let rows = frust_reactive::spawn_blocking(move || {
+let rows = spawn_blocking(move || {
     db.query("SELECT * FROM notes", ())
 })
 .await??;
@@ -198,6 +204,7 @@ parallelism. On `engine-sqlite`, this is real wall-clock parallelism:
 threads.
 
 ```rust
+use frust::spawn_blocking;
 use frust_database::Database;
 
 let db1 = Database::open("app")?;
@@ -205,8 +212,8 @@ let db2 = Database::open("app")?;  // Same file, different connection
 
 // engine-sqlite: two independent background tasks that genuinely read in
 // parallel. Each handle moves into its own closure — Database isn't Clone.
-let task1 = frust_reactive::spawn_blocking(move || db1.query("SELECT * FROM notes", ()));
-let task2 = frust_reactive::spawn_blocking(move || db2.query("SELECT * FROM items", ()));
+let task1 = spawn_blocking(move || db1.query("SELECT * FROM notes", ()));
+let task2 = spawn_blocking(move || db2.query("SELECT * FROM items", ()));
 
 let (rows1, rows2) = tokio::join!(task1, task2);
 ```
@@ -276,7 +283,7 @@ the default features:
 
 ```toml
 # Your app's Cargo.toml
-frust-database = "0.5"  # engine-sqlite enabled by default
+frust-database = "0.6"  # engine-sqlite enabled by default
 ```
 
 **What it costs:** ~1.0–1.7 MB (measured in the ship profile — see §6).
@@ -346,10 +353,11 @@ To use it, enable the feature and pass the engine explicitly:
 
 ```toml
 # Your app's Cargo.toml
-frust-database = { version = "0.5", features = ["engine-turso"] }
+frust-database = { version = "0.6", features = ["engine-turso"] }
 ```
 
 ```rust
+use frust::spawn_blocking;
 use frust_database::{Database, Engine, OpenOptions};
 
 let db = Database::open_with(
@@ -358,7 +366,7 @@ let db = Database::open_with(
 )?;
 
 // ... the rest of your code is identical to SQLite
-let rows = frust_reactive::spawn_blocking(move || {
+let rows = spawn_blocking(move || {
     db.query("SELECT * FROM notes", ())
 })
 .await??;
@@ -478,7 +486,7 @@ The probe app was never committed.
   discipline is docs-only. There is no shared guard helper in this codebase,
   and adding one would require an FFI dependency this pure-Rust crate
   deliberately carries none of. Respect the pairing with
-  `frust_reactive::spawn_blocking`.
+  `frust::spawn_blocking`.
 - **Turso indexes are experimental upstream.** This crate's own cross-engine
   conformance suite deliberately excludes `CREATE INDEX` from the shared
   behavioral contract for this reason — the sqlite backend has its own

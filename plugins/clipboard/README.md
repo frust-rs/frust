@@ -19,7 +19,7 @@ not re-export it.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-clipboard = { path = "<frust>/plugins/clipboard" }  # or the crates.io release, e.g. version = "0.5"
+frust-clipboard = { path = "<frust>/plugins/clipboard" }  # or the crates.io release, e.g. version = "0.6"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
