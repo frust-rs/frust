@@ -91,9 +91,11 @@ bare CLI:
 - An embedded **MCP server** for AI agents and an embedded **DAP server** for editor debuggers,
   both driving the same sessions the workbench shows.
 
-See [the website's TUI docs](https://frust.dev/docs/tooling/tui) for the full picture. (There is
-no hot reload — a code change still needs a rebuild. Press `R` in the TUI, or use `frust run
---watch` on desktop, to rebuild and relaunch.)
+See [the website's TUI docs](https://frust.dev/docs/tooling/tui) for the full picture. (A debug
+`frust run --watch` — desktop, or `-d` an Android device or booted iOS simulator — hot-patches each
+save into the running app with its State kept, and relaunches only when a change cannot be patched
+(`restart required: <reason>`). `R` in the TUI is always a full rebuild and relaunch; see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) § Dev Loop.)
 
 ### Extensible
 
