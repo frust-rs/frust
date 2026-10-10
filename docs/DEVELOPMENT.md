@@ -171,17 +171,17 @@ A debug `--watch` run — the desktop preview, or `-d <device>` for an Android d
 simulator — watches the workspace graph's path classes (every member and local non-member `src/`,
 each package's `Cargo.toml`/`build.rs`, `Cargo.lock`, `frust.toml`, `rust-toolchain*`,
 `.cargo/config*`; [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)) and **hot-patches** each settled
-save-burst (100ms debounce) into the running process: `patched in N ms`, app state and PID kept.
-It relaunches from a fresh build only on `restart required: <reason>` (a layout change, a framework or build-input edit,
-the patch budget — the classes are under `no-hot-reload-restart-is-a-rebuild` in
-[LIMITATIONS.md](LIMITATIONS.md)). On the desktop, `--no-hot`, a
-profile/release build or a `--features` passthrough keeps the plain kill-and-relaunch loop (`cargo
-run`, incremental, one relaunch per burst, state reset; it watches only `src/` + `Cargo.toml`). With
-`-d <device>` a non-debug build or `--features` is refused; only `--no-hot` reaches the device
-relaunch loop. Kill/relaunch and Ctrl-C exit both reach the whole `cargo run` tree — Unix
-process-group kill, Windows `taskkill /T /F` (`frust_drive::process`, shared by every kill path
-below). Web, a physical iOS device and other devices are not watched (`--watch` + `-d` refuses them).
-Measured baselines: [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Dev loop.
+save-burst (100ms debounce) into the running process: `patched in N ms`, app state and PID kept. It
+relaunches from a fresh build only on `restart required: <reason>` (a layout change, a framework or
+build-input edit, the patch budget — the classes are under `no-hot-reload-restart-is-a-rebuild` in
+[LIMITATIONS.md](LIMITATIONS.md)). On the desktop, `--no-hot`, a profile/release build or a
+`--features` passthrough keeps the plain kill-and-relaunch loop (`cargo run`, incremental, one
+relaunch per burst, state reset; it watches only `src/` + `Cargo.toml`). With `-d <device>` a
+non-debug build or `--features` is refused; only `--no-hot` reaches the device relaunch loop.
+Kill/relaunch and Ctrl-C exit both reach the whole `cargo run` tree — Unix process-group kill,
+Windows `taskkill /T /F` (`frust_drive::process`, shared by every kill path below). Web, a physical
+iOS device and other devices are not watched (`--watch` + `-d` refuses them). Measured baselines:
+[PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Dev loop.
 
 **TUI equivalents.** `R` restarts the active workbench session the same way — rebuild + relaunch,
 never state-preserving. 'Watch: hot patch on save' (`W`, palette, or the run-config checkbox) on a
