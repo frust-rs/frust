@@ -167,17 +167,25 @@ its README, then run [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)'s Browser ma
 frust run --watch
 ```
 
-Desktop only: watches `src/` and `Cargo.toml`, killing and relaunching (`cargo run`, incremental) on
-change, debouncing a save-burst into one relaunch. Kill/relaunch and Ctrl-C exit both reach the whole
-`cargo run` tree — Unix process-group kill, Windows `taskkill /T /F` (`frust_drive::process`, shared
-by every kill path below). A **relaunch loop, not state-preserving hot reload** — app state resets
-every rebuild. `--watch` + `-d <device>` is a hard error (device-side watch isn't implemented). Measured baselines (and why no fast-dev recipe ships): [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Dev loop.
+A debug `--watch` run — the desktop preview, or `-d <device>` for an Android device or a booted iOS
+simulator — watches `src/` and `Cargo.toml` and **hot-patches** each settled save-burst (100ms
+debounce) into the running process: `patched in N ms`, app state and PID kept. It relaunches from a
+fresh build only on `restart required: <reason>` (a layout change, a framework or build-input edit,
+the patch budget — the classes are under `no-hot-reload-restart-is-a-rebuild` in
+[LIMITATIONS.md](LIMITATIONS.md)). `--no-hot`, a profile/release build or a `--features`
+passthrough keeps the plain kill-and-relaunch loop (`cargo run`, incremental, one relaunch per
+burst, state reset). Kill/relaunch and Ctrl-C exit both reach the whole `cargo run` tree — Unix
+process-group kill, Windows `taskkill /T /F` (`frust_drive::process`, shared by every kill path
+below). Web, a physical iOS device and other devices are not watched (`--watch` + `-d` refuses them).
+Measured baselines: [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Dev loop.
 
 **TUI equivalents.** `R` restarts the active workbench session the same way — rebuild + relaunch,
-never state-preserving. 'Watch: restart on save' (`W`, palette, or the run-config checkbox) restarts
-a **desktop** session on every settled save-burst with the same 300ms debounce (`supervise/watch.rs`)
-— one relaunch per burst. A device session's `R` reruns build → install → launch instead; watch is
-refused there (desktop-only, see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
+never state-preserving. 'Watch: hot patch on save' (`W`, palette, or the run-config checkbox) on a
+watched debug session — desktop, an Android device, or a booted iOS simulator — hot-patches each
+settled save-burst (100ms debounce, `supervise/watch.rs`, synced with `frust-cli`'s): a
+`patched in N ms` toast, and the app relaunches only on `restart required: <reason>`. A physical iOS
+device's `R` reruns build → install → launch and watch is refused there (mechanism and refusals:
+[TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
 
 ## Release Builds
 
