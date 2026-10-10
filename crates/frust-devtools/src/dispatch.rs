@@ -187,8 +187,9 @@ pub(crate) fn salvage_id(prefix: &[u8]) -> Option<u64> {
                             .iter()
                             .take_while(|b| b.is_ascii_digit())
                             .count();
-                    // A fraction, exponent or cut-off number is no integer id.
-                    if to == from || !matches!(prefix.get(to), Some(b',' | b'}' | b' ')) {
+                    // A fraction, exponent or cut-off number is no integer id;
+                    // any JSON whitespace may sit between it and its `,`/`}`.
+                    if to == from || !matches!(prefix.get(skip_ws(prefix, to)), Some(b',' | b'}')) {
                         return None;
                     }
                     return std::str::from_utf8(&prefix[from..to]).ok()?.parse().ok();
@@ -653,8 +654,10 @@ struct PendingPatch {
     patch_id: u64,
     total_len: u64,
     bytes: Vec<u8>,
-    /// When its first chunk began to be handled, and how many were appended.
+    /// When its first chunk began to be handled, when its latest chunk
+    /// finished, and how many were appended.
     started: std::time::Instant,
+    last: std::time::Instant,
     chunks: u32,
     /// Time spent handling its chunks here (params, decode, append), as
     /// against the wall time the transfer took.
@@ -828,6 +831,7 @@ impl PatchAssembly {
                 total_len: chunk.total_len,
                 bytes: Vec::new(),
                 started: std::time::Instant::now(),
+                last: std::time::Instant::now(),
                 chunks: 0,
                 handled: std::time::Duration::ZERO,
             });
@@ -848,6 +852,7 @@ impl PatchAssembly {
             if p.chunks == 1 {
                 p.started = since;
             }
+            p.last = std::time::Instant::now();
         }
     }
 
@@ -858,7 +863,9 @@ impl PatchAssembly {
             .as_ref()
             .filter(|p| p.patch_id == patch_id)
             .map(|p| Transfer {
-                wall: p.started.elapsed(),
+                // First chunk to last: idle time before `apply_patch` (or a
+                // table upload after the patch) is not transfer time.
+                wall: p.last.saturating_duration_since(p.started),
                 chunks: p.chunks,
                 handled: p.handled,
             })
@@ -1374,6 +1381,9 @@ mod tests {
         assert_eq!(salvage_id(br#"{"params":["id",1],"id":3}"#), Some(3));
         // A key-looking string inside a string value is skipped whole.
         assert_eq!(salvage_id(br#"{"params":"\"id\":5","id":6,"#), Some(6));
+        // JSON whitespace between the id and its delimiter.
+        assert_eq!(salvage_id(b"{\"id\":7\n,\"method\":\"x\""), Some(7));
+        assert_eq!(salvage_id(b"{\"id\":8\t}"), Some(8));
         // Not an unsigned integer, cut off, or not an object at all.
         for prefix in [
             &br#"{"id":"abc","#[..],
