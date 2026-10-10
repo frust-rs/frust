@@ -16,11 +16,11 @@ A Frust app created with `frust create`.
 The architecture layers all your business logic into the feature slice; `lib.rs`
 stays shallow and only wires the app's `app!()` entry and component's `State`.
 {%- else %}
-- `src/lib.rs` — the entry point (`frust::app!`) and the root component.
-- `src/home_page.rs` — the counter screen, a `Component` built from small widget fns.
+- `src/lib.rs` — the whole counter app: one `Component` whose `build` is the widget
+  tree, helpers as associated fns, and the entry point (`frust::app!`).
 
 Add screens as components in their own modules, and keep `build` shallow by
-pulling stateless pieces out into small widget fns.
+pulling pieces out into associated fns or small widget fns.
 {%- endif %}
 
 ## Theming
