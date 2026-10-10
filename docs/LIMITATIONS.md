@@ -1720,11 +1720,14 @@ iOS simulator>`) and the TUI's 'Watch: hot patch on save' on the same targets ho
 the running process: the changed workspace-member crates are replayed, thin-linked into a patch
 image and applied over devtools, and the CLI prints `patched in <n> ms` (the TUI a `✓ patched`
 toast) with the PID and every component's `State` kept. The `frust/hotpatch` feature is switched on
-for the hot run's own fat build only, never by default; `--no-hot`, a profile/release build or a
-`--features` passthrough keeps the plain relaunch loop. A compile error leaves the running app
-untouched. Anything a patch cannot carry prints `restart required: <reason>`, never `patched`, and
-the app is relaunched from a fresh fat build with State reset. The reasons (`RestartReason`) fall
-into five classes:
+for the hot run's own fat build only, never by default. On the desktop, `--no-hot`, a
+profile/release build or a `--features` passthrough keeps the plain relaunch loop; `--watch -d`
+refuses a non-Debug build or extra features (`run_watch_on_device`), so on a device only `--no-hot`
+keeps the relaunch loop. The save debounce is duplicated between `frust-cli` and `frust-tui` (kept
+in sync by a comment; a follow-up moves it into `frust-drive`). A compile error leaves the running
+app untouched. Anything a patch cannot carry prints `restart required: <reason>`, never `patched`,
+and the app is relaunched from a fresh fat build with State reset. The reasons (`RestartReason`)
+fall into five classes:
 - *Layout or identity*: a replayable type's layout differs from the accepted set (`LayoutChanged`,
   from the host's L3 gate over DWARF (Mach-O/ELF) or PDB type records (Windows), or a mismatch the
   app reports), or a component's `State` changed type (`StateTypeChanged`).
@@ -1769,8 +1772,10 @@ ARM64 and other Android ABIs never patch. The Windows residuals are
 across `frust-tui`, `frust-cli`, `frust-mcp` and `frust-dap`.
 
 **Why accepted**: a patch is applied only where the host can show the running types are unchanged;
-anything else restarts rather than risk memory unsafety, and on every hot target the median
-save→frame of a patch is 13.5-38.5% of that target's restart median. The inline-host gap is closed
+anything else restarts rather than risk memory unsafety. The median save→frame of a patch is
+13.5-38.5% of the restart median on macOS desktop, Android arm64, Windows x64 and the iOS
+simulator; Linux desktop is covered for correctness by the CI canary
+(`scripts/ci/hotpatch-canary.sh`) with no measured ratio. The inline-host gap is closed
 by L3 on every hot target, and closing it in-app would need a witness check on every `event`,
 `layout` and `paint`. In-process hot restart (State reset without a relaunch) is still out of reach:
 `frust::run` takes the root `Component` by value, once; it runs under the shell's root `Owner`,

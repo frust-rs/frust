@@ -50,7 +50,9 @@ The service mints a random per-process token (`frust-devtools::token` — the OS
 `/dev/urandom` on unix and `BCryptGenRandom` on Windows, with a documented non-cryptographic
 fallback only when that fails), prints it on the discovery line, and requires it at
 `handshake` before dispatching any other method — `ServiceConfig::require_token` defaults **on**;
-the off switch exists only for in-process tests. Loading code is gated harder than reading state:
+the off switch exists only for in-process tests. On a shared Android device or simulator host
+any co-resident app can reach the loopback port, so for loaded code the handshake token is the
+only barrier, which is why the lane is debug-only. Loading code is gated harder than reading state:
 `Capability::HotPatch` survives only while `service::hot_patch_gate` holds — the `hotpatch`
 feature, a backend that offers it, a debug build, and an OS-sourced token with `require_token`
 on — and every host, Windows included, answers that same gate; a fallback token keeps inspection
@@ -130,8 +132,10 @@ loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELin
   [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)'s `frust-drive::hotpatch`).
 - **Build-mode funnel.** `BuildMode::cargo_features()` (`frust-drive::build_info`) selects
   `["frust/perf-trace", "frust/devtools"]` for Debug and Profile, `["lean"]` for Release; a
-  Debug hot session alone adds `frust/hotpatch` (`session_cargo_features`), so Profile and
-  Release never compile the hot-patch path in. See [DEVELOPMENT.md](DEVELOPMENT.md) and
+  Debug hot session alone adds `frust/hotpatch` (`session_cargo_features`), so the CLI never
+  compiles the hot-patch path into a Profile or Release build; an app that enables
+  `frust/hotpatch` itself still compiles it, and `service::hot_patch_gate`'s debug-build
+  condition strips `HotPatch` at runtime. See [DEVELOPMENT.md](DEVELOPMENT.md) and
   [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md).
 
 ## Key Types
