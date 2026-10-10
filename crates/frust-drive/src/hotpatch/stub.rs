@@ -13,6 +13,19 @@
 //!   the patch loads;
 //! - **data** becomes an absolute symbol at the runtime address.
 //!
+//! On Windows (MSVC PE, the base's entries read from its PDB) two arms
+//! differ, as in dx: a text thunk loads the address into a scratch register
+//! and jumps through it (`movabs rax` / `movz`+`movk` into `x16`), and an
+//! `__imp_<name>` reference — link.exe's import-address slot — becomes an
+//! 8-byte data slot holding `<name>`'s runtime address. The cache's PE
+//! addresses are VAs (preferred `ImageBase` + RVA, [`super::pe`]), so the
+//! slide is 0 for an exe loaded at its preferred base. A COFF absolute
+//! symbol holds only 32 bits: the fat exe links at a fixed base below 4 GiB
+//! with ASLR off ([`FAT_IMAGE_BASE`](super::fat_link::FAT_IMAGE_BASE)) so
+//! base data fits, and a data symbol whose runtime address still does not
+//! (a relocated image, an ARM exe that keeps ASLR) refuses the stub rather
+//! than being truncated.
+//!
 //! The stub hard-codes one process's addresses, so it is built only once
 //! that process has reported its anchor. Unlike dx it fails closed: a
 //! strongly referenced symbol the base does not have refuses the whole stub
@@ -49,6 +62,16 @@ const AARCH64_LDR_X16_LITERAL: [u8; 4] = [0x50, 0x00, 0x00, 0x58];
 const AARCH64_BR_X16: [u8; 4] = [0x00, 0x02, 0x1f, 0xd6];
 /// `jmp qword ptr [rip + 0]` — jump through the 64-bit address that follows.
 const X86_64_JMP_RIP_INDIRECT: [u8; 6] = [0xff, 0x25, 0x00, 0x00, 0x00, 0x00];
+/// `movabs rax, imm64` (the address follows).
+const X86_64_MOVABS_RAX: [u8; 2] = [0x48, 0xb8];
+/// `jmp rax`.
+const X86_64_JMP_RAX: [u8; 2] = [0xff, 0xe0];
+/// `movz x16, #0` and the three `movk x16, #0, lsl #16/#32/#48`, each
+/// taking a 16-bit slice of the address in bits 5..21.
+const AARCH64_MOV_X16: [u32; 4] = [0xd280_0010, 0xf2a0_0010, 0xf2c0_0010, 0xf2e0_0010];
+
+/// link.exe's prefix for a symbol's import-address slot.
+pub const IMP_PREFIX: &str = "__imp_";
 
 /// The symbols a patch's inputs reference but none of them defines.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -174,6 +197,14 @@ pub fn build_stub(
     let mut missing = Vec::new();
     let mut resolved: Vec<(&str, CachedSymbol)> = Vec::new();
     for name in &undefined.strong {
+        if let Some(slot) = imp_target(target, name) {
+            match resolve_imp(cache, name, slot) {
+                Some(Some(symbol)) => resolved.push((name, symbol)),
+                Some(None) => {}
+                None => missing.push(name.as_str()),
+            }
+            continue;
+        }
         match symbols.get(name) {
             None => missing.push(name.as_str()),
             // Imported by the base too: the patch's own link resolves it.
@@ -182,6 +213,12 @@ pub fn build_stub(
         }
     }
     for name in &undefined.weak {
+        if let Some(slot) = imp_target(target, name) {
+            if let Some(Some(symbol)) = resolve_imp(cache, name, slot) {
+                resolved.push((name, symbol));
+            }
+            continue;
+        }
         if let Some(symbol) = symbols.get(name).filter(|s| !s.is_undefined()) {
             resolved.push((name, *symbol));
         }
@@ -228,6 +265,11 @@ pub fn build_stub(
 
     for (name, symbol) in resolved {
         let stub_name = stub_symbol_name(target, name)?;
+        if imp_target(target, name).is_some() {
+            let address = runtime_address(&symbol, slide, name)?;
+            add_imp_slot(&mut obj, stub_name, address);
+            continue;
+        }
         match symbol.kind {
             SymbolKind::Text => {
                 let address = runtime_address(&symbol, slide, name)?;
@@ -236,6 +278,14 @@ pub fn build_stub(
             SymbolKind::Tls => add_tls(&mut obj, cache, target, name, stub_name)?,
             SymbolKind::Data | SymbolKind::Unknown => {
                 let address = runtime_address(&symbol, slide, name)?;
+                if target.format() == Format::Pe && u32::try_from(address).is_err() {
+                    return Err(HotpatchError::unsupported(format!(
+                        "data symbol `{name}` lives at {address:#x}, beyond the 32 bits a COFF \
+                         absolute symbol holds (an x64 fat exe links at the fixed base {:#x}; \
+                         this image was relocated or keeps ASLR)",
+                        super::fat_link::FAT_IMAGE_BASE
+                    )));
+                }
                 add_absolute(&mut obj, target, &symbol, stub_name, address);
             }
             other => {
@@ -256,7 +306,7 @@ pub fn build_stub(
 /// back exactly as the patch spelled it.
 fn stub_symbol_name(target: Target, raw_name: &str) -> Result<&[u8], HotpatchError> {
     match target.format() {
-        Format::Elf => Ok(raw_name.as_bytes()),
+        Format::Elf | Format::Pe => Ok(raw_name.as_bytes()),
         Format::MachO => raw_name
             .strip_prefix(target.symbol_prefix())
             .map(str::as_bytes)
@@ -292,8 +342,78 @@ pub fn thunk_code(arch: Arch, address: u64) -> Vec<u8> {
     code
 }
 
+/// The Windows thunk, dx's (`patch.rs`): `movabs rax, imm64; jmp rax` on
+/// x86_64 (`rax` is volatile and carries no argument in the Windows x64
+/// convention), `movz`/`movk` building the address in `x16` then `br x16`
+/// on aarch64.
+pub fn windows_thunk_code(arch: Arch, address: u64) -> Vec<u8> {
+    let mut code = Vec::with_capacity(20);
+    match arch {
+        Arch::X86_64 => {
+            code.extend_from_slice(&X86_64_MOVABS_RAX);
+            code.extend_from_slice(&address.to_le_bytes());
+            code.extend_from_slice(&X86_64_JMP_RAX);
+        }
+        Arch::Aarch64 => {
+            for (index, opcode) in AARCH64_MOV_X16.iter().enumerate() {
+                let slice = ((address >> (16 * index)) & 0xffff) as u32;
+                code.extend_from_slice(&(opcode | (slice << 5)).to_le_bytes());
+            }
+            code.extend_from_slice(&AARCH64_BR_X16);
+        }
+    }
+    code
+}
+
+/// On PE, the name `raw_name`'s `__imp_` slot points at; `None` for any
+/// other name or format.
+fn imp_target(target: Target, raw_name: &str) -> Option<&str> {
+    match target.format() {
+        Format::Pe => raw_name.strip_prefix(IMP_PREFIX).filter(|n| !n.is_empty()),
+        Format::Elf | Format::MachO => None,
+    }
+}
+
+/// Resolves the PE import slot `imp_name` for `target_name`, as dx does by
+/// trimming `__imp_`: `Some(Some(_))` when the base defines `target_name`
+/// (the slot will hold its address); `Some(None)` when the base imports it
+/// (it has an `__imp_` slot of its own, or only an undefined entry), so the
+/// patch's own link resolves it through the import libraries; `None` when
+/// the base has neither.
+fn resolve_imp(
+    cache: &SymbolCache,
+    imp_name: &str,
+    target_name: &str,
+) -> Option<Option<CachedSymbol>> {
+    let symbols = cache.symbols();
+    match symbols.get(target_name) {
+        Some(symbol) if !symbol.is_undefined() => Some(Some(*symbol)),
+        Some(_) => Some(None),
+        None => symbols.get(imp_name).map(|_| None),
+    }
+}
+
+/// An `__imp_` slot: 8 bytes of data holding `address`.
+fn add_imp_slot(obj: &mut write::Object<'_>, name: &[u8], address: u64) {
+    let data = obj.section_id(StandardSection::Data);
+    let offset = obj.append_section_data(data, &address.to_le_bytes(), 8);
+    obj.add_symbol(Symbol {
+        name: name.to_vec(),
+        value: offset,
+        size: 8,
+        kind: SymbolKind::Data,
+        scope: SymbolScope::Linkage,
+        weak: false,
+        section: SymbolSection::Section(data),
+        flags: SymbolFlags::None,
+    });
+}
+
 fn add_thunk(obj: &mut write::Object<'_>, target: Target, name: &[u8], address: u64) {
-    let code = thunk_code(target.arch, address);
+    let code = match target.os {
+        Os::Windows => windows_thunk_code(target.arch, address),
+        Os::MacOs | Os::Linux | Os::Android | Os::IosSim => thunk_code(target.arch, address),
+    };
     let text = obj.section_id(StandardSection::Text);
     let offset = obj.append_section_data(text, &code, 8);
     obj.add_symbol(Symbol {

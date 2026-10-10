@@ -1315,25 +1315,91 @@ tooling/framework isolation charter.
 
 ---
 
-### `devtools-token-entropy-windows-fallback` — Windows devtools tokens come from the non-CSPRNG fallback
+### `hotpatch-windows-fixed-base-no-aslr` — Windows x64 hot runs load the app and every patch DLL at fixed bases without ASLR
 
-**Observed**: the devtools handshake token's strong-entropy path reads `/dev/urandom`, which does
-not exist on Windows; `os_random_bytes` is `#[cfg(unix)]`, so every Windows debug/profile session
-mints its token from the documented fallback (a composition of OS-seeded `RandomState` SipHash
-outputs, wall clock, monotonic instant, pid, and a stack address) — 128 bits an unprivileged
-co-resident peer cannot practically enumerate, but not a CSPRNG.
+**Observed**: a debug hot run on an x64 MSVC target links the fat exe with `/DYNAMICBASE:NO
+/BASE:0x10000000` and patch n's DLL with `/DYNAMICBASE:NO` at its own base, 0x20000000 +
+(n-1)*0x10000000, so the app under a hot run and every patch it loads sit at predictable addresses
+with ASLR off. Two constraints force it: the stub turns each base data symbol a patch references
+into a COFF absolute symbol, which holds 32 bits, so base data must sit below 4 GiB; and the runtime
+reads a Windows image's slide as its load address minus the in-memory `ImageBase`, which the loader
+rewrites when it relocates an image, so the slide always reads 0 and only an image loaded at its
+link-time base can be checked. A patch DLL the loader relocates anyway (its base already taken)
+fails the patch-anchor check: the patch is refused and the app restarts. lld-link refuses
+`/DYNAMICBASE:NO` on ARM machines (ARM64, ARM64EC, ARM64X, ARMNT), so an ARM line keeps ASLR and
+its patches are refused: ARM64 Windows never hot-patches. Bases above 4 GiB (patch 15 on) were not
+exercised.
 
-**Applies to**: the Windows desktop shell only; Linux, Android, macOS, and iOS all take the
-kernel-CSPRNG path.
+**Applies to**: Windows debug hot runs only: the fixed-base flags are added only by a hot run's fat
+link and its thin patch links, so a plain `frust run`/`frust build`, and every release build, keep
+ASLR.
 
-**Why accepted**: `frust-devtools` carries no CSPRNG dependency budget (protocol + tokio + log;
-pins are law) and no Windows host exists in the current verify environment to validate a
-`BCryptGenRandom` FFI path. The fallback still gates the listener behind an unguessable-in-practice
-secret; the exposure window is debug/profile developer builds on the developer's own machine. A
-`BCryptGenRandom`-based source (via `std::os::windows` FFI, no new crate) is the named follow-up
-when a Windows verification host is available.
+**Why accepted**: the exposure is a debug developer build on the developer's own machine, for the
+length of one hot run, and a collision fails closed (restart, never a patch applied at the wrong
+slide). Reading a relocated image's slide from its base-relocation data instead of `ImageBase`, and
+resolving base data without 32-bit absolute symbols, are the reopen path.
 
-**Evidence**: `crates/frust-devtools/src/token.rs` (`os_random_bytes` cfg gate + module doc).
+**Evidence**: `crates/frust-drive/src/hotpatch/fat_link.rs` (`DYNAMIC_BASE_OFF`, `FAT_IMAGE_BASE`,
+`PATCH_IMAGE_BASE_FIRST`, `PATCH_IMAGE_STRIDE`, `ASLR_ONLY_MACHINES`, `fixed_base_args_at`);
+`crates/frust-drive/src/hotpatch/stub.rs` module doc; `crates/frust-hotpatch/src/anchor.rs`'s
+Windows `image_containing` and `crates/frust-hotpatch/src/patch.rs`'s patch-slide check;
+`examples/hotpatch-spike/RESULTS.md` `## Stage 3: Windows gate (H3-03)` (Known limits seen, row G's
+base addresses: no relocation in 41 patch loads) and `### Stage 3 re-run (H3-03b)` (30 patched
+runs).
+
+---
+
+### `hotpatch-windows-patch-file-acl` — on Windows the patch DLL lands with an inherited ACL, is loaded by path, and is never removed
+
+**Observed**: the app-side hardening of a written patch is unix-only. On unix `write_patch_file`
+creates the patch directory `0700` and each patch file `0600` (reset exactly after the umask), and
+the `patch_file` hand-off checks owner, mode, size and SHA-256. On Windows each patch DLL is
+written fresh (`create_new`, after removing any existing entry) to
+`%LOCALAPPDATA%\frust-hotpatch\patch-<pid>-<id>.dll` with the ACL that per-user directory
+inherits, closed, then `LoadLibrary`'d by path, with no deny-write share held across the
+close-to-load window, so a process able to write that directory could swap the file before it
+loads. The `patch_file` hand-off is not offered, so every patch travels as base64 `patch_chunk`s
+even over loopback (~600 ms per 1.28 MB patch, load included). The app's removal after the load
+fails for a loaded DLL (`Access is denied. (os error 5)`), so the copies accumulate: 45 files,
+57,368,064 bytes after the Stage 3 gate, and nothing deletes them when the process exits.
+
+**Applies to**: Windows debug hot runs only.
+
+**Why accepted**: a default `%LOCALAPPDATA%` grants only the user, SYSTEM and Administrators, and a
+process already running as the same user could attach a debugger to the app anyway, so the window
+reaches nothing new unless `LOCALAPPDATA` is redirected somewhere with a looser ACL. Hardening the
+written file and its close-to-load window is the tracked code follow-up
+(act_000001a1220c71ceAmoy5UZt); the accumulating copies (act_000001a121b17dc22F1q2SLt) and the
+chunk-only transport (act_000001a121b17dc34CAB7H3R) are tracked separately.
+
+**Evidence**: `crates/frust-shell-common/src/devtools.rs` (`write_patch_file`'s `cfg(unix)` arms,
+`HotState::attempt`, the unix-only `patch_file`); `crates/frust-paths/src/lib.rs`'s `cache_dir`
+(`%LOCALAPPDATA%` on Windows); `examples/hotpatch-spike/RESULTS.md` `## Stage 3: Windows gate
+(H3-03)`, Known limits seen (patch copies, transport).
+
+---
+
+### `hotpatch-windows-pdb-layout-align-blind` — the Windows layout gate admits an alignment-only type edit
+
+**Observed**: on Windows the hot run's layout gate (`hotpatch::pdb_layout`) reads type layouts from
+the PDB's CodeView type records, which state no alignment, so every entry records alignment 0 and
+its hash covers only the record kind, size and field list. An edit that changes only a type's
+alignment, such as adding `#[repr(align(16))]` to a struct whose size is already a multiple of 16
+and whose field offsets do not move, leaves the entry unchanged and the patch is admitted, although
+the patched code may then assume an alignment the running process's existing values do not have.
+The DWARF gate on every other target hashes `DW_AT_alignment` where the DWARF states one, so it
+sees the same edit.
+
+**Applies to**: Windows (MSVC) hot runs only.
+
+**Why accepted**: an alignment-only edit to a live type is rare in a hot-reload loop, every other
+layout change (size, offsets, field types, variants) is still refused, and CodeView carries no
+alignment for the gate to read. An alignment source beside the PDB is the reopen path.
+
+**Evidence**: `crates/frust-drive/src/hotpatch/pdb_layout.rs` module doc (alignment 0) and
+`crates/frust-drive/src/hotpatch/layout.rs` (`DW_AT_alignment` in the DWARF hash); action item
+act_000001a120bafdbdAny5hSb2; `examples/hotpatch-spike/RESULTS.md` `## Stage 3: Windows gate
+(H3-03)`, Known limits seen (not exercised by the gate's rows).
 
 ---
 

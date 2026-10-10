@@ -6,16 +6,45 @@
 //! every rlib. The builder then links for real: every `.rcgu.o` inside the
 //! rlibs cargo built under the target dir is packed into one
 //! `libdeps-<hash>.a` that the linker force-loads (`-force_load` on Darwin,
-//! `--whole-archive` on Gnu), so no function a later patch may reference is
+//! `--whole-archive` on Gnu, `/WHOLEARCHIVE:` on Msvc), so no function a
+//! later patch may reference is
 //! dropped, and the image exports [`ANCHOR_SYMBOL`] instead of dioxus-cli's
 //! `main`. Toolchain rlibs (std) pass through unchanged.
 //!
 //! The argument rules are dioxus-cli 0.7.10's `build/link.rs`
 //! (`run_fat_link`, `linker_flavor`, `select_linker`) without
 //! `target-lexicon`: the flavor comes from the target triple string, and an
-//! unknown one is [`HotpatchError::BuilderUnsupported`]. Every argument is
-//! in the `cc`-driver form rustc emits for a linker it does not recognise
-//! by name. See `docs/CLI_ARCHITECTURE.md`.
+//! unknown one is [`HotpatchError::BuilderUnsupported`]. Darwin and Gnu
+//! arguments are in the `cc`-driver form rustc emits for a linker it does
+//! not recognise by name; Msvc arguments are link.exe's (`/OUT:`), and an
+//! Msvc image's symbols come from its PDB ([`super::pe`]).
+//!
+//! **The Msvc linker** ([`flavor_linker_program`]) is the toolchain's own
+//! `rust-lld`, run as `rust-lld -flavor link` (lld-link, as dx runs its
+//! `gcc-ld/lld-link` wrapper), unless the build configured `lld-link` or
+//! `rust-lld` itself. The fat build's link line never names a linker
+//! (`frust` stands in for it), rustc's own `link.exe` lookup and its `LIB`
+//! setup reach only rustc's linker child, never the capture, and link.exe
+//! does not read the archive the builder writes (a BSD-style `ar` archive
+//! with no linker member), which lld-link takes under `/WHOLEARCHIVE:`.
+//! lld-link finds the MSVC and Windows SDK libraries itself when `LIB` is
+//! unset. A configured linker of any other name is
+//! [`HotpatchError::BuilderUnsupported`]. See `docs/CLI_ARCHITECTURE.md`.
+//!
+//! **The Msvc fat exe links at a fixed base** ([`FAT_IMAGE_BASE`], ASLR off
+//! through [`DYNAMIC_BASE_OFF`]) so the base data a patch references sits
+//! below 4 GiB, where the stub's 32-bit COFF absolute symbols reach it.
+//!
+//! **Every Msvc patch DLL links at its own fixed base too**
+//! ([`patch_image_base`]: [`PATCH_IMAGE_BASE_FIRST`] plus
+//! [`PATCH_IMAGE_STRIDE`] per earlier patch, ASLR off), so it loads at its
+//! link-time base and its VAs are its runtime addresses. The runtime cannot
+//! see a relocated Windows image's slide: the loader rewrites the in-memory
+//! `ImageBase` to the load address, so the runtime reports a slide of 0 for
+//! every image. A DLL linked at a fixed base makes that 0 true. When the
+//! loader relocates one anyway (its range is taken), the table's anchor
+//! implies the real offset while the runtime still reports 0, so the apply
+//! is refused and the hot run restarts the app: fail closed, never a guess.
 
 use std::fs;
 use std::io::Read;
@@ -44,6 +73,61 @@ const RAW_LINKERS: &[&str] = &[
     "lld-link", "link", "wasm-ld", "rust-lld",
 ];
 
+/// The link.exe flag both Msvc images (the fat exe and every patch DLL)
+/// carry: dx's "Prevent alsr from overflowing 32 bits".
+pub const HIGH_ENTROPY_VA_OFF: &str = "/HIGHENTROPYVA:NO";
+
+/// The link.exe flag that turns ASLR off for the Msvc fat exe, which then
+/// loads at [`FAT_IMAGE_BASE`]. The stub resolves a base data symbol a
+/// patch references into a COFF absolute symbol, whose value holds 32 bits
+/// ([`super::stub`]); `/HIGHENTROPYVA:NO` alone leaves the x64 default base
+/// (`0x140000000`) and ASLR placing the image above 4 GiB, where every such
+/// symbol is refused. The fat exe of a debug hot run and every patch DLL
+/// carry it, each with its own `/BASE:` ([`FAT_IMAGE_BASE`],
+/// [`patch_image_base`]). lld-link refuses it for ARM machines, where ASLR
+/// is mandatory, so an ARM line omits it ([`fixed_base_args_at`]) and the
+/// runtime's anchor check refuses that target's patches.
+pub const DYNAMIC_BASE_OFF: &str = "/DYNAMICBASE:NO";
+
+/// The Msvc fat exe's fixed image base (256 MiB): above the low region
+/// Windows reserves. The fat exe owns the 256 MiB from here to
+/// [`PATCH_IMAGE_BASE_FIRST`]: `FAT_IMAGE_BASE + SizeOfImage` must not
+/// exceed that, which [`fat_link`] checks on the linked exe
+/// ([`check_fat_image_fits`]; a stock app's is ~36 MB).
+pub const FAT_IMAGE_BASE: u64 = 0x1000_0000;
+
+/// The fixed image base of Msvc patch 1 (512 MiB): [`FAT_IMAGE_BASE`]
+/// plus the fat exe's 256 MiB window. [`fat_link`] refuses a fat exe whose
+/// `FAT_IMAGE_BASE + SizeOfImage` passes it ([`check_fat_image_fits`]).
+/// Each patch from here owns [`PATCH_IMAGE_STRIDE`] (256 MiB).
+pub const PATCH_IMAGE_BASE_FIRST: u64 = 0x2000_0000;
+
+/// The distance between consecutive Msvc patch bases (256 MiB): each patch
+/// DLL owns that much address space, far more than an unstripped patch
+/// (~13 MB for a stock app), so no two patches of one process collide. A
+/// DLL's own base may lie above 4 GiB; only the base data the stub
+/// references must not.
+pub const PATCH_IMAGE_STRIDE: u64 = 0x1000_0000;
+
+// The fat exe keeps a whole stride below patch 1.
+const _: () = assert!(FAT_IMAGE_BASE + PATCH_IMAGE_STRIDE <= PATCH_IMAGE_BASE_FIRST);
+
+/// The top of x64 user-mode address space: a patch window must end below
+/// it ([`patch_image_base`]).
+const USER_SPACE_END: u64 = 0x7fff_ffff_0000;
+
+/// COFF machines lld-link links with mandatory ASLR (`/DYNAMICBASE:NO` is
+/// an error): ARMNT, ARM64EC, ARM64X and ARM64.
+const ASLR_ONLY_MACHINES: &[u16] = &[0x01c4, 0xa641, 0xa64e, super::pe::MACHINE_ARM64];
+
+/// The LLD the Rust toolchain bundles in `<sysroot>/lib/rustlib/<host>/bin`.
+pub const RUST_LLD: &str = "rust-lld";
+
+/// The linkers an Msvc link runs: they take link.exe arguments and read the
+/// fat archive. `rust-lld` needs `-flavor link` first
+/// ([`linker_driver_args`]).
+const MSVC_LINKERS: &[&str] = &["lld-link", RUST_LLD];
+
 /// Which linker argument dialect a target needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkerFlavor {
@@ -51,13 +135,16 @@ pub enum LinkerFlavor {
     Darwin,
     /// ELF through `cc` and a GNU-compatible linker (Linux, Android).
     Gnu,
+    /// PE/COFF through link.exe-style arguments (`pc-windows-msvc`).
+    Msvc,
 }
 
 impl LinkerFlavor {
     /// The flavor for a target `triple` (`aarch64-apple-darwin`,
     /// `x86_64-unknown-linux-gnu`, `aarch64-linux-android`, ...), following
-    /// rustc's own environment-then-OS order. Windows (MSVC and GNU), wasm
-    /// and anything unrecognised are [`HotpatchError::BuilderUnsupported`].
+    /// rustc's own environment-then-OS order. `<arch>-pc-windows-msvc` is
+    /// [`LinkerFlavor::Msvc`]; GNU-environment Windows, UWP, wasm and
+    /// anything unrecognised are [`HotpatchError::BuilderUnsupported`].
     pub fn for_triple(triple: &str) -> Result<Self, HotpatchError> {
         let parts: Vec<&str> = triple.split('-').collect();
         let [arch, rest @ ..] = parts.as_slice() else {
@@ -76,7 +163,10 @@ impl LinkerFlavor {
             return unsupported("wasm is not hot-patched by the native builder");
         }
         if has("windows") || has("msvc") || has("uwp") {
-            return unsupported("Windows linking is not supported");
+            if rest == ["pc", "windows", "msvc"] {
+                return Ok(Self::Msvc);
+            }
+            return unsupported("only the `pc-windows-msvc` Windows targets are hot-patched");
         }
         let apple_os = ["darwin", "macos", "ios", "tvos", "watchos", "visionos"];
         if has("apple") || rest.iter().any(|part| apple_os.contains(part)) {
@@ -91,11 +181,12 @@ impl LinkerFlavor {
         unsupported("unknown operating system or environment")
     }
 
-    /// The file extension of a patch library: `dylib` or `so`.
+    /// The file extension of a patch library: `dylib`, `so` or `dll`.
     pub fn patch_extension(self) -> &'static str {
         match self {
             Self::Darwin => "dylib",
             Self::Gnu => "so",
+            Self::Msvc => "dll",
         }
     }
 
@@ -104,7 +195,7 @@ impl LinkerFlavor {
     pub fn object_symbol(self, name: &str) -> String {
         match self {
             Self::Darwin => format!("_{name}"),
-            Self::Gnu => name.to_string(),
+            Self::Gnu | Self::Msvc => name.to_string(),
         }
     }
 
@@ -116,6 +207,7 @@ impl LinkerFlavor {
         match self {
             Self::Darwin => format!("-Wl,-exported_symbol,{}", self.object_symbol(ANCHOR_SYMBOL)),
             Self::Gnu => format!("-Wl,--export-dynamic-symbol,{ANCHOR_SYMBOL}"),
+            Self::Msvc => format!("/EXPORT:{ANCHOR_SYMBOL}"),
         }
     }
 
@@ -129,6 +221,7 @@ impl LinkerFlavor {
                 archive,
                 "-Wl,--no-whole-archive".to_string(),
             ],
+            Self::Msvc => vec![format!("/WHOLEARCHIVE:{archive}")],
         }
     }
 }
@@ -141,19 +234,82 @@ pub fn linker_program(custom: Option<&Path>) -> Result<String, HotpatchError> {
     let Some(custom) = custom else {
         return Ok(DEFAULT_LINKER.to_string());
     };
-    let name = custom
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.to_ascii_lowercase())
-        .unwrap_or_default();
-    let stem = name.strip_suffix(".exe").unwrap_or(&name);
-    if stem.is_empty() || RAW_LINKERS.contains(&stem) {
+    let stem = linker_stem(custom);
+    if stem.is_empty() || RAW_LINKERS.contains(&stem.as_str()) {
         return Err(HotpatchError::unsupported(format!(
             "linker `{}` is not a `cc`-compatible driver",
             custom.display()
         )));
     }
     Ok(render(custom))
+}
+
+/// The linker program for `flavor`, which [`fat_link`] and
+/// [`thin_link`](super::thin_link::thin_link) run. Darwin and Gnu:
+/// [`linker_program`]. Msvc: `custom` when it is `lld-link` or `rust-lld`,
+/// else the toolchain's own `rust-lld` that `bundled_lld` locates
+/// ([`bundled_lld`]); asked only when needed. A configured linker of any
+/// other name (`link.exe`, a `cc` driver) is
+/// [`HotpatchError::BuilderUnsupported`] naming it.
+pub fn flavor_linker_program(
+    flavor: LinkerFlavor,
+    custom: Option<&Path>,
+    bundled_lld: impl FnOnce() -> Result<PathBuf, HotpatchError>,
+) -> Result<String, HotpatchError> {
+    if flavor != LinkerFlavor::Msvc {
+        return linker_program(custom);
+    }
+    match custom {
+        Some(custom) if MSVC_LINKERS.contains(&linker_stem(custom).as_str()) => Ok(render(custom)),
+        Some(custom) => Err(HotpatchError::unsupported(format!(
+            "linker `{}` is not one the MSVC hot-patch builder runs (`lld-link` or `{RUST_LLD}`): \
+             the patch links read a BSD-style archive under /WHOLEARCHIVE",
+            custom.display()
+        ))),
+        None => Ok(render(&bundled_lld()?)),
+    }
+}
+
+/// `rust-lld` in the host's rustlib `bin` directory, the sibling of the
+/// host's `target_libdir` (`rustc --print target-libdir`). A missing file is
+/// [`HotpatchError::BuilderUnsupported`]: no linker is guessed.
+pub fn bundled_lld(target_libdir: &Path) -> Result<PathBuf, HotpatchError> {
+    let lld = target_libdir
+        .parent()
+        .map(|rustlib_host| {
+            rustlib_host
+                .join("bin")
+                .join(format!("{RUST_LLD}{}", std::env::consts::EXE_SUFFIX))
+        })
+        .filter(|lld| lld.is_file())
+        .ok_or_else(|| {
+            HotpatchError::unsupported(format!(
+                "the toolchain has no `{RUST_LLD}` beside `{}`; the MSVC hot-patch builder links \
+                 with it",
+                target_libdir.display()
+            ))
+        })?;
+    Ok(lld)
+}
+
+/// What `linker` needs ahead of `flavor`'s link line: `-flavor link` for an
+/// Msvc link through `rust-lld`, nothing otherwise.
+pub fn linker_driver_args(flavor: LinkerFlavor, linker: &str) -> Vec<String> {
+    if flavor == LinkerFlavor::Msvc && linker_stem(Path::new(linker)) == RUST_LLD {
+        vec!["-flavor".to_string(), "link".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// `linker`'s file name, lowercased, without `.exe`.
+fn linker_stem(linker: &Path) -> String {
+    let name = linker
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
+        .unwrap_or_default();
+    name.strip_suffix(".exe").unwrap_or(&name).to_string()
 }
 
 /// The packed `libdeps-<hash>.a` and what the link line still needs beside
@@ -341,6 +497,13 @@ fn remove_stale_archives(archive_dir: &Path, keep_stem: &str) {
 /// to `exe`. With no archive the rlibs stay as captured. No object
 /// argument, or a missing or repeated `-o`, is
 /// [`HotpatchError::BuilderUnsupported`].
+///
+/// Msvc follows dx (`link.rs`): `/WHOLEARCHIVE:<archive>` and the kept
+/// rlibs go right *before* the last object, then `/HIGHENTROPYVA:NO` (dx:
+/// "Prevent alsr from overflowing 32 bits") and, beyond dx, the fixed base
+/// ([`fixed_base_args`]: `/DYNAMICBASE:NO /BASE:0x10000000`), the anchor's
+/// `/EXPORT:` and `/OUT:<exe>` replace the captured `/OUT:`. A `-o` in an
+/// Msvc capture is [`HotpatchError::BuilderUnsupported`].
 pub fn fat_link_args(
     flavor: LinkerFlavor,
     link_args: &[String],
@@ -352,7 +515,13 @@ pub fn fat_link_args(
             "no captured linker arguments for the fat link",
         ));
     }
-    if link_args.iter().any(|arg| arg.starts_with("/OUT:")) {
+    if flavor == LinkerFlavor::Msvc {
+        if link_args.iter().any(|arg| arg == "-o") {
+            return Err(HotpatchError::unsupported(
+                "captured linker arguments are not MSVC-style (`-o`)",
+            ));
+        }
+    } else if link_args.iter().any(|arg| arg.starts_with("/OUT:")) {
         return Err(HotpatchError::unsupported(
             "captured linker arguments are MSVC-style (`/OUT:`)",
         ));
@@ -375,7 +544,19 @@ pub fn fat_link_args(
             skip_value = true;
             continue;
         }
+        if flavor == LinkerFlavor::Msvc && arg.starts_with("/OUT:") {
+            continue;
+        }
         if archive.is_some() && arg.ends_with(".rlib") {
+            continue;
+        }
+        if flavor == LinkerFlavor::Msvc
+            && index == last_object
+            && let Some(archive) = archive
+        {
+            args.extend(flavor.force_load_args(&archive.path));
+            args.extend(archive.kept_rlibs.iter().map(|rlib| render(rlib)));
+            args.push(arg.clone());
             continue;
         }
         args.push(arg.clone());
@@ -386,17 +567,67 @@ pub fn fat_link_args(
             args.extend(archive.kept_rlibs.iter().map(|rlib| render(rlib)));
         }
     }
-    args.push(flavor.anchor_export_arg());
-    args.push("-o".to_string());
-    args.push(render(exe));
+    if flavor == LinkerFlavor::Msvc {
+        args.push(HIGH_ENTROPY_VA_OFF.to_string());
+        args.extend(fixed_base_args(Path::new(&link_args[last_object])));
+        args.push(flavor.anchor_export_arg());
+        args.push(format!("/OUT:{}", render(exe)));
+    } else {
+        args.push(flavor.anchor_export_arg());
+        args.push("-o".to_string());
+        args.push(render(exe));
+    }
     Ok(args)
+}
+
+/// The Msvc fat exe's fixed-base flags: [`fixed_base_args_at`]
+/// [`FAT_IMAGE_BASE`] (`/DYNAMICBASE:NO /BASE:0x10000000`).
+pub fn fixed_base_args(object: &Path) -> Vec<String> {
+    fixed_base_args_at(FAT_IMAGE_BASE, object)
+}
+
+/// The fixed-base flags of an Msvc image linked at `base`,
+/// [`DYNAMIC_BASE_OFF`] and `/BASE:<base>` (lower-case hex), unless
+/// `object` (one of the line's objects) is a COFF object for one of
+/// [`ASLR_ONLY_MACHINES`]. An unreadable object keeps the flags; the link
+/// itself reports it.
+pub fn fixed_base_args_at(base: u64, object: &Path) -> Vec<String> {
+    if coff_machine(object).is_some_and(|machine| ASLR_ONLY_MACHINES.contains(&machine)) {
+        return Vec::new();
+    }
+    vec![DYNAMIC_BASE_OFF.to_string(), format!("/BASE:{base:#x}")]
+}
+
+/// The fixed image base of Msvc patch `n` (counted from 1):
+/// [`PATCH_IMAGE_BASE_FIRST`] + (`n` - 1) × [`PATCH_IMAGE_STRIDE`], so
+/// patch 1 is at `0x20000000`, patch 2 at `0x30000000`, patch 64 (the
+/// default budget) at `0x410000000`. Every window lies above the fat exe's
+/// and none overlaps another. `None` for `n` 0, or when the window would
+/// reach past x64 user-mode address space.
+pub fn patch_image_base(n: u32) -> Option<u64> {
+    let index = u64::from(n.checked_sub(1)?);
+    let base = PATCH_IMAGE_BASE_FIRST + index * PATCH_IMAGE_STRIDE;
+    (base + PATCH_IMAGE_STRIDE <= USER_SPACE_END).then_some(base)
+}
+
+/// The machine field of the COFF object at `path`: offset 0, or offset 6
+/// in a `/bigobj` header (which starts `00 00 ff ff`).
+fn coff_machine(path: &Path) -> Option<u16> {
+    let mut header = [0u8; 8];
+    fs::File::open(path).ok()?.read_exact(&mut header).ok()?;
+    let at = if header[..4] == [0, 0, 0xff, 0xff] {
+        6
+    } else {
+        0
+    };
+    Some(u16::from_le_bytes([header[at], header[at + 1]]))
 }
 
 /// Everything one fat link needs.
 #[derive(Debug, Clone, Copy)]
 pub struct FatLinkRequest<'a> {
     pub flavor: LinkerFlavor,
-    /// From [`linker_program`].
+    /// From [`flavor_linker_program`].
     pub linker: &'a str,
     /// The tip's captured linker arguments
     /// ([`read_link_args`](super::link_intercept::read_link_args)).
@@ -427,7 +658,11 @@ pub struct FatLinkOutput {
 /// Packs the archive, runs the fat link through `runner`, and checks that
 /// the image defines [`ANCHOR_SYMBOL`]. A failed link or a missing anchor
 /// is [`HotpatchError::BuilderUnsupported`] (the session restarts instead);
-/// a linker that cannot be spawned is [`HotpatchError::Process`].
+/// on Msvc, a failure naming the archive says the archive was rejected, and
+/// an exe too large for its fixed-base window ([`check_fat_image_fits`]) is
+/// refused before its anchor is read. The linker's [`linker_driver_args`]
+/// lead the line. A linker that cannot be spawned is
+/// [`HotpatchError::Process`].
 pub fn fat_link(
     runner: &dyn ProcessRunner,
     request: &FatLinkRequest<'_>,
@@ -449,7 +684,29 @@ pub fn fat_link(
         fs::create_dir_all(parent)
             .map_err(|err| HotpatchError::io(format!("creating `{}`", parent.display()), err))?;
     }
-    let linker_output = run_linker(runner, request.linker, &args, request.envs, "fat link")?;
+    let mut argv = linker_driver_args(request.flavor, request.linker);
+    argv.extend(args);
+    let linker_output = run_linker(runner, request.linker, &argv, request.envs, "fat link")
+        .map_err(|err| match (request.flavor, &archive, err) {
+            (LinkerFlavor::Msvc, Some(archive), HotpatchError::BuilderUnsupported { detail })
+                if names_archive(&detail, &archive.path) =>
+            {
+                HotpatchError::unsupported(format!(
+                    "the linker rejected the fat archive `{}` under /WHOLEARCHIVE: {detail}",
+                    archive.path.display()
+                ))
+            }
+            (_, _, err) => err,
+        })?;
+    if request.flavor == LinkerFlavor::Msvc {
+        let bytes = read_image_prefix(request.exe).map_err(|err| {
+            HotpatchError::io(
+                format!("reading linked image `{}`", request.exe.display()),
+                err,
+            )
+        })?;
+        check_fat_image_fits(&bytes, &format!("fat exe `{}`", request.exe.display()))?;
+    }
     let anchor_address = anchor_address(request.flavor, request.exe)?;
     Ok(FatLinkOutput {
         exe: request.exe.to_path_buf(),
@@ -457,6 +714,50 @@ pub fn fat_link(
         anchor_address,
         linker_output,
     })
+}
+
+/// Checks that the Msvc fat exe `bytes` (`what` names it in errors) fits
+/// its fixed-base window: linked at [`FAT_IMAGE_BASE`], the image spans
+/// its PE32+ `SizeOfImage` ([`super::pe::size_of_image`]), so
+/// `FAT_IMAGE_BASE + SizeOfImage` (the image's exclusive end) must not
+/// exceed [`PATCH_IMAGE_BASE_FIRST`], where patch 1 loads: at most 256 MiB.
+/// An image past it, or one whose headers do not read, is
+/// [`HotpatchError::BuilderUnsupported`].
+pub fn check_fat_image_fits(bytes: &[u8], what: &str) -> Result<(), HotpatchError> {
+    let size = super::pe::size_of_image(bytes, what)?;
+    let end = FAT_IMAGE_BASE + u64::from(size);
+    if end <= PATCH_IMAGE_BASE_FIRST {
+        return Ok(());
+    }
+    Err(HotpatchError::unsupported(format!(
+        "{what} is too large for its fixed base: FAT_IMAGE_BASE + SizeOfImage must not exceed \
+         PATCH_IMAGE_BASE_FIRST ({FAT_IMAGE_BASE:#x} + {size:#x} = {end:#x}, past \
+         {PATCH_IMAGE_BASE_FIRST:#x}, where patch 1 loads); the fat exe has 256 MiB"
+    )))
+}
+
+/// How much of a linked image [`fat_link`] reads for the size check: the
+/// DOS header, `e_lfanew` and the PE32+ optional header all lie well inside.
+const IMAGE_HEADER_PREFIX: u64 = 64 * 1024;
+
+/// The first [`IMAGE_HEADER_PREFIX`] bytes of `path` (all of a shorter
+/// file): the headers [`check_fat_image_fits`] reads, without pulling a fat
+/// exe of tens or hundreds of MB into memory.
+fn read_image_prefix(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(IMAGE_HEADER_PREFIX)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Whether a linker's failure `detail` names the archive at `archive` (by
+/// file name: linkers print it in their own path spelling).
+fn names_archive(detail: &str, archive: &Path) -> bool {
+    archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| detail.contains(name))
 }
 
 /// Runs `linker args` with `envs` added and returns its combined output. A
@@ -494,10 +795,17 @@ pub(crate) fn run_linker(
 }
 
 /// The address of the global definition of [`ANCHOR_SYMBOL`] in the image
-/// at `path`, read from its symbol table. An unreadable image, or none such
-/// symbol, is [`HotpatchError::BuilderUnsupported`].
+/// at `path`, read from its symbol table — for Msvc, the anchor's VA
+/// (preferred `ImageBase` + RVA) from the image's own PDB
+/// ([`super::pe::anchor_address`], Windows hosts only).
+/// An unreadable image, or none such symbol, is
+/// [`HotpatchError::BuilderUnsupported`].
 pub fn anchor_address(flavor: LinkerFlavor, path: &Path) -> Result<u64, HotpatchError> {
     use object::{Object, ObjectSymbol};
+
+    if flavor == LinkerFlavor::Msvc {
+        return super::pe::anchor_address(path);
+    }
 
     let bytes = fs::read(path).map_err(|err| {
         HotpatchError::io(format!("reading linked image `{}`", path.display()), err)
@@ -648,6 +956,12 @@ pub(crate) mod test_support {
             if let (Some(image), Some(pos)) = (&self.image, args.iter().position(|a| *a == "-o")) {
                 fs::write(args[pos + 1], image)?;
             }
+            if let (Some(image), Some(out)) = (
+                &self.image,
+                args.iter().find_map(|a| a.strip_prefix("/OUT:")),
+            ) {
+                fs::write(out, image)?;
+            }
             Ok(output)
         }
 
@@ -671,6 +985,7 @@ pub(crate) mod test_support {
         let format = match flavor {
             LinkerFlavor::Darwin => object::BinaryFormat::MachO,
             LinkerFlavor::Gnu => object::BinaryFormat::Elf,
+            LinkerFlavor::Msvc => object::BinaryFormat::Coff,
         };
         let mut obj = Object::new(
             format,
@@ -743,6 +1058,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use super::super::pe;
     use super::test_support::*;
     use super::*;
 
@@ -842,8 +1158,9 @@ mod tests {
         for triple in [
             "",
             "x86_64",
-            "x86_64-pc-windows-msvc",
             "x86_64-pc-windows-gnu",
+            "aarch64-pc-windows-gnullvm",
+            "x86_64-uwp-windows-msvc",
             "wasm32-unknown-unknown",
             "riscv32imc-unknown-none-elf",
             "x86_64-unknown-freebsd",
@@ -867,6 +1184,163 @@ mod tests {
         ] {
             unsupported(linker_program(Some(Path::new(raw))));
         }
+    }
+
+    #[test]
+    fn msvc_links_through_lld_link_or_the_bundled_rust_lld_and_refuses_other_linkers() {
+        let bundled = || Ok(PathBuf::from("/rust/lib/rustlib/host/bin/rust-lld.exe"));
+        assert_eq!(
+            flavor_linker_program(LinkerFlavor::Msvc, None, bundled).unwrap(),
+            "/rust/lib/rustlib/host/bin/rust-lld.exe"
+        );
+        for configured in [
+            "C:/llvm/bin/lld-link.exe",
+            "/opt/llvm/lld-link",
+            "/t/rust-lld",
+        ] {
+            assert_eq!(
+                flavor_linker_program(LinkerFlavor::Msvc, Some(Path::new(configured)), || {
+                    panic!("a configured lld is used as is")
+                })
+                .unwrap(),
+                configured
+            );
+        }
+        for unknown in ["C:/VS/bin/link.exe", "cc", "clang", "/t/mold"] {
+            let detail = unsupported(flavor_linker_program(
+                LinkerFlavor::Msvc,
+                Some(Path::new(unknown)),
+                bundled,
+            ));
+            assert!(
+                detail.contains(unknown) && detail.contains("lld-link"),
+                "{detail}"
+            );
+        }
+        let missing = unsupported(flavor_linker_program(LinkerFlavor::Msvc, None, || {
+            Err(HotpatchError::unsupported("no rust-lld"))
+        }));
+        assert_eq!(missing, "no rust-lld");
+
+        // Darwin and Gnu are `linker_program`'s, and never look for an lld.
+        for flavor in [LinkerFlavor::Darwin, LinkerFlavor::Gnu] {
+            let never = || -> Result<PathBuf, HotpatchError> { panic!("no lld lookup") };
+            assert_eq!(flavor_linker_program(flavor, None, never).unwrap(), "cc");
+            unsupported(flavor_linker_program(
+                flavor,
+                Some(Path::new("/t/rust-lld")),
+                never,
+            ));
+        }
+    }
+
+    #[test]
+    fn rust_lld_takes_the_link_flavor_and_other_linkers_take_nothing() {
+        let lld = "/rust/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe";
+        assert_eq!(
+            linker_driver_args(LinkerFlavor::Msvc, lld),
+            strings(&["-flavor", "link"])
+        );
+        assert_eq!(
+            linker_driver_args(LinkerFlavor::Msvc, "/t/RUST-LLD"),
+            strings(&["-flavor", "link"])
+        );
+        assert!(linker_driver_args(LinkerFlavor::Msvc, "/llvm/lld-link.exe").is_empty());
+        assert!(linker_driver_args(LinkerFlavor::Gnu, lld).is_empty());
+        assert!(linker_driver_args(LinkerFlavor::Darwin, "cc").is_empty());
+    }
+
+    #[test]
+    fn the_bundled_lld_is_the_host_rustlib_bin_rust_lld() {
+        let root = temp_dir("bundled-lld");
+        let libdir = root.join("lib").join("rustlib").join("host").join("lib");
+        fs::create_dir_all(&libdir).unwrap();
+        let detail = unsupported(bundled_lld(&libdir));
+        assert!(detail.contains(RUST_LLD), "{detail}");
+        let bin = libdir.parent().unwrap().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let lld = bin.join(format!("rust-lld{}", std::env::consts::EXE_SUFFIX));
+        fs::write(&lld, b"lld").unwrap();
+        assert_eq!(bundled_lld(&libdir).unwrap(), lld);
+    }
+
+    #[test]
+    fn an_msvc_fat_link_through_rust_lld_leads_with_the_link_flavor() {
+        let fx = fixture("msvc-lld");
+        let link_args = msvc_link_args(&fx);
+        let exe = fx.target.join("debug").join("app.exe");
+        let lld = "/rust/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe";
+        let runner = RecordingRunner::linking(b"MZ stand-in".to_vec());
+        let request = FatLinkRequest {
+            flavor: LinkerFlavor::Msvc,
+            linker: lld,
+            link_args: &link_args,
+            envs: &[],
+            target_dir: &fx.target,
+            archive_dir: &fx.archive_dir,
+            exe: &exe,
+        };
+        unsupported(fat_link(&runner, &request));
+        let link = runner.only_call(lld);
+        assert_eq!(link.args[..2], strings(&["-flavor", "link"])[..]);
+        let archive = write_fat_archive(
+            &runner,
+            LinkerFlavor::Msvc,
+            &link_args,
+            &fx.target,
+            &fx.archive_dir,
+        )
+        .unwrap();
+        assert_eq!(
+            link.args[2..],
+            fat_link_args(LinkerFlavor::Msvc, &link_args, archive.as_ref(), &exe).unwrap()[..]
+        );
+    }
+
+    #[test]
+    fn an_msvc_link_failure_naming_the_archive_says_the_archive_was_rejected() {
+        let fx = fixture("msvc-rejected");
+        let link_args = msvc_link_args(&fx);
+        let exe = fx.target.join("debug").join("app.exe");
+        let packer = RecordingRunner::linking(Vec::new());
+        let archive = write_fat_archive(
+            &packer,
+            LinkerFlavor::Msvc,
+            &link_args,
+            &fx.target,
+            &fx.archive_dir,
+        )
+        .unwrap()
+        .unwrap();
+        let name = archive.path.file_name().unwrap().to_str().unwrap();
+        let request = |runner: &RecordingRunner| {
+            fat_link(
+                runner,
+                &FatLinkRequest {
+                    flavor: LinkerFlavor::Msvc,
+                    linker: "lld-link",
+                    link_args: &link_args,
+                    envs: &[],
+                    target_dir: &fx.target,
+                    archive_dir: &fx.archive_dir,
+                    exe: &exe,
+                },
+            )
+        };
+        let rejected = RecordingRunner::failing(&format!("lld-link: error: {name}: bad archive"));
+        let detail = unsupported(request(&rejected));
+        assert!(
+            detail.starts_with("the linker rejected the fat archive")
+                && detail.contains("/WHOLEARCHIVE")
+                && detail.contains("bad archive"),
+            "{detail}"
+        );
+        let other = RecordingRunner::failing("lld-link: error: undefined symbol: foo");
+        let detail = unsupported(request(&other));
+        assert!(
+            detail.starts_with("fat link failed") && detail.contains("undefined symbol"),
+            "{detail}"
+        );
     }
 
     #[test]
@@ -1085,6 +1559,285 @@ mod tests {
     }
 
     #[test]
+    fn msvc_flavor_is_the_pc_windows_msvc_targets() {
+        for triple in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] {
+            assert_eq!(
+                LinkerFlavor::for_triple(triple).unwrap(),
+                LinkerFlavor::Msvc,
+                "{triple}"
+            );
+        }
+        let msvc = LinkerFlavor::Msvc;
+        assert_eq!(msvc.patch_extension(), "dll");
+        assert_eq!(msvc.object_symbol(ANCHOR_SYMBOL), ANCHOR_SYMBOL);
+        assert_eq!(msvc.anchor_export_arg(), "/EXPORT:__frust_hotpatch_anchor");
+    }
+
+    /// A captured MSVC fat-build line: rustc's `symbols.o`, the tip's
+    /// objects, the rlibs, std's import libraries and `/OUT:`.
+    fn msvc_link_args(fx: &Fixture) -> Vec<String> {
+        let deps = fx.target.join("debug").join("deps");
+        vec![
+            "/NOLOGO".to_string(),
+            "C:/t/rustcXYZ/symbols.o".to_string(),
+            render(&deps.join("app-4444.app.aaaa-cgu.0.rcgu.o")),
+            render(&deps.join("app-4444.app.bbbb-cgu.1.rcgu.o")),
+            render(&fx.dep_a),
+            render(&fx.dep_native),
+            render(&fx.std_rlib),
+            "kernel32.lib".to_string(),
+            "/defaultlib:msvcrt".to_string(),
+            "/NXCOMPAT".to_string(),
+            format!("/LIBPATH:{}", render(&deps)),
+            format!("/OUT:{}", render(&deps.join("app-4444.exe"))),
+            "/OPT:NOREF,NOICF".to_string(),
+            "/DEBUG".to_string(),
+            "/PDBALTPATH:%_PDB%".to_string(),
+        ]
+    }
+
+    #[test]
+    fn msvc_fat_link_whole_archives_before_the_last_object_and_exports_the_anchor() {
+        let fx = fixture("msvc");
+        let link_args = msvc_link_args(&fx);
+        let exe = fx.target.join("debug").join("app.exe");
+        let runner = RecordingRunner::linking(b"MZ stand-in".to_vec());
+        let request = FatLinkRequest {
+            flavor: LinkerFlavor::Msvc,
+            linker: "link.exe",
+            link_args: &link_args,
+            envs: &[],
+            target_dir: &fx.target,
+            archive_dir: &fx.archive_dir,
+            exe: &exe,
+        };
+        // The stand-in image is no PE32+ image, so the size check refuses
+        // it after the link ran.
+        unsupported(fat_link(&runner, &request));
+        let link = runner.only_call("link.exe");
+        let archive = fs::read_dir(&fx.archive_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "a"))
+            .expect("the fat archive was written");
+        assert_eq!(
+            link.args,
+            vec![
+                "/NOLOGO".to_string(),
+                "C:/t/rustcXYZ/symbols.o".to_string(),
+                link_args[2].clone(),
+                format!("/WHOLEARCHIVE:{}", render(&archive)),
+                render(&fx.dep_native),
+                render(&fx.std_rlib),
+                link_args[3].clone(),
+                "kernel32.lib".to_string(),
+                "/defaultlib:msvcrt".to_string(),
+                "/NXCOMPAT".to_string(),
+                link_args[10].clone(),
+                "/OPT:NOREF,NOICF".to_string(),
+                "/DEBUG".to_string(),
+                "/PDBALTPATH:%_PDB%".to_string(),
+                "/HIGHENTROPYVA:NO".to_string(),
+                "/DYNAMICBASE:NO".to_string(),
+                "/BASE:0x10000000".to_string(),
+                "/EXPORT:__frust_hotpatch_anchor".to_string(),
+                format!("/OUT:{}", render(&exe)),
+            ]
+        );
+        assert!(fs::read(&exe).is_ok(), "the link wrote /OUT:");
+        assert!(
+            runner.calls().iter().all(|call| call.cmd != "ranlib"),
+            "only Darwin archives are ranlib'd"
+        );
+    }
+
+    #[test]
+    fn msvc_and_cc_dialects_do_not_mix() {
+        let exe = Path::new("C:/t/app.exe");
+        let detail = unsupported(fat_link_args(
+            LinkerFlavor::Msvc,
+            &strings(&["a.o", "-o", "/t/x"]),
+            None,
+            exe,
+        ));
+        assert!(detail.contains("-o"), "{detail}");
+        unsupported(fat_link_args(
+            LinkerFlavor::Msvc,
+            &strings(&["a.o", "/OUT:a.exe", "/OUT:b.exe"]),
+            None,
+            exe,
+        ));
+        unsupported(fat_link_args(
+            LinkerFlavor::Msvc,
+            &strings(&["lib.rlib", "/OUT:a.exe"]),
+            None,
+            exe,
+        ));
+        let args = fat_link_args(
+            LinkerFlavor::Msvc,
+            &strings(&["a.o", "libdep.rlib", "/OUT:a.exe"]),
+            None,
+            exe,
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            strings(&[
+                "a.o",
+                "libdep.rlib",
+                "/HIGHENTROPYVA:NO",
+                "/DYNAMICBASE:NO",
+                "/BASE:0x10000000",
+                "/EXPORT:__frust_hotpatch_anchor",
+                "/OUT:C:/t/app.exe",
+            ])
+        );
+    }
+
+    #[test]
+    fn the_msvc_fixed_base_follows_the_last_objects_coff_machine() {
+        let dir = temp_dir("fixed-base");
+        let object = |name: &str, header: &[u8]| {
+            let path = dir.join(name);
+            let mut bytes = header.to_vec();
+            bytes.resize(64, 0);
+            fs::write(&path, bytes).unwrap();
+            render(&path)
+        };
+        let amd64 = object("amd64.o", &pe::MACHINE_AMD64.to_le_bytes());
+        let arm64 = object("arm64.o", &pe::MACHINE_ARM64.to_le_bytes());
+        let arm64ec = object("arm64ec.o", &0xa641u16.to_le_bytes());
+        let mut bigobj = vec![0, 0, 0xff, 0xff, 2, 0];
+        bigobj.extend(pe::MACHINE_ARM64.to_le_bytes());
+        let arm64_bigobj = object("arm64-bigobj.o", &bigobj);
+        let fixed = strings(&["/DYNAMICBASE:NO", "/BASE:0x10000000"]);
+        let exe = Path::new("C:/t/app.exe");
+        let msvc = |last: &str| {
+            fat_link_args(
+                LinkerFlavor::Msvc,
+                &[amd64.clone(), last.to_string(), "/OUT:a.exe".to_string()],
+                None,
+                exe,
+            )
+            .unwrap()
+        };
+
+        // An AMD64 (or unreadable) last object links at the fixed base.
+        for last in [amd64.as_str(), "C:/t/missing.o"] {
+            let args = msvc(last);
+            let at = args.iter().position(|a| a == "/HIGHENTROPYVA:NO").unwrap();
+            assert_eq!(args[at + 1..at + 3], fixed[..], "{last}");
+        }
+        // lld-link refuses `/DYNAMICBASE:NO` on ARM: the line keeps ASLR.
+        for last in [&arm64, &arm64ec, &arm64_bigobj] {
+            let args = msvc(last);
+            assert!(args.contains(&"/HIGHENTROPYVA:NO".to_string()));
+            assert!(!args.iter().any(|a| fixed.contains(a)), "{last}: {args:?}");
+        }
+        // The cc dialects never carry it.
+        for flavor in [LinkerFlavor::Darwin, LinkerFlavor::Gnu] {
+            let args = fat_link_args(flavor, &strings(&["a.o", "-o", "/t/x"]), None, exe).unwrap();
+            assert!(!args.iter().any(|a| fixed.contains(a)), "{args:?}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn msvc_patch_bases_step_by_the_stride_above_the_fat_exe_without_overlap() {
+        assert_eq!(patch_image_base(0), None, "patches count from 1");
+        assert_eq!(patch_image_base(1), Some(0x2000_0000));
+        assert_eq!(patch_image_base(2), Some(0x3000_0000));
+        assert_eq!(patch_image_base(64), Some(0x4_1000_0000));
+        let mut last_end = PATCH_IMAGE_BASE_FIRST;
+        for n in 1..=64 {
+            let base = patch_image_base(n).unwrap();
+            assert_eq!(base, last_end, "patch {n} starts where {} ends", n - 1);
+            assert_eq!(base % 0x1_0000, 0, "64 KiB-aligned");
+            last_end = base + PATCH_IMAGE_STRIDE;
+        }
+        // No window reaches past x64 user-mode address space.
+        let last = (USER_SPACE_END - PATCH_IMAGE_BASE_FIRST) / PATCH_IMAGE_STRIDE;
+        let last = u32::try_from(last).unwrap();
+        assert!(patch_image_base(last).unwrap() + PATCH_IMAGE_STRIDE <= USER_SPACE_END);
+        assert_eq!(patch_image_base(last + 1), None);
+        assert_eq!(patch_image_base(u32::MAX), None);
+
+        let object = Path::new("C:/t/missing.o");
+        assert_eq!(
+            fixed_base_args_at(patch_image_base(2).unwrap(), object),
+            strings(&["/DYNAMICBASE:NO", "/BASE:0x30000000"])
+        );
+        assert_eq!(
+            fixed_base_args(object),
+            fixed_base_args_at(FAT_IMAGE_BASE, object)
+        );
+    }
+
+    /// A PE32+ header of an image at [`FAT_IMAGE_BASE`] spanning `size`.
+    fn fat_exe_header(size: u32) -> Vec<u8> {
+        let mut image = vec![0u8; 0x200];
+        image[..2].copy_from_slice(b"MZ");
+        image[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        image[0x40..0x44].copy_from_slice(b"PE\0\0");
+        image[0x44..0x46].copy_from_slice(&pe::MACHINE_AMD64.to_le_bytes());
+        image[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
+        let optional = 0x58;
+        image[optional..optional + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+        image[optional + 24..optional + 32].copy_from_slice(&FAT_IMAGE_BASE.to_le_bytes());
+        image[optional + 56..optional + 60].copy_from_slice(&size.to_le_bytes());
+        image
+    }
+
+    #[test]
+    fn the_fat_exe_must_end_at_or_below_patch_one() {
+        let window = u32::try_from(PATCH_IMAGE_BASE_FIRST - FAT_IMAGE_BASE).unwrap();
+        assert_eq!(window, 256 << 20, "the fat exe owns 256 MiB");
+        for size in [0x1000, 36 << 20, window] {
+            check_fat_image_fits(&fat_exe_header(size), "fat exe `app.exe`")
+                .unwrap_or_else(|err| panic!("{size:#x}: {err}"));
+        }
+        for size in [window + 0x1000, u32::MAX] {
+            let detail = unsupported(check_fat_image_fits(
+                &fat_exe_header(size),
+                "fat exe `app.exe`",
+            ));
+            assert!(
+                detail.starts_with("fat exe `app.exe` is too large")
+                    && detail.contains(
+                        "FAT_IMAGE_BASE + SizeOfImage must not exceed PATCH_IMAGE_BASE_FIRST"
+                    )
+                    && detail.contains(&format!("{size:#x}")),
+                "{detail}"
+            );
+        }
+        let detail = unsupported(check_fat_image_fits(b"MZ stand-in", "fat exe `app.exe`"));
+        assert!(detail.contains("not a usable PE image"), "{detail}");
+
+        // The Msvc fat link refuses such an exe once the linker wrote it.
+        let fx = fixture("msvc-too-large");
+        let link_args = msvc_link_args(&fx);
+        let exe = fx.target.join("debug").join("app.exe");
+        let runner = RecordingRunner::linking(fat_exe_header(window + 0x1000));
+        let detail = unsupported(fat_link(
+            &runner,
+            &FatLinkRequest {
+                flavor: LinkerFlavor::Msvc,
+                linker: "lld-link",
+                link_args: &link_args,
+                envs: &[],
+                target_dir: &fx.target,
+                archive_dir: &fx.archive_dir,
+                exe: &exe,
+            },
+        ));
+        assert!(
+            detail.contains("FAT_IMAGE_BASE + SizeOfImage must not exceed PATCH_IMAGE_BASE_FIRST"),
+            "{detail}"
+        );
+        runner.only_call("lld-link");
+    }
+
+    #[test]
     fn a_fat_link_without_an_archive_keeps_the_captured_rlibs() {
         let fx = fixture("no-archive");
         let args = fat_link_args(LinkerFlavor::Gnu, &fx.link_args, None, &fx.exe).unwrap();
@@ -1281,5 +2034,191 @@ mod tests {
         );
         let run = runner.run(&render(&exe), &[]).unwrap();
         assert!(run.success, "the fat image runs: {}", run.stderr);
+    }
+}
+
+/// A real Msvc fat link on a Windows host: rustc builds a dependency rlib
+/// and the tip (with the fat build's `-Csave-temps=true -Clink-dead-code`,
+/// linked by rustc's own linker only to print its line), and [`fat_link`]
+/// links the image with the toolchain's `rust-lld`. Everything lives beside
+/// the test binary's `deps`, where built binaries run in place.
+#[cfg(all(test, windows))]
+mod windows {
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
+    use crate::process::RealProcessRunner;
+
+    /// `IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE`: the image may be relocated
+    /// by ASLR.
+    const DYNAMIC_BASE: u16 = 0x0040;
+
+    fn rustc() -> String {
+        let cargo = option_env!("CARGO").unwrap_or("cargo");
+        let sibling = Path::new(cargo).with_file_name("rustc.exe");
+        if sibling.is_file() {
+            sibling.display().to_string()
+        } else {
+            "rustc".to_string()
+        }
+    }
+
+    fn fixture_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let exe = std::env::current_exe().unwrap();
+        let dir = exe.parent().unwrap().parent().unwrap().join(format!(
+            "frust-hotpatch-fat-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The arguments of the command `rustc --print link-args` printed (Rust
+    /// `Debug` strings separated by spaces), linker program dropped.
+    fn parse_link_args(printed: &str) -> Vec<String> {
+        let line = printed
+            .lines()
+            .find(|line| line.starts_with('"'))
+            .unwrap_or_else(|| panic!("no link line in {printed:?}"));
+        let mut args = Vec::new();
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            if c != '"' {
+                continue;
+            }
+            let mut arg = String::new();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => arg.push(chars.next().unwrap()),
+                    '"' => break,
+                    c => arg.push(c),
+                }
+            }
+            args.push(arg);
+        }
+        args.remove(0);
+        args
+    }
+
+    /// The PE32+ optional header's `ImageBase`, `SizeOfImage` and
+    /// `DllCharacteristics` of the image `bytes`.
+    fn optional_header(bytes: &[u8]) -> (u64, u32, u16) {
+        let u16_at = |at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        assert_eq!(&bytes[..2], b"MZ");
+        let pe = u32_at(0x3c) as usize;
+        assert_eq!(&bytes[pe..pe + 4], b"PE\0\0");
+        let optional = pe + 4 + 20;
+        assert_eq!(u16_at(optional), 0x20b, "a PE32+ image");
+        (
+            u64_at(optional + 24),
+            u32_at(optional + 56),
+            u16_at(optional + 70),
+        )
+    }
+
+    #[test]
+    fn the_fat_exe_links_at_the_fixed_low_base_without_aslr_and_loads_there() {
+        let dir = fixture_dir("base");
+        let deps = dir.join("target").join("debug").join("deps");
+        fs::create_dir_all(&deps).unwrap();
+        fs::write(
+            dir.join("dep.rs"),
+            "pub static FRUST_FIXTURE_TABLE: [u32; 4] = [1, 2, 3, 4];\n\
+             #[inline(never)]\npub fn frust_fixture_unreferenced() -> u32 { 7 }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("main.rs"),
+            "extern crate dep;\n#[unsafe(no_mangle)]\npub extern \"C\" fn __frust_hotpatch_anchor() {}\n\
+             fn main() {\n    __frust_hotpatch_anchor();\n    \
+             let table = std::hint::black_box(&dep::FRUST_FIXTURE_TABLE);\n    \
+             println!(\"{} {}\", __frust_hotpatch_anchor as usize, table.as_ptr() as usize);\n}\n",
+        )
+        .unwrap();
+        let runner = RealProcessRunner;
+        let rustc = rustc();
+        let run = |args: &[&str]| {
+            let out = runner.run(&rustc, args).unwrap();
+            assert!(out.success, "rustc {args:?}: {}", out.stderr);
+            out.stdout
+        };
+        let deps_s = render(&deps);
+        let common = ["--edition=2024", "-Cdebuginfo=2", "--out-dir", &deps_s];
+        let dep_src = render(&dir.join("dep.rs"));
+        let mut dep_args = vec![
+            "--crate-type=rlib",
+            "--crate-name=dep",
+            "-Cextra-filename=-1111",
+        ];
+        dep_args.extend(common);
+        dep_args.push(&dep_src);
+        run(&dep_args);
+        let dep_extern = format!("dep={}", render(&deps.join("libdep-1111.rlib")));
+        let main_src = render(&dir.join("main.rs"));
+        let mut bin_args = vec![
+            "--crate-type=bin",
+            "--crate-name=app",
+            "-Cextra-filename=-2222",
+            "-Csave-temps=true",
+            "-Clink-dead-code",
+            "--extern",
+            &dep_extern,
+            "--print",
+            "link-args",
+        ];
+        bin_args.extend(common);
+        bin_args.push(&main_src);
+        let link_args = parse_link_args(&run(&bin_args));
+
+        let libdir = run(&["--print", "target-libdir"]);
+        let linker = render(&bundled_lld(Path::new(libdir.trim())).unwrap());
+        let target = dir.join("target");
+        let exe = target.join("frust-hotpatch").join("fat").join("app.exe");
+        let output = fat_link(
+            &runner,
+            &FatLinkRequest {
+                flavor: LinkerFlavor::Msvc,
+                linker: &linker,
+                link_args: &link_args,
+                envs: &[],
+                target_dir: &target,
+                archive_dir: &target.join("frust-hotpatch").join("fat"),
+                exe: &exe,
+            },
+        )
+        .unwrap();
+        assert!(output.archive.is_some(), "the dep rlib was packed");
+
+        // Linked at the fixed base with ASLR off, the whole image below 4 GiB.
+        let (image_base, image_size, characteristics) = optional_header(&fs::read(&exe).unwrap());
+        assert_eq!(image_base, FAT_IMAGE_BASE, "{image_base:#x}");
+        assert_eq!(
+            characteristics & DYNAMIC_BASE,
+            0,
+            "DYNAMICBASE is clear: {characteristics:#06x}"
+        );
+        assert!(image_base + u64::from(image_size) <= u64::from(u32::MAX));
+
+        // And it loads there: the anchor sits at its link-time VA (slide 0),
+        // and base data at a 32-bit address.
+        let ran = Command::new(&exe).output().unwrap();
+        assert!(ran.status.success(), "{ran:?}");
+        let stdout = String::from_utf8(ran.stdout).unwrap();
+        let printed: Vec<u64> = stdout
+            .split_whitespace()
+            .map(|n| n.parse().unwrap())
+            .collect();
+        let [anchor, table] = printed[..] else {
+            panic!("{stdout:?}");
+        };
+        assert_eq!(anchor, output.anchor_address, "{anchor:#x}");
+        assert!(u32::try_from(table).is_ok(), "base data at {table:#x}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

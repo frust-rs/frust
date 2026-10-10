@@ -107,9 +107,10 @@ Known gaps are tracked by the comprehensive-testing feature plan:
   automated launch, device-state normalization (wake/dismiss-keyguard), and a best-effort
   black-band visual probe against an attached device or emulator, but does not provision one.
 - No GPU-runner or device CI. `.github/workflows/ci.yml` runs the CPU gates on pull requests and on
-  pushes to `main` (fmt, clippy, workspace tests, the standalone workspaces, commit hygiene;
-  aggregate `ci-ok` is the required check). `.github/workflows/android-smoke.yml` runs on a schedule
-  or manual dispatch and is not part of the required check.
+  pushes to `main` (fmt, clippy, workspace tests, the standalone workspaces, commit hygiene, the
+  Windows `hotpatch-windows` job under § Required Host Gate; aggregate `ci-ok` is the required
+  check). `.github/workflows/android-smoke.yml` runs on a schedule or manual dispatch and is not
+  part of the required check.
 - Accessibility and several platform plugin paths remain manual physical-device
   gates.
 
@@ -209,6 +210,24 @@ its `db` feature, default-on: turning it off is the app-size-matrix build, and t
 (cd benchmarks/frust_bench && cargo test -p frustbench --no-default-features)
 (cd benchmarks/frust_bench && cargo clippy -p frustbench --no-default-features --all-targets -- -D warnings)
 ```
+
+Some hot-patch tests run only on a Windows host, so a macOS or Linux `cargo test --workspace`
+never executes them: `frust-drive`'s PDB-fixture tests of `hotpatch::pe` and
+`hotpatch::pdb_layout`, the `cfg(all(test, windows))` `windows` suites of `hotpatch::session` and
+`hotpatch::fat_link` (real `rust-lld` links), and `frust-devtools`' tests built with its `hotpatch`
+feature, whose `cfg(windows)` token-source and hot-patch-gate tests run nowhere else; the filter
+also takes in `hotpatch::thin_link`. CI's `hotpatch-windows` job (`.github/workflows/ci.yml`,
+`windows-latest`) runs them on every pull request and push to `main`, with no path filter, and is a
+required check in `ci-ok`'s `needs` (the owner's standing decision). Run the same two commands on a
+Windows host before changing a `hotpatch` module or the devtools token/gate:
+
+```bash
+cargo test -p frust-drive --lib -- hotpatch::pe hotpatch::pdb_layout hotpatch::fat_link hotpatch::thin_link hotpatch::session::windows
+cargo test -p frust-devtools --features hotpatch
+```
+
+The filter is deliberate: a full `cargo test -p frust-drive --lib` on a Windows host has 5
+pre-existing `hotpatch::` failures outside those modules, tracked as act_000001a12096ed6445DWzpgI.
 
 Target compile gates and slow ignored scaffold/build tests remain listed in
 `docs/DEVELOPMENT.md`.

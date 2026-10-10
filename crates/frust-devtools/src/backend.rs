@@ -184,8 +184,8 @@ pub trait DevtoolsBackend: Send + 'static {
     // that overrides them declares [`Capability::HotPatch`] in
     // [`Self::handshake_info`], and even then the service keeps the capability
     // (and dispatches these) only while every code-execution precondition
-    // holds: a debug build, an OS-CSPRNG token with `require_token` on, not
-    // Windows (`crate::service`'s hot-patch gate). They run on a hot-patch
+    // holds: a debug build and an OS-CSPRNG token with `require_token` on
+    // (`crate::service`'s hot-patch gate). They run on a hot-patch
     // worker thread, never the backend thread, one at a time.
 
     /// What a patch builder needs to target this process (`anchor_runtime`,

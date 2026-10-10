@@ -56,7 +56,23 @@
 //! patch is mapped through that image's symbol table and requires a restart
 //! when it names a seam instance the patch carries. No seam hit at all is a
 //! restart too. Once a session has answered a restart, it answers the same
-//! restart to every later change and sends nothing more. See
+//! restart to every later change and sends nothing more.
+//!
+//! **Windows (`pc-windows-msvc`).** The same session, with PE arms: the
+//! fat image is `<bin>.exe`, linked by `rust-lld -flavor link`
+//! ([`fat_link::flavor_linker_program`]) with the archive under
+//! `/WHOLEARCHIVE:`; the symbol cache and anchor come from the exe's own
+//! PDB ([`super::pe`]) and the base layout table from that PDB's type
+//! records ([`super::pdb_layout`]), not from DWARF, and seam instances
+//! from the COFF objects' symbol names. Per change, the replay and stub
+//! are the DWARF path's (a CRT link marker such as `_fltused` is left to
+//! the patch's own link, [`super::pe::CRT_LINK_MARKERS`]), but the
+//! candidate's layout table can only be read once the patch is linked: the
+//! thin link writes `patch-<n>.dll` and its `patch-<n>.pdb`, the table is
+//! extracted from that PDB (`PatchBuilder::linked_layouts`) and checked
+//! against the accepted sets right after the link, before anything is sent
+//! — so a refused patch costs one link on Windows. The app's `HotPatch`
+//! capability decides whether a patch is ever sent. See
 //! `docs/CLI_ARCHITECTURE.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -89,9 +105,10 @@ use super::fat_link::{self, FatLinkRequest, LinkerFlavor};
 use super::graph::{PathClass, ReplayUnit, WorkspaceGraph};
 use super::layout::{self, LayoutTable};
 use super::link_intercept::{LinkAction, LinkMode, linker_arg, read_link_args};
+use super::pdb_layout;
 use super::replay::{STRIPPED_ENV, parse_notifications, replay_args, replay_env, replay_units};
 use super::seams::{self, SeamSet};
-use super::symbols::{ImageSymbols, SymbolCache, Target};
+use super::symbols::{Format, ImageSymbols, SymbolCache, Target};
 use super::thin_link::{self, ThinLinkRequest};
 use super::{HotpatchError, hotpatch_root};
 
@@ -617,8 +634,8 @@ struct LinkedPatch {
 /// Reads the thin-linked image at `patch`, builds its jump table against
 /// `cache` and, when `upload_strip` names a strip tool, writes the stripped
 /// copy the app is sent ([`super::android::strip_for_upload`]). Symbols and
-/// table always come from `patch` itself; without a strip tool the patch is
-/// sent as linked.
+/// table always come from `patch` itself (a PE patch's from its own PDB);
+/// without a strip tool the patch is sent as linked.
 fn read_linked(
     runner: &dyn ProcessRunner,
     cache: &SymbolCache,
@@ -631,7 +648,11 @@ fn read_linked(
             .map_err(|err| HotpatchError::io(format!("reading `{}`", path.display()), err))
     };
     let bytes = read(&patch)?;
-    let symbols = ImageSymbols::parse(&bytes, target, &format!("patch `{}`", patch.display()))?;
+    let symbols = if target.format() == Format::Pe {
+        ImageSymbols::load(&patch, target)?
+    } else {
+        ImageSymbols::parse(&bytes, target, &format!("patch `{}`", patch.display()))?
+    };
     let table = super::jump_table::create_jump_table(cache, &symbols)?;
     let (path, bytes) = match upload_strip {
         None => (patch, bytes),
@@ -672,6 +693,17 @@ trait PatchBuilder: Send {
     /// Links patch number `n` against the process whose anchor is at
     /// `anchor_runtime`.
     fn link(&mut self, n: u32, anchor_runtime: u64) -> Result<LinkedPatch, HotpatchError>;
+    /// The candidate's layout table read from the patch [`link`] just
+    /// produced, taken once: a PE patch's own PDB
+    /// ([`pdb_layout`]), the only place its type records are readable. The
+    /// session gates it before anything is sent. `None` (the default) when
+    /// the table came with [`Compiled::Candidate`], before the link, as on
+    /// every DWARF target.
+    ///
+    /// [`link`]: PatchBuilder::link
+    fn linked_layouts(&mut self) -> Option<LayoutTable> {
+        None
+    }
     /// The session accepted the last candidate: its patch reported
     /// `applied: true` with no layout mismatch and its entries were merged
     /// into the accepted sets. Every object compiled so far has now passed
@@ -940,6 +972,15 @@ impl HotSession {
         let linked = match self.builder.link(n, anchor_runtime) {
             Ok(linked) => linked,
             Err(err) => return restart(RestartReason::builder(&err)),
+        };
+        // A PE candidate's layout table exists only once its patch is
+        // linked: gate it now, before anything is sent.
+        let layouts = match self.builder.linked_layouts() {
+            Some(linked_layouts) => match self.accepted.check(&linked_layouts, present.clone()) {
+                Ok(_) => linked_layouts,
+                Err(reason) => return restart(reason),
+            },
+            None => layouts,
         };
         let len = linked.bytes.len() as u64;
         if let Some(reason) = self
@@ -1227,7 +1268,7 @@ pub fn start_desktop(
             graph,
             link_args,
             image_unit: tip_bin.clone(),
-            image: fat_dir.join(&tip_bin.target),
+            image: fat_dir.join(desktop_image_name(flavor, &tip_bin.target)),
             custom_linker: custom_linker(host.env, &triple),
             upload_strip: None,
             target,
@@ -1267,6 +1308,15 @@ pub fn start_desktop(
 /// triple and the device ([`super::android::session_name`]).
 pub(super) fn desktop_session_name(bin: &str) -> String {
     format!("session-{bin}")
+}
+
+/// The fat image's file name: the bin's name, `<bin>.exe` on Msvc (whose
+/// PDB the linker then writes beside it as `<bin>.pdb`).
+fn desktop_image_name(flavor: LinkerFlavor, bin: &str) -> String {
+    match flavor {
+        LinkerFlavor::Msvc => format!("{bin}.exe"),
+        LinkerFlavor::Darwin | LinkerFlavor::Gnu => bin.to_string(),
+    }
 }
 
 /// What [`link_base`] links the base image from: the fat build's graph,
@@ -1369,7 +1419,10 @@ fn base(
         ))
     })?;
     let tip_env = replay_env(tip_record);
-    let linker = fat_link::linker_program(custom_linker.as_deref())?;
+    let linker = fat_link::flavor_linker_program(flavor, custom_linker.as_deref(), || {
+        let libdir = host_target_libdir(runner, tip_record, &graph.replay_cwd(&image_unit))?;
+        fat_link::bundled_lld(&libdir)
+    })?;
     let image = if relink {
         fat_link::fat_link(
             runner,
@@ -1391,13 +1444,20 @@ fn base(
     let rlibs = member_rlibs(&link_args, &graph);
     let tip_objects = tip_objects(&link_args);
     let crates = replayable_crates(&graph);
-    let typed = typed_objects(&tip_objects, &crates)?;
-    let base_layouts = layout::extract(
-        &rlibs.values().cloned().chain(typed).collect::<Vec<_>>(),
-        &crates,
-    )?
-    .table;
-    let base_seams = SeamSet::from_inputs(
+    let base_layouts = if flavor == LinkerFlavor::Msvc {
+        // CodeView type records are readable from a PDB only: the fat
+        // exe's, which `/WHOLEARCHIVE` made cover every member object.
+        pdb_layout::extract(std::slice::from_ref(&image), &crates)?.table
+    } else {
+        let typed = typed_objects(&tip_objects, &crates)?;
+        layout::extract(
+            &rlibs.values().cloned().chain(typed).collect::<Vec<_>>(),
+            &crates,
+        )?
+        .table
+    };
+    let base_seams = seam_set(
+        flavor,
         &rlibs
             .values()
             .cloned()
@@ -1431,6 +1491,7 @@ fn base(
         frust_exe: host.frust_exe.clone(),
         crates,
         tip_replays: 0,
+        linked_layouts: None,
     };
     Ok(FatBase {
         builder,
@@ -1607,6 +1668,41 @@ fn host_triple(rustc_version: &str) -> Result<String, HotpatchError> {
         .ok_or_else(|| HotpatchError::unsupported("`rustc -vV` reports no `host:` triple"))
 }
 
+/// `rustc --print target-libdir` for the host, run as `record`'s rustc
+/// with its recorded environment in `cwd` (so a rustup proxy picks the
+/// toolchain the fat build used): `<sysroot>/lib/rustlib/<host>/lib`,
+/// beside the bundled `rust-lld`'s `bin`.
+fn host_target_libdir(
+    runner: &dyn ProcessRunner,
+    record: &RustcRecord,
+    cwd: &Path,
+) -> Result<PathBuf, HotpatchError> {
+    let rustc = record
+        .rustc()
+        .ok_or_else(|| HotpatchError::unsupported("the image capture has no rustc"))?;
+    let env = replay_env(record);
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let output = runner
+        .run_streaming(
+            rustc,
+            &["--print", "target-libdir"],
+            Some(cwd),
+            &env,
+            &mut |_| {},
+        )
+        .map_err(|err| HotpatchError::Process {
+            detail: format!("failed to spawn `{rustc} --print target-libdir`: {err:#}"),
+        })?;
+    let libdir = output.stdout.trim();
+    if !output.success || libdir.is_empty() {
+        return Err(HotpatchError::unsupported(format!(
+            "`{rustc} --print target-libdir` failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    Ok(PathBuf::from(libdir))
+}
+
 /// The rustflags cargo applies: `CARGO_ENCODED_RUSTFLAGS`, else `RUSTFLAGS`.
 pub(super) fn rustflags(env: &dyn EnvLookup) -> Vec<String> {
     if let Some(encoded) = env.get("CARGO_ENCODED_RUSTFLAGS") {
@@ -1642,6 +1738,83 @@ pub(super) fn remove_stale(path: &Path) -> Result<(), HotpatchError> {
             err,
         )),
     }
+}
+
+/// The seam instances `inputs` (objects and rlibs) define. Darwin and Gnu:
+/// [`SeamSet::from_inputs`]. Msvc: the same rule over the defined symbol
+/// names of COFF objects, read here, since the shared object reader takes
+/// only the DWARF gates' Mach-O and ELF.
+fn seam_set(flavor: LinkerFlavor, inputs: &[PathBuf]) -> Result<SeamSet, HotpatchError> {
+    if flavor != LinkerFlavor::Msvc {
+        return SeamSet::from_inputs(inputs);
+    }
+    let mut names = Vec::new();
+    for input in inputs {
+        coff_definitions(input, &mut names)?;
+    }
+    SeamSet::from_symbols(names.iter().map(String::as_str))
+}
+
+/// Appends the defined symbol names of the COFF object at `path`, or of
+/// every `.o` member of the archive there. An input holding no object, or
+/// an object in another format, is [`HotpatchError::BuilderUnsupported`].
+fn coff_definitions(path: &Path, names: &mut Vec<String>) -> Result<(), HotpatchError> {
+    use object::read::archive::ArchiveFile;
+    use object::{Object as _, ObjectSymbol as _};
+
+    let data = std::fs::read(path)
+        .map_err(|err| HotpatchError::io(format!("reading {}", path.display()), err))?;
+    let mut read = |label: &str, bytes: &[u8]| {
+        let file = object::File::parse(bytes).map_err(|err| {
+            HotpatchError::unsupported(format!("{label} is not an object file: {err}"))
+        })?;
+        if file.format() != object::BinaryFormat::Coff {
+            return Err(HotpatchError::unsupported(format!(
+                "{label} is {:?}, not a COFF object",
+                file.format()
+            )));
+        }
+        names.extend(
+            file.symbols()
+                .filter(|symbol| symbol.is_definition())
+                .filter_map(|symbol| symbol.name().ok().map(str::to_string)),
+        );
+        Ok(())
+    };
+    let mut count = 0usize;
+    if data.starts_with(b"!<arch>\n") {
+        let archive = ArchiveFile::parse(&*data).map_err(|err| {
+            HotpatchError::unsupported(format!(
+                "{} is not a readable archive: {err}",
+                path.display()
+            ))
+        })?;
+        for member in archive.members() {
+            let member = member.map_err(|err| {
+                HotpatchError::unsupported(format!("{}: bad archive member: {err}", path.display()))
+            })?;
+            let name = String::from_utf8_lossy(member.name()).into_owned();
+            if !name.ends_with(".o") {
+                continue;
+            }
+            let label = format!("{}({name})", path.display());
+            let bytes = member.data(&*data).map_err(|err| {
+                HotpatchError::unsupported(format!("{label}: unreadable member: {err}"))
+            })?;
+            read(&label, bytes)?;
+            count += 1;
+        }
+    } else {
+        read(&path.display().to_string(), &data)?;
+        count += 1;
+    }
+    if count == 0 {
+        return Err(HotpatchError::unsupported(format!(
+            "{} holds no object file",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// The `.rcgu.o` objects a captured tip link names: the image unit's own
@@ -1823,6 +1996,9 @@ struct DesktopBuilder {
     frust_exe: PathBuf,
     crates: Vec<String>,
     tip_replays: u32,
+    /// Msvc: the layout table of the patch [`PatchBuilder::link`] just
+    /// linked, read from its PDB, until the session takes it.
+    linked_layouts: Option<LayoutTable>,
 }
 
 impl DesktopBuilder {
@@ -1973,7 +2149,13 @@ impl PatchBuilder for DesktopBuilder {
         if !image.is_empty() {
             match self.replay_image_unit()? {
                 Ok(link_args) => {
-                    let typed = typed_objects(&tip_objects(&link_args), &self.crates)?;
+                    let typed = if self.flavor == LinkerFlavor::Msvc {
+                        // COFF objects carry CodeView, not DWARF: the gate
+                        // reads the linked patch's PDB instead.
+                        tip_objects(&link_args)
+                    } else {
+                        typed_objects(&tip_objects(&link_args), &self.crates)?
+                    };
                     self.ungated.compiled(self.image_unit.clone(), typed);
                     self.tip_link_args = link_args;
                 }
@@ -1986,17 +2168,21 @@ impl PatchBuilder for DesktopBuilder {
         // and any an earlier round compiled before it failed, is gated here:
         // the patch links them all. Only an input the session accepted with
         // an earlier candidate is left out, and the accepted set holds it.
+        // On Msvc the table is read after the link, from the patch's PDB,
+        // which covers every ungated object the patch links
+        // ([`PatchBuilder::linked_layouts`]).
         let fresh = self.ungated.inputs();
-        let layouts = if fresh.is_empty() {
+        let layouts = if fresh.is_empty() || self.flavor == LinkerFlavor::Msvc {
             LayoutTable::default()
         } else {
             layout::extract(&fresh, &self.crates)?.table
         };
-        let seams = SeamSet::from_inputs(&self.patch_inputs()?)?;
+        let seams = seam_set(self.flavor, &self.patch_inputs()?)?;
         Ok(Compiled::Candidate { layouts, seams })
     }
 
     fn link(&mut self, n: u32, anchor_runtime: u64) -> Result<LinkedPatch, HotpatchError> {
+        self.linked_layouts = None;
         let inputs = self.patch_inputs()?;
         let stub = super::stub::create_undefined_symbol_stub(&self.cache, &inputs, anchor_runtime)?;
         let stub_object = self.session_dir.join(format!("stub-{n}.o"));
@@ -2005,7 +2191,17 @@ impl PatchBuilder for DesktopBuilder {
         })?;
         let output = thin_link::patch_path(&self.target_dir, &self.session, n, self.flavor)?;
         let rlibs = self.modified_rlibs()?;
-        let linked = thin_link::thin_link(
+        // An Msvc patch links at its own fixed base: the runtime sees every
+        // Windows image's slide as 0, so only an unrelocated DLL passes.
+        let fixed_base = match self.flavor {
+            LinkerFlavor::Msvc => Some(fat_link::patch_image_base(n).ok_or_else(|| {
+                HotpatchError::unsupported(format!(
+                    "patch {n} has no fixed Windows image base below the end of user space"
+                ))
+            })?),
+            LinkerFlavor::Darwin | LinkerFlavor::Gnu => None,
+        };
+        let linked = thin_link::thin_link_with_base(
             &*self.runner,
             &ThinLinkRequest {
                 flavor: self.flavor,
@@ -2016,7 +2212,13 @@ impl PatchBuilder for DesktopBuilder {
                 output: &output,
                 envs: &self.tip_env,
             },
+            fixed_base,
         )?;
+        if self.flavor == LinkerFlavor::Msvc {
+            let extraction =
+                pdb_layout::extract(std::slice::from_ref(&linked.patch), &self.crates)?;
+            self.linked_layouts = Some(extraction.table);
+        }
         read_linked(
             &*self.runner,
             &self.cache,
@@ -2024,6 +2226,10 @@ impl PatchBuilder for DesktopBuilder {
             linked.patch,
             self.upload_strip.as_deref(),
         )
+    }
+
+    fn linked_layouts(&mut self) -> Option<LayoutTable> {
+        self.linked_layouts.take()
     }
 
     fn accepted(&mut self) {
@@ -3601,6 +3807,161 @@ mod tests {
         );
     }
 
+    /// A [`FakeBuilder`] whose candidate tables appear only after each
+    /// link, as a PE patch's PDB table does.
+    struct PostLinkTables {
+        inner: FakeBuilder,
+        tables: VecDeque<LayoutTable>,
+        linked: Option<LayoutTable>,
+    }
+
+    impl PatchBuilder for PostLinkTables {
+        fn classify(&self, path: &Path) -> PathClass {
+            self.inner.classify(path)
+        }
+
+        fn compile(&mut self, units: &BTreeSet<ReplayUnit>) -> Result<Compiled, HotpatchError> {
+            self.inner.compile(units)
+        }
+
+        fn link(&mut self, n: u32, anchor_runtime: u64) -> Result<LinkedPatch, HotpatchError> {
+            let linked = self.inner.link(n, anchor_runtime)?;
+            self.linked = self.tables.pop_front();
+            Ok(linked)
+        }
+
+        fn linked_layouts(&mut self) -> Option<LayoutTable> {
+            self.linked.take()
+        }
+
+        fn accepted(&mut self) {
+            self.inner.accepted();
+        }
+    }
+
+    #[test]
+    fn msvc_seams_are_read_from_coff_objects_and_rlib_members() {
+        // `HomePage`'s seam instance, v0-mangled as rustc spells it.
+        const SEAM: &str = "_RNvXNtCsfxYKN7w6hnv_14frust_hotpatch6hot_fnINvNtCskhDZPiJ344Y_10frust_core8hotpatch13checked_buildNtCskJOlR6liO6y_20hotpatch_fixture_app8HomePageEINtB2_11HotFunctionTRB1y_QNtB1A_9HomeStateNtBI_11SeamWitnessENtB2_9Fn3MarkerE7call_itB1A_";
+        let windows = Target::from_triple("x86_64-pc-windows-msvc").unwrap();
+        let dir = temp_dir("coff-seams");
+        let loose = dir.join("app.app.aaaa-cgu.0.rcgu.o");
+        std::fs::write(
+            &loose,
+            object(windows, &[Def::Text("plain_fn", 4), Def::Undefined("ext")]),
+        )
+        .unwrap();
+        let rlib = dir.join("libapp-1.rlib");
+        let member = object(windows, &[Def::Text(SEAM, 8)]);
+        let mut builder = ar::Builder::new(Vec::new());
+        for (name, bytes) in [
+            ("lib.rmeta", &b"meta"[..]),
+            ("app-1.app.bbbb-cgu.0.rcgu.o", &member[..]),
+        ] {
+            let header = ar::Header::new(name.as_bytes().to_vec(), bytes.len() as u64);
+            builder.append(&header, bytes).unwrap();
+        }
+        std::fs::write(&rlib, builder.into_inner().unwrap()).unwrap();
+
+        let set = super::seam_set(LinkerFlavor::Msvc, &[loose.clone(), rlib.clone()]).unwrap();
+        assert_eq!(set, SeamSet::from_symbols([SEAM]).unwrap());
+        assert_eq!(set.len(), 1);
+
+        // Another format, or an archive with no object, fails closed.
+        let elf = dir.join("elf.o");
+        std::fs::write(&elf, object(target(), &[Def::Text("x", 4)])).unwrap();
+        for bad in [elf, dir.join("empty.rlib")] {
+            if !bad.exists() {
+                std::fs::write(&bad, b"!<arch>\n").unwrap();
+            }
+            let err = super::seam_set(LinkerFlavor::Msvc, &[bad]).unwrap_err();
+            assert!(
+                matches!(err, HotpatchError::BuilderUnsupported { .. }),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_post_link_table_is_gated_before_sending_and_merged_once_applied() {
+        // Each candidate compiles with no table (a PE target's objects carry
+        // none the gate reads); its table appears with the linked patch.
+        let mut inner = FakeBuilder::new(vec![
+            FakeCompile::Candidate(LayoutTable::default(), home_seam()),
+            FakeCompile::Candidate(LayoutTable::default(), home_seam()),
+        ]);
+        let server = test_server::spawn(hot_script(vec![applied(1, 1, Vec::new())]));
+        let app = attach_app(server.addr, Some(FAKE_TOKEN), TRIPLE);
+        let accepted = AcceptedSets::begin(
+            &temp_dir("post-link"),
+            "session-app",
+            table(&[("app::HomeState", 4)]),
+            home_seam(),
+        )
+        .unwrap();
+        inner.out_dir = Some(accepted.dir().to_path_buf());
+        let calls = Arc::clone(&inner.calls);
+        let mut session = HotSession {
+            builder: Box::new(PostLinkTables {
+                inner,
+                tables: [
+                    table(&[("app::HomeState", 4), ("app::Badge", 4)]),
+                    table(&[("app::HomeState", 4), ("app::Badge", 8)]),
+                ]
+                .into(),
+                linked: None,
+            }),
+            app,
+            accepted,
+            images: vec![base_image()],
+            budget: Budget::default(),
+            restart: None,
+            next_patch_id: 1,
+        };
+        let change =
+            |session: &mut HotSession| session.on_change(&[PathBuf::from("/w/app/src/lib.rs")]);
+
+        assert!(matches!(change(&mut session), Outcome::Patched { .. }));
+        assert_eq!(
+            session
+                .accepted()
+                .layouts()
+                .get("app::Badge")
+                .map(|e| e.size),
+            Some(4),
+            "the post-link table is what an applied patch merges"
+        );
+        let reason = restart_reason(change(&mut session));
+        assert_eq!(
+            reason,
+            RestartReason::LayoutChanged {
+                records: vec!["app::Badge changed layout (4 → 8 bytes)".into()]
+            }
+        );
+        let sent: Vec<String> = server
+            .methods()
+            .into_iter()
+            .skip(2)
+            .filter(|m| m == "patch_chunk" || m == "apply_patch")
+            .collect();
+        assert_eq!(
+            sent,
+            vec!["patch_chunk", "apply_patch"],
+            "patch 2 is never sent"
+        );
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec![
+                "compile 1",
+                "link 1 0x100004000",
+                "accepted",
+                "compile 1",
+                "link 2 0x100004000"
+            ],
+            "the refusal comes after the second link"
+        );
+    }
+
     #[test]
     fn a_state_identity_change_is_refused_before_sending() {
         let changed = seam_set(&[("app::Home", "(&app::Home, &mut app::OtherState)", "_x")]);
@@ -4534,6 +4895,7 @@ mod tests {
                 frust_exe: PathBuf::from("/opt/frust/bin/frust"),
                 crates,
                 tip_replays: 0,
+                linked_layouts: None,
             };
             Setup {
                 builder,
@@ -4779,5 +5141,608 @@ mod tests {
         assert!(matches!(announced, Err(Cancelled)));
         assert_eq!(lines, vec!["I/app: starting"]);
         child.kill();
+    }
+}
+
+/// The Windows session path over real images: the hot-patch fixture
+/// workspace (with a bin added to its app package) compiled by the pinned
+/// rustc, its captured invocations written as capture records, the fat exe
+/// linked by [`link_base`] and one change replayed and thin-linked by the
+/// real builder into `patch-1.dll`, each table read from a PDB. Everything
+/// lives under the test binary's own target dir, where built binaries run
+/// in place.
+#[cfg(all(test, windows))]
+mod windows {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::super::capture::{RecordKey, RustcRecord, write_record};
+    use super::super::pe;
+    use super::super::symbols::ANCHOR_SYMBOL;
+    use super::*;
+    use crate::process::RealProcessRunner;
+
+    const APP_PACKAGE: &str = "hotpatch-fixture-app";
+    const APP_CRATE: &str = "hotpatch_fixture_app";
+
+    /// The bin added to the fixture's app package: it reaches the app's
+    /// entry points (so a patch links their objects) and prints its anchor's
+    /// runtime address. `mount_home_by_value` it never names.
+    const BIN_SOURCE: &str = r#"
+#[unsafe(no_mangle)]
+pub extern "C" fn __frust_hotpatch_anchor() {}
+
+fn main() {
+    let home = hotpatch_fixture_app::mount_home();
+    let counter = hotpatch_fixture_app::mount_counter();
+    let press = hotpatch_fixture_app::on_press(1);
+    std::hint::black_box((&home, &counter, &press));
+    println!("{}", __frust_hotpatch_anchor as usize);
+}
+"#;
+
+    fn triple() -> &'static str {
+        if cfg!(target_arch = "aarch64") {
+            "aarch64-pc-windows-msvc"
+        } else {
+            "x86_64-pc-windows-msvc"
+        }
+    }
+
+    fn rustc() -> String {
+        let cargo = option_env!("CARGO").unwrap_or("cargo");
+        let sibling = Path::new(cargo).with_file_name("rustc.exe");
+        if sibling.is_file() {
+            sibling.display().to_string()
+        } else {
+            "rustc".to_string()
+        }
+    }
+
+    /// A fresh directory beside the test binary's `deps`.
+    fn fixture_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let exe = std::env::current_exe().unwrap();
+        let dir = exe.parent().unwrap().parent().unwrap().join(format!(
+            "frust-hotpatch-session-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            if name == "target" || name == "Cargo.lock" {
+                continue;
+            }
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &to.join(&name));
+            } else {
+                std::fs::copy(entry.path(), to.join(&name)).unwrap();
+            }
+        }
+    }
+
+    /// The arguments of the command `rustc --print link-args` printed (Rust
+    /// `Debug` strings separated by spaces), linker program dropped.
+    fn parse_link_args(printed: &str) -> Vec<String> {
+        let line = printed
+            .lines()
+            .find(|line| line.starts_with('"'))
+            .unwrap_or_else(|| panic!("no link line in {printed:?}"));
+        let mut args = Vec::new();
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '"' {
+                continue;
+            }
+            let mut arg = String::new();
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => arg.push(chars.next().unwrap()),
+                    '"' => break,
+                    c => arg.push(c),
+                }
+            }
+            args.push(arg);
+        }
+        args.remove(0);
+        args
+    }
+
+    /// One fixture compile: `crate_type` `crate_name` from `src` (relative
+    /// to the workspace root, where cargo runs rustc too), written to `deps`
+    /// as `-<extra>`, recorded into `scope`. Returns rustc's stdout.
+    #[allow(clippy::too_many_arguments)]
+    fn compile(
+        ws: &Path,
+        deps: &Path,
+        scope: &Path,
+        debuginfo: &str,
+        crate_name: &str,
+        crate_type: &str,
+        src: &str,
+        extra: &str,
+        externs: &[(&str, &str)],
+        tip_flags: &[&str],
+    ) -> String {
+        let deps_text = deps.display().to_string();
+        let mut args: Vec<String> = [
+            "--crate-name",
+            crate_name,
+            "--edition=2024",
+            src,
+            "--error-format=json",
+            "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
+            "--crate-type",
+            crate_type,
+            "--emit=dep-info,link",
+            "-C",
+            &format!("debuginfo={debuginfo}"),
+            "-C",
+            &format!("metadata={extra}"),
+            "-C",
+            &format!("extra-filename=-{extra}"),
+            "--out-dir",
+            &deps_text,
+            "-L",
+            &format!("dependency={deps_text}"),
+        ]
+        .map(str::to_string)
+        .to_vec();
+        for (name, extra) in externs {
+            args.push("--extern".to_string());
+            args.push(format!(
+                "{name}={}",
+                deps.join(format!("lib{name}-{extra}.rlib")).display()
+            ));
+        }
+        args.extend(tip_flags.iter().map(|flag| flag.to_string()));
+        let rustc = rustc();
+        let mut recorded = vec![rustc.clone()];
+        recorded.extend(args.iter().cloned());
+        let crate_types = vec![crate_type.to_string()];
+        write_record(
+            scope,
+            &RecordKey::new(crate_name, &crate_types),
+            &RustcRecord {
+                args: recorded,
+                envs: Vec::new(),
+                crate_types,
+            },
+        )
+        .unwrap();
+        if crate_type == "bin" {
+            args.extend(["--print", "link-args"].map(str::to_string));
+        }
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = RealProcessRunner
+            .run_streaming(&rustc, &argv, Some(ws), &[], &mut |_| {})
+            .unwrap();
+        assert!(
+            out.success,
+            "rustc {crate_name} ({crate_type}): {}",
+            out.stderr
+        );
+        out.stdout
+    }
+
+    /// The fixture's fat exe, linked by [`link_base`], and the app source a
+    /// test edits.
+    struct Fat {
+        base: FatBase,
+        app_source: PathBuf,
+        link_args: Vec<String>,
+        /// The fixture's directory, removed with it.
+        dir: PathBuf,
+    }
+
+    impl Drop for Fat {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl Fat {
+        fn builder(&mut self) -> &mut DesktopBuilder {
+            &mut self.base.builder
+        }
+
+        /// Saves an edit to the app crate: the fixture `feature` turned on.
+        fn edit(&self, feature: &str) {
+            let source = std::fs::read_to_string(&self.app_source).unwrap();
+            let edited = source.replace(&format!("feature = \"{feature}\""), "all()");
+            assert_ne!(source, edited, "{feature} is a fixture edit");
+            std::fs::write(&self.app_source, edited).unwrap();
+        }
+
+        /// Runs the fat exe in place: the anchor's runtime address.
+        fn anchor_runtime(&self) -> u64 {
+            let run = std::process::Command::new(self.base.image())
+                .output()
+                .unwrap();
+            assert!(run.status.success(), "{run:?}");
+            String::from_utf8(run.stdout)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        }
+    }
+
+    /// Compiles the fixture (`debuginfo` for every crate) and links its fat
+    /// exe through [`link_base`].
+    fn fat(tag: &str, debuginfo: &str) -> Result<Fat, HotpatchError> {
+        let dir = fixture_dir(tag);
+        let ws = dir.join("ws");
+        copy_tree(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hotpatch"),
+            &ws,
+        );
+        std::fs::write(ws.join("app/src/main.rs"), BIN_SOURCE).unwrap();
+        let target_dir = dir.join("target");
+        let deps = target_dir.join("debug").join("deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        let scope = dir.join("scope");
+        let build = |name, ty, src, extra, externs: &[(&str, &str)], tip: &[&str]| {
+            compile(
+                &ws, &deps, &scope, debuginfo, name, ty, src, extra, externs, tip,
+            )
+        };
+        build("frust_hotpatch", "rlib", "hotfn/src/lib.rs", "f1", &[], &[]);
+        build(
+            "frust_core",
+            "rlib",
+            "core/src/lib.rs",
+            "c1",
+            &[("frust_hotpatch", "f1")],
+            &[],
+        );
+        build(
+            APP_CRATE,
+            "rlib",
+            "app/src/lib.rs",
+            "a1",
+            &[("frust_core", "c1")],
+            &[],
+        );
+        let printed = build(
+            APP_CRATE,
+            "bin",
+            "app/src/main.rs",
+            "b1",
+            &[(APP_CRATE, "a1")],
+            &["-Csave-temps=true", "-Clink-dead-code"],
+        );
+        let link_args = parse_link_args(&printed);
+
+        let runner = RealProcessRunner;
+        let metadata =
+            super::super::graph::cargo_metadata(&runner, &ws.join("Cargo.toml"), None).unwrap();
+        let graph = WorkspaceGraph::from_metadata(&metadata, APP_PACKAGE, None).unwrap();
+        let tip_bin = graph.tip_bin();
+        let fat_dir = target_dir.join("frust-hotpatch").join(FAT_DIR).join("test");
+        std::fs::create_dir_all(&fat_dir).unwrap();
+        let host = SessionHost {
+            runner: Arc::new(RealProcessRunner),
+            env: &RealEnv,
+            frust_exe: PathBuf::from("frust.exe"),
+        };
+        let started = Instant::now();
+        let base = link_base(
+            &host,
+            BaseRequest {
+                graph,
+                link_args: link_args.clone(),
+                image_unit: tip_bin.clone(),
+                image: fat_dir.join(desktop_image_name(LinkerFlavor::Msvc, &tip_bin.target)),
+                custom_linker: None,
+                upload_strip: None,
+                target: Target::from_triple(triple()).unwrap(),
+                flavor: LinkerFlavor::Msvc,
+                target_dir,
+                archive_dir: &fat_dir,
+                scope_dir: scope,
+                session: desktop_session_name(&tip_bin.target),
+            },
+        )
+        .inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&dir);
+        })?;
+        eprintln!(
+            "{tag}: link_base (fat link, PDB cache, PDB base table) took {:?} with `{}`",
+            started.elapsed(),
+            base.builder.linker
+        );
+        Ok(Fat {
+            base,
+            app_source: ws.join("app/src/lib.rs"),
+            link_args,
+            dir,
+        })
+    }
+
+    fn app_lib() -> BTreeSet<ReplayUnit> {
+        [ReplayUnit::lib(APP_PACKAGE, APP_CRATE)].into()
+    }
+
+    fn app(path: &str) -> String {
+        format!("{APP_CRATE}::{path}")
+    }
+
+    /// `image`'s preferred base from its headers and its PDB's anchor RVA.
+    fn base_and_anchor_rva(image: &Path) -> (u64, u64) {
+        let base = pe::image_base(&std::fs::read(image).unwrap(), "fixture").unwrap();
+        let pdb = pe::read_pdb(image).unwrap();
+        let rva = pdb
+            .records
+            .iter()
+            .find(|r| {
+                r.name == ANCHOR_SYMBOL && r.kind == pe::RecordKind::Public { function: true }
+            })
+            .and_then(|r| r.rva)
+            .expect("the anchor's RVA");
+        (base, u64::from(rva))
+    }
+
+    /// `IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE`: the image may be relocated
+    /// by ASLR.
+    const DYNAMIC_BASE: u16 = 0x0040;
+
+    /// The PE32+ optional header's `DllCharacteristics` of `image`.
+    fn dll_characteristics(image: &Path) -> u16 {
+        let bytes = std::fs::read(image).unwrap();
+        let at = |offset: usize, len: usize| &bytes[offset..offset + len];
+        let pe = u32::from_le_bytes(at(0x3c, 4).try_into().unwrap()) as usize;
+        assert_eq!(at(pe, 4), b"PE\0\0");
+        let optional = pe + 4 + 20;
+        assert_eq!(at(optional, 2), 0x20bu16.to_le_bytes(), "a PE32+ image");
+        u16::from_le_bytes(at(optional + 70, 2).try_into().unwrap())
+    }
+
+    /// Loads `dll` (which exports the anchor) into a fresh process: a small
+    /// exe linked against the DLL's import library, beside it, that prints
+    /// the anchor's runtime address in the loaded DLL.
+    fn anchor_runtime_when_loaded(dll: &Path) -> u64 {
+        let dir = dll.parent().unwrap();
+        let stem = dll.file_stem().unwrap().to_str().unwrap();
+        assert!(
+            dir.join(format!("{stem}.lib")).is_file(),
+            "lld-link wrote the import library"
+        );
+        let source = dir.join("load-patch.rs");
+        // Edition 2021: a plain extern block; taking the address calls
+        // nothing.
+        std::fs::write(
+            &source,
+            format!(
+                "#[link(name = \"{stem}\")]\nextern \"C\" {{\n    fn __frust_hotpatch_anchor();\n}}\n\
+                 fn main() {{\n    println!(\"{{}}\", __frust_hotpatch_anchor as usize);\n}}\n"
+            ),
+        )
+        .unwrap();
+        let loader = dir.join("load-patch.exe");
+        let dir_text = dir.display().to_string();
+        let out = RealProcessRunner
+            .run(
+                &rustc(),
+                &[
+                    "--edition=2021",
+                    "-L",
+                    &format!("native={dir_text}"),
+                    "-o",
+                    &loader.display().to_string(),
+                    &source.display().to_string(),
+                ],
+            )
+            .unwrap();
+        assert!(out.success, "rustc load-patch.rs: {}", out.stderr);
+        let run = std::process::Command::new(&loader).output().unwrap();
+        assert!(run.status.success(), "{run:?}");
+        String::from_utf8(run.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    /// Replays the saved edit and links `patch-1.dll` against the running
+    /// fat exe; the candidate's seams and its post-link table.
+    fn patch(fat: &mut Fat) -> (LinkedPatch, SeamSet, LayoutTable) {
+        let anchor_runtime = fat.anchor_runtime();
+        let builder = fat.builder();
+        let (layouts, seams) = match builder.compile(&app_lib()).unwrap() {
+            Compiled::Candidate { layouts, seams } => (layouts, seams),
+            Compiled::Nothing => panic!("nothing compiled"),
+            Compiled::Failed { diagnostics } => panic!("{diagnostics:#?}"),
+        };
+        assert!(layouts.is_empty(), "no table before the link on Msvc");
+        let started = Instant::now();
+        let linked = builder.link(1, anchor_runtime).unwrap();
+        let table = builder.linked_layouts().expect("the patch's PDB table");
+        eprintln!(
+            "thin link + patch PDB reads took {:?}: {} types",
+            started.elapsed(),
+            table.len()
+        );
+        assert!(builder.linked_layouts().is_none(), "taken once");
+        (linked, seams, table)
+    }
+
+    #[test]
+    fn the_fat_exe_takes_the_archive_whole_and_its_pdb_seeds_cache_anchor_and_base_table() {
+        let fat = fat("base", "2").unwrap();
+        let image = fat.base.image().to_path_buf();
+        assert!(image.ends_with("hotpatch-fixture-app.exe"), "{image:?}");
+        assert!(pe::pdb_path(&image).is_file());
+        assert_eq!(fat.base.symbol_source(), image);
+
+        // `/WHOLEARCHIVE:` named the packed archive, and no packed rlib
+        // stayed on the line.
+        let archive = std::fs::read_dir(image.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "a"))
+            .expect("the fat archive");
+        let fat_args = fat_link::fat_link_args(
+            LinkerFlavor::Msvc,
+            &fat.link_args,
+            Some(&fat_link::FatArchive {
+                path: archive.clone(),
+                kept_rlibs: Vec::new(),
+            }),
+            &image,
+        )
+        .unwrap();
+        assert!(fat_args.contains(&format!("/WHOLEARCHIVE:{}", fat_link::render(&archive))));
+        let linker = fat.base.builder.linker.clone();
+        assert!(
+            linker.to_ascii_lowercase().ends_with("rust-lld.exe"),
+            "{linker}"
+        );
+
+        // The cache and the anchor come from the exe's PDB, and the code of
+        // a function the bin never names was linked: the archive was taken
+        // whole.
+        let cache = &fat.base.builder.cache;
+        assert_eq!(cache.anchor_address(), pe::anchor_address(&image).unwrap());
+        assert!(
+            cache
+                .symbols()
+                .iter()
+                .any(|(name, s)| name.contains("mount_home_by_value") && s.is_section_defined()),
+            "an unreferenced app function is in the fat exe"
+        );
+
+        // The base table is the PDB's.
+        let base_table = fat.base.accepted.layouts();
+        assert_eq!(base_table.get(&app("HomeState")).map(|e| e.size), Some(4));
+        assert_eq!(base_table.get(&app("HomeState")).map(|e| e.align), Some(0));
+
+        // The anchor is a VA, and the fat exe runs loaded at a 64 KiB-aligned
+        // base: on x64 its fixed preferred base, so its slide is 0.
+        let (image_base, anchor_rva) = base_and_anchor_rva(&image);
+        assert_eq!(cache.anchor_address(), image_base + anchor_rva);
+        let slide = fat.anchor_runtime().wrapping_sub(cache.anchor_address());
+        assert_eq!(slide & 0xffff, 0, "{slide:#x}");
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(image_base, fat_link::FAT_IMAGE_BASE, "{image_base:#x}");
+            assert_eq!(slide, 0, "the fat exe loaded at its preferred base");
+        }
+    }
+
+    #[test]
+    fn a_layout_preserving_edit_links_patch_1_and_passes_its_pdb_table() {
+        let mut fat = fat("pass", "2").unwrap();
+        fat.edit("sentinel-bump");
+        let (linked, seams, table) = patch(&mut fat);
+        let session_dir = fat.base.accepted.dir().to_path_buf();
+        assert_eq!(linked.path, session_dir.join("patch-1.dll"));
+        assert!(session_dir.join("patch-1.pdb").is_file());
+        assert!(
+            !linked.table.map.is_empty(),
+            "the jump table maps the patch"
+        );
+
+        // Both table anchors are VAs (preferred base + anchor RVA), so the
+        // runtime's anchor check passes: the exe's implied offset is its
+        // slide (0 at the fixed x64 base) and the DLL's is its load base
+        // minus its preferred base, 0 at its own fixed x64 base.
+        let (exe_base, exe_rva) = base_and_anchor_rva(fat.base.image());
+        let (dll_base, dll_rva) = base_and_anchor_rva(&linked.path);
+        assert_eq!(linked.table.aslr_reference, exe_base + exe_rva);
+        assert_eq!(linked.table.new_base_address, dll_base + dll_rva);
+        let implied = fat
+            .anchor_runtime()
+            .wrapping_sub(linked.table.aslr_reference);
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(implied, 0, "base anchor implies offset {implied:#x}");
+        } else {
+            assert_eq!(implied & 0xffff, 0, "{implied:#x}");
+        }
+        let characteristics = dll_characteristics(&linked.path);
+        eprintln!(
+            "patch-1.dll: ImageBase {dll_base:#x}, DllCharacteristics {characteristics:#06x}, \
+             anchor RVA {dll_rva:#x}, new_base_address {:#x}",
+            linked.table.new_base_address
+        );
+        if cfg!(target_arch = "x86_64") {
+            // Patch 1 links at its fixed base with ASLR off, and loads there:
+            // its anchor runs at its VA, the slide the runtime reports (0).
+            assert_eq!(Some(dll_base), fat_link::patch_image_base(1));
+            assert_eq!(
+                characteristics & DYNAMIC_BASE,
+                0,
+                "DYNAMICBASE is clear: {characteristics:#06x}"
+            );
+            assert_eq!(
+                linked.table.new_base_address,
+                fat_link::PATCH_IMAGE_BASE_FIRST + dll_rva
+            );
+            let loaded = anchor_runtime_when_loaded(&linked.path);
+            eprintln!("patch-1.dll loaded: anchor at {loaded:#x}");
+            assert_eq!(
+                loaded.wrapping_sub(linked.table.new_base_address),
+                0,
+                "patch-1.dll loaded at {loaded:#x}, linked for {:#x}",
+                linked.table.new_base_address
+            );
+        }
+        assert_eq!(table.get(&app("HomeState")).map(|e| e.size), Some(4));
+        let present = fat
+            .base
+            .accepted
+            .check(&LayoutTable::default(), seams)
+            .unwrap();
+        assert_eq!(
+            fat.base.accepted.check(&table, present.clone()),
+            Ok(present)
+        );
+
+        // Without its PDB the patch has no table: refused, never passed.
+        std::fs::remove_file(session_dir.join("patch-1.pdb")).unwrap();
+        let err = pdb_layout::extract(std::slice::from_ref(&linked.path), &fat.base.builder.crates)
+            .unwrap_err();
+        assert!(
+            matches!(&err, HotpatchError::BuilderUnsupported { detail } if detail.contains("/DEBUG")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_d2_edit_is_refused_from_the_patch_pdb_table_after_the_link() {
+        let mut fat = fat("d2", "2").unwrap();
+        fat.edit("d2-field-add");
+        let (linked, seams, table) = patch(&mut fat);
+        assert!(linked.path.ends_with("patch-1.dll"));
+        let present = fat
+            .base
+            .accepted
+            .check(&LayoutTable::default(), seams)
+            .unwrap();
+        assert_eq!(
+            fat.base.accepted.check(&table, present),
+            Err(RestartReason::LayoutChanged {
+                records: vec![format!("{} changed layout (4 → 8 bytes)", app("HomeState"))]
+            })
+        );
+    }
+
+    #[test]
+    fn a_fat_build_without_type_records_is_refused_naming_the_pdb() {
+        let err = match fat("line-tables", "line-tables-only") {
+            Ok(_) => panic!("a line-tables-only build passed the base gate"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, HotpatchError::BuilderUnsupported { detail }
+                if detail.contains("no type records") && detail.contains(".pdb")),
+            "{err:?}"
+        );
     }
 }

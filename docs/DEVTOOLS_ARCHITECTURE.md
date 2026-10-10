@@ -19,7 +19,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how DEVTOOLS relates to the other uni
 | `frust-devtools-protocol` | NDJSON JSON-RPC 2.0 wire types: `Request`/`Response`/`Notification`/`Incoming`, the typed v1 `Method` set with per-method param/result structs, `encode_line`/`decode_line` framing, `HandshakeParams`/`RpcError::UNAUTHORIZED`, and `format_discovery_line`/`parse_discovery_line -> Discovery` — the single source of truth for the discovery-line and handshake-token contract both sides use. `redact_discovery_token(line) -> Cow<str>` masks a discovery line's token (borrowing, no allocation, when there is none to redact) for any caller that must retain the line itself rather than just the parsed `Discovery` |
 | `frust-devtools::backend` | `DevtoolsBackend` trait a shell implements (`widget_tree`, `widget_props`, `metrics_snapshot`, `inject_tap`/`inject_scroll`/`inject_text`, `screenshot` defaulting to `NotSupported`), plus `AppInfo` and `BackendError` |
 | `frust-devtools::service` | `Service::start`/`ServiceHandle`: binds `127.0.0.1:0`, owns a small internal current-thread tokio runtime, logs the discovery line (with token), and exposes `publish_frame_stats` (bounded, drop-oldest, never blocks the caller) |
-| `frust-devtools::token` | Mints the per-process handshake token: `/dev/urandom`-backed, with a documented non-cryptographic fallback when it can't be read |
+| `frust-devtools::token` | Mints the per-process handshake token from the OS CSPRNG (`/dev/urandom` on unix, `BCryptGenRandom` on Windows), with a documented non-cryptographic fallback when that fails, and reports the source (`TokenSource`) the hot-patch gate reads |
 | `frust-devtools::{server,dispatch,frame_stats,hop}` | The accept loop (rejects any pre-`handshake` method without a valid token), request→backend-call dispatch, the frame-stats broadcast bus, and the backend-thread hop that carries every backend call through one 1s-timeout channel round trip |
 | `frust-shell-common::devtools` (feature `devtools`) | The shell-side `DevtoolsBackend` implementation: maps `RenderRoot::inspect()` output into protocol types, hops backend calls to each shell's UI thread, and drives service start/pump/frame-stats publish |
 | `frust-drive::devtools_client` | The tool-side client: blocking `std::net::TcpStream` request/response plus a frame-stats subscription, token-aware `connect`/`handshake`, `adb_forward_ephemeral`/`adb_forward_remove` for Android, and discovery-line parsing reused from the protocol leaf |
@@ -46,17 +46,23 @@ existing process-output threading idioms rather than pulling in an async runtime
 **Trust model.** The service binds `127.0.0.1` only, never configurably wider. Loopback alone is
 **not** the trust boundary on a device: any co-resident app can `connect("127.0.0.1", port)`,
 though (e.g. on Android) it cannot read another app's logcat, the channel the token travels over.
-The service mints a random per-process token (`frust-devtools::token` — `/dev/urandom` first, with
-a documented non-cryptographic fallback; Windows always takes the fallback — see
-[LIMITATIONS.md](LIMITATIONS.md) `devtools-token-entropy-windows-fallback`), prints it on the
-discovery line, and requires it at
+The service mints a random per-process token (`frust-devtools::token` — the OS CSPRNG,
+`/dev/urandom` on unix and `BCryptGenRandom` on Windows, with a documented non-cryptographic
+fallback only when that fails), prints it on the discovery line, and requires it at
 `handshake` before dispatching any other method — `ServiceConfig::require_token` defaults **on**;
-the off switch exists only for in-process tests. Because the protocol's `input_*` methods also
-drive real UI, a shell additionally gates starting the service on a debug/profile build via the
-`devtools` cargo feature (never a `debug_assertions` runtime check alone) — a release build
-compiles the listener out entirely, and the `FRUST_DEVTOOLS=0` env var is a runtime kill switch for
-the compiled-in case. `PROTOCOL_VERSION` deliberately stays `1` — token auth is a transport-level
-addition to the v1 wire contract, not a new protocol version. See
+the off switch exists only for in-process tests. Loading code is gated harder than reading state:
+`Capability::HotPatch` survives only while `service::hot_patch_gate` holds — the `hotpatch`
+feature, a backend that offers it, a debug build, and an OS-sourced token with `require_token`
+on — and every host, Windows included, answers that same gate; a fallback token keeps inspection
+working but strips `HotPatch`. On Windows the app writes each patch DLL (uploaded as base64
+`patch_chunk`s; the `patch_file` hand-off is unix-only) under `%LOCALAPPDATA%\frust-hotpatch`
+with that per-user directory's inherited ACL, not unix's `0700`/`0600` modes, and loads it by
+path — see [LIMITATIONS.md](LIMITATIONS.md) `hotpatch-windows-patch-file-acl`. Because the
+protocol's `input_*` methods also drive real UI, a shell additionally gates starting the service on
+a debug/profile build via the `devtools` cargo feature (never a `debug_assertions` runtime check
+alone) — a release build compiles the listener out entirely, and the `FRUST_DEVTOOLS=0` env var is
+a runtime kill switch for the compiled-in case. `PROTOCOL_VERSION` deliberately stays `1` — token
+auth is a transport-level addition to the v1 wire contract, not a new protocol version. See
 [DEVELOPMENT.md](DEVELOPMENT.md) for the feature/build-mode funnel and
 [CODE_STANDARDS.md](CODE_STANDARDS.md) for the frame-stats publish-ordering convention.
 

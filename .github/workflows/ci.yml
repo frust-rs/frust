@@ -216,6 +216,55 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: 2
         run: bash scripts/ci/hotpatch-canary.sh
 
+  hotpatch-windows:
+    # The Windows (MSVC) hot-patch builder mechanics, whose PDB fixtures need a
+    # Windows host: PE/PDB symbol cache, jump table, stub and PDB layout gate
+    # (`hotpatch::pe`, `hotpatch::pdb_layout`), the fixed-base fat and thin links
+    # (`hotpatch::fat_link`, `hotpatch::thin_link`) and the real session over them
+    # (`hotpatch::session::windows`). The filter names modules rather than all of
+    # `hotpatch::` because five known Windows-host failures live outside them
+    # (act_000001a12096ed6445DWzpgI). The devtools service runs with its
+    # `hotpatch` feature: Windows applies hot patches and answers the same gate as
+    # every other host. The job fails when any of the five module filters matched
+    # no test or the devtools crate ran none. The runner's minutes are the owner's
+    # call: drop this job from `ci-ok`'s needs, or give it a path filter, to stop
+    # it gating every pull request.
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Hot-patch builder tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p frust-drive --lib -- hotpatch::pe hotpatch::pdb_layout hotpatch::fat_link hotpatch::thin_link hotpatch::session::windows 2>&1 | tee "$RUNNER_TEMP/frust-drive-tests.log"
+      - name: Devtools service tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p frust-devtools --features hotpatch 2>&1 | tee "$RUNNER_TEMP/frust-devtools-tests.log"
+      - name: Each module filter ran tests
+        shell: bash
+        run: |
+          drive="$RUNNER_TEMP/frust-drive-tests.log"
+          for module in hotpatch::pe hotpatch::pdb_layout hotpatch::fat_link hotpatch::thin_link hotpatch::session::windows; do
+            count=$(grep -c "^test ${module}::" "$drive" || true)
+            echo "$module: $count tests"
+            if [ "$count" -eq 0 ]; then
+              echo "::error::the frust-drive filter $module matched no test"
+              exit 1
+            fi
+          done
+          passed=$(awk '/test result:/ { for (i = 2; i <= NF; i++) if ($i == "passed;") sum += $(i - 1) } END { print sum + 0 }' "$RUNNER_TEMP/frust-devtools-tests.log")
+          echo "frust-devtools: $passed passed"
+          if [ "$passed" -eq 0 ]; then
+            echo "::error::frust-devtools ran no tests"
+            exit 1
+          fi
+
   hygiene:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -238,7 +287,7 @@ jobs:
   ci-ok:
     # The one required status check (.github/rulesets/main.json).
     if: always()
-    needs: [fmt, clippy, test, standalone, hotpatch-feature-gate, hotpatch-canary, hygiene]
+    needs: [fmt, clippy, test, standalone, hotpatch-feature-gate, hotpatch-canary, hotpatch-windows, hygiene]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

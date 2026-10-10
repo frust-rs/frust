@@ -19,11 +19,10 @@
 //! is protocol + tokio + log, and version pins are law), so this module uses
 //! what std and the platform already provide, in this order:
 //!
-//! 1. `/dev/urandom`, when it can be read — a real kernel CSPRNG. This path
-//!    holds on every unix target (Linux, Android, macOS, iOS). **Windows has
-//!    no `/dev/urandom` and always takes path 2** — see the
-//!    `devtools-token-entropy-windows-fallback` entry in `docs/LIMITATIONS.md`;
-//!    a `BCryptGenRandom`-based Windows source is the known follow-up.
+//! 1. The OS CSPRNG: `/dev/urandom`, when it can be read, on every unix target
+//!    (Linux, Android, macOS, iOS); `BCryptGenRandom` with the system-preferred
+//!    RNG on Windows, called through a direct `bcrypt.dll` FFI declaration (no
+//!    crate).
 //! 2. Otherwise a composition of [`RandomState`] hashes (whose keys std seeds
 //!    from OS entropy on first use), the wall clock, a monotonic instant, the
 //!    process id, and a stack address.
@@ -53,10 +52,12 @@ const TOKEN_BYTES: usize = 16;
 /// behind an [`TokenSource::Os`] token (`crate::service`'s hot-patch gate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenSource {
-    /// `/dev/urandom` was read: a kernel CSPRNG.
+    /// The OS CSPRNG answered: `/dev/urandom` on unix, `BCryptGenRandom` on
+    /// Windows.
     Os,
-    /// The non-cryptographic [`fallback_random_bytes`] composition (Windows
-    /// always; a unix sandbox that cannot open `/dev/urandom`).
+    /// The non-cryptographic [`fallback_random_bytes`] composition (a unix
+    /// sandbox that cannot open `/dev/urandom`, a failed `BCryptGenRandom`, or
+    /// a target with neither).
     Fallback,
 }
 
@@ -118,26 +119,80 @@ pub(crate) fn matches(expected: &str, presented: &str) -> bool {
     diff == 0
 }
 
-/// Kernel CSPRNG bytes, when the platform has the classic unix interface.
-/// `None` on any platform or sandbox where it cannot be read, which routes the
-/// caller to [`fallback_random_bytes`].
+/// Kernel CSPRNG bytes from `/dev/urandom`. `None` in a sandbox where it
+/// cannot be read, which routes the caller to [`fallback_random_bytes`].
 ///
-/// `std::fs` rather than `getrandom(2)`: no new dependency, and no `unsafe`
-/// (`frust-devtools` is outside the sanctioned-unsafe zones in
-/// `docs/CODE_STANDARDS.md`).
+/// `std::fs` rather than `getrandom(2)`: no new dependency, and no `unsafe`.
+#[cfg(unix)]
 fn os_random_bytes() -> Option<[u8; TOKEN_BYTES]> {
-    #[cfg(unix)]
-    {
-        use std::io::Read as _;
-        let mut file = std::fs::File::open("/dev/urandom").ok()?;
-        let mut bytes = [0u8; TOKEN_BYTES];
-        file.read_exact(&mut bytes).ok()?;
-        Some(bytes)
+    use std::io::Read as _;
+    let mut file = std::fs::File::open("/dev/urandom").ok()?;
+    let mut bytes = [0u8; TOKEN_BYTES];
+    file.read_exact(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// OS CSPRNG bytes from `BCryptGenRandom` with the system-preferred RNG.
+/// `None` when it answers a failure `NTSTATUS`, which routes the caller to
+/// [`fallback_random_bytes`].
+///
+/// The crate's one `unsafe` block, registered as the sanctioned-unsafe zone
+/// `frust-devtools`'s `token::os_random_bytes` (Windows only) in
+/// `docs/CODE_STANDARDS.md`'s Language Idioms: one `BCryptGenRandom` call
+/// through a direct `extern "system"` declaration linking the Windows SDK's
+/// `bcrypt` rather than a bindings crate, so no new dependency. A non-zero
+/// status yields [`TokenSource::Fallback`], which the hot-patch gate refuses.
+///
+/// # Safety
+///
+/// Safe to call; the contract is the `unsafe` block's. It passes
+/// `BCryptGenRandom` a null algorithm handle with
+/// `BCRYPT_USE_SYSTEM_PREFERRED_RNG` (the documented pairing), and a buffer
+/// pointer and length taken from one live, exclusively borrowed
+/// `[u8; TOKEN_BYTES]`, so the callee writes only inside that array and keeps
+/// no pointer past its return. The callee is C, declared with the
+/// non-unwinding `extern "system"` ABI: should it ever raise, the process
+/// aborts rather than unwinding across the boundary.
+#[cfg(windows)]
+fn os_random_bytes() -> Option<[u8; TOKEN_BYTES]> {
+    /// `BCRYPT_USE_SYSTEM_PREFERRED_RNG`: no algorithm handle; the system's
+    /// preferred RNG.
+    const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+    /// The buffer length as the API's `ULONG`.
+    const LEN: u32 = TOKEN_BYTES as u32;
+
+    #[link(name = "bcrypt")]
+    unsafe extern "system" {
+        /// `NTSTATUS BCryptGenRandom(BCRYPT_ALG_HANDLE hAlgorithm, PUCHAR
+        /// pbBuffer, ULONG cbBuffer, ULONG dwFlags)`.
+        fn BCryptGenRandom(
+            algorithm: *mut core::ffi::c_void,
+            buffer: *mut u8,
+            length: u32,
+            flags: u32,
+        ) -> i32;
     }
-    #[cfg(not(unix))]
-    {
-        None
-    }
+
+    let mut bytes = [0u8; TOKEN_BYTES];
+    // SAFETY: see `# Safety` above: `buffer` and `length` describe `bytes`
+    // exactly, and a null handle is valid with the system-preferred flag.
+    let status = unsafe {
+        BCryptGenRandom(
+            std::ptr::null_mut(),
+            bytes.as_mut_ptr(),
+            LEN,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    // NTSTATUS: 0 is STATUS_SUCCESS; anything else leaves `bytes` unusable.
+    (status == 0).then_some(bytes)
+}
+
+/// No OS CSPRNG this crate reaches on other targets: always
+/// [`fallback_random_bytes`].
+#[cfg(not(any(unix, windows)))]
+fn os_random_bytes() -> Option<[u8; TOKEN_BYTES]> {
+    None
 }
 
 /// The no-CSPRNG path (see the module doc): two independently seeded
@@ -192,14 +247,25 @@ mod tests {
 
     #[test]
     fn the_token_reports_its_source() {
-        // Unix reads /dev/urandom (the hosts this suite runs on); anything else
-        // takes the fallback, Windows always.
-        let expected = if cfg!(unix) && std::path::Path::new("/dev/urandom").exists() {
-            TokenSource::Os
-        } else {
-            TokenSource::Fallback
-        };
+        // Unix reads /dev/urandom (the hosts this suite runs on), Windows
+        // BCryptGenRandom; anything else takes the fallback.
+        let expected =
+            if cfg!(windows) || (cfg!(unix) && std::path::Path::new("/dev/urandom").exists()) {
+                TokenSource::Os
+            } else {
+                TokenSource::Fallback
+            };
         assert_eq!(generate().source, expected);
+    }
+
+    /// The Windows source itself: 128 bits per call, never twice the same.
+    #[cfg(windows)]
+    #[test]
+    fn bcrypt_gen_random_fills_the_token() {
+        let a = os_random_bytes().expect("BCryptGenRandom succeeds");
+        let b = os_random_bytes().expect("BCryptGenRandom succeeds");
+        assert_ne!(a, b);
+        assert_ne!(a, [0u8; TOKEN_BYTES]);
     }
 
     #[test]

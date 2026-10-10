@@ -65,6 +65,9 @@ off this index — read this plus the one that covers what you are touching:
     `docs/RENDER_ARCHITECTURE.md`'s `frust-gpu::context` module row).
   - `frust-drive`'s `process` module — a `kill(2)` FFI shim (std exposes no `killpg`) that
     group-kills a streamed child's Unix process group.
+  - `frust-devtools`'s `token::os_random_bytes` (Windows only) — one `BCryptGenRandom` (SDK
+    `bcrypt`) call: null handle + `BCRYPT_USE_SYSTEM_PREFERRED_RNG`, buffer/length from a local
+    array; a non-zero status yields `TokenSource::Fallback`, which the hot-patch gate refuses.
   - `frust-camera`'s `apple` backend — AVFoundation message sends behind one `QueueBound<T>`
     `unsafe impl Send/Sync` (serial-queue confinement, one `# Safety` note), and
     `frust_camera_session_handle`'s raw-pointer C export (retain contract **+1** — a +0
