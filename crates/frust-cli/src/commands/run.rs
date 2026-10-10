@@ -27,7 +27,7 @@ use frust_drive::hotpatch::session::{
     DesktopStart, HotSession, Outcome, RestartReason, SessionHost, StartError,
     redact_discovery_line, start_desktop,
 };
-use frust_drive::hotpatch::watch::{WATCH_DEBOUNCE, WatchSet, watch_set};
+use frust_drive::hotpatch::watch::{WATCH_DEBOUNCE, WatchSet, is_relevant, watch_set_in};
 use frust_drive::ios_run::{self, IosLaunch, simctl};
 use frust_drive::manifest;
 use frust_drive::packages::CargoLocator;
@@ -1320,7 +1320,7 @@ trait HotBackend {
 fn load_watch_set(runner: &dyn ProcessRunner, root: &Path, package: &str) -> Result<WatchSet> {
     let graph = WorkspaceGraph::load(runner, &root.join("Cargo.toml"), None, package, None)
         .map_err(|err| anyhow::anyhow!("{err}"))?;
-    Ok(watch_set(&graph))
+    Ok(watch_set_in(&graph, root))
 }
 
 /// [`HotBackend`] over the real `frust_drive` desktop session.
@@ -1584,45 +1584,11 @@ fn relevant_paths(roots: &[PathBuf], event: &notify::Event) -> Option<Vec<PathBu
     (!paths.is_empty()).then_some(paths)
 }
 
-/// Whether `path` is a source path rather than editor/build noise, judged
-/// relative to the deepest of `roots` it lies under — the workspace root
-/// and the package directories, never a `src/` tree (so a checkout living
-/// under a hidden directory is not noise, and a `src/build/` module is
-/// source): nothing under `target`/`build` there, no hidden component
-/// (`.git`, `.#lib.rs` Emacs locks, `.foo.rs.swp`) except a cargo config
-/// (`.cargo/config`, `.cargo/config.toml`, a build input), and no
-/// `~`-suffixed backup.
+/// Whether `path` is a source path rather than editor/build noise:
+/// `frust-drive`'s one relevance rule ([`is_relevant`]), shared with the
+/// workbench watcher.
 fn is_relevant_path(roots: &[PathBuf], path: &Path) -> bool {
-    use std::path::Component;
-    let rel = roots
-        .iter()
-        .filter_map(|root| path.strip_prefix(root).ok())
-        .min_by_key(|rel| rel.components().count())
-        .unwrap_or(path);
-    let names: Vec<String> = rel
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
-    let Some(first) = names.first() else {
-        // The watch root itself: nothing to judge by name.
-        return true;
-    };
-    if first == "target" || first == "build" {
-        return false;
-    }
-    if let [dir, file] = names.as_slice()
-        && dir == ".cargo"
-        && (file == "config" || file == "config.toml")
-    {
-        return true;
-    }
-    if names.iter().any(|name| name.starts_with('.')) {
-        return false;
-    }
-    !names.last().is_some_and(|last| last.ends_with('~'))
+    is_relevant(roots, path)
 }
 
 /// The relaunch watcher's handler: one tick per relevant event.
@@ -3384,7 +3350,7 @@ mod tests {
     #[test]
     fn the_watch_set_has_the_three_path_classes() {
         let graph = WorkspaceGraph::from_metadata(METADATA, "app", None).unwrap();
-        let set = watch_set(&graph);
+        let set = frust_drive::hotpatch::watch::watch_set(&graph);
         assert_eq!(set.replayable, vec![PathBuf::from("/w/app/src")]);
         assert_eq!(set.local_non_member, vec![PathBuf::from("/x/material/src")]);
         for input in [

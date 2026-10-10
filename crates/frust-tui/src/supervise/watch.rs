@@ -14,10 +14,13 @@
 //! widens, on its own thread, to the hot watch set `frust run --watch`
 //! registers too — `frust-drive`'s [`WatchSet`], converted by [`hot_scope`]:
 //! the whole `src/` tree of every workspace member (replayable) and of every
-//! local non-member path package (restart), and the build inputs — every
-//! package's `Cargo.toml` and `build.rs`, and the workspace root's
-//! `Cargo.toml`, `Cargo.lock`, `frust.toml`, `rust-toolchain`,
-//! `rust-toolchain.toml` and `.cargo/config(.toml)`. The widening runs
+//! local non-member path package, the directory of every lib/bin target root
+//! outside `src/`, and the build inputs — every package's `Cargo.toml` and
+//! `build.rs`, and the workspace and project roots' `Cargo.toml`,
+//! `Cargo.lock`, `frust.toml`, `rust-toolchain`, `rust-toolchain.toml` and
+//! `.cargo/config(.toml)`. A local non-member source replays when its
+//! compile was captured (desktop) and restarts the session otherwise; the
+//! session classifies, this watcher only names. The widening runs
 //! `cargo metadata` (`WorkspaceGraph::load`), so it never touches the UI
 //! thread, and a project it cannot resolve keeps the base scope. The hot
 //! session's own graph is not reachable from here (`HotSession` exposes
@@ -42,14 +45,14 @@
 //! outlives the workbench.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use frust_drive::hotpatch::graph::WorkspaceGraph;
-use frust_drive::hotpatch::watch::{WatchSet, watch_set};
+use frust_drive::hotpatch::watch::{WatchSet, is_relevant, watch_set_in};
 use frust_drive::process::RealProcessRunner;
 use notify::event::{AccessKind, AccessMode, MetadataKind, ModifyKind};
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -140,41 +143,10 @@ fn relevant_paths(roots: &[PathBuf], event: &notify::Event) -> Option<Vec<PathBu
 }
 
 /// Whether `path` (as `notify` reports it, normally under one of `roots`) is
-/// a source path rather than noise, judged relative to the deepest root it
-/// lies under: nothing under `target`/`build` there, no hidden component
-/// (`.git`, an editor's `.foo.rs.swp`) except a cargo config
-/// (`.cargo/config`, `.cargo/config.toml` — a build input), and no
-/// `~`-suffixed editor backup.
+/// a source path rather than noise: `frust-drive`'s one relevance rule
+/// ([`is_relevant`]).
 fn is_relevant_path(roots: &[PathBuf], path: &Path) -> bool {
-    let rel = roots
-        .iter()
-        .filter_map(|root| path.strip_prefix(root).ok())
-        .min_by_key(|rel| rel.components().count())
-        .unwrap_or(path);
-    let names: Vec<String> = rel
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
-    let Some(first) = names.first() else {
-        // The root itself: nothing to judge by name.
-        return true;
-    };
-    if first == "target" || first == "build" {
-        return false;
-    }
-    if let [dir, file] = names.as_slice()
-        && dir == ".cargo"
-        && (file == "config" || file == "config.toml")
-    {
-        return true;
-    }
-    if names.iter().any(|name| name.starts_with('.')) {
-        return false;
-    }
-    !names.last().is_some_and(|last| last.ends_with('~'))
+    is_relevant(roots, path)
 }
 
 /// What one watcher covers: each path and whether its subtree counts.
@@ -220,7 +192,7 @@ fn resolve_hot_scope(root: &Path) -> Option<(WatchScope, Vec<PathBuf>)> {
         None,
     )
     .ok()?;
-    let set = watch_set(&graph);
+    let set = watch_set_in(&graph, root);
     Some((hot_scope(&set), set.roots))
 }
 
@@ -718,7 +690,7 @@ mod tests {
     fn the_hot_scope_watches_the_lockfile_frust_toml_build_script_and_non_member_src_but_not_target()
      {
         let graph = WorkspaceGraph::from_metadata(METADATA, "app", None).unwrap();
-        let set = watch_set(&graph);
+        let set = frust_drive::hotpatch::watch::watch_set(&graph);
         let scope = hot_scope(&set);
         for (path, mode) in [
             ("/w/Cargo.lock", RecursiveMode::NonRecursive),
