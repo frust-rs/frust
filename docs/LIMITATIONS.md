@@ -1731,9 +1731,14 @@ running app untouched. Anything a patch cannot carry prints `restart required: <
 - *Layout or identity*: a replayable type's layout differs from the accepted set (`LayoutChanged`,
   from the host's L3 gate over DWARF (Mach-O/ELF) or PDB type records (Windows), or a mismatch the
   app reports), or a component's `State` changed type (`StateTypeChanged`).
-- *Framework or build-input edit*: a file of a path dependency outside the workspace (a local
-  framework checkout included), or a manifest, build script, cargo config or toolchain file
-  (`PathDependencyChanged`, `BuildInputChanged`).
+- *Build-input or path-dependency edit*: a manifest, build script, cargo config or toolchain file
+  (`BuildInputChanged`), or a file of a path dependency outside the workspace (a local framework
+  checkout included) that cannot replay (`PathDependencyChanged`). On the desktop a captured path
+  dependency replays with its dependents under the L3 gate; the restart remains for Android and
+  the iOS simulator (which do not capture non-members), proc macros, path packages without a lib
+  target, uncaptured ones and a crate name clashing with a member. Evidence:
+  `examples/hotpatch-spike/RESULTS.md` `## H5-01: path-dependency replay` (a pass-through
+  `RUSTC_WRAPPER` rebuilds 0 of 27 canary units) and the canary's non-member crate.
 - *Budget*: patch images are never unloaded, so one process loads at most 64 patches or 96 MiB of
   patch images by default, set by `frust.toml`'s `[hotpatch]` `patches`/`bytes` (`PatchBudget`).
 - *Protocol or outcome failure*: no `HotPatch` capability, a non-loopback endpoint, a failed
@@ -1749,8 +1754,9 @@ against ~1.45 s on Windows. `R` / 'Restart session', MCP's `restart_app` and DAP
 in-process); a device restart reruns build → install → launch (see
 `tui-device-stop-app-termination-residual` and `mcp-stop-app-termination-in-flight`). `restart_app`
 and `frustRestart` bypass the TUI's `restart_session_at`, so their replacement session starts
-unwatched. In the TUI, turning Watch on for a session launched without it makes the next save a
-plain relaunch into a hot session.
+unwatched. In the TUI, every hot-capable launch runs hot; `r` hot-patches now (the manual apply),
+and a run with 'Auto-apply on save' off is a supported hot run with no watcher. Turning Watch on
+for a session launched without a hot run makes the next save a plain relaunch into a hot session.
 
 The memory-safety argument is the host's: L1 erases each component's view inside the hot function
 (`build_erased`), so the seam's boundary types are layout-fixed, and L3 refuses any patch whose
@@ -1784,9 +1790,7 @@ process-lifetime `OnceLock` that is never torn down.
 
 **Reopen path**: hot restart needs `frust::run`'s by-value root replaced with a factory closure, a
 disposable root `Owner`, a resettable `ReactiveRuntime` and a devtools `restart` method. A physical
-iOS device needs signed patch delivery; the web shell needs a wasm32 patch loader. The save debounce
-and the hot watch set are duplicated between `frust-cli` and `frust-tui` (kept in sync by a
-comment); moving both into `frust-drive` is a tracked follow-up.
+iOS device needs signed patch delivery; the web shell needs a wasm32 patch loader.
 
 **Evidence**: `examples/hotpatch-spike/RESULTS.md`: `## Milestone 1 re-run (R3-04)` (desktop macOS:
 save→frame ~1.4 s, 26.8% of the restart median; `### Latency breakdown (why 1.4 s, not 493 ms, and

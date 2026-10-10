@@ -172,8 +172,9 @@ simulator — watches the workspace graph's path classes (every member and local
 each package's `Cargo.toml`/`build.rs`, `Cargo.lock`, `frust.toml`, `rust-toolchain*`,
 `.cargo/config*`; [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)) and **hot-patches** each settled
 save-burst (100ms debounce) into the running process: `patched in N ms`, app state and PID kept. It
-relaunches from a fresh build only on `restart required: <reason>` (a layout change, a framework or
-build-input edit, the patch budget — the classes are under `no-hot-reload-restart-is-a-rebuild` in
+relaunches from a fresh build only on `restart required: <reason>` (a layout change, a build-input
+edit, a path-dependency edit on a device, the patch budget — the classes are under
+`no-hot-reload-restart-is-a-rebuild` in
 [LIMITATIONS.md](LIMITATIONS.md)). On the desktop, `--no-hot`, a profile/release build or a
 `--features` passthrough keeps the plain kill-and-relaunch loop (`cargo run`, incremental, one
 relaunch per burst, state reset; it watches only `src/` + `Cargo.toml`). With `-d <device>` a
@@ -186,12 +187,13 @@ below). Web, a physical iOS device and other devices are not watched (`--watch` 
 them). Measured baselines: [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Dev loop.
 
 **TUI equivalents.** `R` restarts the active workbench session the same way — rebuild + relaunch,
-never state-preserving. 'Watch: hot patch on save' (`W`, palette, or the run-config checkbox) on a
-watched debug session — desktop, an Android device, or a booted iOS simulator — hot-patches each
-settled save-burst (100ms debounce, `supervise/watch.rs`, synced with `frust-cli`'s): a
-`patched in N ms` toast, and the app relaunches only on `restart required: <reason>`. A session not
-launched hot (every device session, or a desktop one toggled with `W` after launch) relaunches
-into a hot session on its first watched save; later saves patch. A physical iOS
+never state-preserving; `o` opens the run dialog. A debug launch of a desktop, an Android device or
+a booted iOS simulator runs hot by default, and the dialog's 'Auto-apply on save' (default on)
+arms the watcher: each settled save-burst (100ms debounce, shared with `frust-cli` via
+`frust_drive::hotpatch::watch`) hot-patches with a `patched in N ms` toast, and the app relaunches
+only on `restart required: <reason>`. `r` hot-patches now whatever changed (the way to apply with
+auto-apply off); 'Watch: hot patch on save' (`W`) toggles the watcher, and a session not launched
+hot relaunches into a hot session on its first watched save. A physical iOS
 device's `R` reruns build → install → launch and watch is refused there (mechanism and refusals:
 [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
 
@@ -287,8 +289,9 @@ pair with `--features hotpatch` by manifest path for `frust-core`, `frust-shell-
 facade, e.g. `cargo clippy --manifest-path crates/frust/Cargo.toml --features hotpatch
 --all-targets --locked -- -D warnings`) and, on macOS/Linux, `bash scripts/ci/hotpatch-canary.sh`
 (the desktop patch builder end to end on the standalone `testing/hotpatch-canary` fixture: fat
-build, edit, thin build, L3 layout gate, in-process apply, and a layout-changing edit that must be
-refused; the fixture also gates from its own directory like the chain above). Windows-only
+build, a value edit and a non-member `shared` crate's value edit (each thin-built, L3-gated and
+applied in process), and a layout-changing edit to each that must be refused; the fixture also
+gates from its own directory like the chain above). Windows-only
 hot-patch tests: [TESTING.md](TESTING.md).
 
 ```bash

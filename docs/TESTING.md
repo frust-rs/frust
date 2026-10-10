@@ -108,7 +108,8 @@ Known gaps are tracked by the comprehensive-testing feature plan:
   black-band visual probe against an attached device or emulator, but does not provision one.
 - No GPU-runner or device CI. `.github/workflows/ci.yml` runs the CPU gates on pull requests and on
   pushes to `main` (fmt, clippy, workspace tests, the standalone workspaces, commit hygiene, the
-  `hotpatch-feature-gate` and macOS/Linux `hotpatch-canary` jobs, and the Windows
+  `hotpatch-feature-gate` and macOS/Linux `hotpatch-canary` jobs (the Linux one covers the ELF
+  cross-unit DWARF reader), and the Windows
   `hotpatch-windows` job under § Required Host Gate; aggregate `ci-ok` is the required
   check). `.github/workflows/android-smoke.yml` runs on a schedule or manual dispatch and is not
   part of the required check.
