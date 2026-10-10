@@ -1293,6 +1293,10 @@ mod tests {
             "-L".into(),
             path(deps.join("rustcY/raw-dylibs")),
             "-Wl,--export-dynamic-symbol,__frust_hotpatch_anchor".into(),
+            format!(
+                "-Wl,--version-script={}",
+                path(session_dir.join("patch-1.exports"))
+            ),
             "-o".into(),
             path(output.clone()),
         ];

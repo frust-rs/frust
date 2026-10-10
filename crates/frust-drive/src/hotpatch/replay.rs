@@ -4,7 +4,8 @@
 //! Each captured invocation runs again with `-Clinker` stripped (a replayed
 //! crate must produce real outputs, not re-enter the no-link interception)
 //! and `--json=artifacts` forced when absent ([`replay_args`], which the
-//! image unit's intercepted replay uses as is). A lib replayed here
+//! iOS tip capture uses as is; the session's image unit replay narrows it
+//! with [`replay_args_image`]). A lib replayed here
 //! ([`replay_unit`]) emits only its rlib ([`replay_args_rlib_only`]): the
 //! hot run reads nothing else from it, and the cdylib link (MSVC
 //! `link.exe`, ~3 s) and staticlib archive it was captured with are most of
@@ -209,6 +210,84 @@ pub fn replay_args_rlib_only(record: &RustcRecord) -> Result<Vec<String>, Hotpat
     Ok(narrowed)
 }
 
+/// [`replay_args`] narrowed to what a lib image's patch needs: the
+/// `staticlib`, `dylib` and `proc-macro` crate types are dropped from every
+/// `--crate-type` flag (space or `=` form, comma lists included) and the rest
+/// (`cdylib`, whose intercepted link names the fresh objects, and `rlib`)
+/// stay in place. A scaffolded app's lib declares
+/// `["cdylib", "staticlib", "rlib"]`, and the staticlib bundles every
+/// dependency (~1.1 GB for a large app) that a patch never reads.
+///
+/// The `rlib` is kept: it costs one archive of the crate's own objects,
+/// nothing links it (`modified_rlibs` excludes the image unit) and the
+/// codegen is shared with the cdylib, so keeping it leaves the objects the
+/// patch links byte-for-byte what [`replay_args`] produces. A record whose
+/// types hold none of the dropped ones, a `Bin`, and a record whose every
+/// type would be dropped (a staticlib-only lib, which has nothing else to
+/// emit) are returned as [`replay_args`] builds them. The iOS simulator's
+/// tip capture keeps [`replay_args`]: Xcode links the staticlib it writes.
+pub fn replay_args_image(record: &RustcRecord) -> Result<Vec<String>, HotpatchError> {
+    let args = replay_args(record)?;
+    if TargetKind::of(&record.crate_types) == TargetKind::Bin {
+        return Ok(args);
+    }
+    let mut dropped = false;
+    let mut kept = false;
+    for value in flag_values(&args, CRATE_TYPE)? {
+        for ty in value.split(',').map(str::trim) {
+            if is_image_unused_type(ty) {
+                dropped = true;
+            } else {
+                kept = true;
+            }
+        }
+    }
+    if !dropped || !kept {
+        return Ok(args);
+    }
+
+    let equals_prefix = format!("{CRATE_TYPE}=");
+    let mut narrowed = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let (value, equals_form) = if arg == CRATE_TYPE {
+            // `flag_values` above refused a trailing `--crate-type`.
+            let Some(value) = iter.next() else { break };
+            (value, false)
+        } else if let Some(value) = arg.strip_prefix(&equals_prefix) {
+            (value.to_string(), true)
+        } else {
+            narrowed.push(arg);
+            continue;
+        };
+        let remaining: Vec<&str> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|ty| !is_image_unused_type(ty))
+            .collect();
+        if remaining.is_empty() {
+            continue;
+        }
+        let joined = if remaining.len() == value.split(',').count() {
+            value.clone()
+        } else {
+            remaining.join(",")
+        };
+        if equals_form {
+            narrowed.push(format!("{CRATE_TYPE}={joined}"));
+        } else {
+            narrowed.push(CRATE_TYPE.to_string());
+            narrowed.push(joined);
+        }
+    }
+    Ok(narrowed)
+}
+
+/// The crate types a lib image's patch never reads.
+fn is_image_unused_type(ty: &str) -> bool {
+    matches!(ty, "staticlib" | "dylib" | "proc-macro")
+}
+
 const CRATE_TYPE: &str = "--crate-type";
 
 /// `rlib`, or `lib` (rustc's default library type, an rlib).
@@ -311,7 +390,7 @@ pub fn parse_notifications(
 /// Replays one unit's captured compile in `cwd` (see
 /// [`WorkspaceGraph::replay_cwd`]) with [`replay_args_rlib_only`], so a lib
 /// emits only its rlib. Not for the image unit, whose intercepted link
-/// needs every captured crate type. A spawn failure is
+/// needs its cdylib ([`replay_args_image`]). A spawn failure is
 /// [`HotpatchError::Process`]; a successful compile that reports no link
 /// artifact is [`HotpatchError::BuilderUnsupported`].
 pub fn replay_unit(
@@ -991,6 +1070,173 @@ mod tests {
             ),
             Err(HotpatchError::Process { .. })
         ));
+    }
+
+    fn image(args: &[&str]) -> Vec<String> {
+        replay_args_image(&lib_record(args)).unwrap()
+    }
+
+    #[test]
+    fn the_image_replay_drops_the_staticlib_and_keeps_the_cdylib_and_rlib() {
+        let record = template_lib_record();
+        let full = replay_args(&record).unwrap();
+        let image = replay_args_image(&record).unwrap();
+        let mut expected = full.clone();
+        expected.drain(8..10);
+        assert_eq!(image, expected, "only the staticlib pair is dropped");
+        let crate_types: Vec<&str> = image
+            .windows(2)
+            .filter(|pair| pair[0] == "--crate-type")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(crate_types, vec!["cdylib", "rlib"]);
+    }
+
+    #[test]
+    fn the_image_replay_narrows_the_equals_form_and_comma_lists_in_place() {
+        assert_eq!(
+            image(&[
+                "--crate-type=cdylib",
+                "--crate-type=staticlib",
+                "--crate-type=rlib"
+            ]),
+            strings(&[
+                "--crate-name",
+                "x",
+                "--crate-type=cdylib",
+                "--crate-type=rlib",
+                "--json=artifacts"
+            ])
+        );
+        assert_eq!(
+            image(&["--crate-type", "cdylib,staticlib,rlib", "--emit=link"]),
+            strings(&[
+                "--crate-name",
+                "x",
+                "--crate-type",
+                "cdylib,rlib",
+                "--emit=link",
+                "--json=artifacts"
+            ])
+        );
+        assert_eq!(
+            image(&["--crate-type=staticlib,dylib,cdylib", "--emit=link"]),
+            strings(&[
+                "--crate-name",
+                "x",
+                "--crate-type=cdylib",
+                "--emit=link",
+                "--json=artifacts"
+            ])
+        );
+        assert_eq!(
+            image(&["--crate-type", "proc-macro", "--crate-type", "cdylib"]),
+            strings(&[
+                "--crate-name",
+                "x",
+                "--crate-type",
+                "cdylib",
+                "--json=artifacts"
+            ])
+        );
+    }
+
+    #[test]
+    fn the_image_replay_of_a_record_without_a_staticlib_is_byte_identical() {
+        for args in [
+            &["--crate-type", "cdylib", "--crate-type", "rlib"][..],
+            &["--crate-type=cdylib,rlib"][..],
+            &["--crate-type", "cdylib"][..],
+            &["--crate-type", "staticlib"][..],
+            &["--crate-type=staticlib,dylib"][..],
+        ] {
+            let record = lib_record(args);
+            assert_eq!(
+                replay_args_image(&record).unwrap(),
+                replay_args(&record).unwrap(),
+                "{args:?}"
+            );
+        }
+        let bin_record = RustcRecord {
+            args: strings(&["rustc", "--crate-type", "bin", "--crate-type", "staticlib"]),
+            envs: Vec::new(),
+            crate_types: strings(&["bin"]),
+        };
+        assert_eq!(
+            replay_args_image(&bin_record).unwrap(),
+            replay_args(&bin_record).unwrap()
+        );
+    }
+
+    /// The real toolchain: the image replay of a three-type lib leaves the
+    /// cdylib and the rlib in the out-dir and no archive.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_real_rustc_image_replay_of_a_three_crate_type_lib_writes_no_staticlib() {
+        use crate::process::{ProcessRunner, RealProcessRunner};
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "frust-drive-replay-image-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("out")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn greet() -> u8 { 7 }\n").unwrap();
+        let out = root.join("out");
+        let out_text = out.to_str().unwrap();
+        let record = RustcRecord {
+            args: strings(&[
+                "rustc",
+                "--crate-name",
+                "fixture",
+                "--edition=2021",
+                "src/lib.rs",
+                "--error-format=json",
+                "--crate-type",
+                "cdylib",
+                "--crate-type",
+                "staticlib",
+                "--crate-type",
+                "rlib",
+                "--emit=dep-info,link",
+                "-C",
+                "debuginfo=0",
+                "--out-dir",
+                out_text,
+            ]),
+            envs: Vec::new(),
+            crate_types: strings(&["cdylib", "staticlib", "rlib"]),
+        };
+        let args = replay_args_image(&record).unwrap();
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = RealProcessRunner
+            .run_streaming_scrubbed("rustc", &argv, Some(&root), &[], &[], &mut |_| {})
+            .unwrap();
+        assert!(output.success, "{}", output.stderr);
+        let mut written: Vec<String> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        written.sort();
+        assert!(
+            written.iter().any(|name| name == "libfixture.rlib"),
+            "{written:?}"
+        );
+        assert!(
+            written
+                .iter()
+                .any(|name| name.ends_with(".so") || name.ends_with(".dylib")),
+            "{written:?}"
+        );
+        assert!(
+            !written.iter().any(|name| name.ends_with(".a")),
+            "{written:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The real toolchain: a one-package lib captured with three crate

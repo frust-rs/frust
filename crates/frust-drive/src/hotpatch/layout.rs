@@ -174,35 +174,144 @@ pub struct Extraction {
 }
 
 /// Builds the layout table of `inputs` (rlibs or objects) for the types of
-/// `crates` (crate names; `-` is read as `_`).
+/// `crates` (crate names; `-` is read as `_`). The inputs are read in
+/// parallel ([`read_inputs`]); the table and its error are those of reading
+/// them one after another: the first input, in order, that fails or holds no
+/// type answers for the whole call.
 pub fn extract(inputs: &[PathBuf], crates: &[String]) -> Result<Extraction, HotpatchError> {
+    extract_with(inputs, Vec::new(), crates)
+}
+
+/// [`extract`] of `inputs` followed by inputs already read (`read`, each
+/// holding at least one type): the table of all of them, so a caller that
+/// read some inputs for another reason does not read them twice.
+pub fn extract_with(
+    inputs: &[PathBuf],
+    read: Vec<InputTypes>,
+    crates: &[String],
+) -> Result<Extraction, HotpatchError> {
+    let mut reads = Vec::with_capacity(inputs.len() + read.len());
+    for (input, types) in inputs.iter().zip(read_inputs(inputs, crates)) {
+        let types = types?;
+        if types.type_dies == 0 {
+            return Err(no_type_information(input));
+        }
+        reads.push(types);
+    }
+    reads.extend(read);
+    Ok(combine_inputs(reads))
+}
+
+/// The refusal of an input whose DWARF holds no type.
+fn no_type_information(input: &Path) -> HotpatchError {
+    HotpatchError::unsupported(format!(
+        "{} carries DWARF without type information; the layout gate needs \
+         `debug = true` (full debug info)",
+        input.display()
+    ))
+}
+
+/// One input's DWARF, read and fingerprinted but not yet combined with any
+/// other input's: [`combine_inputs`] of several equals [`extract`] of them
+/// (the per-type composites are unioned before they are combined).
+#[derive(Debug, Default)]
+pub struct InputTypes {
+    found: BTreeMap<String, BTreeSet<Composite>>,
+    sources: Vec<DwarfSource>,
+    type_dies: usize,
+}
+
+impl InputTypes {
+    /// The type DIEs the input holds, in scope or not: 0 means DWARF
+    /// without type information.
+    pub fn type_dies(&self) -> usize {
+        self.type_dies
+    }
+}
+
+/// Reads every input's DWARF on its own, in parallel across the host's
+/// cores ([`parallel_map`]), answering in input order. Reading an object is
+/// pure (its bytes and `crates` in, fingerprints out), so the result is the
+/// one a sequential read gives: a large app's image unit is hundreds of
+/// objects, which one thread walks for seconds.
+pub fn read_inputs(
+    inputs: &[PathBuf],
+    crates: &[String],
+) -> Vec<Result<InputTypes, HotpatchError>> {
     let crates: Vec<String> = crates.iter().map(|name| name.replace('-', "_")).collect();
-    let mut found: BTreeMap<String, BTreeSet<Composite>> = BTreeMap::new();
-    let mut sources = Vec::new();
-    for input in inputs {
-        let mut type_dies = 0usize;
+    parallel_map(inputs, |input| {
+        let mut types = InputTypes::default();
         for_each_object(input, |label, file| {
-            let (source, dies) = read_object(label, file, &crates, &mut found)?;
-            sources.push(source);
-            type_dies += dies;
+            let (source, dies) = read_object(label, file, &crates, &mut types.found)?;
+            types.sources.push(source);
+            types.type_dies += dies;
             Ok(())
         })?;
-        if type_dies == 0 {
-            return Err(HotpatchError::unsupported(format!(
-                "{} carries DWARF without type information; the layout gate needs \
-                 `debug = true` (full debug info)",
-                input.display()
-            )));
+        Ok(types)
+    })
+}
+
+/// `items.iter().map(f).collect()`, computed on up to one scoped thread per
+/// core, each taking the next unclaimed item; the answers keep `items`'
+/// order. A panic in `f` is re-raised on the caller's thread.
+pub(super) fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(items.len());
+    if workers <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut slots: Vec<Option<R>> = std::iter::repeat_with(|| None).take(items.len()).collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            return done;
+                        };
+                        done.push((index, f(item)));
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            let done = handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            for (index, answer) in done {
+                slots[index] = Some(answer);
+            }
         }
+    });
+    slots
+        .into_iter()
+        .map(|slot| slot.expect("every item is taken by exactly one worker"))
+        .collect()
+}
+
+/// Combines inputs read by [`read_inputs`] into one table, their sources in
+/// the order given.
+pub fn combine_inputs(reads: impl IntoIterator<Item = InputTypes>) -> Extraction {
+    let mut found: BTreeMap<String, BTreeSet<Composite>> = BTreeMap::new();
+    let mut sources = Vec::new();
+    for read in reads {
+        for (path, composites) in read.found {
+            found.entry(path).or_default().extend(composites);
+        }
+        sources.extend(read.sources);
     }
     let types = found
         .into_iter()
         .map(|(path, layouts)| (path, combine(&layouts)))
         .collect();
-    Ok(Extraction {
+    Extraction {
         table: LayoutTable { types },
         sources,
-    })
+    }
 }
 
 /// Whether any object in `path` (an rlib's `.o` members, or one object)
@@ -1648,12 +1757,45 @@ pub fn total(x: u64) -> u64 { let o = b::build(x); o.value + o.count }
     /// Tests over the fixture workspace, compiled with the pinned toolchain.
     /// Not on Windows: MSVC objects keep types in PDB records, and the gates
     /// read Mach-O and ELF only.
+    #[test]
+    fn parallel_map_keeps_the_input_order() {
+        let items: Vec<u64> = (0..257).collect();
+        let squares = parallel_map(&items, |n| n * n);
+        assert_eq!(squares, items.iter().map(|n| n * n).collect::<Vec<_>>());
+        assert!(parallel_map(&[] as &[u64], |n| *n).is_empty());
+    }
+
+    #[test]
+    fn the_first_failing_input_in_order_answers_a_parallel_extraction() {
+        let dir = temp_dir("first-failure");
+        let missing = dir.join("missing.o");
+        let junk = dir.join("junk.o");
+        std::fs::write(&junk, b"not an object").unwrap();
+        let detail = unsupported(extract(&[junk.clone(), missing], &["my_app".to_string()]));
+        assert!(detail.contains("junk.o"), "{detail}");
+    }
+
     #[cfg(not(windows))]
     mod fixtures {
         use super::super::fixture::{self, Spec};
         use super::super::*;
         use super::{temp_dir, unsupported};
         use std::time::Instant;
+
+        #[test]
+        fn reading_inputs_apart_then_combining_them_equals_one_extraction() {
+            let (a, b) = (fixture::base(), fixture::edited("reorder"));
+            let crates = fixture::crates();
+            let whole = extract(&[a.clone(), b.clone()], &crates).unwrap();
+            let read_b: Vec<InputTypes> = read_inputs(std::slice::from_ref(&b), &crates)
+                .into_iter()
+                .map(Result::unwrap)
+                .collect();
+            assert!(read_b[0].type_dies() > 0);
+            let parts = extract_with(std::slice::from_ref(&a), read_b, &crates).unwrap();
+            assert_eq!(parts.table, whole.table);
+            assert_eq!(parts.sources, whole.sources);
+        }
 
         fn extract_rlib(rlib: &Path) -> Extraction {
             extract(&[rlib.to_path_buf()], &fixture::crates()).expect("extracting the fixture")

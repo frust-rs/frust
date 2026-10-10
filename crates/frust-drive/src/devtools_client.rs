@@ -56,21 +56,35 @@
 //!
 //! # Hot patching
 //!
-//! [`DevtoolsClient::hotpatch_info`], [`DevtoolsClient::patch_chunk`] and
-//! [`DevtoolsClient::apply_patch`] are the three hot-patch methods, gated
-//! on [`Capability::HotPatch`]. A patch travels as base64 chunks of at most
-//! [`PATCH_CHUNK_MAX_BYTES`] raw bytes ([`patch_chunks`], sent in order by
-//! [`DevtoolsClient::upload_patch`]), so each request line stays under the
-//! 1 MiB cap both ends enforce. `apply_patch` is answered only after the
-//! app's next frame, so it waits at least [`APPLY_PATCH_MIN_WAIT`] whatever
-//! the connection's own timeout.
+//! [`DevtoolsClient::hotpatch_info`], [`DevtoolsClient::patch_chunk`],
+//! [`DevtoolsClient::table_chunk`] and [`DevtoolsClient::apply_patch`] are
+//! the hot-patch methods, gated on [`Capability::HotPatch`]. A patch travels
+//! as base64 chunks of at most [`PATCH_CHUNK_MAX_BYTES`] raw bytes
+//! ([`patch_chunks`], sent in order by [`DevtoolsClient::upload_patch`]), and
+//! its jump table the same way as `table_chunk`s
+//! ([`DevtoolsClient::upload_table`], `JumpTableWire::encode_map`'s bytes):
+//! a large app's table is several MB, so no request line carries it and each
+//! stays under the 1 MiB cap both ends enforce. `apply_patch` names the
+//! table's length (`ApplyPatchParams::table_len`) and is answered only after
+//! the app's next frame, so it waits at least [`APPLY_PATCH_MIN_WAIT`]
+//! whatever the connection's own timeout.
 //!
 //! On a loopback session whose app advertises
-//! [`HotpatchInfo::patch_file_hand_off`], no chunk is sent: `apply_patch`
-//! names the patch the host already wrote instead
+//! [`HotpatchInfo::patch_file_hand_off`], no patch chunk is sent:
+//! `apply_patch` names the patch the host already wrote instead
 //! ([`ApplyPatchParams::file`]: its absolute path and [`sha256_hex`] of its
 //! bytes), and the app reads it under its own checks (owner-only regular
-//! file, same user, size and digest). No new RPC is involved.
+//! file, same user, size and digest). The table is uploaded as chunks on that
+//! path too.
+//!
+//! # Line cap
+//!
+//! Every request line is checked against [`MAX_LINE_BYTES`] before it is
+//! written: an over-cap line is never sent, and the call fails with
+//! [`RequestTooLarge`] naming its size. A server that receives an over-cap
+//! line from some other client answers it with an error naming the cap
+//! before closing; one it could not attach to a request id arrives as id `0`
+//! and becomes the reason the connection closed.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -84,9 +98,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use frust_devtools_protocol::{
     AckResult, ApplyPatchParams, Capability, FrameStats, HandshakeInfo, HandshakeParams,
-    HotpatchInfo, Incoming, InputScrollParams, InputTapParams, InputTextParams, Method,
-    MetricsSnapshot, PatchChunkParams, PatchOutcome, Request, Response, ResponseOutcome, RpcError,
-    ScreenshotResult, WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line, encode_line,
+    HotpatchInfo, Incoming, InputScrollParams, InputTapParams, InputTextParams, JumpTableWire,
+    Method, MetricsSnapshot, PatchChunkParams, PatchOutcome, Request, Response, ResponseOutcome,
+    RpcError, ScreenshotResult, WidgetProps, WidgetPropsParams, WidgetTreeDump, decode_line,
+    encode_line,
 };
 use serde_json::Value;
 
@@ -127,6 +142,21 @@ impl DevtoolsRpcError {
     }
 }
 
+/// A request refused before it was sent: its line is longer than the cap both
+/// ends of the wire enforce ([`MAX_LINE_BYTES`]), so the server would have
+/// refused it and closed the connection. Nothing was written; the connection
+/// is still usable. Returned inside `anyhow::Error`
+/// (`err.downcast_ref::<RequestTooLarge>()`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "`{method}` request line {bytes} bytes exceeds the devtools cap of {cap} bytes; nothing was sent"
+)]
+pub struct RequestTooLarge {
+    pub method: String,
+    pub bytes: usize,
+    pub cap: usize,
+}
+
 /// Whether `err` is a devtools rejection for want of a valid token — the one
 /// failure a caller must act on differently (fix the token, don't retry).
 pub fn is_unauthorized(err: &anyhow::Error) -> bool {
@@ -154,6 +184,16 @@ pub fn is_method_not_found(err: &anyhow::Error) -> bool {
 /// larger chunk. 512 KiB is about 683 KiB as base64, well under the 1 MiB
 /// line cap.
 pub const PATCH_CHUNK_MAX_BYTES: usize = 512 * 1024;
+
+/// How many chunk requests [`DevtoolsClient::upload_patch`] and
+/// [`DevtoolsClient::upload_table`] keep in flight before waiting for the
+/// oldest one's answer. The app handles a connection's lines strictly in
+/// order, so a pipelined upload reaches it exactly as a lock-step one does;
+/// it only stops paying one round trip (through `adb forward`, to a phone)
+/// and the encoding of the next chunk per chunk. Bounded so a failing app
+/// is noticed within a few chunks and the unanswered requests stay small
+/// (each about 683 KiB of base64).
+pub const UPLOAD_WINDOW: usize = 4;
 
 /// The least time [`DevtoolsClient::apply_patch`] waits for its answer. The
 /// app replies after the frame that follows the attempt and gives up waiting
@@ -397,30 +437,115 @@ impl DevtoolsClient {
         self.typed_call(Method::PatchChunk, params)
     }
 
+    /// `table_chunk` — one slice of a patch's encoded jump table (see
+    /// [`upload_table`](Self::upload_table)).
+    pub fn table_chunk(&self, params: &PatchChunkParams) -> Result<AckResult> {
+        let params = serde_json::to_value(params).context("encoding `table_chunk` params")?;
+        self.typed_call(Method::TableChunk, params)
+    }
+
     /// Sends every chunk of `bytes` as `patch_id`, in order, stopping at the
     /// first failure. A chunk the server acknowledges with `ok: false` is an
     /// error too: the app would refuse the `apply_patch` that follows.
     pub fn upload_patch(&self, patch_id: u64, bytes: &[u8]) -> Result<()> {
-        for chunk in patch_chunks(patch_id, bytes) {
-            let ack = self.patch_chunk(&chunk)?;
-            if !ack.ok {
-                bail!(
-                    "the app refused patch {patch_id}'s chunk at offset {}",
-                    chunk.offset
-                );
+        self.upload(Method::PatchChunk, patch_id, bytes)
+    }
+
+    /// Sends `table`'s map ([`JumpTableWire::encode_map`]) as `patch_id`'s
+    /// `table_chunk`s, in order, stopping at the first failure, and returns
+    /// its encoded length: the `table_len` the `apply_patch` that follows
+    /// names. An empty map sends nothing and returns `0`.
+    pub fn upload_table(&self, patch_id: u64, table: &JumpTableWire) -> Result<u64> {
+        let encoded = table.encode_map();
+        self.upload(Method::TableChunk, patch_id, &encoded)?;
+        Ok(encoded.len() as u64)
+    }
+
+    /// `bytes` as `method` (`patch_chunk` or `table_chunk`) requests, in
+    /// offset order, up to [`UPLOAD_WINDOW`] of them unanswered at a time.
+    /// The first failure, in chunk order, is the answer; the requests already
+    /// sent behind it are still awaited, so no late reply lands after the
+    /// call returns.
+    fn upload(&self, method: Method, patch_id: u64, bytes: &[u8]) -> Result<()> {
+        let mut in_flight: std::collections::VecDeque<(u64, Pending)> =
+            std::collections::VecDeque::new();
+        let mut first_error: Option<anyhow::Error> = None;
+        let settle = |(offset, pending): (u64, Pending),
+                      first_error: &mut Option<anyhow::Error>| {
+            let acked = self.await_response(pending).and_then(|result| {
+                let ack: AckResult = serde_json::from_value(result)
+                    .with_context(|| format!("decoding `{method}` result"))?;
+                if !ack.ok {
+                    bail!("the app refused patch {patch_id}'s `{method}` at offset {offset}");
+                }
+                Ok(())
+            });
+            if let Err(err) = acked {
+                first_error.get_or_insert(err);
+            }
+        };
+        let total_len = bytes.len() as u64;
+        for (index, data) in bytes.chunks(PATCH_CHUNK_MAX_BYTES).enumerate() {
+            if first_error.is_some() {
+                break;
+            }
+            if in_flight.len() >= UPLOAD_WINDOW
+                && let Some(oldest) = in_flight.pop_front()
+            {
+                settle(oldest, &mut first_error);
+                if first_error.is_some() {
+                    break;
+                }
+            }
+            let offset = (index * PATCH_CHUNK_MAX_BYTES) as u64;
+            let chunk = PatchChunkParams {
+                patch_id,
+                offset,
+                total_len,
+                data_base64: encode_base64(data),
+            };
+            let sent = serde_json::to_value(&chunk)
+                .with_context(|| format!("encoding `{method}` params"))
+                .and_then(|params| self.send_request(method, params, self.timeout));
+            match sent {
+                Ok(pending) => in_flight.push_back((offset, pending)),
+                Err(err) => {
+                    first_error.get_or_insert(err);
+                }
             }
         }
-        Ok(())
+        while let Some(pending) = in_flight.pop_front() {
+            settle(pending, &mut first_error);
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// `apply_patch` — applies the bytes previously uploaded as
     /// `params.patch_id`, or the file `params.file` names (the loopback
-    /// hand-off; then nothing is uploaded first). Waits up to the connection timeout or
-    /// [`APPLY_PATCH_MIN_WAIT`], whichever is longer, since the app answers
+    /// hand-off; then no patch chunk is uploaded first), with the jump table
+    /// uploaded by [`upload_table`](Self::upload_table): `params.table.map`
+    /// is not sent, so `params.table_len` must be its encoded length, or the
+    /// call fails before sending anything. Waits up to the connection timeout
+    /// or [`APPLY_PATCH_MIN_WAIT`], whichever is longer, since the app answers
     /// only after its next frame. An `Err` that is not a
-    /// [`DevtoolsRpcError`] (a closed connection, a timeout, an undecodable
-    /// reply) leaves the outcome unknown: the patch may have been applied.
+    /// [`DevtoolsRpcError`] or [`RequestTooLarge`] (a closed connection, a
+    /// timeout, an undecodable reply) leaves the outcome unknown: the patch
+    /// may have been applied.
     pub fn apply_patch(&self, params: &ApplyPatchParams) -> Result<PatchOutcome> {
+        // A table known here but declared with another length would reach the
+        // app as a different (or empty) table: refuse before sending.
+        if !params.table.map.is_empty() && params.table_len != params.table.encoded_map_len() {
+            bail!(
+                "patch {}'s jump table encodes to {} bytes but `apply_patch` names table_len {}; \
+                 upload it with `upload_table` and pass the length it returns",
+                params.patch_id,
+                params.table.encoded_map_len(),
+                params.table_len
+            );
+        }
         let params = serde_json::to_value(params).context("encoding `apply_patch` params")?;
         let wait = self.timeout.max(APPLY_PATCH_MIN_WAIT);
         let result = self.call_waiting(Method::ApplyPatch, params, wait)?;
@@ -466,15 +591,33 @@ impl DevtoolsClient {
 
     /// [`call`](Self::call) waiting up to `wait` for the response.
     fn call_waiting(&self, method: Method, params: Value, wait: Duration) -> Result<Value> {
+        let pending = self.send_request(method, params, wait)?;
+        self.await_response(pending)
+    }
+
+    /// Sends one request and returns what [`await_response`](Self::await_response)
+    /// needs to collect its answer, waiting up to `wait` from then.
+    fn send_request(&self, method: Method, params: Value, wait: Duration) -> Result<Pending> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let request = Request::new(id, method.as_str(), params);
+        let mut line = encode_line(&request);
+        // The server refuses a longer line and closes the connection: say so
+        // here, by name, rather than send it and lose the answer.
+        if line.len() > MAX_LINE_BYTES {
+            return Err(RequestTooLarge {
+                method: method.to_string(),
+                bytes: line.len(),
+                cap: MAX_LINE_BYTES,
+            }
+            .into());
+        }
+        line.push('\n');
+
         let (tx, rx) = mpsc::channel::<Response>();
         self.pending
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(id, tx);
-
-        let request = Request::new(id, method.as_str(), params);
-        let line = format!("{}\n", encode_line(&request));
         {
             let mut stream = self.write_stream.lock().unwrap_or_else(|p| p.into_inner());
             stream
@@ -484,7 +627,24 @@ impl DevtoolsClient {
                 .flush()
                 .with_context(|| format!("failed to flush a `{method}` request"))?;
         }
+        Ok(Pending {
+            id,
+            method,
+            rx,
+            wait,
+        })
+    }
 
+    /// Waits for the answer to a request [`send_request`](Self::send_request)
+    /// sent: its `result`, or an `Err` for an RPC-level error, a closed
+    /// connection or a timeout.
+    fn await_response(&self, pending: Pending) -> Result<Value> {
+        let Pending {
+            id,
+            method,
+            rx,
+            wait,
+        } = pending;
         let response = rx.recv_timeout(wait).map_err(|err| {
             // Not coming — stop the reader thread from ever routing a late
             // response into a channel nobody is listening on any more.
@@ -534,6 +694,15 @@ impl DevtoolsClient {
     }
 }
 
+/// A request sent and not yet answered: its id, method (for messages), the
+/// channel its response arrives on, and how long to wait for it.
+struct Pending {
+    id: u64,
+    method: Method,
+    rx: mpsc::Receiver<Response>,
+    wait: Duration,
+}
+
 impl Drop for DevtoolsClient {
     fn drop(&mut self) {
         // Shutting down the socket (shared with the reader thread's cloned
@@ -549,7 +718,8 @@ impl Drop for DevtoolsClient {
 }
 
 /// A single line from the peer longer than this without a newline is
-/// treated as a broken connection and closes it. Mirrors
+/// treated as a broken connection and closes it, and no request line longer
+/// than this is ever sent ([`RequestTooLarge`]). Mirrors
 /// `frust_devtools::server::MAX_LINE_BYTES` (`crates/frust-devtools/src/server.rs`)
 /// exactly — the two ends of the wire must agree on what "too big" means, and
 /// nothing in the v1 protocol's server→client direction (a response or a
@@ -688,12 +858,29 @@ fn run_reader_loop(
                 }
                 match decode_line(&line) {
                     Ok(Incoming::Response(response)) => {
-                        if let Some(tx) = pending
+                        let waiting = pending
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
-                            .remove(&response.id)
-                        {
-                            let _ = tx.send(response);
+                            .remove(&response.id);
+                        match (waiting, response.outcome) {
+                            (Some(tx), outcome) => {
+                                let _ = tx.send(Response {
+                                    outcome,
+                                    ..response
+                                });
+                            }
+                            // Id 0 is no call's: the server's answer to a line
+                            // it could not attach to one (an over-cap line),
+                            // sent just before it closes. Kept as the reason.
+                            (None, ResponseOutcome::Error { error }) if response.id == 0 => {
+                                close_reason
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .get_or_insert_with(|| {
+                                        format!("the app's devtools server said: {}", error.message)
+                                    });
+                            }
+                            (None, _) => {}
                         }
                     }
                     Ok(Incoming::Notification(notification)) => {
@@ -875,8 +1062,9 @@ pub(crate) mod test_server {
 
     use frust_devtools_protocol::{
         AckResult, ApplyPatchParams, Capability, FrameStats, HandshakeInfo, HandshakeParams,
-        HotpatchInfo, Notification, PROTOCOL_VERSION, PatchChunkParams, PatchOutcome, RectPx,
-        Request, Response, RpcError, ScreenshotResult, WidgetNode, WidgetTreeDump, encode_line,
+        HotpatchInfo, JumpTableWire, Notification, PROTOCOL_VERSION, PatchChunkParams,
+        PatchOutcome, RectPx, Request, Response, RpcError, ScreenshotResult, WidgetNode,
+        WidgetTreeDump, encode_line,
     };
 
     use super::PATCH_CHUNK_MAX_BYTES;
@@ -917,11 +1105,28 @@ pub(crate) mod test_server {
         pub unsupported_reason: String,
     }
 
+    /// Bytes reassembled per `patch_id`.
+    type Streams = Arc<Mutex<HashMap<u64, Vec<u8>>>>;
+
+    /// What the fake received.
+    #[derive(Default, Clone)]
+    struct Received {
+        log: Arc<Mutex<Vec<Request>>>,
+        /// `patch_chunk` streams.
+        uploads: Streams,
+        /// `table_chunk` streams.
+        tables: Streams,
+        /// The table each applied `patch_id` was applied with: its decoded
+        /// stream and the request's scalars.
+        applied_tables: Arc<Mutex<HashMap<u64, JumpTableWire>>>,
+        /// The longest request line, newline excluded.
+        longest_line: Arc<Mutex<usize>>,
+    }
+
     /// A running fake: its address plus what it received.
     pub(crate) struct FakeServer {
         pub addr: SocketAddr,
-        log: Arc<Mutex<Vec<Request>>>,
-        uploads: Arc<Mutex<HashMap<u64, Vec<u8>>>>,
+        received: Received,
         _handle: thread::JoinHandle<()>,
     }
 
@@ -933,12 +1138,33 @@ pub(crate) mod test_server {
 
         /// Every request received, in order.
         pub fn requests(&self) -> Vec<Request> {
-            self.log.lock().unwrap().clone()
+            self.received.log.lock().unwrap().clone()
         }
 
         /// The bytes reassembled for `patch_id`.
         pub fn uploaded(&self, patch_id: u64) -> Option<Vec<u8>> {
-            self.uploads.lock().unwrap().get(&patch_id).cloned()
+            self.received
+                .uploads
+                .lock()
+                .unwrap()
+                .get(&patch_id)
+                .cloned()
+        }
+
+        /// The jump table `patch_id` was applied with: the map reassembled
+        /// from its `table_chunk`s plus `apply_patch`'s scalars.
+        pub fn applied_table(&self, patch_id: u64) -> Option<JumpTableWire> {
+            self.received
+                .applied_tables
+                .lock()
+                .unwrap()
+                .get(&patch_id)
+                .cloned()
+        }
+
+        /// The longest request line received, in bytes.
+        pub fn longest_line(&self) -> usize {
+            *self.received.longest_line.lock().unwrap()
         }
     }
 
@@ -948,10 +1174,12 @@ pub(crate) mod test_server {
     /// capability gates: `screenshot` is `NOT_SUPPORTED` without
     /// [`Capability::Screenshot`], `hotpatch_info` `NOT_SUPPORTED` and the
     /// patch methods `METHOD_NOT_FOUND` without [`Capability::HotPatch`].
-    /// Chunks must arrive in offset order and hold at most
-    /// [`PATCH_CHUNK_MAX_BYTES`] raw bytes; `apply_patch`'s `len` must
-    /// equal the bytes received — or, when it names a `file`, the file's
-    /// size, and the file's SHA-256 must match (no chunks are required then). A `frame_stats_subscribe` ack is followed
+    /// Chunks (`patch_chunk` and `table_chunk` alike) must arrive in offset
+    /// order and hold at most [`PATCH_CHUNK_MAX_BYTES`] raw bytes;
+    /// `apply_patch`'s `len` must equal the bytes received — or, when it
+    /// names a `file`, the file's size, and the file's SHA-256 must match (no
+    /// patch chunks are required then) — and its `table_len` the table bytes
+    /// received, which must decode. A `frame_stats_subscribe` ack is followed
     /// by one `frame_stats` notification. Deliberately reimplements just
     /// enough JSON-RPC framing to drive the client end-to-end without
     /// depending on the in-app devtools service — this crate may depend on
@@ -960,24 +1188,18 @@ pub(crate) mod test_server {
     pub(crate) fn spawn(script: Script) -> FakeServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let uploads = Arc::new(Mutex::new(HashMap::new()));
-        let (server_log, server_uploads) = (Arc::clone(&log), Arc::clone(&uploads));
-        let handle = thread::spawn(move || serve(listener, script, server_log, server_uploads));
+        let received = Received::default();
+        let server_received = received.clone();
+        let handle = thread::spawn(move || serve(listener, script, server_received));
         FakeServer {
             addr,
-            log,
-            uploads,
+            received,
             _handle: handle,
         }
     }
 
-    fn serve(
-        listener: TcpListener,
-        mut script: Script,
-        log: Arc<Mutex<Vec<Request>>>,
-        uploads: Arc<Mutex<HashMap<u64, Vec<u8>>>>,
-    ) {
+    fn serve(listener: TcpListener, mut script: Script, received: Received) {
+        let log = &received.log;
         let Ok((stream, _)) = listener.accept() else {
             return;
         };
@@ -991,6 +1213,10 @@ pub(crate) mod test_server {
             let n = reader.read_line(&mut line).unwrap_or(0);
             if n == 0 {
                 break;
+            }
+            {
+                let mut longest = received.longest_line.lock().unwrap();
+                *longest = (*longest).max(line.trim_end().len());
             }
             let Ok(req) = serde_json::from_str::<Request>(line.trim_end()) else {
                 continue;
@@ -1022,7 +1248,7 @@ pub(crate) mod test_server {
                     "hotpatch_info" if !hot => {
                         Err(RpcError::not_supported(script.unsupported_reason.clone()))
                     }
-                    "patch_chunk" | "apply_patch" if !hot => Err(RpcError::new(
+                    "patch_chunk" | "table_chunk" | "apply_patch" if !hot => Err(RpcError::new(
                         RpcError::METHOD_NOT_FOUND,
                         format!("unknown method `{}`", req.method),
                     )),
@@ -1032,8 +1258,9 @@ pub(crate) mod test_server {
                             script.pending.pop_front().unwrap_or_default();
                         Ok(serde_json::to_value(info).unwrap())
                     }
-                    "patch_chunk" => chunk(&req, &uploads),
-                    "apply_patch" => match apply(&req, &uploads, &mut script) {
+                    "patch_chunk" => chunk(&req, &received.uploads),
+                    "table_chunk" => chunk(&req, &received.tables),
+                    "apply_patch" => match apply(&req, &received, &mut script) {
                         Some(reply) => reply,
                         None => break,
                     },
@@ -1112,9 +1339,14 @@ pub(crate) mod test_server {
     /// `None` hangs up.
     fn apply(
         req: &Request,
-        uploads: &Mutex<HashMap<u64, Vec<u8>>>,
+        received: &Received,
         script: &mut Script,
     ) -> Option<Result<serde_json::Value, RpcError>> {
+        let (uploads, received_tables, applied_tables) = (
+            &received.uploads,
+            &received.tables,
+            &received.applied_tables,
+        );
         let params: ApplyPatchParams = match serde_json::from_value(req.params.clone()) {
             Ok(params) => params,
             Err(e) => return Some(Err(invalid_params(e.to_string()))),
@@ -1137,6 +1369,29 @@ pub(crate) mod test_server {
                 params.len
             ))));
         }
+        let encoded = received_tables
+            .lock()
+            .unwrap()
+            .remove(&params.patch_id)
+            .unwrap_or_default();
+        if encoded.len() as u64 != params.table_len {
+            return Some(Err(invalid_params(format!(
+                "table is {} bytes, apply_patch says {}",
+                encoded.len(),
+                params.table_len
+            ))));
+        }
+        let map = match JumpTableWire::decode_map(&encoded) {
+            Ok(map) => map,
+            Err(e) => return Some(Err(invalid_params(e))),
+        };
+        applied_tables.lock().unwrap().insert(
+            params.patch_id,
+            JumpTableWire {
+                map,
+                ..params.table.clone()
+            },
+        );
         match script.applies.pop_front().unwrap_or(ApplyReply::Hangup) {
             ApplyReply::Outcome(outcome) => {
                 if let Some(info) = script.info.as_mut() {
@@ -1716,6 +1971,7 @@ mod tests {
         }
     }
 
+    /// Params with an empty jump table (nothing to upload, `table_len` 0).
     fn apply_params(patch_id: u64, len: u64) -> ApplyPatchParams {
         ApplyPatchParams {
             patch_id,
@@ -1723,14 +1979,187 @@ mod tests {
             pid: 4242,
             anchor_runtime: 0x1_0000_4000,
             table: JumpTableWire {
-                map: [(0x10, 0x20)].into_iter().collect(),
+                map: Default::default(),
                 aslr_reference: 0x4000,
                 new_base_address: 0x8000,
                 ifunc_count: 0,
             },
+            table_len: 0,
             expected_seams: 1,
             file: None,
         }
+    }
+
+    /// A table of `entries` mappings, the shape a large app's patch carries.
+    fn large_table(entries: u64) -> JumpTableWire {
+        JumpTableWire {
+            map: (0..entries)
+                .map(|i| (0x10_0000 + i * 16, 0x7000_0000 + i * 8))
+                .collect(),
+            aslr_reference: 0x4000,
+            new_base_address: 0x8000,
+            ifunc_count: 0,
+        }
+    }
+
+    #[test]
+    fn a_two_hundred_thousand_entry_table_travels_in_capped_lines_and_applies_whole() {
+        const ENTRIES: u64 = 200_000;
+        let mut script = hot_script();
+        script
+            .applies
+            .push_back(ApplyReply::Outcome(outcome(true, 1)));
+        let server = test_server::spawn(script);
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_secs(5), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+
+        let started = Instant::now();
+        let table = large_table(ENTRIES);
+        let patch: Vec<u8> = (0..1_000_003u32).map(|i| (i % 251) as u8).collect();
+        client.upload_patch(5, &patch).unwrap();
+        let table_len = client.upload_table(5, &table).unwrap();
+        assert_eq!(table_len, ENTRIES * 16);
+        let mut params = apply_params(5, patch.len() as u64);
+        params.table = table.clone();
+        params.table_len = table_len;
+        assert_eq!(client.apply_patch(&params).unwrap(), outcome(true, 1));
+        eprintln!(
+            "client upload + apply: {ENTRIES} entries ({table_len} table bytes) + {} patch bytes \
+             in {} ms, longest request line {} bytes",
+            patch.len(),
+            started.elapsed().as_millis(),
+            server.longest_line()
+        );
+
+        assert_eq!(server.uploaded(5), Some(patch));
+        assert_eq!(server.applied_table(5), Some(table));
+        assert!(server.longest_line() <= MAX_LINE_BYTES);
+        let methods = server.methods();
+        let table_chunks = methods.iter().filter(|m| *m == "table_chunk").count();
+        assert_eq!(
+            table_chunks,
+            (ENTRIES as usize * 16).div_ceil(PATCH_CHUNK_MAX_BYTES)
+        );
+        assert_eq!(methods.last().map(String::as_str), Some("apply_patch"));
+        // The `apply_patch` line itself carries no map.
+        let apply = server.requests().pop().unwrap();
+        assert!(
+            apply.params["table"].get("map").is_none(),
+            "{}",
+            apply.params
+        );
+        assert!(encode_line(&apply).len() < 1024);
+    }
+
+    #[test]
+    fn a_file_hand_off_still_uploads_its_table_as_chunks() {
+        let mut script = hot_script();
+        script
+            .applies
+            .push_back(ApplyReply::Outcome(outcome(true, 1)));
+        let server = test_server::spawn(script);
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+
+        let path = std::env::temp_dir().join(format!(
+            "frust-drive-client-handoff-table-{}.so",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"patch!").unwrap();
+        let table = large_table(3);
+        let mut params = apply_params(7, 6);
+        params.table_len = client.upload_table(7, &table).unwrap();
+        params.table = table.clone();
+        params.file = Some(frust_devtools_protocol::PatchFile {
+            path: path.to_string_lossy().into_owned(),
+            sha256: sha256_hex(b"patch!"),
+        });
+        assert_eq!(client.apply_patch(&params).unwrap(), outcome(true, 1));
+        assert_eq!(
+            server.methods(),
+            vec!["handshake", "table_chunk", "apply_patch"]
+        );
+        assert_eq!(server.applied_table(7), Some(table));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_patch_refuses_a_table_len_its_map_does_not_encode_to() {
+        let server = test_server::spawn(hot_script());
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+        let mut params = apply_params(8, 3);
+        params.table = large_table(2);
+        let err = client.apply_patch(&params).unwrap_err();
+        assert!(format!("{err}").contains("upload_table"), "{err}");
+        assert_eq!(server.methods(), vec!["handshake"], "nothing was sent");
+    }
+
+    #[test]
+    fn an_over_cap_request_line_is_refused_before_sending_with_a_named_error() {
+        let server = test_server::spawn(hot_script());
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+
+        let err = client.text("x".repeat(MAX_LINE_BYTES)).unwrap_err();
+        let too_large = err
+            .downcast_ref::<RequestTooLarge>()
+            .expect("a RequestTooLarge");
+        assert_eq!(too_large.method, "input_text");
+        assert_eq!(too_large.cap, MAX_LINE_BYTES);
+        assert!(too_large.bytes > MAX_LINE_BYTES);
+        let message = err.to_string();
+        assert!(
+            message.contains(&format!(
+                "request line {} bytes exceeds the devtools cap",
+                too_large.bytes
+            )),
+            "{message}"
+        );
+        assert!(err.downcast_ref::<DevtoolsRpcError>().is_none());
+
+        // Nothing reached the server, and the connection still works.
+        assert_eq!(server.methods(), vec!["handshake"]);
+        client.tap(1.0, 2.0).unwrap();
+        assert_eq!(server.methods(), vec!["handshake", "input_tap"]);
+    }
+
+    #[test]
+    fn a_server_error_for_no_request_becomes_the_close_reason() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            // What `frust-devtools` sends for an over-cap line whose id it
+            // could not read: an error to id 0, then the close.
+            let mut line = String::new();
+            let _ = std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut line);
+            let reply = Response::error(
+                0,
+                RpcError::new(
+                    RpcError::INVALID_REQUEST,
+                    "request line exceeds the devtools cap of 1048576 bytes",
+                ),
+            );
+            let mut writer = &stream;
+            let _ = writeln!(writer, "{}", encode_line(&reply));
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        });
+
+        let client = DevtoolsClient::connect(addr, Duration::from_secs(2), None).unwrap();
+        let err = client.widget_tree().unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("connection closed"), "{message}");
+        assert!(
+            message.contains("exceeds the devtools cap of 1048576 bytes"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -1816,6 +2245,45 @@ mod tests {
     }
 
     #[test]
+    fn a_pipelined_upload_answers_its_first_refusal_and_awaits_every_request_sent() {
+        let server = test_server::spawn(hot_script());
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+        let chunks = UPLOAD_WINDOW * 3 + 1;
+        let bytes: Vec<u8> = (0..PATCH_CHUNK_MAX_BYTES * chunks)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        client.upload_patch(7, &bytes).unwrap();
+        assert_eq!(server.uploaded(7), Some(bytes.clone()), "in order, whole");
+        let sent = |server: &FakeServer| {
+            server
+                .methods()
+                .iter()
+                .filter(|method| *method == "patch_chunk")
+                .count()
+        };
+        assert_eq!(sent(&server), chunks);
+
+        // The fake holds patch 7 already, so a second upload's first chunk
+        // (offset 0) is out of order, and so is every one after it.
+        let err = client.upload_patch(7, &bytes).unwrap_err();
+        let rpc = err
+            .downcast_ref::<DevtoolsRpcError>()
+            .expect("the app's refusal");
+        assert!(rpc.message.contains("out of order"), "{rpc:?}");
+        let resent = sent(&server) - chunks;
+        assert!(
+            (1..=UPLOAD_WINDOW).contains(&resent),
+            "at most a window is sent past a refusal, got {resent}"
+        );
+        assert!(
+            client.pending.lock().unwrap().is_empty(),
+            "every request sent was answered before the call returned"
+        );
+    }
+
+    #[test]
     fn hotpatch_info_upload_and_apply_round_trip_against_a_capable_server() {
         let mut script = hot_script();
         script
@@ -1877,6 +2345,8 @@ mod tests {
         assert!(format!("{err}").contains("not OS-sourced"), "{err}");
 
         let err = client.upload_patch(1, b"abc").unwrap_err();
+        assert!(is_method_not_found(&err), "{err}");
+        let err = client.upload_table(1, &large_table(1)).unwrap_err();
         assert!(is_method_not_found(&err), "{err}");
         let err = client.apply_patch(&apply_params(1, 3)).unwrap_err();
         assert!(is_method_not_found(&err), "{err}");

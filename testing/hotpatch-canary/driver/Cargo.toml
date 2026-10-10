@@ -8,5 +8,10 @@ publish = false
 # The builder API the canary drives, and the runtime whose `JumpTable` the app applies.
 frust-drive = { path = "../../../crates/frust-drive" }
 frust-hotpatch = { path = "../../../crates/frust-hotpatch" }
+# The wire leg stands up both ends of the devtools transport (see `src/wire.rs`):
+# the root workspace's tooling-isolation charter keeps one crate from holding
+# both, and this standalone workspace is outside it.
+frust-devtools = { path = "../../../crates/frust-devtools", features = ["hotpatch"] }
+frust-devtools-protocol = { path = "../../../crates/frust-devtools-protocol" }
 anyhow = "1"
 serde_json = "1"

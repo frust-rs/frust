@@ -12,15 +12,25 @@ use tokio::task::JoinSet;
 
 use crate::dispatch::{self, ConnState, Decoded, SessionCtx, SideEffect};
 
-/// A single request line longer than this is treated as a broken client and
-/// closes the connection. Nothing in the v1 protocol comes close (the largest
-/// client→server payload is an `input_text` string); the cap exists so a
-/// peer that never sends a newline cannot grow this process's memory without
-/// bound.
+/// A single request line longer than this is treated as a broken client: it
+/// is answered with an error naming the cap
+/// ([`dispatch::oversized_line_response`]) and the connection closes. Nothing
+/// in the v1 protocol needs a longer line (a patch and its jump table travel
+/// as chunks under 1 MiB each); the cap exists so a peer that never sends a
+/// newline cannot grow this process's memory without bound.
 const MAX_LINE_BYTES: usize = 1 << 20;
 
-/// Read chunk size for the line reader — one page.
-const READ_CHUNK_BYTES: usize = 4096;
+/// How long a connection that sent an over-long line keeps reading (and
+/// discarding) what its client still sends after the error reply, before it
+/// closes. Closing with unread input pending would reset the connection and
+/// could destroy the reply in flight; draining lets the client read it.
+const OVERSIZED_DRAIN: Duration = Duration::from_secs(2);
+
+/// Least free space the line reader asks the socket to fill per `read`. A
+/// hot patch arrives as `patch_chunk` lines of ~683 KiB each, tens of them
+/// back to back, so a reader reading one page at a time would wake ~170
+/// times per line; 64 KiB takes each line in about a dozen reads.
+const READ_CHUNK_BYTES: usize = 64 * 1024;
 
 /// How long [`accept_loop`] lets in-flight connections finish their current
 /// write after shutdown is signalled, before aborting them. A connection only
@@ -136,7 +146,8 @@ async fn connection(stream: TcpStream, ctx: Arc<SessionCtx>, mut shutdown: watch
             line = reader.next_line() => match line {
                 Ok(Some(line)) => Step::Line(line),
                 Ok(None) => Step::Eof,
-                Err(e) => {
+                Err(ReadError::Oversized { id }) => Step::Oversized(id),
+                Err(ReadError::Io(e)) => {
                     log::debug!("frust-devtools: read error, closing connection: {e}");
                     Step::Eof
                 }
@@ -145,6 +156,19 @@ async fn connection(stream: TcpStream, ctx: Arc<SessionCtx>, mut shutdown: watch
 
         match step {
             Step::Shutdown | Step::Eof => break,
+
+            Step::Oversized(id) => {
+                log::warn!(
+                    "frust-devtools: a request line exceeded {MAX_LINE_BYTES} bytes; answering \
+                     and closing the connection"
+                );
+                let line = encode_line(&dispatch::oversized_line_response(id, MAX_LINE_BYTES));
+                if write_line(&mut write_half, &line).await.is_ok() {
+                    let _ = write_half.shutdown().await;
+                    let _ = tokio::time::timeout(OVERSIZED_DRAIN, reader.discard_to_eof()).await;
+                }
+                break;
+            }
 
             Step::Stats(frame) => {
                 let line = encode_line(&dispatch::frame_stats_notification(frame));
@@ -205,6 +229,8 @@ enum Step {
     Shutdown,
     Eof,
     Line(String),
+    /// A line grew past [`MAX_LINE_BYTES`]; the `id` salvaged from its start.
+    Oversized(Option<u64>),
     Stats(frust_devtools_protocol::FrameStats),
     StatsLagged(u64),
     StatsClosed,
@@ -234,15 +260,42 @@ async fn write_line(
     write_half.write_all(b"\n").await
 }
 
+/// Why [`LineReader::next_line`] produced no line.
+#[derive(Debug)]
+enum ReadError {
+    /// The socket failed.
+    Io(std::io::Error),
+    /// The buffered line passed [`MAX_LINE_BYTES`] without a newline; `id` is
+    /// the request id [`dispatch::salvage_id`] read off its start, if any.
+    Oversized { id: Option<u64> },
+}
+
+impl From<std::io::Error> for ReadError {
+    fn from(e: std::io::Error) -> Self {
+        ReadError::Io(e)
+    }
+}
+
 /// NDJSON line reader.
 ///
 /// Hand-rolled over [`AsyncReadExt::read`] rather than
 /// `tokio::io::BufReader::lines` for two reasons: `read` is documented
 /// cancel-safe (nothing is consumed when a `select!` branch loses), and the
 /// [`MAX_LINE_BYTES`] cap needs to be enforced *while* buffering, not after.
+///
+/// Each byte is scanned for the newline once: `scanned` remembers how much of
+/// `buf` is known newline-free, so a long line costs time linear in its
+/// length. (Rescanning the whole buffer after every read made a ~683 KiB
+/// `patch_chunk` line cost tens of MB of scanning, which dominated a large
+/// app's patch upload on a phone.)
 struct LineReader<R> {
     inner: R,
     buf: Vec<u8>,
+    /// How many leading bytes of `buf` hold no newline.
+    scanned: usize,
+    /// The `read` target, [`READ_CHUNK_BYTES`] long, kept off the future's
+    /// stack and reused.
+    chunk: Box<[u8]>,
 }
 
 impl<R: AsyncRead + Unpin> LineReader<R> {
@@ -250,6 +303,8 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
         Self {
             inner,
             buf: Vec::with_capacity(READ_CHUNK_BYTES),
+            scanned: 0,
+            chunk: vec![0u8; READ_CHUNK_BYTES].into_boxed_slice(),
         }
     }
 
@@ -257,9 +312,18 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
     ///
     /// Cancel-safe: buffered bytes stay in `self.buf`, and the awaited `read`
     /// consumes nothing when it is dropped.
-    async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+    async fn next_line(&mut self) -> Result<Option<String>, ReadError> {
         loop {
-            if let Some(newline) = self.buf.iter().position(|b| *b == b'\n') {
+            let unscanned = &self.buf[self.scanned..];
+            if let Some(at) = unscanned.iter().position(|b| *b == b'\n') {
+                let newline = self.scanned + at;
+                // What follows the newline has not been scanned yet.
+                self.scanned = 0;
+                // A whole line can arrive within one read past the cap: it
+                // is refused all the same.
+                if newline > MAX_LINE_BYTES {
+                    return Err(self.oversized());
+                }
                 let mut line: Vec<u8> = self.buf.drain(..=newline).collect();
                 line.pop(); // the '\n'
                 if line.last() == Some(&b'\r') {
@@ -267,21 +331,38 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
                 }
                 return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
             }
+            self.scanned = self.buf.len();
             if self.buf.len() > MAX_LINE_BYTES {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("devtools line exceeded {MAX_LINE_BYTES} bytes without a newline"),
-                ));
+                return Err(self.oversized());
             }
 
-            let mut chunk = [0u8; READ_CHUNK_BYTES];
-            let read = self.inner.read(&mut chunk).await?;
+            let read = self.inner.read(&mut self.chunk).await?;
             if read == 0 {
                 // A trailing partial line is not a request — an unterminated
                 // line is by definition incomplete under NDJSON framing.
                 return Ok(None);
             }
-            self.buf.extend_from_slice(&chunk[..read]);
+            self.buf.extend_from_slice(&self.chunk[..read]);
+        }
+    }
+
+    /// Drops the buffered over-long line, keeping the id it started with.
+    fn oversized(&mut self) -> ReadError {
+        let id = dispatch::salvage_id(&self.buf);
+        self.buf.clear();
+        self.scanned = 0;
+        ReadError::Oversized { id }
+    }
+
+    /// Reads and discards everything until the peer closes or the socket
+    /// fails: what is left of an over-long line, after its error reply.
+    async fn discard_to_eof(&mut self) {
+        self.buf.clear();
+        self.scanned = 0;
+        while let Ok(read) = self.inner.read(&mut self.chunk).await {
+            if read == 0 {
+                break;
+            }
         }
     }
 }
@@ -292,7 +373,7 @@ mod tests {
 
     /// Drives [`LineReader`] over an in-memory reader — no socket, no runtime
     /// beyond the tiny one this test builds.
-    fn read_all_lines(input: &[u8]) -> std::io::Result<Vec<String>> {
+    fn read_all_lines(input: &[u8]) -> Result<Vec<String>, ReadError> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("current-thread runtime");
@@ -333,11 +414,161 @@ mod tests {
         assert_eq!(lines[0].len(), READ_CHUNK_BYTES * 3);
     }
 
+    /// Hands out its input a few bytes per `read`, as a slow socket does.
+    struct Trickle {
+        input: Vec<u8>,
+        at: usize,
+        step: usize,
+    }
+
+    impl AsyncRead for Trickle {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            out: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let end = (self.at + self.step)
+                .min(self.input.len())
+                .min(self.at + out.remaining());
+            let (from, to) = (self.at, end);
+            out.put_slice(&self.input[from..to]);
+            self.at = end;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn lines_split_across_many_small_reads_keep_their_boundaries() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let long = "y".repeat(READ_CHUNK_BYTES * 2 + 17);
+        let input = format!("a\n{long}\nbc\n\nd");
+        for step in [1, 3, 4096, READ_CHUNK_BYTES + 5] {
+            let lines = rt.block_on(async {
+                let mut reader = LineReader::new(Trickle {
+                    input: input.clone().into_bytes(),
+                    at: 0,
+                    step,
+                });
+                let mut lines = Vec::new();
+                while let Some(line) = reader.next_line().await.expect("no error") {
+                    lines.push(line);
+                }
+                lines
+            });
+            assert_eq!(lines, vec!["a", long.as_str(), "bc", ""], "step {step}");
+        }
+    }
+
     #[test]
     fn an_unbounded_line_is_refused_rather_than_buffered_forever() {
         let input = vec![b'x'; MAX_LINE_BYTES + READ_CHUNK_BYTES];
         let err = read_all_lines(&input).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(matches!(err, ReadError::Oversized { id: None }), "{err:?}");
+    }
+
+    #[test]
+    fn an_over_long_request_line_keeps_the_id_it_started_with() {
+        let mut input =
+            br#"{"jsonrpc":"2.0","id":42,"method":"input_text","params":{"text":""#.to_vec();
+        input.resize(MAX_LINE_BYTES + READ_CHUNK_BYTES, b'x');
+        let err = read_all_lines(&input).unwrap_err();
+        assert!(
+            matches!(err, ReadError::Oversized { id: Some(42) }),
+            "{err:?}"
+        );
+    }
+
+    /// The smallest backend there is: nothing here is reached by a line the
+    /// reader refuses.
+    struct Inert;
+
+    impl crate::DevtoolsBackend for Inert {
+        fn widget_tree(&self) -> frust_devtools_protocol::WidgetTreeDump {
+            frust_devtools_protocol::WidgetTreeDump { roots: Vec::new() }
+        }
+        fn widget_props(&self, _id: u64) -> Option<frust_devtools_protocol::WidgetProps> {
+            None
+        }
+        fn metrics_snapshot(&self) -> frust_devtools_protocol::MetricsSnapshot {
+            frust_devtools_protocol::MetricsSnapshot {
+                rss_bytes: None,
+                uptime_ms: 0,
+            }
+        }
+        fn inject_tap(
+            &self,
+            _p: frust_devtools_protocol::InputTapParams,
+        ) -> Result<(), crate::BackendError> {
+            Ok(())
+        }
+        fn inject_scroll(
+            &self,
+            _p: frust_devtools_protocol::InputScrollParams,
+        ) -> Result<(), crate::BackendError> {
+            Ok(())
+        }
+        fn inject_text(&self, _t: &str) -> Result<(), crate::BackendError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_over_long_line_is_answered_with_an_error_naming_the_cap_before_the_close() {
+        use std::io::{BufRead as _, Write as _};
+
+        let service = crate::Service::start_with_config(
+            Inert,
+            crate::AppInfo::new("over-long", "0.0.0"),
+            crate::ServiceConfig {
+                require_token: false,
+                ..crate::ServiceConfig::default()
+            },
+        )
+        .expect("service starts");
+        let stream = std::net::TcpStream::connect(("127.0.0.1", service.port())).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        let mut writer = stream.try_clone().expect("clone");
+        // Written on its own thread: the server stops buffering at the cap,
+        // so the write completes only through its drain.
+        let sender = std::thread::spawn(move || {
+            let mut line =
+                br#"{"jsonrpc":"2.0","id":42,"method":"input_text","params":{"text":""#.to_vec();
+            line.resize(MAX_LINE_BYTES + 64 * 1024, b'x');
+            line.extend_from_slice(b"\"}}\n");
+            let _ = writer.write_all(&line);
+        });
+
+        let mut reader = std::io::BufReader::new(stream);
+        let mut reply = String::new();
+        reader
+            .read_line(&mut reply)
+            .expect("an error reply arrives");
+        let response: frust_devtools_protocol::Response =
+            frust_devtools_protocol::serde_json::from_str(reply.trim_end()).expect("a response");
+        assert_eq!(response.id, 42);
+        match response.outcome {
+            frust_devtools_protocol::ResponseOutcome::Error { error } => {
+                assert_eq!(
+                    error.code,
+                    frust_devtools_protocol::RpcError::INVALID_REQUEST
+                );
+                assert!(
+                    error.message.contains(&MAX_LINE_BYTES.to_string()),
+                    "{}",
+                    error.message
+                );
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+        // ...and then the connection closes.
+        let mut rest = String::new();
+        assert_eq!(reader.read_line(&mut rest).expect("eof"), 0, "{rest}");
+        sender.join().expect("sender");
+        service.shutdown();
     }
 
     #[test]
