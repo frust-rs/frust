@@ -18,14 +18,14 @@
 //! only the overlay chrome on top, while the debug recording the standard
 //! verify gate and `widget-snapshots` produce shows the magenta fill.
 
-use frust_core::{AnyView, any};
+use frust_core::View;
 use frust_widgets::{
     Align, Alignment, EdgeInsets, Padding, PlatformViewView, button, container, platform_view,
     shield, stack, text,
 };
 use peniko::Color;
 
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 /// The overlay chrome's card fill and ink — explicit, because the label sits
 /// on the platform-view slot rather than on the variant's own surface.
@@ -47,8 +47,8 @@ fn maybe_debug_fill(view: PlatformViewView) -> PlatformViewView {
     }
 }
 
-fn platform_view_case() -> AnyView<()> {
-    any(stack()
+fn platform_view_case() -> impl View<()> {
+    stack()
         .child(
             maybe_debug_fill(
                 platform_view("dev.frust.MapFactory")
@@ -67,11 +67,11 @@ fn platform_view_case() -> AnyView<()> {
             .fill(CARD)
             .radius(10.0)
             .size_centered(260.0, 40.0),
-        )))
+        ))
 }
 
-fn shield_case() -> AnyView<()> {
-    any(stack()
+fn shield_case() -> impl View<()> {
+    stack()
         .child(maybe_debug_fill(
             platform_view("dev.frust.MapFactory")
                 .interactive()
@@ -97,7 +97,7 @@ fn shield_case() -> AnyView<()> {
                 EdgeInsets::all(16.0),
                 shield(button("Recenter", |_: &mut ()| {})),
             ),
-        )))
+        ))
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.
@@ -109,7 +109,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: platform_view_case,
+        build: case_build!(platform_view_case),
     },
     Case {
         slug: "shield",
@@ -118,6 +118,6 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: shield_case,
+        build: case_build!(shield_case),
     },
 ];

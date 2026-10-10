@@ -94,6 +94,7 @@ pub const INTERACTIVE: &[Entry] = &[
 /// The `activity-indicator` case, unfrozen. See the [module docs](self)'s
 /// "not a state problem" section: nothing here owns state, because nothing
 /// about this widget reports anything back to an app to hold.
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn activity_indicator_case() -> AnyView<()> {
     any(framed(cupertino_activity_indicator()))
 }
@@ -157,6 +158,7 @@ impl Component for SwitchCase {
     }
 }
 
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn switch_case() -> AnyView<()> {
     any(component(SwitchCase))
 }
@@ -203,6 +205,7 @@ impl Component for TabBarCase {
     }
 }
 
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn tabbar_case() -> AnyView<()> {
     any(component(TabBarCase))
 }
@@ -284,7 +287,7 @@ impl Component for AlertDialogCase {
             let outcome = root_readout.borrow().clone();
             let reopen_controller = root_controller.clone();
             let reopen_readout = root_readout.clone();
-            any(column()
+            column()
                 .child(text(outcome))
                 .child(SizedBox(None, Some(12.0)))
                 .child(cupertino_button(
@@ -293,11 +296,12 @@ impl Component for AlertDialogCase {
                         push_alert_dialog(&reopen_controller, &reopen_readout);
                     },
                 ))
-                .cross_axis(CrossAxisAlignment::Center))
+                .cross_axis(CrossAxisAlignment::Center)
         }))
     }
 }
 
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn alert_dialog_case() -> AnyView<()> {
     any(component(AlertDialogCase))
 }
@@ -365,7 +369,7 @@ impl Component for ActionSheetCase {
             let outcome = root_readout.borrow().clone();
             let reopen_controller = root_controller.clone();
             let reopen_readout = root_readout.clone();
-            any(column()
+            column()
                 .child(text(outcome))
                 .child(SizedBox(None, Some(12.0)))
                 .child(cupertino_button(
@@ -374,11 +378,12 @@ impl Component for ActionSheetCase {
                         push_action_sheet(&reopen_controller, &reopen_readout);
                     },
                 ))
-                .cross_axis(CrossAxisAlignment::Center))
+                .cross_axis(CrossAxisAlignment::Center)
         }))
     }
 }
 
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn action_sheet_case() -> AnyView<()> {
     any(component(ActionSheetCase))
 }

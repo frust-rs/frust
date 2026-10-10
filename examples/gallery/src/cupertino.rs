@@ -5,7 +5,7 @@
 //! Cupertino theme. See the crate docs and `crate::base` for the pure-`View`/slug-rule
 //! contract every case in this registry follows.
 
-use frust_core::{AnyView, any};
+use frust_core::View;
 use frust_cupertino::{
     CupertinoActionStyle, CupertinoAlertDialogView, CupertinoButtonSize, CupertinoButtonStyle,
     action, cupertino_activity_indicator, cupertino_button, cupertino_nav_bar, cupertino_switch,
@@ -14,10 +14,10 @@ use frust_cupertino::{
 use frust_widgets::{CrossAxisAlignment, NavigatorController, SizedBox, column, row, text};
 
 use super::base::framed;
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
-fn button_case() -> AnyView<()> {
-    any(framed(
+fn button_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 cupertino_button("Small Filled", |_: &mut ()| {})
@@ -37,15 +37,15 @@ fn button_case() -> AnyView<()> {
                     .style(CupertinoButtonStyle::Glass),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn activity_indicator_case() -> AnyView<()> {
-    any(framed(cupertino_activity_indicator().animating(false)))
+fn activity_indicator_case() -> impl View<()> {
+    framed(cupertino_activity_indicator().animating(false))
 }
 
-fn navbar_case() -> AnyView<()> {
-    any(framed(
+fn navbar_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 cupertino_nav_bar("Settings")
@@ -55,11 +55,11 @@ fn navbar_case() -> AnyView<()> {
             .child(SizedBox(None, Some(16.0)))
             .child(text("Navbar with leading and trailing content"))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn switch_case() -> AnyView<()> {
-    any(framed(
+fn switch_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 row()
@@ -77,11 +77,11 @@ fn switch_case() -> AnyView<()> {
                     .cross_axis(CrossAxisAlignment::Center),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn tabbar_case() -> AnyView<()> {
-    any(framed(
+fn tabbar_case() -> impl View<()> {
+    framed(
         column()
             .child(text("Tab bar (selected: 0)"))
             .child(SizedBox(None, Some(12.0)))
@@ -91,12 +91,12 @@ fn tabbar_case() -> AnyView<()> {
                 |_: &mut (), _: usize| {},
             ))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn alert_dialog_case() -> AnyView<()> {
+fn alert_dialog_case() -> impl View<()> {
     let controller: NavigatorController<()> = NavigatorController::new();
-    any(framed(CupertinoAlertDialogView {
+    framed(CupertinoAlertDialogView {
         title: "Confirm".into(),
         message: Some("Are you sure?".into()),
         actions: vec![
@@ -104,20 +104,20 @@ fn alert_dialog_case() -> AnyView<()> {
             action("OK").style(CupertinoActionStyle::Default),
         ],
         controller,
-    }))
+    })
 }
 
-fn action_sheet_case() -> AnyView<()> {
+fn action_sheet_case() -> impl View<()> {
     use frust_cupertino::CupertinoActionSheetView;
     let controller: NavigatorController<()> = NavigatorController::new();
-    any(framed(CupertinoActionSheetView {
+    framed(CupertinoActionSheetView {
         actions: vec![
             action("Save"),
             action("Delete").style(CupertinoActionStyle::Destructive),
         ],
         cancel: Some("Cancel".into()),
         controller,
-    }))
+    })
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.
@@ -129,7 +129,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Cupertino,
-        build: button_case,
+        build: case_build!(button_case),
     },
     Case {
         slug: "cupertino/activity-indicator",
@@ -138,7 +138,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Cupertino,
-        build: activity_indicator_case,
+        build: case_build!(activity_indicator_case),
     },
     Case {
         slug: "cupertino/alert-dialog",
@@ -147,7 +147,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Cupertino,
-        build: alert_dialog_case,
+        build: case_build!(alert_dialog_case),
     },
     Case {
         slug: "cupertino/action-sheet",
@@ -156,7 +156,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Cupertino,
-        build: action_sheet_case,
+        build: case_build!(action_sheet_case),
     },
     Case {
         slug: "cupertino/navbar",
@@ -165,7 +165,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Cupertino,
-        build: navbar_case,
+        build: case_build!(navbar_case),
     },
     Case {
         slug: "cupertino/switch",
@@ -174,7 +174,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Cupertino,
-        build: switch_case,
+        build: case_build!(switch_case),
     },
     Case {
         slug: "cupertino/tabbar",
@@ -183,6 +183,6 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Cupertino,
-        build: tabbar_case,
+        build: case_build!(tabbar_case),
     },
 ];

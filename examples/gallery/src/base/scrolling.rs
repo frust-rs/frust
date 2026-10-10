@@ -4,7 +4,7 @@
 //! registry follows, and [`super::framed`] for why neither case fills its
 //! own backdrop.
 
-use frust_core::{AnyView, any};
+use frust_core::View;
 use frust_widgets::{
     Axis, CrossAxisAlignment, FlexChild, FlexView, SizedBox, container, inflexible, list_view,
     scroll_view, text,
@@ -12,7 +12,7 @@ use frust_widgets::{
 use peniko::Color;
 
 use super::framed;
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 /// Explicit caption color for row text painted directly onto a fixed
 /// `row_color` swatch — self-consistent (both literal, not theme-driven)
@@ -53,8 +53,8 @@ const ROW_WIDTH: f64 = 320.0;
 /// with many rows — is what fills the frame and shows a clipped second row.
 const LIST_ITEM_EXTENT: f64 = 132.0;
 
-fn list_view_case() -> AnyView<()> {
-    any(framed(
+fn list_view_case() -> impl View<()> {
+    framed(
         SizedBox(Some(LIST_VIEWPORT.0), Some(LIST_VIEWPORT.1)).child(list_view(
             6,
             LIST_ITEM_EXTENT,
@@ -64,10 +64,10 @@ fn list_view_case() -> AnyView<()> {
                     .size_centered(ROW_WIDTH, LIST_ITEM_EXTENT - 12.0)
             },
         )),
-    ))
+    )
 }
 
-fn scroll_view_case() -> AnyView<()> {
+fn scroll_view_case() -> impl View<()> {
     let rows: Vec<FlexChild<()>> = (0..8)
         .map(|i| {
             inflexible(
@@ -77,9 +77,9 @@ fn scroll_view_case() -> AnyView<()> {
             )
         })
         .collect();
-    any(framed(scroll_view(
+    framed(scroll_view(
         FlexView::new(Axis::Vertical, rows).cross_axis(CrossAxisAlignment::Center),
-    )))
+    ))
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.
@@ -91,7 +91,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: list_view_case,
+        build: case_build!(list_view_case),
     },
     Case {
         slug: "scroll-view",
@@ -100,6 +100,6 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: scroll_view_case,
+        build: case_build!(scroll_view_case),
     },
 ];

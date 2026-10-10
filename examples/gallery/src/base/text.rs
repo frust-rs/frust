@@ -7,21 +7,21 @@
 //! themed `on_surface` default, and the heading's one explicit colour is an
 //! accent picked to stay legible against a light *and* a dark surface.
 
-use frust_core::{AnyView, any};
+use frust_core::View;
 use frust_text::FontWeight;
 use frust_widgets::{CrossAxisAlignment, column, text};
 use peniko::Color;
 
 use super::framed;
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 /// The heading's explicit glyph colour: a mid-tone blue that keeps usable
 /// contrast against both the light (`#FAFAFA`) and the dark (`#121212`)
 /// neutral surface the recorder clears to.
 const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 
-fn text_case() -> AnyView<()> {
-    any(framed(
+fn text_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 text("Hello, Frust")
@@ -31,7 +31,7 @@ fn text_case() -> AnyView<()> {
             )
             .child(text("the text leaf").size(15.0))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 pub(super) const TEXT: Case = Case {
@@ -41,5 +41,5 @@ pub(super) const TEXT: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: text_case,
+    build: case_build!(text_case),
 };

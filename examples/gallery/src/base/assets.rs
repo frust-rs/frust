@@ -13,7 +13,7 @@
 //! `on_surface` default (see [`super`]'s "The variant has to reach the
 //! pixels").
 
-use frust_core::{AnyView, View, any};
+use frust_core::View;
 use frust_widgets::icons;
 use frust_widgets::{
     CrossAxisAlignment, IconSource, Image, ImageFit, ImageSource, SizedBox, column, container,
@@ -22,7 +22,7 @@ use frust_widgets::{
 use peniko::Color;
 
 use super::framed;
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 
@@ -34,13 +34,13 @@ const CHIP: Color = Color::from_rgb8(0xE2, 0xE8, 0xF0);
 /// rather than onto the variant's own surface.
 const CHIP_INK: Color = Color::from_rgb8(0x33, 0x41, 0x55);
 
-fn icon_case() -> AnyView<()> {
-    any(framed(
+fn icon_case() -> impl View<()> {
+    framed(
         column()
             .child(icon(icons::HOME).size(128.0).color(ACCENT).label("Home"))
             .child(text("icon(icons::HOME).size(128.0)").size(14.0))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// One labelled swatch in the [`icon_sets_case`] grid.
@@ -56,8 +56,8 @@ fn icon_chip(source: IconSource, label: &'static str) -> impl View<()> {
     .size_centered(104.0, 84.0)
 }
 
-fn icon_sets_case() -> AnyView<()> {
-    any(framed(
+fn icon_sets_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 row()
@@ -71,7 +71,7 @@ fn icon_sets_case() -> AnyView<()> {
                     .child(icon_chip(icons::STAR, "star"))
                     .child(icon_chip(icons::MOOD, "mood")),
             ),
-    ))
+    )
 }
 
 /// A small procedurally generated checkerboard, decoded straight from RGBA8
@@ -98,10 +98,10 @@ fn checkerboard_source() -> ImageSource {
     ImageSource::from_rgba8(pixels, SIDE, SIDE)
 }
 
-fn image_case() -> AnyView<()> {
-    any(framed(
+fn image_case() -> impl View<()> {
+    framed(
         SizedBox(Some(300.0), Some(180.0)).child(Image(checkerboard_source()).fit(ImageFit::Cover)),
-    ))
+    )
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.
@@ -113,7 +113,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: icon_case,
+        build: case_build!(icon_case),
     },
     Case {
         slug: "icon-sets",
@@ -122,7 +122,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: icon_sets_case,
+        build: case_build!(icon_sets_case),
     },
     Case {
         slug: "image",
@@ -131,6 +131,6 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: image_case,
+        build: case_build!(image_case),
     },
 ];

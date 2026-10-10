@@ -3,7 +3,7 @@
 //! the pure-`View`/slug-rule contract every case in this registry follows,
 //! and [`super::framed`] for why neither case fills its own backdrop.
 
-use frust_core::{AnyView, any};
+use frust_core::View;
 use frust_text::FontWeight;
 use frust_widgets::{
     CrossAxisAlignment, NavigatorController, SizedBox, column, container, hero, navigator, text,
@@ -11,7 +11,7 @@ use frust_widgets::{
 use peniko::Color;
 
 use super::framed;
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 /// Shared accent used for the hero's shared-element avatar swatch.
 const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
@@ -20,8 +20,8 @@ const ACCENT: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 /// single build has no second, same-tagged page to morph into, so this case
 /// shows the "before" state: a tagged avatar swatch a `navigator` push/pop
 /// would later morph, painted exactly as it renders at rest.
-fn hero_case() -> AnyView<()> {
-    any(framed(
+fn hero_case() -> impl View<()> {
+    framed(
         column()
             .child(hero(
                 "preview-avatar",
@@ -33,7 +33,7 @@ fn hero_case() -> AnyView<()> {
             .child(SizedBox(None, Some(12.0)))
             .child(text("hero(\"preview-avatar\", ..) — morphs across a matching tag").size(12.0))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// A `navigator` is a retained page stack (see its own docs); a single pure
@@ -41,8 +41,8 @@ fn hero_case() -> AnyView<()> {
 /// the stack's static "before" state: the initial page as it renders on
 /// first mount, filling the frame itself rather than being wrapped in an
 /// outer `framed(..)`.
-fn navigator_case() -> AnyView<()> {
-    any(navigator(&NavigatorController::<()>::new(), || {
+fn navigator_case() -> impl View<()> {
+    navigator(&NavigatorController::<()>::new(), || {
         container(
             column()
                 .child(text("Home").size(18.0).weight(FontWeight::BOLD))
@@ -51,7 +51,7 @@ fn navigator_case() -> AnyView<()> {
                 .cross_axis(CrossAxisAlignment::Center),
         )
         .size_centered(Case::DEFAULT_SIZE.width, Case::DEFAULT_SIZE.height)
-    }))
+    })
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.
@@ -63,7 +63,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: hero_case,
+        build: case_build!(hero_case),
     },
     Case {
         slug: "navigator",
@@ -72,6 +72,6 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: navigator_case,
+        build: case_build!(navigator_case),
     },
 ];
