@@ -407,15 +407,18 @@ impl AppState {
     ///
     /// A session's hot-patch success flash counts while it is fading
     /// ([`SessionView::hot_patch_flash_live`]): the tick flows for exactly the
-    /// flash's [`SessionView::HOT_PATCH_FLASH_FRAMES`] and stops afterwards.
+    /// flash's [`SessionView::HOT_PATCH_FLASH_FRAMES`] and stops afterwards;
+    /// so does a hot patch in flight ([`SessionView::hot_patching`]), whose
+    /// spinner and elapsed time advance every tick until the answer.
     pub fn animating(&self) -> bool {
         !self.toasts.items.is_empty()
             || self.mcp_panel_open
             || self.dap_settings_open
-            || self
-                .sessions
-                .iter()
-                .any(|s| is_transient(&s.state) || s.hot_patch_flash_live(self.animation_frame))
+            || self.sessions.iter().any(|s| {
+                is_transient(&s.state)
+                    || s.hot_patching()
+                    || s.hot_patch_flash_live(self.animation_frame)
+            })
     }
 
     /// What the embedded MCP server is doing — the single read the UI (and

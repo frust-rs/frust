@@ -111,21 +111,24 @@ evictable, while a launch not yet registered stays live (see [LIMITATIONS.md](LI
 Android-device or iOS-simulator app session (`SessionTarget::supports_watch`); any other session
 refuses with a toast. `ToggleWatch` flips the session's watch flag and asks `runner` to start/stop
 its `supervise::watch` watcher (`Effect::WatchSet { id, on }`). A settled save-burst's
-`Message::WatchTriggered` is a no-op unless the session still has watch on and no restart is
-already pending (`close_on_exit`) — the guard that keeps one save-burst to one relaunch. A live hot
-session then becomes `Effect::HotPatch { session, paths }`: that session's `HotSessions` worker runs
-`frust-drive`'s `HotSession::on_change` off the UI thread and posts
-`Message::HotPatchOutcome { session, outcome }`, which `hot_patch_outcome` toasts — `patched in N
-ms`, no change, a compile failure (diagnostics appended to the log, the app untouched) or `restart
-required: <reason>` verbatim — a `RestartRequired` falling through to the restart below. A
-`Patched` answer also stamps `SessionView::hot_patch_flash`, which tints the session's tab
-background and watch status segment toward the theme's success colour for ten ticks (500 ms) while
-`AppState::animating()` keeps the tick alive. `r` (`Message::HotPatchNow`, palette row 'Hot patch
-now') asks for the same patch without a save: `Effect::HotPatchNow` makes the session's worker scan
-the shared watch set for files changed since its watermark (`watch::changed_since`), so it works
-with or without a watcher; a `RestartRequired` answer to it restarts even an unwatched session. On
-a cold app session `r` restarts with a toast. A session that is not hot, or has already ended,
-restarts directly. Every such restart and `R`'s
+`Message::WatchTriggered` is a no-op unless the session still has watch on and no restart is already
+pending (`close_on_exit`) — the guard that keeps one save-burst to one relaunch. A live hot session
+then becomes `Effect::HotPatch { session, paths }`: that session's `HotSessions` worker runs
+`frust-drive`'s `HotSession::on_change` off the UI thread and posts `Message::HotPatchOutcome {
+session, outcome }`, which `hot_patch_outcome` toasts — `patched in N ms`, no change, a compile
+failure (diagnostics appended to the log, the app untouched) or `restart required: <reason>`
+verbatim — a `RestartRequired` falling through to the restart below. A `Patched` answer also stamps
+`SessionView::hot_patch_flash`, which tints the session's tab background, the whole tab-bar header
+and the watch status segment toward the theme's success colour for ten ticks (500 ms) while
+`AppState::animating()` keeps the tick alive. Between a request and its answer
+`SessionView::hot_patches_pending` counts the patch in flight (one per
+`Effect::HotPatch`/`HotPatchNow`, one off per outcome, zeroed when the session ends): the tab glyph
+spins and the phase line shows a shimmering `Hot patching…` with its elapsed time. `r`
+(`Message::HotPatchNow`, palette row 'Hot patch now') asks for the same patch without a save:
+`Effect::HotPatchNow` makes the session's worker scan the shared watch set for files changed since
+its watermark (`watch::changed_since`), so it works with or without a watcher; a `RestartRequired`
+answer to it restarts even an unwatched session. On a cold app session `r` restarts with a toast. A
+session that is not hot, or has already ended, restarts directly. Every such restart and `R`'s
 `RestartSession` route through one shared pure-core step, `restart_session_at` (`engine::update`),
 so the `close_on_exit`/re-registration/focus handling above is written once.
 

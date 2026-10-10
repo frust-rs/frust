@@ -85,8 +85,10 @@ pub fn render_main(
     // reserved only while the active session is actually `Building`/
     // `Installing`, so a streaming/terminal session's log pane loses no rows
     // to a hint it no longer needs.
-    let show_phase = active_session
-        .is_some_and(|s| matches!(s.state, SessionState::Building | SessionState::Installing));
+    // A hot patch in flight borrows the same row for its own indicator.
+    let show_phase = active_session.is_some_and(|s| {
+        matches!(s.state, SessionState::Building | SessionState::Installing) || s.hot_patching()
+    });
 
     let mut constraints = vec![Constraint::Length(1)]; // tab bar
     if show_phase {
@@ -153,6 +155,11 @@ fn render_phase_line(
         area,
     );
     let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+    if session.hot_patching() {
+        spans.extend(hot_patch_spans(session, animation_frame, theme));
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     match (&session.state, &session.current_phase) {
         (SessionState::Installing, Some(phase)) | (SessionState::Building, Some(phase)) => {
             spans.extend(themed_shimmer_spans(
@@ -180,6 +187,40 @@ fn render_phase_line(
         _ => return, // render_main only calls this while Building/Installing
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The runner's tick in milliseconds: an animation frame's length, for the
+/// in-flight hot patch's elapsed time.
+const TICK_MS: u64 = 50;
+
+/// The in-flight hot patch's phase line (fdemon's shimmering `Reloading`):
+/// a warn-coloured spinner, `Hot patching…` under the themed shimmer, then
+/// the time since the request in muted seconds.
+fn hot_patch_spans(
+    session: &SessionView,
+    animation_frame: u64,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let glyph = spinner_char(animation_frame / SPINNER_TICKS_PER_FRAME);
+    let mut spans = vec![Span::styled(
+        format!("{glyph} "),
+        Style::default().fg(theme.warn()),
+    )];
+    spans.extend(themed_shimmer_spans(
+        "Hot patching\u{2026}",
+        animation_frame,
+        theme,
+        Modifier::BOLD,
+    ));
+    let frames = session
+        .hot_patch_started
+        .map_or(0, |start| animation_frame.wrapping_sub(start));
+    let tenths = frames * TICK_MS / 100;
+    spans.push(Span::styled(
+        format!("  {}.{}s", tenths / 10, tenths % 10),
+        Style::default().fg(theme.muted()),
+    ));
+    spans
 }
 
 /// The status glyph + color for a session's lifecycle state. `animation_frame`
@@ -237,10 +278,16 @@ fn render_tab_bar(
     theme: &Theme,
     mouse: &mut MouseCtx,
 ) {
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.surface())),
-        area,
-    );
+    // The whole header pulses with the freshest hot-patch flash of any
+    // session (fdemon's header reload flash), so a background tab's patch
+    // shows too, on top of the patched tab's own tint.
+    let pulse = state
+        .sessions
+        .iter()
+        .map(|s| flash_alpha(s.hot_patch_flash, state.animation_frame))
+        .fold(0.0_f32, f32::max);
+    let header = Style::default().bg(flash_bg(theme.surface(), theme.success(), pulse));
+    frame.render_widget(Block::default().style(header), area);
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     // Column cursor (relative to `area.x`) so click rects land on the terminal.
@@ -267,7 +314,14 @@ fn render_tab_bar(
 
         for (idx, session) in group {
             let active = state.active_session == Some(idx);
-            let (glyph, glyph_color) = status_style(&session.state, state.animation_frame, theme);
+            let (glyph, glyph_color) = if session.hot_patching() {
+                (
+                    spinner_char(state.animation_frame / SPINNER_TICKS_PER_FRAME).to_string(),
+                    theme.warn(),
+                )
+            } else {
+                status_style(&session.state, state.animation_frame, theme)
+            };
             let number = if idx < 9 {
                 format!("{} ", idx + 1)
             } else {
@@ -1537,6 +1591,68 @@ mod tests {
         );
     }
 
+    /// Row `y` of `buf` as one string.
+    fn buffer_row(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (buf.area.left()..buf.area.right())
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_pending_hot_patch_spins_the_tab_and_shows_a_timed_phase_line() {
+        let theme = theme();
+        let mut state = two_watched_sessions();
+        let idle = render_main_to_buffer(&state, &theme);
+        assert!(!buffer_row(&idle, 1).contains("Hot patching"));
+
+        state.animation_frame = 100;
+        state.sessions[0].begin_hot_patch(100);
+        state.animation_frame = 123;
+        let busy = render_main_to_buffer(&state, &theme);
+        let tabs = buffer_row(&busy, 0);
+        let spinner = spinner_char(123 / SPINNER_TICKS_PER_FRAME);
+        assert!(
+            tabs.contains(&format!("{spinner} tab0")),
+            "the tab glyph spins: {tabs}"
+        );
+        let phase = buffer_row(&busy, 1);
+        assert!(
+            phase.contains(&format!("{spinner} Hot patching\u{2026}")),
+            "{phase}"
+        );
+        assert!(phase.contains("1.1s"), "23 frames of 50 ms: {phase}");
+
+        state.sessions[0].end_hot_patch();
+        let done = render_main_to_buffer(&state, &theme);
+        assert!(!buffer_row(&done, 1).contains("Hot patching"));
+        assert!(
+            buffer_row(&done, 0).contains("\u{25b6} tab0"),
+            "back to running"
+        );
+    }
+
+    #[test]
+    fn a_completed_patch_pulses_the_whole_header_then_fades() {
+        use crate::engine::update;
+        use crate::ui::anim::FLASH_FRAMES;
+
+        let theme = theme();
+        let mut state = two_watched_sessions();
+        let idle = render_main_to_buffer(&state, &theme);
+        // A header cell past every tab: the bare tab-bar background.
+        let edge = idle.area.right() - 1;
+
+        update(&mut state, patched(0));
+        let pulsing = render_main_to_buffer(&state, &theme);
+        assert_ne!(pulsing[(edge, 0)].bg, idle[(edge, 0)].bg, "header tinted");
+
+        for _ in 0..FLASH_FRAMES {
+            update(&mut state, Message::Tick);
+        }
+        let faded = render_main_to_buffer(&state, &theme);
+        assert_eq!(faded[(edge, 0)].bg, idle[(edge, 0)].bg, "header idle again");
+    }
+
     #[test]
     fn an_inactive_tab_flashes_alone_and_a_non_rgb_theme_does_not_tint() {
         use crate::engine::update;
@@ -1551,6 +1667,12 @@ mod tests {
         let flashing = render_main_to_buffer(&state, &theme);
         assert_ne!(flashing[(tab1, 0)].bg, idle[(tab1, 0)].bg, "patched tab");
         assert_eq!(flashing[(tab0, 0)].bg, idle[(tab0, 0)].bg, "other tab");
+        let edge = idle.area.right() - 1;
+        assert_ne!(
+            flashing[(edge, 0)].bg,
+            idle[(edge, 0)].bg,
+            "a background tab's patch pulses the header too"
+        );
 
         let ansi = Theme::frust_dark_at(crate::ui::theme::ColorDepth::Ansi16);
         let mut idle_state = two_watched_sessions();

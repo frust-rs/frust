@@ -401,6 +401,17 @@ pub struct SessionView {
     /// `RestartRequired` answering a manual request restarts the session
     /// even with its watcher off (a watched session restarts regardless).
     pub hot_patch_requested: bool,
+    /// Hot patches asked of the runner and not yet answered: one per
+    /// `Effect::HotPatchNow` (`r`) and per watched `Effect::HotPatch`, one
+    /// off per `Message::HotPatchOutcome` for this session. The runner's
+    /// worker answers every request exactly once unless the session stops
+    /// mid-patch, so a terminal `SessionState` resets it to zero. Non-zero
+    /// drives the in-flight indicator (see [`Self::hot_patching`]).
+    pub hot_patches_pending: u32,
+    /// The `AppState::animation_frame` the current run of pending patches
+    /// started at — the in-flight indicator's elapsed time. `None` whenever
+    /// [`Self::hot_patches_pending`] is zero.
+    pub hot_patch_started: Option<u64>,
     /// The `AppState::animation_frame` at this session's last completed hot
     /// patch (`HotOutcome::Patched`), or `None` before any. It drives the
     /// one-shot success flash on the session's tab and watch status segment:
@@ -453,6 +464,36 @@ impl SessionView {
             .is_some_and(|stamp| animation_frame.wrapping_sub(stamp) < Self::HOT_PATCH_FLASH_FRAMES)
     }
 
+    /// Whether a hot patch is in flight for this live session: at least one
+    /// request awaits its outcome and the session has not ended.
+    pub fn hot_patching(&self) -> bool {
+        self.hot_patches_pending > 0 && !self.state.is_terminal()
+    }
+
+    /// Count one more hot-patch request, starting the indicator's clock at
+    /// `animation_frame` when none was pending.
+    pub fn begin_hot_patch(&mut self, animation_frame: u64) {
+        if self.hot_patches_pending == 0 {
+            self.hot_patch_started = Some(animation_frame);
+        }
+        self.hot_patches_pending = self.hot_patches_pending.saturating_add(1);
+    }
+
+    /// Count one hot-patch answer; the indicator stops with the last one.
+    pub fn end_hot_patch(&mut self) {
+        self.hot_patches_pending = self.hot_patches_pending.saturating_sub(1);
+        if self.hot_patches_pending == 0 {
+            self.hot_patch_started = None;
+        }
+    }
+
+    /// Forget every pending hot patch: the session ended, so no answer is
+    /// coming.
+    pub fn clear_hot_patches(&mut self) {
+        self.hot_patches_pending = 0;
+        self.hot_patch_started = None;
+    }
+
     /// A fresh session view (empty log, following the tail, no selection) for
     /// an **ad-hoc** session: one that can neither host a devtools service
     /// nor run an app on a target, so it carries no [`SessionTarget`] and
@@ -497,6 +538,8 @@ impl SessionView {
             watch: false,
             hot: false,
             hot_patch_requested: false,
+            hot_patches_pending: 0,
+            hot_patch_started: None,
             hot_patch_flash: None,
             perf: PerfPanel::default(),
             level_filter: LevelFilter::default(),
