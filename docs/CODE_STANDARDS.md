@@ -15,17 +15,14 @@ off this index — read this plus the one that covers what you are touching:
   crate (`frust-core`, `frust-scene`, `frust-text`, `frust-widgets`, `frust-shell-common`,
   `frust-shell-desktop`, `frust-shell-linux`, `frust-shell-web`, `frust`) stays `unsafe`-free —
   where Masonry/xilem-style code would reach for `unsafe` downcasting, use trait upcasting
-  instead: bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`.
-  `frust-shell-web`'s frame waker in particular needs no sanctioned zone of its own: it is a
-  capture-nothing closure over a `thread_local` `EventLoopProxy` slot
-  (`crates/frust-shell-web/src/app_handler.rs`'s `install_wake_proxy`/`WAKE_PROXY`). The
-  sanctioned zones are raw-pointer boundaries a GPU/platform shell cannot avoid, each isolated
-  in one function/module with a `# Safety` doc comment stating the caller contract:
+  instead: bound a trait on `Any` (e.g. `Widget: Any`) and downcast through `&mut dyn Any`; the web
+  shell's frame waker is a capture-nothing closure over a `thread_local` `EventLoopProxy` slot
+  (`app_handler.rs`'s `WAKE_PROXY`). The sanctioned zones are raw-pointer boundaries a GPU/platform
+  shell or loader cannot avoid, each isolated in one function/module with a `# Safety` doc comment:
   - `frust-gpu`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — turn a
-    caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`, each
-    `# Safety`-noted. `frust-render`'s `on_surface_created_from_android_window`/
-    `on_surface_created_from_metal_layer` (`renderer.rs`) are the entry points a shell calls;
-    their own `unsafe` is confined to forwarding the raw pointer into the `frust-gpu` pair above.
+    caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`. `frust-render`'s
+    shell entry points `on_surface_created_from_android_window`/
+    `on_surface_created_from_metal_layer` (`renderer.rs`) only forward the raw pointer to them.
   - `frust-shell-android`'s `jni_glue` module — the JNI FFI boundary (`extern "system"`
     exports, `Box::into_raw`/`from_raw`, `ANativeWindow_fromSurface`, `nativeInitPlatform`'s
     `JavaVM` stash), `android_app!`'s generated exports, and the render-thread split's
@@ -34,14 +31,11 @@ off this index — read this plus the one that covers what you are touching:
     `Box::into_raw`/`from_raw`, the call into `on_surface_created_from_metal_layer`),
     `ios_app!`'s generated exports, and the split's `unsafe impl Send` for
     `SendableMetalLayer` plus a bare `libc::pthread_set_qos_class_self_np` self-boost.
-  - `frust-shell-macos`'s `appkit_glue` module — four sites: the whole `define_class!` block
-    counted as one (its `#[unsafe(super(NSObject))]`/`#[unsafe(method(…))]` attributes
-    declaring the reopen-notification observer class, AND the `unsafe impl NSObjectProtocol`
-    conformance it also carries, share the block's one `SAFETY:` note at the macro head),
-    `msg_send![super(this), init]` (`NSObject`'s designated initializer),
-    `NSNotificationCenter::addObserver_selector_name_object` plus the
-    `NSApplicationDidBecomeActiveNotification` `extern` static read that registers it, and the
-    matching `removeObserver` in `Drop`. Each is `SAFETY`-noted.
+  - `frust-shell-macos`'s `appkit_glue` module — four sites: the reopen-observer `define_class!`
+    block as one (its `#[unsafe(…)]` attributes and `unsafe impl NSObjectProtocol` share
+    one `SAFETY:` note at the macro head), `msg_send![super(this), init]`,
+    `addObserver_selector_name_object` plus the `NSApplicationDidBecomeActiveNotification` `extern`
+    static read, and `removeObserver` in `Drop`. Each is `SAFETY`-noted.
   - `frust-shell-windows`'s `win32_glue` module — three sites:
     `SetCurrentProcessExplicitAppUserModelID` (taskbar identity), the `TranslateAcceleratorW`
     call inside the menu-accelerator message hook, and muda's `Menu::init_for_hwnd` attaching
@@ -88,16 +82,22 @@ off this index — read this plus the one that covers what you are touching:
     glue's own contract establishes; each site is `# Safety`/`SAFETY`-noted and wraps its body
     in `catch_unwind` per the no-unwind rule below. Its `android` backend holds no `unsafe`
     block at all — only its two JNI exports' `#[unsafe(no_mangle)]` attributes.
-  - `frust-auth-session`'s `apple` backend — every `objc2-authentication-services` call is
-    `unsafe` in the binding: the deprecated `ASWebAuthenticationSession` initializer, its
-    presentation-context/ephemeral-session setters, and `-start`; the completion handler's raw
-    `NSURL`/`NSError` derefs plus one `extern` static read (`ASWebAuthenticationSessionErrorDomain`);
-    the `define_class!` presentation-anchor class (`#[unsafe(super(NSObject))]`/
-    `#[unsafe(method_id(…))]` plus two `unsafe impl` conformances, counted as one zone, and its
-    `msg_send![super(this), init]`); and one `MainThreadMarker::new_unchecked()` proving the
-    main-queue bounce. Each site is `# Safety`/`SAFETY`-noted and the completion body runs under
-    `catch_unwind`. Its `android` backend holds no `unsafe` block at all — only its one JNI
-    export's `#[unsafe(no_mangle)]` attribute, mirroring `frust-iap`'s Android backend above.
+  - `frust-auth-session`'s `apple` backend — the `objc2-authentication-services` calls (the
+    deprecated `ASWebAuthenticationSession` initializer, its presentation-context/ephemeral
+    setters, `-start`); the completion handler's raw `NSURL`/`NSError` derefs plus the
+    `ASWebAuthenticationSessionErrorDomain` `extern` static; the `define_class!` presentation-anchor
+    class (attributes and two `unsafe impl` conformances as one zone, plus its
+    `msg_send![super(this), init]`); one `MainThreadMarker::new_unchecked()` proving the main-queue
+    bounce. Each is `# Safety`/`SAFETY`-noted, the completion body under `catch_unwind`; its
+    `android` backend, like `frust-iap`'s, holds only a JNI export's `#[unsafe(no_mangle)]`.
+  - `frust-hotpatch` — `patch.rs`: `load_patch_library` (`libloading`;
+    initialisers run, so only a library built for this process), `apply_patch` (a table from the
+    patch builder for this exact executable, anchored on `__frust_hotpatch_anchor`, cross-image
+    layouts unchanged — the builder's L3 gate checks that) and `get_jump_table` (the leaked,
+    Release-published table, used within one call); `hot_fn.rs`: casting a table address to the
+    hot function's signature; `anchor.rs`: image lookup (`dl_iterate_phdr`, dyld, PE headers via
+    `GetModuleHandleExW`); `android.rs`: memfd + `android_dlopen_ext`. `frust-shell-common` calls
+    the safe `apply_from_devtools`; `frust::app!` emits only the anchor's `#[unsafe(no_mangle)]`.
 - **No unwind across FFI.** Every platform export routes through `frust-shell-common`'s
   `guard` helper (`catch_unwind` + log, returning a benign default) rather than unwinding
   into JVM-/Swift-owned stack frames — a panic crossing the FFI boundary is undefined
@@ -134,11 +134,12 @@ off this index — read this plus the one that covers what you are touching:
   erases once inside. `any()`/`AnyView` remain only for the documented irreducible cases:
   stored view tables (`Vec`/`Option<AnyView>`, `Box<dyn Fn(..) -> AnyView>`, page registries),
   accumulators pushing into a `Vec<AnyView>`, recursive helpers, three-plus-arm bodies (two
-  arms use `either(cond, || a, || b)`), trait extension points, and helpers feeding a
-  hand-written view's `ChildPod` (`build_child`/`rebuild_child`/`teardown_child` take
-  `&AnyView`). A kept site carries `// erasure: keep <why>`; `scripts/ci/erasure-check.sh`
-  enforces codemod rules T1-T7. A driver closure returning a `Component::build` result erases
-  it: `move |s| AnyView::new(root.build(s))`. Never add `#[allow(refining_impl_trait)]`.
+  arms use `either(cond, || a, || b)`), trait extension points, helpers feeding a hand-written
+  view's `ChildPod` (`build_child`/`rebuild_child`/`teardown_child` take `&AnyView`), and the
+  hot-patch seam's `build_erased` (its return type must be layout-fixed across images). A kept
+  site carries `// erasure: keep <why>`; `scripts/ci/erasure-check.sh` enforces codemod rules
+  T1-T7. A driver closure returning a `Component::build` result erases it:
+  `move |s| AnyView::new(root.build(s))`. Never add `#[allow(refining_impl_trait)]`.
 - **Edition-2024 `-> impl Trait` return types capture all in-scope lifetimes by default.**
   When a function returning `impl View<State>` must not be tied to a parameter borrow (the
   result is stored, or returned from a navigator/`RenderRoot` closure that needs one type for

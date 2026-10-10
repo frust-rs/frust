@@ -31,14 +31,14 @@ authority for hardware-specific behavior.
 
 | Tier | Environment | Primary ownership | Default cadence |
 |---|---|---|---|
-| T0 | Pure host process | Math, state machines, parsing, reconciliation, layout invariants | Every change |
+| T0 | Pure host process | Math, state machines, parsing, reconciliation, layout invariants; the hot-patch builder's object/DWARF/PDB parsers, workspace graph and replay (`frust-drive`'s `hotpatch` modules) and `frust-hotpatch`'s jump table | Every change |
 | T1 | Headless `RenderRoot`, no rasterizer | View/widget behavior, input, semantics, scene command construction | Every change |
 | T2 | `vello_cpu`, no GPU | Deterministic raster goldens and reference output | Every visual change |
 | T3 | Native Vulkan/Metal GPU, no display | Real `frust-engine`/wgpu encode, shader, texture, and readback behavior | GPU runner; every visual/render change |
 | T4 | Desktop window or virtual display | Surface lifecycle, DPI, IME, wake/redraw, presentation | Relevant changes; scheduled smoke |
 | T5 | Android emulator | APK/ABI/JNI, `ANativeWindow`, Vulkan/gfxstream, lifecycle, input, screenshots | Relevant changes; nightly full matrix |
 | T6 | Physical Android/iOS | Driver/OEM behavior, biometrics, accessibility, refresh rate, thermal/performance | Release candidate and platform changes |
-| T7 | Tooling and packaging | CLI, drive cores, TUI, scaffolds, Gradle/Xcode, plugin mutation | Every relevant change |
+| T7 | Tooling and packaging | CLI, drive cores, TUI, scaffolds, Gradle/Xcode, plugin mutation; the hot-patch feature gate and canary (`scripts/ci/hotpatch-{feature-gate,canary}.sh`, fixture `testing/hotpatch-canary`) | Every relevant change |
 | T8 | Non-functional | Performance, startup, memory, fuzzing, sanitizers, coverage, dependency policy | Scheduled and release gates |
 
 T0-T1 tests should make visual failures diagnosable. A golden should not be the
@@ -108,7 +108,8 @@ Known gaps are tracked by the comprehensive-testing feature plan:
   black-band visual probe against an attached device or emulator, but does not provision one.
 - No GPU-runner or device CI. `.github/workflows/ci.yml` runs the CPU gates on pull requests and on
   pushes to `main` (fmt, clippy, workspace tests, the standalone workspaces, commit hygiene, the
-  Windows `hotpatch-windows` job under § Required Host Gate; aggregate `ci-ok` is the required
+  `hotpatch-feature-gate` and macOS/Linux `hotpatch-canary` jobs, and the Windows
+  `hotpatch-windows` job under § Required Host Gate; aggregate `ci-ok` is the required
   check). `.github/workflows/android-smoke.yml` runs on a schedule or manual dispatch and is not
   part of the required check.
 - Accessibility and several platform plugin paths remain manual physical-device
@@ -148,7 +149,9 @@ vec-list containers, homogeneous `vec![any(..), ..]` list arguments (T5), fully 
 arguments of a sequence API that should be tuples (T6), or single-erasure helpers still returning
 `AnyView` (T7); fix with `scripts/codemod/frust_any_codemod.py --write --t5 --t6 --t7`, or mark a
 site that must stay erased `// erasure: keep <why>` on its line or the line above; the same
-command runs as a CI hygiene step).
+command runs as a CI hygiene step). A change to the `hotpatch` feature, `frust-hotpatch` or the
+patch builder also runs `scripts/ci/hotpatch-feature-gate.sh` and `scripts/ci/hotpatch-canary.sh`
+— commands and what each proves in `docs/DEVELOPMENT.md` § Test.
 
 `frust-gpu` and `frust-engine` are plain dependencies of `frust-render` (not a cargo feature) —
 their host-only tests already ride the chain above; their real-GPU arms are separate, `--ignored`

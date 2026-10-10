@@ -22,7 +22,7 @@ tooling-isolation charter/verify-gate/pin policy with every unit rather than rea
 
 | Unit | Packages | Spokes |
 |------|----------|--------|
-| `CORE` | crates/frust-core, frust-scene, frust-reactive, frust, frust-paths | A D |
+| `CORE` | crates/frust-core, frust-scene, frust-reactive, frust, frust-paths, frust-hotpatch (native-only hot-patch runtime: a jump-table detour ported from subsecond 0.7.10, wire-compatible with dx) | A D |
 | `RENDER` | crates/frust-render, frust-text | A D |
 | `WIDGETS` | crates/frust-widgets, frust-theme | A C |
 | `SHELLS` | crates/frust-shell-{common,desktop,macos,windows,linux,android,ios,web} | A D |
