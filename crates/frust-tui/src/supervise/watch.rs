@@ -11,23 +11,23 @@
 //! **What is watched.** Every watcher starts on `<project_root>/src`
 //! (recursive) and `<project_root>/Cargo.toml` (non-recursive) — all a cold
 //! (restart-on-save) session watches. A watcher for a **hot** session then
-//! widens, on its own thread, to the three path classes `frust-drive`'s
-//! hot-patch session classifies a change into ([`graph_scope`]): the source
-//! directories of every path package's lib and bin targets, workspace
-//! members (replayable) and local non-members (restart) alike; and the build
-//! inputs — every package's `Cargo.toml` and build script, and the
-//! workspace's and project's `rust-toolchain`/`.cargo/config` files. The
-//! widening runs `cargo metadata` (`WorkspaceGraph::load`), so it never
-//! touches the UI thread, and a project it cannot resolve keeps the base
-//! scope. The hot session's own graph is not reachable from here
-//! (`HotSession` exposes none), so the watcher loads its own.
+//! widens, on its own thread, to the hot watch set `frust run --watch`
+//! registers too — `frust-drive`'s [`WatchSet`], converted by [`hot_scope`]:
+//! the whole `src/` tree of every workspace member (replayable) and of every
+//! local non-member path package (restart), and the build inputs — every
+//! package's `Cargo.toml` and `build.rs`, and the workspace root's
+//! `Cargo.toml`, `Cargo.lock`, `frust.toml`, `rust-toolchain`,
+//! `rust-toolchain.toml` and `.cargo/config(.toml)`. The widening runs
+//! `cargo metadata` (`WorkspaceGraph::load`), so it never touches the UI
+//! thread, and a project it cannot resolve keeps the base scope. The hot
+//! session's own graph is not reachable from here (`HotSession` exposes
+//! none), so the watcher loads its own.
 //!
-//! The debounce rule is `frust run --watch`'s (`frust-cli`'s
-//! `watch_loop_with_slot`): a **trailing edge** — after the first tick, keep
-//! consuming ticks that arrive within [`WATCH_DEBOUNCE`] of the previous one,
-//! and act only once the tree has been quiet for that long. The loop is
-//! duplicated here rather than shared: `frust-tui` does not depend on
-//! `frust-cli`, and extracting it into `frust-drive` is a follow-up.
+//! The debounce rule is `frust run --watch`'s, and so is its window: one
+//! [`WATCH_DEBOUNCE`], defined in `frust-drive` and re-exported here. It is a
+//! **trailing edge** — after the first tick, keep consuming ticks that arrive
+//! within the window of the previous one, and act only once the tree has been
+//! quiet for that long. The loop itself stays this module's own.
 //!
 //! Unlike the CLI loop this one filters events before ticking: reads
 //! (inotify reports `IN_OPEN`, and every rebuild opens every source file)
@@ -48,7 +48,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use frust_drive::hotpatch::graph::{Package, TargetRole, WorkspaceGraph};
+use frust_drive::hotpatch::graph::WorkspaceGraph;
+use frust_drive::hotpatch::watch::{WatchSet, watch_set};
 use frust_drive::process::RealProcessRunner;
 use notify::event::{AccessKind, AccessMode, MetadataKind, ModifyKind};
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -57,11 +58,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::{SessionId, TEARDOWN_DEADLINE, Teardown, spawn_tracked};
 use crate::engine::Message;
 
-/// Debounce window for source changes: trailing-edge coalescing keeps consuming
-/// raw change ticks arriving within this window before acting. 100 ms covers
-/// atomic-save and format-on-save bursts, and measured milestone-1 steady-state
-/// save->`on_change` latency at 312–324 ms. Syncs with `frust-cli`'s `WATCH_DEBOUNCE`.
-pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(100);
+/// The shared save debounce window (`frust-drive`'s, the one `frust run
+/// --watch` uses), re-exported for the runner.
+pub use frust_drive::hotpatch::watch::WATCH_DEBOUNCE;
 
 /// What the debounce thread receives: a raw filesystem change, or the stop
 /// request [`SourceWatcher::stop`] sends. Stop is explicit rather than the
@@ -190,81 +189,27 @@ fn base_scope(root: &Path) -> WatchScope {
     ]
 }
 
-/// A hot session's watch scope: the three path classes its `on_change`
-/// classifies, read off the workspace graph.
-///
-/// - **Replayable** and **local non-member** sources: the directory holding
-///   each lib/bin target's root file, recursively, for every path package
-///   (members and local non-members alike — the session tells them apart).
-///   A target root sitting directly in its package directory is watched as
-///   a file instead, so no package directory (and its `target/`) is ever
-///   watched whole.
-/// - **Build inputs**: every package's `Cargo.toml` and build script, and
-///   the workspace root's and project root's `Cargo.toml`,
-///   `rust-toolchain`/`rust-toolchain.toml` and `.cargo/` (non-recursive:
-///   its `config`/`config.toml`).
-///
-/// Tests, examples and benches are skipped: they are never part of the
-/// running image. A directory nested inside another watched one, and a file
-/// inside a watched directory, are dropped. Paths are returned whether or
-/// not they exist; the caller skips the missing ones.
-fn graph_scope(workspace_root: &Path, project_root: &Path, packages: &[Package]) -> WatchScope {
-    let mut dirs = BTreeSet::new();
-    let mut files = BTreeSet::new();
-    for package in packages {
-        files.insert(package.dir.join("Cargo.toml"));
-        for target in &package.targets {
-            match target.role {
-                TargetRole::Lib | TargetRole::Bin => match target.src_path.parent() {
-                    Some(dir) if dir != package.dir => {
-                        dirs.insert(dir.to_path_buf());
-                    }
-                    _ => {
-                        files.insert(target.src_path.clone());
-                    }
-                },
-                TargetRole::BuildScript => {
-                    files.insert(target.src_path.clone());
-                }
-                TargetRole::Other => {}
-            }
-        }
-    }
-    for base in [workspace_root, project_root] {
-        for name in [
-            "Cargo.toml",
-            "rust-toolchain",
-            "rust-toolchain.toml",
-            ".cargo",
-        ] {
-            files.insert(base.join(name));
-        }
-    }
-    let outermost: Vec<PathBuf> = dirs
-        .iter()
-        .filter(|dir| {
-            !dirs
-                .iter()
-                .any(|other| other != *dir && dir.starts_with(other))
-        })
-        .cloned()
-        .collect();
-    files.retain(|file| !outermost.iter().any(|dir| file.starts_with(dir)));
-    outermost
-        .into_iter()
-        .map(|dir| (dir, RecursiveMode::Recursive))
+/// A hot session's watch scope: the shared [`WatchSet`] as watcher entries —
+/// its `src/` trees ([`WatchSet::dirs`]) recursively, its build inputs one
+/// file each. No package directory (and so no `target/`) is ever watched
+/// whole. Paths are returned whether or not they exist; the caller skips the
+/// missing ones.
+fn hot_scope(set: &WatchSet) -> WatchScope {
+    set.dirs()
+        .map(|dir| (dir.clone(), RecursiveMode::Recursive))
         .chain(
-            files
-                .into_iter()
-                .map(|file| (file, RecursiveMode::NonRecursive)),
+            set.build_inputs
+                .iter()
+                .map(|file| (file.clone(), RecursiveMode::NonRecursive)),
         )
         .collect()
 }
 
 /// Resolve `root`'s workspace graph (`cargo metadata`, blocking) into its
-/// [`graph_scope`], plus the package directories a changed path is judged
-/// relative to. `None` when the project has no `[package]` or cargo cannot
-/// describe it — the watcher then keeps its base scope.
+/// shared [`WatchSet`], as its [`hot_scope`] plus the roots a changed path is
+/// judged relative to (the workspace root and every package directory).
+/// `None` when the project has no `[package]` or cargo cannot describe it —
+/// the watcher then keeps its base scope.
 fn resolve_hot_scope(root: &Path) -> Option<(WatchScope, Vec<PathBuf>)> {
     let package = super::session::package_name(root)?;
     let graph = WorkspaceGraph::load(
@@ -275,11 +220,8 @@ fn resolve_hot_scope(root: &Path) -> Option<(WatchScope, Vec<PathBuf>)> {
         None,
     )
     .ok()?;
-    let scope = graph_scope(graph.workspace_root(), root, graph.packages());
-    let roots = std::iter::once(graph.workspace_root().to_path_buf())
-        .chain(graph.packages().iter().map(|package| package.dir.clone()))
-        .collect();
-    Some((scope, roots))
+    let set = watch_set(&graph);
+    Some((hot_scope(&set), set.roots))
 }
 
 /// Watch every path of `scope` that exists, best effort: a path that fails
@@ -720,93 +662,108 @@ mod tests {
         assert!(!is_relevant_path(&roots, &outside.join("src/.lib.rs.swp")));
     }
 
-    fn target(name: &str, role: TargetRole, src: &str) -> frust_drive::hotpatch::graph::Target {
-        frust_drive::hotpatch::graph::Target {
-            name: name.to_string(),
-            role,
-            src_path: PathBuf::from(src),
+    #[test]
+    fn the_hot_scope_covers_the_three_path_classes_and_nothing_whole() {
+        let set = WatchSet {
+            replayable: vec![PathBuf::from("/w/src"), PathBuf::from("/w/crates/ui/src")],
+            local_non_member: vec![PathBuf::from("/deps/widgets/src")],
+            build_inputs: vec![
+                PathBuf::from("/w/Cargo.lock"),
+                PathBuf::from("/w/Cargo.toml"),
+                PathBuf::from("/w/build.rs"),
+            ],
+            roots: vec![PathBuf::from("/w"), PathBuf::from("/w/crates/ui")],
+        };
+        assert_eq!(
+            hot_scope(&set),
+            vec![
+                (PathBuf::from("/w/src"), RecursiveMode::Recursive),
+                (PathBuf::from("/w/crates/ui/src"), RecursiveMode::Recursive),
+                (PathBuf::from("/deps/widgets/src"), RecursiveMode::Recursive),
+                (PathBuf::from("/w/Cargo.lock"), RecursiveMode::NonRecursive),
+                (PathBuf::from("/w/Cargo.toml"), RecursiveMode::NonRecursive),
+                (PathBuf::from("/w/build.rs"), RecursiveMode::NonRecursive),
+            ],
+            "the src/ trees recursively (members, then non-members), \
+             each build input as one file, no root or package dir whole"
+        );
+    }
+
+    /// A single-package app at `/w` (lib + bin + build script) depending on
+    /// the local non-member path package `widgets` at `/deps/widgets`.
+    const METADATA: &str = r#"{
+        "packages": [
+            {"id": "path+file:///w#0.1.0", "name": "app", "source": null,
+             "manifest_path": "/w/Cargo.toml",
+             "targets": [
+                {"name": "app", "kind": ["lib"], "crate_types": ["lib"], "src_path": "/w/src/lib.rs"},
+                {"name": "app", "kind": ["bin"], "crate_types": ["bin"], "src_path": "/w/src/main.rs"},
+                {"name": "build-script-build", "kind": ["custom-build"], "crate_types": ["bin"], "src_path": "/w/build.rs"}]},
+            {"id": "path+file:///deps/widgets#0.1.0", "name": "widgets", "source": null,
+             "manifest_path": "/deps/widgets/Cargo.toml",
+             "targets": [
+                {"name": "widgets", "kind": ["lib"], "crate_types": ["lib"], "src_path": "/deps/widgets/src/lib.rs"}]}
+        ],
+        "workspace_members": ["path+file:///w#0.1.0"],
+        "resolve": {"nodes": [
+            {"id": "path+file:///w#0.1.0", "deps": [
+                {"name": "widgets", "pkg": "path+file:///deps/widgets#0.1.0",
+                 "dep_kinds": [{"kind": null, "target": null}]}]},
+            {"id": "path+file:///deps/widgets#0.1.0", "deps": []}],
+         "root": "path+file:///w#0.1.0"},
+        "workspace_root": "/w"
+    }"#;
+
+    #[test]
+    fn the_hot_scope_watches_the_lockfile_frust_toml_build_script_and_non_member_src_but_not_target()
+     {
+        let graph = WorkspaceGraph::from_metadata(METADATA, "app", None).unwrap();
+        let set = watch_set(&graph);
+        let scope = hot_scope(&set);
+        for (path, mode) in [
+            ("/w/Cargo.lock", RecursiveMode::NonRecursive),
+            ("/w/frust.toml", RecursiveMode::NonRecursive),
+            ("/w/build.rs", RecursiveMode::NonRecursive),
+            ("/w/.cargo/config.toml", RecursiveMode::NonRecursive),
+            ("/w/src", RecursiveMode::Recursive),
+            ("/deps/widgets/src", RecursiveMode::Recursive),
+        ] {
+            assert!(
+                scope.contains(&(PathBuf::from(path), mode)),
+                "{path} ({mode:?}) in {scope:?}"
+            );
         }
+        for (path, _) in &scope {
+            assert!(
+                !path.starts_with("/w/target") && !path.starts_with("/deps/widgets/target"),
+                "{path:?} is build output"
+            );
+            assert!(
+                path != Path::new("/w") && path != Path::new("/deps/widgets"),
+                "{path:?} is a package directory watched whole"
+            );
+        }
+        // A burst inside a watched tree's build output, reported against the
+        // widened roots, is still noise.
+        assert!(!is_relevant_path(
+            &set.roots,
+            Path::new("/w/target/debug/app")
+        ));
+        assert!(is_relevant_path(&set.roots, Path::new("/w/Cargo.lock")));
+        assert!(is_relevant_path(
+            &set.roots,
+            Path::new("/deps/widgets/src/lib.rs")
+        ));
     }
 
     #[test]
-    fn the_hot_scope_covers_the_three_path_classes_and_nothing_whole() {
-        let packages = vec![
-            Package {
-                name: "app".to_string(),
-                dir: PathBuf::from("/w"),
-                member: true,
-                targets: vec![
-                    target("app", TargetRole::Lib, "/w/src/lib.rs"),
-                    target("app", TargetRole::Bin, "/w/src/main.rs"),
-                    target("tool", TargetRole::Bin, "/w/src/bin/tool.rs"),
-                    target("build-script-build", TargetRole::BuildScript, "/w/build.rs"),
-                    target("smoke", TargetRole::Other, "/w/tests/smoke.rs"),
-                ],
-            },
-            Package {
-                name: "ui".to_string(),
-                dir: PathBuf::from("/w/crates/ui"),
-                member: true,
-                targets: vec![target("ui", TargetRole::Lib, "/w/crates/ui/src/lib.rs")],
-            },
-            Package {
-                name: "flat".to_string(),
-                dir: PathBuf::from("/w/crates/flat"),
-                member: true,
-                targets: vec![target("flat", TargetRole::Lib, "/w/crates/flat/lib.rs")],
-            },
-            Package {
-                name: "widgets".to_string(),
-                dir: PathBuf::from("/deps/widgets"),
-                member: false,
-                targets: vec![target(
-                    "widgets",
-                    TargetRole::Lib,
-                    "/deps/widgets/src/lib.rs",
-                )],
-            },
-        ];
-        let scope = graph_scope(Path::new("/w"), Path::new("/w"), &packages);
-        let recursive: Vec<&Path> = scope
-            .iter()
-            .filter(|(_, mode)| *mode == RecursiveMode::Recursive)
-            .map(|(path, _)| path.as_path())
-            .collect();
-        let files: Vec<&Path> = scope
-            .iter()
-            .filter(|(_, mode)| *mode == RecursiveMode::NonRecursive)
-            .map(|(path, _)| path.as_path())
-            .collect();
-
+    fn the_cold_scope_stays_the_projects_src_tree_and_manifest() {
         assert_eq!(
-            recursive,
+            base_scope(Path::new("/w")),
             vec![
-                Path::new("/deps/widgets/src"),
-                Path::new("/w/crates/ui/src"),
-                Path::new("/w/src"),
-            ],
-            "member and non-member source dirs, the nested bin dir folded in, \
-             tests skipped, no package dir watched whole"
+                (PathBuf::from("/w/src"), RecursiveMode::Recursive),
+                (PathBuf::from("/w/Cargo.toml"), RecursiveMode::NonRecursive),
+            ]
         );
-        for expected in [
-            "/w/Cargo.toml",
-            "/w/build.rs",
-            "/w/rust-toolchain.toml",
-            "/w/.cargo",
-            "/w/crates/ui/Cargo.toml",
-            "/w/crates/flat/Cargo.toml",
-            "/w/crates/flat/lib.rs",
-            "/deps/widgets/Cargo.toml",
-        ] {
-            assert!(
-                files.contains(&Path::new(expected)),
-                "{expected} in {files:?}"
-            );
-        }
-        assert!(
-            !files.iter().any(|f| f.starts_with("/w/src")),
-            "no file inside a watched dir is watched twice"
-        );
-        assert!(!files.contains(&Path::new("/w/tests/smoke.rs")));
     }
 }
