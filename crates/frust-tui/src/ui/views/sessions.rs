@@ -36,7 +36,9 @@ use crate::engine::{
     LogLevel, Message, PanicBlock, RegionId, SOURCE_TAG_WIDTH, SessionView,
 };
 use crate::supervise::SessionState;
-use crate::ui::anim::{SPINNER_TICKS_PER_FRAME, spinner_char, themed_shimmer_spans};
+use crate::ui::anim::{
+    SPINNER_TICKS_PER_FRAME, flash_alpha, flash_bg, spinner_char, themed_shimmer_spans,
+};
 use crate::ui::mouse::MouseCtx;
 use crate::ui::theme::Theme;
 
@@ -207,6 +209,25 @@ const WATCH_GLYPH_SUFFIX: &str = " \u{27f3}"; // ⟳
 /// The log status line's segment for a watched session.
 const WATCH_STATUS: &str = "\u{27f3} watch"; // ⟳ watch
 
+/// `style` with its background tinted by `session`'s live hot-patch flash
+/// (`base` toward `theme.success()`, faded by frame — see
+/// [`crate::ui::anim::flash`]); `style` itself, untouched, once the flash has
+/// faded or when the session never patched, so idle rendering is unchanged.
+fn flash_tint(
+    style: Style,
+    base: Color,
+    session: &SessionView,
+    animation_frame: u64,
+    theme: &Theme,
+) -> Style {
+    let alpha = flash_alpha(session.hot_patch_flash, animation_frame);
+    if alpha > 0.0 {
+        style.bg(flash_bg(base, theme.success(), alpha))
+    } else {
+        style
+    }
+}
+
 /// Render the tab bar: sessions grouped by project (a muted `name:` label per
 /// group), each tab numbered `1`–`9` where jumpable, the active tab accented.
 fn render_tab_bar(
@@ -271,6 +292,20 @@ fn render_tab_bar(
             } else {
                 Style::default().fg(theme.fg()).bg(theme.overlay())
             };
+            // A just-completed hot patch tints the tab's background toward
+            // success and fades back (`crate::ui::anim::flash`); idle tabs
+            // keep their style untouched.
+            let tab_style = flash_tint(
+                tab_style,
+                if active {
+                    theme.accent()
+                } else {
+                    theme.overlay()
+                },
+                session,
+                state.animation_frame,
+                theme,
+            );
             // The glyph keeps its status color on an inactive tab; on the
             // active (accent-filled) tab the whole label reads as one chip.
             let width = label.chars().count() as u16;
@@ -525,7 +560,13 @@ fn render_log_status(
         left.push(Span::styled("  ·  ", Style::default().fg(theme.border())));
         left.push(Span::styled(
             WATCH_STATUS.to_string(),
-            Style::default().fg(theme.accent()),
+            flash_tint(
+                Style::default().fg(theme.accent()),
+                theme.surface(),
+                session,
+                state.animation_frame,
+                theme,
+            ),
         ));
     }
 
@@ -1395,6 +1436,129 @@ mod tests {
         assert!(
             watched.contains(WATCH_STATUS),
             "the status line says so:\n{watched}"
+        );
+    }
+
+    /// Render the session workspace for `state` under `theme` and hand back
+    /// the raw cell buffer, so a test can compare cell styles between two
+    /// renders.
+    fn render_main_to_buffer(state: &AppState, theme: &Theme) -> ratatui::buffer::Buffer {
+        use crate::ui::mouse::MouseRegions;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).expect("test terminal");
+        let mut regions = MouseRegions::new();
+        terminal
+            .draw(|frame| {
+                let mut ctx = MouseCtx::new(&mut regions);
+                let area = frame.area();
+                render_main(frame, area, state, theme, &mut ctx);
+            })
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    /// The position of the first cell of `needle` in `buf`'s row `y`.
+    fn find_in_row(buf: &ratatui::buffer::Buffer, y: u16, needle: &str) -> Option<u16> {
+        let row: Vec<String> = (buf.area.left()..buf.area.right())
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect();
+        let first = needle.chars().next()?.to_string();
+        (0..row.len()).find_map(|i| {
+            let hit = row[i] == first
+                && needle
+                    .chars()
+                    .enumerate()
+                    .all(|(k, c)| row.get(i + k).is_some_and(|cell| *cell == c.to_string()));
+            hit.then_some(buf.area.left() + i as u16)
+        })
+    }
+
+    /// Two running, watched sessions (tab 0 active, tab 1 inactive).
+    fn two_watched_sessions() -> AppState {
+        let mut state = AppState::default();
+        for id in 0..2 {
+            let mut s = SessionView::new(SessionId(id), PathBuf::from("/tmp/app"), "desktop");
+            s.target_label = format!("tab{id}");
+            s.state = SessionState::Running;
+            s.watch = true;
+            state.sessions.push(s);
+        }
+        state.active_session = Some(0);
+        state
+    }
+
+    fn patched(id: u64) -> Message {
+        Message::HotPatchOutcome {
+            session: SessionId(id),
+            outcome: frust_drive::hotpatch::session::Outcome::Patched {
+                ms: 12,
+                components: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn a_hot_patch_flashes_the_tab_and_watch_segment_then_fades_back_to_idle() {
+        use crate::engine::update;
+        use crate::ui::anim::FLASH_FRAMES;
+
+        let theme = theme();
+        let mut state = two_watched_sessions();
+        let idle = render_main_to_buffer(&state, &theme);
+        let tab = find_in_row(&idle, 0, "tab0").expect("active tab drawn");
+        let status_y = (idle.area.top()..idle.area.bottom())
+            .rev()
+            .find(|&y| find_in_row(&idle, y, WATCH_STATUS).is_some())
+            .expect("watch segment drawn");
+        let watch = find_in_row(&idle, status_y, WATCH_STATUS).unwrap();
+
+        update(&mut state, patched(0));
+        let flashing = render_main_to_buffer(&state, &theme);
+        assert_ne!(flashing[(tab, 0)].bg, idle[(tab, 0)].bg, "tab tinted");
+        assert_ne!(
+            flashing[(watch, status_y)].bg,
+            idle[(watch, status_y)].bg,
+            "watch segment tinted"
+        );
+        assert_eq!(flashing[(tab, 0)].symbol(), idle[(tab, 0)].symbol());
+        assert_eq!(flashing[(tab, 0)].fg, idle[(tab, 0)].fg, "text untouched");
+
+        for _ in 0..FLASH_FRAMES {
+            update(&mut state, Message::Tick);
+        }
+        let faded = render_main_to_buffer(&state, &theme);
+        assert_eq!(faded[(tab, 0)].bg, idle[(tab, 0)].bg, "tab back to idle");
+        assert_eq!(
+            faded[(watch, status_y)].bg,
+            idle[(watch, status_y)].bg,
+            "watch segment back to idle"
+        );
+    }
+
+    #[test]
+    fn an_inactive_tab_flashes_alone_and_a_non_rgb_theme_does_not_tint() {
+        use crate::engine::update;
+
+        let theme = theme();
+        let mut state = two_watched_sessions();
+        let idle = render_main_to_buffer(&state, &theme);
+        let tab0 = find_in_row(&idle, 0, "tab0").expect("active tab drawn");
+        let tab1 = find_in_row(&idle, 0, "tab1").expect("inactive tab drawn");
+
+        update(&mut state, patched(1));
+        let flashing = render_main_to_buffer(&state, &theme);
+        assert_ne!(flashing[(tab1, 0)].bg, idle[(tab1, 0)].bg, "patched tab");
+        assert_eq!(flashing[(tab0, 0)].bg, idle[(tab0, 0)].bg, "other tab");
+
+        let ansi = Theme::frust_dark_at(crate::ui::theme::ColorDepth::Ansi16);
+        let mut idle_state = two_watched_sessions();
+        idle_state.animation_frame = state.animation_frame;
+        assert_eq!(
+            render_main_to_buffer(&state, &ansi),
+            render_main_to_buffer(&idle_state, &ansi),
+            "a 16-colour palette degrades to no tint"
         );
     }
 

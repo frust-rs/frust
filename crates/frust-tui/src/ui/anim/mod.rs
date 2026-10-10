@@ -1,5 +1,5 @@
 //! The TUI's animation substrate: pure frame-selection math for the loading
-//! spinner and the shimmer sweep, driven off `AppState::animation_frame`
+//! spinner, the shimmer sweep and the hot-patch success flash, driven off `AppState::animation_frame`
 //! (`crate::engine::state`).
 //!
 //! Everything here is intentionally **pure**: no `AppState`, no rendering
@@ -15,8 +15,10 @@
 //! TUI's own [`crate::ui::theme::Theme`] tokens, never fdemon's hardcoded
 //! RGB palette.
 
+pub mod flash;
 pub mod shimmer;
 pub mod spinner;
 
+pub use flash::{FLASH_BLEND_CAP, FLASH_FRAMES, flash_alpha, flash_bg};
 pub use shimmer::{lerp_color, shimmer_phase, shimmer_spans, themed_shimmer_spans};
 pub use spinner::{SPINNER_TICKS_PER_FRAME, spinner_char};
