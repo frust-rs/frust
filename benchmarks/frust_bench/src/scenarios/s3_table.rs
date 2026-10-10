@@ -196,14 +196,13 @@ impl Component for S3Table {
 
         let table = list_view(count, ROW_EXTENT, move |i| {
             let item = &rows[i];
-            // erasure: keep list_view's lazy item builder returns AnyView
-            any(Padding(
+            Padding(
                 EdgeInsets::symmetric(12.0, 4.0),
                 row()
                     .child(text(item.id.to_string()).size(14.0))
                     .child(SizedBox(Some(12.0), None))
                     .flex(1, text(item.label.clone()).size(14.0)),
-            ))
+            )
         });
 
         // The script cycles continuously for the whole capture window (see
