@@ -82,7 +82,7 @@ fn body(state: &Knobs) -> impl View<Knobs> {
              fab_menu_item(any(icon(icons::MIC)), \"Audio\", on_select),\n    ],\n    \
              |state: &mut State| state.open = !state.open,\n);",
         )],
-        vec![],
+        Vec::<AnyView<Knobs>>::new(),
     )
 }
 

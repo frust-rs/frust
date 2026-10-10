@@ -97,6 +97,7 @@ pub struct AppState {
 /// Never seen: the first navigation replaces it before the first frame (the
 /// pre-first-frame op drain), and it exists only because a navigator needs a
 /// root page to be constructed at all.
+// erasure: keep the navigator's root-page builder must return AnyView
 fn blank_page() -> AnyView<AppState> {
     any(SizedBox::<AppState>(None, None))
 }
@@ -220,8 +221,8 @@ impl Component for Material3Demo {
         // gallery shell): M3's shared-axis-X pattern. Pop reversal, including
         // the edge-swipe gesture, comes free — the navigator reverses the
         // stored spec on pop.
-        any(navigator(&state.outer, blank_page)
-            .transition(TransitionSpec::duration(PageTransition::M3SharedAxisX)))
+        navigator(&state.outer, blank_page)
+            .transition(TransitionSpec::duration(PageTransition::M3SharedAxisX))
     }
 }
 

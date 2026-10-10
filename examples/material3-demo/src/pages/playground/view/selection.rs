@@ -236,7 +236,7 @@ fn open_demo(state: &Knobs) {
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {
-    control_panel::<Knobs>(
+    control_panel::<Knobs, _>(
         "Demo options",
         vec![
             play_switch::<Knobs>(

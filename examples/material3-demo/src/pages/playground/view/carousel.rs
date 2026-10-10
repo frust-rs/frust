@@ -320,7 +320,7 @@ fn title_band(title: &str) -> impl View<PageState> {
 }
 
 fn controls(knobs: &Knobs) -> AnyView<PageState> {
-    control_panel::<PageState>(
+    control_panel::<PageState, _>(
         "Layout",
         vec![
             play_enum_menu_field::<PageState, CarouselLayout>(

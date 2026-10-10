@@ -60,7 +60,7 @@ pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(playground_body(
         vec![catalog_preview(&theme), clipped_child_preview(&theme)],
         vec![catalog_snippet(), clipped_child_snippet()],
-        vec![],
+        Vec::<AnyView<AppState>>::new(),
     ))
 }
 

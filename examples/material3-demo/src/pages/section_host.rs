@@ -53,6 +53,7 @@ impl Default for SectionSelection {
 }
 
 /// The section's page: a list, or a list beside the selected playground.
+// erasure: keep route builders return AnyView; the detail arms join a stored catalog builder's AnyView
 pub fn section_host(section: DemoSection, selection: SectionSelection) -> AnyView<AppState> {
     let wide = use_context::<WindowMetrics>()
         .map(|metrics| metrics.size.width >= SPLIT_BREAKPOINT_PX)

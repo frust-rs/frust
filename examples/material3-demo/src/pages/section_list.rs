@@ -17,6 +17,7 @@ const LIST_PADDING: f64 = 16.0;
 /// `selection`, which the host reads back for its detail pane); otherwise it
 /// pushes that entry's playground route, and every row carries the trailing
 /// chevron that advertises it.
+// erasure: keep section_host joins this list with a stored catalog builder's AnyView
 pub fn section_list(
     section: DemoSection,
     selection: RwSignal<Option<&'static str>>,

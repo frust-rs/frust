@@ -48,7 +48,7 @@
 //! it here directly.
 
 use frust::authoring::text::FontFamily;
-use frust::{AnyView, Color, CrossAxisAlignment, View, any};
+use frust::{Color, CrossAxisAlignment, View};
 use frust_material as m3;
 use frust_testing::case::Tolerance;
 use frust_testing::corpus::CorpusCase;
@@ -102,7 +102,7 @@ fn hgap() -> impl View<()> {
 /// `RenderRoot`, the shell-order rebuild/layout/paint and the paint-time device
 /// scale — so this file never names a `frust-core` type and needs no second
 /// path dependency to reach one.
-fn record_page(scene: &mut Scene, build: impl Fn(&FontFamily) -> AnyView<()> + 'static) {
+fn record_page<V: View<()>>(scene: &mut Scene, build: impl Fn(&FontFamily) -> V + 'static) {
     let (mut tcx, family) = test_text_context();
     let theme = pin_type_scale(m3::baseline(), &family);
     record_view(scene, &FrameSpec::phone(), theme, &mut tcx, move || {
@@ -127,7 +127,7 @@ fn gallery_shell() -> CorpusCase {
     }
     fn record(scene: &mut Scene) {
         record_page(scene, |family| {
-            any(frust::scaffold::<(), _>(frust::Padding(
+            frust::scaffold::<(), _>(frust::Padding(
                 frust::EdgeInsets::all(GUTTER),
                 frust::column()
                     .child(row(family))
@@ -150,7 +150,7 @@ fn gallery_shell() -> CorpusCase {
                 ],
                 0,
                 |_: &mut (), _: usize| {},
-            )))
+            ))
         });
     }
     CorpusCase {
@@ -172,7 +172,7 @@ fn gallery_shell() -> CorpusCase {
 fn buttons() -> CorpusCase {
     fn record(scene: &mut Scene) {
         record_page(scene, |family| {
-            any(frust::container::<(), _>(frust::Padding(
+            frust::container::<(), _>(frust::Padding(
                 frust::EdgeInsets::all(GUTTER),
                 frust::column()
                     .child(label(family, SAMPLE_TEXT, 22.0))
@@ -199,7 +199,7 @@ fn buttons() -> CorpusCase {
                     .cross_axis(CrossAxisAlignment::Stretch),
             ))
             .fill(Color::WHITE)
-            .expand())
+            .expand()
         });
     }
     CorpusCase {
@@ -222,7 +222,7 @@ fn buttons() -> CorpusCase {
 fn selection() -> CorpusCase {
     fn record(scene: &mut Scene) {
         record_page(scene, |family| {
-            any(frust::container::<(), _>(frust::Padding(
+            frust::container::<(), _>(frust::Padding(
                 frust::EdgeInsets::all(GUTTER),
                 frust::column()
                     .child(label(family, SAMPLE_TEXT, 22.0))
@@ -249,7 +249,7 @@ fn selection() -> CorpusCase {
                     .cross_axis(CrossAxisAlignment::Stretch),
             ))
             .fill(Color::WHITE)
-            .expand())
+            .expand()
         });
     }
     CorpusCase {
@@ -270,7 +270,7 @@ fn progress_and_cards() -> CorpusCase {
             fn card(view: impl View<()>) -> impl View<()> {
                 m3::outlined_card::<(), _>(frust::Padding(frust::EdgeInsets::all(16.0), view))
             }
-            any(frust::container::<(), _>(frust::Padding(
+            frust::container::<(), _>(frust::Padding(
                 frust::EdgeInsets::all(GUTTER),
                 frust::column()
                     .child(label(family, SAMPLE_TEXT, 22.0))
@@ -294,7 +294,7 @@ fn progress_and_cards() -> CorpusCase {
                     .cross_axis(CrossAxisAlignment::Stretch),
             ))
             .fill(Color::WHITE)
-            .expand())
+            .expand()
         });
     }
     CorpusCase {

@@ -32,7 +32,8 @@
 
 use frust::authoring::text::TextStyle;
 use frust::{
-    AnyView, Column, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, Theme, any, container, text,
+    AnyView, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, Theme, ViewSeq, any, column,
+    container, text,
 };
 use frust_material::{MaterialDimensions, MaterialSpacing};
 
@@ -53,21 +54,15 @@ fn title_style(theme: &Theme) -> TextStyle {
 /// [`super::play_switch`] output) in a titled, outlined panel — the standard
 /// frame every playground's controls sit in.
 // erasure: keep element of a heterogeneous Vec<AnyView> list (playground_body controls)
-pub fn control_panel<State: 'static>(
+pub fn control_panel<State: 'static, M>(
     title: impl Into<String>,
-    children: Vec<AnyView<State>>,
+    children: impl ViewSeq<State, M>,
 ) -> AnyView<State> {
     let theme = ambient_theme();
     let scheme = theme.scheme();
     let title_style = title_style(&theme);
     let fill = scheme.surface_container_lowest;
     let outline = scheme.outline_variant;
-
-    let mut rows: Vec<AnyView<State>> = vec![
-        any(text(title.into()).style(title_style)),
-        any(SizedBox::<State>(None, Some(MaterialSpacing::MD))),
-    ];
-    rows.extend(children);
 
     any(Padding(
         EdgeInsets {
@@ -78,7 +73,11 @@ pub fn control_panel<State: 'static>(
         },
         container(Padding(
             EdgeInsets::all(MaterialSpacing::LG),
-            Column(rows).cross_axis(CrossAxisAlignment::Stretch),
+            column()
+                .child(text(title.into()).style(title_style))
+                .child(SizedBox::<State>(None, Some(MaterialSpacing::MD)))
+                .children(children)
+                .cross_axis(CrossAxisAlignment::Stretch),
         ))
         .fill(fill)
         .radius(MaterialDimensions::RADIUS_LARGE)
@@ -88,7 +87,7 @@ pub fn control_panel<State: 'static>(
 
 #[cfg(test)]
 mod tests {
-    use frust::{Brightness, any, text};
+    use frust::{AnyView, Brightness, text};
 
     use super::{control_panel, title_style};
 
@@ -96,13 +95,12 @@ mod tests {
 
     #[test]
     fn builds_around_control_rows() {
-        let _view =
-            control_panel::<TestState>("Options", vec![any(text("row one")), any(text("row two"))]);
+        let _view = control_panel::<TestState, _>("Options", (text("row one"), text("row two")));
     }
 
     #[test]
     fn builds_with_no_rows() {
-        let _view = control_panel::<TestState>("Options", vec![]);
+        let _view = control_panel::<TestState, _>("Options", Vec::<AnyView<TestState>>::new());
     }
 
     /// Regression coverage for the dark-on-dark title fix (see this module's
