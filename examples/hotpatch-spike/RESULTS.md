@@ -3005,3 +3005,96 @@ simulator leg, `--frust-run` / `--frust-restart` with `--ios-sim` (or `--udid <u
 - At exit, discovery-line tokens in the saved CLI log are redacted, and an app that outlived the
   CLI is `simctl terminate`d (this bundle only). A simulator app, which is not in the runner's
   process group, is never signalled directly.
+
+## H5-01: path-dependency replay
+
+Card H5-01 (tsk_000001a1181b5c77Y9ybjeUG), run 2026-10-10 on `task/hb-h5-01`, cut from `main` @
+be2c65cb (every H0-H4 card merged, plus the H5 documentation). Same machine, OS and toolchain as
+the Environment block above (`Mac16,1`, Apple M4, macOS 27.0.1, rustc/cargo 1.98.1). The card
+replaces a desktop hot run's `restart required` for an edit to a local path dependency outside the
+workspace (a `--frust-path` checkout, row E) with a replay of the edited package and every
+dependent up to the tip, under the L3 gate.
+
+### Verdict: the RUSTC_WRAPPER cost is not prohibitive; replay lands on the desktop
+
+1. **First measurement, before any design: a pass-through `RUSTC_WRAPPER` changes no cargo
+   fingerprint.** On the canary fixture (27 units), a 9-step alternation of a plain `cargo build`,
+   the fat build (`cargo rustc -- -Csave-temps=true -Clink-dead-code -Clinker=<driver>`,
+   `RUSTC_WORKSPACE_WRAPPER` only) and the same fat build with `RUSTC_WRAPPER` added rebuilt 0/27
+   units at every switch after the first fat build (which rebuilt the tip bin alone, for its extra
+   `cargo rustc` flags). So dependencies never rebuild when a developer moves between a plain
+   `cargo run` and a hot run, with or without the wrapper.
+2. **Cold fat build, n=4 each, fresh target per run, interleaved:** workspace wrapper only 22.98 /
+   19.91 / 19.38 / 19.34 s (median 19.65 s); with `RUSTC_WRAPPER` too 16.02 / 19.31 / 21.82 /
+   23.64 s (median 20.57 s); plain `cargo build` 22.01 / 20.40 / 19.75 / 21.72 s. The spread
+   between runs of one mode (up to 7.6 s) is larger than any difference between modes: the
+   wrapper's per-crate process hop is below this instrument's resolution here.
+3. **Consequence for the design.** Because no fingerprint changes, a non-member cargo already
+   built is never sent to the wrapper again: the fat build busts the fingerprint of each listed
+   non-member that has no record yet, as it already did for members. Measured on the canary with
+   a warm target, the first hot start without records (2 non-members busted) took 995 / 974 / 976
+   ms against 991 / 919 / 903 / 919 / 926 ms with records present. In a `--frust-path` app every
+   framework crate is busted once per capture scope, a one-time cost not measured here.
+
+### Design (as built)
+
+- **Capture.** A desktop start lists the graph's local non-members with a lib target (name,
+  manifest dir) in the scope as `non-members.json`; the list is hashed into the scope name, so a
+  member-only scope (no list, unchanged hash) is never reused for a non-member run or the reverse.
+  The list's presence makes `wrapper_env` add `RUSTC_WRAPPER=<frust>`. cargo then runs `frust
+  frust rustc ...` for a member: the outer invocation records it with the program stripped (the
+  record a member-only scope holds) and runs rustc itself. Any other compile is recorded only when
+  its `CARGO_MANIFEST_DIR` is a listed package and it is a lib. Registry crates and build scripts
+  run unchanged and are never recorded, so their environment never reaches a record. Android and
+  iOS-simulator starts write no list and keep `restart required` for a path dependency.
+- **Graph.** `replay_non_members(records)` makes each listed non-member whose lib was captured a
+  lib unit, except proc macros (no rlib to link) and crate-name clashes with a member. The
+  dependency cascade then follows every local package's edges, so an edit replays the package and
+  each dependent, member or not, up to the tip lib. A cascade into a local package that is not
+  replayable fails closed (`BuilderUnsupported`). A file of an uncaptured non-member still answers
+  `PathDependencyChanged`. `replay_cwd` now finds non-members, so their relative captured
+  arguments resolve in their own directory.
+- **L3.** The replayable crate list and the base rlib map include the captured non-members, so
+  their types (and instantiations naming them) are in the base table and every candidate. A
+  non-member builds under `[profile.dev.package."*"] opt-level = 1`, and its objects then hold
+  type references into other compile units of the same object (`DW_FORM_ref_addr`, from rustc's
+  crate-local ThinLTO imports), which the gate had refused. The gate now reads an object's units
+  as a whole. A non-member rlib with neither code nor data (`frust-shell-ios` on a macOS host,
+  every item `cfg`'d out) is left out of the base table, never a member's.
+
+### After: thin-build timing for a path-dependency edit (canary)
+
+Method: `scripts/ci/hotpatch-canary.sh` with a warm target, the driver's own `timing:` lines
+(`Instant` around `compile` = replay + layout extraction, and around `link` = stub + thin link +
+jump table), 6 runs then 5 more after touching `shared/src/lib.rs`. Edit 1 replays the app lib
+only, edit 2 (`shared`'s value) replays `hotpatch-canary-shared` and then the app lib.
+
+| | compile (ms) | link (ms) | total (ms), median |
+|---|---|---|---|
+| Edit 1, app only (n=11) | 175-221 | 30-32 | 235, 229, 235, 206, 222, 227, 253, 244, 233, 227, 233: **233** |
+| Edit 2, path dependency + app (n=11) | 194-213 | 30-33 | 229, 225, 231, 232, 241, 243, 246, 235, 230, 226, 236: **232** |
+| Before: restart (fat start after a `shared` edit, n=5) | | | 991, 919, 903, 919, 926: **919**, plus the app's relaunch |
+
+The fat start is the fat build (the tip and the edited `shared` recompiled), fat link, L3 base
+table and symbol cache, not the relaunch. These are the canary's numbers: `shared` is a few lines.
+A framework crate's replay costs its own compile at `opt-level = 1` plus each dependent's, so an
+edit low in a `--frust-path` graph (`frust-core`) replays most of the framework in sequence.
+
+### L3 over the real framework crates
+
+To check that the gate reads every framework crate's DWARF at the template's profile, a scratch
+app depending on `frust` (`perf-trace`, `devtools`, `hotpatch`) and `frust-material` by path,
+`debug = 2`, `[profile.dev.package."*"] opt-level = 1`, was built, and `layout::extract` (release
+build of `frust-drive`) ran over every local non-member's rlib with every local crate name: 24
+lib crates, 21 rlibs (proc macros build none). Before the cross-unit fix, `frust-hotpatch`'s rlib
+already failed. After it, 20 rlibs read cleanly and `frust-shell-ios` (no code, no DWARF on
+macOS) is the one left out: **12719 types in 1126 / 1129 / 1130 ms** for the combined base
+extraction (n=3), per rlib 0-223 ms (`frust-engine` 2055 types, 223 ms).
+
+### Not covered
+
+- A real `frust run --watch` on a `--frust-path` app with a framework edit (row E re-run) and its
+  save->frame against a restart: the canary and the L3 probe above stand in for it.
+- Linux and Windows: the canary's CI legs run the same driver on ubuntu; the Windows PDB gate reads
+  the linked patch's PDB, which already covers every crate the crate list names, untested here.
+- Android and the iOS simulator stay on `restart required` for a path dependency.

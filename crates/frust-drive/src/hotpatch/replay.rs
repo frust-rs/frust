@@ -1068,4 +1068,197 @@ mod tests {
         assert!(listed.contains(&root.join("src/greeting.txt")));
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// The real toolchain over a framework-style path dependency: `shared`
+    /// lives outside the workspace root (so it compiled in its own
+    /// directory, its source path relative to it, at `opt-level = 1` as
+    /// `[profile.dev.package."*"]` builds it) and the member `app` holds its
+    /// `Offset` by value. Once the fat build's `shared` capture makes it
+    /// replayable, an edit to it replays `shared` then `app` against the
+    /// fresh rlib; a body edit passes the layout gate against the base, a
+    /// field added to `Offset` is refused naming both types.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_real_rustc_replay_of_an_edited_path_dependency_cascades_to_the_tip_under_the_gate() {
+        use super::super::capture::RecordKey;
+        use super::super::graph::{ModifiedSet, PathClass};
+        use super::super::layout::{self, LayoutChanged};
+        use crate::process::RealProcessRunner;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let base = std::env::temp_dir().join(format!(
+            "frust-drive-replay-path-dep-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("ws");
+        let shared = base.join("frust").join("shared");
+        let out = base.join("target").join("debug").join("deps");
+        for dir in [root.join("app/src"), shared.join("src"), out.clone()] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let shared_source = shared.join("src/lib.rs");
+        let write_shared = |value: &str, field: &str| {
+            std::fs::write(
+                &shared_source,
+                format!(
+                    "pub struct Offset {{ pub value: u64,{field} }}\n\
+                     #[inline(never)]\n\
+                     pub fn offset() -> Offset {{ Offset {{ value: {value},{} }} }}\n",
+                    if field.is_empty() { "" } else { " extra: 0" }
+                ),
+            )
+            .unwrap();
+        };
+        write_shared("0", "");
+        std::fs::write(
+            root.join("app/src/lib.rs"),
+            "pub struct Reading { pub value: u64, pub offset: shared::Offset }\n\
+             pub fn reading() -> Reading {\n\
+                 let offset = shared::offset();\n\
+                 Reading { value: 1 + offset.value, offset }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let (_, rustc) = super::super::layout::fixture::toolchain();
+        let rustc = rustc.map_or_else(|| "rustc".to_string(), |p| p.display().to_string());
+        let out_text = out.to_str().unwrap();
+        let compile = |name: &str, src: &str, extra: &[String]| RustcRecord {
+            args: [
+                rustc.as_str(),
+                "--crate-name",
+                name,
+                "--edition=2024",
+                src,
+                "--error-format=json",
+                "--crate-type",
+                "lib",
+                "--emit=dep-info,metadata,link",
+                "-C",
+                "debuginfo=2",
+                "--out-dir",
+                out_text,
+            ]
+            .iter()
+            .map(|arg| arg.to_string())
+            .chain(extra.iter().cloned())
+            .collect(),
+            envs: Vec::new(),
+            crate_types: strings(&["lib"]),
+        };
+        let shared_rlib = out.join("libshared-aa.rlib");
+        let records: BTreeMap<RecordKey, RustcRecord> = [
+            (
+                RecordKey::parse("shared.lib").unwrap(),
+                compile(
+                    "shared",
+                    "src/lib.rs",
+                    &strings(&["-Copt-level=1", "-Cextra-filename=-aa"]),
+                ),
+            ),
+            (
+                RecordKey::parse("app.lib").unwrap(),
+                compile(
+                    "app",
+                    "app/src/lib.rs",
+                    &[
+                        "-Cextra-filename=-bb".to_string(),
+                        "--extern".to_string(),
+                        format!("shared={}", shared_rlib.display()),
+                    ],
+                ),
+            ),
+            (
+                RecordKey::parse("app.bin").unwrap(),
+                RustcRecord {
+                    args: strings(&["rustc"]),
+                    envs: Vec::new(),
+                    crate_types: strings(&["bin"]),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        const APP: &str = "path+file:///ws/app#0.1.0";
+        const SHARED: &str = "path+file:///frust/shared#0.1.0";
+        let metadata = serde_json::json!({
+            "packages": [
+                {"id": APP, "name": "app", "source": null,
+                 "manifest_path": root.join("app/Cargo.toml"),
+                 "targets": [
+                    {"name": "app", "kind": ["lib"], "src_path": root.join("app/src/lib.rs")},
+                    {"name": "app", "kind": ["bin"], "src_path": root.join("app/src/main.rs")},
+                 ]},
+                {"id": SHARED, "name": "shared", "source": null,
+                 "manifest_path": shared.join("Cargo.toml"),
+                 "targets": [{"name": "shared", "kind": ["lib"], "src_path": &shared_source}]},
+            ],
+            "workspace_members": [APP],
+            "resolve": {"nodes": [
+                {"id": APP, "deps": [{"name": "shared", "pkg": SHARED,
+                                      "dep_kinds": [{"kind": null, "target": null}]}]},
+                {"id": SHARED, "deps": []},
+            ], "root": APP},
+            "workspace_root": &root,
+        });
+        let mut graph = WorkspaceGraph::from_metadata(&metadata.to_string(), "app", None).unwrap();
+        assert_eq!(
+            graph.replay_non_members(&records),
+            vec!["shared".to_string()]
+        );
+        let crates = vec!["app".to_string(), "shared".to_string()];
+        let replay = |units: &[ReplayUnit]| -> Vec<PathBuf> {
+            replay_units(&RealProcessRunner, &graph, &records, units)
+                .unwrap()
+                .iter()
+                .map(|outcome| {
+                    assert!(
+                        outcome.success,
+                        "{}: {:?}",
+                        outcome.unit, outcome.diagnostics
+                    );
+                    outcome.rlib().unwrap().to_path_buf()
+                })
+                .collect()
+        };
+
+        // The fat build's compiles, in dependency order: the base table.
+        let shared_unit = ReplayUnit::lib("shared", "shared");
+        let app_unit = ReplayUnit::lib("app", "app");
+        let fat = replay(&[shared_unit.clone(), app_unit.clone()]);
+        assert_eq!(fat[0], shared_rlib);
+        let accepted = layout::extract(&fat, &crates).unwrap().table;
+        assert!(accepted.get("shared::Offset").is_some());
+
+        let edit = |value: &str, field: &str| {
+            write_shared(value, field);
+            let units = match graph.classify(&shared_source) {
+                PathClass::Replayable { units } => units,
+                other => panic!("expected replayable, got {other:?}"),
+            };
+            let plan = ModifiedSet::new().record_change(&graph, &units).unwrap();
+            assert_eq!(plan.replay, vec![shared_unit.clone(), app_unit.clone()]);
+            let candidate = layout::extract(&replay(&plan.replay), &crates)
+                .unwrap()
+                .table;
+            layout::diff(&candidate, &accepted)
+        };
+        assert_eq!(
+            edit("1", ""),
+            Vec::<LayoutChanged>::new(),
+            "a body edit passes"
+        );
+        let changed: Vec<String> = edit("1", " pub extra: u64,")
+            .into_iter()
+            .map(|change| change.type_path)
+            .collect();
+        for ty in ["shared::Offset", "app::Reading"] {
+            assert!(changed.iter().any(|path| path == ty), "{ty} in {changed:?}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
