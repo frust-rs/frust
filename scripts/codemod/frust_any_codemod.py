@@ -147,7 +147,7 @@ cannot be resolved.
 Usage:
 
     python3 scripts/codemod/frust_any_codemod.py [--check] [--write] [--stats]
-        [--strict] [--t5] [--t6] [--t7] [--apis FILE] [--exclude PATH]... PATH...
+        [--strict] [--t5] [--t6] [--t7] [--unmarked] [--apis FILE] [--exclude PATH]... PATH...
 
 PATH is a `.rs` file or a directory (recursed for `*.rs`, skipping `target/`).
 `--check` (the default) lists `file:line` of every remaining candidate and
@@ -181,6 +181,20 @@ exclusions (with a `N T7 exclusion(s)` summary line), `--write --t7` applies
 the candidates, and `--stats --t7` reports the T7 candidate count and the four
 exclusion buckets (`T7-trait`, `T7-arms`, `T7-ref`, `T7-public`) per file
 (when non-zero) and in total.
+
+U   (report-only, `--unmarked` only) every erasure *call* in a `.rs` file that
+      no `// erasure: keep` marker covers: bare `any(X)`, `frust::any(X)`,
+      `authoring::any(X)`, `frust::authoring::any(X)` (a turbofish `any::<..>(X)`
+      included; `AnyView::new(..)`, `.any(..)` methods, `cfg(any(..))` and text
+      in strings or comments are not calls). A call is covered when (a) its own
+      line is kept (marker on the line, or alone on the line above), (b) it sits
+      inside a fn whose signature is kept (the `fn` line, the line holding its
+      `->`, or alone above the `fn` line), or (c) it sits inside a `vec![..]`,
+      a `let` statement or a `match` whose first line is kept. `--check
+      --unmarked` lists `<path>:<line>: U unmarked erasure` once per line and
+      exits 1 if any (candidates and U both count); `--write` never changes
+      anything for U; `--stats --unmarked` adds a per-file `unmarked=N` (when
+      non-zero) and `total: unmarked=N`.
 
 Known blind spot: a closure parameter typed `AnyView<..>` whose body is
 `any(x)` is still a T1/T4 candidate when the call sits in a slot position; the
@@ -2290,6 +2304,101 @@ def _write_atomic(path: str, text: str) -> None:
         raise
 
 
+# ---------------------------------------------------------------------------
+# Rule U: unmarked erasure calls (report only)
+# ---------------------------------------------------------------------------
+
+def _u_call_sites(s: Source) -> list:
+    """Code indices of every `any(..)` erasure call (single argument), whatever
+    its path (`frust::any`, `authoring::any`, `frust::authoring::any`)."""
+    out = []
+    for k, tok in enumerate(s.t):
+        if tok.kind != IDENT or tok.text != "any":
+            continue
+        if s.is_p(k - 1, ".") or s.is_id(k - 1, "fn"):
+            continue
+        segs = s.path_before(k)
+        if segs:
+            root = s.t[segs[0]].text
+            if not (_frust_root(root) or root == "authoring"):
+                continue
+        elif not s.bare_any_ok:
+            continue
+        o = s._call_open_after(k)
+        if o is None or s.in_attr_or_cfg(k):
+            continue
+        g = s.parent[k]
+        if g >= 0 and s.is_id(g - 1) and s.t[g - 1].text in ("cfg", "cfg_attr"):
+            continue   # `cfg(any(..))` outside an attribute
+        if len(s.split_args(o)) == 1:
+            out.append(k)
+    return out
+
+
+def _u_stmt_start(s: Source, n: int, commas: bool) -> int:
+    """Code index of the first token of the statement (or, with `commas`, the
+    comma/`=>`-separated expression) containing token `n`, at n's own nesting level."""
+    t = s.t
+    j = n - 1
+    while j >= 0:
+        tok = t[j]
+        if tok.kind == PUNCT:
+            if tok.text in CLOSE:
+                if tok.text == "}" and not (
+                        s.is_id(j + 1, "else") or s.is_id(j + 1, "as")
+                        or s.is_p(j + 1, ".") or s.is_p(j + 1, "?")
+                        or s.is_p(j + 1, "=>") or s.is_p(j + 1, ",")):
+                    break
+                j = s.match[j]
+            elif tok.text in OPEN or tok.text == ";":
+                break
+            elif commas and tok.text in (",", "=>"):
+                break
+        j -= 1
+    return j + 1
+
+
+def _u_covered(s: Source, k: int) -> bool:
+    line = s.line_of(s.t[k].start)
+    if s.is_kept(line):
+        return True
+    # (b) an enclosing fn whose signature is kept
+    g = s.parent[k]
+    while g >= 0:
+        if s.t[g].text == "{":
+            j = g - 1
+            while j >= 0 and not (s.is_p(j, ";") or s.is_p(j, "{") or s.is_p(j, "}")):
+                if s.is_id(j, "fn"):
+                    arrow = next((m for m in range(j, g) if s.is_p(m, "->")
+                                  and s.parent[m] == s.parent[j]), None)
+                    if s.is_kept(s.line_of(s.t[j].start)) or (
+                            arrow is not None and s.is_kept(s.line_of(s.t[arrow].start))):
+                        return True
+                    break
+                if s.t[j].kind == PUNCT and s.t[j].text in CLOSE:
+                    j = s.match[j]
+                j -= 1
+        g = s.parent[g]
+    # (c) an enclosing vec![..], or a let / match statement, whose first line is kept
+    n = k
+    while n >= 0:
+        if s.group_kind.get(n) == "macro:vec" and s.is_kept(s.line_of(s.t[n - 2].start)):
+            return True
+        a = _u_stmt_start(s, n, False)
+        if a < n and s.is_id(a, "let") and s.is_kept(s.line_of(s.t[a].start)):
+            return True
+        a = _u_stmt_start(s, n, True)
+        if a < n and s.is_id(a, "match") and s.is_kept(s.line_of(s.t[a].start)):
+            return True
+        n = s.parent[n]
+    return False
+
+
+def unmarked_erasures(s: Source) -> list:
+    """Sorted, de-duplicated lines of erasure calls no keep marker covers."""
+    return sorted({s.line_of(s.t[k].start) for k in _u_call_sites(s) if not _u_covered(s, k)})
+
+
 def iter_rs(paths):
     for p in paths:
         if os.path.isdir(p):
@@ -2333,6 +2442,14 @@ def main(argv=None) -> int:
                          "listed as T6-keyed/T6-mixed/T6-arity, never rewritten and never counted "
                          "toward the exit code; exits 2 when the name list has no [seq] section; "
                          "wins over --t5 for the lists it rewrites")
+    ap.add_argument("--unmarked", action="store_true",
+                    help="report-only rule U: list every any() erasure call (any(, frust::any(, "
+                         "authoring::any(, frust::authoring::any(; not AnyView::new, .any(, "
+                         "cfg(any( or text in strings/comments) that no `// erasure: keep` "
+                         "marker covers (its line, the line above, an enclosing fn signature, "
+                         "or the first line of an enclosing vec![ / let / match) as "
+                         "`<path>:<line>: U unmarked erasure`; --check exits 1 if any; --write "
+                         "changes nothing for U; --stats adds unmarked=N per file")
     ap.add_argument("--exclude", action="append", default=[], metavar="PATH",
                     help="skip PATH, a file or directory, by whole path components (repeatable)")
     ap.add_argument("--apis", default=DEFAULT_APIS, help="name list (default: erasing_apis.txt beside this script)")
@@ -2352,6 +2469,7 @@ def main(argv=None) -> int:
     total_t5 = 0
     total_t7 = 0
     total_kept = 0
+    total_unmarked = 0
     excluded_t7 = 0
     excluded_t6 = 0
     total_t6 = 0
@@ -2380,6 +2498,8 @@ def main(argv=None) -> int:
             continue
         total_before += res.before
         total_after += res.after
+        u_lines = unmarked_erasures(Source(res.text if args.write else src)) if args.unmarked else []
+        total_unmarked += len(u_lines)
         if args.write and res.text != src:
             _write_atomic(path, res.text)
         if check:
@@ -2396,7 +2516,9 @@ def main(argv=None) -> int:
                 print(f"{path}:{line}: {bucket} excluded: {name} ({reason})")
             for line, msg in notes:
                 print(f"{path}:{line}: {msg}")
-            remaining += len(cands)
+            for line in u_lines:
+                print(f"{path}:{line}: U unmarked erasure")
+            remaining += len(cands) + len(u_lines)
             shadow += len(notes)
             excluded_t7 += sum(1 for e in excluded if e[1] in T7_BUCKETS)
             excluded_t6 += sum(1 for e in excluded if e[1] in T6_BUCKETS)
@@ -2405,6 +2527,8 @@ def main(argv=None) -> int:
             total_kept += res.kept
             if res.kept:
                 print(f"{path}: kept={res.kept}")
+            if u_lines:
+                print(f"{path}: unmarked={len(u_lines)}")
             if args.t5:
                 n_t5 = sum(1 for c in res.candidates if c.rule == "T5")
                 total_t5 += n_t5
@@ -2435,6 +2559,8 @@ def main(argv=None) -> int:
     if args.stats:
         print(f"total: erasure calls before={total_before} after={total_after}")
         print(f"total: kept={total_kept}")
+        if args.unmarked:
+            print(f"total: unmarked={total_unmarked}")
         if args.t5:
             print(f"total: T5 candidates={total_t5}")
         if args.t6:

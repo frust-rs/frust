@@ -1610,5 +1610,175 @@ class T6DriverTest(DriverFixture, unittest.TestCase):
             return fh.read()
 
 
+def unmarked(src: str) -> list:
+    return cm.unmarked_erasures(cm.Source(textwrap.dedent(src)))
+
+
+class UnmarkedRuleTest(unittest.TestCase):
+    def test_unmarked_call_listed(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let v = any(text("a"));
+            }
+            """), [2])
+
+    def test_same_line_marker(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let v = any(a); // erasure: keep dyn
+            }
+            """), [])
+
+    def test_marker_alone_above(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                // erasure: keep dyn
+                foo(any(a));
+                foo(any(b));
+            }
+            """), [4])
+
+    def test_fn_signature_marker_covers_match_arms(self):
+        src = """\
+            // erasure: keep arms differ
+            fn f(k: u8) -> AnyView<S> {
+                match k {
+                    0 => any(a()),
+                    1 => any(b()),
+                    _ => any(c()),
+                }
+            }
+            """
+        self.assertEqual(unmarked(src), [])
+        bare = src.split("\n", 1)[1]
+        self.assertEqual(unmarked(bare), [3, 4, 5])
+
+    def test_fn_arrow_line_marker(self):
+        self.assertEqual(unmarked("""\
+            fn f(
+                a: u8,
+            ) -> AnyView<S> { // erasure: keep
+                any(a())
+            }
+            fn g() -> AnyView<S> {
+                any(b())
+            }
+            """), [7])
+
+    def test_vec_start_line_marker_covers_elements(self):
+        src = """\
+            fn f() {
+                x.children(vec![ // erasure: keep mixed
+                    any(a()),
+                    any(b()),
+                ]);
+                x.children(vec![
+                    any(c()),
+                ]);
+            }
+            """
+        self.assertEqual(unmarked(src), [7])
+
+    def test_let_and_match_start_line_markers(self):
+        self.assertEqual(unmarked("""\
+            fn f(k: u8) {
+                // erasure: keep
+                let v = if k == 0 {
+                    any(a())
+                } else {
+                    any(b())
+                };
+                // erasure: keep
+                match k {
+                    0 => any(c()),
+                    _ => any(d()),
+                }
+                let w = any(e());
+            }
+            """), [13])
+
+    def test_qualified_paths_detected(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let a = frust::any(x());
+                let b = authoring::any(y());
+                let c = frust::authoring::any(z());
+            }
+            """), [2, 3, 4])
+
+    def test_anyview_new_ignored(self):
+        self.assertEqual(unmarked("fn f() { let a = AnyView::new(x()); }\n"), [])
+
+    def test_non_calls_ignored(self):
+        self.assertEqual(unmarked("""\
+            #[cfg(any(unix, windows))]
+            fn f(v: Vec<u8>) -> bool {
+                // any(x) in a comment
+                let s = "any(x)";
+                let c = cfg!(any(unix, windows));
+                v.iter().any(|b| *b > 1)
+            }
+            """), [])
+
+    def test_nested_any_reports_each_line_once(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                any(
+                    any(x()),
+                );
+            }
+            """), [2, 3])
+
+    def test_foreign_path_not_erasure(self):
+        self.assertEqual(unmarked("fn f() { other::any(x()); }\n"), [])
+
+
+class UnmarkedDriverTest(DriverFixture, unittest.TestCase):
+    FIXTURE = "fn f() {\n    let a = any(x());\n    // erasure: keep\n    let b = any(y());\n}\n"
+
+    def test_listed_and_exit_one(self):
+        code, out = self.main("--check", "--unmarked", self.path)
+        self.assertEqual(code, 1)
+        self.assertIn("lib.rs:2: U unmarked erasure", out)
+        self.assertNotIn("lib.rs:4:", out)
+        self.assertIn("1 candidate(s)", out)
+
+    def test_clean_exits_zero(self):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("fn f() {\n    // erasure: keep\n    let a = any(x());\n}\n")
+        code, out = self.main("--check", "--unmarked", self.path)
+        self.assertEqual(code, 0)
+        self.assertNotIn(" U ", out)
+
+    def test_flag_absent_no_u_output(self):
+        code, out = self.main("--check", self.path)
+        self.assertEqual(code, 0)
+        self.assertNotIn("U unmarked", out)
+
+    def test_write_changes_nothing(self):
+        before = self.read(self.path)
+        self.main("--write", "--unmarked", self.path)
+        self.assertEqual(self.read(self.path), before)
+
+    def test_combines_with_other_rules(self):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("use frust::{Column, any, text};\n"
+                     "fn f() -> V {\n    Column(vec![any(text(\"a\"))])\n}\n")
+        code, out = self.main("--check", "--strict", "--t5", "--t6", "--t7", "--unmarked", self.path)
+        self.assertEqual(code, 1)
+        self.assertIn("lib.rs:3: T2", out)
+        self.assertIn("lib.rs:3: U unmarked erasure", out)
+
+    def test_stats_unmarked(self):
+        code, out = self.main("--stats", "--unmarked", self.path)
+        self.assertEqual(code, 0)
+        self.assertIn("lib.rs: unmarked=1", out)
+        self.assertIn("total: unmarked=1", out)
+
+    def read(self, path):
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+
 if __name__ == "__main__":
     unittest.main()
