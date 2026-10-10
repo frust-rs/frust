@@ -724,6 +724,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::RunConfigFocusPrev => with_modal(state, RunConfig::focus_prev),
         Message::RunConfigToggleTarget => with_modal(state, RunConfig::toggle_focused_target),
         Message::RunConfigToggleTargetAt(i) => with_modal(state, |m| m.toggle_target(i)),
+        Message::RunConfigToggleRunHot => with_modal(state, RunConfig::toggle_run_hot),
         Message::RunConfigToggleAutoApply => with_modal(state, RunConfig::toggle_auto_apply),
         Message::RunConfigCycleMode(delta) => with_modal(state, |m| {
             m.cycle_mode(delta);
@@ -736,13 +737,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             Some(modal) if modal.any_selected() => {
                 let specs = modal.launch_specs();
                 let auto_apply = modal.auto_apply;
+                let run_hot = modal.run_hot;
                 state.run_config = None;
                 // The modal closes either way: a refusal is explained by its
                 // own toast, not by leaving the dialog up.
                 let specs = drop_already_running(state, specs);
                 Outcome {
                     redraw: true,
-                    effect: launch_effect(state, specs, auto_apply),
+                    effect: launch_effect(state, specs, auto_apply, run_hot),
                 }
             }
             // Modal open but nothing checked, or no modal: nothing to launch.
@@ -1926,7 +1928,9 @@ fn auto_ide_config(state: &AppState, project_root: &Path) -> Option<Effect> {
 /// rest as one plain [`Effect::LaunchSessions`], each with an Info toast
 /// naming why it runs cold when its target could have run hot
 /// ([`SessionTarget::supports_watch`]). A cold launch arms no watcher; `W`
-/// still turns restart-on-save on for it.
+/// still turns restart-on-save on for it. With `run_hot` off (the dialog's
+/// "Run hot" unchecked) every spec goes out as the plain cold launch and no
+/// toast is shown: the user asked for it.
 ///
 /// Sessions launched through the MCP/DAP backend
 /// (`crate::supervise::mcp_backend`) never pass through here, by design: the
@@ -1935,6 +1939,7 @@ fn launch_effect(
     state: &mut AppState,
     specs: Vec<SessionSpec>,
     auto_apply: bool,
+    run_hot: bool,
 ) -> Option<Effect> {
     if specs.is_empty() {
         return None;
@@ -1953,6 +1958,10 @@ fn launch_effect(
     let mut hot = Vec::new();
     let mut cold = Vec::new();
     for spec in specs {
+        if !run_hot {
+            cold.push(spec);
+            continue;
+        }
         match spec.hot_precondition() {
             Ok(()) => hot.push(spec),
             Err(reason) => {
@@ -2334,7 +2343,7 @@ fn run_on_all_devices(state: &mut AppState) -> Outcome {
     }
     Outcome {
         redraw: true,
-        effect: launch_effect(state, specs, config.auto_apply),
+        effect: launch_effect(state, specs, config.auto_apply, config.run_hot),
     }
 }
 
@@ -4586,6 +4595,30 @@ mod tests {
             toast_texts(&st, ToastKind::Info),
             vec!["Pixel 7 runs cold: hot patching needs a debug build, not Profile"]
         );
+    }
+
+    #[test]
+    fn the_run_dialog_with_run_hot_off_launches_every_spec_cold_without_a_toast() {
+        let simulator = dev(
+            "FAKE-SIM-UDID",
+            "iPhone 15 Pro",
+            Platform::Ios,
+            Kind::Simulator,
+        );
+        let mut st = workbench_with_project();
+        run_config_on_devices(&mut st, vec![simulator]);
+        update(&mut st, Message::RunConfigToggleTargetAt(0)); // + desktop
+        update(&mut st, Message::RunConfigToggleRunHot);
+        assert!(!st.run_config.as_ref().unwrap().run_hot);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+        let (hot, auto_apply, cold) = hot_and_cold(&out);
+        assert!(hot.is_empty(), "{hot:?}");
+        assert_eq!(auto_apply, None);
+        let targets: Vec<SessionTarget> =
+            cold.iter().map(|s| SessionTarget::of(&s.target)).collect();
+        assert_eq!(targets, vec![SessionTarget::Desktop, simulator_target()]);
+        assert!(toast_texts(&st, ToastKind::Info).is_empty());
     }
 
     #[test]

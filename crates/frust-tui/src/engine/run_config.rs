@@ -51,7 +51,7 @@ pub struct RunTarget {
 
 /// Which control in the run-config modal has keyboard focus. Ordered
 /// top-to-bottom: the target checkboxes, then mode, flavor, defines, the
-/// auto-apply checkbox, and the launch button — the order
+/// run-hot and auto-apply checkboxes, and the launch button — the order
 /// [`RunConfig::focus_next`]/[`focus_prev`] walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunFocus {
@@ -63,7 +63,10 @@ pub enum RunFocus {
     Flavor,
     /// The defines text field (`KEY=VALUE` pairs, space-separated).
     Defines,
-    /// The "Auto-apply on save" checkbox (`Space` toggles it).
+    /// The "Run hot" checkbox (`Space` toggles it).
+    RunHot,
+    /// The "Auto-apply on save" checkbox (`Space` toggles it; inert while
+    /// "Run hot" is off).
     AutoApply,
     /// The launch button.
     Launch,
@@ -84,13 +87,18 @@ pub struct RunConfig {
     pub flavor: String,
     /// The `--define`s as typed (`KEY=VALUE` pairs, space-separated).
     pub defines: String,
+    /// "Run hot": on (the default), every spec passing
+    /// `SessionSpec::hot_precondition` launches hot; off, every spec launches
+    /// cold through the supervisor, with no "runs cold" toast.
+    pub run_hot: bool,
     /// "Auto-apply on save": whether a session that launches **hot** (every
     /// target passing `SessionSpec::hot_precondition` does, whatever this
     /// says) also gets its source watcher armed as soon as it registers (the
     /// runner's `Message::EnableWatch`), so a save is applied without asking.
     /// Off, the session still runs hot and `r` (`Message::HotPatchNow`)
-    /// applies the edits on demand. A spec that launches cold ignores it. On
-    /// by default.
+    /// applies the edits on demand. A spec that launches cold ignores it, and
+    /// while `run_hot` is off the checkbox is dimmed and toggling it does
+    /// nothing. On by default.
     pub auto_apply: bool,
     /// Which control has focus.
     pub focus: RunFocus,
@@ -124,6 +132,7 @@ impl RunConfig {
             mode: BuildMode::Debug,
             flavor: String::new(),
             defines: String::new(),
+            run_hot: true,
             auto_apply: true,
             focus: RunFocus::Target(0),
         }
@@ -135,6 +144,7 @@ impl RunConfig {
         order.push(RunFocus::Mode);
         order.push(RunFocus::Flavor);
         order.push(RunFocus::Defines);
+        order.push(RunFocus::RunHot);
         order.push(RunFocus::AutoApply);
         order.push(RunFocus::Launch);
         order
@@ -157,8 +167,9 @@ impl RunConfig {
         self.focus = order[next];
     }
 
-    /// Toggle the focused checkbox: a target row's selection, or the
-    /// auto-apply checkbox (no-op on any other control).
+    /// Toggle the focused checkbox: a target row's selection, "Run hot", or
+    /// auto-apply (no-op on any other control, and on auto-apply while
+    /// "Run hot" is off).
     pub fn toggle_focused_target(&mut self) {
         match self.focus {
             RunFocus::Target(i) => {
@@ -166,14 +177,28 @@ impl RunConfig {
                     t.selected = !t.selected;
                 }
             }
-            RunFocus::AutoApply => self.auto_apply = !self.auto_apply,
+            RunFocus::RunHot => self.run_hot = !self.run_hot,
+            RunFocus::AutoApply => {
+                if self.run_hot {
+                    self.auto_apply = !self.auto_apply;
+                }
+            }
             RunFocus::Mode | RunFocus::Flavor | RunFocus::Defines | RunFocus::Launch => {}
         }
     }
 
-    /// Toggle the auto-apply checkbox, focusing it (mouse click parity).
+    /// Toggle the "Run hot" checkbox, focusing it (mouse click parity).
+    pub fn toggle_run_hot(&mut self) {
+        self.run_hot = !self.run_hot;
+        self.focus = RunFocus::RunHot;
+    }
+
+    /// Toggle the auto-apply checkbox, focusing it (mouse click parity). The
+    /// stored value is left alone while "Run hot" is off.
     pub fn toggle_auto_apply(&mut self) {
-        self.auto_apply = !self.auto_apply;
+        if self.run_hot {
+            self.auto_apply = !self.auto_apply;
+        }
         self.focus = RunFocus::AutoApply;
     }
 
@@ -338,6 +363,7 @@ mod tests {
             RunFocus::Mode,
             RunFocus::Flavor,
             RunFocus::Defines,
+            RunFocus::RunHot,
             RunFocus::AutoApply,
             RunFocus::Launch,
         ];
@@ -351,6 +377,33 @@ mod tests {
         // And wrap backward.
         m.focus_prev();
         assert_eq!(m.focus, RunFocus::Launch);
+    }
+
+    #[test]
+    fn run_hot_defaults_on_and_toggles_by_space_and_click() {
+        let mut m = modal();
+        assert!(m.run_hot);
+        m.focus = RunFocus::RunHot;
+        m.toggle_focused_target();
+        assert!(!m.run_hot);
+        m.toggle_run_hot();
+        assert!(m.run_hot);
+        assert_eq!(m.focus, RunFocus::RunHot);
+    }
+
+    #[test]
+    fn auto_apply_is_inert_while_run_hot_is_off() {
+        let mut m = modal();
+        m.run_hot = false;
+        m.focus = RunFocus::AutoApply;
+        m.toggle_focused_target();
+        assert!(m.auto_apply, "Space leaves the stored value alone");
+        m.toggle_auto_apply();
+        assert!(m.auto_apply, "a click leaves it alone too");
+        assert_eq!(m.focus, RunFocus::AutoApply, "but it still takes focus");
+        m.run_hot = true;
+        m.toggle_auto_apply();
+        assert!(!m.auto_apply);
     }
 
     #[test]

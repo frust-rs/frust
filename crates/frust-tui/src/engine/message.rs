@@ -67,6 +67,8 @@ pub enum RegionId {
     RunFlavorRow,
     /// The run-config modal's defines text field; click focuses it.
     RunDefinesRow,
+    /// The run-config modal's "Run hot" checkbox row; click toggles it.
+    RunHotRow,
     /// The run-config modal's "Auto-apply on save" checkbox row; click
     /// toggles it.
     RunAutoApplyRow,
@@ -602,6 +604,9 @@ pub enum Message {
     RunConfigToggleTarget,
     /// Toggle a target checkbox by index (mouse click parity).
     RunConfigToggleTargetAt(usize),
+    /// Toggle the modal's "Run hot" checkbox (mouse click parity; `Space` on
+    /// the focused row reaches it through [`Self::RunConfigToggleTarget`]).
+    RunConfigToggleRunHot,
     /// Toggle the modal's "Auto-apply on save" checkbox (mouse click parity;
     /// `Space` on the focused row reaches it through
     /// [`Self::RunConfigToggleTarget`]).
