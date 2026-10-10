@@ -750,11 +750,10 @@ change at the site that needs it.
 
 **Workaround**: add `+ use<>` (or `+ use<S>` and the generics actually
 needed) when the result borrows nothing it keeps — `fn app_bar(title: &str)
--> impl View<u32> + use<>` as the scaffolded app template does — pass an owned
+-> impl View<u32> + use<>` — pass an owned
 argument, or erase with `any(..)` where the value is stored.
 
-**Evidence**: `crates/frust-drive/templates/app/src/lib.rs.tmpl`,
-`plugins/material/src/dismissible.rs` (test `logic`, `+ use<>` required under a
+**Evidence**: `plugins/material/src/dismissible.rs` (test `logic`, `+ use<>` required under a
 `RenderRoot` closure), `examples/huddle/src/ui/scaffold.rs` (`placeholder_body`),
 `scripts/codemod/frust_any_codemod.py` (rule T7 exclusions).
 
