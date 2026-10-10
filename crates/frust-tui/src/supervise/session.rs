@@ -6,8 +6,8 @@
 //! it is spawned through the drive's `spawn_streaming` seam.
 //!
 //! A debug desktop session the workbench launches runs **hot** instead:
-//! [`SessionSpec::start_hot`] resolves it through `frust-drive`'s hot-patch session start
-//! (`hotpatch::session::start_desktop` — the fat build, then the fat image
+//! [`SessionSpec::start_hot`] resolves it through `frust-drive`'s hot-patch
+//! session start (`hotpatch::session::start_desktop` — the fat build, then the fat image
 //! spawned directly, never `cargo run`), and [`SessionSpec::hot_precondition`]
 //! says which specs qualify. A debug Android device session runs hot
 //! the same way through `hotpatch::android::start_android` (the fat build
@@ -37,7 +37,7 @@ use frust_drive::hotpatch::ios_sim::{IosSimHotStart, IosSimStart, start_ios_sim}
 use frust_drive::hotpatch::session::{
     DesktopStart, HotSession, RestartReason, SessionHost, StartError, start_desktop,
 };
-use frust_drive::hotpatch::watch::{WatchSet, watch_set};
+use frust_drive::hotpatch::watch::{WatchSet, watch_set_in};
 use frust_drive::process::{ProcessRunner, StreamHandle};
 
 /// A unique per-session identifier, handed out monotonically by a single
@@ -276,25 +276,34 @@ impl SessionSpec {
     }
 
     /// The watch set a hot session's manual patch (`r`) scans for changed
-    /// files: `frust-drive`'s [`watch_set`] over the project's workspace
+    /// files: `frust-drive`'s [`watch_set_in`] over the project's workspace
     /// graph — the set a hot session's source watcher widens to — resolved
     /// with `cargo metadata` through `runner`, so it **blocks**; call it off
     /// the UI thread. A project cargo cannot describe (no `[package]`, a
     /// manifest it rejects) falls back to the base scope every watcher
-    /// starts with: the project's `src/` tree and its `Cargo.toml`.
-    pub fn hot_watch_set(&self, runner: &dyn ProcessRunner) -> WatchSet {
+    /// starts with, the project's `src/` tree and its `Cargo.toml`, and the
+    /// reason comes back beside it so the narrowed scope can be shown.
+    pub fn hot_watch_set(&self, runner: &dyn ProcessRunner) -> (WatchSet, Option<String>) {
         let root = &self.project_root;
-        package_name(root)
-            .and_then(|package| {
-                WorkspaceGraph::load(runner, &root.join("Cargo.toml"), None, &package, None).ok()
-            })
-            .map(|graph| watch_set(&graph))
-            .unwrap_or_else(|| WatchSet {
-                replayable: vec![root.join("src")],
-                local_non_member: Vec::new(),
-                build_inputs: vec![root.join("Cargo.toml")],
-                roots: vec![root.clone()],
-            })
+        let loaded = match package_name(root) {
+            Some(package) => {
+                WorkspaceGraph::load(runner, &root.join("Cargo.toml"), None, &package, None)
+                    .map_err(|err| err.to_string())
+            }
+            None => Err("the project has no `[package]` to tip the workspace graph at".to_string()),
+        };
+        match loaded {
+            Ok(graph) => (watch_set_in(&graph, root), None),
+            Err(reason) => (
+                WatchSet {
+                    replayable: vec![root.join("src")],
+                    local_non_member: Vec::new(),
+                    build_inputs: vec![root.join("Cargo.toml")],
+                    roots: vec![root.clone()],
+                },
+                Some(reason),
+            ),
+        }
     }
 }
 
@@ -564,14 +573,19 @@ mod tests {
             build: build(BuildMode::Debug),
         };
         let runner = frust_drive::process::FakeProcessRunner::new();
+        let (set, fallback) = spec.hot_watch_set(&runner);
         assert_eq!(
-            spec.hot_watch_set(&runner),
+            set,
             WatchSet {
                 replayable: vec![root.join("src")],
                 local_non_member: Vec::new(),
                 build_inputs: vec![root.join("Cargo.toml")],
                 roots: vec![root],
             }
+        );
+        assert!(
+            fallback.is_some_and(|reason| reason.contains("[package]")),
+            "the narrowed scope comes back with its reason"
         );
     }
 

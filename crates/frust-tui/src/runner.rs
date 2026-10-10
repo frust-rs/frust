@@ -1550,9 +1550,10 @@ struct LaunchCtx<'a> {
 /// the fat build, then the fat image spawned directly, on Android packaged,
 /// installed and launched, or on an iOS simulator built through the Xcode
 /// fat build, `simctl install`ed and `simctl launch`ed — runs on the
-/// worker's own thread. Anything else launches exactly as [`launch_sessions`] does; with
-/// `auto_apply` it keeps restart-on-save, with an Info toast naming the
-/// precondition that kept a watchable target cold.
+/// worker's own thread. Anything else launches exactly as
+/// [`launch_sessions`] does; with `auto_apply` it keeps restart-on-save,
+/// with an Info toast naming the precondition that kept a watchable target
+/// cold.
 fn launch_hot_sessions(specs: Vec<SessionSpec>, auto_apply: bool, ctx: &mut LaunchCtx<'_>) {
     let mut cold = Vec::new();
     for spec in specs {
@@ -2769,6 +2770,11 @@ impl HotControl {
     }
 }
 
+/// The answer to an `r` whose scan found no file modified since the last
+/// patch: the comparison is by modification time, so the text says exactly
+/// that.
+const NO_FILE_CHANGED: &str = "no file changed since the last patch";
+
 /// One request into a hot worker's queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HotRequest {
@@ -2784,8 +2790,9 @@ enum HotRequest {
 /// Resolves a hot session's [`WatchSet`] — run on its worker the first time
 /// a [`HotRequest::Now`] needs it, never on the UI thread
 /// ([`SessionSpec::hot_watch_set`] in production, which runs `cargo
-/// metadata`).
-type WatchSetLoader = Box<dyn FnOnce() -> WatchSet + Send>;
+/// metadata`). The second value is why the set fell back to the base scope,
+/// when it did; the worker logs it once.
+type WatchSetLoader = Box<dyn FnOnce() -> (WatchSet, Option<String>) + Send>;
 
 /// One hot session: the request queue into its worker, the shared stop
 /// control, and the worker itself.
@@ -2856,7 +2863,7 @@ impl HotSessions {
         starter: HotStarter,
         tx: &UnboundedSender<Message>,
     ) -> io::Result<()> {
-        self.start_with_watch_set(id, starter, Box::new(WatchSet::default), tx)
+        self.start_with_watch_set(id, starter, Box::new(|| (WatchSet::default(), None)), tx)
     }
 
     /// [`Self::start`] over any starter and watch-set loader — the seam the
@@ -2993,11 +3000,12 @@ fn run_hot_session(
 /// **The watermark.** The worker keeps the wall-clock time from which `r`
 /// ([`HotRequest::Now`]) looks for changed files: read immediately *before*
 /// the fat build starts, so an edit saved while it builds is replayed by the
-/// first `r` rather than missed, and advanced — to the time read just before
-/// the `on_change` call — after every `Patched` or `NoChange` answer, so a
-/// patch's own inputs are never replayed twice while an edit landing during
-/// that call still is. A compile failure or a restart leaves it where it
-/// was. It is this worker's value alone: the pure core reads no clock.
+/// first `r` rather than missed, and advanced — to the time read before the
+/// scan and the `on_change` call — after every `Patched` or `NoChange`
+/// answer (and an empty scan), so a patch's own inputs are never replayed
+/// twice while an edit landing during the scan or that call still is. A
+/// compile failure or a restart leaves it where it was. It is this worker's
+/// value alone: the pure core reads no clock.
 fn serve_hot_session(
     id: SessionId,
     starter: HotStarter,
@@ -3073,42 +3081,61 @@ fn serve_hot_session(
     // kept for the session's life.
     let mut load_watch_set = Some(watch_set);
     let mut watch_set: Option<WatchSet> = None;
+    let mut warned_unreadable = false;
     while let Ok(request) = inbox.recv() {
         if control.is_stopped() {
             break;
         }
+        // The watermark candidate, read BEFORE the scan: an edit that lands
+        // while the scan or the patch runs carries a later mtime and is
+        // offered by the next `r`, never lost between the two.
+        let before = SystemTime::now();
         let paths = match request {
             HotRequest::Burst(paths) => paths,
             HotRequest::Now => {
                 let set = watch_set.get_or_insert_with(|| {
-                    load_watch_set
+                    let (set, fallback) = load_watch_set
                         .take()
-                        .map_or_else(WatchSet::default, |load| load())
-                });
-                match changed_since(set, watermark) {
-                    Ok(paths) if paths.is_empty() => {
-                        // Nothing to patch: say so the way an unchanged burst
-                        // would, without a thin build.
-                        let _ = tx.send(Message::HotPatchOutcome {
-                            session: id,
-                            outcome: HotOutcome::NoChange,
-                        });
-                        continue;
-                    }
-                    Ok(paths) => paths,
-                    Err(err) => {
-                        let _ = tx.send(Message::Notify {
-                            level: ToastKind::Warn,
-                            text: format!(
-                                "hot patch: scanning the sources for changes failed: {err}"
+                        .map_or_else(|| (WatchSet::default(), None), |load| load());
+                    if let Some(reason) = fallback {
+                        // Visible in the session's log, once: `r` scans only
+                        // the base scope.
+                        let _ = tx.send(session_line(
+                            id,
+                            format!(
+                                "warning: hot patch: the workspace graph could not be resolved \
+                                 ({reason}); `r` scans only src/ and Cargo.toml"
                             ),
-                        });
-                        continue;
+                        ));
                     }
+                    set
+                });
+                let scan = changed_since(set, watermark);
+                if !scan.skipped.is_empty() && !warned_unreadable {
+                    warned_unreadable = true;
+                    let first = scan.skipped[0].display();
+                    let _ = tx.send(session_line(
+                        id,
+                        format!(
+                            "warning: hot patch: {} path(s) could not be read while scanning \
+                             for changes and were skipped (first: {first})",
+                            scan.skipped.len()
+                        ),
+                    ));
                 }
+                if scan.changed.is_empty() {
+                    // Nothing to patch: say so without a thin build. The scan
+                    // answered, so the watermark moves on like a `NoChange`.
+                    watermark = before;
+                    let _ = tx.send(Message::Notify {
+                        level: ToastKind::Info,
+                        text: NO_FILE_CHANGED.to_string(),
+                    });
+                    continue;
+                }
+                scan.changed
             }
         };
-        let before = SystemTime::now();
         let outcome = patcher.on_change(&paths);
         if control.is_stopped() {
             // Stopped (restarted, closed) while patching: nobody is waiting
@@ -5869,7 +5896,7 @@ mod tests {
                         }
                     }
                 }),
-                Box::new(move || set),
+                Box::new(move || (set, None)),
                 &rig.tx.clone(),
             )
             .unwrap();
@@ -5894,7 +5921,11 @@ mod tests {
         rig.apply(Effect::HotPatchNow {
             session: SessionId(3),
         });
-        assert_eq!(next_outcome(&mut rig), HotOutcome::NoChange);
+        let text = rig.wait_for(|msg| match msg {
+            Message::Notify { text, .. } => Some(text),
+            _ => None,
+        });
+        assert_eq!(text, "no file changed since the last patch");
         assert_eq!(calls.lock().unwrap().len(), 2, "no thin build for nothing");
 
         thread::sleep(Duration::from_millis(20));
@@ -5907,6 +5938,132 @@ mod tests {
         assert_eq!(calls.lock().unwrap().last(), Some(&vec![later]));
 
         rig.apply(Effect::StopSession(SessionId(3)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A hot session whose `on_change` saves one more file, as an editor
+    /// does between the scan and the patch.
+    struct EditingPatcher {
+        edit: PathBuf,
+    }
+
+    impl HotPatcher for EditingPatcher {
+        fn on_change(&mut self, _paths: &[PathBuf]) -> HotOutcome {
+            thread::sleep(Duration::from_millis(20));
+            stamp(&self.edit, SystemTime::now());
+            HotOutcome::Patched {
+                ms: 1,
+                components: 1,
+            }
+        }
+    }
+
+    /// The watermark is read before the scan: an edit saved after the scan
+    /// started and before the patch answered is offered by the next `r`.
+    #[test]
+    fn an_edit_saved_between_the_scan_and_the_patch_is_offered_by_the_next_r() {
+        use frust_drive::process::FakeProcessRunner;
+
+        let root = watch_scratch_dir("patch-race");
+        let src = root.join("src");
+        let first = src.join("first.rs");
+        let during = src.join("during.rs");
+        let set = WatchSet {
+            replayable: vec![src.clone()],
+            local_non_member: Vec::new(),
+            build_inputs: Vec::new(),
+            roots: vec![root.clone()],
+        };
+        let mut rig = HotRig::new(Arc::new(FakeProcessRunner::new()));
+        let edit = during.clone();
+        let first_edit = first.clone();
+        rig.hot
+            .start_with_watch_set(
+                SessionId(4),
+                Box::new(move |_, _| {
+                    // Saved while the fat build runs: the first `r` patches it.
+                    stamp(&first_edit, SystemTime::now());
+                    thread::sleep(Duration::from_millis(20));
+                    HotStart::Running {
+                        patcher: Box::new(EditingPatcher { edit }),
+                        child: None,
+                        notice: None,
+                        teardown: None,
+                    }
+                }),
+                Box::new(move || (set, None)),
+                &rig.tx.clone(),
+            )
+            .unwrap();
+
+        rig.apply(Effect::HotPatchNow {
+            session: SessionId(4),
+        });
+        assert!(matches!(next_outcome(&mut rig), HotOutcome::Patched { .. }));
+        // The edit made during the patch is newer than the watermark, which
+        // was read before the scan, so the scan offers it (and the first
+        // file is behind the watermark now).
+        rig.apply(Effect::HotPatchNow {
+            session: SessionId(4),
+        });
+        assert!(matches!(next_outcome(&mut rig), HotOutcome::Patched { .. }));
+        assert!(during.exists());
+
+        rig.apply(Effect::StopSession(SessionId(4)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A watch set that fell back to the base scope says why, once, in the
+    /// session's log.
+    #[test]
+    fn a_fallback_watch_set_logs_its_reason_once_in_the_session_log() {
+        use frust_drive::process::FakeProcessRunner;
+
+        let root = watch_scratch_dir("fallback-log");
+        let mut rig = HotRig::new(Arc::new(FakeProcessRunner::new()));
+        let patcher = ScriptedPatcher {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            answers: Default::default(),
+        };
+        rig.hot
+            .start_with_watch_set(
+                SessionId(5),
+                Box::new(move |_, _| HotStart::Running {
+                    patcher: Box::new(patcher),
+                    child: None,
+                    notice: None,
+                    teardown: None,
+                }),
+                Box::new(|| (WatchSet::default(), Some("cargo said no".to_string()))),
+                &rig.tx.clone(),
+            )
+            .unwrap();
+
+        for _ in 0..2 {
+            rig.apply(Effect::HotPatchNow {
+                session: SessionId(5),
+            });
+        }
+        let mut warnings = 0;
+        let mut notices = 0;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while notices < 2 && Instant::now() < deadline {
+            while let Ok(msg) = rig.rx.try_recv() {
+                match msg {
+                    Message::Session(SessionEvent {
+                        kind: SessionEventKind::Lines(lines),
+                        ..
+                    }) => warnings += lines.iter().filter(|l| l.contains("cargo said no")).count(),
+                    Message::Notify { .. } => notices += 1,
+                    _ => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(notices, 2, "both `r` answered");
+        assert_eq!(warnings, 1, "the fallback reason is logged once");
+
+        rig.apply(Effect::StopSession(SessionId(5)));
         let _ = std::fs::remove_dir_all(&root);
     }
 

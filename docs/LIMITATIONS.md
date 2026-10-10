@@ -1757,6 +1757,8 @@ and `frustRestart` bypass the TUI's `restart_session_at`, so their replacement s
 unwatched. In the TUI, every hot-capable launch runs hot; `r` hot-patches now (the manual apply),
 and a run with 'Auto-apply on save' off is a supported hot run with no watcher. Turning Watch on
 for a session launched without a hot run makes the next save a plain relaunch into a hot session.
+`r` compares file modification times with the last patch, so a tool that preserves mtimes or a clock
+step can hide an edit; saving the file again makes it visible.
 
 The memory-safety argument is the host's: L1 erases each component's view inside the hot function
 (`build_erased`), so the seam's boundary types are layout-fixed, and L3 refuses any patch whose
