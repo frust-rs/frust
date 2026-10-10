@@ -172,6 +172,7 @@ fn progress_value(state: &Knobs) -> ProgressValue {
 /// `_buildIndicator`. `linear_width` sizes the two linear variants for the
 /// primary preview, see [`PRIMARY_LINEAR_WIDTH`] (the "All styles" preview's
 /// own linear pair is sized by [`all_styles_row`] instead).
+// erasure: keep four-arm match on ProgressKind, each arm a different view type
 fn build_indicator(
     kind: ProgressKind,
     value: ProgressValue,
@@ -205,7 +206,7 @@ fn snippet_code(state: &Knobs) -> String {
         ProgressKind::LinearWavy => "linear_wavy_progress",
     };
     let size_line = if state.kind == ProgressKind::Linear {
-        format!("\n    .size(ProgressSize::{:?})", state.linear_size)
+        format!(".size(ProgressSize::{:?})", state.linear_size)
     } else {
         String::new()
     };
@@ -257,36 +258,34 @@ fn body(state: &mut Knobs) -> impl View<Knobs> {
         |s: &mut Knobs, open: bool| s.menu_open = open,
     );
 
-    let mut rows: Vec<AnyView<Knobs>> = vec![kind_field];
-    if is_linear {
-        rows.push(play_enum_segmented(
-            "Linear size",
-            state.linear_size,
-            &LINEAR_SIZES,
-            linear_size_label,
-            |s: &mut Knobs, v: ProgressSize| s.linear_size = v,
-        ));
-    }
-    rows.push(play_switch(
-        "Determinate",
-        state.determinate,
-        |s: &mut Knobs, v| s.determinate = v,
-    ));
-    if state.determinate {
-        rows.push(play_slider(
-            "Value",
-            state.value,
-            0.0..=1.0,
-            None,
-            |s: &mut Knobs, v| s.value = v,
-        ));
-    }
-    let controls = control_panel("Appearance", rows);
+    let controls = control_panel(
+        "Appearance",
+        (
+            kind_field,
+            is_linear.then(|| {
+                play_enum_segmented(
+                    "Linear size",
+                    state.linear_size,
+                    &LINEAR_SIZES,
+                    linear_size_label,
+                    |s: &mut Knobs, v: ProgressSize| s.linear_size = v,
+                )
+            }),
+            play_switch("Determinate", state.determinate, |s: &mut Knobs, v| {
+                s.determinate = v
+            }),
+            state.determinate.then(|| {
+                play_slider("Value", state.value, 0.0..=1.0, None, |s: &mut Knobs, v| {
+                    s.value = v
+                })
+            }),
+        ),
+    );
 
     let content = playground_body(
         vec![primary_preview, all_styles_preview],
         vec![snippet],
-        vec![controls],
+        controls,
     );
 
     let panel = play_enum_menu_panel::<Knobs, ProgressKind>(
@@ -320,6 +319,7 @@ impl Component for ProgressPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(ProgressPlayground))
 }

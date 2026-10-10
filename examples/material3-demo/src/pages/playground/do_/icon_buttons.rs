@@ -167,12 +167,17 @@ fn preview(state: &Knobs) -> impl View<Knobs> {
 /// `_snippets`, in Frust rather than Dart.
 fn snippet(state: &Knobs) -> PlaySnippet {
     let badge = if state.badge {
-        ".badge(BadgeValue::Count(3))\n    "
+        ".badge(BadgeValue::Count(3))\n"
     } else {
         ""
     };
     let code = format!(
-        "icon_button(any(icon(icons::FAVORITE)), on_press)\n    .selected_icon(any(icon(icons::FAVORITE)))\n    .variant(IconButtonVariant::{variant:?})\n    .size(IconButtonSize::{size:?})\n    .shape(IconButtonShape::{shape:?})\n    .width(IconButtonWidth::{width:?})\n    .selected({selected})\n    .enabled({enabled})\n    {badge}.semantic_label(\"Favorite\");",
+        "icon_button(icon(icons::FAVORITE), |state: &mut State| {{\n    \
+         state.selected = !state.selected\n}})\n\
+         .selected_icon(icon(icons::FAVORITE))\n.variant(IconButtonVariant::{variant:?})\n\
+         .size(IconButtonSize::{size:?})\n.shape(IconButtonShape::{shape:?})\n\
+         .width(IconButtonWidth::{width:?})\n.selected({selected})\n.enabled({enabled})\n\
+         {badge}.semantic_label(\"Favorite\");",
         variant = state.variant,
         size = state.size,
         shape = state.shape,
@@ -185,7 +190,7 @@ fn snippet(state: &Knobs) -> PlaySnippet {
 }
 
 /// "Appearance" controls: variant, size, shape, width.
-fn appearance_panel(state: &Knobs) -> AnyView<Knobs> {
+fn appearance_panel(state: &Knobs) -> impl View<Knobs> {
     control_panel(
         "Appearance",
         vec![
@@ -228,7 +233,7 @@ fn appearance_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// "State" controls: enabled, selected, badge.
-fn state_panel(state: &Knobs) -> AnyView<Knobs> {
+fn state_panel(state: &Knobs) -> impl View<Knobs> {
     control_panel(
         "State",
         vec![
@@ -290,7 +295,7 @@ fn body(state: &Knobs) -> impl View<Knobs> {
     let content = playground_body(
         vec![play_preview_card("Icon button", preview(state))],
         vec![snippet(state)],
-        vec![appearance_panel(state), state_panel(state)],
+        (appearance_panel(state), state_panel(state)),
     );
     stack()
         .child(content)
@@ -315,6 +320,7 @@ impl Component for IconButtonsPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(IconButtonsPlayground))
 }

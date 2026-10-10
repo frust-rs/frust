@@ -99,12 +99,12 @@ fn extended_preview(state: &Knobs) -> impl View<Knobs> {
 /// `_snippets`, in Frust rather than Dart.
 fn snippets(state: &Knobs) -> Vec<PlaySnippet> {
     let fab_code = format!(
-        "fab(any(icon(icons::ADD)), on_press)\n    .size(FabSize::{size:?})\n    .color(FabColor::{color:?})\n    .label(\"Add\");",
+        "fab(icon(icons::ADD), |count: &mut u32| *count += 1)\n    .size(FabSize::{size:?})\n    .color(FabColor::{color:?})\n    .label(\"Add\");",
         size = state.size,
         color = state.color,
     );
     let extended_code = format!(
-        "extended_fab(\"{label}\", on_press)\n    .icon(any(icon(icons::EDIT)))\n    .color(FabColor::{color:?})\n    .extended({extended});",
+        "extended_fab(\"{label}\", |count: &mut u32| *count += 1)\n    .icon(icon(icons::EDIT))\n    .color(FabColor::{color:?})\n    .extended({extended});",
         label = state.label,
         color = state.color,
         extended = state.extended,
@@ -116,7 +116,7 @@ fn snippets(state: &Knobs) -> Vec<PlaySnippet> {
 }
 
 /// "FAB" controls: size, color.
-fn fab_panel(state: &Knobs) -> AnyView<Knobs> {
+fn fab_panel(state: &Knobs) -> impl View<Knobs> {
     control_panel(
         "FAB",
         vec![
@@ -139,7 +139,7 @@ fn fab_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// "Extended FAB" controls: extended toggle, label.
-fn extended_panel(state: &Knobs) -> AnyView<Knobs> {
+fn extended_panel(state: &Knobs) -> impl View<Knobs> {
     control_panel(
         "Extended FAB",
         vec![
@@ -161,7 +161,7 @@ fn body(state: &Knobs) -> impl View<Knobs> {
             play_preview_card("Extended FAB", extended_preview(state)),
         ],
         snippets(state),
-        vec![fab_panel(state), extended_panel(state)],
+        (fab_panel(state), extended_panel(state)),
     )
 }
 
@@ -181,6 +181,7 @@ impl Component for FabsPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(FabsPlayground))
 }

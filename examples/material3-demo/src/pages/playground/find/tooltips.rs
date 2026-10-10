@@ -18,7 +18,7 @@
 //! own docs — this page drives no knob for any of the three, since none is
 //! exposed as a prop upstream either.
 
-use frust::{AnyView, Component, View, any, component, icon, stack};
+use frust::{AnyView, Component, View, any, component, either, icon, stack};
 use frust_material::{
     IconButtonVariant, TooltipHover, icon_button, icons, rich_tooltip, tooltip, tooltip_action,
     tooltip_trigger,
@@ -57,10 +57,13 @@ impl Default for Knobs {
 /// `_snippets` getter, ported to real `frust_material` code rather than a
 /// Dart string.
 fn snippet_code(state: &Knobs) -> String {
-    let trigger = "tooltip_trigger(&hover,\n    icon_button(any(icon(icons::EDIT)), |_| {})\n        .variant(IconButtonVariant::Tonal),\n);";
+    let trigger = "tooltip_trigger(\n    &hover,\n    \
+                   icon_button(icon(icons::EDIT), |_: &mut State| {}).variant(IconButtonVariant::Tonal),\n\
+                   );";
     let panel = if state.rich {
         format!(
-            "rich_tooltip(&hover, {:?})\n    .title({:?})\n    .action(tooltip_action(\"Got it\", |_| {{}}));",
+            "rich_tooltip(&hover, {:?})\n    .title({:?})\n    \
+             .action(tooltip_action(\"Got it\", |_: &mut State| {{}}));",
             state.rich_message, state.rich_title
         )
     } else {
@@ -70,7 +73,7 @@ fn snippet_code(state: &Knobs) -> String {
 }
 
 /// The preview card: the icon-button trigger, wired to the shared hover.
-fn preview_trigger(state: &Knobs) -> AnyView<Knobs> {
+fn preview_trigger(state: &Knobs) -> impl View<Knobs> {
     let button =
         icon_button(icon(icons::EDIT), |_: &mut Knobs| {}).variant(IconButtonVariant::Tonal);
     let label = if state.rich {
@@ -85,14 +88,16 @@ fn preview_trigger(state: &Knobs) -> AnyView<Knobs> {
 /// the module docs); its own portal registration, gated on a live
 /// [`TooltipHover::is_open`] read during paint, is what makes it invisible
 /// while `hover` reads closed.
-fn panel(state: &Knobs) -> AnyView<Knobs> {
-    if state.rich {
-        any(rich_tooltip(&state.hover, state.rich_message.clone())
-            .title(state.rich_title.clone())
-            .action(tooltip_action("Got it", |_: &mut Knobs| {})))
-    } else {
-        any(tooltip(&state.hover, state.message.clone()))
-    }
+fn panel(state: &Knobs) -> impl View<Knobs> {
+    either(
+        state.rich,
+        || {
+            rich_tooltip(&state.hover, state.rich_message.clone())
+                .title(state.rich_title.clone())
+                .action(tooltip_action("Got it", |_: &mut Knobs| {}))
+        },
+        || tooltip(&state.hover, state.message.clone()),
+    )
 }
 
 /// The playground body for the current knob state: [`playground_body`]'s
@@ -107,32 +112,33 @@ fn body(state: &mut Knobs) -> impl View<Knobs> {
     };
     let snippet = play_snippet(snippet_label, snippet_code(state));
 
-    let mut rows: Vec<AnyView<Knobs>> = vec![play_switch(
-        "Rich tooltip",
-        state.rich,
-        |s: &mut Knobs, v| s.rich = v,
-    )];
-    if state.rich {
-        rows.push(play_text_field(
-            "Rich title",
-            state.rich_title.clone(),
-            |s: &mut Knobs, v| s.rich_title = v,
-        ));
-        rows.push(play_text_field(
-            "Rich message",
-            state.rich_message.clone(),
-            |s: &mut Knobs, v| s.rich_message = v,
-        ));
-    } else {
-        rows.push(play_text_field(
-            "Message",
-            state.message.clone(),
-            |s: &mut Knobs, v| s.message = v,
-        ));
-    }
-    let controls = control_panel("Content", rows);
+    let controls = control_panel(
+        "Content",
+        (
+            play_switch("Rich tooltip", state.rich, |s: &mut Knobs, v| s.rich = v),
+            state.rich.then(|| {
+                play_text_field(
+                    "Rich title",
+                    state.rich_title.clone(),
+                    |s: &mut Knobs, v| s.rich_title = v,
+                )
+            }),
+            state.rich.then(|| {
+                play_text_field(
+                    "Rich message",
+                    state.rich_message.clone(),
+                    |s: &mut Knobs, v| s.rich_message = v,
+                )
+            }),
+            (!state.rich).then(|| {
+                play_text_field("Message", state.message.clone(), |s: &mut Knobs, v| {
+                    s.message = v
+                })
+            }),
+        ),
+    );
 
-    let content = playground_body(vec![preview], vec![snippet], vec![controls]);
+    let content = playground_body(preview, vec![snippet], controls);
     stack().child(content).child(panel(state))
 }
 
@@ -154,6 +160,7 @@ impl Component for TooltipsPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(TooltipsPlayground))
 }

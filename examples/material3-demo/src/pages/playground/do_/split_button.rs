@@ -129,8 +129,9 @@ use frust::{
 };
 use frust_material::{
     BottomSheetView, MenuNode, MenuSelection, ModalDismiss, OverlayAnchor, SplitButtonItem,
-    SplitButtonMenuStyle, SplitButtonShape, SplitButtonSize, SplitButtonVariant, bottom_sheet,
-    icons, menu_panel, menu_selectable, show_bottom_sheet, split_button, split_button_item,
+    SplitButtonMenuStyle, SplitButtonShape, SplitButtonSize, SplitButtonVariant, SplitButtonView,
+    bottom_sheet, icons, menu_panel, menu_selectable, show_bottom_sheet, split_button,
+    split_button_item,
 };
 
 use crate::AppState;
@@ -342,14 +343,14 @@ fn on_open(state: &mut Knobs) {
 /// The live split button for this pass, every knob applied — shared by
 /// [`preview`] and [`split_popup_menu`] (the latter reaches only
 /// [`frust_material::SplitButtonView::popup_menu`] off it).
-fn split_view(state: &Knobs) -> frust_material::SplitButtonView<Knobs> {
+fn split_view(state: &Knobs) -> SplitButtonView<Knobs> {
     split_button(
         state.label.get(),
         state.open.get(),
         |_: &mut Knobs| {},
         on_open,
     )
-    .leading_icon(|| any(icon(icons::SAVE)))
+    .leading_icon(|| icon(icons::SAVE))
     .variant(state.style.get())
     .size(state.size.get())
     .shape(state.shape.get())
@@ -371,12 +372,12 @@ fn preview(state: &Knobs) -> impl View<Knobs> {
 /// plays the host's exit ramp. Only relevant while [`Knobs::menu_style`] is
 /// [`SplitButtonMenuStyle::Popup`] — the bottom-sheet route presents through
 /// [`Knobs::nav`] instead, with no kept-mounted counterpart of its own.
-fn split_popup_menu(state: &Knobs) -> AnyView<Knobs> {
+fn split_popup_menu(state: &Knobs) -> impl View<Knobs> {
     split_view(state).popup_menu()
 }
 
 /// "Appearance" controls: style, size, shape, menu style.
-fn appearance_panel(state: &Knobs) -> AnyView<Knobs> {
+fn appearance_panel(state: &Knobs) -> impl View<Knobs> {
     control_panel(
         "Appearance",
         vec![
@@ -425,7 +426,7 @@ fn appearance_panel(state: &Knobs) -> AnyView<Knobs> {
 }
 
 /// "Content" controls: label, enabled.
-fn content_panel(state: &Knobs) -> AnyView<Knobs> {
+fn content_panel(state: &Knobs) -> impl View<Knobs> {
     control_panel(
         "Content",
         vec![
@@ -480,14 +481,17 @@ fn snippet(state: &Knobs) -> PlaySnippet {
         None => "None".to_string(),
     };
     let code = format!(
-        "split_button({label:?}, {open}, on_press, on_open)\n    \
-         .leading_icon(|| any(icon(icons::SAVE)))\n    \
-         .variant(SplitButtonVariant::{style:?})\n    .size(SplitButtonSize::{size:?})\n    \
-         .shape(SplitButtonShape::{shape:?})\n    .enabled({enabled})\n    .items(vec![\n        \
-         split_button_item(\"Save draft\").value(\"draft\"),\n        \
-         split_button_item(\"Save a copy\").value(\"copy\"),\n    ])\n    \
-         .selected_value({selected})\n    .menu_style(SplitButtonMenuStyle::{menu_style:?})\n    \
-         .on_select(on_select);",
+        "split_button(\n    {label:?},\n    {open},\n    |_: &mut State| {{}},\n    \
+         |state: &mut State| state.open = !state.open,\n)\n\
+         .leading_icon(|| icon(icons::SAVE))\n\
+         .variant(SplitButtonVariant::{style:?})\n.size(SplitButtonSize::{size:?})\n\
+         .shape(SplitButtonShape::{shape:?})\n.enabled({enabled})\n.items(vec![\n    \
+         split_button_item(\"Save draft\").value(\"draft\"),\n    \
+         split_button_item(\"Save a copy\").value(\"copy\"),\n])\n\
+         .selected_value({selected})\n.menu_style(SplitButtonMenuStyle::{menu_style:?})\n\
+         .on_select(|state: &mut State, selection: MenuSelection| {{\n    \
+         state.selected = selection.value().map(str::to_string);\n    \
+         state.open = false;\n}});",
         label = state.label.get(),
         open = state.open.get(),
         style = state.style.get(),
@@ -506,7 +510,7 @@ fn content(state: &Knobs) -> impl View<Knobs> + use<> {
     let body = playground_body(
         vec![play_preview_card("Split button", preview(state))],
         vec![snippet(state)],
-        vec![appearance_panel(state), content_panel(state)],
+        (appearance_panel(state), content_panel(state)),
     );
     stack()
         .child(body)
@@ -530,11 +534,12 @@ impl Component for SplitButtonPlayground {
 
     fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let snapshot = state.clone();
-        any(navigator(&state.nav, move || content(&snapshot)))
+        navigator(&state.nav, move || content(&snapshot))
     }
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(SplitButtonPlayground))
 }
