@@ -166,7 +166,7 @@ fn sheet_actions<State: 'static>(
 }
 
 fn controls(title: &str, body: &str, show_actions: bool) -> AnyView<Knobs> {
-    control_panel::<Knobs>(
+    control_panel::<Knobs, _>(
         "Sheet",
         vec![
             play_text_field::<Knobs>(

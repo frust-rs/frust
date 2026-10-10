@@ -282,7 +282,7 @@ fn expandable_preview(state: &Knobs) -> AnyView<Knobs> {
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {
-    control_panel::<Knobs>(
+    control_panel::<Knobs, _>(
         "Content",
         vec![
             play_enum_menu_field::<Knobs, ListKind>(

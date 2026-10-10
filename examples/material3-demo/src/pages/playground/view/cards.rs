@@ -150,7 +150,7 @@ fn all_variants_column(theme: &Theme, state: &Knobs) -> impl View<Knobs> {
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {
-    control_panel::<Knobs>(
+    control_panel::<Knobs, _>(
         "Appearance",
         vec![
             play_enum_segmented::<Knobs, CardVariant>(

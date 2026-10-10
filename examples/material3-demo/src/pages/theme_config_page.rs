@@ -11,8 +11,8 @@
 //! hand-built swatch grid, since nothing in this catalog stands in for it.
 
 use frust::{
-    AnyView, Color, Column, CrossAxisAlignment, EdgeInsets, GestureDetector, Padding, Row,
-    SizedBox, Theme, View, any, column, container, scroll_view, text, use_context,
+    Color, CrossAxisAlignment, EdgeInsets, GestureDetector, Padding, SizedBox, Theme, View, any,
+    column, container, row, scroll_view, text, use_context,
 };
 use frust_material::{card_list_items, list_item, segment, segmented_button, switch};
 
@@ -51,6 +51,7 @@ const SEED_ROW_COLUMNS: usize = 4;
 pub fn theme_config_page() -> impl View<AppState> {
     let settings = use_context::<ThemeSettings>();
     let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
+    // erasure: keep playground_scaffold takes an AnyView body, and the arms differ
     let content = match settings {
         Some(settings) => any(body(&theme, settings)),
         // No scope above this page — only reachable in a bare harness, never
@@ -110,11 +111,11 @@ fn seeds(theme: &Theme, settings: ThemeSettings) -> impl View<AppState> {
 
     let brightness = theme.brightness;
     let selected_index = settings.seed_index();
-    let swatches: Vec<AnyView<AppState>> = SEED_OPTIONS
+    let swatches: Vec<_> = SEED_OPTIONS
         .iter()
         .enumerate()
         .map(|(index, (color, label))| {
-            any(seed_swatch(
+            seed_swatch(
                 theme,
                 *color,
                 label,
@@ -122,7 +123,7 @@ fn seeds(theme: &Theme, settings: ThemeSettings) -> impl View<AppState> {
                 move |state: &mut AppState| {
                     state.settings.set_seed(index, brightness);
                 },
-            ))
+            )
         })
         .collect();
 
@@ -192,7 +193,7 @@ fn type_section(theme: &Theme, settings: ThemeSettings) -> impl View<AppState> {
     detail_style.color = scheme.on_surface_variant;
 
     let brightness = theme.brightness;
-    let font_picker = any(segmented_button::<AppState, DemoFont, _>(
+    let font_picker = segmented_button::<AppState, DemoFont, _>(
         DemoFont::ALL
             .iter()
             .map(|font| segment(*font).label(font.label())),
@@ -202,8 +203,8 @@ fn type_section(theme: &Theme, settings: ThemeSettings) -> impl View<AppState> {
                 state.settings.set_font(font, brightness);
             }
         },
-    ));
-    let style_picker = any(segmented_button::<AppState, DemoTypeStyle, _>(
+    );
+    let style_picker = segmented_button::<AppState, DemoTypeStyle, _>(
         DemoTypeStyle::ALL
             .iter()
             .map(|style| segment(*style).label(style.label())),
@@ -213,7 +214,7 @@ fn type_section(theme: &Theme, settings: ThemeSettings) -> impl View<AppState> {
                 state.settings.set_type_style(style, brightness);
             }
         },
-    ));
+    );
 
     column()
         .child(text("Type").style(title_style))
@@ -232,26 +233,33 @@ fn type_section(theme: &Theme, settings: ThemeSettings) -> impl View<AppState> {
 /// Chunk `items` into [`SEED_ROW_COLUMNS`]-wide rows, `SEED_GAP`px apart in
 /// both directions — see [`SEED_ROW_COLUMNS`]'s own doc comment for the
 /// row-width arithmetic (G10). The same "chunk a fixed-size tile grid" idiom
-/// `crate::pages::playground::view::shapes`'s `catalog_rows` uses (`drain`
-/// rather than `chunks`, since `AnyView` — already-built views, not the raw
-/// data `shapes` chunks — isn't `Clone`).
-fn swatch_grid<State: 'static>(mut items: Vec<AnyView<State>>) -> impl View<State> {
-    let mut rows: Vec<AnyView<State>> = Vec::new();
-    while !items.is_empty() {
-        if !rows.is_empty() {
-            rows.push(any(SizedBox::<State>(None, Some(SEED_GAP))));
+/// `crate::pages::playground::view::shapes`'s `catalog_rows` uses (`take` off
+/// an owning iterator rather than `chunks`, since already-built views, not the
+/// raw data `shapes` chunks, aren't `Clone`).
+fn swatch_grid<State: 'static>(items: Vec<impl View<State>>) -> impl View<State> {
+    let mut items = items.into_iter();
+    let mut grid = column();
+    let mut first_row = true;
+    loop {
+        let cells: Vec<_> = items.by_ref().take(SEED_ROW_COLUMNS).collect();
+        if cells.is_empty() {
+            return grid;
         }
-        let take = SEED_ROW_COLUMNS.min(items.len());
-        let mut cells: Vec<AnyView<State>> = Vec::with_capacity(take * 2);
-        for item in items.drain(..take) {
-            if !cells.is_empty() {
-                cells.push(any(SizedBox::<State>(Some(SEED_GAP), None)));
-            }
-            cells.push(item);
+        let mut line = row();
+        for (index, item) in cells.into_iter().enumerate() {
+            line = line
+                .when(index > 0, |line| {
+                    line.child(SizedBox::<State>(Some(SEED_GAP), None))
+                })
+                .child(item);
         }
-        rows.push(any(Row(cells)));
+        grid = grid
+            .when(!first_row, |grid| {
+                grid.child(SizedBox::<State>(None, Some(SEED_GAP)))
+            })
+            .child(line);
+        first_row = false;
     }
-    Column(rows)
 }
 
 #[cfg(test)]

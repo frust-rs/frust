@@ -116,7 +116,7 @@ fn sheet_content<State: 'static>(body: &str) -> impl View<State> {
 }
 
 fn controls(body: &str) -> AnyView<Knobs> {
-    control_panel::<Knobs>(
+    control_panel::<Knobs, _>(
         "Sheet",
         vec![play_text_field::<Knobs>(
             "Body",

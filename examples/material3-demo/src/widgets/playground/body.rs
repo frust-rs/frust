@@ -1,7 +1,9 @@
 //! Scrollable playground body: preview(s), optional code snippets, then
 //! controls — the reference's `PlaygroundBody`.
 
-use frust::{AnyView, Column, EdgeInsets, Padding, SizedBox, View, any, scroll_view, text};
+use frust::{
+    AnyView, EdgeInsets, Padding, SizedBox, View, ViewSeq, column, scroll_view, text, views,
+};
 use frust_material::MaterialSpacing;
 
 use super::code_snippet::play_code_snippet;
@@ -11,34 +13,21 @@ use super::{PlaySnippet, ambient_theme};
 /// `snippets`, and `controls` — the vertical arrangement every ported
 /// playground page returns as its whole body (see the page contract in
 /// [`crate::pages::playground`]).
-pub fn playground_body<State: 'static>(
-    previews: Vec<AnyView<State>>,
+///
+/// `previews` and `controls` are any [`ViewSeq`]: a `Vec`, a tuple of mixed
+/// views, or a single view.
+pub fn playground_body<State: 'static, PM, CM>(
+    previews: impl ViewSeq<State, PM>,
     snippets: Vec<PlaySnippet>,
-    controls: Vec<AnyView<State>>,
+    controls: impl ViewSeq<State, CM>,
 ) -> impl View<State> {
     let theme = ambient_theme();
     let mut section = theme.type_scale.title_medium.clone();
     section.color = theme.scheme().on_surface;
 
-    let mut rows: Vec<AnyView<State>> = vec![
-        any(text("Preview").style(section.clone())),
-        any(SizedBox::<State>(None, Some(MaterialSpacing::MD))),
-    ];
-    rows.extend(previews);
-
-    if !snippets.is_empty() {
-        rows.push(any(SizedBox::<State>(None, Some(MaterialSpacing::XL))));
-        rows.push(any(text("Code").style(section.clone())));
-        rows.push(any(SizedBox::<State>(None, Some(MaterialSpacing::MD))));
-        rows.extend(snippets.iter().map(|snippet| play_code_snippet(snippet)));
-    }
-
-    if !controls.is_empty() {
-        rows.push(any(SizedBox::<State>(None, Some(MaterialSpacing::XL))));
-        rows.push(any(text("Controls").style(section)));
-        rows.push(any(SizedBox::<State>(None, Some(MaterialSpacing::MD))));
-        rows.extend(controls);
-    }
+    // Emptiness is a property of the flattened sequence, so erase it once here.
+    let mut control_views: Vec<AnyView<State>> = Vec::new();
+    controls.extend_views(&mut control_views);
 
     scroll_view(Padding(
         EdgeInsets {
@@ -47,13 +36,30 @@ pub fn playground_body<State: 'static>(
             right: MaterialSpacing::LG,
             bottom: MaterialSpacing::XXL,
         },
-        Column(rows),
+        column()
+            .child(text("Preview").style(section.clone()))
+            .child(SizedBox::<State>(None, Some(MaterialSpacing::MD)))
+            .children(previews)
+            .when(!snippets.is_empty(), |body| {
+                body.child(SizedBox::<State>(None, Some(MaterialSpacing::XL)))
+                    .child(text("Code").style(section.clone()))
+                    .child(SizedBox::<State>(None, Some(MaterialSpacing::MD)))
+                    .children(views(
+                        snippets.iter().map(|snippet| play_code_snippet(snippet)),
+                    ))
+            })
+            .when(!control_views.is_empty(), |body| {
+                body.child(SizedBox::<State>(None, Some(MaterialSpacing::XL)))
+                    .child(text("Controls").style(section))
+                    .child(SizedBox::<State>(None, Some(MaterialSpacing::MD)))
+                    .children(control_views)
+            }),
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use frust::{any, text};
+    use frust::{AnyView, text};
 
     use super::playground_body;
     use crate::widgets::playground::play_snippet;
@@ -62,15 +68,19 @@ mod tests {
 
     #[test]
     fn builds_with_only_a_preview() {
-        let _view = playground_body::<TestState>(vec![any(text("preview"))], vec![], vec![]);
+        let _view = playground_body::<TestState, _, _>(
+            text("preview"),
+            vec![],
+            Vec::<AnyView<TestState>>::new(),
+        );
     }
 
     #[test]
     fn builds_with_snippets_and_controls() {
-        let _view = playground_body::<TestState>(
-            vec![any(text("preview"))],
+        let _view = playground_body::<TestState, _, _>(
+            text("preview"),
             vec![play_snippet("Filled", "filled_button(\"Go\", |_| {})")],
-            vec![any(text("control"))],
+            text("control"),
         );
     }
 }
