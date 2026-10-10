@@ -50,7 +50,9 @@ use gimli::{
 };
 use object::read::RelocationMap;
 use object::read::archive::ArchiveFile;
-use object::{BinaryFormat, Object as _, ObjectSection as _};
+use object::{
+    BinaryFormat, Object as _, ObjectSection as _, ObjectSymbol as _, RelocationTarget, SymbolKind,
+};
 use serde::{Deserialize, Serialize};
 
 use super::HotpatchError;
@@ -439,6 +441,33 @@ impl gimli::read::Relocate for SectionRelocations<'_> {
     }
 }
 
+/// The relocation map of one ELF section, built entry by entry. A
+/// relocation the map cannot apply is skipped only when it targets a
+/// thread-local symbol: that can only feed a TLS `DW_AT_location`
+/// expression (`R_X86_64_DTPOFF64`, `R_AARCH64_TLS_DTPREL*`), which the
+/// layout gate never reads. Any other failure refuses the section.
+fn elf_relocation_map<'data>(
+    file: &object::File<'data>,
+    section: &object::Section<'data, '_>,
+) -> object::read::Result<RelocationMap> {
+    let mut map = RelocationMap::default();
+    for (offset, relocation) in section.relocations() {
+        let target = relocation.target();
+        if let Err(err) = map.add(file, offset, relocation) {
+            let thread_local = match target {
+                RelocationTarget::Symbol(index) => file
+                    .symbol_by_index(index)
+                    .is_ok_and(|symbol| symbol.kind() == SymbolKind::Tls),
+                _ => false,
+            };
+            if !thread_local {
+                return Err(err);
+            }
+        }
+    }
+    Ok(map)
+}
+
 /// Reads one object's DWARF into `found`; returns where it was read and how
 /// many type DIEs it holds.
 fn read_object(
@@ -481,7 +510,7 @@ fn read_object(
             HotpatchError::unsupported(format!("{label}: unreadable {}: {err}", id.name()))
         })?;
         let relocations = if is_elf {
-            section.relocation_map().map_err(|err| {
+            elf_relocation_map(file, &section).map_err(|err| {
                 HotpatchError::unsupported(format!(
                     "{label}: unsupported relocation in {}: {err}",
                     id.name()
@@ -1483,6 +1512,128 @@ pub fn total(x: u64) -> u64 { let o = b::build(x); o.value + o.count }
         std::fs::write(&object, empty).unwrap();
         let detail = unsupported(extract(&[object], &["my_app".to_string()]));
         assert!(detail.contains("carries no DWARF"), "{detail}");
+    }
+
+    /// An x86_64 ELF object whose `.debug_info` holds one empty unit and two
+    /// relocations: `R_X86_64_32` against `.debug_abbrev` at the unit's
+    /// abbrev offset, and `kind` against a thread-local (or, when
+    /// `tls_target` is false, a plain data) symbol in the trailing padding.
+    fn elf_with_debug_relocation(kind: u32, tls_target: bool) -> Vec<u8> {
+        use object::write::{Object, Relocation, Symbol, SymbolSection};
+        use object::{RelocationFlags, SectionKind, SymbolFlags, SymbolScope};
+        let mut obj = Object::new(
+            BinaryFormat::Elf,
+            object::Architecture::X86_64,
+            object::Endianness::Little,
+        );
+        let abbrev = obj.add_section(Vec::new(), b".debug_abbrev".to_vec(), SectionKind::Debug);
+        // 1: compile unit, 2: namespace (both with children), 3: a
+        // 4-byte struct; all named by an inline string.
+        let abbrevs = [
+            &[1, 0x11, 1, 0, 0][..],
+            &[2, 0x39, 1, 0x03, 0x08, 0, 0],
+            &[3, 0x13, 0, 0x03, 0x08, 0x0b, 0x0b, 0, 0],
+            &[0],
+        ];
+        obj.set_section_data(abbrev, abbrevs.concat(), 1);
+        let info = obj.add_section(Vec::new(), b".debug_info".to_vec(), SectionKind::Debug);
+        // DWARF 4, abbrev offset 0, 8-byte addresses: `my_app::S`, then the
+        // scope closes and 8 padding bytes carry the second relocation.
+        let mut unit = vec![0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 8];
+        unit.extend([1, 2]);
+        unit.extend(b"my_app\0");
+        unit.extend([3]);
+        unit.extend(b"S\0");
+        unit.extend([4, 0, 0]);
+        let padding = unit.len() as u64;
+        unit.extend([0u8; 8]);
+        let length = (unit.len() - 4) as u32;
+        unit[..4].copy_from_slice(&length.to_le_bytes());
+        obj.set_section_data(info, unit, 1);
+        let (section, symbol_kind) = if tls_target {
+            let tdata = obj.add_section(Vec::new(), b".tdata".to_vec(), SectionKind::Tls);
+            obj.set_section_data(tdata, vec![0; 8], 8);
+            (tdata, SymbolKind::Tls)
+        } else {
+            let data = obj.add_section(Vec::new(), b".data".to_vec(), SectionKind::Data);
+            obj.set_section_data(data, vec![0; 8], 8);
+            (data, SymbolKind::Data)
+        };
+        let target = obj.add_symbol(Symbol {
+            name: b"VAR".to_vec(),
+            value: 0,
+            size: 8,
+            kind: symbol_kind,
+            scope: SymbolScope::Compilation,
+            weak: false,
+            section: SymbolSection::Section(section),
+            flags: SymbolFlags::None,
+        });
+        let abbrev_symbol = obj.section_symbol(abbrev);
+        let flags = |r_type| RelocationFlags::Elf { r_type };
+        obj.add_relocation(
+            info,
+            Relocation {
+                offset: 6,
+                symbol: abbrev_symbol,
+                addend: 0,
+                flags: flags(object::elf::R_X86_64_32),
+            },
+        )
+        .unwrap();
+        obj.add_relocation(
+            info,
+            Relocation {
+                offset: padding,
+                symbol: target,
+                addend: 0,
+                flags: flags(kind),
+            },
+        )
+        .unwrap();
+        obj.write().unwrap()
+    }
+
+    #[test]
+    fn a_tls_offset_relocation_in_debug_info_is_skipped_not_refused() {
+        let dir = temp_dir("tls-reloc");
+        let object = dir.join("tls.o");
+        std::fs::write(
+            &object,
+            elf_with_debug_relocation(object::elf::R_X86_64_DTPOFF64, true),
+        )
+        .unwrap();
+        let extraction = extract(&[object], &["my_app".to_string()]).unwrap();
+        assert!(extraction.table.get("my_app::S").is_some());
+    }
+
+    #[test]
+    fn an_unsupported_relocation_against_a_plain_symbol_is_builder_unsupported() {
+        let dir = temp_dir("plain-reloc");
+        let object = dir.join("plain.o");
+        std::fs::write(
+            &object,
+            elf_with_debug_relocation(object::elf::R_X86_64_PC32, false),
+        )
+        .unwrap();
+        let detail = unsupported(extract(&[object], &["my_app".to_string()]));
+        assert!(
+            detail.contains("unsupported relocation in .debug_info"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn a_four_byte_tls_offset_relocation_is_skipped_too() {
+        let dir = temp_dir("tls-dtpoff32");
+        let object = dir.join("tls32.o");
+        std::fs::write(
+            &object,
+            elf_with_debug_relocation(object::elf::R_X86_64_DTPOFF32, true),
+        )
+        .unwrap();
+        let extraction = extract(&[object], &["my_app".to_string()]).unwrap();
+        assert!(extraction.table.get("my_app::S").is_some());
     }
 
     #[test]
