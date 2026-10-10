@@ -138,10 +138,10 @@ use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
 use frust::motion::{AnimatedOpacity, AnimatedScale};
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, Color, CrossAxisAlignment, Curve, EdgeInsets,
-    FlexChild, FlexView, GestureDetector, Get, GetUntracked, Image, ImageFit, ImageSource, Padding,
-    RwSignal, Set, SizedBox, Stack, Theme, Timing, Update, any, button, column, inflexible, keyed,
-    row, scroll_view, stack, text, use_context,
+    Align, Alignment, Axis, ButtonStyle, Color, CrossAxisAlignment, Curve, EdgeInsets, FlexChild,
+    FlexView, GestureDetector, Get, GetUntracked, Image, ImageFit, ImageSource, Padding, RwSignal,
+    Set, SizedBox, Theme, Timing, Update, any, button, column, either, inflexible, keyed, row,
+    scroll_view, stack, text, use_context,
 };
 // `progress` is aliased to avoid shadowing by `demo_charge_ring`'s own local
 // `progress: f64` binding (the hold fraction it reads off
@@ -541,15 +541,14 @@ fn demo_heartbeat(state: &CatalogState) -> FlexChild<CatalogState> {
     // above) — tapping the row toggles `hb_active_sig`, resetting the wall
     // clock on each (re)start so a cycle always begins at the ping rather
     // than resuming mid-cycle.
-    let tappable_row: AnyView<CatalogState> =
-        any(GestureDetector(row).on_tap(move |_s: &mut CatalogState| {
-            if active_sig.get_untracked() {
-                active_sig.set(false);
-            } else {
-                hb_reset_clock();
-                active_sig.set(true);
-            }
-        }));
+    let tappable_row = GestureDetector(row).on_tap(move |_s: &mut CatalogState| {
+        if active_sig.get_untracked() {
+            active_sig.set(false);
+        } else {
+            hb_reset_clock();
+            active_sig.set(true);
+        }
+    });
 
     let mut children = vec![
         inflexible(label("01 Connection heartbeat")),
@@ -583,33 +582,37 @@ fn demo_attach() -> FlexChild<CatalogState> {
     let attached = attached_sig.get();
     let key = usize::from(attached);
 
-    let face: AnyView<CatalogState> = if attached {
-        any(column()
-            .child(
-                row()
-                    .child(
-                        button("‹ sessions", move |_s: &mut CatalogState| {
-                            attached_sig.set(false)
-                        })
-                        .style(ButtonStyle::Ghost)
-                        .small(),
-                    )
-                    .flex(1, text("dev").size(12.0).color(amber()))
-                    .cross_axis(CrossAxisAlignment::Center),
+    let face = either(
+        attached,
+        || {
+            column()
+                .child(
+                    row()
+                        .child(
+                            button("‹ sessions", move |_s: &mut CatalogState| {
+                                attached_sig.set(false)
+                            })
+                            .style(ButtonStyle::Ghost)
+                            .small(),
+                        )
+                        .flex(1, text("dev").size(12.0).color(amber()))
+                        .cross_axis(CrossAxisAlignment::Center),
+                )
+                .push(gap(8.0))
+                .child(term_block(vec![
+                    TermLine::prompt("ed@dev:~$ btop"),
+                    TermLine::output("cpu 12% · mem 4.1/16gb"),
+                ]))
+        },
+        || {
+            GestureDetector(
+                glyph_card::<CatalogState>()
+                    .title(text("dev").size(13.0))
+                    .desc(text("9 panes · 4 tabs · running").size(11.0).color(muted())),
             )
-            .push(gap(8.0))
-            .child(term_block(vec![
-                TermLine::prompt("ed@dev:~$ btop"),
-                TermLine::output("cpu 12% · mem 4.1/16gb"),
-            ])))
-    } else {
-        any(GestureDetector(
-            glyph_card::<CatalogState>()
-                .title(text("dev").size(13.0))
-                .desc(text("9 panes · 4 tabs · running").size(11.0).color(muted())),
-        )
-        .on_tap(move |_s: &mut CatalogState| attached_sig.set(true)))
-    };
+            .on_tap(move |_s: &mut CatalogState| attached_sig.set(true))
+        },
+    );
 
     block(vec![
         inflexible(label("02 Session attach")),
@@ -654,37 +657,41 @@ fn demo_boot() -> FlexChild<CatalogState> {
     let n = replay_sig.get();
     let key = usize::from(active);
 
-    let frame: AnyView<CatalogState> = if active {
-        let elapsed = boot_elapsed_ms();
-        let chip_visible = elapsed >= BOOT_CHIP_DELAY_MS;
-        let chip_row = row()
-            .child(badge("running", BadgeVariant::Success).dot(true))
-            .child(SizedBox(Some(8.0), None))
-            .child(text("swift-otter").size(12.0))
-            .cross_axis(CrossAxisAlignment::Center);
+    let frame = either(
+        active,
+        || {
+            let elapsed = boot_elapsed_ms();
+            let chip_visible = elapsed >= BOOT_CHIP_DELAY_MS;
+            let chip_row = row()
+                .child(badge("running", BadgeVariant::Success).dot(true))
+                .child(SizedBox(Some(8.0), None))
+                .child(text("swift-otter").size(12.0))
+                .cross_axis(CrossAxisAlignment::Center);
 
-        let mut card_children = vec![
-            keyed(n, term_block(boot_lines()).staggered(true)),
-            gap(8.0),
-            inflexible(AnimatedOpacity(
-                if chip_visible { 1.0 } else { 0.0 },
-                chip_row,
-            )),
-        ];
-        if !chip_visible {
-            card_children.push(frame_ticker());
-        }
-        any(glyph_card::<CatalogState>().desc(FlexView::new(Axis::Vertical, card_children)))
-    } else {
-        any(GestureDetector(
-            glyph_card::<CatalogState>().desc(text("+ new session").size(12.0).color(amber())),
-        )
-        .on_tap(move |_s: &mut CatalogState| {
-            boot_reset_clock();
-            replay_sig.update(|c| *c += 1);
-            active_sig.set(true);
-        }))
-    };
+            let mut card_children = vec![
+                keyed(n, term_block(boot_lines()).staggered(true)),
+                gap(8.0),
+                inflexible(AnimatedOpacity(
+                    if chip_visible { 1.0 } else { 0.0 },
+                    chip_row,
+                )),
+            ];
+            if !chip_visible {
+                card_children.push(frame_ticker());
+            }
+            glyph_card::<CatalogState>().desc(FlexView::new(Axis::Vertical, card_children))
+        },
+        || {
+            GestureDetector(
+                glyph_card::<CatalogState>().desc(text("+ new session").size(12.0).color(amber())),
+            )
+            .on_tap(move |_s: &mut CatalogState| {
+                boot_reset_clock();
+                replay_sig.update(|c| *c += 1);
+                active_sig.set(true);
+            })
+        },
+    );
 
     block(vec![
         inflexible(label("03 New session boot")),
@@ -780,13 +787,9 @@ fn scramble_text(frame: u32) -> String {
 }
 
 /// The token name text, tinted [`error_ink`] while glitching.
-fn token_name_view(rendered: String, glitching: bool) -> AnyView<CatalogState> {
+fn token_name_view(rendered: String, glitching: bool) -> impl View<CatalogState> {
     let t = text(rendered).size(11.5);
-    if glitching {
-        any(t.color(error_ink()))
-    } else {
-        any(t)
-    }
+    if glitching { t.color(error_ink()) } else { t }
 }
 
 /// 04 token revoke — scramble: revoking progressively locks the token's
@@ -842,12 +845,12 @@ fn demo_token_scramble(state: &CatalogState) -> FlexChild<CatalogState> {
         )
         .cross_axis(CrossAxisAlignment::Center);
 
-    let row: AnyView<CatalogState> = any(AnimatedOpacity(
+    let row = AnimatedOpacity(
         ratio,
         SizedBox(None, Some((SCRAMBLE_ROW_H * ratio).max(0.0)))
             .child(Padding(EdgeInsets::symmetric(4.0, 6.0), row_inner)),
     )
-    .timing(ZERO));
+    .timing(ZERO);
 
     let mut children = vec![
         inflexible(label("04 Token revoke — scramble")),
@@ -939,17 +942,14 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
         with_alpha(muted(), 0.14)
     };
     let icon_fg = if floated { amber() } else { muted() };
-    let icon_box: AnyView<CatalogState> =
-        any(
-            SizedBox(Some(CHARGE_ICON_SIZE), Some(CHARGE_ICON_SIZE)).child(
-                stack()
-                    .child(Image(solid_source(icon_bg)).fit(ImageFit::Fill))
-                    .child(Align(
-                        Alignment::CENTER,
-                        text("▤").size(12.0).color(icon_fg),
-                    )),
-            ),
-        );
+    let icon_box = SizedBox(Some(CHARGE_ICON_SIZE), Some(CHARGE_ICON_SIZE)).child(
+        stack()
+            .child(Image(solid_source(icon_bg)).fit(ImageFit::Fill))
+            .child(Align(
+                Alignment::CENTER,
+                text("▤").size(12.0).color(icon_fg),
+            )),
+    );
 
     // `SizedBox` TIGHTENS its child's constraints (both axes forced to
     // CHARGE_RING_SIZE), which would clamp `icon_box`'s own 26×26 `SizedBox`
@@ -960,9 +960,8 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
     // docs), so `icon_box` recovers its authored 26×26 footprint and Align
     // centers it in the remaining 34×34 space, matching the reference's
     // small-icon-in-a-bigger-slot look.
-    let icon_stack: AnyView<CatalogState> =
-        any(SizedBox(Some(CHARGE_RING_SIZE), Some(CHARGE_RING_SIZE))
-            .child(Align(Alignment::CENTER, icon_box)));
+    let icon_stack = SizedBox(Some(CHARGE_RING_SIZE), Some(CHARGE_RING_SIZE))
+        .child(Align(Alignment::CENTER, icon_box));
 
     // The fill readout lives beside the title rather than traced as a ring
     // around the icon (see the fn's doc comment) — a third row in the same
@@ -977,13 +976,13 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
         title_children.push(gap(3.0));
         title_children.push(inflexible(glyph_progress(progress)));
     }
-    let title_col: AnyView<CatalogState> = any(FlexView::new(Axis::Vertical, title_children));
+    let title_col = FlexView::new(Axis::Vertical, title_children);
 
-    let chip: AnyView<CatalogState> = any(AnimatedOpacity(
+    let chip = AnimatedOpacity(
         if floated { 1.0 } else { 0.0 },
         badge("floating", BadgeVariant::Accent),
     )
-    .timing(ZERO));
+    .timing(ZERO);
 
     let row_inner = row()
         .child(icon_stack)
@@ -1010,27 +1009,27 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
     // wraps the wash in a single-child horizontal `flexible(1, ..)` row:
     // its main axis (width) is tightened to the row's full available width
     // exactly the way a flexible flex child's main axis always is.
-    let glow_wash: AnyView<CatalogState> = any(row().flex(
+    let glow_wash = row().flex(
         1,
         SizedBox(None, Some(CHARGE_ROW_H))
             .child(Image(solid_source(with_alpha(amber(), CHARGE_GLOW_ALPHA))).fit(ImageFit::Fill)),
-    ));
-    let glow: AnyView<CatalogState> =
-        any(AnimatedOpacity(if floated { 1.0 } else { 0.0 }, glow_wash).timing(ZERO));
+    );
+    let glow = AnimatedOpacity(if floated { 1.0 } else { 0.0 }, glow_wash).timing(ZERO);
 
-    let card: AnyView<CatalogState> = any(SizedBox(None, Some(CHARGE_ROW_H)).child(
+    let card = SizedBox(None, Some(CHARGE_ROW_H)).child(
         stack()
             .child(glow)
             .child(Padding(EdgeInsets::all(12.0), row_inner)),
-    ));
+    );
 
-    let scaled: AnyView<CatalogState> = if reduce {
-        card
+    // erasure: keep both arms consume the same `card`, which either() cannot move into two closures
+    let scaled = if reduce {
+        any(card)
     } else {
         any(AnimatedScale(if floated { 1.03 } else { 1.0 }, card).timing(ZERO))
     };
 
-    let gesture: AnyView<CatalogState> = any(GestureDetector(scaled)
+    let gesture = GestureDetector(scaled)
         .hold_threshold_ms(CHARGE_HOLD_MS)
         .on_hold_progress(move |_s: &mut CatalogState, p: f64| {
             // Reset idiom for the Cancel staleness gap (see this fn's doc
@@ -1050,7 +1049,7 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
                 floated_sig.set(false);
                 progress_sig.set(0.0);
             }
-        }));
+        });
 
     block(vec![
         inflexible(label("05 Long-press → float")),
@@ -1123,10 +1122,10 @@ fn demo_rain_burst(state: &CatalogState) -> FlexChild<CatalogState> {
     // Reduced motion settles straight to the end-state — no falling glyphs.
     let running = active && !reduce && elapsed < RAIN_BURST_MS;
 
-    let mut layers: Vec<AnyView<CatalogState>> =
-        vec![any(SizedBox(Some(RAIN_ZONE_W), Some(RAIN_ZONE_H)).child(
-            Image(solid_source(with_alpha(muted(), 0.05))).fit(ImageFit::Fill),
-        ))];
+    let mut layers = stack().child(
+        SizedBox(Some(RAIN_ZONE_W), Some(RAIN_ZONE_H))
+            .child(Image(solid_source(with_alpha(muted(), 0.05))).fit(ImageFit::Fill)),
+    );
     if running {
         for col in 0..RAIN_COLUMNS {
             let stagger = rain_stagger(col);
@@ -1138,17 +1137,17 @@ fn demo_rain_burst(state: &CatalogState) -> FlexChild<CatalogState> {
             let x = -1.0 + 2.0 * (col as f64 + 0.5) / RAIN_COLUMNS as f64;
             let y = -1.0 + 2.0 * p;
             let op = (1.0 - p * 0.6).clamp(0.0, 1.0);
-            layers.push(any(Align(
+            layers = layers.child(Align(
                 Alignment::new(x, y),
                 AnimatedOpacity(
                     op,
                     text(rain_char(col).to_string()).size(9.0).color(amber()),
                 )
                 .timing(ZERO),
-            )));
+            ));
         }
     }
-    layers.push(any(Align(
+    layers = layers.child(Align(
         Alignment::CENTER,
         text(if running {
             "refreshing…"
@@ -1157,16 +1156,15 @@ fn demo_rain_burst(state: &CatalogState) -> FlexChild<CatalogState> {
         })
         .size(10.5)
         .color(if running { amber() } else { muted() }),
-    )));
+    ));
 
-    let inner: AnyView<CatalogState> =
-        any(SizedBox(Some(RAIN_ZONE_W), Some(RAIN_ZONE_H)).child(Stack(layers)));
-    let zone: AnyView<CatalogState> = any(SizedBox(Some(RAIN_ZONE_W), Some(RAIN_ZONE_H)).child(
+    let inner = SizedBox(Some(RAIN_ZONE_W), Some(RAIN_ZONE_H)).child(layers);
+    let zone = SizedBox(Some(RAIN_ZONE_W), Some(RAIN_ZONE_H)).child(
         scroll_view(inner).on_refresh_release(move |_s: &mut CatalogState| {
             rain_reset_clock();
             active_sig.set(true);
         }),
-    ));
+    );
 
     let mut children = vec![
         inflexible(label("06 Pull to refresh — rain burst")),
@@ -1341,40 +1339,40 @@ fn demo_copy_burst() -> FlexChild<CatalogState> {
     let particles_visible = elapsed < COPY_PARTICLE_MS;
     let toast_visible = elapsed < COPY_TOAST_MS;
 
-    let flash_bg: AnyView<CatalogState> = any(AnimatedOpacity(
+    let flash_bg = AnimatedOpacity(
         flash_opacity,
         SizedBox(None, Some(44.0))
             .child(Image(solid_source(with_alpha(amber(), 0.18))).fit(ImageFit::Fill)),
     )
-    .timing(ZERO));
+    .timing(ZERO);
 
-    let field_content: AnyView<CatalogState> = any(Padding(
+    let field_content = Padding(
         EdgeInsets::all(11.0),
         row()
             .flex(1, text("203.0.113.57:50051").size(11.5))
             .child(text("⧉").size(13.0).color(muted()))
             .cross_axis(CrossAxisAlignment::Center),
-    ));
+    );
 
-    let mut layers = vec![flash_bg, field_content];
+    let mut layers = stack().child(flash_bg).child(field_content);
     if particles_visible {
         const GLYPHS: [&str; 3] = ["0", "1", "#"];
         for (i, glyph) in GLYPHS.iter().enumerate() {
             let x = -0.5 + i as f64 * 0.5;
             let y = 1.0 - 2.2 * particle_p;
             let op = (1.0 - particle_p).max(0.0);
-            layers.push(any(Align(
+            layers = layers.child(Align(
                 Alignment { x, y },
                 AnimatedOpacity(op, text(*glyph).size(10.0).color(amber())).timing(ZERO),
-            )));
+            ));
         }
     }
-    let field = SizedBox(None, Some(44.0)).child(Stack(layers));
+    let field = SizedBox(None, Some(44.0)).child(layers);
 
-    let toast: AnyView<CatalogState> = any(AnimatedOpacity(
+    let toast = AnimatedOpacity(
         if toast_visible { 1.0 } else { 0.0 },
         badge("copied to clipboard", BadgeVariant::Neutral),
-    ));
+    );
 
     let mut children = vec![
         inflexible(label("08 Copy burst")),
@@ -1455,7 +1453,9 @@ mod tests {
     use peniko::{Brush, Color};
     use reactive_graph::owner::Owner;
 
-    use super::{AnyView, PaintScene, Set, any, page};
+    use frust::AnyView;
+
+    use super::{PaintScene, Set, View, any, page};
     use crate::CatalogState;
 
     /// A paint target that records nothing — only `RenderRoot::paint`'s
@@ -1490,6 +1490,7 @@ mod tests {
         state: &mut CatalogState,
         tcx: &mut TextContext,
     ) -> bool {
+        // erasure: keep the RenderRoot root type is AnyView, shared by every page test
         let mut logic = |s: &mut CatalogState| any(page(s));
         root.rebuild(&mut logic, state);
         let tcx_any: &mut dyn Any = tcx;
@@ -1729,19 +1730,19 @@ mod tests {
         }
     }
 
-    /// Lay out and paint a standalone `AnyView<CatalogState>` built fresh from
+    /// Lay out and paint a standalone view built fresh from
     /// `make_view` (not the whole page) at `size`, returning the recorded
     /// geometry — the isolation the tests below need to attribute every
     /// recorded draw/layer to the one effect under test, not the rest of the
-    /// page. Mirrors `page`'s own `fn(&CatalogState) -> AnyView<CatalogState>`
+    /// page. Mirrors `page`'s own `fn(&CatalogState) -> impl View<CatalogState>`
     /// shape (`paint_needs_frame`'s `logic` above) rather than a pre-built
-    /// `AnyView` — `AnyView` has no `Clone` impl, so a closure that builds a
+    /// view — a view has no `Clone` guarantee, so a closure that builds a
     /// fresh one is the only shape a `RenderRoot::rebuild` callback can take.
-    fn paint_view_into_recorder(
-        mut make_view: impl FnMut(&CatalogState) -> AnyView<CatalogState>,
+    fn paint_view_into_recorder<V: View<CatalogState>>(
+        mut make_view: impl FnMut(&CatalogState) -> V,
         size: Size,
     ) -> SlotRecorder {
-        let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+        let mut root: RenderRoot<CatalogState, V> = RenderRoot::new();
         let mut state = CatalogState::new();
         let mut logic = |s: &mut CatalogState| make_view(s);
         root.rebuild(&mut logic, &mut state);
@@ -1806,7 +1807,7 @@ mod tests {
         assert_eq!(scale, HB_RING_SCALE_MAX);
 
         let recorder = paint_view_into_recorder(
-            |_s| any(heartbeat_ring_view(opacity.max(0.3), scale)),
+            |_s| heartbeat_ring_view(opacity.max(0.3), scale),
             Size::new(200.0, 200.0),
         );
 
@@ -1856,9 +1857,9 @@ mod tests {
         let _owner = setup();
         let (opacity, scale) = heartbeat_ring_state(HB_RING_MS, false);
 
-        let mut root: RenderRoot<CatalogState, AnyView<CatalogState>> = RenderRoot::new();
+        let mut root = RenderRoot::new();
         let mut state = CatalogState::new();
-        let mut logic = |_s: &mut CatalogState| any(heartbeat_ring_view(opacity.max(0.3), scale));
+        let mut logic = |_s: &mut CatalogState| heartbeat_ring_view(opacity.max(0.3), scale);
         root.rebuild(&mut logic, &mut state);
         let mut tcx = TextContext::new();
         let tcx_any: &mut dyn Any = &mut tcx;
@@ -1891,7 +1892,7 @@ mod tests {
     fn heartbeat_ping_headroom_does_not_stretch_sibling_row_content() {
         let _owner = setup();
         let recorder = paint_view_into_recorder(
-            |s| super::any(column().push(super::demo_heartbeat(s))),
+            |s| column().push(super::demo_heartbeat(s)),
             Size::new(390.0, 400.0),
         );
 
@@ -1926,10 +1927,8 @@ mod tests {
         const BLOCK_PADDING: f64 = 12.0 * 2.0;
 
         super::charge_floated_sig().set(true);
-        let recorder = paint_view_into_recorder(
-            |s| super::any(column().push(demo_charge_ring(s))),
-            Size::new(W, 400.0),
-        );
+        let recorder =
+            paint_view_into_recorder(|s| column().push(demo_charge_ring(s)), Size::new(W, 400.0));
         super::charge_floated_sig().set(false);
 
         let expected_w = W - BLOCK_PADDING;
@@ -1985,7 +1984,7 @@ mod tests {
         const MARGIN: f64 = (CHARGE_RING_SIZE - CHARGE_ICON_SIZE) / 2.0;
 
         let recorder = paint_view_into_recorder(
-            |s| super::any(column().push(demo_charge_ring(s))),
+            |s| column().push(demo_charge_ring(s)),
             Size::new(390.0, 400.0),
         );
 
@@ -2019,15 +2018,11 @@ mod tests {
         const W: f64 = 390.0;
 
         super::charge_progress_sig().set(0.4);
-        let holding_recorder = paint_view_into_recorder(
-            |s| super::any(column().push(demo_charge_ring(s))),
-            Size::new(W, 400.0),
-        );
+        let holding_recorder =
+            paint_view_into_recorder(|s| column().push(demo_charge_ring(s)), Size::new(W, 400.0));
         super::charge_progress_sig().set(0.0);
-        let idle_recorder = paint_view_into_recorder(
-            |s| super::any(column().push(demo_charge_ring(s))),
-            Size::new(W, 400.0),
-        );
+        let idle_recorder =
+            paint_view_into_recorder(|s| column().push(demo_charge_ring(s)), Size::new(W, 400.0));
 
         let is_bar_track = |r: &Rect| r.width() > 80.0 && r.height() < 10.0;
         assert!(

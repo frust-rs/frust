@@ -74,7 +74,7 @@
 
 use frust::{
     Alignment, ButtonStyle, Component, CrossAxisAlignment, EdgeInsets, Get, Padding, RwSignal, Set,
-    SizedBox, View, any, button, checkbox, column, component, radio, row, slider, text, text_input,
+    SizedBox, View, button, checkbox, column, component, radio, row, slider, text, text_input,
 };
 // The Glyph catalog's own authored toggle — not a baseline `frust`/
 // `frust-widgets` item, and not a themed stand-in for one either.
@@ -249,7 +249,7 @@ impl Component for ButtonsFormsScreen {
             .child(spacer(4.0))
             .child(slider_row(slider_value));
 
-        any(Padding(EdgeInsets::all(16.0), content))
+        Padding(EdgeInsets::all(16.0), content)
     }
 }
 

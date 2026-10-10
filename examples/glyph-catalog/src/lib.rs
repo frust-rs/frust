@@ -39,7 +39,7 @@ use frust::authoring::{
 use frust::motion::switcher::pattern_switcher;
 use frust::{
     Brightness, Color, Component, Get, GetUntracked, MotionScheme, NavigatorController, RwSignal,
-    ScrollInfo, Set, Theme, TransitionSpec, View, any, button, column, flexible, icon, icons,
+    ScrollInfo, Set, Theme, TransitionSpec, View, button, column, flexible, icon, icons,
     inflexible, navigator, safe_area, scroll_view, set_app_theme, stack,
 };
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
@@ -234,9 +234,9 @@ fn catalog_app_bar(state: &CatalogState) -> impl View<CatalogState> + use<> {
         .scheme()
         .primary;
 
-    let brand = any(icon(icons::PALETTE).size(20.0).color(accent));
+    let brand = icon(icons::PALETTE).size(20.0).color(accent);
 
-    let brightness_btn = any(button(brightness_label, |state: &mut CatalogState| {
+    let brightness_btn = button(brightness_label, |state: &mut CatalogState| {
         let next = match state.brightness.get_untracked() {
             Brightness::Dark => Brightness::Light,
             Brightness::Light => Brightness::Dark,
@@ -249,29 +249,29 @@ fn catalog_app_bar(state: &CatalogState) -> impl View<CatalogState> + use<> {
                 state.animations_enabled.get_untracked(),
             ),
         );
-    }));
+    });
 
-    let motion_btn = any(button(motion_label, |state: &mut CatalogState| {
+    let motion_btn = button(motion_label, |state: &mut CatalogState| {
         let next = !state.reduce_motion.get_untracked();
         state.reduce_motion.set(next);
         apply_theme(
             state.brightness.get_untracked(),
             effective_reduce_motion(next, state.animations_enabled.get_untracked()),
         );
-    }));
+    });
 
-    let animations_btn = any(button(animations_label, |state: &mut CatalogState| {
+    let animations_btn = button(animations_label, |state: &mut CatalogState| {
         let next = !state.animations_enabled.get_untracked();
         state.animations_enabled.set(next);
         apply_theme(
             state.brightness.get_untracked(),
             effective_reduce_motion(state.reduce_motion.get_untracked(), next),
         );
-    }));
+    });
 
     frust_glyph::app_bar::<CatalogState>("glyph catalog")
         .leading(brand)
-        .actions(vec![brightness_btn, motion_btn, animations_btn])
+        .actions((brightness_btn, motion_btn, animations_btn))
         .elevated(elevated)
 }
 

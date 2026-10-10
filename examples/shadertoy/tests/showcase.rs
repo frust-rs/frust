@@ -5,7 +5,7 @@
 
 use std::any::Any;
 
-use frust::{AnyView, ComponentView, GetUntracked, RwSignal, any, component};
+use frust::{ComponentView, GetUntracked, RwSignal, component};
 use frust_core::{
     FrameTime, InputEvent, PaintScene, PointerButton, PointerEvent, PointerPhase, RenderRoot, View,
 };
@@ -206,13 +206,13 @@ fn back_button_returns_to_menu_with_no_quad_recorded() {
 #[test]
 fn fps_signal_publishes_a_sane_rate_after_a_second() {
     let _owner = setup();
-    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+    let mut root = RenderRoot::new();
     let fps = RwSignal::new(0.0_f64);
     let program = ShaderProgram::new(
         "@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> \
          { return vec4<f32>(frust_u.time, 0.0, 0.0, 1.0); }",
     );
-    let mut logic = move |_s: &mut ()| any(shader_view(program.clone(), fps));
+    let mut logic = move |_s: &mut ()| shader_view(program.clone(), fps);
     let mut state = ();
     let mut tcx = TextContext::new();
 
@@ -237,13 +237,13 @@ fn fps_measures_presented_rate_not_paint_cadence_when_wired() {
     // counter that advances once per 10 paints, and assert the published rate
     // tracks the presented deltas.
     let _owner = setup();
-    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
+    let mut root = RenderRoot::new();
     let fps = RwSignal::new(0.0_f64);
     let program = ShaderProgram::new(
         "@fragment fn fs_main(in: FrustVsOut) -> @location(0) vec4<f32> \
          { return vec4<f32>(frust_u.time, 0.0, 0.0, 1.0); }",
     );
-    let mut logic = move |_s: &mut ()| any(shader_view(program.clone(), fps));
+    let mut logic = move |_s: &mut ()| shader_view(program.clone(), fps);
     let mut state = ();
     let mut tcx = TextContext::new();
 

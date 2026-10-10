@@ -14,8 +14,8 @@
 use std::any::Any;
 
 use frust::{
-    AnyView, Brightness, MotionScheme, NavigatorController, Set, Theme, TransitionSpec, any,
-    component, navigator, provide_context,
+    AnyView, Brightness, MotionScheme, NavigatorController, Set, Theme, TransitionSpec, component,
+    navigator, provide_context,
 };
 use frust_core::FrameTime;
 use frust_core::{InputEvent, PointerButton, PointerEvent, PointerPhase};
@@ -321,8 +321,8 @@ fn full_shell_mounts_with_header_tabs_and_body() {
     // Mount the whole app through its root Component — the same tree `app!`
     // binds on every platform: navigator → header + tabs + pattern-switched
     // section body + toast host.
-    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
-    let mut logic = |_s: &mut ()| any(component(CatalogApp));
+    let mut root = RenderRoot::new();
+    let mut logic = |_s: &mut ()| component(CatalogApp);
     let mut state = ();
 
     let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
@@ -362,8 +362,8 @@ fn root_appbar_consumes_inset_without_double_padding() {
 
     let _owner = setup();
     let mut tcx = TextContext::new();
-    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
-    let mut logic = |_s: &mut ()| any(component(CatalogApp));
+    let mut root = RenderRoot::new();
+    let mut logic = |_s: &mut ()| component(CatalogApp);
     let mut state = ();
 
     let (zero, _zero_outcome) =
@@ -590,8 +590,8 @@ const APPBAR_VARIATION_OPENERS: [fn(&mut CatalogState); 6] = [
 /// screen via the SAME shared navigator the real shell also drives — see
 /// `glyphcatalog`'s module docs — so a section-scoped navigator here is a
 /// faithful stand-in, not a divergent shape).
-fn mount_appbar_launcher() -> (
-    RenderRoot<CatalogState, AnyView<CatalogState>>,
+fn mount_appbar_launcher<V: View<CatalogState>>() -> (
+    RenderRoot<CatalogState, V>,
     NavigatorController<CatalogState>,
     CatalogState,
 ) {
@@ -613,9 +613,7 @@ fn appbar_variation_pages_push_and_pop() {
         let (mut root, controller, mut state) = mount_appbar_launcher();
         let ctrl = controller.clone();
         let mut logic = move |_s: &mut CatalogState| {
-            any(navigator(&ctrl, || {
-                pages::appbar::page(&CatalogState::new())
-            }))
+            navigator(&ctrl, || pages::appbar::page(&CatalogState::new()))
         };
 
         let (launcher_scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
@@ -657,9 +655,7 @@ fn appbar_variation_pages_mount_at_every_size_and_brightness() {
                 root.set_theme(Box::new(theme));
                 let ctrl = controller.clone();
                 let mut logic = move |_s: &mut CatalogState| {
-                    any(navigator(&ctrl, || {
-                        pages::appbar::page(&CatalogState::new())
-                    }))
+                    navigator(&ctrl, || pages::appbar::page(&CatalogState::new()))
                 };
 
                 let _ = frame_at_size(
@@ -794,10 +790,8 @@ fn pushed_variation_page_drag_scrolls_its_scrollview() {
     // `.transition(TransitionSpec::glyph())`), which leaves the edge-swipe
     // pop gesture DISABLED (on only for the iOS-push preset).
     let mut logic = move |_s: &mut CatalogState| {
-        any(
-            navigator(&ctrl, || pages::appbar::page(&CatalogState::new()))
-                .transition(TransitionSpec::glyph()),
-        )
+        navigator(&ctrl, || pages::appbar::page(&CatalogState::new()))
+            .transition(TransitionSpec::glyph())
     };
 
     // Mount the launcher, push the scroll-collapse variation, settle its push.
@@ -853,11 +847,9 @@ fn edge_zone_vertical_drag_still_scrolls_pushed_page() {
     // Edge-swipe explicitly ENABLED over the Glyph transition — the arm/steal
     // machinery suspected for drags starting in the zone.
     let mut logic = move |_s: &mut CatalogState| {
-        any(
-            navigator(&ctrl, || pages::appbar::page(&CatalogState::new()))
-                .transition(TransitionSpec::glyph())
-                .pop_swipe(true),
-        )
+        navigator(&ctrl, || pages::appbar::page(&CatalogState::new()))
+            .transition(TransitionSpec::glyph())
+            .pop_swipe(true)
     };
 
     let _ = frame_at_size(
