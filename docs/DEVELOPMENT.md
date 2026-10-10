@@ -167,17 +167,33 @@ its README, then run [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)'s Browser ma
 frust run --watch
 ```
 
-Desktop only: watches `src/` and `Cargo.toml`, killing and relaunching (`cargo run`, incremental) on
-change, debouncing a save-burst into one relaunch. Kill/relaunch and Ctrl-C exit both reach the whole
-`cargo run` tree — Unix process-group kill, Windows `taskkill /T /F` (`frust_drive::process`, shared
-by every kill path below). A **relaunch loop, not state-preserving hot reload** — app state resets
-every rebuild. `--watch` + `-d <device>` is a hard error (device-side watch isn't implemented). Measured baselines (and why no fast-dev recipe ships): [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Dev loop.
+A debug `--watch` run — the desktop preview, or `-d <device>` for an Android device or a booted iOS
+simulator — watches the workspace graph's path classes (every member and local non-member `src/`,
+each package's `Cargo.toml`/`build.rs`, `Cargo.lock`, `frust.toml`, `rust-toolchain*`,
+`.cargo/config*`; [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)) and **hot-patches** each settled
+save-burst (100ms debounce) into the running process: `patched in N ms`, app state and PID kept. It
+relaunches from a fresh build only on `restart required: <reason>` (a layout change, a framework or
+build-input edit, the patch budget — the classes are under `no-hot-reload-restart-is-a-rebuild` in
+[LIMITATIONS.md](LIMITATIONS.md)). On the desktop, `--no-hot`, a profile/release build or a
+`--features` passthrough keeps the plain kill-and-relaunch loop (`cargo run`, incremental, one
+relaunch per burst, state reset; it watches only `src/` + `Cargo.toml`). With `-d <device>` a
+non-debug build or `--features` is refused, so `--no-hot` is the only flag that picks the device
+relaunch loop; a hot run whose setup fails, or that reports it cannot patch, prints `hot reload
+unavailable: ...; relaunching on change instead` and falls back to that same loop, watching only
+`src/` + `Cargo.toml`. Kill/relaunch and Ctrl-C exit both reach the whole `cargo run` tree — Unix
+process-group kill, Windows `taskkill /T /F` (`frust_drive::process`, shared by every kill path
+below). Web, a physical iOS device and other devices are not watched (`--watch` + `-d` refuses
+them). Measured baselines: [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Dev loop.
 
 **TUI equivalents.** `R` restarts the active workbench session the same way — rebuild + relaunch,
-never state-preserving. 'Watch: restart on save' (`W`, palette, or the run-config checkbox) restarts
-a **desktop** session on every settled save-burst with the same 300ms debounce (`supervise/watch.rs`)
-— one relaunch per burst. A device session's `R` reruns build → install → launch instead; watch is
-refused there (desktop-only, see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
+never state-preserving. 'Watch: hot patch on save' (`W`, palette, or the run-config checkbox) on a
+watched debug session — desktop, an Android device, or a booted iOS simulator — hot-patches each
+settled save-burst (100ms debounce, `supervise/watch.rs`, synced with `frust-cli`'s): a
+`patched in N ms` toast, and the app relaunches only on `restart required: <reason>`. A session not
+launched hot (every device session, or a desktop one toggled with `W` after launch) relaunches
+into a hot session on its first watched save; later saves patch. A physical iOS
+device's `R` reruns build → install → launch and watch is refused there (mechanism and refusals:
+[TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
 
 ## Release Builds
 
@@ -264,7 +280,16 @@ plain (non-feature-gated) dependencies of `frust-render`, so their host-only tes
 engine-turso`, libclang required), and `devtools` (the in-app debug service,
 [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) the same shape: `cargo test -p
 frust-shell-common --features devtools` at minimum; `BuildMode::cargo_features()` enables it
-alongside `perf-trace` for generated apps' Debug/Profile builds, never Release.
+alongside `perf-trace` for generated apps' Debug/Profile builds, never Release. `hotpatch`
+(opt-in, never default) has two gates, both in CI: `bash scripts/ci/hotpatch-feature-gate.sh`
+(`cargo test` + `cargo clippy --all-targets -- -D warnings` for `-p frust-hotpatch`, then the same
+pair with `--features hotpatch` by manifest path for `frust-core`, `frust-shell-desktop` and the
+facade, e.g. `cargo clippy --manifest-path crates/frust/Cargo.toml --features hotpatch
+--all-targets --locked -- -D warnings`) and, on macOS/Linux, `bash scripts/ci/hotpatch-canary.sh`
+(the desktop patch builder end to end on the standalone `testing/hotpatch-canary` fixture: fat
+build, edit, thin build, L3 layout gate, in-process apply, and a layout-changing edit that must be
+refused; the fixture also gates from its own directory like the chain above). Windows-only
+hot-patch tests: [TESTING.md](TESTING.md).
 
 ```bash
 # frust-database mobile compile gates: run separately from the facade-graph gates below
@@ -400,10 +425,10 @@ touching it. The pin rows themselves — pin, rationale, tripwire — live with 
 | Pins | Owner |
 |------|-------|
 | `wgpu`, `image`, `vello_common`/`glifo`, `parley` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
-| `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
+| `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters, `frust-hotpatch`'s crate-local `libloading`/`memmap2`/`memfd`/`subsecond-types` | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
 | `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard` (one pin, two consumers — `frust-clipboard` and `frust-shell-desktop`'s clipboard route — so its row carries two tripwires, `cargo check -p frust-clipboard` **and** `cargo check -p frust-shell-desktop`), `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `sys-locale` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
 | `muda`, `windows-sys` (desktop shells' native menu-bar/Win32 bindings; `objc2-app-kit` rides the objc2 pin family above); web shell tier: `wasm-bindgen` (=0.2.128 exact — must equal the host `wasm-bindgen-cli`), `wasm-bindgen-futures`, `js-sys`/`web-sys`, `web-time`, `console_log`, `console_error_panic_hook`, `wasm-bindgen-test` (=0.3.78 exact — crate-local, bumps in lockstep with `wasm-bindgen`) | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) |
-| `notify`, `rmcp`, `axum`, `base64`, `tokio-util`, `icns` (+ `cargo-packager`/`winresource`, external-tool/template-side, not `[workspace.dependencies]`) | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
+| `notify`, `rmcp`, `axum`, `base64`, `tokio-util`, `icns`, the hot-patch builder's `object`/`ar`/`gimli`/`rustc-demangle`/`pdb` (+ `cargo-packager`/`winresource`, external-tool/template-side, not `[workspace.dependencies]`) | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
 | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) |
 | The Rust toolchain itself (`rust-toolchain.toml`: stable 1.98.1 with `rustfmt` + `clippy`) | this section, rule below |
 
@@ -411,8 +436,10 @@ The rules below bind every pin, wherever its row lives:
 
 - **The toolchain is a pin too.** `rust-toolchain.toml` names the exact stable release the gates
   run on; rustup installs it on first use. Bump it in its own change, only after `cargo clippy
-  --workspace --all-targets -- -D warnings` passes on the candidate — a stable auto-update once
-  turned new lints on under untouched code and failed the gate everywhere.
+  --workspace --all-targets -- -D warnings` and `scripts/ci/hotpatch-canary.sh` (*Test*) pass on
+  the candidate — a stable auto-update once turned new lints on under untouched code and failed
+  the gate everywhere, and the hot-patch builder relies on rustc/cargo/linker output shapes that
+  are stable in practice, not by contract.
 - `examples/huddle` and `plugins/clean-signals-frust` are each a **standalone package** (own
   `[workspace]` root/`Cargo.lock`, excluded from the root `[workspace]`), depending on the
   `clean-signals` core crate from crates.io (see

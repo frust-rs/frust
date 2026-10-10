@@ -1713,73 +1713,95 @@ retain_bounded`; `run_app_refuses_bookkeeping_free_once_the_cap_of_live_sessions
 
 ---
 
-### `no-hot-reload-restart-is-a-rebuild` — every restart is a full rebuild + relaunch, never a hot reload
+### `no-hot-reload-restart-is-a-rebuild` — hot patching covers in-place code edits only; every restart is a full rebuild + relaunch
 
-**Observed**: every restart path — the TUI's `R` keypress / palette 'Restart session', the TUI's own
-'Watch: restart on save' (`W`/palette/run-config checkbox), `frust run --watch`'s file-change
-relaunch, MCP's `restart_app`, and DAP's `frustRestart` — is a full rebuild and relaunch with app
-state reset each time: Flutter's "hot restart" semantics, never "hot reload". A device restart
-reruns the whole build → install → launch pipeline rather than patching a running process (see
-`tui-device-stop-app-termination-residual` and `mcp-stop-app-termination-in-flight` for what "stop"
-already does and does not guarantee before that relaunch begins). The TUI's own `R` restart shares
-that same best-effort stop window: the stop is issued, not awaited, before the relaunch fires.
-'Watch: restart on save' is desktop-only — a device or ad-hoc session refuses it (`Message::ToggleWatch`)
-with "Watch is desktop-only: the watch loop has no device-side kill/rebuild/relaunch story yet",
-`frust run --watch`'s own reason — and shares `R`'s rebuild+relaunch path (`engine::update`'s
-`restart_session_at`) rather than being a fourth mechanism. `engine::update`'s `on_session_event` turns a session's `watch` flag off the moment it lands
-`SessionState::Killed`, whichever path killed it — the keyboard `x`, `close_tab` (X/palette/context
-menu, which clears it immediately rather than waiting for `Killed`), MCP's `stop_app`, DAP
-terminate/disconnect, or `restart_app`'s own kill of the session it replaces — so a stopped session's
-watcher never outlives it; `Exited(_)` is left untouched, so a crash or compile-error exit keeps a
-watched session watching and the next save still relaunches it. Neither MCP's `restart_app` nor DAP's
-`frustRestart` carries that flag onto the *new* session, though: both bypass `restart_session_at`, the
-one seam that re-sends `EnableWatch` after a relaunch, so the replacement session always starts
-unwatched and watch must be re-toggled by hand afterward. On MCP/DAP stop paths the old tab is not
-removed either — it parks in the session list as `Killed`, same as any other MCP-launched session (see
-`tui-mcp-sessions-tab-uncapped`). The 300ms
-trailing-edge debounce itself is duplicated rather than shared: `frust-cli`'s `watch_loop_with_slot`
-and `frust-tui`'s `supervise::watch` each run their own copy (`frust-tui` has no dependency on
-`frust-cli`) — a tracked follow-up is moving it into `frust-drive`. On Windows, both loops' kill
-(the TUI's session stop/restart and the CLI's respawn) already route through the same
-`frust_drive::process::StreamHandle::kill` → `windows_tree_kill` (`taskkill /T /F`) path, so a
-watched session's relaunch reaches the whole `cargo run` tree there too, falling back to a
-direct-child-only `Child::kill` only if `taskkill` itself is missing or fails.
+**Observed**: a debug `frust run --watch` (the desktop preview, `-d <Android device>` or `-d <booted
+iOS simulator>`) and the TUI's 'Watch: hot patch on save' on the same targets hot-patch a save into
+the running process: the changed workspace-member crates are replayed, thin-linked into a patch
+image and applied over devtools, and the CLI prints `patched in <n> ms` (the TUI a `✓ patched`
+toast) with the PID and every component's `State` kept. The `frust/hotpatch` feature is switched on
+for the hot run's own fat build only, never by default. On the desktop, `--no-hot`, a
+profile/release build or a `--features` passthrough keeps the plain relaunch loop; `--watch -d`
+refuses a non-Debug build or extra features (`run_watch_on_device`), so `--no-hot` is the only flag
+that picks the device relaunch loop; a hot run whose setup fails, or that reports it cannot patch,
+falls back to that loop too, watching only `src/` and `Cargo.toml`. A compile error leaves the
+running app untouched. Anything a patch cannot carry prints `restart required: <reason>`, never
+`patched`, and the app is relaunched from a fresh fat build with State reset. The reasons
+(`RestartReason`) fall into five classes:
+- *Layout or identity*: a replayable type's layout differs from the accepted set (`LayoutChanged`,
+  from the host's L3 gate over DWARF (Mach-O/ELF) or PDB type records (Windows), or a mismatch the
+  app reports), or a component's `State` changed type (`StateTypeChanged`).
+- *Framework or build-input edit*: a file of a path dependency outside the workspace (a local
+  framework checkout included), or a manifest, build script, cargo config or toolchain file
+  (`PathDependencyChanged`, `BuildInputChanged`).
+- *Budget*: patch images are never unloaded, so one process loads at most 64 patches or 96 MiB of
+  patch images by default, set by `frust.toml`'s `[hotpatch]` `patches`/`bytes` (`PatchBudget`).
+- *Protocol or outcome failure*: no `HotPatch` capability, a non-loopback endpoint, a failed
+  devtools call, a refused patch, a reply lost after `apply_patch` (`PatchOutcomeUnknown`: the
+  patch may be live), stale code still calling a replaced seam, an unmappable missed seam key, or
+  a patch no component ran.
+- *Builder refusal*: anything the builder does not recognise fails closed (`BuilderUnsupported`).
 
-**Applies to**: every restart entry point across `frust-tui` (including 'Watch: restart on save'),
-`frust-cli`'s `--watch` flag, `frust-mcp`, and `frust-dap` — desktop and device alike.
+The first patch of a hot run is slower than steady state: a few hundred ms more on the desktop
+(run 1 at 1551 ms against a 1362 ms steady median in the milestone-1 re-run), and ~5.3-5.5 s
+against ~1.45 s on Windows. `R` / 'Restart session', MCP's `restart_app` and DAP's
+`frustRestart` are full rebuild + relaunch with State reset (Flutter's hot restart, never
+in-process); a device restart reruns build → install → launch (see
+`tui-device-stop-app-termination-residual` and `mcp-stop-app-termination-in-flight`). `restart_app`
+and `frustRestart` bypass the TUI's `restart_session_at`, so their replacement session starts
+unwatched. In the TUI, turning Watch on for a session launched without it makes the next save a
+plain relaunch into a hot session.
 
-**Why accepted**: in-process hot restart and hot reload both need capability the framework doesn't
-have yet. Hot restart (state reset, code re-run without a process relaunch) would need a seam to
-dispose and rebuild the running app, but the root `Component` is taken by value once, by
-`frust::run` (`crates/frust/src/lib.rs:1837`); it runs under the shell's **root** `Owner`, which
-lives for the whole process and is never disposed (`crates/frust-core/src/component.rs:56-68`); and
-`ReactiveRuntime` is installed once into a process-lifetime `OnceLock` and never torn down
-(`crates/frust-reactive/src/runtime.rs:122`) — none of the three has a dispose-and-rebuild path
-short of exiting the process. Hot reload (patching running code in place) has no Rust-native path
-short of subsecond-class hot-patching tooling that is tip-crate-only, unsupported across
-struct-layout changes, and experimental/unproven on Android and iOS; the devtools wire protocol also
-has no structure-mutating method to carry a reload over (`crates/frust-devtools-protocol/src/method.rs`'s
-`Method` enum is read/input-simulation only: `handshake`, `widget_tree`, `widget_props`,
-`frame_stats_subscribe`, `frame_stats`, `metrics_snapshot`, `input_tap`, `input_scroll`,
-`input_text`, `screenshot`). The rebuild cost is judged acceptable meanwhile: on an i5-12600 Linux
-host (2026-09-25), an incremental `cargo build` after touching one file took 1.0s (the app crate),
-1.7s (`frust-widgets`), and 1.9s (`frust-core`), against a 43s cold build — consistent with
-`docs/DEVELOPMENT.md`'s separately measured 0.89s incremental-build median.
+The memory-safety argument is the host's: L1 erases each component's view inside the hot function
+(`build_erased`), so the seam's boundary types are layout-fixed, and L3 refuses any patch whose
+types differ from the accepted layouts. The app's L2 witness (`SeamWitness`, written by the image
+that created a component's state) is a backstop with two limits. It covers only a component hosted
+in its own erased `Box<dyn Widget>`; one held inline by a generic container (`Either`, or an app
+`View` whose `Element` embeds a child element) is covered by L3 alone. And on a witness mismatch the
+creator's `Box<C::State>` is leaked (`mem::forget`, never dropped or freed by another image) and the
+run restarts: one `C::State` per mismatched widget, once.
 
-**Reopen path**: a framework spike replacing `frust::run`'s by-value root with a factory closure, a
-disposable (not process-lifetime) root `Owner`, a resettable `ReactiveRuntime`, and a devtools
-`restart` method to drive the three remotely.
+**Applies to**: hot patching on debug builds for macOS and Linux desktop, Windows x64 MSVC (the
+layout gate reads PDB type records, and the devtools token comes from the OS CSPRNG,
+`BCryptGenRandom`, so `Capability::HotPatch` answers the same gate as on every other host), Android
+arm64-v8a and the iOS simulator. A physical iOS device (a loaded patch would need code signing) and
+the web shell (`frust-hotpatch` is a `compile_error!` on wasm32) are not watched at all; Windows
+ARM64 and other Android ABIs never patch. The Windows residuals are
+`hotpatch-windows-fixed-base-no-aslr`, `hotpatch-windows-patch-file-acl` and
+`hotpatch-windows-pdb-layout-align-blind`. The restart semantics apply to every restart entry point
+across `frust-tui`, `frust-cli`, `frust-mcp` and `frust-dap`.
 
-**Evidence**: `crates/frust/src/lib.rs:1837` (`pub fn run<C: Component>`);
-`crates/frust-core/src/component.rs:56-68` (`Component::init` doc, root-component owner);
-`crates/frust-reactive/src/runtime.rs:122` (`static RUNTIME: OnceLock<ReactiveRuntime>`);
-`crates/frust-devtools-protocol/src/method.rs` (`Method` enum); on-host build measurement,
-i5-12600 Linux host, 2026-09-25; `docs/DEVELOPMENT.md`'s incremental-build baseline.
-`crates/frust-tui/src/supervise/watch.rs` (`WATCH_DEBOUNCE`, module doc's debounce-duplication note);
-`crates/frust-tui/src/engine/update.rs` (`WATCH_DESKTOP_ONLY`, `restart_session_at`, `toggle_watch`);
-`crates/frust-tui/src/supervise/mcp_backend.rs`'s `restart_app` (no `SourceWatchers` access);
-`crates/frust-drive/src/process.rs`'s `windows_tree_kill` (shared by `RealProcessRunner::spawn_streaming`,
-which both `frust-cli`'s `run` command and `frust-tui`'s `Supervisor`/`supervise::watch` build on).
+**Why accepted**: a patch is applied only where the host can show the running types are unchanged;
+anything else restarts rather than risk memory unsafety. The median save→frame of a patch is
+13.5-38.5% of the restart median on macOS desktop, Android arm64, Windows x64 and the iOS
+simulator; Linux desktop is covered for correctness by the CI canary
+(`scripts/ci/hotpatch-canary.sh`) with no measured ratio. The inline-host gap is closed
+by L3 on every hot target, and closing it in-app would need a witness check on every `event`,
+`layout` and `paint`. In-process hot restart (State reset without a relaunch) is still out of reach:
+`frust::run` takes the root `Component` by value, once; it runs under the shell's root `Owner`,
+which lives for the whole process and is never disposed; and `ReactiveRuntime` sits in a
+process-lifetime `OnceLock` that is never torn down.
+
+**Reopen path**: hot restart needs `frust::run`'s by-value root replaced with a factory closure, a
+disposable root `Owner`, a resettable `ReactiveRuntime` and a devtools `restart` method. A physical
+iOS device needs signed patch delivery; the web shell needs a wasm32 patch loader. The save debounce
+and the hot watch set are duplicated between `frust-cli` and `frust-tui` (kept in sync by a
+comment); moving both into `frust-drive` is a tracked follow-up.
+
+**Evidence**: `examples/hotpatch-spike/RESULTS.md`: `## Milestone 1 re-run (R3-04)` (desktop macOS:
+save→frame ~1.4 s, 26.8% of the restart median; `### Latency breakdown (why 1.4 s, not 493 ms, and
+not 2.2 s)`; TUI Watch leg), `## Stage 2 re-run (H2-07)` (Pixel 5, Android arm64: ~2.9 s, 21.4%),
+`### Stage 3 re-run (H3-03b)` under `## Stage 3: Windows gate (H3-03)` (Windows x64 MSVC: A 1468
+ms, 13.5% of 10861 ms; the PDB gate refused D2 and D4), `## Stage 4: iOS simulator gate (H4-03)` (A
+1694 ms, 38.5% of 4395 ms). `crates/frust-drive/src/hotpatch/session.rs` (`RestartReason`,
+`Budget`); `crates/frust-drive/src/hotpatch/layout.rs` and `pdb_layout.rs` (L3);
+`crates/frust-core/src/hotpatch.rs` (`build_erased`, `SeamWitness`) and
+`crates/frust-core/src/component.rs` (`ComponentWidget`'s witness checks and `Drop` leak);
+`crates/frust-widgets/src/either.rs` (inline arms); `crates/frust-cli/src/commands/run.rs`
+(`WATCH_DEVICE_REJECTION`); `crates/frust-tui/src/engine/session_view.rs` (`supports_watch`);
+`crates/frust-hotpatch/src/lib.rs` (wasm32 `compile_error!`); `crates/frust/src/lib.rs`
+(`pub fn run<C: Component>`); `crates/frust-reactive/src/runtime.rs` (`static RUNTIME`);
+`scripts/ci/hotpatch-canary.sh` (Linux and macOS canary).
 
 ---
 
