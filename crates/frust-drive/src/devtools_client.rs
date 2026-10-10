@@ -185,6 +185,16 @@ pub fn is_method_not_found(err: &anyhow::Error) -> bool {
 /// line cap.
 pub const PATCH_CHUNK_MAX_BYTES: usize = 512 * 1024;
 
+/// How many chunk requests [`DevtoolsClient::upload_patch`] and
+/// [`DevtoolsClient::upload_table`] keep in flight before waiting for the
+/// oldest one's answer. The app handles a connection's lines strictly in
+/// order, so a pipelined upload reaches it exactly as a lock-step one does;
+/// it only stops paying one round trip (through `adb forward`, to a phone)
+/// and the encoding of the next chunk per chunk. Bounded so a failing app
+/// is noticed within a few chunks and the unanswered requests stay small
+/// (each about 683 KiB of base64).
+pub const UPLOAD_WINDOW: usize = 4;
+
 /// The least time [`DevtoolsClient::apply_patch`] waits for its answer. The
 /// app replies after the frame that follows the attempt and gives up waiting
 /// for that frame after 5 s, so a shorter connection timeout would turn every
@@ -451,20 +461,66 @@ impl DevtoolsClient {
         Ok(encoded.len() as u64)
     }
 
-    /// `bytes` as `method` (`patch_chunk` or `table_chunk`) requests.
+    /// `bytes` as `method` (`patch_chunk` or `table_chunk`) requests, in
+    /// offset order, up to [`UPLOAD_WINDOW`] of them unanswered at a time.
+    /// The first failure, in chunk order, is the answer; the requests already
+    /// sent behind it are still awaited, so no late reply lands after the
+    /// call returns.
     fn upload(&self, method: Method, patch_id: u64, bytes: &[u8]) -> Result<()> {
-        for chunk in patch_chunks(patch_id, bytes) {
-            let params = serde_json::to_value(&chunk)
-                .with_context(|| format!("encoding `{method}` params"))?;
-            let ack: AckResult = self.typed_call(method, params)?;
-            if !ack.ok {
-                bail!(
-                    "the app refused patch {patch_id}'s `{method}` at offset {}",
-                    chunk.offset
-                );
+        let mut in_flight: std::collections::VecDeque<(u64, Pending)> =
+            std::collections::VecDeque::new();
+        let mut first_error: Option<anyhow::Error> = None;
+        let settle = |(offset, pending): (u64, Pending),
+                      first_error: &mut Option<anyhow::Error>| {
+            let acked = self.await_response(pending).and_then(|result| {
+                let ack: AckResult = serde_json::from_value(result)
+                    .with_context(|| format!("decoding `{method}` result"))?;
+                if !ack.ok {
+                    bail!("the app refused patch {patch_id}'s `{method}` at offset {offset}");
+                }
+                Ok(())
+            });
+            if let Err(err) = acked {
+                first_error.get_or_insert(err);
+            }
+        };
+        let total_len = bytes.len() as u64;
+        for (index, data) in bytes.chunks(PATCH_CHUNK_MAX_BYTES).enumerate() {
+            if first_error.is_some() {
+                break;
+            }
+            if in_flight.len() >= UPLOAD_WINDOW
+                && let Some(oldest) = in_flight.pop_front()
+            {
+                settle(oldest, &mut first_error);
+                if first_error.is_some() {
+                    break;
+                }
+            }
+            let offset = (index * PATCH_CHUNK_MAX_BYTES) as u64;
+            let chunk = PatchChunkParams {
+                patch_id,
+                offset,
+                total_len,
+                data_base64: encode_base64(data),
+            };
+            let sent = serde_json::to_value(&chunk)
+                .with_context(|| format!("encoding `{method}` params"))
+                .and_then(|params| self.send_request(method, params, self.timeout));
+            match sent {
+                Ok(pending) => in_flight.push_back((offset, pending)),
+                Err(err) => {
+                    first_error.get_or_insert(err);
+                }
             }
         }
-        Ok(())
+        while let Some(pending) = in_flight.pop_front() {
+            settle(pending, &mut first_error);
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// `apply_patch` — applies the bytes previously uploaded as
@@ -535,6 +591,13 @@ impl DevtoolsClient {
 
     /// [`call`](Self::call) waiting up to `wait` for the response.
     fn call_waiting(&self, method: Method, params: Value, wait: Duration) -> Result<Value> {
+        let pending = self.send_request(method, params, wait)?;
+        self.await_response(pending)
+    }
+
+    /// Sends one request and returns what [`await_response`](Self::await_response)
+    /// needs to collect its answer, waiting up to `wait` from then.
+    fn send_request(&self, method: Method, params: Value, wait: Duration) -> Result<Pending> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = Request::new(id, method.as_str(), params);
         let mut line = encode_line(&request);
@@ -564,7 +627,24 @@ impl DevtoolsClient {
                 .flush()
                 .with_context(|| format!("failed to flush a `{method}` request"))?;
         }
+        Ok(Pending {
+            id,
+            method,
+            rx,
+            wait,
+        })
+    }
 
+    /// Waits for the answer to a request [`send_request`](Self::send_request)
+    /// sent: its `result`, or an `Err` for an RPC-level error, a closed
+    /// connection or a timeout.
+    fn await_response(&self, pending: Pending) -> Result<Value> {
+        let Pending {
+            id,
+            method,
+            rx,
+            wait,
+        } = pending;
         let response = rx.recv_timeout(wait).map_err(|err| {
             // Not coming — stop the reader thread from ever routing a late
             // response into a channel nobody is listening on any more.
@@ -612,6 +692,15 @@ impl DevtoolsClient {
             .into()),
         }
     }
+}
+
+/// A request sent and not yet answered: its id, method (for messages), the
+/// channel its response arrives on, and how long to wait for it.
+struct Pending {
+    id: u64,
+    method: Method,
+    rx: mpsc::Receiver<Response>,
+    wait: Duration,
 }
 
 impl Drop for DevtoolsClient {
@@ -2153,6 +2242,45 @@ mod tests {
         }
         assert_eq!(reassembled, bytes);
         assert_eq!(chunks[2].data_base64.len(), encode_base64(&[0; 7]).len());
+    }
+
+    #[test]
+    fn a_pipelined_upload_answers_its_first_refusal_and_awaits_every_request_sent() {
+        let server = test_server::spawn(hot_script());
+        let client =
+            DevtoolsClient::connect(server.addr, Duration::from_secs(2), Some(FAKE_TOKEN)).unwrap();
+        client.handshake().unwrap();
+        let chunks = UPLOAD_WINDOW * 3 + 1;
+        let bytes: Vec<u8> = (0..PATCH_CHUNK_MAX_BYTES * chunks)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        client.upload_patch(7, &bytes).unwrap();
+        assert_eq!(server.uploaded(7), Some(bytes.clone()), "in order, whole");
+        let sent = |server: &FakeServer| {
+            server
+                .methods()
+                .iter()
+                .filter(|method| *method == "patch_chunk")
+                .count()
+        };
+        assert_eq!(sent(&server), chunks);
+
+        // The fake holds patch 7 already, so a second upload's first chunk
+        // (offset 0) is out of order, and so is every one after it.
+        let err = client.upload_patch(7, &bytes).unwrap_err();
+        let rpc = err
+            .downcast_ref::<DevtoolsRpcError>()
+            .expect("the app's refusal");
+        assert!(rpc.message.contains("out of order"), "{rpc:?}");
+        let resent = sent(&server) - chunks;
+        assert!(
+            (1..=UPLOAD_WINDOW).contains(&resent),
+            "at most a window is sent past a refusal, got {resent}"
+        );
+        assert!(
+            client.pending.lock().unwrap().is_empty(),
+            "every request sent was answered before the call returned"
+        );
     }
 
     #[test]

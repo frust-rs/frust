@@ -558,9 +558,12 @@ impl DevtoolsBackend for ShellBackend {
     #[cfg(feature = "hotpatch")]
     fn patch_chunk(&self, chunk: &PatchChunkParams) -> Result<Vec<u8>, BackendError> {
         use base64::Engine as _;
-        base64::engine::general_purpose::STANDARD
+        let decoding = Instant::now();
+        let decoded = base64::engine::general_purpose::STANDARD
             .decode(&chunk.data_base64)
-            .map_err(|e| BackendError::invalid_request(format!("patch chunk is not base64: {e}")))
+            .map_err(|e| BackendError::invalid_request(format!("patch chunk is not base64: {e}")));
+        self.hot.decoded(decoding.elapsed());
+        decoded
     }
 
     /// The loopback hand-off: see the module doc's *Hot patching*.
@@ -588,8 +591,13 @@ impl DevtoolsBackend for ShellBackend {
     ) -> Result<PatchOutcome, BackendError> {
         // Held across the attempt and the frame wait: one patch at a time.
         let mut counters = self.hot.lock();
-        let attempt = self.hot.attempt(&mut counters, bytes, params);
+        let mut timings = ApplyTimings {
+            decode: self.hot.take_decoded(),
+            ..ApplyTimings::default()
+        };
+        let attempt = self.hot.attempt(&mut counters, bytes, params, &mut timings);
 
+        let waiting = Instant::now();
         let frame = park_until_next_frame();
         if !self.bridge.submit(UiRequest::RequestFrame) {
             log::warn!("frust-devtools: could not ask the UI thread for a frame");
@@ -600,6 +608,8 @@ impl DevtoolsBackend for ShellBackend {
                 UI_HOP_DEADLINE.as_secs()
             );
         }
+        timings.frame = waiting.elapsed();
+        log::info!("{timings}");
 
         let Attempt {
             applied,
@@ -749,6 +759,55 @@ struct HotState {
     /// Replaces `frust_paths::cache_dir()` as the patch file's base (tests).
     cache_root: Option<std::path::PathBuf>,
     counters: Mutex<HotCounters>,
+    /// Nanoseconds spent decoding chunk base64 since the last `apply_patch`
+    /// took them ([`ApplyTimings::decode`]). Its own atomic, not under
+    /// `counters`: chunks never wait on an apply's frame wait for it.
+    decode_nanos: AtomicU64,
+}
+
+/// Where one `apply_patch` spent its time on the app side, logged once per
+/// apply at `info` as `frust-hotpatch: apply timings: decode=… write=…
+/// dlopen=… table=… frame=…` (milliseconds). Permanent and cheap (a handful
+/// of `Instant` reads per patch): the app half of the host's `hot patch
+/// timings` line, the instrument for patch-latency regressions.
+#[cfg(feature = "hotpatch")]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct ApplyTimings {
+    /// Base64 decoding of every `patch_chunk`/`table_chunk` since the last
+    /// apply (the patch and its table).
+    decode: Duration,
+    /// Writing the patch file the loader opens.
+    write: Duration,
+    /// `frust_hotpatch`'s library load (on Android the memfd copy and
+    /// `android_dlopen_ext`).
+    dlopen: Duration,
+    /// Rebasing and installing the jump table, handlers included.
+    table: Duration,
+    /// The wait for the frame after the apply, which the answer follows.
+    frame: Duration,
+    /// The patch's size in bytes.
+    bytes: u64,
+    /// The jump table's entry count.
+    entries: usize,
+}
+
+#[cfg(feature = "hotpatch")]
+impl std::fmt::Display for ApplyTimings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ms = |d: Duration| d.as_millis();
+        write!(
+            f,
+            "frust-hotpatch: apply timings: decode={}ms write={}ms dlopen={}ms table={}ms \
+             frame={}ms bytes={} entries={}",
+            ms(self.decode),
+            ms(self.write),
+            ms(self.dlopen),
+            ms(self.table),
+            ms(self.frame),
+            self.bytes,
+            self.entries
+        )
+    }
 }
 
 #[cfg(feature = "hotpatch")]
@@ -777,6 +836,17 @@ impl HotState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Adds one chunk's decode time to [`ApplyTimings::decode`].
+    fn decoded(&self, took: Duration) {
+        let nanos = u64::try_from(took.as_nanos()).unwrap_or(u64::MAX);
+        self.decode_nanos.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// The decode time since the last call, resetting it.
+    fn take_decoded(&self) -> Duration {
+        Duration::from_nanos(self.decode_nanos.swap(0, Ordering::Relaxed))
+    }
+
     /// `<cache dir>/frust-hotpatch`, or `None` when the platform has no cache
     /// dir (yet — Android installs it from its first surface).
     fn patch_dir(&self) -> Option<std::path::PathBuf> {
@@ -793,12 +863,15 @@ impl HotState {
         counters: &mut HotCounters,
         bytes: Vec<u8>,
         params: ApplyPatchParams,
+        timings: &mut ApplyTimings,
     ) -> Result<Attempt, BackendError> {
         check_target(
             (params.pid, params.anchor_runtime),
             (std::process::id(), frust_hotpatch::aslr_reference() as u64),
         )?;
         let len = bytes.len() as u64;
+        timings.bytes = len;
+        timings.entries = params.table.map.len();
         if len != params.len {
             return Err(BackendError::invalid_request(format!(
                 "patch is {len} bytes, apply_patch says {}",
@@ -830,7 +903,10 @@ impl HotState {
             std::process::id(),
             params.patch_id
         );
-        let path = write_patch_file(&dir, &name, &bytes).map_err(|e| {
+        let writing = Instant::now();
+        let written = write_patch_file(&dir, &name, &bytes);
+        timings.write = writing.elapsed();
+        let path = written.map_err(|e| {
             BackendError::internal(redact(
                 &format!("could not write the patch: {e}"),
                 &dir,
@@ -856,6 +932,8 @@ impl HotState {
             params.expected_seams
         );
         let report = frust_hotpatch::apply_from_devtools(&path, table);
+        timings.dlopen = report.load;
+        timings.table = report.install;
         // A loaded library stays mapped; the file has done its job either way.
         if let Err(e) = std::fs::remove_file(&path) {
             log::debug!("frust-devtools: could not remove {}: {e}", path.display());
@@ -1464,7 +1542,7 @@ mod tests {
                 started: Instant::now(),
                 hot: HotState {
                     cache_root: Some(root.to_path_buf()),
-                    counters: Mutex::default(),
+                    ..HotState::default()
                 },
             }
         }
@@ -1689,6 +1767,34 @@ mod tests {
             );
             let again = backend.hotpatch_info().expect("info");
             assert!(again.pending_layout_mismatches.is_empty(), "reported once");
+        }
+
+        #[test]
+        fn chunk_decoding_time_accumulates_until_an_apply_takes_it() {
+            let backend = backend(&scratch("decode-time"));
+            assert_eq!(backend.hot.take_decoded(), Duration::ZERO);
+            backend.hot.decoded(Duration::from_millis(3));
+            backend.hot.decoded(Duration::from_millis(4));
+            assert_eq!(backend.hot.take_decoded(), Duration::from_millis(7));
+            assert_eq!(backend.hot.take_decoded(), Duration::ZERO, "taken once");
+        }
+
+        #[test]
+        fn apply_timings_render_as_one_line_in_milliseconds() {
+            let timings = ApplyTimings {
+                decode: Duration::from_millis(93),
+                write: Duration::from_micros(23_900),
+                dlopen: Duration::from_millis(26),
+                table: Duration::from_millis(2),
+                frame: Duration::from_millis(3),
+                bytes: 17_843_800,
+                entries: 68_692,
+            };
+            assert_eq!(
+                timings.to_string(),
+                "frust-hotpatch: apply timings: decode=93ms write=23ms dlopen=26ms table=2ms \
+                 frame=3ms bytes=17843800 entries=68692"
+            );
         }
 
         #[test]

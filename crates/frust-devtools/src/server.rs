@@ -26,8 +26,11 @@ const MAX_LINE_BYTES: usize = 1 << 20;
 /// could destroy the reply in flight; draining lets the client read it.
 const OVERSIZED_DRAIN: Duration = Duration::from_secs(2);
 
-/// Read chunk size for the line reader — one page.
-const READ_CHUNK_BYTES: usize = 4096;
+/// Least free space the line reader asks the socket to fill per `read`. A
+/// hot patch arrives as `patch_chunk` lines of ~683 KiB each, tens of them
+/// back to back, so a reader reading one page at a time would wake ~170
+/// times per line; 64 KiB takes each line in about a dozen reads.
+const READ_CHUNK_BYTES: usize = 64 * 1024;
 
 /// How long [`accept_loop`] lets in-flight connections finish their current
 /// write after shutdown is signalled, before aborting them. A connection only
@@ -279,9 +282,20 @@ impl From<std::io::Error> for ReadError {
 /// `tokio::io::BufReader::lines` for two reasons: `read` is documented
 /// cancel-safe (nothing is consumed when a `select!` branch loses), and the
 /// [`MAX_LINE_BYTES`] cap needs to be enforced *while* buffering, not after.
+///
+/// Each byte is scanned for the newline once: `scanned` remembers how much of
+/// `buf` is known newline-free, so a long line costs time linear in its
+/// length. (Rescanning the whole buffer after every read made a ~683 KiB
+/// `patch_chunk` line cost tens of MB of scanning, which dominated a large
+/// app's patch upload on a phone.)
 struct LineReader<R> {
     inner: R,
     buf: Vec<u8>,
+    /// How many leading bytes of `buf` hold no newline.
+    scanned: usize,
+    /// The `read` target, [`READ_CHUNK_BYTES`] long, kept off the future's
+    /// stack and reused.
+    chunk: Box<[u8]>,
 }
 
 impl<R: AsyncRead + Unpin> LineReader<R> {
@@ -289,6 +303,8 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
         Self {
             inner,
             buf: Vec::with_capacity(READ_CHUNK_BYTES),
+            scanned: 0,
+            chunk: vec![0u8; READ_CHUNK_BYTES].into_boxed_slice(),
         }
     }
 
@@ -298,7 +314,16 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
     /// consumes nothing when it is dropped.
     async fn next_line(&mut self) -> Result<Option<String>, ReadError> {
         loop {
-            if let Some(newline) = self.buf.iter().position(|b| *b == b'\n') {
+            let unscanned = &self.buf[self.scanned..];
+            if let Some(at) = unscanned.iter().position(|b| *b == b'\n') {
+                let newline = self.scanned + at;
+                // What follows the newline has not been scanned yet.
+                self.scanned = 0;
+                // A whole line can arrive within one read past the cap: it
+                // is refused all the same.
+                if newline > MAX_LINE_BYTES {
+                    return Err(self.oversized());
+                }
                 let mut line: Vec<u8> = self.buf.drain(..=newline).collect();
                 line.pop(); // the '\n'
                 if line.last() == Some(&b'\r') {
@@ -306,29 +331,35 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
                 }
                 return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
             }
+            self.scanned = self.buf.len();
             if self.buf.len() > MAX_LINE_BYTES {
-                let id = dispatch::salvage_id(&self.buf);
-                self.buf.clear();
-                return Err(ReadError::Oversized { id });
+                return Err(self.oversized());
             }
 
-            let mut chunk = [0u8; READ_CHUNK_BYTES];
-            let read = self.inner.read(&mut chunk).await?;
+            let read = self.inner.read(&mut self.chunk).await?;
             if read == 0 {
                 // A trailing partial line is not a request — an unterminated
                 // line is by definition incomplete under NDJSON framing.
                 return Ok(None);
             }
-            self.buf.extend_from_slice(&chunk[..read]);
+            self.buf.extend_from_slice(&self.chunk[..read]);
         }
+    }
+
+    /// Drops the buffered over-long line, keeping the id it started with.
+    fn oversized(&mut self) -> ReadError {
+        let id = dispatch::salvage_id(&self.buf);
+        self.buf.clear();
+        self.scanned = 0;
+        ReadError::Oversized { id }
     }
 
     /// Reads and discards everything until the peer closes or the socket
     /// fails: what is left of an over-long line, after its error reply.
     async fn discard_to_eof(&mut self) {
         self.buf.clear();
-        let mut chunk = [0u8; READ_CHUNK_BYTES];
-        while let Ok(read) = self.inner.read(&mut chunk).await {
+        self.scanned = 0;
+        while let Ok(read) = self.inner.read(&mut self.chunk).await {
             if read == 0 {
                 break;
             }
@@ -381,6 +412,53 @@ mod tests {
         let lines = read_all_lines(&input).unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].len(), READ_CHUNK_BYTES * 3);
+    }
+
+    /// Hands out its input a few bytes per `read`, as a slow socket does.
+    struct Trickle {
+        input: Vec<u8>,
+        at: usize,
+        step: usize,
+    }
+
+    impl AsyncRead for Trickle {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            out: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let end = (self.at + self.step)
+                .min(self.input.len())
+                .min(self.at + out.remaining());
+            let (from, to) = (self.at, end);
+            out.put_slice(&self.input[from..to]);
+            self.at = end;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn lines_split_across_many_small_reads_keep_their_boundaries() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let long = "y".repeat(READ_CHUNK_BYTES * 2 + 17);
+        let input = format!("a\n{long}\nbc\n\nd");
+        for step in [1, 3, 4096, READ_CHUNK_BYTES + 5] {
+            let lines = rt.block_on(async {
+                let mut reader = LineReader::new(Trickle {
+                    input: input.clone().into_bytes(),
+                    at: 0,
+                    step,
+                });
+                let mut lines = Vec::new();
+                while let Some(line) = reader.next_line().await.expect("no error") {
+                    lines.push(line);
+                }
+                lines
+            });
+            assert_eq!(lines, vec!["a", long.as_str(), "bc", ""], "step {step}");
+        }
     }
 
     #[test]

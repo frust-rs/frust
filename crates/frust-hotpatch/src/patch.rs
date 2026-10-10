@@ -216,7 +216,7 @@ pub unsafe fn apply_patch(table: JumpTable) -> Result<(), PatchError> {
         return Err(PatchError::ReleaseBuild);
     }
     // SAFETY: forwarded verbatim; the caller upholds this function's contract.
-    unsafe { apply_patch_with_anchor(table, aslr_reference) }
+    unsafe { apply_patch_with_anchor(table, aslr_reference) }.map(|_| ())
 }
 
 /// What [`apply_from_devtools`] did: whether the patch was applied, and why not when it was not.
@@ -231,6 +231,13 @@ pub struct ApplyReport {
     pub layout_mismatches: Vec<LayoutMismatch>,
     /// Why applying failed, when it did (and no mismatch record was the reason).
     pub error: Option<PatchError>,
+    /// Wall time spent loading the library ([`load_patch_library`]: on Android the read, the
+    /// memfd copy and `android_dlopen_ext`); zero when nothing was loaded. Part of the app's
+    /// permanent `apply timings` line, the instrument for patch-latency regressions.
+    pub load: std::time::Duration,
+    /// Wall time from the loaded library to the published table: the anchor checks, the rebase
+    /// of every entry, the install and the handlers. Zero when nothing was installed.
+    pub install: std::time::Duration,
 }
 
 /// The safe devtools entry: apply the patch library at `bytes_path` with `table`.
@@ -248,35 +255,41 @@ pub struct ApplyReport {
 /// release-profile build refuses the same way, with [`PatchError::ReleaseBuild`].
 #[cfg(any(unix, windows))]
 pub fn apply_from_devtools(bytes_path: &Path, mut table: JumpTable) -> ApplyReport {
+    let refused = |layout_mismatches: Vec<LayoutMismatch>, error: Option<PatchError>| ApplyReport {
+        applied: false,
+        layout_mismatches,
+        error,
+        load: std::time::Duration::ZERO,
+        install: std::time::Duration::ZERO,
+    };
     if !cfg!(debug_assertions) {
-        return ApplyReport {
-            applied: false,
-            layout_mismatches: Vec::new(),
-            error: Some(PatchError::ReleaseBuild),
-        };
+        return refused(Vec::new(), Some(PatchError::ReleaseBuild));
     }
     table.lib = bytes_path.to_path_buf();
     // SAFETY: this entry's documented contract: `bytes_path` was written by the app from bytes
     // received on the authenticated devtools connection, and the table comes from the same
-    // authenticated builder for this running build, which is what `apply_patch` requires. The
-    // builder's L3 gate owns the layout precondition.
-    match unsafe { apply_patch(table) } {
-        Ok(()) => ApplyReport {
+    // authenticated builder for this running build, which is what `apply_patch` requires (whose
+    // release-build refusal is checked above). The builder's L3 gate owns the layout
+    // precondition.
+    match unsafe { apply_patch_with_anchor(table, aslr_reference) } {
+        Ok(timings) => ApplyReport {
             applied: true,
             layout_mismatches: Vec::new(),
             error: None,
+            load: timings.load,
+            install: timings.install,
         },
-        Err(PatchError::LayoutMismatchPending(records)) => ApplyReport {
-            applied: false,
-            layout_mismatches: records,
-            error: None,
-        },
-        Err(error) => ApplyReport {
-            applied: false,
-            layout_mismatches: Vec::new(),
-            error: Some(error),
-        },
+        Err(PatchError::LayoutMismatchPending(records)) => refused(records, None),
+        Err(error) => refused(Vec::new(), Some(error)),
     }
+}
+
+/// Where one successful apply spent its time (see [`ApplyReport::load`]).
+#[cfg(any(unix, windows))]
+#[derive(Debug, PartialEq)]
+struct ApplyTimings {
+    load: std::time::Duration,
+    install: std::time::Duration,
 }
 
 /// [`apply_patch`] with the executable's anchor lookup injected, so a test can force it unresolved.
@@ -288,7 +301,7 @@ pub fn apply_from_devtools(bytes_path: &Path, mut table: JumpTable) -> ApplyRepo
 unsafe fn apply_patch_with_anchor(
     mut table: JumpTable,
     anchor: fn() -> usize,
-) -> Result<(), PatchError> {
+) -> Result<ApplyTimings, PatchError> {
     let _serial = APPLY_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
 
     // Under the lock and before any load: a mismatch reported while this call waited is seen, and
@@ -320,8 +333,11 @@ unsafe fn apply_patch_with_anchor(
         });
     }
 
+    let loading = std::time::Instant::now();
     // SAFETY: the caller guarantees `table.lib` is the patch library built for this process.
     let lib = unsafe { load_patch_library(&table.lib)? };
+    let load = loading.elapsed();
+    let installing = std::time::Instant::now();
     // Never unload a patch: its code stays reachable through the table, and dropping a handle has
     // been seen to run teardown code that crashes the process.
     let lib: &'static libloading::Library = Box::leak(Box::new(lib));
@@ -366,7 +382,10 @@ unsafe fn apply_patch_with_anchor(
     register_base(base_start, base_end, old_offset);
     register_patch(patch_start, patch_end, new_offset);
     commit_patch(table);
-    Ok(())
+    Ok(ApplyTimings {
+        load,
+        install: installing.elapsed(),
+    })
 }
 
 /// A layout disagreement found at run time: a value built by one image was reached by another
@@ -889,6 +908,11 @@ mod tests {
         assert!(!report.applied);
         assert_eq!(report.layout_mismatches, vec![expected.clone()]);
         assert_eq!(report.error, None, "refused for the record, not an error");
+        assert_eq!(
+            (report.load, report.install),
+            (std::time::Duration::ZERO, std::time::Duration::ZERO),
+            "nothing was loaded or installed, so nothing was timed"
+        );
         // SAFETY: only checked for presence.
         assert!(unsafe { get_jump_table() }.is_none());
 

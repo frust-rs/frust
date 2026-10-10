@@ -3176,3 +3176,89 @@ disk; the rest of the compile is the crate's own codegen, which no crate type re
 the Pixel 5 run took is therefore not mostly this archive on a fast local disk: the link, the
 cdylib's size and the upload are the remainder, and are not measured here. The I/O saved scales
 with the disk the build directory sits on.
+
+## Large apps: patch latency
+
+A body-only edit of the demo app (`examples/material3-demo`) on the Pixel 5 took about a minute to
+patch, and its third patch restarted the app. Both sides now time every stage of every patch, and
+the four dominant costs are fixed.
+
+**The instrument (permanent).**
+
+- The host session appends one line per change that reached the compile to `patch-timings.log` in
+  the session directory, and keeps the last as `HotSession::last_timings`:
+  `hot patch timings: outcome=… compile= gate= check= symbols= link= table= strip= upload_patch=
+  upload_table= apply= total= patch_bytes= table_entries=`.
+- The app logs two lines per apply at `info`. `frust-hotpatch: transfer timings: patch=<wall>ms/<n>
+  chunks/<handled>ms handled table=… table_decode=…` comes from the devtools service.
+  `frust-hotpatch: apply timings: decode= write= dlopen= table= frame= bytes= entries=` comes from
+  the shell backend.
+
+Method: `frust run --watch -d <device>` from the worktree's demo, with the worktree's debug `frust`
+binary. The Pixel 5 was attached over USB, with its screen kept awake. Each patch changed the
+preview card's title string (`src/pages/playground/do_/fab_menu.rs`). In the after run the FAB menu
+was opened before the first patch and was still open after every patch, so `State` was kept. The
+title changed on screen each time. Times are the host line and the app lines for the same patch.
+
+**Before** (base `f2e5828b`):
+
+| Patch | total | compile | gate | symbols+link+table+strip | upload_patch (app: wall / handled) | upload_table | apply |
+|-------|-------|---------|------|--------------------------|------------------------------------|--------------|-------|
+| 1 | 58.1 s | 10.0 s | 11.2 s | 0.9 s | 34.2 s (33.0 s / 0.69 s) | 1.1 s | 0.17 s |
+| 2 | 71.9 s | 2.7 s | 28.6 s | 1.8 s | 36.9 s (33.2 s / 0.67 s) | 1.1 s | 0.23 s |
+| 3 | restart | | | | | | |
+
+The patch was 37.5 MB stripped with 68 686 table entries. On the app side, dlopen took 78 ms and
+the frame 3 ms. The Mac's load average was about 24 during patch 2, because another worktree was
+building. Patch 3 restarted because `3 patches / 112358472 bytes` passed the 96 MiB byte budget.
+
+**After:**
+
+| Patch | total | compile | gate | symbols+link+table+strip | upload_patch (app: wall / handled) | upload_table | apply |
+|-------|-------|---------|------|--------------------------|------------------------------------|--------------|-------|
+| 1 | 9.9 s | 7.2 s | 0.25 s | 0.65 s | 1.30 s (1.35 s / 0.17 s) | 0.16 s | 0.09 s |
+| 2 | 3.5 s | 0.99 s | 0.20 s | 0.64 s | 1.31 s (1.36 s / 0.15 s) | 0.16 s | 0.08 s |
+| 3 | 3.4 s | 0.90 s | 0.20 s | 0.64 s | 1.30 s (1.37 s / 0.18 s) | 0.16 s | 0.08 s |
+| 4 | 3.5 s | 0.91 s | 0.20 s | 0.63 s | 1.30 s (1.36 s / 0.18 s) | 0.16 s | 0.09 s |
+
+The median is 3.5 s (n = 4), against the goal of under 15 s. The patch is 17.8 MB stripped, with
+the same 68 692-entry table. The app side took decode 78–111 ms, write 21–23 ms, dlopen 25–32 ms,
+table 2–3 ms and frame 1–3 ms. At 17.8 MB a patch, five fit the default 96 MiB budget.
+
+**What changed, by cost:**
+
+1. **Upload (34 s → 1.3 s).** The app handled the chunks in 0.7 s of the 33 s wall time. The
+   service's line reader rescanned its whole buffer for a newline after every 4 KiB read. Each
+   683 KiB `patch_chunk` line therefore scanned about 60 MB, and the build optimizes the app's
+   dependencies only at `opt-level = 1`. The reader now scans each byte once and reads 64 KiB at a
+   time; a complete line over the 1 MiB cap is still refused (`server.rs`).
+
+   The client then keeps up to four chunk requests in flight (`UPLOAD_WINDOW`). The app handles a
+   connection's lines in order, so the bytes it assembles are unchanged, and the first refusal
+   (in chunk order) is the answer. This took the upload from 3.8 s to 1.3 s on the same 17.8 MB.
+2. **Patch size (37.5 MB → 17.8 MB).** A Gnu thin link exported every default-visibility global.
+   `.dynstr` alone was 14.7 MB of the 37.5 MB, and there were 53 000 PLT relocations. The link
+   now takes a version script that leaves `__frust_hotpatch_anchor` as the only export
+   (`thin_link.rs`). Nothing else reads a patch's dynamic symbols: the jump table and the host's
+   symbol map come from the unstripped `.symtab`, which keeps local symbols, and the stub binds
+   every undefined symbol. The table had the same 68 692 entries. A relink of one patch by hand
+   with and without the script gave 36 988 624 and 17 844 128 bytes stripped.
+3. **Gate (11–29 s → 0.2 s).** Each candidate read every one of the image unit's 257 objects
+   (264 MB) twice: `typed_objects` extracted each one, then the table extracted them all again.
+   It also demangled every defined symbol for the seam set. Now:
+   - each object is read once, in parallel (`layout::read_inputs`, `extract_with`);
+   - a tip object whose SHA-256 matches bytes already in the accepted set (the base build's tip
+     objects, and every object of an accepted patch) is not read again. An incremental rebuild
+     leaves untouched codegen units byte-identical, so their types are already accepted;
+   - seam candidates are cached per input digest.
+
+   Objects with new bytes are still read and gated, so the gate is not weakened. Skipping an
+   identical object is what not recompiling it would do.
+4. **Table:** filtering it was evaluated and not taken. Its 68 692 entries upload in 0.16 s and
+   decode in 4 ms. `HotFn::from_fn_ptr` keys on any function's address, so a seam-only filter
+   would not be sound.
+
+**What remains.** On a later patch, compile (0.9 s) and upload (1.3 s) are most of the 3.5 s. The
+first patch of a session also pays the image unit's first incremental replay (7.2 s), which rebuilds
+every codegen unit after the fat build's three-type compile. The host times above are from a debug
+`frust` binary.
