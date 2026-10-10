@@ -4,6 +4,9 @@
 [workspace]
 resolver = "3"
 members = ["app", "driver"]
+# `shared` is the app's local path dependency kept out of the workspace, as a
+# `--frust-path` checkout is: the canary replays it through `RUSTC_WRAPPER`.
+exclude = ["shared"]
 
 # Debug dependencies at `opt-level = 1`, as the `frust create` template sets them.
 [profile.dev.package."*"]

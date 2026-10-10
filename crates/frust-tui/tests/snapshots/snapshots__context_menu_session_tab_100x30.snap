@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │huddle:  1 ▶ desktop                                                      
   ▸ huddle               │   12:00:00 [app]       Compiling huddle v0.1.0                           
                          │   12:00╭───────────────────────────╮ profile                             
- DEVICES ↻ r             │   12:00│▸ Select tab           1-9 │▓get/debug/huddle`                   
+ DEVICES ↻ R             │   12:00│▸ Select tab           1-9 │▓get/debug/huddle`                   
    none found            │   12:00│  Stop session           x │▓                                    
                          │ W 12:00│  Stop & close           X │▓ariable `x`                         
  SESSIONS                │   12:00│  Toggle follow-tail     f │▓ered                                
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
-● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]
+● 1 running  │  o run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

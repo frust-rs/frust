@@ -12,6 +12,7 @@
 //! [`HotpatchError::BuilderUnsupported`] — a guessed patch is never built.
 //! [`android`] runs the same builder for an Android arm64 app: the fat build
 //! through cargo-ndk outside Gradle, the session through `adb forward`.
+//! [`watch`] names the paths and the save debounce both `--watch` front-ends share.
 //! See `docs/CLI_ARCHITECTURE.md`.
 
 use std::path::{Path, PathBuf};
@@ -32,6 +33,7 @@ pub mod session;
 pub mod stub;
 pub mod symbols;
 pub mod thin_link;
+pub mod watch;
 
 /// The directory under a cargo target dir that holds every hot-patch
 /// artifact: captured invocations, fat archives, patches.

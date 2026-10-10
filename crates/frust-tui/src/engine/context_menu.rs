@@ -179,7 +179,7 @@ pub fn entries_for(state: &AppState, target: ContextTarget) -> Vec<MenuEntry> {
             vec![
                 MenuEntry::gated(
                     "Run on device(s)…",
-                    "r",
+                    "o",
                     Message::OpenRunConfig,
                     has_project,
                 ),

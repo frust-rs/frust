@@ -94,7 +94,8 @@ bare CLI:
 See [the website's TUI docs](https://frust.dev/docs/tooling/tui) for the full picture. (A debug
 `frust run --watch` — desktop, or `-d` an Android device or booted iOS simulator — hot-patches each
 save into the running app with its State kept, and relaunches only when a change cannot be patched
-(`restart required: <reason>`). `R` in the TUI is always a full rebuild and relaunch; see
+(`restart required: <reason>`). `r` in the TUI hot-patches now; `R` is always a full rebuild and
+relaunch; see
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) § Dev Loop.)
 
 ### Extensible

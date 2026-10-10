@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │huddle:  1 ◌ desktop                                                      
   ▸ huddle               │ E 12:04:22 [gradle] FAILURE: Build failed with an exception.             
                          │ E 12:04:24 [logcat] E/ActivityThread( 1234): Failed to find provider info
- DEVICES ↻ r             │                                                                          
+ DEVICES ↻ R             │                                                                          
    none found            │                                                                          
                          │                                                                          
  SESSIONS                │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │● follow  ·  wrap:off ⏷warn+ ·4      x stop · f follow · w wrap · / search
-● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]
+● 1 running  │  o run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

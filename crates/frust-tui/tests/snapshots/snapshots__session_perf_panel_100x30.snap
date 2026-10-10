@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │huddle:  1 ▶ desktop                                                      
   ▸ huddle               │   12:00:22 [frust]  frust-perf raw n=20 total_us=2740 rebuild_us=200 layo
                          │   12:00:23 [frust]  frust-perf raw n=21 total_us=2777 rebuild_us=200 layo
- DEVICES ↻ r             │   12:00:24 [frust]  frust-perf raw n=22 total_us=2814 rebuild_us=200 layo
+ DEVICES ↻ R             │   12:00:24 [frust]  frust-perf raw n=22 total_us=2814 rebuild_us=200 layo
    none found            │   12:00:25 [frust]  frust-perf raw n=23 total_us=2851 rebuild_us=200 layo
                          │   12:00:26 [frust]  frust-perf raw n=24 total_us=2888 rebuild_us=200 layo
  SESSIONS                │   12:00:27 [frust]  frust-perf raw n=25 total_us=2925 rebuild_us=200 layo
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │  ▄▄▄▄▄▅▅▅▅▅▅▅▅▅▅▅▆▆▆▆▆▆▆▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇█                                
                          │  perf n=40 p50=8ms p95=14ms p99=22ms skipped=0 total_frames=40           
                          │  startup: app_created=2ms first_frame_presented=45ms                     
-● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]
+● 1 running  │  o run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

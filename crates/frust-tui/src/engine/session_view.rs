@@ -377,15 +377,40 @@ pub struct SessionView {
     /// `super::update::on_session_event`) instead of staying around like an
     /// ordinary stopped session. `false` for every ordinary session.
     pub close_on_exit: bool,
-    /// "Watch: restart on save" (`Message::ToggleWatch`): while `true` the
-    /// runner keeps a source watcher over this session's project and a
-    /// settled change burst restarts it (`Message::WatchTriggered`). Desktop
-    /// sessions only. Survives a terminal state on purpose — a build that
-    /// failed to compile is exactly the session a save should relaunch — and
-    /// carries over to the relaunch: the runner re-enables it on the new
-    /// session with `Message::EnableWatch` once that registers. `false` for
-    /// every freshly registered session.
+    /// "Watch: hot patch on save" (`Message::ToggleWatch`, or "Auto-apply on
+    /// save" at launch): while `true` the runner keeps a source watcher over
+    /// this session's project and a settled change burst hot-patches it, or
+    /// restarts it when it is not hot (`Message::WatchTriggered`). Desktop,
+    /// Android device and iOS simulator sessions only. Survives a terminal
+    /// state on purpose — a build that failed to compile is exactly the
+    /// session a save should relaunch — and carries over to the relaunch:
+    /// the runner re-enables it on the new session with
+    /// `Message::EnableWatch` once that registers. `false` for every freshly
+    /// registered session.
     pub watch: bool,
+    /// Whether the runner launched this session through the hot-patch
+    /// session start (`Message::HotSessionStarted`, right after its
+    /// registration): `r` (`Message::HotPatchNow`) then patches it instead
+    /// of restarting it. Independent of [`Self::watch`] — a hot session
+    /// launched with "Auto-apply on save" off runs hot with no watcher.
+    /// `false` for every freshly registered session; a relaunch is a new
+    /// view the runner marks again when it runs hot.
+    pub hot: bool,
+    /// Set by `Message::HotPatchNow` when it asks the runner to patch, and
+    /// taken by the next `Message::HotPatchOutcome` for this session: a
+    /// `RestartRequired` answering a manual request restarts the session
+    /// even with its watcher off (a watched session restarts regardless).
+    pub hot_patch_requested: bool,
+    /// The `AppState::animation_frame` at this session's last completed hot
+    /// patch (`HotOutcome::Patched`), or `None` before any. It drives the
+    /// one-shot success flash on the session's tab and watch status segment:
+    /// live for [`Self::HOT_PATCH_FLASH_FRAMES`] ticks after the stamp (see
+    /// [`Self::hot_patch_flash_live`]), restarted by each new `Patched`, and
+    /// never set by `NoChange`/`CompileFailed`/`RestartRequired`. The stamp is
+    /// never cleared — an expired one is simply inert. A restart's relaunch is
+    /// a freshly registered `SessionView` (new id), so the flash does not carry
+    /// across a restart; the replaced view's own stamp is left as it was.
+    pub hot_patch_flash: Option<u64>,
     /// The parsed `frust-perf` sparkline/stats panel for this session —
     /// fed one line at a time from [`Self::push_line`].
     pub perf: PerfPanel,
@@ -414,6 +439,20 @@ pub struct SessionView {
 }
 
 impl SessionView {
+    /// How many frame ticks a hot-patch success flash lasts: 10 × the
+    /// runner's 50 ms tick = 500 ms, fdemon's reload-flash duration. The
+    /// engine owns the number (it decides when the tick may stop); the
+    /// render-side fade math in `crate::ui::anim::flash` reads it from here.
+    pub const HOT_PATCH_FLASH_FRAMES: u64 = 10;
+
+    /// Whether this session's hot-patch flash is still fading at
+    /// `animation_frame` — fewer than [`Self::HOT_PATCH_FLASH_FRAMES`] ticks
+    /// since the stamp (wrap-safe). `false` with no stamp.
+    pub fn hot_patch_flash_live(&self, animation_frame: u64) -> bool {
+        self.hot_patch_flash
+            .is_some_and(|stamp| animation_frame.wrapping_sub(stamp) < Self::HOT_PATCH_FLASH_FRAMES)
+    }
+
     /// A fresh session view (empty log, following the tail, no selection) for
     /// an **ad-hoc** session: one that can neither host a devtools service
     /// nor run an app on a target, so it carries no [`SessionTarget`] and
@@ -456,6 +495,9 @@ impl SessionView {
             dropped: 0,
             close_on_exit: false,
             watch: false,
+            hot: false,
+            hot_patch_requested: false,
+            hot_patch_flash: None,
             perf: PerfPanel::default(),
             level_filter: LevelFilter::default(),
             panic_tracker: PanicTracker::default(),
@@ -1144,6 +1186,25 @@ mod tests {
             role: LineRole::Normal,
             source_prefix_strip: 0,
         }
+    }
+
+    // ── Hot-patch flash ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_hot_patch_flash_is_live_for_exactly_its_frame_budget_and_wrap_safe() {
+        let mut view = sess();
+        assert!(!view.hot_patch_flash_live(0), "no stamp, no flash");
+
+        view.hot_patch_flash = Some(100);
+        let last = 100 + SessionView::HOT_PATCH_FLASH_FRAMES - 1;
+        assert!(view.hot_patch_flash_live(100));
+        assert!(view.hot_patch_flash_live(last));
+        assert!(!view.hot_patch_flash_live(last + 1));
+
+        view.hot_patch_flash = Some(u64::MAX - 1);
+        assert!(view.hot_patch_flash_live(u64::MAX));
+        assert!(view.hot_patch_flash_live(3), "the frame counter wrapped");
+        assert!(!view.hot_patch_flash_live(SessionView::HOT_PATCH_FLASH_FRAMES));
     }
 
     // ── Line-selection mode ─────────────────────────────────────────────

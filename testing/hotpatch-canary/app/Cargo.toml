@@ -10,4 +10,5 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 frust-hotpatch = { path = "../../../crates/frust-hotpatch" }
+hotpatch-canary-shared = { path = "../shared" }
 serde_json = "1"

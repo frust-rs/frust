@@ -308,6 +308,7 @@ name = "hotpatch-canary-app"
 version = "0.1.0"
 dependencies = [
  "frust-hotpatch",
+ "hotpatch-canary-shared",
  "serde_json",
 ]
 
@@ -320,6 +321,10 @@ dependencies = [
  "frust-hotpatch",
  "serde_json",
 ]
+
+[[package]]
+name = "hotpatch-canary-shared"
+version = "0.1.0"
 
 [[package]]
 name = "icns"

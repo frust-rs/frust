@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │huddle:  1 ▶ desktop                                                      
   ▸ huddle               │ [1] Performance  [2] System  [3] Inspector  [4] Network        ● service 
                          │                  ━━━━━━━━━━                                              
- DEVICES ↻ r             │ desktop  ⚠ sampling unavailable — pid not exposed                        
+ DEVICES ↻ R             │ desktop  ⚠ sampling unavailable — pid not exposed                        
    none found            │ CPU    n/a — no samples yet                                              
                          │  waiting for CPU samples…                                                
  SESSIONS                │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │ devtools: system │ [1234][ ] tabs · Esc back to log             [mouse ✓]
-● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]
+● 1 running  │  o run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

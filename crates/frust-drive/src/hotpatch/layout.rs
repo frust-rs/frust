@@ -23,6 +23,13 @@
 //! trait-object child is invisible in DWARF): editing a type with no live
 //! values also restarts, a false positive that is accepted.
 //!
+//! **Units.** An object is read as a whole: a type reference may name a DIE
+//! in another compile unit of the same object (`DW_FORM_ref_addr`), which
+//! is what an object compiled at `opt-level >= 1` holds once rustc's
+//! crate-local ThinLTO has imported functions across codegen units — the
+//! case of a dependency built under `[profile.dev.package."*"]`. DIEs are
+//! keyed by their `.debug_info` offset ([`DieRef`]).
+//!
 //! **Fail closed.** Only Mach-O and ELF objects are read. An input with no
 //! object, an object without `.debug_info`, or debug info without types
 //! (`debug = "line-tables-only"` or `"limited"`) is
@@ -37,10 +44,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use gimli::{AttributeValue, DebuggingInformationEntry, Reader, RunTimeEndian, Unit, UnitOffset};
+use gimli::{
+    AttributeValue, DebugInfoOffset, DebuggingInformationEntry, Reader, RunTimeEndian, Unit,
+    UnitOffset,
+};
 use object::read::RelocationMap;
 use object::read::archive::ArchiveFile;
-use object::{BinaryFormat, Object as _, ObjectSection as _};
+use object::{
+    BinaryFormat, Object as _, ObjectSection as _, ObjectSymbol as _, RelocationTarget, SymbolKind,
+};
 use serde::{Deserialize, Serialize};
 
 use super::HotpatchError;
@@ -191,6 +203,37 @@ pub fn extract(inputs: &[PathBuf], crates: &[String]) -> Result<Extraction, Hotp
         table: LayoutTable { types },
         sources,
     })
+}
+
+/// Whether any object in `path` (an rlib's `.o` members, or one object)
+/// holds code or data. A crate compiled to nothing on this target (a
+/// platform shell whose every item is `cfg`'d out) holds neither, so it
+/// has no value of any type, and carries no DWARF to read either. An input
+/// that yields no object, or an object that is not Mach-O or ELF, is
+/// [`HotpatchError::BuilderUnsupported`].
+pub fn holds_code_or_data(path: &Path) -> Result<bool, HotpatchError> {
+    use object::SectionKind;
+    let mut found = false;
+    for_each_object(path, |_, file| {
+        found |= file.sections().any(|section| {
+            section.size() > 0
+                && matches!(
+                    section.kind(),
+                    SectionKind::Text
+                        | SectionKind::Data
+                        | SectionKind::ReadOnlyData
+                        | SectionKind::ReadOnlyDataWithRel
+                        | SectionKind::ReadOnlyString
+                        | SectionKind::UninitializedData
+                        | SectionKind::Common
+                        | SectionKind::Tls
+                        | SectionKind::UninitializedTls
+                        | SectionKind::TlsVariables
+                )
+        });
+        Ok(())
+    })?;
+    Ok(found)
 }
 
 /// Every type present in both tables whose hash differs, ordered by path.
@@ -398,6 +441,33 @@ impl gimli::read::Relocate for SectionRelocations<'_> {
     }
 }
 
+/// The relocation map of one ELF section, built entry by entry. A
+/// relocation the map cannot apply is skipped only when it targets a
+/// thread-local symbol: that can only feed a TLS `DW_AT_location`
+/// expression (`R_X86_64_DTPOFF64`, `R_AARCH64_TLS_DTPREL*`), which the
+/// layout gate never reads. Any other failure refuses the section.
+fn elf_relocation_map<'data>(
+    file: &object::File<'data>,
+    section: &object::Section<'data, '_>,
+) -> object::read::Result<RelocationMap> {
+    let mut map = RelocationMap::default();
+    for (offset, relocation) in section.relocations() {
+        let target = relocation.target();
+        if let Err(err) = map.add(file, offset, relocation) {
+            let thread_local = match target {
+                RelocationTarget::Symbol(index) => file
+                    .symbol_by_index(index)
+                    .is_ok_and(|symbol| symbol.kind() == SymbolKind::Tls),
+                _ => false,
+            };
+            if !thread_local {
+                return Err(err);
+            }
+        }
+    }
+    Ok(map)
+}
+
 /// Reads one object's DWARF into `found`; returns where it was read and how
 /// many type DIEs it holds.
 fn read_object(
@@ -440,7 +510,7 @@ fn read_object(
             HotpatchError::unsupported(format!("{label}: unreadable {}: {err}", id.name()))
         })?;
         let relocations = if is_elf {
-            section.relocation_map().map_err(|err| {
+            elf_relocation_map(file, &section).map_err(|err| {
                 HotpatchError::unsupported(format!(
                     "{label}: unsupported relocation in {}: {err}",
                     id.name()
@@ -466,45 +536,61 @@ fn read_object(
     Ok((source, type_dies))
 }
 
+/// A DIE's offset in the object's `.debug_info`: unique across its units,
+/// so a reference into another unit resolves like a unit-local one.
+type DieRef = DebugInfoOffset<usize>;
+
 fn read_units<R: Reader<Offset = usize>>(
     dwarf: &gimli::Dwarf<R>,
     crates: &[String],
     found: &mut BTreeMap<String, BTreeSet<Composite>>,
 ) -> Result<usize, ReadError> {
-    let mut type_dies = 0;
+    let mut units = Vec::new();
     let mut headers = dwarf.units();
     while let Some(header) = headers.next()? {
-        let unit = dwarf.unit(header)?;
-        let mut walk = Walk::default();
-        let mut tree = unit.entries_tree(None)?;
-        walk_node(dwarf, &unit, tree.root()?, &mut Vec::new(), &mut walk)?;
-        type_dies += walk.type_dies;
-        let mut fingerprints = Fingerprints {
-            dwarf,
-            unit: &unit,
-            paths: &walk.paths,
-            composites: HashMap::new(),
-            refs: HashMap::new(),
-            active: HashSet::new(),
-        };
-        for (offset, path) in &walk.roots {
-            if !in_scope(path, crates) {
-                continue;
-            }
-            let composite = fingerprints.composite(*offset)?;
-            found.entry(path.clone()).or_default().insert(composite);
-        }
+        units.push(dwarf.unit(header)?);
     }
-    Ok(type_dies)
+    let mut walk = Walk::default();
+    for unit in &units {
+        let mut tree = unit.entries_tree(None)?;
+        walk_node(dwarf, unit, tree.root()?, &mut Vec::new(), &mut walk)?;
+    }
+    let mut fingerprints = Fingerprints {
+        dwarf,
+        units: &units,
+        paths: &walk.paths,
+        composites: HashMap::new(),
+        refs: HashMap::new(),
+        active: HashSet::new(),
+    };
+    for (offset, path) in &walk.roots {
+        if !in_scope(path, crates) {
+            continue;
+        }
+        let composite = fingerprints.composite(*offset)?;
+        found.entry(path.clone()).or_default().insert(composite);
+    }
+    Ok(walk.type_dies)
 }
 
-/// The first pass over a unit: every composite type's path, and the
-/// defined (sized, non-declaration) ones to fingerprint.
+/// The first pass over an object's units: every composite type's path, and
+/// the defined (sized, non-declaration) ones to fingerprint.
 #[derive(Default)]
 struct Walk {
-    paths: HashMap<UnitOffset, String>,
-    roots: Vec<(UnitOffset, String)>,
+    paths: HashMap<DieRef, String>,
+    roots: Vec<(DieRef, String)>,
     type_dies: usize,
+}
+
+/// `offset` of `unit` as a [`DieRef`]; a unit outside `.debug_info` (a
+/// DWARF 4 type unit) has none, a shape the gate does not read.
+fn die_ref<R: Reader<Offset = usize>>(
+    unit: &Unit<R>,
+    offset: UnitOffset,
+) -> Result<DieRef, ReadError> {
+    offset
+        .to_debug_info_offset(&unit.header)
+        .ok_or_else(|| ReadError::Shape("a type DIE outside `.debug_info`".to_string()))
 }
 
 fn walk_node<R: Reader<Offset = usize>>(
@@ -530,9 +616,10 @@ fn walk_node<R: Reader<Offset = usize>>(
             let path = qualify(stack, &name);
             let declaration = flag(entry, gimli::DW_AT_declaration)?;
             let sized = udata(entry, gimli::DW_AT_byte_size)?.is_some();
-            walk.paths.insert(entry.offset(), path.clone());
+            let at = die_ref(unit, entry.offset())?;
+            walk.paths.insert(at, path.clone());
             if sized && !declaration {
-                walk.roots.push((entry.offset(), path));
+                walk.roots.push((at, path));
             }
             stack.push(name);
             pushed = true;
@@ -563,11 +650,11 @@ enum Item {
     Member {
         name: String,
         offset: Option<u64>,
-        ty: Option<UnitOffset>,
+        ty: Option<DieRef>,
     },
     Discriminant {
         offset: Option<u64>,
-        ty: Option<UnitOffset>,
+        ty: Option<DieRef>,
     },
     Variant {
         value: Option<String>,
@@ -583,27 +670,43 @@ struct Collected {
     tag: gimli::DwTag,
     size: u64,
     align: u64,
-    underlying: Option<UnitOffset>,
+    underlying: Option<DieRef>,
     items: Vec<Item>,
 }
 
-/// The second pass over a unit: memoised fingerprints of composites and
-/// descriptors of referenced types.
+/// The second pass over an object: memoised fingerprints of composites and
+/// descriptors of referenced types, in whichever of its units they are.
 struct Fingerprints<'a, R: Reader<Offset = usize>> {
     dwarf: &'a gimli::Dwarf<R>,
-    unit: &'a Unit<R>,
-    paths: &'a HashMap<UnitOffset, String>,
-    composites: HashMap<UnitOffset, Composite>,
-    refs: HashMap<UnitOffset, String>,
-    active: HashSet<UnitOffset>,
+    /// The object's units, in `.debug_info` order.
+    units: &'a [Unit<R>],
+    paths: &'a HashMap<DieRef, String>,
+    composites: HashMap<DieRef, Composite>,
+    refs: HashMap<DieRef, String>,
+    active: HashSet<DieRef>,
 }
 
-impl<R: Reader<Offset = usize>> Fingerprints<'_, R> {
-    fn path(&self, offset: UnitOffset) -> &str {
+impl<'a, R: Reader<Offset = usize>> Fingerprints<'a, R> {
+    fn path(&self, offset: DieRef) -> &str {
         self.paths.get(&offset).map_or("{anon}", String::as_str)
     }
 
-    fn composite(&mut self, offset: UnitOffset) -> Result<Composite, ReadError> {
+    /// The unit holding `at`, and `at` within it. A reference outside every
+    /// unit is a shape the gate does not read.
+    fn locate(&self, at: DieRef) -> Result<(&'a Unit<R>, UnitOffset), ReadError> {
+        let units: &'a [Unit<R>] = self.units;
+        units
+            .iter()
+            .find_map(|unit| at.to_unit_offset(&unit.header).map(|offset| (unit, offset)))
+            .ok_or_else(|| {
+                ReadError::Shape(format!(
+                    "type reference {:#x} lies in no compile unit of the object",
+                    at.0
+                ))
+            })
+    }
+
+    fn composite(&mut self, offset: DieRef) -> Result<Composite, ReadError> {
         if let Some(composite) = self.composites.get(&offset) {
             return Ok(*composite);
         }
@@ -655,15 +758,16 @@ impl<R: Reader<Offset = usize>> Fingerprints<'_, R> {
         Ok(composite)
     }
 
-    fn collect(&self, offset: UnitOffset) -> Result<Collected, ReadError> {
-        let mut tree = self.unit.entries_tree(Some(offset))?;
+    fn collect(&self, offset: DieRef) -> Result<Collected, ReadError> {
+        let (unit, local) = self.locate(offset)?;
+        let mut tree = unit.entries_tree(Some(local))?;
         let root = tree.root()?;
         let entry = root.entry();
         let tag = entry.tag();
         let size = udata(entry, gimli::DW_AT_byte_size)?.unwrap_or(0);
         let align = udata(entry, gimli::DW_AT_alignment)?.unwrap_or(0);
         let underlying = if tag == gimli::DW_TAG_enumeration_type {
-            type_of(entry)?
+            type_of(unit, entry)?
         } else {
             None
         };
@@ -672,9 +776,9 @@ impl<R: Reader<Offset = usize>> Fingerprints<'_, R> {
         while let Some(child) = children.next()? {
             let entry = child.entry();
             match entry.tag() {
-                gimli::DW_TAG_member => items.push(self.member(entry)?),
+                gimli::DW_TAG_member => items.push(self.member(unit, entry)?),
                 gimli::DW_TAG_enumerator => items.push(Item::Enumerator {
-                    name: self.name(entry)?,
+                    name: self.name(unit, entry)?,
                     value: constant(entry, gimli::DW_AT_const_value)?
                         .unwrap_or_else(|| "?".to_string()),
                 }),
@@ -685,7 +789,7 @@ impl<R: Reader<Offset = usize>> Fingerprints<'_, R> {
                         match entry.tag() {
                             gimli::DW_TAG_member => items.push(Item::Discriminant {
                                 offset: member_offset(entry)?,
-                                ty: type_of(entry)?,
+                                ty: type_of(unit, entry)?,
                             }),
                             gimli::DW_TAG_variant => {
                                 items.push(Item::Variant {
@@ -694,7 +798,7 @@ impl<R: Reader<Offset = usize>> Fingerprints<'_, R> {
                                 let mut members = part.children();
                                 while let Some(member) = members.next()? {
                                     if member.entry().tag() == gimli::DW_TAG_member {
-                                        items.push(self.member(member.entry())?);
+                                        items.push(self.member(unit, member.entry())?);
                                     }
                                 }
                             }
@@ -714,29 +818,38 @@ impl<R: Reader<Offset = usize>> Fingerprints<'_, R> {
         })
     }
 
-    fn member(&self, entry: &DebuggingInformationEntry<'_, '_, R>) -> Result<Item, ReadError> {
+    fn member(
+        &self,
+        unit: &Unit<R>,
+        entry: &DebuggingInformationEntry<'_, '_, R>,
+    ) -> Result<Item, ReadError> {
         Ok(Item::Member {
-            name: self.name(entry)?,
+            name: self.name(unit, entry)?,
             offset: member_offset(entry)?,
-            ty: type_of(entry)?,
+            ty: type_of(unit, entry)?,
         })
     }
 
-    fn name(&self, entry: &DebuggingInformationEntry<'_, '_, R>) -> Result<String, ReadError> {
-        Ok(name_of(self.dwarf, self.unit, entry)?.unwrap_or_else(|| "{anon}".to_string()))
+    fn name(
+        &self,
+        unit: &Unit<R>,
+        entry: &DebuggingInformationEntry<'_, '_, R>,
+    ) -> Result<String, ReadError> {
+        Ok(name_of(self.dwarf, unit, entry)?.unwrap_or_else(|| "{anon}".to_string()))
     }
 
     /// A referenced type: a composite by path and fingerprint, a pointer by
     /// its own name and size (its pointee has its own entry), anything else
     /// by its shape.
-    fn type_ref(&mut self, offset: Option<UnitOffset>) -> Result<String, ReadError> {
+    fn type_ref(&mut self, offset: Option<DieRef>) -> Result<String, ReadError> {
         let Some(offset) = offset else {
             return Ok("void".to_string());
         };
         if let Some(desc) = self.refs.get(&offset) {
             return Ok(desc.clone());
         }
-        let entry = self.unit.entry(offset)?;
+        let (unit, local) = self.locate(offset)?;
+        let entry = unit.entry(local)?;
         let tag = entry.tag();
         let size = udata(&entry, gimli::DW_AT_byte_size)?;
         let desc = match tag {
@@ -751,17 +864,17 @@ impl<R: Reader<Offset = usize>> Fingerprints<'_, R> {
                     Some(AttributeValue::Encoding(encoding)) => encoding.0,
                     _ => 0,
                 };
-                format!("b:{}:{}:{encoding}", self.name(&entry)?, opt(size))
+                format!("b:{}:{}:{encoding}", self.name(unit, &entry)?, opt(size))
             }
             gimli::DW_TAG_pointer_type
             | gimli::DW_TAG_reference_type
             | gimli::DW_TAG_rvalue_reference_type
             | gimli::DW_TAG_ptr_to_member_type => {
-                format!("p:{}:{}", self.name(&entry)?, opt(size))
+                format!("p:{}:{}", self.name(unit, &entry)?, opt(size))
             }
             gimli::DW_TAG_array_type => {
-                let element = type_of(&entry)?;
-                let counts = self.array_counts(offset)?;
+                let element = type_of(unit, &entry)?;
+                let counts = self.array_counts(unit, local)?;
                 let element = self.type_ref(element)?;
                 format!("a:[{element};{counts}]")
             }
@@ -770,17 +883,17 @@ impl<R: Reader<Offset = usize>> Fingerprints<'_, R> {
             | gimli::DW_TAG_volatile_type
             | gimli::DW_TAG_atomic_type
             | gimli::DW_TAG_restrict_type => {
-                let inner = type_of(&entry)?;
+                let inner = type_of(unit, &entry)?;
                 format!("q{}:{}", tag.0, self.type_ref(inner)?)
             }
-            _ => format!("t{}:{}:{}", tag.0, self.name(&entry)?, opt(size)),
+            _ => format!("t{}:{}:{}", tag.0, self.name(unit, &entry)?, opt(size)),
         };
         self.refs.insert(offset, desc.clone());
         Ok(desc)
     }
 
-    fn array_counts(&self, offset: UnitOffset) -> Result<String, ReadError> {
-        let mut tree = self.unit.entries_tree(Some(offset))?;
+    fn array_counts(&self, unit: &Unit<R>, offset: UnitOffset) -> Result<String, ReadError> {
+        let mut tree = unit.entries_tree(Some(offset))?;
         let root = tree.root()?;
         let mut counts = Vec::new();
         let mut children = root.children();
@@ -906,14 +1019,20 @@ fn hex(bytes: &[u8]) -> String {
         .join(" ")
 }
 
+/// `entry`'s `DW_AT_type` (of `unit`) as a [`DieRef`]: a unit-local
+/// reference, or a `DW_FORM_ref_addr` one into any unit of the object. Any
+/// other form (a type unit's signature, a supplementary file) is a shape
+/// the gate does not read.
 fn type_of<R: Reader<Offset = usize>>(
+    unit: &Unit<R>,
     entry: &DebuggingInformationEntry<'_, '_, R>,
-) -> Result<Option<UnitOffset>, ReadError> {
+) -> Result<Option<DieRef>, ReadError> {
     match entry.attr_value(gimli::DW_AT_type)? {
         None => Ok(None),
-        Some(AttributeValue::UnitRef(offset)) => Ok(Some(offset)),
+        Some(AttributeValue::UnitRef(offset)) => die_ref(unit, offset).map(Some),
+        Some(AttributeValue::DebugInfoRef(offset)) => Ok(Some(offset)),
         Some(other) => Err(ReadError::Shape(format!(
-            "type reference in form {} is not unit-local",
+            "type reference in form {} is not within the object's `.debug_info`",
             form(&other)
         ))),
     }
@@ -1166,6 +1285,122 @@ mod tests {
         dir
     }
 
+    /// A crate whose module `a` uses a struct only `a::make` names, each
+    /// module its own codegen unit. At `opt-level = 1` crate-local ThinLTO
+    /// imports `make` into `b`'s unit with its own compile unit, which then
+    /// defines `Scratch` while the `u64` its members name was already
+    /// emitted by `b`'s: the members reference it by `DW_FORM_ref_addr`.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    const CROSS_UNIT_SOURCE: &str = "
+pub mod a {
+    pub struct Scratch { pub v: u64, pub w: u64 }
+    pub fn make(x: u64) -> u64 {
+        let scratch = Scratch { v: x * 3, w: x ^ 5 };
+        std::hint::black_box(&scratch);
+        scratch.v + scratch.w
+    }
+}
+pub mod b {
+    pub struct Outer { pub value: u64, pub count: u64 }
+    pub fn build(x: u64) -> Outer { Outer { value: crate::a::make(x), count: x } }
+}
+pub fn total(x: u64) -> u64 { let o = b::build(x); o.value + o.count }
+";
+
+    /// [`CROSS_UNIT_SOURCE`] compiled by the toolchain building these tests
+    /// as the rlib `xcu` at `opt_level`, full debug info, 16 codegen units.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn cross_unit_rlib(dir: &Path, opt_level: &str) -> PathBuf {
+        let out = dir.join(format!("opt-{opt_level}"));
+        std::fs::create_dir_all(&out).unwrap();
+        let source = dir.join("lib.rs");
+        std::fs::write(&source, CROSS_UNIT_SOURCE).unwrap();
+        use crate::process::{ProcessRunner as _, RealProcessRunner};
+        let (_, rustc) = super::fixture::toolchain();
+        let rustc = rustc.map_or_else(|| "rustc".to_string(), |p| p.display().to_string());
+        let opt = format!("-Copt-level={opt_level}");
+        let (out_text, source_text) = (out.to_string_lossy(), source.to_string_lossy());
+        let output = RealProcessRunner
+            .run(
+                &rustc,
+                &[
+                    "--edition=2024",
+                    "--crate-name=xcu",
+                    "--crate-type=rlib",
+                    &opt,
+                    "-Cdebuginfo=2",
+                    "-Ccodegen-units=16",
+                    "--out-dir",
+                    &out_text,
+                    &source_text,
+                ],
+            )
+            .expect("spawning rustc");
+        assert!(output.success, "rustc failed at {opt}: {}", output.stderr);
+        out.join("libxcu.rlib")
+    }
+
+    /// How many members in `rlib`'s objects reference their type in another
+    /// compile unit (`DW_FORM_ref_addr`).
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn cross_unit_type_refs(rlib: &Path) -> usize {
+        let mut count = 0;
+        for_each_object(rlib, |_, file| {
+            let sections =
+                gimli::DwarfSections::load(|id| -> Result<Cow<'_, [u8]>, gimli::Error> {
+                    Ok(file
+                        .section_by_name(id.name())
+                        .and_then(|section| section.uncompressed_data().ok())
+                        .unwrap_or(Cow::Borrowed(&[])))
+                })
+                .unwrap();
+            let dwarf =
+                sections.borrow(|data| gimli::EndianSlice::new(data, RunTimeEndian::Little));
+            let mut headers = dwarf.units();
+            while let Some(header) = headers.next().unwrap() {
+                let unit = dwarf.unit(header).unwrap();
+                let mut entries = unit.entries();
+                while let Some((_, entry)) = entries.next_dfs().unwrap() {
+                    if entry.tag() == gimli::DW_TAG_member
+                        && let Some(AttributeValue::DebugInfoRef(_)) =
+                            entry.attr_value(gimli::DW_AT_type).unwrap()
+                    {
+                        count += 1;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        count
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_type_reference_into_another_compile_unit_of_the_object_is_followed() {
+        let dir = temp_dir("cross-unit");
+        let plain = cross_unit_rlib(&dir, "0");
+        let optimized = cross_unit_rlib(&dir, "1");
+        assert_eq!(cross_unit_type_refs(&plain), 0);
+        assert!(
+            cross_unit_type_refs(&optimized) > 0,
+            "the optimized rlib must hold a member typed across compile units, or this \
+             test proves nothing"
+        );
+        let crates = vec!["xcu".to_string()];
+        let plain = extract(&[plain], &crates).unwrap().table;
+        let optimized = extract(&[optimized], &crates).unwrap().table;
+        for ty in ["xcu::a::Scratch", "xcu::b::Outer"] {
+            let entry = optimized.get(ty).unwrap_or_else(|| panic!("no `{ty}`"));
+            assert_eq!(
+                Some(entry),
+                plain.get(ty),
+                "`{ty}` fingerprints alike through a cross-unit reference"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // Pure comparison.
 
     #[test]
@@ -1277,6 +1512,128 @@ mod tests {
         std::fs::write(&object, empty).unwrap();
         let detail = unsupported(extract(&[object], &["my_app".to_string()]));
         assert!(detail.contains("carries no DWARF"), "{detail}");
+    }
+
+    /// An x86_64 ELF object whose `.debug_info` holds one empty unit and two
+    /// relocations: `R_X86_64_32` against `.debug_abbrev` at the unit's
+    /// abbrev offset, and `kind` against a thread-local (or, when
+    /// `tls_target` is false, a plain data) symbol in the trailing padding.
+    fn elf_with_debug_relocation(kind: u32, tls_target: bool) -> Vec<u8> {
+        use object::write::{Object, Relocation, Symbol, SymbolSection};
+        use object::{RelocationFlags, SectionKind, SymbolFlags, SymbolScope};
+        let mut obj = Object::new(
+            BinaryFormat::Elf,
+            object::Architecture::X86_64,
+            object::Endianness::Little,
+        );
+        let abbrev = obj.add_section(Vec::new(), b".debug_abbrev".to_vec(), SectionKind::Debug);
+        // 1: compile unit, 2: namespace (both with children), 3: a
+        // 4-byte struct; all named by an inline string.
+        let abbrevs = [
+            &[1, 0x11, 1, 0, 0][..],
+            &[2, 0x39, 1, 0x03, 0x08, 0, 0],
+            &[3, 0x13, 0, 0x03, 0x08, 0x0b, 0x0b, 0, 0],
+            &[0],
+        ];
+        obj.set_section_data(abbrev, abbrevs.concat(), 1);
+        let info = obj.add_section(Vec::new(), b".debug_info".to_vec(), SectionKind::Debug);
+        // DWARF 4, abbrev offset 0, 8-byte addresses: `my_app::S`, then the
+        // scope closes and 8 padding bytes carry the second relocation.
+        let mut unit = vec![0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 8];
+        unit.extend([1, 2]);
+        unit.extend(b"my_app\0");
+        unit.extend([3]);
+        unit.extend(b"S\0");
+        unit.extend([4, 0, 0]);
+        let padding = unit.len() as u64;
+        unit.extend([0u8; 8]);
+        let length = (unit.len() - 4) as u32;
+        unit[..4].copy_from_slice(&length.to_le_bytes());
+        obj.set_section_data(info, unit, 1);
+        let (section, symbol_kind) = if tls_target {
+            let tdata = obj.add_section(Vec::new(), b".tdata".to_vec(), SectionKind::Tls);
+            obj.set_section_data(tdata, vec![0; 8], 8);
+            (tdata, SymbolKind::Tls)
+        } else {
+            let data = obj.add_section(Vec::new(), b".data".to_vec(), SectionKind::Data);
+            obj.set_section_data(data, vec![0; 8], 8);
+            (data, SymbolKind::Data)
+        };
+        let target = obj.add_symbol(Symbol {
+            name: b"VAR".to_vec(),
+            value: 0,
+            size: 8,
+            kind: symbol_kind,
+            scope: SymbolScope::Compilation,
+            weak: false,
+            section: SymbolSection::Section(section),
+            flags: SymbolFlags::None,
+        });
+        let abbrev_symbol = obj.section_symbol(abbrev);
+        let flags = |r_type| RelocationFlags::Elf { r_type };
+        obj.add_relocation(
+            info,
+            Relocation {
+                offset: 6,
+                symbol: abbrev_symbol,
+                addend: 0,
+                flags: flags(object::elf::R_X86_64_32),
+            },
+        )
+        .unwrap();
+        obj.add_relocation(
+            info,
+            Relocation {
+                offset: padding,
+                symbol: target,
+                addend: 0,
+                flags: flags(kind),
+            },
+        )
+        .unwrap();
+        obj.write().unwrap()
+    }
+
+    #[test]
+    fn a_tls_offset_relocation_in_debug_info_is_skipped_not_refused() {
+        let dir = temp_dir("tls-reloc");
+        let object = dir.join("tls.o");
+        std::fs::write(
+            &object,
+            elf_with_debug_relocation(object::elf::R_X86_64_DTPOFF64, true),
+        )
+        .unwrap();
+        let extraction = extract(&[object], &["my_app".to_string()]).unwrap();
+        assert!(extraction.table.get("my_app::S").is_some());
+    }
+
+    #[test]
+    fn an_unsupported_relocation_against_a_plain_symbol_is_builder_unsupported() {
+        let dir = temp_dir("plain-reloc");
+        let object = dir.join("plain.o");
+        std::fs::write(
+            &object,
+            elf_with_debug_relocation(object::elf::R_X86_64_PC32, false),
+        )
+        .unwrap();
+        let detail = unsupported(extract(&[object], &["my_app".to_string()]));
+        assert!(
+            detail.contains("unsupported relocation in .debug_info"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn a_four_byte_tls_offset_relocation_is_skipped_too() {
+        let dir = temp_dir("tls-dtpoff32");
+        let object = dir.join("tls32.o");
+        std::fs::write(
+            &object,
+            elf_with_debug_relocation(object::elf::R_X86_64_DTPOFF32, true),
+        )
+        .unwrap();
+        let extraction = extract(&[object], &["my_app".to_string()]).unwrap();
+        assert!(extraction.table.get("my_app::S").is_some());
     }
 
     #[test]

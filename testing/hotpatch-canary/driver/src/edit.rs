@@ -1,5 +1,5 @@
-//! The source edits the canary makes to the running app, and the guard that
-//! puts the file back.
+//! The source edits the canary makes to the running app and to its local
+//! path dependency, and the guard that puts each file back.
 
 use std::path::{Path, PathBuf};
 
@@ -15,11 +15,24 @@ pub struct Edit {
 /// Changes the hot function's return value: a body-only edit L3 must pass.
 pub const VALUE_EDIT: Edit = Edit {
     name: "value edit (`reading()` returns 2)",
-    replacements: &[("Reading { value: 1 }", "Reading { value: 2 }")],
+    replacements: &[(
+        "let value = 1 + offset.value;",
+        "let value = 2 + offset.value;",
+    )],
 };
 
 /// The value the app must answer once [`VALUE_EDIT`] is applied.
 pub const EDITED_VALUE: u64 = 2;
+
+/// Changes the path dependency's `offset()` value: a body-only edit outside
+/// the workspace, which must replay the dependency and the app and pass L3.
+pub const SHARED_VALUE_EDIT: Edit = Edit {
+    name: "shared value edit (`offset()` returns 1)",
+    replacements: &[("Offset { value: 0 }", "Offset { value: 1 }")],
+};
+
+/// The value the app must answer once [`SHARED_VALUE_EDIT`] is applied too.
+pub const SHARED_EDITED_VALUE: u64 = 3;
 
 /// RESULTS.md row D2's shape: a field added to a type whose values cross the
 /// seam (`Reading`, the hot function's return). L3 must refuse it.
@@ -27,15 +40,34 @@ pub const D2_EDIT: Edit = Edit {
     name: "D2 edit (`Reading` gains a field)",
     replacements: &[
         (
-            "    pub value: u64,\n}",
-            "    pub value: u64,\n    pub extra: u64,\n}",
+            "    pub offset: Offset,\n}",
+            "    pub offset: Offset,\n    pub extra: u64,\n}",
         ),
-        ("Reading { value: 2 }", "Reading { value: 2, extra: 0 }"),
+        (
+            "value = 2 + offset.value;\n    Reading { value, offset }",
+            "value = 2 + offset.value;\n    Reading { value, offset, extra: 0 }",
+        ),
     ],
 };
 
 /// The type D2 changes, as the layout table names it.
 pub const D2_TYPE: &str = "hotpatch_canary_app::Reading";
+
+/// D2's shape in the path dependency: a field added to the type the app's
+/// `Reading` holds by value. L3 must refuse it.
+pub const SHARED_D2_EDIT: Edit = Edit {
+    name: "shared D2 edit (`Offset` gains a field)",
+    replacements: &[
+        (
+            "    pub value: u64,\n}",
+            "    pub value: u64,\n    pub extra: u64,\n}",
+        ),
+        ("Offset { value: 1 }", "Offset { value: 1, extra: 0 }"),
+    ],
+};
+
+/// The type the shared D2 edit changes, as the layout table names it.
+pub const SHARED_D2_TYPE: &str = "hotpatch_canary_shared::Offset";
 
 impl Edit {
     /// `text` with every replacement made.
@@ -104,14 +136,26 @@ mod tests {
     use super::*;
 
     const FIXTURE: &str = include_str!("../../app/src/lib.rs");
+    const SHARED_FIXTURE: &str = include_str!("../../shared/src/lib.rs");
 
     #[test]
     fn both_edits_apply_to_the_fixture_in_order() {
         let valued = VALUE_EDIT.apply_to(FIXTURE).unwrap();
-        assert!(valued.contains("Reading { value: 2 }"));
+        assert!(valued.contains("let value = 2 + offset.value;"));
         let d2 = D2_EDIT.apply_to(&valued).unwrap();
         assert!(d2.contains("pub extra: u64,"));
-        assert!(d2.contains("Reading { value: 2, extra: 0 }"));
+        assert!(d2.contains("Reading { value, offset, extra: 0 }"));
+    }
+
+    #[test]
+    fn both_shared_edits_apply_to_the_path_dependency_in_order() {
+        let valued = SHARED_VALUE_EDIT.apply_to(SHARED_FIXTURE).unwrap();
+        assert!(valued.contains("Offset { value: 1 }"));
+        let d2 = SHARED_D2_EDIT.apply_to(&valued).unwrap();
+        assert!(d2.contains("pub extra: u64,"));
+        assert!(d2.contains("Offset { value: 1, extra: 0 }"));
+        let err = SHARED_D2_EDIT.apply_to(SHARED_FIXTURE).unwrap_err();
+        assert!(err.to_string().contains("occurs 0 times"), "{err}");
     }
 
     #[test]

@@ -2,23 +2,31 @@
 //! every later source change either offered to it as a patch or answered
 //! with a restart.
 //!
-//! **Start** ([`start_desktop`], Debug builds only). The dev profile's
-//! resolved debuginfo is checked first ([`check_debuginfo`]): the layout
-//! gate reads DWARF types, so anything short of full debug info fails
-//! closed before any build. The fat build is then `cargo rustc` with the
-//! Debug hot-session features, `-Csave-temps=true -Clink-dead-code
-//! -Clinker=<frust>`, `frust` as the workspace wrapper and the link step
-//! intercepted ([`fat_build_command`]); the builder links the fat image
-//! itself, writes `layout-base.json` and seeds the accepted-layout and
-//! accepted-seam sets from it ([`AcceptedSets`]), builds the symbol cache,
+//! **Start** ([`start_desktop`], Debug builds only). The workspace graph is
+//! read for the host triple the fat build compiles for (`cargo metadata
+//! --filter-platform`), so a dependency gated to another platform is no edge
+//! of it. The dev profile's resolved debuginfo is checked next
+//! ([`check_debuginfo`]): the layout gate reads DWARF types, so anything short
+//! of full debug info fails closed before any build. The fat build is then
+//! `cargo rustc` with the Debug hot-session features, `-Csave-temps=true
+//! -Clink-dead-code -Clinker=<frust>`, `frust` as the workspace wrapper and
+//! the link step intercepted ([`fat_build_command`]); the builder links the
+//! fat image itself, writes `layout-base.json` and seeds the accepted-layout
+//! and accepted-seam sets from it ([`AcceptedSets`]), builds the symbol cache,
 //! spawns that image directly (never `cargo run`), reads the devtools
 //! discovery line from its output and connects with the token. An app that
 //! does not advertise `HotPatch`, or whose endpoint is not loopback, gives a
 //! restart-only session carrying the reason.
 //!
 //! **Change** ([`HotSession::on_change`]). Changed paths are classified: a
-//! file of a path dependency outside the workspace or a build input is a
-//! restart with no thin build. Otherwise the changed units are replayed, the
+//! file of a path dependency outside the workspace whose lib the fat build
+//! did not capture, or a build input, is a restart with no thin build. (A
+//! desktop fat build captures local non-members too,
+//! [`capture::prepare_scope_dir_for`]; each captured one is a replay unit,
+//! [`WorkspaceGraph::replay_non_members`], whose types the layout gate
+//! covers like a member's, so an edit to it replays it and its dependents
+//! up to the tip. The Android and iOS-simulator starts do not capture
+//! them.) Otherwise the changed units are replayed, the
 //! candidate's layout table and seam instances are checked against the
 //! accepted sets, `hotpatch_info`'s pending layout-mismatch records and the
 //! patch budget are read, and only then is the stub built against the
@@ -47,7 +55,9 @@
 //! produces stays in the builder's ungated set (`Ungated`) — through a
 //! round that fails on a later unit or on the image unit — and each
 //! candidate's layout table is extracted from that whole set, not from the
-//! last round's objects alone. Only the session's acceptance of an applied
+//! last round's objects alone, by the base table's input rule (a
+//! replayable non-member's rlib holding no code or data is left out of
+//! both, `gated_inputs`). Only the session's acceptance of an applied
 //! patch (`PatchBuilder::accepted`) empties it.
 //!
 //! **Outcome.** A reply lost after `apply_patch` was sent is
@@ -99,7 +109,7 @@ use crate::process::{ProcessRunner, StreamHandle, TryRecvError};
 
 use super::capture::{
     self, CAPTURE_ENV, RecordKey, RustcRecord, ScopeInputs, TargetKind, WrapperSetup, load_records,
-    prepare_scope_dir,
+    prepare_scope_dir_for,
 };
 use super::fat_link::{self, FatLinkRequest, LinkerFlavor};
 use super::graph::{PathClass, ReplayUnit, WorkspaceGraph};
@@ -187,8 +197,9 @@ impl Budget {
 /// required: `.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestartReason {
-    /// A file of a path package outside the workspace changed; only a fat
-    /// rebuild captures such a package.
+    /// A file of a path package outside the workspace changed whose lib the
+    /// fat build did not capture (an Android or iOS-simulator session, a
+    /// proc macro, a package without a lib); only a fat rebuild picks it up.
     PathDependencyChanged { package: String, file: PathBuf },
     /// A manifest, build script, cargo config or other build input changed.
     BuildInputChanged {
@@ -738,9 +749,18 @@ impl Ungated {
         self.objects.contains_key(unit)
     }
 
-    /// Every ungated object, in unit order: the layout gate's input.
+    /// Every ungated object, in unit order.
+    #[cfg(test)]
     fn inputs(&self) -> Vec<PathBuf> {
-        self.objects.values().flatten().cloned().collect()
+        self.objects().map(|(_, object)| object.clone()).collect()
+    }
+
+    /// Every ungated object with its unit, in unit order: the layout gate's
+    /// input, through [`gated_inputs`].
+    fn objects(&self) -> impl Iterator<Item = (&ReplayUnit, &PathBuf)> {
+        self.objects
+            .iter()
+            .flat_map(|(unit, objects)| objects.iter().map(move |object| (unit, object)))
     }
 
     /// Every ungated object passed the gates in an accepted candidate.
@@ -1202,13 +1222,16 @@ pub fn start_desktop(
         manifest::load_optional(start.root).map_err(|err| unsupported(format!("{err:#}")))?;
     let budget = Budget::from_section(manifest.as_ref().and_then(|m| m.hotpatch.as_ref()));
 
-    let metadata = super::graph::cargo_metadata(runner, &start.root.join("Cargo.toml"), None)?;
-    let graph = WorkspaceGraph::from_metadata(&metadata, start.package, start.bin)?;
+    // The fat build compiles for the host, so the graph is the host's: a
+    // dependency gated to another platform is no edge of it.
+    let rustc_version = capture::rustc_version(runner)?;
+    let triple = host_triple(&rustc_version)?;
+    let metadata =
+        super::graph::cargo_metadata(runner, &start.root.join("Cargo.toml"), Some(&triple))?;
+    let mut graph = WorkspaceGraph::from_metadata(&metadata, start.package, start.bin)?;
     check_debuginfo(host.env, start.root, graph.workspace_root())?;
     let target_dir = target_directory(&metadata)?;
 
-    let rustc_version = capture::rustc_version(runner)?;
-    let triple = host_triple(&rustc_version)?;
     let target = Target::from_triple(&triple)?;
     let flavor = LinkerFlavor::for_triple(&triple)?;
     let features = start.info.mode.session_cargo_features(true);
@@ -1220,12 +1243,16 @@ pub fn start_desktop(
         rustflags: rustflags(host.env),
         rustc_version,
     };
-    let scope_dir = prepare_scope_dir(&target_dir, &scope)?;
+    // Local non-members (a `--frust-path` checkout) are captured too, so an
+    // edit to one replays with its dependents instead of restarting.
+    let non_members = graph.non_members();
+    let scope_dir = prepare_scope_dir_for(&target_dir, &scope, &non_members)?;
     let members: Vec<String> = graph
         .packages()
         .iter()
         .filter(|p| p.member && p.name != start.package)
         .map(|p| p.name.clone())
+        .chain(non_members.names())
         .collect();
     capture::bust_fingerprints(
         &capture::fingerprint_dir(&target_dir, None, "dev"),
@@ -1236,7 +1263,7 @@ pub fn start_desktop(
 
     let fat_dir = hotpatch_root(&target_dir)
         .join(FAT_DIR)
-        .join(scope.dir_name()?);
+        .join(scope.dir_name_for(&non_members)?);
     std::fs::create_dir_all(&fat_dir)
         .map_err(|err| HotpatchError::io(format!("creating `{}`", fat_dir.display()), err))?;
     let link = LinkAction {
@@ -1262,6 +1289,16 @@ pub fn start_desktop(
     run_fat_build(runner, &fat, start.root, on_line)?;
 
     let link_args = read_link_args(&link.args_file)?;
+    if !non_members.is_empty() {
+        graph.replay_non_members(&load_records(&scope_dir)?);
+        // An empty set means the link line was not read the way this
+        // expects (a response file, a wrapped archive): keep every local
+        // package in the image rather than drop one silently.
+        let linked = linked_crates(&link_args);
+        if !linked.is_empty() {
+            graph.set_linked_crates(linked);
+        }
+    }
     let base = link_base(
         host,
         BaseRequest {
@@ -1451,7 +1488,10 @@ fn base(
     } else {
         let typed = typed_objects(&tip_objects, &crates)?;
         layout::extract(
-            &rlibs.values().cloned().chain(typed).collect::<Vec<_>>(),
+            &gated_inputs(&rlibs, &graph)?
+                .into_iter()
+                .chain(typed)
+                .collect::<Vec<_>>(),
             &crates,
         )?
         .table
@@ -1868,8 +1908,9 @@ fn typed_objects(objects: &[PathBuf], crates: &[String]) -> Result<Vec<PathBuf>,
     Ok(typed)
 }
 
-/// The rlib a captured link names for each workspace-member lib in the
-/// image: `lib<crate>.rlib` or `lib<crate>-<hash>.rlib`.
+/// The rlib a captured link names for each lib unit in the image (members'
+/// and replayable non-members'): `lib<crate>.rlib` or
+/// `lib<crate>-<hash>.rlib`.
 fn member_rlibs(link_args: &[String], graph: &WorkspaceGraph) -> BTreeMap<ReplayUnit, PathBuf> {
     let rlibs: Vec<(&str, &String)> = link_args
         .iter()
@@ -1895,8 +1936,51 @@ fn member_rlibs(link_args: &[String], graph: &WorkspaceGraph) -> BTreeMap<Replay
         .collect()
 }
 
-/// Every member target's crate name: the crates whose types the layout
-/// gate fingerprints.
+/// The crate names (rustc spelling) of every rlib a captured link line
+/// names, `lib<crate>.rlib` or `lib<crate>-<hash>.rlib`: what the image
+/// links ([`WorkspaceGraph::set_linked_crates`]).
+fn linked_crates(link_args: &[String]) -> BTreeSet<String> {
+    link_args
+        .iter()
+        .filter_map(|arg| {
+            let name = Path::new(arg).file_name()?.to_str()?;
+            let stem = name.strip_prefix("lib")?.strip_suffix(".rlib")?;
+            Some(
+                stem.split_once('-')
+                    .map_or(stem, |(name, _)| name)
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// The one input rule of the DWARF layout gate, for the base table (each
+/// lib unit's rlib in the image) and every candidate table (each ungated
+/// object): a member unit's input is always read, so an empty one still
+/// fails closed; a replayable non-member's is read only when it holds code
+/// or data ([`layout::holds_code_or_data`]). A platform shell compiled
+/// empty for this host has no DWARF to read and no value to protect, and
+/// leaving it out of one table but not the other would refuse every cascade
+/// that replays it.
+fn gated_inputs<'a>(
+    inputs: impl IntoIterator<Item = (&'a ReplayUnit, &'a PathBuf)>,
+    graph: &WorkspaceGraph,
+) -> Result<Vec<PathBuf>, HotpatchError> {
+    let mut gated = Vec::new();
+    for (unit, input) in inputs {
+        let member = graph
+            .packages()
+            .iter()
+            .any(|package| package.member && package.name == unit.package);
+        if member || layout::holds_code_or_data(input)? {
+            gated.push(input.clone());
+        }
+    }
+    Ok(gated)
+}
+
+/// Every replay unit's crate name (members' targets and replayable
+/// non-members' libs): the crates whose types the layout gate fingerprints.
 fn replayable_crates(graph: &WorkspaceGraph) -> Vec<String> {
     let names: BTreeSet<String> = graph
         .units()
@@ -2170,12 +2254,17 @@ impl PatchBuilder for DesktopBuilder {
         // an earlier candidate is left out, and the accepted set holds it.
         // On Msvc the table is read after the link, from the patch's PDB,
         // which covers every ungated object the patch links
-        // ([`PatchBuilder::linked_layouts`]).
-        let fresh = self.ungated.inputs();
-        let layouts = if fresh.is_empty() || self.flavor == LinkerFlavor::Msvc {
+        // ([`PatchBuilder::linked_layouts`]). The objects read are chosen
+        // by the base table's rule ([`gated_inputs`]).
+        let layouts = if self.flavor == LinkerFlavor::Msvc {
             LayoutTable::default()
         } else {
-            layout::extract(&fresh, &self.crates)?.table
+            let fresh = gated_inputs(self.ungated.objects(), &self.graph)?;
+            if fresh.is_empty() {
+                LayoutTable::default()
+            } else {
+                layout::extract(&fresh, &self.crates)?.table
+            }
         };
         let seams = seam_set(self.flavor, &self.patch_inputs()?)?;
         Ok(Compiled::Candidate { layouts, seams })
@@ -2245,6 +2334,7 @@ mod tests {
 
     use frust_devtools_protocol::{HotpatchInfo, RpcError};
 
+    use super::super::capture::prepare_scope_dir;
     use super::super::layout::LayoutEntry;
     use super::super::seams::SeamInstance;
     use super::super::symbols::ANCHOR_SYMBOL;
@@ -3581,8 +3671,81 @@ mod tests {
         WorkspaceGraph::from_metadata(&json.to_string(), "app", None).unwrap()
     }
 
+    /// [`graph_with_path_dependency`] after a desktop fat build captured
+    /// `frust-material`'s lib.
+    fn graph_with_captured_path_dependency() -> WorkspaceGraph {
+        let mut graph = graph_with_path_dependency();
+        let record = |ty: &str| RustcRecord {
+            args: vec!["rustc".to_string()],
+            envs: Vec::new(),
+            crate_types: vec![ty.to_string()],
+        };
+        let records = [
+            (RecordKey::parse("app.lib").unwrap(), record("lib")),
+            (RecordKey::parse("app.bin").unwrap(), record("bin")),
+            (
+                RecordKey::parse("frust_material.lib").unwrap(),
+                record("lib"),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            graph.replay_non_members(&records),
+            vec!["frust-material".to_string()]
+        );
+        graph
+    }
+
     #[test]
-    fn a_path_dependency_change_restarts_with_no_thin_build() {
+    fn a_captured_path_dependency_change_is_replayed_and_patched() {
+        let mut builder = FakeBuilder::new(Vec::new());
+        builder.graph = Some(graph_with_captured_path_dependency());
+        let mut rig = rig_with(
+            hot_script(vec![applied(1, 1, Vec::new())]),
+            builder,
+            table(&[("frust_material::Theme", 8)]),
+            Budget::default(),
+        );
+        let outcome = rig
+            .session
+            .on_change(&[PathBuf::from("/x/material/src/button.rs")]);
+        assert!(matches!(outcome, Outcome::Patched { .. }), "{outcome:?}");
+        assert_eq!(
+            rig.calls(),
+            vec!["compile 1", "link 1 0x100004000", "accepted"]
+        );
+        assert_eq!(rig.sent(), vec!["patch_chunk", "apply_patch"]);
+    }
+
+    #[test]
+    fn a_captured_path_dependency_layout_change_restarts_before_anything_is_sent() {
+        let mut builder = FakeBuilder::new(vec![FakeCompile::Candidate(
+            table(&[("frust_material::Theme", 16)]),
+            home_seam(),
+        )]);
+        builder.graph = Some(graph_with_captured_path_dependency());
+        let mut rig = rig_with(
+            hot_script(Vec::new()),
+            builder,
+            table(&[("frust_material::Theme", 8)]),
+            Budget::default(),
+        );
+        let reason = restart_reason(
+            rig.session
+                .on_change(&[PathBuf::from("/x/material/src/theme.rs")]),
+        );
+        assert!(
+            matches!(&reason, RestartReason::LayoutChanged { records }
+                if records.iter().any(|r| r.contains("frust_material::Theme"))),
+            "{reason:?}"
+        );
+        assert_eq!(rig.calls(), vec!["compile 1"], "no link");
+        assert!(rig.sent().is_empty(), "nothing sent");
+    }
+
+    #[test]
+    fn an_uncaptured_path_dependency_change_restarts_with_no_thin_build() {
         let mut builder = FakeBuilder::new(Vec::new());
         builder.graph = Some(graph_with_path_dependency());
         let mut rig = rig_with(
@@ -3602,6 +3765,39 @@ mod tests {
         );
         assert!(rig.calls().is_empty(), "no thin build: {:?}", rig.calls());
         assert_eq!(rig.server.methods(), vec!["handshake", "hotpatch_info"]);
+    }
+
+    #[test]
+    fn the_link_line_helpers_cover_a_captured_path_dependency() {
+        let graph = graph_with_captured_path_dependency();
+        let args: Vec<String> = [
+            "/t/debug/deps/app-1.app.a-cgu.0.rcgu.o",
+            "/t/debug/deps/libapp-77.rlib",
+            "/t/debug/deps/libfrust_material-9.rlib",
+            "/rustlib/libstd-1.rlib",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        assert_eq!(
+            member_rlibs(&args, &graph),
+            [
+                (
+                    ReplayUnit::lib("app", "app"),
+                    PathBuf::from("/t/debug/deps/libapp-77.rlib")
+                ),
+                (
+                    ReplayUnit::lib("frust-material", "frust_material"),
+                    PathBuf::from("/t/debug/deps/libfrust_material-9.rlib")
+                ),
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert_eq!(
+            replayable_crates(&graph),
+            vec!["app".to_string(), "frust_material".to_string()],
+            "the layout gate covers the path dependency's types"
+        );
     }
 
     #[test]
@@ -4312,8 +4508,8 @@ mod tests {
         assert!(
             invocations
                 .iter()
-                .all(|call| call.starts_with("cargo metadata")),
-            "nothing but metadata may run: {invocations:?}"
+                .all(|call| call.starts_with("cargo metadata") || call == "rustc -vV"),
+            "nothing but the toolchain probe and metadata may run: {invocations:?}"
         );
     }
 
@@ -4427,12 +4623,13 @@ mod tests {
         assert_eq!(
             runner.invocations()[..2],
             [
+                "rustc -vV".to_string(),
                 format!(
-                    "cargo metadata --format-version 1 --manifest-path {}",
+                    "cargo metadata --format-version 1 --manifest-path {} --filter-platform {TRIPLE}",
                     root.join("Cargo.toml").display()
                 ),
-                "rustc -vV".to_string()
-            ]
+            ],
+            "the graph is the host triple's, read before anything is built"
         );
     }
 
@@ -4474,6 +4671,109 @@ mod tests {
                 "not json"
             ]
         );
+    }
+
+    #[test]
+    fn a_desktop_start_captures_a_path_dependency_through_rustc_wrapper() {
+        let (root, target_dir, _) = project("path-dep-start", Output::default());
+        let widgets = root.parent().unwrap().join("frust").join("widgets");
+        const APP: &str = "path+file:///p/my-app#0.1.0";
+        const WIDGETS: &str = "path+file:///p/frust/widgets#0.6.0";
+        let metadata = serde_json::json!({
+            "packages": [
+                {"id": APP, "name": "my-app", "source": null,
+                 "manifest_path": root.join("Cargo.toml"),
+                 "targets": [
+                    {"name": "my_app", "kind": ["lib"], "crate_types": ["lib"],
+                     "src_path": root.join("src/lib.rs")},
+                    {"name": "my-app", "kind": ["bin"], "crate_types": ["bin"],
+                     "src_path": root.join("src/main.rs")},
+                 ]},
+                {"id": WIDGETS, "name": "frust-widgets", "source": null,
+                 "manifest_path": widgets.join("Cargo.toml"),
+                 "targets": [{"name": "frust_widgets", "kind": ["lib"], "crate_types": ["lib"],
+                              "src_path": widgets.join("src/lib.rs")}]},
+            ],
+            "workspace_members": [APP],
+            "resolve": {"nodes": [
+                {"id": APP, "deps": [{"name": "frust_widgets", "pkg": WIDGETS,
+                                      "dep_kinds": [{"kind": null, "target": null}]}]},
+                {"id": WIDGETS, "deps": []},
+            ], "root": APP},
+            "workspace_root": root,
+            "target_directory": target_dir,
+        });
+        let ok = |stdout: String| Output {
+            success: true,
+            stdout,
+            stderr: String::new(),
+        };
+        let runner = Arc::new(ScriptedRunner {
+            runs: [
+                ("cargo metadata".to_string(), ok(metadata.to_string())),
+                ("rustc -vV".to_string(), ok(RUSTC_VV.to_string())),
+            ]
+            .into_iter()
+            .collect(),
+            streaming: Output {
+                success: true,
+                ..Output::default()
+            },
+            calls: Mutex::new(Vec::new()),
+        });
+        let fingerprints = target_dir.join("debug").join(".fingerprint");
+        for name in ["frust-widgets-1111", "serde-2222"] {
+            std::fs::create_dir_all(fingerprints.join(name)).unwrap();
+        }
+
+        start(
+            &runner,
+            &FakeEnv::new(),
+            &root,
+            &debug_info(),
+            &mut Vec::new(),
+        );
+
+        let (_, env, _) = runner.call("cargo");
+        let value = |name: &str| {
+            env.iter()
+                .find(|(set, _)| set == name)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            value("RUSTC_WRAPPER").as_deref(),
+            Some("/opt/frust/bin/frust")
+        );
+        assert_eq!(
+            value("RUSTC_WORKSPACE_WRAPPER").as_deref(),
+            Some("/opt/frust/bin/frust")
+        );
+        let scope = PathBuf::from(value("FRUST_HOTPATCH_CAPTURE").unwrap());
+        let listed = capture::read_non_members(&scope).unwrap().unwrap();
+        assert_eq!(listed.names(), vec!["frust-widgets".to_string()]);
+        assert!(listed.contains_dir(&widgets));
+        let member_only = ScopeInputs {
+            tip: "my-app".into(),
+            triple: TRIPLE.into(),
+            profile: "dev".into(),
+            features: vec![
+                "frust/perf-trace".into(),
+                "frust/devtools".into(),
+                "frust/hotpatch".into(),
+            ],
+            rustflags: Vec::new(),
+            rustc_version: RUSTC_VV.trim().to_string(),
+        };
+        assert_ne!(
+            scope.file_name().unwrap().to_string_lossy(),
+            member_only.dir_name().unwrap(),
+            "a non-member scope is never a member-only one"
+        );
+        assert!(
+            !fingerprints.join("frust-widgets-1111").exists(),
+            "an uncaptured path dependency is busted so the wrapper sees it"
+        );
+        assert!(fingerprints.join("serde-2222").is_dir());
     }
 
     #[test]
@@ -4556,6 +4856,65 @@ mod tests {
             vec![PathBuf::from("/t/debug/deps/app-1.app.a-cgu.0.rcgu.o")]
         );
         assert_eq!(replayable_crates(&graph), vec!["app".to_string()]);
+    }
+
+    #[test]
+    fn linked_crates_names_every_rlib_on_the_link_line() {
+        let args: Vec<String> = [
+            "/t/debug/deps/app-1.app.a-cgu.0.rcgu.o",
+            "/t/debug/deps/libapp-77.rlib",
+            "/t/debug/deps/libfrust_shell_ios-9.rlib",
+            "/t/debug/deps/libplain.rlib",
+            "/t/debug/deps/libnot_an_rlib-1.rmeta",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        assert_eq!(
+            linked_crates(&args),
+            ["app", "frust_shell_ios", "plain"]
+                .map(str::to_string)
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn an_empty_path_dependency_rlib_is_left_out_of_the_base_table_but_never_a_members() {
+        let dir = temp_dir("gated-rlibs");
+        let empty = super::super::link_intercept::empty_object(
+            object::BinaryFormat::MachO,
+            object::Architecture::Aarch64,
+        )
+        .unwrap();
+        let empty_object = dir.join("empty.o");
+        std::fs::write(&empty_object, &empty).unwrap();
+        let code_object = dir.join("code.o");
+        std::fs::write(&code_object, object(target(), &[Def::Text("f", 8)])).unwrap();
+        assert!(!layout::holds_code_or_data(&empty_object).unwrap());
+        assert!(layout::holds_code_or_data(&code_object).unwrap());
+
+        let graph = graph_with_captured_path_dependency();
+        let app = ReplayUnit::lib("app", "app");
+        let material = ReplayUnit::lib("frust-material", "frust_material");
+        let rlibs: BTreeMap<ReplayUnit, PathBuf> = [
+            (app.clone(), empty_object.clone()),
+            (material.clone(), empty_object.clone()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            gated_inputs(&rlibs, &graph).unwrap(),
+            vec![empty_object.clone()],
+            "the member's empty rlib is still read (and refused by the gate)"
+        );
+        let rlibs: BTreeMap<ReplayUnit, PathBuf> =
+            [(app, code_object.clone()), (material, code_object.clone())]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            gated_inputs(&rlibs, &graph).unwrap(),
+            vec![code_object.clone(), code_object]
+        );
     }
 
     #[test]
@@ -5079,6 +5438,133 @@ mod tests {
             assert_eq!(builder.patch_inputs().unwrap(), vec![a_new.clone()]);
             assert_eq!(accepted.check(&layouts, seams), Err(badge_grew()));
             assert_eq!(builder.ungated.inputs(), vec![a_new]);
+        }
+
+        /// An rlib like a platform shell compiled for another target: crate
+        /// metadata and one object holding neither code nor data.
+        fn code_less_rlib(dir: &Path) -> PathBuf {
+            let empty = super::super::super::link_intercept::empty_object(
+                object::BinaryFormat::MachO,
+                object::Architecture::Aarch64,
+            )
+            .unwrap();
+            let rlib = dir.join("libshell-0.rlib");
+            let mut builder = ar::Builder::new(std::fs::File::create(&rlib).unwrap());
+            for (name, bytes) in [
+                ("lib.rmeta", b"rust".to_vec()),
+                ("shell-0.shell.0-cgu.0.rcgu.o", empty),
+            ] {
+                builder
+                    .append(
+                        &ar::Header::new(name.as_bytes().to_vec(), bytes.len() as u64),
+                        bytes.as_slice(),
+                    )
+                    .unwrap();
+            }
+            rlib
+        }
+
+        /// A workspace at `/w` whose tip `b` (lib and bin) depends on the
+        /// non-members `a` and `shell` under `/x`, `shell` on `a` too, both
+        /// captured: an edit to `a` cascades through `shell`.
+        fn graph_through_a_shell() -> WorkspaceGraph {
+            const A: &str = "path+file:///x/a#0.1.0";
+            const SHELL: &str = "path+file:///x/shell#0.1.0";
+            const B: &str = "path+file:///w/b#0.1.0";
+            let target = |name: &str, kind: &str, src: &str| serde_json::json!({"name": name, "kind": [kind], "crate_types": [kind], "src_path": src});
+            let normal = |pkg: &str| serde_json::json!({"name": pkg, "pkg": pkg, "dep_kinds": [{"kind": null, "target": null}]});
+            let json = serde_json::json!({
+                "packages": [
+                    {"id": A, "name": "a", "source": null, "manifest_path": "/x/a/Cargo.toml",
+                     "targets": [target("a", "lib", "/x/a/src/lib.rs")]},
+                    {"id": SHELL, "name": "shell", "source": null,
+                     "manifest_path": "/x/shell/Cargo.toml",
+                     "targets": [target("shell", "lib", "/x/shell/src/lib.rs")]},
+                    {"id": B, "name": "b", "source": null, "manifest_path": "/w/b/Cargo.toml",
+                     "targets": [target("b", "lib", "/w/b/src/lib.rs"),
+                                 target("b-app", "bin", "/w/b/src/main.rs")]},
+                ],
+                "workspace_members": [B],
+                "resolve": {"nodes": [
+                    {"id": A, "deps": []},
+                    {"id": SHELL, "deps": [normal(A)]},
+                    {"id": B, "deps": [normal(A), normal(SHELL)]},
+                ], "root": B},
+                "workspace_root": "/w",
+            });
+            let mut graph = WorkspaceGraph::from_metadata(&json.to_string(), "b", None).unwrap();
+            let records = [
+                RecordKey::parse("a.lib").unwrap(),
+                RecordKey::parse("shell.lib").unwrap(),
+                RecordKey::parse("b.lib").unwrap(),
+                RecordKey::parse("b_app.bin").unwrap(),
+            ]
+            .into_iter()
+            .map(|key| {
+                let record = record(&key.crate_name, key.kind.suffix());
+                (key, record)
+            })
+            .collect();
+            assert_eq!(graph.replay_non_members(&records), vec!["a", "shell"]);
+            graph
+        }
+
+        /// The base table leaves a captured non-member's code-less rlib out
+        /// ([`gated_inputs`]); a cascade that replays it must leave it out
+        /// of the candidate's table too, or every edit below it is refused.
+        #[test]
+        fn a_cascade_through_a_code_less_path_dependency_passes_the_candidate_gate() {
+            let a_rlib = fixture::edited("badge-p1");
+            let Setup {
+                mut builder,
+                accepted,
+                script,
+                b_rlib,
+            } = setup(
+                "code-less-shell",
+                vec![
+                    ("a", vec![Reply::Rlib(a_rlib.clone())]),
+                    ("b", vec![Reply::Rlib(fixture::base())]),
+                ],
+            );
+            let shell_rlib = code_less_rlib(&builder.scope_dir);
+            script
+                .replies
+                .lock()
+                .unwrap()
+                .insert("shell".into(), [Reply::Rlib(shell_rlib.clone())].into());
+            let shell = ReplayUnit::lib("shell", "shell");
+            builder.graph = graph_through_a_shell();
+            builder
+                .records
+                .insert(shell.record_key(), record("shell", "lib"));
+            builder.rlibs.insert(shell.clone(), shell_rlib.clone());
+            assert_eq!(
+                gated_inputs(&builder.rlibs, &builder.graph).unwrap(),
+                vec![a_rlib.clone(), b_rlib.clone()],
+                "the base table's inputs"
+            );
+
+            let (layouts, seams) = candidate(builder.compile(&units(&[lib_a()])));
+            assert_eq!(script.replayed(), vec!["a", "shell", "b"]);
+            assert!(builder.ungated.contains(&shell));
+            let checked = accepted.check(&layouts, seams);
+            assert!(checked.is_ok(), "{checked:?}");
+            assert_eq!(
+                builder.modified_rlibs().unwrap(),
+                vec![b_rlib.clone(), shell_rlib.clone(), a_rlib.clone()],
+                "the shell's rlib is still linked into the patch"
+            );
+
+            // Negative control: the candidate's inputs unfiltered, as the
+            // builder read them before, are refused outright.
+            let unfiltered = builder.ungated.inputs();
+            assert_eq!(unfiltered, vec![a_rlib, b_rlib, shell_rlib]);
+            let refused = layout::extract(&unfiltered, &fixture::crates());
+            assert!(
+                matches!(refused, Err(HotpatchError::BuilderUnsupported { .. })),
+                "{refused:?}"
+            );
         }
 
         /// Accepting a candidate empties the set: the next candidate is

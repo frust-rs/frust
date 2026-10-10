@@ -13,23 +13,30 @@
 //!
 //! EOF on stdin ends the loop. The driver edits this file while the app runs
 //! (the [`reading`] return value, then a field added to [`Reading`]) and
-//! restores it afterwards.
+//! restores it afterwards; it edits the local path dependency
+//! `hotpatch_canary_shared` the same way.
 
 use std::io::{BufRead, Write};
 
 use frust_hotpatch::{HotFn, JumpTable};
+use hotpatch_canary_shared::Offset;
 
 /// The value the hot function returns: it crosses the patch seam by value,
-/// so its layout is what the builder's L3 gate must protect.
+/// so its layout (the path dependency's [`Offset`] inside it included) is
+/// what the builder's L3 gate must protect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reading {
     pub value: u64,
+    pub offset: Offset,
 }
 
-/// The hot function the canary patches.
+/// The hot function the canary patches: its own value plus the path
+/// dependency's.
 #[inline(never)]
 pub fn reading() -> Reading {
-    Reading { value: 1 }
+    let offset = hotpatch_canary_shared::offset();
+    let value = 1 + offset.value;
+    Reading { value, offset }
 }
 
 /// The app-owned hot-patch anchor, as `frust::app!` emits it.

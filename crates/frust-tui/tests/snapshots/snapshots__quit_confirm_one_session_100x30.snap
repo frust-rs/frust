@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │huddle:  1 ▶ desktop                                                      
   ▸ huddle               │   12:00:00 [app]       Compiling huddle v0.1.0                           
                          │   12:00:01 [app]        Finished dev profile                             
- DEVICES ↻ r             │   12:00:02 [app]         Running `target/debug/huddle`                   
+ DEVICES ↻ R             │   12:00:02 [app]         Running `target/debug/huddle`                   
    none found            │   12:00:03 [app]    app: booting up                                      
                          │ W 12:00:04 [app]    warning: unused variable `x`                         
  SESSIONS                │   12:00:05 [app]    app: frame 1 rendered                                
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │● follow  ·  wrap:off     x stop · f follow · w wrap · / search · l filter
-● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]
+● 1 running  │  o run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

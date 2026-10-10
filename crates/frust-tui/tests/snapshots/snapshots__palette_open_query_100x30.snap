@@ -8,11 +8,11 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │                                                                          
   ▸ huddle               │  Dashboard                                                               
                          │  ━━━━━━━━━━                                                              
- DEVICES ↻ r        ╭ ⌘ Command palette ────────────────────────── [Esc] Close ╮                    
+ DEVICES ↻ R        ╭ ⌘ Command palette ────────────────────────── [Esc] Close ╮                    
    none found       │                                                          │▓▓e.                
                     │  ❯ run█                                                  │▓▓                  
  SESSIONS           │  ──────────────────────────────────────────────────────  │▓▓                  
-   none running     │  ▸ Run on device(s)…                                 r   │▓▓                  
+   none running     │  ▸ Run on device(s)…                                 o   │▓▓                  
                     │    Run on all devices            no devices discovered   │▓▓                  
  ACTIONS            │                                                          │▓▓                  
    New project · n  │                                                          │▓▓                  
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  o run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

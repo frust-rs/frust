@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &run_config_modal_state())"
  PROJECTS                │                                                                          
   ▸ huddle               │  Dashboard                                                               
                          │  ━━━━━━━━━━                                                              
- DEVICES (1) ↻ r         │                                                                          
+ DEVICES (1) ↻ R         │                                                                          
     [x] ● OnePlus 9╭ Run · huddle ──────────────────────────────────────────────╮re.                
   ▸ [ ] ● Pixel 7 a│                                                            │▓▓                 
     [ ] ● iPhone SE│  Targets                                                   │▓▓                 
@@ -20,7 +20,7 @@ expression: "render_to_string(100, 30, &run_config_modal_state())"
    New project · n │  Mode     ‹ release ›                                      │▓▓                 
    Add plugin · a  │  Flavor   paid                                             │▓▓                 
    Doctor · i      │  Defines  FRUST_TRACE=1█                                   │▓▓                 
-   Build · b       │    [ ] Watch src/ and restart on change (desktop only)     │▓▓                 
+   Build · b       │    [x] Auto-apply on save                                  │▓▓                 
    Clean · c       │                                                            │▓▓                 
    MCP off · M     │   Launch (1)     Cancel                                    │▓▓                 
    DAP off · D     │  Space toggle · ←/→ mode · Tab next · Enter launch · Esc   │▓▓                 
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &run_config_modal_state())"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  o run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

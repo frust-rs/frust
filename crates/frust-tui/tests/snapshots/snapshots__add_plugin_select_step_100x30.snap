@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
                   │  Choose a plugin to add to this project  (1-9 of 18)         │▓▓                
- DEVICES ↻ r      │  ▸ (o) shared-preferences                                    │▓▓                
+ DEVICES ↻ R      │  ▸ (o) shared-preferences                                    │▓▓                
    none found     │        Synchronous, thread-safe key-value store              │▓▓                
                   │    ( ) secure-storage                                        │▓▓                
  SESSIONS         │        Encrypted key-value store (Keychain / Keystore /      │▓▓                
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &add_plugin_state(AddPluginStep::Select, 
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
                   ╰──────────────────────────────────────────────────────────────╯▓▓                
                     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓                
-● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  o run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
