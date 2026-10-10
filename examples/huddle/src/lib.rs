@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use frust::{
     BackHandler, Component, CrossAxisAlignment, DesignLanguage, NavigatorController,
-    PageTransition, Router, RouterDeepLinks, RwSignal, Theme, TransitionSpec, View, any,
+    PageTransition, Router, RouterDeepLinks, RwSignal, Theme, TransitionSpec, View,
     attach_back_handler, column, navigator, provide_context, router_with_deep_links, stack,
     use_context,
 };
@@ -176,16 +176,16 @@ impl Component for HuddleApp {
 
         // The tab shell: the router-driven navigator above the persistent
         // bottom bar.
-        let content = any(column()
+        let content = column()
             .flex(1, nav_view)
             .child(bottom)
-            .cross_axis(CrossAxisAlignment::Stretch));
+            .cross_axis(CrossAxisAlignment::Stretch);
 
         // The root `Stack`: the tab shell, then the toast overlay on top (the
         // reserved overlay slot — above everything, below nothing).
-        any(stack()
+        stack()
             .child(content)
-            .child(toast_overlay(state.toasts.clone())))
+            .child(toast_overlay(state.toasts.clone()))
     }
 }
 

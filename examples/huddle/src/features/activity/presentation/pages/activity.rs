@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use clean_signals::async_state::AsyncState;
 use frust::{
-    Align, Alignment, Column, CrossAxisAlignment, GestureDetector, Get, SizedBox, View, any,
-    column, hero, icon, icons, scroll_view, text, use_context,
+    Align, Alignment, Column, CrossAxisAlignment, GestureDetector, Get, SizedBox, View, column,
+    hero, icon, icons, scroll_view, text, use_context,
 };
 use frust_material::{app_bar, filled_card, filter_chip, list_item};
 
@@ -47,21 +47,23 @@ pub fn activity_screen() -> impl View<HuddleState> {
     // Tracked read: `ActivityController::load`/`mark_all_read` write this
     // signal from a spawned task, waking the frame (see
     // `docs/ARCHITECTURE.md`'s Signal-driven wake).
+    // Every arm is the same `ScrollView`, which erases its child once inside —
+    // the three body shapes need no erasure of their own.
     let snapshot = controller.rows.get();
     let body = match snapshot {
-        AsyncState::Loading => any(skeleton_body()),
+        AsyncState::Loading => scroll_view(skeleton_body()),
         AsyncState::Data(rows) | AsyncState::Reloading(rows) => {
             if rows.is_empty() {
-                any(empty_body())
+                scroll_view(empty_body())
             } else {
-                any(list_body(rows, &repo))
+                scroll_view(list_body(rows, &repo))
             }
         }
         // `LoadActivity`/`MarkAllRead` never fail (see
         // `features::activity`'s module docs); kept exhaustive rather than
         // `unreachable!()` so a future fallible use case swap isn't a silent
         // panic trap.
-        AsyncState::Error { .. } => any(empty_body()),
+        AsyncState::Error { .. } => scroll_view(empty_body()),
     };
 
     let mark_all_read_ctrl = Arc::clone(&controller);
@@ -78,7 +80,7 @@ pub fn activity_screen() -> impl View<HuddleState> {
 
     column()
         .child(bar)
-        .flex(1, scroll_view(body))
+        .flex(1, body)
         .cross_axis(CrossAxisAlignment::Stretch)
 }
 
@@ -88,7 +90,7 @@ pub fn activity_screen() -> impl View<HuddleState> {
 fn skeleton_body() -> impl View<HuddleState> {
     Column(
         (0..3)
-            .map(|_| any(list_item::<HuddleState>("Loading…").supporting(" ")))
+            .map(|_| list_item::<HuddleState>("Loading…").supporting(" "))
             .collect::<Vec<_>>(),
     )
 }

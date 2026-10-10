@@ -78,9 +78,10 @@ use frust::authoring::{
 };
 use frust::{
     Align, Alignment, AnimationController, AnyView, ChildKey, Column, CrossAxisAlignment,
-    DesignLanguage, EdgeInsets, GestureDetector, Get, Image, ImageFit, ImageSource, ListView,
-    NavigatorController, Padding, PopResult, SizedBox, Theme, View, any, button, column, component,
-    hero, icon, icons, row, scroll_view, stack, text, text_input, use_context,
+    DesignLanguage, EdgeInsets, Either, GestureDetector, Get, Image, ImageFit, ImageSource,
+    ListView, NavigatorController, Padding, PopResult, SizedBox, Theme, View, any, button, column,
+    component, either, hero, icon, icons, row, scroll_view, stack, text, text_input, use_context,
+    views,
 };
 use frust_cupertino::{action, show_cupertino_alert};
 use frust_material::{ProgressValue, app_bar, circular_progress, dialog, show_dialog, switch};
@@ -360,8 +361,9 @@ impl frust::Component for HomeScreen {
     fn build(&self, state: &mut HomeState) -> impl View<HomeState> {
         let async_state = state.controller.data.get(); // tracked
 
+        // erasure: keep three-arm body (roster / skeleton / error)
         let body: AnyView<HomeState> = if let Some(data) = async_state.value() {
-            roster_list(state, data, async_state.is_loading())
+            any(roster_list(state, data, async_state.is_loading()))
         } else if async_state.is_loading() {
             any(skeleton_list())
         } else {
@@ -377,20 +379,20 @@ impl frust::Component for HomeScreen {
 
         // Docked at the window top: the bar insets itself (top + sides) and
         // paints its container through the status-bar band.
-        let bar = any(app_bar::<HomeState>("Huddle")
+        let bar = app_bar::<HomeState>("Huddle")
             .leading(workspace_tile(&state.nav))
-            .actions(vec![create_channel_action()]));
+            .actions(vec![create_channel_action()]);
 
-        let screen = any(column()
+        let screen = column()
             .child(bar)
             .flex(1, body)
-            .cross_axis(CrossAxisAlignment::Stretch));
+            .cross_axis(CrossAxisAlignment::Stretch);
 
         // The open Home overlay sheet mounts in the screen's own `Stack` top
         // layer (mirrors `screens::channel_feed`'s `feed_sheet`); when
         // closed it is an inert zero-size box, so the roster stays interactive.
         let overlay = home_sheet_overlay(state, design);
-        any(stack().child(screen).child(overlay))
+        stack().child(screen).child(overlay)
     }
 }
 
@@ -443,11 +445,8 @@ fn create_channel_action() -> impl View<HomeState> {
 
 /// The loading skeleton: shimmer rows standing in for the roster.
 fn skeleton_list() -> impl View<HomeState> {
-    let mut rows: Vec<AnyView<HomeState>> = Vec::new();
-    for _ in 0..7 {
-        rows.push(any(skeleton_row()));
-    }
-    scroll_view(Padding(EdgeInsets::all(8.0), Column(rows)))
+    let rows = Column(views((0..7).map(|_| skeleton_row())));
+    scroll_view(Padding(EdgeInsets::all(8.0), rows))
 }
 
 /// One skeleton row: a shimmer circle + two shimmer lines.
@@ -481,7 +480,7 @@ fn roster_list(
     state: &HomeState,
     data: &channels::ChannelsData,
     refreshing: bool,
-) -> AnyView<HomeState> {
+) -> impl View<HomeState> {
     // Build the roster row list: "Channels" header, then channels, then
     // "Direct messages" header, then DMs. This mirrors the earlier keyed
     // Column structure built by hand each frame.
@@ -511,6 +510,7 @@ fn roster_list(
     // The builder function: construct the view for each row. Each row needs
     // the pieces for navigation, async ops, and UI state that were extracted
     // above.
+    // erasure: keep three-type match arms (header / channel row / DM row)
     let builder = move |i: usize| match &build_rows[i] {
         RosterRow::ChannelsHeader => any(section_header("Channels")),
         RosterRow::Channel(c) => any(channel_row_keyed(
@@ -544,10 +544,10 @@ fn roster_list(
     // The outer padding is the same 8px horizontal that the old scroll_view
     // used (and the vertical breathing room is unchanged too, just now applied
     // to the list's viewport rather than the column's content).
-    let list = any(Padding(EdgeInsets::all(8.0), list));
+    let list = Padding(EdgeInsets::all(8.0), list);
 
     if !refreshing {
-        return list;
+        return Either::Left(list);
     }
 
     // While a pull-to-refresh reload is in flight, overlay a centered
@@ -557,7 +557,7 @@ fn roster_list(
     // app supplies one, exactly as the pre-`ListView` `scroll_view` version
     // did. A `Stack` layer rather than a synthetic row, so it never
     // participates in row keying/windowing.
-    any(stack().child(list).child(Align(
+    Either::Right(stack().child(list).child(Align(
         Alignment::new(0.0, -0.85), // near the top, matching the old top-of-content spinner
         Padding(
             EdgeInsets::all(8.0),
@@ -585,7 +585,7 @@ fn section_header(title: &str) -> impl View<HomeState> {
 /// so this composes cleanly with the row's own tap navigation and the
 /// swipe wrapper that wraps it next.
 fn row_with_long_press_menu(
-    row: AnyView<HomeState>,
+    row: impl View<HomeState>,
     id: String,
     label: String,
     muted: bool,
@@ -622,18 +622,18 @@ fn channel_circle() -> impl View<HomeState> {
 /// The tappable middle-of-row content: name/title, preview, and trailing unread
 /// badge — a `GestureDetector` firing `on_tap` (the row navigation).
 fn tappable_content<F: Fn(&mut HomeState) + 'static>(
-    title: AnyView<HomeState>,
+    title: impl View<HomeState>,
     preview: String,
     unread: u32,
     on_tap: F,
 ) -> impl View<HomeState> {
-    let column = any(column()
+    let labels = column()
         .child(title)
         .child(SizedBox(None, Some(4.0)))
-        .child(text(preview).size(LIST_SUBTITLE_SIZE)));
+        .child(text(preview).size(LIST_SUBTITLE_SIZE));
     GestureDetector(
         row()
-            .flex(1, column)
+            .flex(1, labels)
             .child(unread_badge(unread))
             .cross_axis(CrossAxisAlignment::Center),
     )
@@ -641,33 +641,39 @@ fn tappable_content<F: Fn(&mut HomeState) + 'static>(
 }
 
 /// The unread badge: a colored pill + count (empty when zero).
-fn unread_badge(count: u32) -> AnyView<HomeState> {
-    if count == 0 {
-        return any(SizedBox(None, None));
-    }
-    let label = if count > 99 {
-        "99+".to_string()
-    } else {
-        count.to_string()
-    };
-    any(Padding(
-        EdgeInsets::symmetric(4.0, 0.0),
-        // SizedBox+Align monogram idiom — see `channel_circle`.
-        stack()
-            .child(fill_box(
-                Size::new(BADGE_W, BADGE_H),
-                BADGE_COLOR,
-                BADGE_RADIUS,
-            ))
-            .child(SizedBox(Some(BADGE_W), Some(BADGE_H)).child(Align(
-                Alignment::CENTER,
-                text(label).size(BADGE_TEXT_SIZE).color(Color::WHITE),
-            ))),
-    ))
+fn unread_badge(count: u32) -> impl View<HomeState> {
+    either(
+        count == 0,
+        || SizedBox(None, None),
+        || {
+            let label = if count > 99 {
+                "99+".to_string()
+            } else {
+                count.to_string()
+            };
+            Padding(
+                EdgeInsets::symmetric(4.0, 0.0),
+                // SizedBox+Align monogram idiom — see `channel_circle`.
+                stack()
+                    .child(fill_box(
+                        Size::new(BADGE_W, BADGE_H),
+                        BADGE_COLOR,
+                        BADGE_RADIUS,
+                    ))
+                    .child(SizedBox(Some(BADGE_W), Some(BADGE_H)).child(Align(
+                        Alignment::CENTER,
+                        text(label).size(BADGE_TEXT_SIZE).color(Color::WHITE),
+                    ))),
+            )
+        },
+    )
 }
 
 /// The horizontal row layout: leading avatar + tappable content.
-fn row_layout(leading: AnyView<HomeState>, content: AnyView<HomeState>) -> impl View<HomeState> {
+fn row_layout(
+    leading: impl View<HomeState>,
+    content: impl View<HomeState>,
+) -> impl View<HomeState> {
     Padding(
         EdgeInsets::symmetric(8.0, 10.0),
         row()
@@ -690,17 +696,19 @@ fn channel_row_keyed(
 ) -> impl View<HomeState> {
     // Mimic the structure of the original channel_row, but accept the
     // extracted pieces instead of HomeState.
-    let leading = any(channel_circle());
+    let leading = channel_circle();
 
     // Title row: the name, plus a lock icon for a private channel.
-    let title: AnyView<HomeState> = if c.private {
-        any(row()
-            .child(text(c.name.clone()).size(LIST_TITLE_SIZE))
-            .child(SizedBox(Some(6.0), None))
-            .child(icon(icons::LOCK).size(16.0)))
-    } else {
-        any(text(c.name.clone()).size(LIST_TITLE_SIZE))
-    };
+    let title = either(
+        c.private,
+        || {
+            row()
+                .child(text(c.name.clone()).size(LIST_TITLE_SIZE))
+                .child(SizedBox(Some(6.0), None))
+                .child(icon(icons::LOCK).size(16.0))
+        },
+        || text(c.name.clone()).size(LIST_TITLE_SIZE),
+    );
 
     let nav_clone = nav.clone();
     let route_id = c.id.clone();
@@ -720,11 +728,10 @@ fn channel_row_keyed(
         },
     );
 
-    let row = row_layout(leading, any(content));
-    let menu_row =
-        row_with_long_press_menu(any(row), c.id.clone(), format!("#{}", c.name), c.muted);
+    let row = row_layout(leading, content);
+    let menu_row = row_with_long_press_menu(row, c.id.clone(), format!("#{}", c.name), c.muted);
     swipe_wrap_keyed(
-        any(menu_row),
+        menu_row,
         c.id.clone(),
         format!("#{}", c.name),
         controller,
@@ -746,7 +753,7 @@ fn dm_row_keyed(
     // pieces instead of HomeState.
     let leading = dm_avatar_keyed(logo, d);
 
-    let title = any(text(d.name.clone()).size(LIST_TITLE_SIZE));
+    let title = text(d.name.clone()).size(LIST_TITLE_SIZE);
     let nav_clone = nav.clone();
     let route_id = d.id.clone();
     let content = tappable_content(
@@ -765,15 +772,9 @@ fn dm_row_keyed(
         },
     );
 
-    let row = row_layout(any(leading), any(content));
-    let menu_row = row_with_long_press_menu(any(row), d.id.clone(), d.name.clone(), d.muted);
-    swipe_wrap_keyed(
-        any(menu_row),
-        d.id.clone(),
-        d.name.clone(),
-        controller,
-        toasts,
-    )
+    let row = row_layout(leading, content);
+    let menu_row = row_with_long_press_menu(row, d.id.clone(), d.name.clone(), d.muted);
+    swipe_wrap_keyed(menu_row, d.id.clone(), d.name.clone(), controller, toasts)
 }
 
 /// A DM avatar built from extracted state pieces (primarily `logo`). This is
@@ -782,32 +783,36 @@ fn dm_row_keyed(
 fn dm_avatar_keyed(_logo: &Option<ImageSource>, d: &DmItem) -> impl View<HomeState> {
     // A couple of users get a real `Image` avatar; the rest an initials circle.
     let use_image = matches!(d.user_id, 2 | 5) && _logo.is_some();
-    let base: AnyView<HomeState> = if use_image {
-        let src = _logo.clone().expect("guarded by use_image");
-        any(SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Image(src).fit(ImageFit::Cover)))
-    } else {
-        // SizedBox+Align monogram idiom — see `channel_circle`.
-        any(stack()
-            .child(fill_box(
-                Size::new(AVATAR_SIZE, AVATAR_SIZE),
-                avatar_color(d.user_id),
-                AVATAR_RADIUS,
-            ))
-            .child(
-                SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
-                    Alignment::CENTER,
-                    text(d.initials.clone())
-                        .size(MONOGRAM_SIZE)
-                        .color(Color::WHITE),
-                )),
-            ))
-    };
+    let base = either(
+        use_image,
+        || {
+            let src = _logo.clone().expect("guarded by use_image");
+            SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Image(src).fit(ImageFit::Cover))
+        },
+        || {
+            // SizedBox+Align monogram idiom — see `channel_circle`.
+            stack()
+                .child(fill_box(
+                    Size::new(AVATAR_SIZE, AVATAR_SIZE),
+                    avatar_color(d.user_id),
+                    AVATAR_RADIUS,
+                ))
+                .child(
+                    SizedBox(Some(AVATAR_SIZE), Some(AVATAR_SIZE)).child(Align(
+                        Alignment::CENTER,
+                        text(d.initials.clone())
+                            .size(MONOGRAM_SIZE)
+                            .color(Color::WHITE),
+                    )),
+                )
+        },
+    );
 
-    let dot = any(Align(
+    let dot = Align(
         Alignment::new(1.0, 1.0),
         fill_box(Size::new(12.0, 12.0), status_color(d.status), 6.0),
-    ));
-    let avatar = any(stack().child(base).child(dot));
+    );
+    let avatar = stack().child(base).child(dot);
 
     let user_id = d.user_id;
     GestureDetector(hero(format!("avatar-{user_id}"), avatar)).on_tap(move |_s: &mut HomeState| {
@@ -823,7 +828,7 @@ fn dm_avatar_keyed(_logo: &Option<ImageSource>, d: &DmItem) -> impl View<HomeSta
 /// swipe right → archive, left → mute, each raising an undo toast. This
 /// version takes extracted pieces (controller, toasts) instead of HomeState.
 fn swipe_wrap_keyed(
-    row: AnyView<HomeState>,
+    row: impl View<HomeState>,
     id: String,
     label: String,
     controller: &Arc<ChannelsController>,
@@ -876,15 +881,16 @@ fn swipe_wrap_keyed(
 /// open. `design` (resolved once, at build time, from the live
 /// [`use_context::<Theme>`]) picks the invite modal's widget family — see
 /// [`show_invite_modal`].
-fn home_sheet_overlay(state: &HomeState, design: DesignLanguage) -> AnyView<HomeState> {
+fn home_sheet_overlay(state: &HomeState, design: DesignLanguage) -> impl View<HomeState> {
     let dismiss = |s: &mut HomeState| s.sheet = HomeSheet::None;
+    // Two view types: the inert spacer, or a `SheetView` (which erases its
+    // content once inside).
     match state.sheet.clone() {
-        HomeSheet::None => any(SizedBox(None, None)),
-        HomeSheet::Create => any(sheet(create_channel_form(state)).on_dismiss(dismiss)),
-        HomeSheet::RowActions { id, label, muted } => any(sheet(action_menu(row_action_rows(
-            state, id, label, muted, design,
-        )))
-        .on_dismiss(dismiss)),
+        HomeSheet::None => Either::Left(SizedBox(None, None)),
+        HomeSheet::Create => Either::Right(sheet(create_channel_form(state)).on_dismiss(dismiss)),
+        HomeSheet::RowActions { id, label, muted } => Either::Right(
+            sheet(row_action_rows(state, id, label, muted, design)).on_dismiss(dismiss),
+        ),
     }
 }
 
@@ -893,16 +899,16 @@ fn home_sheet_overlay(state: &HomeState, design: DesignLanguage) -> AnyView<Home
 /// [`ChannelsController`]'s live list (a no-op on an empty/whitespace-only
 /// name) and raises a "Created #name" toast; Cancel (and the sheet's own
 /// scrim/drag dismiss) discards the draft without touching the roster.
-fn create_channel_form(state: &HomeState) -> AnyView<HomeState> {
-    let name_field = any(text_input(
+fn create_channel_form(state: &HomeState) -> impl View<HomeState> {
+    let name_field = text_input(
         state.create_name.clone(),
         |s: &mut HomeState, next: String| {
             s.create_name = next;
         },
     )
-    .placeholder("Channel name"));
+    .placeholder("Channel name");
 
-    let private_row = any(row()
+    let private_row = row()
         .child(icon(icons::LOCK).size(18.0))
         .child(SizedBox(Some(8.0), None))
         .flex(1, text("Private"))
@@ -912,12 +918,12 @@ fn create_channel_form(state: &HomeState) -> AnyView<HomeState> {
                 s.create_private = checked;
             },
         ))
-        .cross_axis(CrossAxisAlignment::Center));
+        .cross_axis(CrossAxisAlignment::Center);
 
-    let cancel_btn = any(button("Cancel", |s: &mut HomeState| {
+    let cancel_btn = button("Cancel", |s: &mut HomeState| {
         s.sheet = HomeSheet::None;
-    }));
-    let create_btn = any(button("Create", |s: &mut HomeState| {
+    });
+    let create_btn = button("Create", |s: &mut HomeState| {
         let trimmed = s.create_name.trim().to_string();
         if trimmed.is_empty() {
             return;
@@ -926,15 +932,15 @@ fn create_channel_form(state: &HomeState) -> AnyView<HomeState> {
             .create_channel(trimmed.clone(), s.create_private);
         s.toasts.show(format!("Created #{trimmed}"));
         s.sheet = HomeSheet::None;
-    }));
-    let actions_row = any(row()
+    });
+    let actions_row = row()
         .flex(1, SizedBox(None, None))
         .child(cancel_btn)
         .child(SizedBox(Some(8.0), None))
         .child(create_btn)
-        .cross_axis(CrossAxisAlignment::Center));
+        .cross_axis(CrossAxisAlignment::Center);
 
-    any(Padding(
+    Padding(
         EdgeInsets::all(16.0),
         column()
             .child(text("Create a channel").size(18.0))
@@ -945,7 +951,7 @@ fn create_channel_form(state: &HomeState) -> AnyView<HomeState> {
             .child(SizedBox(None, Some(20.0)))
             .child(actions_row)
             .cross_axis(CrossAxisAlignment::Stretch),
-    ))
+    )
 }
 
 /// The row long-press menu: Mute/Unmute, Archive, Invite people, Cancel.
@@ -960,7 +966,7 @@ fn row_action_rows(
     label: String,
     muted: bool,
     design: DesignLanguage,
-) -> Vec<AnyView<HomeState>> {
+) -> impl View<HomeState> {
     let data = state.controller.data;
 
     let mute_id = id.clone();
@@ -1014,7 +1020,7 @@ fn row_action_rows(
         s.sheet = HomeSheet::None;
     });
 
-    vec![mute_row, archive_row, invite_row, cancel_row]
+    action_menu((mute_row, archive_row, invite_row, cancel_row))
 }
 
 /// Push the invite confirmation modal onto the outer app navigator: `dialog`

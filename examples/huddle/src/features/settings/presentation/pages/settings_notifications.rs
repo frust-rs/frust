@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use frust::{
-    AnyView, Column, CrossAxisAlignment, EdgeInsets, Get, Padding, Set, SizedBox, View, any,
-    column, component, radio, row, scroll_view, text,
+    CrossAxisAlignment, EdgeInsets, Get, Padding, Set, SizedBox, View, column, component, radio,
+    row, scroll_view, text,
 };
 use frust_material::{Switch, app_bar};
 
@@ -24,8 +24,8 @@ use crate::features::settings::{NotifFrequency, NotificationsController};
 use clean_signals_frust::use_controller;
 
 /// The notification-settings route entry point.
-pub fn notifications_screen() -> AnyView<HuddleState> {
-    any(component(NotificationsScreen))
+pub fn notifications_screen() -> impl View<HuddleState> {
+    component(NotificationsScreen)
 }
 
 /// The notification-settings `Component` (stateless config).
@@ -53,39 +53,32 @@ impl frust::Component for NotificationsScreen {
         let vibrate = state.controller.vibrate.get();
         let previews = state.controller.previews.get();
 
-        let mut children: Vec<AnyView<NotificationsState>> = Vec::new();
-        children.push(any(text("Notify me about").size(16.0)));
+        let children = column()
+            .child(text("Notify me about").size(16.0))
+            // The frequency radio group (the new `radio` widget).
+            .children(NotifFrequency::ALL.map(|choice| {
+                radio(choice == freq, choice.label()).on_select(
+                    move |st: &mut NotificationsState| {
+                        st.controller.frequency.set(choice);
+                    },
+                )
+            }))
+            .child(SizedBox(None, Some(20.0)))
+            .child(text("Alert style").size(16.0))
+            .child(toggle_row("Play a sound", sound, |st, on| {
+                st.controller.sound.set(on)
+            }))
+            .child(toggle_row("Vibrate", vibrate, |st, on| {
+                st.controller.vibrate.set(on)
+            }))
+            .child(toggle_row("Show message preview", previews, |st, on| {
+                st.controller.previews.set(on)
+            }));
 
-        // The frequency radio group (the new `radio` widget).
-        for choice in NotifFrequency::ALL {
-            children.push(any(radio(choice == freq, choice.label()).on_select(
-                move |st: &mut NotificationsState| {
-                    st.controller.frequency.set(choice);
-                },
-            )));
-        }
-
-        children.push(any(SizedBox(None, Some(20.0))));
-        children.push(any(text("Alert style").size(16.0)));
-        children.push(any(toggle_row("Play a sound", sound, |st, on| {
-            st.controller.sound.set(on)
-        })));
-        children.push(any(toggle_row("Vibrate", vibrate, |st, on| {
-            st.controller.vibrate.set(on)
-        })));
-        children.push(any(toggle_row(
-            "Show message preview",
-            previews,
-            |st, on| st.controller.previews.set(on),
-        )));
-
-        any(column()
+        column()
             .child(app_bar::<NotificationsState>("Notifications"))
-            .flex(
-                1,
-                scroll_view(Padding(EdgeInsets::all(16.0), Column(children))),
-            )
-            .cross_axis(CrossAxisAlignment::Stretch))
+            .flex(1, scroll_view(Padding(EdgeInsets::all(16.0), children)))
+            .cross_axis(CrossAxisAlignment::Stretch)
     }
 }
 
