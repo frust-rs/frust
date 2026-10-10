@@ -4815,6 +4815,11 @@ mod tests {
         let out = update(&mut st, outcome(a, HotOutcome::RestartRequired(reason)));
         assert_eq!(out.effect, Some(Effect::RestartSession(a)));
         assert!(st.sessions[0].close_on_exit);
+        assert!(
+            !st.sessions[0].hot_patching(),
+            "the answer ends the in-flight indicator before the restart"
+        );
+        assert_eq!(st.sessions[0].hot_patch_flash, None, "no pulse");
     }
 
     #[test]

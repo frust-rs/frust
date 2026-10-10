@@ -278,18 +278,15 @@ fn render_tab_bar(
     theme: &Theme,
     mouse: &mut MouseCtx,
 ) {
-    // The whole header pulses with the active session's hot-patch flash
-    // (fdemon's header reload flash), on top of the patched tab's own tint.
-    let header = match state.active_session() {
-        Some(session) => flash_tint(
-            Style::default().bg(theme.surface()),
-            theme.surface(),
-            session,
-            state.animation_frame,
-            theme,
-        ),
-        None => Style::default().bg(theme.surface()),
-    };
+    // The whole header pulses with the freshest hot-patch flash of any
+    // session (fdemon's header reload flash), so a background tab's patch
+    // shows too, on top of the patched tab's own tint.
+    let pulse = state
+        .sessions
+        .iter()
+        .map(|s| flash_alpha(s.hot_patch_flash, state.animation_frame))
+        .fold(0.0_f32, f32::max);
+    let header = Style::default().bg(flash_bg(theme.surface(), theme.success(), pulse));
     frame.render_widget(Block::default().style(header), area);
 
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -1619,7 +1616,10 @@ mod tests {
             "the tab glyph spins: {tabs}"
         );
         let phase = buffer_row(&busy, 1);
-        assert!(phase.contains("Hot patching\u{2026}"), "{phase}");
+        assert!(
+            phase.contains(&format!("{spinner} Hot patching\u{2026}")),
+            "{phase}"
+        );
         assert!(phase.contains("1.1s"), "23 frames of 50 ms: {phase}");
 
         state.sessions[0].end_hot_patch();
@@ -1667,6 +1667,12 @@ mod tests {
         let flashing = render_main_to_buffer(&state, &theme);
         assert_ne!(flashing[(tab1, 0)].bg, idle[(tab1, 0)].bg, "patched tab");
         assert_eq!(flashing[(tab0, 0)].bg, idle[(tab0, 0)].bg, "other tab");
+        let edge = idle.area.right() - 1;
+        assert_ne!(
+            flashing[(edge, 0)].bg,
+            idle[(edge, 0)].bg,
+            "a background tab's patch pulses the header too"
+        );
 
         let ansi = Theme::frust_dark_at(crate::ui::theme::ColorDepth::Ansi16);
         let mut idle_state = two_watched_sessions();
