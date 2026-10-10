@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use clean_signals_frust::use_interval;
-use frust::{Axis, Component, FlexView, View, any, component, keyed, text};
+use frust::{Axis, Component, FlexView, View, component, keyed, text};
 use frust_core::RenderRoot;
 use frust_text::TextContext;
 
@@ -41,7 +41,7 @@ impl Component for TickingScreen {
     }
 
     fn build(&self, _state: &mut ()) -> impl View<()> {
-        any(text("ticking screen"))
+        text("ticking screen")
     }
 }
 
