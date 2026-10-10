@@ -76,8 +76,8 @@ use std::time::Duration;
 use frust::Theme;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Point, Rect, Role, SemanticsCtx, Size, View, Widget, any,
-    build_child, rebuild_child, route_event, teardown_child, visit_children,
+    LayoutCtx, PaintCtx, PaintScene, Point, Rect, Role, SemanticsCtx, Size, View, ViewSeq, Widget,
+    any, build_child, rebuild_child, route_event, teardown_child, visit_children,
 };
 
 use crate::agents::message::{MessageFrom, message};
@@ -520,8 +520,19 @@ impl<State: 'static> ChatConversationView<State> {
     /// Takes a factory, not a list: `AnyView` is not `Clone`, and the
     /// transcript is re-assembled on both sides of every `rebuild`, so the rows
     /// have to be buildable twice.
-    pub fn extra_rows<F: Fn() -> Vec<AnyView<State>> + 'static>(mut self, rows: F) -> Self {
-        self.extra_rows = Some(Rc::new(rows));
+    ///
+    /// The factory returns any child sequence (a view, a tuple, a `Vec`, ...),
+    /// erased here: `.extra_rows(|| (tool_card(), approval_card()))`.
+    pub fn extra_rows<F, Seq, M>(mut self, rows: F) -> Self
+    where
+        F: Fn() -> Seq + 'static,
+        Seq: ViewSeq<State, M>,
+    {
+        self.extra_rows = Some(Rc::new(move || {
+            let mut out = Vec::new();
+            rows().extend_views(&mut out);
+            out
+        }));
         self
     }
 
@@ -1150,6 +1161,17 @@ mod tests {
             .on_stop(|app: &mut App| {
                 app.model.stop();
             })
+    }
+
+    #[test]
+    fn extra_rows_accepts_concrete_views_or_any_views() {
+        let m = model();
+        let concrete = conversation(&m).extra_rows(|| (text("a"), text("b")));
+        let erased = conversation(&m)
+            .extra_rows(|| vec![any::<App, _>(text("a")), any::<App, _>(text("b"))]);
+        let count = |v: &ChatConversationView<App>| (v.extra_rows.as_ref().unwrap())().len();
+        assert_eq!(count(&concrete), 2);
+        assert_eq!(count(&concrete), count(&erased));
     }
 
     fn build_conversation(view: &ChatConversationView<App>) -> ChatConversationWidget {

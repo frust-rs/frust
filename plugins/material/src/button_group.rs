@@ -468,6 +468,15 @@ pub fn member_radii(index: usize, count: usize, outer: f64, inner: f64) -> Round
 /// closure takes.
 type IconFactory<State> = Rc<dyn Fn() -> AnyView<State>>;
 
+/// Erase a caller's icon closure into the stored [`IconFactory`].
+fn erase_icon<State: 'static, F, V>(icon: F) -> IconFactory<State>
+where
+    F: Fn() -> V + 'static,
+    V: View<State>,
+{
+    Rc::new(move || AnyView::new(icon()))
+}
+
 /// A declarative description of one member — `M3EButtonGroupAction`
 /// (`models/m3e_button_group_action.dart:12`).
 ///
@@ -499,13 +508,15 @@ pub fn button_group_action<State: 'static>(label: impl Into<String>) -> ButtonGr
 }
 
 /// Create an icon-only group member; `icon` is called once per rebuild of the
-/// member (see [`IconFactory`]'s note).
-pub fn button_group_icon_action<State: 'static, F>(icon: F) -> ButtonGroupAction<State>
+/// member (see [`IconFactory`]'s note) and may return any view, which is erased
+/// here: `button_group_icon_action(|| icon(icons::STAR))`.
+pub fn button_group_icon_action<State: 'static, F, V>(icon: F) -> ButtonGroupAction<State>
 where
-    F: Fn() -> AnyView<State> + 'static,
+    F: Fn() -> V + 'static,
+    V: View<State>,
 {
     ButtonGroupAction {
-        icon: Some(Rc::new(icon)),
+        icon: Some(erase_icon(icon)),
         checked_icon: None,
         label: None,
         checked_label: None,
@@ -517,15 +528,23 @@ where
 
 impl<State: 'static> ButtonGroupAction<State> {
     /// The icon shown while unchecked (and while checked too, unless
-    /// [`Self::checked_icon`] is set).
-    pub fn icon<F: Fn() -> AnyView<State> + 'static>(mut self, icon: F) -> Self {
-        self.icon = Some(Rc::new(icon));
+    /// [`Self::checked_icon`] is set): `.icon(|| icon(icons::STAR))`.
+    pub fn icon<F, V>(mut self, icon: F) -> Self
+    where
+        F: Fn() -> V + 'static,
+        V: View<State>,
+    {
+        self.icon = Some(erase_icon(icon));
         self
     }
 
     /// The icon shown while checked. Falls back to [`Self::icon`] when unset.
-    pub fn checked_icon<F: Fn() -> AnyView<State> + 'static>(mut self, icon: F) -> Self {
-        self.checked_icon = Some(Rc::new(icon));
+    pub fn checked_icon<F, V>(mut self, icon: F) -> Self
+    where
+        F: Fn() -> V + 'static,
+        V: View<State>,
+    {
+        self.checked_icon = Some(erase_icon(icon));
         self
     }
 
@@ -792,8 +811,12 @@ impl<State: 'static> ButtonGroupView<State> {
 
     /// Replace the overflow trigger's icon (`M3EButtonGroup.overflowIcon`;
     /// the default is `M3EIcons.more_horiz`).
-    pub fn overflow_icon<F: Fn() -> AnyView<State> + 'static>(mut self, icon: F) -> Self {
-        self.overflow_icon = Some(Rc::new(icon));
+    pub fn overflow_icon<F, V>(mut self, icon: F) -> Self
+    where
+        F: Fn() -> V + 'static,
+        V: View<State>,
+    {
+        self.overflow_icon = Some(erase_icon(icon));
         self
     }
 
@@ -1770,7 +1793,7 @@ mod tests {
     /// the layout tests measure against.
     fn bare_icon_actions(count: usize) -> Vec<ButtonGroupAction<()>> {
         (0..count)
-            .map(|_| button_group_icon_action::<(), _>(|| leaf_any(0.0, 0.0)))
+            .map(|_| button_group_icon_action::<(), _, _>(|| leaf_any(0.0, 0.0)))
             .collect()
     }
 
@@ -2054,6 +2077,27 @@ mod tests {
     // ---- layout -----------------------------------------------------------
 
     #[test]
+    fn icon_closures_may_return_a_concrete_view_or_an_any_view() {
+        let concrete = button_group_actions(vec![
+            button_group_icon_action::<(), _, _>(|| frust::icon(crate::icons::CHECK))
+                .checked_icon(|| frust::icon(crate::icons::CHECK)),
+        ])
+        .overflow_icon(|| frust::icon(crate::icons::MORE_HORIZ));
+        let erased = button_group_actions(vec![
+            button_group_icon_action::<(), _, _>(|| {
+                frust::authoring::any::<(), _>(frust::icon(crate::icons::CHECK))
+            })
+            .checked_icon(|| frust::authoring::any::<(), _>(frust::icon(crate::icons::CHECK))),
+        ])
+        .overflow_icon(|| frust::authoring::any::<(), _>(frust::icon(crate::icons::MORE_HORIZ)));
+        let mut a = build(&concrete);
+        let mut b = build(&erased);
+        assert_eq!(a.members.len(), b.members.len());
+        let max = Size::new(500.0, 200.0);
+        assert_eq!(layout(&mut a, max), layout(&mut b, max));
+    }
+
+    #[test]
     fn members_abut_with_the_resolved_gap() {
         let mut widget = build(&button_group_actions(bare_icon_actions(3)));
         let size = layout(&mut widget, Size::new(500.0, 200.0));
@@ -2086,8 +2130,8 @@ mod tests {
     #[test]
     fn a_pinned_action_width_overrides_the_natural_extent() {
         let actions = vec![
-            button_group_icon_action::<(), _>(|| leaf_any(0.0, 0.0)).width(90.0),
-            button_group_icon_action::<(), _>(|| leaf_any(0.0, 0.0)),
+            button_group_icon_action::<(), _, _>(|| leaf_any(0.0, 0.0)).width(90.0),
+            button_group_icon_action::<(), _, _>(|| leaf_any(0.0, 0.0)),
         ];
         let mut widget = build(&button_group_actions(actions));
         let size = layout(&mut widget, Size::new(500.0, 200.0));
@@ -2436,8 +2480,8 @@ mod tests {
 
         // 2. index wins over a per-action `checked`.
         let actions = vec![
-            button_group_icon_action::<(), _>(|| leaf_any(0.0, 0.0)).checked(true),
-            button_group_icon_action::<(), _>(|| leaf_any(0.0, 0.0)),
+            button_group_icon_action::<(), _, _>(|| leaf_any(0.0, 0.0)).checked(true),
+            button_group_icon_action::<(), _, _>(|| leaf_any(0.0, 0.0)),
         ];
         let view = button_group_actions(actions).selected_index(Some(1));
         assert!(!view.is_selected(0));
@@ -2445,8 +2489,8 @@ mod tests {
 
         // 3. uncontrolled: the action's own flag.
         let actions = vec![
-            button_group_icon_action::<(), _>(|| leaf_any(0.0, 0.0)).checked(true),
-            button_group_icon_action::<(), _>(|| leaf_any(0.0, 0.0)),
+            button_group_icon_action::<(), _, _>(|| leaf_any(0.0, 0.0)).checked(true),
+            button_group_icon_action::<(), _, _>(|| leaf_any(0.0, 0.0)),
         ];
         let view = button_group_actions(actions);
         assert!(view.is_selected(0));
