@@ -174,10 +174,12 @@ by every kill path below). A **relaunch loop, not state-preserving hot reload** 
 every rebuild. `--watch` + `-d <device>` is a hard error (device-side watch isn't implemented). Measured baselines (and why no fast-dev recipe ships): [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Dev loop.
 
 **TUI equivalents.** `R` restarts the active workbench session the same way — rebuild + relaunch,
-never state-preserving. 'Watch: restart on save' (`W`, palette, or the run-config checkbox) restarts
-a **desktop** session on every settled save-burst with the same 300ms debounce (`supervise/watch.rs`)
-— one relaunch per burst. A device session's `R` reruns build → install → launch instead; watch is
-refused there (desktop-only, see [TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
+never state-preserving. 'Watch: hot patch on save' (`W`, palette, or the run-config checkbox) on a
+watched debug session — desktop, an Android device, or a booted iOS simulator — hot-patches each
+settled save-burst (100ms debounce, `supervise/watch.rs`, synced with `frust-cli`'s): a
+`patched in N ms` toast, and the app relaunches only on `restart required: <reason>`. A physical iOS
+device's `R` reruns build → install → launch and watch is refused there (mechanism and refusals:
+[TUI_ARCHITECTURE.md](TUI_ARCHITECTURE.md)).
 
 ## Release Builds
 
