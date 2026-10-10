@@ -141,7 +141,7 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
     vec![
         gated(
             "Run on device(s)…",
-            "r",
+            "o",
             Message::OpenRunConfig,
             has_project,
             "open a project first",
@@ -163,6 +163,17 @@ pub fn commands(state: &AppState) -> Vec<PaletteCommand> {
             Message::StopSession,
             running,
             "no running session",
+        ),
+        // `r`, the fdemon/Flutter reload key: a hot session is patched with
+        // everything changed since its last patch; any other app session
+        // restarts (`Message::HotPatchNow` toasts why). An app session only,
+        // like "Restart session" below.
+        gated(
+            "Hot patch now",
+            "r",
+            Message::HotPatchNow,
+            has_app_session,
+            "no app session to patch",
         ),
         // The keyboard twin of MCP `restart_app` / DAP `frustRestart` — an
         // app session only (`target.is_some()`), unlike "Stop session" above,
@@ -596,6 +607,47 @@ mod tests {
                 .iter()
                 .all(|c| c.title != "Watch: restart on save"),
             "the row was renamed, not duplicated"
+        );
+    }
+
+    #[test]
+    fn hot_patch_now_sits_beside_restart_on_r_and_the_run_dialog_moved_to_o() {
+        use crate::engine::{DevtoolsLaunch, SessionTarget, SessionView};
+        use crate::supervise::SessionId;
+
+        let row = |state: &AppState, title: &str| {
+            commands(state)
+                .into_iter()
+                .find(|c| c.title == title)
+                .expect("command present")
+        };
+
+        let no_session = workbench();
+        let hot = row(&no_session, "Hot patch now");
+        assert!(!hot.enabled);
+        assert_eq!(hot.disabled_reason, Some("no app session to patch"));
+        assert_eq!(row(&no_session, "Run on device(s)…").hint, "o");
+
+        let mut app_session = workbench();
+        app_session.sessions.push(SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
+        ));
+        app_session.active_session = Some(0);
+        let hot = row(&app_session, "Hot patch now");
+        assert!(hot.enabled);
+        assert_eq!(hot.hint, "r");
+        assert_eq!(hot.message, Message::HotPatchNow);
+
+        let titles: Vec<&str> = commands(&app_session).iter().map(|c| c.title).collect();
+        let at = |title: &str| titles.iter().position(|t| *t == title).unwrap();
+        assert_eq!(
+            at("Hot patch now") + 1,
+            at("Restart session"),
+            "the two reload keys sit side by side"
         );
     }
 

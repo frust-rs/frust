@@ -377,15 +377,30 @@ pub struct SessionView {
     /// `super::update::on_session_event`) instead of staying around like an
     /// ordinary stopped session. `false` for every ordinary session.
     pub close_on_exit: bool,
-    /// "Watch: restart on save" (`Message::ToggleWatch`): while `true` the
-    /// runner keeps a source watcher over this session's project and a
-    /// settled change burst restarts it (`Message::WatchTriggered`). Desktop
-    /// sessions only. Survives a terminal state on purpose — a build that
-    /// failed to compile is exactly the session a save should relaunch — and
-    /// carries over to the relaunch: the runner re-enables it on the new
-    /// session with `Message::EnableWatch` once that registers. `false` for
-    /// every freshly registered session.
+    /// "Watch: hot patch on save" (`Message::ToggleWatch`, or "Auto-apply on
+    /// save" at launch): while `true` the runner keeps a source watcher over
+    /// this session's project and a settled change burst hot-patches it, or
+    /// restarts it when it is not hot (`Message::WatchTriggered`). Desktop,
+    /// Android device and iOS simulator sessions only. Survives a terminal
+    /// state on purpose — a build that failed to compile is exactly the
+    /// session a save should relaunch — and carries over to the relaunch:
+    /// the runner re-enables it on the new session with
+    /// `Message::EnableWatch` once that registers. `false` for every freshly
+    /// registered session.
     pub watch: bool,
+    /// Whether the runner launched this session through the hot-patch
+    /// session start (`Message::HotSessionStarted`, right after its
+    /// registration): `r` (`Message::HotPatchNow`) then patches it instead
+    /// of restarting it. Independent of [`Self::watch`] — a hot session
+    /// launched with "Auto-apply on save" off runs hot with no watcher.
+    /// `false` for every freshly registered session; a relaunch is a new
+    /// view the runner marks again when it runs hot.
+    pub hot: bool,
+    /// Set by `Message::HotPatchNow` when it asks the runner to patch, and
+    /// taken by the next `Message::HotPatchOutcome` for this session: a
+    /// `RestartRequired` answering a manual request restarts the session
+    /// even with its watcher off (a watched session restarts regardless).
+    pub hot_patch_requested: bool,
     /// The `AppState::animation_frame` at this session's last completed hot
     /// patch (`HotOutcome::Patched`), or `None` before any. It drives the
     /// one-shot success flash on the session's tab and watch status segment:
@@ -480,6 +495,8 @@ impl SessionView {
             dropped: 0,
             close_on_exit: false,
             watch: false,
+            hot: false,
+            hot_patch_requested: false,
             hot_patch_flash: None,
             perf: PerfPanel::default(),
             level_filter: LevelFilter::default(),

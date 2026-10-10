@@ -67,6 +67,17 @@ pub enum Effect {
         /// The burst's changed paths.
         paths: Vec<PathBuf>,
     },
+    /// Hot-patch a live hot session now, unprompted by a save
+    /// ([`Message::HotPatchNow`], `r`). The runner's worker for `session`
+    /// replays every file of the session's watch set changed since its last
+    /// applied patch (or since its fat build started) and posts the answer
+    /// back as [`Message::HotPatchOutcome`] — `NoChange` when nothing has
+    /// changed. The "since when" is the worker's own clock reading, never
+    /// the pure core's.
+    HotPatchNow {
+        /// The hot session to patch.
+        session: SessionId,
+    },
     /// Copy text to the system clipboard (the runner emits an OSC 52 sequence).
     Copy(String),
     /// Discover devices off-thread (`frust-drive`'s `DeviceDiscovery` set),
@@ -75,11 +86,21 @@ pub enum Effect {
     /// Launch one supervised session per spec (the run-config modal's checked
     /// targets), registering each returned id back into the model.
     LaunchSessions(Vec<SessionSpec>),
-    /// [`Self::LaunchSessions`] for desktop specs launched with the
-    /// run-config modal's watch checkbox ticked: the runner launches them
-    /// exactly the same way, then posts [`Message::EnableWatch`] for each
-    /// session that started, after its registration.
-    LaunchWatchedSessions(Vec<SessionSpec>),
+    /// Launch specs **hot** — every spec of a workbench launch that passes
+    /// `SessionSpec::hot_precondition`, and every relaunch of a hot or
+    /// watched session. The runner starts each through the hot-patch session
+    /// start, posting [`Message::RegisterSession`], then — with
+    /// `auto_apply` — [`Message::EnableWatch`], then
+    /// [`Message::HotSessionStarted`], in that order. A spec that fails the
+    /// precondition after all launches as [`Self::LaunchSessions`] would,
+    /// restarting on save when `auto_apply` asks for a watcher.
+    LaunchHotSessions {
+        /// The specs to launch.
+        specs: Vec<SessionSpec>,
+        /// Arm each launched session's source watcher ("Auto-apply on
+        /// save"); off, a hot session is patched only by `r`.
+        auto_apply: bool,
+    },
     /// Persist `path` as the most-recently-opened project (`toml_edit`
     /// format-preserving save to `~/.config/frust/tui.toml`) — the runner
     /// performs the actual file I/O; the pure engine only requests it.
@@ -454,6 +475,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             Some(idx) => restart_session_at(state, idx),
             None => Outcome::idle(),
         },
+        Message::HotPatchNow => hot_patch_now(state),
+        Message::HotSessionStarted { session } => match state.session_index(session) {
+            Some(idx) if !state.sessions[idx].hot => {
+                state.sessions[idx].hot = true;
+                Outcome::redraw()
+            }
+            _ => Outcome::idle(),
+        },
         Message::ToggleWatch => toggle_watch(state),
         Message::WatchTriggered {
             session,
@@ -695,7 +724,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::RunConfigFocusPrev => with_modal(state, RunConfig::focus_prev),
         Message::RunConfigToggleTarget => with_modal(state, RunConfig::toggle_focused_target),
         Message::RunConfigToggleTargetAt(i) => with_modal(state, |m| m.toggle_target(i)),
-        Message::RunConfigToggleWatch => with_modal(state, RunConfig::toggle_watch),
+        Message::RunConfigToggleAutoApply => with_modal(state, RunConfig::toggle_auto_apply),
         Message::RunConfigCycleMode(delta) => with_modal(state, |m| {
             m.cycle_mode(delta);
             m.focus = super::run_config::RunFocus::Mode;
@@ -706,14 +735,14 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         Message::RunConfigLaunch => match &state.run_config {
             Some(modal) if modal.any_selected() => {
                 let specs = modal.launch_specs();
-                let watch = modal.watch;
+                let auto_apply = modal.auto_apply;
                 state.run_config = None;
                 // The modal closes either way: a refusal is explained by its
                 // own toast, not by leaving the dialog up.
                 let specs = drop_already_running(state, specs);
                 Outcome {
                     redraw: true,
-                    effect: launch_effect(state, specs, watch),
+                    effect: launch_effect(state, specs, auto_apply),
                 }
             }
             // Modal open but nothing checked, or no modal: nothing to launch.
@@ -1884,46 +1913,69 @@ fn auto_ide_config(state: &AppState, project_root: &Path) -> Option<Effect> {
 
 /// The effect for launching `specs` — every workbench launch path
 /// (the run-config modal, run-on-all-devices) goes through here, so an app
-/// launch is where the editor's DAP client config gets written: one
-/// [`Effect::LaunchSessions`], followed (via [`Effect::Batch`]) by one
-/// [`auto_ide_config`] write per *distinct* project root among the specs,
-/// when one is due. `None` for no specs. With `watch` set (the run-config
-/// modal's checkbox), the desktop specs go out as
-/// [`Effect::LaunchWatchedSessions`] instead and the device specs stay in a
-/// plain [`Effect::LaunchSessions`] — watch is desktop-only.
+/// launch is where the editor's DAP client config gets written: the launch
+/// effect(s), followed (via [`Effect::Batch`]) by one [`auto_ide_config`]
+/// write per *distinct* project root among the specs, when one is due.
+/// `None` for no specs.
+///
+/// **Hot by default.** Specs are partitioned by
+/// `SessionSpec::hot_precondition`, not by target: every spec that passes it
+/// (a debug desktop, Android device or iOS simulator build) goes out as one
+/// [`Effect::LaunchHotSessions`] carrying `auto_apply` (the modal's "Auto-apply
+/// on save" — whether the runner also arms each session's watcher), and the
+/// rest as one plain [`Effect::LaunchSessions`], each with an Info toast
+/// naming why it runs cold when its target could have run hot
+/// ([`SessionTarget::supports_watch`]). A cold launch arms no watcher; `W`
+/// still turns restart-on-save on for it.
 ///
 /// Sessions launched through the MCP/DAP backend
 /// (`crate::supervise::mcp_backend`) never pass through here, by design: the
 /// DAP client that launched them already had a config to connect with.
-fn launch_effect(state: &AppState, specs: Vec<SessionSpec>, watch: bool) -> Option<Effect> {
+fn launch_effect(
+    state: &mut AppState,
+    specs: Vec<SessionSpec>,
+    auto_apply: bool,
+) -> Option<Effect> {
     if specs.is_empty() {
         return None;
     }
-    let mut roots: Vec<&Path> = Vec::new();
+    let mut roots: Vec<PathBuf> = Vec::new();
     for spec in &specs {
-        let root = spec.project_root.as_path();
         // `Path` equality is already component-wise.
-        if !roots.contains(&root) {
-            roots.push(root);
+        if !roots.contains(&spec.project_root) {
+            roots.push(spec.project_root.clone());
         }
     }
     let configs: Vec<Effect> = roots
-        .into_iter()
+        .iter()
         .filter_map(|root| auto_ide_config(state, root))
         .collect();
+    let mut hot = Vec::new();
+    let mut cold = Vec::new();
+    for spec in specs {
+        match spec.hot_precondition() {
+            Ok(()) => hot.push(spec),
+            Err(reason) => {
+                let target = SessionTarget::of(&spec.target);
+                if target.supports_watch() {
+                    state.toasts.push(
+                        ToastKind::Info,
+                        format!("{} runs cold: {reason}", target.label()),
+                    );
+                }
+                cold.push(spec);
+            }
+        }
+    }
     let mut effects = Vec::with_capacity(2 + configs.len());
-    if watch {
-        let (desktop, devices): (Vec<SessionSpec>, Vec<SessionSpec>) = specs
-            .into_iter()
-            .partition(|spec| matches!(spec.target, DeviceTarget::Desktop));
-        if !desktop.is_empty() {
-            effects.push(Effect::LaunchWatchedSessions(desktop));
-        }
-        if !devices.is_empty() {
-            effects.push(Effect::LaunchSessions(devices));
-        }
-    } else {
-        effects.push(Effect::LaunchSessions(specs));
+    if !hot.is_empty() {
+        effects.push(Effect::LaunchHotSessions {
+            specs: hot,
+            auto_apply,
+        });
+    }
+    if !cold.is_empty() {
+        effects.push(Effect::LaunchSessions(cold));
     }
     effects.extend(configs);
     batch(effects)
@@ -2282,7 +2334,7 @@ fn run_on_all_devices(state: &mut AppState) -> Outcome {
     }
     Outcome {
         redraw: true,
-        effect: launch_effect(state, specs, false),
+        effect: launch_effect(state, specs, config.auto_apply),
     }
 }
 
@@ -2646,6 +2698,47 @@ fn restart_session_at(state: &mut AppState, idx: usize) -> Outcome {
     Outcome::effect(Effect::RestartSession(id))
 }
 
+/// The Info toast for `r` on an app session that is not hot: it restarts
+/// instead, the only way its edits can reach the app.
+const NOT_A_HOT_RUN: &str = "not a hot run: restarting";
+
+/// Hot-patch the active session now ([`Message::HotPatchNow`], `r`).
+///
+/// No active session, or an ad-hoc one (no target), idles. A **hot** session
+/// that is still live and has no restart pending is asked to patch now
+/// ([`Effect::HotPatchNow`]) and marked `hot_patch_requested`, so a
+/// `RestartRequired` answer restarts it even with no watcher armed (see
+/// [`hot_patch_outcome`]). Any other app session — not hot, or a hot one
+/// that has already ended — restarts through [`restart_session_at`], the
+/// same path `R` takes; a session that is not hot also gets the
+/// [`NOT_A_HOT_RUN`] Info toast once that restart is actually requested.
+fn hot_patch_now(state: &mut AppState) -> Outcome {
+    let Some(idx) = state.active_session else {
+        return Outcome::idle();
+    };
+    let Some(view) = state.sessions.get_mut(idx) else {
+        return Outcome::idle();
+    };
+    if view.target.is_none() {
+        return Outcome::idle();
+    }
+    if view.hot && !view.state.is_terminal() && !view.close_on_exit {
+        view.hot_patch_requested = true;
+        return Outcome::effect(Effect::HotPatchNow { session: view.id });
+    }
+    let hot = view.hot;
+    let out = restart_session_at(state, idx);
+    if !hot && out.effect.is_some() {
+        state
+            .toasts
+            .push(ToastKind::Info, NOT_A_HOT_RUN.to_string());
+    }
+    Outcome {
+        redraw: true,
+        ..out
+    }
+}
+
 /// The refusal toast for "Watch: hot patch on save" on anything but a
 /// desktop, Android or iOS simulator app session — the targets `frust run
 /// --watch` drives (`frust run --watch -d` refuses a physical iOS device the
@@ -2733,14 +2826,17 @@ fn watch_triggered(
 /// A `RestartRequired` also restarts the session through
 /// [`restart_session_at`] — the same relaunch a non-hot watched session
 /// gets, so the relaunch carries watch over and runs hot again — but only
-/// while the session still has watch on and no restart is pending: a second
-/// answer for the same burst (or one arriving after the tab was closed)
-/// finds `close_on_exit` set and only toasts. An answer for a session that
-/// is gone is dropped.
+/// while the session still has watch on (or the answer is to a manual
+/// [`Message::HotPatchNow`], whose `hot_patch_requested` mark every answer
+/// for the session takes) and no restart is pending: a second answer for
+/// the same burst (or one arriving after the tab was closed) finds
+/// `close_on_exit` set and only toasts. An answer for a session that is gone
+/// is dropped.
 fn hot_patch_outcome(state: &mut AppState, session: SessionId, outcome: HotOutcome) -> Outcome {
     let Some(idx) = state.session_index(session) else {
         return Outcome::idle();
     };
+    let requested = std::mem::take(&mut state.sessions[idx].hot_patch_requested);
     match outcome {
         HotOutcome::Patched { ms, .. } => {
             state
@@ -2783,7 +2879,7 @@ fn hot_patch_outcome(state: &mut AppState, session: SessionId, outcome: HotOutco
                 .toasts
                 .push(ToastKind::Warn, format!("restart required: {reason}"));
             let view = &state.sessions[idx];
-            if !view.watch || view.close_on_exit {
+            if !(view.watch || requested) || view.close_on_exit {
                 return Outcome::redraw();
             }
             let out = restart_session_at(state, idx);
@@ -2796,10 +2892,10 @@ fn hot_patch_outcome(state: &mut AppState, session: SessionId, outcome: HotOutco
 }
 
 /// Turn watch on for a freshly launched session the runner says should carry
-/// it ([`Message::EnableWatch`] — a watched session's relaunch, or a
-/// watch-checked desktop launch). Only a desktop or Android app session
-/// takes it; anything else, an unknown id, or a session already watching
-/// idles.
+/// it ([`Message::EnableWatch`] — a watched session's relaunch, or a hot
+/// launch with "Auto-apply on save" ticked). Only a desktop, Android or iOS
+/// simulator app session takes it; anything else, an unknown id, or a
+/// session already watching idles.
 fn enable_watch(state: &mut AppState, session: SessionId) -> Outcome {
     let Some(idx) = state.session_index(session) else {
         return Outcome::idle();
@@ -4428,46 +4524,206 @@ mod tests {
         assert_eq!(warn_texts(&st), vec!["Watch unavailable: no inotify"]);
     }
 
+    /// The launch effects of `out`, split into the hot launch (its specs and
+    /// `auto_apply`) and the plain cold one.
+    fn hot_and_cold(out: &Outcome) -> (Vec<SessionSpec>, Option<bool>, Vec<SessionSpec>) {
+        let mut hot = Vec::new();
+        let mut auto_apply = None;
+        let mut cold = Vec::new();
+        for effect in effects_of(out) {
+            match effect {
+                Effect::LaunchHotSessions {
+                    specs,
+                    auto_apply: flag,
+                } => {
+                    hot.extend(specs);
+                    auto_apply = Some(flag);
+                }
+                Effect::LaunchSessions(specs) => cold.extend(specs),
+                _ => {}
+            }
+        }
+        (hot, auto_apply, cold)
+    }
+
     #[test]
-    fn a_watch_checked_launch_routes_only_the_desktop_spec_through_the_watched_launch() {
+    fn the_run_dialog_launches_every_hot_capable_spec_hot() {
+        let simulator = dev(
+            "FAKE-SIM-UDID",
+            "iPhone 15 Pro",
+            Platform::Ios,
+            Kind::Simulator,
+        );
+        let mut st = workbench_with_project();
+        run_config_on_devices(&mut st, vec![pixel_7(), simulator]);
+        update(&mut st, Message::RunConfigToggleTargetAt(0)); // + desktop
+        assert!(st.run_config.as_ref().unwrap().auto_apply, "on by default");
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+        let (hot, auto_apply, cold) = hot_and_cold(&out);
+        let targets: Vec<SessionTarget> =
+            hot.iter().map(|s| SessionTarget::of(&s.target)).collect();
+        assert_eq!(
+            targets,
+            vec![SessionTarget::Desktop, pixel_7_target(), simulator_target()],
+            "desktop, the Android device and the simulator all launch hot"
+        );
+        assert_eq!(auto_apply, Some(true));
+        assert!(cold.is_empty(), "{cold:?}");
+        assert!(toast_texts(&st, ToastKind::Info).is_empty());
+
+        // A profile build cannot run hot: it launches cold, and says why.
         let mut st = workbench_with_project();
         run_config_on_devices(&mut st, vec![pixel_7()]);
-        update(&mut st, Message::RunConfigToggleTargetAt(0)); // desktop on
-        update(&mut st, Message::RunConfigToggleWatch);
-        assert!(st.run_config.as_ref().unwrap().watch);
-
+        update(&mut st, Message::RunConfigCycleMode(1));
+        assert_eq!(st.run_config.as_ref().unwrap().mode, BuildMode::Profile);
         let out = update(&mut st, Message::RunConfigLaunch);
-        let effects = effects_of(&out);
-        let watched: Vec<&SessionSpec> = effects
-            .iter()
-            .filter_map(|e| match e {
-                Effect::LaunchWatchedSessions(specs) => Some(specs),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        let plain: Vec<&SessionSpec> = effects
-            .iter()
-            .filter_map(|e| match e {
-                Effect::LaunchSessions(specs) => Some(specs),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        assert_eq!(watched.len(), 1);
-        assert_eq!(watched[0].target, DeviceTarget::Desktop);
-        assert_eq!(plain.len(), 1);
-        assert_eq!(SessionTarget::of(&plain[0].target), pixel_7_target());
-
-        // Unchecked (the default), the same launch stays one plain effect.
-        let mut st = workbench_with_project();
-        update(&mut st, Message::OpenRunConfig);
-        let out = update(&mut st, Message::RunConfigLaunch);
-        assert!(
-            effects_of(&out)
-                .iter()
-                .all(|e| !matches!(e, Effect::LaunchWatchedSessions(_)))
+        let (hot, _, cold) = hot_and_cold(&out);
+        assert!(hot.is_empty(), "{hot:?}");
+        assert_eq!(cold.len(), 1);
+        assert_eq!(SessionTarget::of(&cold[0].target), pixel_7_target());
+        assert_eq!(
+            toast_texts(&st, ToastKind::Info),
+            vec!["Pixel 7 runs cold: hot patching needs a debug build, not Profile"]
         );
+    }
+
+    #[test]
+    fn auto_apply_off_launches_hot_without_arming_the_watcher() {
+        let mut st = workbench_with_project();
+        update(&mut st, Message::OpenRunConfig); // desktop checked by default
+        update(&mut st, Message::RunConfigToggleAutoApply);
+        assert!(!st.run_config.as_ref().unwrap().auto_apply);
+
+        let out = update(&mut st, Message::RunConfigLaunch);
+        let (hot, auto_apply, cold) = hot_and_cold(&out);
+        assert_eq!(hot.len(), 1, "still hot");
+        assert_eq!(hot[0].target, DeviceTarget::Desktop);
+        assert_eq!(auto_apply, Some(false), "but the runner arms no watcher");
+        assert!(cold.is_empty());
+
+        // The runner then registers and marks it hot, with no `EnableWatch`:
+        // the session runs hot and unwatched, and `r` patches it.
+        let id = register_on(&mut st, 7, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::HotSessionStarted { session: id });
+        st.sessions[0].state = SessionState::Running;
+        assert!(st.sessions[0].hot);
+        assert!(!st.sessions[0].watch);
+        assert_eq!(
+            update(&mut st, Message::HotPatchNow).effect,
+            Some(Effect::HotPatchNow { session: id })
+        );
+    }
+
+    /// A running desktop session the runner launched hot, unwatched.
+    fn hot_desktop() -> (AppState, SessionId) {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        update(&mut st, Message::HotSessionStarted { session: a });
+        st.sessions[0].state = SessionState::Running;
+        (st, a)
+    }
+
+    #[test]
+    fn hot_patch_now_on_a_hot_session_asks_the_runner_to_patch() {
+        let (mut st, a) = hot_desktop();
+
+        let out = update(&mut st, Message::HotPatchNow);
+
+        assert_eq!(out.effect, Some(Effect::HotPatchNow { session: a }));
+        assert!(st.sessions[0].hot_patch_requested);
+        assert!(!st.sessions[0].close_on_exit, "nothing is restarted");
+        assert!(st.toasts.items.is_empty(), "the answer is what toasts");
+
+        // The answer flows through the ordinary outcome handling: the toast,
+        // the flash, and the request mark taken.
+        update(
+            &mut st,
+            outcome(
+                a,
+                HotOutcome::Patched {
+                    ms: 42,
+                    components: 3,
+                },
+            ),
+        );
+        assert_eq!(
+            toast_texts(&st, ToastKind::Success),
+            vec!["patched in 42 ms"]
+        );
+        assert!(st.sessions[0].hot_patch_flash.is_some());
+        assert!(!st.sessions[0].hot_patch_requested);
+    }
+
+    #[test]
+    fn hot_patch_now_with_nothing_changed_tells_the_user() {
+        let (mut st, a) = hot_desktop();
+        update(&mut st, Message::HotPatchNow);
+
+        let out = update(&mut st, outcome(a, HotOutcome::NoChange));
+
+        assert_eq!(out.effect, None);
+        assert_eq!(
+            toast_texts(&st, ToastKind::Info),
+            vec!["no change to the running app"]
+        );
+    }
+
+    #[test]
+    fn a_restart_required_answer_to_hot_patch_now_restarts_an_unwatched_session() {
+        let (mut st, a) = hot_desktop();
+        let reason = RestartReason::NoSeamHit;
+
+        // Unasked (say a late answer) and unwatched: only the toast.
+        let out = update(
+            &mut st,
+            outcome(a, HotOutcome::RestartRequired(reason.clone())),
+        );
+        assert_eq!(out.effect, None);
+        assert!(!st.sessions[0].close_on_exit);
+
+        // Asked with `r`: the restart follows, watcher or not.
+        update(&mut st, Message::HotPatchNow);
+        let out = update(&mut st, outcome(a, HotOutcome::RestartRequired(reason)));
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert!(st.sessions[0].close_on_exit);
+    }
+
+    #[test]
+    fn hot_patch_now_on_a_cold_app_session_restarts_with_a_toast() {
+        let mut st = workbench_with_project();
+        let a = register_on(&mut st, 0, "/tmp/huddle", SessionTarget::Desktop);
+        st.sessions[0].state = SessionState::Running;
+
+        let out = update(&mut st, Message::HotPatchNow);
+
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert!(st.sessions[0].close_on_exit, "the restart path ran");
+        assert_eq!(
+            toast_texts(&st, ToastKind::Info),
+            vec!["not a hot run: restarting"]
+        );
+    }
+
+    #[test]
+    fn hot_patch_now_without_an_app_session_does_nothing() {
+        let mut st = workbench_with_project();
+        assert_eq!(update(&mut st, Message::HotPatchNow), Outcome::idle());
+
+        register(&mut st, 0, "/tmp/huddle", "build apk");
+        assert_eq!(update(&mut st, Message::HotPatchNow), Outcome::idle());
+        assert!(st.toasts.items.is_empty());
+    }
+
+    #[test]
+    fn hot_patch_now_on_an_ended_hot_session_restarts_it_without_the_cold_toast() {
+        let (mut st, a) = hot_desktop();
+        st.sessions[0].state = SessionState::Exited(false);
+
+        let out = update(&mut st, Message::HotPatchNow);
+
+        assert_eq!(out.effect, Some(Effect::RestartSession(a)));
+        assert!(toast_texts(&st, ToastKind::Info).is_empty());
     }
 
     #[test]
@@ -5028,8 +5284,8 @@ mod tests {
 
         let out = update(&mut st, Message::RunConfigLaunch);
         assert!(st.run_config.is_none(), "launch closes the modal");
-        let Some(Effect::LaunchSessions(specs)) = out.effect else {
-            panic!("expected a LaunchSessions effect, got {:?}", out.effect);
+        let Some(Effect::LaunchHotSessions { specs, .. }) = out.effect else {
+            panic!("expected a LaunchHotSessions effect, got {:?}", out.effect);
         };
         // desktop + 3 devices.
         assert_eq!(specs.len(), 4);
@@ -5168,7 +5424,7 @@ mod tests {
 
         let out = update(&mut st, Message::RunConfigLaunch);
 
-        let Some(Effect::LaunchSessions(specs)) = out.effect else {
+        let Some(Effect::LaunchHotSessions { specs, .. }) = out.effect else {
             panic!("the free target must still launch, got {:?}", out.effect);
         };
         assert_eq!(specs.len(), 1);
@@ -5196,7 +5452,7 @@ mod tests {
         let out = update(&mut st, Message::RunConfigLaunch);
 
         assert!(
-            matches!(out.effect, Some(Effect::LaunchSessions(ref specs)) if specs.len() == 1),
+            matches!(out.effect, Some(Effect::LaunchHotSessions { ref specs, .. }) if specs.len() == 1),
             "an exited session occupies nothing, got {:?}",
             out.effect
         );
@@ -5213,7 +5469,7 @@ mod tests {
 
         let out = update(&mut st, Message::RunConfigLaunch);
 
-        let Some(Effect::LaunchSessions(specs)) = out.effect else {
+        let Some(Effect::LaunchHotSessions { specs, .. }) = out.effect else {
             panic!(
                 "a different project must still launch, got {:?}",
                 out.effect
@@ -5233,7 +5489,7 @@ mod tests {
         let out = update(&mut st, Message::RunConfigLaunch);
 
         assert!(
-            matches!(out.effect, Some(Effect::LaunchSessions(ref specs)) if specs.len() == 1),
+            matches!(out.effect, Some(Effect::LaunchHotSessions { ref specs, .. }) if specs.len() == 1),
             "building a project must not stop it being run, got {:?}",
             out.effect
         );
@@ -5259,7 +5515,7 @@ mod tests {
 
         let out = update(&mut st, Message::RunOnAllDevices);
 
-        let Some(Effect::LaunchSessions(specs)) = out.effect else {
+        let Some(Effect::LaunchHotSessions { specs, .. }) = out.effect else {
             panic!("the free device must still launch, got {:?}", out.effect);
         };
         assert_eq!(specs.len(), 1);
@@ -8245,7 +8501,7 @@ mod tests {
 
             let out = launch_from_run_config(&mut st);
             assert!(
-                matches!(out.effect, Some(Effect::LaunchSessions(_))),
+                matches!(out.effect, Some(Effect::LaunchHotSessions { .. })),
                 "a refused config never holds up the launch, got {:?}",
                 out.effect
             );
@@ -8285,7 +8541,7 @@ mod tests {
             panic!("expected a Batch, got {:?}", out.effect);
         };
         assert_eq!(effects.len(), 2);
-        let Effect::LaunchSessions(specs) = &effects[0] else {
+        let Effect::LaunchHotSessions { specs, .. } = &effects[0] else {
             panic!("the launch comes first, got {:?}", effects[0]);
         };
         assert_eq!(specs.len(), 1);
@@ -8316,7 +8572,7 @@ mod tests {
         let Some(Effect::Batch(effects)) = out.effect else {
             panic!("expected a Batch, got {:?}", out.effect);
         };
-        assert!(matches!(&effects[0], Effect::LaunchSessions(specs) if specs.len() == 2));
+        assert!(matches!(&effects[0], Effect::LaunchHotSessions { specs, .. } if specs.len() == 2));
         let configs: Vec<_> = effects[1..]
             .iter()
             .filter(|e| matches!(e, Effect::GenerateIdeConfig(_)))
@@ -8333,7 +8589,7 @@ mod tests {
         update(&mut st, Message::OpenRunConfig);
         let out = update(&mut st, Message::RunConfigLaunch);
         assert!(
-            matches!(out.effect, Some(Effect::LaunchSessions(ref specs)) if specs.len() == 1),
+            matches!(out.effect, Some(Effect::LaunchHotSessions { ref specs, .. }) if specs.len() == 1),
             "got {:?}",
             out.effect
         );
@@ -8344,7 +8600,7 @@ mod tests {
         update(&mut st, Message::OpenRunConfig);
         let out = update(&mut st, Message::RunConfigLaunch);
         assert!(
-            matches!(out.effect, Some(Effect::LaunchSessions(_))),
+            matches!(out.effect, Some(Effect::LaunchHotSessions { .. })),
             "got {:?}",
             out.effect
         );
@@ -8357,7 +8613,7 @@ mod tests {
         update(&mut st, Message::OpenRunConfig);
         let out = update(&mut st, Message::RunConfigLaunch);
         assert!(
-            matches!(out.effect, Some(Effect::LaunchSessions(_))),
+            matches!(out.effect, Some(Effect::LaunchHotSessions { .. })),
             "got {:?}",
             out.effect
         );
@@ -8377,7 +8633,7 @@ mod tests {
         let Some(Effect::Batch(effects)) = out.effect else {
             panic!("expected a Batch, got {:?}", out.effect);
         };
-        assert!(matches!(&effects[0], Effect::LaunchSessions(_)));
+        assert!(matches!(&effects[0], Effect::LaunchHotSessions { .. }));
         assert!(matches!(
             &effects[1],
             Effect::GenerateIdeConfig(request)

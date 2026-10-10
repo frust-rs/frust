@@ -51,7 +51,8 @@ pub struct RunTarget {
 
 /// Which control in the run-config modal has keyboard focus. Ordered
 /// top-to-bottom: the target checkboxes, then mode, flavor, defines, the
-/// watch checkbox, and the launch button — the order [`RunConfig::focus_next`]/[`focus_prev`] walk.
+/// auto-apply checkbox, and the launch button — the order
+/// [`RunConfig::focus_next`]/[`focus_prev`] walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunFocus {
     /// A target checkbox row (0-based index into [`RunConfig::targets`]).
@@ -62,9 +63,8 @@ pub enum RunFocus {
     Flavor,
     /// The defines text field (`KEY=VALUE` pairs, space-separated).
     Defines,
-    /// The "Watch src/ and restart on change (desktop only)" checkbox
-    /// (`Space` toggles it).
-    Watch,
+    /// The "Auto-apply on save" checkbox (`Space` toggles it).
+    AutoApply,
     /// The launch button.
     Launch,
 }
@@ -84,11 +84,14 @@ pub struct RunConfig {
     pub flavor: String,
     /// The `--define`s as typed (`KEY=VALUE` pairs, space-separated).
     pub defines: String,
-    /// Whether the launched **desktop** session gets "Watch: restart on
-    /// save" turned on as soon as it registers (the runner's
-    /// `Message::EnableWatch`). Device targets ignore it — the watch loop
-    /// has no device-side story. Off by default.
-    pub watch: bool,
+    /// "Auto-apply on save": whether a session that launches **hot** (every
+    /// target passing `SessionSpec::hot_precondition` does, whatever this
+    /// says) also gets its source watcher armed as soon as it registers (the
+    /// runner's `Message::EnableWatch`), so a save is applied without asking.
+    /// Off, the session still runs hot and `r` (`Message::HotPatchNow`)
+    /// applies the edits on demand. A spec that launches cold ignores it. On
+    /// by default.
+    pub auto_apply: bool,
     /// Which control has focus.
     pub focus: RunFocus,
 }
@@ -111,7 +114,7 @@ impl RunConfig {
             });
         }
         // If nothing was pre-selected, default to desktop so a bare
-        // `r`→`Enter` still launches something sensible.
+        // `o`→`Enter` still launches something sensible.
         if !targets.iter().any(|t| t.selected) {
             targets[0].selected = true;
         }
@@ -121,7 +124,7 @@ impl RunConfig {
             mode: BuildMode::Debug,
             flavor: String::new(),
             defines: String::new(),
-            watch: false,
+            auto_apply: true,
             focus: RunFocus::Target(0),
         }
     }
@@ -132,7 +135,7 @@ impl RunConfig {
         order.push(RunFocus::Mode);
         order.push(RunFocus::Flavor);
         order.push(RunFocus::Defines);
-        order.push(RunFocus::Watch);
+        order.push(RunFocus::AutoApply);
         order.push(RunFocus::Launch);
         order
     }
@@ -154,8 +157,8 @@ impl RunConfig {
         self.focus = order[next];
     }
 
-    /// Toggle the focused checkbox: a target row's selection, or the watch
-    /// checkbox (no-op on any other control).
+    /// Toggle the focused checkbox: a target row's selection, or the
+    /// auto-apply checkbox (no-op on any other control).
     pub fn toggle_focused_target(&mut self) {
         match self.focus {
             RunFocus::Target(i) => {
@@ -163,15 +166,15 @@ impl RunConfig {
                     t.selected = !t.selected;
                 }
             }
-            RunFocus::Watch => self.watch = !self.watch,
+            RunFocus::AutoApply => self.auto_apply = !self.auto_apply,
             RunFocus::Mode | RunFocus::Flavor | RunFocus::Defines | RunFocus::Launch => {}
         }
     }
 
-    /// Toggle the watch checkbox, focusing it (mouse click parity).
-    pub fn toggle_watch(&mut self) {
-        self.watch = !self.watch;
-        self.focus = RunFocus::Watch;
+    /// Toggle the auto-apply checkbox, focusing it (mouse click parity).
+    pub fn toggle_auto_apply(&mut self) {
+        self.auto_apply = !self.auto_apply;
+        self.focus = RunFocus::AutoApply;
     }
 
     /// Toggle a target by index (mouse click parity).
@@ -335,7 +338,7 @@ mod tests {
             RunFocus::Mode,
             RunFocus::Flavor,
             RunFocus::Defines,
-            RunFocus::Watch,
+            RunFocus::AutoApply,
             RunFocus::Launch,
         ];
         for expected in order.iter().skip(1) {
@@ -439,17 +442,17 @@ mod tests {
     }
 
     #[test]
-    fn watch_starts_off_and_space_or_a_click_toggles_it() {
+    fn auto_apply_starts_on_and_space_or_a_click_toggles_it() {
         let mut m = modal();
-        assert!(!m.watch, "watch is opt-in");
-        m.focus = RunFocus::Watch;
+        assert!(m.auto_apply, "auto-apply is on by default");
+        m.focus = RunFocus::AutoApply;
         m.toggle_focused_target();
-        assert!(m.watch);
+        assert!(!m.auto_apply);
         // The checkbox never touches a target's selection.
         assert!(!m.targets[0].selected);
         m.focus = RunFocus::Target(0);
-        m.toggle_watch();
-        assert!(!m.watch);
-        assert_eq!(m.focus, RunFocus::Watch, "a click focuses the checkbox");
+        m.toggle_auto_apply();
+        assert!(m.auto_apply);
+        assert_eq!(m.focus, RunFocus::AutoApply, "a click focuses the checkbox");
     }
 }

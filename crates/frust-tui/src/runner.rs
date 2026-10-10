@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use crossterm::event::EventStream;
@@ -30,6 +30,7 @@ use frust_drive::doctor::{self, DoctorCtx, RealEnv};
 use frust_drive::hotpatch::session::{
     HotSession, Outcome as HotOutcome, RestartReason, StartError,
 };
+use frust_drive::hotpatch::watch::{WatchSet, changed_since};
 use frust_drive::ios_build::{self, IosArtifact};
 use frust_drive::ios_run;
 use frust_drive::process::{ProcessRunner, RealProcessRunner, StreamHandle};
@@ -600,11 +601,14 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         // session is sent `EnableWatch` right after its `RegisterSession` —
         // same channel, so the engine always sees the registration first —
         // which flips its flag and asks for a fresh watcher (`WatchSet`).
-        // A watched relaunch runs hot (`launch_watched_sessions`): a fresh
-        // hot-patch session start, fat build included — so `R` on a hot
-        // session is the full reset it always was.
+        // A watched or hot session's relaunch runs hot (`launch_hot_sessions`):
+        // a fresh hot-patch session start, fat build included — so `R` on a
+        // hot session is the full reset it always was, and a hot session
+        // launched without a watcher ("Auto-apply on save" off) relaunches
+        // hot and still unwatched.
         Some(Effect::RestartSession(id)) => {
             let watched = watchers.contains(id);
+            let was_hot = hot.contains(id);
             spawn_teardown(watchers.stop(id));
             match records.get(id) {
                 Some(record) if record.launch_error.is_none() => {
@@ -612,9 +616,10 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
                     records.mark_closed(id);
                     supervisor.stop(id);
                     hot.stop(id);
-                    if watched {
-                        launch_watched_sessions(
+                    if watched || was_hot {
+                        launch_hot_sessions(
                             vec![spec],
+                            watched,
                             &mut LaunchCtx {
                                 supervisor,
                                 hot,
@@ -654,9 +659,10 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         Some(Effect::LaunchSessions(specs)) => {
             launch_sessions(specs, supervisor, tx, records);
         }
-        Some(Effect::LaunchWatchedSessions(specs)) => {
-            launch_watched_sessions(
+        Some(Effect::LaunchHotSessions { specs, auto_apply }) => {
+            launch_hot_sessions(
                 specs,
+                auto_apply,
                 &mut LaunchCtx {
                     supervisor,
                     hot,
@@ -706,6 +712,19 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
         // hot answers a restart at once, so the burst is never lost.
         Some(Effect::HotPatch { session, paths }) => {
             if !hot.patch(session, paths) {
+                let _ = tx.send(Message::HotPatchOutcome {
+                    session,
+                    outcome: HotOutcome::RestartRequired(RestartReason::HotPatchUnavailable {
+                        reason: "the session is not running as a hot-patch session".to_string(),
+                    }),
+                });
+            }
+        }
+        // `r`: the same queue, asking the worker to find the changed paths
+        // itself (`HotRequest::Now`) — so the same answer comes back the same
+        // way, and a session that is no longer hot answers the same restart.
+        Some(Effect::HotPatchNow { session }) => {
+            if !hot.patch_now(session) {
                 let _ = tx.send(Message::HotPatchOutcome {
                     session,
                     outcome: HotOutcome::RestartRequired(RestartReason::HotPatchUnavailable {
@@ -834,9 +853,10 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
 }
 
 /// Post [`Message::EnableWatch`] for every desktop session in `started` — the
-/// carry-over of "Watch: hot patch on save" onto a relaunch, and the run-config
-/// modal's watch checkbox. Sent after `launch_sessions` has already sent each
-/// session's `RegisterSession`, so the engine always has the tab first.
+/// carry-over of "Watch: hot patch on save" onto the cold relaunch of a
+/// watched session that cannot run hot. Sent after `launch_sessions` has
+/// already sent each session's `RegisterSession`, so the engine always has
+/// the tab first.
 fn enable_watch_on(started: &[(SessionId, bool)], tx: &UnboundedSender<Message>) {
     for &(session, desktop) in started {
         if desktop {
@@ -1499,7 +1519,7 @@ fn launch_sessions(
     started
 }
 
-/// The launch-side handles [`launch_watched_sessions`] needs from
+/// The launch-side handles [`launch_hot_sessions`] needs from
 /// [`apply_effect`]'s context.
 struct LaunchCtx<'a> {
     /// Launches what cannot run hot.
@@ -1516,21 +1536,24 @@ struct LaunchCtx<'a> {
     records: &'a mut McpSessionRecords,
 }
 
-/// Launch specs that carry "Watch: hot patch on save" — the run-config
-/// modal's watch checkbox and every relaunch of a watched session.
+/// Launch specs hot — the hot-capable specs of a run-config or
+/// run-on-all-devices launch (`Effect::LaunchHotSessions`), and every
+/// relaunch of a hot or watched session.
 ///
 /// A spec that can run hot ([`SessionSpec::hot_precondition`]: a debug
 /// desktop, Android device or iOS simulator build) becomes a
-/// [`HotSessions`] entry: registered, recorded and sent `EnableWatch` here,
+/// [`HotSessions`] entry: registered, recorded, sent `EnableWatch` when
+/// `auto_apply` asks for a watcher ("Auto-apply on save", or a watched
+/// session's relaunch), and marked hot (`HotSessionStarted`) here,
 /// synchronously and in that order, and only then started, so the engine
-/// has the tab (and its watch flag) before the worker's first event. Its
-/// start — the fat build, then the fat image spawned directly, on Android
-/// packaged, installed and launched, or on an iOS simulator built through
-/// the Xcode fat build, `simctl install`ed and `simctl launch`ed — runs on
-/// the worker's own thread. Anything else launches
-/// exactly as [`launch_sessions`] does and keeps restart-on-save, with an
-/// Info toast naming the precondition that kept a watchable target cold.
-fn launch_watched_sessions(specs: Vec<SessionSpec>, ctx: &mut LaunchCtx<'_>) {
+/// has the tab (and its flags) before the worker's first event. Its start —
+/// the fat build, then the fat image spawned directly, on Android packaged,
+/// installed and launched, or on an iOS simulator built through the Xcode
+/// fat build, `simctl install`ed and `simctl launch`ed — runs on the
+/// worker's own thread. Anything else launches exactly as [`launch_sessions`] does; with
+/// `auto_apply` it keeps restart-on-save, with an Info toast naming the
+/// precondition that kept a watchable target cold.
+fn launch_hot_sessions(specs: Vec<SessionSpec>, auto_apply: bool, ctx: &mut LaunchCtx<'_>) {
     let mut cold = Vec::new();
     for spec in specs {
         match spec.hot_precondition() {
@@ -1544,7 +1567,10 @@ fn launch_watched_sessions(specs: Vec<SessionSpec>, ctx: &mut LaunchCtx<'_>) {
                     target: Some(SessionTarget::of(&spec.target)),
                 });
                 ctx.records.insert(id, spec.clone());
-                let _ = ctx.tx.send(Message::EnableWatch { session: id });
+                if auto_apply {
+                    let _ = ctx.tx.send(Message::EnableWatch { session: id });
+                }
+                let _ = ctx.tx.send(Message::HotSessionStarted { session: id });
                 if let Err(err) = ctx.hot.start(id, spec, ctx.tx) {
                     let _ = ctx.tx.send(session_line(
                         id,
@@ -1554,7 +1580,7 @@ fn launch_watched_sessions(specs: Vec<SessionSpec>, ctx: &mut LaunchCtx<'_>) {
                 }
             }
             Err(reason) => {
-                if SessionTarget::of(&spec.target).supports_watch() {
+                if auto_apply && SessionTarget::of(&spec.target).supports_watch() {
                     let _ = ctx.tx.send(Message::Notify {
                         level: ToastKind::Info,
                         text: format!("Watch restarts this session on save: {reason}"),
@@ -1566,7 +1592,9 @@ fn launch_watched_sessions(specs: Vec<SessionSpec>, ctx: &mut LaunchCtx<'_>) {
     }
     if !cold.is_empty() {
         let started = launch_sessions(cold, ctx.supervisor, ctx.tx, ctx.records);
-        enable_watch_on(&started, ctx.tx);
+        if auto_apply {
+            enable_watch_on(&started, ctx.tx);
+        }
     }
 }
 
@@ -1811,7 +1839,7 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
     // Keyboard focus heuristic (this crate has no true focus system yet): with no
     // session open the devices panel owns the arrows/Space/Enter; once a
     // session is running the log view owns them (devices stay mouse- and
-    // `r`-driven).
+    // `o`-driven).
     let devices_focused = workbench && !has_active_session;
 
     match code {
@@ -1866,13 +1894,17 @@ fn translate_key(code: KeyCode, mods: KeyModifiers, state: &AppState) -> Vec<Mes
         // `n` opens the create wizard from the workbench (mouse parity: the
         // sidebar ACTIONS "New project" row).
         KeyCode::Char('n') if workbench => vec![Message::OpenCreateWizard],
-        // `r`/`Enter` open the run-config modal primed with the panel
-        // selection; `R` re-runs discovery (mouse parity: the ⟳ affordance) —
-        // except with an *app* session active, where `R` restarts it instead
+        // `o`/`Enter` open the run-config modal primed with the panel
+        // selection. `r` hot-patches the active *app* session now (the
+        // fdemon/Flutter reload key; the pure core restarts a session that
+        // is not hot, with a toast saying so) and claims nothing without
+        // one. `R` re-runs discovery (mouse parity: the ⟳ affordance) —
+        // except with an app session active, where `R` restarts it instead
         // (the keyboard twin of MCP `restart_app` / DAP `frustRestart`). An
         // ad-hoc build/clean tab has nothing to relaunch, so there `R` keeps
         // its discovery job rather than claiming a key that only refuses.
-        KeyCode::Char('r') if workbench => vec![Message::OpenRunConfig],
+        KeyCode::Char('o') if workbench => vec![Message::OpenRunConfig],
+        KeyCode::Char('r') if has_app_session => vec![Message::HotPatchNow],
         KeyCode::Char('R') if has_app_session => vec![Message::RestartSession],
         KeyCode::Char('R') if workbench => vec![Message::RefreshDevices],
         // `W` toggles "Watch: hot patch on save" on the active session (mouse
@@ -2737,11 +2769,30 @@ impl HotControl {
     }
 }
 
+/// One request into a hot worker's queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HotRequest {
+    /// A settled save-burst: patch exactly these paths
+    /// ([`Effect::HotPatch`]).
+    Burst(Vec<PathBuf>),
+    /// Patch whatever changed since the worker's watermark
+    /// ([`Effect::HotPatchNow`], `r`): the worker scans its session's watch
+    /// set ([`changed_since`]) for the paths itself.
+    Now,
+}
+
+/// Resolves a hot session's [`WatchSet`] — run on its worker the first time
+/// a [`HotRequest::Now`] needs it, never on the UI thread
+/// ([`SessionSpec::hot_watch_set`] in production, which runs `cargo
+/// metadata`).
+type WatchSetLoader = Box<dyn FnOnce() -> WatchSet + Send>;
+
 /// One hot session: the request queue into its worker, the shared stop
 /// control, and the worker itself.
 struct HotWorker {
-    /// Settled save-bursts, in order; dropping it ends the worker's loop.
-    requests: mpsc::Sender<Vec<PathBuf>>,
+    /// Settled save-bursts and `r` requests, in order; dropping it ends the
+    /// worker's loop.
+    requests: mpsc::Sender<HotRequest>,
     control: Arc<HotControl>,
     worker: JoinHandle<()>,
     /// Whether the model has shown this session's tab yet — until it has, a
@@ -2781,22 +2832,40 @@ impl HotSessions {
     }
 
     /// Start `spec` hot as session `id` ([`real_hot_start`]), reporting into
-    /// `tx`. `id` must already be registered with the engine.
+    /// `tx`. `id` must already be registered with the engine. The session's
+    /// watch set, for `r`, is resolved from the same spec on the worker
+    /// ([`SessionSpec::hot_watch_set`]).
     fn start(
         &mut self,
         id: SessionId,
         spec: SessionSpec,
         tx: &UnboundedSender<Message>,
     ) -> io::Result<()> {
-        let starter = real_hot_start(spec, Arc::clone(&self.runner));
-        self.start_with(id, starter, tx)
+        let starter = real_hot_start(spec.clone(), Arc::clone(&self.runner));
+        let runner = Arc::clone(&self.runner);
+        let watch_set: WatchSetLoader = Box::new(move || spec.hot_watch_set(&*runner));
+        self.start_with_watch_set(id, starter, watch_set, tx)
     }
 
-    /// [`Self::start`] over any starter — the seam the tests drive.
+    /// [`Self::start`] over any starter, with an empty watch set (so `r`
+    /// always finds nothing changed) — the seam the burst tests drive.
+    #[cfg(test)]
     fn start_with(
         &mut self,
         id: SessionId,
         starter: HotStarter,
+        tx: &UnboundedSender<Message>,
+    ) -> io::Result<()> {
+        self.start_with_watch_set(id, starter, Box::new(WatchSet::default), tx)
+    }
+
+    /// [`Self::start`] over any starter and watch-set loader — the seam the
+    /// `r` tests drive.
+    fn start_with_watch_set(
+        &mut self,
+        id: SessionId,
+        starter: HotStarter,
+        watch_set: WatchSetLoader,
         tx: &UnboundedSender<Message>,
     ) -> io::Result<()> {
         let (requests, inbox) = mpsc::channel();
@@ -2806,7 +2875,7 @@ impl HotSessions {
             let tx = tx.clone();
             thread::Builder::new()
                 .name(format!("frust-tui-hot-{}", id.0))
-                .spawn(move || run_hot_session(id, starter, &inbox, &control, &tx))?
+                .spawn(move || run_hot_session(id, starter, watch_set, &inbox, &control, &tx))?
         };
         let entry = HotWorker {
             requests,
@@ -2824,8 +2893,20 @@ impl HotSessions {
     /// comes back as [`Message::HotPatchOutcome`]. `false` when `id` is not a
     /// live hot session.
     fn patch(&self, id: SessionId, paths: Vec<PathBuf>) -> bool {
+        self.request(id, HotRequest::Burst(paths))
+    }
+
+    /// Ask `id`'s worker to patch everything changed since its watermark
+    /// (`r`). Never blocks, answers like [`Self::patch`]; `false` when `id`
+    /// is not a live hot session.
+    fn patch_now(&self, id: SessionId) -> bool {
+        self.request(id, HotRequest::Now)
+    }
+
+    /// Queue `request` for `id`'s worker, unless it is gone or stopped.
+    fn request(&self, id: SessionId, request: HotRequest) -> bool {
         match self.live.get(&id) {
-            Some(entry) if !entry.control.is_stopped() => entry.requests.send(paths).is_ok(),
+            Some(entry) if !entry.control.is_stopped() => entry.requests.send(request).is_ok(),
             _ => false,
         }
     }
@@ -2887,17 +2968,19 @@ impl Drop for HotSessions {
 
 /// A hot worker's whole life: run the blocking start (its lines into the
 /// session's log), hand the app's output to a drain thread, then answer
-/// every queued burst with `on_change` until the queue closes or the session
-/// is stopped. Whichever way it ends, the drain thread is joined (a stop has
-/// already killed the stream it drains) and the app's teardown has run.
+/// every queued request with `on_change` until the queue closes or the
+/// session is stopped. Whichever way it ends, the drain thread is joined (a
+/// stop has already killed the stream it drains) and the app's teardown has
+/// run.
 fn run_hot_session(
     id: SessionId,
     starter: HotStarter,
-    inbox: &mpsc::Receiver<Vec<PathBuf>>,
+    watch_set: WatchSetLoader,
+    inbox: &mpsc::Receiver<HotRequest>,
     control: &Arc<HotControl>,
     tx: &UnboundedSender<Message>,
 ) {
-    let drain = serve_hot_session(id, starter, inbox, control, tx);
+    let drain = serve_hot_session(id, starter, watch_set, inbox, control, tx);
     if let Some(drain) = drain {
         let _ = drain.join();
     }
@@ -2906,13 +2989,24 @@ fn run_hot_session(
 
 /// [`run_hot_session`]'s body, returning the drain thread (when one was
 /// started) for it to join.
+///
+/// **The watermark.** The worker keeps the wall-clock time from which `r`
+/// ([`HotRequest::Now`]) looks for changed files: read immediately *before*
+/// the fat build starts, so an edit saved while it builds is replayed by the
+/// first `r` rather than missed, and advanced — to the time read just before
+/// the `on_change` call — after every `Patched` or `NoChange` answer, so a
+/// patch's own inputs are never replayed twice while an edit landing during
+/// that call still is. A compile failure or a restart leaves it where it
+/// was. It is this worker's value alone: the pure core reads no clock.
 fn serve_hot_session(
     id: SessionId,
     starter: HotStarter,
-    inbox: &mpsc::Receiver<Vec<PathBuf>>,
+    watch_set: WatchSetLoader,
+    inbox: &mpsc::Receiver<HotRequest>,
     control: &Arc<HotControl>,
     tx: &UnboundedSender<Message>,
 ) -> Option<JoinHandle<()>> {
+    let mut watermark = SystemTime::now();
     let _ = tx.send(session_state(id, SessionState::Building));
     let started = {
         let mut on_line = |line: &str| {
@@ -2975,15 +3069,54 @@ fn serve_hot_session(
             patcher
         }
     };
-    while let Ok(paths) = inbox.recv() {
+    // The session's watch set, resolved on the first `r` that needs it and
+    // kept for the session's life.
+    let mut load_watch_set = Some(watch_set);
+    let mut watch_set: Option<WatchSet> = None;
+    while let Ok(request) = inbox.recv() {
         if control.is_stopped() {
             break;
         }
+        let paths = match request {
+            HotRequest::Burst(paths) => paths,
+            HotRequest::Now => {
+                let set = watch_set.get_or_insert_with(|| {
+                    load_watch_set
+                        .take()
+                        .map_or_else(WatchSet::default, |load| load())
+                });
+                match changed_since(set, watermark) {
+                    Ok(paths) if paths.is_empty() => {
+                        // Nothing to patch: say so the way an unchanged burst
+                        // would, without a thin build.
+                        let _ = tx.send(Message::HotPatchOutcome {
+                            session: id,
+                            outcome: HotOutcome::NoChange,
+                        });
+                        continue;
+                    }
+                    Ok(paths) => paths,
+                    Err(err) => {
+                        let _ = tx.send(Message::Notify {
+                            level: ToastKind::Warn,
+                            text: format!(
+                                "hot patch: scanning the sources for changes failed: {err}"
+                            ),
+                        });
+                        continue;
+                    }
+                }
+            }
+        };
+        let before = SystemTime::now();
         let outcome = patcher.on_change(&paths);
         if control.is_stopped() {
             // Stopped (restarted, closed) while patching: nobody is waiting
             // for this answer any more.
             break;
+        }
+        if matches!(outcome, HotOutcome::Patched { .. } | HotOutcome::NoChange) {
+            watermark = before;
         }
         let _ = tx.send(Message::HotPatchOutcome {
             session: id,
@@ -4498,6 +4631,71 @@ mod tests {
         );
     }
 
+    /// `r` hot-patches the active app session (the pure core decides hot
+    /// patch or restart) and claims nothing without one; `o` — and `Enter`
+    /// on the devices panel — opens the run dialog that `r` used to.
+    #[test]
+    fn r_hot_patches_an_app_session_and_o_opens_the_run_dialog() {
+        use crate::engine::SessionView;
+
+        let regions = MouseRegions::new();
+        let mut app_session = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        app_session.sessions.push(SessionView::with_devtools(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "desktop",
+            DevtoolsLaunch::unavailable(),
+            Some(SessionTarget::Desktop),
+        ));
+        app_session.active_session = Some(0);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('r')), &app_session, &regions),
+            vec![Message::HotPatchNow]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('o')), &app_session, &regions),
+            vec![Message::OpenRunConfig]
+        );
+
+        let mut ad_hoc = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        ad_hoc.sessions.push(SessionView::new(
+            SessionId(0),
+            PathBuf::from("/tmp/huddle"),
+            "build apk",
+        ));
+        ad_hoc.active_session = Some(0);
+        assert_eq!(
+            translate_event(key(KeyCode::Char('r')), &ad_hoc, &regions),
+            Vec::<Message>::new(),
+            "an ad-hoc tab has nothing to patch"
+        );
+
+        let no_session = AppState {
+            screen: Screen::Workbench,
+            ..Default::default()
+        };
+        assert_eq!(
+            translate_event(key(KeyCode::Char('r')), &no_session, &regions),
+            Vec::<Message>::new(),
+            "with no session `r` claims nothing"
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Char('o')), &no_session, &regions),
+            vec![Message::OpenRunConfig]
+        );
+        assert_eq!(
+            translate_event(key(KeyCode::Enter), &no_session, &regions),
+            vec![Message::OpenRunConfig],
+            "Enter on the devices panel still opens it"
+        );
+    }
+
     /// A restart whose launch record is gone (evicted by the MCP path's
     /// bounded retention) must reach the user as a toast, not vanish into
     /// stderr under the raw-mode TUI.
@@ -4883,7 +5081,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // ── Hot sessions (`Effect::HotPatch`, `launch_watched_sessions`) ─────────
+    // ── Hot sessions (`Effect::HotPatch`, `launch_hot_sessions`) ─────────────
 
     /// Everything [`apply_effect`] needs, owned, so one hot test can enact
     /// several effects against the same state.
@@ -5088,7 +5286,7 @@ mod tests {
         assert!(!rig.hot.patch(SessionId(2), vec![]));
     }
 
-    /// The run-config watch checkbox (and every watched relaunch) launches a
+    /// A hot launch with "Auto-apply on save" (and every watched relaunch) runs a
     /// debug desktop spec hot: registered, recorded and sent `EnableWatch`
     /// before its worker says anything, never through the supervisor. This
     /// project has no `[package]`, so the start refuses before building and
@@ -5105,9 +5303,10 @@ mod tests {
             true,
         ));
         let mut rig = HotRig::new(runner);
-        rig.apply(Effect::LaunchWatchedSessions(vec![watch_desktop_spec(
-            &root,
-        )]));
+        rig.apply(Effect::LaunchHotSessions {
+            specs: vec![watch_desktop_spec(&root)],
+            auto_apply: true,
+        });
 
         let id = match rig.rx.try_recv() {
             Ok(Message::RegisterSession { id, target, .. }) => {
@@ -5384,9 +5583,10 @@ mod tests {
 
         let root = watch_scratch_dir("simulator-hot-launch");
         let mut rig = HotRig::new(Arc::new(FakeProcessRunner::new()));
-        rig.apply(Effect::LaunchWatchedSessions(vec![watch_simulator_spec(
-            &root,
-        )]));
+        rig.apply(Effect::LaunchHotSessions {
+            specs: vec![watch_simulator_spec(&root)],
+            auto_apply: true,
+        });
 
         let id = match rig.rx.try_recv() {
             Ok(Message::RegisterSession { id, target, .. }) => {
@@ -5439,9 +5639,10 @@ mod tests {
 
         let root = watch_scratch_dir("android-hot-launch");
         let mut rig = HotRig::new(Arc::new(FakeProcessRunner::new()));
-        rig.apply(Effect::LaunchWatchedSessions(vec![watch_android_spec(
-            &root,
-        )]));
+        rig.apply(Effect::LaunchHotSessions {
+            specs: vec![watch_android_spec(&root)],
+            auto_apply: true,
+        });
 
         let id = match rig.rx.try_recv() {
             Ok(Message::RegisterSession { id, target, .. }) => {
@@ -5509,7 +5710,10 @@ mod tests {
         let mut rig = HotRig::new(runner);
         let mut spec = watch_desktop_spec(&root);
         spec.build.mode = BuildMode::Release;
-        rig.apply(Effect::LaunchWatchedSessions(vec![spec]));
+        rig.apply(Effect::LaunchHotSessions {
+            specs: vec![spec],
+            auto_apply: true,
+        });
 
         match rig.rx.try_recv() {
             Ok(Message::Notify {
@@ -5528,6 +5732,181 @@ mod tests {
         ));
         assert!(!rig.hot.contains(id));
         assert_eq!(rig.supervisor.session_ids().count(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// "Auto-apply on save" off: the spec still launches hot — registered,
+    /// marked hot, never through the supervisor — but no `EnableWatch`
+    /// follows its registration, so no watcher is ever armed for it.
+    #[test]
+    fn an_auto_apply_off_launch_runs_hot_without_enabling_watch() {
+        use frust_drive::process::FakeProcessRunner;
+
+        let root = watch_scratch_dir("auto-apply-off");
+        let runner = Arc::new(FakeProcessRunner::new().with_stream(
+            "cargo run --features frust/perf-trace --features frust/devtools",
+            ["hello from the app"],
+            true,
+        ));
+        let mut rig = HotRig::new(runner);
+        rig.apply(Effect::LaunchHotSessions {
+            specs: vec![watch_desktop_spec(&root)],
+            auto_apply: false,
+        });
+
+        let id = match rig.rx.try_recv() {
+            Ok(Message::RegisterSession { id, .. }) => id,
+            other => panic!("expected RegisterSession first, got {other:?}"),
+        };
+        match rig.rx.try_recv() {
+            Ok(Message::HotSessionStarted { session }) => assert_eq!(session, id),
+            other => panic!("expected HotSessionStarted, with no EnableWatch, got {other:?}"),
+        }
+        assert!(rig.hot.contains(id));
+        assert!(!rig.watchers.contains(id));
+        assert_eq!(rig.supervisor.session_ids().count(), 0);
+        rig.apply(Effect::StopSession(id));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `r` on a session that is not (or no longer) hot is answered at once
+    /// with a restart, exactly like a burst.
+    #[test]
+    fn hot_patch_now_for_a_session_that_is_not_hot_answers_a_restart() {
+        use frust_drive::process::FakeProcessRunner;
+
+        let mut rig = HotRig::new(Arc::new(FakeProcessRunner::new()));
+        rig.apply(Effect::HotPatchNow {
+            session: SessionId(4),
+        });
+        match rig.rx.try_recv() {
+            Ok(Message::HotPatchOutcome {
+                session,
+                outcome: HotOutcome::RestartRequired(RestartReason::HotPatchUnavailable { .. }),
+            }) => assert_eq!(session, SessionId(4)),
+            other => panic!("expected an immediate restart answer, got {other:?}"),
+        }
+    }
+
+    /// A patcher that records every path list it is handed and answers from
+    /// a script (then `Patched`).
+    struct ScriptedPatcher {
+        calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+        answers: std::collections::VecDeque<HotOutcome>,
+    }
+
+    impl HotPatcher for ScriptedPatcher {
+        fn on_change(&mut self, paths: &[PathBuf]) -> HotOutcome {
+            self.calls.lock().unwrap().push(paths.to_vec());
+            self.answers.pop_front().unwrap_or(HotOutcome::Patched {
+                ms: 5,
+                components: 1,
+            })
+        }
+    }
+
+    /// Write `path` (creating its parents) stamped `at`.
+    fn stamp(path: &Path, at: SystemTime) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        file.set_modified(at).unwrap();
+    }
+
+    /// The next `HotPatchOutcome` the rig receives.
+    fn next_outcome(rig: &mut HotRig) -> HotOutcome {
+        rig.wait_for(|msg| match msg {
+            Message::HotPatchOutcome { outcome, .. } => Some(outcome),
+            _ => None,
+        })
+    }
+
+    /// Acceptance: `r` replays what changed since the watermark. The
+    /// watermark is read before the fat build, so an edit saved *during*
+    /// the build is replayed and an older one is not; a compile failure
+    /// leaves it in place (the same edit is offered again), a `Patched`
+    /// advances it (nothing is left to patch: `NoChange`, without a thin
+    /// build), and a later edit is picked up on its own.
+    #[test]
+    fn hot_patch_now_replays_what_changed_since_the_fat_build_started() {
+        use frust_drive::process::FakeProcessRunner;
+
+        let root = watch_scratch_dir("patch-now");
+        let src = root.join("src");
+        stamp(
+            &src.join("old.rs"),
+            SystemTime::now() - Duration::from_secs(3600),
+        );
+        let set = WatchSet {
+            replayable: vec![src.clone()],
+            local_non_member: Vec::new(),
+            build_inputs: vec![root.join("Cargo.toml")],
+            roots: vec![root.clone()],
+        };
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let patcher = ScriptedPatcher {
+            calls: Arc::clone(&calls),
+            answers: [HotOutcome::CompileFailed {
+                diagnostics: vec!["error: expected `;`".to_string()],
+            }]
+            .into(),
+        };
+        let during = src.join("during.rs");
+        let mut rig = HotRig::new(Arc::new(FakeProcessRunner::new()));
+        rig.hot
+            .start_with_watch_set(
+                SessionId(3),
+                Box::new({
+                    let during = during.clone();
+                    move |_, _| {
+                        // An edit saved while the fat build runs.
+                        stamp(&during, SystemTime::now());
+                        thread::sleep(Duration::from_millis(20));
+                        HotStart::Running {
+                            patcher: Box::new(patcher),
+                            child: None,
+                            notice: None,
+                            teardown: None,
+                        }
+                    }
+                }),
+                Box::new(move || set),
+                &rig.tx.clone(),
+            )
+            .unwrap();
+
+        rig.apply(Effect::HotPatchNow {
+            session: SessionId(3),
+        });
+        assert!(matches!(
+            next_outcome(&mut rig),
+            HotOutcome::CompileFailed { .. }
+        ));
+        rig.apply(Effect::HotPatchNow {
+            session: SessionId(3),
+        });
+        assert!(matches!(next_outcome(&mut rig), HotOutcome::Patched { .. }));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![vec![during.clone()], vec![during.clone()]],
+            "the build-time edit, twice: a compile failure keeps the watermark"
+        );
+
+        rig.apply(Effect::HotPatchNow {
+            session: SessionId(3),
+        });
+        assert_eq!(next_outcome(&mut rig), HotOutcome::NoChange);
+        assert_eq!(calls.lock().unwrap().len(), 2, "no thin build for nothing");
+
+        thread::sleep(Duration::from_millis(20));
+        let later = src.join("ui/later.rs");
+        stamp(&later, SystemTime::now());
+        rig.apply(Effect::HotPatchNow {
+            session: SessionId(3),
+        });
+        assert!(matches!(next_outcome(&mut rig), HotOutcome::Patched { .. }));
+        assert_eq!(calls.lock().unwrap().last(), Some(&vec![later]));
+
+        rig.apply(Effect::StopSession(SessionId(3)));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5794,8 +6173,9 @@ mod tests {
                 // `gate_state`'s existing shapes give without also opening
                 // DevTools (`inspector_live`, which would hijack `R` into
                 // `translate_devtools_key` instead) — built directly instead.
-                // "Watch: hot patch on save" needs the same desktop app session.
-                "Restart session" | "Watch: hot patch on save" => {
+                // "Watch: hot patch on save" and "Hot patch now" need the same
+                // desktop app session.
+                "Restart session" | "Watch: hot patch on save" | "Hot patch now" => {
                     use crate::engine::SessionView;
                     let mut state = AppState {
                         screen: Screen::Workbench,

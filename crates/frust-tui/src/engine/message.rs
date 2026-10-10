@@ -67,9 +67,9 @@ pub enum RegionId {
     RunFlavorRow,
     /// The run-config modal's defines text field; click focuses it.
     RunDefinesRow,
-    /// The run-config modal's "Watch src/ and restart on change" checkbox
-    /// row; click toggles it.
-    RunWatchRow,
+    /// The run-config modal's "Auto-apply on save" checkbox row; click
+    /// toggles it.
+    RunAutoApplyRow,
     /// The run-config modal's launch button.
     RunLaunch,
     /// The run-config modal's cancel button.
@@ -414,15 +414,25 @@ pub enum Message {
     /// restarts — a crashed session must be relaunchable, not just a running
     /// one. The relaunch's tab becomes active when it registers.
     RestartSession,
+    /// Hot-patch the active session now (`r` with an app session active, and
+    /// the palette's "Hot patch now" row): a live hot session is asked to
+    /// replay every source and build input changed since its last applied
+    /// patch ([`super::Effect::HotPatchNow`]), the manual twin of a watched
+    /// save-burst — the answer comes back as [`Self::HotPatchOutcome`], and a
+    /// `RestartRequired` restarts it whether or not its watcher is armed. An
+    /// app session that is not hot restarts through the
+    /// [`Self::RestartSession`] path with an Info toast saying so; no app
+    /// session, nothing.
+    HotPatchNow,
     /// Toggle "Watch: hot patch on save" on the active session (the
     /// palette's "Watch: hot patch on save" row, `W`): while on, a settled
     /// save-burst is offered to the running app as a hot patch
     /// ([`super::Effect::HotPatch`]) when the session runs hot, and restarts
     /// it through the [`Self::RestartSession`] path otherwise, once per
     /// burst. A watched session's relaunch runs hot (the runner launches a
-    /// watched debug desktop session through the hot-patch session start).
-    /// Desktop sessions only — a device (or ad-hoc) session refuses with a
-    /// toast, the `frust run --watch` rule. Routed to the runner as
+    /// watched debug session through the hot-patch session start). Desktop,
+    /// Android device and iOS simulator app sessions only — anything else
+    /// refuses with a toast, the `frust run --watch` rule. Routed to the runner as
     /// [`super::Effect::WatchSet`], which starts/stops the session's
     /// `crate::supervise::SourceWatchers` entry.
     ToggleWatch,
@@ -454,11 +464,20 @@ pub enum Message {
         /// `frust-drive`'s answer, verbatim.
         outcome: HotOutcome,
     },
-    /// Turn watch on for a just-registered desktop session without a toggle
-    /// — posted by the runner right after a launch that should carry the
-    /// flag registers: the relaunch of a watched session (how the flag
-    /// survives a restart), or a desktop launch from the run-config modal
-    /// with its watch checkbox ticked. Always arrives after that launch's
+    /// Mark a just-registered session as a **hot** session — posted by the
+    /// runner after the [`Self::RegisterSession`] (and any
+    /// [`Self::EnableWatch`]) of every launch it starts through the
+    /// hot-patch session start (same channel, sent later), so the pure core
+    /// knows `r` can patch it rather than restart it.
+    HotSessionStarted {
+        /// The freshly launched hot session.
+        session: SessionId,
+    },
+    /// Turn watch on for a just-registered session without a toggle —
+    /// posted by the runner right after a launch that should carry the flag
+    /// registers: the relaunch of a watched session (how the flag survives a
+    /// restart), or a hot launch from the run-config modal with "Auto-apply
+    /// on save" ticked. Always arrives after that launch's
     /// [`Self::RegisterSession`] (same channel, sent later).
     EnableWatch {
         /// The freshly launched session.
@@ -570,8 +589,8 @@ pub enum Message {
     ToggleDeviceSelect,
     /// Move the cursor to a device by index and toggle it (mouse click parity).
     SelectDeviceAt(usize),
-    /// Open the run-config modal, primed from the panel selection (`Enter`
-    /// from the devices panel).
+    /// Open the run-config modal, primed from the panel selection (`o` in
+    /// the workbench, `Enter` from the devices panel).
     OpenRunConfig,
     /// Close the run-config modal without launching (`Esc`).
     CloseRunConfig,
@@ -583,10 +602,10 @@ pub enum Message {
     RunConfigToggleTarget,
     /// Toggle a target checkbox by index (mouse click parity).
     RunConfigToggleTargetAt(usize),
-    /// Toggle the modal's "Watch src/ and restart on change (desktop only)"
-    /// checkbox (mouse click parity; `Space` on the focused row reaches it
-    /// through [`Self::RunConfigToggleTarget`]).
-    RunConfigToggleWatch,
+    /// Toggle the modal's "Auto-apply on save" checkbox (mouse click parity;
+    /// `Space` on the focused row reaches it through
+    /// [`Self::RunConfigToggleTarget`]).
+    RunConfigToggleAutoApply,
     /// Cycle the build mode by `delta` (`←`/`→`).
     RunConfigCycleMode(isize),
     /// Move modal focus to a specific control (mouse parity for the
