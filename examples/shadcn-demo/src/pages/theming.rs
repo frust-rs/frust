@@ -6,7 +6,7 @@
 //! carries the font-verification row: a body line in Inter, a `kbd` row in
 //! JetBrains Mono.
 
-use frust::{Brightness, Row, SizedBox, View, any, column, row, set_app_theme, text};
+use frust::{Brightness, SizedBox, View, column, row, set_app_theme, text};
 use frust_shadcn::{ButtonVariant, ShadcnBase, button, kbd, kbd_group, separator, theme_for};
 
 use crate::AppState;
@@ -42,20 +42,22 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     let base = state.base;
     let dark = state.dark;
 
-    let mut base_buttons: Vec<frust::AnyView<AppState>> = Vec::with_capacity(ShadcnBase::ALL.len());
-    for b in ShadcnBase::ALL {
+    let base_buttons = ShadcnBase::ALL.into_iter().fold(row(), |buttons, b| {
         let variant = if b == base {
             ButtonVariant::Default
         } else {
             ButtonVariant::Outline
         };
-        base_buttons.push(any(button(b.id(), move |s: &mut AppState| {
-            s.theming.base = b;
-            apply(b, s.theming.dark);
-        })
-        .variant(variant)));
-        base_buttons.push(any(SizedBox(Some(8.0), None)));
-    }
+        buttons
+            .child(
+                button(b.id(), move |s: &mut AppState| {
+                    s.theming.base = b;
+                    apply(b, s.theming.dark);
+                })
+                .variant(variant),
+            )
+            .child(SizedBox(Some(8.0), None))
+    });
 
     column()
         .child(crate::nav::heading("Theming"))
@@ -69,7 +71,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             .size(14.0),
         )
         .child(gap())
-        .child(Row(base_buttons))
+        .child(base_buttons)
         .child(gap())
         .child(button(
             if dark {

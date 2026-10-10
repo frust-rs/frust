@@ -3,7 +3,7 @@
 //! an empty state, a marker, and the button/button-group family with a
 //! disabled example (the `NotAllowed` cursor check).
 
-use frust::{Row, SizedBox, View, any, column, text};
+use frust::{SizedBox, View, column, row, text};
 use frust_shadcn::{
     AlertVariant, AvatarSize, BadgeVariant, ButtonGroupOrientation, ButtonSize, ButtonVariant,
     EmptyMediaVariant, ItemVariant, MarkerVariant, alert, alert_description, alert_title,
@@ -22,10 +22,6 @@ use crate::AppState;
 #[derive(Default)]
 pub struct State;
 
-fn row(children: Vec<frust::AnyView<AppState>>) -> impl View<AppState> + use<> {
-    Row(children)
-}
-
 fn gap() -> impl frust::View<AppState> {
     SizedBox(Some(12.0), None)
 }
@@ -35,50 +31,50 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
         .child(crate::nav::heading("Primitives"))
         .child(SizedBox(None, Some(16.0)))
         // --- Badges, avatars, kbd, labels ---
-        .child(row(vec![
-            any(badge("Default")),
-            any(gap()),
-            any(badge("Secondary").variant(BadgeVariant::Secondary)),
-            any(gap()),
-            any(badge("Destructive").variant(BadgeVariant::Destructive)),
-            any(gap()),
-            any(badge("Outline").variant(BadgeVariant::Outline)),
-            any(gap()),
-            any(avatar::<AppState>().fallback("ED")),
-            any(gap()),
-            any(avatar::<AppState>().fallback("SM").size(AvatarSize::Sm)),
-            any(gap()),
-            any(kbd("Ctrl")),
-            any(SizedBox(Some(4.0), None)),
-            any(kbd_group(vec![kbd("Shift"), kbd("P")])),
-        ]))
+        .child(
+            row()
+                .child(badge("Default"))
+                .child(gap())
+                .child(badge("Secondary").variant(BadgeVariant::Secondary))
+                .child(gap())
+                .child(badge("Destructive").variant(BadgeVariant::Destructive))
+                .child(gap())
+                .child(badge("Outline").variant(BadgeVariant::Outline))
+                .child(gap())
+                .child(avatar::<AppState>().fallback("ED"))
+                .child(gap())
+                .child(avatar::<AppState>().fallback("SM").size(AvatarSize::Sm))
+                .child(gap())
+                .child(kbd("Ctrl"))
+                .child(SizedBox(Some(4.0), None))
+                .child(kbd_group(vec![kbd("Shift"), kbd("P")])),
+        )
         .child(SizedBox(None, Some(16.0)))
-        .child(row(vec![
-            any(label("A plain label")),
-            any(gap()),
-            any(label("Disabled").disabled(true)),
-        ]))
+        .child(
+            row()
+                .child(label("A plain label"))
+                .child(gap())
+                .child(label("Disabled").disabled(true)),
+        )
         .child(SizedBox(None, Some(16.0)))
         .child(separator())
         .child(SizedBox(None, Some(16.0)))
         // --- Progress / spinner / skeleton / marker ---
-        .child(row(vec![
-            any(progress(0.65)),
-            any(gap()),
-            any(spinner()),
-            any(gap()),
-            any(skeleton(120.0, 20.0)),
-            any(gap()),
-            any(marker("1")),
-            any(gap()),
-            any(marker("Section").variant(MarkerVariant::Separator)),
-        ]))
+        .child(
+            row()
+                .child(progress(0.65))
+                .child(gap())
+                .child(spinner())
+                .child(gap())
+                .child(skeleton(120.0, 20.0))
+                .child(gap())
+                .child(marker("1"))
+                .child(gap())
+                .child(marker("Section").variant(MarkerVariant::Separator)),
+        )
         .child(SizedBox(None, Some(16.0)))
         // --- Aspect ratio ---
-        .child(aspect_ratio(
-            16.0 / 9.0,
-            any::<AppState, _>(skeleton(240.0, 0.0).radius(8.0)),
-        ))
+        .child(aspect_ratio(16.0 / 9.0, skeleton(240.0, 0.0).radius(8.0)))
         .child(SizedBox(None, Some(16.0)))
         // --- Breadcrumb ---
         .child(breadcrumb_list((
@@ -124,7 +120,7 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
         // --- Item ---
         .child(
             item((
-                item_media(any::<AppState, _>(avatar::<AppState>().fallback("IT"))),
+                item_media(avatar::<AppState>().fallback("IT")),
                 item_content((
                     item_title("Item title"),
                     item_description("A trailing detail."),
@@ -139,8 +135,7 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
         // --- Empty state ---
         .child(empty((
             empty_header((
-                empty_media(any::<AppState, _>(text("\u{1F4ED}").size(28.0)))
-                    .variant(EmptyMediaVariant::Icon),
+                empty_media(text("\u{1F4ED}").size(28.0)).variant(EmptyMediaVariant::Icon),
                 empty_title("Nothing here yet"),
                 empty_description("Once you add data it shows up in this space."),
             )),
@@ -150,19 +145,23 @@ pub fn page(_state: &mut State) -> impl View<AppState> + use<> {
         .child(separator())
         .child(SizedBox(None, Some(16.0)))
         // --- Buttons, sizes, disabled ---
-        .child(row(vec![
-            any(button("Default", |_: &mut AppState| {})),
-            any(gap()),
-            any(button("Secondary", |_: &mut AppState| {}).variant(ButtonVariant::Secondary)),
-            any(gap()),
-            any(button("Outline", |_: &mut AppState| {}).variant(ButtonVariant::Outline)),
-            any(gap()),
-            any(button("Destructive", |_: &mut AppState| {}).variant(ButtonVariant::Destructive)),
-            any(gap()),
-            any(button("Link", |_: &mut AppState| {}).variant(ButtonVariant::Link)),
-            any(gap()),
-            any(button("Disabled", |_: &mut AppState| {}).disabled(true)),
-        ]))
+        .child(
+            row()
+                .child(button("Default", |_: &mut AppState| {}))
+                .child(gap())
+                .child(button("Secondary", |_: &mut AppState| {}).variant(ButtonVariant::Secondary))
+                .child(gap())
+                .child(button("Outline", |_: &mut AppState| {}).variant(ButtonVariant::Outline))
+                .child(gap())
+                .child(
+                    button("Destructive", |_: &mut AppState| {})
+                        .variant(ButtonVariant::Destructive),
+                )
+                .child(gap())
+                .child(button("Link", |_: &mut AppState| {}).variant(ButtonVariant::Link))
+                .child(gap())
+                .child(button("Disabled", |_: &mut AppState| {}).disabled(true)),
+        )
         .child(SizedBox(None, Some(12.0)))
         .child(
             button_group(vec![

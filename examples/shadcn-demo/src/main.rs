@@ -32,8 +32,8 @@ mod nav;
 mod pages;
 
 use frust::{
-    AnyView, Component, CrossAxisAlignment, DesktopConfig, EdgeInsets, MenuItemSpec, MenuRole,
-    MenuSpec, Padding, View, any, column, scroll_view,
+    Component, CrossAxisAlignment, DesktopConfig, EdgeInsets, MenuItemSpec, MenuRole, MenuSpec,
+    Padding, View, any, column, scroll_view,
 };
 use frust_shadcn::{sidebar_inset, sidebar_provider};
 
@@ -81,14 +81,14 @@ impl Default for AppState {
 /// Pages that host an overlay, or that own a scroll surface of their own, take
 /// the page slot's bounded constraints directly instead (see this module's
 /// constraint chain).
-pub fn scroll_slot(content: AnyView<AppState>) -> impl View<AppState> {
+pub fn scroll_slot(content: impl View<AppState>) -> impl View<AppState> {
     scroll_view(Padding(EdgeInsets::all(24.0), content))
 }
 
 /// The inset's content: the top bar over a page slot that fills whatever
 /// **finite** height `sidebar_inset` hands this `FlexView` (see the module
 /// docs' constraint chain).
-fn shell_body(page: Page, open: bool, content: AnyView<AppState>) -> impl View<AppState> + use<> {
+fn shell_body(page: Page, open: bool, content: impl View<AppState>) -> impl View<AppState> {
     column()
         .child(nav::top_bar(page, open))
         .flex(1, content)
@@ -116,32 +116,30 @@ impl Component for ShadcnDemoApp {
         // wrapped in the shared scroll slot here.
         // erasure: keep 10 arms with distinct impl Trait types
         let content = match page {
-            Page::Primitives => any(scroll_slot(any(pages::primitives::page(
-                &mut state.primitives,
-            )))),
-            Page::Controls => any(scroll_slot(any(pages::controls::page(&mut state.controls)))),
-            Page::InputsTable => any(scroll_slot(any(pages::inputs_table::page(
+            Page::Primitives => any(scroll_slot(pages::primitives::page(&mut state.primitives))),
+            Page::Controls => any(scroll_slot(pages::controls::page(&mut state.controls))),
+            Page::InputsTable => any(scroll_slot(pages::inputs_table::page(
                 &mut state.inputs_table,
-            )))),
-            Page::Layout => any(scroll_slot(any(pages::layout::page(&mut state.layout)))),
+            ))),
+            Page::Layout => any(scroll_slot(pages::layout::page(&mut state.layout))),
             Page::Overlays => any(pages::overlays::page(&mut state.overlays)),
             Page::Anchored => any(pages::anchored::page(&mut state.anchored)),
             Page::Chat => any(pages::chat::page(&mut state.chat)),
-            Page::Questionnaire => any(scroll_slot(any(pages::questionnaire::page(
+            Page::Questionnaire => any(scroll_slot(pages::questionnaire::page(
                 &mut state.questionnaire,
-            )))),
+            ))),
             Page::DataTable => any(pages::data_table::page(&mut state.data_table)),
-            Page::Theming => any(scroll_slot(any(pages::theming::page(&mut state.theming)))),
+            Page::Theming => any(scroll_slot(pages::theming::page(&mut state.theming))),
         };
 
-        any(sidebar_provider(
+        sidebar_provider(
             nav::shell_sidebar(state),
             sidebar_inset(vec![shell_body(page, open, content)]),
             open,
             |s: &mut AppState, next: bool| {
                 s.sidebar_open = next;
             },
-        ))
+        )
     }
 }
 

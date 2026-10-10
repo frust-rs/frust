@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use frust::{Column as ColumnOf, CrossAxisAlignment, SizedBox, Stack, View, any, row, text};
+use frust::{CrossAxisAlignment, SizedBox, View, any, row, stack, text};
 use frust_shadcn::overlay::{OverlayAnchor, anchor};
 use frust_shadcn::{
     BadgeVariant, ButtonSize, ButtonVariant, PaginationItem, badge, button, checkbox,
@@ -276,7 +276,8 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     // *body* row instead, marked selected for the `bg-muted` wash that reads as
     // a head band. Doing it this way also keeps it in the same column-width
     // solve as the rows under it.
-    let mut header_cells: Vec<frust::AnyView<AppState>> = vec![any(checkbox(
+    // erasure: keep table_row stores Vec<AnyView> cells; checkbox + sort buttons + label
+    let header_cells: Vec<frust::AnyView<AppState>> = std::iter::once(any(checkbox(
         all_selected,
         move |s: &mut AppState, _next: bool| {
             let ids: Vec<u32> = s.data_table.view_rows().iter().map(|p| p.id).collect();
@@ -291,12 +292,14 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             }
         },
     )
-    .indeterminate(some_selected))];
-    header_cells.push(any(sort_button(Column::Name, sort)));
-    for column in &visible {
-        header_cells.push(any(sort_button(*column, sort)));
-    }
-    header_cells.push(any(text("Actions").size(13.0)));
+    .indeterminate(some_selected)))
+    .chain(
+        std::iter::once(Column::Name)
+            .chain(visible.iter().copied())
+            .map(|column| any(sort_button(column, sort))),
+    )
+    .chain(std::iter::once(any(text("Actions").size(13.0))))
+    .collect();
 
     let mut table_rows = vec![table_row(header_cells).selected(true)];
 
@@ -304,7 +307,13 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     for person in &page_rows {
         let id = person.id;
         let is_selected = state.selected.contains(&id);
-        let mut cells: Vec<frust::AnyView<AppState>> = vec![any(checkbox(
+        let row_anchor = state
+            .row_anchors
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(OverlayAnchor::new);
+        // erasure: keep table_row stores Vec<AnyView> cells; checkbox, text, badge, menu button
+        let cells: Vec<frust::AnyView<AppState>> = std::iter::once(any(checkbox(
             is_selected,
             move |s: &mut AppState, next: bool| {
                 if next {
@@ -313,24 +322,15 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                     s.data_table.selected.remove(&id);
                 }
             },
-        ))];
-        cells.push(any(text(person.name.clone()).size(13.0)));
-        for column in &visible {
-            cells.push(match column {
-                Column::Role => any(text(person.role.clone()).size(13.0)),
-                Column::Status => {
-                    any(badge(person.status.title()).variant(person.status.variant()))
-                }
-                Column::Amount => any(text(format!("{} \u{20AC}", person.amount)).size(13.0)),
-                Column::Name => any(text(person.name.clone()).size(13.0)),
-            });
-        }
-        let row_anchor = state
-            .row_anchors
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(OverlayAnchor::new);
-        cells.push(any(anchor(
+        )))
+        .chain(std::iter::once(any(text(person.name.clone()).size(13.0))))
+        .chain(visible.iter().map(|column| match column {
+            Column::Role => any(text(person.role.clone()).size(13.0)),
+            Column::Status => any(badge(person.status.title()).variant(person.status.variant())),
+            Column::Amount => any(text(format!("{} \u{20AC}", person.amount)).size(13.0)),
+            Column::Name => any(text(person.name.clone()).size(13.0)),
+        }))
+        .chain(std::iter::once(any(anchor(
             &row_anchor,
             button("\u{22EE}", move |s: &mut AppState| {
                 s.data_table.row_menu_row = id;
@@ -338,7 +338,8 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
             })
             .variant(ButtonVariant::Ghost)
             .size(ButtonSize::IconSm),
-        )));
+        ))))
+        .collect();
         table_rows.push(table_row(cells).selected(is_selected).on_click(
             move |s: &mut AppState| {
                 if !s.data_table.selected.remove(&id) {
@@ -350,65 +351,43 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
 
     let pages: Vec<PaginationItem> = (1..=page_count).map(PaginationItem::Page).collect();
 
-    let body = ColumnOf(vec![
-        any(crate::nav::heading("Data Table")),
-        any(SizedBox(None, Some(8.0))),
-        any(crate::nav::caption(
+    let body = frust::column()
+        .child(crate::nav::heading("Data Table"))
+        .child(SizedBox(None, Some(8.0)))
+        .child(crate::nav::caption(
             "Every behaviour here is app code over `table`: the sort comparators, \
              the name filter, the page slice, the selection set and the column \
              set all live in this page's own state. Row click toggles selection; \
              a cell that handles its own press (the checkbox, the \u{22EE} button) \
              wins over the row.",
-        )),
-        any(SizedBox(None, Some(16.0))),
-        any(toolbar),
-        any(SizedBox(None, Some(12.0))),
-        any(table(table_rows).caption(format!(
+        ))
+        .child(SizedBox(None, Some(16.0)))
+        .child(toolbar)
+        .child(SizedBox(None, Some(12.0)))
+        .child(table(table_rows).caption(format!(
             "{selected_here} of {total} row(s) selected \u{2014} page {} of {page_count}",
             current + 1
-        ))),
-        any(SizedBox(None, Some(16.0))),
-        any(pagination(
+        )))
+        .child(SizedBox(None, Some(16.0)))
+        .child(pagination(
             pages,
             current + 1,
             |s: &mut AppState, page: usize| {
                 s.data_table.page = page.saturating_sub(1);
             },
-        )),
-        any(SizedBox(None, Some(16.0))),
-        any(separator()),
-        any(SizedBox(None, Some(8.0))),
-        any(crate::nav::caption(format!(
+        ))
+        .child(SizedBox(None, Some(16.0)))
+        .child(separator())
+        .child(SizedBox(None, Some(8.0)))
+        .child(crate::nav::caption(format!(
             "Last row action \u{2014} {}",
             state.last_action
-        ))),
-    ]);
-
-    // --- The two anchored menus, kept mounted so they animate out ---
-    let mut layers: Vec<frust::AnyView<AppState>> = vec![any(crate::scroll_slot(any(body)))];
+        )));
 
     let column_items = TOGGLEABLE
         .into_iter()
         .map(|column| dropdown_menu_item(column.title()).checked(state.visible.contains(&column)))
         .collect::<Vec<_>>();
-    layers.push(any(dropdown_menu(
-        std::iter::once(dropdown_menu_label("Toggle columns"))
-            .chain(column_items)
-            .collect(),
-        |s: &mut AppState, index: usize| {
-            // Index 0 is the label; the toggles follow it in order.
-            if let Some(column) = index.checked_sub(1).and_then(|i| TOGGLEABLE.get(i))
-                && !s.data_table.visible.remove(column)
-            {
-                s.data_table.visible.insert(*column);
-            }
-        },
-    )
-    .anchor(&state.columns_anchor)
-    .open(state.columns_open)
-    .on_open_change(|s: &mut AppState, open: bool| {
-        s.data_table.columns_open = open;
-    })));
 
     let menu_row = state.row_menu_row;
     let menu_anchor = state
@@ -416,39 +395,63 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         .get(&menu_row)
         .cloned()
         .unwrap_or_else(OverlayAnchor::new);
-    layers.push(any(dropdown_menu(
-        vec![
-            dropdown_menu_item("View details"),
-            dropdown_menu_item("Copy name").shortcut("\u{2318}C"),
-            dropdown_menu_separator(),
-            dropdown_menu_item("Delete row"),
-        ],
-        move |s: &mut AppState, index: usize| {
-            let name = s
-                .data_table
-                .rows
-                .iter()
-                .find(|p| p.id == menu_row)
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
-            s.data_table.last_action = match index {
-                0 => format!("viewed {name}"),
-                1 => format!("copied {name}"),
-                3 => {
-                    s.data_table.rows.retain(|p| p.id != menu_row);
-                    s.data_table.selected.remove(&menu_row);
-                    format!("deleted {name}")
-                }
-                _ => s.data_table.last_action.clone(),
-            };
-            s.data_table.row_menu_open = false;
-        },
-    )
-    .anchor(&menu_anchor)
-    .open(state.row_menu_open)
-    .on_open_change(|s: &mut AppState, open: bool| {
-        s.data_table.row_menu_open = open;
-    })));
 
-    Stack(layers)
+    // --- The two anchored menus, kept mounted so they animate out ---
+    stack()
+        .child(crate::scroll_slot(body))
+        .child(
+            dropdown_menu(
+                std::iter::once(dropdown_menu_label("Toggle columns"))
+                    .chain(column_items)
+                    .collect(),
+                |s: &mut AppState, index: usize| {
+                    // Index 0 is the label; the toggles follow it in order.
+                    if let Some(column) = index.checked_sub(1).and_then(|i| TOGGLEABLE.get(i))
+                        && !s.data_table.visible.remove(column)
+                    {
+                        s.data_table.visible.insert(*column);
+                    }
+                },
+            )
+            .anchor(&state.columns_anchor)
+            .open(state.columns_open)
+            .on_open_change(|s: &mut AppState, open: bool| {
+                s.data_table.columns_open = open;
+            }),
+        )
+        .child(
+            dropdown_menu(
+                vec![
+                    dropdown_menu_item("View details"),
+                    dropdown_menu_item("Copy name").shortcut("\u{2318}C"),
+                    dropdown_menu_separator(),
+                    dropdown_menu_item("Delete row"),
+                ],
+                move |s: &mut AppState, index: usize| {
+                    let name = s
+                        .data_table
+                        .rows
+                        .iter()
+                        .find(|p| p.id == menu_row)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default();
+                    s.data_table.last_action = match index {
+                        0 => format!("viewed {name}"),
+                        1 => format!("copied {name}"),
+                        3 => {
+                            s.data_table.rows.retain(|p| p.id != menu_row);
+                            s.data_table.selected.remove(&menu_row);
+                            format!("deleted {name}")
+                        }
+                        _ => s.data_table.last_action.clone(),
+                    };
+                    s.data_table.row_menu_open = false;
+                },
+            )
+            .anchor(&menu_anchor)
+            .open(state.row_menu_open)
+            .on_open_change(|s: &mut AppState, open: bool| {
+                s.data_table.row_menu_open = open;
+            }),
+        )
 }

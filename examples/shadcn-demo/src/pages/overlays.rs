@@ -29,8 +29,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use frust::{
-    AnyView, Column, EdgeInsets, NavigatorController, Padding, PopResult, SizedBox, View, any,
-    column, navigator, scroll_view, text,
+    Column, EdgeInsets, NavigatorController, Padding, PopResult, SizedBox, View, column, navigator,
+    row, scroll_view, text,
 };
 use frust_shadcn::{
     ButtonVariant, DrawerSide, SheetSide, alert_dialog, alert_dialog_action, alert_dialog_cancel,
@@ -90,19 +90,6 @@ fn gap() -> impl View<AppState> {
 
 fn hgap() -> impl View<AppState> {
     SizedBox(Some(8.0), None)
-}
-
-/// A row of trigger buttons, each separated by a fixed gap.
-fn trigger_row(buttons: Vec<AnyView<AppState>>) -> impl View<AppState> {
-    let mut children = Vec::with_capacity(buttons.len() * 2);
-    for (index, child) in buttons.into_iter().enumerate() {
-        if index > 0 {
-            // erasure: keep mixed Vec types from hgap() and child
-            children.push(any(hgap()));
-        }
-        children.push(child);
-    }
-    frust::Row(children)
 }
 
 /// Record `result` (via `PopResult::take::<&str>`-style tagging) as the last
@@ -198,193 +185,204 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         // the navigator: a pushed modal page is laid out under the navigator's
         // own constraints, and a scroll view's infinite max height would
         // collapse every panel it hosts to nothing.
-        crate::scroll_slot(any(column()
-            .child(crate::nav::heading("Overlays"))
-            .child(SizedBox(None, Some(16.0)))
-            .child(text(format!("Last result: {last_result}")).size(14.0))
-            .child(SizedBox(None, Some(8.0)))
-            .child(crate::nav::caption(
-                "Watch every dismissal, not just every opening: the panel plays its \
+        crate::scroll_slot(
+            column()
+                .child(crate::nav::heading("Overlays"))
+                .child(SizedBox(None, Some(16.0)))
+                .child(text(format!("Last result: {last_result}")).size(14.0))
+                .child(SizedBox(None, Some(8.0)))
+                .child(crate::nav::caption(
+                    "Watch every dismissal, not just every opening: the panel plays its \
                  entrance in reverse (fade + zoom for the centered ones, the edge \
                  slide for sheets and drawers) and the scrim fades down with it \
                  before the navigator page pops. Under reduced motion it closes \
                  outright instead.",
-            ))
-            .child(gap())
-            // --- The centered family ---
-            .child(text("Dialogs").size(16.0))
-            .child(SizedBox(None, Some(8.0)))
-            .child(trigger_row(vec![
-                any(button("Open Dialog", move |_: &mut AppState| {
-                    let cancel_ctrl = dialog_ctrl.clone();
-                    show_dialog(
-                        &dialog_ctrl,
-                        move || {
-                            let cancel_ctrl = cancel_ctrl.clone();
-                            dialog(vec![
-                                dialog_header(vec![
-                                    dialog_title("Delete project?"),
-                                    dialog_description("This action cannot be undone."),
-                                ]),
-                                dialog_footer(vec![
-                                    button("Cancel", move |_: &mut AppState| cancel_ctrl.pop())
-                                        .variant(ButtonVariant::Outline),
-                                ]),
-                            ])
-                        },
-                        record("dialog"),
-                    );
-                })),
-                any(button("Open Alert Dialog", move |_: &mut AppState| {
-                    let action_ctrl = alert_ctrl.clone();
-                    let cancel_ctrl = alert_ctrl.clone();
-                    show_alert_dialog(
-                        &alert_ctrl,
-                        move || {
-                            let action_ctrl = action_ctrl.clone();
-                            let cancel_ctrl = cancel_ctrl.clone();
-                            alert_dialog(vec![
-                                alert_dialog_header(vec![
-                                    alert_dialog_title("Are you absolutely sure?"),
-                                    alert_dialog_description(
-                                        "This will permanently delete the selected item.",
-                                    ),
-                                ]),
-                                alert_dialog_footer(vec![
-                                    alert_dialog_cancel(
-                                        button("Cancel", move |_: &mut AppState| {
-                                            cancel_ctrl.pop_with_result(PopResult::of(false));
-                                        })
-                                        .variant(ButtonVariant::Outline),
-                                    ),
-                                    alert_dialog_action(
-                                        button("Continue", move |_: &mut AppState| {
-                                            action_ctrl.pop_with_result(PopResult::of(true));
-                                        })
-                                        .variant(ButtonVariant::Destructive),
-                                    ),
-                                ]),
-                            ])
-                        },
-                        record("alert_dialog"),
-                    );
-                })),
-                any(button("Open Command Palette", move |_: &mut AppState| {
-                    let select_ctrl = command_ctrl.clone();
-                    let read_handle = command_query.clone();
-                    show_command_dialog(
-                        &command_ctrl,
-                        move || {
-                            let select_ctrl = select_ctrl.clone();
-                            // The live read (see `current_command_query`'s own
-                            // doc): the navigator re-invokes this whole
-                            // closure on every rebuild while the palette is
-                            // pushed, so re-reading the handle here (rather
-                            // than closing over a `String` computed once,
-                            // above this closure) is what keeps typed text
-                            // from being fought back to empty every frame.
-                            let query = current_command_query(&read_handle);
-                            command_dialog(command(
-                                vec![
-                                    command_item("Calendar").group("Suggestions"),
-                                    command_item("Search Emoji").group("Suggestions"),
-                                    command_item("Profile")
-                                        .group("Settings")
-                                        .shortcut("\u{2318}P"),
-                                    command_item("Billing")
-                                        .group("Settings")
-                                        .shortcut("\u{2318}B")
-                                        .disabled(true),
-                                ],
-                                query,
-                                |s: &mut AppState, text: String| {
-                                    // Written through `&mut AppState` (the
-                                    // handle lives at `s.overlays.command_query`,
-                                    // not a detached clone), so the edit lands
-                                    // on the same cell the next builder
-                                    // invocation reads — see `State::command_query`'s
-                                    // own doc for why the cell has to live there.
-                                    *s.overlays.command_query.borrow_mut() = text;
+                ))
+                .child(gap())
+                // --- The centered family ---
+                .child(text("Dialogs").size(16.0))
+                .child(SizedBox(None, Some(8.0)))
+                .child(
+                    row()
+                        .child(button("Open Dialog", move |_: &mut AppState| {
+                            let cancel_ctrl = dialog_ctrl.clone();
+                            show_dialog(
+                                &dialog_ctrl,
+                                move || {
+                                    let cancel_ctrl = cancel_ctrl.clone();
+                                    dialog(vec![
+                                        dialog_header(vec![
+                                            dialog_title("Delete project?"),
+                                            dialog_description("This action cannot be undone."),
+                                        ]),
+                                        dialog_footer(vec![
+                                            button("Cancel", move |_: &mut AppState| {
+                                                cancel_ctrl.pop()
+                                            })
+                                            .variant(ButtonVariant::Outline),
+                                        ]),
+                                    ])
                                 },
-                                move |s: &mut AppState, index: usize| {
-                                    s.overlays.last_result =
-                                        format!("command: selected index {index}");
+                                record("dialog"),
+                            );
+                        }))
+                        .child(hgap())
+                        .child(button("Open Alert Dialog", move |_: &mut AppState| {
+                            let action_ctrl = alert_ctrl.clone();
+                            let cancel_ctrl = alert_ctrl.clone();
+                            show_alert_dialog(
+                                &alert_ctrl,
+                                move || {
+                                    let action_ctrl = action_ctrl.clone();
+                                    let cancel_ctrl = cancel_ctrl.clone();
+                                    alert_dialog(vec![
+                                        alert_dialog_header(vec![
+                                            alert_dialog_title("Are you absolutely sure?"),
+                                            alert_dialog_description(
+                                                "This will permanently delete the selected item.",
+                                            ),
+                                        ]),
+                                        alert_dialog_footer(vec![
+                                            alert_dialog_cancel(
+                                                button("Cancel", move |_: &mut AppState| {
+                                                    cancel_ctrl
+                                                        .pop_with_result(PopResult::of(false));
+                                                })
+                                                .variant(ButtonVariant::Outline),
+                                            ),
+                                            alert_dialog_action(
+                                                button("Continue", move |_: &mut AppState| {
+                                                    action_ctrl
+                                                        .pop_with_result(PopResult::of(true));
+                                                })
+                                                .variant(ButtonVariant::Destructive),
+                                            ),
+                                        ]),
+                                    ])
+                                },
+                                record("alert_dialog"),
+                            );
+                        }))
+                        .child(hgap())
+                        .child(button("Open Command Palette", move |_: &mut AppState| {
+                            let select_ctrl = command_ctrl.clone();
+                            let read_handle = command_query.clone();
+                            show_command_dialog(
+                                &command_ctrl,
+                                move || {
+                                    let select_ctrl = select_ctrl.clone();
+                                    // The live read (see `current_command_query`'s own
+                                    // doc): the navigator re-invokes this whole
+                                    // closure on every rebuild while the palette is
+                                    // pushed, so re-reading the handle here (rather
+                                    // than closing over a `String` computed once,
+                                    // above this closure) is what keeps typed text
+                                    // from being fought back to empty every frame.
+                                    let query = current_command_query(&read_handle);
+                                    command_dialog(command(
+                                        vec![
+                                            command_item("Calendar").group("Suggestions"),
+                                            command_item("Search Emoji").group("Suggestions"),
+                                            command_item("Profile")
+                                                .group("Settings")
+                                                .shortcut("\u{2318}P"),
+                                            command_item("Billing")
+                                                .group("Settings")
+                                                .shortcut("\u{2318}B")
+                                                .disabled(true),
+                                        ],
+                                        query,
+                                        |s: &mut AppState, text: String| {
+                                            // Written through `&mut AppState` (the
+                                            // handle lives at `s.overlays.command_query`,
+                                            // not a detached clone), so the edit lands
+                                            // on the same cell the next builder
+                                            // invocation reads — see `State::command_query`'s
+                                            // own doc for why the cell has to live there.
+                                            *s.overlays.command_query.borrow_mut() = text;
+                                        },
+                                        move |s: &mut AppState, index: usize| {
+                                            s.overlays.last_result =
+                                                format!("command: selected index {index}");
+                                            clear_command_query(&s.overlays.command_query);
+                                            select_ctrl.pop();
+                                        },
+                                    ))
+                                },
+                                |s: &mut AppState, result: PopResult| {
+                                    // Covers the scrim/Escape/close-X dismissal path —
+                                    // `on_select` above already clears for a
+                                    // selection, and this same callback also runs
+                                    // when a selection's own `pop()` resolves, so the
+                                    // second clear there is a harmless no-op repeat.
                                     clear_command_query(&s.overlays.command_query);
-                                    select_ctrl.pop();
+                                    record("command_dialog")(s, result);
                                 },
-                            ))
-                        },
-                        |s: &mut AppState, result: PopResult| {
-                            // Covers the scrim/Escape/close-X dismissal path —
-                            // `on_select` above already clears for a
-                            // selection, and this same callback also runs
-                            // when a selection's own `pop()` resolves, so the
-                            // second clear there is a harmless no-op repeat.
-                            clear_command_query(&s.overlays.command_query);
-                            record("command_dialog")(s, result);
-                        },
-                    );
-                })),
-            ]))
-            .child(gap())
-            .child(frust_shadcn::separator())
-            .child(gap())
-            // --- Sheets: four sides plus two content variants ---
-            .child(text("Sheets").size(16.0))
-            .child(SizedBox(None, Some(8.0)))
-            .child(crate::nav::caption(
-                "A sheet is dialog-family, so it does NOT drag: it is dismissed by \
+                            );
+                        })),
+                )
+                .child(gap())
+                .child(frust_shadcn::separator())
+                .child(gap())
+                // --- Sheets: four sides plus two content variants ---
+                .child(text("Sheets").size(16.0))
+                .child(SizedBox(None, Some(8.0)))
+                .child(crate::nav::caption(
+                    "A sheet is dialog-family, so it does NOT drag: it is dismissed by \
                  the scrim, Escape or its close X, and only then slides out.",
-            ))
-            .child(SizedBox(None, Some(8.0)))
-            .child(trigger_row(vec![
-                any(sheet_trigger("Right", &root_controller, SheetSide::Right)),
-                any(sheet_trigger("Left", &root_controller, SheetSide::Left)),
-                any(sheet_trigger("Top", &root_controller, SheetSide::Top)),
-                any(sheet_trigger("Bottom", &root_controller, SheetSide::Bottom)),
-            ]))
-            .child(SizedBox(None, Some(8.0)))
-            .child(trigger_row(vec![
-                any(button(
-                    "Sheet with scrolling content",
-                    move |_: &mut AppState| {
-                        show_sheet(
-                            &scroll_sheet_ctrl,
-                            || {
-                                sheet(vec![
-                                    sheet_header(vec![
-                                        sheet_title("Long content"),
-                                        sheet_description(
-                                            "The panel keeps its size; the body scrolls.",
-                                        ),
-                                    ]),
-                                    any(Padding(
-                                        EdgeInsets::all(16.0),
-                                        frust::SizedBox::<AppState>(None, Some(320.0)).child(
-                                            scroll_view(Column(
-                                                (1..=40)
-                                                    .map(|i| {
-                                                        any::<AppState, _>(
-                                                            text(format!("Line {i}")).size(13.0),
-                                                        )
-                                                    })
-                                                    .collect::<Vec<_>>(),
-                                            )),
-                                        ),
-                                    )),
-                                ])
+                ))
+                .child(SizedBox(None, Some(8.0)))
+                .child(
+                    row()
+                        .child(sheet_trigger("Right", &root_controller, SheetSide::Right))
+                        .child(hgap())
+                        .child(sheet_trigger("Left", &root_controller, SheetSide::Left))
+                        .child(hgap())
+                        .child(sheet_trigger("Top", &root_controller, SheetSide::Top))
+                        .child(hgap())
+                        .child(sheet_trigger("Bottom", &root_controller, SheetSide::Bottom)),
+                )
+                .child(SizedBox(None, Some(8.0)))
+                .child(
+                    row()
+                        .child(button(
+                            "Sheet with scrolling content",
+                            move |_: &mut AppState| {
+                                show_sheet(
+                                    &scroll_sheet_ctrl,
+                                    || {
+                                        sheet((
+                                            sheet_header(vec![
+                                                sheet_title("Long content"),
+                                                sheet_description(
+                                                    "The panel keeps its size; the body scrolls.",
+                                                ),
+                                            ]),
+                                            Padding(
+                                                EdgeInsets::all(16.0),
+                                                frust::SizedBox::<AppState>(None, Some(320.0))
+                                                    .child(scroll_view(Column(
+                                                        (1..=40)
+                                                            .map(|i| {
+                                                                text(format!("Line {i}")).size(13.0)
+                                                            })
+                                                            .collect::<Vec<_>>(),
+                                                    ))),
+                                            ),
+                                        ))
+                                    },
+                                    record("sheet_scroll"),
+                                );
                             },
-                            record("sheet_scroll"),
-                        );
-                    },
-                )),
-                any(button(
-                    "Sheet without a close button",
-                    move |_: &mut AppState| {
-                        show_sheet(
-                            &bare_sheet_ctrl,
-                            || {
-                                sheet(vec![
+                        ))
+                        .child(hgap())
+                        .child(button(
+                            "Sheet without a close button",
+                            move |_: &mut AppState| {
+                                show_sheet(
+                                    &bare_sheet_ctrl,
+                                    || {
+                                        sheet(vec![
                                     sheet_header(vec![
                                         sheet_title("No X in the corner"),
                                         sheet_description(
@@ -395,70 +393,75 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
                                     sheet_footer(vec![text("Press Escape.")]),
                                 ])
                                 .close_button(false)
+                                    },
+                                    record("sheet_bare"),
+                                );
                             },
-                            record("sheet_bare"),
-                        );
-                    },
-                )),
-            ]))
-            .child(gap())
-            .child(frust_shadcn::separator())
-            .child(gap())
-            // --- Drawers: four directions, drag-to-close, snap points ---
-            .child(text("Drawers").size(16.0))
-            .child(SizedBox(None, Some(8.0)))
-            .child(crate::nav::caption(
-                "A drawer drags. Press the panel (the handle on a bottom drawer, or \
+                        )),
+                )
+                .child(gap())
+                .child(frust_shadcn::separator())
+                .child(gap())
+                // --- Drawers: four directions, drag-to-close, snap points ---
+                .child(text("Drawers").size(16.0))
+                .child(SizedBox(None, Some(8.0)))
+                .child(crate::nav::caption(
+                    "A drawer drags. Press the panel (the handle on a bottom drawer, or \
                  anywhere the content does not take the press) and pull it toward its \
                  own edge: the panel follows the pointer and the scrim fades with it. \
                  Release past the halfway point, or flick it, and the exit ramp \
                  continues from wherever the drag left it; release short of it and it \
                  springs back. Catching a closing drawer cancels its dismissal.",
-            ))
-            .child(SizedBox(None, Some(8.0)))
-            .child(trigger_row(vec![
-                any(drawer_trigger(
-                    "Bottom",
-                    &root_controller,
-                    DrawerSide::Bottom,
-                )),
-                any(drawer_trigger("Top", &root_controller, DrawerSide::Top)),
-                any(drawer_trigger("Left", &root_controller, DrawerSide::Left)),
-                any(drawer_trigger("Right", &root_controller, DrawerSide::Right)),
-            ]))
-            .child(SizedBox(None, Some(8.0)))
-            .child(trigger_row(vec![any(button(
-                "Drawer with snap points (40% / 100%)",
-                move |_: &mut AppState| {
-                    show_drawer(
-                        &snap_ctrl,
-                        || {
-                            drawer(
-                                DrawerSide::Bottom,
-                                vec![
-                                    drawer_header(vec![
-                                        drawer_title("Snap points"),
-                                        drawer_description(
-                                            "It opens at the first point (40% of its \
+                ))
+                .child(SizedBox(None, Some(8.0)))
+                .child(
+                    row()
+                        .child(drawer_trigger(
+                            "Bottom",
+                            &root_controller,
+                            DrawerSide::Bottom,
+                        ))
+                        .child(hgap())
+                        .child(drawer_trigger("Top", &root_controller, DrawerSide::Top))
+                        .child(hgap())
+                        .child(drawer_trigger("Left", &root_controller, DrawerSide::Left))
+                        .child(hgap())
+                        .child(drawer_trigger("Right", &root_controller, DrawerSide::Right)),
+                )
+                .child(SizedBox(None, Some(8.0)))
+                .child(row().child(button(
+                    "Drawer with snap points (40% / 100%)",
+                    move |_: &mut AppState| {
+                        show_drawer(
+                            &snap_ctrl,
+                            || {
+                                drawer(
+                                    DrawerSide::Bottom,
+                                    vec![
+                                        drawer_header(vec![
+                                            drawer_title("Snap points"),
+                                            drawer_description(
+                                                "It opens at the first point (40% of its \
                                              extent). Drag up to fill it, drag down to \
                                              come back \u{2014} a release snaps to \
                                              whichever resting point is nearest, and \
                                              closed counts as one of them.",
-                                        ),
-                                    ]),
-                                    drawer_footer(vec![text(
-                                        "The scrim rides the open fraction, so a \
+                                            ),
+                                        ]),
+                                        drawer_footer(vec![text(
+                                            "The scrim rides the open fraction, so a \
                                          part-open drawer sits under a lighter scrim.",
-                                    )]),
-                                ],
-                            )
-                            .snap_points(&[0.4, 1.0])
-                        },
-                        record("drawer_snap"),
-                    );
-                },
-            ))]))
-            .child(SizedBox(None, Some(24.0)))))
+                                        )]),
+                                    ],
+                                )
+                                .snap_points(&[0.4, 1.0])
+                            },
+                            record("drawer_snap"),
+                        );
+                    },
+                )))
+                .child(SizedBox(None, Some(24.0))),
+        )
     })
 }
 
