@@ -25,11 +25,11 @@ pub struct StackView<State: 'static> {
 /// once, here.
 ///
 /// ```
-/// use frust_core::any;
 /// use frust_widgets::{Stack, StackView, text};
 /// # fn demo() -> (StackView<()>, StackView<()>) {
+/// // Same type: a `Vec`. Mixed types: a tuple, no `any(..)` needed.
 /// let layers = Stack(vec![text("under"), text("over")]);
-/// let mixed = Stack(vec![any(text("under")), any(Stack(vec![text("over")]))]);
+/// let mixed = Stack((text("under"), Stack((text("over"), text("badge")))));
 /// # (layers, mixed)
 /// # }
 /// # let _ = demo();
@@ -39,7 +39,7 @@ pub fn Stack<State: 'static, M>(children: impl ViewSeq<State, M>) -> StackView<S
     stack().children(children)
 }
 
-/// An empty z-order stack, ready for fluent children: no `any()` needed.
+/// An empty z-order stack, ready for fluent children (no `any(..)` wrapping).
 pub fn stack<State: 'static>() -> StackView<State> {
     StackView {
         children: Vec::new(),

@@ -423,10 +423,10 @@ pub struct ShieldView<State: 'static> {
 /// away from it.
 ///
 /// ```ignore
-/// any(Stack(vec![
-///     any(platform_view("dev.frust.MapFactory").interactive()),
-///     any(shield(button("recenter", |s: &mut State| s.recenter()))),
-/// ]))
+/// Stack((
+///     platform_view("dev.frust.MapFactory").interactive(),
+///     shield(button("recenter", |state: &mut State| state.recenter())),
+/// ))
 /// ```
 pub fn shield<State: 'static, V: View<State>>(child: V) -> ShieldView<State> {
     ShieldView { child: any(child) }

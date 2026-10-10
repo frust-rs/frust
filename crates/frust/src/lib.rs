@@ -8,12 +8,7 @@
 //! ```no_run
 //! use frust::{Component, View, column, text};
 //!
-//! // A small stateless widget: a plain fn, generic over the state of
-//! // whichever component places it.
-//! fn greeting<S: 'static>(message: &str) -> impl View<S> + use<S> {
-//!     text(message.to_owned()).size(24.0)
-//! }
-//!
+//! #[derive(Default)]
 //! struct Counter;
 //!
 //! impl Component for Counter {
@@ -23,20 +18,27 @@
 //!         0
 //!     }
 //!
-//!     // The whole UI lives in `build`; split it into widget fns like
-//!     // `greeting` rather than nesting ever deeper inside it.
+//!     // The whole UI is one declarative tree in `build`; helpers that keep it
+//!     // shallow are `Self::` associated fns in a separate inherent impl.
 //!     fn build(&self, state: &mut i32) -> impl View<i32> {
 //!         column()
-//!             .child(greeting("Hello from Frust"))
+//!             .child(Self::greeting("Hello from Frust"))
 //!             .child(text(format!("count: {state}")).size(32.0))
 //!     }
 //! }
 //!
-//! frust::run(Counter).unwrap();
+//! impl Counter {
+//!     fn greeting(message: &str) -> impl View<i32> {
+//!         text(message.to_owned()).size(24.0)
+//!     }
+//! }
+//!
+//! frust::app!(Counter);
+//! # fn main() {}
 //! ```
 //!
-//! The composition rule: stateless pieces are plain widget functions called
-//! from `build`; a piece with its own state is a child [`Component`] mounted
+//! The composition rule: stateless pieces are `Self::` helper fns (or widget
+//! fns) called from `build`; a piece with its own state is a child [`Component`] mounted
 //! with [`component`], which gives it a private state boundary. [`run`] (or
 //! the [`app!`] macro, which also covers the mobile and web shells) starts it.
 //!
@@ -50,13 +52,15 @@
 //! `(state, build)` pair:
 //!
 //! ```no_run
+//! use frust::text;
+//!
 //! struct AppState {
 //!     greeting: String,
 //! }
 //!
 //! // The build closure is generic over its return (`impl View<State>`), so it
 //! // returns the concrete view directly, with no erasure.
-//! let build = |state: &mut AppState| frust::text(state.greeting.clone()).size(32.0);
+//! let build = |state: &mut AppState| text(state.greeting.clone()).size(32.0);
 //!
 //! frust::App::new(AppState { greeting: "Hello from Frust".into() }, build)
 //!     .run()
@@ -66,37 +70,37 @@
 //! ## Layout containers
 //!
 //! The fluent `column()` / `row()` builders take each child as-is (they erase
-//! internally); the tuple-style primitives compose with [`any`], which is
-//! only needed because a `Vec` holds one element type:
+//! internally); the tuple-style primitives take a tuple of mixed view types
+//! (up to 12, nest beyond), so no [`any`] is written:
 //!
 //! ```
 //! use frust::{
-//!     Align, Alignment, Column, EdgeInsets, Padding, Row, SizedBox, any, text,
+//!     Align, Alignment, Column, Component, EdgeInsets, Padding, Row, SizedBox, View, text,
 //! };
 //!
+//! #[derive(Default)]
 //! struct Layouts;
 //!
-//! impl frust::Component for Layouts {
+//! impl Component for Layouts {
 //!     type State = ();
 //!
 //!     fn init(&self) {}
 //!
-//!     fn build(&self, _state: &mut ()) -> impl frust::View<()> {
-//!         // `any` is needed inside these `vec![..]`s: the children are different view types.
-//!         Column(vec![
-//!             any(text("title").size(24.0)),
-//!             any(Row(vec![any(text("left")), any(text("right"))])),
-//!             any(Padding(EdgeInsets::all(8.0), text("padded"))),
-//!             any(Align(Alignment::CENTER, text("centered"))),
-//!             any(SizedBox(Some(0.0), Some(12.0))),
-//!         ])
+//!     fn build(&self, _state: &mut ()) -> impl View<()> {
+//!         Column((
+//!             text("title").size(24.0),
+//!             Row((text("left"), text("right"))),
+//!             Padding(EdgeInsets::all(8.0), text("padded")),
+//!             Align(Alignment::CENTER, text("centered")),
+//!             SizedBox(Some(0.0), Some(12.0)),
+//!         ))
 //!     }
 //! }
 //! # let _ = Layouts;
 //! ```
 //!
-//! The fluent builders erase internally, so no `any()` is written for
-//! container children:
+//! The fluent builders also express conditional and iterated children
+//! (`.when`, `.children`) without any erasure:
 //!
 //! ```
 //! use frust::{column, row, stack, text};
@@ -195,16 +199,18 @@ pub use frust_widgets::scroll_controller::ItemAlignment;
 ///     hovering: bool,
 /// }
 ///
-/// // A tooltip: above its trigger, in the topmost band, and transparent to the
-/// // pointer so hovering the trigger is never interrupted by its own tip.
-/// fn trigger(state: &mut App) -> impl View<App> + use<> {
-///     overlay_portal(text("Save"))
-///         .overlay(state.hovering.then(|| text("Save the document")))
-///         .placement(OverlayPlacement::on(OverlaySide::Top))
-///         .band(OverlayBand::Tooltip)
-///         .input(OverlayInput::Transparent)
+/// impl App {
+///     // A tooltip: above its trigger, in the topmost band, and transparent to the
+///     // pointer so hovering the trigger is never interrupted by its own tip.
+///     fn trigger(state: &mut App) -> impl View<App> {
+///         overlay_portal(text("Save"))
+///             .overlay(state.hovering.then(|| text("Save the document")))
+///             .placement(OverlayPlacement::on(OverlaySide::Top))
+///             .band(OverlayBand::Tooltip)
+///             .input(OverlayInput::Transparent)
+///     }
 /// }
-/// # let _ = trigger;
+/// # let _ = App::trigger;
 /// ```
 pub use frust_core::{OutsideTap, OverlayBand, OverlayInput};
 
@@ -322,11 +328,15 @@ pub use frust_core::{
 ///     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
 ///         column()
 ///             .child(text("map below"))
-///             .child(
-///                 platform_view("dev.frust.MapFactory")
-///                     .params_json(r#"{"style":"dark"}"#)
-///                     .size(320.0, 240.0),
-///             )
+///             .child(Self::map())
+///     }
+/// }
+///
+/// impl MapDemo {
+///     fn map() -> impl View<()> {
+///         platform_view("dev.frust.MapFactory")
+///             .params_json(r#"{"style":"dark"}"#)
+///             .size(320.0, 240.0)
 ///     }
 /// }
 ///
@@ -371,7 +381,12 @@ pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 ///     }
 ///
 ///     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-///         let ticks = *state;
+///         Self::face(*state)
+///     }
+/// }
+///
+/// impl Clock {
+///     fn face(ticks: u32) -> impl View<u32> {
 ///         canvas(move |scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
 ///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x10, 0x10, 0x10));
 ///         })
@@ -423,15 +438,20 @@ pub use frust_widgets::{CanvasView, CanvasWidget, canvas};
 ///     }
 ///
 ///     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-///         let board = canvas(|scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
-///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x20, 0x20, 0x20));
-///         })
-///         .size(Size::new(2000.0, 1500.0));
-///         pan_zoom(board)
+///         pan_zoom(Self::surface())
 ///             .max_scale(4.0)
 ///             .inertia(true)
 ///             .controller(state.zoom.clone())
 ///             .on_transform(|state: &mut BoardState, t| state.transform = t)
+///     }
+/// }
+///
+/// impl Board {
+///     fn surface() -> impl View<BoardState> {
+///         canvas(|scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
+///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x20, 0x20, 0x20));
+///         })
+///         .size(Size::new(2000.0, 1500.0))
 ///     }
 /// }
 ///
@@ -614,7 +634,8 @@ pub use frust_widgets::motion;
 ///     child: AnyView<State>,
 /// }
 ///
-/// /// The view-fn app code calls; `any` erases the concrete child view.
+/// /// The view-fn app code calls; `any` erases the child because the view
+/// /// *stores* it in a field (storing is the one place erasure is needed).
 /// fn offset<State: 'static, V: View<State>>(offset: Point, child: V) -> OffsetView<State> {
 ///     OffsetView { offset, child: any(child) }
 /// }
@@ -1117,7 +1138,13 @@ pub use back_glue::{BackHandler, attach_back_handler};
 ///
 ///     fn build(&self, state: &mut AppState) -> impl View<AppState> {
 ///         // Back handling is automatic — no BackHandler needed.
-///         navigator(&state.nav, || text("home"))
+///         navigator(&state.nav, Self::home)
+///     }
+/// }
+///
+/// impl App {
+///     fn home() -> impl View<AppState> {
+///         text("home")
 ///     }
 /// }
 ///
@@ -1188,11 +1215,15 @@ pub fn navigator<State: 'static, V: View<State>>(
 ///         let nav = state.nav.clone();
 ///         // The former root view moves INSIDE the host's page builder — which
 ///         // is also what puts the inner navigator's wiring after the host's.
-///         overlay_host(&state.overlays, move || {
-///             stack()
-///                 .child(navigator(&nav, || text("home")))
-///                 .child(text("persistent chrome"))
-///         })
+///         overlay_host(&state.overlays, move || Self::shell(nav.clone()))
+///     }
+/// }
+///
+/// impl App {
+///     fn shell(nav: NavigatorController<AppState>) -> impl View<AppState> {
+///         stack()
+///             .child(navigator(&nav, || text("home")))
+///             .child(text("persistent chrome"))
 ///     }
 /// }
 ///
@@ -1471,18 +1502,14 @@ pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 /// [`Router`]) is a separate opt-in, not automatic here.
 ///
 /// ```no_run
-/// use frust::{Route, Router, View, deep_links, text};
+/// use frust::{Component, Route, Router, View, deep_links, text};
 ///
 /// struct AppState;
 ///
+/// #[derive(Default)]
 /// struct NavDemo;
 ///
-/// fn build_router() -> Router<AppState> {
-///     // A route builder returns any `View`, so it needs no erasure.
-///     Router::new(vec![Route::new("/", |_params| text("home"))])
-/// }
-///
-/// impl frust::Component for NavDemo {
+/// impl Component for NavDemo {
 ///     type State = AppState;
 ///
 ///     fn init(&self) -> AppState {
@@ -1490,13 +1517,20 @@ pub use frust_reactive::{RwSignal, on_cleanup, provide_context, use_context};
 ///     }
 ///
 ///     fn build(&self, _state: &mut AppState) -> impl View<AppState> {
-///         let _router = build_router();
+///         let _router = Self::router();
 ///         // A late-subscribed read: `initial` sees a cold-start link (if any);
 ///         // `latest` is the live signal a rebuild tracks for warm links.
 ///         let links = deep_links();
 ///         let _ = links.initial;
 ///         let _ = links.latest;
 ///         text("nav demo")
+///     }
+/// }
+///
+/// impl NavDemo {
+///     fn router() -> Router<AppState> {
+///         // A route builder returns any `View`, so it needs no erasure.
+///         Router::new(vec![Route::new("/", |_params| text("home"))])
 ///     }
 /// }
 /// # let _ = NavDemo;
@@ -2197,7 +2231,13 @@ pub fn __frust_register_hotpatch_anchor(_anchor: extern "C" fn()) {}
 ///     }
 ///
 ///     fn build(&self, state: &mut i32) -> impl View<i32> {
-///         text(format!("count: {state}")).size(32.0)
+///         Self::label(*state)
+///     }
+/// }
+///
+/// impl App {
+///     fn label(count: i32) -> impl View<i32> {
+///         text(format!("count: {count}")).size(32.0)
 ///     }
 /// }
 ///
