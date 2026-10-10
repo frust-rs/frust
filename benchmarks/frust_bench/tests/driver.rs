@@ -4,7 +4,7 @@
 
 use std::any::Any;
 
-use frust::{AnyView, any, component};
+use frust::{AnyView, component};
 use frust_core::{FrameTime, RenderRoot, View};
 use frust_reactive::ReactiveRuntime;
 use frust_scene::GlyphRun;
@@ -462,8 +462,8 @@ fn s3_cycles_continuously_and_repopulates_after_each_clear_under_layout_skip_gat
 #[test]
 fn full_app_mounts_with_scenario_switcher() {
     let _owner = setup();
-    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
-    let mut logic = |_s: &mut ()| any(component(BenchApp));
+    let mut root: RenderRoot<(), _> = RenderRoot::new();
+    let mut logic = |_s: &mut ()| component(BenchApp);
     let mut state = ();
     let mut tcx = TextContext::new();
 

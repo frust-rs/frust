@@ -49,9 +49,9 @@
 
 use frust::motion::AnimatedOpacity;
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, Padding, PlatformViewView, RwSignal, Set, SizedBox, Theme, View, any, button,
-    inflexible, platform_view, row, stack, text, use_context,
+    Align, Alignment, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
+    Padding, PlatformViewView, RwSignal, Set, SizedBox, Theme, View, button, inflexible,
+    platform_view, row, stack, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -171,15 +171,15 @@ fn block(children: Vec<FlexChild<PlaygroundState>>) -> FlexChild<PlaygroundState
 /// body height, so scrolling read as broken on-device while the same filler
 /// scrolled generously in a shorter headless test viewport, masking the bug).
 fn filler_rows() -> impl View<PlaygroundState> {
-    let rows: Vec<AnyView<PlaygroundState>> = (1..=64)
+    let rows = (1..=64)
         .map(|i| {
-            any(Padding(
+            inflexible(Padding(
                 EdgeInsets::symmetric(0.0, 8.0),
                 text(format!("row {i:02} \u{2014} platform-views filler")).size(12.0),
             ))
         })
         .collect();
-    FlexView::new(Axis::Vertical, rows.into_iter().map(inflexible).collect())
+    FlexView::new(Axis::Vertical, rows)
 }
 
 // ---------------------------------------------------------------------------

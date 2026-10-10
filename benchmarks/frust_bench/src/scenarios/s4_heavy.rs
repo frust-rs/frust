@@ -72,6 +72,7 @@ impl Scenario for S4 {
         "Heavy-work responsiveness (parse while animating)"
     }
 
+    // erasure: keep Scenario::build feeds the dyn SCENARIOS table
     fn build(&self, _state: &mut BenchState) -> AnyView<BenchState> {
         any(component(S4Heavy))
     }
@@ -439,10 +440,10 @@ impl Component for S4Heavy {
             AsyncValue::Error(_) => "parse failed".to_string(),
         };
 
-        any(stack()
+        stack()
             // The animation runs the whole time, independent of the parse.
             .child(SpinBox::new())
-            .child(Align(Alignment::new(0.0, 0.0), text(status).size(18.0))))
+            .child(Align(Alignment::new(0.0, 0.0), text(status).size(18.0)))
     }
 }
 

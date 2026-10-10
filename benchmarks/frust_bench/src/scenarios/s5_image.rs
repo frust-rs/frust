@@ -184,6 +184,7 @@ impl Scenario for S5 {
         "Image pipeline (off-thread decode stream)"
     }
 
+    // erasure: keep Scenario::build feeds the dyn SCENARIOS table
     fn build(&self, _state: &mut BenchState) -> AnyView<BenchState> {
         any(component(ImageStreamPage))
     }
@@ -382,7 +383,7 @@ impl Component for ImageStreamPage {
             }
         }
 
-        any(ImageStream {
+        ImageStream {
             ready,
             visible_ids: state.visible_ids,
             offset: state.offset,
@@ -390,7 +391,7 @@ impl Component for ImageStreamPage {
             // whose `ImageStream::rebuild` then reports `ChangeFlags::LAYOUT`
             // (see `ImageStreamState::offset`).
             scroll_offset: state.offset.get(),
-        })
+        }
     }
 }
 

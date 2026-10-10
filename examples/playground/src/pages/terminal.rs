@@ -119,7 +119,7 @@ use frust::authoring::{
 };
 use frust::{
     Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
-    Padding, RwSignal, Set, SizedBox, Theme, any, button, component, inflexible, on_cleanup,
+    Padding, RwSignal, Set, SizedBox, Theme, button, component, inflexible, on_cleanup,
     spawn_blocking, spawn_local, text, use_context,
 };
 
@@ -895,10 +895,10 @@ impl Component for TerminalPage {
         }));
         children.push(gap(16.0));
 
-        any(Padding(
+        Padding(
             EdgeInsets::all(16.0),
             FlexView::new(Axis::Vertical, children),
-        ))
+        )
     }
 }
 

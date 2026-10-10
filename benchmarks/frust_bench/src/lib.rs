@@ -33,7 +33,7 @@ pub mod scenarios;
 
 use frust::{
     Axis, Brightness, Component, EdgeInsets, FlexChild, FlexView, Get, Padding, Set, SizedBox,
-    View, any, button, column, inflexible, safe_area, set_app_theme, stack,
+    View, button, column, inflexible, safe_area, set_app_theme, stack,
 };
 
 use scenarios::{BenchState, SCENARIOS};
@@ -92,9 +92,7 @@ impl Component for BenchApp {
         // also the S1 size-parity contract's play area: `min(playW, playH)` is
         // measured over the SafeArea-inset region on both apps (see
         // `benchmarks/flutter_bench/lib/bench/datasets.dart`'s S1 spec).
-        any(safe_area(
-            stack().child(scenario_view).child(scenario_switcher(state)),
-        ))
+        safe_area(stack().child(scenario_view).child(scenario_switcher(state)))
     }
 }
 

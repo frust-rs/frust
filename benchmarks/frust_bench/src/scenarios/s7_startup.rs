@@ -50,6 +50,7 @@ impl Scenario for S7 {
         "Cold start + idle (thin runtime, frame-gate idle)"
     }
 
+    // erasure: keep Scenario::build feeds the dyn SCENARIOS table
     fn build(&self, _state: &mut BenchState) -> AnyView<BenchState> {
         let body = Padding(
             EdgeInsets::all(24.0),

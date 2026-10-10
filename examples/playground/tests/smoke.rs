@@ -15,8 +15,7 @@ use std::any::Any;
 
 use frust::authoring::WindowInsets;
 use frust::{
-    AnyView, Brightness, GetUntracked, Theme, Update, WindowMetrics, any, component,
-    provide_context,
+    AnyView, Brightness, GetUntracked, Theme, Update, WindowMetrics, component, provide_context,
 };
 use frust_core::FrameTime;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
@@ -369,8 +368,8 @@ fn full_shell_nav_labels_fit_single_line_at_phone_width() {
     let nav_top = PHONE_H - NAV_HEIGHT;
     let expected_label_y = nav_top + LABEL_TOP_OFFSET;
 
-    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
-    let mut logic = |_s: &mut ()| any(component(PlaygroundApp));
+    let mut root: RenderRoot<(), _> = RenderRoot::new();
+    let mut logic = |_s: &mut ()| component(PlaygroundApp);
     let mut state = ();
     let (scene, _outcome) = frame_at_size(
         &mut root,
@@ -412,8 +411,8 @@ fn full_shell_mounts_with_app_bar_body_and_nav_bar() {
     // Mount the whole app through its root Component — the same tree `app!`
     // binds on every platform: navigator → app bar + pattern-switched section
     // body + bottom navigation bar.
-    let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
-    let mut logic = |_s: &mut ()| any(component(PlaygroundApp));
+    let mut root: RenderRoot<(), _> = RenderRoot::new();
+    let mut logic = |_s: &mut ()| component(PlaygroundApp);
     let mut state = ();
 
     let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
@@ -490,8 +489,8 @@ fn wide_width_shows_every_section_in_the_side_rail() {
     let mut tcx = TextContext::new();
 
     let narrow_runs = {
-        let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
-        let mut logic = |_s: &mut ()| any(component(PlaygroundApp));
+        let mut root: RenderRoot<(), _> = RenderRoot::new();
+        let mut logic = |_s: &mut ()| component(PlaygroundApp);
         let mut state = ();
         let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
         scene.text_runs
@@ -503,8 +502,8 @@ fn wide_width_shows_every_section_in_the_side_rail() {
         WindowInsets::default(),
     ));
     let wide_runs = {
-        let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
-        let mut logic = |_s: &mut ()| any(component(PlaygroundApp));
+        let mut root: RenderRoot<(), _> = RenderRoot::new();
+        let mut logic = |_s: &mut ()| component(PlaygroundApp);
         let mut state = ();
         let (scene, _outcome) = frame_at_size(
             &mut root,

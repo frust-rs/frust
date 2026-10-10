@@ -63,6 +63,7 @@ impl Scenario for S6 {
         "Text shaping stress (multilingual relayout)"
     }
 
+    // erasure: keep Scenario::build feeds the dyn SCENARIOS table
     fn build(&self, _state: &mut BenchState) -> AnyView<BenchState> {
         any(component(S6Text))
     }
@@ -97,10 +98,10 @@ impl Component for S6Text {
                 .color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xE6)),
         );
 
-        any(stack()
+        stack()
             .child(WidthPulse { frac: state.frac })
             // Top-center so the corpus starts at the top and wraps downward.
-            .child(Align(Alignment::new(0.0, -1.0), column)))
+            .child(Align(Alignment::new(0.0, -1.0), column))
     }
 }
 
@@ -181,6 +182,7 @@ impl Widget for WidthPulseWidget {
 pub fn width_box<State: 'static, V: View<State>>(frac: f64, child: V) -> WidthBox<State> {
     WidthBox {
         frac,
+        // erasure: keep stored in WidthBox's hand-written child field
         child: any(child),
     }
 }
