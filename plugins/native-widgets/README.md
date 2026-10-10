@@ -108,24 +108,26 @@ bare bar stays at the bottom and gets no Liquid Glass — the iPadOS 18 top tab
 bar and the floating glass bar are `UITabBarController` features.
 
 ```rust
-use frust::{RwSignal, Get, Set, RouteNavigator};
-use frust_native_widgets::{native_tab_bar, TabIcon, TabId, TabItem};
+use frust::{Get, RouteNavigator, RwSignal, Set, View};
+use frust_native_widgets::{TabIcon, TabId, TabItem, native_tab_bar};
 
-// The router owns navigation; the tab bar only reports the request.
-fn bottom_tabs(nav: RouteNavigator, tab: RwSignal<String>) -> impl frust::View<AppState> {
-    native_tab_bar(
-        vec![
-            TabItem::new("home", "Home", TabIcon::AppleSymbol("house".into()))
-                .selected_icon(TabIcon::AppleSymbol("house.fill".into())),
-            TabItem::new("inbox", "Inbox", TabIcon::AppleSymbol("tray".into())).badge("3"),
-        ],
-        TabId::new(tab.get()),
-    )
-    .on_select(move |id| {
-        tab.set(id.to_string()); // feed the confirmed id back next rebuild
-        nav.go(format!("/{id}")); // Router::go through its Send + Sync navigator
-    })
-    .on_reselect(|id| log::info!("scroll {id} to top"))
+impl Shell {
+    // The router owns navigation; the tab bar only reports the request.
+    fn bottom_tabs(nav: RouteNavigator, tab: RwSignal<String>) -> impl View<ShellState> {
+        native_tab_bar(
+            vec![
+                TabItem::new("home", "Home", TabIcon::AppleSymbol("house".into()))
+                    .selected_icon(TabIcon::AppleSymbol("house.fill".into())),
+                TabItem::new("inbox", "Inbox", TabIcon::AppleSymbol("tray".into())).badge("3"),
+            ],
+            TabId::new(tab.get()),
+        )
+        .on_select(move |id| {
+            tab.set(id.to_string()); // feed the confirmed id back next rebuild
+            nav.go(format!("/{id}")); // Router::go through its Send + Sync navigator
+        })
+        .on_reselect(|id| log::info!("scroll {id} to top"))
+    }
 }
 ```
 
@@ -186,16 +188,18 @@ a hosted native control — this is inherent to hosting real platform widgets,
 not a gap.
 
 ```rust
-use frust::RwSignal;
+use frust::{RwSignal, Set, View};
 use frust_native_widgets::native_button;
 
-// A native control's callback takes no app-state parameter — it fires
-// straight from the platform's own listener, so it closes over a signal
-// instead (the events-as-signals idiom every builder follows):
-fn save_button(saved: RwSignal<bool>) -> impl frust::View<AppState> {
-    native_button("Save")
-        .size(160.0, 48.0)
-        .on_press(move || saved.set(true))
+impl Editor {
+    // A native control's callback takes no app-state parameter — it fires
+    // straight from the platform's own listener, so it closes over a signal
+    // instead (the events-as-signals idiom every builder follows):
+    fn save_button(saved: RwSignal<bool>) -> impl View<EditorState> {
+        native_button("Save")
+            .size(160.0, 48.0)
+            .on_press(move || saved.set(true))
+    }
 }
 ```
 
@@ -226,7 +230,7 @@ and Android has no severity styling for it — plain, sharing `Default`'s
 button-slot preference. Two shapes:
 
 ```rust
-use frust::{RwSignal, Set};
+use frust::{RwSignal, Set, spawn_local};
 use frust_native_widgets::{
     ActionRole, AlertOutcome, AlertSpec, AlertStyle, AnchorRect, native_button, show_native_alert,
     show_native_alert_into,
@@ -238,9 +242,9 @@ fn delete_spec() -> AlertSpec {
         .with_action("delete", "Delete", ActionRole::Destructive)
 }
 
-// 1. Awaitable — from any async context (`frust::spawn_local` on the UI thread);
+// 1. Awaitable — from any async context (`spawn_local` on the UI thread);
 //    `deleted` is an app `RwSignal<bool>`:
-frust::spawn_local(async move {
+spawn_local(async move {
     if let Ok(AlertOutcome::Action(id)) = show_native_alert(delete_spec()).await
         && id == "delete"
     {
@@ -311,7 +315,7 @@ is refused `InvalidSpec`, as are more than three actions or a
 `Detent::Custom(f)` outside `0 < f <= 1`.
 
 ```rust
-use frust::RwSignal;
+use frust::{RwSignal, Set, spawn_local};
 use frust_native_widgets::{
     ActionRole, Detent, SheetContent, SheetOutcome, SheetSpec, native_button, show_native_sheet,
     show_native_sheet_into,
@@ -334,7 +338,7 @@ let presentation = show_native_sheet(share_spec().on_detent(move |detent| {
     expanded.set(detent == Detent::Large); // user drags stream here; not outcomes
 }));
 let handle = presentation.sheet_handle();
-frust::spawn_local(async move {
+spawn_local(async move {
     if let Ok(SheetOutcome::Action(id)) = presentation.await {
         chosen.set(Some(id));
     }
@@ -367,7 +371,7 @@ parity across idioms.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-native-widgets = "0.5"
+frust-native-widgets = "0.6"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {

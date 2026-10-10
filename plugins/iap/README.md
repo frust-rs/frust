@@ -34,7 +34,7 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-iap = "0.5"
+frust-iap = "0.6"
 serde_json = "1"
 ```
 
@@ -171,6 +171,7 @@ dead. The same "unknown, not failed" treatment applies to a timed-out
 `finish_transaction` — see its doc comment.
 
 ```rust
+use frust::spawn_blocking;
 use frust_iap::{Iap, IapEvent, IapErrorCode};
 
 // Register before the first request_purchase, and keep the handle alive
@@ -180,7 +181,7 @@ let _listener = Iap::set_purchase_listener(Box::new(|event| match event {
         // 1. verify `purchase` server-side, 2. grant entitlement durably,
         // 3. THEN settle it — never on request_purchase's own return.
         let purchase = purchase.clone();
-        frust_reactive::spawn_blocking(move || {
+        spawn_blocking(move || {
             use frust_iap::PurchaseInput;
             Iap::finish_transaction(
                 PurchaseInput {
@@ -265,7 +266,9 @@ platform plugin has, since standing up a bespoke thread pool for one plugin
 buys nothing over the pool the reactive runtime already runs:
 
 ```rust
-let connected = frust_reactive::spawn_blocking(|| Iap::init_connection(None)).await??;
+use frust::spawn_blocking;
+
+let connected = spawn_blocking(|| Iap::init_connection(None)).await??;
 ```
 
 The guard order every call runs, before any platform work: **delivery-thread

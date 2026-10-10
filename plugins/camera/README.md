@@ -36,7 +36,7 @@ The **only** required Cargo step is the dependency line:
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-camera = { path = "<frust>/plugins/camera" }  # or the crates.io release, e.g. version = "0.5"
+frust-camera = { path = "<frust>/plugins/camera" }  # or the crates.io release, e.g. version = "0.6"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -62,8 +62,11 @@ both platform additions below (permission and still capture work without
 them, but you'll be looking at a black rectangle).
 
 ```rust
+use frust::platform_view;
+
+// in a Component's build
 let view_type = session.preview_view_type(); // target-gated — see the doc below
-frust::platform_view(view_type)
+platform_view(view_type)
     .params_json(session.params_json())
     // size it off `session.preview_aspect_ratio()` once non-zero
 ```
@@ -156,13 +159,15 @@ Pair each with `frust-reactive`'s `spawn_blocking` (an app-tier concern — the
 plugin itself stays framework-free per the platform-plugin charter):
 
 ```rust
-let status = frust_reactive::spawn_blocking(Camera::request_permission).await??;
+use frust::spawn_blocking;
+
+let status = spawn_blocking(Camera::request_permission).await??;
 
 // `take_picture` takes `&self`, so hold the session behind a shared handle
 // (e.g. `Arc<CameraSession>`) and move a clone of that into the closure:
 let session = Arc::clone(&session);
 let path = photo_path.clone();
-frust_reactive::spawn_blocking(move || session.take_picture(&path)).await??;
+spawn_blocking(move || session.take_picture(&path)).await??;
 ```
 
 **Never call `request_permission` or `take_picture` on the UI thread.** On

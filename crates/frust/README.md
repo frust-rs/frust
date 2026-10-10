@@ -23,31 +23,60 @@ Add the dependency:
 
 ```toml
 [dependencies]
-frust = { package = "frust-ui", version = "0.5" }
+frust = { package = "frust-ui", version = "0.6" }
+frust-material = "0.6"
 ```
 
 The package is named `frust-ui` and imported as `frust`, because the crates.io name `frust` belongs to another project (<https://github.com/lloydmeta/frunk/issues/258>).
 
-A counter-style component, as shown in the crate-level documentation:
+A counter app, the shape `frust create` generates. `build` reads as one declarative tree, and
+`frust::app!` turns the `Component` into the platform entry points:
 
 ```rust
-use frust::{Component, View, text};
+use frust::{Align, Alignment, Component, CrossAxisAlignment, View, column, icon, scaffold, text};
+use frust_material::{AppBarContainer, app_bar, fab, icons};
 
-struct Counter;
+#[derive(Default)]
+pub struct CounterApp;
 
-impl Component for Counter {
-    type State = i32;
+impl Component for CounterApp {
+    type State = u32;
 
-    fn init(&self) -> i32 {
+    fn init(&self) -> u32 {
         0
     }
 
-    fn build(&self, state: &mut i32) -> impl View<i32> {
-        text(format!("count: {state}")).size(32.0)
+    fn build(&self, count: &mut u32) -> impl View<u32> {
+        scaffold(Align(
+            Alignment::CENTER,
+            column()
+                .child(text("You have pushed the button this many times:"))
+                .child(text(count.to_string()).size(48.0))
+                .cross_axis(CrossAxisAlignment::Center),
+        ))
+        .app_bar(
+            app_bar::<u32>("Counter")
+                .container(AppBarContainer::InversePrimary)
+                .elevation(2),
+        )
+        .fab(Self::increment_fab())
     }
 }
 
-frust::run(Counter).unwrap();
+impl CounterApp {
+    fn increment_fab() -> impl View<u32> {
+        fab(icon(icons::ADD), |count: &mut u32| *count += 1).label("Increment")
+    }
+}
+
+// `setup` runs once on the UI thread before the root `init`. Material 3 is the
+// design system; swap in another design-system plugin's `install()` to change it.
+frust::app!(
+    CounterApp,
+    setup = {
+        frust_material::install();
+    }
+);
 ```
 
 ## Getting started

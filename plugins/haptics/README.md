@@ -17,7 +17,7 @@ not re-export it.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-haptics = { path = "<frust>/plugins/haptics" }  # or the crates.io release, e.g. version = "0.5"
+frust-haptics = { path = "<frust>/plugins/haptics" }  # or the crates.io release, e.g. version = "0.6"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {

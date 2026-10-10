@@ -32,7 +32,7 @@ dependency line:
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-secure-storage = { path = "<frust>/plugins/secure-storage" }  # or the crates.io release, e.g. version = "0.5"
+frust-secure-storage = { path = "<frust>/plugins/secure-storage" }  # or the crates.io release, e.g. version = "0.6"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -157,8 +157,10 @@ UI thread freezes the frame loop. Pair it with `frust-reactive`'s
 per the platform-plugin charter):
 
 ```rust
+use frust::spawn_blocking;
+
 // In your app (which already depends on `frust` / `frust-reactive`):
-let token = frust_reactive::spawn_blocking(move || {
+let token = spawn_blocking(move || {
     let store = SecureStorage::open_with("credentials", opts)?;
     store.get("api_token")           // blocks here on the biometric prompt
 }).await??;
