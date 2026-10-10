@@ -18,8 +18,8 @@
 //! documentation rail.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, View, any, column, component, icon,
-    icons, row, text,
+    Component, CrossAxisAlignment, SizedBox, View, ViewSeq, column, component, icon, icons, row,
+    text,
 };
 use frust_beui::components::animated_sidebar::{animated_sidebar, sidebar_item};
 use frust_beui::components::bounce_sidebar::{bounce_sidebar, bounce_sidebar_item};
@@ -156,20 +156,19 @@ fn hgap(width: f64) -> impl View<State> {
 
 /// One component's block: its name, a one-line note (where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
-    let mut children = vec![
-        any(text(title.to_string()).size(16.0)),
-        any(gap(4.0)),
-        any(caption(note.to_string())),
-        any(gap(12.0)),
-    ];
-    children.extend(body);
-    children.push(any(gap(32.0)));
-    Column(children).cross_axis(CrossAxisAlignment::Start)
+fn demo<M>(title: &str, note: &str, body: impl ViewSeq<State, M>) -> impl View<State> {
+    column()
+        .child(text(title.to_string()).size(16.0))
+        .child(gap(4.0))
+        .child(caption(note.to_string()))
+        .child(gap(12.0))
+        .children(body)
+        .child(gap(32.0))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A labelled specimen: the caption above the live component.
-fn labelled(label: &str, body: AnyView<State>) -> impl View<State> {
+fn labelled(label: &str, body: impl View<State>) -> impl View<State> {
     column()
         .child(caption(label.to_string()))
         .child(gap(8.0))
@@ -186,7 +185,7 @@ fn knob(label: &str, on_press: impl Fn(&mut State) + 'static) -> impl View<State
 
 /// [`tabs`] in all three variants.
 fn tab_sets(state: &State) -> impl View<State> {
-    let pill = any(tabs(
+    let pill = tabs(
         state.pill_tab.clone(),
         vec![
             tabs_tab(
@@ -199,9 +198,9 @@ fn tab_sets(state: &State) -> impl View<State> {
         ],
         |s: &mut State, v: String| s.pill_tab = v,
     )
-    .variant(TabsVariant::Pill));
+    .variant(TabsVariant::Pill);
 
-    let segment = any(tabs(
+    let segment = tabs(
         state.segment_tab.clone(),
         vec![
             tabs_tab("day", "Day", caption("24 hours of events.")),
@@ -210,9 +209,9 @@ fn tab_sets(state: &State) -> impl View<State> {
         ],
         |s: &mut State, v: String| s.segment_tab = v,
     )
-    .variant(TabsVariant::Segment));
+    .variant(TabsVariant::Segment);
 
-    let underline = any(tabs(
+    let underline = tabs(
         state.underline_tab.clone(),
         vec![
             tabs_tab("all", "All", caption("Every issue.")),
@@ -222,7 +221,7 @@ fn tab_sets(state: &State) -> impl View<State> {
         ],
         |s: &mut State, v: String| s.underline_tab = v,
     )
-    .variant(TabsVariant::Underline));
+    .variant(TabsVariant::Underline);
 
     demo(
         "tabs",
@@ -233,22 +232,19 @@ fn tab_sets(state: &State) -> impl View<State> {
          that overshoot is this component's character. Arrow keys move focus \
          and activate; the disabled tab is a catalog convention upstream has \
          no equivalent for.",
-        vec![any(row()
-            .child(labelled(
-                "Pill",
-                any(SizedBox(Some(240.0), None).child(pill)),
-            ))
+        row()
+            .child(labelled("Pill", SizedBox(Some(240.0), None).child(pill)))
             .child(hgap(20.0))
             .child(labelled(
                 "Segment",
-                any(SizedBox(Some(220.0), None).child(segment)),
+                SizedBox(Some(220.0), None).child(segment),
             ))
             .child(hgap(20.0))
             .child(labelled(
                 "Underline \u{b7} last tab disabled",
-                any(SizedBox(Some(250.0), None).child(underline)),
+                SizedBox(Some(250.0), None).child(underline),
             ))
-            .cross_axis(CrossAxisAlignment::Start))],
+            .cross_axis(CrossAxisAlignment::Start),
     )
 }
 
@@ -286,18 +282,14 @@ fn docks(state: &State) -> impl View<State> {
         items
     };
 
-    let magnifying = any(
-        dock(entries(state.dock_active, true), |s: &mut State, index| {
-            s.dock_active = index;
-        })
-        .magnify(state.dock_magnify),
-    );
+    let magnifying = dock(entries(state.dock_active, true), |s: &mut State, index| {
+        s.dock_active = index;
+    })
+    .magnify(state.dock_magnify);
 
-    let plain = any(
-        dock(entries(state.dock_active, false), |_: &mut State, _| {})
-            .magnify(false)
-            .size(36.0),
-    );
+    let plain = dock(entries(state.dock_active, false), |_: &mut State, _| {})
+        .magnify(false)
+        .size(36.0);
 
     demo(
         "dock",
@@ -307,22 +299,22 @@ fn docks(state: &State) -> impl View<State> {
          upward about their bottom edge out of a baseline that never moves, \
          and the whole effect is paint-only: a cursor sweep costs repaints, \
          not relayouts.",
-        vec![
-            any(row()
+        (
+            row()
                 .child(labelled("Magnifying \u{b7} 44px items", magnifying))
                 .child(hgap(32.0))
                 .child(labelled("magnify: off \u{b7} 36px items", plain))
-                .cross_axis(CrossAxisAlignment::Start)),
-            any(gap(14.0)),
-            any(knob(
+                .cross_axis(CrossAxisAlignment::Start),
+            gap(14.0),
+            knob(
                 if state.dock_magnify {
                     "Magnify: on"
                 } else {
                     "Magnify: off"
                 },
                 |s: &mut State| s.dock_magnify = !s.dock_magnify,
-            )),
-        ],
+            ),
+        ),
     )
 }
 
@@ -347,11 +339,11 @@ fn sidebars(state: &State) -> impl View<State> {
         })
         .collect();
 
-    let rail = any(SizedBox(None, Some(280.0)).child(animated_sidebar(
+    let rail = SizedBox(None, Some(280.0)).child(animated_sidebar(
         state.sidebar_open,
         rail_items,
         |s: &mut State, index| s.sidebar_active = index,
-    )));
+    ));
 
     let bounce_items: Vec<_> = DESTINATIONS
         .iter()
@@ -361,11 +353,11 @@ fn sidebars(state: &State) -> impl View<State> {
         })
         .collect();
 
-    let bounce = any(SizedBox(Some(220.0), None).child(bounce_sidebar(
+    let bounce = SizedBox(Some(220.0), None).child(bounce_sidebar(
         state.bounce_active,
         bounce_items,
         |s: &mut State, index| s.bounce_active = index,
-    )));
+    ));
 
     demo(
         "animated_sidebar \u{b7} bounce_sidebar",
@@ -376,25 +368,25 @@ fn sidebars(state: &State) -> impl View<State> {
          sidebar is a different component, not a bouncier rail: its items carry \
          no motion at all, and the bounce is the dot's own bowed arc between \
          rows, softened as the jump grows.",
-        vec![
-            any(row()
+        (
+            row()
                 .child(labelled(
                     "Rail \u{b7} collapsible, badge, disabled row",
                     rail,
                 ))
                 .child(hgap(48.0))
                 .child(labelled("Bounce \u{b7} the dot arcs between rows", bounce))
-                .cross_axis(CrossAxisAlignment::Start)),
-            any(gap(14.0)),
-            any(knob(
+                .cross_axis(CrossAxisAlignment::Start),
+            gap(14.0),
+            knob(
                 if state.sidebar_open {
                     "Collapse the rail"
                 } else {
                     "Expand the rail"
                 },
                 |s: &mut State| s.sidebar_open = !s.sidebar_open,
-            )),
-        ],
+            ),
+        ),
     )
 }
 
@@ -429,7 +421,7 @@ fn disclosure(state: &State) -> impl View<State> {
         file_tree_folder("vendor", "vendor", vec![file_tree_file("dep", "dep.rs")]).disabled(true),
     ];
 
-    let tree = any(SizedBox(Some(280.0), None).child(
+    let tree = SizedBox(Some(280.0), None).child(
         file_tree(nodes)
             .selected(state.tree_selected.clone())
             .expanded(state.tree_expanded.clone())
@@ -441,7 +433,7 @@ fn disclosure(state: &State) -> impl View<State> {
                     s.tree_expanded.push(value);
                 }
             }),
-    ));
+    );
 
     let panels: Vec<_> = PANELS
         .iter()
@@ -451,11 +443,11 @@ fn disclosure(state: &State) -> impl View<State> {
         })
         .collect();
 
-    let accordion = any(SizedBox(Some(360.0), None).child(bouncy_accordion(
+    let accordion = SizedBox(Some(360.0), None).child(bouncy_accordion(
         state.panel.clone(),
         panels,
         |s: &mut State, value| s.panel = value,
-    )));
+    ));
 
     demo(
         "file_tree \u{b7} bouncy_accordion",
@@ -467,14 +459,14 @@ fn disclosure(state: &State) -> impl View<State> {
          accordion's springs are Motion's perceptual {duration, bounce} form \
          converted once so each settles in upstream's stated time with \
          upstream's overshoot.",
-        vec![any(row()
+        row()
             .child(labelled("Project tree \u{b7} vendor/ disabled", tree))
             .child(hgap(48.0))
             .child(labelled(
                 "Release queue \u{b7} last panel disabled",
                 accordion,
             ))
-            .cross_axis(CrossAxisAlignment::Start))],
+            .cross_axis(CrossAxisAlignment::Start),
     )
 }
 
@@ -487,21 +479,21 @@ fn rails(state: &State) -> impl View<State> {
             .collect::<Vec<_>>()
     };
 
-    let vertical = any(SizedBox(Some(340.0), Some(230.0)).child(
+    let vertical = SizedBox(Some(340.0), Some(230.0)).child(
         preview_rail(items(), state.rail_active, |s: &mut State, index| {
             s.rail_active = index
         })
         .highlight_active(true),
-    ));
+    );
 
-    let horizontal = any(SizedBox(Some(340.0), Some(230.0)).child(
+    let horizontal = SizedBox(Some(340.0), Some(230.0)).child(
         preview_rail(
             items(),
             state.rail_horizontal_active,
             |s: &mut State, index| s.rail_horizontal_active = index,
         )
         .orientation(PreviewRailOrientation::Horizontal),
-    ));
+    );
 
     demo(
         "preview_rail",
@@ -511,14 +503,14 @@ fn rails(state: &State) -> impl View<State> {
          move between two ladders. The card's entrance drops its blur, an \
          outgoing card gets no exit (a swap replays the entrance), and a press \
          pins a card with a second press un-pinning it.",
-        vec![any(row()
+        row()
             .child(labelled(
                 "Vertical \u{b7} active tick highlighted",
                 vertical,
             ))
             .child(hgap(48.0))
             .child(labelled("Horizontal", horizontal))
-            .cross_axis(CrossAxisAlignment::Start))],
+            .cross_axis(CrossAxisAlignment::Start),
     )
 }
 
@@ -533,13 +525,13 @@ impl Component for NavigationPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(column()
+        column()
             .child(tab_sets(state))
             .child(docks(state))
             .child(sidebars(state))
             .child(disclosure(state))
             .child(rails(state))
-            .cross_axis(CrossAxisAlignment::Start))
+            .cross_axis(CrossAxisAlignment::Start)
     }
 }
 

@@ -6,7 +6,7 @@
 //! # Where the page's state lives
 //!
 //! `crate::main`'s `page_body` calls every Motion page as a bare
-//! `page() -> AnyView<AppState>`, and `AppState` itself is outside this task's
+//! `page() -> impl View<AppState>`, and `AppState` itself is outside this task's
 //! write scope — so a page that needs retained state of its own hosts it in a
 //! [`frust::component`] instead of a field on `AppState`. That is the same
 //! `component(..)` route `examples/material3-demo`'s playgrounds take, and it
@@ -22,8 +22,8 @@
 //! the same logo ticker.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, MainAxisAlignment, Row, SizedBox, View, any,
-    column, component, row, text,
+    Component, CrossAxisAlignment, MainAxisAlignment, SizedBox, View, ViewSeq, column, component,
+    row, text,
 };
 use frust_beui::components::animated_badge::{
     AnimatedBadgeSize, AnimatedBadgeStatus, animated_badge,
@@ -136,20 +136,19 @@ fn hgap(width: f64) -> impl View<State> {
 
 /// One component's block: its name, a one-line note (which is where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
-    let mut children = vec![
-        any(text(title.to_string()).size(16.0)),
-        any(gap(4.0)),
-        any(caption(note.to_string())),
-        any(gap(12.0)),
-    ];
-    children.extend(body);
-    children.push(any(gap(32.0)));
-    Column(children).cross_axis(CrossAxisAlignment::Start)
+fn demo<M>(title: &str, note: &str, body: impl ViewSeq<State, M>) -> impl View<State> {
+    column()
+        .child(text(title.to_string()).size(16.0))
+        .child(gap(4.0))
+        .child(caption(note.to_string()))
+        .child(gap(12.0))
+        .children(body)
+        .child(gap(32.0))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A labelled specimen: the live component over its caption.
-fn specimen(label: &str, body: AnyView<State>) -> impl View<State> {
+fn specimen(label: &str, body: impl View<State>) -> impl View<State> {
     column()
         .child(body)
         .child(gap(6.0))
@@ -160,31 +159,23 @@ fn specimen(label: &str, body: AnyView<State>) -> impl View<State> {
 /// Lay `items` out in rows of `per_row`, `gap`px apart — this workspace has no
 /// flow/wrap primitive, so a long variant grid is chunked by hand (the same
 /// route `examples/material3-demo` takes for upstream's `Wrap`).
-fn grid(items: Vec<AnyView<State>>, per_row: usize, spacing: f64) -> impl View<State> {
-    let mut rows: Vec<AnyView<State>> = Vec::new();
-    let mut row: Vec<AnyView<State>> = Vec::new();
-    for item in items {
-        if !row.is_empty() {
-            row.push(any(hgap(spacing)));
-        }
-        row.push(item);
-        if row.len() >= per_row * 2 - 1 {
-            rows.push(any(
-                Row(std::mem::take(&mut row)).cross_axis(CrossAxisAlignment::Start)
-            ));
-        }
+fn grid<V: View<State>>(
+    items: impl IntoIterator<Item = V>,
+    per_row: usize,
+    spacing: f64,
+) -> impl View<State> {
+    let mut items = items.into_iter().peekable();
+    let mut grid = column().cross_axis(CrossAxisAlignment::Start);
+    let mut first = true;
+    while items.peek().is_some() {
+        let line = items.by_ref().take(per_row).enumerate().fold(
+            row().cross_axis(CrossAxisAlignment::Start),
+            |line, (i, item)| line.when(i > 0, |l| l.child(hgap(spacing))).child(item),
+        );
+        grid = grid.when(!first, |g| g.child(gap(spacing))).child(line);
+        first = false;
     }
-    if !row.is_empty() {
-        rows.push(any(Row(row).cross_axis(CrossAxisAlignment::Start)));
-    }
-    let mut spaced: Vec<AnyView<State>> = Vec::with_capacity(rows.len() * 2);
-    for r in rows {
-        if !spaced.is_empty() {
-            spaced.push(any(gap(spacing)));
-        }
-        spaced.push(r);
-    }
-    Column(spaced).cross_axis(CrossAxisAlignment::Start)
+    grid
 }
 
 /// A small ghost button — the knob every demo on this page is driven by.
@@ -205,25 +196,19 @@ fn text_effects(state: &State) -> impl View<State> {
         (TextAnimationVariant::Shimmer, "Shimmer"),
         (TextAnimationVariant::Chromatic, "Chromatic"),
     ];
-    let rows: Vec<AnyView<State>> = variants
+    // Each variant row is followed by its own spacer, flat in the block.
+    let rows: Vec<_> = variants
         .iter()
         .map(|(variant, label)| {
-            any(row()
-                .child(SizedBox(Some(96.0), None).child(caption(label.to_string())))
-                .child(text_animation::<State>(phrase).variant(*variant).size(22.0))
-                .cross_axis(CrossAxisAlignment::Center))
+            (
+                row()
+                    .child(SizedBox(Some(96.0), None).child(caption(label.to_string())))
+                    .child(text_animation::<State>(phrase).variant(*variant).size(22.0))
+                    .cross_axis(CrossAxisAlignment::Center),
+                gap(10.0),
+            )
         })
         .collect();
-
-    let mut body: Vec<AnyView<State>> = Vec::new();
-    for row in rows {
-        body.push(row);
-        body.push(any(gap(10.0)));
-    }
-    body.push(any(gap(2.0)));
-    body.push(any(knob("Next phrase", |s: &mut State| {
-        s.phrase = (s.phrase + 1) % PHRASES.len();
-    })));
 
     demo(
         "text_animation",
@@ -232,7 +217,13 @@ fn text_effects(state: &State) -> impl View<State> {
          blur halves are dropped — frust's scene has no blur primitive — so \
          both keep only the opacity and translation. Changing the phrase \
          restarts every effect.",
-        body,
+        (
+            rows,
+            gap(2.0),
+            knob("Next phrase", |s: &mut State| {
+                s.phrase = (s.phrase + 1) % PHRASES.len();
+            }),
+        ),
     )
 }
 
@@ -243,22 +234,22 @@ fn numbers(state: &State) -> impl View<State> {
 
     let roll = specimen(
         "Roll \u{b7} Active users",
-        any(number::<State>(value).group(true).size(34.0)),
+        number::<State>(value).group(true).size(34.0),
     );
     let count_up = specimen(
         "CountUp \u{b7} Revenue",
-        any(number::<State>(revenue)
+        number::<State>(revenue)
             .mode(NumberMode::CountUp)
             .group(true)
             .prefix("$")
-            .size(34.0)),
+            .size(34.0),
     );
     let padded = specimen(
         "Roll \u{b7} zero-padded, suffixed",
-        any(number::<State>(value % 1000.0)
+        number::<State>(value % 1000.0)
             .pad(4)
             .suffix(" ms")
-            .size(34.0)),
+            .size(34.0),
     );
 
     demo(
@@ -266,16 +257,16 @@ fn numbers(state: &State) -> impl View<State> {
         "Roll is upstream's slot machine, CountUp its value ramp. Grouping is \
          ASCII (en-US), not locale-aware; the ticker's optional blur is not \
          ported; both arm from first paint rather than on a viewport gate.",
-        vec![
-            any(row()
+        (
+            row()
                 .child(roll)
                 .child(hgap(48.0))
                 .child(count_up)
                 .child(hgap(48.0))
                 .child(padded)
-                .cross_axis(CrossAxisAlignment::Start)),
-            any(gap(14.0)),
-            any(row()
+                .cross_axis(CrossAxisAlignment::Start),
+            gap(14.0),
+            row()
                 .child(knob("+137", |s: &mut State| s.value += 137.0))
                 .child(hgap(8.0))
                 .child(knob("+2,480", |s: &mut State| s.value += 2_480.0))
@@ -284,8 +275,8 @@ fn numbers(state: &State) -> impl View<State> {
                     s.value = (s.value - 1_000.0).max(0.0)
                 }))
                 .child(hgap(8.0))
-                .child(knob("Reset", |s: &mut State| s.value = 48_273.0))),
-        ],
+                .child(knob("Reset", |s: &mut State| s.value = 48_273.0)),
+        ),
     )
 }
 
@@ -294,7 +285,7 @@ fn numbers(state: &State) -> impl View<State> {
 fn badges(state: &State) -> impl View<State> {
     let (status, label) = BADGE_STATES[state.badge % BADGE_STATES.len()];
 
-    let live = any(row()
+    let live = row()
         .child(
             animated_badge::<State>(label)
                 .status(status)
@@ -304,33 +295,30 @@ fn badges(state: &State) -> impl View<State> {
         .child(knob("Advance status", |s: &mut State| {
             s.badge = (s.badge + 1) % BADGE_STATES.len();
         }))
-        .cross_axis(CrossAxisAlignment::Center));
+        .cross_axis(CrossAxisAlignment::Center);
 
-    let tones: Vec<AnyView<State>> = BADGE_STATUSES
-        .iter()
-        .map(|(status, label)| {
-            any(column()
-                .child(
-                    animated_badge::<State>(*label)
-                        .status(*status)
-                        .size(AnimatedBadgeSize::Md),
-                )
-                .child(gap(6.0))
-                .child(
-                    animated_badge::<State>(*label)
-                        .status(*status)
-                        .size(AnimatedBadgeSize::Sm),
-                )
-                .child(gap(6.0))
-                .child(
-                    animated_badge::<State>(*label)
-                        .status(*status)
-                        .size(AnimatedBadgeSize::Md)
-                        .show_icon(false),
-                )
-                .cross_axis(CrossAxisAlignment::Start))
-        })
-        .collect();
+    let tones = BADGE_STATUSES.iter().map(|(status, label)| {
+        column()
+            .child(
+                animated_badge::<State>(*label)
+                    .status(*status)
+                    .size(AnimatedBadgeSize::Md),
+            )
+            .child(gap(6.0))
+            .child(
+                animated_badge::<State>(*label)
+                    .status(*status)
+                    .size(AnimatedBadgeSize::Sm),
+            )
+            .child(gap(6.0))
+            .child(
+                animated_badge::<State>(*label)
+                    .status(*status)
+                    .size(AnimatedBadgeSize::Md)
+                    .show_icon(false),
+            )
+            .cross_axis(CrossAxisAlignment::Start)
+    });
 
     demo(
         "animated_badge",
@@ -338,23 +326,20 @@ fn badges(state: &State) -> impl View<State> {
          icon-less below). The roll drops upstream's blur and its \u{2212}8\u{b0} icon \
          rotation; the pill takes its new width immediately rather than \
          gliding, since nothing here layout-animates a container.",
-        vec![live, any(gap(16.0)), any(grid(tones, 3, 24.0))],
+        (live, gap(16.0), grid(tones, 3, 24.0)),
     )
 }
 
 /// The `loader` block: all seventeen variants at one size.
 fn loaders(state: &State) -> impl View<State> {
     let size = state.loader_size;
-    let cells: Vec<AnyView<State>> = LoaderVariant::ALL
-        .iter()
-        .map(|variant| {
-            any(specimen(
-                loader_label(*variant),
-                any(SizedBox(Some(size + 24.0), Some(size + 8.0))
-                    .child(loader::<State>().variant(*variant).size(size))),
-            ))
-        })
-        .collect();
+    let cells = LoaderVariant::ALL.iter().map(move |variant| {
+        specimen(
+            loader_label(*variant),
+            SizedBox(Some(size + 24.0), Some(size + 8.0))
+                .child(loader::<State>().variant(*variant).size(size)),
+        )
+    });
 
     demo(
         "loader",
@@ -363,10 +348,10 @@ fn loaders(state: &State) -> impl View<State> {
          sampled point's radius rather than path data; the ascii sets need the \
          bundled Geist Mono glyphs. Reduced motion keeps a calm opacity pulse \
          here rather than freezing \u{2014} upstream's own rule.",
-        vec![
-            any(grid(cells, 6, 16.0)),
-            any(gap(16.0)),
-            any(row()
+        (
+            grid(cells, 6, 16.0),
+            gap(16.0),
+            row()
                 .child(caption("Size"))
                 .child(hgap(10.0))
                 .child(knob("24", |s: &mut State| s.loader_size = 24.0))
@@ -374,8 +359,8 @@ fn loaders(state: &State) -> impl View<State> {
                 .child(knob("36", |s: &mut State| s.loader_size = 36.0))
                 .child(hgap(8.0))
                 .child(knob("48", |s: &mut State| s.loader_size = 48.0))
-                .cross_axis(CrossAxisAlignment::Center)),
-        ],
+                .cross_axis(CrossAxisAlignment::Center),
+        ),
     )
 }
 
@@ -406,22 +391,22 @@ fn loader_label(variant: LoaderVariant) -> &'static str {
 fn marquee_demo(state: &State) -> impl View<State> {
     let direction = state.marquee_direction;
     let fade = state.marquee_fade;
-    let items: Vec<AnyView<State>> = LOGOS
+    let items: Vec<_> = LOGOS
         .iter()
-        .map(|logo| any(text(logo.to_string()).size(15.0)))
+        .map(|logo| text(logo.to_string()).size(15.0))
         .collect();
 
     let height = if direction.is_vertical() { 180.0 } else { 56.0 };
-    let track = any(SizedBox(None, Some(height)).child(
+    let track = SizedBox(None, Some(height)).child(
         marquee(items)
             .direction(direction)
             .speed(std::time::Duration::from_secs(25))
             .gap(32.0)
             .pause_on_hover(true)
             .fade(fade),
-    ));
+    );
 
-    let direction_knobs = any(row()
+    let direction_knobs = row()
         .child(caption("Direction"))
         .child(hgap(10.0))
         .child(knob("Left", |s: &mut State| {
@@ -444,7 +429,7 @@ fn marquee_demo(state: &State) -> impl View<State> {
             if fade { "Fade: on" } else { "Fade: off" },
             |s: &mut State| s.marquee_fade = !s.marquee_fade,
         ))
-        .cross_axis(CrossAxisAlignment::Center));
+        .cross_axis(CrossAxisAlignment::Center);
 
     demo(
         "marquee",
@@ -453,23 +438,23 @@ fn marquee_demo(state: &State) -> impl View<State> {
          surface colour rather than upstream's mask, so it is off by default \
          and only exact over a surface-coloured background; items are \
          decorative and take no pointer input.",
-        vec![track, any(gap(14.0)), direction_knobs],
+        (track, gap(14.0), direction_knobs),
     )
 }
 
 /// The `theme_toggle` block: four reveals sharing one start origin.
 fn theme_toggles(state: &State) -> impl View<State> {
     let (start, start_label) = TOGGLE_STARTS[state.toggle_start % TOGGLE_STARTS.len()];
-    let toggles: Vec<AnyView<State>> = TOGGLE_VARIANTS
+    let toggles: Vec<_> = TOGGLE_VARIANTS
         .iter()
         .map(|(variant, label)| {
-            any(specimen(
+            specimen(
                 label,
-                any(theme_toggle::<State>()
+                theme_toggle::<State>()
                     .variant(*variant)
                     .start(start)
-                    .size(32.0)),
-            ))
+                    .size(32.0),
+            )
         })
         .collect();
 
@@ -481,17 +466,19 @@ fn theme_toggles(state: &State) -> impl View<State> {
          page behind it simply changes colour. circle-blur fades instead of \
          blurring, and blinds is fixed at four slats rather than a repeating \
          72px tile.",
-        vec![
-            any(Row(toggles).cross_axis(CrossAxisAlignment::Start)),
-            any(gap(14.0)),
-            any(row()
+        (
+            row()
+                .children(toggles)
+                .cross_axis(CrossAxisAlignment::Start),
+            gap(14.0),
+            row()
                 .child(caption(format!("Start \u{b7} {start_label}")))
                 .child(hgap(10.0))
                 .child(knob("Next start", |s: &mut State| {
                     s.toggle_start = (s.toggle_start + 1) % TOGGLE_STARTS.len();
                 }))
-                .cross_axis(CrossAxisAlignment::Center)),
-        ],
+                .cross_axis(CrossAxisAlignment::Center),
+        ),
     )
 }
 
@@ -507,7 +494,7 @@ impl Component for TextPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(column()
+        column()
             .child(text_effects(state))
             .child(numbers(state))
             .child(badges(state))
@@ -515,7 +502,7 @@ impl Component for TextPage {
             .child(marquee_demo(state))
             .child(theme_toggles(state))
             .cross_axis(CrossAxisAlignment::Start)
-            .main_axis(MainAxisAlignment::Start))
+            .main_axis(MainAxisAlignment::Start)
     }
 }
 
