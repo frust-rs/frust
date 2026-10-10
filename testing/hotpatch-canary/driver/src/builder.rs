@@ -7,10 +7,11 @@
 //! table names that path, so the app loads the very file a hand-off names.
 //!
 //! The session keeps a few small helpers private (`tip_objects`,
-//! `typed_objects`, `member_rlibs`, `replayable_crates`, `seed_dep_info`, the
-//! `cargo metadata` / `rustc -vV` / environment readers). They are mirrored
-//! here line for line, so a change to them in `session.rs` must be mirrored
-//! too; everything else is called through the public API.
+//! `typed_objects`, `member_rlibs`, `gated_rlibs`, `replayable_crates`,
+//! `seed_dep_info`, the `cargo metadata` / `rustc -vV` / environment
+//! readers). They are mirrored here line for line, so a change to them in
+//! `session.rs` must be mirrored too; everything else is called through the
+//! public API.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use frust_drive::devtools_client::sha256_hex;
 use frust_drive::doctor::{EnvLookup, RealEnv};
 use frust_drive::hotpatch::capture::{
     self, RecordKey, RustcRecord, ScopeInputs, TargetKind, WrapperSetup, ambient_env_names,
-    load_records, prepare_scope_dir,
+    load_records, prepare_scope_dir_for,
 };
 use frust_drive::hotpatch::fat_link::{self, FatLinkRequest, LinkerFlavor};
 use frust_drive::hotpatch::graph::{self, ModifiedSet, PathClass, ReplayUnit, WorkspaceGraph};
@@ -44,6 +45,10 @@ pub const TIP_PACKAGE: &str = "hotpatch-canary-app";
 
 /// The fixture's driver package: a workspace member outside the tip's image.
 const DRIVER_PACKAGE: &str = "hotpatch-canary-driver";
+
+/// The fixture's local path dependency outside the workspace, which the fat
+/// build must capture and the session replay.
+pub const SHARED_PACKAGE: &str = "hotpatch-canary-shared";
 
 /// The layout gate's refusal of an input whose DWARF holds no type at all.
 const NO_TYPE_INFORMATION: &str = "without type information";
@@ -152,7 +157,10 @@ impl FatSession {
             rustflags: rustflags(&RealEnv),
             rustc_version: toolchain.rustc_version.clone(),
         };
-        let scope_dir = prepare_scope_dir(&target_dir, &scope)?;
+        // Local non-members are captured through `RUSTC_WRAPPER`, as the
+        // session captures them.
+        let non_members = graph.non_members();
+        let scope_dir = prepare_scope_dir_for(&target_dir, &scope, &non_members)?;
         // The session busts every other member; the driver is not in the
         // tip's image, so it is left alone to keep its own build warm.
         let members: Vec<String> = graph
@@ -160,6 +168,7 @@ impl FatSession {
             .iter()
             .filter(|p| p.member && p.name != TIP_PACKAGE && p.name != DRIVER_PACKAGE)
             .map(|p| p.name.clone())
+            .chain(non_members.names())
             .collect();
         capture::bust_fingerprints(
             &capture::fingerprint_dir(&target_dir, None, "dev"),
@@ -170,7 +179,7 @@ impl FatSession {
 
         let fat_dir = hotpatch_root(&target_dir)
             .join("fat")
-            .join(scope.dir_name()?);
+            .join(scope.dir_name_for(&non_members)?);
         std::fs::create_dir_all(&fat_dir)
             .with_context(|| format!("creating `{}`", fat_dir.display()))?;
         let link = LinkAction {
@@ -195,7 +204,7 @@ impl FatSession {
             "fat build: {} {} (capture scope {})",
             fat.program,
             fat.args.join(" "),
-            scope.dir_name()?
+            scope.dir_name_for(&non_members)?
         ));
         run_fat_build(&runner, &fat.program, &fat.args, &fat.env, root, log)
             .map_err(|err| with_link_report(err, link.err_file.as_deref()))?;
@@ -204,6 +213,13 @@ impl FatSession {
         let records = load_records(&scope_dir)?;
         let keys: Vec<String> = records.keys().map(ToString::to_string).collect();
         log(&format!("fat build: captured rustc records {keys:?}"));
+        let replayable = graph.replay_non_members(&records);
+        log(&format!(
+            "fat build: replayable local non-members {replayable:?}"
+        ));
+        if !replayable.iter().any(|name| name == SHARED_PACKAGE) {
+            bail!("the fat build did not capture the local non-member `{SHARED_PACKAGE}`");
+        }
         for unit in [&tip_bin, &tip_lib] {
             if !records.contains_key(&unit.record_key()) {
                 bail!(
@@ -249,7 +265,10 @@ impl FatSession {
         let crates = replayable_crates(&graph);
         let typed = typed_objects(&tip_objects, &crates)?;
         let base_layouts = layout::extract(
-            &rlibs.values().cloned().chain(typed).collect::<Vec<_>>(),
+            &gated_rlibs(&rlibs, &graph)?
+                .into_iter()
+                .chain(typed)
+                .collect::<Vec<_>>(),
             &crates,
         )?
         .table;
@@ -310,7 +329,8 @@ impl FatSession {
 
     /// The thin build of one changed file: classify it, record the change,
     /// replay what it touches (libs only: the fixture's tip bin never
-    /// changes), and read the candidate's layouts and seams.
+    /// changes; a path dependency's edit cascades to the tip lib), and read
+    /// the candidate's layouts and seams.
     pub fn compile(&mut self, changed: &Path) -> Result<Candidate> {
         let mut class = self.graph.classify(changed);
         if class == PathClass::Unaffected
@@ -641,8 +661,9 @@ fn typed_objects(objects: &[PathBuf], crates: &[String]) -> Result<Vec<PathBuf>,
     Ok(typed)
 }
 
-/// The rlib a captured link names for each workspace-member lib in the
-/// image: `lib<crate>.rlib` or `lib<crate>-<hash>.rlib`.
+/// The rlib a captured link names for each lib unit in the image (members'
+/// and replayable non-members'): `lib<crate>.rlib` or
+/// `lib<crate>-<hash>.rlib`.
 fn member_rlibs(link_args: &[String], graph: &WorkspaceGraph) -> BTreeMap<ReplayUnit, PathBuf> {
     let rlibs: Vec<(&str, &String)> = link_args
         .iter()
@@ -668,7 +689,26 @@ fn member_rlibs(link_args: &[String], graph: &WorkspaceGraph) -> BTreeMap<Replay
         .collect()
 }
 
-/// Every member target's crate name: the crates whose types L3 fingerprints.
+/// The rlibs the base layout table is read from: every lib unit's but a
+/// replayable non-member's that holds neither code nor data.
+fn gated_rlibs(
+    rlibs: &BTreeMap<ReplayUnit, PathBuf>,
+    graph: &WorkspaceGraph,
+) -> Result<Vec<PathBuf>, HotpatchError> {
+    let mut gated = Vec::new();
+    for (unit, rlib) in rlibs {
+        let member = graph
+            .packages()
+            .iter()
+            .any(|package| package.member && package.name == unit.package);
+        if member || layout::holds_code_or_data(rlib)? {
+            gated.push(rlib.clone());
+        }
+    }
+    Ok(gated)
+}
+
+/// Every replay unit's crate name: the crates whose types L3 fingerprints.
 fn replayable_crates(graph: &WorkspaceGraph) -> Vec<String> {
     let names: BTreeSet<String> = graph
         .units()

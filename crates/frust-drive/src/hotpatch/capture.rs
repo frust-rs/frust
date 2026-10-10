@@ -54,6 +54,23 @@
 //! never replayed under a configuration it was not taken in. A fat build
 //! busts cargo's fingerprints ([`bust_fingerprints`]) so the wrapper sees a
 //! fresh compile wherever a record is due.
+//!
+//! **Path dependencies outside the workspace.** cargo applies
+//! `RUSTC_WORKSPACE_WRAPPER` to workspace members only, so a local path
+//! package that is not a member (a `--frust-path` checkout) needs
+//! `RUSTC_WRAPPER`, which cargo applies to every crate. A session that
+//! captures such packages writes their list ([`NonMembers`]) into the scope
+//! as [`NON_MEMBERS_FILE`] before the fat build, keyed into the scope name
+//! ([`ScopeInputs::dir_name_for`]); [`wrapper_env`] then adds
+//! `RUSTC_WRAPPER`. Under both wrappers cargo runs `frust frust rustc ...`
+//! for a member: the outer invocation records it with its program stripped
+//! and runs rustc itself, so a member's record is the one a member-only
+//! scope holds. Any other compile is recorded only when its
+//! `CARGO_MANIFEST_DIR` is a listed package and it is a lib; everything
+//! else (registry crates, build scripts) runs unchanged and unrecorded. A
+//! pass-through `RUSTC_WRAPPER` changes no cargo fingerprint, so a cached
+//! non-member never reaches the wrapper: the fat build busts each listed
+//! package that has no record yet.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -73,6 +90,13 @@ use super::{HotpatchError, hotpatch_root};
 pub const CAPTURE_ENV: &str = "FRUST_HOTPATCH_CAPTURE";
 /// cargo's wrapper variable, applied to workspace members only.
 pub const WORKSPACE_WRAPPER_ENV: &str = "RUSTC_WORKSPACE_WRAPPER";
+/// cargo's wrapper variable applied to every crate; set only for a scope
+/// that captures local non-members ([`NON_MEMBERS_FILE`]).
+pub const WRAPPER_ENV: &str = "RUSTC_WRAPPER";
+/// The scope file listing the local non-member packages a fat build
+/// captures ([`NonMembers`]). Its presence makes [`wrapper_env`] set
+/// [`WRAPPER_ENV`].
+pub const NON_MEMBERS_FILE: &str = "non-members.json";
 /// The names of the environment the host handed cargo, newline-separated
 /// ([`ambient_env_var`]). A wrapper invocation finds cargo's own additions
 /// by their absence from this list. Unset, the wrapper records the
@@ -455,6 +479,11 @@ pub fn load_records(scope_dir: &Path) -> Result<BTreeMap<RecordKey, RustcRecord>
 /// the step succeeded (a failed compile or link is `Ok(false)`); a builder
 /// problem is an `Err`, which fails the build rather than recording a
 /// guess.
+///
+/// In a scope with a [`NON_MEMBERS_FILE`] the invocation may be cargo's
+/// `RUSTC_WRAPPER` (see the module doc): a compile is recorded only as a
+/// member's (its program the workspace wrapper, which is stripped) or as a
+/// listed non-member's lib, and runs unchanged and unrecorded otherwise.
 pub fn run_wrapper(
     runner: &dyn ProcessRunner,
     scope_dir: &Path,
@@ -469,8 +498,17 @@ pub fn run_wrapper(
             crate_name,
             crate_types,
         } => {
-            let key = RecordKey::new(crate_name, &crate_types);
             let envs = utf8_envs(envs)?;
+            let args = match read_non_members(scope_dir)? {
+                None => args,
+                Some(non_members) => {
+                    match non_member_scope_compile(&args, &envs, &crate_types, &non_members) {
+                        Some(args) => args,
+                        None => return run_program(runner, &args, out, err),
+                    }
+                }
+            };
+            let key = RecordKey::new(crate_name, &crate_types);
             let ambient = ambient_names(&envs);
             let mut record = RustcRecord {
                 args: args.clone(),
@@ -508,6 +546,130 @@ pub fn run_wrapper(
         }
         Invocation::Passthrough => run_program(runner, &args, out, err),
     }
+}
+
+/// The rustc invocation a compile in a non-member scope records, or `None`
+/// when it runs unrecorded. cargo nests the wrappers for a member
+/// (`RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER rustc ...`), so a program equal
+/// to the workspace wrapper marks a member: its invocation is the rest,
+/// recorded and run here directly rather than through a second wrapper
+/// process. Any other compile is a non-member's or a registry crate's; only
+/// a lib of a listed package (by `CARGO_MANIFEST_DIR`) is recorded.
+fn non_member_scope_compile(
+    args: &[String],
+    envs: &[(String, String)],
+    crate_types: &[String],
+    non_members: &NonMembers,
+) -> Option<Vec<String>> {
+    let env = |name: &str| {
+        envs.iter()
+            .find(|(set, _)| set == name)
+            .map(|(_, value)| value.as_str())
+    };
+    if let (Some(program), Some(workspace_wrapper)) = (args.first(), env(WORKSPACE_WRAPPER_ENV))
+        && !workspace_wrapper.is_empty()
+        && program == workspace_wrapper
+    {
+        return Some(args[1..].to_vec());
+    }
+    let listed =
+        env("CARGO_MANIFEST_DIR").is_some_and(|dir| non_members.contains_dir(Path::new(dir)));
+    (listed && TargetKind::of(crate_types) == TargetKind::Lib).then(|| args.to_vec())
+}
+
+/// One local path package outside the workspace whose lib a fat build
+/// captures through `RUSTC_WRAPPER`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NonMember {
+    /// The package name, as `cargo metadata` spells it.
+    pub name: String,
+    /// The directory holding its `Cargo.toml`: cargo's `CARGO_MANIFEST_DIR`
+    /// for its compiles.
+    pub dir: PathBuf,
+}
+
+/// The local non-member packages a scope captures, sorted by name then
+/// directory. Empty for a member-only scope, which then is exactly the
+/// scope a session without them uses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NonMembers {
+    packages: Vec<NonMember>,
+}
+
+impl NonMembers {
+    /// `packages`, sorted and deduplicated, directories lexically
+    /// normalised.
+    pub fn new(packages: impl IntoIterator<Item = NonMember>) -> Self {
+        let set: BTreeSet<NonMember> = packages
+            .into_iter()
+            .map(|package| NonMember {
+                dir: super::graph::normalize(&package.dir),
+                ..package
+            })
+            .collect();
+        Self {
+            packages: set.into_iter().collect(),
+        }
+    }
+
+    pub fn packages(&self) -> &[NonMember] {
+        &self.packages
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.packages.is_empty()
+    }
+
+    /// The package names, in order: the dependencies a fat build busts
+    /// until each has a record ([`bust_fingerprints`]).
+    pub fn names(&self) -> Vec<String> {
+        self.packages.iter().map(|p| p.name.clone()).collect()
+    }
+
+    /// Whether `dir` (a `CARGO_MANIFEST_DIR`) is a listed package's,
+    /// compared lexically normalised.
+    pub fn contains_dir(&self, dir: &Path) -> bool {
+        let dir = super::graph::normalize(dir);
+        self.packages.iter().any(|package| package.dir == dir)
+    }
+}
+
+/// Writes `non_members` as `<scope_dir>/`[`NON_MEMBERS_FILE`], atomically
+/// and owner-only.
+fn write_non_members(scope_dir: &Path, non_members: &NonMembers) -> Result<(), HotpatchError> {
+    let json = serde_json::to_vec(non_members).map_err(|err| {
+        HotpatchError::unsupported(format!("cannot serialize the non-member list: {err}"))
+    })?;
+    let path = scope_dir.join(NON_MEMBERS_FILE);
+    let tmp = scope_dir.join(format!(".{NON_MEMBERS_FILE}.tmp-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    write_private_file(&tmp, &json)
+        .map_err(|err| HotpatchError::io(format!("writing `{}`", tmp.display()), err))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|err| HotpatchError::io(format!("moving `{}` into place", path.display()), err))
+}
+
+/// The scope's [`NON_MEMBERS_FILE`], `None` when the scope has none (a
+/// member-only scope). An unreadable or malformed one is an error: the
+/// wrapper must not guess which compiles to record.
+pub fn read_non_members(scope_dir: &Path) -> Result<Option<NonMembers>, HotpatchError> {
+    let path = scope_dir.join(NON_MEMBERS_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(HotpatchError::io(
+                format!("reading `{}`", path.display()),
+                err,
+            ));
+        }
+    };
+    serde_json::from_slice(&bytes).map(Some).map_err(|err| {
+        HotpatchError::unsupported(format!(
+            "malformed non-member list `{}`: {err}",
+            path.display()
+        ))
+    })
 }
 
 fn run_program(
@@ -798,6 +960,14 @@ impl ScopeInputs {
     /// feature set, the rustflags and the rustc version, each field and item
     /// length-prefixed so no two inputs share an encoding.
     pub fn hash16(&self) -> String {
+        self.hash16_for(&NonMembers::default())
+    }
+
+    /// [`hash16`](Self::hash16) of a scope that also captures
+    /// `non_members`: their names and directories are one more field, which
+    /// an empty list leaves out, so a member-only scope keeps its hash and a
+    /// non-member scope never shares one with it.
+    pub fn hash16_for(&self, non_members: &NonMembers) -> String {
         let mut features = self.features.clone();
         features.sort();
         features.dedup();
@@ -807,6 +977,14 @@ impl ScopeInputs {
         hasher.field(b'f', &features);
         hasher.field(b'r', &self.rustflags);
         hasher.field(b'v', std::slice::from_ref(&self.rustc_version));
+        if !non_members.is_empty() {
+            let items: Vec<String> = non_members
+                .packages()
+                .iter()
+                .flat_map(|p| [p.name.clone(), p.dir.to_string_lossy().into_owned()])
+                .collect();
+            hasher.field(b'n', &items);
+        }
         format!("{:016x}", hasher.finish())
     }
 
@@ -814,6 +992,11 @@ impl ScopeInputs {
     /// empty or could leave the directory is
     /// [`HotpatchError::BuilderUnsupported`].
     pub fn dir_name(&self) -> Result<String, HotpatchError> {
+        self.dir_name_for(&NonMembers::default())
+    }
+
+    /// [`dir_name`](Self::dir_name) with [`hash16_for`](Self::hash16_for).
+    pub fn dir_name_for(&self, non_members: &NonMembers) -> Result<String, HotpatchError> {
         let tip = self.tip.replace('-', "_");
         for (what, part) in [
             ("tip", tip.as_str()),
@@ -830,7 +1013,7 @@ impl ScopeInputs {
             "{tip}-{}-{}-{}",
             self.triple,
             self.profile,
-            self.hash16()
+            self.hash16_for(non_members)
         ))
     }
 }
@@ -886,8 +1069,23 @@ pub fn prepare_scope_dir(
     target_dir: &Path,
     inputs: &ScopeInputs,
 ) -> Result<PathBuf, HotpatchError> {
-    let dir = scope_dir(target_dir, inputs)?;
+    prepare_scope_dir_for(target_dir, inputs, &NonMembers::default())
+}
+
+/// [`prepare_scope_dir`] for a scope that also captures `non_members`: the
+/// directory is named by [`ScopeInputs::dir_name_for`], and a non-empty
+/// list is written into it as [`NON_MEMBERS_FILE`], which turns on
+/// `RUSTC_WRAPPER` ([`wrapper_env`]) and the wrapper's filter.
+pub fn prepare_scope_dir_for(
+    target_dir: &Path,
+    inputs: &ScopeInputs,
+    non_members: &NonMembers,
+) -> Result<PathBuf, HotpatchError> {
+    let dir = captured_args_root(target_dir).join(inputs.dir_name_for(non_members)?);
     ensure_private_scope(&dir)?;
+    if !non_members.is_empty() {
+        write_non_members(&dir, non_members)?;
+    }
     host_path::canonicalize_simplified(&dir).map_err(|err| {
         HotpatchError::io(format!("resolving capture scope `{}`", dir.display()), err)
     })
@@ -912,13 +1110,19 @@ pub struct WrapperSetup<'a> {
 }
 
 /// The environment that makes cargo route workspace-member compiles through
-/// `frust_exe`, recording into `scope_dir`.
+/// `frust_exe`, recording into `scope_dir` — plus [`WRAPPER_ENV`], routing
+/// every other compile through it too, when the scope holds a
+/// [`NON_MEMBERS_FILE`] ([`prepare_scope_dir_for`]).
 pub fn wrapper_env(frust_exe: &Path, scope_dir: &Path) -> Vec<(String, String)> {
     let render = |path: &Path| host_path::simplify(path).to_string_lossy().into_owned();
-    vec![
+    let mut env = vec![
         (WORKSPACE_WRAPPER_ENV.to_string(), render(frust_exe)),
         (CAPTURE_ENV.to_string(), render(scope_dir)),
-    ]
+    ];
+    if scope_dir.join(NON_MEMBERS_FILE).is_file() {
+        env.push((WRAPPER_ENV.to_string(), render(frust_exe)));
+    }
+    env
 }
 
 /// `rustc -vV`, trimmed: the toolchain identity a scope is keyed on.
@@ -957,8 +1161,9 @@ pub fn fingerprint_dir(target_dir: &Path, triple: Option<&str>, profile: &str) -
 
 /// Forces a fat build to recompile (and so re-capture) what it must: the
 /// tip package always — its link step has to reach the interception again —
-/// and every workspace dependency in `workspace_deps` that has no
-/// `{dep}.lib.json` record in `scope_dir` yet. Removes each matching
+/// and every local dependency in `workspace_deps` (the other members, and
+/// any [`NonMembers`] the scope captures) that has no `{dep}.lib.json`
+/// record in `scope_dir` yet. Removes each matching
 /// `<package>-<hash>` entry of `fingerprint_dir` (names compared with
 /// hyphens normalised to underscores) and returns the removed paths. A
 /// missing fingerprint directory (a clean target) busts nothing.
@@ -1940,5 +2145,175 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    fn non_members() -> NonMembers {
+        NonMembers::new([
+            NonMember {
+                name: "shared".to_string(),
+                dir: PathBuf::from("/x/frust/crates/shared"),
+            },
+            NonMember {
+                name: "frust-core".to_string(),
+                dir: PathBuf::from("/x/frust/crates/./frust-core"),
+            },
+        ])
+    }
+
+    /// `rustc --crate-name <name> src/lib.rs --crate-type <ty>` as cargo
+    /// passes it, `program` first.
+    fn compile(program: &[&str], name: &str, ty: &str) -> Vec<String> {
+        let mut args = strings(program);
+        args.extend(strings(&[
+            "/rust/bin/rustc",
+            "--crate-name",
+            name,
+            "src/lib.rs",
+            "--crate-type",
+            ty,
+        ]));
+        args
+    }
+
+    #[test]
+    fn the_non_member_list_keys_the_scope_and_turns_on_rustc_wrapper() {
+        let empty = NonMembers::default();
+        assert_eq!(inputs().hash16_for(&empty), inputs().hash16());
+        assert_eq!(
+            inputs().dir_name_for(&empty).unwrap(),
+            inputs().dir_name().unwrap()
+        );
+        let listed = non_members();
+        assert_ne!(inputs().hash16_for(&listed), inputs().hash16());
+        let mut moved = listed.packages().to_vec();
+        moved[0].dir = PathBuf::from("/y/frust-core");
+        assert_ne!(
+            inputs().hash16_for(&NonMembers::new(moved)),
+            inputs().hash16_for(&listed),
+            "a package's directory is keyed"
+        );
+        assert_eq!(
+            listed.names(),
+            strings(&["frust-core", "shared"]),
+            "sorted by name"
+        );
+
+        let target = temp_dir("non-member-scope");
+        let member_only = prepare_scope_dir(&target, &inputs()).unwrap();
+        let scope = prepare_scope_dir_for(&target, &inputs(), &listed).unwrap();
+        assert_ne!(scope, member_only);
+        assert_eq!(read_non_members(&scope).unwrap(), Some(listed.clone()));
+        assert_eq!(read_non_members(&member_only).unwrap(), None);
+        assert!(
+            load_records(&scope).unwrap().is_empty(),
+            "the list is not a record"
+        );
+        let frust = Path::new("/bin/frust");
+        assert_eq!(
+            wrapper_env(frust, &member_only),
+            vec![
+                (WORKSPACE_WRAPPER_ENV.to_string(), "/bin/frust".to_string()),
+                (
+                    CAPTURE_ENV.to_string(),
+                    member_only.to_string_lossy().into_owned()
+                ),
+            ],
+            "a member-only scope sets no RUSTC_WRAPPER"
+        );
+        let env = wrapper_env(frust, &scope);
+        assert_eq!(
+            env.last(),
+            Some(&(WRAPPER_ENV.to_string(), "/bin/frust".to_string()))
+        );
+        assert_eq!(env.len(), 3);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(scope.join(NON_MEMBERS_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        fs::write(scope.join(NON_MEMBERS_FILE), "not json").unwrap();
+        unsupported(read_non_members(&scope));
+    }
+
+    #[test]
+    fn a_non_member_scope_records_members_and_listed_libs_and_passes_the_rest_through() {
+        let target = temp_dir("non-member-wrapper");
+        let scope = prepare_scope_dir_for(&target, &inputs(), &non_members()).unwrap();
+        let wrapper = ("RUSTC_WORKSPACE_WRAPPER", "/bin/frust");
+        let member = compile(&["/bin/frust"], "my_app", "lib");
+        let listed = compile(&[], "shared", "lib");
+        let listed_build_script = compile(&[], "build_script_build", "bin");
+        let registry = compile(&[], "serde", "lib");
+        // Every compile runs rustc itself: the member's without a second
+        // wrapper process.
+        let runner = [&member[1..], &listed, &listed_build_script, &registry]
+            .into_iter()
+            .fold(FakeProcessRunner::new(), |runner, args| {
+                runner.with(args.join(" "), ok_output(""))
+            });
+        let run = |args: &[String], dir: &str| {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let env = envs(&[wrapper, ("CARGO_MANIFEST_DIR", dir)]);
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            run_wrapper(&runner, &scope, &os(&args), &env, &mut out, &mut err).unwrap()
+        };
+        assert!(run(&member, "/w/my-app"));
+        assert!(run(&listed, "/x/frust/crates/shared/"));
+        assert!(run(&listed_build_script, "/x/frust/crates/shared"));
+        assert!(run(&registry, "/home/.cargo/registry/src/serde-1.0.0"));
+
+        let records = load_records(&scope).unwrap();
+        let keys: Vec<String> = records.keys().map(ToString::to_string).collect();
+        assert_eq!(keys, strings(&["my_app.lib", "shared.lib"]));
+        let my_app = &records[&RecordKey::parse("my_app.lib").unwrap()];
+        assert_eq!(
+            my_app.args,
+            member[1..].to_vec(),
+            "a member's record is a member-only scope's"
+        );
+        assert_eq!(my_app.rustc(), Some("/rust/bin/rustc"));
+        assert_eq!(
+            records[&RecordKey::parse("shared.lib").unwrap()].args,
+            listed
+        );
+    }
+
+    #[test]
+    fn a_member_only_scope_records_whatever_the_workspace_wrapper_passes() {
+        let scope = temp_dir("member-only-wrapper");
+        let registry = compile(&[], "serde", "lib");
+        let runner = FakeProcessRunner::new().with(registry.join(" "), ok_output(""));
+        let args: Vec<&str> = registry.iter().map(String::as_str).collect();
+        let env = envs(&[("CARGO_MANIFEST_DIR", "/anywhere")]);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert!(run_wrapper(&runner, &scope, &os(&args), &env, &mut out, &mut err).unwrap());
+        assert_eq!(
+            load_records(&scope).unwrap().keys().collect::<Vec<_>>(),
+            vec![&RecordKey::parse("serde.lib").unwrap()],
+            "no list: cargo's workspace wrapper already filtered to members"
+        );
+    }
+
+    #[test]
+    fn a_fat_build_busts_uncaptured_non_members_like_members() {
+        let root = temp_dir("bust-non-members");
+        let fingerprints = root.join(".fingerprint");
+        let scope = root.join("scope");
+        for name in ["my-app-1", "shared-2", "frust-core-3", "serde-4"] {
+            fs::create_dir_all(fingerprints.join(name)).unwrap();
+        }
+        fs::create_dir_all(&scope).unwrap();
+        fs::write(scope.join("frust_core.lib.json"), "{}").unwrap();
+        let removed =
+            bust_fingerprints(&fingerprints, &scope, "my-app", &non_members().names()).unwrap();
+        let names: Vec<String> = removed
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["my-app-1", "shared-2"]);
     }
 }
