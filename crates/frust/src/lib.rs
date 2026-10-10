@@ -8,12 +8,7 @@
 //! ```no_run
 //! use frust::{Component, View, column, text};
 //!
-//! // A small stateless widget: a plain fn, generic over the state of
-//! // whichever component places it.
-//! fn greeting<S: 'static>(message: &str) -> impl View<S> + use<S> {
-//!     text(message.to_owned()).size(24.0)
-//! }
-//!
+//! #[derive(Default)]
 //! struct Counter;
 //!
 //! impl Component for Counter {
@@ -23,20 +18,27 @@
 //!         0
 //!     }
 //!
-//!     // The whole UI lives in `build`; split it into widget fns like
-//!     // `greeting` rather than nesting ever deeper inside it.
+//!     // The whole UI is one declarative tree in `build`; helpers that keep it
+//!     // shallow are `Self::` associated fns in a separate inherent impl.
 //!     fn build(&self, state: &mut i32) -> impl View<i32> {
 //!         column()
-//!             .child(greeting("Hello from Frust"))
+//!             .child(Self::greeting("Hello from Frust"))
 //!             .child(text(format!("count: {state}")).size(32.0))
 //!     }
 //! }
 //!
-//! frust::run(Counter).unwrap();
+//! impl Counter {
+//!     fn greeting(message: &str) -> impl View<i32> {
+//!         text(message.to_owned()).size(24.0)
+//!     }
+//! }
+//!
+//! frust::app!(Counter);
+//! # fn main() {}
 //! ```
 //!
-//! The composition rule: stateless pieces are plain widget functions called
-//! from `build`; a piece with its own state is a child [`Component`] mounted
+//! The composition rule: stateless pieces are `Self::` helper fns (or widget
+//! fns) called from `build`; a piece with its own state is a child [`Component`] mounted
 //! with [`component`], which gives it a private state boundary. [`run`] (or
 //! the [`app!`] macro, which also covers the mobile and web shells) starts it.
 //!
@@ -66,37 +68,37 @@
 //! ## Layout containers
 //!
 //! The fluent `column()` / `row()` builders take each child as-is (they erase
-//! internally); the tuple-style primitives compose with [`any`], which is
-//! only needed because a `Vec` holds one element type:
+//! internally); the tuple-style primitives take a tuple of mixed view types
+//! (up to 12, nest beyond), so no [`any`] is written:
 //!
 //! ```
 //! use frust::{
-//!     Align, Alignment, Column, EdgeInsets, Padding, Row, SizedBox, any, text,
+//!     Align, Alignment, Column, Component, EdgeInsets, Padding, Row, SizedBox, View, text,
 //! };
 //!
+//! #[derive(Default)]
 //! struct Layouts;
 //!
-//! impl frust::Component for Layouts {
+//! impl Component for Layouts {
 //!     type State = ();
 //!
 //!     fn init(&self) {}
 //!
-//!     fn build(&self, _state: &mut ()) -> impl frust::View<()> {
-//!         // `any` is needed inside these `vec![..]`s: the children are different view types.
-//!         Column(vec![
-//!             any(text("title").size(24.0)),
-//!             any(Row(vec![any(text("left")), any(text("right"))])),
-//!             any(Padding(EdgeInsets::all(8.0), text("padded"))),
-//!             any(Align(Alignment::CENTER, text("centered"))),
-//!             any(SizedBox(Some(0.0), Some(12.0))),
-//!         ])
+//!     fn build(&self, _state: &mut ()) -> impl View<()> {
+//!         Column((
+//!             text("title").size(24.0),
+//!             Row((text("left"), text("right"))),
+//!             Padding(EdgeInsets::all(8.0), text("padded")),
+//!             Align(Alignment::CENTER, text("centered")),
+//!             SizedBox(Some(0.0), Some(12.0)),
+//!         ))
 //!     }
 //! }
 //! # let _ = Layouts;
 //! ```
 //!
-//! The fluent builders erase internally, so no `any()` is written for
-//! container children:
+//! The fluent builders also express conditional and iterated children
+//! (`.when`, `.children`) without any erasure:
 //!
 //! ```
 //! use frust::{column, row, stack, text};
@@ -614,7 +616,8 @@ pub use frust_widgets::motion;
 ///     child: AnyView<State>,
 /// }
 ///
-/// /// The view-fn app code calls; `any` erases the concrete child view.
+/// /// The view-fn app code calls; `any` erases the child because the view
+/// /// *stores* it in a field (storing is the one place erasure is needed).
 /// fn offset<State: 'static, V: View<State>>(offset: Point, child: V) -> OffsetView<State> {
 ///     OffsetView { offset, child: any(child) }
 /// }
