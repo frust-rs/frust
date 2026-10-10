@@ -113,7 +113,7 @@ cd examples/huddle
 frust run -d <device-id>           # build/install/launch/stream (Android or iOS sim/device)
 ```
 
-The template `frust create` scaffolds is its own demo (a Material counter: an `App` component hosting a `HomePage` — Scaffold, app bar, FAB — in `crates/frust-drive/templates/app/src/{lib,home_page}.rs.tmpl`)
+The template `frust create` scaffolds is its own demo (a single-file Material counter: one `Component` whose `build` is the Scaffold/app bar/FAB tree, in `crates/frust-drive/templates/app/src/lib.rs.tmpl`)
 with no example counterpart to run directly in this repo; check scaffold changes via *Template
 development* ([CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) or the scaffold end-to-end test in *Test*.
 

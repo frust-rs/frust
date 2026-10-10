@@ -753,7 +753,7 @@ needed) when the result borrows nothing it keeps — `fn app_bar(title: &str)
 -> impl View<u32> + use<>` as the scaffolded app template does — pass an owned
 argument, or erase with `any(..)` where the value is stored.
 
-**Evidence**: `crates/frust-drive/templates/app/src/home_page.rs.tmpl`,
+**Evidence**: `crates/frust-drive/templates/app/src/lib.rs.tmpl`,
 `plugins/material/src/dismissible.rs` (test `logic`, `+ use<>` required under a
 `RenderRoot` closure), `examples/huddle/src/ui/scaffold.rs` (`placeholder_body`),
 `scripts/codemod/frust_any_codemod.py` (rule T7 exclusions).
@@ -4556,7 +4556,7 @@ the back-press leg: a platform back press arriving mid-exit-ramp has not itself 
 shared-mechanism argument at all.)
 
 **Evidence**: `plugins/beui/src/overlay/modal.rs:1281` (`show_modal`, `push_with_options` at
-`:1308`) and its test module (in-process only); `plugins/material/src/overlay/modal.rs:1146`
+`:1308`) and its test module (in-process only); `plugins/material/src/overlay/modal.rs:1150`
 (`show_overlay_modal`);
 `plugins/shadcn/src/overlay/modal.rs:655` (`push_transparent_for_result`);
 `crates/frust-widgets/src/nav/controller.rs:388-395` (`push_transparent_for_result`) and `:438`
@@ -5095,8 +5095,8 @@ verified NATURAL and therefore unaffected, recorded so the sweep is auditable: `
 paints a glyph scaled and centered to that tier's box instead of the pre-fix 24dp corner-anchored
 placement — the demo's fabs/buttons/button_group/icon_buttons/split_button playground pages each
 expose the relevant Size knob live (e.g.
-`examples/material3-demo/src/pages/playground/do_/fabs.rs:84`'s `any(icon(icons::ADD))` under a
-selectable `FabSize::Large`; `do_/split_button.rs:303`'s `.leading_icon(|| any(icon(icons::SAVE)))`
+`examples/material3-demo/src/pages/playground/do_/fabs.rs:84`'s `fab(icon(icons::ADD), ..)` under a
+selectable `FabSize::Large`; `do_/split_button.rs:353`'s `.leading_icon(|| icon(icons::SAVE))`
 with all five tiers offered). This is believed net-positive — the same glyph-vs-box contract
 violation the fix closes, corrected everywhere it recurs, not only at the FAB — but **unverified on
 device**: the widened re-verify scope is recorded against the FAB device-gate row. None of this touches the

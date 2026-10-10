@@ -150,7 +150,9 @@ vec-list containers, homogeneous `vec![any(..), ..]` list arguments (T5), fully 
 arguments of a sequence API that should be tuples (T6), or single-erasure helpers still returning
 `AnyView` (T7); fix with `scripts/codemod/frust_any_codemod.py --write --t5 --t6 --t7`, or mark a
 site that must stay erased `// erasure: keep <why>` on its line or the line above; the same
-command runs as a CI hygiene step). A change to the `hotpatch` feature, `frust-hotpatch` or the
+command also runs rule U: any unmarked `any()` under `examples/` and `benchmarks/` fails
+(`examples/hotpatch-spike` excluded), while framework and plugin internals are not audited by U;
+the same command runs as a CI hygiene step). A change to the `hotpatch` feature, `frust-hotpatch` or the
 patch builder also runs `scripts/ci/hotpatch-feature-gate.sh` and `scripts/ci/hotpatch-canary.sh`
 — commands and what each proves in `docs/DEVELOPMENT.md` § Test.
 
