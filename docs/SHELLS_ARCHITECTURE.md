@@ -134,18 +134,20 @@ only its own host's native bindings: `crates/frust/Cargo.toml`'s `[target.'cfg(n
 | Web (`wasm32-unknown-unknown`) | `frust-shell-web` only; the desktop core is excluded (see the Overview, and `crates/frust-shell-web/Cargo.toml`'s own header). `frust::web_app!` mirrors `android_app!`/`ios_app!`: an unconditional, self-gating invocation whose generated `#[wasm_bindgen(start)]` shim expands to nothing off `wasm32`, and `app!` emits it under the identical gate |
 
 Hot patching is available on the desktop shells (macOS, Linux, Windows x64 MSVC), the Android
-shell (arm64) and the iOS shell on the simulator; a physical iOS device and the web shell are
-refused — see `no-hot-reload-restart-is-a-rebuild` in [LIMITATIONS.md](LIMITATIONS.md).
+shell (arm64) and the iOS shell on the simulator; a physical iOS device is refused when the
+builder parses the target triple, and the web shell at compile time (`frust-hotpatch` is a
+`compile_error!` on `wasm32`) — see `no-hot-reload-restart-is-a-rebuild` in
+[LIMITATIONS.md](LIMITATIONS.md).
 
 ### Sanctioned-unsafe zones
 
 Each concrete shell confines all unsafe/FFI code to one named module — `jni_glue` on Android,
 `ffi_glue` on iOS, `appkit_glue` on macOS, `win32_glue` on Windows — so each platform boundary is
 auditable as a single surface. `frust-shell-common`, `frust-shell-desktop` and
-`frust-shell-linux` hold no `unsafe` at all, hot-patch code included (the one `unsafe` lives in
-`frust-hotpatch`; the Android/iOS hot-patch arms add none beyond their zones). The register of what each zone is permitted to do,
-and the `# Safety`/no-unwind rules that govern it, live in
-[CODE_STANDARDS.md](CODE_STANDARDS.md) § Language Idioms.
+`frust-shell-linux` hold no `unsafe` at all, hot-patch code included: the patch loader's `unsafe`
+lives in `frust-hotpatch`, and the Android/iOS hot-patch arms add none beyond their zones. The
+register of what each zone is permitted to do, and the `# Safety`/no-unwind rules that govern
+it, live in [CODE_STANDARDS.md](CODE_STANDARDS.md) § Language Idioms.
 
 `surface_mode`'s writer set is pinned by a source-scan conformance test: exactly one call site per
 platform may publish a resolved surface mode, a single-writer contract that keeps the signal-poll
