@@ -93,6 +93,10 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
   the facade's non-default `gpu` feature adds an optional `frust-gpu` edge, re-exported flat as
   `frust::gpu`, forwarded by the three shell crates so `frust::gpu::with_context` can read back a
   shell-published device handle — see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam.
+- **Hot-patch edges** — `frust-core → frust-hotpatch` and `frust-shell-common → frust-hotpatch`
+  exist only under the opt-in `hotpatch` feature (Debug hot runs; never default); detail in
+  [CORE](CORE_ARCHITECTURE.md), [SHELLS](SHELLS_ARCHITECTURE.md),
+  [DEVTOOLS](DEVTOOLS_ARCHITECTURE.md) and [CLI](CLI_ARCHITECTURE.md).
 
 ```
 frust-reactive (leaf)              frust-paths (leaf)      tooling: frust-cli/-drive/-tui/-mcp/-dap
