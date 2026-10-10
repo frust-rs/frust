@@ -3091,10 +3091,57 @@ already failed. After it, 20 rlibs read cleanly and `frust-shell-ios` (no code, 
 macOS) is the one left out: **12719 types in 1126 / 1129 / 1130 ms** for the combined base
 extraction (n=3), per rlib 0-223 ms (`frust-engine` 2055 types, 223 ms).
 
+### Framework-crate edit end to end
+
+Card H5B-R1-01 (tsk_000001a125a7e9b1h0PqF3z3), run 2026-10-10 on `task/hb-h5b-r1-01`, cut from
+`feature/hotpatch-h5b` @ bfac8af7 (every H5B card merged), same Mac and toolchain as above. Review
+round 0 of H5B found that a framework edit could not get this far: the desktop graph was read
+without `--filter-platform`, so on macOS `frust`'s wasm-, Windows- and Linux-only shells were
+dependents of `frust-core` that the fat build never compiled, and the cascade failed closed on
+them (`BuilderUnsupported`, a sticky restart). The desktop start now reads the graph for the host
+triple; a non-member the image neither captured nor links is outside the cascade; and the candidate
+layout table leaves a captured code-less non-member rlib out by the base table's own rule.
+
+Method: `frust` built from the task worktree (`cargo build -p frust-cli`, debug); `frust create
+e2e_app --frust-path <worktree>` in a scratch directory outside the repository; `frust run --watch`
+there (hot by default, desktop); then a body-only edit to
+`crates/frust-core/src/lib.rs` in the worktree (`let _ = std::hint::black_box(0u8);` added inside
+`point_in_transformed_rect`), and then its revert. The replay list is every rlib under the app's
+target directory rewritten after the save (`find -newer` on a marker touched just before it).
+
+- Capture: 18 local non-members listed, none of `frust-shell-web`, `frust-shell-windows`,
+  `frust-shell-linux` (dropped by the host filter); 21 records (18 non-member libs, the app's lib
+  and bin, and the app's build script's bin).
+- Fat start to the first frame: 94 s from a cold target (one run, wall clock from `frust run` to
+  the app's first `frust-hotpatch: frame` line).
+- The CLI's lines, edit then revert, with the app's process id the same before and after both:
+
+  ```
+  patched in 8531 ms (1 components rebuilt)
+  [frust INFO] frust-hotpatch: applied t_unix_ms=1791634115034
+  patched in 10253 ms (1 components rebuilt)
+  [frust INFO] frust-hotpatch: applied t_unix_ms=1791634144692
+  ```
+
+- Replayed, both times (9 rlibs, then `patch-1.dylib` / `patch-2.dylib`): `frust_core`,
+  `frust_theme`, `frust_widgets`, `frust_shell_common`, `frust_shell_macos`,
+  `frust_shell_desktop`, `frust` (the facade, `frust-ui`), `frust_material`, `e2e_app`.
+  `frust-shell-android` and `frust-shell-ios` are not dependents here: their `frust-core` edge is
+  gated to their own OS, so the host graph drops it.
+
+The ~9 s is eight framework crates recompiled in sequence at `opt-level = 1` plus the app, against
+a ~0.23 s app-only patch on the canary; it is still a patch, the process and its state kept.
+
+One gap the run surfaced, not fixed here: `cargo metadata` resolves default features, not the hot
+run's (`frust/perf-trace`, `frust/devtools`, `frust/hotpatch`), so crates only those features
+enable (`frust-devtools`, `frust-devtools-protocol`, `frust-hotpatch`) are compiled into the image
+but are no package of the graph: never listed, never captured, and no dependent the cascade could
+reach. None of them depends on `frust-core`, so this edit is unaffected.
+
 ### Not covered
 
-- A real `frust run --watch` on a `--frust-path` app with a framework edit (row E re-run) and its
-  save->frame against a restart: the canary and the L3 probe above stand in for it.
+- The save->frame of a framework edit against a restart, and an edit to a crate only a hot run's
+  features enable (see above).
 - Linux and Windows: the canary's CI legs run the same driver on ubuntu; the Windows PDB gate reads
   the linked patch's PDB, which already covers every crate the crate list names, untested here.
 - Android and the iOS simulator stay on `restart required` for a path dependency.

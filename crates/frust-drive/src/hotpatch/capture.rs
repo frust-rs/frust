@@ -66,8 +66,10 @@
 //! for a member: the outer invocation records it with its program stripped
 //! and runs rustc itself, so a member's record is the one a member-only
 //! scope holds. Any other compile is recorded only when its
-//! `CARGO_MANIFEST_DIR` is a listed package and it is a lib; everything
-//! else (registry crates, build scripts) runs unchanged and unrecorded. A
+//! `CARGO_MANIFEST_DIR` is a listed package, it is a lib, and its
+//! `--crate-name` is that package's lib crate name; everything else
+//! (registry crates, build scripts, and the probes a build script compiles
+//! from the package's directory) runs unchanged and unrecorded. A
 //! pass-through `RUSTC_WRAPPER` changes no cargo fingerprint, so a cached
 //! non-member never reaches the wrapper: the fat build busts each listed
 //! package that has no record yet.
@@ -502,7 +504,13 @@ pub fn run_wrapper(
             let args = match read_non_members(scope_dir)? {
                 None => args,
                 Some(non_members) => {
-                    match non_member_scope_compile(&args, &envs, &crate_types, &non_members) {
+                    match non_member_scope_compile(
+                        &args,
+                        &envs,
+                        &crate_name,
+                        &crate_types,
+                        &non_members,
+                    ) {
                         Some(args) => args,
                         None => return run_program(runner, &args, out, err),
                     }
@@ -554,10 +562,13 @@ pub fn run_wrapper(
 /// to the workspace wrapper marks a member: its invocation is the rest,
 /// recorded and run here directly rather than through a second wrapper
 /// process. Any other compile is a non-member's or a registry crate's; only
-/// a lib of a listed package (by `CARGO_MANIFEST_DIR`) is recorded.
+/// a lib of a listed package (by `CARGO_MANIFEST_DIR`) whose `--crate-name`
+/// is that package's lib crate name is recorded, so a probe a build script
+/// compiles from the package's directory (`autocfg`'s, say) never is.
 fn non_member_scope_compile(
     args: &[String],
     envs: &[(String, String)],
+    crate_name: &str,
     crate_types: &[String],
     non_members: &NonMembers,
 ) -> Option<Vec<String>> {
@@ -572,8 +583,9 @@ fn non_member_scope_compile(
     {
         return Some(args[1..].to_vec());
     }
-    let listed =
-        env("CARGO_MANIFEST_DIR").is_some_and(|dir| non_members.contains_dir(Path::new(dir)));
+    let listed = env("CARGO_MANIFEST_DIR")
+        .and_then(|dir| non_members.by_dir(Path::new(dir)))
+        .is_some_and(|package| package.lib == crate_name);
     (listed && TargetKind::of(crate_types) == TargetKind::Lib).then(|| args.to_vec())
 }
 
@@ -586,6 +598,9 @@ pub struct NonMember {
     /// The directory holding its `Cargo.toml`: cargo's `CARGO_MANIFEST_DIR`
     /// for its compiles.
     pub dir: PathBuf,
+    /// Its lib target's crate name in rustc's spelling (hyphens as
+    /// underscores): the only `--crate-name` recorded from `dir`.
+    pub lib: String,
 }
 
 /// The local non-member packages a scope captures, sorted by name then
@@ -629,8 +644,14 @@ impl NonMembers {
     /// Whether `dir` (a `CARGO_MANIFEST_DIR`) is a listed package's,
     /// compared lexically normalised.
     pub fn contains_dir(&self, dir: &Path) -> bool {
+        self.by_dir(dir).is_some()
+    }
+
+    /// The listed package whose directory `dir` (a `CARGO_MANIFEST_DIR`)
+    /// is, compared lexically normalised.
+    pub fn by_dir(&self, dir: &Path) -> Option<&NonMember> {
         let dir = super::graph::normalize(dir);
-        self.packages.iter().any(|package| package.dir == dir)
+        self.packages.iter().find(|package| package.dir == dir)
     }
 }
 
@@ -2152,10 +2173,12 @@ mod tests {
             NonMember {
                 name: "shared".to_string(),
                 dir: PathBuf::from("/x/frust/crates/shared"),
+                lib: "shared".to_string(),
             },
             NonMember {
                 name: "frust-core".to_string(),
                 dir: PathBuf::from("/x/frust/crates/./frust-core"),
+                lib: "frust_core".to_string(),
             },
         ])
     }
@@ -2279,6 +2302,47 @@ mod tests {
         assert_eq!(
             records[&RecordKey::parse("shared.lib").unwrap()].args,
             listed
+        );
+    }
+
+    /// A build script that compiles a probe (`autocfg`'s, `rustversion`'s)
+    /// runs it through `RUSTC_WRAPPER` with the package's own
+    /// `CARGO_MANIFEST_DIR`, as a lib: only the package's lib crate name is
+    /// recorded from that directory, so the probe runs unrecorded.
+    #[test]
+    fn a_build_script_probe_from_a_listed_package_is_never_recorded() {
+        let target = temp_dir("non-member-probe");
+        let scope = prepare_scope_dir_for(&target, &inputs(), &non_members()).unwrap();
+        let probe = compile(&[], "probe0", "lib");
+        let lib = compile(&[], "frust_core", "lib");
+        let runner = [&probe, &lib]
+            .into_iter()
+            .fold(FakeProcessRunner::new(), |runner, args| {
+                runner.with(args.join(" "), ok_output(""))
+            });
+        let run = |args: &[String]| {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let env = envs(&[("CARGO_MANIFEST_DIR", "/x/frust/crates/frust-core")]);
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            run_wrapper(&runner, &scope, &os(&args), &env, &mut out, &mut err).unwrap()
+        };
+        assert!(run(&probe), "the probe still runs");
+        assert!(
+            load_records(&scope).unwrap().is_empty(),
+            "a probe is not the package's lib"
+        );
+        assert!(run(&lib));
+        let keys: Vec<String> = load_records(&scope)
+            .unwrap()
+            .keys()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(keys, strings(&["frust_core.lib"]));
+        assert_eq!(
+            non_members()
+                .by_dir(Path::new("/x/frust/crates/frust-core/"))
+                .map(|package| package.lib.as_str()),
+            Some("frust_core")
         );
     }
 

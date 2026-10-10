@@ -22,6 +22,20 @@
 //! Until then, and in a session that never calls it, the graph is the
 //! member-only one.
 //!
+//! **Platform and image.** An edge's `target` cfg is not evaluated here:
+//! every session loads the graph for the triple its fat build compiles for
+//! (`cargo metadata --filter-platform`; the desktop's is the host's), so
+//! cargo has already dropped the edges that triple excludes, such as a
+//! wasm-, Windows- or Linux-only shell on a macOS host. What filtering
+//! leaves behind that the fat build still never compiled (an optional
+//! dependency another member's features enable, for one) is outside the
+//! image: once [`WorkspaceGraph::set_linked_crates`] has named the crates
+//! whose rlib the image's link line carries (the fact the base layout
+//! table is read from), a local non-member with neither a capture record
+//! nor a linked rlib is no part of the tip's closure, so the cascade never
+//! reaches it. A non-member the image does link but that is not replayable
+//! (no record, a proc macro, a crate-name clash) still fails closed.
+//!
 //! **Replay units.** The unit is a (package, target) pair ([`ReplayUnit`]).
 //! A changed `.rs` file maps to its package's lib target unless it is a bin's
 //! root (`targets[].src_path`) or a module only a bin's dep-info lists.
@@ -229,7 +243,9 @@ struct MetaDepKind {
 
 impl MetaDep {
     /// A normal (not dev-, not build-) edge. Old cargo without `dep_kinds`
-    /// counts as normal, which only widens the cascade.
+    /// counts as normal, which only widens the cascade. The edge's `target`
+    /// cfg is not read: the graph is loaded for one platform (see the
+    /// module doc), which drops the edges that platform excludes.
     fn is_normal(&self) -> bool {
         self.dep_kinds.is_empty() || self.dep_kinds.iter().any(|kind| kind.kind.is_none())
     }
@@ -291,6 +307,13 @@ pub struct WorkspaceGraph {
     local_deps: BTreeMap<String, BTreeSet<String>>,
     /// The non-members whose captured lib is a replay unit.
     replayable_non_members: BTreeSet<String>,
+    /// The non-members whose lib the fat build captured, replayable or
+    /// not (a proc macro, a crate-name clash).
+    captured_non_members: BTreeSet<String>,
+    /// The crate names (rustc spelling) whose rlib the image's link line
+    /// carries, once [`set_linked_crates`](Self::set_linked_crates) named
+    /// them; `None` counts every local package as part of the image.
+    linked_crates: Option<BTreeSet<String>>,
     tip: String,
     tip_bin: String,
     dep_info: BTreeMap<ReplayUnit, BTreeSet<PathBuf>>,
@@ -444,6 +467,8 @@ impl WorkspaceGraph {
             member_deps,
             local_deps,
             replayable_non_members: BTreeSet::new(),
+            captured_non_members: BTreeSet::new(),
+            linked_crates: None,
             tip: tip_package.to_string(),
             tip_bin,
             dep_info: BTreeMap::new(),
@@ -490,15 +515,18 @@ impl WorkspaceGraph {
     }
 
     /// The local non-members a fat build can capture: every one with a lib
-    /// target, by name and manifest directory.
+    /// target, by name, manifest directory and lib crate name.
     pub fn non_members(&self) -> NonMembers {
         NonMembers::new(
             self.packages
                 .iter()
-                .filter(|package| !package.member && package.lib_target_unit().is_some())
-                .map(|package| NonMember {
-                    name: package.name.clone(),
-                    dir: package.dir.clone(),
+                .filter(|package| !package.member)
+                .filter_map(|package| {
+                    Some(NonMember {
+                        name: package.name.clone(),
+                        dir: package.dir.clone(),
+                        lib: package.lib_target_unit()?.record_key().crate_name,
+                    })
                 }),
         )
     }
@@ -520,6 +548,7 @@ impl WorkspaceGraph {
             .flat_map(|package| package.lib_unit().into_iter().chain(package.bin_units()))
             .map(|unit| unit.record_key())
             .collect();
+        let mut captured = BTreeSet::new();
         let enabled: BTreeSet<String> = self
             .packages
             .iter()
@@ -527,12 +556,43 @@ impl WorkspaceGraph {
             .filter_map(|package| {
                 let key = package.lib_target_unit()?.record_key();
                 let record = records.get(&key)?;
+                captured.insert(package.name.clone());
                 let proc_macro = record.crate_types.iter().any(|ty| ty == "proc-macro");
                 (!proc_macro && !member_keys.contains(&key)).then(|| package.name.clone())
             })
             .collect();
         self.replayable_non_members = enabled.clone();
+        self.captured_non_members = captured;
         enabled.into_iter().collect()
+    }
+
+    /// Names the crates (rustc spelling) whose rlib the image's captured
+    /// link line carries. From then on a local non-member that has neither
+    /// a capture record ([`replay_non_members`](Self::replay_non_members))
+    /// nor a linked rlib was never compiled into the image: it is left out
+    /// of the tip's closure, so no cascade reaches it (see the module doc).
+    pub fn set_linked_crates(&mut self, crates: BTreeSet<String>) {
+        self.linked_crates = Some(crates);
+    }
+
+    /// Whether the local package `name` is compiled into the running
+    /// image, as far as the graph can tell: always for a member, and for a
+    /// non-member unless [`set_linked_crates`](Self::set_linked_crates)
+    /// says its rlib is not linked and the fat build captured no compile of
+    /// it either.
+    fn in_image(&self, name: &str) -> bool {
+        let Some(linked) = &self.linked_crates else {
+            return true;
+        };
+        match self.local_package(name) {
+            Some(package) if !package.member => {
+                self.captured_non_members.contains(name)
+                    || package
+                        .lib_target_unit()
+                        .is_some_and(|lib| linked.contains(&lib.record_key().crate_name))
+            }
+            _ => true,
+        }
     }
 
     /// Records the files `unit`'s dep-info lists (see [`parse_dep_info`]),
@@ -760,11 +820,19 @@ impl WorkspaceGraph {
         seen
     }
 
-    /// The tip and every package it depends on: the packages compiled into
-    /// the running image.
+    /// The tip and every package it depends on that is compiled into the
+    /// running image ([`in_image`](Self::in_image)); a package outside the
+    /// image is not walked through either.
     fn tip_closure(&self) -> BTreeSet<&str> {
-        let mut closure = self.transitive_deps(&self.tip);
-        closure.insert(&self.tip);
+        let mut closure = BTreeSet::from([self.tip.as_str()]);
+        let mut stack: Vec<&str> = vec![&self.tip];
+        while let Some(current) = stack.pop() {
+            for dep in self.edges().get(current).into_iter().flatten() {
+                if self.in_image(dep) && closure.insert(dep.as_str()) {
+                    stack.push(dep);
+                }
+            }
+        }
         closure
     }
 
@@ -851,9 +919,11 @@ impl ModifiedSet {
     /// the tip's dependency closure is not in the running image and is
     /// dropped, as is any bin but the tip bin. A changed lib cascades to
     /// its dependents inside the closure; the cascade reaches the tip lib
-    /// (or, for a lib-less tip, the tip bin) and stops there. A unit the
-    /// graph does not know, or a cascade reaching a local non-member that is
-    /// not replayable, is [`HotpatchError::BuilderUnsupported`].
+    /// (or, for a lib-less tip, the tip bin) and stops there; a dependent
+    /// outside the image (see the module doc) is not part of the closure,
+    /// so the cascade passes it by. A unit the graph does not know, or a
+    /// cascade reaching a local non-member in the image that is not
+    /// replayable, is [`HotpatchError::BuilderUnsupported`].
     pub fn record_change<'a>(
         &mut self,
         graph: &WorkspaceGraph,
@@ -1049,7 +1119,7 @@ pub(super) fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::{FakeProcessRunner, Output};
+    use crate::process::{FakeProcessRunner, Output, RealProcessRunner};
 
     fn unsupported<T: std::fmt::Debug>(result: Result<T, HotpatchError>) -> String {
         match result {
@@ -1481,6 +1551,161 @@ mod tests {
         );
         let err = unsupported(ModifiedSet::new().record_change(&graph, [&widgets_lib()]));
         assert!(err.contains("`frust-material`"), "{err}");
+    }
+
+    /// An uncaptured `frust-material` (a direct dependency of the tip)
+    /// whose rlib the image does not link either was never compiled into
+    /// it: the cascade passes it by. Linked but uncaptured (a capture
+    /// miss), it still fails closed.
+    #[test]
+    fn a_dependent_the_image_never_compiled_is_outside_the_cascade() {
+        let ui = ReplayUnit::lib("ui", "ui");
+        let linked = |names: &[&str]| names.iter().map(|name| name.to_string()).collect();
+
+        let mut graph = framework_graph(&["frust_widgets.lib"]);
+        graph.set_linked_crates(linked(&["app", "ui", "frust_widgets"]));
+        let plan = ModifiedSet::new()
+            .record_change(&graph, [&widgets_lib()])
+            .unwrap();
+        assert_eq!(plan.replay, vec![widgets_lib(), ui.clone(), app_lib()]);
+
+        let mut graph = framework_graph(&["frust_widgets.lib"]);
+        graph.set_linked_crates(linked(&["app", "ui", "frust_widgets", "frust_material"]));
+        let err = unsupported(ModifiedSet::new().record_change(&graph, [&widgets_lib()]));
+        assert!(
+            err.contains("`frust-material`"),
+            "linked but never captured is a capture miss: {err}"
+        );
+
+        // The proc macro is never linked, but its capture record says the
+        // fat build compiled it: still in the image.
+        let mut graph = framework_graph(&[
+            "frust_widgets.lib",
+            "frust_material.lib",
+            "frust_macros.lib",
+        ]);
+        graph.set_linked_crates(linked(&["app", "ui", "frust_widgets", "frust_material"]));
+        assert!(graph.in_image("frust-macros"));
+        assert!(graph.tip_closure().contains("frust-macros"));
+        assert_eq!(
+            ModifiedSet::new()
+                .record_change(&graph, [&widgets_lib()])
+                .unwrap()
+                .replay,
+            vec![widgets_lib(), framework_material_lib(), ui, app_lib()]
+        );
+    }
+
+    /// Writes a framework checkout beside an app workspace under a fresh
+    /// temp dir: the app (`app`, lib + bin, the tip) depends on `core`,
+    /// `shell-host`, a `cfg(target_arch = "wasm32")`-gated `shell-web` and
+    /// a `cfg(windows)`-gated `shell-win`; every shell depends on `core`.
+    /// Returns the app's manifest.
+    fn platform_gated_project(tag: &str) -> PathBuf {
+        let base =
+            std::env::temp_dir().join(format!("frust-drive-graph-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let write = |path: &str, text: &str| {
+            let path = base.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let manifest = |name: &str, deps: &str| {
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+                 [dependencies]\n{deps}"
+            )
+        };
+        write(
+            "app/Cargo.toml",
+            &format!(
+                "{}\n[target.'cfg(target_arch = \"wasm32\")'.dependencies]\n\
+                 shell-web = {{ path = \"../fw/shell-web\" }}\n\n\
+                 [target.'cfg(windows)'.dependencies]\n\
+                 shell-win = {{ path = \"../fw/shell-win\" }}\n\n[workspace]\n",
+                manifest(
+                    "app",
+                    "core = { path = \"../fw/core\" }\nshell-host = { path = \"../fw/shell-host\" }\n"
+                )
+            ),
+        );
+        write("app/src/lib.rs", "");
+        write("app/src/main.rs", "fn main() {}\n");
+        write("fw/core/Cargo.toml", &manifest("core", ""));
+        write("fw/core/src/lib.rs", "");
+        for shell in ["shell-host", "shell-web", "shell-win"] {
+            write(
+                &format!("fw/{shell}/Cargo.toml"),
+                &manifest(shell, "core = { path = \"../core\" }\n"),
+            );
+            write(&format!("fw/{shell}/src/lib.rs"), "");
+        }
+        base.join("app/Cargo.toml")
+    }
+
+    /// The host's triple, from the `rustc` cargo runs.
+    fn host_triple() -> String {
+        let version = super::super::capture::rustc_version(&RealProcessRunner).unwrap();
+        version
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .expect("`rustc -vV` names the host")
+            .trim()
+            .to_string()
+    }
+
+    /// The review's case, read by real `cargo metadata`: `core` is edited
+    /// and every shell depends on it, but only `shell-host` (and, on a
+    /// Windows host, `shell-win`) is compiled for this host. Unfiltered, the
+    /// gated shells are edges of the tip and the cascade fails closed on
+    /// them (the negative control); loaded for the host, it replays the
+    /// host's dependents only.
+    #[test]
+    fn a_graph_loaded_for_the_host_cascades_through_host_dependents_only() {
+        let manifest = platform_gated_project("host-filter");
+        let records = records(
+            &[
+                "app.lib",
+                "app.bin",
+                "core.lib",
+                "shell_host.lib",
+                "shell_win.lib",
+            ][..if cfg!(windows) { 5 } else { 4 }],
+            &[],
+        );
+        let core = ReplayUnit::lib("core", "core");
+        let load = |filter: Option<&str>| {
+            let mut graph =
+                WorkspaceGraph::load(&RealProcessRunner, &manifest, filter, "app", None)
+                    .expect("cargo metadata over the fixture");
+            graph.replay_non_members(&records);
+            graph
+        };
+
+        let unfiltered = load(None);
+        let err = unsupported(ModifiedSet::new().record_change(&unfiltered, [&core]));
+        assert!(
+            err.contains("`shell-web`") || err.contains("`shell-win`"),
+            "{err}"
+        );
+
+        let host = load(Some(&host_triple()));
+        let plan = ModifiedSet::new().record_change(&host, [&core]).unwrap();
+        let mut expected = vec![core.clone(), ReplayUnit::lib("shell-host", "shell_host")];
+        if cfg!(windows) {
+            expected.push(ReplayUnit::lib("shell-win", "shell_win"));
+        }
+        expected.push(app_lib());
+        assert_eq!(plan.replay, expected);
+        let local: Vec<&str> = host
+            .packages()
+            .iter()
+            .filter(|p| !p.member)
+            .map(|p| p.name.as_str())
+            .collect();
+        assert!(!local.contains(&"shell-web"), "{local:?}");
+        assert_eq!(local.contains(&"shell-win"), cfg!(windows), "{local:?}");
+        let _ = std::fs::remove_dir_all(manifest.parent().unwrap().parent().unwrap());
     }
 
     #[test]
