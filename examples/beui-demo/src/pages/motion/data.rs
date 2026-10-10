@@ -18,8 +18,7 @@
 use std::rc::Rc;
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, column, component,
-    row, stack, text,
+    Component, CrossAxisAlignment, SizedBox, View, ViewSeq, column, component, row, stack, text,
 };
 use frust_beui::components::animated_toast_stack::{
     AnimatedToastStackEntry, AnimatedToastStackPosition, AnimatedToastStackStatus, animated_toast,
@@ -217,16 +216,15 @@ fn hgap(width: f64) -> impl View<State> {
 
 /// One component's block: its name, a one-line note (where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
-    let mut children = vec![
-        any(text(title.to_string()).size(16.0)),
-        any(gap(4.0)),
-        any(caption(note.to_string())),
-        any(gap(12.0)),
-    ];
-    children.extend(body);
-    children.push(any(gap(32.0)));
-    Column(children).cross_axis(CrossAxisAlignment::Start)
+fn demo<M>(title: &str, note: &str, body: impl ViewSeq<State, M>) -> impl View<State> {
+    column()
+        .child(text(title.to_string()).size(16.0))
+        .child(gap(4.0))
+        .child(caption(note.to_string()))
+        .child(gap(12.0))
+        .children(body)
+        .child(gap(32.0))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A small outline button — this page's triggers.
@@ -249,47 +247,50 @@ fn status_label(status: AnimatedToastStackStatus) -> &'static str {
 
 /// The [`animated_toast_stack`], with a trigger per status.
 fn toasts(state: &State) -> impl View<State> {
-    let mut triggers: Vec<AnyView<State>> = Vec::new();
-    for (index, (status, _, _, _)) in TOASTS.iter().enumerate() {
-        if !triggers.is_empty() {
-            triggers.push(any(hgap(8.0)));
-        }
-        // The trigger is labelled by the *status* rather than by the toast's
-        // title: five title-length buttons do not fit the stage at a 900px
-        // window.
-        triggers.push(any(knob(status_label(*status), move |s: &mut State| {
-            let (status, title, description, action) = TOASTS[index];
-            let id = s.next_toast_id;
-            s.next_toast_id += 1;
-            let mut entry = animated_toast(id, title)
-                .description(description)
-                .status(status);
-            if let Some(label) = action {
-                entry = entry.action(label);
-            }
-            s.toasts.push(entry);
-            s.toast_status = format!("Raised \u{201c}{title}\u{201d} (id {id}).");
-        })));
-    }
+    let triggers = TOASTS
+        .iter()
+        .enumerate()
+        .fold(row(), |triggers, (index, (status, _, _, _))| {
+            // The trigger is labelled by the *status* rather than by the toast's
+            // title: five title-length buttons do not fit the stage at a 900px
+            // window.
+            triggers.when(index > 0, |r| r.child(hgap(8.0))).child(knob(
+                status_label(*status),
+                move |s: &mut State| {
+                    let (status, title, description, action) = TOASTS[index];
+                    let id = s.next_toast_id;
+                    s.next_toast_id += 1;
+                    let mut entry = animated_toast(id, title)
+                        .description(description)
+                        .status(status);
+                    if let Some(label) = action {
+                        entry = entry.action(label);
+                    }
+                    s.toasts.push(entry);
+                    s.toast_status = format!("Raised \u{201c}{title}\u{201d} (id {id}).");
+                },
+            ))
+        })
+        .cross_axis(CrossAxisAlignment::Center);
 
     let position_row = |from: usize, to: usize| {
-        let mut row: Vec<AnyView<State>> = Vec::new();
-        for (position, label) in &POSITIONS[from..to] {
-            if !row.is_empty() {
-                row.push(any(hgap(8.0)));
-            }
-            let position = *position;
-            row.push(any(knob(label, move |s: &mut State| {
-                s.toast_position = position
-            })));
-        }
-        any(Row(row).cross_axis(CrossAxisAlignment::Center))
+        POSITIONS[from..to]
+            .iter()
+            .enumerate()
+            .fold(row(), |line, (i, (position, label))| {
+                let position = *position;
+                line.when(i > 0, |r| r.child(hgap(8.0)))
+                    .child(knob(label, move |s: &mut State| {
+                        s.toast_position = position
+                    }))
+            })
+            .cross_axis(CrossAxisAlignment::Center)
     };
 
-    let panel = any(column()
+    let panel = column()
         .child(text("Raise a toast").size(15.0))
         .child(gap(8.0))
-        .child(Row(triggers).cross_axis(CrossAxisAlignment::Center))
+        .child(triggers)
         .child(gap(12.0))
         .child(
             row()
@@ -311,19 +312,17 @@ fn toasts(state: &State) -> impl View<State> {
         .child(caption(state.toast_status.clone()))
         .child(gap(4.0))
         .child(caption(format!("Queued: {}", state.toasts.len())))
-        .cross_axis(CrossAxisAlignment::Start));
+        .cross_axis(CrossAxisAlignment::Start);
 
-    let toast_stack = any(
-        animated_toast_stack(state.toasts.clone(), |s: &mut State, id| {
-            s.toasts.retain(|toast| toast.id() != id);
-            s.toast_status = format!("Dismissed id {id}.");
-        })
-        .position(state.toast_position)
-        .max_visible(4)
-        .on_action(|s: &mut State, id| {
-            s.toast_status = format!("Action pressed on id {id}.");
-        }),
-    );
+    let toast_stack = animated_toast_stack(state.toasts.clone(), |s: &mut State, id| {
+        s.toasts.retain(|toast| toast.id() != id);
+        s.toast_status = format!("Dismissed id {id}.");
+    })
+    .position(state.toast_position)
+    .max_visible(4)
+    .on_action(|s: &mut State, id| {
+        s.toast_status = format!("Action pressed on id {id}.");
+    });
 
     demo(
         "animated_toast_stack",
@@ -335,14 +334,12 @@ fn toasts(state: &State) -> impl View<State> {
          paint has no route to app state. Swipe a card sideways past 72px to \
          dismiss it \u{2014} the velocity arm is not ported, a PointerEvent carries \
          none \u{2014} and no ramp blurs.",
-        vec![any(
-            SizedBox(Some(620.0), Some(380.0)).child(stack().child(panel).child(toast_stack))
-        )],
+        SizedBox(Some(620.0), Some(380.0)).child(stack().child(panel).child(toast_stack)),
     )
 }
 
 /// The virtualized [`table`].
-fn tables(state: &State) -> AnyView<State> {
+fn tables(state: &State) -> impl View<State> {
     let columns = vec![
         table_column("Name").sortable(true).width(200.0),
         table_column("Team").sortable(true),
@@ -361,7 +358,7 @@ fn tables(state: &State) -> AnyView<State> {
     let selected_order = state.order.clone();
     let selected = state.selected.clone();
 
-    let view = any(table(columns, state.row_count, move |row, column| {
+    let view = table(columns, state.row_count, move |row, column| {
         order
             .get(row)
             .map_or_else(String::new, |&source| cell_text(source, column))
@@ -396,9 +393,9 @@ fn tables(state: &State) -> AnyView<State> {
             s.pages_loaded += 1;
             s.order = sorted_order(s.row_count, s.sort);
         }
-    }));
+    });
 
-    any(demo(
+    demo(
         "table",
         "A synthetic dataset read through one cell(row, column) provider, so \
          only the rows ListView has materialized are ever asked for. It rides \
@@ -410,10 +407,10 @@ fn tables(state: &State) -> AnyView<State> {
          animate out (the list tears a departing key down immediately), cells \
          are single-line strings, and horizontal overflow scales rather than \
          scrolling.",
-        vec![
-            any(SizedBox(Some(720.0), None).child(view)),
-            any(gap(12.0)),
-            any(row()
+        (
+            SizedBox(Some(720.0), None).child(view),
+            gap(12.0),
+            row()
                 .child(caption(format!(
                     "{} rows \u{b7} {} selected \u{b7} {} extra page(s) loaded \u{b7} sort: {}",
                     state.row_count,
@@ -447,9 +444,9 @@ fn tables(state: &State) -> AnyView<State> {
                     s.pages_loaded = 0;
                     s.order = sorted_order(s.row_count, s.sort);
                 }))
-                .cross_axis(CrossAxisAlignment::Center)),
-        ],
-    ))
+                .cross_axis(CrossAxisAlignment::Center),
+        ),
+    )
 }
 
 /// The page's interactive body.
@@ -463,10 +460,10 @@ impl Component for DataPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(column()
+        column()
             .child(toasts(state))
             .child(tables(state))
-            .cross_axis(CrossAxisAlignment::Start))
+            .cross_axis(CrossAxisAlignment::Start)
     }
 }
 

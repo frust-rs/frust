@@ -25,8 +25,7 @@
 //! combobox, the team multi-select, and the guest stepper.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, View, any, column, component, row,
-    stack, text,
+    Component, CrossAxisAlignment, SizedBox, View, ViewSeq, column, component, row, stack, text,
 };
 use frust_beui::components::adaptive_stepper::adaptive_stepper;
 use frust_beui::components::combobox::{
@@ -120,16 +119,15 @@ fn hgap(width: f64) -> impl View<State> {
 
 /// One component's block: its name, a one-line note (where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
-    let mut children = vec![
-        any(text(title.to_string()).size(16.0)),
-        any(gap(4.0)),
-        any(caption(note.to_string())),
-        any(gap(12.0)),
-    ];
-    children.extend(body);
-    children.push(any(gap(32.0)));
-    Column(children).cross_axis(CrossAxisAlignment::Start)
+fn demo<M>(title: &str, note: &str, body: impl ViewSeq<State, M>) -> impl View<State> {
+    column()
+        .child(text(title.to_string()).size(16.0))
+        .child(gap(4.0))
+        .child(caption(note.to_string()))
+        .child(gap(12.0))
+        .children(body)
+        .child(gap(32.0))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// One picker's bounded overlay stage — see the [module docs](self).
@@ -143,8 +141,8 @@ fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> 
 fn stage(
     trigger_width: f64,
     size: (f64, f64),
-    trigger: AnyView<State>,
-    panel: AnyView<State>,
+    trigger: impl View<State>,
+    panel: impl View<State>,
 ) -> impl View<State> {
     let (width, height) = size;
     SizedBox(Some(width), Some(height)).child(
@@ -159,7 +157,7 @@ fn stage(
 }
 
 /// A labelled stage: the caption above the live picker.
-fn labelled_stage(label: &str, body: AnyView<State>) -> impl View<State> {
+fn labelled_stage(label: &str, body: impl View<State>) -> impl View<State> {
     column()
         .child(caption(label.to_string()))
         .child(gap(8.0))
@@ -181,44 +179,36 @@ fn selects(state: &State) -> impl View<State> {
     let default = stage(
         224.0,
         (290.0, 280.0),
-        any(
-            select_trigger(&state.select_anchor, label_of(state.select_value))
-                .placeholder("Pick a framework")
-                .open(state.select_open)
-                .on_open_change(|s: &mut State, open| s.select_open = open),
-        ),
-        any(
-            select(options(), state.select_value, |s: &mut State, index| {
-                s.select_value = Some(index);
-                s.select_open = false;
-            })
-            .anchor(&state.select_anchor)
+        select_trigger(&state.select_anchor, label_of(state.select_value))
+            .placeholder("Pick a framework")
             .open(state.select_open)
             .on_open_change(|s: &mut State, open| s.select_open = open),
-        ),
+        select(options(), state.select_value, |s: &mut State, index| {
+            s.select_value = Some(index);
+            s.select_open = false;
+        })
+        .anchor(&state.select_anchor)
+        .open(state.select_open)
+        .on_open_change(|s: &mut State, open| s.select_open = open),
     );
 
     let morph = stage(
         224.0,
         (290.0, 280.0),
-        any(
-            select_trigger(&state.morph_anchor, label_of(state.morph_value))
-                .variant(SelectVariant::Morph)
-                .placeholder("Pick a framework")
-                .open(state.morph_open)
-                .on_open_change(|s: &mut State, open| s.morph_open = open),
-        ),
-        any(
-            select(options(), state.morph_value, |s: &mut State, index| {
-                s.morph_value = Some(index);
-                s.morph_open = false;
-            })
+        select_trigger(&state.morph_anchor, label_of(state.morph_value))
             .variant(SelectVariant::Morph)
-            .header(label_of(state.morph_value), "Pick a framework")
-            .anchor(&state.morph_anchor)
+            .placeholder("Pick a framework")
             .open(state.morph_open)
             .on_open_change(|s: &mut State, open| s.morph_open = open),
-        ),
+        select(options(), state.morph_value, |s: &mut State, index| {
+            s.morph_value = Some(index);
+            s.morph_open = false;
+        })
+        .variant(SelectVariant::Morph)
+        .header(label_of(state.morph_value), "Pick a framework")
+        .anchor(&state.morph_anchor)
+        .open(state.morph_open)
+        .on_open_change(|s: &mut State, open| s.morph_open = open),
     );
 
     demo(
@@ -231,11 +221,11 @@ fn selects(state: &State) -> impl View<State> {
          edge. The item entrance drops its blur, the gooey separation animates \
          the near edge's two corners rather than all four, there is no \
          type-ahead, and the list height is a constant cap. Vite is disabled.",
-        vec![any(row()
-            .child(labelled_stage("Default", any(default)))
+        row()
+            .child(labelled_stage("Default", default))
             .child(hgap(32.0))
-            .child(labelled_stage("Morph", any(morph)))
-            .cross_axis(CrossAxisAlignment::Start))],
+            .child(labelled_stage("Morph", morph))
+            .cross_axis(CrossAxisAlignment::Start),
     )
 }
 
@@ -254,7 +244,7 @@ fn comboboxes(state: &State) -> impl View<State> {
     let live = stage(
         260.0,
         (340.0, 320.0),
-        any(combobox_trigger(
+        combobox_trigger(
             &state.combo_anchor,
             state.combo_query.clone(),
             |s: &mut State, q| {
@@ -264,8 +254,8 @@ fn comboboxes(state: &State) -> impl View<State> {
         .selected_label(selected_label)
         .placeholder("Search workspaces\u{2026}")
         .open(state.combo_open)
-        .on_open_change(|s: &mut State, open| s.combo_open = open)),
-        any(combobox(
+        .on_open_change(|s: &mut State, open| s.combo_open = open),
+        combobox(
             options,
             state.combo_value,
             state.combo_query.clone(),
@@ -277,7 +267,7 @@ fn comboboxes(state: &State) -> impl View<State> {
         )
         .anchor(&state.combo_anchor)
         .open(state.combo_open)
-        .on_open_change(|s: &mut State, open| s.combo_open = open)),
+        .on_open_change(|s: &mut State, open| s.combo_open = open),
     );
 
     demo(
@@ -289,7 +279,7 @@ fn comboboxes(state: &State) -> impl View<State> {
          (the wrapped field owns the focus path), the hover highlight cuts \
          between rows rather than travelling, and a long list clips at the \
          height cap rather than scrolling.",
-        vec![any(live)],
+        live,
     )
 }
 
@@ -302,7 +292,7 @@ fn multi_selects(state: &State) -> impl View<State> {
     let live = stage(
         280.0,
         (360.0, 340.0),
-        any(multi_select_trigger(
+        multi_select_trigger(
             &state.multi_anchor,
             options,
             state.multi_selected.clone(),
@@ -312,8 +302,8 @@ fn multi_selects(state: &State) -> impl View<State> {
         .placeholder("Add a team\u{2026}")
         .open(state.multi_open)
         .on_remove(|s: &mut State, index| s.multi_selected.retain(|i| *i != index))
-        .on_open_change(|s: &mut State, open| s.multi_open = open)),
-        any(multi_select(
+        .on_open_change(|s: &mut State, open| s.multi_open = open),
+        multi_select(
             panel_options,
             state.multi_selected.clone(),
             state.multi_query.clone(),
@@ -327,7 +317,7 @@ fn multi_selects(state: &State) -> impl View<State> {
         )
         .anchor(&state.multi_anchor)
         .open(state.multi_open)
-        .on_open_change(|s: &mut State, open| s.multi_open = open)),
+        .on_open_change(|s: &mut State, open| s.multi_open = open),
     );
 
     demo(
@@ -339,30 +329,26 @@ fn multi_selects(state: &State) -> impl View<State> {
          and the hosted search field paints its own surface fill (the baseline \
          field offers no seam to suppress it). Backspace does not remove the \
          last chip \u{2014} that key belongs to the field's own focus path.",
-        vec![any(live)],
+        live,
     )
 }
 
 /// [`adaptive_stepper`]: the fixed-footprint quantity control.
 fn steppers(state: &State) -> impl View<State> {
-    let guests = any(
-        adaptive_stepper(state.guests, |s: &mut State, v| s.guests = v)
-            .min(0.0)
-            .max(3.0)
-            .label("Guests"),
-    );
+    let guests = adaptive_stepper(state.guests, |s: &mut State, v| s.guests = v)
+        .min(0.0)
+        .max(3.0)
+        .label("Guests");
 
-    let quantity = any(
-        adaptive_stepper(state.quantity, |s: &mut State, v| s.quantity = v)
-            .min(0.0)
-            .max(10.0)
-            .step(2.0)
-            .label("Quantity"),
-    );
+    let quantity = adaptive_stepper(state.quantity, |s: &mut State, v| s.quantity = v)
+        .min(0.0)
+        .max(10.0)
+        .step(2.0)
+        .label("Quantity");
 
-    let disabled = any(adaptive_stepper(5.0, |_: &mut State, _| {})
+    let disabled = adaptive_stepper(5.0, |_: &mut State, _| {})
         .disabled(true)
-        .label("Disabled"));
+        .label("Disabled");
 
     demo(
         "adaptive_stepper",
@@ -374,7 +360,7 @@ fn steppers(state: &State) -> impl View<State> {
          reported as a plain numeric update rather than an announced one. The \
          arrow keys step \u{2014} an addition, since one widget cannot host \
          upstream's two focusable buttons.",
-        vec![any(row()
+        row()
             .child(
                 column()
                     .child(guests)
@@ -404,7 +390,7 @@ fn steppers(state: &State) -> impl View<State> {
                     .child(caption("Disabled"))
                     .cross_axis(CrossAxisAlignment::Start),
             )
-            .cross_axis(CrossAxisAlignment::Start))],
+            .cross_axis(CrossAxisAlignment::Start),
     )
 }
 
@@ -419,12 +405,12 @@ impl Component for SelectionPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(column()
+        column()
             .child(selects(state))
             .child(comboboxes(state))
             .child(multi_selects(state))
             .child(steppers(state))
-            .cross_axis(CrossAxisAlignment::Start))
+            .cross_axis(CrossAxisAlignment::Start)
     }
 }
 
