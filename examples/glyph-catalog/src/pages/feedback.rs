@@ -28,7 +28,7 @@
 
 use frust::{
     Axis, Component, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get, Padding, RwSignal,
-    SizedBox, Update, View, any, button, column, component, keyed, row, text,
+    SizedBox, Update, View, button, column, component, keyed, row, text,
 };
 // Re-anchored onto `frust_glyph` under the old `glyph` local name (this
 // file's own dense `glyph::` call-site prefix predates the plugin split) —
@@ -98,7 +98,7 @@ impl Component for FeedbackPage {
             .child(loaders_column())
             .cross_axis(CrossAxisAlignment::Start);
 
-        any(Padding(EdgeInsets::all(16.0), column))
+        Padding(EdgeInsets::all(16.0), column)
     }
 }
 

@@ -17,9 +17,9 @@
 use frust::motion::patterns::{FadeScale, FadeThrough, SharedAxis};
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get,
-    GetUntracked, MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme,
-    TransitionSpec, Update, View, any, button, column, inflexible, row, text, use_context,
+    Align, Alignment, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
+    MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme, TransitionSpec, Update,
+    View, any, button, column, inflexible, row, text, use_context,
 };
 use frust_glyph::TermLine;
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
@@ -238,7 +238,7 @@ fn demo_modal() -> FlexChild<CatalogState> {
 /// See `overlays.rs`'s twin: bottom-pinned, full width on phones, capped at
 /// 640dp + centered on larger screens (M3/Flutter convention, device-gate
 /// verified). The glyph_card supplies the panel surface.
-fn sheet_scaffold(panel: AnyView<CatalogState>) -> impl View<CatalogState> {
+fn sheet_scaffold(panel: impl View<CatalogState>) -> impl View<CatalogState> {
     Align(
         Alignment { x: 0.0, y: 1.0 },
         SizedBox(Some(SHEET_MAX_WIDTH), None)
@@ -261,7 +261,7 @@ fn demo_sheet() -> FlexChild<CatalogState> {
         inflexible(button("Show bottom sheet", |s: &mut CatalogState| {
             s.nav.push_transparent_for_result(
                 || {
-                    sheet_scaffold(any(Padding(
+                    sheet_scaffold(Padding(
                         EdgeInsets::all(20.0),
                         column()
                             .child(text("Bottom sheet").size(15.0).color(amber()))
@@ -269,7 +269,7 @@ fn demo_sheet() -> FlexChild<CatalogState> {
                             .child(text("Slides up at 340ms; slides back at 150ms.").size(12.0))
                             .push(gap(12.0))
                             .child(button("Close", |s: &mut CatalogState| s.nav.pop())),
-                    )))
+                    ))
                 },
                 TransitionSpec::duration(PageTransition::SlideUp),
                 |_s: &mut CatalogState, _r| {},
@@ -393,6 +393,7 @@ fn demo_screen() -> FlexChild<CatalogState> {
 
     // The same keyed switcher under each of the four patterns — type-erased so
     // the runtime pick composes onto one showcase.
+    // erasure: keep four-arm runtime pattern pick
     let switcher = match p {
         0 => any(pattern_switcher(c, FadeThrough, card_view(c)).reverse(b)),
         1 => any(pattern_switcher(c, SharedAxis::X, card_view(c)).reverse(b)),

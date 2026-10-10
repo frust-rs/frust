@@ -29,9 +29,8 @@ use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
 use frust::{
-    AnyView, Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, Image, ImageFit, ImageSource,
-    Padding, Row, ShapeScale, SizedBox, StatusPalette, TextView, Theme, any, column, inflexible,
-    row, text, use_context,
+    AnyView, Color, CrossAxisAlignment, EdgeInsets, Image, ImageFit, ImageSource, Padding, Row,
+    ShapeScale, SizedBox, StatusPalette, TextView, Theme, ViewSeq, column, row, text, use_context,
 };
 use frust_glyph::GlyphInk;
 
@@ -137,9 +136,8 @@ const RADIUS_CHIP_SIZE: f64 = 44.0;
 /// One color swatch: a filled box, the token's reference name, and its
 /// live-resolved hex text — `color` is always a value read off the current
 /// theme by the caller, never a literal.
-// erasure: keep an element of wrap_rows' Vec<AnyView> items, mixed with swatch_na
-fn swatch(name: &str, color: Color, label_color: Color) -> AnyView<CatalogState> {
-    any(Padding(
+fn swatch(name: &str, color: Color, label_color: Color) -> impl View<CatalogState> {
+    Padding(
         EdgeInsets::all(6.0),
         column()
             .child(
@@ -149,22 +147,21 @@ fn swatch(name: &str, color: Color, label_color: Color) -> AnyView<CatalogState>
             .child(mono_label(name.to_string(), label_color))
             .child(mono_label(hex(color), label_color))
             .cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 /// A "N/A" placeholder swatch for a token with no live `ColorScheme` role
 /// (see the module docs' "Unmapped Glyph text tokens" section) — same
 /// footprint as [`swatch`] so the ramp stays visually aligned, but painted
 /// with a dashed-feel dim label instead of a resolved color/hex.
-// erasure: keep an element of wrap_rows' Vec<AnyView> items, mixed with swatch
-fn swatch_na(name: &str, reason: &str, label_color: Color) -> AnyView<CatalogState> {
-    any(Padding(
+fn swatch_na(name: &str, reason: &str, label_color: Color) -> impl View<CatalogState> {
+    Padding(
         EdgeInsets::all(6.0),
         column()
             .child(mono_label(format!("{name} — N/A"), label_color))
             .child(text(reason.to_string()).size(9.5).color(label_color))
             .cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 /// A small monospace-styled label (the Glyph type scale's `micro` slot),
@@ -177,47 +174,39 @@ fn mono_label(content: String, color: Color) -> TextView {
 /// Group `items` into rows of `per_row`, stacked vertically — the closest
 /// approximation of a wrapping grid the facade offers today (no `Wrap`
 /// widget yet).
-// erasure: keep every caller passes it as section's AnyView body
-fn wrap_rows(mut items: Vec<AnyView<CatalogState>>, per_row: usize) -> AnyView<CatalogState> {
-    let mut rows: Vec<AnyView<CatalogState>> = Vec::new();
+fn wrap_rows<M>(seq: impl ViewSeq<CatalogState, M>, per_row: usize) -> impl View<CatalogState> {
+    // erasure: keep the swatch count is dynamic, so the row split needs a Vec of erased items
+    let mut items: Vec<AnyView<CatalogState>> = Vec::new();
+    seq.extend_views(&mut items);
+    let mut grid = column().cross_axis(CrossAxisAlignment::Start);
     while !items.is_empty() {
         let rest = if items.len() > per_row {
             items.split_off(per_row)
         } else {
             Vec::new()
         };
-        rows.push(any(Row(items)));
+        grid = grid.child(Row(items));
         items = rest;
     }
-    any(
-        FlexView::new(Axis::Vertical, rows.into_iter().map(inflexible).collect())
-            .cross_axis(CrossAxisAlignment::Start),
-    )
+    grid
 }
 
 /// A titled section: a heading line, a small vertical gap, then `body`.
-// erasure: keep every caller pushes it onto the page's Vec<AnyView> children
 fn section(
     title: &str,
     subtitle: Option<&str>,
-    body: AnyView<CatalogState>,
-) -> AnyView<CatalogState> {
-    let mut children: Vec<AnyView<CatalogState>> = vec![any(text(title.to_string()).size(15.0))];
-    if let Some(sub) = subtitle {
-        children.push(any(text(sub.to_string()).size(10.5)));
-    }
-    children.push(any(SizedBox(None, Some(8.0))));
-    children.push(body);
-    children.push(any(SizedBox(None, Some(20.0))));
-
-    any(Padding(
+    body: impl View<CatalogState>,
+) -> impl View<CatalogState> {
+    Padding(
         EdgeInsets::symmetric(16.0, 8.0),
-        FlexView::new(
-            Axis::Vertical,
-            children.into_iter().map(inflexible).collect(),
-        )
-        .cross_axis(CrossAxisAlignment::Start),
-    ))
+        column()
+            .child(text(title.to_string()).size(15.0))
+            .when_some(subtitle, |c, sub| c.child(text(sub.to_string()).size(10.5)))
+            .child(SizedBox(None, Some(8.0)))
+            .child(body)
+            .child(SizedBox(None, Some(20.0)))
+            .cross_axis(CrossAxisAlignment::Start),
+    )
 }
 
 /// One type-scale specimen: the sample text set in `style`, plus a
@@ -270,8 +259,7 @@ pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
     let type_scale = theme.type_scale.clone();
     let shape = theme.shape;
 
-    let mut page_children: Vec<AnyView<CatalogState>> = Vec::new();
-    page_children.push(any(Padding(
+    let header = Padding(
         EdgeInsets::symmetric(16.0, 12.0),
         column()
             .child(text("Foundations").size(24.0))
@@ -285,29 +273,31 @@ pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
                 .color(muted),
             )
             .cross_axis(CrossAxisAlignment::Start),
-    )));
+    );
+
+    let mut page = column().cross_axis(CrossAxisAlignment::Start).child(header);
 
     // ---- Color tokens -------------------------------------------------
-    page_children.push(section(
+    page = page.child(section(
         "Background ramp",
         Some("bg-void -> bg-base -> bg-surface -> bg-raised -> bg-overlay -> bg-hover"),
         wrap_rows(
-            vec![
+            (
                 swatch("bg-void", scheme.surface_container_lowest, muted),
                 swatch("bg-base", scheme.surface_container_low, muted),
                 swatch("bg-surface", scheme.surface, muted),
                 swatch("bg-raised", scheme.surface_container_high, muted),
                 swatch("bg-overlay", scheme.surface_container_highest, muted),
                 swatch("bg-hover", scheme.surface_bright, muted),
-            ],
+            ),
             3,
         ),
     ));
 
-    page_children.push(section(
+    page = page.child(section(
         "Accent",
         Some("amber — the single accent hue, filled role"),
-        wrap_rows(vec![swatch("amber", scheme.primary_container, muted)], 3),
+        wrap_rows((swatch("amber", scheme.primary_container, muted),), 3),
     ));
 
     let (success, success_faint, warning, warning_faint) = match status {
@@ -326,11 +316,11 @@ pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
             scheme.tertiary_container,
         ),
     };
-    page_children.push(section(
+    page = page.child(section(
         "Semantic",
         Some("cyan (info) / success / warning / error, each with a -faint container"),
         wrap_rows(
-            vec![
+            (
                 swatch("cyan", scheme.tertiary, muted),
                 swatch("cyan-faint", scheme.tertiary_container, muted),
                 swatch("success", success, muted),
@@ -339,57 +329,57 @@ pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
                 swatch("warning-faint", warning_faint, muted),
                 swatch("error", scheme.error, muted),
                 swatch("error-faint", scheme.error_container, muted),
-            ],
+            ),
             4,
         ),
     ));
 
-    page_children.push(section(
+    page = page.child(section(
         "Text",
         Some(
             "fg / fg-muted resolve from ColorScheme; fg-dim / fg-faintest have no \
              live role (frust_glyph::tokens::color, documented leftover)",
         ),
         wrap_rows(
-            vec![
+            (
                 swatch("fg", scheme.on_surface, muted),
                 swatch("fg-muted", scheme.on_surface_variant, muted),
                 swatch_na("fg-dim", "no ColorScheme role", muted),
                 swatch_na("fg-faintest", "no ColorScheme role", muted),
-            ],
+            ),
             4,
         ),
     ));
 
-    page_children.push(section(
+    page = page.child(section(
         "Borders",
         Some("border -> outline_variant, border-bright -> outline"),
         wrap_rows(
-            vec![
+            (
                 swatch("border", scheme.outline_variant, muted),
                 swatch("border-bright", scheme.outline, muted),
-            ],
+            ),
             4,
         ),
     ));
 
     if let Some(colors) = status {
-        page_children.push(section(
+        page = page.child(section(
             "StatusPalette extension",
             Some("theme.extension::<StatusPalette>() — success / warning / info"),
             wrap_rows(
-                vec![
+                (
                     swatch("success", colors.success, muted),
                     swatch("warning", colors.warning, muted),
                     swatch("info", colors.info, muted),
-                ],
+                ),
                 4,
             ),
         ));
     }
 
     if let Some(ink) = ink {
-        page_children.push(section(
+        page = page.child(section(
             "GlyphInk extension (brightness-invariant)",
             Some(
                 "theme.extension::<GlyphInk>() — the terminal block + tooltip stay dark \
@@ -397,7 +387,7 @@ pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
                  swatches never move",
             ),
             wrap_rows(
-                vec![
+                (
                     swatch("terminal-bg", ink.terminal_bg, muted),
                     swatch("terminal-head", ink.terminal_head, muted),
                     swatch("terminal-fg", ink.terminal_fg, muted),
@@ -406,17 +396,17 @@ pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
                     swatch("terminal-prompt", ink.terminal_prompt, muted),
                     swatch("tooltip-bg", ink.tooltip_bg, muted),
                     swatch("tooltip-fg", ink.tooltip_fg, muted),
-                ],
+                ),
                 4,
             ),
         ));
     }
 
     // ---- Type scale -----------------------------------------------------
-    page_children.push(section(
+    page = page.child(section(
         "Type scale",
         Some("6 roles, theme.type_scale — Space Mono (display/heading), IBM Plex Mono (rest)"),
-        any(column()
+        column()
             .child(type_specimen(
                 text("Foundations")
                     .style(type_scale.display_large.clone())
@@ -459,25 +449,21 @@ pub fn page(_state: &CatalogState) -> impl View<CatalogState> {
                 "micro/9.5 · IBM Plex Mono 500 · fg-dim(≈fg-muted, unmapped) · uppercase · +0.05em",
                 muted,
             ))
-            .cross_axis(CrossAxisAlignment::Start)),
+            .cross_axis(CrossAxisAlignment::Start),
     ));
 
     // ---- Radius scale -----------------------------------------------------
     let raised_bg = scheme.surface_container_high;
-    page_children.push(section(
+    page = page.child(section(
         "Radius scale",
         Some("4 / 6 / 10 / 16 / full, theme.shape — static rounded-rect fill"),
-        any(row()
+        row()
             .child(radius_chip("4px", shape.extra_small, raised_bg, muted))
             .child(radius_chip("6px", shape.small, raised_bg, muted))
             .child(radius_chip("10px", shape.medium, raised_bg, muted))
             .child(radius_chip("16px", shape.large, raised_bg, muted))
-            .child(radius_chip("full", shape.full, raised_bg, muted))),
+            .child(radius_chip("full", shape.full, raised_bg, muted)),
     ));
 
-    FlexView::new(
-        Axis::Vertical,
-        page_children.into_iter().map(inflexible).collect(),
-    )
-    .cross_axis(CrossAxisAlignment::Start)
+    page
 }

@@ -13,8 +13,8 @@
 //! lives in the retained `Component` element" rule.
 
 use frust::{
-    ButtonStyle, Color, Component, SizedBox, Theme, View, any, button, column, component, row,
-    text, use_context,
+    ButtonStyle, Color, Component, SizedBox, Theme, View, button, column, component, row, text,
+    use_context,
 };
 use frust_glyph::{
     BadgeVariant, StatDelta, TermLine, accordion, badge, empty_state, glyph_card, glyph_list,
@@ -90,7 +90,7 @@ impl Component for ContentDemo {
     }
 
     fn build(&self, state: &mut ContentDemoState) -> impl View<ContentDemoState> {
-        any(column()
+        column()
             .child(section("Card", card_demo()))
             .child(section("Stat cards", stat_card_grid()))
             .child(section(
@@ -100,7 +100,7 @@ impl Component for ContentDemo {
             .child(section("Accordion", accordion_demo(state)))
             .child(section("Empty state", empty_state_demo()))
             .child(section("Terminal", term_demo(state)))
-            .child(section("Tooltip", tooltip_demo())))
+            .child(section("Tooltip", tooltip_demo()))
     }
 }
 
