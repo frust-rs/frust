@@ -14,8 +14,7 @@
 //! "Slide to continue", the Copy/Copied swap pair.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, Row, SizedBox, View, any, column, component,
-    text,
+    Component, CrossAxisAlignment, Row, SizedBox, View, ViewSeq, column, component, text, views,
 };
 use frust_beui::components::action_swap::{
     ActionSwapItem, ActionSwapSize, ActionSwapTransition, action_swap,
@@ -92,32 +91,34 @@ fn hgap(width: f64) -> impl View<State> {
 
 /// One component's block: its name, a one-line note (where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
-    let mut children = vec![
-        any(text(title.to_string()).size(16.0)),
-        any(gap(4.0)),
-        any(caption(note.to_string())),
-        any(gap(12.0)),
-    ];
-    children.extend(body);
-    children.push(any(gap(32.0)));
-    Column(children).cross_axis(CrossAxisAlignment::Start)
+fn demo<M>(title: &str, note: &str, body: impl ViewSeq<State, M>) -> impl View<State> {
+    column()
+        .child(text(title.to_string()).size(16.0))
+        .child(gap(4.0))
+        .child(caption(note.to_string()))
+        .child(gap(12.0))
+        .children(body)
+        .child(gap(32.0))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A row of live instances, `spacing`px apart.
-fn row(items: Vec<AnyView<State>>, spacing: f64) -> impl View<State> {
-    let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
-    for item in items {
-        if !children.is_empty() {
-            children.push(any(hgap(spacing)));
-        }
-        children.push(item);
-    }
-    Row(children).cross_axis(CrossAxisAlignment::Center)
+///
+/// The items are flattened once (as any container does) so a spacer can sit
+/// between each pair whatever their types.
+fn row<M>(items: impl ViewSeq<State, M>, spacing: f64) -> impl View<State> {
+    let mut flat = Vec::new();
+    items.extend_views(&mut flat);
+    let spaced: Vec<_> = flat
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| ((index > 0).then(|| hgap(spacing)), item))
+        .collect();
+    Row(spaced).cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A labelled specimen: the live component over its caption.
-fn specimen(label: &str, body: AnyView<State>) -> impl View<State> {
+fn specimen(label: &str, body: impl View<State>) -> impl View<State> {
     column()
         .child(body)
         .child(gap(6.0))
@@ -141,76 +142,76 @@ fn advance(state: ButtonState, outcome: ButtonState) -> ButtonState {
 /// behavioural variants.
 fn buttons(state: &State) -> impl View<State> {
     let tones = row(
-        vec![
-            any(button("Continue", |_: &mut State| {}).tone(ButtonTone::Primary)),
-            any(button("Download", |_: &mut State| {}).tone(ButtonTone::Secondary)),
-            any(button("Outline", |_: &mut State| {}).tone(ButtonTone::Outline)),
-            any(button("Ghost", |_: &mut State| {}).tone(ButtonTone::Ghost)),
-            any(button("Disabled", |_: &mut State| {}).disabled(true)),
-        ],
+        (
+            button("Continue", |_: &mut State| {}).tone(ButtonTone::Primary),
+            button("Download", |_: &mut State| {}).tone(ButtonTone::Secondary),
+            button("Outline", |_: &mut State| {}).tone(ButtonTone::Outline),
+            button("Ghost", |_: &mut State| {}).tone(ButtonTone::Ghost),
+            button("Disabled", |_: &mut State| {}).disabled(true),
+        ),
         12.0,
     );
 
     let sizes = row(
-        vec![
-            any(button("Small", |_: &mut State| {}).size(ButtonSize::Sm)),
-            any(button("Medium", |_: &mut State| {}).size(ButtonSize::Md)),
-            any(button("Large", |_: &mut State| {}).size(ButtonSize::Lg)),
-            any(button("\u{2715}", |_: &mut State| {})
+        (
+            button("Small", |_: &mut State| {}).size(ButtonSize::Sm),
+            button("Medium", |_: &mut State| {}).size(ButtonSize::Md),
+            button("Large", |_: &mut State| {}).size(ButtonSize::Lg),
+            button("\u{2715}", |_: &mut State| {})
                 .size(ButtonSize::Icon)
-                .tone(ButtonTone::Secondary)),
-        ],
+                .tone(ButtonTone::Secondary),
+        ),
         12.0,
     );
 
     let metallic = row(
-        vec![
-            any(button("Continue", |_: &mut State| {}).variant(ButtonVariant::Metallic)),
-            any(button("Generate", |_: &mut State| {})
+        (
+            button("Continue", |_: &mut State| {}).variant(ButtonVariant::Metallic),
+            button("Generate", |_: &mut State| {})
                 .variant(ButtonVariant::Metallic)
-                .size(ButtonSize::Sm)),
-            any(button("Paused sheen", |_: &mut State| {})
+                .size(ButtonSize::Sm),
+            button("Paused sheen", |_: &mut State| {})
                 .variant(ButtonVariant::Metallic)
-                .paused(true)),
-        ],
+                .paused(true),
+        ),
         12.0,
     );
 
     let magnetic = row(
-        vec![
-            any(button("Hover me", |_: &mut State| {})
+        (
+            button("Hover me", |_: &mut State| {})
                 .variant(ButtonVariant::Magnetic)
-                .strength(0.35)),
-            any(button("Subtle pull", |_: &mut State| {})
+                .strength(0.35),
+            button("Subtle pull", |_: &mut State| {})
                 .variant(ButtonVariant::Magnetic)
                 .tone(ButtonTone::Secondary)
-                .strength(0.25)),
-            any(button("Strong pull", |_: &mut State| {})
+                .strength(0.25),
+            button("Strong pull", |_: &mut State| {})
                 .variant(ButtonVariant::Magnetic)
                 .tone(ButtonTone::Outline)
-                .strength(0.5)),
-        ],
+                .strength(0.5),
+        ),
         16.0,
     );
 
     let stateful = row(
-        vec![
-            any(button("Save changes", |s: &mut State| {
+        (
+            button("Save changes", |s: &mut State| {
                 s.ok_state = advance(s.ok_state, ButtonState::Success);
             })
             .variant(ButtonVariant::Stateful)
             .state(state.ok_state)
             .loading_label("Saving")
-            .success_label("Saved")),
-            any(button("Submit", |s: &mut State| {
+            .success_label("Saved"),
+            button("Submit", |s: &mut State| {
                 s.err_state = advance(s.err_state, ButtonState::Error);
             })
             .variant(ButtonVariant::Stateful)
             .tone(ButtonTone::Secondary)
             .state(state.err_state)
             .loading_label("Submitting")
-            .error_label("Failed")),
-        ],
+            .error_label("Failed"),
+        ),
         12.0,
     );
 
@@ -222,68 +223,54 @@ fn buttons(state: &State) -> impl View<State> {
          and scale. The stateful button reserves its widest label instead of \
          morphing its width; press it repeatedly to walk idle \u{2192} loading \u{2192} \
          outcome \u{2192} idle (upstream uses a timer, this page uses the press).",
-        vec![
-            any(specimen(
+        (
+            specimen(
                 "Tones \u{b7} primary, secondary, outline, ghost, disabled",
-                any(tones),
-            )),
-            any(gap(18.0)),
-            any(specimen("Sizes \u{b7} sm, md, lg, icon", any(sizes))),
-            any(gap(18.0)),
-            any(specimen(
-                "Metallic \u{b7} md, sm, sheen paused",
-                any(metallic),
-            )),
-            any(gap(18.0)),
-            any(specimen(
-                "Magnetic \u{b7} strength 0.35, 0.25, 0.5",
-                any(magnetic),
-            )),
-            any(gap(18.0)),
-            any(specimen(
-                "Stateful \u{b7} success path, error path",
-                any(stateful),
-            )),
-        ],
+                tones,
+            ),
+            gap(18.0),
+            specimen("Sizes \u{b7} sm, md, lg, icon", sizes),
+            gap(18.0),
+            specimen("Metallic \u{b7} md, sm, sheen paused", metallic),
+            gap(18.0),
+            specimen("Magnetic \u{b7} strength 0.35, 0.25, 0.5", magnetic),
+            gap(18.0),
+            specimen("Stateful \u{b7} success path, error path", stateful),
+        ),
     )
 }
 
 /// The three call-to-action buttons the `expanding-arrow-button` slug installs.
 fn call_to_action(state: &State) -> impl View<State> {
     let arrow = row(
-        vec![
-            any(expanding_arrow_button("Book a demo", |s: &mut State| {
+        (
+            expanding_arrow_button("Book a demo", |s: &mut State| {
                 s.cta_status = "Demo booked.".to_string();
-            })),
-            any(expanding_arrow_button("Disabled", |_: &mut State| {}).disabled(true)),
-        ],
+            }),
+            expanding_arrow_button("Disabled", |_: &mut State| {}).disabled(true),
+        ),
         16.0,
     );
 
     let hold = row(
-        vec![
-            any(hold_action_button(
-                "Hold for vertical fill",
-                |s: &mut State| {
-                    s.cta_status = "Hold confirmed (vertical fill).".to_string();
-                },
-            )),
-            any(
-                hold_action_button("Hold for horizontal fill", |s: &mut State| {
-                    s.cta_status = "Hold confirmed (horizontal fill).".to_string();
-                })
-                .direction(HoldActionDirection::Horizontal)
-                .holding_label("Keep holding")
-                .complete_label("Done"),
-            ),
-        ],
+        (
+            hold_action_button("Hold for vertical fill", |s: &mut State| {
+                s.cta_status = "Hold confirmed (vertical fill).".to_string();
+            }),
+            hold_action_button("Hold for horizontal fill", |s: &mut State| {
+                s.cta_status = "Hold confirmed (horizontal fill).".to_string();
+            })
+            .direction(HoldActionDirection::Horizontal)
+            .holding_label("Keep holding")
+            .complete_label("Done"),
+        ),
         16.0,
     );
 
-    let slide = any(slide_action_button("Slide to continue", |s: &mut State| {
+    let slide = slide_action_button("Slide to continue", |s: &mut State| {
         s.cta_status = "Slide completed.".to_string();
     })
-    .complete_label("Ready"));
+    .complete_label("Ready");
 
     demo(
         "expanding_arrow_button \u{b7} hold_action_button \u{b7} slide_action_button",
@@ -293,46 +280,36 @@ fn call_to_action(state: &State) -> impl View<State> {
          painted straight, its completion callback lands on the next event \
          pass rather than the instant the fill does, and neither the hold nor \
          the slide accepts keyboard activation.",
-        vec![
-            any(specimen(
-                "Hover or focus to expand the arrow trail",
-                any(arrow),
-            )),
-            any(gap(18.0)),
-            any(specimen(
-                "Hold to the end; release early to cancel",
-                any(hold),
-            )),
-            any(gap(18.0)),
-            any(specimen("Drag the thumb past 82% of the track", slide)),
-            any(gap(14.0)),
-            any(caption(state.cta_status.clone())),
-        ],
+        (
+            specimen("Hover or focus to expand the arrow trail", arrow),
+            gap(18.0),
+            specimen("Hold to the end; release early to cancel", hold),
+            gap(18.0),
+            specimen("Drag the thumb past 82% of the track", slide),
+            gap(14.0),
+            caption(state.cta_status.clone()),
+        ),
     )
 }
 
 /// Both `expandable_control` shapes, controlled from this page's state.
 fn expandables(state: &State) -> impl View<State> {
     let controls = row(
-        vec![
-            any(
-                expandable_button("\u{1f514}", "Notifications", |s: &mut State, open| {
-                    s.notifications_expanded = open;
-                })
-                .expanded(state.notifications_expanded),
-            ),
-            any(expandable_chip("React", "\u{2715}", "Remove React")
+        (
+            expandable_button("\u{1f514}", "Notifications", |s: &mut State, open| {
+                s.notifications_expanded = open;
+            })
+            .expanded(state.notifications_expanded),
+            expandable_chip("React", "\u{2715}", "Remove React")
                 .expanded(state.chip_expanded)
                 .on_expanded_change(|s: &mut State, open| s.chip_expanded = open)
                 .on_action(|s: &mut State, _| {
                     s.chip_status = "Removed React.".to_string();
-                })),
-            any(
-                expandable_button("\u{2699}", "Settings", |_: &mut State, _| {})
-                    .expanded(true)
-                    .disabled(true),
-            ),
-        ],
+                }),
+            expandable_button("\u{2699}", "Settings", |_: &mut State, _| {})
+                .expanded(true)
+                .disabled(true),
+        ),
         16.0,
     );
 
@@ -345,14 +322,14 @@ fn expandables(state: &State) -> impl View<State> {
          touch quicker, the label reveal is opacity with the blur dropped, and \
          the icon slot takes a short string because this catalog has no icon \
          vocabulary.",
-        vec![
-            any(specimen(
+        (
+            specimen(
                 "Press to expand \u{b7} chip action \u{b7} disabled",
-                any(controls),
-            )),
-            any(gap(14.0)),
-            any(caption(state.chip_status.clone())),
-        ],
+                controls,
+            ),
+            gap(14.0),
+            caption(state.chip_status.clone()),
+        ),
     )
 }
 
@@ -365,47 +342,45 @@ fn action_swaps(state: &State) -> impl View<State> {
         ]
     };
 
-    let swaps: Vec<AnyView<State>> = SWAP_TRANSITIONS
-        .iter()
-        .enumerate()
-        .map(|(index, (transition, label))| {
-            any(specimen(
+    let swaps = views(SWAP_TRANSITIONS.into_iter().enumerate().map(
+        move |(index, (transition, label))| {
+            specimen(
                 label,
-                any(action_swap(items())
-                    .transition(*transition)
+                action_swap(items())
+                    .transition(transition)
                     .value(state.swap_values[index].clone())
-                    .on_change(move |s: &mut State, id: String| s.swap_values[index] = id)),
-            ))
-        })
-        .collect();
+                    .on_change(move |s: &mut State, id: String| s.swap_values[index] = id),
+            )
+        },
+    ));
 
     let sizes = row(
-        vec![
-            any(action_swap(vec![
+        (
+            action_swap(vec![
                 ActionSwapItem::new("send", "Send"),
                 ActionSwapItem::new("sent", "Sent"),
             ])
             .size(ActionSwapSize::Sm)
             .value(state.swap_values[4].clone())
-            .on_change(|s: &mut State, id: String| s.swap_values[4] = id)),
-            any(action_swap(vec![
+            .on_change(|s: &mut State, id: String| s.swap_values[4] = id),
+            action_swap(vec![
                 ActionSwapItem::new("send", "Send invite"),
                 ActionSwapItem::new("sent", "Invite sent"),
             ])
             .size(ActionSwapSize::Lg)
             .tone(ButtonTone::Secondary)
             .value(state.swap_values[5].clone())
-            .on_change(|s: &mut State, id: String| s.swap_values[5] = id)),
-            any(action_swap(vec![
+            .on_change(|s: &mut State, id: String| s.swap_values[5] = id),
+            action_swap(vec![
                 ActionSwapItem::new("copy", "\u{2398}"),
                 ActionSwapItem::new("copied", "\u{2713}"),
             ])
             .size(ActionSwapSize::Icon)
             .tone(ButtonTone::Outline)
             .value(state.swap_values[6].clone())
-            .on_change(|s: &mut State, id: String| s.swap_values[6] = id)),
-            any(action_swap(items()).disabled(true)),
-        ],
+            .on_change(|s: &mut State, id: String| s.swap_values[6] = id),
+            action_swap(items()).disabled(true),
+        ),
         16.0,
     );
 
@@ -417,14 +392,14 @@ fn action_swaps(state: &State) -> impl View<State> {
          Fade is the quiet crossfade upstream never names. There is no icon \
          slot (an item is an id and a label), and the button reserves its \
          widest item rather than morphing its width.",
-        vec![
-            any(row(swaps, 24.0)),
-            any(gap(18.0)),
-            any(specimen(
+        (
+            row(swaps, 24.0),
+            gap(18.0),
+            specimen(
                 "Sizes \u{b7} sm, lg (secondary), icon (outline), disabled",
-                any(sizes),
-            )),
-        ],
+                sizes,
+            ),
+        ),
     )
 }
 
@@ -439,12 +414,12 @@ impl Component for ButtonsPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(column()
+        column()
             .child(buttons(state))
             .child(call_to_action(state))
             .child(expandables(state))
             .child(action_swaps(state))
-            .cross_axis(CrossAxisAlignment::Start))
+            .cross_axis(CrossAxisAlignment::Start)
     }
 }
 
