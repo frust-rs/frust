@@ -635,7 +635,7 @@ fn apply_effect(effect: Option<Effect>, ctx: &mut EffectCtx<'_>) {
                 _ => {
                     let _ = tx.send(Message::Notify {
                         level: ToastKind::Warn,
-                        text: "no launch record for this session — relaunch it with r".to_string(),
+                        text: "no launch record for this session — relaunch it with o".to_string(),
                     });
                 }
             }
@@ -1509,7 +1509,7 @@ fn launch_sessions(
                 let _ = tx.send(Message::Notify {
                     level: ToastKind::Warn,
                     text: format!(
-                        "failed to start {}: {err:#} — relaunch it with r",
+                        "failed to start {}: {err:#} — relaunch it with o",
                         target_label(&spec.target)
                     ),
                 });
@@ -4736,7 +4736,7 @@ mod tests {
         match rx.try_recv() {
             Ok(Message::Notify { level, text }) => {
                 assert_eq!(level, ToastKind::Warn);
-                assert!(text.contains("relaunch it with r"), "toast text: {text}");
+                assert!(text.contains("relaunch it with o"), "toast text: {text}");
             }
             other => panic!("expected a warn toast, got {other:?}"),
         }
@@ -4821,7 +4821,7 @@ mod tests {
             Ok(Message::Notify { level, text }) => {
                 assert_eq!(level, ToastKind::Warn);
                 assert!(text.contains("failed to start"), "toast text: {text}");
-                assert!(text.contains("relaunch it with r"), "toast text: {text}");
+                assert!(text.contains("relaunch it with o"), "toast text: {text}");
             }
             other => panic!("expected a warn toast, got {other:?}"),
         }

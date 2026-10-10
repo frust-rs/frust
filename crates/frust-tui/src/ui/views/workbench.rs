@@ -492,7 +492,7 @@ fn devices_header_line(state: &AppState, theme: &Theme) -> Line<'static> {
     let refresh = if state.devices_refreshing {
         Span::styled(" \u{25cc} scanning", Style::default().fg(theme.warn()))
     } else {
-        Span::styled(" \u{21bb} r", Style::default().fg(theme.muted()))
+        Span::styled(" \u{21bb} R", Style::default().fg(theme.muted()))
     };
     Line::from(vec![
         Span::styled(
@@ -676,7 +676,7 @@ fn status(frame: &mut Frame, area: Rect, state: &AppState, theme: &Theme, narrow
                 "i doctor"
             };
             let palette_hint = theme.palette_open_hint();
-            let mut hint = format!("r run · b build · {d_hint} · {palette_hint} · ? help");
+            let mut hint = format!("o run · b build · {d_hint} · {palette_hint} · ? help");
             if narrow {
                 // The narrow-breakpoint sidebar-overlay toggle only matters
                 // (and only shows) once the sidebar has actually collapsed

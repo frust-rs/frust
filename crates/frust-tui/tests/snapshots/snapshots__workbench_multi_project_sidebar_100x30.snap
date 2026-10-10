@@ -9,7 +9,7 @@ expression: "render_to_string(100, 30, &multi_project_workbench_state())"
   ▸ bubblebench          │  Dashboard                                                               
     huddle               │  ━━━━━━━━━━                                                              
                          │                                                                          
- DEVICES ↻ r             │  No session running — start a run to open a log tab here.                
+ DEVICES ↻ R             │  No session running — start a run to open a log tab here.                
    none found            │                                                                          
                          │                                                                          
  SESSIONS                │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &multi_project_workbench_state())"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  o run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]

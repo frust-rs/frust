@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │huddle:  1 ▶ desktop                                                      
   ▸ huddle               │ [1] Performance  [2] System  [3] Inspector  [4] Network        ● service 
                          │ ━━━━━━━━━━━━━━━                                                          
- DEVICES ↻ r             │ Frame Timing  FPS 54.6 · p50 16.0ms · p95 16.0ms · p99 60.0ms · jank 1 (5
+ DEVICES ↻ R             │ Frame Timing  FPS 54.6 · p50 16.0ms · p95 16.0ms · p99 60.0ms · jank 1 (5
    none found            │          █                                                               
                          │          █                                                               
  SESSIONS                │▆▆▆▆▆▆▆▆▆▆█▆▆▆▆▁▆▆▆▆                                                      
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │ devtools: performance │ [1234][ ] tabs · Esc back to log        [mouse ✓]
-● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]
+● 1 running  │  o run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

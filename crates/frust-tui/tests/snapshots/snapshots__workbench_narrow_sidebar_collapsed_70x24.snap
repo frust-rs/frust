@@ -25,4 +25,4 @@ expression: "render_to_string(70, 24, &workbench_state())"
                                                                       
                                                                       
                                                                       
-● ready  │  r run · b build · i doctor · ⌘ palette · ? help ·[mouse ✓]
+● ready  │  o run · b build · i doctor · ⌘ palette · ? help ·[mouse ✓]

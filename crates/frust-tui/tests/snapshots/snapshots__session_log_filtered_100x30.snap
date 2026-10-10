@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │huddle:  1 ▶ desktop                                                      
   ▸ huddle               │   12:00:03 [app]    app: booting up                                      
                          │   12:00:05 [app]    app: frame 1 rendered                                
- DEVICES ↻ r             │   12:00:07 [app]    app: recovering                                      
+ DEVICES ↻ R             │   12:00:07 [app]    app: recovering                                      
    none found            │                                                                          
                          │                                                                          
  SESSIONS                │                                                                          
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │● follow  ·  wrap:off  ·  /app/      x stop · f follow · w wrap · / search
-● 1 running  │  r run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]
+● 1 running  │  o run · b build · d devtools · ⌘ palette · ? help                          [mouse ✓]

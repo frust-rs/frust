@@ -8,7 +8,7 @@ expression: "render_to_string(100, 30, &state)"
  PROJECTS                │                                                                          
   ▸ huddle  ╭ Keyboard Shortcuts ─────────────────────────────────────────────────────╮             
             │                                                                         │▓▓           
- DEVICES ↻ r│  o   Run on device(s)…               m   MCP server…                    │▓▓           
+ DEVICES ↻ R│  o   Run on device(s)…               m   MCP server…                    │▓▓           
    none foun│  —   Run on all devices              M   Start/stop MCP server          │▓▓           
             │  x   Stop session                    D   DAP server…                    │▓▓           
  SESSIONS   │  r   Hot patch now                   —   Start/stop DAP server          │▓▓           
@@ -31,4 +31,4 @@ expression: "render_to_string(100, 30, &state)"
                          │                                                                          
                          │                                                                          
                          │                                                                          
-● ready  │  r run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
+● ready  │  o run · b build · i doctor · ⌘ palette · ? help                                [mouse ✓]
