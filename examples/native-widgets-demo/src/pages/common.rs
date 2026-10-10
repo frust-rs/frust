@@ -19,9 +19,9 @@ use frust::authoring::{
     rebuild_child, route_event_single, teardown_child,
 };
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, Color, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, Get, GetUntracked, ImageSource, Padding, Set, SizedBox, Theme, any, button,
-    inflexible, text, use_context,
+    Align, Alignment, AnyView, Axis, ButtonStyle, Color, CrossAxisAlignment, EdgeInsets, Either,
+    FlexChild, FlexView, Get, GetUntracked, ImageSource, Padding, Set, SizedBox, Theme, any,
+    button, inflexible, text, use_context,
 };
 use frust_native_widgets::{AnchorRect, live_slot_count};
 
@@ -336,14 +336,14 @@ pub enum CellFit {
 
 /// One pair cell: a fixed `w` x `h` box, so both columns are literally the
 /// same size and the difference a reader sees is the widget, not the box.
-pub fn cell(fit: CellFit, w: f64, h: f64, content: impl View<S>) -> AnyView<S> {
+pub fn cell(fit: CellFit, w: f64, h: f64, content: impl View<S>) -> impl View<S> {
     match fit {
-        CellFit::Stretch => any(SizedBox(Some(w), Some(h)).child(content)),
+        CellFit::Stretch => Either::Left(SizedBox(Some(w), Some(h)).child(content)),
         // `Align` loosens the constraints it hands its child — the only way
         // to keep a natural size inside a tightened box.
-        CellFit::Natural => {
-            any(SizedBox(Some(w), Some(h)).child(Align(Alignment::new(-1.0, 0.0), content)))
-        }
+        CellFit::Natural => Either::Right(
+            SizedBox(Some(w), Some(h)).child(Align(Alignment::new(-1.0, 0.0), content)),
+        ),
     }
 }
 
@@ -463,6 +463,7 @@ thread_local! {
 pub fn anchor_probe<V: View<S>>(key: &'static str, child: V) -> AnchorProbe {
     AnchorProbe {
         key,
+        // erasure: keep the hand-written view stores its child as a ChildPod element
         child: any(child),
     }
 }

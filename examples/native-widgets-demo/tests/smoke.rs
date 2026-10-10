@@ -12,7 +12,7 @@
 
 use std::any::Any;
 
-use frust::{AnyView, Brightness, Theme, any, component, provide_context};
+use frust::{AnyView, Brightness, Theme, component, provide_context};
 use frust_core::FrameTime;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
 use frust_reactive::ReactiveRuntime;
@@ -289,11 +289,10 @@ fn anchor_probe_records_the_painted_window_rect() {
 
     let _owner = setup();
     let mut tcx = TextContext::new();
-    let mut root: RenderRoot<NativeWidgetsDemoState, AnyView<NativeWidgetsDemoState>> =
-        RenderRoot::new();
+    let mut root = RenderRoot::new();
     let mut state = NativeWidgetsDemoState::new();
     let mut logic = |_: &mut NativeWidgetsDemoState| {
-        any(Padding(
+        Padding(
             EdgeInsets::all(20.0),
             column()
                 .child(SizedBox(Some(10.0), Some(40.0)))
@@ -301,7 +300,7 @@ fn anchor_probe_records_the_painted_window_rect() {
                     "smoke.anchor",
                     SizedBox(Some(120.0), Some(44.0)),
                 )),
-        ))
+        )
     };
     frame_at(&mut root, &mut logic, &mut state, &mut tcx, 0);
     let anchor = anchor_rect("smoke.anchor").expect("the probe painted");
@@ -332,8 +331,8 @@ fn full_shell_mounts_with_app_bar_body_and_section_nav() {
     for (w, h) in SIZES {
         let _owner = setup();
         let mut tcx = TextContext::new();
-        let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
-        let mut logic = |_s: &mut ()| any(component(NativeWidgetsDemoApp));
+        let mut root = RenderRoot::new();
+        let mut logic = |_s: &mut ()| component(NativeWidgetsDemoApp);
         let mut state = ();
 
         let size = Size::new(w, h);
