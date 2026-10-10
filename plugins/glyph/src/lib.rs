@@ -26,20 +26,37 @@
 //! runs before any shell construction:
 //!
 //! ```no_run
-//! use frust::{Component, View, any, text};
+//! use frust::{Align, Alignment, Component, CrossAxisAlignment, View, column, scaffold, text};
+//! use frust_glyph::{app_bar, toggle};
 //!
 //! #[derive(Default)]
-//! struct MyApp;
+//! pub struct MyApp;
 //!
 //! impl Component for MyApp {
-//!     type State = ();
-//!     fn init(&self) -> Self::State {}
-//!     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
-//!         any(text("glyph"))
+//!     type State = bool;
+//!
+//!     fn init(&self) -> bool {
+//!         false
+//!     }
+//!
+//!     fn build(&self, on: &mut bool) -> impl View<bool> {
+//!         scaffold(Align(
+//!             Alignment::CENTER,
+//!             column()
+//!                 .child(text("glyph"))
+//!                 .child(toggle(*on, |on: &mut bool, next: bool| *on = next))
+//!                 .cross_axis(CrossAxisAlignment::Center),
+//!         ))
+//!         .app_bar(app_bar::<bool>("Glyph"))
 //!     }
 //! }
 //!
-//! frust::app!(MyApp, setup = { frust_glyph::install(); });
+//! frust::app!(
+//!     MyApp,
+//!     setup = {
+//!         frust_glyph::install();
+//!     }
+//! );
 //! # fn main() {}
 //! ```
 //!
