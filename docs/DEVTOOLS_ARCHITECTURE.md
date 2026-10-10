@@ -22,7 +22,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how DEVTOOLS relates to the other uni
 | `frust-devtools::token` | Mints the per-process handshake token from the OS CSPRNG (`/dev/urandom` on unix, `BCryptGenRandom` on Windows), with a documented non-cryptographic fallback when that fails, and reports the source (`TokenSource`) the hot-patch gate reads |
 | `frust-devtools::{server,dispatch,frame_stats,hop}` | The accept loop (rejects any pre-`handshake` method without a valid token), request→backend-call dispatch, the frame-stats broadcast bus, and the backend-thread hop that carries every backend call through one 1s-timeout channel round trip. `dispatch` also owns the per-connection `patch_chunk` reassembly and the hot-patch lane (see Data Flow) |
 | `frust-shell-common::devtools` (feature `devtools`) | The shell-side `DevtoolsBackend` implementation: maps `RenderRoot::inspect()` output into protocol types, hops backend calls to each shell's UI thread, and drives service start/pump/frame-stats publish. Under `hotpatch` it offers `HotPatch` and applies a patch through `frust-hotpatch`, answering after the next frame each shell reports through `frame_submitted` |
-| `frust-drive::devtools_client` | The tool-side client: blocking `std::net::TcpStream` request/response plus a frame-stats subscription, token-aware `connect`/`handshake`, the hot-patch calls (`hotpatch_info`, `upload_patch` over `patch_chunks`, `upload_table` over `table_chunk`, `apply_patch`; a request line over the cap fails as `RequestTooLarge` before sending), `adb_forward_ephemeral`/`adb_forward_remove` for Android, and discovery-line parsing reused from the protocol leaf |
+| `frust-drive::devtools_client` | The tool-side client: blocking `std::net::TcpStream` request/response plus a frame-stats subscription, token-aware `connect`/`handshake`, the hot-patch calls (`hotpatch_info`, `upload_patch` over `patch_chunks`, `upload_table` over `table_chunk`, `apply_patch`; chunk uploads are pipelined, up to four requests in flight; a request line over the cap fails as `RequestTooLarge` before sending), `adb_forward_ephemeral`/`adb_forward_remove` for Android, and discovery-line parsing reused from the protocol leaf |
 
 ## Layer Dependencies
 
@@ -124,7 +124,9 @@ loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELin
   rides the `apply_patch` line: on both paths it arrives as `table_chunk`s (16-byte little-endian
   base/patch pairs, capped like the patch) and `apply_patch` names only its `table_len`, so a large
   app's table cannot overflow the 1 MiB line cap; a line over the cap is refused before sending
-  by the client and answered with an error naming the cap by the server. `apply_patch` consumes
+  by the client and answered with an error naming the cap by the server (even when the whole line
+  arrives in one read). Each patch logs app-side `frust-hotpatch: transfer timings` and `apply
+  timings` lines, the counterpart of the host's per-patch timings. `apply_patch` consumes
   only its own connection's reassembled bytes (a `patch_id` both uploaded and named is refused)
   and runs on the hot-patch lane: a worker thread per call over the backend the backend thread
   shares under one mutex, with its own longer timeout and one apply in flight (a second is
