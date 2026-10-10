@@ -34,7 +34,7 @@
 
 use kurbo::Size;
 
-use frust_core::{AnyView, any};
+use frust_core::View;
 use frust_glyph::{
     AlertVariant, BadgeVariant, PaletteItem, StatDelta, TermLine, ToastVariant, accordion, alert,
     app_bar, badge, command_palette, dots_loader, empty_state, glyph_card, glyph_dialog,
@@ -44,7 +44,7 @@ use frust_glyph::{
 use frust_widgets::{ButtonStyle, CrossAxisAlignment, SizedBox, button, column, row, text};
 
 use crate::base::{framed, framed_in};
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 /// A taller-than-[`Case::DEFAULT_SIZE`] frame for a case whose content (a
 /// list plus its empty-state counterpart, or a card plus a stat-card row)
@@ -57,8 +57,8 @@ const MEDIUM_FRAME: Size = Size::new(360.0, 300.0);
 
 /// `glyph/accordion` — one settled-open panel (no tween on first build, per
 /// the accordion doc's "already open" contract) above a settled-closed one.
-fn accordion_case() -> AnyView<()> {
-    any(framed(
+fn accordion_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 accordion(
@@ -69,12 +69,12 @@ fn accordion_case() -> AnyView<()> {
             )
             .child(SizedBox(None, Some(12.0)))
             .child(accordion("Rollback", text("Revert to the previous release.")).open(false)),
-    ))
+    )
 }
 
 /// `glyph/alert` — the four severities stacked.
-fn alert_case() -> AnyView<()> {
-    any(framed_in(
+fn alert_case() -> impl View<()> {
+    framed_in(
         MEDIUM_FRAME,
         column()
             .child(alert(
@@ -94,22 +94,22 @@ fn alert_case() -> AnyView<()> {
                 "Low disk space",
                 "Free up space soon to avoid interruptions.",
             )),
-    ))
+    )
 }
 
 /// `glyph/app-bar` — the compact bar with a subtitle, elevated.
-fn appbar_case() -> AnyView<()> {
-    any(framed(
+fn appbar_case() -> impl View<()> {
+    framed(
         app_bar::<()>("Deploys")
             .subtitle("production")
             .elevated(true),
-    ))
+    )
 }
 
 /// `glyph/badge-and-tag` — one badge per status variant, plus a removable and
 /// a static tag.
-fn badge_and_tag_case() -> AnyView<()> {
-    any(framed(
+fn badge_and_tag_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 row()
@@ -128,13 +128,13 @@ fn badge_and_tag_case() -> AnyView<()> {
                     .child(tag("v0.44.1").on_remove(|_: &mut ()| {}))
                     .cross_axis(CrossAxisAlignment::Center),
             ),
-    ))
+    )
 }
 
 /// `glyph/card` — a three-slot card with a status footer, above a two-up
 /// stat-card row mixing both delta directions.
-fn card_case() -> AnyView<()> {
-    any(framed_in(
+fn card_case() -> impl View<()> {
+    framed_in(
         TALL_FRAME,
         column()
             .child(
@@ -150,7 +150,7 @@ fn card_case() -> AnyView<()> {
                 1,
                 stat_card("Uptime", "99.98%").delta(StatDelta::Up, "0.4%"),
             )),
-    ))
+    )
 }
 
 /// `glyph/command-palette` — a live query over a short filtered list, built
@@ -168,8 +168,8 @@ fn card_case() -> AnyView<()> {
 /// it. A spelled-out hint costs nothing and keeps this case eligible for the
 /// live tier; the one loss is that the catalog no longer demonstrates the
 /// literal glyph the real widget would show on a Mac keyboard.
-fn command_palette_case() -> AnyView<()> {
-    any(framed(
+fn command_palette_case() -> impl View<()> {
+    framed(
         command_palette::<(), _, _>(
             vec![PaletteItem::new("Deploy").hint("Cmd+D")],
             |_: &mut (), _: String| {},
@@ -177,13 +177,13 @@ fn command_palette_case() -> AnyView<()> {
         )
         .query("dep")
         .placeholder("Type a command or search…"),
-    ))
+    )
 }
 
 /// `glyph/dialog` — a confirm/cancel modal, built directly (not through the
 /// navigator-pushed `show_glyph_dialog`).
-fn dialog_case() -> AnyView<()> {
-    any(framed(
+fn dialog_case() -> impl View<()> {
+    framed(
         glyph_dialog::<()>()
             .title("Revoke observer-token?")
             .body("Any device using this token loses access immediately. This can't be undone.")
@@ -197,13 +197,13 @@ fn dialog_case() -> AnyView<()> {
                     .style(ButtonStyle::Danger)
                     .small(),
             ),
-    ))
+    )
 }
 
 /// `glyph/list` — a glyph-led list, above its zero-item `empty_state`
 /// counterpart.
-fn list_case() -> AnyView<()> {
-    any(framed_in(
+fn list_case() -> impl View<()> {
+    framed_in(
         TALL_FRAME,
         column()
             .child(glyph_list::<()>(vec![
@@ -225,13 +225,13 @@ fn list_case() -> AnyView<()> {
                 .glyph("▪")
                 .action(button("Deploy now", |_: &mut ()| {}).style(ButtonStyle::Primary)),
             ),
-    ))
+    )
 }
 
 /// `glyph/loaders` — the determinate bar, the shimmer placeholder and the
 /// indeterminate dot cycle.
-fn loaders_case() -> AnyView<()> {
-    any(framed(
+fn loaders_case() -> impl View<()> {
+    framed(
         column()
             .child(progress(0.65))
             .child(SizedBox(None, Some(18.0)))
@@ -239,12 +239,12 @@ fn loaders_case() -> AnyView<()> {
             .child(SizedBox(None, Some(18.0)))
             .child(dots_loader())
             .cross_axis(CrossAxisAlignment::Start),
-    ))
+    )
 }
 
 /// `glyph/nav-bar` — the glyph-character bottom bar.
-fn navbar_case() -> AnyView<()> {
-    any(framed(glyph_nav_bar::<(), _>(
+fn navbar_case() -> impl View<()> {
+    framed(glyph_nav_bar::<(), _>(
         vec![
             glyph_nav_item("┌", "frame"),
             glyph_nav_item("─", "stream"),
@@ -252,12 +252,12 @@ fn navbar_case() -> AnyView<()> {
         ],
         0,
         |_: &mut (), _: usize| {},
-    )))
+    ))
 }
 
 /// `glyph/tabs` — the label tab strip above a pill segmented control.
-fn tabs_case() -> AnyView<()> {
-    any(framed(
+fn tabs_case() -> impl View<()> {
+    framed(
         column()
             .child(tabs::<(), _>(
                 vec![
@@ -278,7 +278,7 @@ fn tabs_case() -> AnyView<()> {
                 1,
                 |_: &mut (), _: usize| {},
             )),
-    ))
+    )
 }
 
 /// `glyph/term-block` — a prompt/output/comment transcript, unstaggered.
@@ -291,13 +291,13 @@ fn tabs_case() -> AnyView<()> {
 /// unstaggered widget already paints. Measured rather than argued — recorded
 /// at `time_ms: 400` with the warm pass active, both variants came back
 /// byte-identical.
-fn term_block_case() -> AnyView<()> {
-    any(framed(term_block(vec![
+fn term_block_case() -> impl View<()> {
+    framed(term_block(vec![
         TermLine::prompt("frust build apk --release"),
         TermLine::output("Compiling glyph-catalog v0.1.0"),
         TermLine::output("Finished release [optimized] target(s) in 38.2s"),
         TermLine::comment("# staggered per-line reveal — replays below"),
-    ])))
+    ]))
 }
 
 /// `glyph/toast` — three severities of the transient message itself, not the
@@ -308,25 +308,25 @@ fn term_block_case() -> AnyView<()> {
 /// reads no frame time in `paint` whatsoever, so it has nothing a warm pass or
 /// a [`Case::time_ms`] could advance. Measured the same way as
 /// [`term_block_case`]: `time_ms: 400` recorded byte-identical PNGs.
-fn toast_case() -> AnyView<()> {
-    any(framed(
+fn toast_case() -> impl View<()> {
+    framed(
         column()
             .child(toast("New layout available").variant(ToastVariant::Info))
             .child(SizedBox(None, Some(12.0)))
             .child(toast("Changes saved").variant(ToastVariant::Success))
             .child(SizedBox(None, Some(12.0)))
             .child(toast("Low disk space").variant(ToastVariant::Warning)),
-    ))
+    )
 }
 
 /// `glyph/toggle` — checked and unchecked, both labelled.
-fn toggle_case() -> AnyView<()> {
-    any(framed(
+fn toggle_case() -> impl View<()> {
+    framed(
         column()
             .child(toggle::<(), _>(true, |_: &mut (), _: bool| {}).label("Notifications"))
             .child(SizedBox(None, Some(16.0)))
             .child(toggle::<(), _>(false, |_: &mut (), _: bool| {}).label("Auto-sync")),
-    ))
+    )
 }
 
 /// This module's slice of the registry [`crate::cases`]: one entry per
@@ -340,7 +340,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: accordion_case,
+        build: case_build!(accordion_case),
     },
     Case {
         slug: "glyph/alert",
@@ -349,7 +349,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: alert_case,
+        build: case_build!(alert_case),
     },
     Case {
         slug: "glyph/app-bar",
@@ -358,7 +358,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: appbar_case,
+        build: case_build!(appbar_case),
     },
     Case {
         slug: "glyph/badge-and-tag",
@@ -367,7 +367,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: badge_and_tag_case,
+        build: case_build!(badge_and_tag_case),
     },
     Case {
         slug: "glyph/card",
@@ -376,7 +376,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: card_case,
+        build: case_build!(card_case),
     },
     Case {
         slug: "glyph/command-palette",
@@ -385,7 +385,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: command_palette_case,
+        build: case_build!(command_palette_case),
     },
     Case {
         slug: "glyph/dialog",
@@ -394,7 +394,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: dialog_case,
+        build: case_build!(dialog_case),
     },
     Case {
         slug: "glyph/list",
@@ -403,7 +403,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: list_case,
+        build: case_build!(list_case),
     },
     Case {
         slug: "glyph/loaders",
@@ -412,7 +412,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: loaders_case,
+        build: case_build!(loaders_case),
     },
     Case {
         slug: "glyph/nav-bar",
@@ -421,7 +421,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: navbar_case,
+        build: case_build!(navbar_case),
     },
     Case {
         slug: "glyph/tabs",
@@ -430,7 +430,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: tabs_case,
+        build: case_build!(tabs_case),
     },
     Case {
         slug: "glyph/term-block",
@@ -439,7 +439,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: term_block_case,
+        build: case_build!(term_block_case),
     },
     Case {
         slug: "glyph/toast",
@@ -448,7 +448,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: toast_case,
+        build: case_build!(toast_case),
     },
     Case {
         slug: "glyph/toggle",
@@ -457,6 +457,6 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Glyph,
-        build: toggle_case,
+        build: case_build!(toggle_case),
     },
 ];

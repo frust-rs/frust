@@ -101,7 +101,7 @@
 //! mid-neutral that clears roughly 4:1 against *both* shells. Every other case
 //! in this module leaves its text at the themed default.
 
-use frust_core::{AnyView, View, any};
+use frust_core::View;
 use frust_widgets::{EdgeInsets, Padding, SizedBox, column, container, row, text};
 use kurbo::Size;
 use peniko::Color;
@@ -125,7 +125,7 @@ use frust_beui::components::tabs::{TabsVariant, tabs, tabs_tab};
 use frust_beui::components::tilt_card::tilt_card;
 
 use crate::base::{framed, framed_in};
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 /// The ink every `dynamic-island` slot child paints in — see the module docs'
 /// *inverted-chrome ink gap*.
@@ -155,12 +155,12 @@ const ACCENT_SURFACE: Color = frust_beui::BEUI_LIGHT.accent;
 /// reads on both).
 const ACCENT_INK: Color = frust_beui::BEUI_LIGHT.accent_fg;
 
-/// A fixed vertical gap, as an `AnyView` a [`Column`] can take.
+/// A fixed vertical gap, for a [`Column`].
 fn gap_y(height: f64) -> impl View<()> {
     SizedBox(None, Some(height))
 }
 
-/// A fixed horizontal gap, as an `AnyView` a [`Row`] can take.
+/// A fixed horizontal gap, for a [`Row`].
 fn gap_x(width: f64) -> impl View<()> {
     SizedBox(Some(width), None)
 }
@@ -172,8 +172,8 @@ fn gap_x(width: f64) -> impl View<()> {
 /// The tones are the page's own axis; the animated variants are excluded for
 /// the reason in the module docs (`Magnetic` needs a pointer, `Metallic` a
 /// clock, `Stateful` a transition a single frame cannot stage).
-fn button_case() -> AnyView<()> {
-    any(framed(
+fn button_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 row()
@@ -203,15 +203,15 @@ fn button_case() -> AnyView<()> {
                             .size(ButtonSize::Lg),
                     ),
             ),
-    ))
+    )
 }
 
 // ---- components/input ------------------------------------------------------
 
 /// The labelled field in its three readable states: filled, empty with a
 /// placeholder, and invalid with its message row.
-fn input_case() -> AnyView<()> {
-    any(framed_in(
+fn input_case() -> impl View<()> {
+    framed_in(
         Size::new(360.0, 300.0),
         column()
             .child(
@@ -234,7 +234,7 @@ fn input_case() -> AnyView<()> {
                         .error("That handle is taken."),
                 ),
             ),
-    ))
+    )
 }
 
 // ---- components/form-controls ----------------------------------------------
@@ -245,8 +245,8 @@ fn input_case() -> AnyView<()> {
 /// Each is composed with its own `label`, which is the catalog's accessible
 /// name only — the visible caption beside it is a plain themed [`text`], per
 /// the components' own module docs.
-fn form_controls_case() -> AnyView<()> {
-    any(framed_in(
+fn form_controls_case() -> impl View<()> {
+    framed_in(
         Size::new(360.0, 280.0),
         column()
             .child(
@@ -289,14 +289,14 @@ fn form_controls_case() -> AnyView<()> {
                     .child(gap_x(10.0))
                     .child(text("Beta features").size(14.0)),
             ),
-    ))
+    )
 }
 
 // ---- components/tabs -------------------------------------------------------
 
 /// The pill strip with its active panel — the page's default variant.
-fn tabs_case() -> AnyView<()> {
-    any(framed_in(
+fn tabs_case() -> impl View<()> {
+    framed_in(
         Size::new(400.0, 240.0),
         SizedBox(Some(340.0), None).child(
             tabs(
@@ -317,7 +317,7 @@ fn tabs_case() -> AnyView<()> {
             )
             .variant(TabsVariant::Pill),
         ),
-    ))
+    )
 }
 
 // ---- components/tilt-card --------------------------------------------------
@@ -332,8 +332,8 @@ fn tabs_case() -> AnyView<()> {
 /// explicitly"), so an unfilled child would record as floating text over the
 /// glare. It is painted in the beUI [`ACCENT_SURFACE`]/[`ACCENT_INK`] pair
 /// rather than a scheme role for the reason those constants document.
-fn tilt_card_case() -> AnyView<()> {
-    any(framed_in(
+fn tilt_card_case() -> impl View<()> {
+    framed_in(
         Size::new(360.0, 280.0),
         SizedBox(Some(248.0), Some(160.0)).child(
             tilt_card(
@@ -354,7 +354,7 @@ fn tilt_card_case() -> AnyView<()> {
             .glare(true)
             .shadow(true),
         ),
-    ))
+    )
 }
 
 // ---- agents/message-bubble -------------------------------------------------
@@ -366,8 +366,8 @@ fn tilt_card_case() -> AnyView<()> {
 /// the catalog publishes no inverted-ink seam for a bubble's child (see the
 /// module docs), so a `Solid` bubble here would paint on-surface ink on an
 /// on-surface fill.
-fn message_bubble_case() -> AnyView<()> {
-    any(framed_in(
+fn message_bubble_case() -> impl View<()> {
+    framed_in(
         Size::new(400.0, 260.0),
         SizedBox(Some(320.0), None).child(message_bubble_group(vec![
             message_bubble(text("How do I freeze a beUI preview?").size(14.0))
@@ -382,7 +382,7 @@ fn message_bubble_case() -> AnyView<()> {
                 .variant(MessageBubbleVariant::Outline)
                 .align(MessageBubbleAlign::End),
         ])),
-    ))
+    )
 }
 
 // ---- agents/chat -----------------------------------------------------------
@@ -392,7 +392,7 @@ fn message_bubble_case() -> AnyView<()> {
 /// The [`ChatModel`] is built inside the case (it is a plain value, not a
 /// signal) with a finished history and no driver, so nothing is streaming and
 /// no clock is owed.
-fn chat_case() -> AnyView<()> {
+fn chat_case() -> impl View<()> {
     let model = ChatModel::new().with_history(vec![
         ChatMessage::new("m1", ChatRole::User, "Summarize the release notes."),
         ChatMessage::new(
@@ -407,21 +407,21 @@ fn chat_case() -> AnyView<()> {
             "The beUI port \u{2014} 81 components across three catalogs.",
         ),
     ]);
-    any(framed_in(
+    framed_in(
         Size::new(440.0, 396.0),
         SizedBox(Some(376.0), None).child(
             chat_conversation::<()>(&model)
                 .placeholder("Ask a follow-up\u{2026}")
                 .avatars("You", "AI"),
         ),
-    ))
+    )
 }
 
 // ---- agents/code-block -----------------------------------------------------
 
 /// The finished snippet, syntax-coloured through the caller's own
 /// [`CodeSpan`] list — nothing here infers syntax.
-fn code_block_case() -> AnyView<()> {
+fn code_block_case() -> impl View<()> {
     // Each span carries its separating space as a LEADING one. A run's
     // trailing space is dropped by shaping, so `"const "` + `"theme"` would
     // paint as `consttheme`; `"const"` + `" theme"` does not.
@@ -445,7 +445,7 @@ fn code_block_case() -> AnyView<()> {
         ],
     ];
     let code = "const theme = beui();\n// one frame, already at rest\nrecord(theme, 0);";
-    any(framed_in(
+    framed_in(
         Size::new(420.0, 280.0),
         SizedBox(Some(340.0), None).child(
             code_block::<()>(code)
@@ -455,14 +455,14 @@ fn code_block_case() -> AnyView<()> {
                 .line_numbers(true)
                 .highlight_lines(vec![3]),
         ),
-    ))
+    )
 }
 
 // ---- agents/prompt-input ---------------------------------------------------
 
 /// The composer with a draft in it, so the send affordance reads as enabled.
-fn prompt_input_case() -> AnyView<()> {
-    any(framed_in(
+fn prompt_input_case() -> impl View<()> {
+    framed_in(
         Size::new(400.0, 240.0),
         SizedBox(Some(320.0), None).child(
             prompt_input::<(), _>(
@@ -473,7 +473,7 @@ fn prompt_input_case() -> AnyView<()> {
             .min_rows(2)
             .max_rows(4),
         ),
-    ))
+    )
 }
 
 // ---- blocks/otp-input ------------------------------------------------------
@@ -482,14 +482,14 @@ fn prompt_input_case() -> AnyView<()> {
 ///
 /// `Success`/`Error` are ramps (the check draw, the row shake) that a
 /// single-frame recording would capture at progress 0 — see the module docs.
-fn otp_input_case() -> AnyView<()> {
-    any(framed_in(
+fn otp_input_case() -> impl View<()> {
+    framed_in(
         Size::new(360.0, 240.0),
         otp_input("428", |_: &mut (), _: String| {})
             .length(6)
             .label("Verification code")
             .hint("Enter the six digits we sent you."),
-    ))
+    )
 }
 
 // ---- blocks/dynamic-island -------------------------------------------------
@@ -498,7 +498,7 @@ fn otp_input_case() -> AnyView<()> {
 ///
 /// Every child paints in [`ISLAND_INK`] rather than the themed default,
 /// because the shell is inverted chrome — see the module docs.
-fn dynamic_island_case() -> AnyView<()> {
+fn dynamic_island_case() -> impl View<()> {
     let compact = column().child(text("9:41").size(13.0).color(ISLAND_INK));
     let slots = vec![
         dynamic_island_slot(
@@ -517,9 +517,7 @@ fn dynamic_island_case() -> AnyView<()> {
             column().child(text("INCOMING CALL").size(10.0).color(ISLAND_INK)),
         ),
     ];
-    any(framed(
-        dynamic_island(Some("music".to_string()), compact, slots).label("Live activity"),
-    ))
+    framed(dynamic_island(Some("music".to_string()), compact, slots).label("Live activity"))
 }
 
 // ---- blocks/command-palette ------------------------------------------------
@@ -536,7 +534,7 @@ fn dynamic_island_case() -> AnyView<()> {
 /// case's frame — a command palette clipping its own scrollable list is the
 /// component behaving correctly, and the scrim stays visible on all four
 /// sides.
-fn command_palette_case() -> AnyView<()> {
+fn command_palette_case() -> impl View<()> {
     let items = vec![
         command_palette_item("New project")
             .group("Actions")
@@ -547,7 +545,7 @@ fn command_palette_case() -> AnyView<()> {
         command_palette_item("Toggle theme").group("View"),
         command_palette_item("Go to settings").group("View"),
     ];
-    any(framed_in(
+    framed_in(
         Size::new(480.0, 360.0),
         command_palette(
             items,
@@ -557,7 +555,7 @@ fn command_palette_case() -> AnyView<()> {
         )
         .open(true)
         .label("Gallery command palette"),
-    ))
+    )
 }
 
 // ---- blocks/wallet-card ----------------------------------------------------
@@ -571,7 +569,7 @@ fn command_palette_case() -> AnyView<()> {
 /// the figure is simply absent. This case pins `time_ms: 1_000` — past the end
 /// of that cascade, and on the unread pulse's own period boundary. See the
 /// module docs' *The two cases the warm pass rescues*.
-fn wallet_card_case() -> AnyView<()> {
+fn wallet_card_case() -> impl View<()> {
     let accounts = vec![
         wallet_account(
             "main",
@@ -584,14 +582,14 @@ fn wallet_card_case() -> AnyView<()> {
             "0x1a2B3c4D5e6F7a8B9c0D1e2F3a4B5c6D7e8F9a0B",
         ),
     ];
-    any(framed_in(
+    framed_in(
         Size::new(400.0, 340.0),
         wallet_card::<()>(accounts, 12_480.25)
             .account_id("main")
             .balance_prefix("$")
             .change(2.4)
             .has_notifications(true),
-    ))
+    )
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates, in the
@@ -604,7 +602,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Beui,
-        build: button_case,
+        build: case_build!(button_case),
     },
     Case {
         slug: "beui/chat",
@@ -613,7 +611,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Beui,
-        build: chat_case,
+        build: case_build!(chat_case),
     },
     Case {
         slug: "beui/code-block",
@@ -622,7 +620,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Beui,
-        build: code_block_case,
+        build: case_build!(code_block_case),
     },
     Case {
         slug: "beui/command-palette",
@@ -631,7 +629,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: 400,
         design: Design::Beui,
-        build: command_palette_case,
+        build: case_build!(command_palette_case),
     },
     Case {
         slug: "beui/dynamic-island",
@@ -640,7 +638,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Beui,
-        build: dynamic_island_case,
+        build: case_build!(dynamic_island_case),
     },
     Case {
         slug: "beui/form-controls",
@@ -649,7 +647,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Beui,
-        build: form_controls_case,
+        build: case_build!(form_controls_case),
     },
     Case {
         slug: "beui/input",
@@ -658,7 +656,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Beui,
-        build: input_case,
+        build: case_build!(input_case),
     },
     Case {
         slug: "beui/message-bubble",
@@ -667,7 +665,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Beui,
-        build: message_bubble_case,
+        build: case_build!(message_bubble_case),
     },
     Case {
         slug: "beui/otp-input",
@@ -676,7 +674,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Beui,
-        build: otp_input_case,
+        build: case_build!(otp_input_case),
     },
     Case {
         slug: "beui/prompt-input",
@@ -685,7 +683,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Beui,
-        build: prompt_input_case,
+        build: case_build!(prompt_input_case),
     },
     Case {
         slug: "beui/tabs",
@@ -694,7 +692,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Beui,
-        build: tabs_case,
+        build: case_build!(tabs_case),
     },
     Case {
         slug: "beui/tilt-card",
@@ -703,7 +701,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Beui,
-        build: tilt_card_case,
+        build: case_build!(tilt_card_case),
     },
     Case {
         slug: "beui/wallet-card",
@@ -712,6 +710,6 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: 1_000,
         design: Design::Beui,
-        build: wallet_card_case,
+        build: case_build!(wallet_card_case),
     },
 ];

@@ -12,10 +12,11 @@
 //!
 //! # Pure `View`, one captured frame — what that excludes
 //!
-//! [`Case::build`] is a plain `fn() -> `[`AnyView`]`<()>` recorded through one
-//! captured build/layout/paint pass (`crates/frust-testing/src/frame.rs`'s
-//! `frame`), so every callback here is an empty closure over `()` and every
-//! knob is a literal. Two consequences shape this module:
+//! [`Case::build`] is a plain `fn() -> `[`AnyView`](frust_core::AnyView)`<()>`
+//! recorded through one captured build/layout/paint pass
+//! (`crates/frust-testing/src/frame.rs`'s `frame`), so every callback here is
+//! an empty closure over `()` and every knob is a literal. Two consequences
+//! shape this module:
 //!
 //! - **No navigator.** The `show_*` entry points every overlay page also
 //!   documents (`show_dialog`, `show_bottom_sheet`, `show_date_picker`,
@@ -51,7 +52,7 @@
 //! Material container resolves its own fill from the active
 //! [`frust_material::MaterialTokens`] scheme, which differs by brightness.
 
-use frust_core::{AnyView, View, any};
+use frust_core::View;
 use frust_material::{
     AppBarDensity, ButtonGroupType, ButtonVariant, CardVariant, DatePickerState, DropdownItem,
     FabColor, FabSize, IconButtonVariant, MaterialDate, MenuSelection, NavBarLabelBehavior,
@@ -74,7 +75,7 @@ use frust_widgets::{
 use kurbo::Size;
 
 use crate::base::{framed, framed_in};
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 // # The entrance-ramp limit, and how cases answer it
 //
@@ -180,7 +181,7 @@ const RAIL_W: f64 = 96.0;
 /// phone-ish column with the cleared surface still visible around it.
 const BLEED_W: f64 = 344.0;
 
-/// `icon(..)` as an `AnyView<()>` — the shape every Material slot that takes a
+/// `icon(..)` at `()` state — the shape every Material slot that takes a
 /// leading/trailing glyph expects.
 fn glyph(source: IconSource) -> impl View<()> {
     icon(source)
@@ -202,8 +203,8 @@ fn hgap(width: f64) -> impl View<()> {
     SizedBox(Some(width), None)
 }
 
-fn app_bar_case() -> AnyView<()> {
-    any(framed_in(
+fn app_bar_case() -> impl View<()> {
+    framed_in(
         STRIP,
         column()
             .child(bleed(
@@ -227,18 +228,18 @@ fn app_bar_case() -> AnyView<()> {
                     .fab(fab(glyph(icons::ADD), |_: &mut ()| {}).size(FabSize::Small)),
             ))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn button_group_case() -> AnyView<()> {
-    any(framed_in(
+fn button_group_case() -> impl View<()> {
+    framed_in(
         STRIP,
         column()
             .child(
                 button_group_actions(vec![
-                    button_group_action("Left").icon(|| any(glyph(icons::FORMAT_ALIGN_LEFT))),
-                    button_group_action("Center").icon(|| any(glyph(icons::FORMAT_ALIGN_CENTER))),
-                    button_group_action("Right").icon(|| any(glyph(icons::FORMAT_ALIGN_RIGHT))),
+                    button_group_action("Left").icon(|| glyph(icons::FORMAT_ALIGN_LEFT)),
+                    button_group_action("Center").icon(|| glyph(icons::FORMAT_ALIGN_CENTER)),
+                    button_group_action("Right").icon(|| glyph(icons::FORMAT_ALIGN_RIGHT)),
                 ])
                 .group_type(ButtonGroupType::Connected)
                 .selected_index(Some(1))
@@ -255,11 +256,11 @@ fn button_group_case() -> AnyView<()> {
                 |_: &mut (), _: Vec<&'static str>| {},
             ))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn button_case() -> AnyView<()> {
-    any(framed(
+fn button_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 row()
@@ -282,7 +283,7 @@ fn button_case() -> AnyView<()> {
                     ),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// One card's body — a headline plus a supporting line, boxed so the three
@@ -297,8 +298,8 @@ fn card_body(title: &'static str) -> impl View<()> {
     .size_centered(76.0, 64.0)
 }
 
-fn card_case() -> AnyView<()> {
-    any(framed_in(
+fn card_case() -> impl View<()> {
+    framed_in(
         BAR,
         row()
             .child(card(CardVariant::Elevated, card_body("Elevated")))
@@ -307,11 +308,11 @@ fn card_case() -> AnyView<()> {
             .child(hgap(12.0))
             .child(card(CardVariant::Outlined, card_body("Outlined")).on_press(|_: &mut ()| {}))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn chips_case() -> AnyView<()> {
-    any(framed(
+fn chips_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 row()
@@ -327,13 +328,13 @@ fn chips_case() -> AnyView<()> {
                     .child(suggestion_chip("Reply", |_: &mut ()| {}).elevated(true)),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn date_picker_case() -> AnyView<()> {
+fn date_picker_case() -> impl View<()> {
     let today = MaterialDate::new(2026, 9, 7);
     let selected = MaterialDate::new(2026, 9, 17);
-    any(framed_in(
+    framed_in(
         PICKER,
         calendar_date_picker(
             DatePickerState::new(Some(selected), today),
@@ -342,7 +343,7 @@ fn date_picker_case() -> AnyView<()> {
             |_: &mut (), _: DatePickerState| {},
         )
         .today(today),
-    ))
+    )
 }
 
 /// The M3 dialog on its `overlay_modal` host, entrance included: the panel
@@ -354,8 +355,8 @@ fn date_picker_case() -> AnyView<()> {
 /// primitives rather than handed to the `dialog()` builder. The entrance used
 /// to force that and no longer does; swapping in the builder is a composition
 /// change with its own poster consequences, so it stays a separate question.
-fn dialog_case() -> AnyView<()> {
-    any(framed_in(
+fn dialog_case() -> impl View<()> {
+    framed_in(
         TALL,
         overlay_modal(
             Padding(
@@ -377,7 +378,7 @@ fn dialog_case() -> AnyView<()> {
             ),
             OverlayModalConfig::centered(OVERLAY_DIALOG_MAX_WIDTH),
         ),
-    ))
+    )
 }
 
 /// The option list both dropdown surfaces in [`dropdown_case`] read.
@@ -390,8 +391,8 @@ fn dropdown_items() -> Vec<DropdownItem> {
     ]
 }
 
-fn dropdown_case() -> AnyView<()> {
-    any(framed_in(
+fn dropdown_case() -> impl View<()> {
+    framed_in(
         SURFACE,
         column()
             .child(bleed(
@@ -407,7 +408,7 @@ fn dropdown_case() -> AnyView<()> {
                     .max_height(220.0),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// The three FAB sizes and a colour spread. `extended_fab` is deliberately
@@ -416,8 +417,8 @@ fn dropdown_case() -> AnyView<()> {
 /// collapsed pill under a full-width label on the recorder's single frame —
 /// the same one-frame entrance-ramp limit documented above, reached here
 /// through a widget with no `entrance`-style seam to opt out of.
-fn fab_case() -> AnyView<()> {
-    any(framed(
+fn fab_case() -> impl View<()> {
+    framed(
         row()
             .child(fab(glyph(icons::ADD), |_: &mut ()| {}).size(FabSize::Small))
             .child(hgap(16.0))
@@ -433,11 +434,11 @@ fn fab_case() -> AnyView<()> {
                     .color(FabColor::Secondary),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn icon_button_case() -> AnyView<()> {
-    any(framed(
+fn icon_button_case() -> impl View<()> {
+    framed(
         row()
             .child(icon_button(glyph(icons::FAVORITE), |_: &mut ()| {}).semantic_label("Favorite"))
             .child(hgap(12.0))
@@ -457,11 +458,11 @@ fn icon_button_case() -> AnyView<()> {
                     .variant(IconButtonVariant::Outlined),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn list_case() -> AnyView<()> {
-    any(framed_in(
+fn list_case() -> impl View<()> {
+    framed_in(
         STRIP,
         column()
             .child(bleed(
@@ -486,11 +487,11 @@ fn list_case() -> AnyView<()> {
                     .on_press(|_: &mut ()| {}),
             ))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn menu_case() -> AnyView<()> {
-    any(framed_in(
+fn menu_case() -> impl View<()> {
+    framed_in(
         TALL,
         menu_panel(
             vec![
@@ -510,11 +511,11 @@ fn menu_case() -> AnyView<()> {
             ],
             |_: &mut (), _: MenuSelection| {},
         ),
-    ))
+    )
 }
 
-fn navigation_bar_case() -> AnyView<()> {
-    any(framed_in(
+fn navigation_bar_case() -> impl View<()> {
+    framed_in(
         BAR,
         bleed(
             navigation_bar(
@@ -530,11 +531,11 @@ fn navigation_bar_case() -> AnyView<()> {
             .label_behavior(NavBarLabelBehavior::AlwaysShow)
             .safe_area(false),
         ),
-    ))
+    )
 }
 
-fn navigation_drawer_case() -> AnyView<()> {
-    any(framed_in(
+fn navigation_drawer_case() -> impl View<()> {
+    framed_in(
         SURFACE,
         navigation_drawer_content(
             vec![
@@ -550,11 +551,11 @@ fn navigation_drawer_case() -> AnyView<()> {
             0,
             |_: &mut (), _: usize| {},
         ),
-    ))
+    )
 }
 
-fn navigation_rail_case() -> AnyView<()> {
-    any(framed_in(
+fn navigation_rail_case() -> impl View<()> {
+    framed_in(
         RAIL,
         SizedBox(Some(RAIL_W), Some(440.0)).child(
             navigation_rail(
@@ -570,11 +571,11 @@ fn navigation_rail_case() -> AnyView<()> {
             .rail_type(NavigationRailType::AlwaysCollapse)
             .fab(rail_fab(icons::ADD, "Compose", |_: &mut ()| {})),
         ),
-    ))
+    )
 }
 
-fn selection_controls_case() -> AnyView<()> {
-    any(framed(
+fn selection_controls_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 row()
@@ -612,7 +613,7 @@ fn selection_controls_case() -> AnyView<()> {
                     .cross_axis(CrossAxisAlignment::Center),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// The M3 bottom-sheet at-rest chrome, approximated via the `overlay_modal`
@@ -628,8 +629,8 @@ fn selection_controls_case() -> AnyView<()> {
 /// [`dialog_case`], a warm pass cannot stand in for the pin: the edge preset's
 /// `Slide` is driven in layout, one pass behind the paint that advances it —
 /// see the module docs' entrance-ramp section for the measured result.
-fn sheet_case() -> AnyView<()> {
-    any(framed_in(
+fn sheet_case() -> impl View<()> {
+    framed_in(
         TALL,
         overlay_modal(
             Padding(
@@ -661,11 +662,11 @@ fn sheet_case() -> AnyView<()> {
                 .handle(true)
                 .entrance(OverlayEntrance::None),
         ),
-    ))
+    )
 }
 
-fn slider_case() -> AnyView<()> {
-    any(framed(
+fn slider_case() -> impl View<()> {
+    framed(
         column()
             .child(SizedBox(Some(280.0), None).child(slider(0.4, |_: &mut (), _: f64| {})))
             .child(gap(12.0))
@@ -683,7 +684,7 @@ fn slider_case() -> AnyView<()> {
             .child(gap(12.0))
             .child(SizedBox(Some(280.0), None).child(wavy_slider(0.5, |_: &mut (), _: f64| {})))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// The snackbar host with a message already requested — the page's own mount
@@ -692,10 +693,10 @@ fn slider_case() -> AnyView<()> {
 /// this frame: the case pins no [`Case::time_ms`], so the recorder takes no
 /// warm pass for it and the entrance ramp never advances past zero (see the
 /// module docs' entrance-ramp section).
-fn snackbar_case() -> AnyView<()> {
+fn snackbar_case() -> impl View<()> {
     let toasts: SnackbarController<()> = SnackbarController::new();
     toasts.show(snackbar("Message archived").action("Undo", |_: &mut ()| {}));
-    any(framed_in(
+    framed_in(
         STRIP,
         snackbar_host(
             &toasts,
@@ -708,7 +709,7 @@ fn snackbar_case() -> AnyView<()> {
             )
             .size_centered(STRIP.width, STRIP.height),
         ),
-    ))
+    )
 }
 
 /// The three tabs [`tabs_case`] shows, built the way the page's example does.
@@ -720,15 +721,15 @@ fn tab_specs() -> Vec<Tab> {
     ]
 }
 
-fn tabs_case() -> AnyView<()> {
-    any(framed_in(
+fn tabs_case() -> impl View<()> {
+    framed_in(
         BAR,
         bleed(tabs(tab_specs(), 1, |_: &mut (), _: usize| {}).variant(TabsVariant::Primary)),
-    ))
+    )
 }
 
-fn text_field_case() -> AnyView<()> {
-    any(framed_in(
+fn text_field_case() -> impl View<()> {
+    framed_in(
         TALL,
         column()
             .child(
@@ -756,22 +757,22 @@ fn text_field_case() -> AnyView<()> {
                 ),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// The time picker's own dial surface. `time_picker(..)` composes an
 /// `OverlayModalWidget` (it *is* the dialog), which a one-frame recording
 /// cannot bring on screen (entrance ramp limit — see module docs above);
 /// `time_dial` is the non-modal ring that dialog wraps.
-fn time_picker_case() -> AnyView<()> {
-    any(framed_in(
+fn time_picker_case() -> impl View<()> {
+    framed_in(
         PICKER,
         time_dial(TimeOfDay::new(10, 30), |_: &mut (), _: TimeOfDay| {}).use_24_hour(false),
-    ))
+    )
 }
 
-fn toolbar_case() -> AnyView<()> {
-    any(framed_in(
+fn toolbar_case() -> impl View<()> {
+    framed_in(
         STRIP,
         column()
             .child(bleed(docked_toolbar().actions(vec![
@@ -790,7 +791,7 @@ fn toolbar_case() -> AnyView<()> {
                     ]),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates — one
@@ -804,7 +805,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: app_bar_case,
+        build: case_build!(app_bar_case),
     },
     Case {
         slug: "material/button-group",
@@ -813,7 +814,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: button_group_case,
+        build: case_build!(button_group_case),
     },
     Case {
         slug: "material/button",
@@ -822,7 +823,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: button_case,
+        build: case_build!(button_case),
     },
     Case {
         slug: "material/card",
@@ -831,7 +832,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: card_case,
+        build: case_build!(card_case),
     },
     Case {
         slug: "material/chips",
@@ -840,7 +841,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: chips_case,
+        build: case_build!(chips_case),
     },
     Case {
         slug: "material/date-picker",
@@ -849,7 +850,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: date_picker_case,
+        build: case_build!(date_picker_case),
     },
     Case {
         slug: "material/dialog",
@@ -858,7 +859,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: 400,
         design: Design::Material,
-        build: dialog_case,
+        build: case_build!(dialog_case),
     },
     Case {
         slug: "material/dropdown",
@@ -867,7 +868,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: dropdown_case,
+        build: case_build!(dropdown_case),
     },
     Case {
         slug: "material/fab",
@@ -876,7 +877,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: fab_case,
+        build: case_build!(fab_case),
     },
     Case {
         slug: "material/icon-button",
@@ -885,7 +886,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: icon_button_case,
+        build: case_build!(icon_button_case),
     },
     Case {
         slug: "material/list",
@@ -894,7 +895,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: list_case,
+        build: case_build!(list_case),
     },
     Case {
         slug: "material/menu",
@@ -903,7 +904,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: menu_case,
+        build: case_build!(menu_case),
     },
     Case {
         slug: "material/navigation-bar",
@@ -912,7 +913,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: navigation_bar_case,
+        build: case_build!(navigation_bar_case),
     },
     Case {
         slug: "material/navigation-drawer",
@@ -921,7 +922,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: navigation_drawer_case,
+        build: case_build!(navigation_drawer_case),
     },
     Case {
         slug: "material/navigation-rail",
@@ -930,7 +931,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: navigation_rail_case,
+        build: case_build!(navigation_rail_case),
     },
     Case {
         slug: "material/selection-controls",
@@ -939,7 +940,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: selection_controls_case,
+        build: case_build!(selection_controls_case),
     },
     Case {
         slug: "material/sheet",
@@ -948,7 +949,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: sheet_case,
+        build: case_build!(sheet_case),
     },
     Case {
         slug: "material/slider",
@@ -957,7 +958,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: slider_case,
+        build: case_build!(slider_case),
     },
     Case {
         slug: "material/snackbar",
@@ -966,7 +967,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: snackbar_case,
+        build: case_build!(snackbar_case),
     },
     Case {
         slug: "material/tabs",
@@ -975,7 +976,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: tabs_case,
+        build: case_build!(tabs_case),
     },
     Case {
         slug: "material/text-field",
@@ -984,7 +985,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: text_field_case,
+        build: case_build!(text_field_case),
     },
     Case {
         slug: "material/time-picker",
@@ -993,7 +994,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: time_picker_case,
+        build: case_build!(time_picker_case),
     },
     Case {
         slug: "material/toolbar",
@@ -1002,6 +1003,6 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Material,
-        build: toolbar_case,
+        build: case_build!(toolbar_case),
     },
 ];

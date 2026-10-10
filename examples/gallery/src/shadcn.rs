@@ -116,7 +116,7 @@
 //! clocks, and only the recorder is missing both. Stuck here means stuck in the
 //! RECORDER.
 
-use frust_core::{AnyView, any};
+use frust_core::View;
 use frust_shadcn::overlay::modal::DRAWER_MAX_HEIGHT_FRACTION;
 use frust_shadcn::overlay::{
     HANDLE_RESERVE, ModalConfig, ModalCorners, ModalEntrance, ModalExtent, ModalLimit,
@@ -139,7 +139,7 @@ use frust_widgets::{CrossAxisAlignment, EdgeInsets, SizedBox, column, icon, icon
 use kurbo::Size;
 
 use crate::base::{framed, framed_in};
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 /// A wider card frame: two stacked cards or a layout component that needs more
 /// horizontal space.
@@ -161,8 +161,8 @@ const TABLE_WIDE: Size = Size::new(420.0, 220.0);
 
 /// From `examples/shadcn-demo`'s primitives page — the variant row, wrapped
 /// over two rows so the full variant set fits [`Case::DEFAULT_SIZE`]'s width.
-fn button_case() -> AnyView<()> {
-    any(framed(
+fn button_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 row()
@@ -185,13 +185,13 @@ fn button_case() -> AnyView<()> {
                     .child(button("Disabled", |_: &mut ()| {}).disabled(true))
                     .cross_axis(CrossAxisAlignment::Center),
             ),
-    ))
+    )
 }
 
 /// From `examples/shadcn-demo`'s layout page (a carousel slide card) and its
 /// primitives page (a footer-actions card), stacked.
-fn card_case() -> AnyView<()> {
-    any(framed_in(
+fn card_case() -> impl View<()> {
+    framed_in(
         CARD_WIDE,
         column()
             .child(card(vec![
@@ -210,7 +210,7 @@ fn card_case() -> AnyView<()> {
                     button("Save", |_: &mut ()| {}),
                 )),
             ])),
-    ))
+    )
 }
 
 /// The real `dialog()`, sugared constructor and all: the panel fades and zooms
@@ -219,8 +219,8 @@ fn card_case() -> AnyView<()> {
 /// why this case is no longer one of them.
 ///
 /// Content mirrors `examples/shadcn-demo`'s overlays page.
-fn dialog_case() -> AnyView<()> {
-    any(framed_in(
+fn dialog_case() -> impl View<()> {
+    framed_in(
         DIALOG,
         dialog(vec![
             dialog_header(vec![
@@ -231,7 +231,7 @@ fn dialog_case() -> AnyView<()> {
                 button("Cancel", |_: &mut ()| {}).variant(ButtonVariant::Outline),
             ]),
         ]),
-    ))
+    )
 }
 
 /// The bottom drawer chrome, `drawer()`'s own composition for
@@ -241,9 +241,9 @@ fn dialog_case() -> AnyView<()> {
 /// it — see the module docs' "Why two cases bypass" section.
 ///
 /// Content mirrors `examples/shadcn-demo`'s overlays page.
-fn drawer_case() -> AnyView<()> {
+fn drawer_case() -> impl View<()> {
     let side = DrawerSide::Bottom;
-    any(framed_in(
+    framed_in(
         DRAWER_TALL,
         modal(
             stack_slots(
@@ -273,7 +273,7 @@ fn drawer_case() -> AnyView<()> {
                 )
                 .entrance(ModalEntrance::None),
         ),
-    ))
+    )
 }
 
 /// From `examples/shadcn-demo`'s anchored page. See the module docs' "Three
@@ -281,9 +281,9 @@ fn drawer_case() -> AnyView<()> {
 /// so the panel's own fade/zoom entrance records at zero presence and only the
 /// trigger is visually present in the recorded frame. A live host opens it on
 /// interaction instead, entrance and all — see [`crate::interactive::shadcn`].
-fn dropdown_menu_case() -> AnyView<()> {
+fn dropdown_menu_case() -> impl View<()> {
     let dropdown_anchor = OverlayAnchor::new();
-    any(framed_in(
+    framed_in(
         DROPDOWN,
         frust_widgets::stack()
             .child(anchor(&dropdown_anchor, button("Actions", |_: &mut ()| {})))
@@ -302,13 +302,13 @@ fn dropdown_menu_case() -> AnyView<()> {
                 )
                 .anchor(&dropdown_anchor),
             ),
-    ))
+    )
 }
 
 /// From `examples/shadcn-demo`'s controls page (checkbox) and its inputs page
 /// (a labelled, described `field` wrapping an `input`).
-fn form_controls_case() -> AnyView<()> {
-    any(framed_in(
+fn form_controls_case() -> impl View<()> {
+    framed_in(
         Size::new(360.0, 220.0),
         column()
             .child(
@@ -324,13 +324,13 @@ fn form_controls_case() -> AnyView<()> {
                     .label("Name")
                     .description("Shown on your public profile."),
             ),
-    ))
+    )
 }
 
 /// From `examples/shadcn-demo`'s chat composer, and its inputs page's
 /// invalid-`field` example.
-fn input_case() -> AnyView<()> {
-    any(framed_in(
+fn input_case() -> impl View<()> {
+    framed_in(
         Size::new(360.0, 200.0),
         column()
             .child(input("", |_: &mut (), _: String| {}).placeholder("Write a message\u{2026}"))
@@ -344,13 +344,13 @@ fn input_case() -> AnyView<()> {
                 .label("Invalid example")
                 .error("This field is required."),
             ),
-    ))
+    )
 }
 
 /// From `examples/shadcn-demo`'s chat page: a `message_scroller` over a
 /// couple of `message` rows, one per side of the thread.
-fn message_case() -> AnyView<()> {
-    any(framed_in(
+fn message_case() -> impl View<()> {
+    framed_in(
         DROPDOWN,
         message_scroller((
             message(vec![message_content(vec![bubble(
@@ -363,12 +363,12 @@ fn message_case() -> AnyView<()> {
             ])])
             .align(frust_shadcn::MessageAlign::End),
         )),
-    ))
+    )
 }
 
 /// From `examples/shadcn-demo`'s questionnaire page.
-fn questionnaire_case() -> AnyView<()> {
-    any(framed_in(
+fn questionnaire_case() -> impl View<()> {
+    framed_in(
         QUESTIONNAIRE,
         questionnaire(
             vec![
@@ -385,7 +385,7 @@ fn questionnaire_case() -> AnyView<()> {
         .on_answer(|_: &mut (), _| {})
         .on_navigate(|_: &mut (), _| {})
         .on_submit(|_: &mut ()| {}),
-    ))
+    )
 }
 
 /// From `examples/shadcn-demo`'s anchored page. See the module docs' "Three
@@ -394,14 +394,14 @@ fn questionnaire_case() -> AnyView<()> {
 /// the trigger is visually present in the recorded frame. A live host opens it
 /// on interaction instead, entrance and all — see
 /// [`crate::interactive::shadcn`].
-fn select_case() -> AnyView<()> {
+fn select_case() -> impl View<()> {
     let select_anchor = OverlayAnchor::new();
     let options = vec![
         select_option("Apple"),
         select_option("Banana"),
         select_option("Cherry"),
     ];
-    any(framed_in(
+    framed_in(
         Size::new(360.0, 220.0),
         frust_widgets::stack()
             .child(anchor(
@@ -414,7 +414,7 @@ fn select_case() -> AnyView<()> {
                     .anchor(&select_anchor)
                     .align(OverlayAlign::Start),
             ),
-    ))
+    )
 }
 
 /// The right-edge sheet chrome, `sheet()`'s own composition
@@ -424,9 +424,9 @@ fn select_case() -> AnyView<()> {
 /// bypass" section.
 ///
 /// Content mirrors `examples/shadcn-demo`'s overlays page.
-fn sheet_case() -> AnyView<()> {
+fn sheet_case() -> impl View<()> {
     let side = SheetSide::Right;
-    any(framed_in(
+    framed_in(
         SHEET_TALL,
         modal(
             stack_slots(
@@ -447,7 +447,7 @@ fn sheet_case() -> AnyView<()> {
                 .close_button(true)
                 .entrance(ModalEntrance::None),
         ),
-    ))
+    )
 }
 
 /// From `examples/shadcn-demo`'s layout page: a floating, icon-collapsible
@@ -456,26 +456,26 @@ fn sheet_case() -> AnyView<()> {
 /// ramp-in-one-paint trap here — see `plugins/shadcn/src/components/
 /// sidebar.rs`'s "A panel built collapsed starts collapsed rather than
 /// animating shut"), so this case needs no entrance workaround.
-fn sidebar_case() -> AnyView<()> {
-    any(framed_in(
+fn sidebar_case() -> impl View<()> {
+    framed_in(
         SIDEBAR_WIDE,
         sidebar_provider(
-            sidebar(sidebar_content(vec![sidebar_group(vec![
-                any(sidebar_group_label("Mail")),
+            sidebar(sidebar_content(vec![sidebar_group((
+                sidebar_group_label("Mail"),
                 sidebar_menu(
                     ["Inbox", "Sent", "Drafts"]
                         .iter()
                         .enumerate()
                         .map(|(index, label)| {
-                            any(sidebar_menu_item(vec![
+                            sidebar_menu_item(vec![
                                 sidebar_menu_button(*label, |_: &mut ()| {})
                                     .icon(icon(icons::FORUM).size(16.0))
                                     .active(index == 0),
-                            ]))
+                            ])
                         })
                         .collect::<Vec<_>>(),
                 ),
-            ])]))
+            ))]))
             .header(sidebar_header(vec![
                 frust_widgets::text("Floating").size(14.0),
             ]))
@@ -487,27 +487,27 @@ fn sidebar_case() -> AnyView<()> {
             true,
             |_: &mut (), _: bool| {},
         ),
-    ))
+    )
 }
 
 /// From `examples/shadcn-demo`'s data-table page: a selectable row and the
 /// table's caption.
-fn table_case() -> AnyView<()> {
+fn table_case() -> impl View<()> {
     let rows = vec![
-        table_row(vec![any(table_cell("Alex Kim")), any(table_cell("Admin"))]).selected(true),
-        table_row(vec![any(table_cell("Sam Lee")), any(table_cell("Member"))]),
+        table_row(vec![table_cell("Alex Kim"), table_cell("Admin")]).selected(true),
+        table_row(vec![table_cell("Sam Lee"), table_cell("Member")]),
     ];
-    any(framed_in(
+    framed_in(
         TABLE_WIDE,
         table(rows)
             .header(["Name", "Role"])
             .caption("1 of 2 row(s) selected \u{2014} page 1 of 1"),
-    ))
+    )
 }
 
 /// From `examples/shadcn-demo`'s controls page.
-fn tabs_case() -> AnyView<()> {
-    any(framed(tabs(
+fn tabs_case() -> impl View<()> {
+    framed(tabs(
         "account",
         vec![
             tabs_tab(
@@ -522,7 +522,7 @@ fn tabs_case() -> AnyView<()> {
             ),
         ],
         |_: &mut (), _: String| {},
-    )))
+    ))
 }
 
 /// From `examples/shadcn-demo`'s anchored page. See the module docs' "Three
@@ -532,17 +532,17 @@ fn tabs_case() -> AnyView<()> {
 /// pre-opened (`TooltipHover::set_open`) for fidelity to the real component
 /// wiring. A live host opens it on interaction instead, entrance and all — see
 /// [`crate::interactive::shadcn`].
-fn tooltip_case() -> AnyView<()> {
+fn tooltip_case() -> impl View<()> {
     let hover = TooltipHover::new();
     hover.set_open(true);
-    any(framed(
+    framed(
         frust_widgets::stack()
             .child(tooltip_trigger::<(), _>(
                 &hover,
                 button("Hover me", |_: &mut ()| {}),
             ))
             .child(tooltip::<()>(&hover, "A tooltip, 700ms after rest")),
-    ))
+    )
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.
@@ -554,7 +554,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: button_case,
+        build: case_build!(button_case),
     },
     Case {
         slug: "shadcn/card",
@@ -563,7 +563,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: card_case,
+        build: case_build!(card_case),
     },
     Case {
         slug: "shadcn/dialog",
@@ -572,7 +572,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: 400,
         design: Design::Shadcn,
-        build: dialog_case,
+        build: case_build!(dialog_case),
     },
     Case {
         slug: "shadcn/drawer",
@@ -581,7 +581,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: drawer_case,
+        build: case_build!(drawer_case),
     },
     Case {
         slug: "shadcn/dropdown-menu",
@@ -590,7 +590,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: dropdown_menu_case,
+        build: case_build!(dropdown_menu_case),
     },
     Case {
         slug: "shadcn/form-controls",
@@ -599,7 +599,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: form_controls_case,
+        build: case_build!(form_controls_case),
     },
     Case {
         slug: "shadcn/input",
@@ -608,7 +608,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: input_case,
+        build: case_build!(input_case),
     },
     Case {
         slug: "shadcn/message",
@@ -617,7 +617,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: message_case,
+        build: case_build!(message_case),
     },
     Case {
         slug: "shadcn/questionnaire",
@@ -626,7 +626,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: questionnaire_case,
+        build: case_build!(questionnaire_case),
     },
     Case {
         slug: "shadcn/select",
@@ -635,7 +635,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: select_case,
+        build: case_build!(select_case),
     },
     Case {
         slug: "shadcn/sheet",
@@ -644,7 +644,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: sheet_case,
+        build: case_build!(sheet_case),
     },
     Case {
         slug: "shadcn/sidebar",
@@ -653,7 +653,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: sidebar_case,
+        build: case_build!(sidebar_case),
     },
     Case {
         slug: "shadcn/table",
@@ -662,7 +662,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: table_case,
+        build: case_build!(table_case),
     },
     Case {
         slug: "shadcn/tabs",
@@ -671,7 +671,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: tabs_case,
+        build: case_build!(tabs_case),
     },
     Case {
         slug: "shadcn/tooltip",
@@ -680,6 +680,6 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Shadcn,
-        build: tooltip_case,
+        build: case_build!(tooltip_case),
     },
 ];
