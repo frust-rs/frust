@@ -177,11 +177,13 @@ build-input edit, the patch budget — the classes are under `no-hot-reload-rest
 [LIMITATIONS.md](LIMITATIONS.md)). On the desktop, `--no-hot`, a profile/release build or a
 `--features` passthrough keeps the plain kill-and-relaunch loop (`cargo run`, incremental, one
 relaunch per burst, state reset; it watches only `src/` + `Cargo.toml`). With `-d <device>` a
-non-debug build or `--features` is refused; only `--no-hot` reaches the device relaunch loop.
-Kill/relaunch and Ctrl-C exit both reach the whole `cargo run` tree — Unix process-group kill,
-Windows `taskkill /T /F` (`frust_drive::process`, shared by every kill path below). Web, a physical
-iOS device and other devices are not watched (`--watch` + `-d` refuses them). Measured baselines:
-[PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Dev loop.
+non-debug build or `--features` is refused, so `--no-hot` is the only flag that picks the device
+relaunch loop; a hot run whose setup fails, or that reports it cannot patch, prints `hot reload
+unavailable: ...; relaunching on change instead` and falls back to that same loop, watching only
+`src/` + `Cargo.toml`. Kill/relaunch and Ctrl-C exit both reach the whole `cargo run` tree — Unix
+process-group kill, Windows `taskkill /T /F` (`frust_drive::process`, shared by every kill path
+below). Web, a physical iOS device and other devices are not watched (`--watch` + `-d` refuses
+them). Measured baselines: [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Dev loop.
 
 **TUI equivalents.** `R` restarts the active workbench session the same way — rebuild + relaunch,
 never state-preserving. 'Watch: hot patch on save' (`W`, palette, or the run-config checkbox) on a

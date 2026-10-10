@@ -33,8 +33,7 @@ tooling-isolation charter/verify-gate/pin policy with every unit rather than rea
 | `DEVTOOLS` | crates/frust-devtools, frust-devtools-protocol | A |
 | `GPU`/`ENGINE` | crates/frust-gpu, crates/frust-engine | – |
 
-**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/web-spike, examples/web-gallery, examples/glyph-catalog, examples/playground, examples/design-system-sample, examples/material3-demo, examples/native-widgets-demo, examples/hotpatch-spike, testing/hotpatch-canary (a CI fixture
-workspace), editors/vscode-frust.
+**Excluded** (consumers, not units — index line + own README only): examples/huddle, examples/shadertoy, examples/web-spike, examples/web-gallery, examples/glyph-catalog, examples/playground, examples/design-system-sample, examples/material3-demo, examples/native-widgets-demo, examples/hotpatch-spike, testing/hotpatch-canary, editors/vscode-frust.
 
 NATIVE_WIDGETS' pins/conventions ride PLUGINS' spokes (shared Apple FFI pins, one plugin charter).
 GPU/ENGINE get no spoke of their own — they document inside RENDER's (`RENDER_ARCHITECTURE.md`,

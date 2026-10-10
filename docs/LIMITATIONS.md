@@ -1722,12 +1722,12 @@ image and applied over devtools, and the CLI prints `patched in <n> ms` (the TUI
 toast) with the PID and every component's `State` kept. The `frust/hotpatch` feature is switched on
 for the hot run's own fat build only, never by default. On the desktop, `--no-hot`, a
 profile/release build or a `--features` passthrough keeps the plain relaunch loop; `--watch -d`
-refuses a non-Debug build or extra features (`run_watch_on_device`), so on a device only `--no-hot`
-keeps the relaunch loop. The save debounce is duplicated between `frust-cli` and `frust-tui` (kept
-in sync by a comment; a follow-up moves it into `frust-drive`). A compile error leaves the running
-app untouched. Anything a patch cannot carry prints `restart required: <reason>`, never `patched`,
-and the app is relaunched from a fresh fat build with State reset. The reasons (`RestartReason`)
-fall into five classes:
+refuses a non-Debug build or extra features (`run_watch_on_device`), so `--no-hot` is the only flag
+that picks the device relaunch loop; a hot run whose setup fails, or that reports it cannot patch,
+falls back to that loop too, watching only `src/` and `Cargo.toml`. A compile error leaves the
+running app untouched. Anything a patch cannot carry prints `restart required: <reason>`, never
+`patched`, and the app is relaunched from a fresh fat build with State reset. The reasons
+(`RestartReason`) fall into five classes:
 - *Layout or identity*: a replayable type's layout differs from the accepted set (`LayoutChanged`,
   from the host's L3 gate over DWARF (Mach-O/ELF) or PDB type records (Windows), or a mismatch the
   app reports), or a component's `State` changed type (`StateTypeChanged`).
@@ -1784,7 +1784,9 @@ process-lifetime `OnceLock` that is never torn down.
 
 **Reopen path**: hot restart needs `frust::run`'s by-value root replaced with a factory closure, a
 disposable root `Owner`, a resettable `ReactiveRuntime` and a devtools `restart` method. A physical
-iOS device needs signed patch delivery; the web shell needs a wasm32 patch loader.
+iOS device needs signed patch delivery; the web shell needs a wasm32 patch loader. The save debounce
+and the hot watch set are duplicated between `frust-cli` and `frust-tui` (kept in sync by a
+comment); moving both into `frust-drive` is a tracked follow-up.
 
 **Evidence**: `examples/hotpatch-spike/RESULTS.md`: `## Milestone 1 re-run (R3-04)` (desktop macOS:
 save→frame ~1.4 s, 26.8% of the restart median; `### Latency breakdown (why 1.4 s, not 493 ms, and

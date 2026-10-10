@@ -52,7 +52,9 @@ fallback only when that fails), prints it on the discovery line, and requires it
 `handshake` before dispatching any other method — `ServiceConfig::require_token` defaults **on**;
 the off switch exists only for in-process tests. On a shared Android device or simulator host
 any co-resident app can reach the loopback port, so for loaded code the handshake token is the
-only barrier, which is why the lane is debug-only. Loading code is gated harder than reading state:
+only barrier — on a simulator or desktop host it keeps out other OS users and sandboxed apps, not
+same-user processes, which can read the app's console anyway — which is why the lane is debug-only.
+Loading code is gated harder than reading state:
 `Capability::HotPatch` survives only while `service::hot_patch_gate` holds — the `hotpatch`
 feature, a backend that offers it, a debug build, and an OS-sourced token with `require_token`
 on — and every host, Windows included, answers that same gate; a fallback token keeps inspection
