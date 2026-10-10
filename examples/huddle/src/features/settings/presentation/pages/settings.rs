@@ -6,7 +6,7 @@
 //! through the shared [`NavigatorController`].
 
 use frust::{
-    CrossAxisAlignment, EdgeInsets, NavigatorController, Padding, View, any, column, icon, icons,
+    CrossAxisAlignment, EdgeInsets, NavigatorController, Padding, View, column, icon, icons,
     scroll_view,
 };
 use frust_material::{app_bar, list_item};
@@ -50,7 +50,7 @@ pub fn settings_screen(controller: NavigatorController<HuddleState>) -> impl Vie
                 }),
         );
 
-    let body = any(scroll_view(Padding(EdgeInsets::all(8.0), rows)));
+    let body = scroll_view(Padding(EdgeInsets::all(8.0), rows));
 
     column()
         .child(app_bar::<HuddleState>("Settings"))

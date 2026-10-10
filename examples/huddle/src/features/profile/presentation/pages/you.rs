@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use frust::{
     Align, Alignment, Color, CrossAxisAlignment, EdgeInsets, Image, ImageFit, NavigatorController,
-    Padding, SizedBox, Theme, View, any, column, hero, icon, icons, scroll_view, stack, text,
+    Padding, SizedBox, Theme, View, column, hero, icon, icons, scroll_view, stack, text,
     use_context,
 };
 use frust_material::{app_bar, list_item};
@@ -48,10 +48,10 @@ pub fn you_screen(controller: NavigatorController<HuddleState>) -> impl View<Hud
     };
 
     // The hero-wrapped avatar block (tag `avatar-u1` → the profile page's hero).
-    let avatar = any(hero(
+    let avatar = hero(
         "avatar-u1",
         avatar_block(initials, scheme.primary, scheme.on_primary),
-    ));
+    );
 
     let profile_controller = controller.clone();
     let user_id = me.map(|u| u.id).unwrap_or(CURRENT_USER_ID);
@@ -85,7 +85,7 @@ pub fn you_screen(controller: NavigatorController<HuddleState>) -> impl View<Hud
         .leading(icon(icons::PALETTE))
         .trailing(icon(icons::CHEVRON_RIGHT));
 
-    let body = any(scroll_view(Padding(
+    let body = scroll_view(Padding(
         EdgeInsets::all(12.0),
         column()
             .child(user_card)
@@ -93,7 +93,7 @@ pub fn you_screen(controller: NavigatorController<HuddleState>) -> impl View<Hud
             .child(settings_row)
             .child(saved_row)
             .child(prefs_row),
-    )));
+    ));
 
     column()
         .child(app_bar::<HuddleState>("You"))
@@ -105,15 +105,15 @@ pub fn you_screen(controller: NavigatorController<HuddleState>) -> impl View<Hud
 /// initials centered in `on_primary`.
 fn avatar_block(initials: String, fill: Color, on_fill: Color) -> impl View<HuddleState> {
     let tile =
-        any(SizedBox(Some(56.0), Some(56.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill)));
+        SizedBox(Some(56.0), Some(56.0)).child(Image(solid_source(fill)).fit(ImageFit::Fill));
     // Center the monogram with the SizedBox+Align idiom (a bare `Align` under a
     // `Stack` shrink-wraps to the origin;
     // `profile::presentation::pages::profile`'s `initials_tile` is the
     // precedent).
-    let label = any(SizedBox(Some(56.0), Some(56.0)).child(Align(
+    let label = SizedBox(Some(56.0), Some(56.0)).child(Align(
         Alignment::CENTER,
         text(initials).size(20.0).color(on_fill),
-    )));
+    ));
     stack().child(tile).child(label)
 }
 

@@ -23,9 +23,9 @@
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Axis, Brightness, Button, Color, Column, CrossAxisAlignment,
-    DesignLanguage, EdgeInsets, FlexView, Get, Image, ImageFit, Padding, Set, SizedBox, Theme,
-    View, any, column, component, inflexible, row, scroll_view, slider, stack, text, use_context,
+    Align, Alignment, Brightness, Button, Color, CrossAxisAlignment, DesignLanguage, EdgeInsets,
+    Either, Get, Image, ImageFit, Padding, Set, SizedBox, Theme, View, column, component, either,
+    row, scroll_view, slider, stack, text, use_context,
 };
 use frust_cupertino::{cupertino_button, cupertino_switch};
 use frust_material::{CardVariant, Switch, app_bar, button_group, card};
@@ -42,8 +42,8 @@ use clean_signals_frust::use_controller;
 /// The appearance screen's route entry point: a `Component` under the outer
 /// [`HuddleState`], so its `init` runs under a real reactive `Owner` that
 /// disposes the hosted controller on teardown.
-pub fn appearance_screen() -> AnyView<HuddleState> {
-    any(component(AppearanceScreen))
+pub fn appearance_screen() -> impl View<HuddleState> {
+    component(AppearanceScreen)
 }
 
 /// The appearance screen `Component`. Stateless configuration; all state lives
@@ -87,68 +87,53 @@ impl frust::Component for AppearanceScreen {
         let effective_dark = theme.brightness == Brightness::Dark;
         let brightness = theme.brightness;
 
-        let mut children: Vec<AnyView<AppearanceState>> = Vec::new();
-        children.push(any(text("Appearance").size(28.0)));
-        children.push(any(text(
-            "Brightness, accent, and text size swap the whole app live.",
-        )
-        .size(13.0)));
+        let children = column()
+            .child(text("Appearance").size(28.0))
+            .child(text("Brightness, accent, and text size swap the whole app live.").size(13.0))
+            // --- Brightness + design language (the original two axes) ------------
+            .child(section_label(format!(
+                "Design language: {}",
+                design_choice.label()
+            )))
+            .child(design_selector(design_lang, design_choice, theme.clone()))
+            .child(section_label(format!(
+                "Brightness: {}",
+                brightness_choice.label()
+            )))
+            .child(brightness_switch(
+                design_lang,
+                effective_dark,
+                theme.clone(),
+            ))
+            .child(Button("Follow system brightness", {
+                let current = theme.clone();
+                move |st: &mut AppearanceState| {
+                    st.controller.brightness.set(BrightnessChoice::System);
+                    spawn_apply(&st.controller, current.clone());
+                }
+            }))
+            // --- Accent palette --------------------------------------------------
+            .child(section_label(format!("Accent: {}", accent_choice.label())))
+            .child(accent_picker(accent_choice, brightness, theme.clone()))
+            // --- Dynamic type ----------------------------------------------------
+            .child(section_label(format!(
+                "Text size: {:.0}%",
+                (type_factor * 100.0).round()
+            )))
+            .child(type_slider(type_factor, theme.clone()))
+            // Live preview scaled by the current factor.
+            .child(text("Aa — the quick brown fox").size(18.0 * type_factor));
 
-        // --- Brightness + design language (the original two axes) ------------
-        children.push(any(section_label(format!(
-            "Design language: {}",
-            design_choice.label()
-        ))));
-        children.push(design_selector(design_lang, design_choice, theme.clone()));
-
-        children.push(any(section_label(format!(
-            "Brightness: {}",
-            brightness_choice.label()
-        ))));
-        children.push(brightness_switch(
-            design_lang,
-            effective_dark,
-            theme.clone(),
-        ));
-        children.push(any(Button("Follow system brightness", {
-            let current = theme.clone();
-            move |st: &mut AppearanceState| {
-                st.controller.brightness.set(BrightnessChoice::System);
-                spawn_apply(&st.controller, current.clone());
-            }
-        })));
-
-        // --- Accent palette --------------------------------------------------
-        children.push(any(section_label(format!(
-            "Accent: {}",
-            accent_choice.label()
-        ))));
-        children.push(any(accent_picker(accent_choice, brightness, theme.clone())));
-
-        // --- Dynamic type ----------------------------------------------------
-        children.push(any(section_label(format!(
-            "Text size: {:.0}%",
-            (type_factor * 100.0).round()
-        ))));
-        children.push(any(type_slider(type_factor, theme.clone())));
-        // Live preview scaled by the current factor.
-        children.push(any(
-            text("Aa — the quick brown fox").size(18.0 * type_factor)
-        ));
-
-        let content = any(column()
+        let content = column()
             .child(app_bar::<AppearanceState>("Appearance"))
-            .flex(
-                1,
-                scroll_view(Padding(EdgeInsets::all(16.0), Column(children))),
-            )
-            .cross_axis(CrossAxisAlignment::Stretch));
+            .flex(1, scroll_view(Padding(EdgeInsets::all(16.0), children)))
+            .cross_axis(CrossAxisAlignment::Stretch);
 
         // The fade veil (top `Stack` layer): a translucent surface wash painted
         // over this screen while a swap is in flight, inert (zero-size) otherwise.
-        any(stack()
+        stack()
             .child(content)
-            .child(veil_layer(veil_opacity, theme.scheme().surface)))
+            .child(veil_layer(veil_opacity, theme.scheme().surface))
     }
 }
 
@@ -163,55 +148,40 @@ fn design_selector(
     design_lang: DesignLanguage,
     selected: DesignChoice,
     current: Theme,
-) -> AnyView<AppearanceState> {
+) -> impl View<AppearanceState> {
     match design_lang {
+        DesignLanguage::Cupertino => {
+            // A capsule button per choice, 8px apart (no gap before the first).
+            let btns = DesignChoice::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(i, choice)| {
+                    let current = current.clone();
+                    (
+                        (i > 0).then(|| SizedBox(Some(8.0), None)),
+                        cupertino_button(choice.label(), move |st: &mut AppearanceState| {
+                            st.controller.design.set(choice);
+                            spawn_apply(&st.controller, current.clone());
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>();
+            Either::Left(row().children(btns).cross_axis(CrossAxisAlignment::Center))
+        }
         // Glyph and Material3 share the Material `button_group` picker chrome:
         // the Glyph catalog has no connected segmented-selector widget yet, and
         // `button_group`'s shape (labelled slots + a `selected` index) is a fine
         // fit for a settings toggle regardless of the active design language —
-        // this row is settings-screen chrome, not in-app Glyph surface.
-        DesignLanguage::Material3 | DesignLanguage::Glyph => {
-            any(button_group::<AppearanceState, _>(
-                DesignChoice::ALL.into_iter().map(|c| c.label()),
-                selected.index(),
-                move |st: &mut AppearanceState, idx: usize| {
-                    st.controller.design.set(DesignChoice::from_index(idx));
-                    spawn_apply(&st.controller, current.clone());
-                },
-            ))
-        }
-        DesignLanguage::Cupertino => {
-            let mut btns: Vec<AnyView<AppearanceState>> = Vec::new();
-            for (i, choice) in DesignChoice::ALL.into_iter().enumerate() {
-                if i > 0 {
-                    btns.push(any(SizedBox(Some(8.0), None)));
-                }
-                let current = current.clone();
-                btns.push(any(cupertino_button(
-                    choice.label(),
-                    move |st: &mut AppearanceState| {
-                        st.controller.design.set(choice);
-                        spawn_apply(&st.controller, current.clone());
-                    },
-                )));
-            }
-            any(FlexView::new(
-                Axis::Horizontal,
-                btns.into_iter().map(inflexible).collect::<Vec<_>>(),
-            )
-            .cross_axis(CrossAxisAlignment::Center))
-        }
-        _ => {
-            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
-            any(button_group::<AppearanceState, _>(
-                DesignChoice::ALL.into_iter().map(|c| c.label()),
-                selected.index(),
-                move |st: &mut AppearanceState, idx: usize| {
-                    st.controller.design.set(DesignChoice::from_index(idx));
-                    spawn_apply(&st.controller, current.clone());
-                },
-            ))
-        }
+        // this row is settings-screen chrome, not in-app Glyph surface. External
+        // design systems (DesignLanguage::Custom) fall back to Material chrome too.
+        _ => Either::Right(button_group::<AppearanceState, _>(
+            DesignChoice::ALL.into_iter().map(|c| c.label()),
+            selected.index(),
+            move |st: &mut AppearanceState, idx: usize| {
+                st.controller.design.set(DesignChoice::from_index(idx));
+                spawn_apply(&st.controller, current.clone());
+            },
+        )),
     }
 }
 
@@ -221,7 +191,7 @@ fn brightness_switch(
     design_lang: DesignLanguage,
     effective_dark: bool,
     current: Theme,
-) -> AnyView<AppearanceState> {
+) -> impl View<AppearanceState> {
     let on_toggle = move |st: &mut AppearanceState, on: bool| {
         st.controller.brightness.set(if on {
             BrightnessChoice::Dark
@@ -230,24 +200,26 @@ fn brightness_switch(
         });
         spawn_apply(&st.controller, current.clone());
     };
+    // Every arm is the same `FlexView` row, which erases its children once
+    // inside — no per-arm erasure needed.
     match design_lang {
         // Glyph reuses the Material `Switch` for this toggle — the Glyph
         // catalog has no dedicated switch widget yet, and this settings-screen
         // control isn't itself in-app Glyph chrome.
-        DesignLanguage::Material3 | DesignLanguage::Glyph => any(row()
+        DesignLanguage::Material3 | DesignLanguage::Glyph => row()
             .child(text("Dark").size(14.0))
             .child(SizedBox(Some(8.0), None))
-            .child(Switch(effective_dark, on_toggle))),
-        DesignLanguage::Cupertino => any(row()
+            .child(Switch(effective_dark, on_toggle)),
+        DesignLanguage::Cupertino => row()
             .child(text("Dark").size(14.0))
             .child(SizedBox(Some(8.0), None))
-            .child(cupertino_switch(effective_dark, on_toggle))),
+            .child(cupertino_switch(effective_dark, on_toggle)),
         _ => {
             // external design systems (DesignLanguage::Custom) fall back to Material chrome here
-            any(row()
+            row()
                 .child(text("Dark").size(14.0))
                 .child(SizedBox(Some(8.0), None))
-                .child(Switch(effective_dark, on_toggle)))
+                .child(Switch(effective_dark, on_toggle))
         }
     }
 }
@@ -259,23 +231,18 @@ fn accent_picker(
     brightness: Brightness,
     current: Theme,
 ) -> impl View<AppearanceState> {
-    let mut cards: Vec<AnyView<AppearanceState>> = Vec::new();
-    for (i, accent) in AccentChoice::SWATCHES.into_iter().enumerate() {
-        if i > 0 {
-            cards.push(any(SizedBox(Some(10.0), None)));
-        }
-        cards.push(any(swatch(
-            accent,
-            accent == selected,
-            brightness,
-            current.clone(),
-        )));
-    }
-    FlexView::new(
-        Axis::Horizontal,
-        cards.into_iter().map(inflexible).collect::<Vec<_>>(),
-    )
-    .cross_axis(CrossAxisAlignment::Center)
+    // A swatch per accent, 10px apart (no gap before the first).
+    let cards = AccentChoice::SWATCHES
+        .into_iter()
+        .enumerate()
+        .map(|(i, accent)| {
+            (
+                (i > 0).then(|| SizedBox(Some(10.0), None)),
+                swatch(accent, accent == selected, brightness, current.clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    row().children(cards).cross_axis(CrossAxisAlignment::Center)
 }
 
 /// One accent swatch card.
@@ -287,7 +254,7 @@ fn swatch(
 ) -> impl View<AppearanceState> {
     let color = accent.primary(brightness);
     let tile =
-        any(SizedBox(Some(40.0), Some(40.0)).child(Image(solid_source(color)).fit(ImageFit::Fill)));
+        SizedBox(Some(40.0), Some(40.0)).child(Image(solid_source(color)).fit(ImageFit::Fill));
     let inner = Padding(
         EdgeInsets::all(8.0),
         column()
@@ -321,12 +288,15 @@ fn type_slider(type_factor: f32, current: Theme) -> impl View<AppearanceState> {
 /// fill-to-max `SizedBox` (the incoming max clamps the requested span) wrapping a
 /// stretched 1×1 image — the facade-only way to paint an arbitrary translucent
 /// rectangle.
-fn veil_layer(opacity: f64, surface: Color) -> AnyView<AppearanceState> {
-    if opacity <= 0.001 {
-        return any(SizedBox(None, None));
-    }
-    any(SizedBox(Some(f64::INFINITY), Some(f64::INFINITY))
-        .child(Image(solid_source_alpha(surface, opacity)).fit(ImageFit::Fill)))
+fn veil_layer(opacity: f64, surface: Color) -> impl View<AppearanceState> {
+    either(
+        opacity <= 0.001,
+        || SizedBox(None, None),
+        || {
+            SizedBox(Some(f64::INFINITY), Some(f64::INFINITY))
+                .child(Image(solid_source_alpha(surface, opacity)).fit(ImageFit::Fill))
+        },
+    )
 }
 
 /// Trigger the fade veil, then drive `controller.apply(current)` on the UI-thread

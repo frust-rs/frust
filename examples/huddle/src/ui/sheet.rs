@@ -193,6 +193,7 @@ pub struct SheetView<State: 'static> {
 /// attached with [`SheetView::on_dismiss`]).
 pub fn sheet<State: 'static, V: View<State>>(content: V) -> SheetView<State> {
     SheetView {
+        // erasure: keep stored in a hand-written view, fed to its ChildPod
         content: any(content),
         on_dismiss: None,
     }
@@ -660,6 +661,7 @@ pub struct DragUpDismissView<State: 'static> {
 /// wrapped content (e.g. a workspace row) still fires normally.
 pub fn drag_up_dismiss<State: 'static, V: View<State>>(content: V) -> DragUpDismissView<State> {
     DragUpDismissView {
+        // erasure: keep stored in a hand-written view, fed to its ChildPod
         content: any(content),
         on_dismiss: None,
     }
@@ -903,7 +905,10 @@ pub struct KeyboardAvoidView<State: 'static> {
 /// Wrap `child` so its bottom edge tracks the window's live keyboard
 /// occlusion. See the [`KeyboardAvoidView`] docs.
 pub fn avoid_keyboard<State: 'static, V: View<State>>(child: V) -> KeyboardAvoidView<State> {
-    KeyboardAvoidView { child: any(child) }
+    KeyboardAvoidView {
+        // erasure: keep stored in a hand-written view, fed to its ChildPod
+        child: any(child),
+    }
 }
 
 /// The retained widget for a [`KeyboardAvoidView`].

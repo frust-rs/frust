@@ -109,6 +109,7 @@ pub fn filled_box<State: 'static, V: View<State>>(
     radius: f64,
 ) -> FilledBox<State> {
     FilledBox {
+        // erasure: keep stored in a hand-written view, fed to its ChildPod
         child: any(child),
         color,
         radius,

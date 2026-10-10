@@ -41,8 +41,8 @@ use frust::authoring::{
     PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget,
 };
 use frust::{
-    Align, Alignment, AnimationController, AnyView, Column, Curve, EdgeInsets, Get, GetUntracked,
-    Padding, RwSignal, SizedBox, Update, any, text,
+    Align, Alignment, AnimationController, AnyView, Curve, EdgeInsets, Get, GetUntracked, Padding,
+    RwSignal, SizedBox, Update, any, column, row, text,
 };
 use frust_material::filled_card;
 
@@ -202,38 +202,39 @@ impl frust::Component for ToastOverlay {
         // Bottom-anchored stack of toast cards. An empty queue renders an empty
         // (zero-child) column that paints nothing, so the overlay is inert when
         // there is nothing to show.
-        let mut rows: Vec<AnyView<ToastOverlayState>> = Vec::new();
-        for entry in entries {
-            rows.push(any(toast_card(entry)));
-            rows.push(any(SizedBox(None, Some(8.0))));
-        }
+        // Each entry is a (card, 8px gap) pair, flattened in order.
+        let rows = column().children(
+            entries
+                .into_iter()
+                .map(|entry| (toast_card(entry), SizedBox(None, Some(8.0))))
+                .collect::<Vec<_>>(),
+        );
 
         // `Align` at the bottom-center places the toast column above the
         // keyboard/nav area; the overlay layer itself fills the window.
-        any(Align(Alignment::new(0.0, 1.0), Column(rows)))
+        Align(Alignment::new(0.0, 1.0), rows)
     }
 }
 
 /// Render one toast as a `filled_card` with its text and optional action button.
 fn toast_card(entry: ToastEntry) -> impl View<ToastOverlayState> {
     let id = entry.id;
-    let mut row: Vec<AnyView<ToastOverlayState>> = vec![any(text(entry.text).size(14.0))];
-
-    if let Some(action) = entry.action {
-        row.push(any(SizedBox(Some(12.0), None)));
-        let callback = action.callback.clone();
-        row.push(any(frust::Button(
-            action.label,
-            move |st: &mut ToastOverlayState| {
-                (callback)();
-                st.controller.dismiss(id);
-            },
-        )));
-    }
+    let content = row()
+        .child(text(entry.text).size(14.0))
+        .when_some(entry.action, |r, action| {
+            let callback = action.callback.clone();
+            r.child(SizedBox(Some(12.0), None)).child(frust::Button(
+                action.label,
+                move |st: &mut ToastOverlayState| {
+                    (callback)();
+                    st.controller.dismiss(id);
+                },
+            ))
+        });
 
     toast_entrance(Padding(
         EdgeInsets::all(8.0),
-        filled_card(Padding(EdgeInsets::symmetric(16.0, 12.0), frust::Row(row))),
+        filled_card(Padding(EdgeInsets::symmetric(16.0, 12.0), content)),
     ))
 }
 
@@ -250,6 +251,7 @@ const ENTRANCE_SLIDE: f64 = 28.0;
 /// [`ENTRANCE`] on first appearance — see the [module docs](self)' entrance note.
 pub fn toast_entrance<State: 'static, V: View<State>>(content: V) -> ToastEntrance<State> {
     ToastEntrance {
+        // erasure: keep stored in a hand-written view, fed to its ChildPod
         content: any(content),
     }
 }

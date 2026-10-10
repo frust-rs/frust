@@ -51,9 +51,8 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use frust::{
-    Align, Alignment, AnimationController, AnyView, Column, Curve, EdgeInsets, FrameTime,
-    GestureDetector, Get, GetUntracked, Padding, Row, RwSignal, Set, SizedBox, View, any, stack,
-    text,
+    Align, Alignment, AnimationController, Column, Curve, EdgeInsets, FrameTime, GestureDetector,
+    Get, GetUntracked, Padding, RwSignal, Set, SizedBox, View, row, stack, text, views,
 };
 use frust_material::filled_card;
 
@@ -186,18 +185,17 @@ fn entrance_progress() -> RwSignal<f64> {
 
 /// The workspace-switcher page: a full-bleed scrim behind a top-anchored,
 /// full-width drawer panel that slides down into place on first appearance.
-pub fn workspace_drawer_screen() -> AnyView<HuddleState> {
+pub fn workspace_drawer_screen() -> impl View<HuddleState> {
     // Tracked read: a write from the entrance ticker wakes this page's own
     // rebuild until the animation settles at `1.0`.
     let progress = entrance_progress().get().clamp(0.0, 1.0);
     let top_offset = (1.0 - progress) * ENTRANCE_SLIDE_DISTANCE;
 
-    let scrim: AnyView<HuddleState> = any(GestureDetector(SizedBox(Some(FILL), Some(FILL)))
-        .on_tap(|s: &mut HuddleState| {
-            s.nav.router().pop();
-        }));
+    let scrim = GestureDetector(SizedBox(Some(FILL), Some(FILL))).on_tap(|s: &mut HuddleState| {
+        s.nav.router().pop();
+    });
 
-    let rows: Vec<AnyView<HuddleState>> = WORKSPACES.iter().map(workspace_row).collect();
+    let rows = views(WORKSPACES.iter().map(workspace_row));
     // Drag-up-to-dismiss: a vertical drag upward on the panel past
     // its own threshold pops the route, mirroring the scrim tap below —
     // `ui::sheet::drag_up_dismiss` is the sheet's downward drag-dismiss
@@ -214,34 +212,35 @@ pub fn workspace_drawer_screen() -> AnyView<HuddleState> {
         },
         panel_content,
     );
-    let panel: AnyView<HuddleState> = any(Align(Alignment::new(0.0, -1.0), panel_slid));
+    let panel = Align(Alignment::new(0.0, -1.0), panel_slid);
 
-    any(stack().child(scrim).child(panel))
+    stack().child(scrim).child(panel)
 }
 
 /// One tappable workspace row: an initials tile, name, and a trailing
 /// checkmark (active) or unread count.
-fn workspace_row(ws: &Workspace) -> AnyView<HuddleState> {
+fn workspace_row(ws: &Workspace) -> impl View<HuddleState> {
     let name = ws.name;
     let active = ws.active;
     let unread = ws.unread;
 
-    let mut cells: Vec<AnyView<HuddleState>> = vec![
-        any(initials_tile(ws.initials, 40.0, 16.0)),
-        any(SizedBox(Some(12.0), None)),
-        any(text(name).size(16.0)),
-    ];
-    if active {
-        cells.push(any(SizedBox(Some(8.0), None)));
-        cells.push(any(text("\u{2713}").size(16.0))); // check mark: the active workspace
-    } else if unread > 0 {
-        cells.push(any(SizedBox(Some(8.0), None)));
-        cells.push(any(text(format!("{unread}")).size(14.0)));
-    }
+    let cells = row()
+        .child(initials_tile(ws.initials, 40.0, 16.0))
+        .child(SizedBox(Some(12.0), None))
+        .child(text(name).size(16.0))
+        // check mark: the active workspace
+        .when(active, |r| {
+            r.child(SizedBox(Some(8.0), None))
+                .child(text("\u{2713}").size(16.0))
+        })
+        .when(!active && unread > 0, |r| {
+            r.child(SizedBox(Some(8.0), None))
+                .child(text(format!("{unread}")).size(14.0))
+        });
 
-    any(Padding(
+    Padding(
         EdgeInsets::symmetric(16.0, 12.0),
-        GestureDetector(Row(cells)).on_tap(move |s: &mut HuddleState| {
+        GestureDetector(cells).on_tap(move |s: &mut HuddleState| {
             // Tapping the already-active workspace does nothing (see the
             // module docs: no real multi-workspace state exists to switch).
             if active {
@@ -250,7 +249,7 @@ fn workspace_row(ws: &Workspace) -> AnyView<HuddleState> {
             s.toasts.show(format!("Switched to {name}"));
             s.nav.router().pop();
         }),
-    ))
+    )
 }
 
 /// A rounded initials tile — see

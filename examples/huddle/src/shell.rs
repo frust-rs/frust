@@ -16,9 +16,7 @@
 
 use std::rc::Rc;
 
-use frust::{
-    AnyView, DesignLanguage, Get, RouterDeepLinks, RwSignal, Set, any, icon, icons, safe_area,
-};
+use frust::{DesignLanguage, Get, RouterDeepLinks, RwSignal, Set, View, icon, icons, safe_area};
 use frust_cupertino::{cupertino_tab_bar, tab_item};
 use frust_glyph::{glyph_nav_bar, glyph_nav_item_icon};
 use frust_material::{nav_item, navigation_bar};
@@ -179,10 +177,10 @@ pub fn bottom_bar(
     design: DesignLanguage,
     nav: Rc<RouterDeepLinks<HuddleState>>,
     tab: RwSignal<Tab>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let selected = tab.get().index();
     match design {
-        DesignLanguage::Material3 => any(safe_area(navigation_bar::<HuddleState, _>(
+        DesignLanguage::Material3 => safe_area(navigation_bar::<HuddleState, _>(
             Tab::ALL
                 .iter()
                 .map(|t| nav_item::<HuddleState>(t.label()).icon(icon(t.icon()).size(24.0)))
@@ -195,11 +193,11 @@ pub fn bottom_bar(
             },
         ))
         .top(false)
-        .bottom(false)),
+        .bottom(false),
         // `glyph_nav_bar`'s (items, selected, on_select(index)) shape is the
         // same controlled-index contract `navigation_bar`/`cupertino_tab_bar`
         // use above, so it fits this shell's tab model directly.
-        DesignLanguage::Glyph => any(safe_area(glyph_nav_bar::<HuddleState, _>(
+        DesignLanguage::Glyph => safe_area(glyph_nav_bar::<HuddleState, _>(
             Tab::ALL
                 .iter()
                 .map(|t| glyph_nav_item_icon(t.glyph_icon(), t.label()))
@@ -211,8 +209,8 @@ pub fn bottom_bar(
                 nav.router().go(t.route());
             },
         ))
-        .top(false)),
-        DesignLanguage::Cupertino => any(safe_area(cupertino_tab_bar::<HuddleState, _>(
+        .top(false),
+        DesignLanguage::Cupertino => safe_area(cupertino_tab_bar::<HuddleState, _>(
             Tab::ALL
                 .iter()
                 .map(|t| tab_item::<HuddleState>(t.label()).icon(icon(t.icon()).size(24.0)))
@@ -224,10 +222,10 @@ pub fn bottom_bar(
                 nav.router().go(t.route());
             },
         ))
-        .top(false)),
+        .top(false),
         _ => {
             // external design systems (DesignLanguage::Custom) fall back to Material chrome here
-            any(safe_area(navigation_bar::<HuddleState, _>(
+            safe_area(navigation_bar::<HuddleState, _>(
                 Tab::ALL
                     .iter()
                     .map(|t| nav_item::<HuddleState>(t.label()).icon(icon(t.icon()).size(24.0)))
@@ -240,7 +238,7 @@ pub fn bottom_bar(
                 },
             ))
             .top(false)
-            .bottom(false))
+            .bottom(false)
         }
     }
 }

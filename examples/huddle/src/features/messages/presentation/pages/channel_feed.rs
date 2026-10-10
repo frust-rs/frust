@@ -93,9 +93,10 @@ use std::sync::Arc;
 
 use frust::{
     Align, Alignment, AnyView, Axis, ChildKey, Color, CrossAxisAlignment, DesignLanguage,
-    EdgeInsets, FlexView, GestureDetector, Get, GetUntracked, ListView, NavigatorController,
-    Padding, RwSignal, Set, SizedBox, Theme, Update, View, any, column, hero, icon, icons,
-    inflexible, kurbo::Size, row, stack, text, text_input, use_context,
+    EdgeInsets, Either, FlexView, GestureDetector, Get, GetUntracked, ListView,
+    NavigatorController, Padding, RwSignal, Set, SizedBox, Theme, Update, View, any, column,
+    either, hero, icon, icons, inflexible, kurbo::Size, row, stack, text, text_input, use_context,
+    views,
 };
 use frust_cupertino::cupertino_activity_indicator;
 use frust_material::{app_bar, assist_chip, filter_chip, loading_indicator};
@@ -274,11 +275,11 @@ pub fn channel_feed(
     let body = feed_body(&controller, design, sheet_sig);
     let composer_row = composer_bar(&controller, composer, sheet_sig);
 
-    let screen = any(column()
+    let screen = column()
         .child(bar)
         .flex(1, body)
         .child(composer_row)
-        .cross_axis(CrossAxisAlignment::Stretch));
+        .cross_axis(CrossAxisAlignment::Stretch);
 
     // The message-action sheet mounts in the screen's own `Stack` top layer
     // (see `crate::ui::sheet`); when closed it is an inert zero-size box, so the
@@ -294,12 +295,14 @@ fn feed_sheet(
     controller: &Arc<MessagesController>,
     composer: RwSignal<String>,
     sheet_sig: RwSignal<FeedSheet>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     let dismiss = move |_st: &mut HuddleState| sheet_sig.set(FeedSheet::None);
+    // Two view types: the inert spacer, or a `SheetView` (which erases its
+    // content once inside).
     match sheet_sig.get() {
-        FeedSheet::None => any(SizedBox(None, None)),
+        FeedSheet::None => Either::Left(SizedBox(None, None)),
         FeedSheet::Menu(id) => {
-            any(sheet(action_menu(feed_menu_rows(id, sheet_sig))).on_dismiss(dismiss))
+            Either::Right(sheet(action_menu(feed_menu_rows(id, sheet_sig))).on_dismiss(dismiss))
         }
         FeedSheet::Emoji(target) => {
             let ctrl = Arc::clone(controller);
@@ -310,10 +313,10 @@ fn feed_sheet(
                 }
                 sheet_sig.set(FeedSheet::None);
             });
-            any(sheet(picker).on_dismiss(dismiss))
+            Either::Right(sheet(picker).on_dismiss(dismiss))
         }
         FeedSheet::Attach => {
-            any(sheet(action_menu(attachment_rows(sheet_sig))).on_dismiss(dismiss))
+            Either::Right(sheet(action_menu(attachment_rows(sheet_sig))).on_dismiss(dismiss))
         }
     }
 }
@@ -421,6 +424,7 @@ impl FeedRow {
 /// The scrolling feed area: skeletons while loading, else the keyed,
 /// variable-extent `ListView` with the near-start pagination trigger. See the
 /// [module docs](self)' *Feed container* section.
+// erasure: keep three-exit body (skeletons / empty state / keyed list)
 fn feed_body(
     controller: &Arc<MessagesController>,
     design: DesignLanguage,
@@ -485,6 +489,7 @@ fn feed_body(
 
 /// One feed row's view: the two singleton rows unchanged from the earlier
 /// keyed `Column`, or a real message row.
+// erasure: keep three-type match arms feeding the ListView builder
 fn feed_row_view(
     controller: &Arc<MessagesController>,
     row: &FeedRow,
@@ -493,7 +498,7 @@ fn feed_row_view(
 ) -> AnyView<HuddleState> {
     match row {
         FeedRow::LoadingOlder => any(loading_older_row(design)),
-        FeedRow::Message(msg) => message_row(controller, msg, sheet_sig),
+        FeedRow::Message(msg) => any(message_row(controller, msg, sheet_sig)),
         FeedRow::Typing => any(typing_row(design)),
     }
 }
@@ -511,31 +516,32 @@ fn message_row(
     controller: &Arc<MessagesController>,
     msg: &FeedMessage,
     sheet_sig: RwSignal<FeedSheet>,
-) -> AnyView<HuddleState> {
-    let bubble = message_bubble(controller, msg, sheet_sig);
-    if msg.is_own() {
-        let row = row().flex(1, SizedBox(None, None)).child(bubble);
-        return any(Padding(EdgeInsets::symmetric(0.0, 4.0), row));
-    }
+) -> impl View<HuddleState> {
+    let bubble = || message_bubble(controller, msg, sheet_sig);
+    let own = || row().flex(1, SizedBox(None, None)).child(bubble());
+    let other = || {
+        let row = row()
+            .child(avatar(controller, msg.author_id))
+            .child(SizedBox(Some(8.0), None))
+            .child(bubble())
+            .flex(1, SizedBox(None, None))
+            .cross_axis(CrossAxisAlignment::Start);
 
-    let row = row()
-        .child(avatar(controller, msg.author_id))
-        .child(SizedBox(Some(8.0), None))
-        .child(bubble)
-        .flex(1, SizedBox(None, None))
-        .cross_axis(CrossAxisAlignment::Start);
-
-    // Swipe right → open the thread (starting it if the message has none yet —
-    // the thread screen already handles an empty thread).
-    let root_id = msg.id;
-    let reply = swipeable_row(row).on_swipe_right_marked(
-        REPLY_COLOR,
-        SwipeMarker::Reply,
-        move |st: &mut HuddleState| {
-            st.nav.router().push(&format!("/thread/{root_id}"));
-        },
-    );
-    any(Padding(EdgeInsets::symmetric(0.0, 4.0), reply))
+        // Swipe right → open the thread (starting it if the message has none yet —
+        // the thread screen already handles an empty thread).
+        let root_id = msg.id;
+        swipeable_row(row).on_swipe_right_marked(
+            REPLY_COLOR,
+            SwipeMarker::Reply,
+            move |st: &mut HuddleState| {
+                st.nav.router().push(&format!("/thread/{root_id}"));
+            },
+        )
+    };
+    Padding(
+        EdgeInsets::symmetric(0.0, 4.0),
+        either(msg.is_own(), own, other),
+    )
 }
 
 /// The flat message content: author line (others only), body, reaction chips,
@@ -548,27 +554,25 @@ fn message_bubble(
     msg: &FeedMessage,
     sheet_sig: RwSignal<FeedSheet>,
 ) -> impl View<HuddleState> {
-    let mut lines: Vec<AnyView<HuddleState>> = Vec::new();
+    let sender = if msg.is_own() {
+        None
+    } else {
+        controller.user(msg.author_id)
+    };
 
-    if !msg.is_own()
-        && let Some(user) = controller.user(msg.author_id)
-    {
+    let lines = column()
         // Sender + timestamp on one line: 13 (a combined meta line between the
         // sizing table's sender-15 and timestamp-12 roles — `Text` has no
         // mixed-run weight/size, so it's one size, per the chat-row conventions).
-        lines.push(any(text(format!("{}  ·  9:41 AM", user.name)).size(13.0)));
-    }
-
-    lines.push(message_body(msg));
-
-    let reactions = reaction_chips(controller, msg);
-    if let Some(reactions) = reactions {
-        lines.push(reactions);
-    }
-
-    if msg.reply_count() > 0 {
-        lines.push(any(thread_affordance(msg)));
-    }
+        .when_some(sender, |c, user| {
+            c.child(text(format!("{}  ·  9:41 AM", user.name)).size(13.0))
+        })
+        .child(message_body(msg))
+        .when_some(reaction_chips(controller, msg), |c, reactions| {
+            c.child(reactions)
+        })
+        .when(msg.reply_count() > 0, |c| c.child(thread_affordance(msg)))
+        .cross_axis(CrossAxisAlignment::Start);
 
     // FLAT ROW: no `filled_card`/
     // `elevated_card` wrapper — that card's hardcoded 16px inset was the size
@@ -577,14 +581,7 @@ fn message_bubble(
     // the row layout (own right-aligned, others left with an avatar — see
     // `message_row`), NOT a per-bubble background tint (see RESULT: dropped as
     // not trivially expressible full-width behind variable-height content).
-    let inner = Padding(
-        EdgeInsets::symmetric(12.0, 6.0),
-        FlexView::new(
-            Axis::Vertical,
-            lines.into_iter().map(inflexible).collect::<Vec<_>>(),
-        )
-        .cross_axis(CrossAxisAlignment::Start),
-    );
+    let inner = Padding(EdgeInsets::symmetric(12.0, 6.0), lines);
 
     let id = msg.id;
     GestureDetector(inner).on_long_press(move |_st: &mut HuddleState| {
@@ -593,14 +590,15 @@ fn message_bubble(
 }
 
 /// The message body: plain text, a link-preview card, or a file-stub card.
-fn message_body(msg: &FeedMessage) -> AnyView<HuddleState> {
+fn message_body(msg: &FeedMessage) -> impl View<HuddleState> {
+    // Two view types: plain text, or a `FilledBox` tile (both attachment arms).
     match &msg.body {
-        FeedBody::Text(t) => any(text(t.clone()).size(15.0)),
+        FeedBody::Text(t) => Either::Left(text(t.clone()).size(15.0)),
         // Attachment tiles keep a boxed look but COMPACT:
         // `filled_box(radius 8) + Padding(10)`, not a `filled_card`/
         // `outlined_card` (whose 16px inset would balloon the tile like it did
         // the whole feed).
-        FeedBody::Link { url, title } => any(filled_box(
+        FeedBody::Link { url, title } => Either::Right(filled_box(
             Padding(
                 EdgeInsets::all(10.0),
                 column()
@@ -616,7 +614,7 @@ fn message_body(msg: &FeedMessage) -> AnyView<HuddleState> {
             TILE_FILL,
             8.0,
         )),
-        FeedBody::File { name, size } => any(filled_box(
+        FeedBody::File { name, size } => Either::Right(filled_box(
             Padding(
                 EdgeInsets::all(10.0),
                 row()
@@ -643,7 +641,7 @@ fn message_body(msg: &FeedMessage) -> AnyView<HuddleState> {
 fn reaction_chips(
     controller: &Arc<MessagesController>,
     msg: &FeedMessage,
-) -> Option<AnyView<HuddleState>> {
+) -> Option<impl View<HuddleState>> {
     if msg.reactions.is_empty() && msg.is_own() {
         return None;
     }
@@ -672,10 +670,10 @@ fn reaction_chips(
         .leading("+"),
     ));
 
-    Some(any(Padding(
+    Some(Padding(
         EdgeInsets::symmetric(0.0, 6.0),
         FlexView::new(Axis::Horizontal, chips).cross_axis(CrossAxisAlignment::Center),
-    )))
+    ))
 }
 
 /// The "N replies →" thread affordance; tapping pushes `/thread/:id` via
@@ -711,7 +709,7 @@ fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> impl View<Hud
         .user(author_id)
         .map(|u| u.initials)
         .unwrap_or("?");
-    let tile = any(stack()
+    let tile = stack()
         .child(fill_box(
             Size::new(AVATAR_SIZE, AVATAR_SIZE),
             avatar_color(author_id),
@@ -724,7 +722,7 @@ fn avatar(controller: &Arc<MessagesController>, author_id: u32) -> impl View<Hud
                     .size(AVATAR_MONOGRAM_SIZE)
                     .color(Color::WHITE),
             )),
-        ));
+        );
     GestureDetector(hero(format!("avatar-{author_id}"), tile)).on_tap(
         move |st: &mut HuddleState| {
             st.nav.router().push(&format!("/user/{author_id}"));
@@ -746,16 +744,7 @@ fn empty_feed_state() -> impl View<HuddleState> {
 
 /// The typing indicator row (a self-animating facade spinner + label).
 fn typing_row(design: DesignLanguage) -> impl View<HuddleState> {
-    let spinner: AnyView<HuddleState> = match design {
-        DesignLanguage::Cupertino => any(cupertino_activity_indicator()),
-        // Glyph has no spinner chrome baseline yet —
-        // falls through to the Material3 arm for now.
-        DesignLanguage::Material3 | DesignLanguage::Glyph => any(loading_indicator()),
-        _ => {
-            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
-            any(loading_indicator())
-        }
-    };
+    let spinner = design_spinner(design);
     Padding(
         EdgeInsets::symmetric(4.0, 8.0),
         row()
@@ -768,16 +757,7 @@ fn typing_row(design: DesignLanguage) -> impl View<HuddleState> {
 
 /// The "loading older…" row shown at the top while an older page is fetched.
 fn loading_older_row(design: DesignLanguage) -> impl View<HuddleState> {
-    let spinner: AnyView<HuddleState> = match design {
-        DesignLanguage::Cupertino => any(cupertino_activity_indicator()),
-        // Glyph has no spinner chrome baseline yet —
-        // falls through to the Material3 arm for now.
-        DesignLanguage::Material3 | DesignLanguage::Glyph => any(loading_indicator()),
-        _ => {
-            // external design systems (DesignLanguage::Custom) fall back to Material chrome here
-            any(loading_indicator())
-        }
-    };
+    let spinner = design_spinner(design);
     Padding(
         EdgeInsets::all(8.0),
         frust::Align(
@@ -791,6 +771,18 @@ fn loading_older_row(design: DesignLanguage) -> impl View<HuddleState> {
     )
 }
 
+/// The design language's self-animating spinner: Cupertino's activity
+/// indicator, else the Material one. Glyph has no spinner chrome baseline yet,
+/// and external design systems (`DesignLanguage::Custom`) fall back to Material
+/// chrome, so both take the Material arm.
+fn design_spinner(design: DesignLanguage) -> impl View<HuddleState> {
+    either(
+        matches!(design, DesignLanguage::Cupertino),
+        cupertino_activity_indicator,
+        loading_indicator,
+    )
+}
+
 /// The loading skeleton: a column of flat grey placeholder bars. Each bar is a
 /// stretched [`fill_box`] (full row width, [`SKELETON_HEIGHT`] tall) in 6px
 /// vertical padding — a ~52px flat row, down from the old 92px `filled_card`
@@ -798,20 +790,17 @@ fn loading_older_row(design: DesignLanguage) -> impl View<HuddleState> {
 /// Under `CrossAxisAlignment::Stretch` the fill_box's nominal width
 /// is overridden by the tight cross-axis constraint, so it fills the row.
 fn skeletons() -> impl View<HuddleState> {
-    let mut rows: Vec<AnyView<HuddleState>> = Vec::new();
-    for _ in 0..SKELETON_COUNT {
-        rows.push(any(Padding(
+    let rows = views((0..SKELETON_COUNT).map(|_| {
+        Padding(
             EdgeInsets::symmetric(0.0, 6.0),
             fill_box(Size::new(0.0, SKELETON_HEIGHT), SKELETON_FILL, 8.0),
-        )));
-    }
+        )
+    }));
     Padding(
         EdgeInsets::all(8.0),
-        FlexView::new(
-            Axis::Vertical,
-            rows.into_iter().map(inflexible).collect::<Vec<_>>(),
-        )
-        .cross_axis(CrossAxisAlignment::Stretch),
+        column()
+            .children(rows)
+            .cross_axis(CrossAxisAlignment::Stretch),
     )
 }
 
@@ -847,19 +836,21 @@ fn composer_bar(
     });
 
     let send_ctrl = Arc::clone(controller);
-    let send_icon = icon(icons::SEND).size(24.0);
-    let send_btn: AnyView<HuddleState> = if has_text {
+    let send_icon = || icon(icons::SEND).size(24.0);
+    let send_btn = either(
+        has_text,
         // press_pop adds the pressed-state scale dip.
-        any(press_pop(frust::GestureDetector(send_icon).on_tap(
-            move |_st: &mut HuddleState| {
-                let text = composer.get_untracked();
-                submit(&send_ctrl, composer, text);
-            },
-        )))
-    } else {
+        move || {
+            press_pop(
+                frust::GestureDetector(send_icon()).on_tap(move |_st: &mut HuddleState| {
+                    let text = composer.get_untracked();
+                    submit(&send_ctrl, composer, text);
+                }),
+            )
+        },
         // Empty: the button is inert (no handler), just the glyph.
-        any(send_icon)
-    };
+        send_icon,
+    );
 
     // Rides above the on-screen keyboard: the
     // composer sits at the window bottom under edge-to-edge + `adjustResize`

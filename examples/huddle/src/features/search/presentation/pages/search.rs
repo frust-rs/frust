@@ -45,9 +45,9 @@
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, GestureDetector, Get, Padding, Set, SizedBox, TextInput, View, any, column, hero,
-    icon, icons, keyed, row, scroll_view, text, use_context,
+    Align, Alignment, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
+    GestureDetector, Get, Padding, Set, SizedBox, TextInput, View, column, hero, icon, icons,
+    keyed, row, scroll_view, text, use_context,
 };
 use frust_material::{filled_card, list_item};
 
@@ -80,10 +80,10 @@ pub fn search_screen() -> impl View<HuddleState> {
     let query = controller.query.get();
     let results = controller.results.get();
 
-    let children: Vec<AnyView<HuddleState>> = vec![
-        any(search_field(controller, &query)),
-        any(results_container(&query, results, &repo)),
-    ];
+    let children = (
+        search_field(controller, &query),
+        results_container(&query, results, &repo),
+    );
 
     scaffold("Search", scroll_view(Column(children)))
 }
@@ -146,7 +146,7 @@ fn search_field(controller: SearchController, query: &str) -> impl View<HuddleSt
         clear_icon = clear_icon.color(Color::TRANSPARENT);
     }
 
-    let row: AnyView<HuddleState> = any(row()
+    let field_row = row()
         .flex(1, field)
         .child(
             GestureDetector(clear_icon).on_tap(move |_s: &mut HuddleState| {
@@ -157,10 +157,10 @@ fn search_field(controller: SearchController, query: &str) -> impl View<HuddleSt
                 }
             }),
         )
-        .cross_axis(CrossAxisAlignment::Center));
+        .cross_axis(CrossAxisAlignment::Center);
 
     SizedBox::<HuddleState>(None, Some(FIELD_HEIGHT))
-        .child(Padding(EdgeInsets::symmetric(16.0, 0.0), row))
+        .child(Padding(EdgeInsets::symmetric(16.0, 0.0), field_row))
 }
 
 /// The empty-query hint state: `icons::SEARCH` plus a short instruction.

@@ -114,6 +114,7 @@ pub struct SwipeableRow<State: 'static> {
 /// Wrap `child` in a swipeable row (no actions until one is attached).
 pub fn swipeable_row<State: 'static, V: View<State>>(child: V) -> SwipeableRow<State> {
     SwipeableRow {
+        // erasure: keep stored in a hand-written view, fed to its ChildPod
         child: any(child),
         swipe_right: None,
         swipe_left: None,
@@ -576,7 +577,10 @@ pub struct PressPop<State: 'static> {
 
 /// Wrap `child` so a press scales it to [`PRESS_SCALE`] and a release restores it.
 pub fn press_pop<State: 'static, V: View<State>>(child: V) -> PressPop<State> {
-    PressPop { child: any(child) }
+    PressPop {
+        // erasure: keep stored in a hand-written view, fed to its ChildPod
+        child: any(child),
+    }
 }
 
 /// The retained widget for a [`PressPop`].
