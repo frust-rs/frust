@@ -62,7 +62,7 @@ pub struct BreadcrumbListView<State: 'static> {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn breadcrumb_list<State: 'static, M>(
     children: impl ViewSeq<State, M>,
 ) -> BreadcrumbListView<State> {
@@ -80,7 +80,7 @@ pub fn breadcrumb_list<State: 'static, M>(
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn breadcrumb<State: 'static, M>(
     children: impl ViewSeq<State, M>,
 ) -> BreadcrumbListView<State> {

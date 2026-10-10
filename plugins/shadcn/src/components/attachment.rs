@@ -111,7 +111,7 @@ pub struct AttachmentView<State: 'static> {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn attachment<State: 'static, M>(children: impl ViewSeq<State, M>) -> AttachmentView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);
@@ -445,7 +445,7 @@ pub struct AttachmentContentView<State: 'static> {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn attachment_content<State: 'static, M>(
     children: impl ViewSeq<State, M>,
 ) -> AttachmentContentView<State> {
@@ -570,7 +570,7 @@ pub struct AttachmentRowView<State: 'static> {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn attachment_actions<State: 'static, M>(
     children: impl ViewSeq<State, M>,
 ) -> AttachmentRowView<State> {
@@ -588,7 +588,7 @@ pub fn attachment_actions<State: 'static, M>(
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn attachment_group<State: 'static, M>(
     children: impl ViewSeq<State, M>,
 ) -> AttachmentRowView<State> {

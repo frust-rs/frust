@@ -740,7 +740,7 @@ fn with_gaps<State: 'static, M>(
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn stack_slots<State: 'static, M>(
     children: impl ViewSeq<State, M>,
     gap: f64,
@@ -770,7 +770,7 @@ pub fn stack_slots<State: 'static, M>(
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn trailing_row<State: 'static, M>(
     children: impl ViewSeq<State, M>,
     gap: f64,

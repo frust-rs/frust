@@ -112,7 +112,7 @@ pub struct ItemView<State: 'static> {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn item<State: 'static, M>(children: impl ViewSeq<State, M>) -> ItemView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);
@@ -519,7 +519,7 @@ pub struct ItemContentView<State: 'static> {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn item_content<State: 'static, M>(children: impl ViewSeq<State, M>) -> ItemContentView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);
@@ -638,7 +638,7 @@ pub struct ItemRowView<State: 'static> {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn item_actions<State: 'static, M>(children: impl ViewSeq<State, M>) -> ItemRowView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);
@@ -653,7 +653,7 @@ pub fn item_actions<State: 'static, M>(children: impl ViewSeq<State, M>) -> Item
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn item_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> ItemRowView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);
@@ -668,7 +668,7 @@ pub fn item_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> ItemR
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn item_footer<State: 'static, M>(children: impl ViewSeq<State, M>) -> ItemRowView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);

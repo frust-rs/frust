@@ -310,7 +310,7 @@ const GROUP_GAP: f64 = style::SPACING_UNIT * 2.0;
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn bubble_group<State: 'static, M>(children: impl ViewSeq<State, M>) -> BubbleGroupView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);

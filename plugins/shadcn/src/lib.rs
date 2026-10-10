@@ -42,20 +42,27 @@
 //! runs before any shell construction:
 //!
 //! ```no_run
-//! use frust::{Component, View, any, text};
+//! use frust::{Component, View, column, text};
 //!
 //! #[derive(Default)]
 //! struct MyApp;
 //!
 //! impl Component for MyApp {
 //!     type State = ();
+//!
 //!     fn init(&self) -> Self::State {}
+//!
 //!     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
-//!         any(text("shadcn"))
+//!         column().child(text("shadcn"))
 //!     }
 //! }
 //!
-//! frust::app!(MyApp, setup = { frust_shadcn::install(); });
+//! frust::app!(
+//!     MyApp,
+//!     setup = {
+//!         frust_shadcn::install();
+//!     }
+//! );
 //! # fn main() {}
 //! ```
 //!
