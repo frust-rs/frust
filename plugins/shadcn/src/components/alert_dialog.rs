@@ -85,7 +85,7 @@ fn config(size: AlertDialogSize) -> ModalConfig {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn alert_dialog<State: 'static, M>(children: impl ViewSeq<State, M>) -> AlertDialogView<State> {
     AlertDialogView {
         inner: modal(
@@ -100,7 +100,7 @@ pub fn alert_dialog<State: 'static, M>(children: impl ViewSeq<State, M>) -> Aler
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn alert_dialog_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     stack_slots(children, HEADER_GAP, EdgeInsets::all(0.0))
 }
@@ -124,7 +124,7 @@ pub fn alert_dialog_description<State: 'static>(description: impl Into<String>) 
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn alert_dialog_footer<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     trailing_row(children, FOOTER_GAP, EdgeInsets::all(0.0))
 }

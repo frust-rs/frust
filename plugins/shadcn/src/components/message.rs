@@ -131,7 +131,7 @@ pub struct MessageGroupView<State: 'static> {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn message_group<State: 'static, M>(
     children: impl ViewSeq<State, M>,
 ) -> MessageGroupView<State> {
@@ -221,7 +221,7 @@ pub struct MessageView<State: 'static> {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn message<State: 'static, M>(children: impl ViewSeq<State, M>) -> MessageView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);
@@ -484,7 +484,7 @@ pub struct MessageContentView<State: 'static> {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn message_content<State: 'static, M>(
     children: impl ViewSeq<State, M>,
 ) -> MessageContentView<State> {

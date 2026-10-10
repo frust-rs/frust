@@ -66,7 +66,7 @@ fn interleave<State: 'static>(children: Vec<AnyView<State>>, gap: f64) -> Vec<An
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn card<State: 'static, M>(children: impl ViewSeq<State, M>) -> CardView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);
@@ -85,7 +85,7 @@ pub fn card<State: 'static, M>(children: impl ViewSeq<State, M>) -> CardView<Sta
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn card_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);
@@ -103,7 +103,7 @@ pub fn card_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyVi
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn card_header_with_action<State: 'static, M>(
     children: impl ViewSeq<State, M>,
     action: impl View<State> + 'static,
@@ -152,7 +152,7 @@ pub fn card_content<State: 'static>(child: impl View<State> + 'static) -> AnyVie
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn card_footer<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);

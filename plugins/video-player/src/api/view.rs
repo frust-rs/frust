@@ -30,9 +30,15 @@ use super::handle::VideoPlayerHandle;
 /// controls in a [`frust::Column`]:
 ///
 /// ```no_run
-/// use frust::{AnyView, Column, any, text};
+/// use frust::{View, column, text};
 /// use frust_video_player::api::{VideoPlayerHandle, video_view};
 /// use frust_video_player::{PlayerOptions, VideoFit, VideoPlayer, VideoSource};
+///
+/// fn page(handle: &VideoPlayerHandle) -> impl View<()> {
+///     column()
+///         .child(video_view(handle, VideoFit::Contain))
+///         .child(text("Play / Pause / Seek go here"))
+/// }
 ///
 /// let session = VideoPlayer::open(
 ///     VideoSource::Url("https://example.invalid/clip.mp4".to_owned()),
@@ -40,11 +46,7 @@ use super::handle::VideoPlayerHandle;
 /// )
 /// .expect("open");
 /// let handle = VideoPlayerHandle::new(session);
-///
-/// let _page: AnyView<()> = any(Column(vec![
-///     any(video_view(&handle, VideoFit::Contain)),
-///     any(text("Play / Pause / Seek go here")),
-/// ]));
+/// let _page = page(&handle);
 /// ```
 ///
 /// Overlaying controls **inside a [`frust::Stack`]**, on top of this slot,
