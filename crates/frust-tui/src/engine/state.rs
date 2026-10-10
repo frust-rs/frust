@@ -404,11 +404,18 @@ impl AppState {
     /// the whole life of a running server. The open DAP settings dialog counts
     /// for exactly the same reason (its attached-editor count is the same kind
     /// of live registry read).
+    ///
+    /// A session's hot-patch success flash counts while it is fading
+    /// ([`SessionView::hot_patch_flash_live`]): the tick flows for exactly the
+    /// flash's [`SessionView::HOT_PATCH_FLASH_FRAMES`] and stops afterwards.
     pub fn animating(&self) -> bool {
         !self.toasts.items.is_empty()
             || self.mcp_panel_open
             || self.dap_settings_open
-            || self.sessions.iter().any(|s| is_transient(&s.state))
+            || self
+                .sessions
+                .iter()
+                .any(|s| is_transient(&s.state) || s.hot_patch_flash_live(self.animation_frame))
     }
 
     /// What the embedded MCP server is doing — the single read the UI (and
@@ -1079,6 +1086,20 @@ mod tests {
         let mut state = AppState::default();
         state.toasts.push(crate::engine::ToastKind::Info, "hi");
         assert!(state.animating());
+    }
+
+    #[test]
+    fn animating_true_only_while_a_running_sessions_hot_patch_flash_is_live() {
+        let mut state = AppState::default();
+        state
+            .sessions
+            .push(session_with_state(SessionState::Running));
+        state.animation_frame = 7;
+        state.sessions[0].hot_patch_flash = Some(7);
+        assert!(state.animating(), "a fresh flash keeps the tick alive");
+
+        state.animation_frame = 7 + SessionView::HOT_PATCH_FLASH_FRAMES;
+        assert!(!state.animating(), "an expired flash does not");
     }
 
     #[test]

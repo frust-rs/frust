@@ -338,6 +338,13 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
         // `animating()` is false and the runner never delivers a tick here —
         // the dirty-frame skip.
         Message::Tick => {
+            // A hot-patch flash live *before* this tick has a new (or, on its
+            // last tick, the idle) frame to paint — read before the advance so
+            // the tick that ends a fade still repaints the untinted tab.
+            let flash_animating = state
+                .sessions
+                .iter()
+                .any(|s| s.hot_patch_flash_live(state.animation_frame));
             state.animation_frame = state.animation_frame.wrapping_add(1);
             let toast_expired = state.toasts.tick();
             let session_animating = state
@@ -352,6 +359,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             Outcome::dirty(
                 toast_expired
                     || session_animating
+                    || flash_animating
                     || state.mcp_panel_open
                     || state.dap_settings_open,
             )
@@ -2738,6 +2746,9 @@ fn hot_patch_outcome(state: &mut AppState, session: SessionId, outcome: HotOutco
             state
                 .toasts
                 .push(ToastKind::Success, format!("patched in {ms} ms"));
+            // Stamp (or restart) the tab's one-shot success flash; only a
+            // completed patch flashes — every other outcome leaves it alone.
+            state.sessions[idx].hot_patch_flash = Some(state.animation_frame);
             Outcome::redraw()
         }
         HotOutcome::NoChange => {
@@ -3847,6 +3858,72 @@ mod tests {
         );
         assert!(!st.sessions[0].close_on_exit);
         assert!(st.sessions[0].watch);
+    }
+
+    #[test]
+    fn patched_stamps_the_flash_and_keeps_the_tick_alive_for_its_duration() {
+        let (mut st, a) = watched_desktop();
+        st.animation_frame = 40;
+        let patched = || {
+            outcome(
+                a,
+                HotOutcome::Patched {
+                    ms: 42,
+                    components: 3,
+                },
+            )
+        };
+
+        update(&mut st, patched());
+        assert_eq!(st.sessions[0].hot_patch_flash, Some(40));
+        assert_eq!(
+            toast_texts(&st, ToastKind::Success),
+            vec!["patched in 42 ms"],
+            "the toast stays"
+        );
+        // Isolate the flash from the toast's own (longer) claim on the tick.
+        st.toasts = crate::engine::Toasts::default();
+        assert!(st.animating());
+
+        for n in 1..SessionView::HOT_PATCH_FLASH_FRAMES {
+            let out = update(&mut st, Message::Tick);
+            assert!(out.redraw, "tick {n} paints the next fade frame");
+            assert!(st.animating(), "still fading after {n} ticks");
+        }
+        // The last tick repaints the idle colour, then the tick may stop.
+        let out = update(&mut st, Message::Tick);
+        assert!(out.redraw);
+        assert!(!st.animating());
+        let out = update(&mut st, Message::Tick);
+        assert!(!out.redraw, "an expired flash dirties nothing");
+
+        // A new patch restarts the fade from the current frame.
+        update(&mut st, patched());
+        assert_eq!(st.sessions[0].hot_patch_flash, Some(st.animation_frame));
+        st.toasts = crate::engine::Toasts::default();
+        assert!(st.animating());
+    }
+
+    #[test]
+    fn a_restart_required_outcome_does_not_flash() {
+        for other in [
+            HotOutcome::RestartRequired(RestartReason::NoSeamHit),
+            HotOutcome::NoChange,
+            HotOutcome::CompileFailed {
+                diagnostics: vec!["error[E0308]: mismatched types".to_string()],
+            },
+        ] {
+            let (mut st, a) = watched_desktop();
+            update(&mut st, outcome(a, other));
+            assert_eq!(st.sessions[0].hot_patch_flash, None);
+        }
+
+        // Nor does it disturb a flash already fading.
+        let (mut st, a) = watched_desktop();
+        st.sessions[0].hot_patch_flash = Some(3);
+        st.animation_frame = 5;
+        update(&mut st, outcome(a, HotOutcome::NoChange));
+        assert_eq!(st.sessions[0].hot_patch_flash, Some(3));
     }
 
     #[test]
