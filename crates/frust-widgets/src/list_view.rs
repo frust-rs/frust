@@ -1,5 +1,5 @@
 //! The virtualized `ListView`:
-//! `ListView::builder(item_count, item_extent, |index| -> AnyView)` with a
+//! `ListView::builder(item_count, item_extent, |index| -> impl View<State>)` with a
 //! uniform, required `item_extent` — or, on a keyed list,
 //! `ListView::builder_keyed(..).estimated_item_extent(px)` for rows that size
 //! themselves (see *Variable extents*, below). Its place in the widget set and

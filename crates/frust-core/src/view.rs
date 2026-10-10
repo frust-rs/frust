@@ -294,6 +294,10 @@ impl<State: 'static, V: View<State>> ErasedView<State> for V {
 /// and swapped in (signalling `LAYOUT | PAINT`). Its `Element` is a
 /// `Box<dyn Widget>`, which implements [`Widget`] through the blanket impl so it
 /// satisfies `View::Element: Widget`.
+///
+/// Erasure is idempotent, and the generic builders erase internally, so app code
+/// needs `AnyView` only for stored views, branches of three or more arms, and
+/// genuinely heterogeneous dynamic lists (see [`any`]).
 pub struct AnyView<State: 'static> {
     inner: Box<dyn ErasedView<State>>,
 }

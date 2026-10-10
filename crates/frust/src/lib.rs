@@ -52,13 +52,15 @@
 //! `(state, build)` pair:
 //!
 //! ```no_run
+//! use frust::text;
+//!
 //! struct AppState {
 //!     greeting: String,
 //! }
 //!
 //! // The build closure is generic over its return (`impl View<State>`), so it
 //! // returns the concrete view directly, with no erasure.
-//! let build = |state: &mut AppState| frust::text(state.greeting.clone()).size(32.0);
+//! let build = |state: &mut AppState| text(state.greeting.clone()).size(32.0);
 //!
 //! frust::App::new(AppState { greeting: "Hello from Frust".into() }, build)
 //!     .run()
@@ -197,16 +199,18 @@ pub use frust_widgets::scroll_controller::ItemAlignment;
 ///     hovering: bool,
 /// }
 ///
-/// // A tooltip: above its trigger, in the topmost band, and transparent to the
-/// // pointer so hovering the trigger is never interrupted by its own tip.
-/// fn trigger(state: &mut App) -> impl View<App> + use<> {
-///     overlay_portal(text("Save"))
-///         .overlay(state.hovering.then(|| text("Save the document")))
-///         .placement(OverlayPlacement::on(OverlaySide::Top))
-///         .band(OverlayBand::Tooltip)
-///         .input(OverlayInput::Transparent)
+/// impl App {
+///     // A tooltip: above its trigger, in the topmost band, and transparent to the
+///     // pointer so hovering the trigger is never interrupted by its own tip.
+///     fn trigger(state: &mut App) -> impl View<App> {
+///         overlay_portal(text("Save"))
+///             .overlay(state.hovering.then(|| text("Save the document")))
+///             .placement(OverlayPlacement::on(OverlaySide::Top))
+///             .band(OverlayBand::Tooltip)
+///             .input(OverlayInput::Transparent)
+///     }
 /// }
-/// # let _ = trigger;
+/// # let _ = App::trigger;
 /// ```
 pub use frust_core::{OutsideTap, OverlayBand, OverlayInput};
 
@@ -324,11 +328,15 @@ pub use frust_core::{
 ///     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
 ///         column()
 ///             .child(text("map below"))
-///             .child(
-///                 platform_view("dev.frust.MapFactory")
-///                     .params_json(r#"{"style":"dark"}"#)
-///                     .size(320.0, 240.0),
-///             )
+///             .child(Self::map())
+///     }
+/// }
+///
+/// impl MapDemo {
+///     fn map() -> impl View<()> {
+///         platform_view("dev.frust.MapFactory")
+///             .params_json(r#"{"style":"dark"}"#)
+///             .size(320.0, 240.0)
 ///     }
 /// }
 ///
@@ -373,7 +381,12 @@ pub use frust_widgets::{PlatformViewView, ShieldView, platform_view, shield};
 ///     }
 ///
 ///     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-///         let ticks = *state;
+///         Self::face(*state)
+///     }
+/// }
+///
+/// impl Clock {
+///     fn face(ticks: u32) -> impl View<u32> {
 ///         canvas(move |scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
 ///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x10, 0x10, 0x10));
 ///         })
@@ -425,15 +438,20 @@ pub use frust_widgets::{CanvasView, CanvasWidget, canvas};
 ///     }
 ///
 ///     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-///         let board = canvas(|scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
-///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x20, 0x20, 0x20));
-///         })
-///         .size(Size::new(2000.0, 1500.0));
-///         pan_zoom(board)
+///         pan_zoom(Self::surface())
 ///             .max_scale(4.0)
 ///             .inertia(true)
 ///             .controller(state.zoom.clone())
 ///             .on_transform(|state: &mut BoardState, t| state.transform = t)
+///     }
+/// }
+///
+/// impl Board {
+///     fn surface() -> impl View<BoardState> {
+///         canvas(|scene: &mut dyn PaintScene, size: Size, _ctx: &PaintCtx| {
+///             scene.fill_rect(Point::ZERO, size, Color::from_rgb8(0x20, 0x20, 0x20));
+///         })
+///         .size(Size::new(2000.0, 1500.0))
 ///     }
 /// }
 ///
@@ -1120,7 +1138,13 @@ pub use back_glue::{BackHandler, attach_back_handler};
 ///
 ///     fn build(&self, state: &mut AppState) -> impl View<AppState> {
 ///         // Back handling is automatic — no BackHandler needed.
-///         navigator(&state.nav, || text("home"))
+///         navigator(&state.nav, Self::home)
+///     }
+/// }
+///
+/// impl App {
+///     fn home() -> impl View<AppState> {
+///         text("home")
 ///     }
 /// }
 ///
@@ -1191,11 +1215,15 @@ pub fn navigator<State: 'static, V: View<State>>(
 ///         let nav = state.nav.clone();
 ///         // The former root view moves INSIDE the host's page builder — which
 ///         // is also what puts the inner navigator's wiring after the host's.
-///         overlay_host(&state.overlays, move || {
-///             stack()
-///                 .child(navigator(&nav, || text("home")))
-///                 .child(text("persistent chrome"))
-///         })
+///         overlay_host(&state.overlays, move || Self::shell(nav.clone()))
+///     }
+/// }
+///
+/// impl App {
+///     fn shell(nav: NavigatorController<AppState>) -> impl View<AppState> {
+///         stack()
+///             .child(navigator(&nav, || text("home")))
+///             .child(text("persistent chrome"))
 ///     }
 /// }
 ///
@@ -2200,7 +2228,13 @@ pub fn __frust_register_hotpatch_anchor(_anchor: extern "C" fn()) {}
 ///     }
 ///
 ///     fn build(&self, state: &mut i32) -> impl View<i32> {
-///         text(format!("count: {state}")).size(32.0)
+///         Self::label(*state)
+///     }
+/// }
+///
+/// impl App {
+///     fn label(count: i32) -> impl View<i32> {
+///         text(format!("count: {count}")).size(32.0)
 ///     }
 /// }
 ///
