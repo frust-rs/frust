@@ -34,7 +34,9 @@
 //! applied — or, when the app advertises `patch_file_hand_off`, restricted
 //! to `0600` and named on `apply_patch` by absolute path and SHA-256 instead
 //! of uploaded (the session is loopback-only, so the app reads the very file
-//! the host wrote). A device session (Android, through `adb forward`;
+//! the host wrote). The jump table is uploaded in chunks either way
+//! (`table_chunk`, `DevtoolsClient::upload_table`): a large app's table is
+//! several MB, past the devtools request line cap. A device session (Android, through `adb forward`;
 //! [`super::android`]) always uploads, and uploads a stripped copy of the
 //! patch: the app is not on this host, and the host alone reads the
 //! patch's symbols, from the unstripped image. `len`, the byte budget and
@@ -102,7 +104,9 @@ use frust_devtools_protocol::{
 
 use crate::build_info::{BuildInfo, BuildMode};
 use crate::desktop_run;
-use crate::devtools_client::{DevtoolsClient, DevtoolsRpcError, is_not_supported, sha256_hex};
+use crate::devtools_client::{
+    DevtoolsClient, DevtoolsRpcError, RequestTooLarge, is_not_supported, sha256_hex,
+};
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::manifest::{self, HotpatchSection};
 use crate::process::{ProcessRunner, StreamHandle, TryRecvError};
@@ -230,7 +234,8 @@ pub enum RestartReason {
     /// The app answered `apply_patch` with an error, or `applied: false`
     /// without layout records.
     PatchRefused { detail: String },
-    /// A devtools call before `apply_patch` failed; nothing was applied.
+    /// A devtools call failed before `apply_patch` reached the app (an
+    /// upload, or an `apply_patch` line refused unsent); nothing was applied.
     DevtoolsFailed { detail: String },
     /// Code in the base image (`image` 0) or an older patch still called a
     /// seam instance this patch replaced.
@@ -1031,12 +1036,23 @@ impl HotSession {
                 detail: format!("{err:#}"),
             });
         }
+        // The jump table travels as chunks on every path, the hand-off too:
+        // a large app's table is far past the request line cap.
+        let table_len = match client.upload_table(patch_id, &linked.table) {
+            Ok(table_len) => table_len,
+            Err(err) => {
+                return restart(RestartReason::DevtoolsFailed {
+                    detail: format!("{err:#}"),
+                });
+            }
+        };
         let params = ApplyPatchParams {
             patch_id,
             len,
             pid,
             anchor_runtime,
             table: linked.table,
+            table_len,
             expected_seams: u32::try_from(present.len()).unwrap_or(u32::MAX),
             file,
         };
@@ -1046,6 +1062,9 @@ impl HotSession {
                 let detail = format!("{err:#}");
                 return restart(if err.downcast_ref::<DevtoolsRpcError>().is_some() {
                     RestartReason::PatchRefused { detail }
+                } else if err.downcast_ref::<RequestTooLarge>().is_some() {
+                    // Refused before sending: nothing reached the app.
+                    RestartReason::DevtoolsFailed { detail }
                 } else {
                     RestartReason::PatchOutcomeUnknown { detail }
                 });
@@ -2546,12 +2565,7 @@ mod tests {
             Ok(LinkedPatch {
                 path,
                 bytes: self.patch.clone(),
-                table: JumpTableWire {
-                    map: [(0x40, 0x0)].into_iter().collect(),
-                    aslr_reference: 0x60,
-                    new_base_address: 0x20,
-                    ifunc_count: 0,
-                },
+                table: fake_table(),
                 symbols: patch_image(),
             })
         }
@@ -2559,6 +2573,16 @@ mod tests {
         fn accepted(&mut self) {
             self.calls.lock().unwrap().push("accepted".to_string());
             self.ungated.lock().unwrap().accept();
+        }
+    }
+
+    /// The jump table every [`FakeBuilder`] patch links with.
+    fn fake_table() -> JumpTableWire {
+        JumpTableWire {
+            map: [(0x40, 0x0)].into_iter().collect(),
+            aslr_reference: 0x60,
+            new_base_address: 0x20,
+            ifunc_count: 0,
         }
     }
 
@@ -2726,11 +2750,13 @@ mod tests {
                 "hotpatch_info",
                 "hotpatch_info",
                 "patch_chunk",
+                "table_chunk",
                 "apply_patch"
             ]
         );
         let patch: Vec<u8> = (0..1000u32).map(|i| (i % 253) as u8).collect();
         assert_eq!(rig.server.uploaded(1), Some(patch));
+        assert_eq!(rig.server.applied_table(1), Some(fake_table()));
         let apply = rig.server.requests().pop().unwrap();
         let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
         assert_eq!(
@@ -2739,9 +2765,10 @@ mod tests {
                 params.len,
                 params.pid,
                 params.anchor_runtime,
+                params.table_len,
                 params.expected_seams
             ),
-            (1, 1000, PID, ANCHOR, 1)
+            (1, 1000, PID, ANCHOR, 16, 1)
         );
         assert!(outcome.to_string().starts_with("patched in "));
         assert!(outcome.to_string().ends_with(" ms (2 components rebuilt)"));
@@ -2766,6 +2793,8 @@ mod tests {
         );
         assert_eq!(rig.sent(), vec!["apply_patch"]);
         assert_eq!(rig.server.uploaded(1), None);
+        // The table still travels as chunks: no line carries it.
+        assert_eq!(rig.server.applied_table(1), Some(fake_table()));
 
         let apply = rig.server.requests().pop().unwrap();
         let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
@@ -3155,7 +3184,11 @@ mod tests {
         let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
         assert_eq!(params.len, STRIPPED.len() as u64);
         assert_eq!(params.file, None);
-        assert_eq!(params.table, rig.expected_table);
+        assert_eq!(params.table_len, rig.expected_table.encoded_map_len());
+        assert_eq!(
+            rig.server.applied_table(1),
+            Some(rig.expected_table.clone())
+        );
         let kept = &rig.session.images[1];
         let unstripped = ImageSymbols::parse(&android_patch(), android(), "patch").unwrap();
         assert!(kept.defined_address("seam_home").is_some());
@@ -3214,7 +3247,10 @@ mod tests {
             let apply = rig.server.requests().pop().unwrap();
             let params: ApplyPatchParams = serde_json::from_value(apply.params).unwrap();
             assert_eq!(params.len, android_patch().len() as u64);
-            assert_eq!(params.table, rig.expected_table);
+            assert_eq!(
+                rig.server.applied_table(1),
+                Some(rig.expected_table.clone())
+            );
             match params.file {
                 Some(file) => {
                     assert!(hand_off);

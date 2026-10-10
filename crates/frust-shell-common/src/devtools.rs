@@ -59,7 +59,10 @@
 //! the same gate on every host, Windows included), and owns the
 //! per-connection chunk reassembly. Here:
 //!
-//! - `patch_chunk` decodes one chunk's base64 payload;
+//! - `patch_chunk` decodes one chunk's base64 payload, for the patch bytes
+//!   and the jump table's `table_chunk` stream alike (the service reassembles
+//!   both, bounds the table and decodes it into the params `apply_patch`
+//!   receives, which checks the map against the declared `table_len`);
 //! - `patch_file` (unix only, so a Windows host always uploads chunks;
 //!   `hotpatch_info` advertises `patch_file_hand_off`) reads a patch the
 //!   loopback host already wrote, named on `apply_patch` by path and SHA-256,
@@ -802,6 +805,16 @@ impl HotState {
                 params.len
             )));
         }
+        // The service fills the map from the `table_chunk` stream; a map
+        // short of a declared table would rebase too few symbols. (With no
+        // stream declared the map is empty or a pre-chunk host's inline one.)
+        if params.table_len != 0 && params.table.encoded_map_len() != params.table_len {
+            return Err(BackendError::invalid_request(format!(
+                "the jump table holds {} entries, apply_patch declared {} bytes of them",
+                params.table.map.len(),
+                params.table_len
+            )));
+        }
         if counters.used_ids.contains(&params.patch_id) {
             return Err(BackendError::invalid_request(format!(
                 "patch_id {} was already used in this process; send a fresh id",
@@ -1469,6 +1482,7 @@ mod tests {
                     new_base_address: 0,
                     ifunc_count: 0,
                 },
+                table_len: 0,
                 expected_seams: 1,
                 file: None,
             }
@@ -1569,6 +1583,21 @@ mod tests {
             );
             assert!(matches!(answer, Err(BackendError::InvalidRequest(_))));
             assert!(!root.join("frust-hotpatch").exists());
+        }
+
+        #[test]
+        fn a_table_short_of_its_declared_length_is_refused_and_writes_nothing() {
+            let _serial = serial();
+            frust_hotpatch::set_anchor(anchor() as usize);
+            let root = scratch("table-len");
+            let mut short = params(2, 3, std::process::id(), anchor());
+            short.table_len = 16;
+            let (_, answer) = apply_with_frame_tick(backend(&root), vec![1, 2, 3], short);
+            assert!(
+                matches!(&answer, Err(BackendError::InvalidRequest(m)) if m.contains("jump table")),
+                "{answer:?}"
+            );
+            assert!(!root.join("frust-hotpatch").exists(), "nothing written");
         }
 
         #[test]

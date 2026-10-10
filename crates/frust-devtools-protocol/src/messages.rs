@@ -5,6 +5,24 @@
 //! `serde_json::from_value`/`to_value`s the type below that pairs with it —
 //! that pairing is a documented convention here, not something the type
 //! system enforces, since the envelope has to stay method-agnostic.
+//!
+//! # The hot-patch jump table travels as chunks
+//!
+//! A patch's jump table can map hundreds of thousands of symbols — several MB,
+//! far past the 1 MiB request line both ends cap. So no line carries it: the
+//! host uploads [`JumpTableWire::encode_map`]'s bytes as `table_chunk`s
+//! ([`PatchChunkParams`], the same shape and 512 KiB raw bound as
+//! `patch_chunk`) under the patch's `patch_id`, on every path including the
+//! loopback file hand-off, and [`ApplyPatchParams`] names only their length
+//! ([`ApplyPatchParams::table_len`]) next to the table's three scalars. The app
+//! reassembles the stream per connection, bounds it, decodes it with
+//! [`JumpTableWire::decode_map`] and hands its backend the complete table.
+//!
+//! [`crate::PROTOCOL_VERSION`] stays 1 across this change: a hot-patching host
+//! and app always ship from the same frust build (the app is built by the very
+//! `frust` that drives it), and the change is additive on the app side — a
+//! pre-chunk host's inline `table.map` (with no `table_len`, which defaults to
+//! 0) still decodes and is applied as sent. This crate never writes one.
 
 use serde::{Deserialize, Serialize};
 
@@ -214,8 +232,10 @@ pub struct HotpatchInfo {
     pub patch_file_hand_off: bool,
 }
 
-/// `patch_chunk` params; answered by [`AckResult`]. At most 512 KiB of raw
-/// bytes per chunk (the base64 text stays under the 1 MiB line cap).
+/// `patch_chunk` and `table_chunk` params; answered by [`AckResult`]. At most
+/// 512 KiB of raw bytes per chunk (the base64 text stays under the 1 MiB line
+/// cap). A `table_chunk` carries a slice of `patch_id`'s encoded jump table
+/// ([`JumpTableWire::encode_map`]), reassembled apart from the patch bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatchChunkParams {
     pub patch_id: u64,
@@ -228,6 +248,11 @@ pub struct PatchChunkParams {
 /// `JumpTable` minus `lib`: the only filesystem path on the wire is
 /// [`ApplyPatchParams::file`]'s, so a `lib` field (or any other unknown
 /// field) is rejected at decode.
+///
+/// On an `apply_patch` line it is the three scalars only
+/// ([`ApplyPatchParams::table`]): `map` travels as the `table_chunk` stream in
+/// [`Self::encode_map`]'s encoding, and the app's service fills it from the
+/// reassembled stream before its backend sees the params (see the module doc).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JumpTableWire {
@@ -237,10 +262,68 @@ pub struct JumpTableWire {
     pub ifunc_count: u64,
 }
 
+impl JumpTableWire {
+    /// Bytes per encoded entry: the base address, then the patch address, each
+    /// a little-endian `u64`.
+    pub const ENTRY_BYTES: usize = 16;
+
+    /// The length of [`Self::encode_map`]'s output, without encoding.
+    pub fn encoded_map_len(&self) -> u64 {
+        (self.map.len() as u64).saturating_mul(Self::ENTRY_BYTES as u64)
+    }
+
+    /// `map` as the `table_chunk` stream carries it: one [`Self::ENTRY_BYTES`]
+    /// entry per mapping, in ascending base-address order (so one table always
+    /// encodes to the same bytes, and a repeated key cannot be encoded).
+    pub fn encode_map(&self) -> Vec<u8> {
+        let mut entries: Vec<(u64, u64)> = self.map.iter().map(|(k, v)| (*k, *v)).collect();
+        entries.sort_unstable();
+        let mut out = Vec::with_capacity(entries.len() * Self::ENTRY_BYTES);
+        for (base, patch) in entries {
+            out.extend_from_slice(&base.to_le_bytes());
+            out.extend_from_slice(&patch.to_le_bytes());
+        }
+        out
+    }
+
+    /// Decodes [`Self::encode_map`]'s bytes back into the map. Refuses a length
+    /// that is not a whole number of entries and base addresses that are not
+    /// strictly ascending (a repeated or reordered key means the stream was not
+    /// produced by `encode_map`). The message names what was wrong.
+    pub fn decode_map(bytes: &[u8]) -> Result<std::collections::HashMap<u64, u64>, String> {
+        if !bytes.len().is_multiple_of(Self::ENTRY_BYTES) {
+            return Err(format!(
+                "a jump table of {} bytes is not a whole number of {}-byte entries",
+                bytes.len(),
+                Self::ENTRY_BYTES
+            ));
+        }
+        let mut map = std::collections::HashMap::with_capacity(bytes.len() / Self::ENTRY_BYTES);
+        let mut previous: Option<u64> = None;
+        // Whole entries only (checked above): pairs of little-endian words.
+        let words = bytes.as_chunks::<8>().0;
+        for &[base, patch] in words.as_chunks::<2>().0 {
+            let (base, patch) = (u64::from_le_bytes(base), u64::from_le_bytes(patch));
+            if previous.is_some_and(|previous| base <= previous) {
+                return Err(format!(
+                    "jump table base address {base:#x} is not above the one before it"
+                ));
+            }
+            previous = Some(base);
+            map.insert(base, patch);
+        }
+        Ok(map)
+    }
+}
+
 /// `apply_patch` params — applies the bytes previously sent as `patch_id`
 /// chunks, or, when [`Self::file`] is set, the bytes of that host-written
 /// file. `len` is the patch length either way (a named file's size must equal
 /// it). Unknown fields (any other path included) are rejected.
+///
+/// The jump table's map is the `table_chunk` stream uploaded for `patch_id` on
+/// the same connection, `table_len` bytes long, on the chunk and the file path
+/// alike; `table` carries only its scalars on the wire (see the module doc).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyPatchParams {
@@ -248,7 +331,17 @@ pub struct ApplyPatchParams {
     pub len: u64,
     pub pid: u32,
     pub anchor_runtime: u64,
+    /// The table's scalars. Its `map` is never written here: the map is the
+    /// `table_chunk` stream, and this field decodes with an empty one — except
+    /// from a pre-chunk host, whose inline `map` still decodes (see the module
+    /// doc) and is valid only with `table_len` 0.
+    #[serde(with = "table_scalars")]
     pub table: JumpTableWire,
+    /// Length of the encoded map uploaded as `table_chunk`s for `patch_id`
+    /// ([`JumpTableWire::encoded_map_len`]); `0` for an empty map, with no
+    /// `table_chunk` sent, and the default for a pre-chunk host.
+    #[serde(default)]
+    pub table_len: u64,
     pub expected_seams: u32,
     /// The loopback hand-off: the patch the host already wrote, named in place
     /// of `patch_chunk` uploads. The **only** filesystem path any wire type
@@ -258,6 +351,58 @@ pub struct ApplyPatchParams {
     /// byte-for-byte what an older app decodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PatchFile>,
+}
+
+/// [`ApplyPatchParams::table`]'s wire form: [`JumpTableWire`] without its map
+/// when written; read with a pre-chunk host's optional inline map.
+mod table_scalars {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::JumpTableWire;
+
+    /// What is written: the scalars only.
+    #[derive(Serialize)]
+    struct Written {
+        aslr_reference: u64,
+        new_base_address: u64,
+        ifunc_count: u64,
+    }
+
+    /// What is read: the scalars and a pre-chunk host's inline map, refusing
+    /// any other field (a `lib` included).
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Read {
+        #[serde(default)]
+        map: std::collections::HashMap<u64, u64>,
+        aslr_reference: u64,
+        new_base_address: u64,
+        ifunc_count: u64,
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        table: &JumpTableWire,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        Written {
+            aslr_reference: table.aslr_reference,
+            new_base_address: table.new_base_address,
+            ifunc_count: table.ifunc_count,
+        }
+        .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<JumpTableWire, D::Error> {
+        let read = Read::deserialize(deserializer)?;
+        Ok(JumpTableWire {
+            map: read.map,
+            aslr_reference: read.aslr_reference,
+            new_base_address: read.new_base_address,
+            ifunc_count: read.ifunc_count,
+        })
+    }
 }
 
 /// A patch handed off by file on a loopback session ([`ApplyPatchParams::file`]).
@@ -337,15 +482,88 @@ mod tests {
     }
 
     #[test]
-    fn apply_patch_params_decode_string_keyed_map() {
+    fn a_pre_chunk_inline_table_map_still_decodes_with_no_table_len() {
+        // The pre-chunk shape: the whole map on the `apply_patch` line.
         let json = r#"{"patch_id":1,"len":10,"pid":5,"anchor_runtime":99,
             "table":{"map":{"4096":8192,"16":32},"aslr_reference":1,
             "new_base_address":2,"ifunc_count":0},"expected_seams":2}"#;
         let p: ApplyPatchParams = serde_json::from_str(json).unwrap();
         assert_eq!(p.table.map.get(&4096), Some(&8192));
         assert_eq!(p.table.map.get(&16), Some(&32));
-        let back = serde_json::to_string(&p).unwrap();
-        assert_eq!(serde_json::from_str::<ApplyPatchParams>(&back).unwrap(), p);
+        assert_eq!(p.table_len, 0);
+        // ...and is never written back.
+        assert!(!serde_json::to_string(&p).unwrap().contains("\"map\""));
+    }
+
+    #[test]
+    fn apply_patch_params_never_put_the_map_on_the_line() {
+        let mut params = sample_params(None);
+        params.table.map = (0..1000u64).map(|i| (i * 16, i * 32)).collect();
+        params.table_len = params.table.encoded_map_len();
+        let j = serde_json::to_string(&params).unwrap();
+        assert!(!j.contains("\"map\""), "{j}");
+        assert!(j.contains("\"table_len\":16000"), "{j}");
+        assert!(j.len() < 300, "the line stays small: {} bytes", j.len());
+        let back: ApplyPatchParams = serde_json::from_str(&j).unwrap();
+        assert!(back.table.map.is_empty());
+        assert_eq!(back.table_len, 16_000);
+        assert_eq!(back.table.aslr_reference, params.table.aslr_reference);
+    }
+
+    #[test]
+    fn a_standalone_jump_table_still_serializes_its_map() {
+        // Only `ApplyPatchParams::table` drops the map; the type itself keeps
+        // its full shape for any other use.
+        let table = JumpTableWire {
+            map: [(1, 2)].into_iter().collect(),
+            aslr_reference: 0,
+            new_base_address: 0,
+            ifunc_count: 0,
+        };
+        let j = serde_json::to_string(&table).unwrap();
+        assert!(j.contains("\"map\":{\"1\":2}"), "{j}");
+    }
+
+    #[test]
+    fn a_jump_table_map_round_trips_through_its_encoding() {
+        let table = JumpTableWire {
+            map: [(0x4000, 0x10), (0x10, 0x4000), (u64::MAX, 0), (0, u64::MAX)]
+                .into_iter()
+                .collect(),
+            aslr_reference: 1,
+            new_base_address: 2,
+            ifunc_count: 0,
+        };
+        let bytes = table.encode_map();
+        assert_eq!(bytes.len() as u64, table.encoded_map_len());
+        assert_eq!(bytes.len(), 4 * JumpTableWire::ENTRY_BYTES);
+        // Ascending keys, little-endian: the first entry is (0, u64::MAX).
+        assert_eq!(&bytes[..8], &[0; 8]);
+        assert_eq!(&bytes[8..16], &[0xff; 8]);
+        assert_eq!(JumpTableWire::decode_map(&bytes).unwrap(), table.map);
+        assert_eq!(JumpTableWire::decode_map(&[]).unwrap(), Default::default());
+    }
+
+    #[test]
+    fn a_jump_table_encoding_that_is_cut_or_out_of_order_is_refused() {
+        let table = JumpTableWire {
+            map: [(1, 2), (3, 4)].into_iter().collect(),
+            aslr_reference: 0,
+            new_base_address: 0,
+            ifunc_count: 0,
+        };
+        let bytes = table.encode_map();
+        let cut = JumpTableWire::decode_map(&bytes[..bytes.len() - 1]).unwrap_err();
+        assert!(cut.contains("whole number"), "{cut}");
+
+        let mut swapped = bytes[16..].to_vec();
+        swapped.extend_from_slice(&bytes[..16]);
+        let swapped = JumpTableWire::decode_map(&swapped).unwrap_err();
+        assert!(swapped.contains("not above"), "{swapped}");
+
+        let mut repeated = bytes[..16].to_vec();
+        repeated.extend_from_slice(&bytes[..16]);
+        assert!(JumpTableWire::decode_map(&repeated).is_err());
     }
 
     #[test]
@@ -363,11 +581,14 @@ mod tests {
             pid: 77,
             anchor_runtime: 0x1000,
             table: JumpTableWire {
-                map: [(16, 32)].into_iter().collect(),
+                // The map never travels in JSON, so a round trip compares
+                // equal only without one.
+                map: Default::default(),
                 aslr_reference: 1,
                 new_base_address: 2,
                 ifunc_count: 0,
             },
+            table_len: 16,
             expected_seams: 1,
             file,
         }
@@ -396,7 +617,7 @@ mod tests {
     #[test]
     fn apply_patch_params_without_file_default_to_none() {
         let json = r#"{"patch_id":1,"len":10,"pid":5,"anchor_runtime":99,
-            "table":{"map":{},"aslr_reference":1,"new_base_address":2,"ifunc_count":0},
+            "table":{"aslr_reference":1,"new_base_address":2,"ifunc_count":0},"table_len":0,
             "expected_seams":2}"#;
         let p: ApplyPatchParams = serde_json::from_str(json).unwrap();
         assert_eq!(p.file, None);
@@ -405,7 +626,7 @@ mod tests {
     #[test]
     fn patch_file_rejects_unknown_fields() {
         let json = r#"{"patch_id":1,"len":10,"pid":5,"anchor_runtime":99,
-            "table":{"map":{},"aslr_reference":1,"new_base_address":2,"ifunc_count":0},
+            "table":{"aslr_reference":1,"new_base_address":2,"ifunc_count":0},"table_len":0,
             "expected_seams":2,"file":{"path":"/x","sha256":"00","lib":"/y"}}"#;
         assert!(serde_json::from_str::<ApplyPatchParams>(json).is_err());
     }
@@ -413,11 +634,11 @@ mod tests {
     #[test]
     fn apply_patch_rejects_lib_and_path_fields() {
         let with_lib = r#"{"patch_id":1,"len":10,"pid":5,"anchor_runtime":99,
-            "table":{"lib":"/tmp/evil.dylib","map":{},"aslr_reference":1,
-            "new_base_address":2,"ifunc_count":0},"expected_seams":2}"#;
+            "table":{"lib":"/tmp/evil.dylib","aslr_reference":1,
+            "new_base_address":2,"ifunc_count":0},"table_len":0,"expected_seams":2}"#;
         assert!(serde_json::from_str::<ApplyPatchParams>(with_lib).is_err());
         let with_path = r#"{"patch_id":1,"len":10,"pid":5,"anchor_runtime":99,"path":"/x",
-            "table":{"map":{},"aslr_reference":1,"new_base_address":2,"ifunc_count":0},
+            "table":{"aslr_reference":1,"new_base_address":2,"ifunc_count":0},"table_len":0,
             "expected_seams":2}"#;
         assert!(serde_json::from_str::<ApplyPatchParams>(with_path).is_err());
     }
