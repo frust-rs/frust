@@ -113,11 +113,12 @@ impl Default for Knobs {
     }
 }
 
-/// The reference's `_num`: an integral value prints bare, a fractional one
-/// keeps its decimal.
+/// The reference's `_num`, kept a Rust float literal: an integral value keeps
+/// its `.0` so it reads as `f64` (`16.0`, not `16`), a fractional one keeps its
+/// decimal.
 fn num_text(value: f64) -> String {
     if value == value.round() {
-        format!("{}", value as i64)
+        format!("{value:.1}")
     } else {
         format!("{value}")
     }
@@ -208,28 +209,28 @@ fn snippet(state: &Knobs) -> PlaySnippet {
     let enabled = state.enabled;
     let code = match state.kind {
         SliderKind::Continuous => format!(
-            "slider({value}, on_changed)\n    .enabled({enabled})\n    .track_thickness({thickness});",
+            "slider({value}, |app: &mut App, value: f64| app.value = value)\n    .enabled({enabled})\n    .track_thickness({thickness});",
             value = num_text(state.value)
         ),
         SliderKind::Wavy => format!(
-            "wavy_slider({value}, on_changed)\n    .enabled({enabled})\n    .track_thickness({thickness});",
+            "wavy_slider({value}, |app: &mut App, value: f64| app.value = value)\n    .enabled({enabled})\n    .track_thickness({thickness});",
             value = num_text(state.value)
         ),
         SliderKind::Centered => format!(
-            "centered_slider({value}, on_changed)\n    .range(-100.0, 100.0)\n    .enabled({enabled})\n    .track_thickness({thickness});",
+            "centered_slider({value}, |app: &mut App, value: f64| app.value = (value + 100.0) / 200.0)\n    .range(-100.0, 100.0)\n    .enabled({enabled})\n    .track_thickness({thickness});",
             value = num_text(centered_value(state.value))
         ),
         SliderKind::Discrete => format!(
-            "slider({value}, on_changed)\n    .range(0.0, 5.0)\n    .divisions(5)\n    .enabled({enabled})\n    .track_thickness({thickness})\n    .haptic(HapticSignal::Light);",
+            "slider({value}, |app: &mut App, value: f64| app.value = value / 5.0)\n    .range(0.0, 5.0)\n    .divisions(5)\n    .enabled({enabled})\n    .track_thickness({thickness})\n    .haptic(HapticSignal::Light);",
             value = num_text(discrete_value(state.value))
         ),
         SliderKind::Vertical => format!(
-            "vertical_slider({value}, on_changed)\n    .enabled({enabled})\n    .track_thickness({thickness})\n    .thumb_length(80.0)\n    .icon(icons::VOLUME_UP)\n    .icon_position(SliderIconPosition::{icon_position:?});",
+            "vertical_slider({value}, |app: &mut App, value: f64| app.value = value)\n    .enabled({enabled})\n    .track_thickness({thickness})\n    .thumb_length(80.0)\n    .icon(icons::VOLUME_UP)\n    .icon_position(SliderIconPosition::{icon_position:?});",
             value = num_text(state.value),
             icon_position = state.icon_position,
         ),
         SliderKind::Range => format!(
-            "range_slider(SliderRange::new({start}, {end}), on_changed)\n    .enabled({enabled})\n    .track_thickness({thickness});",
+            "range_slider(SliderRange::new({start}, {end}), |app: &mut App, range: SliderRange| app.range = range)\n    .enabled({enabled})\n    .track_thickness({thickness});",
             start = num_text(state.range.start),
             end = num_text(state.range.end)
         ),

@@ -345,7 +345,7 @@ fn chip_snippet(
         String::new()
     };
     let deleted_line = if kind == ChipKind::Input {
-        "\n    .on_deleted(on_deleted)".to_string()
+        "\n    .on_deleted(|app: &mut App| { /* remove the chip */ })".to_string()
     } else {
         String::new()
     };
@@ -362,7 +362,7 @@ fn chip_snippet(
             ChipKind::Filter => unreachable!("handled above"),
         };
         format!(
-            "{ctor}({label:?}, on_press)\n    .elevated({elevated}){leading_line}{deleted_line};"
+            "{ctor}({label:?}, |app: &mut App| {{ /* on press */ }})\n    .elevated({elevated}){leading_line}{deleted_line};"
         )
     }
 }

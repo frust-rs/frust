@@ -150,7 +150,7 @@ fn switch_snippet(value: bool, enabled: bool, show_icons: bool, state_layer_size
         String::new()
     };
     let layer = if state_layer_size == state_layer_size.round() {
-        format!("{state_layer_size:.0}")
+        format!("{state_layer_size:.1}")
     } else {
         format!("{state_layer_size}")
     };
