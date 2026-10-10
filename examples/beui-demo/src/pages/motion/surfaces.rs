@@ -20,8 +20,8 @@
 
 use frust::row;
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, RwSignal, ScrollInfo, SizedBox, View, any,
-    column, component, scroll_view, text,
+    Component, CrossAxisAlignment, RwSignal, ScrollInfo, SizedBox, View, ViewSeq, column,
+    component, scroll_view, text, views,
 };
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 use frust_beui::components::cylinder_carousel::{CylinderCarouselVariant, cylinder_carousel};
@@ -101,20 +101,19 @@ fn hgap(width: f64) -> impl View<State> {
 
 /// One component's block: its name, a one-line note (where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
-    let mut children = vec![
-        any(text(title.to_string()).size(16.0)),
-        any(gap(4.0)),
-        any(caption(note.to_string())),
-        any(gap(12.0)),
-    ];
-    children.extend(body);
-    children.push(any(gap(32.0)));
-    Column(children).cross_axis(CrossAxisAlignment::Start)
+fn demo<M>(title: &str, note: &str, body: impl ViewSeq<State, M>) -> impl View<State> {
+    column()
+        .child(text(title.to_string()).size(16.0))
+        .child(gap(4.0))
+        .child(caption(note.to_string()))
+        .child(gap(12.0))
+        .children(body)
+        .child(gap(32.0))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A labelled specimen: the caption above the live component.
-fn labelled(label: &str, body: AnyView<State>) -> impl View<State> {
+fn labelled(label: &str, body: impl View<State>) -> impl View<State> {
     column()
         .child(caption(label.to_string()))
         .child(gap(8.0))
@@ -143,21 +142,21 @@ fn card_body(title: &str, body: &str) -> impl View<State> {
 
 /// [`tilt_card`]: the cursor-tracked lean and its glare.
 fn tilt_cards(state: &State) -> impl View<State> {
-    let default = any(tilt_card(card_body(
+    let default = tilt_card(card_body(
         "Glare on",
         "Move the pointer over the card: the lean follows it and the glare \
              tracks the cursor.",
     ))
     .max(state.tilt_max)
-    .shadow(state.tilt_shadow));
+    .shadow(state.tilt_shadow);
 
-    let no_glare = any(tilt_card(card_body(
+    let no_glare = tilt_card(card_body(
         "Glare off",
         "The same lean with the cursor-tracked highlight suppressed.",
     ))
     .max(state.tilt_max)
     .glare(false)
-    .shadow(state.tilt_shadow));
+    .shadow(state.tilt_shadow);
 
     demo(
         "tilt_card",
@@ -168,14 +167,14 @@ fn tilt_cards(state: &State) -> impl View<State> {
          upstream rotates into depth, and .shadow() is the compensation offered \
          for it (off by default, since upstream paints none). A press keeps the \
          tilt rather than snapping flat.",
-        vec![
-            any(row()
+        (
+            row()
                 .child(labelled("Default \u{b7} glare on", default))
                 .child(hgap(40.0))
                 .child(labelled("glare: off", no_glare))
-                .cross_axis(CrossAxisAlignment::Start)),
-            any(gap(14.0)),
-            any(row()
+                .cross_axis(CrossAxisAlignment::Start),
+            gap(14.0),
+            row()
                 .child(caption(format!("max: {:.0}\u{b0}", state.tilt_max)))
                 .child(hgap(12.0))
                 .child(knob("8\u{b0}", |s: &mut State| s.tilt_max = 8.0))
@@ -192,27 +191,23 @@ fn tilt_cards(state: &State) -> impl View<State> {
                     },
                     |s: &mut State| s.tilt_shadow = !s.tilt_shadow,
                 ))
-                .cross_axis(CrossAxisAlignment::Center)),
-        ],
+                .cross_axis(CrossAxisAlignment::Center),
+        ),
     )
 }
 
 /// [`shared_layout_bg`]: the pill that glides between hovered rows.
 fn shared_layout(state: &State) -> impl View<State> {
-    let rows: Vec<AnyView<State>> = ROWS
-        .iter()
-        .map(|(title, body)| {
-            any(column()
-                .child(text(title.to_string()).size(14.0))
-                .child(gap(2.0))
-                .child(caption(body.to_string()))
-                .cross_axis(CrossAxisAlignment::Start))
-        })
-        .collect();
+    let rows = views(ROWS.iter().map(|(title, body)| {
+        column()
+            .child(text(title.to_string()).size(14.0))
+            .child(gap(2.0))
+            .child(caption(body.to_string()))
+            .cross_axis(CrossAxisAlignment::Start)
+    }));
 
     let list =
-        any(SizedBox(Some(340.0), None)
-            .child(shared_layout_bg(rows).kind(state.row_kind).inset(20.0)));
+        SizedBox(Some(340.0), None).child(shared_layout_bg(rows).kind(state.row_kind).inset(20.0));
 
     demo(
         "shared_layout_bg",
@@ -222,10 +217,10 @@ fn shared_layout(state: &State) -> impl View<State> {
          which is exactly what upstream itself does under reduced motion. Enter, \
          move and exit stay three different animations, and a press keeps the \
          highlight.",
-        vec![
-            any(labelled("Hover the rows", list)),
-            any(gap(14.0)),
-            any(row()
+        (
+            labelled("Hover the rows", list),
+            gap(14.0),
+            row()
                 .child(caption(match state.row_kind {
                     SharedLayoutBgKind::Block => "as: div (group)",
                     SharedLayoutBgKind::List => "as: ul (list)",
@@ -238,8 +233,8 @@ fn shared_layout(state: &State) -> impl View<State> {
                 .child(knob("List", |s: &mut State| {
                     s.row_kind = SharedLayoutBgKind::List
                 }))
-                .cross_axis(CrossAxisAlignment::Center)),
-        ],
+                .cross_axis(CrossAxisAlignment::Center),
+        ),
     )
 }
 
@@ -247,64 +242,72 @@ fn shared_layout(state: &State) -> impl View<State> {
 fn scroll_effects(state: &State) -> impl View<State> {
     let progress = state.fx.progress();
 
-    let mut rows: Vec<AnyView<State>> = vec![
-        any(text("Scroll this surface").size(15.0)),
-        any(gap(6.0)),
-        any(caption(
+    let rows = column()
+        .child(text("Scroll this surface").size(15.0))
+        .child(gap(6.0))
+        .child(caption(
             "Its ScrollFx feeds the bar, the ring, the parallax layer and the \
              reveal below.",
-        )),
-        any(gap(12.0)),
-        any(parallax(
-            caption("parallax \u{b7} speed 0.4, axis y \u{2014} drifts against the travel"),
-            progress,
+        ))
+        .child(gap(12.0))
+        .child(
+            parallax(
+                caption("parallax \u{b7} speed 0.4, axis y \u{2014} drifts against the travel"),
+                progress,
+            )
+            .speed(0.4),
         )
-        .speed(0.4)),
-        any(gap(10.0)),
-        any(
+        .child(gap(10.0))
+        .child(
             parallax(caption("parallax \u{b7} speed 0.8, axis x"), progress)
                 .speed(0.8)
                 .axis(ParallaxAxis::X),
-        ),
-        any(gap(16.0)),
-    ];
-    for index in 0..10 {
-        rows.push(any(caption(format!(
-            "Row {:02} \u{b7} the surface's own travel is what \"progress\" means here.",
-            index + 1
-        ))));
-        rows.push(any(gap(10.0)));
-    }
-    rows.push(any(scroll_reveal(
-        column()
-            .child(text("Revealed").size(15.0))
-            .child(gap(6.0))
-            .child(caption(
-                "scroll_reveal fires once past 30% of the surface's travel, \
-                 rising 24px into place with its blur dropped.",
-            ))
-            .cross_axis(CrossAxisAlignment::Start),
-        progress,
-    )
-    .threshold(0.3)
-    .slide(24.0)));
-    rows.push(any(gap(20.0)));
+        )
+        .child(gap(16.0))
+        .children(
+            (0..10)
+                .map(|index| {
+                    (
+                        caption(format!(
+                            "Row {:02} \u{b7} the surface's own travel is what \"progress\" means here.",
+                            index + 1
+                        )),
+                        gap(10.0),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .child(
+            scroll_reveal(
+                column()
+                    .child(text("Revealed").size(15.0))
+                    .child(gap(6.0))
+                    .child(caption(
+                        "scroll_reveal fires once past 30% of the surface's travel, \
+                         rising 24px into place with its blur dropped.",
+                    ))
+                    .cross_axis(CrossAxisAlignment::Start),
+                progress,
+            )
+            .threshold(0.3)
+            .slide(24.0),
+        )
+        .child(gap(20.0))
+        .cross_axis(CrossAxisAlignment::Start);
 
-    let surface = any(SizedBox(Some(420.0), Some(240.0)).child(
-        scroll_view(Column(rows).cross_axis(CrossAxisAlignment::Start)).on_scroll(
-            |s: &mut State, info: ScrollInfo| {
-                s.fx.observe(info);
-            },
-        ),
+    let surface = SizedBox(Some(420.0), Some(240.0)).child(scroll_view(rows).on_scroll(
+        |s: &mut State, info: ScrollInfo| {
+            s.fx.observe(info);
+        },
     ));
 
-    let bar = any(SizedBox(Some(420.0), Some(6.0)).child(scroll_progress::<State>(progress)));
-    let bottom_bar = any(SizedBox(Some(420.0), Some(6.0))
-        .child(scroll_progress::<State>(progress).position(ScrollProgressPosition::Bottom)));
-    let ring = any(SizedBox(Some(56.0), Some(56.0))
-        .child(scroll_progress::<State>(progress).variant(ScrollProgressVariant::Ring)));
+    let bar = SizedBox(Some(420.0), Some(6.0)).child(scroll_progress::<State>(progress));
+    let bottom_bar = SizedBox(Some(420.0), Some(6.0))
+        .child(scroll_progress::<State>(progress).position(ScrollProgressPosition::Bottom));
+    let ring = SizedBox(Some(56.0), Some(56.0))
+        .child(scroll_progress::<State>(progress).variant(ScrollProgressVariant::Ring));
 
-    let jump = any(scroll_to(
+    let jump = scroll_to(
         button("Ease the offset to 480", |_: &mut State| {})
             .tone(ButtonTone::Outline)
             .size(ButtonSize::Sm),
@@ -314,7 +317,7 @@ fn scroll_effects(state: &State) -> impl View<State> {
     .on_activate(|s: &mut State| {
         s.scroll_to_status =
             "Eased 0 \u{2192} 480 into the signal; no surface consumed it.".to_string();
-    }));
+    });
 
     demo(
         "scroll_animation",
@@ -325,7 +328,7 @@ fn scroll_effects(state: &State) -> impl View<State> {
          publishes no programmatic-scroll seam: the ease is real, the page \
          movement is the missing half. Progress is the surface's travel rather \
          than one element's viewport crossing.",
-        vec![any(row()
+        row()
             .child(
                 column()
                     .child(labelled("scroll_progress \u{b7} bar, top", bar))
@@ -347,30 +350,32 @@ fn scroll_effects(state: &State) -> impl View<State> {
                     .child(caption(state.scroll_to_status.clone()))
                     .cross_axis(CrossAxisAlignment::Start),
             )
-            .cross_axis(CrossAxisAlignment::Start))],
+            .cross_axis(CrossAxisAlignment::Start),
     )
 }
 
 /// [`pull_to_refresh`], on both of its routes.
 fn pull_to_refreshes(state: &State) -> impl View<State> {
     let list = |title: &str| {
-        let mut rows: Vec<AnyView<State>> =
-            vec![any(text(title.to_string()).size(15.0)), any(gap(8.0))];
-        for index in 0..8 {
-            rows.push(any(caption(format!("Item {:02}", index + 1))));
-            rows.push(any(gap(8.0)));
-        }
-        Column(rows).cross_axis(CrossAxisAlignment::Start)
+        column()
+            .child(text(title.to_string()).size(15.0))
+            .child(gap(8.0))
+            .children(
+                (0..8)
+                    .map(|index| (caption(format!("Item {:02}", index + 1)), gap(8.0)))
+                    .collect::<Vec<_>>(),
+            )
+            .cross_axis(CrossAxisAlignment::Start)
     };
 
-    let drag_route = any(SizedBox(Some(320.0), Some(240.0)).child(
+    let drag_route = SizedBox(Some(320.0), Some(240.0)).child(
         pull_to_refresh(list("Press and drag down"), |s: &mut State| {
             s.refreshing = true;
         })
         .refreshing(state.refreshing),
-    ));
+    );
 
-    let overscroll_route = any(SizedBox(Some(320.0), Some(240.0)).child(
+    let overscroll_route = SizedBox(Some(320.0), Some(240.0)).child(
         pull_to_refresh(
             scroll_view(list("Overscroll past the top")).on_scroll(
                 |s: &mut State, info: ScrollInfo| {
@@ -381,7 +386,7 @@ fn pull_to_refreshes(state: &State) -> impl View<State> {
         )
         .refreshing(state.overscroll_refreshing)
         .overscroll(state.pull_fx.overscroll()),
-    ));
+    );
 
     demo(
         "pull_to_refresh",
@@ -392,42 +397,39 @@ fn pull_to_refreshes(state: &State) -> impl View<State> {
          faithful route, and the one that feels native on touch). Upstream \
          awaits an async onRefresh; a callback here is synchronous, so the \
          refreshing flag is the app's and this page clears it by hand.",
-        vec![
-            any(row()
+        (
+            row()
                 .child(labelled("Drag route", drag_route))
                 .child(hgap(40.0))
                 .child(labelled("Overscroll route", overscroll_route))
-                .cross_axis(CrossAxisAlignment::Start)),
-            any(gap(14.0)),
-            any(row()
+                .cross_axis(CrossAxisAlignment::Start),
+            gap(14.0),
+            row()
                 .child(knob("Finish drag refresh", |s: &mut State| {
                     s.refreshing = false
                 }))
                 .child(hgap(8.0))
                 .child(knob("Finish overscroll refresh", |s: &mut State| {
                     s.overscroll_refreshing = false
-                }))),
-            any(gap(8.0)),
-            any(caption(format!(
+                })),
+            gap(8.0),
+            caption(format!(
                 "refreshing: drag {} \u{b7} overscroll {}",
                 state.refreshing, state.overscroll_refreshing
-            ))),
-        ],
+            )),
+        ),
     )
 }
 
 /// The [`cylinder_carousel`].
 fn carousels(state: &State) -> impl View<State> {
-    let items: Vec<AnyView<State>> = BALLS
-        .iter()
-        .map(|label| {
-            any(column()
-                .child(text(label.to_string()).size(15.0))
-                .cross_axis(CrossAxisAlignment::Center))
-        })
-        .collect();
+    let items = views(BALLS.iter().map(|label| {
+        column()
+            .child(text(label.to_string()).size(15.0))
+            .cross_axis(CrossAxisAlignment::Center)
+    }));
 
-    let stage = any(SizedBox(Some(520.0), None).child(
+    let stage = SizedBox(Some(520.0), None).child(
         cylinder_carousel(items)
             .variant(state.carousel_variant)
             .item_size(120.0)
@@ -437,7 +439,7 @@ fn carousels(state: &State) -> impl View<State> {
             .auto_rotate(state.carousel_auto)
             .default_index(0)
             .on_index_change(|s: &mut State, index| s.carousel_index = index),
-    ));
+    );
 
     demo(
         "cylinder_carousel",
@@ -448,10 +450,10 @@ fn carousels(state: &State) -> impl View<State> {
          displacement released from rest, so a flick keeps upstream's reach but \
          restarts the roll from zero speed. Drag, wheel or arrow-key it; the \
          items are not pointer targets, the stage owns the gesture.",
-        vec![
+        (
             stage,
-            any(gap(14.0)),
-            any(row()
+            gap(14.0),
+            row()
                 .child(caption(format!(
                     "index: {} \u{b7} {}",
                     state.carousel_index,
@@ -474,8 +476,8 @@ fn carousels(state: &State) -> impl View<State> {
                     },
                     |s: &mut State| s.carousel_auto = !s.carousel_auto,
                 ))
-                .cross_axis(CrossAxisAlignment::Center)),
-        ],
+                .cross_axis(CrossAxisAlignment::Center),
+        ),
     )
 }
 
@@ -490,13 +492,13 @@ impl Component for SurfacesPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(column()
+        column()
             .child(tilt_cards(state))
             .child(shared_layout(state))
             .child(scroll_effects(state))
             .child(pull_to_refreshes(state))
             .child(carousels(state))
-            .cross_axis(CrossAxisAlignment::Start))
+            .cross_axis(CrossAxisAlignment::Start)
     }
 }
 
