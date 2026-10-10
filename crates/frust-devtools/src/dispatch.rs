@@ -57,6 +57,10 @@ pub(crate) struct ConnState {
     authenticated: bool,
     #[cfg(feature = "hotpatch")]
     patches: PatchAssembly,
+    /// The `table_chunk` stream: a patch's encoded jump table, reassembled
+    /// apart from its bytes under the same rules.
+    #[cfg(feature = "hotpatch")]
+    tables: PatchAssembly,
 }
 
 impl ConnState {
@@ -67,7 +71,9 @@ impl ConnState {
         Self {
             authenticated: ctx.token.is_none(),
             #[cfg(feature = "hotpatch")]
-            patches: PatchAssembly::default(),
+            patches: PatchAssembly::patches(),
+            #[cfg(feature = "hotpatch")]
+            tables: PatchAssembly::tables(),
         }
     }
 }
@@ -125,6 +131,77 @@ pub(crate) fn parse_error_response(id: u64, detail: &str) -> Response {
             format!("could not decode request: {detail}"),
         ),
     )
+}
+
+/// The reply to a request line longer than the line cap (`cap` bytes), sent
+/// just before the connection closes so the client learns why instead of
+/// seeing a bare close. `id` is the one [`salvage_id`] recovered from the
+/// line's start; without one the reply goes to id `0`, which no client call
+/// uses, so a client can still read the reason off it.
+pub(crate) fn oversized_line_response(id: Option<u64>, cap: usize) -> Response {
+    Response::error(
+        id.unwrap_or(0),
+        RpcError::new(
+            RpcError::INVALID_REQUEST,
+            format!(
+                "request line exceeds the devtools cap of {cap} bytes; the connection is closed \
+                 (large payloads travel as chunks)"
+            ),
+        ),
+    )
+}
+
+/// The top-level integer `id` of a JSON object of which `prefix` is only the
+/// start (a line cut at the cap): the key `"id"` at nesting depth 1, followed
+/// by an unsigned integer. A key of that name inside a nested value is not
+/// it; anything that is not that shape answers `None`.
+pub(crate) fn salvage_id(prefix: &[u8]) -> Option<u64> {
+    let skip_ws = |bytes: &[u8], mut i: usize| {
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        i
+    };
+    let mut i = skip_ws(prefix, 0);
+    if prefix.get(i) != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    while i < prefix.len() {
+        match prefix[i] {
+            b'"' => {
+                let start = i + 1;
+                i = start;
+                while i < prefix.len() && prefix[i] != b'"' {
+                    i += if prefix[i] == b'\\' { 2 } else { 1 };
+                }
+                if i >= prefix.len() {
+                    return None;
+                }
+                let text = &prefix[start..i];
+                i = skip_ws(prefix, i + 1);
+                if depth == 1 && text == b"id" && prefix.get(i) == Some(&b':') {
+                    let from = skip_ws(prefix, i + 1);
+                    let to = from
+                        + prefix[from..]
+                            .iter()
+                            .take_while(|b| b.is_ascii_digit())
+                            .count();
+                    // A fraction, exponent or cut-off number is no integer id.
+                    if to == from || !matches!(prefix.get(to), Some(b',' | b'}' | b' ')) {
+                        return None;
+                    }
+                    return std::str::from_utf8(&prefix[from..to]).ok()?.parse().ok();
+                }
+                continue;
+            }
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// The effect a handled request has on the connection beyond its reply.
@@ -233,7 +310,7 @@ pub(crate) async fn handle_request(
         },
 
         // Capability-gated (`Capability::HotPatch`): see `hot_patch_request`.
-        Method::HotpatchInfo | Method::PatchChunk | Method::ApplyPatch => {
+        Method::HotpatchInfo | Method::PatchChunk | Method::TableChunk | Method::ApplyPatch => {
             no_effect(hot_patch_request(ctx, conn, method, req).await)
         }
     }
@@ -288,6 +365,14 @@ async fn hot_patch_request(
 /// `apply_patch` naming a file (the loopback hand-off) instead gets its bytes
 /// from the backend's checked read (`DevtoolsBackend::patch_file`); a
 /// `patch_id` both uploaded and named by file is refused.
+///
+/// `table_chunk` fills the connection's second reassembly, the jump table's
+/// encoded map, on either path. `apply_patch` checks it is complete and
+/// `table_len` bytes long before taking the patch bytes, then decodes it
+/// (bounded by [`MAX_TABLE_BYTES`]) into the params the backend receives, so
+/// the backend sees the whole table exactly as a single line once carried it.
+/// With `table_len` 0 the params' own map (empty, or a pre-chunk host's
+/// inline one) is applied as decoded.
 #[cfg(feature = "hotpatch")]
 async fn hot_patch_request(
     ctx: &SessionCtx,
@@ -311,35 +396,61 @@ async fn hot_patch_request(
             Ok(info) => result_response(id, serde_json::to_value(info)),
             Err(e) => Response::error(id, e),
         },
-        Method::PatchChunk => {
+        Method::PatchChunk | Method::TableChunk => {
             let chunk = match serde_json::from_value::<frust_devtools_protocol::PatchChunkParams>(
                 req.params.clone(),
             ) {
                 Ok(chunk) => chunk,
                 Err(e) => return Response::error(id, invalid_params(req, &e)),
             };
+            let assembly = if method == Method::TableChunk {
+                &mut conn.tables
+            } else {
+                &mut conn.patches
+            };
             // Shape checks before the backend decodes anything: an over-cap
             // chunk is refused without being decoded or buffered.
-            if let Err(e) = conn.patches.admit(&chunk) {
+            if let Err(e) = assembly.admit(&chunk) {
                 return Response::error(id, e);
             }
             let bytes = match lane.chunk(chunk.clone()).await {
                 Ok(bytes) => bytes,
                 Err(e) => return Response::error(id, e),
             };
-            match conn.patches.append(&chunk, bytes) {
+            match assembly.append(&chunk, bytes) {
                 Ok(()) => result_response(id, serde_json::to_value(AckResult::default())),
                 Err(e) => Response::error(id, e),
             }
         }
         Method::ApplyPatch => {
             // `deny_unknown_fields`: a `lib`/`path` field fails here.
-            let params = match serde_json::from_value::<frust_devtools_protocol::ApplyPatchParams>(
+            let mut params = match serde_json::from_value::<frust_devtools_protocol::ApplyPatchParams>(
                 req.params.clone(),
             ) {
                 Ok(params) => params,
                 Err(e) => return Response::error(id, invalid_params(req, &e)),
             };
+            if let Err(e) = check_table_len(params.table_len) {
+                return Response::error(id, e);
+            }
+            // A pre-chunk host's inline map stands in for a stream only when
+            // no stream is declared.
+            if params.table_len > 0 && !params.table.map.is_empty() {
+                return Response::error(
+                    id,
+                    invalid(format!(
+                        "patch {} declares a streamed jump table and an inline map",
+                        params.patch_id
+                    )),
+                );
+            }
+            // The table must be complete before any patch byte is taken or
+            // read, so a missing table leaves an uploaded patch in place.
+            if params.table_len > 0
+                && let Err(e) = conn.tables.ready(params.patch_id, params.table_len)
+            {
+                return Response::error(id, e);
+            }
             let bytes = match params.file.clone() {
                 None => match conn.patches.take_complete(params.patch_id, params.len) {
                     Ok(bytes) => bytes,
@@ -381,12 +492,26 @@ async fn hot_patch_request(
                     }
                 }
             };
+            if params.table_len == 0 {
+                // No stream: the map is empty, or a pre-chunk host's inline one.
+                conn.tables.discard(params.patch_id);
+            } else {
+                let encoded = match conn.tables.take_complete(params.patch_id, params.table_len) {
+                    Ok(encoded) => encoded,
+                    Err(e) => return Response::error(id, e),
+                };
+                params.table.map =
+                    match frust_devtools_protocol::JumpTableWire::decode_map(&encoded) {
+                        Ok(map) => map,
+                        Err(e) => return Response::error(id, invalid(e)),
+                    };
+            }
             match lane.apply(bytes, params).await {
                 Ok(outcome) => result_response(id, serde_json::to_value(outcome)),
                 Err(e) => Response::error(id, e),
             }
         }
-        // Only the three hot-patch methods are routed here.
+        // Only the four hot-patch methods are routed here.
         _ => method_not_found(id, &req.method),
     }
 }
@@ -478,6 +603,31 @@ const MAX_CHUNK_BASE64: usize = MAX_CHUNK_BYTES.div_ceil(3) * 4;
 #[cfg(feature = "hotpatch")]
 pub(crate) const MAX_PATCH_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Largest encoded jump table a connection may assemble: the patch cap again.
+/// At [`frust_devtools_protocol::JumpTableWire::ENTRY_BYTES`] per mapping that
+/// is about four million symbols, several times the largest app measured, and
+/// it bounds what one client can make this process buffer and decode.
+#[cfg(feature = "hotpatch")]
+pub(crate) const MAX_TABLE_BYTES: u64 = MAX_PATCH_BYTES;
+
+/// `apply_patch`'s `table_len` shape: whole entries, within
+/// [`MAX_TABLE_BYTES`].
+#[cfg(feature = "hotpatch")]
+fn check_table_len(table_len: u64) -> Result<(), RpcError> {
+    let entry = frust_devtools_protocol::JumpTableWire::ENTRY_BYTES as u64;
+    if table_len > MAX_TABLE_BYTES {
+        return Err(invalid(format!(
+            "jump table of {table_len} bytes exceeds the {MAX_TABLE_BYTES}-byte cap"
+        )));
+    }
+    if !table_len.is_multiple_of(entry) {
+        return Err(invalid(format!(
+            "jump table of {table_len} bytes is not a whole number of {entry}-byte entries"
+        )));
+    }
+    Ok(())
+}
+
 /// How long an `apply_patch` may take before its client is answered with an
 /// error: a library load plus a wait for the following frame, which the shell
 /// side bounds itself.
@@ -492,14 +642,18 @@ struct PendingPatch {
     bytes: Vec<u8>,
 }
 
-/// A connection's chunk reassembly: **one** patch at a time, chunks in order
-/// and contiguous (`offset` equal to the bytes received so far), every chunk
+/// A connection's chunk reassembly of one stream (a patch's bytes, or its
+/// encoded jump table): **one** transfer at a time, chunks in order and
+/// contiguous (`offset` equal to the bytes received so far), every chunk
 /// agreeing on `total_len`. A chunk at offset 0 for a new `patch_id` discards
 /// any unfinished one, so an abandoned transfer never wedges the connection
-/// and the buffer never holds more than one patch.
+/// and the buffer never holds more than one transfer.
 #[cfg(feature = "hotpatch")]
-#[derive(Default)]
 pub(crate) struct PatchAssembly {
+    /// What this stream is, for messages: `patch` or `table of patch`.
+    what: &'static str,
+    /// Largest `total_len` this stream accepts.
+    cap: u64,
     pending: Option<PendingPatch>,
 }
 
@@ -508,6 +662,7 @@ impl std::fmt::Debug for PatchAssembly {
     /// Lengths only, never the bytes.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("PatchAssembly");
+        s.field("what", &self.what);
         if let Some(p) = &self.pending {
             s.field("patch_id", &p.patch_id)
                 .field("received", &p.bytes.len())
@@ -524,36 +679,55 @@ fn invalid(message: impl Into<String>) -> RpcError {
 
 #[cfg(feature = "hotpatch")]
 impl PatchAssembly {
+    /// The patch-bytes stream (`patch_chunk`), capped at [`MAX_PATCH_BYTES`].
+    pub(crate) fn patches() -> Self {
+        Self {
+            what: "patch",
+            cap: MAX_PATCH_BYTES,
+            pending: None,
+        }
+    }
+
+    /// The jump-table stream (`table_chunk`), capped at [`MAX_TABLE_BYTES`].
+    pub(crate) fn tables() -> Self {
+        Self {
+            what: "table of patch",
+            cap: MAX_TABLE_BYTES,
+            pending: None,
+        }
+    }
+
     /// The checks that need no decoding: size caps, `total_len` agreement, and
     /// that `offset` continues this connection's transfer of `patch_id`.
     pub(crate) fn admit(
         &self,
         chunk: &frust_devtools_protocol::PatchChunkParams,
     ) -> Result<(), RpcError> {
+        let (what, cap) = (self.what, self.cap);
         if chunk.data_base64.len() > MAX_CHUNK_BASE64 {
             return Err(invalid(format!(
-                "patch chunk exceeds {MAX_CHUNK_BYTES} raw bytes"
+                "{what} chunk exceeds {MAX_CHUNK_BYTES} raw bytes"
             )));
         }
         if chunk.data_base64.is_empty() {
-            return Err(invalid("a patch chunk must carry at least one byte"));
-        }
-        if chunk.total_len == 0 || chunk.total_len > MAX_PATCH_BYTES {
             return Err(invalid(format!(
-                "patch total_len must be 1..={MAX_PATCH_BYTES} bytes"
+                "a {what} chunk must carry at least one byte"
             )));
+        }
+        if chunk.total_len == 0 || chunk.total_len > cap {
+            return Err(invalid(format!("{what} total_len must be 1..={cap} bytes")));
         }
         match &self.pending {
             Some(p) if p.patch_id == chunk.patch_id => {
                 if p.total_len != chunk.total_len {
                     return Err(invalid(format!(
-                        "patch {} changed total_len from {} to {}",
+                        "{what} {} changed total_len from {} to {}",
                         chunk.patch_id, p.total_len, chunk.total_len
                     )));
                 }
                 if chunk.offset != p.bytes.len() as u64 {
                     return Err(invalid(format!(
-                        "patch {} chunk at offset {}, expected {}",
+                        "{what} {} chunk at offset {}, expected {}",
                         chunk.patch_id,
                         chunk.offset,
                         p.bytes.len()
@@ -563,7 +737,7 @@ impl PatchAssembly {
             // A new transfer starts at offset 0 (and replaces any unfinished one).
             _ if chunk.offset != 0 => {
                 return Err(invalid(format!(
-                    "patch {} has no chunks on this connection; its first chunk must be at offset 0",
+                    "{what} {} has no chunks on this connection; its first chunk must be at offset 0",
                     chunk.patch_id
                 )));
             }
@@ -579,14 +753,15 @@ impl PatchAssembly {
         data: Vec<u8>,
     ) -> Result<(), RpcError> {
         self.admit(chunk)?;
+        let what = self.what;
         if data.is_empty() || data.len() > MAX_CHUNK_BYTES {
             return Err(invalid(format!(
-                "a decoded patch chunk must be 1..={MAX_CHUNK_BYTES} bytes"
+                "a decoded {what} chunk must be 1..={MAX_CHUNK_BYTES} bytes"
             )));
         }
         if chunk.offset + data.len() as u64 > chunk.total_len {
             return Err(invalid(format!(
-                "patch {} chunk runs past total_len {}",
+                "{what} {} chunk runs past total_len {}",
                 chunk.patch_id, chunk.total_len
             )));
         }
@@ -594,7 +769,7 @@ impl PatchAssembly {
         if !continuing {
             if let Some(dropped) = self.pending.take() {
                 log::debug!(
-                    "frust-devtools: patch {} superseded by patch {} before it completed",
+                    "frust-devtools: {what} {} superseded by {what} {} before it completed",
                     dropped.patch_id,
                     chunk.patch_id
                 );
@@ -618,32 +793,58 @@ impl PatchAssembly {
             .is_some_and(|p| p.patch_id == patch_id)
     }
 
-    /// Hands over `patch_id`'s bytes for `apply_patch`: it must have been
-    /// assembled on **this** connection, be complete, and be exactly `len`
-    /// bytes. A complete patch is consumed whatever the answer (a length
-    /// mismatch means its bytes cannot be trusted); an incomplete one stays.
-    pub(crate) fn take_complete(&mut self, patch_id: u64, len: u64) -> Result<Vec<u8>, RpcError> {
-        let Some(p) = self.pending.take_if(|p| p.patch_id == patch_id) else {
+    /// Whether [`Self::take_complete`] would hand over `patch_id`'s bytes
+    /// (assembled here, complete, exactly `len` bytes), without taking them;
+    /// the error is the one `take_complete` would answer.
+    pub(crate) fn ready(&self, patch_id: u64, len: u64) -> Result<(), RpcError> {
+        let what = self.what;
+        let Some(p) = self.pending.as_ref().filter(|p| p.patch_id == patch_id) else {
             return Err(invalid(format!(
-                "patch {patch_id} has no chunks on this connection"
+                "{what} {patch_id} has no chunks on this connection"
             )));
         };
         if (p.bytes.len() as u64) < p.total_len {
-            let message = format!(
-                "patch {patch_id} is incomplete: {} of {} bytes received",
+            return Err(invalid(format!(
+                "{what} {patch_id} is incomplete: {} of {} bytes received",
                 p.bytes.len(),
                 p.total_len
-            );
-            self.pending = Some(p);
-            return Err(invalid(message));
+            )));
         }
         if p.bytes.len() as u64 != len {
             return Err(invalid(format!(
-                "patch {patch_id} is {} bytes, apply_patch says {len}",
+                "{what} {patch_id} is {} bytes, apply_patch says {len}",
                 p.bytes.len()
             )));
         }
-        Ok(p.bytes)
+        Ok(())
+    }
+
+    /// Hands over `patch_id`'s bytes for `apply_patch`: it must have been
+    /// assembled on **this** connection, be complete, and be exactly `len`
+    /// bytes. A complete transfer is consumed whatever the answer (a length
+    /// mismatch means its bytes cannot be trusted); an incomplete one stays.
+    pub(crate) fn take_complete(&mut self, patch_id: u64, len: u64) -> Result<Vec<u8>, RpcError> {
+        let verdict = self.ready(patch_id, len);
+        let complete = self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.patch_id == patch_id && p.bytes.len() as u64 >= p.total_len);
+        let taken = if complete { self.pending.take() } else { None };
+        match (verdict, taken) {
+            (Ok(()), Some(p)) => Ok(p.bytes),
+            (Err(e), _) => Err(e),
+            // `ready` passing means a complete transfer was there to take.
+            (Ok(()), None) => Err(invalid(format!(
+                "{} {patch_id} has no chunks on this connection",
+                self.what
+            ))),
+        }
+    }
+
+    /// Drops whatever this connection holds for `patch_id`: an `apply_patch`
+    /// that declares no table leaves no table stream behind it.
+    pub(crate) fn discard(&mut self, patch_id: u64) {
+        self.pending.take_if(|p| p.patch_id == patch_id);
     }
 }
 
@@ -898,6 +1099,7 @@ mod tests {
             Method::FrameStats,
             Method::HotpatchInfo,
             Method::PatchChunk,
+            Method::TableChunk,
             Method::ApplyPatch,
         ] {
             let req = Request::new(1, method.as_str(), Value::Null);
@@ -1080,6 +1282,48 @@ mod tests {
     }
 
     #[test]
+    fn salvage_id_reads_only_the_top_level_integer_id() {
+        assert_eq!(
+            salvage_id(br#"{"jsonrpc":"2.0","id":42,"method":"apply_patch","params":{"#),
+            Some(42)
+        );
+        assert_eq!(salvage_id(br#"  { "id" : 7 , "params": "xxx"#), Some(7));
+        // An `id` inside a nested value is not the envelope's.
+        assert_eq!(
+            salvage_id(br#"{"method":"x","params":{"id":9,"text":"aaaa"#),
+            None
+        );
+        assert_eq!(salvage_id(br#"{"params":["id",1],"id":3}"#), Some(3));
+        // A key-looking string inside a string value is skipped whole.
+        assert_eq!(salvage_id(br#"{"params":"\"id\":5","id":6,"#), Some(6));
+        // Not an unsigned integer, cut off, or not an object at all.
+        for prefix in [
+            &br#"{"id":"abc","#[..],
+            br#"{"id":-1,"#,
+            br#"{"id":1.5,"#,
+            br#"{"id":12"#,
+            br#"[{"id":1}]"#,
+            b"xxxxxxxx",
+        ] {
+            assert_eq!(
+                salvage_id(prefix),
+                None,
+                "{}",
+                String::from_utf8_lossy(prefix)
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_line_reply_names_the_cap_and_falls_back_to_id_zero() {
+        let reply = oversized_line_response(Some(5), 1 << 20);
+        assert_eq!(reply.id, 5);
+        assert_eq!(error_code(&reply), RpcError::INVALID_REQUEST);
+        assert!(error_message(&reply).contains("1048576"), "{reply:?}");
+        assert_eq!(oversized_line_response(None, 1 << 20).id, 0);
+    }
+
+    #[test]
     fn parse_error_response_carries_the_standard_code() {
         let resp = parse_error_response(3, "bad");
         match resp.outcome {
@@ -1137,7 +1381,7 @@ mod tests {
 
         let unknown = Request::new(1, "no_such_method", Value::Null);
         let (unknown, _) = block_on(handle_request(&ctx, &mut conn, &unknown));
-        for method in [Method::PatchChunk, Method::ApplyPatch] {
+        for method in [Method::PatchChunk, Method::TableChunk, Method::ApplyPatch] {
             let req = Request::new(1, method.as_str(), Value::Null);
             let (response, effect) = block_on(handle_request(&ctx, &mut conn, &req));
             assert_eq!(
@@ -1193,6 +1437,8 @@ mod tests {
         struct HotStub {
             chunks_decoded: AtomicUsize,
             applied: Mutex<Vec<Vec<u8>>>,
+            /// The jump-table map each `apply_patch` arrived with.
+            tables: Mutex<Vec<std::collections::HashMap<u64, u64>>>,
             /// When set, `apply_patch` parks until a value arrives.
             hold: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
             /// What `patch_file` answers with; `None` refuses like a backend
@@ -1260,8 +1506,9 @@ mod tests {
             fn apply_patch(
                 &self,
                 bytes: Vec<u8>,
-                _params: ApplyPatchParams,
+                params: ApplyPatchParams,
             ) -> Result<PatchOutcome, crate::BackendError> {
+                self.tables.lock().expect("tables").push(params.table.map);
                 let hold = self.hold.lock().expect("hold").take();
                 if let Some(hold) = hold {
                     let _ = hold.recv_timeout(std::time::Duration::from_secs(5));
@@ -1319,6 +1566,11 @@ mod tests {
         }
 
         fn apply(patch_id: u64, len: u64) -> Request {
+            apply_with_table(patch_id, len, 0)
+        }
+
+        /// An `apply_patch` whose table is `table_len` bytes of `table_chunk`s.
+        fn apply_with_table(patch_id: u64, len: u64, table_len: u64) -> Request {
             Request::new(
                 11,
                 Method::ApplyPatch.as_str(),
@@ -1333,11 +1585,34 @@ mod tests {
                         new_base_address: 0,
                         ifunc_count: 0,
                     },
+                    table_len,
                     expected_seams: 0,
                     file: None,
                 })
                 .expect("apply params"),
             )
+        }
+
+        /// A `table_chunk` whose identity-encoded text is `data`.
+        fn table_chunk(patch_id: u64, offset: u64, total_len: u64, data: &str) -> Request {
+            let mut req = chunk(patch_id, offset, total_len, data);
+            req.method = Method::TableChunk.as_str().to_string();
+            req
+        }
+
+        /// A map whose encoding is plain ASCII, so [`HotStub`]'s identity
+        /// transfer encoding carries it, with that encoding as text.
+        fn ascii_table() -> (std::collections::HashMap<u64, u64>, String) {
+            let map: std::collections::HashMap<u64, u64> =
+                [(0x10, 0x20), (0x30, 0x40)].into_iter().collect();
+            let wire = JumpTableWire {
+                map: map.clone(),
+                aslr_reference: 0,
+                new_base_address: 0,
+                ifunc_count: 0,
+            };
+            let text = String::from_utf8(wire.encode_map()).expect("ascii encoding");
+            (map, text)
         }
 
         fn send(ctx: &SessionCtx, conn: &mut ConnState, req: &Request) -> Response {
@@ -1549,6 +1824,190 @@ mod tests {
         }
 
         #[test]
+        fn a_table_streamed_in_chunks_reaches_the_backend_whole() {
+            let stub = Arc::new(HotStub::default());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+            let (map, text) = ascii_table();
+
+            assert!(is_success(&send(&ctx, &mut conn, &chunk(7, 0, 3, "abc"))));
+            assert!(is_success(&send(
+                &ctx,
+                &mut conn,
+                &table_chunk(7, 0, 32, &text[..16])
+            )));
+            assert!(is_success(&send(
+                &ctx,
+                &mut conn,
+                &table_chunk(7, 16, 32, &text[16..])
+            )));
+            let outcome = send(&ctx, &mut conn, &apply_with_table(7, 3, 32));
+            assert!(is_success(&outcome), "{outcome:?}");
+            assert_eq!(
+                *stub.applied.lock().expect("applied"),
+                vec![b"abc".to_vec()]
+            );
+            assert_eq!(*stub.tables.lock().expect("tables"), vec![map]);
+        }
+
+        #[test]
+        fn an_apply_missing_its_table_is_refused_and_keeps_the_patch() {
+            let stub = Arc::new(HotStub::default());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+            let (map, text) = ascii_table();
+
+            assert!(is_success(&send(&ctx, &mut conn, &chunk(8, 0, 3, "abc"))));
+            let refused = send(&ctx, &mut conn, &apply_with_table(8, 3, 32));
+            assert_eq!(error_code(&refused), RpcError::INVALID_PARAMS);
+            assert!(
+                error_message(&refused).contains("table of patch 8 has no chunks"),
+                "{refused:?}"
+            );
+            // An incomplete table is refused the same way, and kept.
+            assert!(is_success(&send(
+                &ctx,
+                &mut conn,
+                &table_chunk(8, 0, 32, &text[..16])
+            )));
+            let early = send(&ctx, &mut conn, &apply_with_table(8, 3, 32));
+            assert!(error_message(&early).contains("incomplete"), "{early:?}");
+            assert!(stub.applied.lock().expect("applied").is_empty());
+
+            assert!(is_success(&send(
+                &ctx,
+                &mut conn,
+                &table_chunk(8, 16, 32, &text[16..])
+            )));
+            let outcome = send(&ctx, &mut conn, &apply_with_table(8, 3, 32));
+            assert!(is_success(&outcome), "{outcome:?}");
+            assert_eq!(*stub.tables.lock().expect("tables"), vec![map]);
+        }
+
+        #[test]
+        fn a_file_hand_off_takes_its_table_from_table_chunks() {
+            let stub = Arc::new(HotStub::default());
+            *stub.file_bytes.lock().expect("file_bytes") = Some(b"filed!".to_vec());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+            let (map, text) = ascii_table();
+
+            assert!(is_success(&send(
+                &ctx,
+                &mut conn,
+                &table_chunk(12, 0, 32, &text)
+            )));
+            let mut req = apply_file(12, 6);
+            req.params["table_len"] = serde_json::json!(32);
+            let outcome = send(&ctx, &mut conn, &req);
+            assert!(is_success(&outcome), "{outcome:?}");
+            assert_eq!(
+                *stub.applied.lock().expect("applied"),
+                vec![b"filed!".to_vec()]
+            );
+            assert_eq!(*stub.tables.lock().expect("tables"), vec![map]);
+        }
+
+        #[test]
+        fn a_table_len_off_the_entry_grid_or_over_the_cap_is_refused() {
+            let stub = Arc::new(HotStub::default());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+            assert!(is_success(&send(&ctx, &mut conn, &chunk(9, 0, 3, "abc"))));
+            for table_len in [17, MAX_TABLE_BYTES + 16] {
+                let refused = send(&ctx, &mut conn, &apply_with_table(9, 3, table_len));
+                assert_eq!(
+                    error_code(&refused),
+                    RpcError::INVALID_PARAMS,
+                    "{table_len}"
+                );
+            }
+            // ...and a table stream claiming more than the cap is refused at
+            // its first chunk.
+            let refused = send(
+                &ctx,
+                &mut conn,
+                &table_chunk(9, 0, MAX_TABLE_BYTES + 16, "abcdefghijklmnop"),
+            );
+            assert_eq!(error_code(&refused), RpcError::INVALID_PARAMS);
+            assert!(stub.applied.lock().expect("applied").is_empty());
+        }
+
+        #[test]
+        fn a_table_that_does_not_decode_is_refused_before_the_apply() {
+            let stub = Arc::new(HotStub::default());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+            let (_, text) = ascii_table();
+            // The same entry twice: not strictly ascending.
+            let repeated = format!("{}{}", &text[..16], &text[..16]);
+            assert!(is_success(&send(&ctx, &mut conn, &chunk(10, 0, 3, "abc"))));
+            assert!(is_success(&send(
+                &ctx,
+                &mut conn,
+                &table_chunk(10, 0, 32, &repeated)
+            )));
+            let refused = send(&ctx, &mut conn, &apply_with_table(10, 3, 32));
+            assert_eq!(error_code(&refused), RpcError::INVALID_PARAMS);
+            assert!(error_message(&refused).contains("not above"), "{refused:?}");
+            assert!(stub.applied.lock().expect("applied").is_empty());
+        }
+
+        #[test]
+        fn a_pre_chunk_inline_map_applies_as_sent_but_never_beside_a_stream() {
+            let stub = Arc::new(HotStub::default());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+            let inline = || {
+                let mut req = apply(14, 3);
+                req.params["table"]["map"] = serde_json::json!({ "16": 32 });
+                req
+            };
+
+            // The shape an older host sends: the map inline, no `table_len`.
+            assert!(is_success(&send(&ctx, &mut conn, &chunk(14, 0, 3, "abc"))));
+            let mut legacy = inline();
+            legacy
+                .params
+                .as_object_mut()
+                .expect("params")
+                .remove("table_len");
+            let outcome = send(&ctx, &mut conn, &legacy);
+            assert!(is_success(&outcome), "{outcome:?}");
+            assert_eq!(
+                *stub.tables.lock().expect("tables"),
+                vec![[(16, 32)].into_iter().collect()]
+            );
+
+            // Both at once is refused.
+            assert!(is_success(&send(&ctx, &mut conn, &chunk(15, 0, 3, "abc"))));
+            let mut both = inline();
+            both.params["patch_id"] = serde_json::json!(15);
+            both.params["table_len"] = serde_json::json!(16);
+            let refused = send(&ctx, &mut conn, &both);
+            assert_eq!(error_code(&refused), RpcError::INVALID_PARAMS);
+            assert!(error_message(&refused).contains("inline"), "{refused:?}");
+        }
+
+        #[test]
+        fn table_chunks_never_complete_a_patch() {
+            let stub = Arc::new(HotStub::default());
+            let ctx = enabled_ctx(&stub);
+            let mut conn = authed(&ctx);
+            assert!(is_success(&send(
+                &ctx,
+                &mut conn,
+                &table_chunk(11, 0, 3, "abc")
+            )));
+            let refused = send(&ctx, &mut conn, &apply(11, 3));
+            assert_eq!(error_code(&refused), RpcError::INVALID_PARAMS);
+            assert!(
+                error_message(&refused).starts_with("patch 11 has no chunks"),
+                "{refused:?}"
+            );
+        }
+
+        #[test]
         fn hotpatch_info_reaches_the_backend_when_enabled() {
             let stub = Arc::new(HotStub::default());
             let ctx = enabled_ctx(&stub);
@@ -1587,6 +2046,212 @@ mod tests {
                 *stub.applied.lock().expect("applied"),
                 vec![b"abc".to_vec()]
             );
+        }
+
+        /// What the real-socket backend received: each apply's bytes and map.
+        type Received = Arc<Mutex<Vec<(Vec<u8>, std::collections::HashMap<u64, u64>)>>>;
+
+        /// A backend offering `HotPatch` whose transfer encoding is lowercase
+        /// hex (the service never decodes chunks itself), recording what each
+        /// `apply_patch` received.
+        struct SocketBackend(Received);
+
+        impl crate::DevtoolsBackend for SocketBackend {
+            fn handshake_info(&self, app: &crate::AppInfo) -> HandshakeInfo {
+                HandshakeInfo {
+                    app_name: app.app_name.clone(),
+                    frust_version: app.frust_version.clone(),
+                    protocol_version: frust_devtools_protocol::PROTOCOL_VERSION,
+                    capabilities: vec![frust_devtools_protocol::Capability::HotPatch],
+                }
+            }
+            fn widget_tree(&self) -> frust_devtools_protocol::WidgetTreeDump {
+                frust_devtools_protocol::WidgetTreeDump { roots: Vec::new() }
+            }
+            fn widget_props(&self, _id: u64) -> Option<frust_devtools_protocol::WidgetProps> {
+                None
+            }
+            fn metrics_snapshot(&self) -> frust_devtools_protocol::MetricsSnapshot {
+                frust_devtools_protocol::MetricsSnapshot {
+                    rss_bytes: None,
+                    uptime_ms: 0,
+                }
+            }
+            fn inject_tap(&self, _p: InputTapParams) -> Result<(), crate::BackendError> {
+                Ok(())
+            }
+            fn inject_scroll(&self, _p: InputScrollParams) -> Result<(), crate::BackendError> {
+                Ok(())
+            }
+            fn inject_text(&self, _t: &str) -> Result<(), crate::BackendError> {
+                Ok(())
+            }
+            fn patch_chunk(
+                &self,
+                chunk: &PatchChunkParams,
+            ) -> Result<Vec<u8>, crate::BackendError> {
+                let text = chunk.data_base64.as_bytes();
+                if !text.len().is_multiple_of(2) {
+                    return Err(crate::BackendError::invalid_request("odd hex"));
+                }
+                text.chunks(2)
+                    .map(|pair| {
+                        std::str::from_utf8(pair)
+                            .ok()
+                            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                            .ok_or_else(|| crate::BackendError::invalid_request("not hex"))
+                    })
+                    .collect()
+            }
+            fn apply_patch(
+                &self,
+                bytes: Vec<u8>,
+                params: ApplyPatchParams,
+            ) -> Result<PatchOutcome, crate::BackendError> {
+                let len = bytes.len() as u64;
+                self.0
+                    .lock()
+                    .expect("received")
+                    .push((bytes, params.table.map));
+                Ok(PatchOutcome {
+                    applied: true,
+                    seam_hits: 1,
+                    seam_fall_throughs: Vec::new(),
+                    layout_mismatches: Vec::new(),
+                    patches_applied: 1,
+                    patch_bytes_loaded: len,
+                })
+            }
+        }
+
+        /// One blocking NDJSON connection that refuses to write a line over
+        /// the server's cap, so the test proves no request needed one.
+        struct LineClient {
+            writer: std::net::TcpStream,
+            reader: std::io::BufReader<std::net::TcpStream>,
+            next_id: u64,
+            longest_line: usize,
+        }
+
+        impl LineClient {
+            fn call(&mut self, method: Method, params: Value) -> Response {
+                use std::io::{BufRead as _, Write as _};
+                self.next_id += 1;
+                let line = encode_line(&Request::new(self.next_id, method.as_str(), params));
+                assert!(
+                    line.len() <= 1 << 20,
+                    "a {} byte `{method}` line",
+                    line.len()
+                );
+                self.longest_line = self.longest_line.max(line.len());
+                self.writer.write_all(line.as_bytes()).expect("write");
+                self.writer.write_all(b"\n").expect("write");
+                let mut reply = String::new();
+                self.reader.read_line(&mut reply).expect("read");
+                let response: Response = serde_json::from_str(reply.trim_end()).expect("reply");
+                assert_eq!(response.id, self.next_id);
+                response
+            }
+
+            /// Sends `bytes` as `method` chunks of `raw` bytes, hex-encoded.
+            fn upload(&mut self, method: Method, patch_id: u64, bytes: &[u8], raw: usize) {
+                for (index, data) in bytes.chunks(raw).enumerate() {
+                    let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
+                    let params = serde_json::to_value(PatchChunkParams {
+                        patch_id,
+                        offset: (index * raw) as u64,
+                        total_len: bytes.len() as u64,
+                        data_base64: hex,
+                    })
+                    .expect("chunk");
+                    let response = self.call(method, params);
+                    assert!(is_success(&response), "{response:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn a_two_hundred_thousand_entry_table_crosses_a_real_socket_and_applies_whole() {
+            const ENTRIES: u64 = 200_000;
+            let received = Received::default();
+            let service = crate::Service::start_with_config(
+                SocketBackend(Arc::clone(&received)),
+                crate::AppInfo::new("large-table", "0.0.0"),
+                crate::ServiceConfig {
+                    backend_timeout: std::time::Duration::from_secs(10),
+                    ..crate::ServiceConfig::default()
+                },
+            )
+            .expect("service starts");
+            let stream =
+                std::net::TcpStream::connect(("127.0.0.1", service.port())).expect("connect");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+                .expect("timeout");
+            let mut client = LineClient {
+                writer: stream.try_clone().expect("clone"),
+                reader: std::io::BufReader::new(stream),
+                next_id: 0,
+                longest_line: 0,
+            };
+            let token = service.token().expect("a token").to_string();
+            let hello = client.call(
+                Method::Handshake,
+                serde_json::to_value(HandshakeParams { token: Some(token) }).expect("params"),
+            );
+            assert!(is_success(&hello), "{hello:?}");
+
+            let started = std::time::Instant::now();
+            let table = JumpTableWire {
+                map: (0..ENTRIES)
+                    .map(|i| (0x1000 + i * 8, 0x9000_0000 + i * 4))
+                    .collect(),
+                aslr_reference: 0x100,
+                new_base_address: 0x200,
+                ifunc_count: 0,
+            };
+            let encoded = table.encode_map();
+            assert_eq!(encoded.len() as u64, ENTRIES * 16);
+            let patch: Vec<u8> = (0..1_000_003u32).map(|i| (i % 251) as u8).collect();
+            // 256 KiB raw is 512 KiB of hex: inside the chunk text bound.
+            client.upload(Method::PatchChunk, 3, &patch, 256 * 1024);
+            client.upload(Method::TableChunk, 3, &encoded, 256 * 1024);
+            let params = ApplyPatchParams {
+                patch_id: 3,
+                len: patch.len() as u64,
+                pid: 2,
+                anchor_runtime: 1,
+                table: table.clone(),
+                table_len: encoded.len() as u64,
+                expected_seams: 1,
+                file: None,
+            };
+            let outcome = client.call(
+                Method::ApplyPatch,
+                serde_json::to_value(&params).expect("params"),
+            );
+            assert!(is_success(&outcome), "{outcome:?}");
+            let elapsed = started.elapsed();
+            eprintln!(
+                "real-socket apply: {ENTRIES} entries ({} table bytes) + {} patch bytes in {} ms, \
+                 longest request line {} bytes",
+                encoded.len(),
+                patch.len(),
+                elapsed.as_millis(),
+                client.longest_line
+            );
+
+            let received = received.lock().expect("received");
+            assert_eq!(received.len(), 1);
+            assert_eq!(received[0].0, patch);
+            assert_eq!(received[0].1.len() as u64, ENTRIES);
+            assert_eq!(received[0].1, table.map);
+            assert!(
+                elapsed < std::time::Duration::from_secs(60),
+                "the transfer took {elapsed:?}"
+            );
+            drop(received);
+            service.shutdown();
         }
     }
 }

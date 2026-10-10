@@ -45,11 +45,19 @@ pub enum Method {
     /// Client→server request; params: [`crate::PatchChunkParams`];
     /// result: [`crate::AckResult`]. Capability-gated like `Screenshot`.
     PatchChunk,
+    /// Client→server request; params: [`crate::PatchChunkParams`];
+    /// result: [`crate::AckResult`]. Capability-gated like `Screenshot`. One
+    /// slice of `patch_id`'s encoded jump table
+    /// ([`crate::JumpTableWire::encode_map`]), reassembled per connection
+    /// apart from the patch bytes; sent on every path, the file hand-off
+    /// included, since no request line carries the table.
+    TableChunk,
     /// Client→server request; params: [`crate::ApplyPatchParams`];
     /// result: [`crate::PatchOutcome`]. Capability-gated like `Screenshot`.
     /// Applies the `patch_chunk` uploads for `patch_id`, or — on an app that
     /// advertises [`crate::HotpatchInfo::patch_file_hand_off`] — the
-    /// host-written file named by [`crate::ApplyPatchParams::file`] instead.
+    /// host-written file named by [`crate::ApplyPatchParams::file`] instead,
+    /// with the jump table its `table_chunk` uploads carried.
     ApplyPatch,
 }
 
@@ -69,6 +77,7 @@ impl Method {
             Method::Screenshot => "screenshot",
             Method::HotpatchInfo => "hotpatch_info",
             Method::PatchChunk => "patch_chunk",
+            Method::TableChunk => "table_chunk",
             Method::ApplyPatch => "apply_patch",
         }
     }
@@ -99,6 +108,7 @@ impl Method {
             "screenshot" => Method::Screenshot,
             "hotpatch_info" => Method::HotpatchInfo,
             "patch_chunk" => Method::PatchChunk,
+            "table_chunk" => Method::TableChunk,
             "apply_patch" => Method::ApplyPatch,
             _ => return None,
         })
@@ -115,7 +125,7 @@ impl std::fmt::Display for Method {
 mod tests {
     use super::*;
 
-    const ALL: [Method; 13] = [
+    const ALL: [Method; 14] = [
         Method::Handshake,
         Method::WidgetTree,
         Method::WidgetProps,
@@ -128,6 +138,7 @@ mod tests {
         Method::Screenshot,
         Method::HotpatchInfo,
         Method::PatchChunk,
+        Method::TableChunk,
         Method::ApplyPatch,
     ];
 
@@ -145,6 +156,7 @@ mod tests {
             Some(Method::HotpatchInfo)
         );
         assert_eq!(Method::from_str("patch_chunk"), Some(Method::PatchChunk));
+        assert_eq!(Method::from_str("table_chunk"), Some(Method::TableChunk));
         assert_eq!(Method::from_str("apply_patch"), Some(Method::ApplyPatch));
     }
 
