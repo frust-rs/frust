@@ -371,7 +371,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             let session_animating = state
                 .sessions
                 .iter()
-                .any(|s| super::state::is_transient(&s.state));
+                .any(|s| super::state::is_transient(&s.state) || s.hot_patching());
             // The open MCP panel repaints on every tick: its client list is
             // read live off the registry at render time, so nothing else
             // would ever dirty the frame when a client connects or drops
@@ -2505,6 +2505,11 @@ fn on_session_event(state: &mut AppState, ev: SessionEvent) -> Outcome {
             }
             SessionEventKind::State(s) => {
                 session.state = s;
+                // A session that ended mid-patch gets no answer: the worker
+                // drops it once stopped, so the indicator stops here.
+                if session.state.is_terminal() {
+                    session.clear_hot_patches();
+                }
                 // `Killed` is the terminal transition of *every* external
                 // stop: the keyboard `x` (`Message::StopSession`, which
                 // already clears `watch` itself), `close_tab`/`CloseActiveTab`
@@ -2733,7 +2738,12 @@ fn hot_patch_now(state: &mut AppState) -> Outcome {
     }
     if view.hot && !view.state.is_terminal() && !view.close_on_exit {
         view.hot_patch_requested = true;
-        return Outcome::effect(Effect::HotPatchNow { session: view.id });
+        // The in-flight indicator shows from this frame until the answer.
+        view.begin_hot_patch(state.animation_frame);
+        return Outcome {
+            redraw: true,
+            effect: Some(Effect::HotPatchNow { session: view.id }),
+        };
     }
     let hot = view.hot;
     let out = restart_session_at(state, idx);
@@ -2821,7 +2831,11 @@ fn watch_triggered(
         .as_ref()
         .is_some_and(SessionTarget::supports_watch);
     if hot && watchable && !view.state.is_terminal() {
-        return Outcome::effect(Effect::HotPatch { session, paths });
+        state.sessions[idx].begin_hot_patch(state.animation_frame);
+        return Outcome {
+            redraw: true,
+            effect: Some(Effect::HotPatch { session, paths }),
+        };
     }
     restart_session_at(state, idx)
 }
@@ -2846,6 +2860,7 @@ fn hot_patch_outcome(state: &mut AppState, session: SessionId, outcome: HotOutco
         return Outcome::idle();
     };
     let requested = std::mem::take(&mut state.sessions[idx].hot_patch_requested);
+    state.sessions[idx].end_hot_patch();
     match outcome {
         HotOutcome::Patched { ms, .. } => {
             state
@@ -4700,6 +4715,86 @@ mod tests {
             toast_texts(&st, ToastKind::Info),
             vec!["no change to the running app"]
         );
+    }
+
+    #[test]
+    fn a_hot_patch_shows_in_flight_from_the_request_until_its_answer() {
+        let (mut st, a) = hot_desktop();
+        st.animation_frame = 7;
+        assert!(!st.sessions[0].hot_patching());
+
+        let out = update(&mut st, Message::HotPatchNow);
+        assert!(out.redraw, "the indicator shows on the keypress");
+        assert!(st.sessions[0].hot_patching());
+        assert_eq!(st.sessions[0].hot_patch_started, Some(7));
+        assert!(st.animating(), "the spinner ticks while patching");
+        assert!(update(&mut st, Message::Tick).redraw);
+
+        update(&mut st, outcome(a, HotOutcome::NoChange));
+        assert!(!st.sessions[0].hot_patching());
+        assert_eq!(st.sessions[0].hot_patch_started, None);
+        assert_eq!(st.sessions[0].hot_patch_flash, None, "only a patch pulses");
+        st.toasts.items.clear();
+        assert!(!st.animating(), "the tick stops with the answer");
+    }
+
+    #[test]
+    fn a_watched_save_shows_in_flight_and_every_answer_kind_ends_it() {
+        let answers = [
+            HotOutcome::CompileFailed {
+                diagnostics: vec!["error[E0308]".into()],
+            },
+            HotOutcome::Patched {
+                ms: 9,
+                components: 1,
+            },
+        ];
+        for answer in answers {
+            let (mut st, a) = watched_desktop();
+            let out = update(&mut st, hot_trigger(a, &["/tmp/huddle/src/a.rs"]));
+            assert!(matches!(out.effect, Some(Effect::HotPatch { .. })));
+            assert!(out.redraw);
+            assert!(st.sessions[0].hot_patching());
+
+            update(&mut st, outcome(a, answer));
+            assert!(!st.sessions[0].hot_patching());
+        }
+    }
+
+    #[test]
+    fn two_pending_hot_patches_need_two_answers_and_keep_the_first_start() {
+        let (mut st, a) = hot_desktop();
+        st.animation_frame = 3;
+        update(&mut st, Message::HotPatchNow);
+        st.animation_frame = 9;
+        update(&mut st, Message::HotPatchNow);
+        assert_eq!(st.sessions[0].hot_patches_pending, 2);
+        assert_eq!(st.sessions[0].hot_patch_started, Some(3));
+
+        update(&mut st, outcome(a, HotOutcome::NoChange));
+        assert!(st.sessions[0].hot_patching(), "one answer still owed");
+        update(&mut st, outcome(a, HotOutcome::NoChange));
+        assert!(!st.sessions[0].hot_patching());
+        // A stray extra answer never underflows.
+        update(&mut st, outcome(a, HotOutcome::NoChange));
+        assert_eq!(st.sessions[0].hot_patches_pending, 0);
+    }
+
+    #[test]
+    fn a_session_ending_mid_patch_drops_the_in_flight_indicator() {
+        let (mut st, a) = hot_desktop();
+        update(&mut st, Message::HotPatchNow);
+        assert!(st.sessions[0].hot_patching());
+
+        update(
+            &mut st,
+            Message::Session(SessionEvent {
+                id: a,
+                kind: SessionEventKind::State(SessionState::Killed),
+            }),
+        );
+        assert_eq!(st.sessions[0].hot_patches_pending, 0);
+        assert_eq!(st.sessions[0].hot_patch_started, None);
     }
 
     #[test]
