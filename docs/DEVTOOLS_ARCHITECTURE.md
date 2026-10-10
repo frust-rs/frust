@@ -22,7 +22,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how DEVTOOLS relates to the other uni
 | `frust-devtools::token` | Mints the per-process handshake token from the OS CSPRNG (`/dev/urandom` on unix, `BCryptGenRandom` on Windows), with a documented non-cryptographic fallback when that fails, and reports the source (`TokenSource`) the hot-patch gate reads |
 | `frust-devtools::{server,dispatch,frame_stats,hop}` | The accept loop (rejects any pre-`handshake` method without a valid token), request→backend-call dispatch, the frame-stats broadcast bus, and the backend-thread hop that carries every backend call through one 1s-timeout channel round trip. `dispatch` also owns the per-connection `patch_chunk` reassembly and the hot-patch lane (see Data Flow) |
 | `frust-shell-common::devtools` (feature `devtools`) | The shell-side `DevtoolsBackend` implementation: maps `RenderRoot::inspect()` output into protocol types, hops backend calls to each shell's UI thread, and drives service start/pump/frame-stats publish. Under `hotpatch` it offers `HotPatch` and applies a patch through `frust-hotpatch`, answering after the next frame each shell reports through `frame_submitted` |
-| `frust-drive::devtools_client` | The tool-side client: blocking `std::net::TcpStream` request/response plus a frame-stats subscription, token-aware `connect`/`handshake`, the hot-patch calls (`hotpatch_info`, `upload_patch` over `patch_chunks`, `apply_patch`), `adb_forward_ephemeral`/`adb_forward_remove` for Android, and discovery-line parsing reused from the protocol leaf |
+| `frust-drive::devtools_client` | The tool-side client: blocking `std::net::TcpStream` request/response plus a frame-stats subscription, token-aware `connect`/`handshake`, the hot-patch calls (`hotpatch_info`, `upload_patch` over `patch_chunks`, `upload_table` over `table_chunk`, `apply_patch`; a request line over the cap fails as `RequestTooLarge` before sending), `adb_forward_ephemeral`/`adb_forward_remove` for Android, and discovery-line parsing reused from the protocol leaf |
 
 ## Layer Dependencies
 
@@ -120,7 +120,11 @@ loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELin
   exactly as an unknown name does, and `hotpatch_info` answers `NOT_SUPPORTED` naming the failed
   gate condition. A patch arrives as `patch_chunk`s, one patch per connection at a time, in order
   and contiguous, the whole patch size-capped by the service, or — when `hotpatch_info` advertises
-  `patch_file_hand_off` — as a host-written file named on `apply_patch`. `apply_patch` consumes
+  `patch_file_hand_off` — as a host-written file named on `apply_patch`. The jump table never
+  rides the `apply_patch` line: on both paths it arrives as `table_chunk`s (16-byte little-endian
+  base/patch pairs, capped like the patch) and `apply_patch` names only its `table_len`, so a large
+  app's table cannot overflow the 1 MiB line cap; a line over the cap is refused before sending
+  by the client and answered with an error naming the cap by the server. `apply_patch` consumes
   only its own connection's reassembled bytes (a `patch_id` both uploaded and named is refused)
   and runs on the hot-patch lane: a worker thread per call over the backend the backend thread
   shares under one mutex, with its own longer timeout and one apply in flight (a second is
@@ -150,8 +154,8 @@ loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELin
 | `DevtoolsBackend` | The trait a shell implements to answer every devtools request; the seam decoupling the service from `frust-core` |
 | `Service` / `ServiceHandle` / `ServiceConfig` | The framework-side server: start/stop, `publish_frame_stats`, its 1s backend-call timeout, and (`ServiceConfig::require_token`, `ServiceHandle::token()`) the per-process auth token |
 | `HotpatchInfo` | `hotpatch_info`'s result: `anchor_runtime`, `pid`, `triple`, the `patches_applied`/`patch_bytes_loaded` counters, `pending_layout_mismatches` (marked reported once returned), and `patch_file_hand_off` (defaults `false`, so an older app gets chunks) |
-| `PatchChunkParams` | `{ patch_id, offset, total_len, data_base64 }`, answered by `AckResult`; at most 512 KiB raw per chunk, keeping the base64 under the 1 MiB line cap |
-| `ApplyPatchParams` / `JumpTableWire` / `PatchFile` | `apply_patch`'s `{ patch_id, len, pid, anchor_runtime, table, expected_seams, file }`, rejecting unknown fields; the jump table (`map`, `aslr_reference`, `new_base_address`, `ifunc_count`) carries no library path; `PatchFile { path, sha256 }` is accepted only under five checks — opened `O_NOFOLLOW` as a regular file, owned by the app's effective uid, `mode & 0o077 == 0`, size `len`, matching SHA-256 — and only on unix (see Trust model) |
+| `PatchChunkParams` | `{ patch_id, offset, total_len, data_base64 }` for both `patch_chunk` and `table_chunk`, answered by `AckResult`; at most 512 KiB raw per chunk, keeping the base64 under the 1 MiB line cap |
+| `ApplyPatchParams` / `JumpTableWire` / `PatchFile` | `apply_patch`'s `{ patch_id, len, pid, anchor_runtime, table, table_len, expected_seams, file }`, rejecting unknown fields; the jump table (`map`, `aslr_reference`, `new_base_address`, `ifunc_count`) carries no library path, and on the wire `table` holds only the three scalars — the map is the `table_chunk` stream (`JumpTableWire::encode_map`/`decode_map`); `PatchFile { path, sha256 }` is accepted only under five checks — opened `O_NOFOLLOW` as a regular file, owned by the app's effective uid, `mode & 0o077 == 0`, size `len`, matching SHA-256 — and only on unix (see Trust model) |
 | `PatchOutcome` / `MissedKey` | `apply_patch`'s result: `applied`, `seam_hits`, `seam_fall_throughs` (`MissedKey { image, link_address }`), `layout_mismatches`, and the two counters |
 | `DevtoolsUi` | `frust-shell-common`'s per-shell view the hop's per-frame `pump` drains against |
 | `DevtoolsClient` | `frust-drive`'s blocking tool-side client: `connect(addr, timeout, token)`, typed requests including `screenshot`/`capabilities` and the hot-patch calls, a `subscribe_frame_stats` receiver, and `DevtoolsRpcError`/`is_unauthorized`/`is_not_supported`/`is_method_not_found` for rejection detection. Shared by `frust-tui` and `frust-mcp` (see [CLI_ARCHITECTURE.md](CLI_ARCHITECTURE.md)) |

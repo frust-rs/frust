@@ -120,7 +120,9 @@ use super::graph::{PathClass, ReplayUnit, WorkspaceGraph};
 use super::layout::{self, LayoutTable};
 use super::link_intercept::{LinkAction, LinkMode, linker_arg, read_link_args};
 use super::pdb_layout;
-use super::replay::{STRIPPED_ENV, parse_notifications, replay_args, replay_env, replay_units};
+use super::replay::{
+    STRIPPED_ENV, parse_notifications, replay_args_image, replay_env, replay_units,
+};
 use super::seams::{self, SeamSet};
 use super::symbols::{Format, ImageSymbols, SymbolCache, Target};
 use super::thin_link::{self, ThinLinkRequest};
@@ -2145,7 +2147,7 @@ impl DesktopBuilder {
             .rustc()
             .ok_or_else(|| HotpatchError::unsupported(format!("the `{key}` capture has no rustc")))?
             .to_string();
-        let mut args = replay_args(record)?;
+        let mut args = replay_args_image(record)?;
         args.push(linker_arg(&self.frust_exe));
         self.tip_replays += 1;
         let link = LinkAction {

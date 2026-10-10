@@ -390,7 +390,7 @@ pub fn parse_notifications(
 /// Replays one unit's captured compile in `cwd` (see
 /// [`WorkspaceGraph::replay_cwd`]) with [`replay_args_rlib_only`], so a lib
 /// emits only its rlib. Not for the image unit, whose intercepted link
-/// needs every captured crate type. A spawn failure is
+/// needs its cdylib ([`replay_args_image`]). A spawn failure is
 /// [`HotpatchError::Process`]; a successful compile that reports no link
 /// artifact is [`HotpatchError::BuilderUnsupported`].
 pub fn replay_unit(
