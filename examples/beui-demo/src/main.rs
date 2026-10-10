@@ -56,6 +56,7 @@ impl Default for AppState {
 }
 
 /// Resolve the active page's content view.
+// erasure: keep 19-arm page match, one concrete view type per page
 fn page_body(page: Page, state: &mut AppState) -> AnyView<AppState> {
     match page {
         Page::Home => any(pages::home::page(&mut state.home)),
@@ -95,18 +96,18 @@ impl Component for BeuiDemoApp {
         let open = state.sidebar_open;
 
         let body = page_body(page, state);
-        let content = any(pattern_switcher::<AppState, FadeThrough, _>(
+        let content = pattern_switcher::<AppState, FadeThrough, _>(
             page as usize,
             FadeThrough,
             nav::scroll_slot(body),
-        ));
+        );
 
-        let sidebar = any(nav::shell_sidebar(state));
+        let sidebar = nav::shell_sidebar(state);
 
-        any(row()
+        row()
             .child(sidebar)
             .flex(1, nav::shell_inset(page, open, content))
-            .cross_axis(CrossAxisAlignment::Stretch))
+            .cross_axis(CrossAxisAlignment::Stretch)
     }
 }
 

@@ -37,10 +37,7 @@ use std::time::Duration;
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
-use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, FrameTime, SizedBox, any, column, component,
-    row, text,
-};
+use frust::{Component, CrossAxisAlignment, FrameTime, SizedBox, column, component, row, text};
 use frust_beui::agents::loading_states::{LoadingStatesVariant, loading_states};
 use frust_beui::agents::message::{MessageFrom, message, message_marker};
 use frust_beui::agents::message_bubble::{
@@ -368,50 +365,44 @@ fn bubble_sample(variant: MessageBubbleVariant) -> impl View<State> {
 /// `message_bubble`: every variant, both alignments, and the two group
 /// spacings consecutive turns are stacked at.
 fn bubbles() -> impl View<State> {
-    let mut column: Vec<AnyView<State>> = vec![
-        any(sub_heading("message_bubble")),
-        any(SizedBox(None, Some(6.0))),
-        any(caption(
+    column()
+        .child(sub_heading("message_bubble"))
+        .child(SizedBox(None, Some(6.0)))
+        .child(caption(
             "Six variants. The entrance is a spring pop substituted from the \
              catalog's own token table (upstream's per-component spring is not \
              one of the six), and the content fades a beat after the surface.",
-        )),
-        any(SizedBox(None, Some(12.0))),
-    ];
-    for variant in MessageBubbleVariant::ALL {
-        column.push(any(bubble_sample(variant)));
-        column.push(any(SizedBox(None, Some(10.0))));
-    }
-
-    column.push(any(caption(
-        "message_bubble_group stacks consecutive turns: Compact for one \
-         sender's run, Default across a change of sender. The trailing bubble \
-         is End-aligned.",
-    )));
-    column.push(any(SizedBox(None, Some(10.0))));
-    column.push(any(message_bubble_group::<State, _>(vec![
-        any(message_bubble::<State, _>(
-            text("Compact spacing, first line.").size(14.0),
-        )),
-        any(message_bubble::<State, _>(
-            text("Compact spacing, second line.").size(14.0),
-        )),
-    ])
-    .spacing(MessageBubbleSpacing::Compact)));
-    column.push(any(SizedBox(None, Some(10.0))));
-    column.push(any(message_bubble_group::<State, _>(vec![
-        any(message_bubble::<State, _>(
-            text("Default spacing \u{2014} a change of sender.").size(14.0),
-        )),
-        any(
-            message_bubble::<State, _>(text("And the reply.").size(14.0))
-                .variant(MessageBubbleVariant::Solid)
-                .align(MessageBubbleAlign::End),
-        ),
-    ])
-    .spacing(MessageBubbleSpacing::Default)));
-
-    Column(column)
+        ))
+        .child(SizedBox(None, Some(12.0)))
+        .children(
+            MessageBubbleVariant::ALL
+                .map(|variant| (bubble_sample(variant), SizedBox(None, Some(10.0)))),
+        )
+        .child(caption(
+            "message_bubble_group stacks consecutive turns: Compact for one \
+             sender's run, Default across a change of sender. The trailing bubble \
+             is End-aligned.",
+        ))
+        .child(SizedBox(None, Some(10.0)))
+        .child(
+            message_bubble_group::<State, _>((
+                message_bubble::<State, _>(text("Compact spacing, first line.").size(14.0)),
+                message_bubble::<State, _>(text("Compact spacing, second line.").size(14.0)),
+            ))
+            .spacing(MessageBubbleSpacing::Compact),
+        )
+        .child(SizedBox(None, Some(10.0)))
+        .child(
+            message_bubble_group::<State, _>((
+                message_bubble::<State, _>(
+                    text("Default spacing \u{2014} a change of sender.").size(14.0),
+                ),
+                message_bubble::<State, _>(text("And the reply.").size(14.0))
+                    .variant(MessageBubbleVariant::Solid)
+                    .align(MessageBubbleAlign::End),
+            ))
+            .spacing(MessageBubbleSpacing::Default),
+        )
 }
 
 /// `message`: the row a bubble sits in — avatar, sender metadata, content
@@ -463,7 +454,7 @@ fn message_rows() -> impl View<State> {
 /// `message_scroller`: the pin-to-the-live-edge viewport, in a box with a
 /// finite height so it has something to scroll.
 fn scroller(state: &State) -> impl View<State> {
-    let rows: Vec<AnyView<State>> = state
+    let rows: Vec<_> = state
         .transcript
         .iter()
         .map(|&(from, ref body)| {
@@ -478,9 +469,9 @@ fn scroller(state: &State) -> impl View<State> {
                 } else {
                     MessageBubbleAlign::Start
                 });
-            any(message::<State, _>(from, bubble)
+            message::<State, _>(from, bubble)
                 .avatar(if from.is_mirrored() { "You" } else { "AI" })
-                .animate_in(true))
+                .animate_in(true)
         })
         .collect();
 
@@ -699,7 +690,7 @@ impl Component for Primitives {
         let delta = state.clock.tick();
         state.advance(delta);
 
-        any(column()
+        column()
             .child(heading("Agents \u{b7} Primitives"))
             .child(SizedBox(None, Some(8.0)))
             .child(caption(
@@ -718,7 +709,7 @@ impl Component for Primitives {
             .child(SizedBox(None, Some(BLOCK_GAP)))
             .child(streaming(state))
             .child(SizedBox(None, Some(BLOCK_GAP)))
-            .child(loading()))
+            .child(loading())
     }
 }
 

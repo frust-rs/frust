@@ -15,8 +15,7 @@
 use std::time::Duration;
 
 use frust::{
-    AnyView, Color, Component, CrossAxisAlignment, SizedBox, View, any, colored_box, column,
-    component, row, text,
+    Color, Component, CrossAxisAlignment, SizedBox, View, colored_box, column, component, row, text,
 };
 use frust_beui::agents::agent_activity::{
     AgentActivityStatus, AgentStepStatus, activity_search, activity_step, activity_text,
@@ -228,7 +227,7 @@ fn workspace_rows(
     activity_open: bool,
     media: ImageGenerationStatus,
     turns: usize,
-) -> Vec<AnyView<State>> {
+) -> (impl View<State>, impl View<State>) {
     let plan = vec![
         todo_item("inspect", "Inspect the checkout flow").status(TodoListStatus::Completed),
         todo_item("patch", "Prepare the validation patch").status(TodoListStatus::Completed),
@@ -259,8 +258,8 @@ fn workspace_rows(
         activity_trace("trace", "Re-ran the focused checks", false),
     ];
 
-    vec![
-        any(message::<State, _>(
+    (
+        message::<State, _>(
             MessageFrom::Assistant,
             column()
                 .child(
@@ -286,8 +285,8 @@ fn workspace_rows(
                         .on_open_change(|s: &mut State, open| s.plan_open = open),
                 ),
         )
-        .avatar_placeholder(true)),
-        any(message::<State, _>(
+        .avatar_placeholder(true),
+        message::<State, _>(
             MessageFrom::Assistant,
             column()
                 .child(
@@ -311,8 +310,8 @@ fn workspace_rows(
                         .size(ButtonSize::Sm),
                 ),
         )
-        .avatar_placeholder(true)),
-    ]
+        .avatar_placeholder(true),
+    )
 }
 
 /// The shell's inset: the assembled conversation, wired to the model.
@@ -365,7 +364,7 @@ impl Component for Chat {
             .clone()
             .unwrap_or_else(|| "No move requested yet.".to_string());
 
-        any(column()
+        column()
             .child(heading("Agents \u{b7} Chat"))
             .child(SizedBox(None, Some(8.0)))
             .child(caption(
@@ -416,7 +415,7 @@ impl Component for Chat {
                     .cross_axis(CrossAxisAlignment::Center),
             )
             .child(SizedBox(None, Some(8.0)))
-            .child(caption(moved)))
+            .child(caption(moved))
     }
 }
 

@@ -36,8 +36,7 @@ use frust_beui::blocks::wallet_card::{WalletAction, wallet_account, wallet_card}
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, FlexView, SizedBox, TextView, View, any, column,
-    component, inflexible, text,
+    Component, CrossAxisAlignment, SizedBox, TextView, View, ViewSeq, column, component, row, text,
 };
 
 use crate::AppState;
@@ -138,20 +137,19 @@ fn hgap(width: f64) -> impl View<State> {
     SizedBox(Some(width), None)
 }
 
-/// A centred row of controls.
-fn controls(children: Vec<AnyView<State>>) -> impl View<State> {
-    let mut spaced = Vec::with_capacity(children.len() * 2);
-    for (index, child) in children.into_iter().enumerate() {
-        if index > 0 {
-            spaced.push(any(hgap(8.0)));
-        }
-        spaced.push(child);
-    }
-    FlexView::new(
-        Axis::Horizontal,
-        spaced.into_iter().map(inflexible).collect(),
-    )
-    .cross_axis(CrossAxisAlignment::Center)
+/// A centred row of controls, 8px apart.
+fn controls<M>(children: impl ViewSeq<State, M>) -> impl View<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    erased
+        .into_iter()
+        .enumerate()
+        .fold(row(), |controls, (index, child)| {
+            controls
+                .when(index > 0, |c| c.child(hgap(8.0)))
+                .child(child)
+        })
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A small secondary button.
@@ -188,8 +186,8 @@ fn masonry_items(count: usize) -> Vec<MasonryItem> {
 
 /// The masonry block: a virtualized feed that asks for more as its viewport
 /// nears the end.
-fn masonry_block(state: &State) -> AnyView<State> {
-    any(column()
+fn masonry_block(state: &State) -> impl View<State> {
+    column()
         .child(section("infinite_masonry"))
         .child(gap(6.0))
         .child(caption(
@@ -217,15 +215,12 @@ fn masonry_block(state: &State) -> AnyView<State> {
             ),
         )
         .child(gap(10.0))
-        .child(controls(vec![
-            any(minor("Reset feed", |s: &mut State| {
+        .child(controls((
+            minor("Reset feed", |s: &mut State| {
                 s.masonry_count = MASONRY_PAGE * 2;
-            })),
-            any(caption(format!(
-                "{} of {MASONRY_MAX} cards",
-                state.masonry_count
-            ))),
-        ])))
+            }),
+            caption(format!("{} of {MASONRY_MAX} cards", state.masonry_count)),
+        )))
 }
 
 // ---- The project folder ----------------------------------------------------
@@ -271,16 +266,14 @@ fn folder_block(state: &State) -> impl View<State> {
         .child(gap(10.0))
         .child(folder)
         .child(gap(10.0))
-        .child(controls(vec![
-            any(minor("Toggle open", |s: &mut State| {
+        .child(controls((
+            minor("Toggle open", |s: &mut State| {
                 let next = !s.folder_open.unwrap_or(false);
                 s.folder_open = Some(next);
-            })),
-            any(minor("Release to hover", |s: &mut State| {
-                s.folder_open = None
-            })),
-            any(caption(state.folder_log.clone())),
-        ]))
+            }),
+            minor("Release to hover", |s: &mut State| s.folder_open = None),
+            caption(state.folder_log.clone()),
+        )))
 }
 
 // ---- The knockout bracket --------------------------------------------------
@@ -446,15 +439,15 @@ fn bracket_block(state: &State) -> impl View<State> {
                 .on_page_change(|s: &mut State, page: usize| s.bracket_page = page),
         )
         .child(gap(10.0))
-        .child(controls(vec![
-            any(minor("Advance round", |s: &mut State| {
+        .child(controls((
+            minor("Advance round", |s: &mut State| {
                 s.bracket_played = (s.bracket_played + 1).min(3);
-            })),
-            any(minor("Rewind round", |s: &mut State| {
+            }),
+            minor("Rewind round", |s: &mut State| {
                 s.bracket_played = s.bracket_played.saturating_sub(1);
-            })),
-            any(caption(format!("{} of 3 rounds played", played))),
-        ]))
+            }),
+            caption(format!("{} of 3 rounds played", played)),
+        )))
 }
 
 // ---- The swap --------------------------------------------------------------
@@ -552,22 +545,22 @@ fn market_block(state: &State) -> impl View<State> {
                 }),
         )
         .child(gap(10.0))
-        .child(controls(vec![
-            any(minor("Tick prices", |s: &mut State| {
+        .child(controls((
+            minor("Tick prices", |s: &mut State| {
                 // A market feed's next print, stood in for by a fixed nudge:
                 // deterministic, and enough to show the ticker roll.
                 let next = (s.market_prices[0] + 0.037).rem_euclid(0.94).max(0.03);
                 s.market_prices = [next, 1.0 - next];
                 s.market_status = MarketStatus::Idle;
-            })),
-            any(minor("Reset ticket", |s: &mut State| {
+            }),
+            minor("Reset ticket", |s: &mut State| {
                 s.market_prices = [0.167, 0.833];
                 s.market_amount = 115.0;
                 s.market_status = MarketStatus::Idle;
                 s.market_log = "(no trade placed)".to_string();
-            })),
-            any(caption(state.market_log.clone())),
-        ]))
+            }),
+            caption(state.market_log.clone()),
+        )))
 }
 
 // ---- The wallet card -------------------------------------------------------
@@ -632,17 +625,17 @@ fn wallet_block(state: &State) -> impl View<State> {
                 }),
         )
         .child(gap(10.0))
-        .child(controls(vec![
-            any(minor("Simulate balance change", |s: &mut State| {
+        .child(controls((
+            minor("Simulate balance change", |s: &mut State| {
                 // A deterministic stand-in for a chain update: alternate a
                 // credit and a debit so the ticker rolls both ways.
                 let up = s.wallet_change <= 0.0;
                 let delta = if up { 268.4 } else { -142.9 };
                 s.wallet_balance = (s.wallet_balance + delta).max(0.0);
                 s.wallet_change = delta;
-            })),
-            any(caption(state.wallet_log.clone())),
-        ]))
+            }),
+            caption(state.wallet_log.clone()),
+        )))
 }
 
 // ---- The 404 pages ---------------------------------------------------------
@@ -660,11 +653,11 @@ fn style_label(style: NotFoundStyle) -> &'static str {
 
 /// The 404 block: one component with five presentations, switched below it.
 fn not_found_block(state: &State) -> impl View<State> {
-    let picker: Vec<AnyView<State>> = NotFoundStyle::ALL
+    let picker: Vec<_> = NotFoundStyle::ALL
         .into_iter()
         .map(|style| {
             let selected = style == state.not_found_style;
-            any(button(style_label(style), move |s: &mut State| {
+            button(style_label(style), move |s: &mut State| {
                 s.not_found_style = style;
             })
             .tone(if selected {
@@ -672,7 +665,7 @@ fn not_found_block(state: &State) -> impl View<State> {
             } else {
                 ButtonTone::Outline
             })
-            .size(ButtonSize::Sm))
+            .size(ButtonSize::Sm)
         })
         .collect();
 
@@ -721,7 +714,7 @@ impl Component for ShowcasePage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(column()
+        column()
             .child(heading("Blocks \u{b7} Showcase"))
             .child(gap(8.0))
             .child(caption(
@@ -742,7 +735,7 @@ impl Component for ShowcasePage {
             .child(gap(24.0))
             .child(wallet_block(state))
             .child(gap(24.0))
-            .child(not_found_block(state)))
+            .child(not_found_block(state))
     }
 }
 
