@@ -1657,7 +1657,7 @@ class UnmarkedRuleTest(unittest.TestCase):
         self.assertEqual(unmarked("""\
             fn f(
                 a: u8,
-            ) -> AnyView<S> { // erasure: keep
+            ) -> AnyView<S> { // erasure: keep why
                 any(a())
             }
             fn g() -> AnyView<S> {
@@ -1682,13 +1682,13 @@ class UnmarkedRuleTest(unittest.TestCase):
     def test_let_and_match_start_line_markers(self):
         self.assertEqual(unmarked("""\
             fn f(k: u8) {
-                // erasure: keep
+                // erasure: keep why
                 let v = if k == 0 {
                     any(a())
                 } else {
                     any(b())
                 };
-                // erasure: keep
+                // erasure: keep why
                 match k {
                     0 => any(c()),
                     _ => any(d()),
@@ -1696,6 +1696,149 @@ class UnmarkedRuleTest(unittest.TestCase):
                 let w = any(e());
             }
             """), [13])
+
+    def test_arrow_in_generics_marker_does_not_cover_body(self):
+        self.assertEqual(unmarked("""\
+            fn f<F: Fn() -> u32>(g: F) -> AnyView<S> { // erasure: keep generic arrow
+                any(a())
+            }
+            """), [])
+        self.assertEqual(unmarked("""\
+            fn f<F: Fn() -> u32>(g: F) -> AnyView<S> {
+                let n = g(); // erasure: keep n
+                any(a())
+            }
+            """), [3])
+        self.assertEqual(unmarked("""\
+            fn f<F: Fn() -> u32>(
+                g: F,
+            ) -> AnyView<S> {
+                any(a())
+            }
+            """), [4])
+
+    def test_generic_arrow_line_marker_not_binding(self):
+        self.assertEqual(unmarked("""\
+            fn f<
+                F: Fn() -> u32, // erasure: keep generic arrow
+            >(g: F) -> AnyView<S> {
+                any(a())
+            }
+            """), [4])
+
+    def test_where_clause_arrow_marker_does_not_cover_body(self):
+        self.assertEqual(unmarked("""\
+            fn f<F, V>(g: F) -> AnyView<S>
+            where
+                F: Fn(u32) -> V, // erasure: keep where arrow
+            {
+                any(a())
+            }
+            """), [5])
+
+    def test_real_return_arrow_covers_when_generics_contain_arrow(self):
+        self.assertEqual(unmarked("""\
+            fn f<F: Fn() -> u32>(
+                g: F,
+            ) -> AnyView<S> { // erasure: keep dyn
+                any(a())
+            }
+            """), [])
+
+    def test_bare_marker_covers_nothing(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let a = any(x()); // erasure: keep
+                // erasure: keep
+                foo(any(b()));
+            }
+            """), [2, 4])
+        self.assertEqual(unmarked("""\
+            // erasure: keep
+            fn f() {
+                any(a())
+            }
+            fn g() -> AnyView<S> { // erasure: keep
+                any(b())
+            }
+            """), [3, 6])
+        self.assertEqual(unmarked("""\
+            fn f(k: u8) {
+                x.children(vec![ // erasure: keep
+                    any(a()),
+                ]);
+                // erasure: keep
+                let v = any(b());
+                // erasure: keep
+                match k {
+                    _ => any(c()),
+                }
+            }
+            """), [3, 6, 9])
+
+    def test_whitespace_only_reason_is_bare(self):
+        self.assertEqual(unmarked("fn f() { let a = any(x()); } // erasure: keep   \n"), [1])
+
+    def test_marker_above_blank_or_attribute_line_does_not_cover_fn(self):
+        self.assertEqual(unmarked("""\
+            // erasure: keep dyn
+
+            fn f() {
+                any(a())
+            }
+            """), [4])
+        self.assertEqual(unmarked("""\
+            // erasure: keep dyn
+            #[inline]
+            fn f() {
+                any(a())
+            }
+            """), [4])
+
+    def test_kept_statement_first_line_does_not_cover_following_statement(self):
+        self.assertEqual(unmarked("""\
+            fn f(k: u8) {
+                // erasure: keep one
+                let v = any(a());
+                foo(any(b()));
+            }
+            """), [4])
+        self.assertEqual(unmarked("""\
+            fn f(k: u8) {
+                // erasure: keep arms
+                match k {
+                    _ => any(a()),
+                }
+                foo(any(b()));
+            }
+            """), [6])
+        self.assertEqual(unmarked("""\
+            fn f() {
+                x.children(vec![ // erasure: keep mixed
+                    any(a()),
+                ]);
+                foo(any(b()));
+            }
+            """), [5])
+
+    def test_closure_body_marker_does_not_leak_to_outer_fn(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let c = |k: u8| -> AnyView<S> { // erasure: keep closure
+                    any(a())
+                };
+                any(b())
+            }
+            """), [5])
+        self.assertEqual(unmarked("""\
+            fn f() {
+                // erasure: keep inner
+                fn inner() -> AnyView<S> {
+                    any(a())
+                }
+                any(b())
+            }
+            """), [6])
 
     def test_qualified_paths_detected(self):
         self.assertEqual(unmarked("""\
@@ -1734,7 +1877,7 @@ class UnmarkedRuleTest(unittest.TestCase):
 
 
 class UnmarkedDriverTest(DriverFixture, unittest.TestCase):
-    FIXTURE = "fn f() {\n    let a = any(x());\n    // erasure: keep\n    let b = any(y());\n}\n"
+    FIXTURE = "fn f() {\n    let a = any(x());\n    // erasure: keep why\n    let b = any(y());\n}\n"
 
     def test_listed_and_exit_one(self):
         code, out = self.main("--check", "--unmarked", self.path)
@@ -1745,7 +1888,7 @@ class UnmarkedDriverTest(DriverFixture, unittest.TestCase):
 
     def test_clean_exits_zero(self):
         with open(self.path, "w", encoding="utf-8") as fh:
-            fh.write("fn f() {\n    // erasure: keep\n    let a = any(x());\n}\n")
+            fh.write("fn f() {\n    // erasure: keep why\n    let a = any(x());\n}\n")
         code, out = self.main("--check", "--unmarked", self.path)
         self.assertEqual(code, 0)
         self.assertNotIn(" U ", out)

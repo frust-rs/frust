@@ -182,15 +182,19 @@ the candidates, and `--stats --t7` reports the T7 candidate count and the four
 exclusion buckets (`T7-trait`, `T7-arms`, `T7-ref`, `T7-public`) per file
 (when non-zero) and in total.
 
-U   (report-only, `--unmarked` only) every erasure *call* in a `.rs` file that
-      no `// erasure: keep` marker covers: bare `any(X)`, `frust::any(X)`,
+U   (`--unmarked` only; never auto-fixed: `--write` leaves every U site alone and a
+      leftover fails the gate) every erasure *call* in a `.rs` file that no
+      `// erasure: keep <why>` marker covers (the reason is required: a bare
+      `// erasure: keep` covers nothing under U): bare `any(X)`, `frust::any(X)`,
       `authoring::any(X)`, `frust::authoring::any(X)` (a turbofish `any::<..>(X)`
       included; `AnyView::new(..)`, `.any(..)` methods, `cfg(any(..))` and text
       in strings or comments are not calls). A call is covered when (a) its own
       line is kept (marker on the line, or alone on the line above), (b) it sits
       inside a fn whose signature is kept (the `fn` line, the line holding its
       `->`, or alone above the `fn` line), or (c) it sits inside a `vec![..]`,
-      a `let` statement or a `match` whose first line is kept. `--check
+      a `let` statement or a `match` whose first line is kept. A fn-signature
+      marker covers every call in that fn body, so its reason must justify all
+      of them. `--check
       --unmarked` lists `<path>:<line>: U unmarked erasure` once per line and
       exits 1 if any (candidates and U both count); `--write` never changes
       anything for U; `--stats --unmarked` adds a per-file `unmarked=N` (when
@@ -411,7 +415,8 @@ class Source:
         self.group_kind = {o: self._classify_group(o) for o in self.match if t[o].text in OPEN}
         self.line_starts = [0] + [m.end() for m in re.finditer("\n", src)]
         self.line_comment_ends = {tok.end for tok in self.all if tok.kind == LINE_COMMENT}
-        self.keep_lines, self.keep_above = self._keep_markers()
+        (self.keep_lines, self.keep_above,
+         self.why_lines, self.why_above) = self._keep_markers()
         self.kept = 0
         self.t7_excluded: list = []   # (line, bucket, fn name, reason), set by T7
         self.t6_excluded: list = []   # (line, bucket, callee, reason), set by T6
@@ -425,9 +430,10 @@ class Source:
         """Lines carrying a `// erasure: keep` comment, from the comment tokens.
 
         Returns (every marker line, marker lines whose comment is the only thing
-        on its line). The marker is the exact text `erasure: keep` right after
-        `//`, ending the comment or followed by whitespace and a reason."""
-        anywhere, alone = set(), set()
+        on its line, the subset of each that carries a non-empty reason). The
+        marker is the exact text `erasure: keep` right after `//`, ending the
+        comment or followed by whitespace and a reason."""
+        anywhere, alone, why_anywhere, why_alone = set(), set(), set(), set()
         for tok in self.all:
             if tok.kind != LINE_COMMENT or not tok.text.startswith("//"):
                 continue
@@ -435,14 +441,24 @@ class Source:
             if body != "erasure: keep" and not re.match(r"erasure: keep[ \t]", body):
                 continue
             line = self.line_of(tok.start)
+            has_reason = bool(body[len("erasure: keep"):].strip())
+            is_alone = not self.src[self.line_starts[line - 1]:tok.start].strip()
             anywhere.add(line)
-            if not self.src[self.line_starts[line - 1]:tok.start].strip():
+            if has_reason:
+                why_anywhere.add(line)
+            if is_alone:
                 alone.add(line)
-        return anywhere, alone
+                if has_reason:
+                    why_alone.add(line)
+        return anywhere, alone, why_anywhere, why_alone
 
-    def is_kept(self, line: int) -> bool:
+    def is_kept(self, line: int, reasoned: bool = False) -> bool:
         """True when a site starting on `line` carries the opt-out marker: on
-        that line, or alone on the line immediately above."""
+        that line, or alone on the line immediately above. With `reasoned`
+        (rule U), only a marker with a non-empty reason after `erasure: keep`
+        counts."""
+        if reasoned:
+            return line in self.why_lines or (line - 1) in self.why_above
         return line in self.keep_lines or (line - 1) in self.keep_above
 
     # -- basic helpers -----------------------------------------------------
@@ -2305,7 +2321,7 @@ def _write_atomic(path: str, text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Rule U: unmarked erasure calls (report only)
+# Rule U: unmarked erasure calls (never auto-fixed; a leftover fails the gate)
 # ---------------------------------------------------------------------------
 
 def _u_call_sites(s: Source) -> list:
@@ -2358,37 +2374,67 @@ def _u_stmt_start(s: Source, n: int, commas: bool) -> int:
     return j + 1
 
 
+def _u_fn_of_body(s: Source, g: int):
+    """Code index of the `fn` keyword whose body is the `{` at g, else None."""
+    j = g - 1
+    while j >= 0 and not (s.is_p(j, ";") or s.is_p(j, "{") or s.is_p(j, "}")):
+        if s.is_id(j, "fn"):
+            return j
+        if s.t[j].kind == PUNCT and s.t[j].text in CLOSE:
+            j = s.match[j]
+        j -= 1
+    return None
+
+
+def _u_return_arrow(s: Source, fn: int):
+    """Code index of the fn's own `->`: the one right after the `)` closing its
+    parameter list (generic parameters and where-clauses are never searched)."""
+    j = fn + 2   # past `fn name`
+    if s.is_p(j, "<"):
+        end = _angle_end(s, j)
+        if end is None:
+            return None
+        j = end + 1
+    if not s.is_p(j, "("):
+        return None
+    close = s.match[j]
+    return close + 1 if s.is_p(close + 1, "->") else None
+
+
+def _u_fn_kept(s: Source, g: int) -> bool:
+    """True when the fn whose body opens at g has a reasoned marker on its
+    `fn` line, on its return-arrow line, or alone above the `fn` line."""
+    fn = _u_fn_of_body(s, g)
+    if fn is None:
+        return False
+    if s.is_kept(s.line_of(s.t[fn].start), reasoned=True):
+        return True
+    arrow = _u_return_arrow(s, fn)
+    return arrow is not None and s.is_kept(s.line_of(s.t[arrow].start), reasoned=True)
+
+
 def _u_covered(s: Source, k: int) -> bool:
     line = s.line_of(s.t[k].start)
-    if s.is_kept(line):
+    # (a) the call's own line: reasoned marker on it, or alone on the line above
+    if s.is_kept(line, reasoned=True):
         return True
-    # (b) an enclosing fn whose signature is kept
+    # (b) an enclosing fn whose signature is kept; the marker covers every call
+    # in the body, so its reason must justify all of them
     g = s.parent[k]
     while g >= 0:
-        if s.t[g].text == "{":
-            j = g - 1
-            while j >= 0 and not (s.is_p(j, ";") or s.is_p(j, "{") or s.is_p(j, "}")):
-                if s.is_id(j, "fn"):
-                    arrow = next((m for m in range(j, g) if s.is_p(m, "->")
-                                  and s.parent[m] == s.parent[j]), None)
-                    if s.is_kept(s.line_of(s.t[j].start)) or (
-                            arrow is not None and s.is_kept(s.line_of(s.t[arrow].start))):
-                        return True
-                    break
-                if s.t[j].kind == PUNCT and s.t[j].text in CLOSE:
-                    j = s.match[j]
-                j -= 1
+        if s.t[g].text == "{" and _u_fn_kept(s, g):
+            return True
         g = s.parent[g]
     # (c) an enclosing vec![..], or a let / match statement, whose first line is kept
     n = k
     while n >= 0:
-        if s.group_kind.get(n) == "macro:vec" and s.is_kept(s.line_of(s.t[n - 2].start)):
+        if s.group_kind.get(n) == "macro:vec" and s.is_kept(s.line_of(s.t[n - 2].start), reasoned=True):
             return True
         a = _u_stmt_start(s, n, False)
-        if a < n and s.is_id(a, "let") and s.is_kept(s.line_of(s.t[a].start)):
+        if a < n and s.is_id(a, "let") and s.is_kept(s.line_of(s.t[a].start), reasoned=True):
             return True
         a = _u_stmt_start(s, n, True)
-        if a < n and s.is_id(a, "match") and s.is_kept(s.line_of(s.t[a].start)):
+        if a < n and s.is_id(a, "match") and s.is_kept(s.line_of(s.t[a].start), reasoned=True):
             return True
         n = s.parent[n]
     return False
@@ -2443,11 +2489,12 @@ def main(argv=None) -> int:
                          "toward the exit code; exits 2 when the name list has no [seq] section; "
                          "wins over --t5 for the lists it rewrites")
     ap.add_argument("--unmarked", action="store_true",
-                    help="report-only rule U: list every any() erasure call (any(, frust::any(, "
+                    help="rule U (never auto-fixes; a leftover fails the gate; a marker needs a reason): list every any() erasure call (any(, frust::any(, "
                          "authoring::any(, frust::authoring::any(; not AnyView::new, .any(, "
-                         "cfg(any( or text in strings/comments) that no `// erasure: keep` "
-                         "marker covers (its line, the line above, an enclosing fn signature, "
-                         "or the first line of an enclosing vec![ / let / match) as "
+                         "cfg(any( or text in strings/comments) that no `// erasure: keep <why>` "
+                         "marker with a non-empty reason covers (its line, the line above, an enclosing fn signature, "
+                         "or the first line of an enclosing vec![ / let / match; a fn-signature marker covers "
+                         "its whole body) as "
                          "`<path>:<line>: U unmarked erasure`; --check exits 1 if any; --write "
                          "changes nothing for U; --stats adds unmarked=N per file")
     ap.add_argument("--exclude", action="append", default=[], metavar="PATH",
