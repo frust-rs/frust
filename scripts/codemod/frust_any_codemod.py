@@ -69,16 +69,22 @@ the first matching bucket wins:
   T6-arity   more than 12 erased elements: tuples take at most 12.
 `--t6` exits 2 up front when the name list (`--apis`) has no `[seq]` section.
 
-T7 captures: edition 2024 `-> impl Trait` captures every in-scope generic
-parameter and lifetime, and `View<S>: 'static` keeps a captured borrow from
-outliving its use, so nothing is added. In an edition 2015-2021 crate, when the
-fn (or its impl) has a lifetime parameter or the fn takes an elided reference
-(`&self`, `&State`), `+ use<..>` lists every lifetime (`'_` for elided ones)
-and every type/const parameter in scope; a fn that also takes an
-argument-position `impl Trait` (which `use<..>` cannot name) is skipped with a
-note. The edition comes from the crate's `Cargo.toml` (`edition.workspace =
-true` resolves through the nearest `[workspace]` manifest; no `edition` key is
-2015; a file outside any package counts as 2024).
+T7 captures: a `View<S>` is `'static`, so a returned view never holds a borrow,
+but edition 2024 `-> impl Trait` captures every in-scope lifetime (an elided
+`&self`/`&State` included) and callers then fail with E0597/E0716/E0700. In any
+edition, when the fn (or its impl) has a lifetime parameter or the fn takes an
+elided reference, `+ use<..>` is emitted listing only the type/const
+parameters in scope, never a lifetime (`+ use<>` when there are none); a fn
+that also takes an argument-position `impl Trait` (which `use<..>` cannot
+name) is skipped with a note. A fn with no lifetime or reference parameter
+gets no `use<..>`. The edition comes from the crate's `Cargo.toml`
+(`edition.workspace = true` resolves through the nearest `[workspace]`
+manifest; no `edition` key is 2015; a file outside any package counts as 2024).
+
+T7 tail: when the unwrapped tail is a plain identifier `x` and the statement
+right before it is `let x = <expr>;` (no `mut`, type annotation, pattern or
+attribute, no comment in between), the let is dropped and `<expr>` is the
+tail, so `clippy::let_and_return` does not fire.
 
 T7 exclusions — listed by `--check --t7` as `<bucket> excluded: <fn> (<why>)`,
 never rewritten, never counted as candidates (they do not affect the exit
@@ -93,16 +99,27 @@ code); the first matching bucket wins:
   T7-ref     a recursive fn (`f(..)` in a free fn, `Self::f(..)`/`self.f(..)`
              in a method), or a fn named as a value — a fn pointer, a stored
              callback, an argument of `Box::new`/`.map(..)`/`.push(..)` —
-             anywhere in its package (the `Cargo.toml` directory's `*.rs`
-             files, nested packages and `--exclude`d paths left out). The
-             value-use scan is a heuristic that errs towards a hit: a local
-             binding or pattern of the same name does not count, a
+             in its own file, or in another file of its package (the
+             `Cargo.toml` directory's `*.rs` files, nested packages and
+             `--exclude`d paths left out) when that use is scoped to the
+             helper: path-qualified to its module (`super::f`,
+             `crate::a::f`, `a::f`) or to its impl type (`Self::f` inside an
+             impl of that type, `Type::f`), or a bare `f` in a file that
+             imports it (or globs) from the helper's module. An unrelated
+             same-named fn in another file does not count, and a private
+             helper is only reachable from its own module and descendants.
+             The value-use scan is a heuristic that errs towards a hit: a
+             local binding or pattern of the same name does not count, a
              type-qualified `Kind::f` only counts against a method. Also a
              fn whose same-file call is the whole operand of a prefix `&` /
              `&mut` ("taken by reference": `&f(..)`, `&self.f(..)`,
              `&Self::f(..)`, `&prev.f(..)`) — the caller relies on
              `&AnyView<S>`, private helpers included. A `&` over a larger
-             expression (`&(a, f())`, `&vec![f()]`, `&f().x`) does not count.
+             expression (`&(a, f())`, `&vec![f()]`, `&f().x`) does not count. Also
+             a fn whose same-file call is the whole initializer of an untyped
+             `let [mut] x = f(..);` with a later bare `&x` / `&mut x` in the
+             same block (`&x.field`, `&x[..]`, `&x.m()` do not count; a later
+             re-binding of `x` is not tracked, so still excluded).
   T7-public  a `pub fn` (a restricted `pub(..)` is not API) in a `crates/` or
              `plugins/` library source — not under a `tests/`, `examples/` or
              `src/corpus/` directory, and not inside a `#[cfg(test)] mod`:
@@ -274,6 +291,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 # ---------------------------------------------------------------------------
 # Lexer
@@ -1676,7 +1694,10 @@ class T7Ctx:
     edition: str = "2024"          # the crate's Rust edition
     library: bool = False          # a crates/ or plugins/ library source
     visible: bool = False          # `--t7-visible`: also rewrite fns with a visibility modifier
-    values: frozenset = frozenset()   # `_t7_value_names` keys found elsewhere in the package
+    values: frozenset = frozenset()   # keys that exclude a same-named helper unconditionally
+    path: str = ""                 # this file (its own uses are the same-file rule's)
+    module: tuple | None = None    # this file's module path, `_t7_file_module`
+    uses: tuple = ()               # `T7Use` value uses in the package's other files
 
 
 @dataclass
@@ -1950,6 +1971,40 @@ def _t7_taken_by_ref(s: Source, f: T7Fn, kind: str) -> bool:
             a -= 1
         if _t7_prefix_amp(s, a):
             return True
+        if _t7_let_bound_borrowed(s, k, pos, end):
+            return True
+    return False
+
+
+def _t7_let_bound_borrowed(s: Source, k: int, pos: int, end: int) -> bool:
+    """True when the call spanning tokens `pos..end` (name token `k`) is the whole
+    initializer of `let [mut] <ident> = <call>;` (no type annotation) and the bare
+    binding is later borrowed (`&ident` / `&mut ident`) in the let's enclosing
+    block, which bounds the binding's scope. A borrow of a longer expression
+    (`&ident.f`, `&ident[..]`, `&ident.m()`, `&ident?`) does not count. A later
+    re-binding of the same name is not tracked: it is conservatively still a hit."""
+    if not (s.is_p(end + 1, ";") and s.is_p(pos - 1, "=") and s.is_id(pos - 2)):
+        return False
+    b = pos - 3
+    if s.is_id(b, "mut"):
+        b -= 1
+    if not s.is_id(b, "let"):
+        return False
+    ident = s.t[pos - 2].text
+    blk = s.parent[end + 1]
+    stop = s.match[blk] if blk >= 0 and s.is_p(blk, "{") else len(s.t)
+    for j in range(end + 2, stop):
+        if not (s.is_id(j, ident) and not s.is_p(j - 1, ".") and not s.is_p(j - 1, "::")):
+            continue
+        if s.is_p(j + 1, ".") or s.is_p(j + 1, "?") or s.is_p(j + 1, "[") or \
+                s.is_p(j + 1, "(") or s.is_p(j + 1, "!") or s.is_p(j + 1, "::") or \
+                s.is_id(j + 1, "as"):
+            continue
+        a = j - 1
+        if s.is_id(a, "mut"):
+            a -= 1
+        if _t7_prefix_amp(s, a):
+            return True
     return False
 
 
@@ -1968,24 +2023,24 @@ def _t7_recursive(s: Source, f: T7Fn, kind: str) -> bool:
     return False
 
 
-def _t7_value_names(s: Source, names) -> set:
-    """Names in `names` that this file uses as a *value* (not a call): a fn
-    pointer, a stored callback, an argument of `Box::new`/`.map(..)`.
+def _t7_value_sites(s: Source, names):
+    """(token index, key) for every use of a name in `names` as a *value* (not
+    a call): a fn pointer, a stored callback, an argument of `Box::new`/`.map(..)`.
 
-    A bare or module-qualified use (`name`, `views::name`) is reported as
-    `name` (it can name a free fn); a type-qualified one (`Self::name`,
-    `Card::name`) as `::name` (it can name a method). A heuristic that errs
-    towards reporting a use, so a false hit only excludes."""
+    A bare or module-qualified use (`name`, `views::name`) has key `name` (it
+    can name a free fn); a type-qualified one (`Self::name`, `Card::name`) has
+    key `::name` (it can name a method). A heuristic that errs towards
+    reporting a use, so a false hit only excludes."""
     if not names:
-        return set()
-    t, out = s.t, set()
+        return
+    t = s.t
     spans = [(d.stmt_start, d.semi) for d in s.decls]
     for k, tok in enumerate(t):
         if tok.kind != IDENT or tok.text not in names:
             continue
         typed = s.is_p(k - 1, "::") and s.is_id(k - 2) and s.t[k - 2].text[:1].isupper()
         key = "::" + tok.text if typed else tok.text
-        if key in out or s.is_p(k - 1, ".") or s.is_id(k - 1, "fn"):
+        if s.is_p(k - 1, ".") or s.is_id(k - 1, "fn"):
             continue
         if s.is_p(k + 1, "(") or s.is_p(k + 1, "!") or s.is_p(k + 1, "::") or s.is_p(k + 1, ":") \
                 or s.is_p(k + 1, "@") or s.is_p(k + 1, "=>") or s.is_id(k + 1, "in") \
@@ -2005,8 +2060,194 @@ def _t7_value_names(s: Source, names) -> set:
         if not s.is_p(k - 1, "::") and (
                 s.binding_shadows(tok.text, k) or _t7_let_typed(s, tok.text, k)):
             continue   # a local binding of the same name
-        out.add(key)
+        yield k, key
+
+
+def _t7_value_names(s: Source, names) -> set:
+    """The keys of `_t7_value_sites`: names in `names` this file uses as a value."""
+    return {key for _, key in _t7_value_sites(s, names)}
+
+
+class T7Use(NamedTuple):
+    """One value use of a T7 fn name in a file, with what scopes it to a module."""
+    path: str                 # the file holding the use
+    module: tuple | None      # that file's module path plus the enclosing inline `mod`s
+    key: str                  # `_t7_value_sites` key (`name` or `::name`)
+    qual: tuple               # path segments before the name (`super`, `Card`, ..)
+    via: tuple                # module paths the name is imported from, in scope at the use
+    impl_type: str | None     # the type of the `impl` enclosing the use
+
+
+def _t7_mod_chain(s: Source, k: int) -> tuple:
+    """Names of the inline `mod name { .. }` blocks enclosing token `k`, outermost first."""
+    out, g = [], s.parent[k]
+    while g >= 0:
+        if s.t[g].text == "{" and s.is_id(g - 1) and s.is_id(g - 2, "mod"):
+            out.append(s.t[g - 1].text)
+        g = s.parent[g]
+    return tuple(reversed(out))
+
+
+def _t7_head(s: Source, g: int) -> list:
+    """Code indices of the item head in front of the `{` at `g`."""
+    j = g - 1
+    while j >= 0 and s.parent[j] == s.parent[g] and not (
+            s.is_p(j, ";") or s.is_p(j, "{") or s.is_p(j, "}")):
+        if s.t[j].kind == PUNCT and s.t[j].text in CLOSE:
+            j = s.match[j]
+        j -= 1
+    return [k for k in range(j + 1, g) if s.parent[k] == s.parent[g]]
+
+
+def _t7_impl_type(s: Source, pos: int):
+    """Last path segment of the type of the innermost `impl` block enclosing
+    token `pos` (the `for` type of a trait impl); None outside one."""
+    g = s.parent[pos]
+    while g >= 0:
+        if s.t[g].text == "{":
+            head = _t7_head(s, g)
+            if any(s.is_id(k, "fn") or s.is_id(k, "mod") or s.is_id(k, "trait") for k in head):
+                return None
+            impls = [k for k in head if s.is_id(k, "impl")]
+            if impls:
+                fors = [k for k in head if s.is_id(k, "for") and not s.is_p(k + 1, "<")]
+                j = fors[0] + 1 if fors else impls[0] + 1
+                if not fors and s.is_p(j, "<"):
+                    e = _angle_end(s, j)
+                    j = e + 1 if e is not None else j
+                while s.is_p(j, "&") or s.is_id(j, "mut") or s.is_id(j, "dyn"):
+                    j += 1
+                if s.is_p(j, "::"):
+                    j += 1
+                last = None
+                while s.is_id(j) and s.t[j].text != "where":
+                    last = s.t[j].text
+                    if s.is_p(j + 1, "::"):
+                        j += 2
+                    else:
+                        break
+                return last
+        g = s.parent[g]
+    return None
+
+
+def _t7_file_module(path: str):
+    """The module path of file `path` inside its crate: (crate-root id, mod names..).
+
+    A package's `src/lib.rs`/`src/main.rs` are the root `("src",)`; every other
+    `src/` file is a module below it (`a/b.rs`, `a/b/mod.rs` -> `("src", "a",
+    "b")`). A `src/bin`, `examples`, `tests` or `benches` file (or `build.rs`) is
+    its own crate root, identified by its path (a directory's `main.rs` by the
+    directory), and a file below it a module of that root. A file outside any
+    package is a root of its own."""
+    full = _norm(path)
+    d = _manifest_dir(path)
+    if d is None:
+        return (full,)
+    parts = [x for x in os.path.relpath(full, d).split(os.sep) if x]
+    if not parts:
+        return (full,)
+    def mods(root, rest):
+        rest = list(rest)
+        if rest and rest[-1] == "mod.rs":
+            rest.pop()
+        elif rest and rest[-1].endswith(".rs"):
+            rest[-1] = rest[-1][:-3]
+        return (root,) + tuple(rest)
+    if parts[0] == "src" and not (len(parts) > 1 and parts[1] == "bin"):
+        if parts[1:] in (["lib.rs"], ["main.rs"]):
+            return ("src",)
+        return mods("src", parts[1:])
+    if parts == ["build.rs"]:
+        return (full,)
+    base = 2 if parts[0] == "src" else 1     # the entry: src/bin/<x>, examples/<x>, ..
+    if parts[0] not in ("src", "examples", "tests", "benches") or len(parts) <= base:
+        return (full,)
+    if len(parts) == base + 1:
+        return (full,)
+    root = os.path.join(d, *parts[:base + 1])
+    rest = parts[base + 1:]
+    return (root,) if rest == ["main.rs"] else mods(root, rest)
+
+
+def _t7_resolve(path: tuple, base):
+    """The module `path` (use-path segments) names from module `base`: a tuple,
+    or None when it cannot be resolved exactly (a non-keyword first segment, or
+    an unknown `base`)."""
+    if not path:
+        return base
+    if base is None:
+        return None
+    first = path[0]
+    if first == "crate":
+        return (base[0],) + tuple(path[1:])
+    if first in ("self", "super"):
+        m, i = list(base), 1 if first == "self" else 0
+        while i < len(path) and path[i] == "super":
+            if len(m) <= 1:
+                return None
+            m.pop()
+            i += 1
+        return tuple(m) + tuple(path[i:])
+    return None
+
+
+def _t7_path_hits(path: tuple, base, hmod) -> bool:
+    """True when use-path `path`, written in module `base`, may name module `hmod`."""
+    if not path or hmod is None:
+        return True
+    r = _t7_resolve(path, base)
+    if r is not None:
+        return r == hmod
+    if path[0] in ("crate", "self", "super"):
+        return True    # a keyword path from an unknown module: assume the worst
+    # `views::name`, `a::views::*`: match on the innermost module name.
+    return len(hmod) > 1 and path[-1] == hmod[-1]
+
+
+def _t7_use_hits(u: T7Use, name: str, kind: str, hmod, impl_type, private: bool) -> bool:
+    """True when value use `u` in another file may name the helper `name`.
+
+    A path-qualified use counts when its qualifier names the helper's module
+    (`super::name`, `crate::a::name`, `a::name`) or, for a method, its type
+    (`Self::name` inside an impl of the helper's type, `Type::name`); a bare use
+    counts when the file imports the name (or globs) from the helper's module.
+    A private helper is only reachable from its own module and descendants."""
+    if u.key != (name if kind == "free" else "::" + name):
+        return False
+    if private and hmod is not None and u.module is not None and u.module[:len(hmod)] != hmod:
+        return False
+    if kind != "free":
+        if not u.qual:
+            return False
+        q = u.qual[-1]
+        return u.impl_type == impl_type if q == "Self" else q == impl_type
+    if u.qual:
+        return _t7_path_hits(u.qual, u.module, hmod)
+    return any(_t7_path_hits(v, u.module, hmod) for v in u.via)
+
+
+def _t7_collect_uses(s: Source, names, path: str, module) -> list:
+    """The `T7Use` records for the value uses of `names` in `s`."""
+    out = []
+    for k, key in _t7_value_sites(s, names):
+        qual, j = [], k
+        while s.is_p(j - 1, "::") and s.is_id(j - 2):
+            qual.insert(0, s.t[j - 2].text)
+            j -= 2
+        pos, via = s.t[k].start, []
+        if not qual:
+            for d in s.decls:
+                if not (d.scope[0] <= pos < d.scope[1]):
+                    continue
+                via += [lf.path[:-1] for lf in d.leaves
+                        if lf.name == s.t[k].text and not lf.aliased]
+                via += list(d.globs)
+        mod = None if module is None else module + _t7_mod_chain(s, k)
+        out.append(T7Use(path, mod, key, tuple(qual), tuple(via),
+                         _t7_impl_type(s, k) if key.startswith("::") else None))
     return out
+
 
 
 def _t7_in_pattern(s: Source, k: int) -> bool:
@@ -2108,32 +2349,61 @@ def _t7_generic_names(s: Source, rng):
 def _t7_captures(s: Source, f: T7Fn, impl_gen, edition: str):
     """The `+ use<..>` suffix for the new return type, "" for none, None when unspellable.
 
-    Edition 2024 captures every in-scope generic parameter and lifetime by
-    default, and `View<S>: 'static` keeps a captured borrow from constraining
-    callers, so nothing is emitted. Edition 2015-2021 captures no lifetime
-    implicitly: when the fn has a lifetime parameter (its own or its impl's) or
-    an elided reference parameter, emit `+ use<..>` listing every lifetime
-    (`'_` for elided ones) and every type/const parameter in scope. An
+    Every edition: a `View<S>` is `'static`, so the returned view can never hold
+    a borrow, yet edition 2024 captures every in-scope lifetime (an elided
+    `&self`/`&State` borrow included) and the opaque type then constrains
+    callers (E0597/E0716/E0700). When the fn (or its impl) has a lifetime
+    parameter or the fn takes an elided reference, emit `+ use<..>` listing
+    only the type/const parameters in scope, never a lifetime. An
     argument-position `impl Trait` cannot be named in that list, so such a fn
-    is skipped with a note."""
-    try:
-        if int(edition) >= 2024:
-            return ""
-    except ValueError:
-        return ""
+    is skipped with a note. `edition` no longer matters: the list is valid in
+    2021 and 2024 alike."""
     lts, tys = _t7_generic_names(s, impl_gen)
     l2, t2 = _t7_generic_names(s, f.gen)
     lts, tys = lts + l2, tys + t2
     close = s.match[f.params]
-    elided = any((s.is_p(k, "&") and s.t[k + 1].kind != LIFETIME)
+    elided = any(((s.is_p(k, "&") or s.is_p(k, "&&")) and s.t[k + 1].kind != LIFETIME)
                  or (s.t[k].kind == LIFETIME and s.t[k].text == "'_")
                  for k in range(f.params + 1, close))
     if not lts and not elided:
         return ""
     if any(s.is_id(k, "impl") for k in range(f.params + 1, close)):
         return None
-    items = lts + (["'_"] if elided else []) + tys
-    return " + use<" + ", ".join(items) + ">"
+    return " + use<" + ", ".join(tys) + ">"
+
+
+def _t7_let_and_return(s: Source, f: T7Fn, ta: int, inner: str):
+    """(index of `let`, initialiser text) when the statement right before the
+    tail at `ta` is `let x = <expr>;` and the unwrapped tail is just `x`:
+    a plain binding (no `mut`, pattern, type annotation or attribute) and no
+    comment between the statement and the tail. None otherwise."""
+    name = inner.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or name in KEYWORDS or \
+            not s.is_p(ta - 1, ";"):
+        return None
+    body, semi, let = f.body, ta - 1, None
+    for k in range(body + 1, semi):
+        if s.parent[k] != body:
+            continue
+        if s.is_p(k, ";"):
+            let = None
+        elif s.is_id(k, "let"):
+            let = k
+    if let is None or s.parent[semi] != body or s.parent[let] != body:
+        return None
+    if not (s.is_id(let + 1, name) and s.is_p(let + 2, "=") and not s.is_p(let + 3, "=")):
+        return None
+    if s.is_p(let - 1, "]") or semi <= let + 3:
+        return None
+    if any(s.is_id(k, "else") and s.parent[k] == body for k in range(let + 3, semi)) and \
+            not any(s.is_id(k, "if") and s.parent[k] == body for k in range(let + 3, semi)):
+        return None   # let-else
+    if s.src[s.t[semi].end:s.t[ta].start].strip():
+        return None   # a comment between the statement and the tail
+    stmt = s.src[s.t[let].start:s.t[semi].end]
+    if "//" in stmt or "/*" in stmt:
+        return None
+    return let, s.src[s.t[let + 3].start:s.t[semi - 1].end]
 
 
 def _t7_view_import(s: Source, f: T7Fn, notes: list):
@@ -2198,6 +2468,13 @@ def _t7(s: Source, ctx: T7Ctx, cands: list, notes: list) -> None:
         if (name if kind == "free" else "::" + name) in values:
             exclude("T7-ref", "used as a value")
             continue
+        if ctx.uses:
+            hmod = None if ctx.module is None else ctx.module + _t7_mod_chain(s, f.fn)
+            ity = _t7_impl_type(s, f.fn) if kind != "free" else None
+            private = not _t7_has_vis(s, f.fn)
+            if any(_t7_use_hits(u, name, kind, hmod, ity, private) for u in ctx.uses):
+                exclude("T7-ref", "used as a value")
+                continue
         if _t7_taken_by_ref(s, f, kind):
             exclude("T7-ref", "taken by reference")
             continue
@@ -2221,8 +2498,13 @@ def _t7(s: Source, ctx: T7Ctx, cands: list, notes: list) -> None:
             if imports is None:
                 continue
         ret = "impl " + prefix + "View" + s.src[s.t[f.av + 1].start:s.t[b].end] + uses
-        edits = [Edit(s.t[a].start, s.t[b].end, ret),
-                 Edit(s.t[ta].start, s.t[tb].end, s.inner_text(eo))]
+        inner = s.inner_text(eo)
+        lr = _t7_let_and_return(s, f, ta, inner)
+        if lr is None:
+            tail_edit = Edit(s.t[ta].start, s.t[tb].end, inner)
+        else:   # `let x = E; any(x)` -> `E`: no clippy::let_and_return
+            tail_edit = Edit(s.t[lr[0]].start, s.t[tb].end, lr[1])
+        edits = [Edit(s.t[a].start, s.t[b].end, ret), tail_edit]
         span = (s.t[f.fn].start, s.t[s.match[f.body]].end)
         cands.append(Candidate("T7", line, f"helper returns impl View: {name}", span, edits, imports))
 
@@ -2308,8 +2590,8 @@ def crate_edition(path: str, default: str = "2024") -> str:
         w = up
 
 
-def package_values(path: str, excludes=(), cache=None) -> frozenset:
-    """T7 fn names used as values anywhere in the package that owns `path`.
+def package_values(path: str, excludes=(), cache=None) -> tuple:
+    """`T7Use` records: T7 fn names used as values anywhere in the package that owns `path`.
 
     The package is the nearest `Cargo.toml`'s directory, walked for `*.rs`
     (skipping `target/`, hidden directories, symlinks, nested packages and
@@ -2334,20 +2616,24 @@ def package_values(path: str, excludes=(), cache=None) -> frozenset:
             continue
         try:
             with open(p, encoding="utf-8", newline="") as fh:
-                sources.append(Source(fh.read()))
+                sources.append((_norm(p), Source(fh.read())))
         except (OSError, LexError, UnicodeDecodeError):
             continue
-    names = {s.t[f.name].text for s in sources for f in _t7_fns(s)}
-    values = set()
-    for s in sources:
-        values |= _t7_value_names(s, names)
-    cache[key] = frozenset(values)
+    names = {s.t[f.name].text for _, s in sources for f in _t7_fns(s)}
+    uses = []
+    for p, s in sources:
+        uses += _t7_collect_uses(s, names, p, _t7_file_module(p))
+    cache[key] = tuple(uses)
     return cache[key]
 
 
 def t7_context(path: str, excludes=(), cache=None, visible: bool = False) -> T7Ctx:
-    return T7Ctx(crate_edition(path), _t7_library(path), visible,
-                 package_values(path, excludes, cache))
+    """The T7 facts for `path`; the package's value uses in its *other* files
+    are scoped to each helper by `_t7_use_hits`."""
+    me = _norm(path)
+    uses = tuple(u for u in package_values(path, excludes, cache) if u.path != me)
+    return T7Ctx(crate_edition(path), _t7_library(path), visible, frozenset(),
+                 me, _t7_file_module(path), uses)
 
 
 def select_outermost(cands: list[Candidate]) -> list[Candidate]:

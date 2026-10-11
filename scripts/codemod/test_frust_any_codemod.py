@@ -1168,7 +1168,7 @@ class T7Test(unittest.TestCase):
         self.assertEqual(res.text, textwrap.dedent("""\
             use frust::{View, text};
 
-            fn title(s: &State) -> impl View<State> {
+            fn title(s: &State) -> impl View<State> + use<> {
                 text(s.name.clone())
             }
             """))
@@ -1248,21 +1248,78 @@ class T7Test(unittest.TestCase):
             }
             """
         res = run7(src, edition="2021")
-        self.assertIn("fn row<'a, S: 'static>(label: &'a str) -> impl View<S> + use<'a, S> {", res.text)
+        self.assertIn("fn row<'a, S: 'static>(label: &'a str) -> impl View<S> + use<S> {", res.text)
         self.assertIn("fn plain<S: 'static>(n: u8) -> impl View<S> {", res.text)  # borrows nothing
-        self.assertIn("fn view(&self) -> impl View<S> + use<'_, S> {", res.text)
+        self.assertIn("fn view(&self) -> impl View<S> + use<S> {", res.text)
         res = run7("use frust::{AnyView, View, any};\n"
                    "fn f(a: &u8, b: impl Into<u8>) -> AnyView<S> { any(t()) }\n", edition="2018")
         self.assertEqual(res.candidates, [])
         self.assertIn("cannot name an `impl Trait` parameter", res.notes[0][1])
 
-    def test_edition_2024_emits_no_use(self):
+    def test_edition_2024_borrowing_helpers_emit_type_only_use(self):
         res = run7("""\
             use frust::{AnyView, View, any};
+            impl<S: 'static> Card<S> {
+                fn view(&self) -> AnyView<S> { any(t(1)) }
+            }
+            fn free<S: 'static>(st: &State) -> AnyView<S> { any(t(st)) }
             fn row<'a, S: 'static>(label: &'a str) -> AnyView<S> { any(t(label)) }
+            fn plain<S: 'static>(n: u8) -> AnyView<S> { any(t(n)) }
             """, edition="2024")
-        self.assertIn("-> impl View<S> { t(label) }", res.text)
-        self.assertNotIn("use<", res.text)
+        self.assertIn("fn view(&self) -> impl View<S> + use<S> { t(1) }", res.text)
+        self.assertIn("fn free<S: 'static>(st: &State) -> impl View<S> + use<S> { t(st) }", res.text)
+        self.assertIn("-> impl View<S> + use<S> { t(label) }", res.text)
+        self.assertIn("fn plain<S: 'static>(n: u8) -> impl View<S> { t(n) }", res.text)
+        self.assertNotIn("'a, S>", res.text)
+        res = run7("use frust::{AnyView, View, any};\n"
+                   "fn f(a: &u8, b: impl Into<u8>) -> AnyView<S> { any(t()) }\n", edition="2024")
+        self.assertEqual(res.candidates, [])
+        self.assertIn("cannot name an `impl Trait` parameter", res.notes[0][1])
+
+    def test_let_and_return_collapsed(self):
+        res = run7("""\
+            use frust::{AnyView, View, any, column};
+            fn body<S: 'static>() -> AnyView<S> {
+                let v = column(a());
+                any(v)
+            }
+            """)
+        self.assertIn("fn body<S: 'static>() -> impl View<S> {\n    column(a())\n}", res.text)
+        self.assertNotIn("let v", res.text)
+
+    def test_let_and_return_leaves_other_shapes(self):
+        for stmt, tail in (("let mut v = column(a());", "any(v)"),
+                           ("let v: Foo = column(a());", "any(v)"),
+                           ("let w = column(a());", "any(v)"),
+                           ("#[allow(x)] let v = column(a());", "any(v)")):
+            res = run7(f"""\
+                use frust::{{AnyView, View, any, column}};
+                fn body<S: 'static>() -> AnyView<S> {{
+                    {stmt}
+                    {tail}
+                }}
+                """)
+            self.assertIn(stmt, res.text, stmt)
+
+    def test_cross_file_method_uses_match_the_impl_type(self):
+        src = """\
+            use frust::{AnyView, View, any};
+            impl Card { fn body(&self) -> AnyView<S> { any(t()) } }
+            """
+        use = lambda qual, ity=None: cm.T7Use("/o.rs", ("src", "o"), "::body", qual, (), ity)
+        run = lambda u: run7(src, path="/a.rs", module=("src",), uses=(u,))
+        self.assertEqual(buckets(run(use(("Card",)))), [("T7-ref", "body")])
+        self.assertEqual(buckets(run(use(("Self",), "Card"))), [("T7-ref", "body")])
+        self.assertEqual(buckets(run(use(("Other",)))), [])
+        self.assertEqual(buckets(run(use(("Self",), "Other"))), [])
+
+    def test_private_helper_only_reached_from_descendant_modules(self):
+        src = "use frust::{AnyView, View, any};\nfn h() -> AnyView<S> { any(t()) }\n"
+        sib = cm.T7Use("/o.rs", ("src", "o"), "h", ("crate",), (), None)
+        kid = cm.T7Use("/k.rs", ("src", "a", "k"), "h", ("super",), (), None)
+        run = lambda u: run7(src, path="/a.rs", module=("src", "a"), uses=(u,))
+        self.assertEqual(buckets(run(sib)), [])        # `crate::h` names the root's h
+        self.assertEqual(buckets(run(kid)), [("T7-ref", "h")])
 
     def test_recursion_excluded(self):
         res = run7("""\
@@ -1330,6 +1387,34 @@ class T7Test(unittest.TestCase):
                                         ("T7-ref", "m"), ("T7-ref", "assoc")])
         self.assertEqual([c.desc for c in res.candidates],
                          ["helper returns impl View: plain", "helper returns impl View: bigger"])
+        self.assertTrue(all(e[3] == "taken by reference" for e in res.excluded
+                            if e[1] == "T7-ref"))
+
+    def test_let_bound_result_borrowed_excluded(self):
+        res = run7("""\
+            use frust::{AnyView, View, any};
+            impl T {
+                fn content(&self) -> AnyView<S> { any(x()) }
+                fn moved(&self) -> AnyView<S> { any(x()) }
+                fn field(&self) -> AnyView<S> { any(x()) }
+                fn mutb(&self) -> AnyView<S> { any(x()) }
+                fn build(&self, slot: &mut Slot, ctx: &mut Ctx) {
+                    let content = self.content();
+                    slot.rebuild(None, Some(&content), ctx);
+                }
+                fn other(&self, kids: &mut Vec<AnyView<S>>) {
+                    let moved = self.moved();
+                    kids.push(moved);
+                    let field = self.field();
+                    take(&field.len());
+                    let mut mutb = self.mutb();
+                    take(&mut mutb);
+                }
+            }
+            """)
+        self.assertEqual(buckets(res), [("T7-ref", "content"), ("T7-ref", "mutb")])
+        self.assertEqual([c.desc for c in res.candidates],
+                         ["helper returns impl View: moved", "helper returns impl View: field"])
         self.assertTrue(all(e[3] == "taken by reference" for e in res.excluded
                             if e[1] == "T7-ref"))
 
@@ -1635,7 +1720,7 @@ class T7DriverTest(DriverFixture, unittest.TestCase):
         self.assertEqual(self.read(self.lib), self.LIB)            # T7 off: untouched
         self.main("--write", "--t7", self.crates)
         once = self.read(self.lib)
-        self.assertIn("fn helper(s: &S) -> impl View<S> + use<'_> {\n    p()\n}", once)
+        self.assertIn("fn helper(s: &S) -> impl View<S> + use<> {\n    p()\n}", once)
         self.assertIn("pub fn api() -> AnyView<S> {", once)
         self.assertEqual(self.read(self.test), self.TEST)          # T7-visible: untouched
         self.main("--write", "--t7", "--t7-visible", self.crates)
@@ -1647,7 +1732,7 @@ class T7DriverTest(DriverFixture, unittest.TestCase):
     def test_edition_2024_and_resolution_rules(self):
         self.write("Cargo.toml", '[workspace]\n\n[workspace.package]\nedition = "2024"\n')
         self.main("--write", "--t7", self.crates)
-        self.assertIn("fn helper(s: &S) -> impl View<S> {", self.read(self.lib))
+        self.assertIn("fn helper(s: &S) -> impl View<S> + use<> {", self.read(self.lib))
         cm._TOML_CACHE.clear()
         self.assertEqual(cm.crate_edition(self.lib), "2024")
         self.write("crates/foo/Cargo.toml", '[package]\nname = "foo"\nedition = "2021"\n')
@@ -1659,13 +1744,37 @@ class T7DriverTest(DriverFixture, unittest.TestCase):
         self.assertEqual(cm.crate_edition("/nonexistent-dir/x.rs", "2024"), "2024")
 
     def test_value_use_in_another_file_of_the_package(self):
-        self.write("crates/foo/src/table.rs", "pub fn rows() { let f = helper; f(); }\n")
+        self.write("crates/foo/src/table.rs", "pub fn rows() { let f = crate::helper; f(); }\n")
         code, out = self.main("--check", "--t7", self.lib)
         self.assertIn("lib.rs:7: T7-ref excluded: helper (used as a value)", out)
         self.assertEqual(code, 0, out)
         # An --exclude'd file is never read, so its uses do not count.
         code, out = self.main("--check", "--t7", self.lib, "--exclude",
                               os.path.join(self.crates, "foo", "src", "table.rs"))
+        self.assertEqual(code, 1, out)
+
+    def test_unrelated_same_named_value_use_does_not_exclude(self):
+        self.write("crates/foo/src/table.rs", "fn rows() { let f = helper; f(); }\n")
+        code, out = self.main("--check", "--t7", self.lib)
+        self.assertEqual(code, 1, out)
+        self.assertIn("lib.rs:7: T7 helper returns impl View: helper", out)
+        self.assertNotIn("used as a value", out)
+
+    def test_child_module_super_path_value_use_excludes(self):
+        self.write("crates/foo/src/table.rs", "fn rows() { let f = super::helper; f(); }\n")
+        code, out = self.main("--check", "--t7", self.lib)
+        self.assertEqual(code, 0, out)
+        self.assertIn("lib.rs:7: T7-ref excluded: helper (used as a value)", out)
+
+    def test_import_from_the_helper_module_excludes(self):
+        self.write("crates/foo/src/table.rs",
+                   "use crate::helper;\nfn rows() { let f = helper; f(); }\n")
+        code, out = self.main("--check", "--t7", self.lib)
+        self.assertEqual(code, 0, out)
+        self.assertIn("lib.rs:7: T7-ref excluded: helper (used as a value)", out)
+        self.write("crates/foo/src/table.rs",
+                   "use crate::other::helper;\nfn rows() { let f = helper; f(); }\n")
+        code, out = self.main("--check", "--t7", self.lib)
         self.assertEqual(code, 1, out)
 
     def test_stats_reports_t7_and_buckets_separately(self):
