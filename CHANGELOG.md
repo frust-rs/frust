@@ -21,6 +21,27 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `return` inside a closure is not an early return, a first-body-line keep marker that rustfmt
   moved is fn-scoped for T7 and rule U (40b6f35f), and a helper whose same-file call is taken by
   `&` is excluded as "taken by reference" (46be57ae).
+- Codemod T7 emits a type-only `+ use<..>` whenever the helper (or its impl) has a lifetime
+  parameter or an elided reference parameter, in any edition, so a stored borrow of a temporary no
+  longer fails E0716; an argument-position `impl Trait` still skips with a note. T7-ref counts a
+  use in another file only when it is path-qualified to the helper's module or imported from it,
+  `let x = <expr>; any(x)` tails collapse to `<expr>` (no `clippy::let_and_return`), and "taken by
+  reference" also covers a same-file call bound by an untyped `let` and later borrowed as `&x` or
+  `&mut x` in the same block (bd02b8b7, f3e36a12).
+- Codemod: a local fn shadows a builder only in its own module and descendants, so a `fn row` in a
+  nested `#[cfg(test)] mod` no longer blocks T2/T3 in the parent; a reasoned `// erasure: keep`
+  marker on an accumulator `let` of `AnyView`s covers that vec's `push`/`insert`/`extend` calls in
+  the same fn, and a reasoned own-line marker inside an erasure call's parentheses (the form rustfmt
+  produces for a multi-line `any(..)`) covers that call for rule U and the T1-T7 keep exemption
+  (1b015a7b).
+
+### Changed
+
+- Migration guidance: use `Either` or `either(..)` only when the two arms have different concrete
+  view types. When both arms produce the same type, build it conditionally (compute the differing
+  props or children in an `if`, construct once): `Either` reconciles a Left/Right swap as a
+  teardown and remount, which drops in-flight gestures and can orphan focus
+  ([docs/WIDGETS_CODE_STANDARDS.md](docs/WIDGETS_CODE_STANDARDS.md)).
 
 ## 0.6.0 — 2026-10-11
 
