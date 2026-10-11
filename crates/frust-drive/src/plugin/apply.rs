@@ -14,6 +14,7 @@ use super::{
     PluginSpec,
 };
 use crate::build_dirs::BuildLayout;
+use crate::facade_key;
 use crate::host_path;
 use crate::packages::{CargoLocator, LockfilePolicy, PackageLocator};
 use crate::platform_wiring::{self, SyncError};
@@ -547,7 +548,8 @@ fn apply_app_crate_macro(
 }
 
 /// How the project depends on the framework facade, read from its
-/// `[dependencies].frust` entry.
+/// `[dependencies]` entry for the facade package under whichever key names
+/// it (`frust`, `frust-ui`, or a rename with `package = "frust-ui"`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FrustDep {
     /// A `path` is present: a local checkout (path mode). `path` is the value
@@ -560,23 +562,26 @@ enum FrustDep {
 }
 
 impl FrustDep {
-    /// The mode `doc`'s `frust` entry declares, or `None` when there is no
-    /// such entry or it carries neither a `path` nor a `version`. `package`
-    /// defaults to the dependency key, as cargo's own does — though every
-    /// scaffolded project names `frust-ui` explicitly in both modes.
+    /// The mode `doc`'s facade entry declares (the first, in document order,
+    /// whose package is the facade — [`facade_key::facade_entries`]), or
+    /// `None` when there is no such entry or it carries neither a `path` nor
+    /// a `version`. `package` defaults to the dependency key, as cargo's own
+    /// does — though every scaffolded project names `frust-ui` explicitly in
+    /// both modes.
     fn read(doc: &DocumentMut) -> Option<Self> {
-        let item = doc.get("dependencies")?.as_table_like()?.get("frust")?;
+        let deps = doc.get("dependencies")?.as_table_like()?;
+        let (key, item) = facade_key::facade_entries(deps).next()?;
         if let Some(version) = item.as_str() {
             return Some(Self::Registry {
                 version: version.to_string(),
-                package: "frust".to_string(),
+                package: key.to_string(),
             });
         }
         let table = item.as_table_like()?;
         let package = table
             .get("package")
             .and_then(Item::as_str)
-            .unwrap_or("frust")
+            .unwrap_or(key)
             .to_string();
         if let Some(path) = table.get("path").and_then(Item::as_str) {
             return Some(Self::Path {
@@ -746,8 +751,9 @@ fn apply_cargo_dep(
     let deps = doc
         .get_mut("dependencies")
         .and_then(Item::as_table_like_mut)
-        // Unreachable in practice — `FrustDep::read` already found
-        // `[dependencies].frust` — but avoid an `unwrap` at an FFI-free core.
+        // Unreachable in practice — `FrustDep::read` already found the
+        // facade entry in `[dependencies]` — but avoid an `unwrap` at an
+        // FFI-free core.
         .ok_or(PluginAddError::NoFrustDependency)?;
 
     if deps.contains_key(name) {
@@ -2175,6 +2181,43 @@ mod tests {
                 None,
             ),
             ("[dependencies]\nserde = \"1\"\n", None),
+        ] {
+            let doc = manifest.parse::<DocumentMut>().unwrap();
+            assert_eq!(FrustDep::read(&doc), expected, "{manifest}");
+        }
+    }
+
+    /// The facade is found by package name, so an app keying it `frust-ui`
+    /// (the crates.io name) or any rename still has a facade dependency;
+    /// a `frust` key on some other package is not the facade.
+    #[test]
+    fn frust_dep_finds_the_facade_under_any_key() {
+        for (manifest, expected) in [
+            (
+                "[dependencies]\nfrust-ui = \"0.6.0\"\n",
+                Some(FrustDep::Registry {
+                    version: "0.6.0".into(),
+                    package: "frust-ui".into(),
+                }),
+            ),
+            (
+                "[dependencies]\nfrust-ui = { path = \"../f/crates/frust\" }\n",
+                Some(FrustDep::Path {
+                    path: "../f/crates/frust".into(),
+                    package: "frust-ui".into(),
+                }),
+            ),
+            (
+                "[dependencies]\nlog = \"0.4\"\nui = { package = \"frust-ui\", version = \"0.6\" }\n",
+                Some(FrustDep::Registry {
+                    version: "0.6".into(),
+                    package: "frust-ui".into(),
+                }),
+            ),
+            (
+                "[dependencies]\nfrust = { package = \"not-the-facade\", version = \"1\" }\n",
+                None,
+            ),
         ] {
             let doc = manifest.parse::<DocumentMut>().unwrap();
             assert_eq!(FrustDep::read(&doc), expected, "{manifest}");
