@@ -222,6 +222,10 @@ beyond 12 children, homogeneous lists stay `Vec<V>`, and two-arm conditionals us
 `either(cond, || a, || b)`. `frust run` builds and launches it on the connected device, emulator,
 simulator, or the desktop.
 
+The dependency key is what `frust run` and `frust build` use to enable `frust/devtools`-style
+features: frust-cli 0.6.0 requires the key `frust`, while newer CLIs resolve any key, so with
+them `frust-ui = "0.6"` also works.
+
 ## Learning the rendering pipeline
 
 [`docs/learning/`](docs/learning/README.md) is a hands-on, lab-based
