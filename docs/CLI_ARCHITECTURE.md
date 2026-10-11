@@ -216,20 +216,19 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   `crates/frust-cli/src/cli.rs`) and then refused outright if any token would enable the in-app
   devtools listener (`refuse_devtools_features`, `crates/frust-cli/src/commands/build.rs`;
   `is_devtools_token` matches `devtools`, `frust/devtools`, any `*/devtools`, plus a one-level
-  app-manifest alias via `cargo_manifest::feature_enables_devtools`, which checks the alias
-  through either facade key — `frust/devtools` or `<key>/devtools`) — release artifacts must keep
-  the listener compiled out (see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)'s Trust
-  model); debug/profile lanes and `frust run` skip both checks. The surviving list is threaded into
+  app-manifest alias via `cargo_manifest::feature_enables_devtools`, which checks the alias through
+  either facade key — `frust/devtools` or `<key>/devtools`) — release artifacts must keep the
+  listener compiled out (see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)'s Trust model);
+  debug/profile lanes and `frust run` skip both checks. The surviving list is threaded into
   `frust-drive::cargo_manifest::resolve_release_features(.., extra)`, which appends it strictly
-  *after* the build mode's own `frust/perf-trace`+`frust/devtools`/`lean` selection. Debug/profile/hot
-  builds spell the mode's features `<key>/perf-trace`, `<key>/devtools`, `<key>/hotpatch` (`<key>`
-  from `frust-drive::facade_key`). Reaches
-  `android_build` (base64 `-Pfrust.cargoFeatures` CSV), `ios_build` (`FRUST_FEATURES` CSV; the
-  shared step is `ios_build::resolve_features_b64`) — both carry the mapped names —
-  `android_run`, `ios_run`, and the desktop `cargo run` plan. `build macos|windows|linux` refuses it
-  outright (`reject_unplumbed_features`) — `desktop_build::build`'s entry point carries no parameter
-  for it, so silently dropping the flag would compile a bundle without the feature the caller asked
-  for.
+  *after* the build mode's own `frust/perf-trace`+`frust/devtools`/`lean` selection.
+  Debug/profile/hot builds spell the mode's features `<key>/perf-trace`, `<key>/devtools`,
+  `<key>/hotpatch` (`<key>` from `frust-drive::facade_key`). Reaches `android_build` (base64
+  `-Pfrust.cargoFeatures` CSV), `ios_build` (`FRUST_FEATURES` CSV; the shared step is
+  `ios_build::resolve_features_b64`) — both carry the mapped names — `android_run`, `ios_run`, and
+  the desktop `cargo run` plan. `build macos|windows|linux` refuses it outright
+  (`reject_unplumbed_features`) — `desktop_build::build`'s entry point carries no parameter for it,
+  so silently dropping the flag would compile a bundle without the feature the caller asked for.
 - `build macos|windows|linux`: `BuildTarget::{Macos, Windows, Linux}` each carry a shared
   `BuildArgs` plus an `--installer` flag (release-default; no `--no-codesign` — signing is
   `[macos] signing-identity`-driven). The handler calls `frust_drive::desktop_build::build`
