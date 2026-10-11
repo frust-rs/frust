@@ -138,9 +138,9 @@ use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
 use frust::motion::{AnimatedOpacity, AnimatedScale};
 use frust::{
-    Align, Alignment, Axis, ButtonStyle, Color, CrossAxisAlignment, Curve, EdgeInsets, FlexChild,
-    FlexView, GestureDetector, Get, GetUntracked, Image, ImageFit, ImageSource, Padding, RwSignal,
-    Set, SizedBox, Theme, Timing, Update, any, button, column, either, inflexible, keyed, row,
+    Align, Alignment, Axis, ButtonStyle, Color, CrossAxisAlignment, Curve, EdgeInsets, Either,
+    FlexChild, FlexView, GestureDetector, Get, GetUntracked, Image, ImageFit, ImageSource, Padding,
+    RwSignal, Set, SizedBox, Theme, Timing, Update, button, column, either, inflexible, keyed, row,
     scroll_view, stack, text, use_context,
 };
 // `progress` is aliased to avoid shadowing by `demo_charge_ring`'s own local
@@ -1022,11 +1022,12 @@ fn demo_charge_ring(state: &CatalogState) -> FlexChild<CatalogState> {
             .child(Padding(EdgeInsets::all(12.0), row_inner)),
     );
 
-    // erasure: keep both arms consume the same `card`, which either() cannot move into two closures
+    // Both arms move `card` exactly once; `Either` (a plain enum, unlike the
+    // closure-taking `either()` fn) carries it into whichever arm is chosen.
     let scaled = if reduce {
-        any(card)
+        Either::Left(card)
     } else {
-        any(AnimatedScale(if floated { 1.03 } else { 1.0 }, card).timing(ZERO))
+        Either::Right(AnimatedScale(if floated { 1.03 } else { 1.0 }, card).timing(ZERO))
     };
 
     let gesture = GestureDetector(scaled)
@@ -1453,9 +1454,9 @@ mod tests {
     use peniko::{Brush, Color};
     use reactive_graph::owner::Owner;
 
-    use frust::AnyView;
+    use frust::{AnyView, any};
 
-    use super::{PaintScene, Set, View, any, page};
+    use super::{PaintScene, Set, View, page};
     use crate::CatalogState;
 
     /// A paint target that records nothing — only `RenderRoot::paint`'s
