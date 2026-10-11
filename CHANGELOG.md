@@ -13,7 +13,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   argument list, Android `-Pfrust.cargoFeatures`, iOS `FRUST_FEATURES` and hot-patch fat build
   spells features with the app's key, a missing-feature cargo failure on a debug or profile build
   carries a one-line hint naming both forms, and release lanes refuse devtools through either key
-  (c801185c, 5fb139c6, 3e294d9f, fcbb1e91).
+  (c801185c, 5fb139c6, fcbb1e91).
 - Codemod (`scripts/codemod/frust_any_codemod.py`): the name-list callees and the
   `column`/`row`/`stack` builders resolve by import origin (a strict `frust*` path head), so an
   app fn or an app-imported builder that shares a listed name is skipped with a note (412dc49a);
@@ -53,8 +53,9 @@ component's State.
   `button_group_icon_action` needs one more `_`.
 - `InputEvent` gained a `FileDrop(FileDropEvent)` variant (with the new `FileDropPhase`).
   `InputEvent` is not `#[non_exhaustive]`, so an exhaustive `match` over it needs a `FileDrop(_)`
-  arm (E0004). The same release adds `OverlayAnchor::Window` (`frust-widgets`), which an
-  exhaustive `match` over `OverlayAnchor` must also handle.
+  arm (E0004) (`crates/frust-core/src/event.rs`). The same release adds `OverlayAnchor::Window`
+  (`crates/frust-widgets/src/overlay.rs`), which an exhaustive `match` over `OverlayAnchor` must
+  also handle.
 - Public exhaustive-enum changes in tooling crates (none is `#[non_exhaustive]`, so an exhaustive
   `match` outside the crate breaks): `frust-devtools-protocol` `Capability` gains `HotPatch` and
   `Method` gains `HotpatchInfo`, `PatchChunk`, `TableChunk` and `ApplyPatch`; `frust-tui`'s
@@ -64,7 +65,9 @@ component's State.
   -`Watch`), `Effect` (+`HotPatch`, `HotPatchNow`, `LaunchHotSessions`;
   -`LaunchWatchedSessions`) and `SessionTarget` (+`Simulator`). `frust-shell-desktop`'s
   `ShellUserEvent` (doc-hidden) became `#[non_exhaustive]` and gained `HotPatched` (`hotpatch`
-  feature only).
+  feature only). Files: `crates/frust-devtools-protocol/src/{messages,method}.rs`,
+  `crates/frust-tui/src/engine/{message,update,run_config,session_view}.rs`,
+  `crates/frust-shell-desktop/src/app_handler.rs` (`git diff v0.5.2 v0.6.0 -- crates`).
 
 ### Known limitations, now documented
 
@@ -192,11 +195,11 @@ rather than introducing them.
    caller of a plugin list function writes `::<State, _>`, one of `button_group_icon_action` adds a
    `_`); a caller whose result now lands in a `Vec<AnyView>` or a `match` arm is re-erased with
    `any(..)` (or its list becomes a tuple); two-arm bodies use `either(cond, || a, || b)`, except a
-   body whose two arms both consume one moved value, which uses `Either::Left`/`Either::Right` (or
-   a `match`) instead of `either(..)`. Only a
-   site that must stay erased (a stored view table, an accumulator into `Vec<AnyView>`, a
-   three-plus-arm body, a `ChildPod`-fed helper, a same-head list whose elements differ in type)
-   keeps `any()`. Re-run the codemod after each fix until `--check --t6 --t7` is quiet.
+   body whose two arms both consume one moved value, which uses `Either::Left`/`Either::Right` (or a
+   `match`) instead of `either(..)`. Only a site that must stay erased (a stored view table, an
+   accumulator into `Vec<AnyView>`, a three-plus-arm body, a `ChildPod`-fed helper, a same-head list
+   whose elements differ in type) keeps `any()`. Re-run the codemod after each fix until
+   `--check --t6 --t7` is quiet.
 5. Replace `dyn Component` with generics or stored `AnyView`s; see `docs/LIMITATIONS.md` for the
    two behaviours listed under Known limitations, now documented.
 6. Run `scripts/ci/erasure-check.sh`; mark required erasure with `// erasure: keep <why>`.
