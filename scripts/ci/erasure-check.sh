@@ -14,11 +14,13 @@
 #
 # (U) examples and benchmarks only (examples/hotpatch-spike is excluded): every
 # any() erasure call left in example and benchmark code carries a
-# `// erasure: keep <why>` marker, either on the call's own line, alone on the
+# `// erasure: keep <why>` marker (the reason is required; a bare marker does
+# not count), either on the call's own line, alone on the
 # line above it, or on the enclosing fn signature (the `fn` line, its `->`
 # line, or alone above the `fn`). A call inside a kept `vec![`, `let` or
-# `match` first line is covered too. U is report-only: a leftover fails the
-# gate and is never auto-fixed. Framework and plugin internals (crates/,
+# `match` first line is covered too. A fn-signature marker covers every call in
+# that fn body, so its reason must justify all of them. U never auto-fixes:
+# `--write` leaves every U site alone, and a leftover fails the gate. Framework and plugin internals (crates/,
 # plugins/) are deliberately not audited by U; a builder or helper there is
 # judged by T alone.
 #
