@@ -87,7 +87,9 @@ code); the first matching bucket wins:
              method of a trait impl: the signature is the trait's.
   T7-arms    an `if`/`else` chain or a `match` as the tail, or an early
              `return` anywhere in the body: several exits of different types
-             (`Either` candidates, not T7's).
+             (`Either` candidates, not T7's). A `return` inside a closure
+             body (`move |_app| { ..; return; }`) leaves the closure, not the
+             helper, and does not count.
   T7-ref     a recursive fn (`f(..)` in a free fn, `Self::f(..)`/`self.f(..)`
              in a method), or a fn named as a value — a fn pointer, a stored
              callback, an argument of `Box::new`/`.map(..)`/`.push(..)` —
@@ -100,6 +102,12 @@ code); the first matching bucket wins:
              `plugins/` library source — not under a `tests/`, `examples/` or
              `src/corpus/` directory, and not inside a `#[cfg(test)] mod`:
              changing a library signature is a human decision.
+  T7-visible any other fn with a visibility modifier (`pub`, `pub(crate)`,
+             `pub(super)`, `pub(in ..)`): visible outside its module, so
+             callers (other modules, files outside the run set, integration
+             tests) may rely on AnyView (a `Vec<AnyView>`, a two-arm
+             `if`/`match`, an `-> AnyView` tail). `--t7-visible` rewrites
+             them; a private fn is always a candidate.
 A tail that is neither one erasure call nor an `if`/`match` (a `vec![..]`, a
 loop, an accumulator, a call of another helper, a turbofish `any::<S, _>(..)`)
 is neither rewritten nor listed.
@@ -124,7 +132,13 @@ Opt-out: a line comment `// erasure: keep` (exact text after `//`, optional
 trailing reason) on the same line as the start of a candidate's span, or alone
 on the line immediately above it, exempts that site from every rule (T1-T7).
 For T7 the site is the signature: the marker goes on the `fn` line or the `->`
-line, or alone on the line above the `fn` line.
+line, or alone on the line above the `fn` line. rustfmt-stable placements: at
+the end of the `->` line with the `{` on the next line, or at the end of the
+`any(..)` line; a marker written after the `{` of the signature line is moved
+by rustfmt to an own line as the first line of the body, and such a first
+own-line comment (before any statement) counts as a signature marker, for T7
+and for rule U (where it covers every `any(..)` in the body). A marker later
+in the body stays a plain line marker.
 Kept sites are never listed by `--check` and never rewritten; `--stats`
 counts them as `kept=N`. T5 applies `Column`/`Row`/`Stack` only when T2
 would resolve them to frust's own sugar (a local `struct Row` or a foreign
@@ -207,8 +221,8 @@ exclusion(s)` summary line), `--write --t6` applies the candidates, and
 `--t7` likewise turns rule T7 on for every mode (off by default): `--check
 --t7` also lists `T7 helper returns impl View: <fn>` candidates and the T7
 exclusions (with a `N T7 exclusion(s)` summary line), `--write --t7` applies
-the candidates, and `--stats --t7` reports the T7 candidate count and the four
-exclusion buckets (`T7-trait`, `T7-arms`, `T7-ref`, `T7-public`) per file
+the candidates, and `--stats --t7` reports the T7 candidate count and the five
+exclusion buckets (`T7-trait`, `T7-arms`, `T7-ref`, `T7-public`, `T7-visible`) per file
 (when non-zero) and in total.
 
 U   (`--unmarked` only; never auto-fixed: `--write` leaves every U site alone and a
@@ -220,7 +234,8 @@ U   (`--unmarked` only; never auto-fixed: `--write` leaves every U site alone an
       in strings or comments are not calls). A call is covered when (a) its own
       line is kept (marker on the line, or alone on the line above), (b) it sits
       inside a fn whose signature is kept (the `fn` line, the line holding its
-      `->`, or alone above the `fn` line), or (c) it sits inside a `vec![..]`,
+      `->`, alone above the `fn` line, or, for a fn returning an AnyView type, as the first
+      own-line comment of its body), or (c) it sits inside a `vec![..]`,
       a `let` statement or a `match` whose first line is kept. A fn-signature
       marker covers every call in that fn body, so its reason must justify all
       of them. `--check
@@ -446,6 +461,7 @@ class Source:
         self.line_comment_ends = {tok.end for tok in self.all if tok.kind == LINE_COMMENT}
         (self.keep_lines, self.keep_above,
          self.why_lines, self.why_above) = self._keep_markers()
+        self._body_gap = None
         self.kept = 0
         self.t7_excluded: list = []   # (line, bucket, fn name, reason), set by T7
         self.t6_excluded: list = []   # (line, bucket, callee, reason), set by T6
@@ -480,6 +496,30 @@ class Source:
                 if has_reason:
                     why_alone.add(line)
         return anywhere, alone, why_anywhere, why_alone
+
+    def body_marker(self, body: int, reasoned: bool = False) -> bool:
+        """True when the fn body opening at code index `body` starts with an
+        own-line `// erasure: keep` comment: the first own-line comment between
+        the `{` and the first statement. rustfmt moves a marker written after
+        the `{` of the signature line to exactly this place, so it counts as a
+        fn-signature marker. A trailing comment on the `{` line is not own-line
+        and a comment after the first statement never matches."""
+        if self._body_gap is None:
+            gap, cur, ci = {}, [], 0
+            for tok in self.all:
+                if tok.kind in TRIVIA:
+                    if tok.kind == LINE_COMMENT:
+                        cur.append(tok)
+                    continue
+                gap[ci] = cur
+                cur, ci = [], ci + 1
+            self._body_gap = gap
+        for tok in self._body_gap.get(body + 1, ()):
+            line = self.line_of(tok.start)
+            if self.src[self.line_starts[line - 1]:tok.start].strip():
+                continue   # trailing comment of the `{` line
+            return line in (self.why_above if reasoned else self.keep_above)
+        return False
 
     def is_kept(self, line: int, reasoned: bool = False) -> bool:
         """True when a site starting on `line` carries the opt-out marker: on
@@ -1622,7 +1662,7 @@ def _t6(s, key, o, cands):
 # T7: helper fns returning AnyView
 # ---------------------------------------------------------------------------
 
-T7_BUCKETS = ("T7-trait", "T7-arms", "T7-ref", "T7-public")
+T7_BUCKETS = ("T7-trait", "T7-arms", "T7-ref", "T7-public", "T7-visible")
 
 
 @dataclass
@@ -1630,6 +1670,7 @@ class T7Ctx:
     """Per-file facts T7 needs that the file text alone does not carry."""
     edition: str = "2024"          # the crate's Rust edition
     library: bool = False          # a crates/ or plugins/ library source
+    visible: bool = False          # `--t7-visible`: also rewrite fns with a visibility modifier
     values: frozenset = frozenset()   # `_t7_value_names` keys found elsewhere in the package
 
 
@@ -1766,6 +1807,18 @@ def _t7_container(s: Source, fn: int):
     return "impl", gen
 
 
+def _t7_in_closure(s: Source, k: int, body: int) -> bool:
+    """True when the innermost enclosing callable of token `k` (inside the fn
+    body opening at `body`) is a closure: some brace group between them is a
+    closure body (`|params| { .. }`, `|| { .. }`)."""
+    g = s.parent[k]
+    while g > body:
+        if s.is_p(g, "{") and (s.is_p(g - 1, "|") or s.is_p(g - 1, "||")):
+            return True
+        g = s.parent[g]
+    return False
+
+
 def _t7_returns(s: Source, f: T7Fn) -> list:
     """`return` tokens of this fn's own body (nested fn items excluded)."""
     close = s.match[f.body]
@@ -1773,7 +1826,7 @@ def _t7_returns(s: Source, f: T7Fn) -> list:
     for k in range(f.body + 1, close):
         if s.is_id(k, "return"):
             enc = s.enclosing_fn(k)
-            if enc is not None and enc[0] == f.fn:
+            if enc is not None and enc[0] == f.fn and not _t7_in_closure(s, k, f.body):
                 out.append(k)
     return out
 
@@ -1927,6 +1980,18 @@ def _t7_is_pub(s: Source, fn: int) -> bool:
     return s.is_id(j, "pub")
 
 
+def _t7_has_vis(s: Source, fn: int) -> bool:
+    """True when the fn carries any visibility modifier: `pub`, `pub(crate)`,
+    `pub(super)`, `pub(in ..)`."""
+    j = fn - 1
+    while j >= 0 and (s.t[j].kind == STR or (
+            s.is_id(j) and s.t[j].text in ("unsafe", "extern", "default"))):
+        j -= 1
+    if s.is_p(j, ")") and s.is_id(s.match[j] - 1, "pub"):
+        return True
+    return s.is_id(j, "pub")
+
+
 def _t7_in_test_mod(s: Source, k: int) -> bool:
     """True when token `k` sits inside a `#[cfg(test)] mod name { .. }`."""
     g = s.parent[k]
@@ -2043,7 +2108,8 @@ def _t7(s: Source, ctx: T7Ctx, cands: list, notes: list) -> None:
     for f in fns:
         name = s.t[f.name].text
         line = s.line_of(s.t[f.fn].start)
-        if s.is_kept(line) or s.is_kept(s.line_of(s.t[f.arrow].start)):
+        if s.is_kept(line) or s.is_kept(s.line_of(s.t[f.arrow].start)) or (
+                f.body is not None and s.body_marker(f.body)):
             s.kept += 1
             continue
         kind, impl_gen = _t7_container(s, f.fn)
@@ -2070,6 +2136,9 @@ def _t7(s: Source, ctx: T7Ctx, cands: list, notes: list) -> None:
             continue
         if ctx.library and _t7_is_pub(s, f.fn) and not _t7_in_test_mod(s, f.fn):
             exclude("T7-public", "pub fn in a library source")
+            continue
+        if not ctx.visible and _t7_has_vis(s, f.fn):
+            exclude("T7-visible", "visible outside its module; callers may rely on AnyView")
             continue
         _, eo, ta, tb = shape
         uses = _t7_captures(s, f, impl_gen, ctx.edition)
@@ -2209,8 +2278,9 @@ def package_values(path: str, excludes=(), cache=None) -> frozenset:
     return cache[key]
 
 
-def t7_context(path: str, excludes=(), cache=None) -> T7Ctx:
-    return T7Ctx(crate_edition(path), _t7_library(path), package_values(path, excludes, cache))
+def t7_context(path: str, excludes=(), cache=None, visible: bool = False) -> T7Ctx:
+    return T7Ctx(crate_edition(path), _t7_library(path), visible,
+                 package_values(path, excludes, cache))
 
 
 def select_outermost(cands: list[Candidate]) -> list[Candidate]:
@@ -2542,7 +2612,16 @@ def _u_fn_kept(s: Source, g: int) -> bool:
     if s.is_kept(s.line_of(s.t[fn].start), reasoned=True):
         return True
     arrow = _u_return_arrow(s, fn)
-    return arrow is not None and s.is_kept(s.line_of(s.t[arrow].start), reasoned=True)
+    if arrow is not None and s.is_kept(s.line_of(s.t[arrow].start), reasoned=True):
+        return True
+    # rustfmt-moved marker: only for a fn returning an AnyView type, where a
+    # marker after the signature's `{` is the documented placement
+    if arrow is None:
+        return False
+    j = arrow + 1
+    while j < g and not s.is_id(j, "AnyView"):
+        j += 1
+    return j < g and s.body_marker(g, reasoned=True)
 
 
 def _u_covered(s: Source, k: int) -> bool:
@@ -2608,10 +2687,17 @@ def main(argv=None) -> int:
                          "erasure call returns impl View<S> instead (+ use<..> only in a "
                          "pre-2024 crate when the fn has a lifetime or reference parameter); "
                          "trait fns, multi-arm bodies, recursive fns or fns used as values, and "
-                         "pub fns of crates/ and plugins/ library sources are listed as "
-                         "T7-trait/T7-arms/T7-ref/T7-public exclusions, never rewritten and never "
+                         "bare pub fns of crates/ and plugins/ library sources, and fns with any "
+                         "visibility modifier (pub(crate), pub(super), pub(in ..), or pub in an "
+                         "app) unless --t7-visible is given, are listed as "
+                         "T7-trait/T7-arms/T7-ref/T7-public/T7-visible exclusions, never rewritten and never "
                          "counted toward the exit code; `// erasure: keep <why>` on the signature "
                          "line (or alone above it) exempts a fn")
+    ap.add_argument("--t7-visible", action="store_true",
+                    help="with --t7, also rewrite helpers that carry a visibility modifier "
+                         "(pub, pub(crate), pub(super), pub(in ..)) and are not T7-public; "
+                         "without it they are listed as T7-visible (callers in other modules "
+                         "or files may rely on AnyView)")
     ap.add_argument("--t6", action="store_true",
                     help="opt in to rule T6: a vec![..] argument of a [seq] API (name list) whose "
                          "elements are all erasure calls (1-12 of them, heads may differ) becomes "
@@ -2669,7 +2755,7 @@ def main(argv=None) -> int:
         try:
             with open(path, encoding="utf-8", newline="") as fh:
                 src = fh.read()
-            ctx = t7_context(path, excludes, pkg_cache) if args.t7 else None
+            ctx = t7_context(path, excludes, pkg_cache, args.t7_visible) if args.t7 else None
             res = rewrite(src, apis, args.t5, args.t7, ctx, args.t6)
         except (LexError, UnicodeDecodeError) as exc:
             print(f"{path}: skipped, cannot tokenise: {exc}", file=sys.stderr)
