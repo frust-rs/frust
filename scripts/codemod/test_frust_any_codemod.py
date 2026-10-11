@@ -1303,6 +1303,59 @@ class T7Test(unittest.TestCase):
                    values=frozenset({"a"}))
         self.assertEqual(buckets(res), [("T7-ref", "a")])
 
+    def test_helper_taken_by_reference_excluded(self):
+        res = run7("""\
+            use frust::{AnyView, View, any};
+            fn free_h() -> AnyView<S> { any(x()) }
+            fn plain() -> AnyView<S> { any(x()) }
+            fn mutref() -> AnyView<S> { any(x()) }
+            fn bigger() -> AnyView<S> { any(x()) }
+            impl X {
+                fn m(&self) -> AnyView<S> { any(x()) }
+                fn assoc() -> AnyView<S> { any(x()) }
+                fn user(&self, prev: &X) {
+                    take(&free_h());
+                    take(&self.m());
+                    take(&Self::assoc());
+                    take(&prev.m());
+                    take(&mut mutref());
+                    take((a, bigger()));
+                    take(&vec![bigger()]);
+                    take(&bigger().len());
+                    let v = plain();
+                }
+            }
+            """)
+        self.assertEqual(buckets(res), [("T7-ref", "free_h"), ("T7-ref", "mutref"),
+                                        ("T7-ref", "m"), ("T7-ref", "assoc")])
+        self.assertEqual([c.desc for c in res.candidates],
+                         ["helper returns impl View: plain", "helper returns impl View: bigger"])
+        self.assertTrue(all(e[3] == "taken by reference" for e in res.excluded
+                            if e[1] == "T7-ref"))
+
+    def test_beui_shape_taken_by_reference_not_rewritten(self):
+        src = """\
+            use frust::{AnyView, View, any, text};
+            impl Block {
+                fn primary_view(&self) -> AnyView<State> {
+                    any(text(self.label.clone()))
+                }
+                fn build(&self, ctx: &mut Ctx) {
+                    build_child(&self.primary_view(), ctx);
+                }
+                fn rebuild(&self, prev: &Self, ctx: &mut Ctx) {
+                    rebuild_child(&prev.primary_view(), &self.primary_view(), ctx);
+                }
+                fn teardown(&self, ctx: &mut Ctx) {
+                    teardown_child(&self.primary_view(), ctx);
+                }
+            }
+            """
+        res = run7(src)
+        self.assertEqual(res.candidates, [])
+        self.assertEqual(buckets(res), [("T7-ref", "primary_view")])
+        self.assertEqual(res.text, textwrap.dedent(src))
+
     def test_bindings_and_other_items_are_not_value_uses(self):
         res = run7("""\
             use frust::{AnyView, View, any};

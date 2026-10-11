@@ -97,7 +97,12 @@ code); the first matching bucket wins:
              files, nested packages and `--exclude`d paths left out). The
              value-use scan is a heuristic that errs towards a hit: a local
              binding or pattern of the same name does not count, a
-             type-qualified `Kind::f` only counts against a method.
+             type-qualified `Kind::f` only counts against a method. Also a
+             fn whose same-file call is the whole operand of a prefix `&` /
+             `&mut` ("taken by reference": `&f(..)`, `&self.f(..)`,
+             `&Self::f(..)`, `&prev.f(..)`) — the caller relies on
+             `&AnyView<S>`, private helpers included. A `&` over a larger
+             expression (`&(a, f())`, `&vec![f()]`, `&f().x`) does not count.
   T7-public  a `pub fn` (a restricted `pub(..)` is not API) in a `crates/` or
              `plugins/` library source — not under a `tests/`, `examples/` or
              `src/corpus/` directory, and not inside a `#[cfg(test)] mod`:
@@ -1889,6 +1894,65 @@ def _t7_tail(s: Source, f: T7Fn):
     return "single", eo, a, b
 
 
+def _t7_prefix_amp(s: Source, k: int) -> bool:
+    """True when token `k` is a prefix `&` / `&&` (a borrow, not a bit-and /
+    logical-and): nothing operand-like precedes it (ignoring a `mut` after it)."""
+    if not (s.is_p(k, "&") or s.is_p(k, "&&")):
+        return False
+    p = k - 1
+    if p < 0:
+        return True
+    tok = s.t[p]
+    if tok.kind in (STR, NUM, CHAR, LIFETIME):
+        return False
+    if tok.kind == IDENT:
+        return tok.text in ("return", "in", "if", "match", "while", "else", "let", "mut",
+                            "break", "move", "yield")
+    return not (tok.kind == PUNCT and tok.text in (")", "]", "?", "}"))
+
+
+def _t7_taken_by_ref(s: Source, f: T7Fn, kind: str) -> bool:
+    """True when a same-file call of the helper is the whole operand of a
+    prefix `&` / `&mut` (`&name(..)`, `&self.name(..)`, `&Self::name(..)`,
+    `&prev.name(..)`): the caller relies on `&AnyView<S>`. A `&` applying to a
+    larger expression (`&(a, name())`, `&vec![name()]`, `&name().x`) does not count."""
+    name = s.t[f.name].text
+    for k, tok in enumerate(s.t):
+        if tok.kind != IDENT or tok.text != name or not s.is_p(k + 1, "(") or k == f.name:
+            continue
+        if s.is_id(k - 1, "fn"):
+            continue
+        if kind == "free":
+            if s.is_p(k - 1, ".") or (s.is_p(k - 1, "::") and
+                                      s.is_id(k - 2) and s.t[k - 2].text[:1].isupper()):
+                continue
+        elif not (s.is_p(k - 1, ".") or (s.is_p(k - 1, "::") and s.is_id(k - 2, "Self"))):
+            continue
+        end = s.match[k + 1]
+        if s.is_p(end + 1, ".") or s.is_p(end + 1, "?") or s.is_p(end + 1, "[") or \
+                s.is_id(end + 1, "as"):
+            continue   # the borrow applies to a longer expression
+        pos = k
+        while s.is_p(pos - 1, ".") or s.is_p(pos - 1, "::"):
+            q = pos - 2
+            while s.is_p(q, "?"):
+                q -= 1
+            if s.is_p(q, ")") or s.is_p(q, "]"):
+                pos = s.match[q]
+                if s.is_id(pos - 1) and not s.is_p(pos, "["):
+                    pos -= 1
+            elif q >= 0 and s.t[q].kind in (IDENT, STR, NUM):
+                pos = q
+            else:
+                break
+        a = pos - 1
+        if s.is_id(a, "mut"):
+            a -= 1
+        if _t7_prefix_amp(s, a):
+            return True
+    return False
+
+
 def _t7_recursive(s: Source, f: T7Fn, kind: str) -> bool:
     """True when the fn calls itself (`name(..)`, or `Self::name(..)`/`self.name(..)` in an impl)."""
     name = s.t[f.name].text
@@ -2133,6 +2197,9 @@ def _t7(s: Source, ctx: T7Ctx, cands: list, notes: list) -> None:
             continue
         if (name if kind == "free" else "::" + name) in values:
             exclude("T7-ref", "used as a value")
+            continue
+        if _t7_taken_by_ref(s, f, kind):
+            exclude("T7-ref", "taken by reference")
             continue
         if ctx.library and _t7_is_pub(s, f.fn) and not _t7_in_test_mod(s, f.fn):
             exclude("T7-public", "pub fn in a library source")
