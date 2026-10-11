@@ -23,9 +23,8 @@
 //! runner doesn't have to go find them in `docs/SHELLS_DEVELOPMENT.md`.
 
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Padding,
-    RwSignal, Set, SizedBox, Theme, View, any, button, deep_links, inflexible, row, text,
-    use_context,
+    ButtonStyle, Color, EdgeInsets, FlexChild, Get, GetUntracked, Padding, RwSignal, Set, SizedBox,
+    Theme, View, button, column, deep_links, inflexible, row, text, use_context,
 };
 use frust_url_launcher::UrlLauncher;
 
@@ -115,61 +114,62 @@ pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
         format!("status: {status}")
     };
 
-    let children: Vec<AnyView<PlaygroundState>> = vec![
-        any(text("URL launcher").size(13.0).color(accent())),
-        any(text(
-            "frust-url-launcher's open_external, exercised from a real button press \u{2014} \
+    let body = column()
+        .child(text("URL launcher").size(13.0).color(accent()))
+        .child(
+            text(
+                "frust-url-launcher's open_external, exercised from a real button press \u{2014} \
                  the browser-out half of the round-trip device gate. The frustplay:// deep-link-\
                  back half is read below and driven by the commands in the caption.",
-        )
-        .size(11.0)
-        .color(muted())),
-        any(SizedBox(None, Some(12.0))),
-        any(row()
-            .child(
-                button("Open example.com", |_state: &mut PlaygroundState| {
-                    let result = UrlLauncher::open_external("https://example.com");
-                    status_sig().set(format!(
-                        "open_external(\"https://example.com\") -> {result:?}"
-                    ));
-                })
-                .style(ButtonStyle::Primary)
-                .small(),
             )
-            .push(gap_h(8.0))
-            .child(
-                button(
-                    "Open invalid (javascript:)",
-                    |_state: &mut PlaygroundState| {
-                        let result = UrlLauncher::open_external("javascript:alert(1)");
+            .size(11.0)
+            .color(muted()),
+        )
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            row()
+                .child(
+                    button("Open example.com", |_state: &mut PlaygroundState| {
+                        let result = UrlLauncher::open_external("https://example.com");
                         status_sig().set(format!(
-                            "open_external(\"javascript:alert(1)\") -> {result:?}"
+                            "open_external(\"https://example.com\") -> {result:?}"
                         ));
-                    },
+                    })
+                    .style(ButtonStyle::Primary)
+                    .small(),
                 )
-                .style(ButtonStyle::Secondary)
-                .small(),
-            )),
-        any(SizedBox(None, Some(8.0))),
-        any(text(status_line).size(12.0)),
-        any(SizedBox(None, Some(12.0))),
-        any(text(latest_line).size(12.0).color(accent())),
-        any(SizedBox(None, Some(12.0))),
-        any(text(format!("Return leg (Android): {ADB_RETURN_COMMAND}"))
+                .push(gap_h(8.0))
+                .child(
+                    button(
+                        "Open invalid (javascript:)",
+                        |_state: &mut PlaygroundState| {
+                            let result = UrlLauncher::open_external("javascript:alert(1)");
+                            status_sig().set(format!(
+                                "open_external(\"javascript:alert(1)\") -> {result:?}"
+                            ));
+                        },
+                    )
+                    .style(ButtonStyle::Secondary)
+                    .small(),
+                ),
+        )
+        .child(SizedBox(None, Some(8.0)))
+        .child(text(status_line).size(12.0))
+        .child(SizedBox(None, Some(12.0)))
+        .child(text(latest_line).size(12.0).color(accent()))
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            text(format!("Return leg (Android): {ADB_RETURN_COMMAND}"))
+                .size(10.0)
+                .color(muted()),
+        )
+        .child(
+            text(format!(
+                "Return leg (iOS Simulator): {SIMCTL_RETURN_COMMAND}"
+            ))
             .size(10.0)
-            .color(muted())),
-        any(text(format!(
-            "Return leg (iOS Simulator): {SIMCTL_RETURN_COMMAND}"
-        ))
-        .size(10.0)
-        .color(muted())),
-    ];
+            .color(muted()),
+        );
 
-    Padding(
-        EdgeInsets::all(16.0),
-        FlexView::new(
-            Axis::Vertical,
-            children.into_iter().map(inflexible).collect(),
-        ),
-    )
+    Padding(EdgeInsets::all(16.0), body)
 }

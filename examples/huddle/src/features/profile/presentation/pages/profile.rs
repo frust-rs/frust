@@ -21,8 +21,8 @@
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Button, CrossAxisAlignment, SizedBox, Theme, View, any, column,
-    hero, row, text, use_context,
+    Align, Alignment, Button, CrossAxisAlignment, Either, SizedBox, Theme, View, column, hero, row,
+    text, use_context,
 };
 use frust_material::filled_card;
 
@@ -39,15 +39,16 @@ const AVATAR_TILE: f64 = 64.0;
 const AVATAR_FONT: f32 = 28.0;
 
 /// The profile card for `user_id` (the `/user/:id` route param — a string,
-/// parsed against the mock dataset's numeric ids).
-pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
+/// parsed against the mock dataset's numeric ids). Two view types: the
+/// unknown-user fallback, or the loaded profile card.
+pub fn profile_screen(user_id: String) -> impl View<HuddleState> {
     let Some(id) = user_id.parse::<u32>().ok() else {
-        return any(unknown_user_screen(&user_id));
+        return Either::Left(unknown_user_screen(&user_id));
     };
     let repo = use_context::<Arc<dyn ProfileRepository + Send + Sync>>()
         .expect("ProfileRepository is provided by lib.rs's composition root");
     let Some(profile) = ProfileController::load(repo.as_ref(), id) else {
-        return any(unknown_user_screen(&user_id));
+        return Either::Left(unknown_user_screen(&user_id));
     };
 
     // Status-dot color from the theme's semantic roles (never a hardcoded
@@ -63,17 +64,17 @@ pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
 
     let dm_channel_id = profile.dm_channel_id.clone();
 
-    let avatar = any(hero(
+    let avatar = hero(
         format!("avatar-{id}"),
         initials_tile::<HuddleState>(profile.user.initials, AVATAR_TILE, AVATAR_FONT),
-    ));
+    );
 
-    let status_row = any(row()
+    let status_row = row()
         .child(text("\u{25CF}").color(status_color).size(14.0))
         .child(SizedBox(Some(6.0), None))
-        .child(text(profile.user.status.label()).size(14.0)));
+        .child(text(profile.user.status.label()).size(14.0));
 
-    let actions = any(row()
+    let actions = row()
         .child(Button("Message", move |s: &mut HuddleState| {
             // Inert when there is no existing DM with this user (see the
             // module docs) — the button still shows its native pressed
@@ -87,9 +88,9 @@ pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
         // module docs. `Button` already paints its own pressed state on
         // `Down`/`Move`, so this needs no extra wiring to satisfy "inert with
         // pressed state".
-        .child(Button("Huddle call", |_s: &mut HuddleState| {})));
+        .child(Button("Huddle call", |_s: &mut HuddleState| {}));
 
-    let body = any(column()
+    let body = column()
         .child(avatar)
         .child(SizedBox(None, Some(16.0)))
         .child(text(profile.user.name).size(24.0))
@@ -101,9 +102,9 @@ pub fn profile_screen(user_id: String) -> AnyView<HuddleState> {
         .child(text(profile.role_team.clone()).size(13.0))
         .child(SizedBox(None, Some(16.0)))
         .child(actions)
-        .cross_axis(CrossAxisAlignment::Center));
+        .cross_axis(CrossAxisAlignment::Center);
 
-    any(scaffold(profile.user.name, body))
+    Either::Right(scaffold(profile.user.name, body))
 }
 
 /// A rounded, theme-colored initials tile — the avatar/workspace-tile visual
@@ -128,7 +129,7 @@ fn initials_tile<State: 'static>(
 
 /// Fallback for an id that doesn't resolve against the mock dataset (an
 /// invalid `/user/:id` deep link/param) — renders instead of panicking.
-fn unknown_user_screen(user_id: &str) -> impl View<HuddleState> {
+fn unknown_user_screen(user_id: &str) -> impl View<HuddleState> + use<> {
     scaffold(
         "Profile",
         placeholder_body(&format!("No such user: {user_id}")),

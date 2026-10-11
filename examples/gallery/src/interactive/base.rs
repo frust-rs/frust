@@ -106,6 +106,7 @@ impl Component for CheckboxCase {
 /// the stateful component, legal because `ComponentView<C>` implements
 /// `View<Outer>` for every `Outer`. Every constructor below repeats this
 /// three-line shape.
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn checkbox_case() -> AnyView<()> {
     any(component(CheckboxCase))
 }
@@ -152,6 +153,7 @@ impl Component for RadioCase {
     }
 }
 
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn radio_case() -> AnyView<()> {
     any(component(RadioCase))
 }
@@ -202,6 +204,7 @@ impl Component for SliderCase {
     }
 }
 
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn slider_case() -> AnyView<()> {
     any(component(SliderCase))
 }
@@ -276,6 +279,7 @@ impl Component for TextInputCase {
     }
 }
 
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn text_input_case() -> AnyView<()> {
     any(component(TextInputCase))
 }
@@ -331,6 +335,7 @@ impl Component for GestureDetectorCase {
     }
 }
 
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn gesture_detector_case() -> AnyView<()> {
     any(component(GestureDetectorCase))
 }
@@ -382,7 +387,7 @@ impl Component for ShieldCase {
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let taps = state.taps;
         let unit = if taps == 1 { "time" } else { "times" };
-        any(stack()
+        stack()
             .child(maybe_debug_fill(
                 platform_view("dev.frust.MapFactory")
                     .interactive()
@@ -410,10 +415,11 @@ impl Component for ShieldCase {
                         state.taps += 1
                     })),
                 ),
-            )))
+            ))
     }
 }
 
+// erasure: keep stored as an `interactive::Build` fn pointer (`Entry`)
 fn shield_case() -> AnyView<()> {
     any(component(ShieldCase))
 }

@@ -57,6 +57,7 @@ impl Scenario for D2 {
         "DB reads (frust-database)"
     }
 
+    // erasure: keep Scenario::build feeds the dyn SCENARIOS table
     fn build(&self, _state: &mut BenchState) -> AnyView<BenchState> {
         any(component(D2Read))
     }
@@ -157,7 +158,7 @@ impl Component for D2Read {
             AsyncValue::Error(_) => "D2 run task failed".to_string(),
         };
 
-        any(Align(Alignment::new(0.0, 0.0), text(status).size(18.0)))
+        Align(Alignment::new(0.0, 0.0), text(status).size(18.0))
     }
 }
 

@@ -236,24 +236,26 @@ fn dialog_snippet(
 ) -> PlaySnippet {
     let code = format!(
         "let dismiss = ModalDismiss::new();\n\
-         let confirm = dismiss.clone();\n\
-         let cancel = dismiss.clone();\n\
          show_time_picker(\n    \
-             &nav,\n    \
-             move || time_picker(TimeOfDay::new({hour}, {minute}))\n        \
-                 .entry_mode(TimePickerEntryMode::{entry_mode:?})\n        \
-                 .use_24_hour({use_24_hour})\n        \
-                 .on_change(|state, next| state.time = next)\n        \
-                 .on_confirm(move |_state, confirmed| {{\n            \
-                     if let Some(picked) = confirmed {{\n                \
-                         confirm.dismiss_with(PopResult::of(picked));\n            \
-                     }}\n        \
-                 }})\n        \
-                 .on_cancel(move |_state| cancel.dismiss())\n        \
-                 .dismiss_handle(dismiss.clone()),\n    \
-             |state, result| {{\n        \
+             &app.nav,\n    \
+             move || {{\n        \
+                 let confirm = dismiss.clone();\n        \
+                 let cancel = dismiss.clone();\n        \
+                 time_picker(TimeOfDay::new({hour}, {minute}))\n            \
+                     .entry_mode(TimePickerEntryMode::{entry_mode:?})\n            \
+                     .use_24_hour({use_24_hour})\n            \
+                     .on_change(|app: &mut App, next: TimeOfDay| app.time = next)\n            \
+                     .on_confirm(move |_: &mut App, confirmed: Option<TimeOfDay>| {{\n                \
+                         if let Some(picked) = confirmed {{\n                    \
+                             confirm.dismiss_with(PopResult::of(picked));\n                \
+                         }}\n            \
+                     }})\n            \
+                     .on_cancel(move |_: &mut App| cancel.dismiss())\n            \
+                     .dismiss_handle(dismiss.clone())\n    \
+             }},\n    \
+             |app: &mut App, result: PopResult| {{\n        \
                  if let Some(picked) = result.take::<TimeOfDay>() {{\n            \
-                     state.time = picked;\n        \
+                     app.time = picked;\n        \
                  }}\n    \
              }},\n\
          );",
@@ -380,7 +382,7 @@ impl Component for TimePickersPlayground {
         let use_24_hour = state.use_24_hour;
         let entry_mode_anchor = state.entry_mode_anchor.clone();
         let entry_mode_open = state.entry_mode_open;
-        any(navigator(&state.nav, move || {
+        navigator(&state.nav, move || {
             content(
                 &nav,
                 time,
@@ -389,11 +391,12 @@ impl Component for TimePickersPlayground {
                 &entry_mode_anchor,
                 entry_mode_open.get(),
             )
-        }))
+        })
     }
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(TimePickersPlayground))
 }

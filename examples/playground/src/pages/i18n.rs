@@ -47,9 +47,8 @@
 //! `docs/PLUGINS_DEVELOPMENT.md`); nothing here works around it.
 
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get,
-    Padding, RwSignal, Set, SizedBox, Theme, View, any, button, component, inflexible, text,
-    use_context,
+    Axis, ButtonStyle, Color, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, Padding,
+    RwSignal, Set, SizedBox, Theme, View, button, column, component, inflexible, text, use_context,
 };
 use frust_i18n::fmt::{self, CivilDate, CivilTime, DateLength};
 use frust_i18n::{I18n, Locale, use_i18n};
@@ -153,68 +152,64 @@ impl Component for I18nDemoPage {
         let theme_choice = state.theme_choice.get();
         let muted = muted();
 
-        let children: Vec<AnyView<I18nDemoPageState>> = vec![
-            any(text("i18n").size(13.0).color(accent())),
-            any(text(
-                "frust-i18n's whole vertical slice: system detection, live language \
+        let body = column()
+            .child(text("i18n").size(13.0).color(accent()))
+            .child(
+                text(
+                    "frust-i18n's whole vertical slice: system detection, live language \
                  switching, a plural, a select, typed keys, and locale-aware formatting.",
+                )
+                .size(11.0)
+                .color(muted),
             )
-            .size(11.0)
-            .color(muted)),
-            any(SizedBox(None, Some(SECTION_GAP))),
-            section_heading("System locales"),
-            any(text(system_locales_line()).size(11.0).color(muted)),
-            any(SizedBox(None, Some(SECTION_GAP))),
-            section_heading("Language"),
-            any(text(format!("Message locale: {active}")).size(12.0)),
-            any(text(format!("Format locale: {format_locale}")).size(12.0)),
-            switcher_row(&i18n, &active),
-            any(SizedBox(None, Some(SECTION_GAP))),
-            section_heading("Plural — cart-items"),
-            plural_stepper_row(state.plural_count, plural_count),
-            any(text(crate::keys::cart_items(&i18n, plural_count)).size(12.0)),
-            any(SizedBox(None, Some(SECTION_GAP))),
-            section_heading("Select — theme-choice"),
-            theme_choice_row(state.theme_choice, theme_choice),
-            any(text(crate::keys::theme_choice(&i18n, theme_choice)).size(12.0)),
-            any(SizedBox(None, Some(SECTION_GAP))),
-            section_heading("Typed keys"),
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(section_heading("System locales"))
+            .child(text(system_locales_line()).size(11.0).color(muted))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(section_heading("Language"))
+            .child(text(format!("Message locale: {active}")).size(12.0))
+            .child(text(format!("Format locale: {format_locale}")).size(12.0))
+            .child(switcher_row(&i18n, &active))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(section_heading("Plural — cart-items"))
+            .child(plural_stepper_row(state.plural_count, plural_count))
+            .child(text(crate::keys::cart_items(&i18n, plural_count)).size(12.0))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(section_heading("Select — theme-choice"))
+            .child(theme_choice_row(state.theme_choice, theme_choice))
+            .child(text(crate::keys::theme_choice(&i18n, theme_choice)).size(12.0))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(section_heading("Typed keys"))
             // Without this caption the page shows two differently-sourced
             // dates with no explanation (`last-visit`'s in-message DATETIME,
             // three lines below, vs. the formatting matrix's own date row
             // further down) — see this module's doc and
             // `I18n::format_locale`'s own doc for the full mechanism.
-            any(text(
-                "last-visit's { DATETIME() } placeable formats at the message locale \
+            .child(
+                text(
+                    "last-visit's { DATETIME() } placeable formats at the message locale \
                  (Engine is immutable once built); the formatting matrix below uses \
                  format_locale instead — the two can render differently-regioned dates.",
+                )
+                .size(10.0)
+                .color(muted),
             )
-            .size(10.0)
-            .color(muted)),
-            any(text(crate::keys::hello(&i18n, "Ada")).size(12.0)),
-            any(text(crate::keys::order_total(&i18n, 1234.5)).size(12.0)),
-            any(text(crate::keys::last_visit(&i18n, "2024-01-31")).size(12.0)),
-            any(SizedBox(None, Some(SECTION_GAP))),
-            section_heading("Formatting matrix (frust_i18n::fmt)"),
-            formatting_table(&format_locale, muted),
-            any(SizedBox(None, Some(BOTTOM_GAP))),
-        ];
+            .child(text(crate::keys::hello(&i18n, "Ada")).size(12.0))
+            .child(text(crate::keys::order_total(&i18n, 1234.5)).size(12.0))
+            .child(text(crate::keys::last_visit(&i18n, "2024-01-31")).size(12.0))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(section_heading("Formatting matrix (frust_i18n::fmt)"))
+            .child(formatting_table(&format_locale, muted))
+            .child(SizedBox(None, Some(BOTTOM_GAP)))
+            .cross_axis(CrossAxisAlignment::Start);
 
-        any(Padding(
-            EdgeInsets::all(CONTENT_PAD),
-            FlexView::new(
-                Axis::Vertical,
-                children.into_iter().map(inflexible).collect(),
-            )
-            .cross_axis(CrossAxisAlignment::Start),
-        ))
+        Padding(EdgeInsets::all(CONTENT_PAD), body)
     }
 }
 
 /// A section's small caption heading, in the accent role.
-// erasure: keep an element of the page's let-bound Vec<AnyView> children list
-fn section_heading(label: &str) -> AnyView<I18nDemoPageState> {
-    any(text(label.to_string()).size(12.0).color(accent()))
+fn section_heading(label: &str) -> impl View<I18nDemoPageState> + use<> {
+    text(label.to_string()).size(12.0).color(accent())
 }
 
 /// The app-scoped [`I18n`] handle from context, or a throwaway fallback when
@@ -260,8 +255,7 @@ fn system_locales_line() -> String {
 ///
 /// The active locale's button is [`ButtonStyle::Primary`]; the rest are
 /// [`ButtonStyle::Secondary`].
-// erasure: keep an element of the page's let-bound Vec<AnyView> children list
-fn switcher_row(i18n: &I18n, active: &Locale) -> AnyView<I18nDemoPageState> {
+fn switcher_row(i18n: &I18n, active: &Locale) -> impl View<I18nDemoPageState> + use<> {
     let items = SWITCHER_LOCALES
         .iter()
         .map(|(tag, label)| {
@@ -283,13 +277,12 @@ fn switcher_row(i18n: &I18n, active: &Locale) -> AnyView<I18nDemoPageState> {
             )
         })
         .collect();
-    any(FlexView::new(Axis::Horizontal, items))
+    FlexView::new(Axis::Horizontal, items)
 }
 
 /// The plural stepper: one button per [`PLURAL_COUNTS`] entry, writing
 /// `count_signal` on press. The selected count is [`ButtonStyle::Primary`].
-// erasure: keep an element of the page's let-bound Vec<AnyView> children list
-fn plural_stepper_row(count_signal: RwSignal<i64>, current: i64) -> AnyView<I18nDemoPageState> {
+fn plural_stepper_row(count_signal: RwSignal<i64>, current: i64) -> impl View<I18nDemoPageState> {
     let items = PLURAL_COUNTS
         .iter()
         .map(|&count| {
@@ -307,17 +300,16 @@ fn plural_stepper_row(count_signal: RwSignal<i64>, current: i64) -> AnyView<I18n
             )
         })
         .collect();
-    any(FlexView::new(Axis::Horizontal, items))
+    FlexView::new(Axis::Horizontal, items)
 }
 
 /// The `theme-choice` select demo's row: one button per [`THEME_CHOICES`]
 /// entry, writing `choice_signal` on press. The selected choice is
 /// [`ButtonStyle::Primary`].
-// erasure: keep an element of the page's let-bound Vec<AnyView> children list
 fn theme_choice_row(
     choice_signal: RwSignal<&'static str>,
     current: &'static str,
-) -> AnyView<I18nDemoPageState> {
+) -> impl View<I18nDemoPageState> {
     let items = THEME_CHOICES
         .iter()
         .map(|&choice| {
@@ -335,7 +327,7 @@ fn theme_choice_row(
             )
         })
         .collect();
-    any(FlexView::new(Axis::Horizontal, items))
+    FlexView::new(Axis::Horizontal, items)
 }
 
 /// The decimal/currency/date/time formatting matrix, rendered through the
@@ -345,8 +337,7 @@ fn theme_choice_row(
 /// the caller's actual requested region rather than the negotiated message
 /// locale) — every value is a fresh call, so switching languages re-renders
 /// locale-correct output rather than a hardcoded string.
-// erasure: keep an element of the page's let-bound Vec<AnyView> children list
-fn formatting_table(format_locale: &Locale, muted: Color) -> AnyView<I18nDemoPageState> {
+fn formatting_table(format_locale: &Locale, muted: Color) -> impl View<I18nDemoPageState> + use<> {
     let mut lines = vec![format!("decimal: {}", fmt::decimal(format_locale, 1234.56))];
 
     for code in CURRENCIES {
@@ -367,7 +358,7 @@ fn formatting_table(format_locale: &Locale, muted: Color) -> AnyView<I18nDemoPag
         .into_iter()
         .map(|line| inflexible(text(line).size(11.0).color(muted)))
         .collect();
-    any(FlexView::new(Axis::Vertical, items).cross_axis(CrossAxisAlignment::Start))
+    FlexView::new(Axis::Vertical, items).cross_axis(CrossAxisAlignment::Start)
 }
 
 /// Live-theme accent-text role (`primary`), falling back to the Material

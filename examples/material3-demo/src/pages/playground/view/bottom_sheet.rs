@@ -72,11 +72,12 @@ impl Component for BottomSheetPlayground {
     fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let nav = state.nav.clone();
         let body = state.body;
-        any(navigator(&state.nav, move || content(&nav, &body.get())))
+        navigator(&state.nav, move || content(&nav, &body.get()))
     }
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(BottomSheetPlayground))
 }
@@ -116,7 +117,7 @@ fn sheet_content<State: 'static>(body: &str) -> impl View<State> {
 }
 
 fn controls(body: &str) -> AnyView<Knobs> {
-    control_panel::<Knobs>(
+    control_panel::<Knobs, _>(
         "Sheet",
         vec![play_text_field::<Knobs>(
             "Body",
@@ -131,9 +132,9 @@ fn snippet(body: &str) -> PlaySnippet {
         "Bottom sheet",
         format!(
             "show_bottom_sheet(\n\
-             \u{20}   &nav,\n\
+             \u{20}   &app.nav,\n\
              \u{20}   || bottom_sheet(text({body:?})),\n\
-             \u{20}   |_state, _result| {{}},\n\
+             \u{20}   |_: &mut App, _: PopResult| {{}},\n\
              );"
         ),
     )

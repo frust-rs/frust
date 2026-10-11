@@ -14,7 +14,7 @@
 //! chord first — which is why the top bar says so on screen.
 
 use frust::{
-    CrossAxisAlignment, EdgeInsets, IconSource, Padding, SizedBox, any, icon, icons, row, text,
+    CrossAxisAlignment, EdgeInsets, IconSource, Padding, SizedBox, icon, icons, row, text,
 };
 use frust_shadcn::{
     SidebarCollapsible, SidebarMenuButtonSize, SidebarView, separator, sidebar, sidebar_content,
@@ -72,20 +72,20 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
     let active = state.page;
     let message_count = state.chat.messages.len();
 
-    let gallery = sidebar_group(vec![
-        any(sidebar_group_label("Gallery")),
+    let gallery = sidebar_group((
+        sidebar_group_label("Gallery"),
         sidebar_menu(vec![
             sidebar_menu_item((nav_button(Page::Primitives, active, icons::STAR),)),
             sidebar_menu_item((nav_button(Page::Controls, active, icons::SETTINGS),)),
             sidebar_menu_item((nav_button(Page::InputsTable, active, icons::EDIT),)),
             sidebar_menu_item((nav_button(Page::Layout, active, icons::PANE_MARK),)),
         ]),
-    ]);
+    ));
 
     // The one nested list: `Anchored` reads as a sub-section of `Overlays`, so
     // it is a `sidebar_menu_sub` under it rather than a fourth top-level row.
-    let overlays = sidebar_group(vec![
-        any(sidebar_group_label("Overlays")),
+    let overlays = sidebar_group((
+        sidebar_group_label("Overlays"),
         sidebar_menu((
             sidebar_menu_item((nav_button(Page::Overlays, active, icons::SCAN_MARK),)),
             sidebar_menu_sub(vec![sidebar_menu_sub_item(vec![
@@ -96,12 +96,12 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
                 .active(active == Page::Anchored),
             ])]),
         )),
-    ]);
+    ));
 
-    let patterns = sidebar_group(vec![
+    let patterns = sidebar_group((
         // `sidebar_menu_item` is the composed row this port gives a label plus
         // its trailing action (upstream positions the action absolutely).
-        any(sidebar_menu_item((
+        sidebar_menu_item((
             sidebar_group_label("Patterns"),
             sidebar_group_action(
                 icon(icons::REFRESH).size(14.0),
@@ -112,7 +112,7 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
                     s.data_table = Default::default();
                 },
             ),
-        ))),
+        )),
         sidebar_menu(vec![
             sidebar_menu_item((
                 nav_button(Page::Chat, active, icons::FORUM),
@@ -126,15 +126,15 @@ pub fn shell_sidebar(state: &AppState) -> SidebarView<AppState> {
             sidebar_menu_item((nav_button(Page::Questionnaire, active, icons::DONE_ALL),)),
             sidebar_menu_item((nav_button(Page::DataTable, active, icons::DESCRIPTION),)),
         ]),
-    ]);
+    ));
 
-    sidebar(sidebar_content(vec![
+    sidebar(sidebar_content((
         gallery,
-        any(sidebar_separator()),
+        sidebar_separator(),
         overlays,
-        any(sidebar_separator()),
+        sidebar_separator(),
         patterns,
-    ]))
+    )))
     .header(sidebar_header(vec![sidebar_menu(vec![sidebar_menu_item(
         vec![
             sidebar_menu_button("shadcn demo", |_: &mut AppState| {})

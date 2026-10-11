@@ -27,7 +27,7 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-video-player = "0.5"
+frust-video-player = "0.6"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -77,7 +77,9 @@ Without the feature, do the same two calls yourself — never hardcode either
 string, they are target-gated:
 
 ```rust
-frust::platform_view(session.view_type())
+use frust::platform_view;
+
+platform_view(session.view_type())
     .params_json(session.params_json(VideoFit::Contain))
 ```
 

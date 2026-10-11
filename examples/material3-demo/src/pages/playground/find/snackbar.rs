@@ -50,7 +50,8 @@ impl Default for Knobs {
 fn snippet_code(state: &Knobs) -> String {
     if state.show_action {
         format!(
-            "state.toasts.show(\n    snackbar({:?})\n        .action({:?}, |_| {{ /* revert */ }}),\n);",
+            "let message = snackbar({:?}).action({:?}, |_: &mut State| {{}});\n\
+             state.toasts.show(message);",
             state.message, state.action_label
         )
     } else {
@@ -73,24 +74,26 @@ fn body(state: &mut Knobs) -> impl View<Knobs> {
     let preview = play_preview_card("Show overlay", trigger);
     let snippet = play_snippet("Show overlay", snippet_code(state));
 
-    let mut rows: Vec<AnyView<Knobs>> = vec![
-        play_text_field("Message", state.message.clone(), |s: &mut Knobs, v| {
-            s.message = v
-        }),
-        play_switch("Show action", state.show_action, |s: &mut Knobs, v| {
-            s.show_action = v
-        }),
-    ];
-    if state.show_action {
-        rows.push(play_text_field(
-            "Action label",
-            state.action_label.clone(),
-            |s: &mut Knobs, v| s.action_label = v,
-        ));
-    }
-    let controls = control_panel("Content", rows);
+    let controls = control_panel(
+        "Content",
+        (
+            play_text_field("Message", state.message.clone(), |s: &mut Knobs, v| {
+                s.message = v
+            }),
+            play_switch("Show action", state.show_action, |s: &mut Knobs, v| {
+                s.show_action = v
+            }),
+            state.show_action.then(|| {
+                play_text_field(
+                    "Action label",
+                    state.action_label.clone(),
+                    |s: &mut Knobs, v| s.action_label = v,
+                )
+            }),
+        ),
+    );
 
-    playground_body(vec![preview], vec![snippet], vec![controls])
+    playground_body(preview, vec![snippet], controls)
 }
 
 /// The nested [`Component`] this page owns its knobs in. See the page
@@ -108,11 +111,12 @@ impl Component for SnackbarPlayground {
     fn build(&self, state: &mut Knobs) -> impl View<Knobs> {
         let controller = state.toasts.clone();
         let content = body(state);
-        any(snackbar_host(&controller, content))
+        snackbar_host(&controller, content)
     }
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(SnackbarPlayground))
 }

@@ -26,7 +26,7 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-auth-session = "0.5"
+frust-auth-session = "0.6"
 ```
 
 The Android backend needs this plugin's own Gradle library module linked too

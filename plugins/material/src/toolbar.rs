@@ -139,8 +139,8 @@
 //! own scroll view, decides visibility, and feeds it back down.
 //!
 //! ```
-//! use frust::{ScrollInfo, scroll_view, text};
-//! use frust_material::{ToolbarScrollHide, floating_toolbar};
+//! use frust::{Component, ScrollInfo, View, column, scroll_view, text};
+//! use frust_material::{ToolbarScrollHide, ToolbarView, floating_toolbar};
 //!
 //! struct App {
 //!     /// The last offset the body reported — the hide's delta source.
@@ -149,16 +149,35 @@
 //!     hide: ToolbarScrollHide,
 //! }
 //!
-//! fn bar(state: &App) -> frust_material::ToolbarView<App> {
-//!     floating_toolbar().visible(!state.hide.is_hidden())
+//! struct Inbox;
+//!
+//! impl Component for Inbox {
+//!     type State = App;
+//!
+//!     fn init(&self) -> App {
+//!         App {
+//!             scrolled: 0.0,
+//!             hide: ToolbarScrollHide::for_bar(80.0),
+//!         }
+//!     }
+//!
+//!     fn build(&self, state: &mut App) -> impl View<App> {
+//!         column().child(Self::bar(state)).child(Self::body())
+//!     }
 //! }
 //!
-//! fn body(_state: &App) -> impl frust::View<App> + use<> {
-//!     scroll_view(text("content")).on_scroll(|state: &mut App, info: ScrollInfo| {
-//!         let delta = info.offset - state.scrolled;
-//!         state.scrolled = info.offset;
-//!         state.hide.scroll(delta);
-//!     })
+//! impl Inbox {
+//!     fn bar(state: &App) -> ToolbarView<App> {
+//!         floating_toolbar().visible(!state.hide.is_hidden())
+//!     }
+//!
+//!     fn body() -> impl View<App> {
+//!         scroll_view(text("content")).on_scroll(|state: &mut App, info: ScrollInfo| {
+//!             let delta = info.offset - state.scrolled;
+//!             state.scrolled = info.offset;
+//!             state.hide.scroll(delta);
+//!         })
+//!     }
 //! }
 //! ```
 //!

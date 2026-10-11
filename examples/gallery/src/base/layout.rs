@@ -12,7 +12,7 @@
 //! all sized smaller than `FRAME` for that reason, and text painted onto the
 //! frame itself is left at its themed `on_surface` default.
 
-use frust_core::{AnyView, any};
+use frust_core::View;
 use frust_widgets::{
     Align, Alignment, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, colored_box, column,
     container, divider, row, stack, text,
@@ -21,7 +21,7 @@ use kurbo::Size;
 use peniko::Color;
 
 use super::framed_in;
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 /// This module's overridden logical viewport — see the module docs.
 const FRAME: Size = Size::new(480.0, 320.0);
@@ -40,12 +40,12 @@ const LINE: Color = Color::from_rgb8(0x8A, 0x8A, 0x8A);
 /// `Align` fills a *bounded* axis to `constraints.biggest` (the page's own
 /// unbounded-constraint warning), and the frame this case's outer wrapper
 /// hands it is bounded on both axes.
-fn align_case() -> AnyView<()> {
+fn align_case() -> impl View<()> {
     let badge = container(text("BOTTOM_RIGHT").color(Color::WHITE).size(14.0))
         .fill(BOX_A)
         .radius(8.0)
         .size_centered(160.0, 56.0);
-    any(framed_in(FRAME, Align(Alignment::BOTTOM_RIGHT, badge)))
+    framed_in(FRAME, Align(Alignment::BOTTOM_RIGHT, badge))
 }
 
 pub(super) const ALIGN: Case = Case {
@@ -55,19 +55,19 @@ pub(super) const ALIGN: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: align_case,
+    build: case_build!(align_case),
 };
 
 /// `divider`: a hairline rule between two labelled blocks in a `Column` —
 /// the divider fills the column's bounded cross (width) axis regardless of
 /// the flex pass's own unbounded main-axis probe. The two blocks are
 /// unfilled, so the rule reads against the variant's own surface.
-fn divider_case() -> AnyView<()> {
+fn divider_case() -> impl View<()> {
     let column = column()
         .child(container(text("Above").size(18.0)).size_centered(FRAME.width, 130.0))
         .child(divider(LINE).thickness(3.0))
         .child(container(text("Below").size(18.0)).size_centered(FRAME.width, 130.0));
-    any(framed_in(FRAME, column))
+    framed_in(FRAME, column)
 }
 
 pub(super) const DIVIDER: Case = Case {
@@ -77,14 +77,14 @@ pub(super) const DIVIDER: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: divider_case,
+    build: case_build!(divider_case),
 };
 
 /// `Row`/`Column`: one inflexible badge plus two flexible panels sharing the
 /// remaining main-axis space 2:1, via `FlexView::new`/`flexible`/`inflexible`.
 /// The row is boxed to 400x240 inside the frame so the three shares read as a
 /// band on the surface rather than as the whole preview.
-fn flex_case() -> AnyView<()> {
+fn flex_case() -> impl View<()> {
     let row = row()
         .child(
             container(text("fixed").color(Color::WHITE).size(13.0))
@@ -100,10 +100,7 @@ fn flex_case() -> AnyView<()> {
             container(text("flex 1").color(Color::WHITE).size(13.0)).fill(BOX_C),
         )
         .cross_axis(CrossAxisAlignment::Stretch);
-    any(framed_in(
-        FRAME,
-        SizedBox(Some(400.0), Some(240.0)).child(row),
-    ))
+    framed_in(FRAME, SizedBox(Some(400.0), Some(240.0)).child(row))
 }
 
 pub(super) const FLEX: Case = Case {
@@ -113,14 +110,14 @@ pub(super) const FLEX: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: flex_case,
+    build: case_build!(flex_case),
 };
 
 /// `Padding`: a filled outer frame around an inset, differently-colored
 /// child — the inset gap between the two fills IS the padding. The outer
 /// frame shrink-wraps its padded child, so it stays well inside the recorded
 /// frame.
-fn padding_case() -> AnyView<()> {
+fn padding_case() -> impl View<()> {
     let framed_child = container(Padding(
         EdgeInsets::all(24.0),
         container(text("Child").color(Color::WHITE))
@@ -130,7 +127,7 @@ fn padding_case() -> AnyView<()> {
     ))
     .fill(BOX_A)
     .radius(10.0);
-    any(framed_in(FRAME, framed_child))
+    framed_in(FRAME, framed_child)
 }
 
 pub(super) const PADDING: Case = Case {
@@ -140,18 +137,18 @@ pub(super) const PADDING: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: padding_case,
+    build: case_build!(padding_case),
 };
 
 /// `SizedBox`: forces a fixed 220x140 box around a child regardless of its
 /// own natural size.
-fn sized_box_case() -> AnyView<()> {
+fn sized_box_case() -> impl View<()> {
     let boxed = SizedBox(Some(220.0), Some(140.0)).child(
         container(text("220x140").color(Color::WHITE))
             .fill(BOX_B)
             .radius(8.0),
     );
-    any(framed_in(FRAME, boxed))
+    framed_in(FRAME, boxed)
 }
 
 pub(super) const SIZED_BOX: Case = Case {
@@ -161,7 +158,7 @@ pub(super) const SIZED_BOX: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: sized_box_case,
+    build: case_build!(sized_box_case),
 };
 
 /// `Stack`: four overlaid children. The bottom-most one establishes the
@@ -170,7 +167,7 @@ pub(super) const SIZED_BOX: Case = Case {
 /// painting a fixed backdrop over the variant's surface clear. Above it sit a
 /// centered panel and two corner badges that overlap its edges, which is what
 /// makes the overlay order visible.
-fn stack_case() -> AnyView<()> {
+fn stack_case() -> impl View<()> {
     let overlay = stack()
         .child(colored_box().expand())
         .child(Align(
@@ -194,7 +191,7 @@ fn stack_case() -> AnyView<()> {
                 .radius(6.0)
                 .size_centered(120.0, 48.0),
         ));
-    any(SizedBox(Some(FRAME.width), Some(FRAME.height)).child(overlay))
+    SizedBox(Some(FRAME.width), Some(FRAME.height)).child(overlay)
 }
 
 pub(super) const STACK: Case = Case {
@@ -204,5 +201,5 @@ pub(super) const STACK: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: stack_case,
+    build: case_build!(stack_case),
 };

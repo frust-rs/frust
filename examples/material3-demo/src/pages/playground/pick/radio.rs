@@ -27,6 +27,7 @@ const PLANS: [&str; 3] = ["standard", "pro", "team"];
 /// See the page contract in [`crate::pages::playground`]. No page-level
 /// heading of its own — see [`super::checkbox::page`]'s doc for why `entry`
 /// goes unused.
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(RadioPlayground))
 }
@@ -146,13 +147,11 @@ fn radio_snippet(plan: &str, error: bool, enabled: bool, show_labels: bool) -> S
         String::new()
     };
     let changed_line = if enabled {
-        "\n    .on_changed(|state, next| state.plan = next)".to_string()
+        "\n    .on_changed(|app: &mut App, next: &'static str| app.plan = next)".to_string()
     } else {
         String::new()
     };
-    format!(
-        "frust_material::radio({plan:?}, {plan:?})\n    .error({error}){label_line}{changed_line};"
-    )
+    format!("radio({plan:?}, {plan:?})\n    .error({error}){label_line}{changed_line};")
 }
 
 #[cfg(test)]

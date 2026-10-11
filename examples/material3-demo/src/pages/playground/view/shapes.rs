@@ -20,8 +20,8 @@ use frust::authoring::{
     PaintScene, Shape as PathShape, Size, Vec2, View, Widget,
 };
 use frust::{
-    Align, Alignment, AnyView, Column, CrossAxisAlignment, Row, SizedBox, Theme, any, column, icon,
-    stack, text,
+    Align, Alignment, AnyView, CrossAxisAlignment, SizedBox, Theme, any, column, icon, row, stack,
+    text,
 };
 use frust_material::icons;
 use frust_material::shapes::ShapeKind;
@@ -55,12 +55,13 @@ const CATALOG_COLUMNS: usize = 3;
 const CLIPPED_TILE_SIZE: f64 = 120.0;
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     let theme = ambient_theme();
     any(playground_body(
         vec![catalog_preview(&theme), clipped_child_preview(&theme)],
         vec![catalog_snippet(), clipped_child_snippet()],
-        vec![],
+        Vec::<AnyView<AppState>>::new(),
     ))
 }
 
@@ -78,21 +79,25 @@ fn catalog_preview(theme: &Theme) -> AnyView<AppState> {
 /// The tile grid [`catalog_preview`] wraps in a [`play_preview_card`]. See
 /// [`CATALOG_COLUMNS`]' own doc comment for the row-width arithmetic (G17).
 fn catalog_rows(theme: &Theme) -> impl View<AppState> {
-    let mut rows: Vec<AnyView<AppState>> = Vec::new();
-    for (row_index, chunk) in ShapeKind::ALL.chunks(CATALOG_COLUMNS).enumerate() {
-        if row_index > 0 {
-            rows.push(any(SizedBox::<AppState>(None, Some(16.0))));
-        }
-        let mut cells: Vec<AnyView<AppState>> = Vec::new();
-        for (col_index, kind) in chunk.iter().enumerate() {
-            if col_index > 0 {
-                cells.push(any(SizedBox::<AppState>(Some(CATALOG_TILE_GAP), None)));
-            }
-            cells.push(any(catalog_tile(theme, *kind)));
-        }
-        rows.push(any(Row(cells)));
-    }
-    Column(rows)
+    ShapeKind::ALL
+        .chunks(CATALOG_COLUMNS)
+        .enumerate()
+        .fold(column(), |rows, (row_index, chunk)| {
+            let cells = chunk
+                .iter()
+                .enumerate()
+                .fold(row(), |cells, (col_index, kind)| {
+                    cells
+                        .when(col_index > 0, |cells| {
+                            cells.child(SizedBox::<AppState>(Some(CATALOG_TILE_GAP), None))
+                        })
+                        .child(catalog_tile(theme, *kind))
+                });
+            rows.when(row_index > 0, |rows| {
+                rows.child(SizedBox::<AppState>(None, Some(16.0)))
+            })
+            .child(cells)
+        })
 }
 
 /// One catalog tile: a filled shape over its label — the reference's own
@@ -157,11 +162,18 @@ fn catalog_snippet() -> PlaySnippet {
 fn clipped_child_snippet() -> PlaySnippet {
     play_snippet(
         "Shape + icon overlay",
-        "Stack(vec![\n\
-         \u{20}   any(shape_tile(ShapeKind::Cookie4Sided, 120.0, theme.scheme().tertiary_container)),\n\
-         \u{20}   any(Align(Alignment::CENTER, icon(icons::FAVORITE)\n\
-         \u{20}       .color(theme.scheme().on_tertiary_container))),\n\
-         ]);\n\
+        "SizedBox(Some(120.0), Some(120.0)).child(\n\
+         \u{20}   stack()\n\
+         \u{20}       .child(shape_tile(\n\
+         \u{20}           ShapeKind::Cookie4Sided,\n\
+         \u{20}           120.0,\n\
+         \u{20}           theme.scheme().tertiary_container,\n\
+         \u{20}       ))\n\
+         \u{20}       .child(Align(\n\
+         \u{20}           Alignment::CENTER,\n\
+         \u{20}           icon(icons::FAVORITE).color(theme.scheme().on_tertiary_container),\n\
+         \u{20}       )),\n\
+         );\n\
          // `PaintScene` has no arbitrary-path clip yet, so this overlays rather\n\
          // than true-clips the icon to the shape outline.",
     )

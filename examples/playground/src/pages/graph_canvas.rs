@@ -47,8 +47,8 @@
 use frust::authoring::{PaintCtx, PaintScene, PointerEvent, PointerPhase};
 use frust::kurbo::{Point, Size, Vec2};
 use frust::{
-    AnyView, ButtonStyle, Color, EdgeInsets, Get, Padding, PanZoomTransform, Set, SizedBox, Stack,
-    Theme, View, any, button, canvas, column, pan_zoom, row, text, use_context,
+    ButtonStyle, Color, EdgeInsets, Get, Padding, PanZoomTransform, Set, SizedBox, Theme, View,
+    button, canvas, column, pan_zoom, row, stack, text, use_context, views,
 };
 
 use crate::PlaygroundState;
@@ -187,12 +187,10 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
     })
     .repaint_key(selected);
 
-    let mut layers: Vec<AnyView<PlaygroundState>> = Vec::with_capacity(NODE_COUNT + 1);
-    layers.push(any(canvas_view));
-    for (index, &center) in nodes.iter().enumerate() {
+    let labels = nodes.iter().enumerate().map(|(index, &center)| {
         let left = (center.x - NODE_RADIUS).max(0.0);
         let top = (center.y + NODE_RADIUS + 4.0).max(0.0);
-        layers.push(any(Padding(
+        Padding(
             EdgeInsets {
                 left,
                 top,
@@ -200,9 +198,9 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
                 bottom: 0.0,
             },
             text(node_label(index)).size(11.0),
-        )));
-    }
-    let world = Stack(layers);
+        )
+    });
+    let world = stack().child(canvas_view).children(views(labels));
 
     let graph_viewport = SizedBox::<PlaygroundState>(None, Some(VIEWPORT_H)).child(
         pan_zoom(world)

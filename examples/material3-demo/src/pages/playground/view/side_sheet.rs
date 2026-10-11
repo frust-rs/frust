@@ -72,13 +72,14 @@ impl Component for SideSheetPlayground {
         let title = state.title;
         let body = state.body;
         let show_actions = state.show_actions;
-        any(navigator(&state.nav, move || {
+        navigator(&state.nav, move || {
             content(&nav, &title.get(), &body.get(), show_actions.get())
-        }))
+        })
     }
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(SideSheetPlayground))
 }
@@ -144,7 +145,7 @@ fn sheet_body<State: 'static>(body: &str) -> impl View<State> {
 }
 
 /// The optional Reset/Apply footer — the reference's own two `M3EButton`s,
-/// both closing the sheet.
+/// both closing the sheet; `None` (no footer) when `show_actions` is off.
 ///
 /// Both go through the sheet's [`ModalDismiss`] rather than
 /// `NavigatorController::pop`: a raw pop takes the page out from under the
@@ -153,20 +154,19 @@ fn sheet_body<State: 'static>(body: &str) -> impl View<State> {
 fn sheet_actions<State: 'static>(
     dismiss: &ModalDismiss,
     show_actions: bool,
-) -> Vec<AnyView<State>> {
-    if !show_actions {
-        return Vec::new();
-    }
-    let reset = dismiss.clone();
-    let apply = dismiss.clone();
-    vec![
-        any(text_button("Reset", move |_: &mut State| reset.dismiss())),
-        any(filled_button("Apply", move |_: &mut State| apply.dismiss())),
-    ]
+) -> Option<(impl View<State>, impl View<State>)> {
+    show_actions.then(|| {
+        let reset = dismiss.clone();
+        let apply = dismiss.clone();
+        (
+            text_button("Reset", move |_: &mut State| reset.dismiss()),
+            filled_button("Apply", move |_: &mut State| apply.dismiss()),
+        )
+    })
 }
 
 fn controls(title: &str, body: &str, show_actions: bool) -> AnyView<Knobs> {
-    control_panel::<Knobs>(
+    control_panel::<Knobs, _>(
         "Sheet",
         vec![
             play_text_field::<Knobs>(
@@ -189,29 +189,29 @@ fn controls(title: &str, body: &str, show_actions: bool) -> AnyView<Knobs> {
 }
 
 fn snippet(title: &str, body: &str, show_actions: bool) -> PlaySnippet {
-    let actions = if show_actions {
-        "\n\
-         \u{20}   {\n\
-         \u{20}       let reset = dismiss.clone();\n\
-         \u{20}       let apply = dismiss.clone();\n\
-         \u{20}       vec![\n\
-         \u{20}           any(text_button(\"Reset\", move |_: &mut State| reset.dismiss())),\n\
-         \u{20}           any(filled_button(\"Apply\", move |_: &mut State| apply.dismiss())),\n\
-         \u{20}       ]\n\
-         \u{20}   },"
-    } else {
-        "\n    Vec::new(),"
-    };
     play_snippet(
         "Side sheet",
         format!(
             "let dismiss = ModalDismiss::new();\n\
+             let show_actions = {show_actions};\n\
              show_side_sheet(\n\
-             \u{20}   &nav,\n\
-             \u{20}   move || side_sheet({title:?}, text({body:?}),{actions}\n\
-             \u{20}   )\n\
-             \u{20}   .dismiss_handle(dismiss.clone()),\n\
-             \u{20}   |_state, _result| {{}},\n\
+             \u{20}   &app.nav,\n\
+             \u{20}   move || {{\n\
+             \u{20}       side_sheet(\n\
+             \u{20}           {title:?},\n\
+             \u{20}           text({body:?}),\n\
+             \u{20}           show_actions.then(|| {{\n\
+             \u{20}               let reset = dismiss.clone();\n\
+             \u{20}               let apply = dismiss.clone();\n\
+             \u{20}               (\n\
+             \u{20}                   text_button(\"Reset\", move |_: &mut App| reset.dismiss()),\n\
+             \u{20}                   filled_button(\"Apply\", move |_: &mut App| apply.dismiss()),\n\
+             \u{20}               )\n\
+             \u{20}           }}),\n\
+             \u{20}       )\n\
+             \u{20}       .dismiss_handle(dismiss.clone())\n\
+             \u{20}   }},\n\
+             \u{20}   |_: &mut App, _: PopResult| {{}},\n\
              );"
         ),
     )

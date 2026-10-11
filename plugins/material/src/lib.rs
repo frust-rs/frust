@@ -50,15 +50,48 @@
 //! is constructed — the one point a shell reads the default-theme slot:
 //!
 //! ```no_run
-//! # use frust::{Component, View, any, text};
-//! # #[derive(Default)]
-//! # struct MyApp;
-//! # impl Component for MyApp {
-//! #     type State = ();
-//! #     fn init(&self) -> Self::State {}
-//! #     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> { any(text("hi")) }
-//! # }
-//! frust::app!(MyApp, setup = { frust_material::install(); });
+//! use frust::{Align, Alignment, Component, CrossAxisAlignment, View, column, icon, scaffold, text};
+//! use frust_material::{AppBarContainer, app_bar, fab, icons};
+//!
+//! #[derive(Default)]
+//! pub struct CounterApp;
+//!
+//! impl Component for CounterApp {
+//!     type State = u32;
+//!
+//!     fn init(&self) -> u32 {
+//!         0
+//!     }
+//!
+//!     fn build(&self, count: &mut u32) -> impl View<u32> {
+//!         scaffold(Align(
+//!             Alignment::CENTER,
+//!             column()
+//!                 .child(text("You have pushed the button this many times:"))
+//!                 .child(text(count.to_string()).size(48.0))
+//!                 .cross_axis(CrossAxisAlignment::Center),
+//!         ))
+//!         .app_bar(
+//!             app_bar::<u32>("Counter")
+//!                 .container(AppBarContainer::InversePrimary)
+//!                 .elevation(2),
+//!         )
+//!         .fab(Self::increment_fab())
+//!     }
+//! }
+//!
+//! impl CounterApp {
+//!     fn increment_fab() -> impl View<u32> {
+//!         fab(icon(icons::ADD), |count: &mut u32| *count += 1).label("Increment")
+//!     }
+//! }
+//!
+//! frust::app!(
+//!     CounterApp,
+//!     setup = {
+//!         frust_material::install();
+//!     }
+//! );
 //! # fn main() {}
 //! ```
 //!

@@ -67,8 +67,10 @@
 //! `on_change` reported — see [`InputCase`]'s own note for why normalising it
 //! would cost an IME composition, not merely a caret.
 
-use frust_core::{AnyView, Component, View, any, component};
-use frust_widgets::{Align, Alignment, GestureDetector, SizedBox, column, row, stack, text};
+use frust_core::{Component, View, component};
+use frust_widgets::{
+    Align, Alignment, GestureDetector, SizedBox, column, either, row, stack, text,
+};
 use kurbo::Size;
 use peniko::Color;
 
@@ -86,6 +88,7 @@ use frust_beui::components::switch::switch;
 use frust_beui::components::tabs::{TabsVariant, tabs, tabs_tab};
 
 use super::{Entry, framed, framed_in};
+use crate::case::case_build;
 
 /// This catalog's slice of the side table [`super::entries`] concatenates, in
 /// the registry's own slug order so the two read side by side.
@@ -95,15 +98,15 @@ use super::{Entry, framed, framed_in};
 /// `beui/tilt-card` — see the [module docs](self) for what each one needs
 /// instead, which in three of the four is nothing at all.
 pub const INTERACTIVE: &[Entry] = &[
-    ("beui/chat", chat_case),
-    ("beui/command-palette", command_palette_case),
-    ("beui/dynamic-island", dynamic_island_case),
-    ("beui/form-controls", form_controls_case),
-    ("beui/input", input_case),
-    ("beui/otp-input", otp_input_case),
-    ("beui/prompt-input", prompt_input_case),
-    ("beui/tabs", tabs_case),
-    ("beui/wallet-card", wallet_card_case),
+    ("beui/chat", case_build!(chat_case)),
+    ("beui/command-palette", case_build!(command_palette_case)),
+    ("beui/dynamic-island", case_build!(dynamic_island_case)),
+    ("beui/form-controls", case_build!(form_controls_case)),
+    ("beui/input", case_build!(input_case)),
+    ("beui/otp-input", case_build!(otp_input_case)),
+    ("beui/prompt-input", case_build!(prompt_input_case)),
+    ("beui/tabs", case_build!(tabs_case)),
+    ("beui/wallet-card", case_build!(wallet_card_case)),
 ];
 
 // ---- frame sizes and layout helpers -----------------------------------------
@@ -243,12 +246,12 @@ impl Component for ChatCase {
     }
 }
 
-/// The [`super::Build`] the table registers: a `()`-stated `AnyView` around
-/// the stateful component, legal because `ComponentView<C>` implements
-/// `View<Outer>` for every `Outer`. Every constructor below repeats this
-/// three-line shape.
-fn chat_case() -> AnyView<()> {
-    any(component(ChatCase))
+/// The constructor the table registers through [`case_build!`], which erases
+/// it to a [`super::Build`]: the stateful component at `()` state, legal
+/// because `ComponentView<C>` implements `View<Outer>` for every `Outer`.
+/// Every constructor below repeats this shape.
+fn chat_case() -> impl View<()> {
+    component(ChatCase)
 }
 
 // ---- command-palette --------------------------------------------------------
@@ -369,23 +372,25 @@ impl Component for CommandPaletteCase {
         if let Some(last) = &state.last {
             palette = palette.placeholder(format!("Ran {last} \u{2014} type another command"));
         }
-        let backdrop: AnyView<CommandPaletteState> = if state.open {
-            any(SizedBox(None, None))
-        } else {
-            any(Align(
-                Alignment::CENTER,
-                button("Open the palette", |state: &mut CommandPaletteState| {
-                    state.open = true
-                })
-                .tone(ButtonTone::Secondary),
-            ))
-        };
+        let backdrop = either(
+            state.open,
+            || SizedBox(None, None),
+            || {
+                Align(
+                    Alignment::CENTER,
+                    button("Open the palette", |state: &mut CommandPaletteState| {
+                        state.open = true
+                    })
+                    .tone(ButtonTone::Secondary),
+                )
+            },
+        );
         framed_in(COMMAND_PALETTE, stack().child(backdrop).child(palette))
     }
 }
 
-fn command_palette_case() -> AnyView<()> {
-    any(component(CommandPaletteCase))
+fn command_palette_case() -> impl View<()> {
+    component(CommandPaletteCase)
 }
 
 // ---- dynamic-island ---------------------------------------------------------
@@ -471,8 +476,8 @@ impl Component for DynamicIslandCase {
     }
 }
 
-fn dynamic_island_case() -> AnyView<()> {
-    any(component(DynamicIslandCase))
+fn dynamic_island_case() -> impl View<()> {
+    component(DynamicIslandCase)
 }
 
 // ---- form-controls ----------------------------------------------------------
@@ -611,8 +616,8 @@ impl Component for FormControlsCase {
     }
 }
 
-fn form_controls_case() -> AnyView<()> {
-    any(component(FormControlsCase))
+fn form_controls_case() -> impl View<()> {
+    component(FormControlsCase)
 }
 
 // ---- input ------------------------------------------------------------------
@@ -747,8 +752,8 @@ impl Component for InputCase {
     }
 }
 
-fn input_case() -> AnyView<()> {
-    any(component(InputCase))
+fn input_case() -> impl View<()> {
+    component(InputCase)
 }
 
 // ---- otp-input --------------------------------------------------------------
@@ -822,8 +827,8 @@ impl Component for OtpInputCase {
     }
 }
 
-fn otp_input_case() -> AnyView<()> {
-    any(component(OtpInputCase))
+fn otp_input_case() -> impl View<()> {
+    component(OtpInputCase)
 }
 
 // ---- prompt-input -----------------------------------------------------------
@@ -887,8 +892,8 @@ impl Component for PromptInputCase {
     }
 }
 
-fn prompt_input_case() -> AnyView<()> {
-    any(component(PromptInputCase))
+fn prompt_input_case() -> impl View<()> {
+    component(PromptInputCase)
 }
 
 // ---- tabs -------------------------------------------------------------------
@@ -949,8 +954,8 @@ impl Component for TabsCase {
     }
 }
 
-fn tabs_case() -> AnyView<()> {
-    any(component(TabsCase))
+fn tabs_case() -> impl View<()> {
+    component(TabsCase)
 }
 
 // ---- wallet-card ------------------------------------------------------------
@@ -1017,6 +1022,6 @@ impl Component for WalletCardCase {
     }
 }
 
-fn wallet_card_case() -> AnyView<()> {
-    any(component(WalletCardCase))
+fn wallet_card_case() -> impl View<()> {
+    component(WalletCardCase)
 }

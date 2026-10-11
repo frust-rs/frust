@@ -150,6 +150,7 @@ impl Scenario for S2 {
         "Long-list scroll (10k rows)"
     }
 
+    // erasure: keep Scenario::build feeds the dyn SCENARIOS table
     fn build(&self, _state: &mut BenchState) -> AnyView<BenchState> {
         any(component(LongListPage))
     }
@@ -216,7 +217,7 @@ impl Component for LongListPage {
             state.fetching = true;
             state.task.restart();
         }
-        any(LongList {
+        LongList {
             loaded: state.loaded,
             near_end: state.near_end,
             offset: state.offset,
@@ -224,7 +225,7 @@ impl Component for LongListPage {
             // whose `LongList::rebuild` then reports `ChangeFlags::LAYOUT` (see
             // `LongListState::offset`).
             scroll_offset: state.offset.get(),
-        })
+        }
     }
 }
 

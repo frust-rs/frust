@@ -19,7 +19,7 @@ aggregate `ci-ok`).
 1. `version` under `[workspace.package]`.
 2. The `version = "…"` on every internal row of `[workspace.dependencies]` (the rows under the
    `# intra-workspace` comment) and on every literal path dependency in a crate manifest, for example
-   `frust-drive = { path = "../frust-drive", version = "0.5.0" }` in `crates/frust-cli`. Find them
+   `frust-drive = { path = "../frust-drive", version = "0.6.0" }` in `crates/frust-cli`. Find them
    with `git grep -n 'path = ".*version = "'`.
 3. `plugins/clean-signals-frust` is a standalone workspace with its own literal package `version`;
    raise it too.

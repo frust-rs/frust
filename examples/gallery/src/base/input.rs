@@ -4,16 +4,16 @@
 //! registry follows, and [`super::framed`] for why none of these cases fills
 //! its own backdrop.
 
-use frust_core::{AnyView, any};
+use frust_core::View;
 use frust_widgets::{
     CrossAxisAlignment, SizedBox, checkbox, column, radio, row, slider, text, text_input,
 };
 
 use super::framed;
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
-fn checkbox_case() -> AnyView<()> {
-    any(framed(
+fn checkbox_case() -> impl View<()> {
+    framed(
         row()
             .child(checkbox(true, "Notifications", |_: &mut (), _: bool| {}))
             .child(SizedBox(Some(28.0), None))
@@ -23,31 +23,31 @@ fn checkbox_case() -> AnyView<()> {
                 |_: &mut (), _: bool| {},
             ))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn radio_case() -> AnyView<()> {
-    any(framed(
+fn radio_case() -> impl View<()> {
+    framed(
         row()
             .child(radio(true, "Option A").on_select(|_: &mut ()| {}))
             .child(SizedBox(Some(28.0), None))
             .child(radio(false, "Option B").on_select(|_: &mut ()| {}))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn slider_case() -> AnyView<()> {
-    any(framed(
+fn slider_case() -> impl View<()> {
+    framed(
         row()
             .child(slider(0.4, |_: &mut (), _: f64| {}))
             .child(SizedBox(Some(12.0), None))
             .child(text("40%").size(13.0))
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
-fn text_input_case() -> AnyView<()> {
-    any(framed(
+fn text_input_case() -> impl View<()> {
+    framed(
         column()
             .child(
                 SizedBox(Some(280.0), None).child(
@@ -60,7 +60,7 @@ fn text_input_case() -> AnyView<()> {
                     .child(text_input("Frust rocks", |_: &mut (), _: String| {})),
             )
             .cross_axis(CrossAxisAlignment::Center),
-    ))
+    )
 }
 
 /// This module's slice of the registry [`crate::cases`] concatenates.
@@ -72,7 +72,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: checkbox_case,
+        build: case_build!(checkbox_case),
     },
     Case {
         slug: "radio",
@@ -81,7 +81,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: radio_case,
+        build: case_build!(radio_case),
     },
     Case {
         slug: "slider",
@@ -90,7 +90,7 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: slider_case,
+        build: case_build!(slider_case),
     },
     Case {
         slug: "text-input",
@@ -99,6 +99,6 @@ pub const CASES: &[Case] = &[
         scale: Case::DEFAULT_SCALE,
         time_ms: Case::DEFAULT_TIME_MS,
         design: Design::Base,
-        build: text_input_case,
+        build: case_build!(text_input_case),
     },
 ];

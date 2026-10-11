@@ -294,6 +294,10 @@ impl<State: 'static, V: View<State>> ErasedView<State> for V {
 /// and swapped in (signalling `LAYOUT | PAINT`). Its `Element` is a
 /// `Box<dyn Widget>`, which implements [`Widget`] through the blanket impl so it
 /// satisfies `View::Element: Widget`.
+///
+/// Erasure is idempotent, and the generic builders erase internally, so app code
+/// needs `AnyView` only for stored views, branches of three or more arms, and
+/// genuinely heterogeneous dynamic lists (see [`any`]).
 pub struct AnyView<State: 'static> {
     inner: Box<dyn ErasedView<State>>,
 }
@@ -325,6 +329,12 @@ impl<State: 'static> AnyView<State> {
 /// Erasure is idempotent: `any(any(v))` returns the inner `AnyView` unchanged,
 /// not a doubly-boxed wrapper. This makes double erasure safe for swap detection
 /// in containers like `inflexible(any(x))`.
+///
+/// Because of that, writing `any(..)` around an argument is redundant in
+/// 0.6: the generic builders (`child`, `Column((a, b))`, `either`, ..) accept
+/// any [`View`] and erase internally. Reach for `any` only to *store* a view
+/// (a struct field, a `Vec` of builders), for a branch with three or more
+/// arms, or for a genuinely heterogeneous dynamic list.
 pub fn any<State: 'static, V: View<State>>(view: V) -> AnyView<State> {
     AnyView::new(view)
 }

@@ -30,6 +30,7 @@ const STATE_LAYER_DIVISIONS: u32 = 8;
 /// See the page contract in [`crate::pages::playground`]. No page-level
 /// heading of its own — see [`super::checkbox::page`]'s doc for why `entry`
 /// goes unused.
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(SwitchPlayground))
 }
@@ -149,12 +150,12 @@ fn switch_snippet(value: bool, enabled: bool, show_icons: bool, state_layer_size
         String::new()
     };
     let layer = if state_layer_size == state_layer_size.round() {
-        format!("{state_layer_size:.0}")
+        format!("{state_layer_size:.1}")
     } else {
         format!("{state_layer_size}")
     };
     format!(
-        "frust_material::switch({value}, |state, next| state.value = next)\n    .enabled({enabled}){icons_lines}\n    .state_layer_size({layer});"
+        "switch({value}, |app: &mut App, next: bool| app.value = next)\n    .enabled({enabled}){icons_lines}\n    .state_layer_size({layer});"
     )
 }
 

@@ -94,9 +94,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use frust::{
-    AnyView, AsyncValue, Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get,
-    Padding, PlatformViewView, SizedBox, Theme, UseTask, any, button, component, inflexible,
-    on_cleanup, platform_view, spawn_blocking, text, use_context, use_task,
+    AsyncValue, Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Get, Padding,
+    PlatformViewView, SizedBox, Theme, UseTask, button, component, inflexible, on_cleanup,
+    platform_view, spawn_blocking, text, use_context, use_task,
 };
 use frust_camera::barcode::{Barcode, BarcodeFormat, decode_frame};
 use frust_camera::{
@@ -374,10 +374,10 @@ impl Component for CameraPage {
         children.push(gap(12.0));
         children.push(inflexible(filler_rows()));
 
-        any(Padding(
+        Padding(
             EdgeInsets::all(16.0),
             FlexView::new(Axis::Vertical, children),
-        ))
+        )
     }
 }
 
@@ -440,15 +440,15 @@ fn block(children: Vec<FlexChild<CameraPageState>>) -> FlexChild<CameraPageState
 /// duplicated locally per that module's own precedent (private,
 /// per-module, not shared).
 fn filler_rows() -> impl View<CameraPageState> {
-    let rows: Vec<AnyView<CameraPageState>> = (1..=64)
+    let rows = (1..=64)
         .map(|i| {
-            any(Padding(
+            inflexible(Padding(
                 EdgeInsets::symmetric(0.0, 8.0),
                 text(format!("row {i:02} \u{2014} camera page filler")).size(12.0),
             ))
         })
         .collect();
-    FlexView::new(Axis::Vertical, rows.into_iter().map(inflexible).collect())
+    FlexView::new(Axis::Vertical, rows)
 }
 
 // ---------------------------------------------------------------------------

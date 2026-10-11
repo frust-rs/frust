@@ -64,7 +64,7 @@
 //! `Wrap(spacing: 8, runSpacing: 8)`.
 
 use frust::{
-    AnyView, Column, Component, Get, RwSignal, Set, SizedBox, View, any, component, stack,
+    AnyView, Component, Get, RwSignal, Set, SizedBox, View, any, column, component, stack,
 };
 use frust_material::{OverlayAnchor, assist_chip, filter_chip, input_chip, suggestion_chip};
 
@@ -115,6 +115,7 @@ impl ChipKind {
 /// See the page contract in [`crate::pages::playground`]. No page-level
 /// heading of its own — see [`super::checkbox::page`]'s doc for why `entry`
 /// goes unused.
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(ChipsPlayground))
 }
@@ -232,13 +233,14 @@ impl Component for ChipsPlayground {
             |s: &mut ChipsPlaygroundState, next: ChipKind| s.kind.set(next),
         );
 
-        any(stack().child(body).child(panel))
+        stack().child(body).child(panel)
     }
 }
 
 /// Build one chip of `kind` — the one dispatch point every preview routes
 /// through. `leading` is ignored for [`ChipKind::Filter`]: `FilterChipView`
 /// carries no `.leading()` builder (see this file's module docs).
+// erasure: keep match-arm values of a four-arm match over the chip constructors
 fn build_chip(
     kind: ChipKind,
     label: &str,
@@ -294,20 +296,17 @@ fn all_types_row(
     show_leading: bool,
 ) -> impl View<ChipsPlaygroundState> {
     let leading = show_leading.then_some(LEADING_TAG_GLYPH);
-    let chips: Vec<AnyView<ChipsPlaygroundState>> = ChipKind::ALL
-        .into_iter()
-        .map(|kind| {
-            let is_selected = kind == ChipKind::Filter && selected;
-            build_chip(
-                kind,
-                kind.label(),
-                is_selected,
-                elevated,
-                leading,
-                kind == ChipKind::Input,
-            )
-        })
-        .collect();
+    let chips = ChipKind::ALL.into_iter().map(move |kind| {
+        let is_selected = kind == ChipKind::Filter && selected;
+        build_chip(
+            kind,
+            kind.label(),
+            is_selected,
+            elevated,
+            leading,
+            kind == ChipKind::Input,
+        )
+    });
     spaced_column(chips, 8.0)
 }
 
@@ -317,15 +316,19 @@ fn all_types_row(
 /// (`CrossAxisAlignment::Start`, `Column`'s default): a chip's own natural
 /// width, never a fixed one, so there is nothing to stretch or center
 /// against.
-fn spaced_column<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> impl View<State> {
-    let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
-    for item in items {
-        if !children.is_empty() {
-            children.push(any(SizedBox::<State>(None, Some(gap))));
-        }
-        children.push(item);
-    }
-    Column(children)
+fn spaced_column<State: 'static, V: View<State>>(
+    items: impl IntoIterator<Item = V>,
+    gap: f64,
+) -> impl View<State> {
+    items
+        .into_iter()
+        .enumerate()
+        .fold(column(), |col, (index, item)| {
+            col.when(index > 0, |col| {
+                col.child(SizedBox::<State>(None, Some(gap)))
+            })
+            .child(item)
+        })
 }
 
 /// The paste-ready Frust equivalent of the "Selected type" preview.
@@ -342,14 +345,14 @@ fn chip_snippet(
         String::new()
     };
     let deleted_line = if kind == ChipKind::Input {
-        "\n    .on_deleted(|state| {})".to_string()
+        "\n    .on_deleted(|app: &mut App| { /* remove the chip */ })".to_string()
     } else {
         String::new()
     };
 
     if kind == ChipKind::Filter {
         format!(
-            "frust_material::filter_chip(\n    {label:?},\n    {selected},\n    |state, next| state.selected = next,\n)\n.elevated({elevated}){leading_line}{deleted_line};"
+            "filter_chip(\n    {label:?},\n    {selected},\n    |app: &mut App, next: bool| app.selected = next,\n)\n.elevated({elevated}){leading_line}{deleted_line};"
         )
     } else {
         let ctor = match kind {
@@ -359,7 +362,7 @@ fn chip_snippet(
             ChipKind::Filter => unreachable!("handled above"),
         };
         format!(
-            "frust_material::{ctor}(\n    {label:?},\n    |_state, _| {{}},\n)\n.elevated({elevated}){leading_line}{deleted_line};"
+            "{ctor}({label:?}, |app: &mut App| {{ /* on press */ }})\n    .elevated({elevated}){leading_line}{deleted_line};"
         )
     }
 }

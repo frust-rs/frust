@@ -26,8 +26,8 @@
 //! control's event handler.
 
 use frust::{
-    AnyView, Color, CrossAxisAlignment, Get, GetUntracked, Row, RwSignal, Set, SizedBox, Theme,
-    View, any, container, text, use_context,
+    Color, CrossAxisAlignment, Get, GetUntracked, RwSignal, Set, SizedBox, Theme, View, container,
+    text, use_context,
 };
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 use frust_beui::components::shader_background::{
@@ -186,59 +186,69 @@ fn controls() -> impl View<AppState> {
     let variant = ShaderBackgroundVariant::ALL[active];
     let rung = speed.get().min(SPEEDS.len() - 1);
 
-    let mut row: Vec<AnyView<AppState>> = vec![
-        any(text("Animate").size(13.0)),
-        any(SizedBox(Some(8.0), None)),
-        any(switch(
-            animate.get() && variant.animates(),
-            move |_: &mut AppState, on| animate.set(on),
+    let lead = frust::row()
+        .child(text("Animate").size(13.0))
+        .child(SizedBox(Some(8.0), None))
+        .child(
+            switch(
+                animate.get() && variant.animates(),
+                move |_: &mut AppState, on| animate.set(on),
+            )
+            .label("Animate the featured shader")
+            // A variant with no clock cannot be animated — the switch says so
+            // rather than lying about what it does.
+            .disabled(!variant.animates()),
         )
-        .label("Animate the featured shader")
-        // A variant with no clock cannot be animated — the switch says so
-        // rather than lying about what it does.
-        .disabled(!variant.animates())),
-        any(SizedBox(Some(24.0), None)),
-        any(text("Speed").size(13.0)),
-        any(SizedBox(Some(8.0), None)),
-    ];
-    for (index, (label, _)) in SPEEDS.iter().enumerate() {
-        let tone = if index == rung {
-            ButtonTone::Primary
-        } else {
-            ButtonTone::Outline
-        };
-        row.push(any(button(*label, move |_: &mut AppState| {
-            speed.set(index)
-        })
-        .tone(tone)
-        .size(ButtonSize::Sm)));
-        row.push(any(SizedBox(Some(6.0), None)));
-    }
-    row.push(any(SizedBox(Some(18.0), None)));
-    row.push(any(text("Over a tinted card").size(13.0)));
-    row.push(any(SizedBox(Some(8.0), None)));
-    row.push(any(switch(over_card.get(), move |_: &mut AppState, on| {
-        over_card.set(on)
-    })
-    .label("Show the tile over a tinted card")));
+        .child(SizedBox(Some(24.0), None))
+        .child(text("Speed").size(13.0))
+        .child(SizedBox(Some(8.0), None));
+    let with_speeds = SPEEDS
+        .iter()
+        .enumerate()
+        .fold(lead, |line, (index, (label, _))| {
+            let tone = if index == rung {
+                ButtonTone::Primary
+            } else {
+                ButtonTone::Outline
+            };
+            line.child(
+                button(*label, move |_: &mut AppState| speed.set(index))
+                    .tone(tone)
+                    .size(ButtonSize::Sm),
+            )
+            .child(SizedBox(Some(6.0), None))
+        });
 
-    Row(row).cross_axis(CrossAxisAlignment::Center)
+    with_speeds
+        .child(SizedBox(Some(18.0), None))
+        .child(text("Over a tinted card").size(13.0))
+        .child(SizedBox(Some(8.0), None))
+        .child(
+            switch(over_card.get(), move |_: &mut AppState, on| {
+                over_card.set(on)
+            })
+            .label("Show the tile over a tinted card"),
+        )
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The contact sheet: every ported variant at once, frozen.
 fn contact_sheet() -> impl View<AppState> {
-    let mut row: Vec<AnyView<AppState>> = Vec::new();
-    for (index, variant) in ShaderBackgroundVariant::ALL.into_iter().enumerate() {
-        if index > 0 {
-            row.push(any(SizedBox(Some(12.0), None)));
-        }
-        row.push(any(frust::column()
-            .child(tile(variant, false, 0.0, THUMB_SIZE, false))
-            .child(gap(6.0))
-            .child(text(variant.label().to_string()).size(12.0))
-            .child(muted(variant.slug().to_string()))));
-    }
-    Row(row).cross_axis(CrossAxisAlignment::Start)
+    ShaderBackgroundVariant::ALL
+        .into_iter()
+        .enumerate()
+        .fold(frust::row(), |sheet, (index, variant)| {
+            sheet
+                .when(index > 0, |r| r.child(SizedBox(Some(12.0), None)))
+                .child(
+                    frust::column()
+                        .child(tile(variant, false, 0.0, THUMB_SIZE, false))
+                        .child(gap(6.0))
+                        .child(text(variant.label().to_string()).size(12.0))
+                        .child(muted(variant.slug().to_string())),
+                )
+        })
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// The Shader page.

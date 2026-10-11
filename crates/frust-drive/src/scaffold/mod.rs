@@ -117,7 +117,7 @@ pub const KNOWN_ARCHES: &[&str] = &["clean-signals"];
 
 /// Logical paths only the default (no `--arch`) template emits: an arch
 /// variant lays out its sources differently and must not inherit them.
-const DEFAULT_ONLY_PATHS: &[&str] = &["src/home_page.rs"];
+const DEFAULT_ONLY_PATHS: &[&str] = &[];
 
 /// Splits a mode-stripped logical path into `(base, tag)` if it carries a
 /// recognized [`KNOWN_ARCHES`] suffix (see that const's doc for the
@@ -765,33 +765,29 @@ mod tests {
             ),
             "{lib_rs}"
         );
-        // The generated demo is the Flutter-style counter: the root component
-        // hosts a `HomePage` component (its own module) built from widget fns.
+        // The generated demo is the Flutter-style counter: one component in
+        // lib.rs, no separate home page module.
         assert!(
-            lib_rs.contains("component(") && lib_rs.contains("mod home_page"),
+            lib_rs.contains("impl Component for MyAppApp")
+                && lib_rs.contains("scaffold(")
+                && lib_rs.contains("app_bar")
+                && lib_rs.contains("fab(")
+                && lib_rs.contains("icons::ADD")
+                && lib_rs.contains("InversePrimary")
+                && lib_rs.contains("elevation(2)")
+                && lib_rs.contains("Self::increment_fab()")
+                && lib_rs.contains("\"My App\""),
             "{lib_rs}"
         );
-        let home_rs = fs::read_to_string(dest.join("src/home_page.rs")).unwrap();
-        assert!(
-            home_rs.contains("impl Component for HomePage")
-                && home_rs.contains("scaffold(")
-                && home_rs.contains("app_bar")
-                && home_rs.contains("fab(")
-                && home_rs.contains("icons::ADD")
-                && home_rs.contains("InversePrimary")
-                && home_rs.contains("elevation(2)"),
-            "{home_rs}"
-        );
-        for src in [&lib_rs, &home_rs] {
-            assert!(!src.contains("app_logic"), "{src}");
-            assert!(!src.contains("frust-glyph"), "{src}");
-        }
+        assert!(!lib_rs.contains("mod home_page"), "{lib_rs}");
+        assert!(!dest.join("src/home_page.rs").exists());
+        assert!(!lib_rs.contains("app_logic"), "{lib_rs}");
+        assert!(!lib_rs.contains("frust-glyph"), "{lib_rs}");
         // lib.rs's comment may name the swap; the live setup call must not.
         assert!(
             !lib_rs.contains("        frust_glyph::install();"),
             "{lib_rs}"
         );
-        assert!(!home_rs.contains("frust_glyph"), "{home_rs}");
         // The launcher icon still ships even though the UI no longer shows it.
         assert!(dest.join("assets/logo.png").exists());
         assert!(dest.join("src/main.rs").exists());
@@ -843,7 +839,7 @@ mod tests {
         // README.md generated with theme/font docs and examples
         let readme = fs::read_to_string(dest.join("README.md")).unwrap();
         assert!(readme.contains("Material 3 design system"), "{readme}");
-        assert!(readme.contains("home_page.rs"), "{readme}");
+        assert!(!readme.contains("home_page.rs"), "{readme}");
         assert!(readme.contains("frust_material::install()"), "{readme}");
         assert!(readme.contains("frust_cupertino::install()"), "{readme}");
         assert!(readme.contains("register_app_fonts"), "{readme}");
@@ -1915,7 +1911,7 @@ mod tests {
     }
 
     /// README.md.tmpl is arch-aware: the default arch describes
-    /// `src/home_page.rs` as the counter screen, while the clean-signals arch
+    /// `src/lib.rs` as the whole counter app, while the clean-signals arch
     /// describes the clean-signals feature structure instead.
     #[test]
     fn generate_readme_structure_section_is_arch_aware() {
@@ -1937,14 +1933,14 @@ mod tests {
         let readme_clean_signals =
             fs::read_to_string(dest_clean_signals.join("README.md")).unwrap();
 
-        // Default arch mentions `src/home_page.rs` as the counter screen.
+        // Default arch describes `src/lib.rs` as the whole counter app.
         assert!(
-            readme_default.contains("src/home_page.rs"),
-            "default README must mention src/home_page.rs: {readme_default}"
+            readme_default.contains("src/lib.rs` — the whole counter app"),
+            "default README must describe lib.rs as the whole counter app: {readme_default}"
         );
         assert!(
-            readme_default.contains("counter screen, a `Component` built from small widget fns"),
-            "default README must describe home_page.rs as the counter screen: {readme_default}"
+            !readme_default.contains("home_page.rs"),
+            "default README must not mention home_page.rs: {readme_default}"
         );
         assert!(
             !readme_default.contains("src/features/counter"),

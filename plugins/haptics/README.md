@@ -17,7 +17,7 @@ not re-export it.
 
 ```toml
 # app Cargo.toml — [dependencies]
-frust-haptics = { path = "<frust>/plugins/haptics" }  # or the crates.io release, e.g. version = "0.5"
+frust-haptics = { path = "<frust>/plugins/haptics" }  # or the crates.io release, e.g. version = "0.6"
 ```
 
 `<frust>` is the path to your frust checkout — derive it from the `frust = {
@@ -102,7 +102,7 @@ worst case a no-op single tick on hardware that lacks it, never a crash.
 - **Android's `Vibrator.vibrate(VibrationEffect)` call is synchronous and
   quick** (the vibration itself plays asynchronously on the vibrator HAL, not
   inside the call) — this backend calls it directly from the caller's thread,
-  no `frust_reactive::spawn_blocking` needed.
+  no `frust::spawn_blocking` needed.
 
 ---
 

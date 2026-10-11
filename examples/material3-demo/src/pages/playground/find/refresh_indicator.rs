@@ -70,7 +70,8 @@ use frust::{
 };
 
 use frust_material::{
-    MaterialDimensions, OverlayAnchor, card_list_items, icons, list_item, refresh_indicator,
+    MaterialDimensions, OverlayAnchor, RefreshIndicatorView, card_list_items, icons, list_item,
+    refresh_indicator,
 };
 
 use crate::AppState;
@@ -205,19 +206,16 @@ fn refresh_list_content() -> impl View<Knobs> {
 
 /// Build the indicator `kind` selects, wired to the shared [`on_refresh`]
 /// callback and the current controlled `refreshing` prop — the reference's
-/// `_buildIndicator`.
-fn build_indicator(kind: RefreshKind, refreshing: bool) -> AnyView<Knobs> {
+/// `_buildIndicator`. Every kind is the same [`RefreshIndicatorView`], so
+/// the match needs no erasure.
+fn build_indicator(kind: RefreshKind, refreshing: bool) -> RefreshIndicatorView<Knobs> {
+    let indicator = refresh_indicator(refresh_list_content(), on_refresh);
     match kind {
-        RefreshKind::Expressive => {
-            any(refresh_indicator(refresh_list_content(), on_refresh).refreshing(refreshing))
-        }
-        RefreshKind::Contained => any(refresh_indicator(refresh_list_content(), on_refresh)
-            .contained()
-            .refreshing(refreshing)),
-        RefreshKind::NoSpinner => any(refresh_indicator(refresh_list_content(), on_refresh)
-            .no_spinner()
-            .refreshing(refreshing)),
+        RefreshKind::Expressive => indicator,
+        RefreshKind::Contained => indicator.contained(),
+        RefreshKind::NoSpinner => indicator.no_spinner(),
     }
+    .refreshing(refreshing)
 }
 
 /// The FRUST snippet text for the current knob state — the reference's
@@ -230,7 +228,8 @@ fn snippet_code(state: &Knobs) -> String {
         RefreshKind::NoSpinner => "\n    .no_spinner()".to_string(),
     };
     format!(
-        "refresh_indicator(content, on_refresh){ctor_suffix}\n    .refreshing(state.refreshing);"
+        "refresh_indicator(content, |state: &mut State| state.refreshing = true){ctor_suffix}\n    \
+         .refreshing(state.refreshing);"
     )
 }
 
@@ -258,9 +257,9 @@ fn body(state: &mut Knobs) -> impl View<Knobs> {
         state.menu_open,
         |s: &mut Knobs, open: bool| s.menu_open = open,
     );
-    let controls = control_panel("Appearance", vec![kind_field]);
+    let controls = control_panel("Appearance", kind_field);
 
-    let content = playground_body(vec![preview], vec![snippet], vec![controls]);
+    let content = playground_body(preview, vec![snippet], controls);
 
     let panel = play_enum_menu_panel::<Knobs, RefreshKind>(
         state.kind,
@@ -293,6 +292,7 @@ impl Component for RefreshIndicatorPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(RefreshIndicatorPlayground))
 }

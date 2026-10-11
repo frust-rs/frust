@@ -61,12 +61,11 @@ use std::rc::Rc;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerButton, PointerEvent, PointerPhase,
-    SemanticsCtx, Size, View, Widget, any,
+    SemanticsCtx, Size, View, ViewSeq, Widget, any,
 };
 use frust::{
-    AnimationController, Axis, CrossAxisAlignment, Curve, EdgeInsets, FlexView, FrameTime,
-    GestureDetector, IconSource, Padding, SizedBox, Theme, flexible, icon, inflexible,
-    input::TOUCH_SLOP, row, text,
+    AnimationController, CrossAxisAlignment, Curve, EdgeInsets, FrameTime, GestureDetector,
+    IconSource, Padding, SizedBox, Theme, column, icon, input::TOUCH_SLOP, row, text, views,
 };
 use frust_material::filled_card;
 use std::time::Duration;
@@ -193,6 +192,7 @@ pub struct SheetView<State: 'static> {
 /// attached with [`SheetView::on_dismiss`]).
 pub fn sheet<State: 'static, V: View<State>>(content: V) -> SheetView<State> {
     SheetView {
+        // erasure: keep stored in a hand-written view, fed to its ChildPod
         content: any(content),
         on_dismiss: None,
     }
@@ -563,12 +563,11 @@ impl Widget for SheetWidget {
 /// `filled_card`, wrapped in a [`GestureDetector`] firing `on_tap`. Used for the
 /// long-press context menu and the attachment sheet. Meant to sit inside a
 /// [`CrossAxisAlignment::Stretch`] column so the card fills the panel width.
-// erasure: keep rows feed a caller-built Vec<AnyView<State>> of sheet rows (stored, heterogeneous callers)
 pub fn sheet_action_row<State, F>(
     leading: IconSource,
     label: impl Into<String>,
     on_tap: F,
-) -> AnyView<State>
+) -> impl View<State>
 where
     State: 'static,
     F: Fn(&mut State) + 'static,
@@ -582,11 +581,11 @@ where
         .child(text(label.into()).size(16.0))
         .cross_axis(CrossAxisAlignment::Center);
 
-    any(GestureDetector(Padding(
+    GestureDetector(Padding(
         EdgeInsets::symmetric(ROW_H_PAD, ROW_V_PAD),
         filled_card(Padding(EdgeInsets::symmetric(16.0, 14.0), row)),
     ))
-    .on_tap(on_tap))
+    .on_tap(on_tap)
 }
 
 /// The curated color-emoji reaction picker: an [`EMOJI_COLS`]-wide grid of
@@ -598,38 +597,37 @@ where
     State: 'static,
     F: Fn(&mut State, &'static str) + Clone + 'static,
 {
-    let mut rows: Vec<frust::FlexChild<State>> = Vec::new();
-    for chunk in REACTION_EMOJI.chunks(EMOJI_COLS) {
-        let mut cells: Vec<frust::FlexChild<State>> = Vec::new();
-        for &emoji in chunk {
+    let rows = REACTION_EMOJI.chunks(EMOJI_COLS).map(|chunk| {
+        // No `Align` here: under a flex row's loose cross constraint it would
+        // expand to the full available height. The `flexible` slot already
+        // gives the cell a tight column width; `Padding` fills it and sizes
+        // its height to the glyph, so each cell spans its whole column and
+        // stays tappable end-to-end.
+        // press_pop adds the pressed-state scale dip micro-interaction; it
+        // forwards every event so the tap still fires.
+        let cells = chunk.iter().fold(row(), |cells, &emoji| {
             let pick = on_pick.clone();
-            // No `Align` here: under a flex row's loose cross constraint it would
-            // expand to the full available height. The `flexible` slot already
-            // gives the cell a tight column width; `Padding` fills it and sizes
-            // its height to the glyph, so each cell spans its whole column and
-            // stays tappable end-to-end.
-            // press_pop adds the pressed-state scale dip micro-interaction; it
-            // forwards every event so the tap still fires.
-            let cell = crate::ui::swipeable::press_pop(
-                GestureDetector(Padding(
-                    EdgeInsets::all(EMOJI_CELL_PAD),
-                    text(emoji).size(EMOJI_SIZE),
-                ))
-                .on_tap(move |st: &mut State| pick(st, emoji)),
-            );
-            cells.push(flexible(1, cell));
-        }
+            cells.flex(
+                1,
+                crate::ui::swipeable::press_pop(
+                    GestureDetector(Padding(
+                        EdgeInsets::all(EMOJI_CELL_PAD),
+                        text(emoji).size(EMOJI_SIZE),
+                    ))
+                    .on_tap(move |st: &mut State| pick(st, emoji)),
+                ),
+            )
+        });
         // Pad a short final row so its cells keep the same column width.
-        while cells.len() < EMOJI_COLS {
-            cells.push(flexible(1, SizedBox(None, None)));
-        }
-        rows.push(inflexible(
-            FlexView::new(Axis::Horizontal, cells).cross_axis(CrossAxisAlignment::Center),
-        ));
-    }
+        (chunk.len()..EMOJI_COLS)
+            .fold(cells, |cells, _| cells.flex(1, SizedBox(None, None)))
+            .cross_axis(CrossAxisAlignment::Center)
+    });
     Padding(
         EdgeInsets::symmetric(0.0, 8.0),
-        FlexView::new(Axis::Vertical, rows).cross_axis(CrossAxisAlignment::Stretch),
+        column()
+            .children(views(rows))
+            .cross_axis(CrossAxisAlignment::Stretch),
     )
 }
 
@@ -660,6 +658,7 @@ pub struct DragUpDismissView<State: 'static> {
 /// wrapped content (e.g. a workspace row) still fires normally.
 pub fn drag_up_dismiss<State: 'static, V: View<State>>(content: V) -> DragUpDismissView<State> {
     DragUpDismissView {
+        // erasure: keep stored in a hand-written view, fed to its ChildPod
         content: any(content),
         on_dismiss: None,
     }
@@ -873,14 +872,12 @@ impl Widget for DragUpDismissWidget {
 /// Assemble sheet rows into the stretched column the [`sheet`] panel expects
 /// (each row fills the panel width). A small convenience over building the
 /// [`FlexView`] inline at every call site.
-pub fn action_menu<State: 'static>(rows: Vec<AnyView<State>>) -> impl View<State> {
+pub fn action_menu<State: 'static, M>(rows: impl ViewSeq<State, M>) -> impl View<State> {
     Padding(
         EdgeInsets::symmetric(0.0, 8.0),
-        FlexView::new(
-            Axis::Vertical,
-            rows.into_iter().map(inflexible).collect::<Vec<_>>(),
-        )
-        .cross_axis(CrossAxisAlignment::Stretch),
+        column()
+            .children(rows)
+            .cross_axis(CrossAxisAlignment::Stretch),
     )
 }
 
@@ -903,7 +900,10 @@ pub struct KeyboardAvoidView<State: 'static> {
 /// Wrap `child` so its bottom edge tracks the window's live keyboard
 /// occlusion. See the [`KeyboardAvoidView`] docs.
 pub fn avoid_keyboard<State: 'static, V: View<State>>(child: V) -> KeyboardAvoidView<State> {
-    KeyboardAvoidView { child: any(child) }
+    KeyboardAvoidView {
+        // erasure: keep stored in a hand-written view, fed to its ChildPod
+        child: any(child),
+    }
 }
 
 /// The retained widget for a [`KeyboardAvoidView`].

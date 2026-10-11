@@ -146,23 +146,39 @@
 //! function of it.
 //!
 //! ```
-//! use frust::{ScrollInfo, scroll_view, text};
-//! use frust_material::{AppBarVariant, sliver_app_bar};
+//! use frust::{Component, ScrollInfo, View, column, scroll_view, text};
+//! use frust_material::{AppBarVariant, SliverAppBarView, sliver_app_bar};
 //!
 //! struct App {
 //!     /// The last offset the body reported — the bar's collapse input.
 //!     scrolled: f64,
 //! }
 //!
-//! fn header(state: &App) -> frust_material::SliverAppBarView<App> {
-//!     sliver_app_bar("Inbox")
-//!         .variant(AppBarVariant::Large)
-//!         .scroll_offset(state.scrolled)
+//! struct Inbox;
+//!
+//! impl Component for Inbox {
+//!     type State = App;
+//!
+//!     fn init(&self) -> App {
+//!         App { scrolled: 0.0 }
+//!     }
+//!
+//!     fn build(&self, state: &mut App) -> impl View<App> {
+//!         column().child(Self::header(state)).child(Self::body())
+//!     }
 //! }
 //!
-//! fn body(_state: &App) -> impl frust::View<App> + use<> {
-//!     scroll_view(text("content"))
-//!         .on_scroll(|state: &mut App, info: ScrollInfo| state.scrolled = info.offset)
+//! impl Inbox {
+//!     fn header(state: &App) -> SliverAppBarView<App> {
+//!         sliver_app_bar("Inbox")
+//!             .variant(AppBarVariant::Large)
+//!             .scroll_offset(state.scrolled)
+//!     }
+//!
+//!     fn body() -> impl View<App> {
+//!         scroll_view(text("content"))
+//!             .on_scroll(|state: &mut App, info: ScrollInfo| state.scrolled = info.offset)
+//!     }
 //! }
 //! ```
 //!

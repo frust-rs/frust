@@ -27,9 +27,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked, Padding,
-    RwSignal, Set, SizedBox, Theme, Update, View, any, button, inflexible, row, spawn_blocking,
-    spawn_local, text, use_context,
+    ButtonStyle, Color, EdgeInsets, FlexChild, Get, GetUntracked, Padding, RwSignal, Set, SizedBox,
+    Theme, Update, View, button, column, inflexible, row, spawn_blocking, spawn_local, text,
+    use_context,
 };
 use frust_database::{Database, DatabaseError, Value};
 
@@ -187,53 +187,50 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
         format!("status: {status}")
     };
 
-    let children: Vec<AnyView<PlaygroundState>> = vec![
-        any(text("Database").size(13.0).color(accent())),
-        any(text(
-            "frust-database's Database::open/execute/query, exercised from a real button \
+    let body = column()
+        .child(text("Database").size(13.0).color(accent()))
+        .child(
+            text(
+                "frust-database's Database::open/execute/query, exercised from a real button \
                  press \u{2014} the Android device-gate vehicle proving frust_paths::data_dir() \
                  resolves inside the app process (Context.getFilesDir(), no HOME/XDG \
                  environment variable). \u{201c}Open + insert\u{201d} opens \
                  <data_dir>/databases/playground.db, creates the smoke table, inserts a row, \
                  and counts them; \u{201c}Clear\u{201d} empties it for a re-run.",
-        )
-        .size(11.0)
-        .color(muted())),
-        any(SizedBox(None, Some(12.0))),
-        any(row()
-            .child(
-                button("Open + insert", |state: &mut PlaygroundState| {
-                    spawn_smoke(status_sig(), state.toasts);
-                })
-                .style(ButtonStyle::Primary)
-                .small(),
             )
-            .push(gap_h(8.0))
-            .child(
-                button("Clear", |state: &mut PlaygroundState| {
-                    let toasts = state.toasts;
-                    spawn_local(async move {
-                        let message = match spawn_blocking(run_clear).await {
-                            Ok(Ok(())) => "db cleared".to_string(),
-                            Ok(Err(err)) => format!("db error: {err}"),
-                            Err(join_err) => format!("db error: {join_err}"),
-                        };
-                        status_sig().set(message.clone());
-                        toasts.update(|queue| queue.push(message));
-                    });
-                })
-                .style(ButtonStyle::Secondary)
-                .small(),
-            )),
-        any(SizedBox(None, Some(8.0))),
-        any(text(status_line).size(12.0)),
-    ];
+            .size(11.0)
+            .color(muted()),
+        )
+        .child(SizedBox(None, Some(12.0)))
+        .child(
+            row()
+                .child(
+                    button("Open + insert", |state: &mut PlaygroundState| {
+                        spawn_smoke(status_sig(), state.toasts);
+                    })
+                    .style(ButtonStyle::Primary)
+                    .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("Clear", |state: &mut PlaygroundState| {
+                        let toasts = state.toasts;
+                        spawn_local(async move {
+                            let message = match spawn_blocking(run_clear).await {
+                                Ok(Ok(())) => "db cleared".to_string(),
+                                Ok(Err(err)) => format!("db error: {err}"),
+                                Err(join_err) => format!("db error: {join_err}"),
+                            };
+                            status_sig().set(message.clone());
+                            toasts.update(|queue| queue.push(message));
+                        });
+                    })
+                    .style(ButtonStyle::Secondary)
+                    .small(),
+                ),
+        )
+        .child(SizedBox(None, Some(8.0)))
+        .child(text(status_line).size(12.0));
 
-    Padding(
-        EdgeInsets::all(16.0),
-        FlexView::new(
-            Axis::Vertical,
-            children.into_iter().map(inflexible).collect(),
-        ),
-    )
+    Padding(EdgeInsets::all(16.0), body)
 }

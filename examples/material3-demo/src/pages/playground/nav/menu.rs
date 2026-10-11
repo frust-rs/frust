@@ -26,6 +26,7 @@ use crate::widgets::playground::{
 };
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(MenuPlayground))
 }

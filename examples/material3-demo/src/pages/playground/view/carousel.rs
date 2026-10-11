@@ -42,9 +42,9 @@
 
 use frust::authoring::text::{FontWeight, TextAlign};
 use frust::{
-    AnyView, AsyncValue, Color, Component, CrossAxisAlignment, EdgeInsets, Get, Image,
+    AnyView, AsyncValue, Color, Component, CrossAxisAlignment, EdgeInsets, Either, Get, Image,
     ImageDecodeError, ImageFit, ImageSource, Padding, SizedBox, UseTask, View, any, column,
-    component, container, decode_image_async, stack, text, use_task,
+    component, container, decode_image_async, stack, text, use_task, views,
 };
 use frust_material::{
     CarouselAxis, CarouselChange, CarouselLayout, HeroAlignment, OverlayAnchor, carousel,
@@ -212,6 +212,7 @@ impl Component for CarouselPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(CarouselPlayground))
 }
@@ -227,11 +228,11 @@ fn content(
     status: Option<&str>,
 ) -> impl View<PageState> + use<> {
     let preview = match status {
-        Some(message) => any(status_view(message)),
-        None => any(carousel_preview(knobs, images)),
+        Some(message) => Either::Left(status_view(message)),
+        None => Either::Right(carousel_preview(knobs, images)),
     };
     let body = playground_body(
-        vec![any(play_preview_card("Carousel", preview))],
+        vec![play_preview_card("Carousel", preview)],
         vec![snippet(knobs)],
         vec![controls(knobs)],
     );
@@ -258,18 +259,14 @@ fn status_view(message: &str) -> impl View<PageState> {
 /// from `M3ECarousel.didUpdateWidget`).
 fn carousel_preview(knobs: &Knobs, images: &[ImageSource]) -> impl View<PageState> {
     let vertical = knobs.axis == CarouselAxis::Vertical;
-    let items: Vec<AnyView<PageState>> = images
-        .iter()
-        .enumerate()
-        .map(|(index, source)| {
-            let title = IMAGES.get(index).map(|(_, title)| *title).unwrap_or("");
-            carousel_item(
-                source.clone(),
-                title,
-                knobs.show_titles && index == knobs.focal,
-            )
-        })
-        .collect();
+    let items = views(images.iter().enumerate().map(|(index, source)| {
+        let title = IMAGES.get(index).map(|(_, title)| *title).unwrap_or("");
+        carousel_item(
+            source.clone(),
+            title,
+            knobs.show_titles && index == knobs.focal,
+        )
+    }));
 
     let view = carousel(items)
         .layout(knobs.layout)
@@ -290,12 +287,13 @@ fn carousel_preview(knobs: &Knobs, images: &[ImageSource]) -> impl View<PageStat
 
 /// One carousel cell: the image, plus the focal title band over it — the
 /// reference's `_CarouselImage`.
-fn carousel_item(source: ImageSource, title: &str, show_title: bool) -> AnyView<PageState> {
-    let image = any(Image(source).fit(ImageFit::Cover));
-    if !show_title {
-        return image;
+fn carousel_item(source: ImageSource, title: &str, show_title: bool) -> impl View<PageState> {
+    let image = Image(source).fit(ImageFit::Cover);
+    if show_title {
+        Either::Left(stack().child(image).child(title_band(title)))
+    } else {
+        Either::Right(image)
     }
-    any(stack().child(image).child(title_band(title)))
 }
 
 /// The bottom-pinned title band — see the module docs' scrim divergence.
@@ -320,7 +318,7 @@ fn title_band(title: &str) -> impl View<PageState> {
 }
 
 fn controls(knobs: &Knobs) -> AnyView<PageState> {
-    control_panel::<PageState>(
+    control_panel::<PageState, _>(
         "Layout",
         vec![
             play_enum_menu_field::<PageState, CarouselLayout>(
@@ -397,8 +395,8 @@ fn snippet(knobs: &Knobs) -> PlaySnippet {
              \u{20}   .hero_alignment(HeroAlignment::{alignment:?})\n\
              \u{20}   .axis(CarouselAxis::{axis:?})\n\
              \u{20}   .extended({extended})\n\
-             \u{20}   .on_change(|state, change| {{\n\
-             \u{20}       state.focal = change.focal_index;\n\
+             \u{20}   .on_change(|app: &mut App, change: CarouselChange| {{\n\
+             \u{20}       app.focal = change.focal_index;\n\
              \u{20}   }});",
             layout = knobs.layout,
             alignment = knobs.alignment,

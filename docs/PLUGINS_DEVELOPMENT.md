@@ -16,7 +16,7 @@ android|ios`, re-syncs.
 
 A kill-and-relaunch persistence gate for `frust-shared-preferences`
 (`plugins/shared-preferences`), against a fresh `frust create` app: add `frust-shared-preferences`
-to its `Cargo.toml`, persist the `HomePage` count through it:
+to its `Cargo.toml`, persist the root component's count in `src/lib.rs` through it:
 
 - **Persistence:** bump the count, kill the app, relaunch it, and
   confirm it survived — desktop preview, an installed Android device, and an installed

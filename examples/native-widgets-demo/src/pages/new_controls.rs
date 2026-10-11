@@ -25,7 +25,7 @@
 //!
 //! Native slots at rest: 4 on iOS/macOS, 2 elsewhere.
 
-use frust::{AnyView, Get, GetUntracked, Set, any, button, checkbox, inflexible, text};
+use frust::{AnyView, Get, GetUntracked, Set, button, checkbox, either, inflexible, text};
 use frust_glyph::{dots_loader, segmented_control};
 use frust_native_widgets::{
     CivilDate, NativeDatePickerStyle, native_date_picker, native_segmented, native_spinner,
@@ -129,11 +129,7 @@ fn confirm_stepper(requested: i32) {
 
 /// The spinner pair plus its animating toggle.
 fn spinner_block(animating: bool) -> Vec<FlexChildS> {
-    let drawn = if animating {
-        any(dots_loader())
-    } else {
-        any(text("(stopped)").size(12.0))
-    };
+    let drawn = either(animating, dots_loader, || text("(stopped)").size(12.0));
     vec![
         pair_row(
             "Spinner",
@@ -145,9 +141,9 @@ fn spinner_block(animating: bool) -> Vec<FlexChildS> {
             "Display-only. Toggle it: both columns stop and start together.",
             CellFit::Natural,
             44.0,
-            any(native_spinner(animating)
+            native_spinner(animating)
                 .content_description("Native spinner")
-                .size(44.0, 44.0)),
+                .size(44.0, 44.0),
             drawn,
         ),
         block(vec![inflexible(chip(
@@ -183,16 +179,14 @@ fn segmented_block(selected: usize, refusing: bool, refused: u32, events: u32) -
             "Controlled: a tap reports the requested segment; the app feeds it back.",
             CellFit::Stretch,
             32.0,
-            any(native_segmented(labels.clone(), selected)
+            native_segmented(labels.clone(), selected)
                 .content_description(description)
                 .size(PAIR_CELL_W, 32.0)
                 .on_select(|index| {
                     bump(segment_events_sig());
                     confirm_segment(index);
-                })),
-            any(segmented_control(labels, selected, |_: &mut S, index| {
-                confirm_segment(index)
-            })),
+                }),
+            segmented_control(labels, selected, |_: &mut S, index| confirm_segment(index)),
         ),
         block(vec![
             inflexible(checkbox(
@@ -246,7 +240,7 @@ fn stepper_block(value: i32, wraps: bool, big_step: bool, events: u32) -> Vec<Fl
              step/wrap arithmetic.",
             CellFit::Natural,
             36.0,
-            any(native_stepper(value, STEPPER_MIN, STEPPER_MAX)
+            native_stepper(value, STEPPER_MIN, STEPPER_MAX)
                 .step(step)
                 .wraps(wraps)
                 .content_description("Native stepper")
@@ -254,7 +248,7 @@ fn stepper_block(value: i32, wraps: bool, big_step: bool, events: u32) -> Vec<Fl
                 .on_change(|requested| {
                     bump(stepper_events_sig());
                     confirm_stepper(requested);
-                })),
+                }),
             drawn,
         ),
         block(vec![
@@ -305,7 +299,7 @@ fn date_block(value: CivilDate, inline: bool, events: u32) -> Vec<FlexChildS> {
     };
     let native_w = if inline { 300.0 } else { PAIR_CELL_W };
     let h = if inline { 330.0 } else { 40.0 };
-    let picker = any(native_date_picker(value)
+    let picker = native_date_picker(value)
         .min(date_min())
         .max(date_max())
         .style(style)
@@ -314,7 +308,7 @@ fn date_block(value: CivilDate, inline: bool, events: u32) -> Vec<FlexChildS> {
         .on_change(|requested| {
             bump(date_events_sig());
             date_sig().set(requested);
-        }));
+        });
     let classes = NativeClasses {
         android: "DatePicker",
         ios: "UIDatePicker",

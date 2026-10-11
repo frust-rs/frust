@@ -106,7 +106,7 @@ fn config(side: SheetSide, close_button: bool) -> ModalConfig {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn sheet<State: 'static, M>(children: impl ViewSeq<State, M>) -> SheetView<State> {
     let side = SheetSide::default();
     SheetView {
@@ -123,7 +123,7 @@ pub fn sheet<State: 'static, M>(children: impl ViewSeq<State, M>) -> SheetView<S
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn sheet_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     stack_slots(children, HEADER_GAP, EdgeInsets::all(SLOT_PAD))
 }
@@ -143,7 +143,7 @@ pub fn sheet_description<State: 'static>(description: impl Into<String>) -> AnyV
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn sheet_footer<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     stack_slots(children, FOOTER_GAP, EdgeInsets::all(SLOT_PAD))
 }

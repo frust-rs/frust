@@ -74,6 +74,7 @@ const ENTRY_ID: &str = "buttons";
 /// the same two `frust_material` constructors `gallery_shell` composes in
 /// `src/lib.rs`. Its content slot is a placeholder rather than a mounted
 /// inner navigator (see this module's docs).
+// erasure: keep Route::new builders must return AnyView
 fn shell_page(_params: &RouteParams) -> AnyView<St> {
     let bar = app_bar::<St>("Material 3 Expressive");
     let nav_bar = navigation_bar(
@@ -92,6 +93,7 @@ fn shell_page(_params: &RouteParams) -> AnyView<St> {
 /// One section's list content — a single-row card list, mirroring
 /// `section_host`'s narrow-layout list shape closely enough to exercise the
 /// same `frust_material` list constructors it uses.
+// erasure: keep Route::new builders must return AnyView
 fn section_content(_params: &RouteParams) -> AnyView<St> {
     any(card_list_items(vec![list_item::<St>("Buttons")]))
 }
@@ -99,6 +101,7 @@ fn section_content(_params: &RouteParams) -> AnyView<St> {
 /// The playground route's page — no chrome, just enough content to prove the
 /// route's builder constructs (mirroring `playground_route`'s shape: a page
 /// keyed by the matched `:id`).
+// erasure: keep Route::new builders must return AnyView
 fn playground_route(params: &RouteParams) -> AnyView<St> {
     let id = params.get("id").map(String::as_str).unwrap_or("");
     any(scaffold(text(id.to_string())))

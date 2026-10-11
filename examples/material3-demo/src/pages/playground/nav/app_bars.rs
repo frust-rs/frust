@@ -21,8 +21,9 @@
 //! the real seam.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, EdgeInsets, Padding, ScrollInfo, SizedBox,
-    Theme, View, any, column, component, container, icon, safe_area, scroll_view, stack, text,
+    AnyView, Component, CrossAxisAlignment, EdgeInsets, Either, IconSource, Padding, ScrollInfo,
+    SizedBox, Theme, View, any, column, component, container, icon, safe_area, scroll_view, stack,
+    text, views,
 };
 use frust_material::{
     AppBarDensity, AppBarShapeFamily, AppBarVariant, FabSize, MaterialDimensions, MaterialSpacing,
@@ -38,6 +39,7 @@ use crate::widgets::playground::{
 };
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(AppBarsPlayground))
 }
@@ -177,18 +179,18 @@ fn body(state: &AppBarsState) -> impl View<AppBarsState> {
 /// than a bare glyph, since every bar slot in this family is opaque
 /// caller-supplied content (see `plugins/material/src/appbar/mod.rs`'s slot
 /// contract).
-fn icon_slot(source: frust::IconSource, label: &str) -> impl View<AppBarsState> {
+fn icon_slot(source: IconSource, label: &str) -> impl View<AppBarsState> {
     icon_button(icon(source), |_: &mut AppBarsState| {}).semantic_label(label)
 }
 
 /// Wrap `bar` in [`frust::safe_area`] when the Safe area toggle is on. Only
 /// for the bottom and sliver bars, which have no `safe_area` prop; the top
 /// and search bars take `.safe_area(on)` directly.
-fn wrap_safe_area(state: &AppBarsState, bar: impl View<AppBarsState>) -> AnyView<AppBarsState> {
+fn wrap_safe_area(state: &AppBarsState, bar: impl View<AppBarsState>) -> impl View<AppBarsState> {
     if state.safe_area {
-        any(safe_area(bar))
+        Either::Left(safe_area(bar))
     } else {
-        any(bar)
+        Either::Right(bar)
     }
 }
 
@@ -269,22 +271,22 @@ fn sliver_preview(theme: &Theme, state: &AppBarsState) -> AnyView<AppBarsState> 
 
     let mut item_style = theme.type_scale.body_medium.clone();
     item_style.color = theme.scheme().on_surface;
-    let items: Vec<AnyView<AppBarsState>> = (1..=4)
-        .map(|i| {
-            any(Padding(
-                EdgeInsets {
-                    left: MaterialSpacing::LG,
-                    top: MaterialSpacing::SM,
-                    right: MaterialSpacing::LG,
-                    bottom: MaterialSpacing::SM,
-                },
-                text(format!("Item {i}")).style(item_style.clone()),
-            ))
-        })
-        .collect();
-    let list = scroll_view(Column(items)).on_scroll(|s: &mut AppBarsState, info: ScrollInfo| {
-        s.scrolled = info.offset;
-    });
+    let items = views((1..=4).map(|i| {
+        Padding(
+            EdgeInsets {
+                left: MaterialSpacing::LG,
+                top: MaterialSpacing::SM,
+                right: MaterialSpacing::LG,
+                bottom: MaterialSpacing::SM,
+            },
+            text(format!("Item {i}")).style(item_style.clone()),
+        )
+    }));
+    let list = scroll_view(column().children(items)).on_scroll(
+        |s: &mut AppBarsState, info: ScrollInfo| {
+            s.scrolled = info.offset;
+        },
+    );
 
     let column = column()
         .child(bar)
@@ -300,25 +302,29 @@ fn sliver_preview(theme: &Theme, state: &AppBarsState) -> AnyView<AppBarsState> 
 /// `Variant` control panel: the Kind picker's field, plus (sliver only) the
 /// expanded-size picker — the reference's own conditional `PlayEnumSegmented`.
 fn variant_panel(state: &AppBarsState) -> AnyView<AppBarsState> {
-    let mut rows = vec![play_enum_menu_field::<AppBarsState, AppBarKind>(
-        "Kind",
-        state.kind,
-        &AppBarKind::ALL,
-        AppBarKind::label,
-        &state.kind_anchor,
-        state.kind_open,
-        |s: &mut AppBarsState, open| s.kind_open = open,
-    )];
-    if state.kind == AppBarKind::Sliver {
-        rows.push(play_enum_segmented::<AppBarsState, AppBarVariant>(
-            "Sliver size",
-            state.variant,
-            &APP_BAR_VARIANTS,
-            variant_label,
-            |s: &mut AppBarsState, v| s.variant = v,
-        ));
-    }
-    control_panel("Variant", rows)
+    control_panel(
+        "Variant",
+        (
+            play_enum_menu_field::<AppBarsState, AppBarKind>(
+                "Kind",
+                state.kind,
+                &AppBarKind::ALL,
+                AppBarKind::label,
+                &state.kind_anchor,
+                state.kind_open,
+                |s: &mut AppBarsState, open| s.kind_open = open,
+            ),
+            (state.kind == AppBarKind::Sliver).then(|| {
+                play_enum_segmented::<AppBarsState, AppBarVariant>(
+                    "Sliver size",
+                    state.variant,
+                    &APP_BAR_VARIANTS,
+                    variant_label,
+                    |s: &mut AppBarsState, v| s.variant = v,
+                )
+            }),
+        ),
+    )
 }
 
 /// `Appearance` control panel: density, shape, the two toggles, and the
@@ -382,10 +388,10 @@ fn snippet_code(state: &AppBarsState) -> String {
             shape = state.shape,
             center_title = state.center_title,
         ),
-        AppBarKind::Bottom => "bottom_app_bar()\n    .actions(vec![menu_icon, search_icon, edit_icon])\n    .fab(fab(add_icon, on_press).size(FabSize::Small));"
+        AppBarKind::Bottom => "bottom_app_bar()\n    .actions(vec![menu_icon, search_icon, edit_icon])\n    .fab(fab(add_icon, on_press).size(FabSize::Small).label(\"Add\"));"
             .to_string(),
         AppBarKind::Sliver => format!(
-            "sliver_app_bar({title:?})\n    .variant(AppBarVariant::{variant:?})\n    .density(AppBarDensity::{density:?})\n    .shape_family(AppBarShapeFamily::{shape:?})\n    .center_title({center_title})\n    .scroll_offset(state.scrolled)\n    .actions(vec![search_icon]);",
+            "sliver_app_bar({title:?})\n    .variant(AppBarVariant::{variant:?})\n    .density(AppBarDensity::{density:?})\n    .shape_family(AppBarShapeFamily::{shape:?})\n    .center_title({center_title})\n    .scroll_offset(app.scrolled)\n    .actions(vec![search_icon]);",
             title = state.title,
             variant = state.variant,
             density = state.density,

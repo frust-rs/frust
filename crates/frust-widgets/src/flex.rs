@@ -252,7 +252,7 @@ impl<State: 'static> FlexView<State> {
     }
 }
 
-/// An empty vertical flex, ready for fluent children: no `any()` needed.
+/// An empty vertical flex, ready for fluent children (no `any(..)` wrapping).
 ///
 /// ```
 /// use frust_widgets::{FlexView, column, text};
@@ -283,11 +283,11 @@ pub fn row<State: 'static>() -> FlexView<State> {
 /// out (`Vec::<AnyView<State>>::new()`).
 ///
 /// ```
-/// use frust_core::any;
 /// use frust_widgets::{FlexView, Row, text};
 /// # fn demo() -> (FlexView<()>, FlexView<()>) {
+/// // Same type: a `Vec`. Mixed types: a tuple, no `any(..)` needed.
 /// let labels = Row(vec![text("a"), text("b"), text("c")]);
-/// let mixed = Row(vec![any(text("a")), any(Row(vec![text("b")]))]);
+/// let mixed = Row((text("a"), Row((text("b"), text("c")))));
 /// # (labels, mixed)
 /// # }
 /// # let _ = demo();
@@ -307,11 +307,11 @@ pub fn Row<State: 'static, M>(children: impl ViewSeq<State, M>) -> FlexView<Stat
 /// out (`Vec::<AnyView<State>>::new()`).
 ///
 /// ```
-/// use frust_core::any;
-/// use frust_widgets::{FlexView, Column, text};
+/// use frust_widgets::{Column, FlexView, text};
 /// # fn demo() -> (FlexView<()>, FlexView<()>) {
+/// // Same type: a `Vec`. Mixed types: a tuple, no `any(..)` needed.
 /// let labels = Column(vec![text("a"), text("b"), text("c")]);
-/// let mixed = Column(vec![any(text("a")), any(Column(vec![text("b")]))]);
+/// let mixed = Column((text("a"), Column((text("b"), text("c")))));
 /// # (labels, mixed)
 /// # }
 /// # let _ = demo();

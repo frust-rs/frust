@@ -15,7 +15,7 @@
 //! state.
 
 use clean_signals::{AsyncState, Failure};
-use frust::AnyView;
+use frust::{AnyView, View};
 
 /// Maps a snapshot of an [`AsyncState`] to a view.
 ///
@@ -49,33 +49,55 @@ use frust::AnyView;
 ///   over (mirrors every other Frust view-producing helper).
 /// - `T`: the loaded value type.
 /// - `F`: the app's [`Failure`] type.
+/// - `L`, `D`, `E`: the view each arm returns. They may all differ; the
+///   arm that runs is erased once, inside, with [`AnyView::new`], so callers
+///   write plain views. Closures that already return `any(..)` keep working
+///   (erasure is idempotent).
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// let snapshot = state.messages.get(); // tracked read
+/// ```rust
+/// # use clean_signals::{AsyncState, Failure};
+/// # use clean_signals_frust::async_view;
+/// # use frust::{AnyView, column, text, views};
+/// # #[derive(Debug, Clone)]
+/// # struct AppFailure(String);
+/// # impl std::fmt::Display for AppFailure {
+/// #     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+/// #         f.write_str(&self.0)
+/// #     }
+/// # }
+/// # impl Failure for AppFailure {}
+/// # struct Message {
+/// #     subject: String,
+/// # }
+/// # fn inbox(snapshot: AsyncState<Vec<Message>, AppFailure>) -> AnyView<()> {
 /// async_view(
 ///     snapshot,
-///     || any(text("Loading…")),
-///     |messages: Vec<Message>| any(Column(
-///         messages.into_iter().map(|m| any(text(m.subject))).collect(),
-///     )),
-///     |failure: AppFailure| any(text(failure.user_message())),
+///     || text("Loading…"),
+///     |messages: Vec<Message>| {
+///         column().children(views::<(), _>(messages.into_iter().map(|m| text(m.subject))))
+///     },
+///     |failure: AppFailure| text(failure.user_message()),
 /// )
+/// # }
 /// ```
-pub fn async_view<S, T, F>(
+pub fn async_view<S, T, F, L, D, E>(
     state: AsyncState<T, F>,
-    loading: impl FnOnce() -> AnyView<S>,
-    data: impl FnOnce(T) -> AnyView<S>,
-    error: impl FnOnce(F) -> AnyView<S>,
+    loading: impl FnOnce() -> L,
+    data: impl FnOnce(T) -> D,
+    error: impl FnOnce(F) -> E,
 ) -> AnyView<S>
 where
     S: 'static,
     F: Failure,
+    L: View<S>,
+    D: View<S>,
+    E: View<S>,
 {
     match state {
-        AsyncState::Loading => loading(),
-        AsyncState::Data(value) | AsyncState::Reloading(value) => data(value),
-        AsyncState::Error { failure, .. } => error(failure),
+        AsyncState::Loading => AnyView::new(loading()),
+        AsyncState::Data(value) | AsyncState::Reloading(value) => AnyView::new(data(value)),
+        AsyncState::Error { failure, .. } => AnyView::new(error(failure)),
     }
 }

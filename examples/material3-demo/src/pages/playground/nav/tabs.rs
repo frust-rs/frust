@@ -5,7 +5,7 @@
 //! out as an equal-share `Expanded` unconditionally); this page mirrors that
 //! faithfully rather than inventing one.
 
-use frust::{AnyView, Component, View, any, component};
+use frust::{AnyView, Component, IconSource, View, any, component};
 use frust_material::{Tab, TabsVariant, icons, tab, tabs};
 
 use crate::AppState;
@@ -16,6 +16,7 @@ use crate::widgets::playground::{
 };
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(TabsPlayground))
 }
@@ -65,7 +66,7 @@ fn body(state: &TabsState) -> impl View<TabsState> {
 
 /// The three tabs' `(label, icon)` pairs — the reference's own `_tabs`
 /// getter.
-const TAB_SPECS: [(&str, frust::IconSource); 3] = [
+const TAB_SPECS: [(&str, IconSource); 3] = [
     ("Overview", icons::HOME),
     ("Specs", icons::TUNE),
     ("Reviews", icons::STAR_OUTLINE),
@@ -111,9 +112,9 @@ fn appearance_panel(state: &TabsState) -> AnyView<TabsState> {
 /// The FRUST-equivalent snippet for the current knob state.
 fn snippet_code(state: &TabsState) -> String {
     let tabs_block = if state.show_icons {
-        "tabs: vec![\n        tab().label(\"Overview\").icon(icons::HOME),\n        tab().label(\"Specs\").icon(icons::TUNE),\n        tab().label(\"Reviews\").icon(icons::STAR_OUTLINE),\n    ],"
+        "vec![\n        tab().label(\"Overview\").icon(icons::HOME),\n        tab().label(\"Specs\").icon(icons::TUNE),\n        tab().label(\"Reviews\").icon(icons::STAR_OUTLINE),\n    ],"
     } else {
-        "tabs: vec![\n        tab().label(\"Overview\"),\n        tab().label(\"Specs\"),\n        tab().label(\"Reviews\"),\n    ],"
+        "vec![\n        tab().label(\"Overview\"),\n        tab().label(\"Specs\"),\n        tab().label(\"Reviews\"),\n    ],"
     };
     format!(
         "tabs(\n    {tabs_block}\n    {selected},\n    on_selected,\n)\n    .variant(TabsVariant::{variant:?});",

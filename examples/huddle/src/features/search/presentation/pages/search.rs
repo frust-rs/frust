@@ -45,9 +45,9 @@
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, Axis, Color, Column, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, GestureDetector, Get, Padding, Set, SizedBox, TextInput, View, any, column, hero,
-    icon, icons, keyed, row, scroll_view, text, use_context,
+    Align, Alignment, Color, Column, CrossAxisAlignment, EdgeInsets, FlexView, GestureDetector,
+    Get, Padding, Set, SizedBox, TextInput, View, column, hero, icon, icons, row, scroll_view,
+    text, use_context,
 };
 use frust_material::{filled_card, list_item};
 
@@ -80,10 +80,10 @@ pub fn search_screen() -> impl View<HuddleState> {
     let query = controller.query.get();
     let results = controller.results.get();
 
-    let children: Vec<AnyView<HuddleState>> = vec![
-        any(search_field(controller, &query)),
-        any(results_container(&query, results, &repo)),
-    ];
+    let children = (
+        search_field(controller, &query),
+        results_container(&query, results, &repo),
+    );
 
     scaffold("Search", scroll_view(Column(children)))
 }
@@ -99,15 +99,16 @@ fn results_container(
     results: SearchResults,
     repo: &Arc<dyn SearchRepository + Send + Sync>,
 ) -> impl View<HuddleState> {
-    let children: Vec<FlexChild<HuddleState>> = if query.trim().is_empty() {
-        vec![keyed("hint", hint_view())]
-    } else if results.is_empty() {
-        vec![keyed("no-results", no_results_view(query))]
-    } else {
-        keyed_section_views(results, repo)
-    };
-
-    FlexView::new(Axis::Vertical, children)
+    let blank = query.trim().is_empty();
+    let none = !blank && results.is_empty();
+    column()
+        .when(blank, |list| list.keyed("hint", hint_view()))
+        .when(none, |list| {
+            list.keyed("no-results", no_results_view(query))
+        })
+        .when(!blank && !none, |list| {
+            keyed_section_views(list, results, repo)
+        })
 }
 
 /// The search field row: a controlled [`TextInput`] filtering as-you-type,
@@ -146,7 +147,7 @@ fn search_field(controller: SearchController, query: &str) -> impl View<HuddleSt
         clear_icon = clear_icon.color(Color::TRANSPARENT);
     }
 
-    let row: AnyView<HuddleState> = any(row()
+    let field_row = row()
         .flex(1, field)
         .child(
             GestureDetector(clear_icon).on_tap(move |_s: &mut HuddleState| {
@@ -157,10 +158,10 @@ fn search_field(controller: SearchController, query: &str) -> impl View<HuddleSt
                 }
             }),
         )
-        .cross_axis(CrossAxisAlignment::Center));
+        .cross_axis(CrossAxisAlignment::Center);
 
     SizedBox::<HuddleState>(None, Some(FIELD_HEIGHT))
-        .child(Padding(EdgeInsets::symmetric(16.0, 0.0), row))
+        .child(Padding(EdgeInsets::symmetric(16.0, 0.0), field_row))
 }
 
 /// The empty-query hint state: `icons::SEARCH` plus a short instruction.
@@ -189,38 +190,33 @@ fn no_results_view(query: &str) -> impl View<HuddleState> {
 /// it holds — survives across query edits that reorder or partially overlap
 /// the result set, instead of being torn down and rebuilt positionally.
 fn keyed_section_views(
+    list: FlexView<HuddleState>,
     results: SearchResults,
     repo: &Arc<dyn SearchRepository + Send + Sync>,
-) -> Vec<FlexChild<HuddleState>> {
-    let mut views = Vec::new();
-    if !results.channels.is_empty() {
-        views.push(keyed("header-channels", section_header("Channels")));
-        views.extend(
-            results
-                .channels
-                .into_iter()
-                .map(|c| keyed(format!("channel-{}", c.id), channel_row(c))),
-        );
-    }
-    if !results.users.is_empty() {
-        views.push(keyed("header-people", section_header("People")));
-        views.extend(
-            results
-                .users
-                .into_iter()
-                .map(|u| keyed(format!("user-{}", u.id), user_row(u))),
-        );
-    }
-    if !results.messages.is_empty() {
-        views.push(keyed("header-messages", section_header("Messages")));
-        views.extend(results.messages.into_iter().map(|hit| {
-            keyed(
-                format!("message-{}", hit.message_id),
-                message_row(hit, repo),
-            )
-        }));
-    }
-    views
+) -> FlexView<HuddleState> {
+    list.when(!results.channels.is_empty(), |list| {
+        results.channels.into_iter().fold(
+            list.keyed("header-channels", section_header("Channels")),
+            |list, c| list.keyed(format!("channel-{}", c.id), channel_row(c)),
+        )
+    })
+    .when(!results.users.is_empty(), |list| {
+        results.users.into_iter().fold(
+            list.keyed("header-people", section_header("People")),
+            |list, u| list.keyed(format!("user-{}", u.id), user_row(u)),
+        )
+    })
+    .when(!results.messages.is_empty(), |list| {
+        results.messages.into_iter().fold(
+            list.keyed("header-messages", section_header("Messages")),
+            |list, hit| {
+                list.keyed(
+                    format!("message-{}", hit.message_id),
+                    message_row(hit, repo),
+                )
+            },
+        )
+    })
 }
 
 fn section_header(label: &str) -> impl View<HuddleState> {

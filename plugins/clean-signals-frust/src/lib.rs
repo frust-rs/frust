@@ -53,7 +53,7 @@
 //! ```rust,ignore
 //! use clean_signals::{ControllerCore, async_state_signal, AsyncState};
 //! use clean_signals_frust::{use_controller, use_failure_listener};
-//! use frust::{Component, View, any, text};
+//! use frust::{Component, View, text};
 //! use std::sync::Arc;
 //!
 //! impl Component for InboxScreen {

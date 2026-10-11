@@ -113,7 +113,8 @@
 //!     child: AnyView<State>,
 //! }
 //!
-//! /// The view-fn app code calls; `any` erases the concrete child view.
+//! /// The view-fn app code calls; `any` erases the child because the view
+//! /// *stores* it in a field (storing is the one place erasure is needed).
 //! fn offset<State: 'static, V: View<State>>(offset: Point, child: V) -> OffsetView<State> {
 //!     OffsetView { offset, child: any(child) }
 //! }

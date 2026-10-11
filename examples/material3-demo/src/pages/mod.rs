@@ -48,6 +48,7 @@ pub fn brightness_action(brightness: Brightness) -> impl View<AppState> {
 ///
 /// An unknown id renders a plain message rather than an empty screen — it is
 /// reachable from a hand-typed deep link, not just from a list row.
+// erasure: keep route builders must return AnyView, and playground_scaffold takes an AnyView body
 pub fn playground_route(params: &RouteParams) -> AnyView<AppState> {
     any(
         match params.get("id").and_then(|id| catalog::find_by_id(id)) {

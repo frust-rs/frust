@@ -57,8 +57,8 @@ use frust::authoring::{
     route_event_single, teardown_child, visit_children,
 };
 use frust::{
-    AnyView, Axis, Component, CrossAxisAlignment, FlexView, IconSource, SizedBox, Stack, TextView,
-    any, column, component, icon, icons, inflexible, text,
+    Component, CrossAxisAlignment, IconSource, SizedBox, Stack, TextView, ViewSeq, any, column,
+    component, icon, icons, row, text,
 };
 use frust_beui::blocks::bloom_menu::{bloom_menu, bloom_menu_item};
 use frust_beui::blocks::command_palette::{
@@ -161,26 +161,25 @@ fn hgap(width: f64) -> impl View<State> {
     SizedBox(Some(width), None)
 }
 
-/// A centred row of controls.
-fn controls(children: Vec<AnyView<State>>) -> impl View<State> {
-    let mut spaced = Vec::with_capacity(children.len() * 2);
-    for (index, child) in children.into_iter().enumerate() {
-        if index > 0 {
-            spaced.push(any(hgap(8.0)));
-        }
-        spaced.push(child);
-    }
-    FlexView::new(
-        Axis::Horizontal,
-        spaced.into_iter().map(inflexible).collect(),
-    )
-    .cross_axis(CrossAxisAlignment::Center)
+/// A centred row of controls, 8px apart.
+fn controls<M>(children: impl ViewSeq<State, M>) -> impl View<State> {
+    let mut erased = Vec::new();
+    children.extend_views(&mut erased);
+    erased
+        .into_iter()
+        .enumerate()
+        .fold(row(), |controls, (index, child)| {
+            controls
+                .when(index > 0, |c| c.child(hgap(8.0)))
+                .child(child)
+        })
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 /// A fixed-height mounting box for an overlay host: the bounded constraints
 /// `frust_beui::overlay` requires, and a `Stack` to put the host on top of the
 /// block's own explanatory content. See the [module docs](self).
-fn stage(height: f64, children: Vec<AnyView<State>>) -> impl View<State> {
+fn stage<M>(height: f64, children: impl ViewSeq<State, M>) -> impl View<State> {
     SizedBox(None, Some(height)).child(Stack(children))
 }
 
@@ -220,7 +219,7 @@ fn palette_block(state: &State) -> impl View<State> {
 
     // The stage is 560px so the panel's own `60vh` cap clears the five rows and
     // their two group headings rather than clipping them.
-    let mounting_note = any(caption("The palette mounts over this box."));
+    let mounting_note = caption("The palette mounts over this box.");
 
     column()
         .child(section("command_palette"))
@@ -234,22 +233,20 @@ fn palette_block(state: &State) -> impl View<State> {
              own arrows and Enter reachable.",
         ))
         .child(gap(10.0))
-        .child(controls(vec![
-            any(button("Open command palette", |s: &mut State| {
+        .child(controls((
+            button("Open command palette", |s: &mut State| {
                 s.palette.open();
-            })),
-            any(caption(
-                "\u{2026} or press Ctrl / \u{2318} + K after clicking the page",
-            )),
-        ]))
+            }),
+            caption("\u{2026} or press Ctrl / \u{2318} + K after clicking the page"),
+        )))
         .child(gap(8.0))
         .child(caption(format!("Last command: {}", state.palette_log)))
         .child(gap(10.0))
         .child(stage(
             560.0,
-            vec![
+            (
                 mounting_note,
-                any(command_palette(
+                command_palette(
                     items,
                     query,
                     |s: &mut State, text: String| s.palette_query = text,
@@ -270,8 +267,8 @@ fn palette_block(state: &State) -> impl View<State> {
                     if !open {
                         s.palette_query.clear();
                     }
-                })),
-            ],
+                }),
+            ),
         ))
 }
 
@@ -308,14 +305,14 @@ fn search_block(state: &State) -> impl View<State> {
     // The trigger sits at the stage's own top edge: the panel's top lands on
     // the trigger's, so anything above it inside the stage would be painted
     // over. The block's prose stays outside the stage for the same reason.
-    let body = any(column().child(controls(vec![
-        any(morphing_search_trigger::<State>(&state.search_anchor)
+    let body = column().child(controls((
+        morphing_search_trigger::<State>(&state.search_anchor)
             .placeholder("Find components")
             .shortcut(Some("F"))
             .icon_only(state.search_icon_only)
             .open(state.search_open)
-            .on_open_change(|s: &mut State, open: bool| s.search_open = open)),
-        any(button(
+            .on_open_change(|s: &mut State, open: bool| s.search_open = open),
+        button(
             if state.search_icon_only {
                 "Full field"
             } else {
@@ -324,8 +321,8 @@ fn search_block(state: &State) -> impl View<State> {
             |s: &mut State| s.search_icon_only = !s.search_icon_only,
         )
         .tone(ButtonTone::Secondary)
-        .size(ButtonSize::Sm)),
-    ])));
+        .size(ButtonSize::Sm),
+    )));
 
     column()
         .child(section("morphing_search"))
@@ -338,9 +335,9 @@ fn search_block(state: &State) -> impl View<State> {
         .child(gap(10.0))
         .child(stage(
             400.0,
-            vec![
+            (
                 body,
-                any(morphing_search(
+                morphing_search(
                     items,
                     query,
                     |s: &mut State, text: String| s.search_query = text,
@@ -360,8 +357,8 @@ fn search_block(state: &State) -> impl View<State> {
                     if !open {
                         s.search_query.clear();
                     }
-                })),
-            ],
+                }),
+            ),
         ))
         .child(gap(8.0))
         .child(caption(format!("Last opened: {}", state.search_log)))
@@ -417,8 +414,8 @@ fn action_bar_block(state: &State) -> impl View<State> {
             .on_expanded_change(|s: &mut State, expanded: bool| s.bar_expanded = expanded),
         )
         .child(gap(10.0))
-        .child(controls(vec![
-            any(button(
+        .child(controls((
+            button(
                 if state.bar_expanded {
                     "Collapse"
                 } else {
@@ -427,9 +424,9 @@ fn action_bar_block(state: &State) -> impl View<State> {
                 |s: &mut State| s.bar_expanded = !s.bar_expanded,
             )
             .tone(ButtonTone::Secondary)
-            .size(ButtonSize::Sm)),
-            any(caption(format!("Last action: {}", state.bar_log))),
-        ]))
+            .size(ButtonSize::Sm),
+            caption(format!("Last action: {}", state.bar_log)),
+        )))
 }
 
 // ---- The overflow rail -----------------------------------------------------
@@ -453,17 +450,17 @@ fn overflow_block(state: &State) -> impl View<State> {
         .map(|item| item.label().to_string())
         .collect();
 
-    let width_buttons: Vec<AnyView<State>> = RAIL_WIDTHS
+    let width_buttons: Vec<_> = RAIL_WIDTHS
         .iter()
         .map(|(label, width)| {
             let width = *width;
-            any(button(*label, move |s: &mut State| s.rail_width = width)
+            button(*label, move |s: &mut State| s.rail_width = width)
                 .tone(if (state.rail_width - width).abs() < 0.5 {
                     ButtonTone::Primary
                 } else {
                     ButtonTone::Outline
                 })
-                .size(ButtonSize::Sm))
+                .size(ButtonSize::Sm)
         })
         .collect();
 
@@ -557,7 +554,7 @@ impl Component for CommandPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(key_scope(
+        key_scope(
             column()
                 .child(heading("Blocks \u{b7} Command"))
                 .child(gap(8.0))
@@ -578,7 +575,7 @@ impl Component for CommandPage {
             |s: &mut State| {
                 s.palette.toggle();
             },
-        ))
+        )
     }
 }
 
@@ -598,6 +595,7 @@ fn key_scope<State: 'static, V: View<State>>(
     on_chord: impl Fn(&mut State) + 'static,
 ) -> KeyScopeView<State> {
     KeyScopeView {
+        // erasure: keep stored child, fed to the hand-written view's ChildPod
         child: any(child),
         on_chord: Rc::new(on_chord),
     }

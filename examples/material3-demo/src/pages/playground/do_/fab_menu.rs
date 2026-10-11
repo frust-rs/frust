@@ -75,14 +75,14 @@ fn body(state: &Knobs) -> impl View<Knobs> {
         vec![play_preview_card("FAB menu", preview(state))],
         vec![play_snippet(
             "FAB menu",
-            "let trigger_icon = if open { icons::CLOSE } else { icons::ADD };\n\
-             fab_menu(\n    any(icon(trigger_icon)),\n    open,\n    vec![\n        \
-             fab_menu_item(any(icon(icons::IMAGE)), \"Image\", on_select),\n        \
-             fab_menu_item(any(icon(icons::VIDEOCAM)), \"Video\", on_select),\n        \
-             fab_menu_item(any(icon(icons::MIC)), \"Audio\", on_select),\n    ],\n    \
+            "let trigger_icon = if state.open { icons::CLOSE } else { icons::ADD };\n\
+             fab_menu(\n    icon(trigger_icon),\n    state.open,\n    vec![\n        \
+             fab_menu_item(icon(icons::IMAGE), \"Image\", |_: &mut State| {}),\n        \
+             fab_menu_item(icon(icons::VIDEOCAM), \"Video\", |_: &mut State| {}),\n        \
+             fab_menu_item(icon(icons::MIC), \"Audio\", |_: &mut State| {}),\n    ],\n    \
              |state: &mut State| state.open = !state.open,\n);",
         )],
-        vec![],
+        Vec::<AnyView<Knobs>>::new(),
     )
 }
 
@@ -102,6 +102,7 @@ impl Component for FabMenuPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(FabMenuPlayground))
 }

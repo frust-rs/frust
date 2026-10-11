@@ -9,8 +9,8 @@ clean-signals use cases and react to their failures without hand-written glue.
 ```toml
 [dependencies]
 clean-signals = "0.1"
-clean-signals-frust = "0.5"
-frust = { package = "frust-ui", version = "0.5" }
+clean-signals-frust = "0.6"
+frust = { package = "frust-ui", version = "0.6" }
 ```
 
 The Frust facade crate is published on crates.io as `frust-ui` because the name

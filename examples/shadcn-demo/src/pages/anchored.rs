@@ -17,7 +17,7 @@
 //! and costs one layout pass. Wrapping the mount in an `if` stays valid and
 //! correct; it just truncates the exit.
 
-use frust::{SizedBox, Stack, View, any, column, row, text};
+use frust::{SizedBox, View, column, row, stack, text};
 use frust_shadcn::overlay::{OverlayAlign, OverlayAnchor, OverlaySide, anchor};
 use frust_shadcn::{
     ButtonVariant, TooltipHover, combobox, combobox_item, combobox_trigger, context_menu,
@@ -271,109 +271,111 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     // only the static body scrolls: a scroll view around the stack would hand
     // the hosts an infinite max height, which they coerce to a zero-height area
     // (a tooltip clamped to `y = 0`, an anchored panel with nowhere to sit).
-    let mut layers: Vec<frust::AnyView<AppState>> = vec![any(crate::scroll_slot(any(base)))];
-
-    layers.push(any(popover(text(
-        "Placement knobs move me around the trigger.",
-    ))
-    .anchor(&popover_anchor)
-    .side(side)
-    .align(align)
-    .offset(offset)
-    .open(popover_open)
-    .on_open_change(|s: &mut AppState, open: bool| {
-        s.anchored.popover_open = open;
-    })));
-
-    layers.push(any(popover(text("I flip when the bottom edge is tight."))
-        .anchor(&flip_anchor)
-        .open(flip_open)
-        .on_open_change(|s: &mut AppState, open: bool| {
-            s.anchored.flip_open = open;
-        })));
-
-    layers.push(any(tooltip(&tooltip_hover, "A tooltip, 700ms after rest")));
-    layers.push(any(hover_card(
-        &hover_card_hover,
-        column()
-            .child(text("Hover card").size(14.0))
-            .child(text("Crossing onto this panel keeps it open.").size(12.0)),
-    )));
-
-    layers.push(any(dropdown_menu(
-        vec![
-            dropdown_menu_label("Actions"),
-            dropdown_menu_item("Bold")
-                .checked(dropdown_bold)
-                .shortcut("\u{2318}B"),
-            dropdown_menu_item("Italic").shortcut("\u{2318}I"),
-            dropdown_menu_separator(),
-            dropdown_menu_item("Align left").radio(dropdown_align == "left"),
-            dropdown_menu_item("Align center").radio(dropdown_align == "center"),
-            dropdown_menu_item("Align right").radio(dropdown_align == "right"),
-            dropdown_menu_separator(),
-            dropdown_menu_item("Disabled row").disabled(true),
-            dropdown_menu_item("More").submenu(vec![
-                dropdown_menu_item("Duplicate"),
-                dropdown_menu_item("Archive"),
-            ]),
-        ],
-        move |s: &mut AppState, index: usize| match index {
-            1 => s.anchored.dropdown_bold = !s.anchored.dropdown_bold,
-            4 => s.anchored.dropdown_align = "left".to_string(),
-            5 => s.anchored.dropdown_align = "center".to_string(),
-            6 => s.anchored.dropdown_align = "right".to_string(),
-            _ => {}
-        },
-    )
-    .anchor(&dropdown_anchor)
-    .open(dropdown_open)
-    .on_open_change(|s: &mut AppState, open: bool| {
-        s.anchored.dropdown_open = open;
-    })));
-
-    layers.push(any(context_menu(
-        vec![
-            dropdown_menu_item("Copy").shortcut("\u{2318}C"),
-            dropdown_menu_item("Paste").shortcut("\u{2318}V"),
-            dropdown_menu_separator(),
-            dropdown_menu_item("Delete"),
-        ],
-        |_: &mut AppState, _index: usize| {},
-    )
-    .anchor(&context_menu_anchor)
-    .open(context_menu_open)
-    .on_open_change(|s: &mut AppState, open: bool| {
-        s.anchored.context_menu_open = open;
-    })));
-
-    layers.push(any(select(
-        fruit_options(),
-        select_value,
-        |s: &mut AppState, index: usize| {
-            s.anchored.select_value = Some(index);
-            s.anchored.select_open = false;
-        },
-    )
-    .anchor(&select_anchor)
-    .open(select_open)));
-
-    layers.push(any(combobox(
-        FRUITS.iter().map(|f| combobox_item(*f)).collect(),
-        combobox_query,
-        |s: &mut AppState, q: String| {
-            s.anchored.combobox_query = q;
-        },
-        move |s: &mut AppState, index: usize| {
-            s.anchored.combobox_value = FRUITS.get(index).map(|f| f.to_string());
-            s.anchored.combobox_open = false;
-            s.anchored.combobox_query.clear();
-        },
-    )
-    .anchor(&combobox_anchor)
-    .open(combobox_open)));
-
-    Stack(layers)
+    stack()
+        .child(crate::scroll_slot(base))
+        .child(
+            popover(text("Placement knobs move me around the trigger."))
+                .anchor(&popover_anchor)
+                .side(side)
+                .align(align)
+                .offset(offset)
+                .open(popover_open)
+                .on_open_change(|s: &mut AppState, open: bool| {
+                    s.anchored.popover_open = open;
+                }),
+        )
+        .child(
+            popover(text("I flip when the bottom edge is tight."))
+                .anchor(&flip_anchor)
+                .open(flip_open)
+                .on_open_change(|s: &mut AppState, open: bool| {
+                    s.anchored.flip_open = open;
+                }),
+        )
+        .child(tooltip(&tooltip_hover, "A tooltip, 700ms after rest"))
+        .child(hover_card(
+            &hover_card_hover,
+            column()
+                .child(text("Hover card").size(14.0))
+                .child(text("Crossing onto this panel keeps it open.").size(12.0)),
+        ))
+        .child(
+            dropdown_menu(
+                vec![
+                    dropdown_menu_label("Actions"),
+                    dropdown_menu_item("Bold")
+                        .checked(dropdown_bold)
+                        .shortcut("\u{2318}B"),
+                    dropdown_menu_item("Italic").shortcut("\u{2318}I"),
+                    dropdown_menu_separator(),
+                    dropdown_menu_item("Align left").radio(dropdown_align == "left"),
+                    dropdown_menu_item("Align center").radio(dropdown_align == "center"),
+                    dropdown_menu_item("Align right").radio(dropdown_align == "right"),
+                    dropdown_menu_separator(),
+                    dropdown_menu_item("Disabled row").disabled(true),
+                    dropdown_menu_item("More").submenu(vec![
+                        dropdown_menu_item("Duplicate"),
+                        dropdown_menu_item("Archive"),
+                    ]),
+                ],
+                move |s: &mut AppState, index: usize| match index {
+                    1 => s.anchored.dropdown_bold = !s.anchored.dropdown_bold,
+                    4 => s.anchored.dropdown_align = "left".to_string(),
+                    5 => s.anchored.dropdown_align = "center".to_string(),
+                    6 => s.anchored.dropdown_align = "right".to_string(),
+                    _ => {}
+                },
+            )
+            .anchor(&dropdown_anchor)
+            .open(dropdown_open)
+            .on_open_change(|s: &mut AppState, open: bool| {
+                s.anchored.dropdown_open = open;
+            }),
+        )
+        .child(
+            context_menu(
+                vec![
+                    dropdown_menu_item("Copy").shortcut("\u{2318}C"),
+                    dropdown_menu_item("Paste").shortcut("\u{2318}V"),
+                    dropdown_menu_separator(),
+                    dropdown_menu_item("Delete"),
+                ],
+                |_: &mut AppState, _index: usize| {},
+            )
+            .anchor(&context_menu_anchor)
+            .open(context_menu_open)
+            .on_open_change(|s: &mut AppState, open: bool| {
+                s.anchored.context_menu_open = open;
+            }),
+        )
+        .child(
+            select(
+                fruit_options(),
+                select_value,
+                |s: &mut AppState, index: usize| {
+                    s.anchored.select_value = Some(index);
+                    s.anchored.select_open = false;
+                },
+            )
+            .anchor(&select_anchor)
+            .open(select_open),
+        )
+        .child(
+            combobox(
+                FRUITS.iter().map(|f| combobox_item(*f)).collect(),
+                combobox_query,
+                |s: &mut AppState, q: String| {
+                    s.anchored.combobox_query = q;
+                },
+                move |s: &mut AppState, index: usize| {
+                    s.anchored.combobox_value = FRUITS.get(index).map(|f| f.to_string());
+                    s.anchored.combobox_open = false;
+                    s.anchored.combobox_query.clear();
+                },
+            )
+            .anchor(&combobox_anchor)
+            .open(combobox_open),
+        )
 }
 
 fn button<F: Fn(&mut AppState) + 'static>(

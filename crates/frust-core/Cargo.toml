@@ -24,6 +24,6 @@ frust-hotpatch = { workspace = true, optional = true }
 # Compiles `PaintCtx::for_test` so an app can paint a clock-dependent widget at a chosen time;
 # `set_frame_time` stays `pub(crate)` (only `RenderRoot::paint` advances the clock). Off by default.
 test-support = []
-# Opt-in, never default: routes every `Component::build` through frust-hotpatch's jump table so `dx` hot
-# patches take effect; absent, `frust-hotpatch` is not in the dependency graph. Dev-profile mechanism (spike).
+# Opt-in, never default: the frust-hotpatch runtime for debug hot-patch runs (`frust run --watch`),
+# routing every `Component::build` through its jump table; absent, it is not in the dependency graph.
 hotpatch = ["dep:frust-hotpatch"]

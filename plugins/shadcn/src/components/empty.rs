@@ -63,7 +63,7 @@ pub struct EmptyColumnView<State: 'static> {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn empty<State: 'static, M>(children: impl ViewSeq<State, M>) -> EmptyColumnView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);
@@ -79,7 +79,7 @@ pub fn empty<State: 'static, M>(children: impl ViewSeq<State, M>) -> EmptyColumn
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn empty_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> EmptyColumnView<State> {
     let mut erased = Vec::new();
     children.extend_views(&mut erased);
@@ -95,7 +95,7 @@ pub fn empty_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> Empt
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn empty_content<State: 'static, M>(
     children: impl ViewSeq<State, M>,
 ) -> EmptyColumnView<State> {

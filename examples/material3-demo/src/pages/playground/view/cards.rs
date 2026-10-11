@@ -1,8 +1,7 @@
 //! Cards: the reference's `CardsPlayground`.
 
 use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, Theme, View, any, column, component,
-    text,
+    AnyView, Component, CrossAxisAlignment, SizedBox, Theme, View, any, column, component, text,
 };
 use frust_material::{CardVariant, card};
 
@@ -61,6 +60,7 @@ impl Component for CardsPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(CardsPlayground))
 }
@@ -132,25 +132,24 @@ fn all_variants_preview(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
 
 /// The tile column [`all_variants_preview`] wraps in a [`play_preview_card`].
 fn all_variants_column(theme: &Theme, state: &Knobs) -> impl View<Knobs> {
-    let mut rows: Vec<AnyView<Knobs>> = Vec::new();
-    for (index, variant) in VARIANTS.iter().enumerate() {
-        if index > 0 {
-            rows.push(any(SizedBox::<Knobs>(None, Some(ALL_VARIANTS_GAP))));
-        }
-        let content = card_body::<Knobs>(theme, variant_label(*variant), &state.body);
-        let mut view = card(*variant, content);
-        if state.tappable {
-            view = view.on_press(|_: &mut Knobs| {});
-        }
-        rows.push(any(
-            SizedBox::<Knobs>(Some(ALL_VARIANTS_TILE_WIDTH), None).child(view)
-        ));
-    }
-    Column(rows)
+    VARIANTS
+        .iter()
+        .enumerate()
+        .fold(column(), |col, (index, variant)| {
+            let content = card_body::<Knobs>(theme, variant_label(*variant), &state.body);
+            let mut view = card(*variant, content);
+            if state.tappable {
+                view = view.on_press(|_: &mut Knobs| {});
+            }
+            col.when(index > 0, |col| {
+                col.child(SizedBox::<Knobs>(None, Some(ALL_VARIANTS_GAP)))
+            })
+            .child(SizedBox::<Knobs>(Some(ALL_VARIANTS_TILE_WIDTH), None).child(view))
+        })
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {
-    control_panel::<Knobs>(
+    control_panel::<Knobs, _>(
         "Appearance",
         vec![
             play_enum_segmented::<Knobs, CardVariant>(
@@ -184,16 +183,19 @@ fn controls(state: &Knobs) -> AnyView<Knobs> {
 fn snippet(state: &Knobs) -> PlaySnippet {
     let variant = format!("{:?}", state.variant);
     let mut code = format!(
-        "card(CardVariant::{variant}, Column(vec![\n\
-         \u{20}   any(text({title:?})),\n\
-         \u{20}   any(SizedBox::<State>(None, Some(4.0))),\n\
-         \u{20}   any(text({body:?})),\n\
-         ]))",
+        "card(\n\
+         \u{20}   CardVariant::{variant},\n\
+         \u{20}   column()\n\
+         \u{20}       .child(text({title:?}))\n\
+         \u{20}       .child(SizedBox(None, Some(4.0)))\n\
+         \u{20}       .child(text({body:?}))\n\
+         \u{20}       .cross_axis(CrossAxisAlignment::Start),\n\
+         )",
         title = state.title,
         body = state.body,
     );
     if state.tappable {
-        code.push_str("\n    .on_press(|_: &mut State| {});");
+        code.push_str("\n.on_press(|_: &mut App| {});");
     } else {
         code.push(';');
     }

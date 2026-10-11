@@ -8,7 +8,7 @@
 //! `SizedBox` — this page itself scrolls, and a scroll view hands its child an
 //! unbounded height.
 
-use frust::{AnyView, EdgeInsets, Padding, SizedBox, View, any, column, icon, icons, text};
+use frust::{EdgeInsets, Padding, SizedBox, View, column, icon, icons, text};
 use frust_shadcn::{
     ButtonVariant, ResizableDirection, SidebarCollapsible, SidebarSide, SidebarVariant, button,
     card, card_content, card_header, card_title, carousel, resizable_handle, resizable_panel,
@@ -45,11 +45,11 @@ fn gap() -> impl View<AppState> {
 }
 
 /// One carousel slide: a card with a large ordinal.
-fn slide(index: usize) -> AnyView<AppState> {
-    any(card(vec![
+fn slide(index: usize) -> impl View<AppState> {
+    card(vec![
         card_header(vec![card_title(format!("Slide {}", index + 1))]),
         card_content(text("Drag the slide sideways, or use the outline arrows.").size(13.0)),
-    ]))
+    ])
 }
 
 /// One resizable panel's filling: a padded label on the panel's own surface.
@@ -69,12 +69,12 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     let mini_open = state.mini_open;
     let mini_item = state.mini_item;
 
-    let slides: Vec<AnyView<AppState>> = (0..5).map(slide).collect();
-    let thirds: Vec<AnyView<AppState>> = (0..6)
+    let slides: Vec<_> = (0..5).map(slide).collect();
+    let thirds: Vec<_> = (0..6)
         .map(|i| {
-            any(card(vec![card_content(
+            card(vec![card_content(
                 text(format!("Item {}", i + 1)).size(13.0),
-            )]))
+            )])
         })
         .collect();
 
@@ -166,24 +166,24 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
         .child(SizedBox(None, Some(8.0)))
         .child(
             SizedBox::<AppState>(None, Some(300.0)).child(sidebar_provider(
-                sidebar(sidebar_content(vec![sidebar_group(vec![
-                    any(sidebar_group_label("Mail")),
+                sidebar(sidebar_content(vec![sidebar_group((
+                    sidebar_group_label("Mail"),
                     sidebar_menu(
                         MINI_ITEMS
                             .iter()
                             .enumerate()
                             .map(|(index, label)| {
-                                any(sidebar_menu_item(vec![
+                                sidebar_menu_item(vec![
                                     sidebar_menu_button(*label, move |s: &mut AppState| {
                                         s.layout.mini_item = index;
                                     })
                                     .icon(icon(icons::FORUM).size(16.0))
                                     .active(index == mini_item),
-                                ]))
+                                ])
                             })
                             .collect::<Vec<_>>(),
                     ),
-                ])]))
+                ))]))
                 .header(sidebar_header(vec![text("Floating").size(14.0)]))
                 .side(SidebarSide::Right)
                 .variant(SidebarVariant::Floating)

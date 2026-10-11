@@ -166,7 +166,7 @@ fn config(side: DrawerSide) -> ModalConfig {
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn drawer<State: 'static, M>(
     side: DrawerSide,
     children: impl ViewSeq<State, M>,
@@ -183,7 +183,7 @@ pub fn drawer<State: 'static, M>(
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn drawer_header<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     stack_slots(children, HEADER_GAP, EdgeInsets::all(SLOT_PAD))
 }
@@ -203,7 +203,7 @@ pub fn drawer_description<State: 'static>(description: impl Into<String>) -> Any
 ///
 /// The list is any [`ViewSeq`] — a tuple of mixed view types (`(a, b, c)`),
 /// a `Vec`/array of one type, an `Option`, or `views(iter)` — erased once here,
-/// so no element needs `any(..)`.
+/// so elements need no manual erasure.
 pub fn drawer_footer<State: 'static, M>(children: impl ViewSeq<State, M>) -> AnyView<State> {
     stack_slots(children, FOOTER_GAP, EdgeInsets::all(SLOT_PAD))
 }

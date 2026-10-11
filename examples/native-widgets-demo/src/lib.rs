@@ -55,7 +55,7 @@ use frust::motion::switcher::pattern_switcher;
 use frust::{
     Axis, Brightness, ButtonStyle, Color, Component, DeepLink, EdgeInsets, FlexView, Get,
     GetUntracked, NavigatorController, Padding, RwSignal, Set, SizedBox, Theme, TransitionSpec,
-    Update, View, any, button, column, deep_links, flexible, icon, icon_button, icons, inflexible,
+    Update, View, button, column, deep_links, flexible, icon, icon_button, icons, inflexible,
     navigator, safe_area, scroll_view, set_app_theme, stack,
 };
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
@@ -438,9 +438,9 @@ fn demo_app_bar(state: &NativeWidgetsDemoState) -> impl View<NativeWidgetsDemoSt
         .unwrap_or_else(frust_glyph::baseline)
         .scheme()
         .primary;
-    let brand = any(icon(icons::PLUG).size(20.0).color(accent));
+    let brand = icon(icons::PLUG).size(20.0).color(accent);
 
-    let brightness_btn = any(icon_button(
+    let brightness_btn = icon_button(
         brightness_mark,
         brightness_label,
         |state: &mut NativeWidgetsDemoState| {
@@ -451,11 +451,11 @@ fn demo_app_bar(state: &NativeWidgetsDemoState) -> impl View<NativeWidgetsDemoSt
             state.brightness.set(next);
             apply_theme(next);
         },
-    ));
+    );
 
     frust_glyph::app_bar::<NativeWidgetsDemoState>("native widgets")
         .leading(brand)
-        .actions(vec![brightness_btn])
+        .actions((brightness_btn,))
 }
 
 /// Sections per navigation row — eight labelled buttons do not fit one

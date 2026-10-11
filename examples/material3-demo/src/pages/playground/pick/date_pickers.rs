@@ -260,10 +260,10 @@ fn dialogs_preview(
 fn calendar_snippet(picker: &DatePickerState) -> PlaySnippet {
     let code = format!(
         "calendar_date_picker(\n    \
-             state.picker.clone().with_mode(DatePickerMode::{mode:?}),\n    \
+             app.picker.clone().with_mode(DatePickerMode::{mode:?}),\n    \
              MaterialDate::new(2020, 1, 1),\n    \
              MaterialDate::new(2030, 12, 31),\n    \
-             |state, next| state.picker = next,\n\
+             |app: &mut App, next: DatePickerState| app.picker = next,\n\
          )\n\
          .today(MaterialDate::new(2026, 8, 20));",
         mode = picker.mode,
@@ -275,17 +275,17 @@ fn calendar_snippet(picker: &DatePickerState) -> PlaySnippet {
 fn dialog_snippet(picker: &DatePickerState) -> PlaySnippet {
     let code = format!(
         "show_date_picker(\n    \
-             &nav,\n    \
+             &app.nav,\n    \
              || date_picker_dialog(\n        \
-                 state.picker.clone().with_entry_mode(DatePickerEntryMode::{entry:?}),\n        \
+                 app.picker.clone().with_entry_mode(DatePickerEntryMode::{entry:?}),\n        \
                  MaterialDate::new(2020, 1, 1),\n        \
                  MaterialDate::new(2030, 12, 31),\n        \
-                 |state, next| state.picker = next,\n    \
+                 |app: &mut App, next: DatePickerState| app.picker = next,\n    \
              )\n    \
              .today(MaterialDate::new(2026, 8, 20)),\n    \
-             |state, result| {{\n        \
+             |app: &mut App, result: PopResult| {{\n        \
                  if let Some(date) = result.take::<MaterialDate>() {{\n            \
-                     state.confirmed = Some(date);\n        \
+                     app.confirmed = Some(date);\n        \
                  }}\n    \
              }},\n\
          );",
@@ -433,7 +433,7 @@ impl Component for DatePickersPlayground {
         let entry_mode_open = state.entry_mode_open;
         let calendar_mode_anchor = state.calendar_mode_anchor.clone();
         let calendar_mode_open = state.calendar_mode_open;
-        any(navigator(&state.nav, move || {
+        navigator(&state.nav, move || {
             content(
                 &nav,
                 picker,
@@ -443,11 +443,12 @@ impl Component for DatePickersPlayground {
                 &calendar_mode_anchor,
                 calendar_mode_open.get(),
             )
-        }))
+        })
     }
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(DatePickersPlayground))
 }

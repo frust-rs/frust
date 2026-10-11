@@ -127,7 +127,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "Stop a session and relaunch the same target, mode, and project root as a NEW session (frust has no hot reload — this is a full restart, so it rebuilds). Returns both the stopped session and the new one; the new id is what every later tool call should use."
+        description = "Stop a session and relaunch the same target, mode, and project root as a NEW session. This is always a full restart: it rebuilds and resets app state. (A debug `frust run --watch` session hot-patches saves on its own and state is kept; use this tool when a session reports `restart required`.) Returns both the stopped session and the new one; the new id is what every later tool call should use."
     )]
     async fn restart_app(
         &self,

@@ -13,8 +13,7 @@
 //! any ambient state tree.
 
 use frust::{
-    AnyView, Component, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, View, any, column,
-    component, row,
+    Component, CrossAxisAlignment, EdgeInsets, Padding, SizedBox, View, column, component, row,
 };
 use frust_shadcn::{
     BubbleAlign, BubbleVariant, ButtonVariant, MessageAlign, avatar, bubble, button, input,
@@ -125,17 +124,17 @@ impl Component for Pill {
     fn init(&self) -> Self::State {}
 
     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
-        any(bubble(self.body.clone())
+        bubble(self.body.clone())
             .variant(self.variant)
-            .align(self.align))
+            .align(self.align)
     }
 }
 
 /// One transcript row: an avatar plus a headed bubble for the other party, a
 /// trailing-aligned bubble with a footer for the local user.
-fn transcript_row(entry: &Message) -> AnyView<AppState> {
+fn transcript_row(entry: &Message) -> impl View<AppState> + use<> {
     if entry.mine {
-        any(message_scroller_item(
+        message_scroller_item(
             message(vec![message_content((
                 component(Pill {
                     body: entry.body.clone(),
@@ -145,9 +144,9 @@ fn transcript_row(entry: &Message) -> AnyView<AppState> {
                 message_footer("Sent").align(MessageAlign::End),
             ))])
             .align(MessageAlign::End),
-        ))
+        )
     } else {
-        any(message_scroller_item(message((
+        message_scroller_item(message((
             message_avatar(avatar::<AppState>().fallback("RB")),
             message_content((
                 message_header(entry.who.clone()),
@@ -157,7 +156,7 @@ fn transcript_row(entry: &Message) -> AnyView<AppState> {
                     align: BubbleAlign::Start,
                 }),
             )),
-        ))))
+        )))
     }
 }
 
@@ -166,7 +165,7 @@ pub fn page(state: &mut State) -> impl View<AppState> + use<> {
     let draft = state.draft.clone();
     let count = state.messages.len();
 
-    let items: Vec<AnyView<AppState>> = state.messages.iter().map(transcript_row).collect();
+    let items: Vec<_> = state.messages.iter().map(transcript_row).collect();
 
     let header = frust::column()
         .child(crate::nav::heading("Chat"))

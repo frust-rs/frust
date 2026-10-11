@@ -12,10 +12,7 @@
 //! terms/updates checkboxes, the four-plan radio group, the email/password
 //! form, the five slider readouts, and the month/day/year date drum.
 
-use frust::{
-    AnyView, Column, Component, CrossAxisAlignment, SizedBox, View, any, column, component, row,
-    text,
-};
+use frust::{Component, CrossAxisAlignment, SizedBox, View, ViewSeq, column, component, row, text};
 use frust_beui::components::button::{ButtonSize, ButtonTone, button};
 use frust_beui::components::checkbox::checkbox;
 use frust_beui::components::input::input;
@@ -108,21 +105,20 @@ fn hgap(width: f64) -> impl View<State> {
 
 /// One component's block: its name, a one-line note (where a ported
 /// degradation is stated), and the live instances.
-fn demo(title: &str, note: &str, body: Vec<AnyView<State>>) -> impl View<State> {
-    let mut children = vec![
-        any(text(title.to_string()).size(16.0)),
-        any(gap(4.0)),
-        any(caption(note.to_string())),
-        any(gap(12.0)),
-    ];
-    children.extend(body);
-    children.push(any(gap(32.0)));
-    Column(children).cross_axis(CrossAxisAlignment::Start)
+fn demo<M>(title: &str, note: &str, body: impl ViewSeq<State, M>) -> impl View<State> {
+    column()
+        .child(text(title.to_string()).size(16.0))
+        .child(gap(4.0))
+        .child(caption(note.to_string()))
+        .child(gap(12.0))
+        .children(body)
+        .child(gap(32.0))
+        .cross_axis(CrossAxisAlignment::Start)
 }
 
 /// A control beside the visible text upstream renders as a sibling element —
 /// `switch`, `checkbox` and `radio` all paint no label of their own.
-fn labelled(control: AnyView<State>, label: &str) -> impl View<State> {
+fn labelled(control: impl View<State>, label: &str) -> impl View<State> {
     row()
         .child(control)
         .child(hgap(10.0))
@@ -131,7 +127,7 @@ fn labelled(control: AnyView<State>, label: &str) -> impl View<State> {
 }
 
 /// A slider row: the control at a fixed width under its own readout.
-fn slider_row(label: &str, readout: String, control: AnyView<State>) -> impl View<State> {
+fn slider_row(label: &str, readout: String, control: impl View<State>) -> impl View<State> {
     column()
         .child(
             row()
@@ -163,71 +159,70 @@ fn days_in(month: &str, year: i32) -> usize {
 
 /// [`switch`], [`checkbox`] and [`radio`] — the three boolean/selection rings.
 fn toggles(state: &State) -> impl View<State> {
-    let switches = any(column()
+    let switches = column()
         .child(labelled(
-            any(switch(state.switch_on, |s: &mut State, v| s.switch_on = v)
-                .label("Enable notifications")),
+            switch(state.switch_on, |s: &mut State, v| s.switch_on = v)
+                .label("Enable notifications"),
             "Enable notifications",
         ))
         .child(gap(12.0))
         .child(labelled(
-            any(switch(state.switch_off, |s: &mut State, v| s.switch_off = v).label("Off")),
+            switch(state.switch_off, |s: &mut State, v| s.switch_off = v).label("Off"),
             "Off",
         ))
         .child(gap(12.0))
         .child(labelled(
-            any(switch(true, |_: &mut State, _| {})
+            switch(true, |_: &mut State, _| {})
                 .disabled(true)
-                .label("Disabled")),
+                .label("Disabled"),
             "Disabled \u{b7} the refusal shake",
         ))
-        .cross_axis(CrossAxisAlignment::Start));
+        .cross_axis(CrossAxisAlignment::Start);
 
-    let checkboxes = any(column()
+    let checkboxes = column()
         .child(labelled(
-            any(checkbox(state.terms, |s: &mut State, v| s.terms = v)
-                .label("Accept terms and conditions")),
+            checkbox(state.terms, |s: &mut State, v| s.terms = v)
+                .label("Accept terms and conditions"),
             "Accept terms and conditions",
         ))
         .child(gap(12.0))
         .child(labelled(
-            any(checkbox(state.updates, |s: &mut State, v| s.updates = v)
-                .label("Email me product updates")),
+            checkbox(state.updates, |s: &mut State, v| s.updates = v)
+                .label("Email me product updates"),
             "Email me product updates",
         ))
         .child(gap(12.0))
         .child(labelled(
-            any(checkbox(true, |_: &mut State, _| {})
+            checkbox(true, |_: &mut State, _| {})
                 .indeterminate(true)
-                .label("Select all (partial)")),
+                .label("Select all (partial)"),
             "Select all (partial)",
         ))
         .child(gap(12.0))
         .child(labelled(
-            any(checkbox(true, |_: &mut State, _| {})
+            checkbox(true, |_: &mut State, _| {})
                 .disabled(true)
-                .label("Disabled")),
+                .label("Disabled"),
             "Disabled",
         ))
-        .cross_axis(CrossAxisAlignment::Start));
+        .cross_axis(CrossAxisAlignment::Start);
 
-    let mut radios: Vec<AnyView<State>> = Vec::new();
-    for (value, label) in PLANS {
-        if !radios.is_empty() {
-            radios.push(any(gap(12.0)));
-        }
-        let selected = state.plan == value;
-        let disabled = value == "legacy";
-        radios.push(any(labelled(
-            any(radio(selected, move |s: &mut State| {
-                s.plan = value.to_string();
-            })
-            .disabled(disabled)
-            .label(label)),
-            label,
-        )));
-    }
-    let radios = any(Column(radios).cross_axis(CrossAxisAlignment::Start));
+    let radios = PLANS
+        .into_iter()
+        .enumerate()
+        .fold(column(), |radios, (i, (value, label))| {
+            let selected = state.plan == value;
+            let disabled = value == "legacy";
+            radios.when(i > 0, |c| c.child(gap(12.0))).child(labelled(
+                radio(selected, move |s: &mut State| {
+                    s.plan = value.to_string();
+                })
+                .disabled(disabled)
+                .label(label),
+                label,
+            ))
+        })
+        .cross_axis(CrossAxisAlignment::Start);
 
     demo(
         "switch \u{b7} checkbox \u{b7} radio",
@@ -237,13 +232,13 @@ fn toggles(state: &State) -> impl View<State> {
          (the mark still collapses on opacity and scale), and the radio dot \
          pops in place rather than gliding between items: there is no \
          shared-layout registry spanning sibling widgets here.",
-        vec![any(row()
+        row()
             .child(switches)
             .child(hgap(40.0))
             .child(checkboxes)
             .child(hgap(40.0))
             .child(radios)
-            .cross_axis(CrossAxisAlignment::Start))],
+            .cross_axis(CrossAxisAlignment::Start),
     )
 }
 
@@ -285,20 +280,20 @@ fn inputs(state: &State) -> impl View<State> {
          field shows the success check. No leading/trailing icon slots are \
          ported, and inner padding is symmetric, so the check sits in the \
          trailing padding rather than in reserved space.",
-        vec![
-            any(row()
+        (
+            row()
                 .child(field(email))
                 .child(hgap(24.0))
                 .child(field(password))
-                .cross_axis(CrossAxisAlignment::Start)),
-            any(gap(16.0)),
-            any(row()
+                .cross_axis(CrossAxisAlignment::Start),
+            gap(16.0),
+            row()
                 .child(field(query))
                 .child(hgap(24.0))
                 .child(field(disabled))
-                .cross_axis(CrossAxisAlignment::Start)),
-            any(gap(12.0)),
-            any(button(
+                .cross_axis(CrossAxisAlignment::Start),
+            gap(12.0),
+            button(
                 if state.show_password {
                     "Hide password"
                 } else {
@@ -307,8 +302,8 @@ fn inputs(state: &State) -> impl View<State> {
                 |s: &mut State| s.show_password = !s.show_password,
             )
             .tone(ButtonTone::Outline)
-            .size(ButtonSize::Sm)),
-        ],
+            .size(ButtonSize::Sm),
+        ),
     )
 }
 
@@ -317,65 +312,57 @@ fn sliders(state: &State) -> impl View<State> {
     let default = slider_row(
         "Default \u{b7} tick dots, stretching thumb",
         format!("{:.0}", state.slider_default),
-        any(range_slider(state.slider_default, |s: &mut State, v| {
+        range_slider(state.slider_default, |s: &mut State, v| {
             s.slider_default = v
         })
         .step(5.0)
         .show_ticks(true)
-        .label("Value")),
+        .label("Value"),
     );
 
     let bubble = slider_row(
         "Bubble \u{b7} drag fast and it leans",
         format!("{:.0}", state.slider_bubble),
-        any(
-            range_slider(state.slider_bubble, |s: &mut State, v| s.slider_bubble = v)
-                .variant(RangeSliderVariant::Bubble)
-                .label("Value"),
-        ),
+        range_slider(state.slider_bubble, |s: &mut State, v| s.slider_bubble = v)
+            .variant(RangeSliderVariant::Bubble)
+            .label("Value"),
     );
 
     let fluid = slider_row(
         "Fluid \u{b7} the pill is the control",
         format!("{:.0}%", state.slider_fluid),
-        any(
-            range_slider(state.slider_fluid, |s: &mut State, v| s.slider_fluid = v)
-                .variant(RangeSliderVariant::Fluid)
-                .label("Brightness"),
-        ),
+        range_slider(state.slider_fluid, |s: &mut State, v| s.slider_fluid = v)
+            .variant(RangeSliderVariant::Fluid)
+            .label("Brightness"),
     );
 
     let ruler = slider_row(
         "Ruler \u{b7} fling it and it snaps to a tick",
         format!("{:.1} kg", state.slider_ruler),
-        any(
-            range_slider(state.slider_ruler, |s: &mut State, v| s.slider_ruler = v)
-                .variant(RangeSliderVariant::Ruler)
-                .range(40.0, 120.0)
-                .step(0.5)
-                .ruler(12.0, 10)
-                .unit("kg")
-                .label("Weight"),
-        ),
+        range_slider(state.slider_ruler, |s: &mut State, v| s.slider_ruler = v)
+            .variant(RangeSliderVariant::Ruler)
+            .range(40.0, 120.0)
+            .step(0.5)
+            .ruler(12.0, 10)
+            .unit("kg")
+            .label("Weight"),
     );
 
     let wave = slider_row(
         "Wave \u{b7} bars crest around the handle",
         format!("{:.0}", state.slider_wave),
-        any(
-            range_slider(state.slider_wave, |s: &mut State, v| s.slider_wave = v)
-                .variant(RangeSliderVariant::Wave)
-                .bars(32)
-                .label("Gain"),
-        ),
+        range_slider(state.slider_wave, |s: &mut State, v| s.slider_wave = v)
+            .variant(RangeSliderVariant::Wave)
+            .bars(32)
+            .label("Gain"),
     );
 
     let disabled = slider_row(
         "Disabled",
         "60".to_string(),
-        any(range_slider(60.0, |_: &mut State, _| {})
+        range_slider(60.0, |_: &mut State, _| {})
             .disabled(true)
-            .label("Disabled")),
+            .label("Disabled"),
     );
 
     demo(
@@ -387,7 +374,7 @@ fn sliders(state: &State) -> impl View<State> {
          velocity is sampled per painted frame, so the bubble's lean and the \
          ruler's fling are frame-quantised. PageUp/PageDown are not bound \
          \u{2014} the framework's key set has no page keys.",
-        vec![any(row()
+        row()
             .child(
                 column()
                     .child(default)
@@ -407,7 +394,7 @@ fn sliders(state: &State) -> impl View<State> {
                     .child(disabled)
                     .cross_axis(CrossAxisAlignment::Start),
             )
-            .cross_axis(CrossAxisAlignment::Start))],
+            .cross_axis(CrossAxisAlignment::Start),
     )
 }
 
@@ -424,7 +411,7 @@ fn wheels(state: &State) -> impl View<State> {
         .map(|y| WheelPickerOption::from(y.to_string().as_str()))
         .collect();
 
-    let month_wheel = any(SizedBox(Some(150.0), None).child(
+    let month_wheel = SizedBox(Some(150.0), None).child(
         wheel_picker(months, state.month.clone(), |s: &mut State, v| {
             s.month = v;
             // A short month can strand the day past its end — pull it back,
@@ -436,12 +423,12 @@ fn wheels(state: &State) -> impl View<State> {
             }
         })
         .label("Month"),
-    ));
+    );
 
-    let day_wheel = any(SizedBox(Some(90.0), None)
-        .child(wheel_picker(days, state.day.clone(), |s: &mut State, v| s.day = v).label("Day")));
+    let day_wheel = SizedBox(Some(90.0), None)
+        .child(wheel_picker(days, state.day.clone(), |s: &mut State, v| s.day = v).label("Day"));
 
-    let year_wheel = any(SizedBox(Some(110.0), None).child(
+    let year_wheel = SizedBox(Some(110.0), None).child(
         wheel_picker(years, state.year.clone(), |s: &mut State, v| {
             s.year = v;
             let year: i32 = s.year.parse().unwrap_or(2004);
@@ -451,9 +438,9 @@ fn wheels(state: &State) -> impl View<State> {
             }
         })
         .label("Year"),
-    ));
+    );
 
-    let disabled_wheel = any(SizedBox(Some(150.0), None).child(
+    let disabled_wheel = SizedBox(Some(150.0), None).child(
         wheel_picker(
             MONTHS.iter().map(|m| WheelPickerOption::from(*m)).collect(),
             "March",
@@ -462,7 +449,7 @@ fn wheels(state: &State) -> impl View<State> {
         .disabled(true)
         .visible_count(5)
         .label("Disabled"),
-    ));
+    );
 
     demo(
         "wheel_picker",
@@ -472,8 +459,8 @@ fn wheels(state: &State) -> impl View<State> {
          fade is evaluated per row rather than per pixel; the tick sound is \
          not ported (there is no audio seam). A fling reports its landing \
          value at release \u{2014} the glide after it is purely visual.",
-        vec![
-            any(row()
+        (
+            row()
                 .child(month_wheel)
                 .child(hgap(12.0))
                 .child(day_wheel)
@@ -481,13 +468,10 @@ fn wheels(state: &State) -> impl View<State> {
                 .child(year_wheel)
                 .child(hgap(48.0))
                 .child(disabled_wheel)
-                .cross_axis(CrossAxisAlignment::Center)),
-            any(gap(12.0)),
-            any(caption(format!(
-                "{} {}, {}",
-                state.month, state.day, state.year
-            ))),
-        ],
+                .cross_axis(CrossAxisAlignment::Center),
+            gap(12.0),
+            caption(format!("{} {}, {}", state.month, state.day, state.year)),
+        ),
     )
 }
 
@@ -502,12 +486,12 @@ impl Component for ControlsPage {
     }
 
     fn build(&self, state: &mut State) -> impl View<State> {
-        any(column()
+        column()
             .child(toggles(state))
             .child(inputs(state))
             .child(sliders(state))
             .child(wheels(state))
-            .cross_axis(CrossAxisAlignment::Start))
+            .cross_axis(CrossAxisAlignment::Start)
     }
 }
 

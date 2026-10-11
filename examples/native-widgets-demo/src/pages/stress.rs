@@ -25,7 +25,9 @@ use std::time::Instant;
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
-use frust::{AnyView, Axis, FlexChild, FlexView, Get, GetUntracked, Set, any, column, inflexible};
+use frust::{
+    AnyView, Axis, FlexChild, FlexView, Get, GetUntracked, Set, column, either, inflexible,
+};
 use frust_native_widgets::{
     NativeImageFit, native_button, native_image, native_label, native_progress, native_slider,
     native_switch,
@@ -130,47 +132,50 @@ fn cycle_state(target: u32) -> (bool, u32, bool) {
 
 /// The cycler's own six-control group — separate instances from the Controls
 /// page, display-only: the point is create/dispose churn, not interaction.
-fn cycle_group(mounted: bool) -> AnyView<S> {
-    if !mounted {
-        return any(caption("(cycler group currently unmounted)"));
-    }
-    any(column()
-        .child(
-            native_button("Cycle button")
-                .content_description("Gate-harness cycler button")
-                .size(160.0, 40.0),
-        )
-        .push(gap(4.0))
-        .child(
-            native_label("Cycle label")
-                .content_description("Gate-harness cycler label")
-                .size(160.0, 28.0),
-        )
-        .push(gap(4.0))
-        .child(
-            native_switch(false)
-                .content_description("Gate-harness cycler switch")
-                .size(70.0, 32.0),
-        )
-        .push(gap(4.0))
-        .child(
-            native_slider(0, 0, 100)
-                .content_description("Gate-harness cycler slider")
-                .size(200.0, 32.0),
-        )
-        .push(gap(4.0))
-        .child(
-            native_progress(0, 0, 100)
-                .content_description("Gate-harness cycler progress")
-                .size(200.0, 20.0),
-        )
-        .push(gap(4.0))
-        .child(
-            native_image(demo_image_bytes())
-                .fit(NativeImageFit::Contain)
-                .content_description("Gate-harness cycler image")
-                .size(48.0, 48.0),
-        ))
+fn cycle_group(mounted: bool) -> impl View<S> {
+    either(
+        mounted,
+        || {
+            column()
+                .child(
+                    native_button("Cycle button")
+                        .content_description("Gate-harness cycler button")
+                        .size(160.0, 40.0),
+                )
+                .push(gap(4.0))
+                .child(
+                    native_label("Cycle label")
+                        .content_description("Gate-harness cycler label")
+                        .size(160.0, 28.0),
+                )
+                .push(gap(4.0))
+                .child(
+                    native_switch(false)
+                        .content_description("Gate-harness cycler switch")
+                        .size(70.0, 32.0),
+                )
+                .push(gap(4.0))
+                .child(
+                    native_slider(0, 0, 100)
+                        .content_description("Gate-harness cycler slider")
+                        .size(200.0, 32.0),
+                )
+                .push(gap(4.0))
+                .child(
+                    native_progress(0, 0, 100)
+                        .content_description("Gate-harness cycler progress")
+                        .size(200.0, 20.0),
+                )
+                .push(gap(4.0))
+                .child(
+                    native_image(demo_image_bytes())
+                        .fit(NativeImageFit::Contain)
+                        .content_description("Gate-harness cycler image")
+                        .size(48.0, 48.0),
+                )
+        },
+        || caption("(cycler group currently unmounted)"),
+    )
 }
 
 /// [`STRESS_SLOT_COUNT`] `native_label` slots in a plain column.

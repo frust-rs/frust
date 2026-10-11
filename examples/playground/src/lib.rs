@@ -95,12 +95,12 @@ use frust::authoring::{
 use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    Align, Alignment, AnyView, Axis, Brightness, ButtonStyle, Color, Component, DeepLink,
-    DragCoordinator, EdgeInsets, FlexView, Get, GetUntracked, MotionScheme, NavigatorController,
-    Padding, PageTransition, PanZoomController, PanZoomTransform, RwSignal, ScrollController,
-    ScrollInfo, ScrollSubscription, Set, SizedBox, Theme, TransitionSpec, Update, View,
-    WindowMetrics, any, button, column, container, deep_links, icon, icons, inflexible, navigator,
-    row, safe_area, scroll_view, set_app_theme, stack, text, use_context,
+    Align, Alignment, Axis, Brightness, ButtonStyle, Color, Component, DeepLink, DragCoordinator,
+    EdgeInsets, Either, FlexView, Get, GetUntracked, MotionScheme, NavigatorController, Padding,
+    PageTransition, PanZoomController, PanZoomTransform, RwSignal, ScrollController, ScrollInfo,
+    ScrollSubscription, Set, SizedBox, Theme, TransitionSpec, Update, View, WindowMetrics, button,
+    column, container, deep_links, icon, icons, inflexible, navigator, row, safe_area, scroll_view,
+    set_app_theme, stack, text, use_context,
 };
 use frust_material::{app_bar, nav_item, navigation_bar};
 
@@ -509,9 +509,9 @@ fn playground_app_bar(state: &PlaygroundState) -> impl View<PlaygroundState> + u
         .scheme()
         .primary;
 
-    let brand = any(icon(icons::PLUG).size(20.0).color(accent));
+    let brand = icon(icons::PLUG).size(20.0).color(accent);
 
-    let brightness_btn = any(button(brightness_label, |state: &mut PlaygroundState| {
+    let brightness_btn = button(brightness_label, |state: &mut PlaygroundState| {
         let next = match state.brightness.get_untracked() {
             Brightness::Dark => Brightness::Light,
             Brightness::Light => Brightness::Dark,
@@ -524,29 +524,29 @@ fn playground_app_bar(state: &PlaygroundState) -> impl View<PlaygroundState> + u
                 state.animations_enabled.get_untracked(),
             ),
         );
-    }));
+    });
 
-    let motion_btn = any(button(motion_label, |state: &mut PlaygroundState| {
+    let motion_btn = button(motion_label, |state: &mut PlaygroundState| {
         let next = !state.reduce_motion.get_untracked();
         state.reduce_motion.set(next);
         apply_theme(
             state.brightness.get_untracked(),
             effective_reduce_motion(next, state.animations_enabled.get_untracked()),
         );
-    }));
+    });
 
-    let animations_btn = any(button(animations_label, |state: &mut PlaygroundState| {
+    let animations_btn = button(animations_label, |state: &mut PlaygroundState| {
         let next = !state.animations_enabled.get_untracked();
         state.animations_enabled.set(next);
         apply_theme(
             state.brightness.get_untracked(),
             effective_reduce_motion(state.reduce_motion.get_untracked(), next),
         );
-    }));
+    });
 
     app_bar::<PlaygroundState>("playground")
         .leading(brand)
-        .actions(vec![brightness_btn, motion_btn, animations_btn])
+        .actions((brightness_btn, motion_btn, animations_btn))
 }
 
 /// Bottom-center inset of the toast strip from the safe-area edge (logical
@@ -722,10 +722,10 @@ fn home_page(state: &PlaygroundState) -> impl View<PlaygroundState> + use<> {
     // would size its container (the row at wide width, the column at narrow
     // width) to the body's own intrinsic extent, so the viewport would never
     // be smaller than the content and scrolling would never engage.
-    let content: AnyView<PlaygroundState> = if wide {
-        any(row().child(side_rail(section)).flex(1, body))
+    let content = if wide {
+        Either::Left(row().child(side_rail(section)).flex(1, body))
     } else {
-        any(column().flex(1, body).child(bottom_nav_bar(section)))
+        Either::Right(column().flex(1, body).child(bottom_nav_bar(section)))
     };
 
     // One safe area around the whole column: unlike a design-system app bar

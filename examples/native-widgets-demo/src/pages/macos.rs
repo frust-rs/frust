@@ -11,7 +11,7 @@
 //!
 //! Two native slots at rest: the image pair.
 
-use frust::{AnyView, any, inflexible};
+use frust::{AnyView, inflexible};
 use frust_native_widgets::{NativeImageFit, native_image};
 
 use super::common::{
@@ -110,20 +110,20 @@ pub fn page(_state: &S) -> AnyView<S> {
                 CellFit::Stretch,
                 IMAGE_W,
                 IMAGE_H,
-                any(native_image(demo_image_bytes())
+                native_image(demo_image_bytes())
                     .fit(NativeImageFit::Cover)
                     .content_description("Demo image, Cover fit")
-                    .size(IMAGE_W, IMAGE_H)),
+                    .size(IMAGE_W, IMAGE_H),
             )),
             gap_h(PAIR_GAP),
             inflexible(cell(
                 CellFit::Stretch,
                 IMAGE_W,
                 IMAGE_H,
-                any(native_image(demo_image_bytes())
+                native_image(demo_image_bytes())
                     .fit(NativeImageFit::Contain)
                     .content_description("Demo image, Contain fit")
-                    .size(IMAGE_W, IMAGE_H)),
+                    .size(IMAGE_W, IMAGE_H),
             )),
         ])),
         gap(4.0),

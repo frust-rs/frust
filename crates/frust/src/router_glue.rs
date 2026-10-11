@@ -255,6 +255,9 @@ impl<State: 'static> RouterDeepLinks<State> {
 /// ```no_run
 /// use frust::{AnyView, Component, Route, Router, RouterDeepLinks, View, any, navigator, text};
 ///
+/// // A route builder is *stored* (`Rc<dyn Fn(..) -> AnyView<_>>`), so it
+/// // erases with `any(..)`; everywhere else erasure is implicit.
+///
 /// #[derive(Default)]
 /// struct App;
 ///

@@ -19,7 +19,7 @@
 //! field, so a bulk-styled run can never fall back to the theme — and it
 //! picks values that keep contrast on a light and a dark surface alike.
 
-use frust_core::{AnyView, View, any};
+use frust_core::View;
 use frust_text::{FontWeight, TextStyle};
 use frust_widgets::{
     Align, Alignment, CrossAxisAlignment, EdgeInsets, Padding, colored_box, column, container, row,
@@ -28,7 +28,7 @@ use frust_widgets::{
 use peniko::Color;
 
 use super::framed;
-use crate::case::{Case, Design};
+use crate::case::{Case, Design, case_build};
 
 const CARD_A: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 const CARD_B: Color = Color::from_rgb8(0xF4, 0x3F, 0x5E);
@@ -49,7 +49,7 @@ const CAPTION_INK: Color = Color::from_rgb8(0x8A, 0x8A, 0x8A);
 /// child is an *unfilled* expanding box: it establishes the shared bounded
 /// box the five `Align`s resolve against without painting over the variant's
 /// surface clear.
-fn alignment_case() -> AnyView<()> {
+fn alignment_case() -> impl View<()> {
     fn badge(label: &'static str) -> impl View<()> {
         container(text(label).color(Color::WHITE).size(11.0))
             .fill(CARD_A)
@@ -63,7 +63,7 @@ fn alignment_case() -> AnyView<()> {
         .child(Align(Alignment::CENTER, badge("CENTER")))
         .child(Align(Alignment::BOTTOM_LEFT, badge("BOTTOM_LEFT")))
         .child(Align(Alignment::BOTTOM_RIGHT, badge("BOTTOM_RIGHT")));
-    any(framed(stack))
+    framed(stack)
 }
 
 pub(super) const ALIGNMENT: Case = Case {
@@ -73,14 +73,14 @@ pub(super) const ALIGNMENT: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: alignment_case,
+    build: case_build!(alignment_case),
 };
 
 /// `Color`: a row of `Color::from_rgb8` swatches, each labelled with its own
 /// hex literal — the "literal is appropriate ... for authoring the palette
 /// itself" case the page calls out, as opposed to a themed role lookup. The
 /// labels themselves are the counterpoint: they take the themed default.
-fn color_case() -> AnyView<()> {
+fn color_case() -> impl View<()> {
     fn swatch(color: Color, label: &'static str) -> impl View<()> {
         column()
             .child(colored_box().fill(color).radius(8.0).size(64.0, 64.0))
@@ -93,7 +93,7 @@ fn color_case() -> AnyView<()> {
         .child(swatch(CARD_C, "#10B981"))
         .child(swatch(CARD_D, "#F59E0B"))
         .cross_axis(CrossAxisAlignment::Center);
-    any(framed(row))
+    framed(row)
 }
 
 pub(super) const COLOR: Case = Case {
@@ -103,14 +103,14 @@ pub(super) const COLOR: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: color_case,
+    build: case_build!(color_case),
 };
 
 /// `EdgeInsets`: the struct-literal form for an asymmetric inset (the page's
 /// own example uses `EdgeInsets::all`, which [`super::layout`]'s `padding`
 /// case already shows) — a wide top inset and a narrow inset on the other
 /// three edges, so the gap itself reads as uneven per edge.
-fn edge_insets_case() -> AnyView<()> {
+fn edge_insets_case() -> impl View<()> {
     let insets = EdgeInsets {
         left: 12.0,
         top: 48.0,
@@ -124,7 +124,7 @@ fn edge_insets_case() -> AnyView<()> {
     .fill(CARD_A)
     .radius(10.0)
     .size_centered(280.0, 180.0);
-    any(framed(framed_child))
+    framed(framed_child)
 }
 
 pub(super) const EDGE_INSETS: Case = Case {
@@ -134,7 +134,7 @@ pub(super) const EDGE_INSETS: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: edge_insets_case,
+    build: case_build!(edge_insets_case),
 };
 
 /// `TextStyle`: three runs bulk-styled with `text(..).style(..)` rather than
@@ -144,7 +144,7 @@ pub(super) const EDGE_INSETS: Case = Case {
 /// `TextStyle` always names a colour, these three runs are the module's one
 /// place that cannot defer to the theme; see [`BODY_INK`] for how the values
 /// were picked.
-fn text_style_case() -> AnyView<()> {
+fn text_style_case() -> impl View<()> {
     let heading = TextStyle {
         weight: FontWeight::BOLD,
         ..TextStyle::new(26.0, CARD_A)
@@ -158,7 +158,7 @@ fn text_style_case() -> AnyView<()> {
         .child(text("Body copy styled in bulk").style(body))
         .child(text("CAPTION").style(caption))
         .cross_axis(CrossAxisAlignment::Center);
-    any(framed(column))
+    framed(column)
 }
 
 pub(super) const TEXT_STYLE: Case = Case {
@@ -168,5 +168,5 @@ pub(super) const TEXT_STYLE: Case = Case {
     scale: Case::DEFAULT_SCALE,
     time_ms: Case::DEFAULT_TIME_MS,
     design: Design::Base,
-    build: text_style_case,
+    build: case_build!(text_style_case),
 };

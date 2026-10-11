@@ -535,7 +535,13 @@ impl<State: 'static> OverlayModalContent<State> for SideSheetView<State> {
 /// ```ignore
 /// show_side_sheet(
 ///     &state.nav,
-///     || side_sheet("Settings", settings_body(), Vec::<AnyView<State>>::new()),
+///     || {
+///         side_sheet(
+///             "Settings",
+///             settings_body(),
+///             filled_button("Done", |_: &mut State| {}),
+///         )
+///     },
 ///     |state: &mut State, result: PopResult| { /* ... */ },
 /// );
 /// ```

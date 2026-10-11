@@ -28,6 +28,37 @@ conventions, and the widget-authoring rules (erasure at the API boundary, the
   in `any()` at the call site. A list that must stay erased (a `Vec<AnyView>` field, a
   `ChildPod`-fed helper) is marked `// erasure: keep <why>` for the tripwire.
 
+## Erase at the API Boundary
+
+Extends the shared rule in [CODE_STANDARDS.md](CODE_STANDARDS.md): erasure happens once, inside
+the API. Reach for these idioms before `any()`: fluent builders (`column().child(..)`), tuples
+for mixed child types, `views(iter)` for iterators, `either(cond, || a, || b)` for two arms, and
+`impl View` / `impl ViewSeq` helper parameters. The four APIs once taking pre-erased views now
+erase internally: `frust-material`'s `button_group` icon family, `split_button`'s `leading_icon`,
+`frust-beui`'s `extra_rows`, and `clean-signals-frust`'s `async_view`.
+
+A site that must stay erased carries `// erasure: keep <why>` in one of three places: on the
+call's own line, alone on the line above it, or on the enclosing fn signature (the `fn` line, its
+`->` line, or alone above the `fn`). Do not add a marker merely to silence the tripwire;
+[TESTING.md](TESTING.md) describes what `scripts/ci/erasure-check.sh` enforces.
+
+## App Code Style
+
+Binds every user-facing snippet: templates, READMEs, rustdoc, the website and playground code
+strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.tmpl`.
+
+- One `Component` per screen; `build` returns `impl View<Self::State>` and reads as one
+  declarative tree (`scaffold(body).app_bar(..).fab(..)`, fluent `column().child(..)`).
+- Tuples, `views(..)` and `either(..)` only where a builder cannot express the shape.
+- Helpers that keep `build` shallow are associated fns in a separate inherent `impl X { .. }`,
+  called `Self::name(..)` — never free view fns, never extra methods inside `impl Component`.
+- Stateful pieces are child components via `component(..)`.
+- Every name is imported; no inline `frust::icon(..)` or `frust_material::fab(..)` paths.
+- No `+ use<>` unless required.
+- The app root derives `Default` (`frust::app!` default-constructs it, so root config is a
+  literal, not a field) and `frust::app!(Root, setup = { .. })` comes last.
+- Event closures type their state (`|count: &mut u32| ..`); rustfmt 2024.
+
 ## Theming & Animation Conventions
 
 - **Paint-time resolution is always safe; layout-time-baked resolution is only safe under

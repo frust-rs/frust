@@ -151,7 +151,7 @@ use frust::authoring::{
 };
 use frust::{
     Axis, Color, Component, EdgeInsets, FlexChild, FlexView, Get, Padding, RwSignal, Set, SizedBox,
-    Theme, any, component, inflexible, text, use_context,
+    Theme, component, inflexible, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -995,7 +995,7 @@ impl Component for KeysPage {
             (probe.header_text(), probe.stream_text(), probe.log_text())
         };
 
-        any(Padding(
+        Padding(
             EdgeInsets::all(CONTENT_PAD),
             FlexView::new(
                 Axis::Vertical,
@@ -1010,7 +1010,7 @@ impl Component for KeysPage {
                     },
                 ),
             ),
-        ))
+        )
     }
 }
 
@@ -1518,7 +1518,6 @@ impl Widget for KeyProbeWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::AnyView;
     use frust_core::{FrameTime, KeyEvent, PointerButton, PointerEvent, RenderRoot};
     use frust_reactive::ReactiveRuntime;
     use frust_text::TextContext as RawTextContext;
@@ -2313,8 +2312,8 @@ mod tests {
     #[test]
     fn the_component_mounts_and_paints_its_whole_surface() {
         let _owner = setup();
-        let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
-        let mut logic = |_s: &mut ()| any(component(KeysPage));
+        let mut root: RenderRoot<(), _> = RenderRoot::new();
+        let mut logic = |_s: &mut ()| component(KeysPage);
         let mut tcx = RawTextContext::new();
         root.rebuild(&mut logic, &mut ());
         root.layout_with_text(Size::new(400.0, 800.0), &mut tcx as &mut dyn Any);
@@ -2331,8 +2330,8 @@ mod tests {
         // Flex → the probe row, several container hops of focus/IME bubbling.
         // `ime_state()` at the root is exactly what `nativeImeState` serialises.
         let _owner = setup();
-        let mut root: RenderRoot<(), AnyView<()>> = RenderRoot::new();
-        let mut logic = |_s: &mut ()| any(component(KeysPage));
+        let mut root: RenderRoot<(), _> = RenderRoot::new();
+        let mut logic = |_s: &mut ()| component(KeysPage);
         let mut tcx = RawTextContext::new();
         let window = Size::new(400.0, 800.0);
         root.rebuild(&mut logic, &mut ());

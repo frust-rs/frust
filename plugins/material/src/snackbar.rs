@@ -29,7 +29,7 @@
 //! same position [`frust::overlay_host`]/[`frust::navigator`] take:
 //!
 //! ```no_run
-//! use frust::{Component, View, any, text};
+//! use frust::{Component, View, text};
 //! use frust_material::{SnackbarController, snackbar, snackbar_host};
 //!
 //! struct AppState {
@@ -47,7 +47,7 @@
 //!     }
 //!
 //!     fn build(&self, state: &mut AppState) -> impl View<AppState> {
-//!         any(snackbar_host(&state.toasts, text("home")))
+//!         snackbar_host(&state.toasts, text("home"))
 //!     }
 //! }
 //!

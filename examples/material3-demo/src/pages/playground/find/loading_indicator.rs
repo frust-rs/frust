@@ -13,8 +13,8 @@
 //! (see `crate::pages::playground::pick::chips`' module docs for the same
 //! divergence).
 
-use frust::{AnyView, Component, CrossAxisAlignment, Row, SizedBox, View, any, component};
-use frust_material::{LoadingIndicatorVariant, loading_indicator};
+use frust::{AnyView, Component, CrossAxisAlignment, SizedBox, View, any, component, row};
+use frust_material::{LoadingIndicatorVariant, LoadingIndicatorView, loading_indicator};
 
 use crate::AppState;
 use crate::catalog::DemoEntry;
@@ -49,11 +49,12 @@ fn variant_label(variant: LoadingIndicatorVariant) -> &'static str {
     }
 }
 
-/// Build the indicator `variant` selects.
-fn indicator_for<State: 'static>(variant: LoadingIndicatorVariant) -> AnyView<State> {
+/// Build the indicator `variant` selects — both arms are the same
+/// [`LoadingIndicatorView`], so the match needs no erasure.
+fn indicator_for(variant: LoadingIndicatorVariant) -> LoadingIndicatorView {
     match variant {
-        LoadingIndicatorVariant::Default => any(loading_indicator()),
-        LoadingIndicatorVariant::Contained => any(loading_indicator().contained()),
+        LoadingIndicatorVariant::Default => loading_indicator(),
+        LoadingIndicatorVariant::Contained => loading_indicator().contained(),
     }
 }
 
@@ -69,15 +70,16 @@ fn snippet_code(state: &Knobs) -> String {
 
 /// Lay `items` out horizontally with `gap`px between each pair — see the
 /// module docs' `Wrap` divergence.
-fn spaced_row<State: 'static>(items: Vec<AnyView<State>>, gap: f64) -> impl View<State> {
-    let mut children: Vec<AnyView<State>> = Vec::with_capacity(items.len() * 2);
-    for item in items {
-        if !children.is_empty() {
-            children.push(any(SizedBox::<State>(Some(gap), None)));
-        }
-        children.push(item);
+fn spaced_row<State: 'static, V: View<State>>(items: Vec<V>, gap: f64) -> impl View<State> {
+    let mut list = row();
+    for (index, item) in items.into_iter().enumerate() {
+        list = list
+            .when(index > 0, |list| {
+                list.child(SizedBox::<State>(Some(gap), None))
+            })
+            .child(item);
     }
-    Row(children).cross_axis(CrossAxisAlignment::Center)
+    list.cross_axis(CrossAxisAlignment::Center)
 }
 
 /// The playground body for the current knob state.
@@ -97,20 +99,16 @@ fn body(state: &mut Knobs) -> impl View<Knobs> {
 
     let controls = control_panel(
         "Appearance",
-        vec![play_enum_segmented(
+        play_enum_segmented(
             "Variant",
             state.variant,
             &VARIANTS,
             variant_label,
             |s: &mut Knobs, v: LoadingIndicatorVariant| s.variant = v,
-        )],
+        ),
     );
 
-    playground_body(
-        vec![primary_preview, both_preview],
-        vec![snippet],
-        vec![controls],
-    )
+    playground_body(vec![primary_preview, both_preview], vec![snippet], controls)
 }
 
 /// The nested [`Component`] this page owns its knobs in. See the page
@@ -131,6 +129,7 @@ impl Component for LoadingIndicatorPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(LoadingIndicatorPlayground))
 }

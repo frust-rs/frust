@@ -1,8 +1,8 @@
 //! Dividers: the reference's `DividersPlayground`.
 
 use frust::{
-    Align, Alignment, AnyView, Component, CrossAxisAlignment, SizedBox, Theme, View, any, column,
-    component, row, text,
+    Align, Alignment, AnyView, Component, CrossAxisAlignment, Either, SizedBox, Theme, View, any,
+    column, component, row, text,
 };
 
 use frust_material::divider;
@@ -62,6 +62,7 @@ impl Component for DividersPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder: the catalog's page table holds this fn pointer (-> AnyView)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(DividersPlayground))
 }
@@ -93,36 +94,40 @@ fn preview(theme: &Theme, state: &Knobs) -> AnyView<Knobs> {
     let content = if state.axis == DividerAxis::Vertical {
         // A vertical divider needs a bounded height to stretch into — the
         // reference's own `SizedBox(height: 64)` wrapping the row.
-        any(SizedBox::<Knobs>(None, Some(64.0)).child(
-            row()
-                .child(Align(
-                    Alignment::new(-1.0, 0.0),
-                    text("Left").style(body_style.clone()),
-                ))
-                .child(SizedBox::<Knobs>(Some(12.0), None))
-                .child(line)
-                .child(SizedBox::<Knobs>(Some(12.0), None))
-                .child(Align(
-                    Alignment::new(-1.0, 0.0),
-                    text("Right").style(body_style),
-                ))
-                .cross_axis(CrossAxisAlignment::Stretch),
-        ))
+        Either::Left(
+            SizedBox::<Knobs>(None, Some(64.0)).child(
+                row()
+                    .child(Align(
+                        Alignment::new(-1.0, 0.0),
+                        text("Left").style(body_style.clone()),
+                    ))
+                    .child(SizedBox::<Knobs>(Some(12.0), None))
+                    .child(line)
+                    .child(SizedBox::<Knobs>(Some(12.0), None))
+                    .child(Align(
+                        Alignment::new(-1.0, 0.0),
+                        text("Right").style(body_style),
+                    ))
+                    .cross_axis(CrossAxisAlignment::Stretch),
+            ),
+        )
     } else {
-        any(column()
-            .child(text("Above").style(body_style.clone()))
-            .child(SizedBox::<Knobs>(None, Some(12.0)))
-            .child(line)
-            .child(SizedBox::<Knobs>(None, Some(12.0)))
-            .child(text("Below").style(body_style))
-            .cross_axis(CrossAxisAlignment::Stretch))
+        Either::Right(
+            column()
+                .child(text("Above").style(body_style.clone()))
+                .child(SizedBox::<Knobs>(None, Some(12.0)))
+                .child(line)
+                .child(SizedBox::<Knobs>(None, Some(12.0)))
+                .child(text("Below").style(body_style))
+                .cross_axis(CrossAxisAlignment::Stretch),
+        )
     };
 
     play_preview_card("Divider", content)
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {
-    control_panel::<Knobs>(
+    control_panel::<Knobs, _>(
         "Appearance",
         vec![
             play_enum_segmented::<Knobs, DividerAxis>(
@@ -158,7 +163,7 @@ fn controls(state: &Knobs) -> AnyView<Knobs> {
 }
 
 fn snippet(state: &Knobs) -> PlaySnippet {
-    let mut code = String::from("frust_material::divider()");
+    let mut code = String::from("divider()");
     code.push_str(&format!("\n    .thickness({:?})", state.thickness));
     code.push_str(&format!("\n    .indent({:?})", state.indent));
     code.push_str(&format!("\n    .end_indent({:?})", state.end_indent));

@@ -1847,8 +1847,14 @@ impl<State: 'static> SplitButtonView<State> {
     /// Attach a leading icon before the label (`M3ESplitButton.leadingIcon`).
     /// The factory is re-invoked per pass, since a view is a value rebuilt every
     /// frame.
-    pub fn leading_icon<F: Fn() -> AnyView<State> + 'static>(mut self, icon: F) -> Self {
-        self.leading_icon = Some(Rc::new(icon));
+    /// The factory may return any view, which is erased here:
+    /// `.leading_icon(|| icon(icons::CHECK))`.
+    pub fn leading_icon<F, V>(mut self, icon: F) -> Self
+    where
+        F: Fn() -> V + 'static,
+        V: View<State>,
+    {
+        self.leading_icon = Some(Rc::new(move || AnyView::new(icon())));
         self
     }
 
@@ -3246,7 +3252,7 @@ mod tests {
     fn a_leading_icon_lays_out_before_the_label_at_the_size_s_gap() {
         let with_icon = plain(false)
             .size(SplitButtonSize::Md)
-            .leading_icon(|| any::<Log, _>(frust::icon(icons::CHECK)));
+            .leading_icon(|| frust::icon(icons::CHECK));
         let mut widget = laid_out(&with_icon);
         layout_with(&mut widget, 600.0, None);
         let seg = segment(&mut widget, 0);
@@ -3258,6 +3264,21 @@ mod tests {
             SplitButtonSize::Md.left_outer_padding()
                 + 24.0
                 + SplitButtonSize::Md.icon_to_label_gap()
+        );
+    }
+
+    #[test]
+    fn leading_icon_accepts_a_concrete_view_or_an_any_view() {
+        let concrete = plain(false).leading_icon(|| frust::icon(icons::CHECK));
+        let erased = plain(false).leading_icon(|| any::<Log, _>(frust::icon(icons::CHECK)));
+        let mut a = laid_out(&concrete);
+        let mut b = laid_out(&erased);
+        assert_eq!(a.segments.len(), b.segments.len());
+        assert!(segment(&mut a, 0).icon.is_some());
+        assert!(segment(&mut b, 0).icon.is_some());
+        assert_eq!(
+            segment(&mut a, 0).icon.as_ref().unwrap().size(),
+            segment(&mut b, 0).icon.as_ref().unwrap().size()
         );
     }
 

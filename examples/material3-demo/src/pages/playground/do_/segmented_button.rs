@@ -80,7 +80,7 @@ fn preview(state: &Knobs) -> impl View<Knobs> {
 }
 
 /// "Behavior" controls: multi select, show selected icon.
-fn behavior_panel(state: &Knobs) -> AnyView<Knobs> {
+fn behavior_panel(state: &Knobs) -> impl View<Knobs> {
     control_panel(
         "Behavior",
         vec![
@@ -104,7 +104,7 @@ fn snippet(state: &Knobs) -> PlaySnippet {
              segment(0).label(\"Day\").icon(icons::CALENDAR_TODAY),\n        \
              segment(1).label(\"Week\").icon(icons::CALENDAR_VIEW_WEEK),\n        \
              segment(2).label(\"Month\").icon(icons::CALENDAR_MONTH),\n    ],\n    \
-             {selected:?},\n    on_selection_changed,\n)\n    .multi_select({multi})\n    \
+             {selected:?},\n    |state: &mut State, next: Vec<usize>| state.selected = next,\n)\n.multi_select({multi})\n\
              .show_selected_icon({show_icon});",
             selected = state.selected,
             multi = state.multi_select,
@@ -119,7 +119,7 @@ fn body(state: &Knobs) -> impl View<Knobs> {
     playground_body(
         vec![play_preview_card("Segmented button", preview(state))],
         vec![snippet(state)],
-        vec![behavior_panel(state)],
+        behavior_panel(state),
     )
 }
 
@@ -139,6 +139,7 @@ impl Component for SegmentedButtonPlayground {
 }
 
 /// See the page contract in [`crate::pages::playground`].
+// erasure: keep stored page builder (a catalog PlaygroundBuilder returns AnyView<AppState>)
 pub fn page(_entry: DemoEntry) -> AnyView<AppState> {
     any(component(SegmentedButtonPlayground))
 }

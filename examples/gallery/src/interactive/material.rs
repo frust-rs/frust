@@ -55,7 +55,7 @@
 //! Nothing here is a `Case::build`, so none of it reaches the snapshot oracle
 //! and no poster moves.
 
-use frust_core::{AnyView, Component, View, any, component};
+use frust_core::{Component, View, component};
 use frust_material::{
     ButtonGroupType, DatePickerState, DropdownItem, IconButtonVariant, MaterialDate, MenuSelection,
     NavBarLabelBehavior, NavigationRailType, SnackbarController, Tab, TabsVariant,
@@ -68,12 +68,13 @@ use frust_material::{
     text_field, time_dial, wavy_slider,
 };
 use frust_widgets::{
-    Align, Alignment, Column, CrossAxisAlignment, EdgeInsets, IconSource, Padding, Row, SizedBox,
-    column, container, icon, row, stack, text,
+    Align, Alignment, CrossAxisAlignment, EdgeInsets, IconSource, Padding, SizedBox, column,
+    container, icon, row, stack, text,
 };
 use kurbo::Size;
 
 use super::{Entry, framed, framed_in};
+use crate::case::case_build;
 
 /// This catalog's slice of the side table [`super::entries`] concatenates, in
 /// the registry's own slug order so the two read side by side.
@@ -81,22 +82,31 @@ use super::{Entry, framed, framed_in};
 /// The seven absent Material cases are the two overlay-entrance ones and the
 /// five that own no app state — see the [module docs](self).
 pub const INTERACTIVE: &[Entry] = &[
-    ("material/button-group", button_group_case),
-    ("material/chips", chips_case),
-    ("material/date-picker", date_picker_case),
-    ("material/dropdown", dropdown_case),
-    ("material/icon-button", icon_button_case),
-    ("material/list", list_case),
-    ("material/menu", menu_case),
-    ("material/navigation-bar", navigation_bar_case),
-    ("material/navigation-drawer", navigation_drawer_case),
-    ("material/navigation-rail", navigation_rail_case),
-    ("material/selection-controls", selection_controls_case),
-    ("material/slider", slider_case),
-    ("material/snackbar", snackbar_case),
-    ("material/tabs", tabs_case),
-    ("material/text-field", text_field_case),
-    ("material/time-picker", time_picker_case),
+    ("material/button-group", case_build!(button_group_case)),
+    ("material/chips", case_build!(chips_case)),
+    ("material/date-picker", case_build!(date_picker_case)),
+    ("material/dropdown", case_build!(dropdown_case)),
+    ("material/icon-button", case_build!(icon_button_case)),
+    ("material/list", case_build!(list_case)),
+    ("material/menu", case_build!(menu_case)),
+    ("material/navigation-bar", case_build!(navigation_bar_case)),
+    (
+        "material/navigation-drawer",
+        case_build!(navigation_drawer_case),
+    ),
+    (
+        "material/navigation-rail",
+        case_build!(navigation_rail_case),
+    ),
+    (
+        "material/selection-controls",
+        case_build!(selection_controls_case),
+    ),
+    ("material/slider", case_build!(slider_case)),
+    ("material/snackbar", case_build!(snackbar_case)),
+    ("material/tabs", case_build!(tabs_case)),
+    ("material/text-field", case_build!(text_field_case)),
+    ("material/time-picker", case_build!(time_picker_case)),
 ];
 
 // ---- frame sizes and layout helpers -----------------------------------------
@@ -128,7 +138,7 @@ const RAIL_W: f64 = 96.0;
 /// list would otherwise shrink-wrap to its content.
 const BLEED_W: f64 = 344.0;
 
-/// `icon(..)` as an `AnyView`, at whatever state the surrounding case is bound
+/// `icon(..)` at whatever state the surrounding case is bound
 /// to — the state-generic mirror of `crate::material`'s own `()`-bound helper.
 fn glyph<State: 'static>(source: IconSource) -> impl View<State> {
     icon(source)
@@ -185,10 +195,9 @@ impl Component for ButtonGroupCase {
             column()
                 .child(
                     button_group_actions(vec![
-                        button_group_action("Left").icon(|| any(glyph(icons::FORMAT_ALIGN_LEFT))),
-                        button_group_action("Center")
-                            .icon(|| any(glyph(icons::FORMAT_ALIGN_CENTER))),
-                        button_group_action("Right").icon(|| any(glyph(icons::FORMAT_ALIGN_RIGHT))),
+                        button_group_action("Left").icon(|| glyph(icons::FORMAT_ALIGN_LEFT)),
+                        button_group_action("Center").icon(|| glyph(icons::FORMAT_ALIGN_CENTER)),
+                        button_group_action("Right").icon(|| glyph(icons::FORMAT_ALIGN_RIGHT)),
                     ])
                     .group_type(ButtonGroupType::Connected)
                     .selected_index(state.align)
@@ -209,12 +218,12 @@ impl Component for ButtonGroupCase {
     }
 }
 
-/// The [`super::Build`] the table registers: a `()`-stated `AnyView` around the
-/// stateful component, legal because `ComponentView<C>` implements
-/// `View<Outer>` for every `Outer`. Every constructor below repeats this
-/// three-line shape.
-fn button_group_case() -> AnyView<()> {
-    any(component(ButtonGroupCase))
+/// The constructor the table registers through [`case_build!`], which erases
+/// it to a [`super::Build`]: the stateful component at `()` state, legal
+/// because `ComponentView<C>` implements `View<Outer>` for every `Outer`.
+/// Every constructor below repeats this shape.
+fn button_group_case() -> impl View<()> {
+    component(ButtonGroupCase)
 }
 
 // ---- chips ------------------------------------------------------------------
@@ -249,17 +258,19 @@ impl Component for ChipsCase {
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         // The seeded single contact renders chip + gap + suggestion — the
         // recorded row, member for member.
-        let mut second_row: Vec<AnyView<ChipsState>> = Vec::new();
-        for name in &state.contacts {
-            let name = *name;
-            second_row.push(any(input_chip(name, |_: &mut ChipsState| {}).on_deleted(
-                move |state: &mut ChipsState| state.contacts.retain(|held| *held != name),
-            )));
-            second_row.push(any(hgap(10.0)));
-        }
-        second_row.push(any(
-            suggestion_chip("Reply", |_: &mut ChipsState| {}).elevated(true)
-        ));
+        let contacts: Vec<_> = state
+            .contacts
+            .iter()
+            .map(|name| {
+                let name = *name;
+                (
+                    input_chip(name, |_: &mut ChipsState| {}).on_deleted(
+                        move |state: &mut ChipsState| state.contacts.retain(|held| *held != name),
+                    ),
+                    hgap(10.0),
+                )
+            })
+            .collect();
         framed(
             column()
                 .child(
@@ -273,14 +284,18 @@ impl Component for ChipsCase {
                         )),
                 )
                 .child(gap(16.0))
-                .child(Row(second_row))
+                .child(
+                    row()
+                        .children(contacts)
+                        .child(suggestion_chip("Reply", |_: &mut ChipsState| {}).elevated(true)),
+                )
                 .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
 
-fn chips_case() -> AnyView<()> {
-    any(component(ChipsCase))
+fn chips_case() -> impl View<()> {
+    component(ChipsCase)
 }
 
 // ---- date-picker ------------------------------------------------------------
@@ -331,8 +346,8 @@ impl Component for DatePickerCase {
     }
 }
 
-fn date_picker_case() -> AnyView<()> {
-    any(component(DatePickerCase))
+fn date_picker_case() -> impl View<()> {
+    component(DatePickerCase)
 }
 
 // ---- dropdown ---------------------------------------------------------------
@@ -382,34 +397,35 @@ impl Component for DropdownCase {
     }
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
-        let mut column: Vec<AnyView<DropdownState>> = vec![any(bleed(
-            dropdown_field(dropdown_items())
-                .selected(state.selected.clone())
-                .hint("Pick a fruit")
-                .show_clear(true)
-                .open(state.open)
-                .on_open(|state: &mut DropdownState, open| state.open = open)
-                .on_change(|state: &mut DropdownState, selected| state.selected = selected),
-        ))];
-        if state.open {
-            column.push(any(gap(12.0)));
-            column.push(any(dropdown_panel(
-                dropdown_items(),
-                |state: &mut DropdownState, selected| state.selected = selected,
-            )
-            .selected(state.selected.clone())
-            .max_height(220.0)
-            .on_open(|state: &mut DropdownState, open| state.open = open)));
-        }
         framed_in(
             SURFACE,
-            Column(column).cross_axis(CrossAxisAlignment::Center),
+            column()
+                .child(bleed(
+                    dropdown_field(dropdown_items())
+                        .selected(state.selected.clone())
+                        .hint("Pick a fruit")
+                        .show_clear(true)
+                        .open(state.open)
+                        .on_open(|state: &mut DropdownState, open| state.open = open)
+                        .on_change(|state: &mut DropdownState, selected| state.selected = selected),
+                ))
+                .when(state.open, |column| {
+                    column.child(gap(12.0)).child(
+                        dropdown_panel(dropdown_items(), |state: &mut DropdownState, selected| {
+                            state.selected = selected
+                        })
+                        .selected(state.selected.clone())
+                        .max_height(220.0)
+                        .on_open(|state: &mut DropdownState, open| state.open = open),
+                    )
+                })
+                .cross_axis(CrossAxisAlignment::Center),
         )
     }
 }
 
-fn dropdown_case() -> AnyView<()> {
-    any(component(DropdownCase))
+fn dropdown_case() -> impl View<()> {
+    component(DropdownCase)
 }
 
 // ---- icon-button ------------------------------------------------------------
@@ -486,8 +502,8 @@ impl Component for IconButtonCase {
     }
 }
 
-fn icon_button_case() -> AnyView<()> {
-    any(component(IconButtonCase))
+fn icon_button_case() -> impl View<()> {
+    component(IconButtonCase)
 }
 
 // ---- list -------------------------------------------------------------------
@@ -546,8 +562,8 @@ impl Component for ListCase {
     }
 }
 
-fn list_case() -> AnyView<()> {
-    any(component(ListCase))
+fn list_case() -> impl View<()> {
+    component(ListCase)
 }
 
 // ---- menu -------------------------------------------------------------------
@@ -618,8 +634,8 @@ impl Component for MenuCase {
     }
 }
 
-fn menu_case() -> AnyView<()> {
-    any(component(MenuCase))
+fn menu_case() -> impl View<()> {
+    component(MenuCase)
 }
 
 // ---- navigation-bar ---------------------------------------------------------
@@ -668,8 +684,8 @@ impl Component for NavigationBarCase {
     }
 }
 
-fn navigation_bar_case() -> AnyView<()> {
-    any(component(NavigationBarCase))
+fn navigation_bar_case() -> impl View<()> {
+    component(NavigationBarCase)
 }
 
 // ---- navigation-drawer ------------------------------------------------------
@@ -719,8 +735,8 @@ impl Component for NavigationDrawerCase {
     }
 }
 
-fn navigation_drawer_case() -> AnyView<()> {
-    any(component(NavigationDrawerCase))
+fn navigation_drawer_case() -> impl View<()> {
+    component(NavigationDrawerCase)
 }
 
 // ---- navigation-rail --------------------------------------------------------
@@ -771,8 +787,8 @@ impl Component for NavigationRailCase {
     }
 }
 
-fn navigation_rail_case() -> AnyView<()> {
-    any(component(NavigationRailCase))
+fn navigation_rail_case() -> impl View<()> {
+    component(NavigationRailCase)
 }
 
 // ---- selection-controls -----------------------------------------------------
@@ -873,8 +889,8 @@ impl Component for SelectionControlsCase {
     }
 }
 
-fn selection_controls_case() -> AnyView<()> {
-    any(component(SelectionControlsCase))
+fn selection_controls_case() -> impl View<()> {
+    component(SelectionControlsCase)
 }
 
 // ---- slider -----------------------------------------------------------------
@@ -947,8 +963,8 @@ impl Component for SliderCase {
     }
 }
 
-fn slider_case() -> AnyView<()> {
-    any(component(SliderCase))
+fn slider_case() -> impl View<()> {
+    component(SliderCase)
 }
 
 // ---- snackbar ---------------------------------------------------------------
@@ -1019,8 +1035,8 @@ impl Component for SnackbarCase {
     }
 }
 
-fn snackbar_case() -> AnyView<()> {
-    any(component(SnackbarCase))
+fn snackbar_case() -> impl View<()> {
+    component(SnackbarCase)
 }
 
 // ---- tabs -------------------------------------------------------------------
@@ -1064,8 +1080,8 @@ impl Component for TabsCase {
     }
 }
 
-fn tabs_case() -> AnyView<()> {
-    any(component(TabsCase))
+fn tabs_case() -> impl View<()> {
+    component(TabsCase)
 }
 
 // ---- text-field -------------------------------------------------------------
@@ -1155,8 +1171,8 @@ impl Component for TextFieldCase {
     }
 }
 
-fn text_field_case() -> AnyView<()> {
-    any(component(TextFieldCase))
+fn text_field_case() -> impl View<()> {
+    component(TextFieldCase)
 }
 
 // ---- time-picker ------------------------------------------------------------
@@ -1195,6 +1211,6 @@ impl Component for TimePickerCase {
     }
 }
 
-fn time_picker_case() -> AnyView<()> {
-    any(component(TimePickerCase))
+fn time_picker_case() -> impl View<()> {
+    component(TimePickerCase)
 }
