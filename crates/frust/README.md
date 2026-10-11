@@ -27,7 +27,7 @@ frust = { package = "frust-ui", version = "0.6" }
 frust-material = "0.6"
 ```
 
-The package is named `frust-ui` and imported as `frust`, because the crates.io name `frust` belongs to another project (<https://github.com/lloydmeta/frunk/issues/258>). The dependency key is what `frust run` and `frust build` use to enable `frust/devtools`-style features: frust-cli 0.6.0 requires the key `frust`, while newer CLIs resolve any key, so `frust-ui = "0.6"` also works.
+The package is named `frust-ui` and imported as `frust`, because the crates.io name `frust` belongs to another project (<https://github.com/lloydmeta/frunk/issues/258>). The dependency key is what `frust run` and `frust build` use to enable `frust/devtools`-style features: frust-cli 0.6.0 requires the key `frust`, while newer CLIs resolve any key, so with them `frust-ui = "0.6"` also works.
 
 A counter app, the shape `frust create` generates. `build` reads as one declarative tree, and
 `frust::app!` turns the `Component` into the platform entry points:
