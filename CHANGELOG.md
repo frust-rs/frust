@@ -228,9 +228,9 @@ rather than introducing them.
    Accepted placements (`docs/WIDGETS_CODE_STANDARDS.md`): on the call's own line, alone on the
    line above it, on the first line of an enclosing `vec![..]`, `let` or `match`, or on the
    enclosing fn signature (the `fn` line, its `->` line, or alone above the `fn`). rustfmt-stable
-   forms: at the end of the `->` line with the `{` on the next line, at the end of the `any(..)`
-   line, or as the first own-line comment in the body (where rustfmt moves a marker written after
-   the signature's `{`), which counts as a signature marker.
+   forms in 0.6.0: at the end of the `->` line with the `{` on the next line, or at the end of the
+   `any(..)` line. Newer placements (a first body line, an accumulator `let`, an in-call own-line
+   marker) are listed under Unreleased.
 8. An app scaffolded by 0.5.0 (yanked) also follows the 0.5.0 machine-path migration (see
    `scaffold-0.5.0-path-dependency` in `docs/LIMITATIONS.md`).
 
