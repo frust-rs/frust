@@ -33,23 +33,41 @@ conventions, and the widget-authoring rules (erasure at the API boundary, the
 Extends the shared rule in [CODE_STANDARDS.md](CODE_STANDARDS.md): erasure happens once, inside
 the API. Reach for these idioms before `any()`: fluent builders (`column().child(..)`), tuples
 for mixed child types, `views(iter)` for iterators, `either(cond, || a, || b)` for two arms, and
-`impl View` / `impl ViewSeq` helper parameters. The four APIs once taking pre-erased views now
+`impl View` / `impl ViewSeq` helper parameters. Use `Either` (or `either(..)`) only when the two
+arms have different concrete view types. When both arms produce the same concrete type, compute the
+differing props or children in an `if` and construct that one type once: `Either` reconciles a
+Left/Right swap as a teardown and remount, so the subtree loses in-flight gestures and can orphan
+focus, where the same type reconciles in place (an app migration hit this in button, gesture
+detector and safe-area wrappers). The four APIs once taking pre-erased views now
 erase internally: `frust-material`'s `button_group` icon family, `split_button`'s `leading_icon`,
 `frust-beui`'s `extra_rows`, and `clean-signals-frust`'s `async_view`.
 
-A site that must stay erased carries `// erasure: keep <why>` in one of four places: on the call's
+A site that must stay erased carries `// erasure: keep <why>` in one of six places: on the call's
 own line, alone on the line above it, on the first line of an enclosing `vec![..]`, `let` statement
-or `match`, or on the enclosing fn signature (the `fn` line, its `->` line, or alone above the
-`fn`). rustfmt moves a `{ // erasure: keep ..` trailer onto the first body line; that form is
+or `match`, on the enclosing fn signature (the `fn` line, its `->` line, or alone above the `fn`),
+on an accumulator `let`, or inside the call. The accumulator form is a marker on, or alone above, a
+`let [mut] v` whose type or initializer names `AnyView`: it covers every erasure call that is an
+argument of `v.push(..)`, `v.insert(..)` or `v.extend(..)` in the same fn (not other vecs, not a
+shadowing re-binding). The in-call form is an own-line marker strictly inside an erasure call's
+parentheses, or directly before the argument holding it in the statement-level call; this is what
+rustfmt produces for a multi-line `any(..)`. It covers that call for rule U and the T1-T7 keep
+exemption; a marker inside a nested closure or block does not escape, and a bare marker does not
+count. rustfmt moves a `{ // erasure: keep ..` trailer onto the first body line; that form is
 accepted as fn-scoped. The rustfmt-stable placements are the end of the `->` line with `{` on the
-next line, and the end of the `any(..)` line. The marker must carry a reason: a bare
+next line, the end of the `any(..)` line, the accumulator `let` line (or alone above it), and the
+in-call own-line form. The marker must carry a reason: a bare
 `// erasure: keep` does not satisfy rule U (the checker enforces this). A fn-signature marker
 covers every call in that fn, so its reason must cover them all. Do not add a marker merely to
 silence the tripwire; [TESTING.md](TESTING.md) describes what `scripts/ci/erasure-check.sh`
 enforces.
 
 Codemod rule T7 skips some helpers (listed per bucket in its output). A helper whose same-file
-call is taken by `&` (e.g. `build_child(&self.x_view())`) is excluded as "taken by reference".
+call is taken by `&` (e.g. `build_child(&self.x_view())`), or is bound by an untyped
+`let x = name(..);` and later borrowed as a bare `&x` or `&mut x` in the same block, is excluded as
+"taken by reference". A helper with a lifetime parameter or an elided reference parameter is
+rewritten to `impl View<S> + use<..>` listing type parameters only, in any edition, because `View`
+is `'static` and a captured borrow would make the opaque type non-`'static`; an argument-position
+`impl Trait` skips with a note. A local fn shadows a builder only in its own module and descendants.
 Non-private helpers (`T7-visible`) are not rewritten without `--t7-visible`, because callers in
 other modules may rely on `AnyView`; a caller picking such a helper two-arm in another module
 needs `either` there, so the migration crosses module boundaries.
