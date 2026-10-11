@@ -171,6 +171,93 @@ class T1Test(unittest.TestCase):
         # `card` is a free-fn entry; `.card(..)` is a different (method) call.
         self.assertEqual(run("s.card(any(x))"), "s.card(any(x))")
 
+    # -- callee origin: the name list matches names, the callee must be frust's --
+
+    def assert_noted(self, src, why):
+        src = textwrap.dedent(src)
+        self.assertEqual(run(src), src)
+        rules, notes = check(src)
+        self.assertEqual(rules, [], src)
+        self.assertTrue(any(why in n for _, n in notes), notes)
+
+    def test_app_fn_named_like_slot_api_noted(self):
+        # muxr rail.rs: the app's own `panel` takes an erased body (E0308).
+        self.assert_noted("""\
+            fn panel<S>(width: f32, body: AnyView<S>) -> AnyView<S> { body }
+            fn f() -> V { panel(1.0, any(text("a"))) }
+            """, "a same-file fn `panel` may be the callee")
+
+    def test_app_import_named_like_slot_api_noted(self):
+        self.assert_noted("""\
+            use crate::ui::panel::panel;
+            fn f() -> V { panel(1.0, any(text("a"))) }
+            """, "`panel` is imported from a non-frust path")
+        self.assert_noted("""\
+            use super::field;
+            fn f() -> V { field(any(x)) }
+            """, "`field` is imported from a non-frust path")
+
+    def test_app_glob_import_noted(self):
+        self.assert_noted("use crate::ui::*;\nfn f() -> V { panel(1.0, any(x)) }\n",
+                          "`panel` may come from a non-frust glob import")
+        self.assert_noted("use frust::*;\nuse crate::ui::*;\nfn f() -> V { card(any(x)) }\n",
+                          "non-frust glob import")
+
+    def test_qualified_app_path_untouched(self):
+        for src in ("crate::ui::panel(any(x))", "super::card(any(x))", "self::ui::card(any(x))",
+                    "ui::card(any(x))", "crate::nav::Route::new(\"/\", || any(home()))"):
+            self.assertEqual(run(src), src, src)
+            self.assertEqual(check(src), ([], []), src)
+
+    def test_local_type_named_like_assoc_api_noted(self):
+        self.assert_noted("""\
+            struct Route;
+            impl Route { fn new<F>(p: &str, f: F) -> Self { Route } }
+            fn f() { Route::new("/", || any(home())); }
+            """, "`Route` is a local type")
+        self.assert_noted("struct ScrollView;\nfn f() { ScrollView::new(any(body)); }\n",
+                          "`ScrollView` is a local type")
+        self.assert_noted("use crate::nav::Route;\nfn f() { Route::new(\"/\", || any(home())); }\n",
+                          "`Route` is imported from a non-frust path")
+
+    def test_method_named_like_same_file_fn_noted(self):
+        self.assert_noted("""\
+            impl Bar { fn leading(self, v: AnyView<()>) -> Self { self } }
+            fn f(b: Bar) -> Bar { b.leading(any(x)) }
+            """, "a same-file fn `leading` may be the callee of `.leading`")
+
+    def test_kept_app_callee_is_not_noted(self):
+        src = "fn panel(b: AnyView<()>) {}\nfn f() { panel(any(x)); // erasure: keep app fn\n}\n"
+        self.assertEqual(run(src), src)
+        self.assertEqual(check(src), ([], []))
+
+    def test_frust_origin_callee_rewrites(self):
+        self.assertEqual(run("use frust_material::card;\nfn f() -> V { card(any(x)) }\n"),
+                         "use frust_material::card;\nfn f() -> V { card(x) }\n")
+        self.assertEqual(run("use frust::panel;\nfn f() -> V { panel(1.0, any(x)) }\n"),
+                         "use frust::panel;\nfn f() -> V { panel(1.0, x) }\n")
+        self.assertEqual(run("frust_shadcn::card(any(x))"), "frust_shadcn::card(x)")
+        self.assertEqual(run("frust::Route::new(\"/\", || any(home()))"),
+                         "frust::Route::new(\"/\", || home())")
+        self.assertEqual(run("use frust::Route;\nRoute::new(\"/\", || any(home()))"),
+                         "use frust::Route;\nRoute::new(\"/\", || home())")
+
+    def test_frust_import_beats_same_named_method(self):
+        # A method `card` does not shadow the imported free fn `card`.
+        src = "use frust::card;\nimpl P { fn card(&self) {} }\nfn f() -> V { card(any(x)) }\n"
+        self.assertEqual(run(src), src.replace("card(any(x))", "card(x)"))
+
+    def test_test_module_super_glob_is_transparent(self):
+        src = textwrap.dedent("""\
+            use frust::*;
+            #[cfg(test)]
+            mod tests {
+                use super::*;
+                fn t() -> V { card(any(x)) }
+            }
+            """)
+        self.assertIn("card(x)", run(src))
+
 
 class T4Test(unittest.TestCase):
     def test_closure_expression_body(self):
@@ -283,6 +370,44 @@ class T2Test(unittest.TestCase):
     def test_let_initialiser_is_not_shadowed(self):
         src = "fn f() -> V { let column = Column(vec![a]); framed(column) }\n"
         self.assertEqual(run_g(src), "fn f() -> V { let column = column().child(a); framed(column) }\n")
+
+    # -- builder origin: only a frust-origin import binds column/row/stack --
+
+    def assert_noted(self, src, why):
+        src = textwrap.dedent(src)
+        self.assertEqual(run(src), src)
+        rules, notes = check(src)
+        self.assertEqual(rules, [], src)
+        self.assertTrue(any(why in n for _, n in notes), notes)
+
+    def test_app_imported_builders_noted(self):
+        # muxr: `use super::{column, row};` helpers took the bare `column()` (E0061).
+        self.assert_noted("""\
+            use frust::{Column, Row};
+            use super::{column, row};
+            fn f() -> V { Column(vec![a, Row(vec![b])]) }
+            """, "T2 skipped: `column` is imported from a non-frust path")
+        self.assert_noted("""\
+            use frust::Row;
+            use crate::ui::row as row;
+            fn f() -> V { Row(vec![a]) }
+            """, "T2 skipped: `row` is imported from a non-frust path")
+
+    def test_app_imported_sugar_noted(self):
+        self.assert_noted("use crate::ui::Column;\nfn f() -> V { Column(vec![a]) }\n",
+                          "T2 skipped: `Column` is imported from a non-frust path")
+        self.assert_noted("use self::ui::FlexView;\nfn f() -> V { FlexView::new(Axis::Vertical, vec![a]) }\n",
+                          "T3 skipped: `FlexView` is imported from a non-frust path")
+        for src in ("crate::ui::Column(vec![a])", "super::Row(vec![a])"):
+            self.assertEqual(run(src), src, src)
+
+    def test_mixed_globs_noted(self):
+        self.assert_noted("use frust::*;\nuse crate::ui::*;\nfn f() -> V { Column(vec![a]) }\n",
+                          "T2 skipped: `Column`/`column` may come from a non-frust glob import")
+
+    def test_frust_imported_builder_still_rewrites(self):
+        src = "use frust_widgets::{column, Column};\nfn f() -> V { Column(vec![a]) }\n"
+        self.assertIn("column().child(a)", run(src))
 
 
 class T3Test(unittest.TestCase):
@@ -531,14 +656,15 @@ class T5Test(unittest.TestCase):
 
     def test_excluded_list_api_untouched(self):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
-            fh.write("[list]\nlist_api\n[exclude]\nother::list_api\n")
+            fh.write("[list]\nlist_api\n[exclude]\nfrust_other::list_api\n")
         try:
             apis = cm.load_apis(fh.name)
         finally:
             os.unlink(fh.name)
-        src = "other::list_api(vec![any(t(1))]); mine::list_api(vec![any(t(1))]);"
+        # Both qualifiers are frust-origin, so only the exclusion tells them apart.
+        src = "frust_other::list_api(vec![any(t(1))]); frust_mine::list_api(vec![any(t(1))]);"
         self.assertEqual(cm.rewrite(src, apis, t5=True).text,
-                         "other::list_api(vec![any(t(1))]); mine::list_api(vec![t(1)]);")
+                         "frust_other::list_api(vec![any(t(1))]); frust_mine::list_api(vec![t(1)]);")
 
 
 class DriverFixture:
