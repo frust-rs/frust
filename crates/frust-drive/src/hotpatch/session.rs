@@ -102,12 +102,13 @@ use frust_devtools_protocol::{
     parse_discovery_line, parse_failure_line, redact_discovery_token,
 };
 
-use crate::build_info::{BuildInfo, BuildMode};
+use crate::build_info::{BuildInfo, BuildMode, HOTPATCH_FEATURE};
 use crate::desktop_run;
 use crate::devtools_client::{
     DevtoolsClient, DevtoolsRpcError, RequestTooLarge, is_not_supported, sha256_hex,
 };
 use crate::doctor::{EnvLookup, RealEnv};
+use crate::facade_key::FacadeKey;
 use crate::manifest::{self, HotpatchSection};
 use crate::process::{ProcessRunner, StreamHandle, TryRecvError};
 
@@ -903,8 +904,10 @@ pub(super) enum AppLink {
 /// session can patch it. Nothing is sent to a non-loopback endpoint (an
 /// IPv4-mapped IPv6 address counts as non-loopback); an app without
 /// `HotPatch` gives the precondition its `hotpatch_info` refusal names.
-fn attach_app(endpoint: SocketAddr, token: Option<&str>, triple: &str) -> AppLink {
-    attach(endpoint, token, triple, true)
+/// `key` is the app's facade dependency key, so a refusal names the feature
+/// as this app spells it (`frust-ui/hotpatch`).
+fn attach_app(endpoint: SocketAddr, token: Option<&str>, triple: &str, key: &FacadeKey) -> AppLink {
+    attach(endpoint, token, triple, key, true)
 }
 
 /// [`attach_app`] for an app on a device, reached through a host loopback
@@ -914,11 +917,28 @@ pub(super) fn attach_device_app(
     endpoint: SocketAddr,
     token: Option<&str>,
     triple: &str,
+    key: &FacadeKey,
 ) -> AppLink {
-    attach(endpoint, token, triple, false)
+    attach(endpoint, token, triple, key, false)
 }
 
-fn attach(endpoint: SocketAddr, token: Option<&str>, triple: &str, same_host: bool) -> AppLink {
+/// The restart-only reason for an app that advertises no `HotPatch`
+/// capability and gives no refusal of its own: it names the hot-patch
+/// feature as an app keyed `key` spells it (`frust-ui/hotpatch`).
+fn no_hotpatch_capability_reason(key: &FacadeKey) -> String {
+    format!(
+        "the app does not advertise the HotPatch capability (is it built with `{}`?)",
+        key.map(HOTPATCH_FEATURE)
+    )
+}
+
+fn attach(
+    endpoint: SocketAddr,
+    token: Option<&str>,
+    triple: &str,
+    key: &FacadeKey,
+    same_host: bool,
+) -> AppLink {
     let restart_only = |reason: String| AppLink::RestartOnly { reason };
     if !endpoint.ip().is_loopback() {
         return restart_only(RestartReason::EndpointNotLoopback { endpoint }.to_string());
@@ -937,9 +957,7 @@ fn attach(endpoint: SocketAddr, token: Option<&str>, triple: &str, same_host: bo
                 .downcast_ref::<DevtoolsRpcError>()
                 .map(|rpc| rpc.message.clone())
                 .unwrap_or_else(|| format!("{err:#}")),
-            _ => "the app does not advertise the HotPatch capability (is it built with \
-                  `frust/hotpatch`?)"
-                .to_string(),
+            _ => no_hotpatch_capability_reason(key),
         };
         return restart_only(reason);
     }
@@ -1402,6 +1420,7 @@ pub fn start_desktop(
     let manifest =
         manifest::load_optional(start.root).map_err(|err| unsupported(format!("{err:#}")))?;
     let budget = Budget::from_section(manifest.as_ref().and_then(|m| m.hotpatch.as_ref()));
+    let key = FacadeKey::resolve(start.root).map_err(|err| unsupported(err.to_string()))?;
 
     // The fat build compiles for the host, so the graph is the host's: a
     // dependency gated to another platform is no edge of it.
@@ -1454,11 +1473,15 @@ pub fn start_desktop(
     };
     remove_stale(&link.args_file)?;
     let tip_bin = graph.tip_bin();
-    let defines = desktop_run::desktop_plan(start.root, start.info).env;
+    let defines = desktop_run::desktop_env(start.info);
+    // The scope above hashes the canonical names (a `frust`-keyed app's
+    // scope is unchanged); the argv spells them with the app's key.
+    let argv_features = argv_features(features, &key);
+    let argv_refs: Vec<&str> = argv_features.iter().map(String::as_str).collect();
     let fat = fat_build_command(
         start.package,
         &tip_bin.target,
-        features,
+        &argv_refs,
         &defines,
         WrapperSetup {
             frust_exe: &host.frust_exe,
@@ -1508,6 +1531,7 @@ pub fn start_desktop(
             SocketAddr::from((Ipv4Addr::LOCALHOST, discovery.port)),
             discovery.token.as_deref(),
             &triple,
+            &key,
         ),
         Announced::Failure(reason) => AppLink::RestartOnly { reason },
         Announced::Exited => {
@@ -1871,9 +1895,23 @@ pub(super) fn run_fat_build(
     if !stderr.is_empty() {
         errors.push(stderr.to_string());
     }
+    // A fat build is always a Debug build; a feature its key does not
+    // resolve gets the dependency-key hint after cargo's own text.
+    if let Some(hint) = desktop_run::facade_feature_hint(BuildMode::Debug, &errors.join("\n")) {
+        errors.push(hint.to_string());
+    }
     Err(StartError::FatBuildFailed {
         diagnostics: errors,
     })
+}
+
+/// A hot session's canonical `features` as the fat build's cargo argv must
+/// spell them for an app whose facade dependency is keyed `key`
+/// (`frust-ui/hotpatch`). The capture scope ([`ScopeInputs::features`])
+/// keeps hashing the canonical names, so a `frust`-keyed app's scope — and
+/// every scope directory already on disk — is byte-identical.
+pub(super) fn argv_features(features: &[&str], key: &FacadeKey) -> Vec<String> {
+    features.iter().map(|feature| key.map(feature)).collect()
 }
 
 /// `cargo metadata`'s `target_directory`.
@@ -3027,7 +3065,7 @@ mod tests {
         budget: Budget,
     ) -> Rig {
         let server = test_server::spawn(script);
-        let app = attach_app(server.addr, Some(FAKE_TOKEN), TRIPLE);
+        let app = attach_app(server.addr, Some(FAKE_TOKEN), TRIPLE, &FacadeKey::default());
         let target_dir = temp_dir("rig");
         let accepted = AcceptedSets::begin(&target_dir, "session-app", base, home_seam()).unwrap();
         let calls = Arc::clone(&builder.calls);
@@ -3258,7 +3296,7 @@ mod tests {
         let mut script = hot_script(vec![applied(1, 2, Vec::new())]);
         script.info.as_mut().unwrap().patch_file_hand_off = true;
         let server = test_server::spawn(script);
-        let app = attach_device_app(server.addr, Some(FAKE_TOKEN), TRIPLE);
+        let app = attach_device_app(server.addr, Some(FAKE_TOKEN), TRIPLE, &FacadeKey::default());
         assert!(
             matches!(
                 app,
@@ -3318,7 +3356,8 @@ mod tests {
             let mut script = hot_script(vec![applied(1, 2, Vec::new())]);
             script.info.as_mut().unwrap().anchor_runtime = anchor;
             let server = test_server::spawn(script);
-            let app = attach_device_app(server.addr, Some(FAKE_TOKEN), TRIPLE);
+            let app =
+                attach_device_app(server.addr, Some(FAKE_TOKEN), TRIPLE, &FacadeKey::default());
             let mut builder = FakeBuilder::new(Vec::new());
             builder.patch = patch;
             let calls = Arc::clone(&builder.calls);
@@ -3532,7 +3571,13 @@ mod tests {
         let patch = ImageSymbols::parse(&android_patch(), android(), "patch").unwrap();
         let expected_table = super::super::jump_table::create_jump_table(&cache, &patch).unwrap();
         let server = test_server::spawn(script);
-        let app = attach(server.addr, Some(FAKE_TOKEN), TRIPLE, same_host);
+        let app = attach(
+            server.addr,
+            Some(FAKE_TOKEN),
+            TRIPLE,
+            &FacadeKey::default(),
+            same_host,
+        );
         let accepted = AcceptedSets::begin(
             &target_dir,
             "session-app",
@@ -3742,7 +3787,7 @@ mod tests {
             std::net::IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped()),
             server.addr.port(),
         );
-        let app = attach_app(mapped, Some(FAKE_TOKEN), TRIPLE);
+        let app = attach_app(mapped, Some(FAKE_TOKEN), TRIPLE, &FacadeKey::default());
         let AppLink::RestartOnly { reason } = &app else {
             panic!("a non-loopback endpoint must not be attached");
         };
@@ -4560,7 +4605,7 @@ mod tests {
             FakeCompile::Candidate(LayoutTable::default(), home_seam()),
         ]);
         let server = test_server::spawn(hot_script(vec![applied(1, 1, Vec::new())]));
-        let app = attach_app(server.addr, Some(FAKE_TOKEN), TRIPLE);
+        let app = attach_app(server.addr, Some(FAKE_TOKEN), TRIPLE, &FacadeKey::default());
         let accepted = AcceptedSets::begin(
             &temp_dir("post-link"),
             "session-app",
@@ -5250,6 +5295,122 @@ mod tests {
             "an uncaptured path dependency is busted so the wrapper sees it"
         );
         assert!(fingerprints.join("serde-2222").is_dir());
+    }
+
+    /// An app keyed `frust-ui`: the fat build's cargo argv carries
+    /// `frust-ui/<feature>`, while the capture scope keeps hashing the
+    /// canonical names — the scope directory is the one a `frust`-keyed app
+    /// gets.
+    #[test]
+    fn a_frust_ui_keyed_fat_build_maps_the_argv_but_not_the_scope() {
+        let (root, target_dir, runner) = project(
+            "fat-frust-ui",
+            Output {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"my-app\"\nversion = \"0.1.0\"\n\n[dependencies]\nfrust-ui = \"0.6.0\"\n",
+        )
+        .unwrap();
+        let _ = start(
+            &runner,
+            &FakeEnv::new(),
+            &root,
+            &debug_info(),
+            &mut Vec::new(),
+        );
+        let (args, env, _) = runner.call("cargo");
+        let features: Vec<&str> = args
+            .iter()
+            .zip(args.iter().skip(1))
+            .filter(|(flag, _)| *flag == "--features")
+            .map(|(_, feature)| feature.as_str())
+            .collect();
+        assert_eq!(
+            features,
+            [
+                "frust-ui/perf-trace",
+                "frust-ui/devtools",
+                "frust-ui/hotpatch"
+            ]
+        );
+        let canonical = ScopeInputs {
+            tip: "my-app".into(),
+            triple: TRIPLE.into(),
+            profile: "dev".into(),
+            features: vec![
+                "frust/perf-trace".into(),
+                "frust/devtools".into(),
+                "frust/hotpatch".into(),
+            ],
+            rustflags: Vec::new(),
+            rustc_version: RUSTC_VV.trim().to_string(),
+        };
+        let scope_dir = prepare_scope_dir(&target_dir, &canonical).unwrap();
+        let captured = env
+            .iter()
+            .find(|(name, _)| name == "FRUST_HOTPATCH_CAPTURE")
+            .map(|(_, value)| PathBuf::from(value))
+            .expect("the capture scope is on the fat build's env");
+        assert_eq!(captured, scope_dir);
+    }
+
+    #[test]
+    fn argv_features_map_only_the_canonical_prefix() {
+        let features = BuildMode::Debug.session_cargo_features(true);
+        assert_eq!(
+            argv_features(features, &FacadeKey::default()),
+            ["frust/perf-trace", "frust/devtools", "frust/hotpatch"]
+        );
+        assert_eq!(
+            argv_features(features, &FacadeKey::new("frust-ui")),
+            [
+                "frust-ui/perf-trace",
+                "frust-ui/devtools",
+                "frust-ui/hotpatch"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_missing_capability_reason_names_the_mapped_feature() {
+        let reason = no_hotpatch_capability_reason(&FacadeKey::new("frust-ui"));
+        assert!(reason.contains("`frust-ui/hotpatch`"), "{reason}");
+        let reason = no_hotpatch_capability_reason(&FacadeKey::default());
+        assert!(reason.contains("`frust/hotpatch`"), "{reason}");
+    }
+
+    /// A fat build cargo refuses for a feature the package does not contain
+    /// ends its diagnostics with the dependency-key hint.
+    #[test]
+    fn a_missing_feature_fat_build_failure_carries_the_facade_key_hint() {
+        let (root, _, runner) = project(
+            "fat-hint",
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "error: the package 'my-app' does not contain this feature: frust/hotpatch"
+                    .to_string(),
+            },
+        );
+        let err = start(
+            &runner,
+            &FakeEnv::new(),
+            &root,
+            &debug_info(),
+            &mut Vec::new(),
+        );
+        let StartError::FatBuildFailed { diagnostics } = err else {
+            panic!("expected a failed fat build, got {err:?}");
+        };
+        assert_eq!(
+            diagnostics.last().map(String::as_str),
+            Some(FacadeKey::hint())
+        );
     }
 
     #[test]

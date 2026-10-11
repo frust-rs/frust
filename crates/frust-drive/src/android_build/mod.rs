@@ -23,6 +23,7 @@ use anyhow::{Context, Result, bail};
 use crate::android_run::preflight::{self, PreflightCtx};
 use crate::build_info::BuildInfo;
 use crate::doctor::{EnvLookup, RealEnv};
+use crate::facade_key::FacadeKey;
 use crate::process::{ProcessRunner, tail_lines};
 
 /// The artifact `frust build apk`/`appbundle` requests.
@@ -62,6 +63,11 @@ pub struct BuiltArtifacts {
 /// [`tasks::gradle_properties`]); an empty slice reproduces the pre-passthrough
 /// invocation exactly. `frust-tui`'s build session has no flag surface for it
 /// and passes an empty slice.
+///
+/// Every canonical `frust/<feature>` in that CSV is spelled with the app's
+/// facade dependency key ([`FacadeKey`], resolved once from `project_dir`),
+/// since `cargo ndk` resolves it against the key; a manifest naming the
+/// facade under two keys is an error before Gradle runs.
 ///
 /// **Frozen signature** — do not change without updating every caller
 /// (`commands::build`, `frust-tui`'s build session) and this doc comment.
@@ -156,6 +162,11 @@ fn build_with_env(
     if let Some(warning) = warning {
         on_line(&warning);
     }
+    // The CSV is handed verbatim to `cargo ndk --features`, so each canonical
+    // `frust/<feature>` is spelled with the app's own facade dependency key
+    // here, the one boundary the key-agnostic Gradle template trusts.
+    let key = FacadeKey::resolve(project_dir).context("resolving the app's frust dependency")?;
+    let features: Vec<String> = features.iter().map(|feature| key.map(feature)).collect();
 
     let task = tasks::task_name(target, info.mode, info.flavor.as_deref());
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
@@ -210,10 +221,13 @@ fn build_with_env(
             );
         }
         let tail = tail_lines(&out.stderr, 50);
+        let hint = crate::desktop_run::facade_feature_hint(info.mode, &combined)
+            .map(|hint| format!("\n{hint}"))
+            .unwrap_or_default();
         if tail.is_empty() {
-            bail!("`./gradlew {task}` failed");
+            bail!("`./gradlew {task}` failed{hint}");
         }
-        bail!("`./gradlew {task}` failed:\n{tail}");
+        bail!("`./gradlew {task}` failed:\n{tail}{hint}");
     }
 
     // The gate promised a release-signed artifact; Gradle just said it produced
@@ -561,6 +575,88 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.paths, vec![out_dir.join("app-debug.apk")]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An app keyed `frust-ui`: the mode's facade features reach the CSV as
+    /// `frust-ui/<feature>`, the passthrough after them unchanged — decoded,
+    /// `frust-ui/perf-trace,frust-ui/devtools,hybrid-tier`.
+    #[test]
+    fn a_frust_ui_keyed_app_spells_the_cargo_features_csv_with_its_key() {
+        let dir = unique_project_dir("frust-ui-key");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nfrust-ui = \"0.6.0\"\n",
+        )
+        .unwrap();
+        let out_dir = dir.join("build/android/app/outputs/apk/debug");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-debug.apk"), b"fake-apk-bytes").unwrap();
+
+        let runner = preflight_ok_runner().with(
+            // base64("frust-ui/perf-trace,frust-ui/devtools,hybrid-tier")
+            gradlew_key(
+                &dir,
+                "assembleDebug -Pfrust.targetPlatforms=arm64-v8a \
+-Pfrust.splitPerAbi=false \
+-Pfrust.cargoFeatures=ZnJ1c3QtdWkvcGVyZi10cmFjZSxmcnVzdC11aS9kZXZ0b29scyxoeWJyaWQtdGllcg==",
+            ),
+            Output {
+                success: true,
+                stdout: "BUILD SUCCESSFUL".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let target = AndroidArtifact::Apk {
+            split_per_abi: false,
+            abis: vec!["arm64-v8a".to_string()],
+        };
+        let result = build_with_env(
+            &runner,
+            &dir,
+            &info(BuildMode::Debug, None),
+            &target,
+            &["hybrid-tier".to_string()],
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(result.paths, vec![out_dir.join("app-debug.apk")]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A Gradle failure whose cargo output names a feature the package does
+    /// not contain carries the dependency-key hint.
+    #[test]
+    fn a_missing_feature_failure_carries_the_facade_key_hint() {
+        let dir = unique_project_dir("feature-hint");
+        let runner = preflight_ok_runner().with(
+            gradlew_key(&dir, "assembleDebug"),
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "error: the package 'app' does not contain this feature: frust/devtools"
+                    .to_string(),
+            },
+        );
+        let target = AndroidArtifact::Apk {
+            split_per_abi: false,
+            abis: vec!["arm64-v8a".to_string()],
+        };
+        let err = build_with_env(
+            &runner,
+            &dir,
+            &info(BuildMode::Debug, None),
+            &target,
+            NO_EXTRA,
+            &fake_env(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.ends_with(FacadeKey::hint()), "{message}");
 
         let _ = fs::remove_dir_all(&dir);
     }

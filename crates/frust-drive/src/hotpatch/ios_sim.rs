@@ -84,6 +84,7 @@ use object::{SymbolKind, SymbolScope};
 use crate::build_info::{BuildInfo, BuildMode};
 use crate::devices::{Device, Kind, Platform};
 use crate::doctor::EnvLookup;
+use crate::facade_key::FacadeKey;
 use crate::ios_build::xcodebuild::host_sim_arch;
 use crate::ios_run::{self, HotBuild, IosLaunch, simctl, xcodebuild};
 use crate::manifest;
@@ -455,6 +456,11 @@ pub fn start_ios_sim(
     let manifest =
         manifest::load_optional(start.root).map_err(|err| unsupported(format!("{err:#}")))?;
     let budget = Budget::from_section(manifest.as_ref().and_then(|m| m.hotpatch.as_ref()));
+    // The fat build's own `FRUST_FEATURES` is spelled with the app's facade
+    // key by the run pipeline (`ios_build::resolve_features_b64`); the key
+    // here names the hot-patch feature in an attach refusal, and an
+    // ambiguous one stops the start before anything builds.
+    let key = FacadeKey::resolve(start.root).map_err(|err| unsupported(err.to_string()))?;
 
     let triple = triple();
     let metadata =
@@ -468,6 +474,8 @@ pub fn start_ios_sim(
     let rustc_version = capture::rustc_version(runner)?;
     let target = Target::from_triple(triple)?;
     let flavor = LinkerFlavor::for_triple(triple)?;
+    // Canonical names: the scope hash is key-independent, so a `frust`-keyed
+    // app's scope directory is unchanged.
     let features = start.info.mode.session_cargo_features(true);
     let scope = ScopeInputs {
         tip: start.package.to_string(),
@@ -575,6 +583,7 @@ pub fn start_ios_sim(
         runner,
         &start.device.id,
         triple,
+        &key,
         staged,
         &mut launch,
         on_line,
@@ -595,11 +604,14 @@ pub fn start_ios_sim(
 /// is [`unwind`]: no staged base and an app console that ended before the
 /// discovery line are [`StartError::Launch`]; a cancel observed during the
 /// wait or the attach is `Ok(None)`. Generic over the base so a test needs
-/// no linked image.
+/// no linked image. `key` is the app's facade key, naming the hot-patch
+/// feature in a refusal.
+#[allow(clippy::too_many_arguments)] // the launch, the attach inputs and the cancel
 fn attach_launched<B>(
     runner: &dyn ProcessRunner,
     udid: &str,
     triple: &str,
+    key: &FacadeKey,
     staged: Option<B>,
     launch: &mut IosLaunch,
     on_line: &mut dyn FnMut(&str),
@@ -623,6 +635,7 @@ fn attach_launched<B>(
             SocketAddr::from((Ipv4Addr::LOCALHOST, discovery.port)),
             discovery.token.as_deref(),
             triple,
+            key,
         ),
         Announced::Failure(reason) => AppLink::RestartOnly { reason },
         Announced::Exited => {
@@ -1295,6 +1308,7 @@ mod tests {
             &runner,
             UDID,
             TRIPLE_ARM64,
+            &FacadeKey::default(),
             Some(()),
             &mut launch,
             &mut |_| {},
@@ -1317,6 +1331,7 @@ mod tests {
             &runner,
             UDID,
             TRIPLE_ARM64,
+            &FacadeKey::default(),
             Some(()),
             &mut launch,
             &mut |_| {},
@@ -1356,6 +1371,7 @@ mod tests {
                 &runner,
                 UDID,
                 TRIPLE_ARM64,
+                &FacadeKey::default(),
                 Some(()),
                 &mut launch,
                 &mut on_line,
@@ -1389,6 +1405,7 @@ mod tests {
             &runner,
             UDID,
             TRIPLE_ARM64,
+            &FacadeKey::default(),
             None,
             &mut launch,
             &mut |_| {},
