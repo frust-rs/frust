@@ -2319,3 +2319,182 @@ class UnmarkedDriverTest(DriverFixture, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModuleScopedShadowTest(unittest.TestCase):
+    def test_nested_mod_fn_does_not_block_parent_but_blocks_inside(self):
+        src = ("fn outer() -> V { Column(vec![a, b]) }\n"
+               "#[cfg(test)]\nmod tests {\n"
+               "    fn column(x: u32) -> u32 { x }\n"
+               "    fn inner() -> V { Column(vec![a, b]) }\n}\n")
+        res = cm.rewrite(GLOB + src, APIS)
+        lines = [c.line for c in res.candidates]
+        self.assertEqual(lines, [2])
+        self.assertTrue(any("local fn `column`" in n for _, n in res.notes))
+
+    def test_parent_fn_still_shadows_nested_mod(self):
+        src = ("fn column(x: u32) -> u32 { x }\n"
+               "mod tests {\n    fn inner() -> V { Column(vec![a, b]) }\n}\n")
+        res = cm.rewrite(GLOB + src, APIS)
+        self.assertEqual(res.candidates, [])
+
+    def test_nested_mod_fn_does_not_block_origin_gate(self):
+        s = cm.Source("fn a() { child(1); }\nmod m { fn child() {} fn b() { child(2); } }\n")
+        self.assertFalse(s.fn_shadows("child", s.src.index("child(1)")))
+        self.assertTrue(s.fn_shadows("child", s.src.index("child(2)")))
+
+
+class AccumulatorMarkerTest(unittest.TestCase):
+    def test_marked_accumulator_covers_pushes(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut kids: Vec<AnyView<S>> = Vec::new(); // erasure: keep accumulator
+                kids.push(any(a()));
+                kids.push(any(b()));
+                kids.insert(0, any(c()));
+                kids.extend([any(d())]);
+            }
+            """), [])
+
+    def test_marker_alone_above_and_untyped_initializer(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                // erasure: keep accumulator
+                let mut kids = Vec::<AnyView<S>>::new();
+                kids.push(any(a()));
+            }
+            """), [])
+
+    def test_unmarked_accumulator_reports_each_push(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut kids: Vec<AnyView<S>> = Vec::new();
+                kids.push(any(a()));
+                kids.push(any(b()));
+            }
+            """), [3, 4])
+
+    def test_bare_marker_covers_nothing(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut kids: Vec<AnyView<S>> = Vec::new(); // erasure: keep
+                kids.push(any(a()));
+            }
+            """), [3])
+
+    def test_other_vec_and_non_anyview_not_covered(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut kids: Vec<AnyView<S>> = Vec::new(); // erasure: keep accumulator
+                let mut other: Vec<AnyView<S>> = Vec::new();
+                let mut nums: Vec<u8> = Vec::new(); // erasure: keep not a view vec
+                other.push(any(a()));
+                nums.push(any(b()));
+            }
+            """), [5, 6])
+
+    def test_other_fn_and_rebinding_not_covered(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut kids: Vec<AnyView<S>> = Vec::new(); // erasure: keep accumulator
+                kids.push(any(a()));
+                let mut kids: Vec<AnyView<S>> = Vec::new();
+                kids.push(any(b()));
+            }
+            fn g(kids: &mut Vec<AnyView<S>>) {
+                kids.push(any(c()));
+            }
+            """), [5, 8])
+
+
+class InCallMarkerTest(unittest.TestCase):
+    def test_own_line_marker_inside_parens_covers_call(self):
+        src = """\
+            fn f() {
+                x.push(any(f(
+                    // erasure: keep why
+                    a,
+                    b,
+                )));
+            }
+            """
+        self.assertEqual(unmarked(src), [])
+
+    def test_marker_after_closing_paren_covers_only_next_line(self):
+        src = """\
+            fn f() {
+                x.push(any(f(
+                    a,
+                )));
+                // erasure: keep why
+                y.push(any(g()));
+                z.push(any(h()));
+            }
+            """
+        self.assertEqual(unmarked(src), [2, 7])
+
+    def test_marker_in_closure_body_does_not_escape(self):
+        src = """\
+            fn f() {
+                x.push(any(w(|| {
+                    // erasure: keep why
+                    1
+                })));
+            }
+            """
+        self.assertEqual(unmarked(src), [2])
+
+    def test_bare_in_call_marker_covers_nothing_under_u(self):
+        src = """\
+            fn f() {
+                x.push(any(f(
+                    // erasure: keep
+                    a,
+                )));
+            }
+            """
+        self.assertEqual(unmarked(src), [2])
+
+    def test_t_rule_keep_exemption(self):
+        src = GLOB + textwrap.dedent("""\
+            fn f() {
+                s.child(any(f(
+                    // erasure: keep why
+                    a,
+                )));
+            }
+            """)
+        res = cm.rewrite(src, APIS)
+        self.assertEqual(res.candidates, [])
+        plain = cm.rewrite(src.replace("// erasure: keep why", "// note"), APIS)
+        self.assertEqual(len(plain.candidates), 1)
+
+    def test_rustfmt_stable_placements(self):
+        import shutil
+        import subprocess
+        rustfmt = shutil.which("rustfmt")
+        if rustfmt is None:
+            self.skipTest("rustfmt not on PATH")
+        src = textwrap.dedent("""\
+            fn a() {
+                x.push(any(f(a, b))); // erasure: keep why
+            }
+            fn b() {
+                let mut kids: Vec<AnyView<S>> = Vec::new(); // erasure: keep accumulator
+                kids.push(any(g()));
+            }
+            fn c() {
+                // erasure: keep why
+                y.push(any(h()));
+            }
+            fn d() {
+                y.push(any(f( // erasure: keep why
+                    aaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbb, cccccccccccccccccccccc, dddddddddddddddddd)));
+            }
+            """)
+        self.assertEqual(unmarked(src), [])
+        out = subprocess.run([rustfmt, "--edition", "2024", "--emit", "stdout"], input=src,
+                             capture_output=True, text=True)
+        if out.returncode != 0:
+            self.skipTest("rustfmt failed: " + out.stderr[:200])
+        self.assertEqual(unmarked(out.stdout), [], out.stdout)

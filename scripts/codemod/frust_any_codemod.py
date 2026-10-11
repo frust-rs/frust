@@ -258,7 +258,18 @@ U   (`--unmarked` only; never auto-fixed: `--write` leaves every U site alone an
       inside a fn whose signature is kept (the `fn` line, the line holding its
       `->`, alone above the `fn` line, or, for a fn returning an AnyView type, as the first
       own-line comment of its body), or (c) it sits inside a `vec![..]`,
-      a `let` statement or a `match` whose first line is kept. A fn-signature
+      a `let` statement or a `match` whose first line is kept, (c') it is an
+      argument of `<v>.push(..)`, `<v>.insert(..)` or `<v>.extend(..)` in a fn
+      body where `<v>` is the nearest preceding in-scope `let [mut] <v>` whose
+      type or initializer names `AnyView` and whose line is kept (a reasoned
+      marker on the `let` line or alone above it; it covers nothing outside
+      that fn, no other vec and no shadowing re-binding of `<v>`), or (d) a
+      reasoned own-line marker sits strictly inside the parentheses of the call
+      (nested parentheses/brackets allowed, a nested closure or block body does
+      not count) or immediately before the argument holding it in the
+      statement-level call: rustfmt moves the trailing marker of
+      `x.push(any(f( // erasure: keep why` to such an own line. The same
+      own-line placement exempts a T1-T7 candidate. A fn-signature
       marker covers every call in that fn body, so its reason must justify all
       of them. `--check
       --unmarked` lists `<path>:<line>: U unmarked erasure` once per line and
@@ -493,6 +504,9 @@ class Source:
         self.local_types = self._local_type_names()
         self.local_fns = {t[k + 1].text for k in range(len(t) - 1)
                           if t[k].text == "fn" and t[k + 1].kind == IDENT}
+        self._fn_mods = None
+        self._tok_starts = [tok.start for tok in t]
+        self._inline_marks = None
 
     def _keep_markers(self):
         """Lines carrying a `// erasure: keep` comment, from the comment tokens.
@@ -519,6 +533,78 @@ class Source:
                 if has_reason:
                     why_alone.add(line)
         return anywhere, alone, why_anywhere, why_alone
+
+    def fn_shadows(self, name: str, pos: int) -> bool:
+        """True when a same-file `fn name` is visible at char `pos`: declared in
+        the site's module or an ancestor of it. A fn of a nested inline module
+        (typically `#[cfg(test)] mod tests`) is invisible to its parent."""
+        if name not in self.local_fns:
+            return False
+        if self._fn_mods is None:
+            mods: dict = {}
+            for k in range(len(self.t) - 1):
+                if self.t[k].text == "fn" and self.t[k + 1].kind == IDENT:
+                    mods.setdefault(self.t[k + 1].text, set()).add(self.module_of(self.t[k + 1].start))
+            self._fn_mods = mods
+        return any(a <= pos < b for a, b in self._fn_mods.get(name, ()))
+
+    def _own_line_marks(self) -> list:
+        """(char pos, innermost enclosing group's code index or -1) of every
+        reasoned own-line `// erasure: keep <why>` comment."""
+        if self._inline_marks is None:
+            out = []
+            for tok in self.all:
+                if tok.kind != LINE_COMMENT or self.line_of(tok.start) not in self.why_above:
+                    continue
+                p = bisect.bisect_left(self._tok_starts, tok.start) - 1
+                if p < 0:
+                    g = -1
+                elif self.t[p].kind == PUNCT and self.t[p].text in OPEN:
+                    g = p
+                else:
+                    g = self.parent[p]
+                out.append((tok.start, g))
+            self._inline_marks = out
+        return self._inline_marks
+
+    def call_marker(self, a: int, b: int) -> bool:
+        """True when a reasoned own-line marker sits inside the call occupying
+        code tokens `a..b` (name token to closing paren): strictly inside its
+        parentheses (nested parentheses/brackets allowed; a marker in a nested
+        block or closure body does not escape), or in the argument gap just
+        before the argument of the statement-level call that holds the call.
+        rustfmt moves a trailing marker of `x.push(any(f( // erasure: keep ..`
+        to such an own line."""
+        marks = self._own_line_marks()
+        if not marks:
+            return False
+        t = self.t
+        lo, hi = t[a].start, t[b].end
+        for pos, g in marks:
+            if lo < pos < hi:
+                while g >= 0 and t[g].start >= lo and t[g].text != "{":
+                    g = self.parent[g]
+                if g < 0 or t[g].start < lo:
+                    return True
+        # statement-level call: topmost paren/bracket group above the call
+        top = -1
+        g = self.parent[a]
+        while g >= 0 and t[g].text in ("(", "["):
+            top, g = g, self.parent[g]
+        if top >= 0:
+            commas = self.commas(top)
+            for pos, g in marks:
+                if g == top and pos < lo and not any(pos < t[c].start < lo for c in commas):
+                    return True
+        return False
+
+    def span_marker(self, span) -> bool:
+        """`call_marker` for a candidate's char span."""
+        a = bisect.bisect_left(self._tok_starts, span[0])
+        b = bisect.bisect_left(self._tok_starts, span[1]) - 1
+        if a >= len(self.t) or b < a:
+            return False
+        return self.call_marker(a, b)
 
     def body_marker(self, body: int, reasoned: bool = False) -> bool:
         """True when the fn body opening at code index `body` starts with an
@@ -1029,7 +1115,7 @@ def _origin_skip(s: Source, key: str, qual: list, k: int):
     pos = s.t[k].start
     if key.startswith("."):
         name = key[1:]
-        if name in s.local_fns:
+        if s.fn_shadows(name, pos):
             return f"a same-file fn `{name}` may be the callee of `.{name}`"
         return None
     if "::" in key:
@@ -1047,7 +1133,7 @@ def _origin_skip(s: Source, key: str, qual: list, k: int):
     hit = s.decl_for(key, pos)
     if hit:
         return None if _leaf_frust(hit[1], key) else f"`{key}` is imported from a non-frust path"
-    if key in s.local_fns:
+    if s.fn_shadows(key, pos):
         return f"a same-file fn `{key}` may be the callee"
     if _glob_origin(s, pos) in ("foreign", "mixed"):
         return f"`{key}` may come from a non-frust glob import"
@@ -1203,7 +1289,7 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False, t7: bool = False,
             # never run here: their keys are sugar, excluded from the gate.
             # A `// erasure: keep` site stays exempt (counted, never noted).
             fresh = cands[before_named:]
-            live = [c for c in fresh if not s.is_kept(s.line_of(c.span[0]))]
+            live = [c for c in fresh if not (s.is_kept(s.line_of(c.span[0])) or s.span_marker(c.span))]
             s.kept += len(fresh) - len(live)
             del cands[before_named:]
             if blocked and live:
@@ -1213,7 +1299,7 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False, t7: bool = False,
             # A `// erasure: keep` site is exempt from every rule: neither
             # listed, rewritten, nor noted; only counted.
             fresh = cands[first_new:]
-            kept = [c for c in fresh if s.is_kept(s.line_of(c.span[0]))]
+            kept = [c for c in fresh if s.is_kept(s.line_of(c.span[0])) or s.span_marker(c.span)]
             if kept:
                 s.kept += len(kept)
                 cands[first_new:] = [c for c in fresh if c not in kept]
@@ -1383,7 +1469,7 @@ def _resolve_builder(s, k, o, anchor, builder, qual, notes, rule):
         notes.append((s.line_of(pos),
                       f"note: {rule} skipped: `{builder}` is imported from a non-frust path"))
         return None
-    if builder in s.local_fns:
+    if s.fn_shadows(builder, pos):
         notes.append((s.line_of(pos), f"note: {rule} skipped: a local fn `{builder}` is in scope"))
         return None
     if hit and not hit[0].is_pub:
@@ -2977,6 +3063,47 @@ def _u_fn_kept(s: Source, g: int) -> bool:
     return j < g and s.body_marker(g, reasoned=True)
 
 
+_ACC_METHODS = ("push", "insert", "extend")
+
+
+def _u_accumulator_kept(s: Source, k: int) -> bool:
+    """True when the call at `k` is inside the arguments of `<v>.push(..)`,
+    `<v>.insert(..)` or `<v>.extend(..)` and the nearest preceding in-scope
+    `let [mut] <v>` of the same fn body names `AnyView` and carries a reasoned
+    marker on its line or alone above it. A re-binding of `<v>` ends the cover."""
+    t = s.t
+    chain, g = [], s.parent[k]
+    while g >= 0:
+        chain.append(g)
+        g = s.parent[g]
+    fn_body = next((g for g in chain if t[g].text == "{" and _u_fn_of_body(s, g) is not None), None)
+    if fn_body is None:
+        return False
+    scope = set(chain)
+    for g in chain:
+        if g == fn_body:
+            break
+        if not (t[g].text == "(" and s.is_id(g - 1) and t[g - 1].text in _ACC_METHODS
+                and s.is_p(g - 2, ".") and s.is_id(g - 3) and not s.is_p(g - 4, ".")
+                and not s.is_p(g - 4, "::")):
+            continue
+        name = t[g - 3].text
+        for j in range(g - 3, fn_body, -1):
+            if not (s.is_id(j, "let") and s.parent[j] in scope):
+                continue
+            n = j + 1
+            if s.is_id(n, "mut"):
+                n += 1
+            if not (s.is_id(n, name) and (s.is_p(n + 1, ":") or s.is_p(n + 1, "=") or s.is_p(n + 1, ";"))):
+                continue
+            e = n
+            while e < len(t) and not s.is_p(e, ";") and t[e].text not in CLOSE:
+                e = s.match[e] + 1 if t[e].text in OPEN else e + 1
+            named = any(s.is_id(x, "AnyView") for x in range(n, min(e, len(t))))
+            return named and s.is_kept(s.line_of(t[j].start), reasoned=True)
+    return False
+
+
 def _u_covered(s: Source, k: int) -> bool:
     line = s.line_of(s.t[k].start)
     # (a) the call's own line: reasoned marker on it, or alone on the line above
@@ -2989,6 +3116,14 @@ def _u_covered(s: Source, k: int) -> bool:
         if s.t[g].text == "{" and _u_fn_kept(s, g):
             return True
         g = s.parent[g]
+    # (c') an accumulator `let [mut] v: ..AnyView..` with a kept first line
+    if _u_accumulator_kept(s, k):
+        return True
+    # (d) a reasoned own-line marker inside the call's parentheses (where
+    # rustfmt moves a trailing marker of a multi-line call)
+    o = s._call_open_after(k)
+    if o is not None and s.call_marker(k, s.match[o]):
+        return True
     # (c) an enclosing vec![..], or a let / match statement, whose first line is kept
     n = k
     while n >= 0:
@@ -3064,7 +3199,10 @@ def main(argv=None) -> int:
                          "authoring::any(, frust::authoring::any(; not AnyView::new, .any(, "
                          "cfg(any( or text in strings/comments) that no `// erasure: keep <why>` "
                          "marker with a non-empty reason covers (its line, the line above, an enclosing fn signature, "
-                         "or the first line of an enclosing vec![ / let / match; a fn-signature marker covers "
+                         "or the first line of an enclosing vec![ / let / match; a marker on a "
+                         "`let [mut] v: Vec<AnyView<S>>` line covers the erasure args of "
+                         "v.push/insert/extend in that fn; an own-line marker inside the call's parentheses "
+                         "(where rustfmt moves it) covers that call; a fn-signature marker covers "
                          "its whole body) as "
                          "`<path>:<line>: U unmarked erasure`; --check exits 1 if any; --write "
                          "changes nothing for U; --stats adds unmarked=N per file")
