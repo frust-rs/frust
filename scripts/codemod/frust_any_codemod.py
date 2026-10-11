@@ -11,7 +11,9 @@ Rewrites (each one is type-preserving, or changes only an argument's type):
   T1  `api(.., any(X), ..)` -> `api(.., X, ..)` and `api(Some(any(X)))` ->
       `api(Some(X))`, when `api` is a slot entry of the name list
       (`erasing_apis.txt`, next to this script) and the erasure call is the
-      *whole* argument. A `vec![..]` argument is never touched.
+      *whole* argument. A `vec![..]` argument is never touched. The name list
+      matches callee *names*, so the callee must also resolve to frust (see
+      "Callee origin" below); an app fn of the same name keeps its `any()`.
   T4  `api(.., || any(X), ..)` -> `api(.., || X, ..)` when `api` is a builder
       entry of the name list and the closure body is exactly one erasure call,
       optionally wrapped in a block (`|| { any(X) }` -> `|| { X }`). Closures
@@ -141,8 +143,34 @@ an import (`any`, `AnyView`, `Column`, `Row`, `Stack`, `FlexView`, `Axis`,
 `inflexible`, `flexible`, `keyed`) that a rewrite left unused is removed from
 the (non-`pub`) `use` that brought it in. A chain is skipped, with a note, when
 a local binding or `fn` (free or method) named `column`/`row`/`stack` is in
-scope (unless that name is itself imported by a `use`), or the builder's import
-cannot be resolved.
+scope (unless that name is itself imported by a frust-origin `use`), or the
+builder's import cannot be resolved.
+
+Callee origin: a name is frust's only when its path head starts with `frust`
+(`frust`, `frust_material`, `frust_shadcn`, ..); `crate`, `super` and `self`
+are the app's own modules and never count. For T1/T4/T5/T6 name-list callees
+(the `Column`/`Row`/`Stack` sugar resolves as below): a qualified call
+(`frust_shadcn::card(..)`, `frust::Route::new(..)`) is a site only under a
+frust-origin qualifier, any other qualifier skips it silently; an unqualified
+`name(..)` imported by a `use` is a site only when that `use` path is
+frust-origin, and otherwise — or when a same-file `fn name` exists, or a
+non-frust glob import (`use crate::ui::*`) covers the site — it is skipped with
+a note; with no import, no local fn and no foreign glob it is a site
+(`container(any(x))` in a scratch file). A `Type::name(..)` is skipped with a
+note when `Type` is a local type or imported from a non-frust path. A
+`.method(..)` is skipped with a note when a same-file `fn method` exists, and
+is otherwise still matched by name alone: a method call has no import to
+resolve, so an app type's same-named method defined in another file is a
+residual risk the compiler (not this tool) catches. The `Column`/`Row`/`Stack`/
+`FlexView` anchor of T2/T3 (and of T5/T6) must be frust-origin too: imported
+from a frust path (a non-frust import is skipped with a note), qualified by
+one, or covered only by frust-origin globs; the builder `column`/`row`/`stack`
+counts as imported only from a frust path — `use super::{column, row};` or
+`use crate::ui::row as row;` skips the chain with a note, as does a mix of
+frust and non-frust glob imports. A `use super::*` inside an inline `mod` of
+the same file (`mod tests`) is transparent: it re-imports the parent's names,
+which the file already shows. The tool skips with a note rather than emitting
+`frust::column()`; every such note counts toward `--strict`.
 
 Usage:
 
@@ -155,8 +183,9 @@ exits 1 if there is one, 0 otherwise; skipped-site notes do not affect the exit
 code. A file that cannot be tokenised or decoded is reported as skipped, counted,
 and makes `--check` exit 2 when no candidate was found (candidates still win: 1).
 The summary always reports the number of shadow-skipped sites (a local binding
-or fn shadows the builder, a mixed keyed flex list, an unresolvable import, or a
-comment inside the replaced call head); `--strict` makes any of them exit 2
+or fn shadows the builder, a mixed keyed flex list, an unresolvable import, a
+callee or builder of non-frust origin, or a comment inside the replaced call
+head); `--strict` makes any of them exit 2
 under `--check` (candidates still win: 1).
 `--exclude PATH` (repeatable; repository-relative or absolute) drops the
 file or directory, matched by whole path components on the normalised path
@@ -889,7 +918,77 @@ class Source:
 
 
 def _frust_root(seg: str) -> bool:
+    """Lenient root test for erasure spellings (`crate::any(..)` inside frust)."""
     return seg.startswith("frust") or seg in ROOT_PREFIX_OK
+
+
+def _frust_origin(seg: str) -> bool:
+    """Strict origin test for API names: the path head is a frust crate
+    (`frust`, `frust_material`, `frust_shadcn`, ..). `crate`/`super`/`self`
+    are the app's own modules, never frust."""
+    return seg.startswith("frust")
+
+
+def _glob_origin(s: Source, pos: int):
+    """Origin of the glob imports covering `pos`: None (no glob), "frust" (only
+    frust-origin globs), "foreign" (only non-frust globs) or "mixed".
+
+    A `use super::*` inside an inline `mod` of this file (typically `mod
+    tests`) is transparent: it re-imports the parent's items and imports, which
+    this file already shows (the parent's own `use` scopes cover the module)."""
+    whole = (0, len(s.src))
+    heads = set()
+    for d in s.decls:
+        if not (d.scope[0] <= pos < d.scope[1]):
+            continue
+        for g in d.globs:
+            if g == ("super",) and s.module_of(s.t[d.use_idx].start) != whole:
+                continue
+            heads.add(bool(g) and _frust_origin(g[0]))
+    if not heads:
+        return None
+    if heads == {True}:
+        return "frust"
+    return "foreign" if heads == {False} else "mixed"
+
+
+def _leaf_frust(leaf: Leaf, name: str) -> bool:
+    """Whether a `use` leaf binding `name` imports frust's own item `name`."""
+    return bool(leaf.path) and _frust_origin(leaf.path[0]) and leaf.path[-1] == name
+
+
+def _origin_skip(s: Source, key: str, qual: list, k: int):
+    """Whether the name-list callee at ident `k` may be someone else's item.
+
+    Returns None to accept the site, "" to skip it silently (a qualified
+    non-frust path is provably not frust's API) and a note text to skip it
+    with a note (an app item or import of the same name may be the callee)."""
+    pos = s.t[k].start
+    if key.startswith("."):
+        name = key[1:]
+        if name in s.local_fns:
+            return f"a same-file fn `{name}` may be the callee of `.{name}`"
+        return None
+    if "::" in key:
+        ty = key.split("::", 1)[0]
+        if qual:
+            return None if _frust_origin(qual[0]) else ""
+        if ty in s.local_types:
+            return f"`{ty}` is a local type"
+        hit = s.decl_for(ty, pos)
+        if hit and not _leaf_frust(hit[1], ty):
+            return f"`{ty}` is imported from a non-frust path"
+        return None
+    if qual:
+        return None if _frust_origin(qual[0]) else ""
+    hit = s.decl_for(key, pos)
+    if hit:
+        return None if _leaf_frust(hit[1], key) else f"`{key}` is imported from a non-frust path"
+    if key in s.local_fns:
+        return f"a same-file fn `{key}` may be the callee"
+    if _glob_origin(s, pos) in ("foreign", "mixed"):
+        return f"`{key}` may come from a non-frust glob import"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1013,9 +1112,16 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False, t7: bool = False,
         o = k + 1
         is_list = t5 and (key in apis.lists or key in T5_BUILTIN) and _t5_sugar_resolves(s, k, key, qual)
         is_seq = t6 and key in apis.seq and _t5_sugar_resolves(s, k, key, qual)
+        blocked = None
         if key in apis.slot or key in apis.builder or is_list or is_seq:
             if "::" not in key and not key.startswith(".") and _excluded(s, apis, key, qual, tok.start):
                 continue
+            # The name list matches callee *names*; an app item of the same
+            # name must not lose its `any()`. Column/Row/Stack sugar resolves
+            # through `_t5_sugar_resolves` / `_resolve_builder` instead.
+            if key not in _T5_SUGAR:
+                blocked = _origin_skip(s, key, qual, k)
+        before_named = len(cands)
         if key in apis.slot:
             _t1(s, key, k, o, cands)
         if key in apis.builder:
@@ -1029,6 +1135,17 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False, t7: bool = False,
             _t6(s, key, o, cands)
         if is_list and len(cands) == before_t2:   # T6 (above) wins a list it rewrote
             _t5(s, key, o, cands)
+        if blocked is not None and len(cands) > before_named:
+            # Only a site that would have been rewritten is reported. T2/T3
+            # never run here: their keys are sugar, excluded from the gate.
+            # A `// erasure: keep` site stays exempt (counted, never noted).
+            fresh = cands[before_named:]
+            live = [c for c in fresh if not s.is_kept(s.line_of(c.span[0]))]
+            s.kept += len(fresh) - len(live)
+            del cands[before_named:]
+            if blocked and live:
+                rules = "/".join(sorted({c.rule for c in live}))
+                notes.append((s.line_of(live[0].span[0]), f"note: {rules} skipped: {blocked}"))
         if len(cands) > first_new or len(notes) > first_note:
             # A `// erasure: keep` site is exempt from every rule: neither
             # listed, rewritten, nor noted; only counted.
@@ -1183,17 +1300,26 @@ def _resolve_builder(s, k, o, anchor, builder, qual, notes, rule):
     if anchor in s.local_types:
         return None
     if qual:
-        if not _frust_root(qual[0]):
+        if not _frust_origin(qual[0]):
             return None
         return "::".join(qual) + "::", []
     hit = s.decl_for(anchor, pos)
-    if hit and (hit[1].aliased or not _frust_root(hit[1].path[0])):
+    if hit and hit[1].aliased:
+        return None
+    if hit and not _frust_origin(hit[1].path[0]):
+        notes.append((s.line_of(pos),
+                      f"note: {rule} skipped: `{anchor}` is imported from a non-frust path"))
         return None
     if s.binding_shadows(builder, k):
         notes.append((s.line_of(pos), f"note: {rule} skipped: a local binding `{builder}` is in scope"))
         return None
-    if s.decl_for(builder, pos):
-        return "", []
+    bhit = s.decl_for(builder, pos)
+    if bhit:
+        if _leaf_frust(bhit[1], builder):
+            return "", []
+        notes.append((s.line_of(pos),
+                      f"note: {rule} skipped: `{builder}` is imported from a non-frust path"))
+        return None
     if builder in s.local_fns:
         notes.append((s.line_of(pos), f"note: {rule} skipped: a local fn `{builder}` is in scope"))
         return None
@@ -1208,8 +1334,13 @@ def _resolve_builder(s, k, o, anchor, builder, qual, notes, rule):
                 if not g.is_pub and ("super",) in g.globs and g.scope == site_mod:
                     return "", [("new", g.ordinal, leaf.path[:-1] + (builder,))]
         return "", [("add", decl.ordinal, leaf.path, builder)]
-    if s.glob_covers(pos):
+    globs = _glob_origin(s, pos)
+    if globs == "frust":
         return "", []
+    if globs is not None:
+        notes.append((s.line_of(pos), f"note: {rule} skipped: `{anchor}`/`{builder}` may come from "
+                                      "a non-frust glob import"))
+        return None
     notes.append((s.line_of(pos), f"note: {rule} skipped: cannot resolve an import for `{builder}`"))
     return None
 
@@ -1315,20 +1446,21 @@ _T5_SUGAR = frozenset({"Column", "Row", "Stack"})
 def _t5_sugar_resolves(s: Source, k: int, key: str, qual: list) -> bool:
     """Whether the `Column`/`Row`/`Stack` call at `k` is frust's own sugar.
 
-    Same conditions T2 applies: a frust-rooted qualifier, or a non-aliased
-    frust import (or a glob import); a local type or foreign path declines.
+    Same conditions T2 applies: a frust-origin qualifier, or a non-aliased
+    frust-origin import (or only frust-origin glob imports); a local type or a
+    non-frust path (`crate::`/`super::`/`self::` included) declines.
     `.children` is a method key and always passes."""
     if key not in _T5_SUGAR:
         return True
     if key in s.local_types:
         return False
     if qual:
-        return _frust_root(qual[0])
+        return _frust_origin(qual[0])
     pos = s.t[k].start
     hit = s.decl_for(key, pos)
     if hit:
-        return not hit[1].aliased and _frust_root(hit[1].path[0])
-    return s.glob_covers(pos)
+        return not hit[1].aliased and _frust_origin(hit[1].path[0])
+    return _glob_origin(s, pos) == "frust"
 # Keywords that can never start a callee path (path roots like `crate` can).
 _T5_NON_PATH = frozenset(KEYWORDS - {"crate", "super", "self", "Self"})
 
