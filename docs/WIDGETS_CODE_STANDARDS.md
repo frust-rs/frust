@@ -43,8 +43,8 @@ statement or `match`, or on the enclosing fn signature (the `fn` line, its `->` 
 above the `fn`). rustfmt moves a `{ // erasure: keep ..` trailer onto the first body line; that
 form is accepted as fn-scoped. The rustfmt-stable placements are the end of the `->` line with
 `{` on the next line, and the end of the `any(..)` line. The marker must carry a reason: a bare
-`// erasure: keep` does not satisfy rule U (the checker enforces this). A fn-signature marker covers every call in that fn,
-so its reason must cover them all. Do not add a marker merely to silence the tripwire;
+`// erasure: keep` does not satisfy rule U (the checker enforces this). A fn-signature marker
+covers every call in that fn, so its reason must cover them all. Do not add a marker merely to silence the tripwire;
 [TESTING.md](TESTING.md) describes what `scripts/ci/erasure-check.sh` enforces.
 
 Codemod rule T7 skips some helpers (listed per bucket in its output). A helper whose same-file
