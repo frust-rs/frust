@@ -220,10 +220,6 @@ fn preflight(runner: &dyn ProcessRunner, simulator: bool) -> Result<(), String> 
     Ok(())
 }
 
-/// Streams an `xcrun xcodebuild …` invocation, prefixing each line, and turns
-/// a non-zero exit into an error whose message tails both stdout and stderr
-/// (xcodebuild reports most errors on stdout) plus a `frust doctor` hint —
-/// signing errors pass through verbatim.
 /// The base64 `FRUST_FEATURES` value for a `mode` build of the app at
 /// `project_dir` with the `extra_features` passthrough — `None` for no
 /// features. The one resolution both iOS lanes (this module's `build` and
@@ -259,6 +255,10 @@ pub(crate) fn resolve_features_b64(
     Ok(encode_features(&feature_refs))
 }
 
+/// Streams an `xcrun xcodebuild …` invocation, prefixing each line, and turns
+/// a non-zero exit into an error whose message tails both stdout and stderr
+/// (xcodebuild reports most errors on stdout) plus a `frust doctor` hint —
+/// signing errors pass through verbatim.
 fn run_xcodebuild(
     runner: &dyn ProcessRunner,
     root: &Path,
