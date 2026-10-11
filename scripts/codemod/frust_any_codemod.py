@@ -115,7 +115,11 @@ code); the first matching bucket wins:
              `&mut` ("taken by reference": `&f(..)`, `&self.f(..)`,
              `&Self::f(..)`, `&prev.f(..)`) — the caller relies on
              `&AnyView<S>`, private helpers included. A `&` over a larger
-             expression (`&(a, f())`, `&vec![f()]`, `&f().x`) does not count.
+             expression (`&(a, f())`, `&vec![f()]`, `&f().x`) does not count. Also
+             a fn whose same-file call is the whole initializer of an untyped
+             `let [mut] x = f(..);` with a later bare `&x` / `&mut x` in the
+             same block (`&x.field`, `&x[..]`, `&x.m()` do not count; a later
+             re-binding of `x` is not tracked, so still excluded).
   T7-public  a `pub fn` (a restricted `pub(..)` is not API) in a `crates/` or
              `plugins/` library source — not under a `tests/`, `examples/` or
              `src/corpus/` directory, and not inside a `#[cfg(test)] mod`:
@@ -1963,6 +1967,40 @@ def _t7_taken_by_ref(s: Source, f: T7Fn, kind: str) -> bool:
             else:
                 break
         a = pos - 1
+        if s.is_id(a, "mut"):
+            a -= 1
+        if _t7_prefix_amp(s, a):
+            return True
+        if _t7_let_bound_borrowed(s, k, pos, end):
+            return True
+    return False
+
+
+def _t7_let_bound_borrowed(s: Source, k: int, pos: int, end: int) -> bool:
+    """True when the call spanning tokens `pos..end` (name token `k`) is the whole
+    initializer of `let [mut] <ident> = <call>;` (no type annotation) and the bare
+    binding is later borrowed (`&ident` / `&mut ident`) in the let's enclosing
+    block, which bounds the binding's scope. A borrow of a longer expression
+    (`&ident.f`, `&ident[..]`, `&ident.m()`, `&ident?`) does not count. A later
+    re-binding of the same name is not tracked: it is conservatively still a hit."""
+    if not (s.is_p(end + 1, ";") and s.is_p(pos - 1, "=") and s.is_id(pos - 2)):
+        return False
+    b = pos - 3
+    if s.is_id(b, "mut"):
+        b -= 1
+    if not s.is_id(b, "let"):
+        return False
+    ident = s.t[pos - 2].text
+    blk = s.parent[end + 1]
+    stop = s.match[blk] if blk >= 0 and s.is_p(blk, "{") else len(s.t)
+    for j in range(end + 2, stop):
+        if not (s.is_id(j, ident) and not s.is_p(j - 1, ".") and not s.is_p(j - 1, "::")):
+            continue
+        if s.is_p(j + 1, ".") or s.is_p(j + 1, "?") or s.is_p(j + 1, "[") or \
+                s.is_p(j + 1, "(") or s.is_p(j + 1, "!") or s.is_p(j + 1, "::") or \
+                s.is_id(j + 1, "as"):
+            continue
+        a = j - 1
         if s.is_id(a, "mut"):
             a -= 1
         if _t7_prefix_amp(s, a):

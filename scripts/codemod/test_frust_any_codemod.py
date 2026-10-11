@@ -1390,6 +1390,34 @@ class T7Test(unittest.TestCase):
         self.assertTrue(all(e[3] == "taken by reference" for e in res.excluded
                             if e[1] == "T7-ref"))
 
+    def test_let_bound_result_borrowed_excluded(self):
+        res = run7("""\
+            use frust::{AnyView, View, any};
+            impl T {
+                fn content(&self) -> AnyView<S> { any(x()) }
+                fn moved(&self) -> AnyView<S> { any(x()) }
+                fn field(&self) -> AnyView<S> { any(x()) }
+                fn mutb(&self) -> AnyView<S> { any(x()) }
+                fn build(&self, slot: &mut Slot, ctx: &mut Ctx) {
+                    let content = self.content();
+                    slot.rebuild(None, Some(&content), ctx);
+                }
+                fn other(&self, kids: &mut Vec<AnyView<S>>) {
+                    let moved = self.moved();
+                    kids.push(moved);
+                    let field = self.field();
+                    take(&field.len());
+                    let mut mutb = self.mutb();
+                    take(&mut mutb);
+                }
+            }
+            """)
+        self.assertEqual(buckets(res), [("T7-ref", "content"), ("T7-ref", "mutb")])
+        self.assertEqual([c.desc for c in res.candidates],
+                         ["helper returns impl View: moved", "helper returns impl View: field"])
+        self.assertTrue(all(e[3] == "taken by reference" for e in res.excluded
+                            if e[1] == "T7-ref"))
+
     def test_beui_shape_taken_by_reference_not_rewritten(self):
         src = """\
             use frust::{AnyView, View, any, text};
