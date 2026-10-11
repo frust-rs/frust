@@ -37,9 +37,12 @@ for mixed child types, `views(iter)` for iterators, `either(cond, || a, || b)` f
 erase internally: `frust-material`'s `button_group` icon family, `split_button`'s `leading_icon`,
 `frust-beui`'s `extra_rows`, and `clean-signals-frust`'s `async_view`.
 
-A site that must stay erased carries `// erasure: keep <why>` in one of three places: on the
-call's own line, alone on the line above it, or on the enclosing fn signature (the `fn` line, its
-`->` line, or alone above the `fn`). Do not add a marker merely to silence the tripwire;
+A site that must stay erased carries `// erasure: keep <why>` in one of four places: on the
+call's own line, alone on the line above it, on the first line of an enclosing `vec![..]`, `let`
+statement or `match`, or on the enclosing fn signature (the `fn` line, its `->` line, or alone
+above the `fn`). The marker must carry a reason: a bare `// erasure: keep` does not satisfy rule U
+(card R-01 makes the checker enforce this). A fn-signature marker covers every call in that fn,
+so its reason must cover them all. Do not add a marker merely to silence the tripwire;
 [TESTING.md](TESTING.md) describes what `scripts/ci/erasure-check.sh` enforces.
 
 ## App Code Style

@@ -149,7 +149,8 @@ Also run `scripts/ci/erasure-check.sh` (the any-erasure tripwire: no redundant `
 vec-list containers, homogeneous `vec![any(..), ..]` list arguments (T5), fully erased list
 arguments of a sequence API that should be tuples (T6), or single-erasure helpers still returning
 `AnyView` (T7); fix with `scripts/codemod/frust_any_codemod.py --write --t5 --t6 --t7`, or mark a
-site that must stay erased `// erasure: keep <why>` on its line or the line above; the same
+site that must stay erased `// erasure: keep <why>` (with a reason; placements in
+[WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md) § Erase at the API Boundary); the same
 command also runs rule U: any unmarked `any()` under `examples/` and `benchmarks/` fails
 (`examples/hotpatch-spike` excluded), while framework and plugin internals are not audited by U;
 the same command runs as a CI hygiene step). A change to the `hotpatch` feature, `frust-hotpatch` or the
