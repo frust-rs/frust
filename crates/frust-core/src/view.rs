@@ -295,9 +295,12 @@ impl<State: 'static, V: View<State>> ErasedView<State> for V {
 /// `Box<dyn Widget>`, which implements [`Widget`] through the blanket impl so it
 /// satisfies `View::Element: Widget`.
 ///
-/// Erasure is idempotent, and the generic builders erase internally, so app code
+/// Erasure is idempotent, and the generic builders (`child`, tuples such as
+/// `Column((a, b))`, ..) accept any [`View`] and erase internally, so app code
 /// needs `AnyView` only for stored views, branches of three or more arms, and
-/// genuinely heterogeneous dynamic lists (see [`any`]).
+/// genuinely heterogeneous dynamic lists (see [`any`]). A two-arm branch is
+/// written with `either(..)`, which keeps both arms statically typed and does
+/// not erase.
 pub struct AnyView<State: 'static> {
     inner: Box<dyn ErasedView<State>>,
 }
@@ -331,10 +334,12 @@ impl<State: 'static> AnyView<State> {
 /// in containers like `inflexible(any(x))`.
 ///
 /// Because of that, writing `any(..)` around an argument is redundant in
-/// 0.6: the generic builders (`child`, `Column((a, b))`, `either`, ..) accept
-/// any [`View`] and erase internally. Reach for `any` only to *store* a view
-/// (a struct field, a `Vec` of builders), for a branch with three or more
-/// arms, or for a genuinely heterogeneous dynamic list.
+/// 0.6: the generic builders (`child`, tuples such as `Column((a, b))`, ..)
+/// accept any [`View`] and erase internally. `either(..)` is the no-erasure way
+/// to write a two-arm branch: it keeps both arms statically typed. Reach for
+/// `any` only to *store* a view (a struct field, a `Vec` of builders), for a
+/// branch with three or more arms, or for a genuinely heterogeneous dynamic
+/// list.
 pub fn any<State: 'static, V: View<State>>(view: V) -> AnyView<State> {
     AnyView::new(view)
 }
