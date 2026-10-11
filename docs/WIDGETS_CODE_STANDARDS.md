@@ -40,10 +40,18 @@ erase internally: `frust-material`'s `button_group` icon family, `split_button`'
 A site that must stay erased carries `// erasure: keep <why>` in one of four places: on the
 call's own line, alone on the line above it, on the first line of an enclosing `vec![..]`, `let`
 statement or `match`, or on the enclosing fn signature (the `fn` line, its `->` line, or alone
-above the `fn`). The marker must carry a reason: a bare `// erasure: keep` does not satisfy rule U
-(card R-01 makes the checker enforce this). A fn-signature marker covers every call in that fn,
+above the `fn`). rustfmt moves a `{ // erasure: keep ..` trailer onto the first body line; that
+form is accepted as fn-scoped. The rustfmt-stable placements are the end of the `->` line with
+`{` on the next line, and the end of the `any(..)` line. The marker must carry a reason: a bare
+`// erasure: keep` does not satisfy rule U (the checker enforces this). A fn-signature marker covers every call in that fn,
 so its reason must cover them all. Do not add a marker merely to silence the tripwire;
 [TESTING.md](TESTING.md) describes what `scripts/ci/erasure-check.sh` enforces.
+
+Codemod rule T7 skips some helpers (listed per bucket in its output). A helper whose same-file
+call is taken by `&` (e.g. `build_child(&self.x_view())`) is excluded as "taken by reference".
+Non-private helpers (`T7-visible`) are not rewritten without `--t7-visible`, because callers in
+other modules may rely on `AnyView`; a caller picking such a helper two-arm in another module
+needs `either` there, so the migration crosses module boundaries.
 
 ## App Code Style
 
