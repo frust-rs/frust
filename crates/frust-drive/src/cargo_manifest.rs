@@ -16,6 +16,8 @@ use std::path::Path;
 use toml_edit::DocumentMut;
 
 use crate::build_info::BuildMode;
+use crate::facade_key::{FacadeKey, FacadeKeyError};
+use crate::process::{ProcessRunner, RealProcessRunner};
 
 /// The one-line migration a legacy app needs to opt into release-lean log
 /// parity — named in [`resolve_release_features`]'s warning so the fix is
@@ -30,7 +32,7 @@ and a `log` dependency under [dependencies].";
 /// exists and is well-formed. `None` on a missing, unreadable, or
 /// unparseable manifest — every caller here picks its own fail-open/
 /// fail-closed stance for that case rather than sharing one.
-fn read_app_manifest(project_root: &Path) -> Option<DocumentMut> {
+pub(crate) fn read_app_manifest(project_root: &Path) -> Option<DocumentMut> {
     let path = project_root.join("Cargo.toml");
     let text = std::fs::read_to_string(&path).ok()?;
     text.parse::<DocumentMut>().ok()
@@ -55,11 +57,15 @@ pub fn declares_feature(project_root: &Path, feature: &str) -> bool {
 }
 
 /// Whether the app's own `[features]` table defines `feature` as an alias
-/// that directly enables `frust/devtools` — e.g. `full =
-/// ["frust/devtools"]`. Deliberately cheap and non-transitive: only a
-/// feature whose *own* enabled-list literally names the string
-/// `"frust/devtools"` counts, with no recursive feature-graph walk through
-/// other app-defined aliases.
+/// that directly enables the facade's `devtools` — e.g. `full =
+/// ["frust/devtools"]`, or `full = ["frust-ui/devtools"]` in an app whose
+/// facade dependency is keyed `frust-ui` (any key [`FacadeKey::resolve`]
+/// reports counts; an ambiguous manifest counts every key it names).
+/// Deliberately cheap and non-transitive: only a feature whose *own*
+/// enabled-list literally names `"frust/devtools"` or `"<key>/devtools"`
+/// counts, with no recursive feature-graph walk through other app-defined
+/// aliases. The key is resolved only when the list names some other
+/// `<dep>/devtools`, so the common case spawns no cargo.
 ///
 /// Used by `frust build`'s release lanes
 /// (`frust-cli::commands::build::refuse_devtools_features`) alongside the
@@ -73,18 +79,40 @@ pub fn declares_feature(project_root: &Path, feature: &str) -> bool {
 /// has nothing to add; the literal-spelling checks alongside it remain the
 /// actual defense.
 pub fn feature_enables_devtools(project_root: &Path, feature: &str) -> bool {
+    feature_enables_devtools_with(&RealProcessRunner, project_root, feature)
+}
+
+/// [`feature_enables_devtools`] resolving the facade key through `runner`.
+fn feature_enables_devtools_with(
+    runner: &dyn ProcessRunner,
+    project_root: &Path,
+    feature: &str,
+) -> bool {
+    const CANONICAL: &str = "frust/devtools";
     let Some(doc) = read_app_manifest(project_root) else {
         return false; // fail closed: missing/unreadable/unparseable
     };
-    doc.get("features")
+    let Some(enabled) = doc
+        .get("features")
         .and_then(|features| features.as_table_like())
         .and_then(|table| table.get(feature))
         .and_then(|item| item.as_array())
-        .is_some_and(|enabled| {
-            enabled
-                .iter()
-                .any(|value| value.as_str() == Some("frust/devtools"))
-        })
+    else {
+        return false;
+    };
+    let names: Vec<&str> = enabled.iter().filter_map(|value| value.as_str()).collect();
+    if names.contains(&CANONICAL) {
+        return true;
+    }
+    if !names.iter().any(|name| name.ends_with("/devtools")) {
+        return false;
+    }
+    let keys = match FacadeKey::resolve_with(runner, project_root) {
+        Ok(key) => vec![key],
+        Err(FacadeKeyError::Ambiguous { keys }) => keys.into_iter().map(FacadeKey::new).collect(),
+    };
+    keys.iter()
+        .any(|key| names.contains(&key.map(CANONICAL).as_str()))
 }
 
 /// Resolves the cargo `--features` a `mode` build selects for the app rooted
@@ -137,6 +165,7 @@ pub fn resolve_release_features(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::FakeProcessRunner;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -240,6 +269,62 @@ mod tests {
             "[package]\nname = \"app\"\n\n[features]\nother = []\n",
         );
         assert!(!feature_enables_devtools(&dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feature_enables_devtools_follows_the_facade_key() {
+        let dir = unique_dir("enables-devtools-frust-ui");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[dependencies]\nfrust-ui = \"0.6.0\"\n\n\
+             [features]\nfull = [\"frust-ui/devtools\"]\nlegacy = [\"frust/devtools\"]\n\
+             other = [\"frust-material/devtools\"]\n",
+        );
+        // No scripted cargo: the key comes from the manifest fallback.
+        let runner = FakeProcessRunner::new();
+        assert!(feature_enables_devtools_with(&runner, &dir, "full"));
+        assert!(feature_enables_devtools_with(&runner, &dir, "legacy"));
+        assert!(!feature_enables_devtools_with(&runner, &dir, "other"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A `frust`-keyed app does not get `frust-ui/devtools` for free: cargo
+    /// would reject that spelling, so it is not this app's devtools alias.
+    #[test]
+    fn feature_enables_devtools_ignores_another_keys_spelling() {
+        let dir = unique_dir("enables-devtools-wrong-key");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n\
+             [dependencies]\nfrust = { package = \"frust-ui\", version = \"0.6.0\" }\n\n\
+             [features]\nfull = [\"frust-ui/devtools\"]\n",
+        );
+        assert!(!feature_enables_devtools_with(
+            &FakeProcessRunner::new(),
+            &dir,
+            "full"
+        ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An app keying the facade twice counts either key's devtools — the
+    /// refusal this widens must not be defeated by an ambiguous manifest.
+    #[test]
+    fn feature_enables_devtools_counts_every_key_of_an_ambiguous_manifest() {
+        let dir = unique_dir("enables-devtools-ambiguous");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n\
+             [dependencies]\nfrust = { package = \"frust-ui\", version = \"0.6.0\" }\n\n\
+             [target.'cfg(unix)'.dependencies]\nui = { package = \"frust-ui\", version = \"0.6.0\" }\n\n\
+             [features]\nfull = [\"ui/devtools\"]\n",
+        );
+        assert!(feature_enables_devtools_with(
+            &FakeProcessRunner::new(),
+            &dir,
+            "full"
+        ));
         let _ = fs::remove_dir_all(&dir);
     }
 
