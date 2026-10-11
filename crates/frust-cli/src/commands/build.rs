@@ -966,6 +966,90 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// An app whose facade dependency is keyed `frust-ui` (the crates.io
+    /// name) spells the facade's devtools switch `frust-ui/devtools`; an
+    /// app-defined alias built on that spelling is refused on a release lane
+    /// under its own name, exactly as the `frust`-keyed alias is.
+    #[test]
+    fn build_apk_refuses_app_defined_alias_in_frust_ui_keyed_app() {
+        let dir = android_project_dir("apk-devtools-alias-frust-ui-key");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\nfrust-ui = \"0.6.0\"\n\n\
+             [features]\nfull = [\"frust-ui/devtools\"]\n",
+        )
+        .unwrap();
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Apk {
+            build: BuildFlags {
+                features: vec!["full".to_string()],
+                ..Default::default()
+            },
+            split_per_abi: false,
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("devtools"), "{message}");
+        assert!(message.contains("full"), "{message}");
+        assert!(message.contains("build apk"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The `frust`-keyed alias (`frust = { package = "frust-ui" }`, the
+    /// scaffolded spelling) that names `frust/devtools` stays refused, so the
+    /// key-aware widening did not narrow the original check.
+    #[test]
+    fn build_apk_refuses_app_defined_alias_in_frust_keyed_app() {
+        let dir = android_project_dir("apk-devtools-alias-frust-key");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\n\
+             frust = { package = \"frust-ui\", version = \"0.6.0\" }\n\n\
+             [features]\nfull = [\"frust/devtools\"]\n",
+        )
+        .unwrap();
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Apk {
+            build: BuildFlags {
+                features: vec!["full".to_string()],
+                ..Default::default()
+            },
+            split_per_abi: false,
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("devtools"), "{message}");
+        assert!(message.contains("full"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An app-defined alias that enables only a non-devtools facade feature
+    /// is not refused, under either facade key: the refusal is about the
+    /// devtools listener, not about every alias of the facade.
+    #[test]
+    fn refuse_devtools_features_allows_non_devtools_alias_under_either_key() {
+        for key in ["frust", "frust-ui"] {
+            let dir = android_project_dir("apk-non-devtools-alias");
+            fs::write(
+                dir.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"app\"\n\n[dependencies]\n\
+                     {key} = {{ package = \"frust-ui\", version = \"0.6.0\" }}\n\n\
+                     [features]\nperf = [\"{key}/perf-trace\"]\n"
+                ),
+            )
+            .unwrap();
+            let tokens = vec!["perf".to_string()];
+            assert!(
+                refuse_devtools_features("build apk", &dir, &tokens).is_ok(),
+                "key {key} refused a non-devtools alias"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
     /// A passthrough token carrying a shell metacharacter is rejected before
     /// any work, naming the offending token — this is what stands between an
     /// unvalidated CSV and the iOS release lane's unquoted `cargo build ...

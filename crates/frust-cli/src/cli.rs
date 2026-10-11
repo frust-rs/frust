@@ -331,7 +331,10 @@ pub struct BuildFlags {
 
     /// Extra cargo features to compile the app with, on top of the ones the
     /// build mode already selects (`frust/perf-trace`+`frust/devtools` for
-    /// debug/profile, `lean` for release). Repeatable, and a single value may
+    /// debug/profile, `lean` for release). The `frust/` prefix is the app's
+    /// dependency key for the frust-ui facade, usually `frust`; an app that
+    /// keys it differently (for example `frust-ui = "0.6.0"`) spells the same
+    /// features `frust-ui/<feat>`. Repeatable, and a single value may
     /// itself be a space- or comma-separated list, matching cargo's own
     /// `--features` syntax. Strictly additive — it never replaces the mode's
     /// selection, it is appended after it, so a `--profile` build keeps its
