@@ -1303,6 +1303,59 @@ class T7Test(unittest.TestCase):
                    values=frozenset({"a"}))
         self.assertEqual(buckets(res), [("T7-ref", "a")])
 
+    def test_helper_taken_by_reference_excluded(self):
+        res = run7("""\
+            use frust::{AnyView, View, any};
+            fn free_h() -> AnyView<S> { any(x()) }
+            fn plain() -> AnyView<S> { any(x()) }
+            fn mutref() -> AnyView<S> { any(x()) }
+            fn bigger() -> AnyView<S> { any(x()) }
+            impl X {
+                fn m(&self) -> AnyView<S> { any(x()) }
+                fn assoc() -> AnyView<S> { any(x()) }
+                fn user(&self, prev: &X) {
+                    take(&free_h());
+                    take(&self.m());
+                    take(&Self::assoc());
+                    take(&prev.m());
+                    take(&mut mutref());
+                    take((a, bigger()));
+                    take(&vec![bigger()]);
+                    take(&bigger().len());
+                    let v = plain();
+                }
+            }
+            """)
+        self.assertEqual(buckets(res), [("T7-ref", "free_h"), ("T7-ref", "mutref"),
+                                        ("T7-ref", "m"), ("T7-ref", "assoc")])
+        self.assertEqual([c.desc for c in res.candidates],
+                         ["helper returns impl View: plain", "helper returns impl View: bigger"])
+        self.assertTrue(all(e[3] == "taken by reference" for e in res.excluded
+                            if e[1] == "T7-ref"))
+
+    def test_beui_shape_taken_by_reference_not_rewritten(self):
+        src = """\
+            use frust::{AnyView, View, any, text};
+            impl Block {
+                fn primary_view(&self) -> AnyView<State> {
+                    any(text(self.label.clone()))
+                }
+                fn build(&self, ctx: &mut Ctx) {
+                    build_child(&self.primary_view(), ctx);
+                }
+                fn rebuild(&self, prev: &Self, ctx: &mut Ctx) {
+                    rebuild_child(&prev.primary_view(), &self.primary_view(), ctx);
+                }
+                fn teardown(&self, ctx: &mut Ctx) {
+                    teardown_child(&self.primary_view(), ctx);
+                }
+            }
+            """
+        res = run7(src)
+        self.assertEqual(res.candidates, [])
+        self.assertEqual(buckets(res), [("T7-ref", "primary_view")])
+        self.assertEqual(res.text, textwrap.dedent(src))
+
     def test_bindings_and_other_items_are_not_value_uses(self):
         res = run7("""\
             use frust::{AnyView, View, any};
@@ -1390,13 +1443,78 @@ class T7Test(unittest.TestCase):
                 pub fn fixture() -> AnyView<S> { any(p()) }
             }
             """
-        res = run7(src, library=True)
+        res = run7(src, library=True, visible=True)
         self.assertEqual(buckets(res), [("T7-public", "api"), ("T7-public", "method")])
         self.assertEqual([c.desc.rsplit(" ", 1)[1] for c in res.candidates],
                          ["internal", "private", "fixture"])
-        res = run7(src, library=False)          # an app, a tests/ or an examples/ source
+        res = run7(src, library=False, visible=True)   # an app, a tests/ or an examples/ source
         self.assertEqual(res.excluded, [])
         self.assertEqual(len(res.candidates), 5)
+
+    def test_visible_helper_listed_unless_opted_in(self):
+        src = """\
+            use frust::{AnyView, View, any};
+            pub(crate) fn a() -> AnyView<S> { any(p()) }
+            pub(super) fn b() -> AnyView<S> { any(p()) }
+            pub(in crate::x) fn c() -> AnyView<S> { any(p()) }
+            pub fn d() -> AnyView<S> { any(p()) }
+            fn e() -> AnyView<S> { any(p()) }
+            """
+        res = run7(src)
+        self.assertEqual([n for _, n in buckets(res)], ["a", "b", "c", "d"])
+        self.assertEqual({b for b, _ in buckets(res)}, {"T7-visible"})
+        self.assertEqual([c.desc.rsplit(" ", 1)[1] for c in res.candidates], ["e"])
+        self.assertIn("pub(crate) fn a() -> AnyView<S>", res.text)
+        self.assertIn("fn e() -> impl View<S>", res.text)
+        res = run7(src, visible=True)
+        self.assertEqual(res.excluded, [])
+        self.assertIn("pub(crate) fn a() -> impl View<S>", res.text)
+        self.assertEqual(len(res.candidates), 5)
+        res = run7("use frust::{AnyView, View, any};\n"
+                   "pub(crate) fn a() -> AnyView<S> { any(p()) }\n", library=True)
+        self.assertEqual(buckets(res), [("T7-visible", "a")])
+
+    def test_closure_local_return_is_not_an_early_return(self):
+        src = """\
+            use frust::{AnyView, View, any};
+            fn a() -> AnyView<S> {
+                let f = move |_app| {
+                    if x { return; }
+                };
+                let g = || { return 1; };
+                any(button().on_click(f))
+            }
+            fn b() -> AnyView<S> {
+                if x { return any(p()); }
+                any(q())
+            }
+            fn c() -> AnyView<S> {
+                let f = |_| { return; };
+                if x { return any(p()); }
+                any(q())
+            }
+            """
+        res = run7(src)
+        self.assertEqual([c.desc.rsplit(" ", 1)[1] for c in res.candidates], ["a"])
+        self.assertEqual(buckets(res), [("T7-arms", "b"), ("T7-arms", "c")])
+
+    def test_rustfmt_moved_marker_is_fn_scoped(self):
+        src = """\
+            use frust::{AnyView, View, any};
+            fn a() -> AnyView<S> {
+                // erasure: keep stored in a Vec<AnyView<S>> by callers
+                any(p())
+            }
+            fn b() -> AnyView<S> {
+                let x = 1;
+                // erasure: keep too late
+                any(p())
+            }
+            """
+        res = run7(src)
+        self.assertEqual(res.kept, 1)
+        self.assertEqual([c.desc.rsplit(" ", 1)[1] for c in res.candidates], ["b"])
+        self.assertIn("fn a() -> AnyView<S>", res.text)
 
     def test_keep_marker_honoured(self):
         src = """\
@@ -1497,9 +1615,14 @@ class T7DriverTest(DriverFixture, unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("lib.rs:7: T7 helper returns impl View: helper", out)
         self.assertIn("lib.rs:3: T7-public excluded: api (pub fn in a library source)", out)
+        self.assertIn("t.rs:3: T7-visible excluded: fixture (visible outside its module", out)
+        self.assertNotIn("T7 helper returns impl View: fixture", out)
+        self.assertIn("2 T7 exclusion(s)", out)
+        code, out = self.main("--check", "--t7", "--t7-visible", self.crates)
+        self.assertEqual(code, 1, out)
         self.assertIn("t.rs:3: T7 helper returns impl View: fixture", out)
         self.assertIn("1 T7 exclusion(s)", out)
-        code, _ = self.main("--write", "--t7", self.crates)
+        code, _ = self.main("--write", "--t7", "--t7-visible", self.crates)
         self.assertEqual(code, 0)
         # Exclusions stay listed but never fail the check, even under --strict.
         code, out = self.main("--check", "--strict", "--t7", self.crates)
@@ -1514,8 +1637,11 @@ class T7DriverTest(DriverFixture, unittest.TestCase):
         once = self.read(self.lib)
         self.assertIn("fn helper(s: &S) -> impl View<S> + use<'_> {\n    p()\n}", once)
         self.assertIn("pub fn api() -> AnyView<S> {", once)
+        self.assertEqual(self.read(self.test), self.TEST)          # T7-visible: untouched
+        self.main("--write", "--t7", "--t7-visible", self.crates)
         self.assertIn("pub fn fixture() -> impl View<S> {", self.read(self.test))
-        self.main("--write", "--t7", self.crates)
+        self.assertIn("pub fn api() -> AnyView<S> {", self.read(self.lib))
+        self.main("--write", "--t7", "--t7-visible", self.crates)
         self.assertEqual(self.read(self.lib), once)
 
     def test_edition_2024_and_resolution_rules(self):
@@ -1548,9 +1674,12 @@ class T7DriverTest(DriverFixture, unittest.TestCase):
         code, out = self.main("--stats", "--t7", self.crates)
         self.assertEqual(code, 0)
         self.assertIn("lib.rs: T7 candidates=1", out)
-        self.assertIn("lib.rs: T7 excluded T7-trait=0 T7-arms=0 T7-ref=0 T7-public=1", out)
+        self.assertIn("lib.rs: T7 excluded T7-trait=0 T7-arms=0 T7-ref=0 T7-public=1 T7-visible=0", out)
+        self.assertIn("total: T7 candidates=1", out)
+        self.assertIn("total: T7 excluded T7-trait=0 T7-arms=0 T7-ref=0 T7-public=1 T7-visible=1", out)
+        code, out = self.main("--stats", "--t7", "--t7-visible", self.crates)
         self.assertIn("total: T7 candidates=2", out)
-        self.assertIn("total: T7 excluded T7-trait=0 T7-arms=0 T7-ref=0 T7-public=1", out)
+        self.assertIn("total: T7 excluded T7-trait=0 T7-arms=0 T7-ref=0 T7-public=1 T7-visible=0", out)
         self.assertEqual(self.read(self.lib), self.LIB)            # --stats never writes
 
 
@@ -1738,6 +1867,36 @@ class T6DriverTest(DriverFixture, unittest.TestCase):
 
 def unmarked(src: str) -> list:
     return cm.unmarked_erasures(cm.Source(textwrap.dedent(src)))
+
+
+class UnmarkedBodyMarkerTest(unittest.TestCase):
+    def test_first_body_comment_covers_the_whole_fn(self):
+        self.assertEqual(unmarked("""\
+            fn f(k: u8) -> AnyView<S> {
+                // erasure: keep arms differ
+                match k {
+                    0 => any(a()),
+                    _ => any(b()),
+                }
+            }
+            """), [])
+
+    def test_later_or_reasonless_body_marker_is_not_fn_scoped(self):
+        self.assertEqual(unmarked("""\
+            fn f(k: u8) -> AnyView<S> {
+                let x = 1;
+                // erasure: keep late
+                foo(any(a()));
+                foo(any(b()));
+            }
+            """), [5])
+        self.assertEqual(unmarked("""\
+            fn f(k: u8) -> AnyView<S> {
+                // erasure: keep
+                foo(any(a()));
+                foo(any(b()));
+            }
+            """), [3, 4])
 
 
 class UnmarkedRuleTest(unittest.TestCase):
