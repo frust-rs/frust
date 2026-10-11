@@ -6,6 +6,22 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Fixed
+
+- The CLI resolves the app's `frust-ui` dependency key, so both `frust-ui = ".."` and
+  `frust = { package = "frust-ui", .. }` work for `run`, `build` and hot sessions: every cargo
+  argument list, Android `-Pfrust.cargoFeatures`, iOS `FRUST_FEATURES` and hot-patch fat build
+  spells features with the app's key, a missing-feature cargo failure on a debug or profile build
+  carries a one-line hint naming both forms, and release lanes refuse devtools through either key
+  (c801185c, 5fb139c6, fcbb1e91).
+- Codemod (`scripts/codemod/frust_any_codemod.py`): the name-list callees and the
+  `column`/`row`/`stack` builders resolve by import origin (a strict `frust*` path head), so an
+  app fn or an app-imported builder that shares a listed name is skipped with a note (412dc49a);
+  non-private T7 helpers land in a T7-visible bucket and are rewritten only with `--t7-visible`, a
+  `return` inside a closure is not an early return, a first-body-line keep marker that rustfmt
+  moved is fn-scoped for T7 and rule U (40b6f35f), and a helper whose same-file call is taken by
+  `&` is excluded as "taken by reference" (46be57ae).
+
 ## 0.6.0 — 2026-10-11
 
 Type erasure moved from the call site to the API boundary: public builders take generic views and
@@ -35,12 +51,35 @@ component's State.
   `vec![]`, an explicit turbofish call, or a `.collect()` straight into a list parameter now needs a
   type: a turbofish caller of a plugin list function writes `::<State, _>`, and one of
   `button_group_icon_action` needs one more `_`.
-- Wrapper views with `type Element = Box<dyn Widget>` that forward to an inner `AnyView` still hide
-  inner type swaps from focus bookkeeping (see `focus-wrapper-erasure-swap-blind` in
-  `docs/LIMITATIONS.md`).
-- Keyed flex lists are all-or-nothing, and the check is a `debug_assert`: a mixed list silently
-  falls back to positional reconciliation in release builds (see
-  `keyed-list-all-or-nothing-debug-only` in `docs/LIMITATIONS.md`).
+- `InputEvent` gained a `FileDrop(FileDropEvent)` variant (with the new `FileDropPhase`).
+  `InputEvent` is not `#[non_exhaustive]`, so an exhaustive `match` over it needs a `FileDrop(_)`
+  arm (E0004) (`crates/frust-core/src/event.rs`). The same release adds `OverlayAnchor::Window`
+  (`crates/frust-widgets/src/overlay.rs`), which an exhaustive `match` over `OverlayAnchor` must
+  also handle.
+- Public exhaustive-enum changes in tooling crates (none is `#[non_exhaustive]`, so an exhaustive
+  `match` outside the crate breaks): `frust-devtools-protocol` `Capability` gains `HotPatch` and
+  `Method` gains `HotpatchInfo`, `PatchChunk`, `TableChunk` and `ApplyPatch`; `frust-tui`'s
+  engine `Message` (+`HotPatchNow`, `HotPatchOutcome`, `HotSessionStarted`,
+  `RunConfigToggleAutoApply`, `RunConfigToggleRunHot`; -`RunConfigToggleWatch`), `RegionId`
+  (+`RunAutoApplyRow`, `RunHotRow`; -`RunWatchRow`), `RunFocus` (+`AutoApply`, `RunHot`;
+  -`Watch`), `Effect` (+`HotPatch`, `HotPatchNow`, `LaunchHotSessions`;
+  -`LaunchWatchedSessions`) and `SessionTarget` (+`Simulator`). `frust-shell-desktop`'s
+  `ShellUserEvent` (doc-hidden) became `#[non_exhaustive]` and gained `HotPatched` (`hotpatch`
+  feature only). Files: `crates/frust-devtools-protocol/src/{messages,method}.rs`,
+  `crates/frust-tui/src/engine/{message,update,run_config,session_view}.rs`,
+  `crates/frust-shell-desktop/src/app_handler.rs` (`git diff v0.5.2 v0.6.0 -- crates`).
+
+### Known limitations, now documented
+
+These behaviours already held before 0.6.0; this release documents them in `docs/LIMITATIONS.md`
+rather than introducing them.
+
+- Wrapper views with `type Element = Box<dyn Widget>` that forward to an inner `AnyView` hide
+  inner type swaps from focus bookkeeping (`focus-wrapper-erasure-swap-blind`, the renamed
+  `focus-double-erasure-swap-blind` entry that 0.5.1 already carried).
+- Keyed flex lists are all-or-nothing, and the check is a `debug_assert` (present since 0.5.1,
+  `crates/frust-widgets/src/authoring.rs:598` at v0.5.1): a mixed list silently falls back to
+  positional reconciliation in release builds (`keyed-list-all-or-nothing-debug-only`).
 
 ### Added
 
@@ -155,10 +194,59 @@ component's State.
    `.collect()` it rejects (a `.collect()` passed to a sequence API gets `::<Vec<_>>()`, a turbofish
    caller of a plugin list function writes `::<State, _>`, one of `button_group_icon_action` adds a
    `_`); a caller whose result now lands in a `Vec<AnyView>` or a `match` arm is re-erased with
-   `any(..)` (or its list becomes a tuple); two-arm bodies use `either(cond, || a, || b)`. Only a
-   site that must stay erased (a stored view table, an accumulator into `Vec<AnyView>`, a
-   three-plus-arm body, a `ChildPod`-fed helper, a same-head list whose elements differ in type)
-   keeps `any()`. Re-run the codemod after each fix until `--check --t6 --t7` is quiet.
+   `any(..)` (or its list becomes a tuple); two-arm bodies use `either(cond, || a, || b)`, except a
+   body whose two arms both consume one moved value, which uses `Either::Left`/`Either::Right` (or a
+   `match`) instead of `either(..)`. Only a site that must stay erased (a stored view table, an
+   accumulator into `Vec<AnyView>`, a three-plus-arm body, a `ChildPod`-fed helper, a same-head list
+   whose elements differ in type) keeps `any()`. Re-run the codemod after each fix until
+   `--check --t6 --t7` is quiet.
 5. Replace `dyn Component` with generics or stored `AnyView`s; see `docs/LIMITATIONS.md` for the
-   two behaviours listed under Breaking.
+   two behaviours listed under Known limitations, now documented.
 6. Run `scripts/ci/erasure-check.sh`; mark required erasure with `// erasure: keep <why>`.
+7. A `// erasure: keep` marker needs a non-empty reason; a bare marker covers nothing under rule U.
+   Accepted placements (`docs/WIDGETS_CODE_STANDARDS.md`): on the call's own line, alone on the
+   line above it, on the first line of an enclosing `vec![..]`, `let` or `match`, or on the
+   enclosing fn signature (the `fn` line, its `->` line, or alone above the `fn`). rustfmt-stable
+   forms: at the end of the `->` line with the `{` on the next line, at the end of the `any(..)`
+   line, or as the first own-line comment in the body (where rustfmt moves a marker written after
+   the signature's `{`), which counts as a signature marker.
+8. An app scaffolded by 0.5.0 (yanked) also follows the 0.5.0 machine-path migration (see
+   `scaffold-0.5.0-path-dependency` in `docs/LIMITATIONS.md`).
+
+## 0.5.2 — 2026-10-05
+
+Template, top-app-bar and wording release (`git log v0.5.1..v0.5.2`, 44 commits).
+
+### Changed
+
+- `Image` layout keeps its aspect ratio when the natural size exceeds the bounds (4f42b8bf, merged
+  by 3d2287d4).
+- The Material top app bar follows the M3 spec: a bare title starts 16dp from the leading edge,
+  `AppBarView` gains `container(AppBarContainer)`, `elevation(u8)` and `safe_area(bool)`, and the
+  fixed and search bars consume the top and side window insets themselves; a bar that is not at
+  the window top opts out with `.safe_area(false)`. `selection_app_bar`'s contextual branch insets
+  the same way (903184fa, 95c92de9, 0dce814d, f12c7da9). The examples that wrapped bars in
+  `safe_area` were audited to match (2f61d997, 6d88f1e5, 2b8ee475).
+- `frust create`'s default template is a Material counter starter built from components, and the
+  clean-signals template is a Material counter feature; both use `InversePrimary` with elevation 2
+  and self-inset (806c1814, c4d4e5da, c480f7ec). Generated READMEs describe each architecture's
+  own layout and their font/theme snippets match the API (f70a92e9, 42a4d372), and the CLI help,
+  wizard and scaffold tests no longer carry notes-app wording (d8e725f3).
+- The app root closure is named `build` (was `app_logic`) across the shells, `frust-core`, the
+  testing harness and the facade docs, which teach all UI in `Component::build` (d9108ee5,
+  94689de4, 5346af2a, f2637e9c). The only public effect is renamed type and value parameters:
+  `App<State, Logic>` is `App<State, Build>`, and `new_boxed_app`, `new_boxed_app_with`,
+  `run_desktop` and `run_desktop_with` name their closure parameter `build`. No public item was
+  added or removed, and type-parameter names are not nameable by callers.
+- User-visible text no longer describes the framework as pre-release: the generated Gradle
+  settings, `.gitignore`, the auth-session runtime error and README, and the TUI wizard no longer
+  name a `frust plugin add` command (there never was one; the TUI's Add Plugin action does this),
+  and the plugin READMEs and Gradle module headers show the generated
+  `frustLocalDir("frust.plugin.<module>.dir")` form read from the gitignored `local.properties`
+  instead of `file("<frust checkout>/plugins/...")` includes (d350ec1b, PR #15 / 383444e6).
+
+### Release
+
+- Version bump to 0.5.2, the first release published by `release.yml` through Trusted
+  Publishing; the publish step retries a minute apart while crates.io's update rate limit
+  applies (a28b2563, PR #16 / 4829391d).
