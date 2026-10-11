@@ -86,6 +86,7 @@ use crate::build_info::{BuildInfo, BuildMode};
 use crate::devices::Device;
 use crate::devtools_client::{adb_forward_ephemeral, adb_forward_remove, sha256_hex};
 use crate::doctor::EnvLookup;
+use crate::facade_key::FacadeKey;
 use crate::host_path;
 use crate::manifest;
 use crate::process::ProcessRunner;
@@ -562,13 +563,14 @@ pub fn start_android(
     let manifest =
         manifest::load_optional(start.root).map_err(|err| unsupported(format!("{err:#}")))?;
     let budget = Budget::from_section(manifest.as_ref().and_then(|m| m.hotpatch.as_ref()));
+    let key = FacadeKey::resolve(start.root).map_err(|err| unsupported(err.to_string()))?;
     let ndk = NdkToolchain::resolve(host.env)?;
 
     let mut staged: Option<FatBase> = None;
     let mut failure: Option<StartError> = None;
     let launched = {
         let mut stage = |abi: &str, on_line: &mut dyn FnMut(&str)| -> anyhow::Result<()> {
-            match build_and_stage(host, start, &ndk, abi, on_line) {
+            match build_and_stage(host, start, &ndk, abi, &key, on_line) {
                 Ok(base) => {
                     staged = Some(base);
                     Ok(())
@@ -603,7 +605,7 @@ pub fn start_android(
     };
 
     let Some((app, forward_port)) =
-        attach_launched(runner, &start.device.id, &mut launch, on_line, cancel)?
+        attach_launched(runner, &start.device.id, &mut launch, &key, on_line, cancel)?
     else {
         return Ok(None);
     };
@@ -642,7 +644,8 @@ fn settle_pipeline(
 }
 
 /// Waits for the launched app's discovery line and attaches through an
-/// `adb forward` on `serial`, answering the link and the forwarded host
+/// `adb forward` on `serial` (a refusal naming the hot-patch feature as an
+/// app keyed `key` spells it), answering the link and the forwarded host
 /// port. `Ok(None)` when `cancel` was observed during the wait, the forward
 /// or the attach: the stream is killed, the forward removed and the app
 /// force-stopped first ([`unwind`]).
@@ -650,6 +653,7 @@ fn attach_launched(
     runner: &dyn ProcessRunner,
     serial: &str,
     launch: &mut AndroidLaunch,
+    key: &FacadeKey,
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
 ) -> Result<Option<(AppLink, Option<u16>)>, StartError> {
@@ -670,6 +674,7 @@ fn attach_launched(
                         SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
                         discovery.token.as_deref(),
                         TRIPLE,
+                        key,
                     )
                 }
                 Err(err) => AppLink::RestartOnly {
@@ -711,12 +716,15 @@ fn unwind(
 }
 
 /// The staging step [`start_android`] hands the run pipeline: the fat
-/// build, the fat link and base image, then the copy into `jniLibs`.
+/// build (its `--features` spelled with the app's facade `key`; the capture
+/// scope hashes the canonical names), the fat link and base image, then the
+/// copy into `jniLibs`.
 fn build_and_stage(
     host: &SessionHost<'_>,
     start: &AndroidStart<'_>,
     ndk: &NdkToolchain,
     abi: &str,
+    key: &FacadeKey,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<FatBase, StartError> {
     if abi != ABI {
@@ -782,9 +790,11 @@ fn build_and_stage(
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     defines.sort();
+    let argv_features = session::argv_features(features, key);
+    let argv_refs: Vec<&str> = argv_features.iter().map(String::as_str).collect();
     let fat = fat_build_command(
         start.package,
-        features,
+        &argv_refs,
         &defines,
         &jni_libs,
         ndk,
@@ -992,6 +1002,50 @@ mod tests {
         assert!(
             matches!(err, HotpatchError::BuilderUnsupported { .. }),
             "{err:?}"
+        );
+    }
+
+    /// An app keyed `frust-ui`: the hot-session features reach cargo-ndk's
+    /// argv as `frust-ui/<feature>` (the composition `build_and_stage` runs).
+    #[test]
+    fn a_frust_ui_keyed_fat_build_spells_its_features_with_the_key() {
+        let ndk = NdkToolchain {
+            home: PathBuf::from("/sdk/ndk"),
+            clang: PathBuf::from("/sdk/ndk/bin/clang"),
+            strip: PathBuf::from("/sdk/ndk/bin/llvm-strip"),
+        };
+        let link = LinkAction {
+            mode: LinkMode::Proxy {
+                linker: ndk.clang.clone(),
+            },
+            args_file: PathBuf::from("/t/fat/link-args.json"),
+            err_file: None,
+        };
+        let features = session::argv_features(
+            BuildMode::Debug.session_cargo_features(true),
+            &FacadeKey::new("frust-ui"),
+        );
+        let refs: Vec<&str> = features.iter().map(String::as_str).collect();
+        let fat = fat_build_command(
+            "my-app",
+            &refs,
+            &[],
+            Path::new("/w/jniLibs"),
+            &ndk,
+            WrapperSetup {
+                frust_exe: Path::new("/opt/frust/bin/frust"),
+                scope_dir: Path::new("/t/scope"),
+                ambient_names: &[],
+            },
+            &link,
+        );
+        let joined = fat.args.join(" ");
+        assert!(
+            joined.contains(
+                "--features frust-ui/perf-trace --features frust-ui/devtools \
+                 --features frust-ui/hotpatch --"
+            ),
+            "{joined}"
         );
     }
 
@@ -1591,9 +1645,16 @@ mod tests {
             device: &device,
         };
         let ndk = fake_ndk(&dir.join("ndk"));
-        let err = build_and_stage(&host, &start, &ndk, "x86_64", &mut |_| {})
-            .err()
-            .expect("x86_64 is refused");
+        let err = build_and_stage(
+            &host,
+            &start,
+            &ndk,
+            "x86_64",
+            &FacadeKey::default(),
+            &mut |_| {},
+        )
+        .err()
+        .expect("x86_64 is refused");
         match err {
             StartError::RestartRequired(RestartReason::BuilderUnsupported { detail }) => {
                 assert!(detail.contains("arm64-v8a only"), "{detail}")
@@ -1694,8 +1755,15 @@ mod tests {
                 cancel.store(true, Ordering::SeqCst);
             })
         };
-        let attached = attach_launched(&runner, SERIAL, &mut launch, &mut |_| {}, &cancel)
-            .expect("a cancel is not an error");
+        let attached = attach_launched(
+            &runner,
+            SERIAL,
+            &mut launch,
+            &FacadeKey::default(),
+            &mut |_| {},
+            &cancel,
+        )
+        .expect("a cancel is not an error");
         raiser.join().unwrap();
         assert!(attached.is_none());
         assert_eq!(runner.runs(), vec![FORCE_STOP]);
@@ -1743,8 +1811,15 @@ mod tests {
                 });
             }
             let mut launch = launched(&runner);
-            let attached = attach_launched(&runner, SERIAL, &mut launch, &mut |_| {}, &cancel)
-                .expect("no launch error");
+            let attached = attach_launched(
+                &runner,
+                SERIAL,
+                &mut launch,
+                &FacadeKey::default(),
+                &mut |_| {},
+                &cancel,
+            )
+            .expect("no launch error");
             if cancelled {
                 assert!(attached.is_none());
                 assert_eq!(

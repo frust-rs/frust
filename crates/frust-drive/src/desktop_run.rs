@@ -6,8 +6,9 @@
 //! supervisor
 //! (`crates/frust-tui/src/supervise/session.rs`'s `SessionSpec::launch_plan`,
 //! which reshapes the result into its own `LaunchPlan`), and `frust-mcp`'s
-//! session engine (through [`spawn_desktop_session`]). Pure value-building plus
-//! a thin [`ProcessRunner`] wrapper — no threads, no tokio, matching this
+//! session engine (through [`spawn_desktop_session`]). Value-building (whose
+//! only I/O is reading the app's facade dependency key, [`FacadeKey`]) plus a
+//! thin [`ProcessRunner`] wrapper — no threads, no tokio, matching this
 //! crate's charter (`docs/CLI_ARCHITECTURE.md`).
 //!
 //! A plan carries its own child environment as well as its argv, because the
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::build_info::{BuildInfo, BuildMode};
+use crate::facade_key::{FacadeKey, FacadeKeyError};
 use crate::process::{ProcessRunner, StreamHandle};
 
 /// The env var a `--profile` desktop preview needs set for the shell's perf
@@ -50,13 +52,17 @@ pub struct DesktopPlan {
 /// profile flag(s) (`BuildMode::cargo_profile_arg`) followed by one
 /// `--features <name>` pair per mode-selected cargo feature
 /// (`BuildMode::cargo_features` — `frust/perf-trace`+`frust/devtools` for
-/// Debug/Profile, `lean` for Release). Without the feature flags the spawned
+/// Debug/Profile, `lean` for Release), each spelled with the app's facade
+/// dependency key ([`FacadeKey`]: `frust-ui/devtools` for an app that
+/// depends on `frust-ui = ".."`). Without the feature flags the spawned
 /// preview compiles the devtools service and perf instrumentation OUT, so a
 /// tool waiting on a discovery line would wait forever.
 ///
-/// Pure: no I/O, no process spawn — see [`spawn_desktop_session`] for the
-/// side-effecting wrapper, and [`desktop_plan_with_features`] for the caller
-/// that resolved its own feature list first.
+/// Spawns no build: the only I/O is resolving the facade key from `root`'s
+/// manifest (see [`try_desktop_plan_with_features`] for how an unresolvable
+/// key is handled). See [`spawn_desktop_session`] for the side-effecting
+/// wrapper, and [`desktop_plan_with_features`] for the caller that resolved
+/// its own feature list first.
 pub fn desktop_plan(root: &Path, info: &BuildInfo) -> DesktopPlan {
     desktop_plan_with_features(root, info, info.mode.cargo_features())
 }
@@ -72,14 +78,48 @@ pub fn desktop_plan(root: &Path, info: &BuildInfo) -> DesktopPlan {
 /// build with cargo's opaque message), and `--features` passthrough entries
 /// are appended after the mode's own. Passing `info.mode.cargo_features()`
 /// here is byte-identical to [`desktop_plan`].
+///
+/// `features` are canonical (`frust/<feature>`); each is mapped to the app's
+/// facade key at this argv boundary. This builder cannot fail, so an app
+/// whose manifest names the facade under two keys
+/// ([`FacadeKeyError::Ambiguous`]) keeps the canonical spelling here — cargo
+/// then reports the feature it cannot resolve. A front-end that wants that
+/// ambiguity as its own error calls [`try_desktop_plan_with_features`];
+/// [`spawn_desktop_session`] does.
 pub fn desktop_plan_with_features(root: &Path, info: &BuildInfo, features: &[&str]) -> DesktopPlan {
+    try_desktop_plan_with_features(root, info, features)
+        .unwrap_or_else(|_| keyed_desktop_plan(root, info, features, &FacadeKey::default()))
+}
+
+/// [`desktop_plan_with_features`], surfacing an unresolvable facade key
+/// ([`FacadeKeyError::Ambiguous`]) instead of falling back to the canonical
+/// spelling. The key is resolved once, from `root`'s manifest
+/// ([`FacadeKey::resolve`]); a `root` without a `Cargo.toml` answers the
+/// default `frust` key, so its plan is unchanged.
+pub fn try_desktop_plan_with_features(
+    root: &Path,
+    info: &BuildInfo,
+    features: &[&str],
+) -> Result<DesktopPlan, FacadeKeyError> {
+    let key = FacadeKey::resolve(root)?;
+    Ok(keyed_desktop_plan(root, info, features, &key))
+}
+
+/// The plan for `features` spelled with `key`: the pure core every
+/// desktop-plan builder shares once the key is known.
+fn keyed_desktop_plan(
+    root: &Path,
+    info: &BuildInfo,
+    features: &[&str],
+    key: &FacadeKey,
+) -> DesktopPlan {
     let mut args = vec!["run".to_string()];
     for arg in info.mode.cargo_profile_arg() {
         args.push((*arg).to_string());
     }
     for feature in features {
         args.push("--features".to_string());
-        args.push((*feature).to_string());
+        args.push(key.map(feature));
     }
 
     DesktopPlan {
@@ -88,6 +128,22 @@ pub fn desktop_plan_with_features(root: &Path, info: &BuildInfo, features: &[&st
         cwd: root.to_path_buf(),
         env: desktop_env(info),
     }
+}
+
+/// cargo's wording when a `--features <key>/<feature>` names a dependency key
+/// the package does not have — e.g. `frust/devtools` for an app that depends
+/// on `frust-ui = ".."` (`the package 'app' does not contain this feature:
+/// frust/devtools`).
+const MISSING_FEATURE_MARKER: &str = "does not contain this feature";
+
+/// [`FacadeKey::hint`] when a failed cargo invocation for a `mode` build
+/// printed `output` that names a feature the package does not contain —
+/// the shape a facade-key mismatch takes. Only Debug and Profile select
+/// facade features (`frust/perf-trace`, `frust/devtools`); Release selects
+/// the app's own `lean`, so its feature errors are never the key's fault.
+/// Shared by every drive pipeline that reports a failed cargo-backed build.
+pub(crate) fn facade_feature_hint(mode: BuildMode, output: &str) -> Option<&'static str> {
+    (mode != BuildMode::Release && output.contains(MISSING_FEATURE_MARKER)).then(FacadeKey::hint)
 }
 
 /// The child environment a desktop preview of `info` runs with: every
@@ -99,7 +155,7 @@ pub fn desktop_plan_with_features(root: &Path, info: &BuildInfo, features: &[&st
 /// workbench's run-config modal builds a [`BuildInfo`] by hand, so a
 /// `--profile` desktop session would otherwise start with perf instrumentation
 /// compiled in and nothing turning it on. An explicit user define always wins.
-fn desktop_env(info: &BuildInfo) -> Vec<(String, String)> {
+pub(crate) fn desktop_env(info: &BuildInfo) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = info
         .defines
         .iter()
@@ -119,13 +175,16 @@ fn desktop_env(info: &BuildInfo) -> Vec<(String, String)> {
 ///
 /// The plan's whole shape is spawned, environment included — a caller that got
 /// the args but not the env would be running a different preview than the one
-/// this module resolved.
+/// this module resolved. A manifest naming the facade under two keys is an
+/// error here ([`try_desktop_plan_with_features`]), before anything spawns.
 pub fn spawn_desktop_session(
     runner: &dyn ProcessRunner,
     root: &Path,
     info: &BuildInfo,
 ) -> Result<StreamHandle> {
-    spawn_desktop_plan(runner, &desktop_plan(root, info))
+    let plan = try_desktop_plan_with_features(root, info, info.mode.cargo_features())
+        .with_context(|| format!("resolving the frust dependency of `{}`", root.display()))?;
+    spawn_desktop_plan(runner, &plan)
 }
 
 /// The plan that runs an already-linked desktop executable directly — a
@@ -329,6 +388,129 @@ mod tests {
         assert_eq!(lines, vec!["frust-devtools listening on 4000 token abc"]);
         assert!(handle.wait());
         assert_eq!(runner.recorded_cwd(), Some(root));
+    }
+
+    /// A project dir whose `Cargo.toml` depends on the facade as
+    /// `dependencies` (a `[dependencies]` table body).
+    fn project_with_deps(tag: &str, dependencies: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "frust-drive-desktop-run-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n{dependencies}"
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// An app keyed `frust-ui` gets every facade feature spelled with that
+    /// key; the app's own `lean` is not a facade feature and stays as is.
+    #[test]
+    fn a_frust_ui_keyed_app_gets_frust_ui_features() {
+        let root = project_with_deps("frust-ui", "frust-ui = \"0.6.0\"\n");
+        let plan = desktop_plan(&root, &build_info(BuildMode::Debug));
+        assert_eq!(
+            plan.args,
+            vec![
+                "run",
+                "--features",
+                "frust-ui/perf-trace",
+                "--features",
+                "frust-ui/devtools",
+            ]
+        );
+        assert_eq!(
+            desktop_plan(&root, &build_info(BuildMode::Release)).args,
+            vec!["run", "--release", "--features", "lean"]
+        );
+        // A caller-resolved list (a `--features` passthrough included) is
+        // mapped the same way.
+        assert_eq!(
+            desktop_plan_with_features(
+                &root,
+                &build_info(BuildMode::Debug),
+                &["frust/devtools", "frust-material/extra"],
+            )
+            .args,
+            vec![
+                "run",
+                "--features",
+                "frust-ui/devtools",
+                "--features",
+                "frust-material/extra",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The scaffolded `frust = { package = "frust-ui" }` key spells exactly
+    /// what the canonical literals already say.
+    #[test]
+    fn the_scaffolded_frust_key_is_byte_identical() {
+        let root = project_with_deps(
+            "scaffolded",
+            "frust = { package = \"frust-ui\", version = \"0.6.0\" }\n",
+        );
+        for mode in [BuildMode::Debug, BuildMode::Profile, BuildMode::Release] {
+            assert_eq!(
+                desktop_plan(&root, &build_info(mode)).args,
+                desktop_plan(Path::new("/tmp/project"), &build_info(mode)).args,
+                "{mode:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two facade keys: the fallible builder (and the spawn) report it; the
+    /// infallible one keeps the canonical spelling.
+    #[test]
+    fn an_ambiguous_key_is_an_error_where_the_plan_can_fail() {
+        let root = project_with_deps(
+            "ambiguous",
+            "frust = { package = \"frust-ui\", version = \"0.6.0\" }\n\
+             ui = { package = \"frust-ui\", version = \"0.6.0\" }\n",
+        );
+        let info = build_info(BuildMode::Debug);
+        let err =
+            try_desktop_plan_with_features(&root, &info, info.mode.cargo_features()).unwrap_err();
+        assert!(matches!(err, FacadeKeyError::Ambiguous { .. }), "{err:?}");
+        assert_eq!(
+            desktop_plan(&root, &info).args,
+            desktop_plan(Path::new("/tmp/project"), &info).args
+        );
+        let runner = FakeProcessRunner::new();
+        let err = spawn_desktop_session(&runner, &root, &info)
+            .err()
+            .expect("an ambiguous key refuses to spawn");
+        let message = format!("{err:#}");
+        assert!(message.contains("more than one key"), "{message}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_feature_hint_fires_for_a_missing_feature_in_debug_and_profile_only() {
+        let stderr = "error: the package 'app' does not contain this feature: frust/devtools";
+        assert_eq!(
+            facade_feature_hint(BuildMode::Debug, stderr),
+            Some(FacadeKey::hint())
+        );
+        assert_eq!(
+            facade_feature_hint(BuildMode::Profile, stderr),
+            Some(FacadeKey::hint())
+        );
+        assert_eq!(facade_feature_hint(BuildMode::Release, stderr), None);
+        assert_eq!(
+            facade_feature_hint(BuildMode::Debug, "error[E0425]: cannot find value"),
+            None
+        );
     }
 
     #[test]

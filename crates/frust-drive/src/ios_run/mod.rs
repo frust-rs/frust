@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 
-use crate::build_info::{BuildInfo, HOTPATCH_FEATURE};
+use crate::build_info::{BuildInfo, BuildMode, HOTPATCH_FEATURE};
 use crate::devices::Device;
 use crate::ios_build::{self, IosArtifact};
 use crate::process::{ProcessRunner, RealProcessRunner, StreamHandle, tail_lines};
@@ -180,11 +180,6 @@ fn prepare_simulator_core(
     }
 
     let configuration = info.mode.xcode_configuration();
-    // Release-lean preflight: drop an undeclared `lean` for a legacy app,
-    // warning once through this session's `on_line` sink, so the simulator
-    // build never threads `--features lean` down to `cargo`. This path
-    // calls `encode_features` directly (bypassing `ios_build::build`), so it
-    // needs its own resolve.
     // A hot build adds the hot-patch feature: the Debug hot-session set.
     let hot_features = [HOTPATCH_FEATURE.to_string()];
     let extra_features = if hot.is_some() {
@@ -192,13 +187,14 @@ fn prepare_simulator_core(
     } else {
         extra_features
     };
-    let (features, warning) =
-        crate::cargo_manifest::resolve_release_features(&project.root, info.mode, extra_features);
-    if let Some(warning) = warning {
-        on_line(&warning);
-    }
-    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
-    let features_b64 = crate::ios_build::encode_features(&feature_refs);
+    // This path bypasses `ios_build::build`, so it resolves the
+    // `FRUST_FEATURES` value through the same shared step: the release-lean
+    // preflight (an undeclared `lean` dropped, warned once through this
+    // session's `on_line`) and the app's facade key (`frust-ui/hotpatch` for
+    // an app depending on `frust-ui = ".."`), so the simulator build never
+    // threads a feature `cargo` cannot resolve.
+    let features_b64 =
+        crate::ios_build::resolve_features_b64(&project.root, info.mode, extra_features, on_line)?;
 
     on_line(&format!("Building `{}`…", project.bundle_id));
     let build_start = Instant::now();
@@ -222,7 +218,7 @@ fn prepare_simulator_core(
         )?,
     };
     if !build_out.success {
-        bail!("{}", xcodebuild_failure_message(&build_out));
+        bail!("{}", xcodebuild_failure_message(&build_out, info.mode));
     }
     on_line(&format!(
         "Build finished in {:.1}s.",
@@ -582,7 +578,7 @@ fn with_developer_mode_hint(message: String) -> String {
 /// lines of both stdout AND stderr — xcodebuild reports most errors on
 /// stdout, unlike `gradlew`, which is why this extends (rather than
 /// verbatim-copies) the Android pipeline's `tail_lines` approach.
-fn xcodebuild_failure_message(build_out: &crate::process::Output) -> String {
+fn xcodebuild_failure_message(build_out: &crate::process::Output, mode: BuildMode) -> String {
     let stdout_tail = tail_lines(&build_out.stdout, 50);
     let stderr_tail = tail_lines(&build_out.stderr, 50);
     let mut message = "`xcodebuild` failed".to_string();
@@ -592,13 +588,20 @@ fn xcodebuild_failure_message(build_out: &crate::process::Output) -> String {
     if !stderr_tail.is_empty() {
         message.push_str(&format!("\n--- stderr (tail) ---\n{stderr_tail}"));
     }
+    if let Some(hint) = crate::desktop_run::facade_feature_hint(
+        mode,
+        &format!("{}\n{}", build_out.stdout, build_out.stderr),
+    ) {
+        message.push('\n');
+        message.push_str(hint);
+    }
     message
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_info::{BuildArgs, BuildMode};
+    use crate::build_info::BuildArgs;
     use crate::devices::{Kind, Platform};
     use crate::ios_build::xcodebuild::host_sim_arch;
     use crate::process::{FakeProcessRunner, Output};
@@ -1376,6 +1379,86 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An app keyed `frust-ui`: the hot build's `FRUST_FEATURES` decodes to
+    /// `frust-ui/perf-trace,frust-ui/devtools,frust-ui/hotpatch`. The xcodebuild
+    /// fixture carries that exact value, so the canonical spelling would find
+    /// no registration; the failed install stops the run right after it.
+    #[test]
+    fn a_frust_ui_keyed_hot_build_spells_frust_features_with_its_key() {
+        let dir = unique_project_dir("hot-frust-ui");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nfrust-ui = \"0.6.0\"\n",
+        )
+        .unwrap();
+        let app_dir = dir.join("build/ios/Build/Products/Debug-iphonesimulator/Runner.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let app_path = app_dir.to_string_lossy().into_owned();
+        // base64("frust-ui/perf-trace,frust-ui/devtools,frust-ui/hotpatch")
+        let features =
+            "ZnJ1c3QtdWkvcGVyZi10cmFjZSxmcnVzdC11aS9kZXZ0b29scyxmcnVzdC11aS9ob3RwYXRjaA==";
+        let runner = FakeProcessRunner::new()
+            .with(
+                "xcode-select -p",
+                ok("/Applications/Xcode.app/Contents/Developer\n"),
+            )
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-apple-ios-sim\n"),
+            )
+            .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
+            .with(
+                format!(
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES={features} build",
+                    host_sim_arch()
+                ),
+                ok("Build succeeded"),
+            )
+            .with(
+                format!("xcrun simctl install AAAA {app_path}"),
+                Output {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "INSTALL_FAILED_TEST_STOP".to_string(),
+                },
+            );
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let mut stage = |_: &Path, _: &mut dyn FnMut(&str)| -> Result<()> { Ok(()) };
+        let mut hot = HotBuild {
+            settings: &[],
+            stage: &mut stage,
+        };
+        let err = spawn_hot_session(
+            &runner,
+            &dir,
+            &device(),
+            &debug_info(),
+            &mut hot,
+            &mut |_| {},
+            &never,
+        )
+        .err()
+        .expect("the install fails after the mapped build");
+        assert!(err.to_string().contains("simctl install"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_feature_failure_carries_the_facade_key_hint() {
+        let out = Output {
+            success: false,
+            stdout: "error: the package 'app' does not contain this feature: frust/hotpatch"
+                .to_string(),
+            stderr: String::new(),
+        };
+        let message = xcodebuild_failure_message(&out, BuildMode::Debug);
+        assert!(
+            message.ends_with(crate::facade_key::FacadeKey::hint()),
+            "{message}"
+        );
+        assert!(!xcodebuild_failure_message(&out, BuildMode::Release).contains("hint:"));
     }
 
     /// The hot pipeline: the fat `xcodebuild` (hot-session features, the

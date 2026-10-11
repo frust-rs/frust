@@ -21,6 +21,7 @@ use crate::android_build::AndroidArtifact;
 use crate::build_info::{BuildInfo, BuildMode};
 use crate::devices::{Device, Platform};
 use crate::doctor::{EnvLookup, RealEnv};
+use crate::facade_key::FacadeKey;
 use crate::process::{ProcessRunner, StreamHandle, tail_lines};
 
 /// Outcome of matching discovered devices against `-d`/no-flag selection.
@@ -335,6 +336,10 @@ fn prepare_session_with(
     if let Some(warning) = warning {
         on_line(&warning);
     }
+    // Gradle hands the CSV to `cargo ndk --features` verbatim, so each
+    // canonical `frust/<feature>` is spelled with the app's facade key here.
+    let key = FacadeKey::resolve(&project.root).context("resolving the app's frust dependency")?;
+    let features: Vec<String> = features.iter().map(|feature| key.map(feature)).collect();
 
     let task = crate::android_build::tasks::task_name(&target, info.mode, info.flavor.as_deref());
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
@@ -381,10 +386,16 @@ fn prepare_session_with(
     drop(generated);
     if !build_out.success {
         let tail = tail_lines(&build_out.stderr, 50);
+        let hint = crate::desktop_run::facade_feature_hint(
+            info.mode,
+            &format!("{}\n{}", build_out.stdout, build_out.stderr),
+        )
+        .map(|hint| format!("\n{hint}"))
+        .unwrap_or_default();
         if tail.is_empty() {
-            bail!("`./gradlew {task}` failed");
+            bail!("`./gradlew {task}` failed{hint}");
         }
-        bail!("`./gradlew {task}` failed:\n{tail}");
+        bail!("`./gradlew {task}` failed:\n{tail}{hint}");
     }
     // The gate promised a release-signed APK; Gradle just said it produced a
     // debug-signed one. Refuse before it reaches a device — the same backstop
@@ -1101,6 +1112,44 @@ mod tests {
             let local_props = fs::read_to_string(android_dir.join("local.properties")).unwrap();
             assert!(local_props.contains("frust.versionName=1.0"));
             assert!(local_props.contains("frust.versionCode=1"));
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// An app keyed `frust-ui`: the run lane's `-Pfrust.cargoFeatures`
+        /// CSV decodes to `frust-ui/perf-trace,frust-ui/devtools` — the fixture
+        /// is registered with that exact value, so the canonical spelling
+        /// finds no registration.
+        #[test]
+        fn a_frust_ui_keyed_app_spells_the_run_csv_with_its_key() {
+            let dir = unique_project_dir("frust-ui-key");
+            fs::write(
+                dir.join("Cargo.toml"),
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nfrust-ui = \"0.6.0\"\n",
+            )
+            .unwrap();
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    // base64("frust-ui/perf-trace,frust-ui/devtools")
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false \
+-Pfrust.cargoFeatures=ZnJ1c3QtdWkvcGVyZi10cmFjZSxmcnVzdC11aS9kZXZ0b29scw==",
+                    ),
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+
+            let build_info = info(BuildMode::Debug, None);
+            let err = run_with_env(&runner, &dir, &device(), &build_info, NO_EXTRA, &fake_env())
+                .unwrap_err();
+            assert!(err.to_string().contains("adb install"), "{err}");
 
             let _ = fs::remove_dir_all(&dir);
         }
