@@ -1458,7 +1458,7 @@ class T7Test(unittest.TestCase):
         self.assertTrue(all(e[3] == "taken by reference" for e in res.excluded
                             if e[1] == "T7-ref"))
 
-    def test_beui_shape_taken_by_reference_not_rewritten(self):
+    def test_beui_shape_child_trio_borrow_is_rewritten(self):
         src = """\
             use frust::{AnyView, View, any, text};
             impl Block {
@@ -1477,9 +1477,9 @@ class T7Test(unittest.TestCase):
             }
             """
         res = run7(src)
-        self.assertEqual(res.candidates, [])
-        self.assertEqual(buckets(res), [("T7-ref", "primary_view")])
-        self.assertEqual(res.text, textwrap.dedent(src))
+        self.assertEqual([c.desc for c in res.candidates],
+                         ["helper returns impl View: primary_view"])
+        self.assertEqual(res.excluded, [])
 
     def test_bindings_and_other_items_are_not_value_uses(self):
         res = run7("""\
@@ -1536,9 +1536,78 @@ class T7Test(unittest.TestCase):
             }
             """)
         self.assertEqual([(b, n, r) for _, b, n, r in res.excluded], [
-            ("T7-arms", "a", "if/else tail"), ("T7-arms", "b", "match tail"),
+            ("T7-arms", "a", "if/else tail, 3 arms"), ("T7-arms", "b", "match tail, 2 arms"),
             ("T7-arms", "c", "early return")])
         self.assertEqual(res.candidates, [])
+
+    def test_child_trio_borrow_is_not_taken_by_reference(self):
+        res = run7("""\
+            use frust::{AnyView, View, any};
+            impl T {
+                fn x(&self) -> AnyView<S> { any(p()) }
+                fn y(&self) -> AnyView<S> { any(p()) }
+                fn z(&self) -> AnyView<S> { any(p()) }
+                fn go(&mut self, prev: &T, ctx: &mut Ctx) {
+                    build_child(&self.x(), ctx);
+                    rebuild_child(&prev.y(), &self.y(), ctx);
+                    frust::authoring::build_child(&self.z(), ctx);
+                }
+            }
+            """)
+        self.assertEqual(res.excluded, [])
+        self.assertEqual(len(res.candidates), 3)
+
+    def test_other_callee_borrow_still_taken_by_reference(self):
+        res = run7("""\
+            use frust::{AnyView, View, any};
+            impl T {
+                fn x(&self) -> AnyView<S> { any(p()) }
+                fn y(&self) -> AnyView<S> { any(p()) }
+                fn go(&mut self, ctx: &mut Ctx) {
+                    other(&self.x(), ctx);
+                    self.build_child(&self.y(), ctx);
+                }
+            }
+            """)
+        self.assertEqual(buckets(res), [("T7-ref", "x"), ("T7-ref", "y")])
+
+    def test_let_bound_trio_borrow(self):
+        res = run7("""\
+            use frust::{AnyView, View, any};
+            fn x() -> AnyView<S> { any(p()) }
+            fn y() -> AnyView<S> { any(p()) }
+            fn z() -> AnyView<S> { any(p()) }
+            fn go(ctx: &mut Ctx) {
+                let v = x();
+                build_child(&v, ctx);
+                let w = y();
+                other(&w);
+                let u = z();
+                build_child(&u, ctx);
+                other(&u);
+            }
+            """)
+        self.assertEqual(buckets(res), [("T7-ref", "y"), ("T7-ref", "z")])
+        self.assertEqual([c.desc for c in res.candidates], ["helper returns impl View: x"])
+
+    def test_arm_counts_and_suggestions(self):
+        arms9 = ", ".join(f"{i} => any(p())" for i in range(8)) + ", _ => any(q())"
+        res = run7(f"""\
+            use frust::{{AnyView, View, any}}; 
+            fn a(c: bool) -> AnyView<S> {{ if c {{ any(p()) }} else {{ any(q()) }} }}
+            fn b(k: u8) -> AnyView<S> {{ match k {{ 0 => any(p()), 1 => any(q()), _ => any(r()) }} }}
+            fn c(k: u8) -> AnyView<S> {{
+                if k == 0 {{ any(p()) }} else if k == 1 {{ any(q()) }} else if k == 2 {{ any(r()) }} else {{ any(s()) }}
+            }}
+            fn d(k: u8) -> AnyView<S> {{ match k {{ {arms9} }} }}
+            """)
+        self.assertEqual([r for _, _, _, r in res.excluded], [
+            "if/else tail, 2 arms", "match tail, 3 arms", "if/else tail, 4 arms", "match tail, 9 arms"])
+        self.assertIn("either(..)", cm._t7_arms_hint("if/else tail, 2 arms"))
+        self.assertTrue(cm._t7_arms_hint("match tail, 3 arms").endswith("EitherOf3"))
+        self.assertTrue(cm._t7_arms_hint("if/else tail, 4 arms").endswith("EitherOf4"))
+        self.assertIn("keep any()", cm._t7_arms_hint("match tail, 9 arms"))
+        self.assertEqual(cm._t7_arms_hint("early return"), "")
 
     def test_other_tails_ignored(self):
         res = run7("""\
