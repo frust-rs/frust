@@ -231,20 +231,25 @@ fn validate_extra_features(command: &str, extra_features: &[String]) -> Result<(
     Ok(())
 }
 
-/// Whether `token` is one of the literal spellings that enable the in-app
-/// devtools listener: the bare name, its `frust`-qualified form, or any
-/// `<pkg>/devtools` spelling another crate might expose the same switch
-/// under.
+/// Whether `token` is one of the literal spellings that compile the in-app
+/// devtools listener in: the bare `devtools` or `hotpatch`, or any
+/// `<pkg>/devtools` / `<pkg>/hotpatch` spelling (`frust/…`, the app's own
+/// facade key, cargo's weak `frust?/…`, or another crate exposing the same
+/// switch). `hotpatch` implies devtools: the facade's `hotpatch` enables the
+/// shells' `hotpatch`, which each enable `devtools`.
 fn is_devtools_token(token: &str) -> bool {
-    token == "devtools" || token == "frust/devtools" || token.ends_with("/devtools")
+    ["devtools", "hotpatch"]
+        .iter()
+        .any(|feature| token == *feature || token.ends_with(&format!("/{feature}")))
 }
 
 /// Refuses a `--features` token that would compile the in-app devtools
 /// listener into a release-signed store artifact. `frust build`'s release
 /// lanes (`apk`/`appbundle`/`ios`/`ipa`) forward `--features` straight
 /// through `BuildMode::cargo_features`'s own devtools-off release
-/// selection, so an explicit `--features frust/devtools` (or an app-defined
-/// feature alias that itself enables it) would silently reopen the hole
+/// selection, so an explicit `--features frust/devtools` or
+/// `frust/hotpatch` (hotpatch implies devtools), or an app-defined feature
+/// alias that itself enables either, would silently reopen the hole
 /// `docs/DEVTOOLS_ARCHITECTURE.md`'s Trust model relies on release builds
 /// closing ("a release build compiles the listener out entirely"). Checked
 /// both literally ([`is_devtools_token`]) and — cheaply, one level, no
@@ -270,8 +275,9 @@ fn refuse_devtools_features(
     }
     bail!(
         "`frust {command}` refuses --features that would enable the devtools listener on a \
-         release artifact ({}); the in-app devtools RPC service must stay compiled out of a \
-         store-distributed build (see docs/DEVTOOLS_ARCHITECTURE.md's Trust model)",
+         release artifact ({}; hotpatch implies devtools); the in-app devtools RPC service must \
+         stay compiled out of a store-distributed build (see docs/DEVTOOLS_ARCHITECTURE.md's \
+         Trust model)",
         offending.join(", ")
     )
 }
@@ -937,6 +943,60 @@ mod tests {
             assert!(message.contains("devtools"), "token {token}: {message}");
             let _ = fs::remove_dir_all(&dir);
         }
+    }
+
+    /// The hotpatch spellings compile the devtools listener in through the
+    /// shells, so a release lane refuses them like `devtools` itself.
+    #[test]
+    fn build_apk_refuses_hotpatch_spellings() {
+        for token in ["frust/hotpatch", "hotpatch", "frust-ui/hotpatch"] {
+            let dir = android_project_dir("apk-hotpatch-spelling");
+            let runner = FakeProcessRunner::new();
+            let target = BuildTarget::Apk {
+                build: BuildFlags {
+                    features: vec![token.to_string()],
+                    ..Default::default()
+                },
+                split_per_abi: false,
+                target_platform: None,
+            };
+            let err = run_in(&runner, &dir, target).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("devtools"), "token {token}: {message}");
+            assert!(message.contains(token), "token {token}: {message}");
+            assert!(
+                message.contains("hotpatch implies devtools"),
+                "token {token}: {message}"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// An app-defined alias using cargo's weak-dependency spelling
+    /// `frust?/devtools` still enables the listener (the facade is always an
+    /// active dependency), so it is refused under the alias's own name.
+    #[test]
+    fn build_apk_refuses_app_defined_weak_dependency_alias() {
+        let dir = android_project_dir("apk-devtools-weak-alias");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[features]\nfull = [\"frust?/devtools\"]\n",
+        )
+        .unwrap();
+        let runner = FakeProcessRunner::new();
+        let target = BuildTarget::Apk {
+            build: BuildFlags {
+                features: vec!["full".to_string()],
+                ..Default::default()
+            },
+            split_per_abi: false,
+            target_platform: None,
+        };
+        let err = run_in(&runner, &dir, target).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("devtools"), "{message}");
+        assert!(message.contains("full"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// An app-defined feature alias whose own `[features]` entry names

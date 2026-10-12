@@ -16,6 +16,17 @@
 //! `[target.*.dependencies]` tables directly; that fallback **cannot see a
 //! workspace-inherited rename** — a `ui.workspace = true` entry carries no
 //! `package` field, so it reads as a dependency on a package named `ui`.
+//! [`FacadeKey::resolve_with_source`] reports which path answered
+//! ([`KeySource`]), and the release lanes' devtools refusal
+//! (`cargo_manifest::feature_enables_devtools`) **fails closed** on a
+//! [`KeySource::ManifestFallback`] key: since that key may be wrong, every
+//! `<dep>/devtools` or `<dep>/hotpatch` spelling counts there, not only the
+//! resolved key's.
+//!
+//! Every resolved key must be spellable in a cargo feature — the
+//! dependency-key charset `[A-Za-z0-9_-]+` — or resolution answers
+//! [`FacadeKeyError::InvalidKey`] rather than a key no `<key>/<feature>`
+//! could name.
 
 use std::fmt;
 use std::path::Path;
@@ -51,6 +62,27 @@ pub enum FacadeKeyError {
         keys.iter().map(|key| format!("`{key}`")).collect::<Vec<_>>().join(", ")
     )]
     Ambiguous { keys: Vec<String> },
+    /// The app keys the facade under a name outside the dependency-key
+    /// charset `[A-Za-z0-9_-]+` (a TOML quoted key such as `"fr ust"`), so
+    /// no `<key>/<feature>` can spell its features.
+    #[error(
+        "the app's Cargo.toml names the frust facade under the dependency key {key:?}, which a \
+         cargo feature cannot spell (expected [A-Za-z0-9_-]+); give the facade dependency a plain \
+         key such as `frust`"
+    )]
+    InvalidKey { key: String },
+}
+
+/// Which path [`FacadeKey::resolve_with_source`] answered from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeySource {
+    /// The project has no `Cargo.toml`; the default key answered.
+    NoManifest,
+    /// `cargo metadata --no-deps` named the root package's dependencies.
+    Cargo,
+    /// cargo could not answer, so the manifest's own tables were read — the
+    /// path that cannot see a workspace-inherited rename (see the module doc).
+    ManifestFallback,
 }
 
 impl Default for FacadeKey {
@@ -67,6 +99,9 @@ impl fmt::Display for FacadeKey {
 
 impl FacadeKey {
     /// A facade key spelled `key`, for a caller that already knows it.
+    /// Unchecked: its callers pass literals (or keys a resolution already
+    /// reported), so the charset check [`resolve_with`](Self::resolve_with)
+    /// applies is not repeated here.
     pub fn new(key: impl Into<String>) -> Self {
         Self(key.into())
     }
@@ -84,31 +119,52 @@ impl FacadeKey {
     /// metadata failure, from the manifest's own tables (see the module doc
     /// for what that fallback cannot see). No manifest, or no facade
     /// dependency, answers [`FacadeKey::default`]; two different keys are
-    /// [`FacadeKeyError::Ambiguous`].
+    /// [`FacadeKeyError::Ambiguous`], and a key outside the dependency-key
+    /// charset is [`FacadeKeyError::InvalidKey`].
     pub fn resolve_with(
         runner: &dyn ProcessRunner,
         project_dir: &Path,
     ) -> Result<Self, FacadeKeyError> {
-        if !project_dir.join("Cargo.toml").is_file() {
-            return Ok(Self::default());
-        }
-        let keys = match CargoLocator::new(runner).root_dependencies(project_dir) {
-            Ok(deps) => deps
-                .into_iter()
-                .filter(|dep| dep.kind.is_none() && is_facade_package(&dep.name))
-                .map(|dep| dep.rename.unwrap_or(dep.name))
-                .collect(),
-            Err(_) => cargo_manifest::read_app_manifest(project_dir)
-                .map(|doc| manifest_facade_keys(&doc))
-                .unwrap_or_default(),
-        };
-        Self::select(keys)
+        Self::resolve_with_source(runner, project_dir).0
     }
 
-    /// One key out of every facade dependency found: none is the default,
-    /// repeats of one key (a `[dependencies]` entry plus a target-specific
-    /// one) are that key, and two different keys are ambiguous.
+    /// [`resolve_with`](Self::resolve_with), also reporting which path
+    /// answered. The source accompanies an error too: a caller widening a
+    /// security check must know whether an [`FacadeKeyError::Ambiguous`] key
+    /// list came from cargo or from the blind manifest fallback.
+    pub(crate) fn resolve_with_source(
+        runner: &dyn ProcessRunner,
+        project_dir: &Path,
+    ) -> (Result<Self, FacadeKeyError>, KeySource) {
+        if !project_dir.join("Cargo.toml").is_file() {
+            return (Ok(Self::default()), KeySource::NoManifest);
+        }
+        let (keys, source) = match CargoLocator::new(runner).root_dependencies(project_dir) {
+            Ok(deps) => (
+                deps.into_iter()
+                    .filter(|dep| dep.kind.is_none() && is_facade_package(&dep.name))
+                    .map(|dep| dep.rename.unwrap_or(dep.name))
+                    .collect(),
+                KeySource::Cargo,
+            ),
+            Err(_) => (
+                cargo_manifest::read_app_manifest(project_dir)
+                    .map(|doc| manifest_facade_keys(&doc))
+                    .unwrap_or_default(),
+                KeySource::ManifestFallback,
+            ),
+        };
+        (Self::select(keys), source)
+    }
+
+    /// One key out of every facade dependency found: any key outside the
+    /// dependency-key charset is invalid, none is the default, repeats of one
+    /// key (a `[dependencies]` entry plus a target-specific one) are that
+    /// key, and two different keys are ambiguous.
     fn select(keys: Vec<String>) -> Result<Self, FacadeKeyError> {
+        if let Some(key) = keys.iter().find(|key| !is_dependency_key(key)) {
+            return Err(FacadeKeyError::InvalidKey { key: key.clone() });
+        }
         let mut distinct: Vec<String> = Vec::new();
         for key in keys {
             if !distinct.contains(&key) {
@@ -144,6 +200,16 @@ impl FacadeKey {
          `frust = { package = \"frust-ui\", .. }` takes `frust/<feature>`, \
          `frust-ui = \"<version>\"` takes `frust-ui/<feature>`"
     }
+}
+
+/// Whether `key` is spellable as the `<key>` of a cargo `<key>/<feature>`:
+/// non-empty and within the crate-name/dependency-key charset
+/// `[A-Za-z0-9_-]`.
+fn is_dependency_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Whether `package` names the framework facade.
@@ -477,6 +543,93 @@ mod tests {
             ),
             Err(FacadeKeyError::Ambiguous { keys }) if keys == ["frust", "ui"]
         ));
+    }
+
+    /// A key no cargo feature can spell is refused, from either path,
+    /// rather than resolved to a `<key>/<feature>` cargo would reject.
+    #[test]
+    fn a_key_outside_the_dependency_charset_is_invalid() {
+        let err = resolve_from_manifest(
+            "invalid-space",
+            &format!(
+                "{PACKAGE}[dependencies]\n\"fr ust\" = {{ package = \"frust-ui\", version = \"0.6\" }}\n"
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FacadeKeyError::InvalidKey {
+                key: "fr ust".into()
+            }
+        );
+        let message = err.to_string();
+        assert!(message.contains("\"fr ust\""), "{message}");
+        assert!(message.contains("[A-Za-z0-9_-]+"), "{message}");
+        assert_eq!(
+            resolve_from_manifest(
+                "invalid-quote",
+                &format!(
+                    "{PACKAGE}[dependencies]\n'fr\"ust' = {{ package = \"frust-ui\", version = \"0.6\" }}\n"
+                ),
+            ),
+            Err(FacadeKeyError::InvalidKey {
+                key: "fr\"ust".into()
+            })
+        );
+        assert_eq!(
+            resolve_from_metadata(
+                "invalid-md",
+                PACKAGE,
+                r#"{"name":"frust-ui","rename":"fr.ust","kind":null,"target":null}"#,
+            ),
+            Err(FacadeKeyError::InvalidKey {
+                key: "fr.ust".into()
+            })
+        );
+        // The charset admits every key a manifest can spell bare.
+        assert_eq!(
+            resolve_from_metadata(
+                "valid-md",
+                PACKAGE,
+                r#"{"name":"frust-ui","rename":"Ui_2-x","kind":null,"target":null}"#,
+            ),
+            key("Ui_2-x")
+        );
+    }
+
+    #[test]
+    fn the_source_names_the_path_that_answered() {
+        let empty = temp_dir("source-none");
+        assert_eq!(
+            FacadeKey::resolve_with_source(&FakeProcessRunner::new(), &empty),
+            (key("frust"), KeySource::NoManifest)
+        );
+        let _ = fs::remove_dir_all(&empty);
+
+        let project = project_with(
+            "source",
+            &format!("{PACKAGE}[dependencies]\nui.workspace = true\n"),
+        );
+        assert_eq!(
+            FacadeKey::resolve_with_source(&FakeProcessRunner::new(), &project),
+            (key("frust"), KeySource::ManifestFallback)
+        );
+        let runner = FakeProcessRunner::new().with(
+            metadata_key(&project),
+            Output {
+                success: true,
+                stdout: metadata(
+                    &project,
+                    r#"{"name":"frust-ui","rename":"ui","kind":null,"target":null}"#,
+                ),
+                stderr: String::new(),
+            },
+        );
+        assert_eq!(
+            FacadeKey::resolve_with_source(&runner, &project),
+            (key("ui"), KeySource::Cargo)
+        );
+        let _ = fs::remove_dir_all(&project);
     }
 
     #[test]
