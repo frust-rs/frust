@@ -21,9 +21,9 @@
 //! the real seam.
 
 use frust::{
-    AnyView, Component, CrossAxisAlignment, EdgeInsets, Either, IconSource, Padding, ScrollInfo,
-    SizedBox, Theme, View, any, column, component, container, icon, safe_area, scroll_view, stack,
-    text, views,
+    AnyView, Component, CrossAxisAlignment, EdgeInsets, Either, EitherOf4, IconSource, Padding,
+    ScrollInfo, SizedBox, Theme, View, any, column, component, container, icon, safe_area,
+    scroll_view, stack, text, views,
 };
 use frust_material::{
     AppBarDensity, AppBarShapeFamily, AppBarVariant, FabSize, MaterialDimensions, MaterialSpacing,
@@ -196,20 +196,21 @@ fn wrap_safe_area(state: &AppBarsState, bar: impl View<AppBarsState>) -> impl Vi
 
 /// Frame `child` in an outlined, rounded box — the reference's `_framed`
 /// helper.
-// erasure: keep match-arm value in preview_content's four-arm match
-fn framed(theme: &Theme, child: impl View<AppBarsState>) -> AnyView<AppBarsState> {
+fn framed(theme: &Theme, child: impl View<AppBarsState>) -> impl View<AppBarsState> {
     let outline = theme.scheme().outline_variant;
-    any(container(child)
+    container(child)
         .radius(MaterialDimensions::RADIUS_LARGE)
-        .border(outline, 1.0))
+        .border(outline, 1.0)
 }
 
-fn preview_content(theme: &Theme, state: &AppBarsState) -> AnyView<AppBarsState> {
+fn preview_content(theme: &Theme, state: &AppBarsState) -> impl View<AppBarsState> {
     match state.kind {
-        AppBarKind::Top => framed(theme, top_bar_view(state)),
-        AppBarKind::Search => framed(theme, search_bar_view(state)),
-        AppBarKind::Bottom => framed(theme, wrap_safe_area(state, bottom_bar_view(state))),
-        AppBarKind::Sliver => sliver_preview(theme, state),
+        AppBarKind::Top => EitherOf4::A(framed(theme, top_bar_view(state))),
+        AppBarKind::Search => EitherOf4::B(framed(theme, search_bar_view(state))),
+        AppBarKind::Bottom => {
+            EitherOf4::C(framed(theme, wrap_safe_area(state, bottom_bar_view(state))))
+        }
+        AppBarKind::Sliver => EitherOf4::D(sliver_preview(theme, state)),
     }
 }
 
@@ -266,7 +267,7 @@ fn sliver_bar_view(state: &AppBarsState) -> impl View<AppBarsState> {
 /// The collapsing bar over a real scrolling item list, both stacked inside a
 /// fixed-height frame — the reference's `_sliverPreview`, ported through the
 /// app-side scroll contract (see this module's own docs).
-fn sliver_preview(theme: &Theme, state: &AppBarsState) -> AnyView<AppBarsState> {
+fn sliver_preview(theme: &Theme, state: &AppBarsState) -> impl View<AppBarsState> {
     let bar = wrap_safe_area(state, sliver_bar_view(state));
 
     let mut item_style = theme.type_scale.body_medium.clone();
