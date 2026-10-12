@@ -332,8 +332,8 @@ menu (see *Overlay flow* above).
 ### Erasure at the API Boundary
 Authoring code rarely names `AnyView`: `AnyView::new`/`any()` is idempotent (an argument already
 an `AnyView<State>` is returned unchanged), so erasure happens once, inside the API that stores
-the child; struct fields and the `&AnyView` reconciler seams in `authoring` (`build_child`/
-`rebuild_child`/`teardown_child`) stay erased.
+the child; `build_child`/`rebuild_child`/`teardown_child` are generic over `V: View<State>`, and
+only `rebuild_children`'s `view_of` (mixed/keyed lists) and `OverlaySlot` stay `&AnyView` seams.
 - **Fluent builders:** `column()`/`row()` (`FlexView`: `child`/`flex`/`keyed`/`children`/`push`/
   `when`/`when_some`) and `stack()` (`StackView`: `child`/`children`/`when`/`when_some`), flat
   re-exported through `frust_widgets` and `frust`. The `Column`/`Row`/`Stack` sugar remains,

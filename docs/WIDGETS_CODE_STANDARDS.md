@@ -25,21 +25,23 @@ conventions, and the widget-authoring rules (erasure at the API boundary, the
   `.collect::<Vec<_>>()`, and a turbofish caller of such an API writes `::<State, _>`.
 - **A catalog list helper erases once, inside.** `fn items<M>(seq: impl ViewSeq<S, M>)` calls
   `seq.extend_views(&mut self.children)`; never ask callers for `Vec<AnyView>` or wrap elements
-  in `any()` at the call site. A list that must stay erased (a `Vec<AnyView>` field) is marked `// erasure: keep <why>` for the tripwire.
+  in `any()` at the call site. A list that must stay erased (a `Vec<AnyView>` field) is marked
+  `// erasure: keep <why>` for the tripwire.
 
 ## Erase at the API Boundary
 
 Extends the shared rule in [CODE_STANDARDS.md](CODE_STANDARDS.md): erasure happens once, inside
 the API. Reach for these idioms before `any()`: fluent builders (`column().child(..)`), tuples
 for mixed child types, `views(iter)` for iterators, `either(cond, || a, || b)` for two arms,
-`EitherOfN` (3-8) for a `match`, and `impl View` / `impl ViewSeq` helper parameters. Use `Either` (or `either(..)`) only when the two
-arms have different concrete view types. When both arms produce the same concrete type, compute the
-differing props or children in an `if` and construct that one type once: `Either` reconciles a
-Left/Right swap as a teardown and remount, so the subtree loses in-flight gestures and can orphan
-focus, where the same type reconciles in place (an app migration hit this in button, gesture
-detector and safe-area wrappers). The four APIs once taking pre-erased views now
-erase internally: `frust-material`'s `button_group` icon family, `split_button`'s `leading_icon`,
-`frust-beui`'s `extra_rows`, and `clean-signals-frust`'s `async_view`.
+`EitherOfN` (3-8) for a `match`, and `impl View` / `impl ViewSeq` helper parameters. Use `Either`
+(or `either(..)`) only when the two arms have different concrete view types. When both arms
+produce the same concrete type, compute the differing props or children in an `if` and construct
+that one type once: `Either` reconciles a Left/Right swap as a teardown and remount, so the
+subtree loses in-flight gestures and can orphan focus, where the same type reconciles in place
+(an app migration hit this in button, gesture detector and safe-area wrappers). The four APIs
+once taking pre-erased views now erase internally: `frust-material`'s `button_group` icon family,
+`split_button`'s `leading_icon`, `frust-beui`'s `extra_rows`, and `clean-signals-frust`'s
+`async_view`.
 
 A site that must stay erased carries `// erasure: keep <why>` in one of six places: on the call's
 own line, alone on the line above it, on the first line of an enclosing `vec![..]`, `let` statement
