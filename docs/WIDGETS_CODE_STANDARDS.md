@@ -47,9 +47,12 @@ A site that must stay erased carries `// erasure: keep <why>` in one of six plac
 own line, alone on the line above it, on the first line of an enclosing `vec![..]`, `let` statement
 or `match`, on the enclosing fn signature (the `fn` line, its `->` line, or alone above the `fn`),
 on an accumulator `let`, or inside the call. The accumulator form is a marker on, or alone above, a
-`let [mut] v` whose type or initializer names `AnyView`: it covers every erasure call that is an
-argument of `v.push(..)`, `v.insert(..)` or `v.extend(..)` in the same fn (not other vecs, not a
-shadowing re-binding). The in-call form is an own-line marker strictly inside an erasure call's
+`let [mut] v` whose type or initializer names `AnyView`, or an untyped one whose `vec![..]` holds a
+direct `any(..)` element (the whole element, not wrapped) or that starts as exactly `Vec::new()`,
+`Vec::with_capacity(..)` or `vec![]` and is later pushed or inserted a direct `any(..)` (so no
+`: Vec<AnyView<_>>` annotation is needed): it covers every erasure call that is an argument of
+`v.push(..)`, `v.insert(..)` or `v.extend(..)` in the same fn (not other vecs, not a shadowing
+re-binding). The in-call form is an own-line marker strictly inside an erasure call's
 parentheses, or directly before the argument holding it in the statement-level call; this is what
 rustfmt produces for a multi-line `any(..)`. It covers that call for rule U and the T1-T7 keep
 exemption; a marker inside a nested closure or block does not escape, and a bare marker does not
