@@ -1660,4 +1660,227 @@ mod tests {
         root.rebuild(&mut app, &mut ());
         assert_eq!(outer.depth(), 1, "outer popped its own shell page");
     }
+
+    // -----------------------------------------------------------------------
+    // Per-tab navigators kept mounted under an `IndexedStack`: only the
+    // selected tab may claim the back press, whatever the wire order.
+    // -----------------------------------------------------------------------
+
+    type TabsApp = Box<dyn FnMut(&mut ()) -> AnyView<()>>;
+
+    /// Two tab navigators inside `IndexedStack(selected, (tab0, tab1))`,
+    /// optionally under a root `overlay_host`. `last_wired_is_tab1` picks
+    /// which tab's `crate::navigator` call (and so its wiring) runs last.
+    struct TabsHarness {
+        tab0: NavigatorController<()>,
+        tab1: NavigatorController<()>,
+        host: NavigatorController<()>,
+        selected: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+        root: RenderRoot<(), AnyView<()>>,
+        app: TabsApp,
+    }
+
+    impl TabsHarness {
+        fn new(selected: usize, last_wired_is_tab1: bool, with_host: bool) -> Self {
+            let tab0: NavigatorController<()> = NavigatorController::new();
+            let tab1: NavigatorController<()> = NavigatorController::new();
+            let host: NavigatorController<()> = NavigatorController::new();
+            let sel = std::rc::Rc::new(std::cell::Cell::new(Some(selected)));
+            let app: TabsApp = {
+                let (tab0, tab1, host, sel) =
+                    (tab0.clone(), tab1.clone(), host.clone(), sel.clone());
+                Box::new(move |_: &mut ()| {
+                    let tabs = {
+                        let (tab0, tab1, sel) = (tab0.clone(), tab1.clone(), sel.clone());
+                        move || {
+                            let (n0, n1);
+                            if last_wired_is_tab1 {
+                                n0 = crate::navigator(&tab0, page);
+                                n1 = crate::navigator(&tab1, page);
+                            } else {
+                                n1 = crate::navigator(&tab1, page);
+                                n0 = crate::navigator(&tab0, page);
+                            }
+                            frust_widgets::IndexedStack(sel.get(), (n0, n1))
+                        }
+                    };
+                    if with_host {
+                        auto_wire_overlay_host(&host);
+                        any(raw_overlay_host(&host, move || any(tabs())))
+                    } else {
+                        any(tabs())
+                    }
+                })
+            };
+            let mut h = Self {
+                tab0,
+                tab1,
+                host,
+                selected: sel,
+                root: RenderRoot::new(),
+                app,
+            };
+            h.rebuild();
+            h
+        }
+
+        fn rebuild(&mut self) {
+            self.root.rebuild(&mut self.app, &mut ());
+        }
+
+        fn select(&mut self, i: usize) {
+            self.selected.set(Some(i));
+            self.rebuild();
+        }
+
+        fn depths(&self) -> (usize, usize) {
+            (self.tab0.depth(), self.tab1.depth())
+        }
+
+        /// Tab 0 to depth `d0`, tab 1 to depth `d1`.
+        fn deepen(&mut self, d0: usize, d1: usize) {
+            // Depth only updates on rebuild, so push by count from the
+            // current (settled) depth.
+            for _ in self.tab0.depth()..d0 {
+                self.tab0.push(page);
+            }
+            for _ in self.tab1.depth()..d1 {
+                self.tab1.push(page);
+            }
+            self.rebuild();
+            assert_eq!(self.depths(), (d0, d1));
+        }
+    }
+
+    /// (a) Selected tab 0 at its root: back bubbles to the platform even though
+    /// the hidden tab 1 (wired last) is deep.
+    #[test]
+    fn a_selected_tab_at_its_root_exits_even_if_a_hidden_tab_is_deep() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = TabsHarness::new(0, true, false);
+        h.deepen(1, 3);
+        assert!(
+            !handles_back(),
+            "selected tab at its root: the app would exit"
+        );
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 3), "the hidden tab was not popped");
+    }
+
+    /// (b) Switching to tab 1 hands it the press; tab 0 is untouched.
+    #[test]
+    fn switching_tabs_hands_the_back_press_to_the_newly_selected_tab() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = TabsHarness::new(0, true, false);
+        h.deepen(1, 3);
+        h.select(1);
+        assert!(handles_back(), "selected tab 1 is poppable");
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 2), "tab 1 popped one page, tab 0 untouched");
+    }
+
+    /// (c) Wire-order independence, both orders: the deep NON-selected tab is
+    /// wired last, yet the press goes to the selected tab.
+    #[test]
+    fn the_back_press_follows_selection_not_wire_order() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+
+        for last_wired_is_tab1 in [true, false] {
+            reset();
+            // Selected tab 0 (depth 2) vs hidden tab 1 (depth 3).
+            let mut h = TabsHarness::new(0, last_wired_is_tab1, false);
+            h.deepen(2, 3);
+            assert!(handles_back());
+            push_back_press();
+            h.rebuild();
+            assert_eq!(
+                h.depths(),
+                (1, 3),
+                "selected tab 0 took the press (tab1 wired last: {last_wired_is_tab1})"
+            );
+
+            // And the mirror: select tab 1, which now wins whichever wired last.
+            h.select(1);
+            h.tab0.push(page);
+            h.rebuild();
+            assert_eq!(h.depths(), (2, 3));
+            push_back_press();
+            h.rebuild();
+            assert_eq!(
+                h.depths(),
+                (2, 2),
+                "selected tab 1 took the press (tab1 wired last: {last_wired_is_tab1})"
+            );
+        }
+    }
+
+    /// (d) A root overlay host with an open overlay still outranks the
+    /// selected tab.
+    #[test]
+    fn a_root_overlay_outranks_the_selected_tab() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = TabsHarness::new(1, false, true);
+        h.deepen(1, 2);
+        h.host
+            .push_with_options(page, PushOptions::transparent().back(BackPolicy::Pop));
+        h.rebuild();
+        assert_eq!(h.host.depth(), 2);
+        assert!(handles_back());
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.host.depth(), 1, "the overlay was dismissed first");
+        assert_eq!(h.depths(), (1, 2), "the selected tab was untouched");
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(
+            h.depths(),
+            (1, 1),
+            "the next press reaches the selected tab"
+        );
+    }
+
+    /// (e) Hidden tabs stay mounted and registered: depth survives a round
+    /// trip with no re-push.
+    #[test]
+    fn a_hidden_tab_keeps_its_stack_and_registration() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = TabsHarness::new(0, true, false);
+        h.deepen(1, 3);
+        h.select(1);
+        h.select(0);
+        for _ in 0..3 {
+            h.rebuild();
+        }
+        assert_eq!(h.depths(), (1, 3), "the hidden tab's depth survived");
+        let ids = registrant_ids();
+        assert!(
+            ids.contains(&h.tab0.id()) && ids.contains(&h.tab1.id()),
+            "both tab controllers stay registered while hidden"
+        );
+
+        h.select(1);
+        assert!(handles_back());
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 2), "tab 1 resumes from its kept stack");
+    }
 }

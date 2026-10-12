@@ -157,19 +157,19 @@ pub use frust_widgets::{
     DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, EdgeInsets, FlexChild,
     FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, HIGHLIGHT_FALLBACK, HeroView,
     Icon, IconButton, IconButtonView, IconData, IconSource, IconView, IconWidget, Image,
-    ImageError, ImageFit, ImageSource, ImageView, ListView, ListViewWidget, MAX_FLING_VELOCITY,
-    MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView,
-    NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide,
-    OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult,
-    PushOptions, Radio, RadioView, RadioWidget, ReorderableListView, ResultCallback, Row,
-    RubberBand, SafeAreaView, ScaffoldView, ScrollController, ScrollInfo, ScrollMetrics,
-    ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox, SizedBoxView, Slider,
-    SliderView, SourceFeedback, SpringDescription, Stack, StackView, TextInput, TextInputView,
-    TextView, Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback,
-    auto_scroll_zone, button, checkbox, colored_box, column, container, divider, drag_target,
-    draggable, flexible, hero, icon, icon_button, inflexible, keyed, list_view, overlay_portal,
-    radio, reorderable_list, row, safe_area, scaffold, scroll_view, slider, stack, text,
-    text_input,
+    ImageError, ImageFit, ImageSource, ImageView, IndexedStack, IndexedStackView, ListView,
+    ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController,
+    NavigatorId, NavigatorView, NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView,
+    OverlaySide, OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition,
+    PageVisibility, PopResult, PushOptions, Radio, RadioView, RadioWidget, ReorderableListView,
+    ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollController, ScrollInfo,
+    ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox,
+    SizedBoxView, Slider, SliderView, SourceFeedback, SpringDescription, Stack, StackView,
+    TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
+    VisibilityCallback, auto_scroll_zone, button, checkbox, colored_box, column, container,
+    divider, drag_target, draggable, flexible, hero, icon, icon_button, indexed_stack, inflexible,
+    keyed, list_view, overlay_portal, radio, reorderable_list, row, safe_area, scaffold,
+    scroll_view, slider, stack, text, text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -1105,6 +1105,11 @@ mod router_glue;
 /// `frust-reactive`'s back-press source together — see [`BackHandler`]'s doc
 /// for the consume/dedupe and timing contracts. Call [`BackHandler::track`]
 /// from every `Component::build`.
+///
+/// Per-tab navigator stacks that stay mounted should sit under an
+/// [`IndexedStack`], not side by side: the stack routes input and back only to
+/// its selected child, so just the selected tab's navigator claims the back
+/// press, and a hidden tab keeps its pages without competing for it.
 pub use back_glue::{BackHandler, attach_back_handler};
 
 /// Build a [`NavigatorView`] driven by `controller` — the facade's back-aware
