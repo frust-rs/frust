@@ -38,11 +38,12 @@ use std::time::Duration;
 
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget,
+    PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget, build_child, rebuild_child,
+    teardown_child,
 };
 use frust::{
-    Align, Alignment, AnimationController, AnyView, Curve, EdgeInsets, Get, GetUntracked, Padding,
-    RwSignal, SizedBox, Update, any, column, row, text,
+    Align, Alignment, AnimationController, Curve, EdgeInsets, Get, GetUntracked, Padding, RwSignal,
+    SizedBox, Update, column, row, text,
 };
 use frust_material::filled_card;
 
@@ -249,16 +250,13 @@ const ENTRANCE_SLIDE: f64 = 28.0;
 
 /// Wrap `content` so it slides up [`ENTRANCE_SLIDE`] px and fades in over
 /// [`ENTRANCE`] on first appearance — see the [module docs](self)' entrance note.
-pub fn toast_entrance<State: 'static, V: View<State>>(content: V) -> ToastEntrance<State> {
-    ToastEntrance {
-        // erasure: keep stored in a hand-written view, fed to its ChildPod
-        content: any(content),
-    }
+pub fn toast_entrance<State: 'static, V: View<State>>(content: V) -> ToastEntrance<V> {
+    ToastEntrance { content }
 }
 
 /// A declarative toast entrance wrapper. See [`toast_entrance`].
-pub struct ToastEntrance<State: 'static> {
-    content: AnyView<State>,
+pub struct ToastEntrance<V> {
+    content: V,
 }
 
 /// The retained widget for a [`ToastEntrance`].
@@ -280,37 +278,7 @@ impl ToastEntranceWidget {
     }
 }
 
-/// Build a [`ChildPod`] wrapping an [`AnyView`]'s element (mirrors
-/// `crate::ui::sheet`'s crate-private helper, re-derived here).
-fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) -> ChildPod {
-    let element: Box<dyn Widget> = view.build(ctx);
-    ChildPod::new(Box::new(element))
-}
-
-fn rebuild_child<State: 'static>(
-    prev: &AnyView<State>,
-    next: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) -> ChangeFlags {
-    let element = pod
-        .widget_mut()
-        .downcast_mut::<Box<dyn Widget>>()
-        .expect("toast entrance child element is a boxed AnyView widget");
-    next.rebuild(prev, element, ctx)
-}
-
-fn teardown_child<State: 'static>(
-    view: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) {
-    if let Some(element) = pod.widget_mut().downcast_mut::<Box<dyn Widget>>() {
-        view.teardown(element, ctx);
-    }
-}
-
-impl<State: 'static> View<State> for ToastEntrance<State> {
+impl<State: 'static, V: View<State>> View<State> for ToastEntrance<V> {
     type Element = ToastEntranceWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ToastEntranceWidget {
@@ -418,7 +386,7 @@ mod tests {
     /// asking for frames.
     #[test]
     fn toast_entrance_slides_up_and_fades_in_then_settles() {
-        let mut root: RenderRoot<(), ToastEntrance<()>> = RenderRoot::new();
+        let mut root: RenderRoot<(), ToastEntrance<Probe>> = RenderRoot::new();
         let mut state = ();
         let mut logic = |_s: &mut ()| toast_entrance(Probe);
         root.rebuild(&mut logic, &mut state);

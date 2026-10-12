@@ -83,10 +83,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
+    Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
-    PointerPhase, Rect, Role, SemanticsCtx, Size, View, Widget, any, build_child,
-    erase_callback_arg, rebuild_child, route_event_single, teardown_child, visit_children,
+    PointerPhase, Rect, Role, SemanticsCtx, Size, View, Widget, build_child, erase_callback_arg,
+    rebuild_child, route_event_single, teardown_child, visit_children,
 };
 use frust::{Theme, text_input};
 
@@ -331,8 +331,7 @@ impl<State: 'static> MultiSelectTriggerView<State> {
     }
 
     /// The hosted editable, with the baseline's own chrome suppressed.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn control(&self) -> AnyView<State> {
+    fn control(&self) -> impl View<State> + use<State> {
         let on_change = self.on_query_change.clone();
         let placeholder = if self.selected.is_empty() {
             self.placeholder.clone()
@@ -341,16 +340,14 @@ impl<State: 'static> MultiSelectTriggerView<State> {
         };
         // The query and placeholder keep the baseline `text_input`'s own
         // family: that field has no themed-family seam.
-        any(
-            text_input(self.query.clone(), move |state: &mut State, text| {
-                on_change(state, text);
-            })
-            .placeholder(placeholder)
-            .enabled(!self.disabled)
-            .padding(0.0, 0.0)
-            .border_width(0.0)
-            .corner_radius(CHIP_RADIUS),
-        )
+        text_input(self.query.clone(), move |state: &mut State, text| {
+            on_change(state, text);
+        })
+        .placeholder(placeholder)
+        .enabled(!self.disabled)
+        .padding(0.0, 0.0)
+        .border_width(0.0)
+        .corner_radius(CHIP_RADIUS)
     }
 }
 

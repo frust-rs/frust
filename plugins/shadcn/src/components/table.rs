@@ -279,7 +279,7 @@ impl<State: 'static> View<State> for TableView<State> {
         for (kind, band) in self.bands(&generated) {
             let start = cells.len();
             for cell in &band {
-                cells.push(build_child(cell, ctx));
+                cells.push(build_child(*cell, ctx));
             }
             let (selected, on_click) = match kind {
                 RowKind::Body => {
@@ -329,7 +329,7 @@ impl<State: 'static> View<State> for TableView<State> {
                 .iter_mut()
                 .zip(prev_bands.iter().flat_map(|(_, b)| b))
             {
-                teardown_child(cell, pod, ctx);
+                teardown_child(*cell, pod, ctx);
             }
             if let (Some(pod), Some(view)) = (element.caption.as_mut(), prev.caption_view()) {
                 teardown_child(&view, pod, ctx);
@@ -342,7 +342,7 @@ impl<State: 'static> View<State> for TableView<State> {
         let prev_cells = prev_bands.iter().flat_map(|(_, b)| b);
         let next_cells = bands.iter().flat_map(|(_, b)| b);
         for ((pod, p), n) in element.cells.iter_mut().zip(prev_cells).zip(next_cells) {
-            flags |= rebuild_child(p, n, pod, ctx);
+            flags |= rebuild_child(*p, *n, pod, ctx);
         }
         if let (Some(pod), Some(p), Some(n)) = (
             element.caption.as_mut(),
@@ -377,7 +377,7 @@ impl<State: 'static> View<State> for TableView<State> {
             .iter_mut()
             .zip(bands.iter().flat_map(|(_, b)| b))
         {
-            teardown_child(cell, pod, ctx);
+            teardown_child(*cell, pod, ctx);
         }
         if let (Some(pod), Some(view)) = (element.caption.as_mut(), self.caption_view()) {
             teardown_child(&view, pod, ctx);

@@ -92,11 +92,10 @@ use std::time::Duration;
 use frust::authoring::scene::arc_path;
 use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
-    Action, Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod,
-    Color, ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene,
-    Point, PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget, any,
-    build_child, erase_callback_arg, rebuild_child, route_event_single, teardown_child,
-    visit_children,
+    Action, Affine, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
+    ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
+    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget, build_child,
+    erase_callback_arg, rebuild_child, route_event_single, teardown_child, visit_children,
 };
 use frust::{Curve, FrameTime, SpringDescription, Theme, text_input};
 
@@ -437,42 +436,36 @@ impl<State: 'static> FeedbackWidgetView<State> {
 
     /// The wrapped message field, configured to match `rows={3}` with its own
     /// chrome suppressed (see the [module docs](self)).
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn field_view(&self) -> AnyView<State> {
+    fn field_view(&self) -> impl View<State> + use<State> {
         let on_change = self.on_message_change.clone();
-        any(
-            // Not themed: the baseline `text_input` has no themed-family opt-in.
-            text_input(self.message.clone(), move |state: &mut State, text| {
-                on_change(state, text);
-            })
-            .placeholder(self.placeholder.clone())
-            .enabled(!self.status.is_busy())
-            .multiline(3)
-            .submit_on_enter(false)
-            .border_width(0.0)
-            .corner_radius(style::RADIUS_MD)
-            .padding(0.0, 0.0),
-        )
+        // Not themed: the baseline `text_input` has no themed-family opt-in.
+        text_input(self.message.clone(), move |state: &mut State, text| {
+            on_change(state, text);
+        })
+        .placeholder(self.placeholder.clone())
+        .enabled(!self.status.is_busy())
+        .multiline(3)
+        .submit_on_enter(false)
+        .border_width(0.0)
+        .corner_radius(style::RADIUS_MD)
+        .padding(0.0, 0.0)
     }
 
     /// The `Cancel` button — a secondary pill that reports
     /// [`FeedbackStatus::Idle`].
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn cancel_view(&self) -> AnyView<State> {
+    fn cancel_view(&self) -> impl View<State> + use<State> {
         let on_status = self.on_status_change.clone();
-        any(
-            button::<State>(self.cancel_label.clone(), move |state: &mut State| {
-                on_status(state, FeedbackStatus::Idle);
-            })
-            .tone(ButtonTone::Secondary)
-            .size(ButtonSize::Md)
-            .disabled(self.status.is_busy()),
-        )
+        button::<State>(self.cancel_label.clone(), move |state: &mut State| {
+            on_status(state, FeedbackStatus::Idle);
+        })
+        .tone(ButtonTone::Secondary)
+        .size(ButtonSize::Md)
+        .disabled(self.status.is_busy())
     }
 
     /// The primary button: `Submit` on the form (stateful, so the sending state
     /// is the button's own), `Try again` on the failure view.
-    fn primary_view(&self) -> AnyView<State> {
+    fn primary_view(&self) -> impl View<State> + use<State> {
         let on_status = self.on_status_change.clone();
         let on_submit = self.on_submit.clone();
         let message = self.message.clone();
@@ -482,7 +475,7 @@ impl<State: 'static> FeedbackWidgetView<State> {
         } else {
             self.submit_label.clone()
         };
-        any(button::<State>(label, move |state: &mut State| {
+        button::<State>(label, move |state: &mut State| {
             if !armed {
                 return;
             }
@@ -499,7 +492,7 @@ impl<State: 'static> FeedbackWidgetView<State> {
         })
         .loading_label("Sending")
         .size(ButtonSize::Md)
-        .disabled(!armed))
+        .disabled(!armed)
     }
 }
 

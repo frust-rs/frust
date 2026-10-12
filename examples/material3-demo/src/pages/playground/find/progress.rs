@@ -61,7 +61,8 @@
 //! calling a documented-inert builder for symmetry.
 
 use frust::{
-    AnyView, Component, CrossAxisAlignment, SizedBox, View, any, component, inflexible, row, stack,
+    AnyView, Component, CrossAxisAlignment, EitherOf4, SizedBox, View, any, component, inflexible,
+    row, stack,
 };
 use frust_material::{
     OverlayAnchor, ProgressSize, ProgressValue, circular_progress, circular_wavy_progress,
@@ -172,21 +173,22 @@ fn progress_value(state: &Knobs) -> ProgressValue {
 /// `_buildIndicator`. `linear_width` sizes the two linear variants for the
 /// primary preview, see [`PRIMARY_LINEAR_WIDTH`] (the "All styles" preview's
 /// own linear pair is sized by [`all_styles_row`] instead).
-// erasure: keep four-arm match on ProgressKind, each arm a different view type
 fn build_indicator(
     kind: ProgressKind,
     value: ProgressValue,
     linear_size: ProgressSize,
     linear_width: f64,
-) -> AnyView<Knobs> {
+) -> impl View<Knobs> {
     match kind {
-        ProgressKind::Circular => any(circular_progress(value)),
-        ProgressKind::CircularWavy => any(circular_wavy_progress(value)),
-        ProgressKind::Linear => any(SizedBox::<Knobs>(Some(linear_width), None)
-            .child(linear_progress(value).size(linear_size))),
-        ProgressKind::LinearWavy => {
-            any(SizedBox::<Knobs>(Some(linear_width), None).child(linear_wavy_progress(value)))
-        }
+        ProgressKind::Circular => EitherOf4::A(circular_progress(value)),
+        ProgressKind::CircularWavy => EitherOf4::B(circular_wavy_progress(value)),
+        ProgressKind::Linear => EitherOf4::C(
+            SizedBox::<Knobs>(Some(linear_width), None)
+                .child(linear_progress(value).size(linear_size)),
+        ),
+        ProgressKind::LinearWavy => EitherOf4::D(
+            SizedBox::<Knobs>(Some(linear_width), None).child(linear_wavy_progress(value)),
+        ),
     }
 }
 

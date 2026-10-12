@@ -92,10 +92,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::{
-    Align, Alignment, AnyView, ChildKey, Color, CrossAxisAlignment, DesignLanguage, EdgeInsets,
-    Either, GestureDetector, Get, GetUntracked, ListView, NavigatorController, Padding, RwSignal,
-    Set, SizedBox, Theme, Update, View, any, column, either, hero, icon, icons, kurbo::Size, row,
-    stack, text, text_input, use_context, views,
+    Align, Alignment, ChildKey, Color, CrossAxisAlignment, DesignLanguage, EdgeInsets, Either,
+    EitherOf3, GestureDetector, Get, GetUntracked, ListView, NavigatorController, Padding,
+    RwSignal, Set, SizedBox, Theme, Update, View, column, either, hero, icon, icons, kurbo::Size,
+    row, stack, text, text_input, use_context, views,
 };
 use frust_cupertino::cupertino_activity_indicator;
 use frust_material::{app_bar, assist_chip, filter_chip, loading_indicator};
@@ -421,14 +421,13 @@ impl FeedRow {
 /// The scrolling feed area: skeletons while loading, else the keyed,
 /// variable-extent `ListView` with the near-start pagination trigger. See the
 /// [module docs](self)' *Feed container* section.
-// erasure: keep three-exit body (skeletons / empty state / keyed list)
 fn feed_body(
     controller: &Arc<MessagesController>,
     design: DesignLanguage,
     sheet_sig: RwSignal<FeedSheet>,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> {
     if controller.loading.get() {
-        return any(skeletons());
+        return EitherOf3::A(skeletons());
     }
 
     let messages = controller.feed(); // tracked
@@ -438,7 +437,7 @@ fn feed_body(
     // Empty conversation (e.g. a DM with no messages): a real empty state
     // rather than a blank scroll area.
     if messages.is_empty() && !loading_older && !typing {
-        return any(empty_feed_state());
+        return EitherOf3::B(empty_feed_state());
     }
 
     let mut rows: Vec<FeedRow> = Vec::with_capacity(messages.len() + 2);
@@ -481,22 +480,21 @@ fn feed_body(
     // list's own viewport here instead of the (now virtualized) content, so
     // it no longer scrolls away with the first/last row — a cosmetic-only
     // difference from the pre-`ListView` feed.
-    any(Padding(EdgeInsets::symmetric(8.0, 12.0), list))
+    EitherOf3::C(Padding(EdgeInsets::symmetric(8.0, 12.0), list))
 }
 
 /// One feed row's view: the two singleton rows unchanged from the earlier
 /// keyed `Column`, or a real message row.
-// erasure: keep three-type match arms feeding the ListView builder
 fn feed_row_view(
     controller: &Arc<MessagesController>,
     row: &FeedRow,
     sheet_sig: RwSignal<FeedSheet>,
     design: DesignLanguage,
-) -> AnyView<HuddleState> {
+) -> impl View<HuddleState> + use<> {
     match row {
-        FeedRow::LoadingOlder => any(loading_older_row(design)),
-        FeedRow::Message(msg) => any(message_row(controller, msg, sheet_sig)),
-        FeedRow::Typing => any(typing_row(design)),
+        FeedRow::LoadingOlder => EitherOf3::A(loading_older_row(design)),
+        FeedRow::Message(msg) => EitherOf3::B(message_row(controller, msg, sheet_sig)),
+        FeedRow::Typing => EitherOf3::C(typing_row(design)),
     }
 }
 
@@ -513,7 +511,7 @@ fn message_row(
     controller: &Arc<MessagesController>,
     msg: &FeedMessage,
     sheet_sig: RwSignal<FeedSheet>,
-) -> impl View<HuddleState> {
+) -> impl View<HuddleState> + use<> {
     let bubble = || message_bubble(controller, msg, sheet_sig);
     let own = || row().flex(1, SizedBox(None, None)).child(bubble());
     let other = || {

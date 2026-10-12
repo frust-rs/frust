@@ -61,7 +61,7 @@ use std::rc::Rc;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerButton, PointerEvent, PointerPhase,
-    SemanticsCtx, Size, View, ViewSeq, Widget, any,
+    SemanticsCtx, Size, View, ViewSeq, Widget, any, build_child, rebuild_child, teardown_child,
 };
 use frust::{
     AnimationController, CrossAxisAlignment, Curve, EdgeInsets, FrameTime, GestureDetector,
@@ -192,7 +192,7 @@ pub struct SheetView<State: 'static> {
 /// attached with [`SheetView::on_dismiss`]).
 pub fn sheet<State: 'static, V: View<State>>(content: V) -> SheetView<State> {
     SheetView {
-        // erasure: keep stored in a hand-written view, fed to its ChildPod
+        // erasure: keep runtime-varying child type (callers match over differing content)
         content: any(content),
         on_dismiss: None,
     }
@@ -214,34 +214,6 @@ fn erase<State: 'static>(cb: &Callback<State>) -> Erased {
         let state = ctx.state_mut::<State>();
         cb(state);
     })
-}
-
-fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) -> ChildPod {
-    let element: Box<dyn Widget> = view.build(ctx);
-    ChildPod::new(Box::new(element))
-}
-
-fn rebuild_child<State: 'static>(
-    prev: &AnyView<State>,
-    next: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) -> ChangeFlags {
-    let element = pod
-        .widget_mut()
-        .downcast_mut::<Box<dyn Widget>>()
-        .expect("sheet content element is a boxed AnyView widget");
-    next.rebuild(prev, element, ctx)
-}
-
-fn teardown_child<State: 'static>(
-    view: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) {
-    if let Some(element) = pod.widget_mut().downcast_mut::<Box<dyn Widget>>() {
-        view.teardown(element, ctx);
-    }
 }
 
 /// The retained widget for a [`SheetView`].
@@ -645,8 +617,8 @@ where
 /// own paint origin. Reuses [`DISMISS_FRACTION`]/[`SETTLE_DECAY`]/
 /// [`SETTLE_STOP_PX`] and the [`Callback`]/[`Erased`] plumbing [`SheetView`]
 /// already defines above.
-pub struct DragUpDismissView<State: 'static> {
-    content: AnyView<State>,
+pub struct DragUpDismissView<State: 'static, V: View<State>> {
+    content: V,
     on_dismiss: Option<Callback<State>>,
 }
 
@@ -656,15 +628,14 @@ pub struct DragUpDismissView<State: 'static> {
 /// into place exactly like [`sheet`]'s downward release-below-threshold case.
 /// Every event is otherwise forwarded through untouched, so a tap on the
 /// wrapped content (e.g. a workspace row) still fires normally.
-pub fn drag_up_dismiss<State: 'static, V: View<State>>(content: V) -> DragUpDismissView<State> {
+pub fn drag_up_dismiss<State: 'static, V: View<State>>(content: V) -> DragUpDismissView<State, V> {
     DragUpDismissView {
-        // erasure: keep stored in a hand-written view, fed to its ChildPod
-        content: any(content),
+        content,
         on_dismiss: None,
     }
 }
 
-impl<State: 'static> DragUpDismissView<State> {
+impl<State: 'static, V: View<State>> DragUpDismissView<State, V> {
     /// Fire `on_dismiss` when the content is dragged upward past
     /// [`DISMISS_FRACTION`] of its own height and released.
     pub fn on_dismiss<F: Fn(&mut State) + 'static>(mut self, on_dismiss: F) -> Self {
@@ -752,7 +723,7 @@ impl DragUpDismissWidget {
     }
 }
 
-impl<State: 'static> View<State> for DragUpDismissView<State> {
+impl<State: 'static, V: View<State>> View<State> for DragUpDismissView<State, V> {
     type Element = DragUpDismissWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> DragUpDismissWidget {
@@ -893,17 +864,14 @@ pub fn action_menu<State: 'static, M>(rows: impl ViewSeq<State, M>) -> impl View
 /// `frust_widgets::safe_area`, this reads the *raw* inset, not the derived
 /// safe-area `padding()` (which intentionally clamps to zero under an IME
 /// overlap — the wrong direction for proactive keyboard avoidance).
-pub struct KeyboardAvoidView<State: 'static> {
-    child: AnyView<State>,
+pub struct KeyboardAvoidView<V> {
+    child: V,
 }
 
 /// Wrap `child` so its bottom edge tracks the window's live keyboard
 /// occlusion. See the [`KeyboardAvoidView`] docs.
-pub fn avoid_keyboard<State: 'static, V: View<State>>(child: V) -> KeyboardAvoidView<State> {
-    KeyboardAvoidView {
-        // erasure: keep stored in a hand-written view, fed to its ChildPod
-        child: any(child),
-    }
+pub fn avoid_keyboard<State: 'static, V: View<State>>(child: V) -> KeyboardAvoidView<V> {
+    KeyboardAvoidView { child }
 }
 
 /// The retained widget for a [`KeyboardAvoidView`].
@@ -911,7 +879,7 @@ pub struct KeyboardAvoidWidget {
     child: ChildPod,
 }
 
-impl<State: 'static> View<State> for KeyboardAvoidView<State> {
+impl<State: 'static, V: View<State>> View<State> for KeyboardAvoidView<V> {
     type Element = KeyboardAvoidWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> KeyboardAvoidWidget {
@@ -1159,10 +1127,11 @@ mod tests {
 
     #[test]
     fn avoid_keyboard_pads_the_bottom_by_the_raw_view_insets() {
-        fn logic(_: &mut ()) -> KeyboardAvoidView<()> {
+        fn logic(_: &mut ()) -> KeyboardAvoidView<frust::SizedBoxView<()>> {
             avoid_keyboard(SizedBox(Some(100.0), Some(40.0)))
         }
-        let mut root: RenderRoot<(), KeyboardAvoidView<()>> = RenderRoot::new();
+        let mut root: RenderRoot<(), KeyboardAvoidView<frust::SizedBoxView<()>>> =
+            RenderRoot::new();
         let mut state = ();
         root.rebuild(&mut logic, &mut state);
 

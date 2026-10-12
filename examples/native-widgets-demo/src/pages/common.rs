@@ -460,12 +460,8 @@ thread_local! {
 /// is in window coordinates, so the value needs no conversion. It describes
 /// the most recent paint: read it from an event handler (the button the user
 /// just pressed was painted where they saw it).
-pub fn anchor_probe<V: View<S>>(key: &'static str, child: V) -> AnchorProbe {
-    AnchorProbe {
-        key,
-        // erasure: keep the hand-written view stores its child as a ChildPod element
-        child: any(child),
-    }
+pub fn anchor_probe<V: View<S>>(key: &'static str, child: V) -> AnchorProbe<V> {
+    AnchorProbe { key, child }
 }
 
 /// The last painted window rect recorded under `key`, if a probe with that key
@@ -485,9 +481,9 @@ pub fn anchor_from_rect(rect: Rect) -> AnchorRect {
 }
 
 /// See [`anchor_probe`].
-pub struct AnchorProbe {
+pub struct AnchorProbe<V> {
     key: &'static str,
-    child: AnyView<S>,
+    child: V,
 }
 
 /// The retained widget for an [`AnchorProbe`].
@@ -496,7 +492,7 @@ pub struct AnchorProbeWidget {
     child: ChildPod,
 }
 
-impl View<S> for AnchorProbe {
+impl<V: View<S>> View<S> for AnchorProbe<V> {
     type Element = AnchorProbeWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AnchorProbeWidget {

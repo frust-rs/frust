@@ -31,9 +31,9 @@
 use std::rc::Rc;
 
 use frust::authoring::{
-    Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
+    Affine, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerButton, PointerEvent, PointerPhase,
-    SemanticsCtx, Size, View, Widget, any,
+    SemanticsCtx, Size, View, Widget, build_child, rebuild_child, teardown_child,
 };
 use frust::{FrameTime, Theme, input::TOUCH_SLOP};
 
@@ -101,8 +101,8 @@ struct SwipeAction<State: 'static> {
 }
 
 /// A declarative swipeable row. See the [module docs](self).
-pub struct SwipeableRow<State: 'static> {
-    child: AnyView<State>,
+pub struct SwipeableRow<State: 'static, V: View<State>> {
+    child: V,
     /// Revealed on a swipe *right* (finger→right, content shifts right), painted
     /// on the row's left edge.
     swipe_right: Option<SwipeAction<State>>,
@@ -112,16 +112,15 @@ pub struct SwipeableRow<State: 'static> {
 }
 
 /// Wrap `child` in a swipeable row (no actions until one is attached).
-pub fn swipeable_row<State: 'static, V: View<State>>(child: V) -> SwipeableRow<State> {
+pub fn swipeable_row<State: 'static, V: View<State>>(child: V) -> SwipeableRow<State, V> {
     SwipeableRow {
-        // erasure: keep stored in a hand-written view, fed to its ChildPod
-        child: any(child),
+        child,
         swipe_right: None,
         swipe_left: None,
     }
 }
 
-impl<State: 'static> SwipeableRow<State> {
+impl<State: 'static, V: View<State>> SwipeableRow<State, V> {
     /// Attach the swipe-*right* action (revealed on the left edge). `color` fills
     /// the revealed strip; `on_commit` fires on release past [`COMMIT_FRACTION`].
     /// Uses the generic [`SwipeMarker::Square`] affordance.
@@ -176,40 +175,6 @@ fn erase<State: 'static>(cb: &Callback<State>) -> Erased {
         let state = ctx.state_mut::<State>();
         cb(state);
     })
-}
-
-/// Build a [`ChildPod`] wrapping an [`AnyView`]'s (double-boxed) element —
-/// the same shape `frust-widgets::build_child` produces, re-derived here
-/// because that helper is crate-private.
-fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) -> ChildPod {
-    let element: Box<dyn Widget> = view.build(ctx);
-    ChildPod::new(Box::new(element))
-}
-
-/// Reconcile the child through its `ChildPod` (mirrors
-/// `frust-widgets::rebuild_child`).
-fn rebuild_child<State: 'static>(
-    prev: &AnyView<State>,
-    next: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) -> ChangeFlags {
-    let element = pod
-        .widget_mut()
-        .downcast_mut::<Box<dyn Widget>>()
-        .expect("swipeable child element is a boxed AnyView widget");
-    next.rebuild(prev, element, ctx)
-}
-
-/// Tear the child down (mirrors `frust-widgets::teardown_child`).
-fn teardown_child<State: 'static>(
-    view: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) {
-    if let Some(element) = pod.widget_mut().downcast_mut::<Box<dyn Widget>>() {
-        view.teardown(element, ctx);
-    }
 }
 
 /// The retained widget for a [`SwipeableRow`].
@@ -364,7 +329,7 @@ impl SwipeableWidget {
     }
 }
 
-impl<State: 'static> View<State> for SwipeableRow<State> {
+impl<State: 'static, V: View<State>> View<State> for SwipeableRow<State, V> {
     type Element = SwipeableWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> SwipeableWidget {
@@ -571,16 +536,13 @@ const PRESS_SCALE: f64 = 0.92;
 /// phases only to toggle the pressed visual. The dip is applied with
 /// `PaintScene::push_transform` (the one seam carrying scale, not just a
 /// translation), the same escape-hatch capability `hero` morphs paint through.
-pub struct PressPop<State: 'static> {
-    child: AnyView<State>,
+pub struct PressPop<V> {
+    child: V,
 }
 
 /// Wrap `child` so a press scales it to [`PRESS_SCALE`] and a release restores it.
-pub fn press_pop<State: 'static, V: View<State>>(child: V) -> PressPop<State> {
-    PressPop {
-        // erasure: keep stored in a hand-written view, fed to its ChildPod
-        child: any(child),
-    }
+pub fn press_pop<State: 'static, V: View<State>>(child: V) -> PressPop<V> {
+    PressPop { child }
 }
 
 /// The retained widget for a [`PressPop`].
@@ -600,7 +562,7 @@ impl PressPopWidget {
     }
 }
 
-impl<State: 'static> View<State> for PressPop<State> {
+impl<State: 'static, V: View<State>> View<State> for PressPop<V> {
     type Element = PressPopWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> PressPopWidget {
@@ -716,7 +678,7 @@ mod tests {
     }
 
     fn laid_out(fired: Rc<Cell<u32>>, cancels: Rc<Cell<u32>>) -> SwipeableWidget {
-        let view: SwipeableRow<()> = swipeable_row(Probe { cancels })
+        let view = swipeable_row(Probe { cancels })
             .on_swipe_right(Color::from_rgb8(0, 128, 0), move |_s: &mut ()| {
                 fired.set(fired.get() + 1)
             });

@@ -21,7 +21,7 @@
 //! (`(_value * 200) - 100` / `(_value * 5).roundToDouble()`), so every kind
 //! shares one continuous knob rather than a value per constructor.
 
-use frust::{AnyView, Component, SizedBox, View, any, component, stack};
+use frust::{AnyView, Component, EitherOf6, SizedBox, View, any, component, stack};
 use frust_material::{
     HapticSignal, OverlayAnchor, SliderIconPosition, SliderRange, centered_slider, icons,
     range_slider, slider, vertical_slider, wavy_slider,
@@ -139,54 +139,49 @@ fn discrete_value(value: f64) -> f64 {
 }
 
 /// The control this page's "Slider" preview shows for the current `Kind`.
-// erasure: keep match-arm values of a six-arm match over the slider constructors
-fn preview_control(state: &Knobs) -> AnyView<Knobs> {
+fn preview_control(state: &Knobs) -> impl View<Knobs> {
     match state.kind {
-        SliderKind::Continuous => any(slider(state.value, |s: &mut Knobs, v: f64| s.value = v)
-            .enabled(state.enabled)
-            .track_thickness(state.track_thickness)),
-        SliderKind::Wavy => any(
+        SliderKind::Continuous => EitherOf6::A(
+            slider(state.value, |s: &mut Knobs, v: f64| s.value = v)
+                .enabled(state.enabled)
+                .track_thickness(state.track_thickness),
+        ),
+        SliderKind::Wavy => EitherOf6::B(
             wavy_slider(state.value, |s: &mut Knobs, v: f64| s.value = v)
                 .enabled(state.enabled)
                 .track_thickness(state.track_thickness),
         ),
-        SliderKind::Centered => any(centered_slider(
-            centered_value(state.value),
-            |s: &mut Knobs, v: f64| {
+        SliderKind::Centered => EitherOf6::C(
+            centered_slider(centered_value(state.value), |s: &mut Knobs, v: f64| {
                 s.value = (v + 100.0) / 200.0;
-            },
-        )
-        .range(-100.0, 100.0)
-        .enabled(state.enabled)
-        .track_thickness(state.track_thickness)),
-        SliderKind::Discrete => any(slider(
-            discrete_value(state.value),
-            |s: &mut Knobs, v: f64| {
+            })
+            .range(-100.0, 100.0)
+            .enabled(state.enabled)
+            .track_thickness(state.track_thickness),
+        ),
+        SliderKind::Discrete => EitherOf6::D(
+            slider(discrete_value(state.value), |s: &mut Knobs, v: f64| {
                 s.value = v / 5.0;
-            },
-        )
-        .range(0.0, 5.0)
-        .divisions(5)
-        .enabled(state.enabled)
-        .track_thickness(state.track_thickness)
-        .haptic(HapticSignal::Light)),
-        SliderKind::Vertical => {
-            any(
-                vertical_slider(state.value, |s: &mut Knobs, v: f64| s.value = v)
-                    .enabled(state.enabled)
-                    .track_thickness(state.track_thickness)
-                    .thumb_length(80.0)
-                    .icon(icons::VOLUME_UP)
-                    .icon_position(state.icon_position),
-            )
-        }
-        SliderKind::Range => {
-            any(
-                range_slider(state.range, |s: &mut Knobs, v: SliderRange| s.range = v)
-                    .enabled(state.enabled)
-                    .track_thickness(state.track_thickness),
-            )
-        }
+            })
+            .range(0.0, 5.0)
+            .divisions(5)
+            .enabled(state.enabled)
+            .track_thickness(state.track_thickness)
+            .haptic(HapticSignal::Light),
+        ),
+        SliderKind::Vertical => EitherOf6::E(
+            vertical_slider(state.value, |s: &mut Knobs, v: f64| s.value = v)
+                .enabled(state.enabled)
+                .track_thickness(state.track_thickness)
+                .thumb_length(80.0)
+                .icon(icons::VOLUME_UP)
+                .icon_position(state.icon_position),
+        ),
+        SliderKind::Range => EitherOf6::F(
+            range_slider(state.range, |s: &mut Knobs, v: SliderRange| s.range = v)
+                .enabled(state.enabled)
+                .track_thickness(state.track_thickness),
+        ),
     }
 }
 

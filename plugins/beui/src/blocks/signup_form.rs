@@ -84,10 +84,10 @@ use std::time::Duration;
 
 use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
-    Action, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx,
-    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
-    RoundedRect, SemanticsCtx, Shape, Size, View, Widget, any, build_child, rebuild_child,
-    route_event_single, teardown_child, visit_children,
+    Action, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role, RoundedRect,
+    SemanticsCtx, Shape, Size, View, Widget, build_child, rebuild_child, route_event_single,
+    teardown_child, visit_children,
 };
 use frust::{FrameTime, Theme};
 
@@ -588,14 +588,13 @@ impl<State: 'static> SignupFormView<State> {
 
     /// One wrapped field, built from the current values, the resolved errors,
     /// and the widget-held touched/reveal state (see the [module docs](self)).
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
     fn field_view(
         &self,
         field: SignupField,
         errors: &SignupErrors,
         touched: bool,
         reveal: bool,
-    ) -> AnyView<State> {
+    ) -> impl View<State> + use<State> {
         let values = self.values.clone();
         let on_change = self.on_values_change.clone();
         let shown_error = touched.then(|| errors.get(field)).flatten();
@@ -619,49 +618,44 @@ impl<State: 'static> SignupFormView<State> {
         if let Some(message) = shown_error {
             view = view.error(message);
         }
-        any(view)
+        view
     }
 
     /// The terms checkbox.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn terms_view(&self) -> AnyView<State> {
+    fn terms_view(&self) -> impl View<State> + use<State> {
         let values = self.values.clone();
         let on_change = self.on_values_change.clone();
-        any(
-            checkbox::<State, _>(self.values.terms, move |state: &mut State, next| {
-                let mut values = values.clone();
-                values.terms = next;
-                on_change(state, values);
-            })
-            .disabled(self.status.is_submitting())
-            .label(self.terms_label.clone()),
-        )
+        checkbox::<State, _>(self.values.terms, move |state: &mut State, next| {
+            let mut values = values.clone();
+            values.terms = next;
+            on_change(state, values);
+        })
+        .disabled(self.status.is_submitting())
+        .label(self.terms_label.clone())
     }
 
     /// The submit button — the stateful variant, so the lifecycle is its own.
-    fn submit_view(&self, errors: &SignupErrors) -> AnyView<State> {
+    fn submit_view(&self, errors: &SignupErrors) -> impl View<State> + use<State> {
         let on_submit = self.on_submit.clone();
         let values = self.values.clone();
         let valid = errors.is_empty();
-        any(
-            button::<State>(self.submit_label.clone(), move |state: &mut State| {
-                // `if (Object.keys(errors).length > 0) return;` — a submit that
-                // fails validation touches every field (the widget's own arm)
-                // and reports nothing.
-                if !valid {
-                    return;
-                }
-                if let Some(on_submit) = &on_submit {
-                    on_submit(state, values.clone());
-                }
-            })
-            .variant(ButtonVariant::Stateful)
-            .state(self.status.button_state())
-            .size(ButtonSize::Lg)
-            .loading_label("Creating account")
-            .success_label("Account created")
-            .error_label("Try again"),
-        )
+        button::<State>(self.submit_label.clone(), move |state: &mut State| {
+            // `if (Object.keys(errors).length > 0) return;` — a submit that
+            // fails validation touches every field (the widget's own arm)
+            // and reports nothing.
+            if !valid {
+                return;
+            }
+            if let Some(on_submit) = &on_submit {
+                on_submit(state, values.clone());
+            }
+        })
+        .variant(ButtonVariant::Stateful)
+        .state(self.status.button_state())
+        .size(ButtonSize::Lg)
+        .loading_label("Creating account")
+        .success_label("Account created")
+        .error_label("Try again")
     }
 }
 

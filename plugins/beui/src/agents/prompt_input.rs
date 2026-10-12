@@ -68,10 +68,10 @@ use std::rc::Rc;
 
 use frust::authoring::{Action, ErasedArgCallback, erase_callback_arg};
 use frust::authoring::{
-    Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
-    ErasedCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
-    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget, any,
-    build_child, erase_callback, rebuild_child, route_event_single, teardown_child, visit_children,
+    Affine, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
+    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect,
+    Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget, build_child, erase_callback,
+    rebuild_child, route_event_single, teardown_child, visit_children,
 };
 use frust::{Theme, text_input};
 
@@ -325,8 +325,7 @@ impl<State: 'static> PromptInputView<State> {
 
     /// The wrapped baseline field, configured with its own chrome suppressed
     /// and the Enter contract set.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn field(&self) -> AnyView<State> {
+    fn field(&self) -> impl View<State> + use<State> {
         let on_change = self.on_change.clone();
         // The prompt and placeholder keep the baseline `text_input`'s own
         // family: that field has no themed-family seam.
@@ -353,7 +352,7 @@ impl<State: 'static> PromptInputView<State> {
                 }
             });
         }
-        any(field)
+        field
     }
 }
 

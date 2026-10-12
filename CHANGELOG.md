@@ -6,8 +6,23 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Added
+
+- `EitherOf3` .. `EitherOf8` (variants `A`..`H`) in `frust-widgets`, re-exported by the facade and
+  the prelude: a `match` with three to eight arms returns one typed view instead of erasing each
+  arm, with `Either`'s swap semantics (a change of arm is a teardown and remount) (3a75095f).
+- `BuildCtx::mark_element_replaced` and `BuildCtx::track_element_replaced` in `frust-core`: a view
+  whose `rebuild` replaced its element's widget while keeping the element type (an enum view
+  switching arms) reports it, and the nearest enclosing reconciler's tracking scope treats the
+  rebuild like a concrete-type swap.
+
 ### Fixed
 
+- An `Either` / `EitherOf3`..`EitherOf8` arm swap now drops the enclosing child pod's pointer
+  capture and focus link (a single-child wrapper, a keyed list, or a component whose body is the
+  enum) and, in a positional list, cancels the recorded capture and focus of every later child,
+  matching an `AnyView` concrete-type swap; before, a swap mid-gesture kept forwarding `Move`/`Up`
+  to the fresh arm and starved its siblings until `Up`.
 - The CLI resolves the app's `frust-ui` dependency key, so both `frust-ui = ".."` and
   `frust = { package = "frust-ui", .. }` work for `run`, `build` and hot sessions: every cargo
   argument list, Android `-Pfrust.cargoFeatures`, iOS `FRUST_FEATURES` and hot-patch fat build
@@ -45,7 +60,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
-- **API (tooling crates, so the next release is a minor version):** `frust-drive`'s
+- **API (tooling crates):** `frust-drive`'s
   `desktop_run::desktop_plan` and `desktop_plan_with_features` return
   `Result<DesktopPlan, FacadeKeyError>` instead of falling back to the `frust/` feature spelling,
   and `try_desktop_plan_with_features` is gone; `frust-drive`'s `DesktopBuildError` and
@@ -57,6 +72,19 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   props or children in an `if`, construct once): `Either` reconciles a Left/Right swap as a
   teardown and remount, which drops in-flight gestures and can orphan focus
   ([docs/WIDGETS_CODE_STANDARDS.md](docs/WIDGETS_CODE_STANDARDS.md)).
+- `frust::authoring::build_child`, `rebuild_child` and `teardown_child` take any `V: View<State>`,
+  so a hand-written view can store `child: V` (single-boxed); `AnyView` children behave as before
+  (double-boxed, concrete-type swap detection kept). Two source changes for callers: (a) an
+  explicit turbofish `build_child::<State>(..)` becomes `build_child::<State, _>(..)`; (b) a caller
+  that passed a `&&AnyView<State>` (for example `&child` where `child: &AnyView<State>` is a
+  loop or closure binding) and relied on deref coercion now fails with E0277 (`V` is inferred as
+  `&AnyView`) and must pass `child` or `*child` instead (ebc5b245).
+- Codemod: a borrow passed to the `build_child` trio no longer excludes a helper from T7, and
+  T7-arms lists the arm count and suggests `EitherOf<n>` (b4baeec0).
+- Frust's plugins and examples no longer keep `any()` for `ChildPod`-fed helpers or three-to-eight
+  arm bodies; the kept cases are overlay-slot tooltip helpers, `Vec<AnyView>` entries,
+  runtime-varying content, and page tables of nine or more arms (1a383163, 3281d802, 3d94eef1,
+  fc4b5f39, 57d0e6fc, 7abdd14e).
 
 ## 0.6.0 — 2026-10-11
 

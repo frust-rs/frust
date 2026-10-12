@@ -64,7 +64,8 @@
 //! `Wrap(spacing: 8, runSpacing: 8)`.
 
 use frust::{
-    AnyView, Component, Get, RwSignal, Set, SizedBox, View, any, column, component, stack,
+    AnyView, Component, EitherOf4, Get, RwSignal, Set, SizedBox, View, any, column, component,
+    stack,
 };
 use frust_material::{OverlayAnchor, assist_chip, filter_chip, input_chip, suggestion_chip};
 
@@ -240,7 +241,6 @@ impl Component for ChipsPlayground {
 /// Build one chip of `kind` — the one dispatch point every preview routes
 /// through. `leading` is ignored for [`ChipKind::Filter`]: `FilterChipView`
 /// carries no `.leading()` builder (see this file's module docs).
-// erasure: keep match-arm values of a four-arm match over the chip constructors
 fn build_chip(
     kind: ChipKind,
     label: &str,
@@ -248,7 +248,7 @@ fn build_chip(
     elevated: bool,
     leading: Option<&str>,
     deletable: bool,
-) -> AnyView<ChipsPlaygroundState> {
+) -> impl View<ChipsPlaygroundState> {
     match kind {
         ChipKind::Assist => {
             let mut view = assist_chip(label.to_string(), |_: &mut ChipsPlaygroundState| {})
@@ -256,21 +256,23 @@ fn build_chip(
             if let Some(glyph) = leading {
                 view = view.leading(glyph);
             }
-            any(view)
+            EitherOf4::A(view)
         }
-        ChipKind::Filter => any(filter_chip(
-            label.to_string(),
-            selected,
-            |s: &mut ChipsPlaygroundState, next: bool| s.selected.set(next),
-        )
-        .elevated(elevated)),
+        ChipKind::Filter => EitherOf4::B(
+            filter_chip(
+                label.to_string(),
+                selected,
+                |s: &mut ChipsPlaygroundState, next: bool| s.selected.set(next),
+            )
+            .elevated(elevated),
+        ),
         ChipKind::Suggestion => {
             let mut view = suggestion_chip(label.to_string(), |_: &mut ChipsPlaygroundState| {})
                 .elevated(elevated);
             if let Some(glyph) = leading {
                 view = view.leading(glyph);
             }
-            any(view)
+            EitherOf4::C(view)
         }
         ChipKind::Input => {
             let mut view =
@@ -281,7 +283,7 @@ fn build_chip(
             if deletable {
                 view = view.on_deleted(|_: &mut ChipsPlaygroundState| {});
             }
-            any(view)
+            EitherOf4::D(view)
         }
     }
 }

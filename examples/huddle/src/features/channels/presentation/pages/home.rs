@@ -77,11 +77,10 @@ use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, Color, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
 };
 use frust::{
-    Align, Alignment, AnimationController, AnyView, ChildKey, Column, CrossAxisAlignment,
-    DesignLanguage, EdgeInsets, Either, GestureDetector, Get, Image, ImageFit, ImageSource,
-    ListView, NavigatorController, Padding, PopResult, SizedBox, Theme, View, any, button, column,
-    component, either, hero, icon, icons, row, scroll_view, stack, text, text_input, use_context,
-    views,
+    Align, Alignment, AnimationController, ChildKey, Column, CrossAxisAlignment, DesignLanguage,
+    EdgeInsets, Either, EitherOf3, GestureDetector, Get, Image, ImageFit, ImageSource, ListView,
+    NavigatorController, Padding, PopResult, SizedBox, Theme, View, button, column, component,
+    either, hero, icon, icons, row, scroll_view, stack, text, text_input, use_context, views,
 };
 use frust_cupertino::{action, show_cupertino_alert};
 use frust_material::{ProgressValue, app_bar, circular_progress, dialog, show_dialog, switch};
@@ -361,13 +360,12 @@ impl frust::Component for HomeScreen {
     fn build(&self, state: &mut HomeState) -> impl View<HomeState> {
         let async_state = state.controller.data.get(); // tracked
 
-        // erasure: keep three-arm body (roster / skeleton / error)
-        let body: AnyView<HomeState> = if let Some(data) = async_state.value() {
-            any(roster_list(state, data, async_state.is_loading()))
+        let body = if let Some(data) = async_state.value() {
+            EitherOf3::A(roster_list(state, data, async_state.is_loading()))
         } else if async_state.is_loading() {
-            any(skeleton_list())
+            EitherOf3::B(skeleton_list())
         } else {
-            any(Align(
+            EitherOf3::C(Align(
                 Alignment::CENTER,
                 text("Couldn't load channels.").size(15.0),
             ))
@@ -510,18 +508,17 @@ fn roster_list(
     // The builder function: construct the view for each row. Each row needs
     // the pieces for navigation, async ops, and UI state that were extracted
     // above.
-    // erasure: keep three-type match arms (header / channel row / DM row)
     let builder = move |i: usize| match &build_rows[i] {
-        RosterRow::ChannelsHeader => any(section_header("Channels")),
-        RosterRow::Channel(c) => any(channel_row_keyed(
+        RosterRow::ChannelsHeader => EitherOf3::A(section_header("Channels")),
+        RosterRow::Channel(c) => EitherOf3::B(channel_row_keyed(
             &build_nav,
             &build_controller,
             &build_toasts,
             &build_logo,
             c,
         )),
-        RosterRow::DmsHeader => any(section_header("Direct messages")),
-        RosterRow::Dm(d) => any(dm_row_keyed(
+        RosterRow::DmsHeader => EitherOf3::A(section_header("Direct messages")),
+        RosterRow::Dm(d) => EitherOf3::C(dm_row_keyed(
             &build_nav,
             &build_controller,
             &build_toasts,
@@ -571,7 +568,7 @@ fn roster_list(
 /// [`ROSTER_ROW_EXTENT`]) — safe under the roster's variable-extent `ListView`
 /// (see [`roster_list`]), which measures each row rather than forcing every
 /// row to one uniform height.
-fn section_header(title: &str) -> impl View<HomeState> {
+fn section_header(title: &str) -> impl View<HomeState> + use<> {
     Padding(
         // Start margin 16 (8 outer list pad + 8 here) — Material side margin.
         EdgeInsets::symmetric(8.0, 12.0),
@@ -693,7 +690,7 @@ fn channel_row_keyed(
     toasts: &crate::ui::toast::ToastController,
     _logo: &Option<ImageSource>,
     c: &ChannelItem,
-) -> impl View<HomeState> {
+) -> impl View<HomeState> + use<> {
     // Mimic the structure of the original channel_row, but accept the
     // extracted pieces instead of HomeState.
     let leading = channel_circle();
@@ -748,7 +745,7 @@ fn dm_row_keyed(
     toasts: &crate::ui::toast::ToastController,
     logo: &Option<ImageSource>,
     d: &DmItem,
-) -> impl View<HomeState> {
+) -> impl View<HomeState> + use<> {
     // Mimic the structure of the original dm_row, but accept the extracted
     // pieces instead of HomeState.
     let leading = dm_avatar_keyed(logo, d);
@@ -780,7 +777,7 @@ fn dm_row_keyed(
 /// A DM avatar built from extracted state pieces (primarily `logo`). This is
 /// the ListView version of [`dm_avatar`], used when the full HomeState cannot
 /// be passed as a reference.
-fn dm_avatar_keyed(_logo: &Option<ImageSource>, d: &DmItem) -> impl View<HomeState> {
+fn dm_avatar_keyed(_logo: &Option<ImageSource>, d: &DmItem) -> impl View<HomeState> + use<> {
     // A couple of users get a real `Image` avatar; the rest an initials circle.
     let use_image = matches!(d.user_id, 2 | 5) && _logo.is_some();
     let base = either(
@@ -827,13 +824,13 @@ fn dm_avatar_keyed(_logo: &Option<ImageSource>, d: &DmItem) -> impl View<HomeSta
 /// Wrap a row in a [`swipeable_row`](crate::ui::swipeable::swipeable_row):
 /// swipe right → archive, left → mute, each raising an undo toast. This
 /// version takes extracted pieces (controller, toasts) instead of HomeState.
-fn swipe_wrap_keyed(
-    row: impl View<HomeState>,
+fn swipe_wrap_keyed<R: View<HomeState>>(
+    row: R,
     id: String,
     label: String,
     controller: &Arc<ChannelsController>,
     toasts: &crate::ui::toast::ToastController,
-) -> impl View<HomeState> {
+) -> impl View<HomeState> + use<R> {
     let data = controller.data;
 
     let archive_id = id.clone();

@@ -132,14 +132,14 @@ off this index — read this plus the one that covers what you are touching:
   of up to 12 views (nest beyond; `Vec<V>` when homogeneous or dynamic; `keyed()` lists stay
   `Vec`); an API that takes a child list is written `fn f<M>(.., c: impl ViewSeq<S, M>)` and
   erases once inside. `any()`/`AnyView` remain only for the documented irreducible cases:
-  stored view tables (`Vec`/`Option<AnyView>`, `Box<dyn Fn(..) -> AnyView>`, page registries),
-  accumulators pushing into a `Vec<AnyView>`, recursive helpers, three-plus-arm bodies (two
-  arms use `either(cond, || a, || b)`), trait extension points, helpers feeding a hand-written
-  view's `ChildPod` (`build_child`/`rebuild_child`/`teardown_child` take `&AnyView`), and the
-  hot-patch seam's `build_erased` (its return type must be layout-fixed across images). A kept
-  site carries `// erasure: keep <why>`; `scripts/ci/erasure-check.sh` enforces codemod rules
-  T1-T7. A driver closure returning a `Component::build` result erases it:
-  `move |s| AnyView::new(root.build(s))`. Never add `#[allow(refining_impl_trait)]`.
+  stored view tables (`Vec`/`Option<AnyView>`, `Box<dyn Fn(..) -> AnyView>`, page registries
+  incl. nine-plus-arm dispatch), accumulators into a `Vec<AnyView>`, recursive helpers, trait
+  extension points, runtime-varying child types and mixed lists, and the hot-patch seam's
+  `build_erased`, and the `OverlaySlot` `&AnyView` seam. Branches: two arms `either(..)`, three to
+  eight `EitherOfN` from a `match`. A hand-written view stores its child typed (`child: V`) and
+  drives it via the generic `build_child`/`rebuild_child`/`teardown_child`. A kept site carries
+  `// erasure: keep <why>` (`scripts/ci/erasure-check.sh`, rules T1-T7); a driver closure erases
+  `Component::build`: `move |s| AnyView::new(root.build(s))`. No `#[allow(refining_impl_trait)]`.
 - **Edition-2024 `-> impl Trait` return types capture all in-scope lifetimes by default.**
   When a function returning `impl View<State>` must not be tied to a parameter borrow (the
   result is stored, or returned from a navigator/`RenderRoot` closure that needs one type for

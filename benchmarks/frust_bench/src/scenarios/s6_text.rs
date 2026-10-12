@@ -25,7 +25,8 @@ use std::time::Duration;
 
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, SemanticsCtx, Size, View, Widget,
+    PaintCtx, PaintScene, SemanticsCtx, Size, View, Widget, build_child, rebuild_child,
+    teardown_child,
 };
 use frust::{
     Align, Alignment, AnimationController, AnyView, Color, Component, Get, RwSignal, Set, any,
@@ -91,7 +92,7 @@ impl Component for S6Text {
         // Tracked read: a `WidthPulse` write wakes this rebuild each frame.
         let frac = state.frac.get();
 
-        let column = width_box(
+        let column = width_box::<S6State, _>(
             frac,
             text(CORPUS)
                 .size(18.0)
@@ -179,18 +180,14 @@ impl Widget for WidthPulseWidget {
 
 /// Wrap `child` in a box whose width is `frac` of the available width, forcing a
 /// reshape of a text child every time `frac` changes.
-pub fn width_box<State: 'static, V: View<State>>(frac: f64, child: V) -> WidthBox<State> {
-    WidthBox {
-        frac,
-        // erasure: keep stored in WidthBox's hand-written child field
-        child: any(child),
-    }
+pub fn width_box<State: 'static, V: View<State>>(frac: f64, child: V) -> WidthBox<V> {
+    WidthBox { frac, child }
 }
 
 /// A declarative width-constraining wrapper. See [`width_box`].
-pub struct WidthBox<State: 'static> {
+pub struct WidthBox<V> {
     frac: f64,
-    child: AnyView<State>,
+    child: V,
 }
 
 /// The retained width-box widget.
@@ -199,35 +196,7 @@ pub struct WidthBoxWidget {
     child: ChildPod,
 }
 
-fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) -> ChildPod {
-    let element: Box<dyn Widget> = view.build(ctx);
-    ChildPod::new(Box::new(element))
-}
-
-fn rebuild_child<State: 'static>(
-    prev: &AnyView<State>,
-    next: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) -> ChangeFlags {
-    let element = pod
-        .widget_mut()
-        .downcast_mut::<Box<dyn Widget>>()
-        .expect("width-box child element is a boxed AnyView widget");
-    next.rebuild(prev, element, ctx)
-}
-
-fn teardown_child<State: 'static>(
-    view: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) {
-    if let Some(element) = pod.widget_mut().downcast_mut::<Box<dyn Widget>>() {
-        view.teardown(element, ctx);
-    }
-}
-
-impl<State: 'static> View<State> for WidthBox<State> {
+impl<State: 'static, V: View<State>> View<State> for WidthBox<V> {
     type Element = WidthBoxWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> WidthBoxWidget {

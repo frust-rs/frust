@@ -21,8 +21,9 @@
 //!   ballooned the whole feed.
 
 use frust::authoring::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget, any,
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult, InputEvent,
+    LayoutCtx, PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget, build_child,
+    rebuild_child, teardown_child,
 };
 
 // ---------------------------------------------------------------------------
@@ -96,8 +97,8 @@ impl Widget for FillBoxWidget {
 /// `filled_card` WITHOUT the card's hardcoded 16px inset (`material/card.rs`),
 /// so a compact boxed look (attachment tiles) is expressible without inflating
 /// the row. Wrap the padded content: `filled_box(Padding(10‥12, child), c, 8)`.
-pub struct FilledBox<State: 'static> {
-    child: AnyView<State>,
+pub struct FilledBox<V> {
+    child: V,
     color: Color,
     radius: f64,
 }
@@ -107,10 +108,9 @@ pub fn filled_box<State: 'static, V: View<State>>(
     child: V,
     color: Color,
     radius: f64,
-) -> FilledBox<State> {
+) -> FilledBox<V> {
     FilledBox {
-        // erasure: keep stored in a hand-written view, fed to its ChildPod
-        child: any(child),
+        child,
         color,
         radius,
     }
@@ -123,41 +123,7 @@ pub struct FilledBoxWidget {
     radius: f64,
 }
 
-/// Build a [`ChildPod`] wrapping an [`AnyView`]'s element (mirrors
-/// `frust-widgets::build_child`, re-derived because that helper is
-/// crate-private — same shape `ui::swipeable` re-derives).
-fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) -> ChildPod {
-    let element: Box<dyn Widget> = view.build(ctx);
-    ChildPod::new(Box::new(element))
-}
-
-/// Reconcile the child through its `ChildPod` (mirrors
-/// `frust-widgets::rebuild_child`).
-fn rebuild_child<State: 'static>(
-    prev: &AnyView<State>,
-    next: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) -> ChangeFlags {
-    let element = pod
-        .widget_mut()
-        .downcast_mut::<Box<dyn Widget>>()
-        .expect("filled_box child element is a boxed AnyView widget");
-    next.rebuild(prev, element, ctx)
-}
-
-/// Tear the child down (mirrors `frust-widgets::teardown_child`).
-fn teardown_child<State: 'static>(
-    view: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) {
-    if let Some(element) = pod.widget_mut().downcast_mut::<Box<dyn Widget>>() {
-        view.teardown(element, ctx);
-    }
-}
-
-impl<State: 'static> View<State> for FilledBox<State> {
+impl<State: 'static, V: View<State>> View<State> for FilledBox<V> {
     type Element = FilledBoxWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> FilledBoxWidget {

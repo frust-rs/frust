@@ -17,9 +17,9 @@
 use frust::motion::patterns::{FadeScale, FadeThrough, SharedAxis};
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    Align, Alignment, Axis, ButtonStyle, Color, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
-    MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme, TransitionSpec, Update,
-    View, any, button, column, inflexible, row, text, use_context,
+    Align, Alignment, Axis, ButtonStyle, Color, EdgeInsets, EitherOf4, FlexChild, FlexView, Get,
+    GetUntracked, MotionScheme, Padding, PageTransition, RwSignal, Set, SizedBox, Theme,
+    TransitionSpec, Update, View, button, column, inflexible, row, text, use_context,
 };
 use frust_glyph::TermLine;
 use frust_glyph::motion::{GlyphSlide, SlideDirection};
@@ -391,16 +391,15 @@ fn demo_screen() -> FlexChild<CatalogState> {
         "GlyphSlide".to_string(),
     ];
 
-    // The same keyed switcher under each of the four patterns — type-erased so
-    // the runtime pick composes onto one showcase.
-    // erasure: keep four-arm runtime pattern pick
+    // The same keyed switcher under each of the four patterns — the runtime
+    // pick composes onto one showcase.
     let switcher = match p {
-        0 => any(pattern_switcher(c, FadeThrough, card_view(c)).reverse(b)),
-        1 => any(pattern_switcher(c, SharedAxis::X, card_view(c)).reverse(b)),
-        2 => any(pattern_switcher(c, FadeScale, card_view(c)).reverse(b)),
-        _ => {
-            any(pattern_switcher(c, GlyphSlide::new(SlideDirection::Left), card_view(c)).reverse(b))
-        }
+        0 => EitherOf4::A(pattern_switcher(c, FadeThrough, card_view(c)).reverse(b)),
+        1 => EitherOf4::B(pattern_switcher(c, SharedAxis::X, card_view(c)).reverse(b)),
+        2 => EitherOf4::C(pattern_switcher(c, FadeScale, card_view(c)).reverse(b)),
+        _ => EitherOf4::D(
+            pattern_switcher(c, GlyphSlide::new(SlideDirection::Left), card_view(c)).reverse(b),
+        ),
     };
 
     block(vec![

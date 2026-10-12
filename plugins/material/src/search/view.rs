@@ -353,8 +353,7 @@ impl<State: 'static> SearchViewContentView<State> {
     /// The header's live editable: the framework's baseline field with its own
     /// border and focus ring suppressed, spanning the header band, its glyphs
     /// inset clear of the back slot.
-    // erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
-    fn field_view(&self) -> AnyView<State> {
+    fn field_view(&self) -> impl View<State> + use<State> {
         let on_change = self.on_query_changed.clone();
         let (hpad, _) = self.mode.header_padding();
         let mut field = text_input(self.query.clone(), move |state: &mut State, text| {
@@ -370,7 +369,7 @@ impl<State: 'static> SearchViewContentView<State> {
         if let Some(on_submit) = self.on_submit.clone() {
             field = field.on_submit(move |state: &mut State, text| on_submit(state, text));
         }
-        any(field)
+        field
     }
 
     /// The header's default leading view: the M3 `arrow_back` affordance.

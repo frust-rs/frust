@@ -31,8 +31,8 @@
 use std::collections::BTreeSet;
 
 use frust::{
-    AnyView, Component, CrossAxisAlignment, SizedBox, View, any, column, component, icon, stack,
-    text,
+    AnyView, Component, CrossAxisAlignment, EitherOf4, SizedBox, View, any, column, component,
+    icon, stack, text,
 };
 use frust_material::{
     DismissDirection, ExpandMode, MaterialSpacing, MaterialTokens, OverlayAnchor, card_list_items,
@@ -156,18 +156,17 @@ fn body(state: &Knobs) -> impl View<Knobs> {
 }
 
 /// The preview for the selected [`ListKind`] — the reference's own `switch`.
-fn preview(state: &Knobs) -> AnyView<Knobs> {
+fn preview(state: &Knobs) -> impl View<Knobs> {
     match state.kind {
-        ListKind::Item => item_preview(state),
-        ListKind::CardList => card_list_preview(state),
-        ListKind::Dismissible => dismissible_preview(state),
-        ListKind::Expandable => expandable_preview(state),
+        ListKind::Item => EitherOf4::A(item_preview(state)),
+        ListKind::CardList => EitherOf4::B(card_list_preview(state)),
+        ListKind::Dismissible => EitherOf4::C(dismissible_preview(state)),
+        ListKind::Expandable => EitherOf4::D(expandable_preview(state)),
     }
 }
 
 /// One interactive row — the reference's `_ItemPreview`.
-// erasure: keep match-arm value in preview's four-arm match
-fn item_preview(state: &Knobs) -> AnyView<Knobs> {
+fn item_preview(state: &Knobs) -> impl View<Knobs> {
     let mut row = list_item(state.headline.clone())
         .supporting(state.supporting.clone())
         .on_press(|_: &mut Knobs| {});
@@ -177,12 +176,11 @@ fn item_preview(state: &Knobs) -> AnyView<Knobs> {
     if state.show_trailing {
         row = row.trailing(icon(icons::CHEVRON_RIGHT));
     }
-    any(row)
+    row
 }
 
 /// Three card-backed rows — the reference's `_CardListPreview`.
-// erasure: keep match-arm value in preview's four-arm match
-fn card_list_preview(state: &Knobs) -> AnyView<Knobs> {
+fn card_list_preview(state: &Knobs) -> impl View<Knobs> {
     let rows = (0..PREVIEW_ROWS).map(|index| {
         let mut row =
             list_item(format!("{} {index}", state.headline)).supporting(state.supporting.clone());
@@ -194,13 +192,12 @@ fn card_list_preview(state: &Knobs) -> AnyView<Knobs> {
         }
         row
     });
-    any(card_list_items(rows))
+    card_list_items(rows)
 }
 
 /// Three swipe-to-dismiss rows plus the commit caption — the reference's
 /// `_DismissiblePreview` (see the module docs for both divergences).
-// erasure: keep match-arm value in preview's four-arm match
-fn dismissible_preview(state: &Knobs) -> AnyView<Knobs> {
+fn dismissible_preview(state: &Knobs) -> impl View<Knobs> {
     let theme = ambient_theme();
     let semantic = theme
         .extension::<MaterialTokens>()
@@ -234,10 +231,9 @@ fn dismissible_preview(state: &Knobs) -> AnyView<Knobs> {
         )
     });
 
-    any(rows
-        .child(SizedBox::<Knobs>(None, Some(MaterialSpacing::MD)))
+    rows.child(SizedBox::<Knobs>(None, Some(MaterialSpacing::MD)))
         .child(text(dismissed_caption(state)).style(caption))
-        .cross_axis(CrossAxisAlignment::Stretch))
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// The caption under the dismissible rows: the last commit `on_dismissed`
@@ -253,8 +249,7 @@ fn dismissed_caption(state: &Knobs) -> String {
 
 /// Two disclosure items in accordion mode — the reference's
 /// `_ExpandablePreview`.
-// erasure: keep match-arm value in preview's four-arm match
-fn expandable_preview(state: &Knobs) -> AnyView<Knobs> {
+fn expandable_preview(state: &Knobs) -> impl View<Knobs> {
     let theme = ambient_theme();
     let mut body_style = theme.type_scale.body_medium.clone();
     body_style.color = theme.scheme().on_surface;
@@ -272,14 +267,14 @@ fn expandable_preview(state: &Knobs) -> AnyView<Knobs> {
         .child(tonal_button("Action", |_: &mut Knobs| {}))
         .cross_axis(CrossAxisAlignment::Start);
 
-    any(expandable_list(vec![
+    expandable_list(vec![
         expandable_item(first_header, first_body),
         expandable_item(second_header, text(SYSTEM_UPDATE_BODY).style(body_style)),
     ])
     .expanded(state.expanded.iter().copied())
     .on_toggle(|state: &mut Knobs, index: usize| {
         state.expanded = toggle_expanded(&state.expanded, index, ExpandMode::SingleOpen);
-    }))
+    })
 }
 
 fn controls(state: &Knobs) -> AnyView<Knobs> {

@@ -88,9 +88,9 @@ use std::rc::Rc;
 
 use frust::Theme;
 use frust::authoring::{
-    Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, ErasedArgCallback, EventCtx,
+    Action, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, ErasedArgCallback, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, Role,
-    SemanticsCtx, Size, View, Widget, any, build_child, erase_callback_arg, rebuild_child,
+    SemanticsCtx, Size, View, Widget, build_child, erase_callback_arg, rebuild_child,
     route_event_single, teardown_child, visit_children,
 };
 
@@ -370,18 +370,15 @@ impl<State: 'static> ComboboxTriggerView<State> {
     /// Built on demand rather than stored so the view stays a plain data
     /// description: the field is `input`'s, and this is the one place its props
     /// are assembled.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn field_view(&self) -> AnyView<State> {
+    fn field_view(&self) -> impl View<State> + use<State> {
         let on_change = self.on_query_change.clone();
         // The query and placeholder keep the wrapped baseline `text_input`'s own
         // family: that field has no themed-family seam.
-        any(
-            input::<State, _>(self.field_text(), move |state: &mut State, text| {
-                on_change(state, text);
-            })
-            .placeholder(self.placeholder.clone())
-            .disabled(self.disabled),
-        )
+        input::<State, _>(self.field_text(), move |state: &mut State, text| {
+            on_change(state, text);
+        })
+        .placeholder(self.placeholder.clone())
+        .disabled(self.disabled)
     }
 }
 
