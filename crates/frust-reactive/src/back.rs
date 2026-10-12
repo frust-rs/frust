@@ -123,15 +123,16 @@ type RegisteredProvider = (u64, Box<dyn Fn() -> bool>);
 
 /// Proof-of-registration token returned by [`set_can_pop_provider`].
 ///
-/// **The provider slot is single-registrant: at most one live provider exists
-/// at a time, and a later [`set_can_pop_provider`] call replaces the earlier
-/// registration without warning** (the facade's `BackHandler` is expected to be
-/// constructed once, at the app root). This token is what makes that
-/// replacement safe against out-of-order teardown: [`CanPopRegistration::unregister`]
-/// clears the slot **only if this registration is still the live one**, so a
-/// replaced (stale) handler's `on_cleanup` can never clear a newer handler's
-/// provider out from under it. A future multi-handler/intercept design must
-/// replace this slot with a stack — see the module docs.
+/// **The provider slot is single-registrant by design: at most one live provider
+/// exists at a time, and a later [`set_can_pop_provider`] call replaces the
+/// earlier registration without warning.** The single slot does not limit how
+/// many navigators or `BackHandler`s an app may have: the `frust` facade
+/// registers exactly one provider, a closure that multiplexes over its own
+/// ordered registrant list (arbitration is documented in the `frust::back_glue`
+/// module docs). This token is what makes replacement safe against
+/// out-of-order teardown: [`CanPopRegistration::unregister`] clears the slot
+/// **only if this registration is still the live one**, so a replaced (stale)
+/// registrant's `on_cleanup` can never clear a newer provider out from under it.
 #[must_use = "dropping the registration token without storing it makes the provider impossible to unregister scoped-safely"]
 #[derive(Debug)]
 pub struct CanPopRegistration(u64);
@@ -235,12 +236,14 @@ pub fn set_handles_back(handles: bool) {
 /// unregisters it scoped-safely.
 ///
 /// **Single-registrant invariant:** the slot holds at most ONE provider; a
-/// second call replaces the first silently (last-writer-wins). Constructing
-/// more than one live `BackHandler` is therefore unsupported today — the
-/// replaced handler stops influencing [`handles_back`] immediately, and its
-/// later cleanup no-ops (token-guarded) rather than clearing the newer
-/// registration. A future back-intercept/stacked design
-/// must widen this slot to a stack instead of registering a second provider.
+/// second call replaces the first silently (last-writer-wins). This binds only
+/// DIRECT callers of this function. The `frust` facade registers its
+/// multiplexer here exactly once, and that multiplexer consults every
+/// navigator and `BackHandler` it has wired, so many of each are supported
+/// (arbitration is documented in the `frust::back_glue` module docs). Any
+/// other registration here displaces the facade's multiplexer: it stops
+/// influencing [`handles_back`] immediately, and the displaced registration's
+/// later cleanup no-ops (token-guarded) rather than clearing the newer one.
 ///
 /// # Panics
 ///
