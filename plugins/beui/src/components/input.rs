@@ -76,9 +76,9 @@ use std::time::Duration;
 
 use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
-    Affine, AnyView, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, CursorIcon,
-    EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect,
-    RoundedRect, SemanticsCtx, Shape, Size, View, Widget, any, build_child, rebuild_child,
+    Affine, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, CursorIcon, EventCtx,
+    EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect,
+    RoundedRect, SemanticsCtx, Shape, Size, View, Widget, build_child, rebuild_child,
     route_event_single, teardown_child, visit_children,
 };
 use frust::{Curve, FrameTime, Theme, text_input};
@@ -384,8 +384,7 @@ impl<State: 'static> InputView<State> {
     }
 
     /// The wrapped baseline field, configured with its own chrome suppressed.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn control(&self) -> AnyView<State> {
+    fn control(&self) -> impl View<State> + use<State> {
         let on_change = self.on_change.clone();
         let mut field = text_input(self.value.clone(), move |state: &mut State, text| {
             on_change(state, text)
@@ -399,7 +398,7 @@ impl<State: 'static> InputView<State> {
         if let Some(on_submit) = self.on_submit.clone() {
             field = field.on_submit(move |state: &mut State, text| on_submit(state, text));
         }
-        any(field)
+        field
     }
 }
 

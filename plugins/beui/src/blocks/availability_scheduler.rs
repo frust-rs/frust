@@ -67,12 +67,12 @@ use std::rc::Rc;
 
 use frust::authoring::text::{FontWeight, TextStyle};
 use frust::authoring::{
-    Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
+    Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
-    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget, any,
-    build_child, erase_callback_arg, rebuild_children, route_event, teardown_child, visit_children,
+    PointerPhase, Rect, Role, RoundedRect, SemanticsCtx, Shape, Size, View, Widget, build_child,
+    erase_callback_arg, rebuild_child, route_event, teardown_child, visit_children,
 };
-use frust::{ChildKey, FrameTime, Theme};
+use frust::{FrameTime, Theme};
 
 use crate::components::switch::switch;
 use crate::motion::{Presence, Ramp};
@@ -669,18 +669,15 @@ impl<State: 'static> AvailabilitySchedulerView<State> {
     }
 
     /// One day's switch, reporting the whole week back.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn switch_view(&self, day: DayKey) -> AnyView<State> {
+    fn switch_view(&self, day: DayKey) -> impl View<State> + use<State> {
         let week = self.value.clone();
         let on_change = self.on_change.clone();
         let state = self.value.day(day).clone();
-        any(
-            switch::<State, _>(state.enabled, move |app: &mut State, enabled| {
-                let next = set_enabled(&state, enabled, || format!("{}-n0", day.key()));
-                on_change(app, week.with_day(day, next));
-            })
-            .label(format!("Toggle {} availability", day.label())),
-        )
+        switch::<State, _>(state.enabled, move |app: &mut State, enabled| {
+            let next = set_enabled(&state, enabled, || format!("{}-n0", day.key()));
+            on_change(app, week.with_day(day, next));
+        })
+        .label(format!("Toggle {} availability", day.label()))
     }
 }
 
@@ -842,22 +839,12 @@ impl<State: 'static> View<State> for AvailabilitySchedulerView<State> {
         element.on_copy = self.on_copy_request.as_ref().map(erase_callback_arg);
         element.has_copy = self.on_copy_request.is_some();
 
-        let prev_switches: Vec<AnyView<State>> = DayKey::WEEK
-            .into_iter()
-            .map(|d| prev.switch_view(d))
-            .collect();
-        let next_switches: Vec<AnyView<State>> = DayKey::WEEK
-            .into_iter()
-            .map(|d| self.switch_view(d))
-            .collect();
-        let mut flags = rebuild_children(
-            &prev_switches,
-            &next_switches,
-            &mut element.switches,
-            ctx,
-            |view: &AnyView<State>| view,
-            |_| None::<ChildKey>,
-        );
+        // Seven day switches of one fixed type: no swap or resize is possible,
+        // so each pod rebuilds against its own day's previous view.
+        let mut flags = ChangeFlags::NONE;
+        for (day, pod) in DayKey::WEEK.into_iter().zip(element.switches.iter_mut()) {
+            flags |= rebuild_child(&prev.switch_view(day), &self.switch_view(day), pod, ctx);
+        }
 
         if prev.value != self.value {
             element.reconcile(&self.value);

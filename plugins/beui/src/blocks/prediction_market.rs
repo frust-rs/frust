@@ -65,11 +65,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    Action, Affine, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color,
-    ErasedArgCallback, ErasedCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx,
-    PaintScene, Point, PointerEvent, PointerPhase, Rect, Role, SemanticsCtx, Size, Vec2, View,
-    Widget, any, build_child, erase_callback, erase_callback_arg, rebuild_child,
-    route_event_single, teardown_child, text::TextStyle, visit_children,
+    Action, Affine, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedArgCallback,
+    ErasedCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
+    PointerEvent, PointerPhase, Rect, Role, SemanticsCtx, Size, Vec2, View, Widget, build_child,
+    erase_callback, erase_callback_arg, rebuild_child, route_event_single, teardown_child,
+    text::TextStyle, visit_children,
 };
 use frust::{FrameTime, Theme};
 
@@ -615,8 +615,7 @@ impl<State: 'static> PredictionMarketView<State> {
 
     /// The payout ticker's own view — a [`crate::components::number`] in roll
     /// mode, timed like upstream's `NumberTicker`.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn ticker_view(&self) -> AnyView<State> {
+    fn ticker_view(&self) -> impl View<State> + use<State> {
         let outcome = self
             .outcomes
             .iter()
@@ -632,14 +631,14 @@ impl<State: 'static> PredictionMarketView<State> {
             )
             .payout
         });
-        any(number::<State>(payout)
+        number::<State>(payout)
             .mode(NumberMode::Roll)
             .group(true)
             .prefix("$")
             .duration(MARKET_TICKER)
             // `stagger={0}`: the columns move together, not in cascade.
             .stagger(Duration::ZERO)
-            .size(MARKET_TICKER_SIZE))
+            .size(MARKET_TICKER_SIZE)
     }
 }
 

@@ -114,7 +114,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    Affine, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
+    Affine, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
     PointerPhase, Rect, Role, SemanticsCtx, Size, View, Widget, any, build_child,
     erase_callback_arg, rebuild_child, route_event_single, teardown_child,
@@ -517,8 +517,7 @@ impl<State: 'static> TableView<State> {
     ///
     /// `enter` is passed to every row built on this pass — see the
     /// [module docs](self) on why only a count change stages an entrance.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn body(&self, enter: bool) -> AnyView<State> {
+    fn body(&self, enter: bool) -> impl View<State> + use<State> {
         let columns = Rc::clone(&self.columns);
         let cell = Rc::clone(&self.cell);
         let selected = self.selected.clone();
@@ -555,7 +554,7 @@ impl<State: 'static> TableView<State> {
                 row_height * TABLE_END_REACHED_ROWS,
             );
         }
-        any(list)
+        list
     }
 }
 
