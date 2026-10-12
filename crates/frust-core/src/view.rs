@@ -298,9 +298,9 @@ impl<State: 'static, V: View<State>> ErasedView<State> for V {
 /// Erasure is idempotent, and the generic builders (`child`, tuples such as
 /// `Column((a, b))`, ..) accept any [`View`] and erase internally, so app code
 /// needs `AnyView` only for stored views, branches of three or more arms, and
-/// genuinely heterogeneous dynamic lists (see [`any`]). A two-arm branch is
-/// written with `either(..)`, which keeps both arms statically typed and does
-/// not erase.
+/// genuinely heterogeneous dynamic lists (see [`any`]). Branches are written
+/// with `either(..)` (two arms) or `EitherOf3`..`EitherOf8` (three to eight),
+/// which keep every arm statically typed and do not erase.
 pub struct AnyView<State: 'static> {
     inner: Box<dyn ErasedView<State>>,
 }
@@ -335,11 +335,11 @@ impl<State: 'static> AnyView<State> {
 ///
 /// Because of that, writing `any(..)` around an argument is redundant in
 /// 0.6: the generic builders (`child`, tuples such as `Column((a, b))`, ..)
-/// accept any [`View`] and erase internally. `either(..)` is the no-erasure way
-/// to write a two-arm branch: it keeps both arms statically typed. Reach for
-/// `any` only to *store* a view (a struct field, a `Vec` of builders), for a
-/// branch with three or more arms, or for a genuinely heterogeneous dynamic
-/// list.
+/// accept any [`View`] and erase internally. `either(..)` and
+/// `EitherOf3`..`EitherOf8` are the no-erasure way to write a branch of two to
+/// eight arms: they keep every arm statically typed. Reach for `any` only to
+/// *store* a view (a struct field, a `Vec` of builders), for a branch with more
+/// than eight arms, or for a genuinely heterogeneous dynamic list.
 pub fn any<State: 'static, V: View<State>>(view: V) -> AnyView<State> {
     AnyView::new(view)
 }

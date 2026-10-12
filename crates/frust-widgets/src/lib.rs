@@ -79,7 +79,11 @@ pub use drag::{
     HIGHLIGHT_FALLBACK, ReorderableListView, SourceFeedback, auto_scroll_zone, drag_target,
     draggable, reorderable_list,
 };
-pub use either::{Either, EitherWidget, either};
+pub use either::{
+    Either, EitherOf3, EitherOf3Widget, EitherOf4, EitherOf4Widget, EitherOf5, EitherOf5Widget,
+    EitherOf6, EitherOf6Widget, EitherOf7, EitherOf7Widget, EitherOf8, EitherOf8Widget,
+    EitherWidget, either,
+};
 pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,
     column, flexible, inflexible, keyed, row,
