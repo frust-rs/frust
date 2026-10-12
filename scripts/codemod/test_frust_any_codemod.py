@@ -203,6 +203,15 @@ class T1Test(unittest.TestCase):
         self.assert_noted("use frust::*;\nuse crate::ui::*;\nfn f() -> V { card(any(x)) }\n",
                           "non-frust glob import")
 
+    def test_type_name_callee_glob_origin(self):
+        self.assert_noted("use crate::ui::*;\nfn f() -> V { ScrollView::new(any(x)) }\n",
+                          "`ScrollView` may come from a non-frust glob import")
+        self.assert_noted("use frust::*;\nuse crate::ui::*;\nfn f() -> V { ScrollView::new(any(x)) }\n",
+                          "`ScrollView` may come from a non-frust glob import")
+        for pre in ("use frust::*;\n", ""):
+            src = pre + "fn f() -> V { ScrollView::new(any(x)) }\n"
+            self.assertIn("ScrollView::new(x)", run(src), src)
+
     def test_qualified_app_path_untouched(self):
         for src in ("crate::ui::panel(any(x))", "super::card(any(x))", "self::ui::card(any(x))",
                     "ui::card(any(x))", "crate::nav::Route::new(\"/\", || any(home()))"):
@@ -1254,7 +1263,8 @@ class T7Test(unittest.TestCase):
         res = run7("use frust::{AnyView, View, any};\n"
                    "fn f(a: &u8, b: impl Into<u8>) -> AnyView<S> { any(t()) }\n", edition="2018")
         self.assertEqual(res.candidates, [])
-        self.assertIn("cannot name an `impl Trait` parameter", res.notes[0][1])
+        self.assertIn("a `use<..>` capture list cannot name an argument-position `impl Trait` parameter",
+                      res.notes[0][1])
 
     def test_edition_2024_borrowing_helpers_emit_type_only_use(self):
         res = run7("""\
@@ -1274,7 +1284,8 @@ class T7Test(unittest.TestCase):
         res = run7("use frust::{AnyView, View, any};\n"
                    "fn f(a: &u8, b: impl Into<u8>) -> AnyView<S> { any(t()) }\n", edition="2024")
         self.assertEqual(res.candidates, [])
-        self.assertIn("cannot name an `impl Trait` parameter", res.notes[0][1])
+        self.assertIn("a `use<..>` capture list cannot name an argument-position `impl Trait` parameter",
+                      res.notes[0][1])
 
     def test_let_and_return_collapsed(self):
         res = run7("""\
@@ -1286,6 +1297,35 @@ class T7Test(unittest.TestCase):
             """)
         self.assertIn("fn body<S: 'static>() -> impl View<S> {\n    column(a())\n}", res.text)
         self.assertNotIn("let v", res.text)
+
+    def test_let_and_return_skipped_before_2024(self):
+        src = """\
+            use frust::{AnyView, View, any, column};
+            fn body<S: 'static>() -> AnyView<S> {
+                let v = column(a());
+                any(v)
+            }
+            fn plain<S: 'static>() -> AnyView<S> { any(column(a())) }
+            """
+        for ed in ("2015", "2018", "2021"):
+            res = run7(src, edition=ed)
+            self.assertIn("let v = column(a());", res.text, ed)
+            self.assertIn("fn body<S: 'static>() -> AnyView<S>", res.text, ed)
+            self.assertIn("fn plain<S: 'static>() -> impl View<S> {", res.text, ed)
+            self.assertEqual(len(res.notes), 1, ed)
+            self.assertIn("a pre-2024 crate keeps tail-expression temporaries alive past locals; "
+                          "collapse `let x = ..; any(x)` by hand", res.notes[0][1])
+        res = run7(src, edition="2024")
+        self.assertIn("fn body<S: 'static>() -> impl View<S> {\n    column(a())\n}", res.text)
+        self.assertEqual(res.notes, [])
+
+    def test_t7_help_is_edition_independent(self):
+        with open(cm.__file__, encoding="utf-8") as fh:
+            ap_src = fh.read()
+        i = ap_src.index('"--t7"')
+        help_text = ap_src[i:ap_src.index('"--t7-visible"', i)]
+        self.assertNotIn("pre-2024", help_text)
+        self.assertIn("any edition", help_text)
 
     def test_let_and_return_leaves_other_shapes(self):
         for stmt, tail in (("let mut v = column(a());", "any(v)"),

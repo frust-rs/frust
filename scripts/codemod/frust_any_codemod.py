@@ -85,6 +85,9 @@ T7 tail: when the unwrapped tail is a plain identifier `x` and the statement
 right before it is `let x = <expr>;` (no `mut`, type annotation, pattern or
 attribute, no comment in between), the let is dropped and `<expr>` is the
 tail, so `clippy::let_and_return` does not fire.
+Before edition 2024 a tail expression's temporaries outlive the fn's locals,
+so moving `<expr>` into the tail can fail E0597: such a fn is skipped with a
+note instead (collapse it by hand).
 
 T7 exclusions — listed by `--check --t7` as `<bucket> excluded: <fn> (<why>)`,
 never rewritten, never counted as candidates (they do not affect the exit
@@ -1127,6 +1130,8 @@ def _origin_skip(s: Source, key: str, qual: list, k: int):
         hit = s.decl_for(ty, pos)
         if hit and not _leaf_frust(hit[1], ty):
             return f"`{ty}` is imported from a non-frust path"
+        if not hit and _glob_origin(s, pos) in ("foreign", "mixed"):
+            return f"`{ty}` may come from a non-frust glob import"
         return None
     if qual:
         return None if _frust_origin(qual[0]) else ""
@@ -2573,8 +2578,14 @@ def _t7(s: Source, ctx: T7Ctx, cands: list, notes: list) -> None:
         _, eo, ta, tb = shape
         uses = _t7_captures(s, f, impl_gen, ctx.edition)
         if uses is None:
-            notes.append((line, "note: T7 skipped: an edition-2021 capture list cannot name "
-                                "an `impl Trait` parameter"))
+            notes.append((line, "note: T7 skipped: a `use<..>` capture list cannot name "
+                                "an argument-position `impl Trait` parameter"))
+            continue
+        lr = _t7_let_and_return(s, f, ta, s.inner_text(eo))
+        if lr is not None and int(ctx.edition) < 2024:
+            notes.append((line, "note: T7 skipped: a pre-2024 crate keeps tail-expression "
+                                "temporaries alive past locals; collapse `let x = ..; any(x)` "
+                                "by hand"))
             continue
         a, b = f.ret
         prefix = s.src[s.t[a].start:s.t[f.av].start]
@@ -2585,7 +2596,6 @@ def _t7(s: Source, ctx: T7Ctx, cands: list, notes: list) -> None:
                 continue
         ret = "impl " + prefix + "View" + s.src[s.t[f.av + 1].start:s.t[b].end] + uses
         inner = s.inner_text(eo)
-        lr = _t7_let_and_return(s, f, ta, inner)
         if lr is None:
             tail_edit = Edit(s.t[ta].start, s.t[tb].end, inner)
         else:   # `let x = E; any(x)` -> `E`: no clippy::let_and_return
@@ -3172,8 +3182,9 @@ def main(argv=None) -> int:
                          "(or bind the vec to a local, or use the fluent builder)")
     ap.add_argument("--t7", action="store_true",
                     help="opt in to rule T7: a fn returning AnyView<S> whose body ends in one "
-                         "erasure call returns impl View<S> instead (+ use<..> only in a "
-                         "pre-2024 crate when the fn has a lifetime or reference parameter); "
+                         "erasure call returns impl View<S> instead (+ a type-only use<..> in "
+                         "any edition when the fn or its impl has a lifetime parameter or the "
+                         "fn takes an elided reference); "
                          "trait fns, multi-arm bodies, recursive fns or fns used as values, and "
                          "bare pub fns of crates/ and plugins/ library sources, and fns with any "
                          "visibility modifier (pub(crate), pub(super), pub(in ..), or pub in an "
