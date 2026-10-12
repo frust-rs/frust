@@ -30,11 +30,10 @@
 use std::rc::Rc;
 
 use frust::authoring::{
-    Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
-    ErasedCallback, EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx,
-    PaintScene, Point, PointerPhase, Role, SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View,
-    Widget, any, build_child, erase_callback, rebuild_child, route_event_single, teardown_child,
-    visit_children,
+    Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, ErasedCallback,
+    EventCtx, EventResult, InputEvent, Key, LayoutCtx, NamedKey, PaintCtx, PaintScene, Point,
+    PointerPhase, Role, SemanticsCtx, Size, ThemeTextColor, ThemeTextType, View, Widget,
+    build_child, erase_callback, rebuild_child, route_event_single, teardown_child, visit_children,
 };
 use frust::{Theme, text};
 
@@ -187,18 +186,17 @@ impl<State: 'static> NativeSelectView<State> {
     /// The label's text child: `text-sm` in the live theme's `BodyMedium`
     /// family, `foreground` for a selected option and `muted-foreground` for the
     /// placeholder.
-    // erasure: keep built into a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
-    fn label_view(&self) -> AnyView<State> {
+    fn label_view(&self) -> impl View<State> + use<State> {
         let (label, is_placeholder) = self.label();
         let role = if is_placeholder {
             ThemeTextColor::OnSurfaceVariant
         } else {
             ThemeTextColor::OnSurface
         };
-        any(text(label)
+        text(label)
             .size(style::TEXT_SM as f32)
             .themed_family(ThemeTextType::BodyMedium)
-            .themed_role(role))
+            .themed_role(role)
     }
 }
 

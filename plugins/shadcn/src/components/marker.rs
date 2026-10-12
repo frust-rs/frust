@@ -84,12 +84,11 @@ impl<State: 'static> MarkerView<State> {
         self
     }
 
-    // erasure: keep built into a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
-    fn content_view(&self) -> AnyView<State> {
-        any(text(self.content.clone())
+    fn content_view(&self) -> impl View<State> + use<State> {
+        text(self.content.clone())
             .size(style::TEXT_SM as f32)
             .themed_family(ThemeTextType::BodyMedium)
-            .themed_role(ThemeTextColor::OnSurfaceVariant))
+            .themed_role(ThemeTextColor::OnSurfaceVariant)
     }
 }
 

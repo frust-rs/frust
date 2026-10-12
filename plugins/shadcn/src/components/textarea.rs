@@ -29,9 +29,9 @@
 use std::rc::Rc;
 
 use frust::authoring::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, SemanticsCtx, Size, View,
-    Widget, any, build_child, rebuild_child, route_event_single, teardown_child, visit_children,
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx, EventResult, InputEvent,
+    LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, SemanticsCtx, Size, View, Widget,
+    build_child, rebuild_child, route_event_single, teardown_child, visit_children,
 };
 use frust::{Theme, text_input};
 
@@ -125,20 +125,17 @@ impl<State: 'static> TextareaView<State> {
     }
 
     /// The wrapped baseline field in multi-line mode, its own chrome suppressed.
-    // erasure: keep built into a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
-    fn control(&self) -> AnyView<State> {
+    fn control(&self) -> impl View<State> + use<State> {
         let on_change = self.on_change.clone();
-        any(
-            text_input(self.value.clone(), move |state: &mut State, text| {
-                on_change(state, text)
-            })
-            .placeholder(self.placeholder.clone())
-            .multiline(self.max_visible_lines)
-            .enabled(!self.disabled)
-            .padding(style::spacing(3.0), style::spacing(2.0))
-            .border_width(0.0)
-            .corner_radius(ShadcnRadius::shadcn().md),
-        )
+        text_input(self.value.clone(), move |state: &mut State, text| {
+            on_change(state, text)
+        })
+        .placeholder(self.placeholder.clone())
+        .multiline(self.max_visible_lines)
+        .enabled(!self.disabled)
+        .padding(style::spacing(3.0), style::spacing(2.0))
+        .border_width(0.0)
+        .corner_radius(ShadcnRadius::shadcn().md)
     }
 }
 
