@@ -215,9 +215,10 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   `validate_feature_token_charset`, cargo's own `[A-Za-z0-9_.-]+`, optionally `<pkg>/`-prefixed;
   `crates/frust-cli/src/cli.rs`) and then refused outright if any token would enable the in-app
   devtools listener (`refuse_devtools_features`, `crates/frust-cli/src/commands/build.rs`;
-  `is_devtools_token` matches `devtools`, `frust/devtools`, any `*/devtools`, plus a one-level
-  app-manifest alias via `cargo_manifest::feature_enables_devtools`, which checks the alias through
-  either facade key — `frust/devtools` or `<key>/devtools`) — release artifacts must keep the
+  `is_devtools_token` matches `devtools`, `hotpatch` (it implies devtools), any `*/devtools` or
+  `*/hotpatch`, plus a one-level app alias via `cargo_manifest::feature_enables_devtools` under
+  `frust` or the cargo-resolved key, `?/` too, failing closed to any key when cargo cannot resolve
+  it) — release artifacts must keep the
   listener compiled out (see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)'s Trust model);
   debug/profile lanes and `frust run` skip both checks. The surviving list is threaded into
   `frust-drive::cargo_manifest::resolve_release_features(.., extra)`, which appends it strictly
