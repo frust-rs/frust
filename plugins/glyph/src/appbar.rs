@@ -840,7 +840,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AppBarWidget {
         let interactive = face_views(self)
             .iter()
-            .map(|v| frust::authoring::build_child(v, ctx))
+            .map(|v| frust::authoring::build_child(*v, ctx))
             .collect();
         let selection_present = self.selection.is_some();
         let large_present = self.large.is_some();
@@ -980,7 +980,7 @@ impl<State: 'static> View<State> for AppBarView<State> {
             }
             element.interactive = face_views(self)
                 .iter()
-                .map(|v| frust::authoring::build_child(v, ctx))
+                .map(|v| frust::authoring::build_child(*v, ctx))
                 .collect();
             element.selection_present = selection_present;
             element.has_leading = !selection_present && self.leading.is_some();

@@ -207,7 +207,7 @@ impl<State: 'static> View<State> for ToastView {
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ToastWidget {
         ToastWidget {
-            message: frust::authoring::build_child::<State>(
+            message: frust::authoring::build_child::<State, _>(
                 &message_view::<State>(self.message.clone()),
                 ctx,
             ),
@@ -645,7 +645,7 @@ impl ToastHostWidget {
         if self.active.is_none()
             && let Some(message) = self.queue.get(self.next_index).cloned()
         {
-            let child = frust::authoring::build_child::<State>(
+            let child = frust::authoring::build_child::<State, _>(
                 &any::<State, _>(toast(message.clone())),
                 ctx,
             );
