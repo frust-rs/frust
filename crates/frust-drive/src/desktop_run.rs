@@ -60,8 +60,9 @@ pub struct DesktopPlan {
 ///
 /// Spawns no build: the only I/O is resolving the facade key from `root`'s
 /// manifest ([`FacadeKey::resolve`]; a `root` without a `Cargo.toml` answers
-/// the default `frust` key). A manifest naming the facade under two keys is
-/// an error ([`FacadeKeyError::Ambiguous`]), never a silent fallback. See
+/// the default `frust` key). A key that cannot be resolved (the facade under
+/// two keys, or under a key no cargo feature can spell) is an error
+/// ([`FacadeKeyError`]), never a silent fallback. See
 /// [`spawn_desktop_session`] for the side-effecting wrapper, and
 /// [`desktop_plan_with_features`] for the caller that resolved its own
 /// feature list first.
@@ -82,10 +83,10 @@ pub fn desktop_plan(root: &Path, info: &BuildInfo) -> Result<DesktopPlan, Facade
 /// here is byte-identical to [`desktop_plan`].
 ///
 /// `features` are canonical (`frust/<feature>`); each is mapped to the app's
-/// facade key at this argv boundary. An unresolvable key (an app naming the
-/// facade under two keys, [`FacadeKeyError`]) is returned as an error so the
-/// caller can report it, rather than handing cargo a spelling it cannot
-/// resolve.
+/// facade key at this argv boundary. An unresolvable key (the facade under two
+/// keys, or under one no feature can spell: [`FacadeKeyError`]) is returned as
+/// an error so the caller can report it, rather than handing cargo a spelling
+/// it cannot resolve.
 pub fn desktop_plan_with_features(
     root: &Path,
     info: &BuildInfo,
@@ -165,8 +166,8 @@ pub(crate) fn desktop_env(info: &BuildInfo) -> Vec<(String, String)> {
 ///
 /// The plan's whole shape is spawned, environment included — a caller that got
 /// the args but not the env would be running a different preview than the one
-/// this module resolved. A manifest naming the facade under two keys is an
-/// error here ([`desktop_plan_with_features`]), before anything spawns.
+/// this module resolved. An unresolvable facade key is an error here
+/// ([`desktop_plan_with_features`]), before anything spawns.
 pub fn spawn_desktop_session(
     runner: &dyn ProcessRunner,
     root: &Path,

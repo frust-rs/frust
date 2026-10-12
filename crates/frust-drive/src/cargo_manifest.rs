@@ -106,6 +106,21 @@ fn devtools_dependency(entry: &str) -> Option<&str> {
         .then(|| dep.strip_suffix('?').unwrap_or(dep))
 }
 
+/// `token` as a name in the app's own `[features]` table: cargo also accepts
+/// `<package>/<feature>` for the package being built, so `app/full` names the
+/// app's `full` when the app's `[package] name` is `app`. Any other token is
+/// returned unchanged.
+fn own_feature<'a>(doc: &DocumentMut, token: &'a str) -> &'a str {
+    let package = doc
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(|name| name.as_str());
+    match token.split_once('/') {
+        Some((pkg, feature)) if Some(pkg) == package => feature,
+        _ => token,
+    }
+}
+
 /// [`feature_enables_devtools`] resolving the facade key through `runner`.
 fn feature_enables_devtools_with(
     runner: &dyn ProcessRunner,
@@ -116,6 +131,7 @@ fn feature_enables_devtools_with(
     let Some(doc) = read_app_manifest(project_root) else {
         return false; // fail closed: missing/unreadable/unparseable
     };
+    let feature = own_feature(&doc, feature);
     let Some(enabled) = doc
         .get("features")
         .and_then(|features| features.as_table_like())
@@ -279,6 +295,20 @@ mod tests {
             "[package]\nname = \"app\"\n\n[features]\nfull = [\"frust/devtools\"]\n",
         );
         assert!(feature_enables_devtools(&dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// cargo accepts `<package>/<feature>` for the package being built, so
+    /// `--features app/full` selects the app's own `full` alias.
+    #[test]
+    fn feature_enables_devtools_follows_the_app_package_prefix() {
+        let dir = unique_dir("enables-devtools-pkg-prefix");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[features]\nfull = [\"frust/devtools\"]\n",
+        );
+        assert!(feature_enables_devtools(&dir, "app/full"));
+        assert!(!feature_enables_devtools(&dir, "other/full"));
         let _ = fs::remove_dir_all(&dir);
     }
 

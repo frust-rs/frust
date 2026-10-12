@@ -18,10 +18,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `hotpatch` features (`hotpatch`, `<key>/hotpatch`, `<key>?/hotpatch`), which compile the devtools
   listener in through the shells; when cargo cannot report the dependency key, or the app keys the
   facade under a name no feature can spell, the app-alias check fails closed and counts any
-  `<dep>/devtools` or `<dep>/hotpatch` (601840eb).
+  `<dep>/devtools` or `<dep>/hotpatch`, and `<app-package>/<alias>` is checked like `<alias>`
+  (601840eb).
 - Codemod (`scripts/codemod/frust_any_codemod.py`): the name-list callees and the
   `column`/`row`/`stack` builders resolve by import origin (a strict `frust*` path head), so an
-  app fn or an app-imported builder that shares a listed name is skipped with a note (412dc49a);
+  app fn or an app-imported builder that shares a listed name is skipped with a note, as is a
+  `Type::name` callee whose `Type` can only come from a non-frust glob import (412dc49a, 998bc8cf);
   non-private T7 helpers land in a T7-visible bucket and are rewritten only with `--t7-visible`, a
   `return` inside a closure is not an early return, a first-body-line keep marker that rustfmt
   moved is fn-scoped for T7 and rule U (40b6f35f), and a helper whose same-file call is taken by
@@ -30,9 +32,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   parameter or an elided reference parameter, in any edition, so a stored borrow of a temporary no
   longer fails E0716; an argument-position `impl Trait` still skips with a note. T7-ref counts a
   use in another file only when it is path-qualified to the helper's module or imported from it,
-  `let x = <expr>; any(x)` tails collapse to `<expr>` (no `clippy::let_and_return`), and "taken by
-  reference" also covers a same-file call bound by an untyped `let` and later borrowed as `&x` or
-  `&mut x` in the same block (bd02b8b7, f3e36a12).
+  `let x = <expr>; any(x)` tails collapse to `<expr>` (no `clippy::let_and_return`) in edition-2024
+  crates while an earlier edition skips that helper with a note (tail-expression temporaries
+  outlive locals there), and "taken by reference" also covers a same-file call bound by an untyped
+  `let` and later borrowed as `&x` or `&mut x` in the same block (bd02b8b7, f3e36a12, 998bc8cf).
 - Codemod: a local fn shadows a builder only in its own module and descendants, so a `fn row` in a
   nested `#[cfg(test)] mod` no longer blocks T2/T3 in the parent; a reasoned `// erasure: keep`
   marker on an accumulator `let` of `AnyView`s covers that vec's `push`/`insert`/`extend` calls in
@@ -42,6 +45,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- **API (tooling crates, so the next release is a minor version):** `frust-drive`'s
+  `desktop_run::desktop_plan` and `desktop_plan_with_features` return
+  `Result<DesktopPlan, FacadeKeyError>` instead of falling back to the `frust/` feature spelling,
+  and `try_desktop_plan_with_features` is gone; `frust-drive`'s `DesktopBuildError` and
+  `frust-tui`'s `LaunchError` gain a `FacadeKey` variant (neither enum is `#[non_exhaustive]`), so
+  an unresolvable facade key is reported as itself rather than as a cargo spawn or feature failure
+  (d9589c77).
 - Migration guidance: use `Either` or `either(..)` only when the two arms have different concrete
   view types. When both arms produce the same type, build it conditionally (compute the differing
   props or children in an `if`, construct once): `Either` reconciles a Left/Right swap as a

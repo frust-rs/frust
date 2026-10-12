@@ -327,8 +327,8 @@ pub(crate) fn refresh_platform_wiring(
 /// go through, so `frust run` and a `frust-tui` desktop session cannot drift
 /// apart. This front-end contributes exactly one thing on top: the
 /// release-lean preflight's resolved feature list
-/// (`desktop_plan_with_features`), and an unresolvable facade key (the app
-/// naming the facade under two keys) fails the run with that error.
+/// (`desktop_plan_with_features`), and an unresolvable facade key (two keys,
+/// or one no cargo feature can spell) fails the run with that error.
 ///
 /// What the plan carries is the resolved [`BuildInfo`] in full (verified
 /// pre-extraction gap — the old fallback ignored `--profile` and dropped

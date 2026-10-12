@@ -423,8 +423,9 @@ pub enum DesktopBuildError {
     ExecutableIdentityMismatch { expected: String, found: String },
     #[error("spawning `cargo {args}`: {reason}")]
     CargoSpawn { args: String, reason: String },
-    /// The app's manifest names the frust facade under more than one key, so
-    /// the build's cargo features have no single spelling.
+    /// The app's facade key cannot be resolved — the manifest names the frust
+    /// facade under more than one key, or under a key no cargo feature can
+    /// spell — so the build's cargo features have no single valid spelling.
     #[error("resolving the app's frust dependency: {0}")]
     FacadeKey(#[from] crate::facade_key::FacadeKeyError),
     #[error("`cargo {args}` failed:\n{tail}")]

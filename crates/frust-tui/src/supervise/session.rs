@@ -415,8 +415,10 @@ pub enum LaunchError {
          (TUI2-04 wires the device pipeline)"
     )]
     DeviceLaunchUnwired(String),
-    /// The project's manifest names the frust facade under more than one
-    /// key, so the desktop plan's cargo features have no single spelling.
+    /// The project's facade key cannot be resolved — the manifest names the
+    /// frust facade under more than one key, or under a key no cargo feature
+    /// can spell — so the desktop plan's cargo features have no single valid
+    /// spelling.
     #[error("resolving the app's frust dependency: {0}")]
     FacadeKey(#[from] FacadeKeyError),
 }
