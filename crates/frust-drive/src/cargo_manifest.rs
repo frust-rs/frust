@@ -16,7 +16,7 @@ use std::path::Path;
 use toml_edit::DocumentMut;
 
 use crate::build_info::BuildMode;
-use crate::facade_key::{FacadeKey, FacadeKeyError};
+use crate::facade_key::{FacadeKey, FacadeKeyError, KeySource};
 use crate::process::{ProcessRunner, RealProcessRunner};
 
 /// The one-line migration a legacy app needs to opt into release-lean log
@@ -57,29 +57,53 @@ pub fn declares_feature(project_root: &Path, feature: &str) -> bool {
 }
 
 /// Whether the app's own `[features]` table defines `feature` as an alias
-/// that directly enables the facade's `devtools` — e.g. `full =
+/// that directly compiles the facade's devtools listener in — e.g. `full =
 /// ["frust/devtools"]`, or `full = ["frust-ui/devtools"]` in an app whose
-/// facade dependency is keyed `frust-ui` (any key [`FacadeKey::resolve`]
-/// reports counts; an ambiguous manifest counts every key it names).
-/// Deliberately cheap and non-transitive: only a feature whose *own*
-/// enabled-list literally names `"frust/devtools"` or `"<key>/devtools"`
-/// counts, with no recursive feature-graph walk through other app-defined
-/// aliases. The key is resolved only when the list names some other
-/// `<dep>/devtools`, so the common case spawns no cargo.
+/// facade dependency is keyed `frust-ui`. The facade's `hotpatch` counts as
+/// devtools (it enables the shells' `hotpatch`, which each enable
+/// `devtools`), and cargo's weak-dependency spelling `<dep>?/<feature>`
+/// counts as `<dep>/<feature>` (the facade is always an active dependency).
+///
+/// So an entry of the enabled-list counts when, after stripping one `?`
+/// before the slash, it is `<key>/devtools` or `<key>/hotpatch` with `<key>`
+/// the canonical `frust` (always) or a key [`FacadeKey::resolve`] reports
+/// through cargo (an ambiguous answer counts every key it names).
+/// Deliberately cheap and non-transitive: only the feature's *own*
+/// enabled-list is read, with no recursive feature-graph walk through other
+/// app-defined aliases. The key is resolved only when the list names some
+/// other `<dep>/devtools` or `<dep>/hotpatch`, so the common case spawns no
+/// cargo.
 ///
 /// Used by `frust build`'s release lanes
 /// (`frust-cli::commands::build::refuse_devtools_features`) alongside the
-/// literal `devtools`/`frust/devtools`/`*/devtools` token checks, to catch
-/// an app-defined feature name that itself turns the devtools listener on.
+/// literal `devtools`/`hotpatch`/`*/devtools`/`*/hotpatch` token checks, to
+/// catch an app-defined feature name that itself turns the devtools listener
+/// on.
 ///
 /// **Fails closed** — the opposite of [`declares_feature`]'s courtesy
 /// fail-open stance — since this function exists purely to widen a security
-/// refusal: a missing or unparseable manifest must never be read as "this
-/// token is safe", it just means this extra (best-effort, one-level) check
-/// has nothing to add; the literal-spelling checks alongside it remain the
-/// actual defense.
+/// refusal. When the key came from the manifest fallback (cargo could not
+/// answer, so a workspace-inherited rename is invisible) or the manifest
+/// names the facade under a key no feature can spell, *any* `<dep>/devtools`
+/// or `<dep>/hotpatch` spelling counts. A missing or unparseable manifest is
+/// never read as "this token is safe"; it just means this extra
+/// (best-effort, one-level) check has nothing to add, and the literal-spelling
+/// checks alongside it remain the actual defense.
 pub fn feature_enables_devtools(project_root: &Path, feature: &str) -> bool {
     feature_enables_devtools_with(&RealProcessRunner, project_root, feature)
+}
+
+/// The facade features that compile the devtools listener in: `devtools`
+/// itself, and `hotpatch`, which enables it through the shells.
+const DEVTOOLS_FEATURES: [&str; 2] = ["devtools", "hotpatch"];
+
+/// `entry`'s dependency key when it spells `<dep>/devtools`,
+/// `<dep>/hotpatch` or a weak `<dep>?/…` form of either; `None` otherwise.
+fn devtools_dependency(entry: &str) -> Option<&str> {
+    let (dep, feature) = entry.split_once('/')?;
+    DEVTOOLS_FEATURES
+        .contains(&feature)
+        .then(|| dep.strip_suffix('?').unwrap_or(dep))
 }
 
 /// [`feature_enables_devtools`] resolving the facade key through `runner`.
@@ -88,7 +112,7 @@ fn feature_enables_devtools_with(
     project_root: &Path,
     feature: &str,
 ) -> bool {
-    const CANONICAL: &str = "frust/devtools";
+    const CANONICAL_KEY: &str = "frust";
     let Some(doc) = read_app_manifest(project_root) else {
         return false; // fail closed: missing/unreadable/unparseable
     };
@@ -100,19 +124,27 @@ fn feature_enables_devtools_with(
     else {
         return false;
     };
-    let names: Vec<&str> = enabled.iter().filter_map(|value| value.as_str()).collect();
-    if names.contains(&CANONICAL) {
-        return true;
-    }
-    if !names.iter().any(|name| name.ends_with("/devtools")) {
+    let deps: Vec<&str> = enabled
+        .iter()
+        .filter_map(|value| value.as_str())
+        .filter_map(devtools_dependency)
+        .collect();
+    if deps.is_empty() {
         return false;
     }
-    let keys = match FacadeKey::resolve_with(runner, project_root) {
-        Ok(key) => vec![key],
-        Err(FacadeKeyError::Ambiguous { keys }) => keys.into_iter().map(FacadeKey::new).collect(),
+    if deps.contains(&CANONICAL_KEY) {
+        return true;
+    }
+    let keys = match FacadeKey::resolve_with_source(runner, project_root) {
+        (_, KeySource::ManifestFallback) | (Err(FacadeKeyError::InvalidKey { .. }), _) => {
+            return true; // fail closed: the key may be wrong or unspellable
+        }
+        (Ok(key), _) => vec![key],
+        (Err(FacadeKeyError::Ambiguous { keys }), _) => {
+            keys.into_iter().map(FacadeKey::new).collect()
+        }
     };
-    keys.iter()
-        .any(|key| names.contains(&key.map(CANONICAL).as_str()))
+    keys.iter().any(|key| deps.contains(&key.as_str()))
 }
 
 /// Resolves the cargo `--features` a `mode` build selects for the app rooted
@@ -165,7 +197,7 @@ pub fn resolve_release_features(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::FakeProcessRunner;
+    use crate::process::{FakeProcessRunner, Output};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -272,6 +304,33 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A runner whose `cargo metadata --no-deps` for `dir` names `deps` as
+    /// the root package's dependencies — the cargo-resolved key path.
+    fn metadata_runner(dir: &Path, deps: &str) -> FakeProcessRunner {
+        let manifest = serde_json::to_string(&dir.join("Cargo.toml")).unwrap();
+        FakeProcessRunner::new().with(
+            format!(
+                "cargo metadata --format-version 1 --no-deps --manifest-path {}",
+                dir.join("Cargo.toml").display()
+            ),
+            Output {
+                success: true,
+                stdout: format!(
+                    r#"{{"packages":[{{"name":"app","version":"0.1.0","id":"app",
+                        "manifest_path":{manifest},"dependencies":[{deps}]}}],
+                        "workspace_members":["app"],"resolve":null,"version":1}}"#
+                ),
+                stderr: String::new(),
+            },
+        )
+    }
+
+    const FRUST_UI_UNRENAMED: &str =
+        r#"{"name":"frust-ui","rename":null,"kind":null,"target":null}"#;
+    const FRUST_UI_AS_FRUST: &str =
+        r#"{"name":"frust-ui","rename":"frust","kind":null,"target":null}"#;
+    const FRUST_UI_AS_UI: &str = r#"{"name":"frust-ui","rename":"ui","kind":null,"target":null}"#;
+
     #[test]
     fn feature_enables_devtools_follows_the_facade_key() {
         let dir = unique_dir("enables-devtools-frust-ui");
@@ -281,11 +340,99 @@ mod tests {
              [features]\nfull = [\"frust-ui/devtools\"]\nlegacy = [\"frust/devtools\"]\n\
              other = [\"frust-material/devtools\"]\n",
         );
-        // No scripted cargo: the key comes from the manifest fallback.
-        let runner = FakeProcessRunner::new();
+        let runner = metadata_runner(&dir, FRUST_UI_UNRENAMED);
         assert!(feature_enables_devtools_with(&runner, &dir, "full"));
         assert!(feature_enables_devtools_with(&runner, &dir, "legacy"));
         assert!(!feature_enables_devtools_with(&runner, &dir, "other"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// cargo's weak-dependency spelling enables the feature whenever the
+    /// dependency is active — and the facade always is.
+    #[test]
+    fn feature_enables_devtools_counts_the_weak_dependency_spelling() {
+        let dir = unique_dir("enables-devtools-weak");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[dependencies]\nfrust-ui = \"0.6.0\"\n\n\
+             [features]\ncanonical = [\"frust?/devtools\"]\nkeyed = [\"frust-ui?/devtools\"]\n\
+             other = [\"frust-material?/devtools\"]\n",
+        );
+        let runner = metadata_runner(&dir, FRUST_UI_UNRENAMED);
+        assert!(feature_enables_devtools_with(&runner, &dir, "canonical"));
+        assert!(feature_enables_devtools_with(&runner, &dir, "keyed"));
+        assert!(!feature_enables_devtools_with(&runner, &dir, "other"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The facade's `hotpatch` enables the shells' `hotpatch`, which each
+    /// enable `devtools`, so it compiles the listener in too.
+    #[test]
+    fn feature_enables_devtools_counts_hotpatch() {
+        let dir = unique_dir("enables-devtools-hotpatch");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[dependencies]\nui = { package = \"frust-ui\", version = \"0.6\" }\n\n\
+             [features]\nfull = [\"frust/hotpatch\"]\nkeyed = [\"ui?/hotpatch\"]\n\
+             other = [\"frust-material/hotpatch\"]\nperf = [\"ui/perf-trace\"]\n",
+        );
+        let runner = metadata_runner(&dir, FRUST_UI_AS_UI);
+        assert!(feature_enables_devtools_with(&runner, &dir, "full"));
+        assert!(feature_enables_devtools_with(&runner, &dir, "keyed"));
+        assert!(!feature_enables_devtools_with(&runner, &dir, "other"));
+        assert!(!feature_enables_devtools_with(&runner, &dir, "perf"));
+        // The canonical spelling needs no resolution at all.
+        assert!(feature_enables_devtools_with(
+            &FakeProcessRunner::new(),
+            &dir,
+            "full"
+        ));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A workspace-inherited rename is invisible to the manifest fallback, so
+    /// when cargo cannot answer, any `<dep>/devtools` counts (fail closed);
+    /// when cargo can, only the key it names does.
+    #[test]
+    fn feature_enables_devtools_fails_closed_on_the_manifest_fallback() {
+        let dir = unique_dir("enables-devtools-fallback");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[dependencies]\nui = { workspace = true }\n\n\
+             [features]\nfull = [\"ui/devtools\"]\nperf = [\"ui/perf-trace\"]\n",
+        );
+        // No scripted cargo: the key comes from the manifest fallback.
+        let fallback = FakeProcessRunner::new();
+        assert!(feature_enables_devtools_with(&fallback, &dir, "full"));
+        assert!(!feature_enables_devtools_with(&fallback, &dir, "perf"));
+        // cargo sees the inherited rename `ui`.
+        let renamed = metadata_runner(&dir, FRUST_UI_AS_UI);
+        assert!(feature_enables_devtools_with(&renamed, &dir, "full"));
+        // cargo resolves the facade as `frust`, so `ui` is another crate.
+        let other = metadata_runner(
+            &dir,
+            &format!(
+                r#"{FRUST_UI_AS_FRUST},{{"name":"ui","rename":null,"kind":null,"target":null}}"#
+            ),
+        );
+        assert!(!feature_enables_devtools_with(&other, &dir, "full"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A facade key no feature can spell is not trusted to exclude any
+    /// `<dep>/devtools` spelling.
+    #[test]
+    fn feature_enables_devtools_fails_closed_on_an_invalid_key() {
+        let dir = unique_dir("enables-devtools-invalid-key");
+        write_manifest(
+            &dir,
+            "[package]\nname = \"app\"\n\n[features]\nfull = [\"frust-material/devtools\"]\n",
+        );
+        let runner = metadata_runner(
+            &dir,
+            r#"{"name":"frust-ui","rename":"fr ust","kind":null,"target":null}"#,
+        );
+        assert!(feature_enables_devtools_with(&runner, &dir, "full"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -301,7 +448,7 @@ mod tests {
              [features]\nfull = [\"frust-ui/devtools\"]\n",
         );
         assert!(!feature_enables_devtools_with(
-            &FakeProcessRunner::new(),
+            &metadata_runner(&dir, FRUST_UI_AS_FRUST),
             &dir,
             "full"
         ));
