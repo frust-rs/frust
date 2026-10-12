@@ -639,29 +639,27 @@ impl<State: 'static> SignupFormView<State> {
     }
 
     /// The submit button — the stateful variant, so the lifecycle is its own.
-    fn submit_view(&self, errors: &SignupErrors) -> AnyView<State> {
+    fn submit_view(&self, errors: &SignupErrors) -> impl View<State> + use<State> {
         let on_submit = self.on_submit.clone();
         let values = self.values.clone();
         let valid = errors.is_empty();
-        any(
-            button::<State>(self.submit_label.clone(), move |state: &mut State| {
-                // `if (Object.keys(errors).length > 0) return;` — a submit that
-                // fails validation touches every field (the widget's own arm)
-                // and reports nothing.
-                if !valid {
-                    return;
-                }
-                if let Some(on_submit) = &on_submit {
-                    on_submit(state, values.clone());
-                }
-            })
-            .variant(ButtonVariant::Stateful)
-            .state(self.status.button_state())
-            .size(ButtonSize::Lg)
-            .loading_label("Creating account")
-            .success_label("Account created")
-            .error_label("Try again"),
-        )
+        button::<State>(self.submit_label.clone(), move |state: &mut State| {
+            // `if (Object.keys(errors).length > 0) return;` — a submit that
+            // fails validation touches every field (the widget's own arm)
+            // and reports nothing.
+            if !valid {
+                return;
+            }
+            if let Some(on_submit) = &on_submit {
+                on_submit(state, values.clone());
+            }
+        })
+        .variant(ButtonVariant::Stateful)
+        .state(self.status.button_state())
+        .size(ButtonSize::Lg)
+        .loading_label("Creating account")
+        .success_label("Account created")
+        .error_label("Try again")
     }
 }
 

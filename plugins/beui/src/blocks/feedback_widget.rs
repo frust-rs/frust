@@ -472,7 +472,7 @@ impl<State: 'static> FeedbackWidgetView<State> {
 
     /// The primary button: `Submit` on the form (stateful, so the sending state
     /// is the button's own), `Try again` on the failure view.
-    fn primary_view(&self) -> AnyView<State> {
+    fn primary_view(&self) -> impl View<State> + use<State> {
         let on_status = self.on_status_change.clone();
         let on_submit = self.on_submit.clone();
         let message = self.message.clone();
@@ -482,7 +482,7 @@ impl<State: 'static> FeedbackWidgetView<State> {
         } else {
             self.submit_label.clone()
         };
-        any(button::<State>(label, move |state: &mut State| {
+        button::<State>(label, move |state: &mut State| {
             if !armed {
                 return;
             }
@@ -499,7 +499,7 @@ impl<State: 'static> FeedbackWidgetView<State> {
         })
         .loading_label("Sending")
         .size(ButtonSize::Md)
-        .disabled(!armed))
+        .disabled(!armed)
     }
 }
 

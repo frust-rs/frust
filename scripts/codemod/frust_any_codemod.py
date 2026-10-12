@@ -100,9 +100,9 @@ code); the first matching bucket wins:
              reports the arm count: `match tail, 4 arms`, `if/else tail, 2
              arms`, and `--check` appends the suggestion — 2 arms: `either(..)`
              when the types differ, one construction when they do not; 3-8:
-             `EitherOf<n>`; 9 or more: keep `any()`, a page table). A `return` inside a closure
-             body (`move |_app| { ..; return; }`) leaves the closure, not the
-             helper, and does not count.
+             `EitherOf<n>`; 9 or more: keep `any()`, a page table). A
+             `return` inside a closure body (`move |_app| { ..; return; }`)
+             leaves the closure, not the helper, and does not count.
   T7-ref     a recursive fn (`f(..)` in a free fn, `Self::f(..)`/`self.f(..)`
              in a method), or a fn named as a value — a fn pointer, a stored
              callback, an argument of `Box::new`/`.map(..)`/`.push(..)` —

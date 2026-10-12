@@ -30,14 +30,15 @@
 //!
 //! # Focus and capture bookkeeping
 //!
-//! [`EitherWidget`] (and every `EitherOfNWidget`) is an enum widget delegating every pass to the live arm; it
-//! holds no `AnyView` or `Box<dyn Widget>` field, so it is not the swap-blind
-//! wrapper shape (`focus-wrapper-erasure-swap-blind`). One gap remains: both
-//! arms share the single element type `EitherWidget<L, R>`, so a parent
-//! reconciler comparing element type ids across the rebuild cannot see an arm
-//! swap. `Either` therefore does the focus half of that bookkeeping itself: when
-//! an arm swap happens while the focus chain runs through this view
-//! ([`BuildCtx::has_focus`]), the focused widget just stopped existing and the
+//! [`EitherWidget`] (and every `EitherOfNWidget`) is an enum widget delegating
+//! every pass to the live arm; it holds no `AnyView` or `Box<dyn Widget>`
+//! field, so it is not the swap-blind wrapper shape
+//! (`focus-wrapper-erasure-swap-blind`). One gap remains: every arm shares the
+//! single element type (`EitherWidget<L, R>`, `EitherOf3Widget<A, B, C>`, ..),
+//! so a parent reconciler comparing element type ids across the rebuild cannot
+//! see an arm swap. Each enum therefore does the focus half of that bookkeeping
+//! itself: when an arm swap happens while the focus chain runs through this
+//! view ([`BuildCtx::has_focus`]), the focused widget just stopped existing and the
 //! root is told to release the focus/IME session
 //! ([`mark_focus_orphaned`](frust_core::mark_focus_orphaned)).
 

@@ -297,7 +297,7 @@ impl<State: 'static, V: View<State>> ErasedView<State> for V {
 ///
 /// Erasure is idempotent, and the generic builders (`child`, tuples such as
 /// `Column((a, b))`, ..) accept any [`View`] and erase internally, so app code
-/// needs `AnyView` only for stored views, branches of three or more arms, and
+/// needs `AnyView` only for stored views, branches of more than eight arms, and
 /// genuinely heterogeneous dynamic lists (see [`any`]). Branches are written
 /// with `either(..)` (two arms) or `EitherOf3`..`EitherOf8` (three to eight),
 /// which keep every arm statically typed and do not erase.

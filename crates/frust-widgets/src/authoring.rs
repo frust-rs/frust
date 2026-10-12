@@ -276,15 +276,16 @@ pub fn erase_callback_arg<State: 'static, A: 'static>(
 /// function:
 ///
 /// - **A concrete child** (`V` is the child's own view type, or an
-///   [`Either`](crate::Either) of two): the element is stored once, and the
-///   rebuild reconciles it in place with no erasure on the path. Choose this
+///   [`Either`](crate::Either) / [`EitherOf3`](crate::EitherOf3) ..
+///   [`EitherOf8`](crate::EitherOf8) of several): the element is stored once,
+///   and the rebuild reconciles it in place with no erasure on the path. Choose this
 ///   when the child's type is fixed by the container view's own type
 ///   parameters (`struct Wrap<V> { child: V }`).
 /// - **An [`AnyView`] child**: the element is itself a `Box<dyn Widget>`, so the
 ///   pod holds it double-boxed and the rebuild recovers `&mut Box<dyn Widget>`
 ///   — the type `AnyView`'s `rebuild` needs to swap the widget on a
 ///   concrete-type change. Choose this when the child's type varies at runtime
-///   (three or more arms) or the child sits in a mixed list.
+///   (a stored view, more than eight arms) or the child sits in a mixed list.
 ///
 /// Whichever `V` built the pod must be the `V` every later call on it names;
 /// a mismatch is a programming error and panics on the downcast.
