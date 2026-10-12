@@ -6,6 +6,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+## 0.6.1 — 2026-10-12
+
+A patch release that also carries two narrow source changes for code that calls the authoring child
+helpers directly (an explicit `build_child::<State>` turbofish, a `&&AnyView` argument) and the
+tooling-crate API changes listed under Changed.
+
 ### Added
 
 - `EitherOf3` .. `EitherOf8` (variants `A`..`H`) in `frust-widgets`, re-exported by the facade and
