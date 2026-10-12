@@ -119,8 +119,7 @@ impl<State: 'static> TimeInputView<State> {
         (self.autovalidate && !valid).then_some(self.strings.invalid_time.as_str())
     }
 
-    // erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
-    fn hour_field(&self) -> AnyView<State> {
+    fn hour_field(&self) -> impl View<State> + use<State> {
         let on_change = self.on_change.clone();
         let entry = self.entry.clone();
         let mut field = text_field(
@@ -133,11 +132,10 @@ impl<State: 'static> TimeInputView<State> {
         if let Some(error) = self.error_for(self.entry.hour_is_valid(self.use_24_hour)) {
             field = field.error_text(error);
         }
-        any(field)
+        field
     }
 
-    // erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
-    fn minute_field(&self) -> AnyView<State> {
+    fn minute_field(&self) -> impl View<State> + use<State> {
         let on_change = self.on_change.clone();
         let entry = self.entry.clone();
         let mut field = text_field(
@@ -150,7 +148,7 @@ impl<State: 'static> TimeInputView<State> {
         if let Some(error) = self.error_for(self.entry.minute_is_valid()) {
             field = field.error_text(error);
         }
-        any(field)
+        field
     }
 
     /// One AM/PM button — filled while selected, outlined otherwise

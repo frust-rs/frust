@@ -1345,16 +1345,13 @@ struct FullScreenPanelWidget {
 /// Build the header close affordance's view — [`icon_button`] over
 /// [`crate::icons::CLOSE`], firing `on_dismiss` directly (see the module
 /// docs' *Deliberate v1 scope cuts*).
-// erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
-fn close_view<State: 'static>(on_dismiss: Option<OnDismiss<State>>) -> AnyView<State> {
-    any(
-        icon_button(icon(crate::icons::CLOSE), move |state: &mut State| {
-            if let Some(on_dismiss) = &on_dismiss {
-                on_dismiss(state);
-            }
-        })
-        .semantic_label(CLOSE_SEMANTIC_LABEL),
-    )
+fn close_view<State: 'static>(on_dismiss: Option<OnDismiss<State>>) -> impl View<State> {
+    icon_button(icon(crate::icons::CLOSE), move |state: &mut State| {
+        if let Some(on_dismiss) = &on_dismiss {
+            on_dismiss(state);
+        }
+    })
+    .semantic_label(CLOSE_SEMANTIC_LABEL)
 }
 
 /// Build the header title's view (`titleLarge`, family from the theme's
