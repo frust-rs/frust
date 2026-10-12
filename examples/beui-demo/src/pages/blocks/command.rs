@@ -51,13 +51,13 @@
 use std::rc::Rc;
 
 use frust::authoring::{
-    AnyView as ErasedView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, ErasedCallback,
-    EventCtx, EventResult, InputEvent, Key, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase,
-    Rect, SemanticsCtx, Size, View, Widget, build_child, erase_callback, rebuild_child,
-    route_event_single, teardown_child, visit_children,
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, ErasedCallback, EventCtx, EventResult,
+    InputEvent, Key, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect, SemanticsCtx,
+    Size, View, Widget, build_child, erase_callback, rebuild_child, route_event_single,
+    teardown_child, visit_children,
 };
 use frust::{
-    Component, CrossAxisAlignment, IconSource, SizedBox, Stack, TextView, ViewSeq, any, column,
+    Component, CrossAxisAlignment, IconSource, SizedBox, Stack, TextView, ViewSeq, column,
     component, icon, icons, row, text,
 };
 use frust_beui::blocks::bloom_menu::{bloom_menu, bloom_menu_item};
@@ -593,17 +593,16 @@ pub fn page() -> impl View<AppState> {
 fn key_scope<State: 'static, V: View<State>>(
     child: V,
     on_chord: impl Fn(&mut State) + 'static,
-) -> KeyScopeView<State> {
+) -> KeyScopeView<State, V> {
     KeyScopeView {
-        // erasure: keep stored child, fed to the hand-written view's ChildPod
-        child: any(child),
+        child,
         on_chord: Rc::new(on_chord),
     }
 }
 
 /// A declarative key scope. See [`key_scope`].
-struct KeyScopeView<State: 'static> {
-    child: ErasedView<State>,
+struct KeyScopeView<State: 'static, V: View<State>> {
+    child: V,
     on_chord: Rc<dyn Fn(&mut State)>,
 }
 
@@ -613,7 +612,7 @@ struct KeyScopeWidget {
     on_chord: ErasedCallback,
 }
 
-impl<State: 'static> View<State> for KeyScopeView<State> {
+impl<State: 'static, V: View<State>> View<State> for KeyScopeView<State, V> {
     type Element = KeyScopeWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> KeyScopeWidget {
