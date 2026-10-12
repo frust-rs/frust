@@ -556,8 +556,7 @@ impl<State: 'static> ChatConversationView<State> {
 
     /// The transcript view: one row per message, plus whatever the host
     /// appended.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn transcript(&self) -> AnyView<State> {
+    fn transcript(&self) -> impl View<State> + use<State> {
         let mut rows: Vec<AnyView<State>> = Vec::with_capacity(self.messages.len());
         for turn in &self.messages {
             let (variant, align, avatar) = match turn.role {
@@ -588,12 +587,11 @@ impl<State: 'static> ChatConversationView<State> {
         if let Some(extra) = &self.extra_rows {
             rows.extend(extra());
         }
-        any(message_scroller(rows))
+        message_scroller(rows)
     }
 
     /// The composer view.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn composer(&self) -> AnyView<State> {
+    fn composer(&self) -> impl View<State> + use<State> {
         let on_input = self.on_input.clone();
         let mut composer = prompt_input::<State, _>(self.input.clone(), move |state, text| {
             if let Some(callback) = &on_input {
@@ -612,7 +610,7 @@ impl<State: 'static> ChatConversationView<State> {
             let on_stop = on_stop.clone();
             composer = composer.on_stop(move |state| on_stop(state));
         }
-        any(composer)
+        composer
     }
 }
 
@@ -630,18 +628,10 @@ pub struct ChatConversationWidget {
 
 /// Recover a pod's concrete widget.
 ///
-/// Two hops, not one: a pod built from an [`AnyView`] stores its element
-/// **double-boxed** (`build_child` wraps the `Box<dyn Widget>` the erased view
-/// produced in a second box), so the first downcast unwraps that box and only
-/// then does the concrete type appear. A pod built from a typed view has no
-/// inner box, which is why the unwrap falls through rather than failing.
+/// One hop: both panes are built from typed views (`impl View`), so a pod
+/// stores its element single-boxed and the downcast reaches `T` directly.
 fn pod_widget<T: Widget>(pod: &ChildPod) -> Option<&T> {
-    let widget = pod.widget();
-    let unboxed = match (widget as &dyn std::any::Any).downcast_ref::<Box<dyn Widget>>() {
-        Some(boxed) => boxed.as_ref(),
-        None => widget,
-    };
-    (unboxed as &dyn std::any::Any).downcast_ref::<T>()
+    (pod.widget() as &dyn std::any::Any).downcast_ref::<T>()
 }
 
 /// [`ChatConversationWidget::panes`]' transcript slot.

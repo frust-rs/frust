@@ -104,10 +104,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    Action, AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedArgCallback,
+    Action, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, ErasedArgCallback,
     ErasedCallback, EventCtx, EventResult, InputEvent, Key, KeyEvent, LayoutCtx, NamedKey,
     PaintCtx, PaintScene, Point, PointerEvent, PointerPhase, Rect, Role, SemanticsCtx, Size, Vec2,
-    View, Widget, any, build_child, erase_callback, erase_callback_arg, rebuild_child,
+    View, Widget, build_child, erase_callback, erase_callback_arg, rebuild_child,
     route_event_single, teardown_child,
     text::{FontWeight, TextStyle},
     visit_children,
@@ -983,20 +983,17 @@ impl MorphingSearchWidget {
 
 impl<State: 'static> SearchPanelView<State> {
     /// The wrapped baseline field, with its own chrome suppressed.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn field(&self) -> AnyView<State> {
+    fn field(&self) -> impl View<State> + use<State> {
         let on_change = self.on_query_change.clone();
-        any(
-            // Not themed: the baseline `text_input` has no themed-family opt-in.
-            text_input(self.query.clone(), move |state: &mut State, text| {
-                on_change(state, text)
-            })
-            .placeholder(self.config.borrow().placeholder.clone())
-            .padding(0.0, 0.0)
-            .border_width(0.0)
-            .corner_radius(0.0)
-            .focus_ring_width(0.0),
-        )
+        // Not themed: the baseline `text_input` has no themed-family opt-in.
+        text_input(self.query.clone(), move |state: &mut State, text| {
+            on_change(state, text)
+        })
+        .placeholder(self.config.borrow().placeholder.clone())
+        .padding(0.0, 0.0)
+        .border_width(0.0)
+        .corner_radius(0.0)
+        .focus_ring_width(0.0)
     }
 }
 

@@ -71,9 +71,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    Action, AnyView, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
+    Action, BezPath, BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color,
     ErasedArgCallback, EventCtx, EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point,
-    PointerPhase, Rect, Role, SemanticsCtx, Shape, Size, View, Widget, any, build_child,
+    PointerPhase, Rect, Role, SemanticsCtx, Shape, Size, View, Widget, build_child,
     erase_callback_arg, rebuild_child, route_event_single, teardown_child,
     text::{FontWeight, TextStyle},
     visit_children,
@@ -553,11 +553,10 @@ impl<State: 'static> AgentActivityView<State> {
 
     /// The shimmering status line the working row composes — the catalog's own
     /// loading-state primitive rather than a second shimmer authored here.
-    // erasure: keep feeds build_child/rebuild_child/teardown_child, which take &AnyView
-    fn working_row(&self) -> AnyView<State> {
-        any(loading_states()
+    fn working_row(&self) -> impl View<State> + use<State> {
+        loading_states()
             .variant(LoadingStatesVariant::Shimmer)
-            .label(self.resolved_active_label()))
+            .label(self.resolved_active_label())
     }
 }
 
