@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 
+use crate::facade_key::FacadeKey;
+
 /// The Rust target triple every browser build compiles to — the single
 /// spelling shared by the drive-side web build, `frust doctor`'s toolchain
 /// check, and the recipe `crates/frust-shell-web/platform/web/README.md` documents. There is no
@@ -141,6 +143,27 @@ impl BuildMode {
             _ => self.cargo_features(),
         }
     }
+
+    /// [`cargo_features`](Self::cargo_features) spelled for an app whose
+    /// facade dependency is keyed `key`. The canonical `frust/..` literals
+    /// stay the funnel every policy check reads; this mapped list is what
+    /// goes on a cargo argv (or a Gradle/Xcode feature list), since cargo
+    /// resolves `<dep>/<feature>` against the app's dependency key.
+    pub fn cargo_features_for(&self, key: &FacadeKey) -> Vec<String> {
+        map_features(self.cargo_features(), key)
+    }
+
+    /// [`session_cargo_features`](Self::session_cargo_features) spelled for
+    /// an app whose facade dependency is keyed `key` — the argv-side mapping
+    /// of the canonical funnel, as [`cargo_features_for`](Self::cargo_features_for).
+    pub fn session_cargo_features_for(&self, hot: bool, key: &FacadeKey) -> Vec<String> {
+        map_features(self.session_cargo_features(hot), key)
+    }
+}
+
+/// `features` with each canonical `frust/` prefix rewritten to `key`.
+fn map_features(features: &[&str], key: &FacadeKey) -> Vec<String> {
+    features.iter().map(|feature| key.map(feature)).collect()
 }
 
 /// The facade feature a Debug hot session compiles in (see
@@ -467,6 +490,50 @@ mod tests {
                     .contains(&HOTPATCH_FEATURE),
                 "{mode:?} must never compile the hot-patch feature in"
             );
+        }
+    }
+
+    #[test]
+    fn mapped_cargo_features_follow_the_facade_key() {
+        let frust_ui = FacadeKey::new("frust-ui");
+        assert_eq!(
+            BuildMode::Debug.cargo_features_for(&frust_ui),
+            vec!["frust-ui/perf-trace", "frust-ui/devtools"]
+        );
+        assert_eq!(
+            BuildMode::Release.cargo_features_for(&frust_ui),
+            vec!["lean"]
+        );
+        assert_eq!(
+            BuildMode::Debug.session_cargo_features_for(true, &frust_ui),
+            vec![
+                "frust-ui/perf-trace",
+                "frust-ui/devtools",
+                "frust-ui/hotpatch"
+            ]
+        );
+        assert_eq!(
+            BuildMode::Profile.session_cargo_features_for(true, &frust_ui),
+            vec!["frust-ui/perf-trace", "frust-ui/devtools"]
+        );
+        // The canonical funnel itself never changes spelling.
+        assert_eq!(
+            BuildMode::Debug.cargo_features(),
+            &["frust/perf-trace", "frust/devtools"]
+        );
+        for mode in [BuildMode::Debug, BuildMode::Profile, BuildMode::Release] {
+            assert_eq!(
+                mode.cargo_features_for(&FacadeKey::default()),
+                mode.cargo_features(),
+                "the default key is the canonical list, mode {mode:?}"
+            );
+            for hot in [false, true] {
+                assert_eq!(
+                    mode.session_cargo_features_for(hot, &FacadeKey::default()),
+                    mode.session_cargo_features(hot),
+                    "mode {mode:?} hot {hot}"
+                );
+            }
         }
     }
 

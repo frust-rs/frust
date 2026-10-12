@@ -11,7 +11,9 @@ Rewrites (each one is type-preserving, or changes only an argument's type):
   T1  `api(.., any(X), ..)` -> `api(.., X, ..)` and `api(Some(any(X)))` ->
       `api(Some(X))`, when `api` is a slot entry of the name list
       (`erasing_apis.txt`, next to this script) and the erasure call is the
-      *whole* argument. A `vec![..]` argument is never touched.
+      *whole* argument. A `vec![..]` argument is never touched. The name list
+      matches callee *names*, so the callee must also resolve to frust (see
+      "Callee origin" below); an app fn of the same name keeps its `any()`.
   T4  `api(.., || any(X), ..)` -> `api(.., || X, ..)` when `api` is a builder
       entry of the name list and the closure body is exactly one erasure call,
       optionally wrapped in a block (`|| { any(X) }` -> `|| { X }`). Closures
@@ -67,16 +69,25 @@ the first matching bucket wins:
   T6-arity   more than 12 erased elements: tuples take at most 12.
 `--t6` exits 2 up front when the name list (`--apis`) has no `[seq]` section.
 
-T7 captures: edition 2024 `-> impl Trait` captures every in-scope generic
-parameter and lifetime, and `View<S>: 'static` keeps a captured borrow from
-outliving its use, so nothing is added. In an edition 2015-2021 crate, when the
-fn (or its impl) has a lifetime parameter or the fn takes an elided reference
-(`&self`, `&State`), `+ use<..>` lists every lifetime (`'_` for elided ones)
-and every type/const parameter in scope; a fn that also takes an
-argument-position `impl Trait` (which `use<..>` cannot name) is skipped with a
-note. The edition comes from the crate's `Cargo.toml` (`edition.workspace =
-true` resolves through the nearest `[workspace]` manifest; no `edition` key is
-2015; a file outside any package counts as 2024).
+T7 captures: a `View<S>` is `'static`, so a returned view never holds a borrow,
+but edition 2024 `-> impl Trait` captures every in-scope lifetime (an elided
+`&self`/`&State` included) and callers then fail with E0597/E0716/E0700. In any
+edition, when the fn (or its impl) has a lifetime parameter or the fn takes an
+elided reference, `+ use<..>` is emitted listing only the type/const
+parameters in scope, never a lifetime (`+ use<>` when there are none); a fn
+that also takes an argument-position `impl Trait` (which `use<..>` cannot
+name) is skipped with a note. A fn with no lifetime or reference parameter
+gets no `use<..>`. The edition comes from the crate's `Cargo.toml`
+(`edition.workspace = true` resolves through the nearest `[workspace]`
+manifest; no `edition` key is 2015; a file outside any package counts as 2024).
+
+T7 tail: when the unwrapped tail is a plain identifier `x` and the statement
+right before it is `let x = <expr>;` (no `mut`, type annotation, pattern or
+attribute, no comment in between), the let is dropped and `<expr>` is the
+tail, so `clippy::let_and_return` does not fire.
+Before edition 2024 a tail expression's temporaries outlive the fn's locals,
+so moving `<expr>` into the tail can fail E0597: such a fn is skipped with a
+note instead (collapse it by hand).
 
 T7 exclusions — listed by `--check --t7` as `<bucket> excluded: <fn> (<why>)`,
 never rewritten, never counted as candidates (they do not affect the exit
@@ -85,19 +96,43 @@ code); the first matching bucket wins:
              method of a trait impl: the signature is the trait's.
   T7-arms    an `if`/`else` chain or a `match` as the tail, or an early
              `return` anywhere in the body: several exits of different types
-             (`Either` candidates, not T7's).
+             (`Either` candidates, not T7's). A `return` inside a closure
+             body (`move |_app| { ..; return; }`) leaves the closure, not the
+             helper, and does not count.
   T7-ref     a recursive fn (`f(..)` in a free fn, `Self::f(..)`/`self.f(..)`
              in a method), or a fn named as a value — a fn pointer, a stored
              callback, an argument of `Box::new`/`.map(..)`/`.push(..)` —
-             anywhere in its package (the `Cargo.toml` directory's `*.rs`
-             files, nested packages and `--exclude`d paths left out). The
-             value-use scan is a heuristic that errs towards a hit: a local
-             binding or pattern of the same name does not count, a
-             type-qualified `Kind::f` only counts against a method.
+             in its own file, or in another file of its package (the
+             `Cargo.toml` directory's `*.rs` files, nested packages and
+             `--exclude`d paths left out) when that use is scoped to the
+             helper: path-qualified to its module (`super::f`,
+             `crate::a::f`, `a::f`) or to its impl type (`Self::f` inside an
+             impl of that type, `Type::f`), or a bare `f` in a file that
+             imports it (or globs) from the helper's module. An unrelated
+             same-named fn in another file does not count, and a private
+             helper is only reachable from its own module and descendants.
+             The value-use scan is a heuristic that errs towards a hit: a
+             local binding or pattern of the same name does not count, a
+             type-qualified `Kind::f` only counts against a method. Also a
+             fn whose same-file call is the whole operand of a prefix `&` /
+             `&mut` ("taken by reference": `&f(..)`, `&self.f(..)`,
+             `&Self::f(..)`, `&prev.f(..)`) — the caller relies on
+             `&AnyView<S>`, private helpers included. A `&` over a larger
+             expression (`&(a, f())`, `&vec![f()]`, `&f().x`) does not count. Also
+             a fn whose same-file call is the whole initializer of an untyped
+             `let [mut] x = f(..);` with a later bare `&x` / `&mut x` in the
+             same block (`&x.field`, `&x[..]`, `&x.m()` do not count; a later
+             re-binding of `x` is not tracked, so still excluded).
   T7-public  a `pub fn` (a restricted `pub(..)` is not API) in a `crates/` or
              `plugins/` library source — not under a `tests/`, `examples/` or
              `src/corpus/` directory, and not inside a `#[cfg(test)] mod`:
              changing a library signature is a human decision.
+  T7-visible any other fn with a visibility modifier (`pub`, `pub(crate)`,
+             `pub(super)`, `pub(in ..)`): visible outside its module, so
+             callers (other modules, files outside the run set, integration
+             tests) may rely on AnyView (a `Vec<AnyView>`, a two-arm
+             `if`/`match`, an `-> AnyView` tail). `--t7-visible` rewrites
+             them; a private fn is always a candidate.
 A tail that is neither one erasure call nor an `if`/`match` (a `vec![..]`, a
 loop, an accumulator, a call of another helper, a turbofish `any::<S, _>(..)`)
 is neither rewritten nor listed.
@@ -122,7 +157,13 @@ Opt-out: a line comment `// erasure: keep` (exact text after `//`, optional
 trailing reason) on the same line as the start of a candidate's span, or alone
 on the line immediately above it, exempts that site from every rule (T1-T7).
 For T7 the site is the signature: the marker goes on the `fn` line or the `->`
-line, or alone on the line above the `fn` line.
+line, or alone on the line above the `fn` line. rustfmt-stable placements: at
+the end of the `->` line with the `{` on the next line, or at the end of the
+`any(..)` line; a marker written after the `{` of the signature line is moved
+by rustfmt to an own line as the first line of the body, and such a first
+own-line comment (before any statement) counts as a signature marker, for T7
+and for rule U (where it covers every `any(..)` in the body). A marker later
+in the body stays a plain line marker.
 Kept sites are never listed by `--check` and never rewritten; `--stats`
 counts them as `kept=N`. T5 applies `Column`/`Row`/`Stack` only when T2
 would resolve them to frust's own sugar (a local `struct Row` or a foreign
@@ -141,8 +182,34 @@ an import (`any`, `AnyView`, `Column`, `Row`, `Stack`, `FlexView`, `Axis`,
 `inflexible`, `flexible`, `keyed`) that a rewrite left unused is removed from
 the (non-`pub`) `use` that brought it in. A chain is skipped, with a note, when
 a local binding or `fn` (free or method) named `column`/`row`/`stack` is in
-scope (unless that name is itself imported by a `use`), or the builder's import
-cannot be resolved.
+scope (unless that name is itself imported by a frust-origin `use`), or the
+builder's import cannot be resolved.
+
+Callee origin: a name is frust's only when its path head starts with `frust`
+(`frust`, `frust_material`, `frust_shadcn`, ..); `crate`, `super` and `self`
+are the app's own modules and never count. For T1/T4/T5/T6 name-list callees
+(the `Column`/`Row`/`Stack` sugar resolves as below): a qualified call
+(`frust_shadcn::card(..)`, `frust::Route::new(..)`) is a site only under a
+frust-origin qualifier, any other qualifier skips it silently; an unqualified
+`name(..)` imported by a `use` is a site only when that `use` path is
+frust-origin, and otherwise — or when a same-file `fn name` exists, or a
+non-frust glob import (`use crate::ui::*`) covers the site — it is skipped with
+a note; with no import, no local fn and no foreign glob it is a site
+(`container(any(x))` in a scratch file). A `Type::name(..)` is skipped with a
+note when `Type` is a local type or imported from a non-frust path. A
+`.method(..)` is skipped with a note when a same-file `fn method` exists, and
+is otherwise still matched by name alone: a method call has no import to
+resolve, so an app type's same-named method defined in another file is a
+residual risk the compiler (not this tool) catches. The `Column`/`Row`/`Stack`/
+`FlexView` anchor of T2/T3 (and of T5/T6) must be frust-origin too: imported
+from a frust path (a non-frust import is skipped with a note), qualified by
+one, or covered only by frust-origin globs; the builder `column`/`row`/`stack`
+counts as imported only from a frust path — `use super::{column, row};` or
+`use crate::ui::row as row;` skips the chain with a note, as does a mix of
+frust and non-frust glob imports. A `use super::*` inside an inline `mod` of
+the same file (`mod tests`) is transparent: it re-imports the parent's names,
+which the file already shows. The tool skips with a note rather than emitting
+`frust::column()`; every such note counts toward `--strict`.
 
 Usage:
 
@@ -155,8 +222,9 @@ exits 1 if there is one, 0 otherwise; skipped-site notes do not affect the exit
 code. A file that cannot be tokenised or decoded is reported as skipped, counted,
 and makes `--check` exit 2 when no candidate was found (candidates still win: 1).
 The summary always reports the number of shadow-skipped sites (a local binding
-or fn shadows the builder, a mixed keyed flex list, an unresolvable import, or a
-comment inside the replaced call head); `--strict` makes any of them exit 2
+or fn shadows the builder, a mixed keyed flex list, an unresolvable import, a
+callee or builder of non-frust origin, or a comment inside the replaced call
+head); `--strict` makes any of them exit 2
 under `--check` (candidates still win: 1).
 `--exclude PATH` (repeatable; repository-relative or absolute) drops the
 file or directory, matched by whole path components on the normalised path
@@ -178,8 +246,8 @@ exclusion(s)` summary line), `--write --t6` applies the candidates, and
 `--t7` likewise turns rule T7 on for every mode (off by default): `--check
 --t7` also lists `T7 helper returns impl View: <fn>` candidates and the T7
 exclusions (with a `N T7 exclusion(s)` summary line), `--write --t7` applies
-the candidates, and `--stats --t7` reports the T7 candidate count and the four
-exclusion buckets (`T7-trait`, `T7-arms`, `T7-ref`, `T7-public`) per file
+the candidates, and `--stats --t7` reports the T7 candidate count and the five
+exclusion buckets (`T7-trait`, `T7-arms`, `T7-ref`, `T7-public`, `T7-visible`) per file
 (when non-zero) and in total.
 
 U   (`--unmarked` only; never auto-fixed: `--write` leaves every U site alone and a
@@ -191,8 +259,20 @@ U   (`--unmarked` only; never auto-fixed: `--write` leaves every U site alone an
       in strings or comments are not calls). A call is covered when (a) its own
       line is kept (marker on the line, or alone on the line above), (b) it sits
       inside a fn whose signature is kept (the `fn` line, the line holding its
-      `->`, or alone above the `fn` line), or (c) it sits inside a `vec![..]`,
-      a `let` statement or a `match` whose first line is kept. A fn-signature
+      `->`, alone above the `fn` line, or, for a fn returning an AnyView type, as the first
+      own-line comment of its body), or (c) it sits inside a `vec![..]`,
+      a `let` statement or a `match` whose first line is kept, (c') it is an
+      argument of `<v>.push(..)`, `<v>.insert(..)` or `<v>.extend(..)` in a fn
+      body where `<v>` is the nearest preceding in-scope `let [mut] <v>` whose
+      type or initializer names `AnyView` and whose line is kept (a reasoned
+      marker on the `let` line or alone above it; it covers nothing outside
+      that fn, no other vec and no shadowing re-binding of `<v>`), or (d) a
+      reasoned own-line marker sits strictly inside the parentheses of the call
+      (nested parentheses/brackets allowed, a nested closure or block body does
+      not count) or immediately before the argument holding it in the
+      statement-level call: rustfmt moves the trailing marker of
+      `x.push(any(f( // erasure: keep why` to such an own line. The same
+      own-line placement exempts a T1-T7 candidate. A fn-signature
       marker covers every call in that fn body, so its reason must justify all
       of them. `--check
       --unmarked` lists `<path>:<line>: U unmarked erasure` once per line and
@@ -225,6 +305,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 # ---------------------------------------------------------------------------
 # Lexer
@@ -417,6 +498,7 @@ class Source:
         self.line_comment_ends = {tok.end for tok in self.all if tok.kind == LINE_COMMENT}
         (self.keep_lines, self.keep_above,
          self.why_lines, self.why_above) = self._keep_markers()
+        self._body_gap = None
         self.kept = 0
         self.t7_excluded: list = []   # (line, bucket, fn name, reason), set by T7
         self.t6_excluded: list = []   # (line, bucket, callee, reason), set by T6
@@ -425,6 +507,9 @@ class Source:
         self.local_types = self._local_type_names()
         self.local_fns = {t[k + 1].text for k in range(len(t) - 1)
                           if t[k].text == "fn" and t[k + 1].kind == IDENT}
+        self._fn_mods = None
+        self._tok_starts = [tok.start for tok in t]
+        self._inline_marks = None
 
     def _keep_markers(self):
         """Lines carrying a `// erasure: keep` comment, from the comment tokens.
@@ -451,6 +536,102 @@ class Source:
                 if has_reason:
                     why_alone.add(line)
         return anywhere, alone, why_anywhere, why_alone
+
+    def fn_shadows(self, name: str, pos: int) -> bool:
+        """True when a same-file `fn name` is visible at char `pos`: declared in
+        the site's module or an ancestor of it. A fn of a nested inline module
+        (typically `#[cfg(test)] mod tests`) is invisible to its parent."""
+        if name not in self.local_fns:
+            return False
+        if self._fn_mods is None:
+            mods: dict = {}
+            for k in range(len(self.t) - 1):
+                if self.t[k].text == "fn" and self.t[k + 1].kind == IDENT:
+                    mods.setdefault(self.t[k + 1].text, set()).add(self.module_of(self.t[k + 1].start))
+            self._fn_mods = mods
+        return any(a <= pos < b for a, b in self._fn_mods.get(name, ()))
+
+    def _own_line_marks(self) -> list:
+        """(char pos, innermost enclosing group's code index or -1) of every
+        reasoned own-line `// erasure: keep <why>` comment."""
+        if self._inline_marks is None:
+            out = []
+            for tok in self.all:
+                if tok.kind != LINE_COMMENT or self.line_of(tok.start) not in self.why_above:
+                    continue
+                p = bisect.bisect_left(self._tok_starts, tok.start) - 1
+                if p < 0:
+                    g = -1
+                elif self.t[p].kind == PUNCT and self.t[p].text in OPEN:
+                    g = p
+                else:
+                    g = self.parent[p]
+                out.append((tok.start, g))
+            self._inline_marks = out
+        return self._inline_marks
+
+    def call_marker(self, a: int, b: int) -> bool:
+        """True when a reasoned own-line marker sits inside the call occupying
+        code tokens `a..b` (name token to closing paren): strictly inside its
+        parentheses (nested parentheses/brackets allowed; a marker in a nested
+        block or closure body does not escape), or in the argument gap just
+        before the argument of the statement-level call that holds the call.
+        rustfmt moves a trailing marker of `x.push(any(f( // erasure: keep ..`
+        to such an own line."""
+        marks = self._own_line_marks()
+        if not marks:
+            return False
+        t = self.t
+        lo, hi = t[a].start, t[b].end
+        for pos, g in marks:
+            if lo < pos < hi:
+                while g >= 0 and t[g].start >= lo and t[g].text != "{":
+                    g = self.parent[g]
+                if g < 0 or t[g].start < lo:
+                    return True
+        # statement-level call: topmost paren/bracket group above the call
+        top = -1
+        g = self.parent[a]
+        while g >= 0 and t[g].text in ("(", "["):
+            top, g = g, self.parent[g]
+        if top >= 0:
+            commas = self.commas(top)
+            for pos, g in marks:
+                if g == top and pos < lo and not any(pos < t[c].start < lo for c in commas):
+                    return True
+        return False
+
+    def span_marker(self, span) -> bool:
+        """`call_marker` for a candidate's char span."""
+        a = bisect.bisect_left(self._tok_starts, span[0])
+        b = bisect.bisect_left(self._tok_starts, span[1]) - 1
+        if a >= len(self.t) or b < a:
+            return False
+        return self.call_marker(a, b)
+
+    def body_marker(self, body: int, reasoned: bool = False) -> bool:
+        """True when the fn body opening at code index `body` starts with an
+        own-line `// erasure: keep` comment: the first own-line comment between
+        the `{` and the first statement. rustfmt moves a marker written after
+        the `{` of the signature line to exactly this place, so it counts as a
+        fn-signature marker. A trailing comment on the `{` line is not own-line
+        and a comment after the first statement never matches."""
+        if self._body_gap is None:
+            gap, cur, ci = {}, [], 0
+            for tok in self.all:
+                if tok.kind in TRIVIA:
+                    if tok.kind == LINE_COMMENT:
+                        cur.append(tok)
+                    continue
+                gap[ci] = cur
+                cur, ci = [], ci + 1
+            self._body_gap = gap
+        for tok in self._body_gap.get(body + 1, ()):
+            line = self.line_of(tok.start)
+            if self.src[self.line_starts[line - 1]:tok.start].strip():
+                continue   # trailing comment of the `{` line
+            return line in (self.why_above if reasoned else self.keep_above)
+        return False
 
     def is_kept(self, line: int, reasoned: bool = False) -> bool:
         """True when a site starting on `line` carries the opt-out marker: on
@@ -889,7 +1070,79 @@ class Source:
 
 
 def _frust_root(seg: str) -> bool:
+    """Lenient root test for erasure spellings (`crate::any(..)` inside frust)."""
     return seg.startswith("frust") or seg in ROOT_PREFIX_OK
+
+
+def _frust_origin(seg: str) -> bool:
+    """Strict origin test for API names: the path head is a frust crate
+    (`frust`, `frust_material`, `frust_shadcn`, ..). `crate`/`super`/`self`
+    are the app's own modules, never frust."""
+    return seg.startswith("frust")
+
+
+def _glob_origin(s: Source, pos: int):
+    """Origin of the glob imports covering `pos`: None (no glob), "frust" (only
+    frust-origin globs), "foreign" (only non-frust globs) or "mixed".
+
+    A `use super::*` inside an inline `mod` of this file (typically `mod
+    tests`) is transparent: it re-imports the parent's items and imports, which
+    this file already shows (the parent's own `use` scopes cover the module)."""
+    whole = (0, len(s.src))
+    heads = set()
+    for d in s.decls:
+        if not (d.scope[0] <= pos < d.scope[1]):
+            continue
+        for g in d.globs:
+            if g == ("super",) and s.module_of(s.t[d.use_idx].start) != whole:
+                continue
+            heads.add(bool(g) and _frust_origin(g[0]))
+    if not heads:
+        return None
+    if heads == {True}:
+        return "frust"
+    return "foreign" if heads == {False} else "mixed"
+
+
+def _leaf_frust(leaf: Leaf, name: str) -> bool:
+    """Whether a `use` leaf binding `name` imports frust's own item `name`."""
+    return bool(leaf.path) and _frust_origin(leaf.path[0]) and leaf.path[-1] == name
+
+
+def _origin_skip(s: Source, key: str, qual: list, k: int):
+    """Whether the name-list callee at ident `k` may be someone else's item.
+
+    Returns None to accept the site, "" to skip it silently (a qualified
+    non-frust path is provably not frust's API) and a note text to skip it
+    with a note (an app item or import of the same name may be the callee)."""
+    pos = s.t[k].start
+    if key.startswith("."):
+        name = key[1:]
+        if s.fn_shadows(name, pos):
+            return f"a same-file fn `{name}` may be the callee of `.{name}`"
+        return None
+    if "::" in key:
+        ty = key.split("::", 1)[0]
+        if qual:
+            return None if _frust_origin(qual[0]) else ""
+        if ty in s.local_types:
+            return f"`{ty}` is a local type"
+        hit = s.decl_for(ty, pos)
+        if hit and not _leaf_frust(hit[1], ty):
+            return f"`{ty}` is imported from a non-frust path"
+        if not hit and _glob_origin(s, pos) in ("foreign", "mixed"):
+            return f"`{ty}` may come from a non-frust glob import"
+        return None
+    if qual:
+        return None if _frust_origin(qual[0]) else ""
+    hit = s.decl_for(key, pos)
+    if hit:
+        return None if _leaf_frust(hit[1], key) else f"`{key}` is imported from a non-frust path"
+    if s.fn_shadows(key, pos):
+        return f"a same-file fn `{key}` may be the callee"
+    if _glob_origin(s, pos) in ("foreign", "mixed"):
+        return f"`{key}` may come from a non-frust glob import"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1013,9 +1266,16 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False, t7: bool = False,
         o = k + 1
         is_list = t5 and (key in apis.lists or key in T5_BUILTIN) and _t5_sugar_resolves(s, k, key, qual)
         is_seq = t6 and key in apis.seq and _t5_sugar_resolves(s, k, key, qual)
+        blocked = None
         if key in apis.slot or key in apis.builder or is_list or is_seq:
             if "::" not in key and not key.startswith(".") and _excluded(s, apis, key, qual, tok.start):
                 continue
+            # The name list matches callee *names*; an app item of the same
+            # name must not lose its `any()`. Column/Row/Stack sugar resolves
+            # through `_t5_sugar_resolves` / `_resolve_builder` instead.
+            if key not in _T5_SUGAR:
+                blocked = _origin_skip(s, key, qual, k)
+        before_named = len(cands)
         if key in apis.slot:
             _t1(s, key, k, o, cands)
         if key in apis.builder:
@@ -1029,11 +1289,22 @@ def find_candidates(s: Source, apis: Apis, t5: bool = False, t7: bool = False,
             _t6(s, key, o, cands)
         if is_list and len(cands) == before_t2:   # T6 (above) wins a list it rewrote
             _t5(s, key, o, cands)
+        if blocked is not None and len(cands) > before_named:
+            # Only a site that would have been rewritten is reported. T2/T3
+            # never run here: their keys are sugar, excluded from the gate.
+            # A `// erasure: keep` site stays exempt (counted, never noted).
+            fresh = cands[before_named:]
+            live = [c for c in fresh if not (s.is_kept(s.line_of(c.span[0])) or s.span_marker(c.span))]
+            s.kept += len(fresh) - len(live)
+            del cands[before_named:]
+            if blocked and live:
+                rules = "/".join(sorted({c.rule for c in live}))
+                notes.append((s.line_of(live[0].span[0]), f"note: {rules} skipped: {blocked}"))
         if len(cands) > first_new or len(notes) > first_note:
             # A `// erasure: keep` site is exempt from every rule: neither
             # listed, rewritten, nor noted; only counted.
             fresh = cands[first_new:]
-            kept = [c for c in fresh if s.is_kept(s.line_of(c.span[0]))]
+            kept = [c for c in fresh if s.is_kept(s.line_of(c.span[0])) or s.span_marker(c.span)]
             if kept:
                 s.kept += len(kept)
                 cands[first_new:] = [c for c in fresh if c not in kept]
@@ -1183,18 +1454,27 @@ def _resolve_builder(s, k, o, anchor, builder, qual, notes, rule):
     if anchor in s.local_types:
         return None
     if qual:
-        if not _frust_root(qual[0]):
+        if not _frust_origin(qual[0]):
             return None
         return "::".join(qual) + "::", []
     hit = s.decl_for(anchor, pos)
-    if hit and (hit[1].aliased or not _frust_root(hit[1].path[0])):
+    if hit and hit[1].aliased:
+        return None
+    if hit and not _frust_origin(hit[1].path[0]):
+        notes.append((s.line_of(pos),
+                      f"note: {rule} skipped: `{anchor}` is imported from a non-frust path"))
         return None
     if s.binding_shadows(builder, k):
         notes.append((s.line_of(pos), f"note: {rule} skipped: a local binding `{builder}` is in scope"))
         return None
-    if s.decl_for(builder, pos):
-        return "", []
-    if builder in s.local_fns:
+    bhit = s.decl_for(builder, pos)
+    if bhit:
+        if _leaf_frust(bhit[1], builder):
+            return "", []
+        notes.append((s.line_of(pos),
+                      f"note: {rule} skipped: `{builder}` is imported from a non-frust path"))
+        return None
+    if s.fn_shadows(builder, pos):
         notes.append((s.line_of(pos), f"note: {rule} skipped: a local fn `{builder}` is in scope"))
         return None
     if hit and not hit[0].is_pub:
@@ -1208,8 +1488,13 @@ def _resolve_builder(s, k, o, anchor, builder, qual, notes, rule):
                 if not g.is_pub and ("super",) in g.globs and g.scope == site_mod:
                     return "", [("new", g.ordinal, leaf.path[:-1] + (builder,))]
         return "", [("add", decl.ordinal, leaf.path, builder)]
-    if s.glob_covers(pos):
+    globs = _glob_origin(s, pos)
+    if globs == "frust":
         return "", []
+    if globs is not None:
+        notes.append((s.line_of(pos), f"note: {rule} skipped: `{anchor}`/`{builder}` may come from "
+                                      "a non-frust glob import"))
+        return None
     notes.append((s.line_of(pos), f"note: {rule} skipped: cannot resolve an import for `{builder}`"))
     return None
 
@@ -1315,20 +1600,21 @@ _T5_SUGAR = frozenset({"Column", "Row", "Stack"})
 def _t5_sugar_resolves(s: Source, k: int, key: str, qual: list) -> bool:
     """Whether the `Column`/`Row`/`Stack` call at `k` is frust's own sugar.
 
-    Same conditions T2 applies: a frust-rooted qualifier, or a non-aliased
-    frust import (or a glob import); a local type or foreign path declines.
+    Same conditions T2 applies: a frust-origin qualifier, or a non-aliased
+    frust-origin import (or only frust-origin glob imports); a local type or a
+    non-frust path (`crate::`/`super::`/`self::` included) declines.
     `.children` is a method key and always passes."""
     if key not in _T5_SUGAR:
         return True
     if key in s.local_types:
         return False
     if qual:
-        return _frust_root(qual[0])
+        return _frust_origin(qual[0])
     pos = s.t[k].start
     hit = s.decl_for(key, pos)
     if hit:
-        return not hit[1].aliased and _frust_root(hit[1].path[0])
-    return s.glob_covers(pos)
+        return not hit[1].aliased and _frust_origin(hit[1].path[0])
+    return _glob_origin(s, pos) == "frust"
 # Keywords that can never start a callee path (path roots like `crate` can).
 _T5_NON_PATH = frozenset(KEYWORDS - {"crate", "super", "self", "Self"})
 
@@ -1490,7 +1776,7 @@ def _t6(s, key, o, cands):
 # T7: helper fns returning AnyView
 # ---------------------------------------------------------------------------
 
-T7_BUCKETS = ("T7-trait", "T7-arms", "T7-ref", "T7-public")
+T7_BUCKETS = ("T7-trait", "T7-arms", "T7-ref", "T7-public", "T7-visible")
 
 
 @dataclass
@@ -1498,7 +1784,11 @@ class T7Ctx:
     """Per-file facts T7 needs that the file text alone does not carry."""
     edition: str = "2024"          # the crate's Rust edition
     library: bool = False          # a crates/ or plugins/ library source
-    values: frozenset = frozenset()   # `_t7_value_names` keys found elsewhere in the package
+    visible: bool = False          # `--t7-visible`: also rewrite fns with a visibility modifier
+    values: frozenset = frozenset()   # keys that exclude a same-named helper unconditionally
+    path: str = ""                 # this file (its own uses are the same-file rule's)
+    module: tuple | None = None    # this file's module path, `_t7_file_module`
+    uses: tuple = ()               # `T7Use` value uses in the package's other files
 
 
 @dataclass
@@ -1634,6 +1924,18 @@ def _t7_container(s: Source, fn: int):
     return "impl", gen
 
 
+def _t7_in_closure(s: Source, k: int, body: int) -> bool:
+    """True when the innermost enclosing callable of token `k` (inside the fn
+    body opening at `body`) is a closure: some brace group between them is a
+    closure body (`|params| { .. }`, `|| { .. }`)."""
+    g = s.parent[k]
+    while g > body:
+        if s.is_p(g, "{") and (s.is_p(g - 1, "|") or s.is_p(g - 1, "||")):
+            return True
+        g = s.parent[g]
+    return False
+
+
 def _t7_returns(s: Source, f: T7Fn) -> list:
     """`return` tokens of this fn's own body (nested fn items excluded)."""
     close = s.match[f.body]
@@ -1641,7 +1943,7 @@ def _t7_returns(s: Source, f: T7Fn) -> list:
     for k in range(f.body + 1, close):
         if s.is_id(k, "return"):
             enc = s.enclosing_fn(k)
-            if enc is not None and enc[0] == f.fn:
+            if enc is not None and enc[0] == f.fn and not _t7_in_closure(s, k, f.body):
                 out.append(k)
     return out
 
@@ -1704,6 +2006,99 @@ def _t7_tail(s: Source, f: T7Fn):
     return "single", eo, a, b
 
 
+def _t7_prefix_amp(s: Source, k: int) -> bool:
+    """True when token `k` is a prefix `&` / `&&` (a borrow, not a bit-and /
+    logical-and): nothing operand-like precedes it (ignoring a `mut` after it)."""
+    if not (s.is_p(k, "&") or s.is_p(k, "&&")):
+        return False
+    p = k - 1
+    if p < 0:
+        return True
+    tok = s.t[p]
+    if tok.kind in (STR, NUM, CHAR, LIFETIME):
+        return False
+    if tok.kind == IDENT:
+        return tok.text in ("return", "in", "if", "match", "while", "else", "let", "mut",
+                            "break", "move", "yield")
+    return not (tok.kind == PUNCT and tok.text in (")", "]", "?", "}"))
+
+
+def _t7_taken_by_ref(s: Source, f: T7Fn, kind: str) -> bool:
+    """True when a same-file call of the helper is the whole operand of a
+    prefix `&` / `&mut` (`&name(..)`, `&self.name(..)`, `&Self::name(..)`,
+    `&prev.name(..)`): the caller relies on `&AnyView<S>`. A `&` applying to a
+    larger expression (`&(a, name())`, `&vec![name()]`, `&name().x`) does not count."""
+    name = s.t[f.name].text
+    for k, tok in enumerate(s.t):
+        if tok.kind != IDENT or tok.text != name or not s.is_p(k + 1, "(") or k == f.name:
+            continue
+        if s.is_id(k - 1, "fn"):
+            continue
+        if kind == "free":
+            if s.is_p(k - 1, ".") or (s.is_p(k - 1, "::") and
+                                      s.is_id(k - 2) and s.t[k - 2].text[:1].isupper()):
+                continue
+        elif not (s.is_p(k - 1, ".") or (s.is_p(k - 1, "::") and s.is_id(k - 2, "Self"))):
+            continue
+        end = s.match[k + 1]
+        if s.is_p(end + 1, ".") or s.is_p(end + 1, "?") or s.is_p(end + 1, "[") or \
+                s.is_id(end + 1, "as"):
+            continue   # the borrow applies to a longer expression
+        pos = k
+        while s.is_p(pos - 1, ".") or s.is_p(pos - 1, "::"):
+            q = pos - 2
+            while s.is_p(q, "?"):
+                q -= 1
+            if s.is_p(q, ")") or s.is_p(q, "]"):
+                pos = s.match[q]
+                if s.is_id(pos - 1) and not s.is_p(pos, "["):
+                    pos -= 1
+            elif q >= 0 and s.t[q].kind in (IDENT, STR, NUM):
+                pos = q
+            else:
+                break
+        a = pos - 1
+        if s.is_id(a, "mut"):
+            a -= 1
+        if _t7_prefix_amp(s, a):
+            return True
+        if _t7_let_bound_borrowed(s, k, pos, end):
+            return True
+    return False
+
+
+def _t7_let_bound_borrowed(s: Source, k: int, pos: int, end: int) -> bool:
+    """True when the call spanning tokens `pos..end` (name token `k`) is the whole
+    initializer of `let [mut] <ident> = <call>;` (no type annotation) and the bare
+    binding is later borrowed (`&ident` / `&mut ident`) in the let's enclosing
+    block, which bounds the binding's scope. A borrow of a longer expression
+    (`&ident.f`, `&ident[..]`, `&ident.m()`, `&ident?`) does not count. A later
+    re-binding of the same name is not tracked: it is conservatively still a hit."""
+    if not (s.is_p(end + 1, ";") and s.is_p(pos - 1, "=") and s.is_id(pos - 2)):
+        return False
+    b = pos - 3
+    if s.is_id(b, "mut"):
+        b -= 1
+    if not s.is_id(b, "let"):
+        return False
+    ident = s.t[pos - 2].text
+    blk = s.parent[end + 1]
+    stop = s.match[blk] if blk >= 0 and s.is_p(blk, "{") else len(s.t)
+    for j in range(end + 2, stop):
+        if not (s.is_id(j, ident) and not s.is_p(j - 1, ".") and not s.is_p(j - 1, "::")):
+            continue
+        if s.is_p(j + 1, ".") or s.is_p(j + 1, "?") or s.is_p(j + 1, "[") or \
+                s.is_p(j + 1, "(") or s.is_p(j + 1, "!") or s.is_p(j + 1, "::") or \
+                s.is_id(j + 1, "as"):
+            continue
+        a = j - 1
+        if s.is_id(a, "mut"):
+            a -= 1
+        if _t7_prefix_amp(s, a):
+            return True
+    return False
+
+
 def _t7_recursive(s: Source, f: T7Fn, kind: str) -> bool:
     """True when the fn calls itself (`name(..)`, or `Self::name(..)`/`self.name(..)` in an impl)."""
     name = s.t[f.name].text
@@ -1719,24 +2114,24 @@ def _t7_recursive(s: Source, f: T7Fn, kind: str) -> bool:
     return False
 
 
-def _t7_value_names(s: Source, names) -> set:
-    """Names in `names` that this file uses as a *value* (not a call): a fn
-    pointer, a stored callback, an argument of `Box::new`/`.map(..)`.
+def _t7_value_sites(s: Source, names):
+    """(token index, key) for every use of a name in `names` as a *value* (not
+    a call): a fn pointer, a stored callback, an argument of `Box::new`/`.map(..)`.
 
-    A bare or module-qualified use (`name`, `views::name`) is reported as
-    `name` (it can name a free fn); a type-qualified one (`Self::name`,
-    `Card::name`) as `::name` (it can name a method). A heuristic that errs
-    towards reporting a use, so a false hit only excludes."""
+    A bare or module-qualified use (`name`, `views::name`) has key `name` (it
+    can name a free fn); a type-qualified one (`Self::name`, `Card::name`) has
+    key `::name` (it can name a method). A heuristic that errs towards
+    reporting a use, so a false hit only excludes."""
     if not names:
-        return set()
-    t, out = s.t, set()
+        return
+    t = s.t
     spans = [(d.stmt_start, d.semi) for d in s.decls]
     for k, tok in enumerate(t):
         if tok.kind != IDENT or tok.text not in names:
             continue
         typed = s.is_p(k - 1, "::") and s.is_id(k - 2) and s.t[k - 2].text[:1].isupper()
         key = "::" + tok.text if typed else tok.text
-        if key in out or s.is_p(k - 1, ".") or s.is_id(k - 1, "fn"):
+        if s.is_p(k - 1, ".") or s.is_id(k - 1, "fn"):
             continue
         if s.is_p(k + 1, "(") or s.is_p(k + 1, "!") or s.is_p(k + 1, "::") or s.is_p(k + 1, ":") \
                 or s.is_p(k + 1, "@") or s.is_p(k + 1, "=>") or s.is_id(k + 1, "in") \
@@ -1756,8 +2151,194 @@ def _t7_value_names(s: Source, names) -> set:
         if not s.is_p(k - 1, "::") and (
                 s.binding_shadows(tok.text, k) or _t7_let_typed(s, tok.text, k)):
             continue   # a local binding of the same name
-        out.add(key)
+        yield k, key
+
+
+def _t7_value_names(s: Source, names) -> set:
+    """The keys of `_t7_value_sites`: names in `names` this file uses as a value."""
+    return {key for _, key in _t7_value_sites(s, names)}
+
+
+class T7Use(NamedTuple):
+    """One value use of a T7 fn name in a file, with what scopes it to a module."""
+    path: str                 # the file holding the use
+    module: tuple | None      # that file's module path plus the enclosing inline `mod`s
+    key: str                  # `_t7_value_sites` key (`name` or `::name`)
+    qual: tuple               # path segments before the name (`super`, `Card`, ..)
+    via: tuple                # module paths the name is imported from, in scope at the use
+    impl_type: str | None     # the type of the `impl` enclosing the use
+
+
+def _t7_mod_chain(s: Source, k: int) -> tuple:
+    """Names of the inline `mod name { .. }` blocks enclosing token `k`, outermost first."""
+    out, g = [], s.parent[k]
+    while g >= 0:
+        if s.t[g].text == "{" and s.is_id(g - 1) and s.is_id(g - 2, "mod"):
+            out.append(s.t[g - 1].text)
+        g = s.parent[g]
+    return tuple(reversed(out))
+
+
+def _t7_head(s: Source, g: int) -> list:
+    """Code indices of the item head in front of the `{` at `g`."""
+    j = g - 1
+    while j >= 0 and s.parent[j] == s.parent[g] and not (
+            s.is_p(j, ";") or s.is_p(j, "{") or s.is_p(j, "}")):
+        if s.t[j].kind == PUNCT and s.t[j].text in CLOSE:
+            j = s.match[j]
+        j -= 1
+    return [k for k in range(j + 1, g) if s.parent[k] == s.parent[g]]
+
+
+def _t7_impl_type(s: Source, pos: int):
+    """Last path segment of the type of the innermost `impl` block enclosing
+    token `pos` (the `for` type of a trait impl); None outside one."""
+    g = s.parent[pos]
+    while g >= 0:
+        if s.t[g].text == "{":
+            head = _t7_head(s, g)
+            if any(s.is_id(k, "fn") or s.is_id(k, "mod") or s.is_id(k, "trait") for k in head):
+                return None
+            impls = [k for k in head if s.is_id(k, "impl")]
+            if impls:
+                fors = [k for k in head if s.is_id(k, "for") and not s.is_p(k + 1, "<")]
+                j = fors[0] + 1 if fors else impls[0] + 1
+                if not fors and s.is_p(j, "<"):
+                    e = _angle_end(s, j)
+                    j = e + 1 if e is not None else j
+                while s.is_p(j, "&") or s.is_id(j, "mut") or s.is_id(j, "dyn"):
+                    j += 1
+                if s.is_p(j, "::"):
+                    j += 1
+                last = None
+                while s.is_id(j) and s.t[j].text != "where":
+                    last = s.t[j].text
+                    if s.is_p(j + 1, "::"):
+                        j += 2
+                    else:
+                        break
+                return last
+        g = s.parent[g]
+    return None
+
+
+def _t7_file_module(path: str):
+    """The module path of file `path` inside its crate: (crate-root id, mod names..).
+
+    A package's `src/lib.rs`/`src/main.rs` are the root `("src",)`; every other
+    `src/` file is a module below it (`a/b.rs`, `a/b/mod.rs` -> `("src", "a",
+    "b")`). A `src/bin`, `examples`, `tests` or `benches` file (or `build.rs`) is
+    its own crate root, identified by its path (a directory's `main.rs` by the
+    directory), and a file below it a module of that root. A file outside any
+    package is a root of its own."""
+    full = _norm(path)
+    d = _manifest_dir(path)
+    if d is None:
+        return (full,)
+    parts = [x for x in os.path.relpath(full, d).split(os.sep) if x]
+    if not parts:
+        return (full,)
+    def mods(root, rest):
+        rest = list(rest)
+        if rest and rest[-1] == "mod.rs":
+            rest.pop()
+        elif rest and rest[-1].endswith(".rs"):
+            rest[-1] = rest[-1][:-3]
+        return (root,) + tuple(rest)
+    if parts[0] == "src" and not (len(parts) > 1 and parts[1] == "bin"):
+        if parts[1:] in (["lib.rs"], ["main.rs"]):
+            return ("src",)
+        return mods("src", parts[1:])
+    if parts == ["build.rs"]:
+        return (full,)
+    base = 2 if parts[0] == "src" else 1     # the entry: src/bin/<x>, examples/<x>, ..
+    if parts[0] not in ("src", "examples", "tests", "benches") or len(parts) <= base:
+        return (full,)
+    if len(parts) == base + 1:
+        return (full,)
+    root = os.path.join(d, *parts[:base + 1])
+    rest = parts[base + 1:]
+    return (root,) if rest == ["main.rs"] else mods(root, rest)
+
+
+def _t7_resolve(path: tuple, base):
+    """The module `path` (use-path segments) names from module `base`: a tuple,
+    or None when it cannot be resolved exactly (a non-keyword first segment, or
+    an unknown `base`)."""
+    if not path:
+        return base
+    if base is None:
+        return None
+    first = path[0]
+    if first == "crate":
+        return (base[0],) + tuple(path[1:])
+    if first in ("self", "super"):
+        m, i = list(base), 1 if first == "self" else 0
+        while i < len(path) and path[i] == "super":
+            if len(m) <= 1:
+                return None
+            m.pop()
+            i += 1
+        return tuple(m) + tuple(path[i:])
+    return None
+
+
+def _t7_path_hits(path: tuple, base, hmod) -> bool:
+    """True when use-path `path`, written in module `base`, may name module `hmod`."""
+    if not path or hmod is None:
+        return True
+    r = _t7_resolve(path, base)
+    if r is not None:
+        return r == hmod
+    if path[0] in ("crate", "self", "super"):
+        return True    # a keyword path from an unknown module: assume the worst
+    # `views::name`, `a::views::*`: match on the innermost module name.
+    return len(hmod) > 1 and path[-1] == hmod[-1]
+
+
+def _t7_use_hits(u: T7Use, name: str, kind: str, hmod, impl_type, private: bool) -> bool:
+    """True when value use `u` in another file may name the helper `name`.
+
+    A path-qualified use counts when its qualifier names the helper's module
+    (`super::name`, `crate::a::name`, `a::name`) or, for a method, its type
+    (`Self::name` inside an impl of the helper's type, `Type::name`); a bare use
+    counts when the file imports the name (or globs) from the helper's module.
+    A private helper is only reachable from its own module and descendants."""
+    if u.key != (name if kind == "free" else "::" + name):
+        return False
+    if private and hmod is not None and u.module is not None and u.module[:len(hmod)] != hmod:
+        return False
+    if kind != "free":
+        if not u.qual:
+            return False
+        q = u.qual[-1]
+        return u.impl_type == impl_type if q == "Self" else q == impl_type
+    if u.qual:
+        return _t7_path_hits(u.qual, u.module, hmod)
+    return any(_t7_path_hits(v, u.module, hmod) for v in u.via)
+
+
+def _t7_collect_uses(s: Source, names, path: str, module) -> list:
+    """The `T7Use` records for the value uses of `names` in `s`."""
+    out = []
+    for k, key in _t7_value_sites(s, names):
+        qual, j = [], k
+        while s.is_p(j - 1, "::") and s.is_id(j - 2):
+            qual.insert(0, s.t[j - 2].text)
+            j -= 2
+        pos, via = s.t[k].start, []
+        if not qual:
+            for d in s.decls:
+                if not (d.scope[0] <= pos < d.scope[1]):
+                    continue
+                via += [lf.path[:-1] for lf in d.leaves
+                        if lf.name == s.t[k].text and not lf.aliased]
+                via += list(d.globs)
+        mod = None if module is None else module + _t7_mod_chain(s, k)
+        out.append(T7Use(path, mod, key, tuple(qual), tuple(via),
+                         _t7_impl_type(s, k) if key.startswith("::") else None))
     return out
+
 
 
 def _t7_in_pattern(s: Source, k: int) -> bool:
@@ -1792,6 +2373,18 @@ def _t7_is_pub(s: Source, fn: int) -> bool:
     while s.is_id(j) and s.t[j].text in ("unsafe", "extern", "default") or \
             (j >= 0 and s.t[j].kind == STR):
         j -= 1
+    return s.is_id(j, "pub")
+
+
+def _t7_has_vis(s: Source, fn: int) -> bool:
+    """True when the fn carries any visibility modifier: `pub`, `pub(crate)`,
+    `pub(super)`, `pub(in ..)`."""
+    j = fn - 1
+    while j >= 0 and (s.t[j].kind == STR or (
+            s.is_id(j) and s.t[j].text in ("unsafe", "extern", "default"))):
+        j -= 1
+    if s.is_p(j, ")") and s.is_id(s.match[j] - 1, "pub"):
+        return True
     return s.is_id(j, "pub")
 
 
@@ -1847,32 +2440,61 @@ def _t7_generic_names(s: Source, rng):
 def _t7_captures(s: Source, f: T7Fn, impl_gen, edition: str):
     """The `+ use<..>` suffix for the new return type, "" for none, None when unspellable.
 
-    Edition 2024 captures every in-scope generic parameter and lifetime by
-    default, and `View<S>: 'static` keeps a captured borrow from constraining
-    callers, so nothing is emitted. Edition 2015-2021 captures no lifetime
-    implicitly: when the fn has a lifetime parameter (its own or its impl's) or
-    an elided reference parameter, emit `+ use<..>` listing every lifetime
-    (`'_` for elided ones) and every type/const parameter in scope. An
+    Every edition: a `View<S>` is `'static`, so the returned view can never hold
+    a borrow, yet edition 2024 captures every in-scope lifetime (an elided
+    `&self`/`&State` borrow included) and the opaque type then constrains
+    callers (E0597/E0716/E0700). When the fn (or its impl) has a lifetime
+    parameter or the fn takes an elided reference, emit `+ use<..>` listing
+    only the type/const parameters in scope, never a lifetime. An
     argument-position `impl Trait` cannot be named in that list, so such a fn
-    is skipped with a note."""
-    try:
-        if int(edition) >= 2024:
-            return ""
-    except ValueError:
-        return ""
+    is skipped with a note. `edition` no longer matters: the list is valid in
+    2021 and 2024 alike."""
     lts, tys = _t7_generic_names(s, impl_gen)
     l2, t2 = _t7_generic_names(s, f.gen)
     lts, tys = lts + l2, tys + t2
     close = s.match[f.params]
-    elided = any((s.is_p(k, "&") and s.t[k + 1].kind != LIFETIME)
+    elided = any(((s.is_p(k, "&") or s.is_p(k, "&&")) and s.t[k + 1].kind != LIFETIME)
                  or (s.t[k].kind == LIFETIME and s.t[k].text == "'_")
                  for k in range(f.params + 1, close))
     if not lts and not elided:
         return ""
     if any(s.is_id(k, "impl") for k in range(f.params + 1, close)):
         return None
-    items = lts + (["'_"] if elided else []) + tys
-    return " + use<" + ", ".join(items) + ">"
+    return " + use<" + ", ".join(tys) + ">"
+
+
+def _t7_let_and_return(s: Source, f: T7Fn, ta: int, inner: str):
+    """(index of `let`, initialiser text) when the statement right before the
+    tail at `ta` is `let x = <expr>;` and the unwrapped tail is just `x`:
+    a plain binding (no `mut`, pattern, type annotation or attribute) and no
+    comment between the statement and the tail. None otherwise."""
+    name = inner.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or name in KEYWORDS or \
+            not s.is_p(ta - 1, ";"):
+        return None
+    body, semi, let = f.body, ta - 1, None
+    for k in range(body + 1, semi):
+        if s.parent[k] != body:
+            continue
+        if s.is_p(k, ";"):
+            let = None
+        elif s.is_id(k, "let"):
+            let = k
+    if let is None or s.parent[semi] != body or s.parent[let] != body:
+        return None
+    if not (s.is_id(let + 1, name) and s.is_p(let + 2, "=") and not s.is_p(let + 3, "=")):
+        return None
+    if s.is_p(let - 1, "]") or semi <= let + 3:
+        return None
+    if any(s.is_id(k, "else") and s.parent[k] == body for k in range(let + 3, semi)) and \
+            not any(s.is_id(k, "if") and s.parent[k] == body for k in range(let + 3, semi)):
+        return None   # let-else
+    if s.src[s.t[semi].end:s.t[ta].start].strip():
+        return None   # a comment between the statement and the tail
+    stmt = s.src[s.t[let].start:s.t[semi].end]
+    if "//" in stmt or "/*" in stmt:
+        return None
+    return let, s.src[s.t[let + 3].start:s.t[semi - 1].end]
 
 
 def _t7_view_import(s: Source, f: T7Fn, notes: list):
@@ -1911,7 +2533,8 @@ def _t7(s: Source, ctx: T7Ctx, cands: list, notes: list) -> None:
     for f in fns:
         name = s.t[f.name].text
         line = s.line_of(s.t[f.fn].start)
-        if s.is_kept(line) or s.is_kept(s.line_of(s.t[f.arrow].start)):
+        if s.is_kept(line) or s.is_kept(s.line_of(s.t[f.arrow].start)) or (
+                f.body is not None and s.body_marker(f.body)):
             s.kept += 1
             continue
         kind, impl_gen = _t7_container(s, f.fn)
@@ -1936,14 +2559,33 @@ def _t7(s: Source, ctx: T7Ctx, cands: list, notes: list) -> None:
         if (name if kind == "free" else "::" + name) in values:
             exclude("T7-ref", "used as a value")
             continue
+        if ctx.uses:
+            hmod = None if ctx.module is None else ctx.module + _t7_mod_chain(s, f.fn)
+            ity = _t7_impl_type(s, f.fn) if kind != "free" else None
+            private = not _t7_has_vis(s, f.fn)
+            if any(_t7_use_hits(u, name, kind, hmod, ity, private) for u in ctx.uses):
+                exclude("T7-ref", "used as a value")
+                continue
+        if _t7_taken_by_ref(s, f, kind):
+            exclude("T7-ref", "taken by reference")
+            continue
         if ctx.library and _t7_is_pub(s, f.fn) and not _t7_in_test_mod(s, f.fn):
             exclude("T7-public", "pub fn in a library source")
+            continue
+        if not ctx.visible and _t7_has_vis(s, f.fn):
+            exclude("T7-visible", "visible outside its module; callers may rely on AnyView")
             continue
         _, eo, ta, tb = shape
         uses = _t7_captures(s, f, impl_gen, ctx.edition)
         if uses is None:
-            notes.append((line, "note: T7 skipped: an edition-2021 capture list cannot name "
-                                "an `impl Trait` parameter"))
+            notes.append((line, "note: T7 skipped: a `use<..>` capture list cannot name "
+                                "an argument-position `impl Trait` parameter"))
+            continue
+        lr = _t7_let_and_return(s, f, ta, s.inner_text(eo))
+        if lr is not None and int(ctx.edition) < 2024:
+            notes.append((line, "note: T7 skipped: a pre-2024 crate keeps tail-expression "
+                                "temporaries alive past locals; collapse `let x = ..; any(x)` "
+                                "by hand"))
             continue
         a, b = f.ret
         prefix = s.src[s.t[a].start:s.t[f.av].start]
@@ -1953,8 +2595,12 @@ def _t7(s: Source, ctx: T7Ctx, cands: list, notes: list) -> None:
             if imports is None:
                 continue
         ret = "impl " + prefix + "View" + s.src[s.t[f.av + 1].start:s.t[b].end] + uses
-        edits = [Edit(s.t[a].start, s.t[b].end, ret),
-                 Edit(s.t[ta].start, s.t[tb].end, s.inner_text(eo))]
+        inner = s.inner_text(eo)
+        if lr is None:
+            tail_edit = Edit(s.t[ta].start, s.t[tb].end, inner)
+        else:   # `let x = E; any(x)` -> `E`: no clippy::let_and_return
+            tail_edit = Edit(s.t[lr[0]].start, s.t[tb].end, lr[1])
+        edits = [Edit(s.t[a].start, s.t[b].end, ret), tail_edit]
         span = (s.t[f.fn].start, s.t[s.match[f.body]].end)
         cands.append(Candidate("T7", line, f"helper returns impl View: {name}", span, edits, imports))
 
@@ -2040,8 +2686,8 @@ def crate_edition(path: str, default: str = "2024") -> str:
         w = up
 
 
-def package_values(path: str, excludes=(), cache=None) -> frozenset:
-    """T7 fn names used as values anywhere in the package that owns `path`.
+def package_values(path: str, excludes=(), cache=None) -> tuple:
+    """`T7Use` records: T7 fn names used as values anywhere in the package that owns `path`.
 
     The package is the nearest `Cargo.toml`'s directory, walked for `*.rs`
     (skipping `target/`, hidden directories, symlinks, nested packages and
@@ -2066,19 +2712,24 @@ def package_values(path: str, excludes=(), cache=None) -> frozenset:
             continue
         try:
             with open(p, encoding="utf-8", newline="") as fh:
-                sources.append(Source(fh.read()))
+                sources.append((_norm(p), Source(fh.read())))
         except (OSError, LexError, UnicodeDecodeError):
             continue
-    names = {s.t[f.name].text for s in sources for f in _t7_fns(s)}
-    values = set()
-    for s in sources:
-        values |= _t7_value_names(s, names)
-    cache[key] = frozenset(values)
+    names = {s.t[f.name].text for _, s in sources for f in _t7_fns(s)}
+    uses = []
+    for p, s in sources:
+        uses += _t7_collect_uses(s, names, p, _t7_file_module(p))
+    cache[key] = tuple(uses)
     return cache[key]
 
 
-def t7_context(path: str, excludes=(), cache=None) -> T7Ctx:
-    return T7Ctx(crate_edition(path), _t7_library(path), package_values(path, excludes, cache))
+def t7_context(path: str, excludes=(), cache=None, visible: bool = False) -> T7Ctx:
+    """The T7 facts for `path`; the package's value uses in its *other* files
+    are scoped to each helper by `_t7_use_hits`."""
+    me = _norm(path)
+    uses = tuple(u for u in package_values(path, excludes, cache) if u.path != me)
+    return T7Ctx(crate_edition(path), _t7_library(path), visible, frozenset(),
+                 me, _t7_file_module(path), uses)
 
 
 def select_outermost(cands: list[Candidate]) -> list[Candidate]:
@@ -2410,7 +3061,57 @@ def _u_fn_kept(s: Source, g: int) -> bool:
     if s.is_kept(s.line_of(s.t[fn].start), reasoned=True):
         return True
     arrow = _u_return_arrow(s, fn)
-    return arrow is not None and s.is_kept(s.line_of(s.t[arrow].start), reasoned=True)
+    if arrow is not None and s.is_kept(s.line_of(s.t[arrow].start), reasoned=True):
+        return True
+    # rustfmt-moved marker: only for a fn returning an AnyView type, where a
+    # marker after the signature's `{` is the documented placement
+    if arrow is None:
+        return False
+    j = arrow + 1
+    while j < g and not s.is_id(j, "AnyView"):
+        j += 1
+    return j < g and s.body_marker(g, reasoned=True)
+
+
+_ACC_METHODS = ("push", "insert", "extend")
+
+
+def _u_accumulator_kept(s: Source, k: int) -> bool:
+    """True when the call at `k` is inside the arguments of `<v>.push(..)`,
+    `<v>.insert(..)` or `<v>.extend(..)` and the nearest preceding in-scope
+    `let [mut] <v>` of the same fn body names `AnyView` and carries a reasoned
+    marker on its line or alone above it. A re-binding of `<v>` ends the cover."""
+    t = s.t
+    chain, g = [], s.parent[k]
+    while g >= 0:
+        chain.append(g)
+        g = s.parent[g]
+    fn_body = next((g for g in chain if t[g].text == "{" and _u_fn_of_body(s, g) is not None), None)
+    if fn_body is None:
+        return False
+    scope = set(chain)
+    for g in chain:
+        if g == fn_body:
+            break
+        if not (t[g].text == "(" and s.is_id(g - 1) and t[g - 1].text in _ACC_METHODS
+                and s.is_p(g - 2, ".") and s.is_id(g - 3) and not s.is_p(g - 4, ".")
+                and not s.is_p(g - 4, "::")):
+            continue
+        name = t[g - 3].text
+        for j in range(g - 3, fn_body, -1):
+            if not (s.is_id(j, "let") and s.parent[j] in scope):
+                continue
+            n = j + 1
+            if s.is_id(n, "mut"):
+                n += 1
+            if not (s.is_id(n, name) and (s.is_p(n + 1, ":") or s.is_p(n + 1, "=") or s.is_p(n + 1, ";"))):
+                continue
+            e = n
+            while e < len(t) and not s.is_p(e, ";") and t[e].text not in CLOSE:
+                e = s.match[e] + 1 if t[e].text in OPEN else e + 1
+            named = any(s.is_id(x, "AnyView") for x in range(n, min(e, len(t))))
+            return named and s.is_kept(s.line_of(t[j].start), reasoned=True)
+    return False
 
 
 def _u_covered(s: Source, k: int) -> bool:
@@ -2425,6 +3126,14 @@ def _u_covered(s: Source, k: int) -> bool:
         if s.t[g].text == "{" and _u_fn_kept(s, g):
             return True
         g = s.parent[g]
+    # (c') an accumulator `let [mut] v: ..AnyView..` with a kept first line
+    if _u_accumulator_kept(s, k):
+        return True
+    # (d) a reasoned own-line marker inside the call's parentheses (where
+    # rustfmt moves a trailing marker of a multi-line call)
+    o = s._call_open_after(k)
+    if o is not None and s.call_marker(k, s.match[o]):
+        return True
     # (c) an enclosing vec![..], or a let / match statement, whose first line is kept
     n = k
     while n >= 0:
@@ -2473,13 +3182,21 @@ def main(argv=None) -> int:
                          "(or bind the vec to a local, or use the fluent builder)")
     ap.add_argument("--t7", action="store_true",
                     help="opt in to rule T7: a fn returning AnyView<S> whose body ends in one "
-                         "erasure call returns impl View<S> instead (+ use<..> only in a "
-                         "pre-2024 crate when the fn has a lifetime or reference parameter); "
+                         "erasure call returns impl View<S> instead (+ a type-only use<..> in "
+                         "any edition when the fn or its impl has a lifetime parameter or the "
+                         "fn takes an elided reference); "
                          "trait fns, multi-arm bodies, recursive fns or fns used as values, and "
-                         "pub fns of crates/ and plugins/ library sources are listed as "
-                         "T7-trait/T7-arms/T7-ref/T7-public exclusions, never rewritten and never "
+                         "bare pub fns of crates/ and plugins/ library sources, and fns with any "
+                         "visibility modifier (pub(crate), pub(super), pub(in ..), or pub in an "
+                         "app) unless --t7-visible is given, are listed as "
+                         "T7-trait/T7-arms/T7-ref/T7-public/T7-visible exclusions, never rewritten and never "
                          "counted toward the exit code; `// erasure: keep <why>` on the signature "
                          "line (or alone above it) exempts a fn")
+    ap.add_argument("--t7-visible", action="store_true",
+                    help="with --t7, also rewrite helpers that carry a visibility modifier "
+                         "(pub, pub(crate), pub(super), pub(in ..)) and are not T7-public; "
+                         "without it they are listed as T7-visible (callers in other modules "
+                         "or files may rely on AnyView)")
     ap.add_argument("--t6", action="store_true",
                     help="opt in to rule T6: a vec![..] argument of a [seq] API (name list) whose "
                          "elements are all erasure calls (1-12 of them, heads may differ) becomes "
@@ -2493,7 +3210,10 @@ def main(argv=None) -> int:
                          "authoring::any(, frust::authoring::any(; not AnyView::new, .any(, "
                          "cfg(any( or text in strings/comments) that no `// erasure: keep <why>` "
                          "marker with a non-empty reason covers (its line, the line above, an enclosing fn signature, "
-                         "or the first line of an enclosing vec![ / let / match; a fn-signature marker covers "
+                         "or the first line of an enclosing vec![ / let / match; a marker on a "
+                         "`let [mut] v: Vec<AnyView<S>>` line covers the erasure args of "
+                         "v.push/insert/extend in that fn; an own-line marker inside the call's parentheses "
+                         "(where rustfmt moves it) covers that call; a fn-signature marker covers "
                          "its whole body) as "
                          "`<path>:<line>: U unmarked erasure`; --check exits 1 if any; --write "
                          "changes nothing for U; --stats adds unmarked=N per file")
@@ -2537,7 +3257,7 @@ def main(argv=None) -> int:
         try:
             with open(path, encoding="utf-8", newline="") as fh:
                 src = fh.read()
-            ctx = t7_context(path, excludes, pkg_cache) if args.t7 else None
+            ctx = t7_context(path, excludes, pkg_cache, args.t7_visible) if args.t7 else None
             res = rewrite(src, apis, args.t5, args.t7, ctx, args.t6)
         except (LexError, UnicodeDecodeError) as exc:
             print(f"{path}: skipped, cannot tokenise: {exc}", file=sys.stderr)

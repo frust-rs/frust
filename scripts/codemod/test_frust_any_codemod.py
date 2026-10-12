@@ -171,6 +171,102 @@ class T1Test(unittest.TestCase):
         # `card` is a free-fn entry; `.card(..)` is a different (method) call.
         self.assertEqual(run("s.card(any(x))"), "s.card(any(x))")
 
+    # -- callee origin: the name list matches names, the callee must be frust's --
+
+    def assert_noted(self, src, why):
+        src = textwrap.dedent(src)
+        self.assertEqual(run(src), src)
+        rules, notes = check(src)
+        self.assertEqual(rules, [], src)
+        self.assertTrue(any(why in n for _, n in notes), notes)
+
+    def test_app_fn_named_like_slot_api_noted(self):
+        # muxr rail.rs: the app's own `panel` takes an erased body (E0308).
+        self.assert_noted("""\
+            fn panel<S>(width: f32, body: AnyView<S>) -> AnyView<S> { body }
+            fn f() -> V { panel(1.0, any(text("a"))) }
+            """, "a same-file fn `panel` may be the callee")
+
+    def test_app_import_named_like_slot_api_noted(self):
+        self.assert_noted("""\
+            use crate::ui::panel::panel;
+            fn f() -> V { panel(1.0, any(text("a"))) }
+            """, "`panel` is imported from a non-frust path")
+        self.assert_noted("""\
+            use super::field;
+            fn f() -> V { field(any(x)) }
+            """, "`field` is imported from a non-frust path")
+
+    def test_app_glob_import_noted(self):
+        self.assert_noted("use crate::ui::*;\nfn f() -> V { panel(1.0, any(x)) }\n",
+                          "`panel` may come from a non-frust glob import")
+        self.assert_noted("use frust::*;\nuse crate::ui::*;\nfn f() -> V { card(any(x)) }\n",
+                          "non-frust glob import")
+
+    def test_type_name_callee_glob_origin(self):
+        self.assert_noted("use crate::ui::*;\nfn f() -> V { ScrollView::new(any(x)) }\n",
+                          "`ScrollView` may come from a non-frust glob import")
+        self.assert_noted("use frust::*;\nuse crate::ui::*;\nfn f() -> V { ScrollView::new(any(x)) }\n",
+                          "`ScrollView` may come from a non-frust glob import")
+        for pre in ("use frust::*;\n", ""):
+            src = pre + "fn f() -> V { ScrollView::new(any(x)) }\n"
+            self.assertIn("ScrollView::new(x)", run(src), src)
+
+    def test_qualified_app_path_untouched(self):
+        for src in ("crate::ui::panel(any(x))", "super::card(any(x))", "self::ui::card(any(x))",
+                    "ui::card(any(x))", "crate::nav::Route::new(\"/\", || any(home()))"):
+            self.assertEqual(run(src), src, src)
+            self.assertEqual(check(src), ([], []), src)
+
+    def test_local_type_named_like_assoc_api_noted(self):
+        self.assert_noted("""\
+            struct Route;
+            impl Route { fn new<F>(p: &str, f: F) -> Self { Route } }
+            fn f() { Route::new("/", || any(home())); }
+            """, "`Route` is a local type")
+        self.assert_noted("struct ScrollView;\nfn f() { ScrollView::new(any(body)); }\n",
+                          "`ScrollView` is a local type")
+        self.assert_noted("use crate::nav::Route;\nfn f() { Route::new(\"/\", || any(home())); }\n",
+                          "`Route` is imported from a non-frust path")
+
+    def test_method_named_like_same_file_fn_noted(self):
+        self.assert_noted("""\
+            impl Bar { fn leading(self, v: AnyView<()>) -> Self { self } }
+            fn f(b: Bar) -> Bar { b.leading(any(x)) }
+            """, "a same-file fn `leading` may be the callee of `.leading`")
+
+    def test_kept_app_callee_is_not_noted(self):
+        src = "fn panel(b: AnyView<()>) {}\nfn f() { panel(any(x)); // erasure: keep app fn\n}\n"
+        self.assertEqual(run(src), src)
+        self.assertEqual(check(src), ([], []))
+
+    def test_frust_origin_callee_rewrites(self):
+        self.assertEqual(run("use frust_material::card;\nfn f() -> V { card(any(x)) }\n"),
+                         "use frust_material::card;\nfn f() -> V { card(x) }\n")
+        self.assertEqual(run("use frust::panel;\nfn f() -> V { panel(1.0, any(x)) }\n"),
+                         "use frust::panel;\nfn f() -> V { panel(1.0, x) }\n")
+        self.assertEqual(run("frust_shadcn::card(any(x))"), "frust_shadcn::card(x)")
+        self.assertEqual(run("frust::Route::new(\"/\", || any(home()))"),
+                         "frust::Route::new(\"/\", || home())")
+        self.assertEqual(run("use frust::Route;\nRoute::new(\"/\", || any(home()))"),
+                         "use frust::Route;\nRoute::new(\"/\", || home())")
+
+    def test_frust_import_beats_same_named_method(self):
+        # A method `card` does not shadow the imported free fn `card`.
+        src = "use frust::card;\nimpl P { fn card(&self) {} }\nfn f() -> V { card(any(x)) }\n"
+        self.assertEqual(run(src), src.replace("card(any(x))", "card(x)"))
+
+    def test_test_module_super_glob_is_transparent(self):
+        src = textwrap.dedent("""\
+            use frust::*;
+            #[cfg(test)]
+            mod tests {
+                use super::*;
+                fn t() -> V { card(any(x)) }
+            }
+            """)
+        self.assertIn("card(x)", run(src))
+
 
 class T4Test(unittest.TestCase):
     def test_closure_expression_body(self):
@@ -283,6 +379,44 @@ class T2Test(unittest.TestCase):
     def test_let_initialiser_is_not_shadowed(self):
         src = "fn f() -> V { let column = Column(vec![a]); framed(column) }\n"
         self.assertEqual(run_g(src), "fn f() -> V { let column = column().child(a); framed(column) }\n")
+
+    # -- builder origin: only a frust-origin import binds column/row/stack --
+
+    def assert_noted(self, src, why):
+        src = textwrap.dedent(src)
+        self.assertEqual(run(src), src)
+        rules, notes = check(src)
+        self.assertEqual(rules, [], src)
+        self.assertTrue(any(why in n for _, n in notes), notes)
+
+    def test_app_imported_builders_noted(self):
+        # muxr: `use super::{column, row};` helpers took the bare `column()` (E0061).
+        self.assert_noted("""\
+            use frust::{Column, Row};
+            use super::{column, row};
+            fn f() -> V { Column(vec![a, Row(vec![b])]) }
+            """, "T2 skipped: `column` is imported from a non-frust path")
+        self.assert_noted("""\
+            use frust::Row;
+            use crate::ui::row as row;
+            fn f() -> V { Row(vec![a]) }
+            """, "T2 skipped: `row` is imported from a non-frust path")
+
+    def test_app_imported_sugar_noted(self):
+        self.assert_noted("use crate::ui::Column;\nfn f() -> V { Column(vec![a]) }\n",
+                          "T2 skipped: `Column` is imported from a non-frust path")
+        self.assert_noted("use self::ui::FlexView;\nfn f() -> V { FlexView::new(Axis::Vertical, vec![a]) }\n",
+                          "T3 skipped: `FlexView` is imported from a non-frust path")
+        for src in ("crate::ui::Column(vec![a])", "super::Row(vec![a])"):
+            self.assertEqual(run(src), src, src)
+
+    def test_mixed_globs_noted(self):
+        self.assert_noted("use frust::*;\nuse crate::ui::*;\nfn f() -> V { Column(vec![a]) }\n",
+                          "T2 skipped: `Column`/`column` may come from a non-frust glob import")
+
+    def test_frust_imported_builder_still_rewrites(self):
+        src = "use frust_widgets::{column, Column};\nfn f() -> V { Column(vec![a]) }\n"
+        self.assertIn("column().child(a)", run(src))
 
 
 class T3Test(unittest.TestCase):
@@ -531,14 +665,15 @@ class T5Test(unittest.TestCase):
 
     def test_excluded_list_api_untouched(self):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
-            fh.write("[list]\nlist_api\n[exclude]\nother::list_api\n")
+            fh.write("[list]\nlist_api\n[exclude]\nfrust_other::list_api\n")
         try:
             apis = cm.load_apis(fh.name)
         finally:
             os.unlink(fh.name)
-        src = "other::list_api(vec![any(t(1))]); mine::list_api(vec![any(t(1))]);"
+        # Both qualifiers are frust-origin, so only the exclusion tells them apart.
+        src = "frust_other::list_api(vec![any(t(1))]); frust_mine::list_api(vec![any(t(1))]);"
         self.assertEqual(cm.rewrite(src, apis, t5=True).text,
-                         "other::list_api(vec![any(t(1))]); mine::list_api(vec![t(1)]);")
+                         "frust_other::list_api(vec![any(t(1))]); frust_mine::list_api(vec![t(1)]);")
 
 
 class DriverFixture:
@@ -1042,7 +1177,7 @@ class T7Test(unittest.TestCase):
         self.assertEqual(res.text, textwrap.dedent("""\
             use frust::{View, text};
 
-            fn title(s: &State) -> impl View<State> {
+            fn title(s: &State) -> impl View<State> + use<> {
                 text(s.name.clone())
             }
             """))
@@ -1122,21 +1257,109 @@ class T7Test(unittest.TestCase):
             }
             """
         res = run7(src, edition="2021")
-        self.assertIn("fn row<'a, S: 'static>(label: &'a str) -> impl View<S> + use<'a, S> {", res.text)
+        self.assertIn("fn row<'a, S: 'static>(label: &'a str) -> impl View<S> + use<S> {", res.text)
         self.assertIn("fn plain<S: 'static>(n: u8) -> impl View<S> {", res.text)  # borrows nothing
-        self.assertIn("fn view(&self) -> impl View<S> + use<'_, S> {", res.text)
+        self.assertIn("fn view(&self) -> impl View<S> + use<S> {", res.text)
         res = run7("use frust::{AnyView, View, any};\n"
                    "fn f(a: &u8, b: impl Into<u8>) -> AnyView<S> { any(t()) }\n", edition="2018")
         self.assertEqual(res.candidates, [])
-        self.assertIn("cannot name an `impl Trait` parameter", res.notes[0][1])
+        self.assertIn("a `use<..>` capture list cannot name an argument-position `impl Trait` parameter",
+                      res.notes[0][1])
 
-    def test_edition_2024_emits_no_use(self):
+    def test_edition_2024_borrowing_helpers_emit_type_only_use(self):
         res = run7("""\
             use frust::{AnyView, View, any};
+            impl<S: 'static> Card<S> {
+                fn view(&self) -> AnyView<S> { any(t(1)) }
+            }
+            fn free<S: 'static>(st: &State) -> AnyView<S> { any(t(st)) }
             fn row<'a, S: 'static>(label: &'a str) -> AnyView<S> { any(t(label)) }
+            fn plain<S: 'static>(n: u8) -> AnyView<S> { any(t(n)) }
             """, edition="2024")
-        self.assertIn("-> impl View<S> { t(label) }", res.text)
-        self.assertNotIn("use<", res.text)
+        self.assertIn("fn view(&self) -> impl View<S> + use<S> { t(1) }", res.text)
+        self.assertIn("fn free<S: 'static>(st: &State) -> impl View<S> + use<S> { t(st) }", res.text)
+        self.assertIn("-> impl View<S> + use<S> { t(label) }", res.text)
+        self.assertIn("fn plain<S: 'static>(n: u8) -> impl View<S> { t(n) }", res.text)
+        self.assertNotIn("'a, S>", res.text)
+        res = run7("use frust::{AnyView, View, any};\n"
+                   "fn f(a: &u8, b: impl Into<u8>) -> AnyView<S> { any(t()) }\n", edition="2024")
+        self.assertEqual(res.candidates, [])
+        self.assertIn("a `use<..>` capture list cannot name an argument-position `impl Trait` parameter",
+                      res.notes[0][1])
+
+    def test_let_and_return_collapsed(self):
+        res = run7("""\
+            use frust::{AnyView, View, any, column};
+            fn body<S: 'static>() -> AnyView<S> {
+                let v = column(a());
+                any(v)
+            }
+            """)
+        self.assertIn("fn body<S: 'static>() -> impl View<S> {\n    column(a())\n}", res.text)
+        self.assertNotIn("let v", res.text)
+
+    def test_let_and_return_skipped_before_2024(self):
+        src = """\
+            use frust::{AnyView, View, any, column};
+            fn body<S: 'static>() -> AnyView<S> {
+                let v = column(a());
+                any(v)
+            }
+            fn plain<S: 'static>() -> AnyView<S> { any(column(a())) }
+            """
+        for ed in ("2015", "2018", "2021"):
+            res = run7(src, edition=ed)
+            self.assertIn("let v = column(a());", res.text, ed)
+            self.assertIn("fn body<S: 'static>() -> AnyView<S>", res.text, ed)
+            self.assertIn("fn plain<S: 'static>() -> impl View<S> {", res.text, ed)
+            self.assertEqual(len(res.notes), 1, ed)
+            self.assertIn("a pre-2024 crate keeps tail-expression temporaries alive past locals; "
+                          "collapse `let x = ..; any(x)` by hand", res.notes[0][1])
+        res = run7(src, edition="2024")
+        self.assertIn("fn body<S: 'static>() -> impl View<S> {\n    column(a())\n}", res.text)
+        self.assertEqual(res.notes, [])
+
+    def test_t7_help_is_edition_independent(self):
+        with open(cm.__file__, encoding="utf-8") as fh:
+            ap_src = fh.read()
+        i = ap_src.index('"--t7"')
+        help_text = ap_src[i:ap_src.index('"--t7-visible"', i)]
+        self.assertNotIn("pre-2024", help_text)
+        self.assertIn("any edition", help_text)
+
+    def test_let_and_return_leaves_other_shapes(self):
+        for stmt, tail in (("let mut v = column(a());", "any(v)"),
+                           ("let v: Foo = column(a());", "any(v)"),
+                           ("let w = column(a());", "any(v)"),
+                           ("#[allow(x)] let v = column(a());", "any(v)")):
+            res = run7(f"""\
+                use frust::{{AnyView, View, any, column}};
+                fn body<S: 'static>() -> AnyView<S> {{
+                    {stmt}
+                    {tail}
+                }}
+                """)
+            self.assertIn(stmt, res.text, stmt)
+
+    def test_cross_file_method_uses_match_the_impl_type(self):
+        src = """\
+            use frust::{AnyView, View, any};
+            impl Card { fn body(&self) -> AnyView<S> { any(t()) } }
+            """
+        use = lambda qual, ity=None: cm.T7Use("/o.rs", ("src", "o"), "::body", qual, (), ity)
+        run = lambda u: run7(src, path="/a.rs", module=("src",), uses=(u,))
+        self.assertEqual(buckets(run(use(("Card",)))), [("T7-ref", "body")])
+        self.assertEqual(buckets(run(use(("Self",), "Card"))), [("T7-ref", "body")])
+        self.assertEqual(buckets(run(use(("Other",)))), [])
+        self.assertEqual(buckets(run(use(("Self",), "Other"))), [])
+
+    def test_private_helper_only_reached_from_descendant_modules(self):
+        src = "use frust::{AnyView, View, any};\nfn h() -> AnyView<S> { any(t()) }\n"
+        sib = cm.T7Use("/o.rs", ("src", "o"), "h", ("crate",), (), None)
+        kid = cm.T7Use("/k.rs", ("src", "a", "k"), "h", ("super",), (), None)
+        run = lambda u: run7(src, path="/a.rs", module=("src", "a"), uses=(u,))
+        self.assertEqual(buckets(run(sib)), [])        # `crate::h` names the root's h
+        self.assertEqual(buckets(run(kid)), [("T7-ref", "h")])
 
     def test_recursion_excluded(self):
         res = run7("""\
@@ -1176,6 +1399,87 @@ class T7Test(unittest.TestCase):
         res = run7("use frust::{AnyView, View, any};\nfn a() -> AnyView<S> { any(x()) }\n",
                    values=frozenset({"a"}))
         self.assertEqual(buckets(res), [("T7-ref", "a")])
+
+    def test_helper_taken_by_reference_excluded(self):
+        res = run7("""\
+            use frust::{AnyView, View, any};
+            fn free_h() -> AnyView<S> { any(x()) }
+            fn plain() -> AnyView<S> { any(x()) }
+            fn mutref() -> AnyView<S> { any(x()) }
+            fn bigger() -> AnyView<S> { any(x()) }
+            impl X {
+                fn m(&self) -> AnyView<S> { any(x()) }
+                fn assoc() -> AnyView<S> { any(x()) }
+                fn user(&self, prev: &X) {
+                    take(&free_h());
+                    take(&self.m());
+                    take(&Self::assoc());
+                    take(&prev.m());
+                    take(&mut mutref());
+                    take((a, bigger()));
+                    take(&vec![bigger()]);
+                    take(&bigger().len());
+                    let v = plain();
+                }
+            }
+            """)
+        self.assertEqual(buckets(res), [("T7-ref", "free_h"), ("T7-ref", "mutref"),
+                                        ("T7-ref", "m"), ("T7-ref", "assoc")])
+        self.assertEqual([c.desc for c in res.candidates],
+                         ["helper returns impl View: plain", "helper returns impl View: bigger"])
+        self.assertTrue(all(e[3] == "taken by reference" for e in res.excluded
+                            if e[1] == "T7-ref"))
+
+    def test_let_bound_result_borrowed_excluded(self):
+        res = run7("""\
+            use frust::{AnyView, View, any};
+            impl T {
+                fn content(&self) -> AnyView<S> { any(x()) }
+                fn moved(&self) -> AnyView<S> { any(x()) }
+                fn field(&self) -> AnyView<S> { any(x()) }
+                fn mutb(&self) -> AnyView<S> { any(x()) }
+                fn build(&self, slot: &mut Slot, ctx: &mut Ctx) {
+                    let content = self.content();
+                    slot.rebuild(None, Some(&content), ctx);
+                }
+                fn other(&self, kids: &mut Vec<AnyView<S>>) {
+                    let moved = self.moved();
+                    kids.push(moved);
+                    let field = self.field();
+                    take(&field.len());
+                    let mut mutb = self.mutb();
+                    take(&mut mutb);
+                }
+            }
+            """)
+        self.assertEqual(buckets(res), [("T7-ref", "content"), ("T7-ref", "mutb")])
+        self.assertEqual([c.desc for c in res.candidates],
+                         ["helper returns impl View: moved", "helper returns impl View: field"])
+        self.assertTrue(all(e[3] == "taken by reference" for e in res.excluded
+                            if e[1] == "T7-ref"))
+
+    def test_beui_shape_taken_by_reference_not_rewritten(self):
+        src = """\
+            use frust::{AnyView, View, any, text};
+            impl Block {
+                fn primary_view(&self) -> AnyView<State> {
+                    any(text(self.label.clone()))
+                }
+                fn build(&self, ctx: &mut Ctx) {
+                    build_child(&self.primary_view(), ctx);
+                }
+                fn rebuild(&self, prev: &Self, ctx: &mut Ctx) {
+                    rebuild_child(&prev.primary_view(), &self.primary_view(), ctx);
+                }
+                fn teardown(&self, ctx: &mut Ctx) {
+                    teardown_child(&self.primary_view(), ctx);
+                }
+            }
+            """
+        res = run7(src)
+        self.assertEqual(res.candidates, [])
+        self.assertEqual(buckets(res), [("T7-ref", "primary_view")])
+        self.assertEqual(res.text, textwrap.dedent(src))
 
     def test_bindings_and_other_items_are_not_value_uses(self):
         res = run7("""\
@@ -1264,13 +1568,78 @@ class T7Test(unittest.TestCase):
                 pub fn fixture() -> AnyView<S> { any(p()) }
             }
             """
-        res = run7(src, library=True)
+        res = run7(src, library=True, visible=True)
         self.assertEqual(buckets(res), [("T7-public", "api"), ("T7-public", "method")])
         self.assertEqual([c.desc.rsplit(" ", 1)[1] for c in res.candidates],
                          ["internal", "private", "fixture"])
-        res = run7(src, library=False)          # an app, a tests/ or an examples/ source
+        res = run7(src, library=False, visible=True)   # an app, a tests/ or an examples/ source
         self.assertEqual(res.excluded, [])
         self.assertEqual(len(res.candidates), 5)
+
+    def test_visible_helper_listed_unless_opted_in(self):
+        src = """\
+            use frust::{AnyView, View, any};
+            pub(crate) fn a() -> AnyView<S> { any(p()) }
+            pub(super) fn b() -> AnyView<S> { any(p()) }
+            pub(in crate::x) fn c() -> AnyView<S> { any(p()) }
+            pub fn d() -> AnyView<S> { any(p()) }
+            fn e() -> AnyView<S> { any(p()) }
+            """
+        res = run7(src)
+        self.assertEqual([n for _, n in buckets(res)], ["a", "b", "c", "d"])
+        self.assertEqual({b for b, _ in buckets(res)}, {"T7-visible"})
+        self.assertEqual([c.desc.rsplit(" ", 1)[1] for c in res.candidates], ["e"])
+        self.assertIn("pub(crate) fn a() -> AnyView<S>", res.text)
+        self.assertIn("fn e() -> impl View<S>", res.text)
+        res = run7(src, visible=True)
+        self.assertEqual(res.excluded, [])
+        self.assertIn("pub(crate) fn a() -> impl View<S>", res.text)
+        self.assertEqual(len(res.candidates), 5)
+        res = run7("use frust::{AnyView, View, any};\n"
+                   "pub(crate) fn a() -> AnyView<S> { any(p()) }\n", library=True)
+        self.assertEqual(buckets(res), [("T7-visible", "a")])
+
+    def test_closure_local_return_is_not_an_early_return(self):
+        src = """\
+            use frust::{AnyView, View, any};
+            fn a() -> AnyView<S> {
+                let f = move |_app| {
+                    if x { return; }
+                };
+                let g = || { return 1; };
+                any(button().on_click(f))
+            }
+            fn b() -> AnyView<S> {
+                if x { return any(p()); }
+                any(q())
+            }
+            fn c() -> AnyView<S> {
+                let f = |_| { return; };
+                if x { return any(p()); }
+                any(q())
+            }
+            """
+        res = run7(src)
+        self.assertEqual([c.desc.rsplit(" ", 1)[1] for c in res.candidates], ["a"])
+        self.assertEqual(buckets(res), [("T7-arms", "b"), ("T7-arms", "c")])
+
+    def test_rustfmt_moved_marker_is_fn_scoped(self):
+        src = """\
+            use frust::{AnyView, View, any};
+            fn a() -> AnyView<S> {
+                // erasure: keep stored in a Vec<AnyView<S>> by callers
+                any(p())
+            }
+            fn b() -> AnyView<S> {
+                let x = 1;
+                // erasure: keep too late
+                any(p())
+            }
+            """
+        res = run7(src)
+        self.assertEqual(res.kept, 1)
+        self.assertEqual([c.desc.rsplit(" ", 1)[1] for c in res.candidates], ["b"])
+        self.assertIn("fn a() -> AnyView<S>", res.text)
 
     def test_keep_marker_honoured(self):
         src = """\
@@ -1371,9 +1740,14 @@ class T7DriverTest(DriverFixture, unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("lib.rs:7: T7 helper returns impl View: helper", out)
         self.assertIn("lib.rs:3: T7-public excluded: api (pub fn in a library source)", out)
+        self.assertIn("t.rs:3: T7-visible excluded: fixture (visible outside its module", out)
+        self.assertNotIn("T7 helper returns impl View: fixture", out)
+        self.assertIn("2 T7 exclusion(s)", out)
+        code, out = self.main("--check", "--t7", "--t7-visible", self.crates)
+        self.assertEqual(code, 1, out)
         self.assertIn("t.rs:3: T7 helper returns impl View: fixture", out)
         self.assertIn("1 T7 exclusion(s)", out)
-        code, _ = self.main("--write", "--t7", self.crates)
+        code, _ = self.main("--write", "--t7", "--t7-visible", self.crates)
         self.assertEqual(code, 0)
         # Exclusions stay listed but never fail the check, even under --strict.
         code, out = self.main("--check", "--strict", "--t7", self.crates)
@@ -1386,16 +1760,19 @@ class T7DriverTest(DriverFixture, unittest.TestCase):
         self.assertEqual(self.read(self.lib), self.LIB)            # T7 off: untouched
         self.main("--write", "--t7", self.crates)
         once = self.read(self.lib)
-        self.assertIn("fn helper(s: &S) -> impl View<S> + use<'_> {\n    p()\n}", once)
+        self.assertIn("fn helper(s: &S) -> impl View<S> + use<> {\n    p()\n}", once)
         self.assertIn("pub fn api() -> AnyView<S> {", once)
+        self.assertEqual(self.read(self.test), self.TEST)          # T7-visible: untouched
+        self.main("--write", "--t7", "--t7-visible", self.crates)
         self.assertIn("pub fn fixture() -> impl View<S> {", self.read(self.test))
-        self.main("--write", "--t7", self.crates)
+        self.assertIn("pub fn api() -> AnyView<S> {", self.read(self.lib))
+        self.main("--write", "--t7", "--t7-visible", self.crates)
         self.assertEqual(self.read(self.lib), once)
 
     def test_edition_2024_and_resolution_rules(self):
         self.write("Cargo.toml", '[workspace]\n\n[workspace.package]\nedition = "2024"\n')
         self.main("--write", "--t7", self.crates)
-        self.assertIn("fn helper(s: &S) -> impl View<S> {", self.read(self.lib))
+        self.assertIn("fn helper(s: &S) -> impl View<S> + use<> {", self.read(self.lib))
         cm._TOML_CACHE.clear()
         self.assertEqual(cm.crate_edition(self.lib), "2024")
         self.write("crates/foo/Cargo.toml", '[package]\nname = "foo"\nedition = "2021"\n')
@@ -1407,7 +1784,7 @@ class T7DriverTest(DriverFixture, unittest.TestCase):
         self.assertEqual(cm.crate_edition("/nonexistent-dir/x.rs", "2024"), "2024")
 
     def test_value_use_in_another_file_of_the_package(self):
-        self.write("crates/foo/src/table.rs", "pub fn rows() { let f = helper; f(); }\n")
+        self.write("crates/foo/src/table.rs", "pub fn rows() { let f = crate::helper; f(); }\n")
         code, out = self.main("--check", "--t7", self.lib)
         self.assertIn("lib.rs:7: T7-ref excluded: helper (used as a value)", out)
         self.assertEqual(code, 0, out)
@@ -1416,15 +1793,42 @@ class T7DriverTest(DriverFixture, unittest.TestCase):
                               os.path.join(self.crates, "foo", "src", "table.rs"))
         self.assertEqual(code, 1, out)
 
+    def test_unrelated_same_named_value_use_does_not_exclude(self):
+        self.write("crates/foo/src/table.rs", "fn rows() { let f = helper; f(); }\n")
+        code, out = self.main("--check", "--t7", self.lib)
+        self.assertEqual(code, 1, out)
+        self.assertIn("lib.rs:7: T7 helper returns impl View: helper", out)
+        self.assertNotIn("used as a value", out)
+
+    def test_child_module_super_path_value_use_excludes(self):
+        self.write("crates/foo/src/table.rs", "fn rows() { let f = super::helper; f(); }\n")
+        code, out = self.main("--check", "--t7", self.lib)
+        self.assertEqual(code, 0, out)
+        self.assertIn("lib.rs:7: T7-ref excluded: helper (used as a value)", out)
+
+    def test_import_from_the_helper_module_excludes(self):
+        self.write("crates/foo/src/table.rs",
+                   "use crate::helper;\nfn rows() { let f = helper; f(); }\n")
+        code, out = self.main("--check", "--t7", self.lib)
+        self.assertEqual(code, 0, out)
+        self.assertIn("lib.rs:7: T7-ref excluded: helper (used as a value)", out)
+        self.write("crates/foo/src/table.rs",
+                   "use crate::other::helper;\nfn rows() { let f = helper; f(); }\n")
+        code, out = self.main("--check", "--t7", self.lib)
+        self.assertEqual(code, 1, out)
+
     def test_stats_reports_t7_and_buckets_separately(self):
         code, out = self.main("--stats", self.crates)
         self.assertNotIn("T7", out)
         code, out = self.main("--stats", "--t7", self.crates)
         self.assertEqual(code, 0)
         self.assertIn("lib.rs: T7 candidates=1", out)
-        self.assertIn("lib.rs: T7 excluded T7-trait=0 T7-arms=0 T7-ref=0 T7-public=1", out)
+        self.assertIn("lib.rs: T7 excluded T7-trait=0 T7-arms=0 T7-ref=0 T7-public=1 T7-visible=0", out)
+        self.assertIn("total: T7 candidates=1", out)
+        self.assertIn("total: T7 excluded T7-trait=0 T7-arms=0 T7-ref=0 T7-public=1 T7-visible=1", out)
+        code, out = self.main("--stats", "--t7", "--t7-visible", self.crates)
         self.assertIn("total: T7 candidates=2", out)
-        self.assertIn("total: T7 excluded T7-trait=0 T7-arms=0 T7-ref=0 T7-public=1", out)
+        self.assertIn("total: T7 excluded T7-trait=0 T7-arms=0 T7-ref=0 T7-public=1 T7-visible=0", out)
         self.assertEqual(self.read(self.lib), self.LIB)            # --stats never writes
 
 
@@ -1612,6 +2016,36 @@ class T6DriverTest(DriverFixture, unittest.TestCase):
 
 def unmarked(src: str) -> list:
     return cm.unmarked_erasures(cm.Source(textwrap.dedent(src)))
+
+
+class UnmarkedBodyMarkerTest(unittest.TestCase):
+    def test_first_body_comment_covers_the_whole_fn(self):
+        self.assertEqual(unmarked("""\
+            fn f(k: u8) -> AnyView<S> {
+                // erasure: keep arms differ
+                match k {
+                    0 => any(a()),
+                    _ => any(b()),
+                }
+            }
+            """), [])
+
+    def test_later_or_reasonless_body_marker_is_not_fn_scoped(self):
+        self.assertEqual(unmarked("""\
+            fn f(k: u8) -> AnyView<S> {
+                let x = 1;
+                // erasure: keep late
+                foo(any(a()));
+                foo(any(b()));
+            }
+            """), [5])
+        self.assertEqual(unmarked("""\
+            fn f(k: u8) -> AnyView<S> {
+                // erasure: keep
+                foo(any(a()));
+                foo(any(b()));
+            }
+            """), [3, 4])
 
 
 class UnmarkedRuleTest(unittest.TestCase):
@@ -1925,3 +2359,182 @@ class UnmarkedDriverTest(DriverFixture, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModuleScopedShadowTest(unittest.TestCase):
+    def test_nested_mod_fn_does_not_block_parent_but_blocks_inside(self):
+        src = ("fn outer() -> V { Column(vec![a, b]) }\n"
+               "#[cfg(test)]\nmod tests {\n"
+               "    fn column(x: u32) -> u32 { x }\n"
+               "    fn inner() -> V { Column(vec![a, b]) }\n}\n")
+        res = cm.rewrite(GLOB + src, APIS)
+        lines = [c.line for c in res.candidates]
+        self.assertEqual(lines, [2])
+        self.assertTrue(any("local fn `column`" in n for _, n in res.notes))
+
+    def test_parent_fn_still_shadows_nested_mod(self):
+        src = ("fn column(x: u32) -> u32 { x }\n"
+               "mod tests {\n    fn inner() -> V { Column(vec![a, b]) }\n}\n")
+        res = cm.rewrite(GLOB + src, APIS)
+        self.assertEqual(res.candidates, [])
+
+    def test_nested_mod_fn_does_not_block_origin_gate(self):
+        s = cm.Source("fn a() { child(1); }\nmod m { fn child() {} fn b() { child(2); } }\n")
+        self.assertFalse(s.fn_shadows("child", s.src.index("child(1)")))
+        self.assertTrue(s.fn_shadows("child", s.src.index("child(2)")))
+
+
+class AccumulatorMarkerTest(unittest.TestCase):
+    def test_marked_accumulator_covers_pushes(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut kids: Vec<AnyView<S>> = Vec::new(); // erasure: keep accumulator
+                kids.push(any(a()));
+                kids.push(any(b()));
+                kids.insert(0, any(c()));
+                kids.extend([any(d())]);
+            }
+            """), [])
+
+    def test_marker_alone_above_and_untyped_initializer(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                // erasure: keep accumulator
+                let mut kids = Vec::<AnyView<S>>::new();
+                kids.push(any(a()));
+            }
+            """), [])
+
+    def test_unmarked_accumulator_reports_each_push(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut kids: Vec<AnyView<S>> = Vec::new();
+                kids.push(any(a()));
+                kids.push(any(b()));
+            }
+            """), [3, 4])
+
+    def test_bare_marker_covers_nothing(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut kids: Vec<AnyView<S>> = Vec::new(); // erasure: keep
+                kids.push(any(a()));
+            }
+            """), [3])
+
+    def test_other_vec_and_non_anyview_not_covered(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut kids: Vec<AnyView<S>> = Vec::new(); // erasure: keep accumulator
+                let mut other: Vec<AnyView<S>> = Vec::new();
+                let mut nums: Vec<u8> = Vec::new(); // erasure: keep not a view vec
+                other.push(any(a()));
+                nums.push(any(b()));
+            }
+            """), [5, 6])
+
+    def test_other_fn_and_rebinding_not_covered(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut kids: Vec<AnyView<S>> = Vec::new(); // erasure: keep accumulator
+                kids.push(any(a()));
+                let mut kids: Vec<AnyView<S>> = Vec::new();
+                kids.push(any(b()));
+            }
+            fn g(kids: &mut Vec<AnyView<S>>) {
+                kids.push(any(c()));
+            }
+            """), [5, 8])
+
+
+class InCallMarkerTest(unittest.TestCase):
+    def test_own_line_marker_inside_parens_covers_call(self):
+        src = """\
+            fn f() {
+                x.push(any(f(
+                    // erasure: keep why
+                    a,
+                    b,
+                )));
+            }
+            """
+        self.assertEqual(unmarked(src), [])
+
+    def test_marker_after_closing_paren_covers_only_next_line(self):
+        src = """\
+            fn f() {
+                x.push(any(f(
+                    a,
+                )));
+                // erasure: keep why
+                y.push(any(g()));
+                z.push(any(h()));
+            }
+            """
+        self.assertEqual(unmarked(src), [2, 7])
+
+    def test_marker_in_closure_body_does_not_escape(self):
+        src = """\
+            fn f() {
+                x.push(any(w(|| {
+                    // erasure: keep why
+                    1
+                })));
+            }
+            """
+        self.assertEqual(unmarked(src), [2])
+
+    def test_bare_in_call_marker_covers_nothing_under_u(self):
+        src = """\
+            fn f() {
+                x.push(any(f(
+                    // erasure: keep
+                    a,
+                )));
+            }
+            """
+        self.assertEqual(unmarked(src), [2])
+
+    def test_t_rule_keep_exemption(self):
+        src = GLOB + textwrap.dedent("""\
+            fn f() {
+                s.child(any(f(
+                    // erasure: keep why
+                    a,
+                )));
+            }
+            """)
+        res = cm.rewrite(src, APIS)
+        self.assertEqual(res.candidates, [])
+        plain = cm.rewrite(src.replace("// erasure: keep why", "// note"), APIS)
+        self.assertEqual(len(plain.candidates), 1)
+
+    def test_rustfmt_stable_placements(self):
+        import shutil
+        import subprocess
+        rustfmt = shutil.which("rustfmt")
+        if rustfmt is None:
+            self.skipTest("rustfmt not on PATH")
+        src = textwrap.dedent("""\
+            fn a() {
+                x.push(any(f(a, b))); // erasure: keep why
+            }
+            fn b() {
+                let mut kids: Vec<AnyView<S>> = Vec::new(); // erasure: keep accumulator
+                kids.push(any(g()));
+            }
+            fn c() {
+                // erasure: keep why
+                y.push(any(h()));
+            }
+            fn d() {
+                y.push(any(f( // erasure: keep why
+                    aaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbb, cccccccccccccccccccccc, dddddddddddddddddd)));
+            }
+            """)
+        self.assertEqual(unmarked(src), [])
+        out = subprocess.run([rustfmt, "--edition", "2024", "--emit", "stdout"], input=src,
+                             capture_output=True, text=True)
+        if out.returncode != 0:
+            self.skipTest("rustfmt failed: " + out.stderr[:200])
+        self.assertEqual(unmarked(out.stdout), [], out.stdout)

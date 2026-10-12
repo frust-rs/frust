@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::build_info::{BuildInfo, BuildMode};
 use crate::doctor::EnvLookup;
+use crate::facade_key::FacadeKey;
 use crate::process::{ProcessRunner, tail_lines};
 
 use super::config::DesktopConfig;
@@ -39,12 +40,20 @@ const FAILURE_TAIL_LINES: usize = 50;
 /// here (`commands::build`'s desktop arm). The empty slice below is therefore
 /// the only value this call can receive, and it keeps the resolved list
 /// byte-identical to the mode's own.
+///
+/// Each feature is spelled with the app's facade dependency key
+/// ([`FacadeKey`], resolved once from `project_dir`): `frust-ui/devtools` for
+/// an app depending on `frust-ui = ".."`. A manifest naming the facade under
+/// two keys fails before cargo runs; a failed Debug/Profile compile whose
+/// output names a feature the package does not contain carries
+/// [`FacadeKey::hint`] after its tail.
 pub(super) fn build(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
     info: &BuildInfo,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<(), DesktopBuildError> {
+    let key = FacadeKey::resolve(project_dir)?;
     let (features, warning) =
         crate::cargo_manifest::resolve_release_features(project_dir, info.mode, &[]);
     if let Some(warning) = warning {
@@ -57,7 +66,7 @@ pub(super) fn build(
     }
     for feature in &features {
         args.push("--features".to_string());
-        args.push(feature.clone());
+        args.push(key.map(feature));
     }
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     let printable = args.join(" ");
@@ -72,11 +81,18 @@ pub(super) fn build(
 
     if !out.success {
         let tail = tail_lines(&out.stderr, FAILURE_TAIL_LINES);
-        let tail = if tail.is_empty() {
+        let mut tail = if tail.is_empty() {
             tail_lines(&out.stdout, FAILURE_TAIL_LINES)
         } else {
             tail
         };
+        if let Some(hint) = crate::desktop_run::facade_feature_hint(
+            info.mode,
+            &format!("{}\n{}", out.stdout, out.stderr),
+        ) {
+            tail.push('\n');
+            tail.push_str(hint);
+        }
         return Err(DesktopBuildError::CargoFailed {
             args: printable,
             tail,
@@ -249,6 +265,72 @@ mod tests {
         );
         build(&runner, &dir, &info(BuildMode::Profile), &mut |_| {}).unwrap();
         assert_eq!(profile_dir(BuildMode::Profile), "profile");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An app keyed `frust-ui` compiles with `frust-ui/<feature>`; a cargo
+    /// feature error then carries the dependency-key hint.
+    #[test]
+    fn a_frust_ui_keyed_app_builds_with_mapped_features_and_hints_a_feature_error() {
+        let dir = temp_dir("frust-ui-key");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nfrust-ui = \"0.6.0\"\n",
+        )
+        .unwrap();
+        let runner = FakeProcessRunner::new().with(
+            "cargo build --features frust-ui/perf-trace --features frust-ui/devtools",
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "error: the package 'app' does not contain this feature: frust-ui/devtools"
+                    .to_string(),
+            },
+        );
+        let err = build(&runner, &dir, &info(BuildMode::Debug), &mut |_| {}).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("frust-ui/devtools"), "{message}");
+        assert!(message.ends_with(FacadeKey::hint()), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A manifest naming the facade under two keys is a facade-key error
+    /// before cargo runs, not a `cargo build` spawn failure.
+    #[test]
+    fn an_ambiguous_facade_key_is_its_own_error_not_a_spawn_failure() {
+        let dir = temp_dir("ambiguous-key");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+             frust = { package = \"frust-ui\", version = \"0.6.0\" }\n\
+             ui = { package = \"frust-ui\", version = \"0.6.0\" }\n",
+        )
+        .unwrap();
+        let runner = FakeProcessRunner::new();
+        let err = build(&runner, &dir, &info(BuildMode::Debug), &mut |_| {}).unwrap_err();
+        assert!(matches!(err, DesktopBuildError::FacadeKey(_)), "{err:?}");
+        let message = err.to_string();
+        assert!(
+            message.starts_with("resolving the app's frust dependency:"),
+            "{message}"
+        );
+        assert!(message.contains("more than one key"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_compile_error_that_is_not_a_feature_error_carries_no_hint() {
+        let dir = temp_dir("no-hint");
+        let runner = FakeProcessRunner::new().with(
+            "cargo build --features frust/perf-trace --features frust/devtools",
+            Output {
+                success: false,
+                stdout: String::new(),
+                stderr: "error[E0425]: cannot find value `x` in this scope".to_string(),
+            },
+        );
+        let err = build(&runner, &dir, &info(BuildMode::Debug), &mut |_| {}).unwrap_err();
+        assert!(!err.to_string().contains("hint:"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
 

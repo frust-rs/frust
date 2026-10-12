@@ -35,6 +35,11 @@ pub mod desktop_run;
 pub mod devices;
 pub mod devtools_client;
 pub mod doctor;
+/// The dependency key an app's `Cargo.toml` gives the framework facade
+/// (`frust`, `frust-ui`, or any rename), and the mapping from the drive's
+/// canonical `frust/<feature>` literals to the spelling that app's cargo
+/// accepts.
+pub mod facade_key;
 /// Windows verbatim-path (`\\?\...`) simplification and portable
 /// (forward-slash) path rendering shared by every scaffold-time `frust`-path
 /// resolver, the generated-file paths plugin apply writes, and

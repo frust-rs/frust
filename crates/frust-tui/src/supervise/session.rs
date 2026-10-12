@@ -31,6 +31,7 @@ use std::sync::atomic::AtomicBool;
 use frust_drive::build_info::{BuildInfo, BuildMode};
 use frust_drive::desktop_run;
 use frust_drive::devices::{Device, Kind, Platform};
+use frust_drive::facade_key::FacadeKeyError;
 use frust_drive::hotpatch::android::{AndroidHotStart, AndroidStart, start_android};
 use frust_drive::hotpatch::graph::WorkspaceGraph;
 use frust_drive::hotpatch::ios_sim::{IosSimHotStart, IosSimStart, start_ios_sim};
@@ -92,7 +93,7 @@ impl SessionSpec {
     /// [`LaunchError::DeviceLaunchUnwired`].
     pub fn launch_plan(&self) -> Result<LaunchPlan, LaunchError> {
         match &self.target {
-            DeviceTarget::Desktop => Ok(self.desktop_plan()),
+            DeviceTarget::Desktop => self.desktop_plan(),
             DeviceTarget::Device(device) => {
                 Err(LaunchError::DeviceLaunchUnwired(device.name.clone()))
             }
@@ -109,14 +110,14 @@ impl SessionSpec {
     /// `frust/devtools` compiled in would leave DevTools waiting forever for a
     /// discovery line that can never be printed, and that decision belongs in
     /// one place for every front-end.
-    fn desktop_plan(&self) -> LaunchPlan {
-        let plan = desktop_run::desktop_plan(&self.project_root, &self.build);
-        LaunchPlan {
+    fn desktop_plan(&self) -> Result<LaunchPlan, LaunchError> {
+        let plan = desktop_run::desktop_plan(&self.project_root, &self.build)?;
+        Ok(LaunchPlan {
             program: plan.program,
             args: plan.args,
             cwd: plan.cwd,
             env: plan.env,
-        }
+        })
     }
 
     /// Whether this spec can run as a hot-patch session, or the failed
@@ -414,6 +415,12 @@ pub enum LaunchError {
          (TUI2-04 wires the device pipeline)"
     )]
     DeviceLaunchUnwired(String),
+    /// The project's facade key cannot be resolved — the manifest names the
+    /// frust facade under more than one key, or under a key no cargo feature
+    /// can spell — so the desktop plan's cargo features have no single valid
+    /// spelling.
+    #[error("resolving the app's frust dependency: {0}")]
+    FacadeKey(#[from] FacadeKeyError),
 }
 
 /// The lifecycle of a supervised session.
@@ -610,6 +617,30 @@ mod tests {
         );
         assert_eq!(plan.cwd, PathBuf::from("/tmp/app"));
         assert!(plan.env.is_empty());
+    }
+
+    #[test]
+    fn an_ambiguous_facade_key_fails_the_desktop_launch_plan() {
+        let root =
+            std::env::temp_dir().join(format!("frust-tui-facade-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+             frust = { package = \"frust-ui\", version = \"0.6.0\" }\n\
+             ui = { package = \"frust-ui\", version = \"0.6.0\" }\n",
+        )
+        .unwrap();
+        let spec = SessionSpec {
+            project_root: root.clone(),
+            target: DeviceTarget::Desktop,
+            build: build(BuildMode::Debug),
+        };
+        let err = spec.launch_plan().unwrap_err();
+        assert!(matches!(err, LaunchError::FacadeKey(_)), "{err:?}");
+        assert!(err.to_string().contains("more than one key"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

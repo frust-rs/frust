@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::build_info::BuildInfo;
+use crate::build_info::{BuildInfo, BuildMode};
 use crate::doctor::{EnvLookup, RealEnv};
+use crate::facade_key::FacadeKey;
 use crate::process::{Output, ProcessRunner, tail_lines};
 
 use self::xcodebuild::{Invocation, Signing};
@@ -110,18 +111,7 @@ fn build_with_env(
     schemes::verify(runner, project_dir, &sc)?;
 
     let defines_b64 = encode_defines(&info.defines);
-    // Release-lean preflight: a legacy app that predates the `lean` feature
-    // has it dropped here (with a one-time warning through the `on_line`
-    // sink) so xcodebuild never threads an undeclared `--features lean`
-    // down to `cargo` — cargo's opaque hard error. A declaring app keeps
-    // byte-identical features and warns nothing.
-    let (features, warning) =
-        crate::cargo_manifest::resolve_release_features(project_dir, info.mode, extra_features);
-    if let Some(warning) = warning {
-        on_line(&warning);
-    }
-    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
-    let features_b64 = encode_features(&feature_refs);
+    let features_b64 = resolve_features_b64(project_dir, info.mode, extra_features, on_line)?;
 
     match target {
         IosArtifact::App {
@@ -150,7 +140,7 @@ fn build_with_env(
                 defines_b64: defines_b64.as_deref(),
                 features_b64: features_b64.as_deref(),
             };
-            run_xcodebuild(runner, project_dir, &inv.build_argv(), on_line)?;
+            run_xcodebuild(runner, project_dir, info.mode, &inv.build_argv(), on_line)?;
 
             let products = products_dir(project_dir, &sc.configuration, *simulator);
             let app = glob_one(&products, "app").with_context(|| {
@@ -178,7 +168,7 @@ fn build_with_env(
                 defines_b64: defines_b64.as_deref(),
                 features_b64: features_b64.as_deref(),
             };
-            run_xcodebuild(runner, project_dir, &inv.archive_argv(), on_line)?;
+            run_xcodebuild(runner, project_dir, info.mode, &inv.archive_argv(), on_line)?;
 
             let plist = export::export_options_plist(export_method, Some(&choice.team));
             let plist_path = project_dir.join(export::EXPORT_OPTIONS_PATH);
@@ -189,7 +179,13 @@ fn build_with_env(
             fs::write(&plist_path, plist)
                 .with_context(|| format!("writing `{}`", plist_path.display()))?;
 
-            run_xcodebuild(runner, project_dir, &export::export_argv(), on_line)?;
+            run_xcodebuild(
+                runner,
+                project_dir,
+                info.mode,
+                &export::export_argv(),
+                on_line,
+            )?;
 
             let ipa_dir = project_dir.join(export::EXPORT_PATH);
             let ipa = glob_one(&ipa_dir, "ipa").with_context(|| {
@@ -224,6 +220,41 @@ fn preflight(runner: &dyn ProcessRunner, simulator: bool) -> Result<(), String> 
     Ok(())
 }
 
+/// The base64 `FRUST_FEATURES` value for a `mode` build of the app at
+/// `project_dir` with the `extra_features` passthrough — `None` for no
+/// features. The one resolution both iOS lanes (this module's `build` and
+/// `ios_run`'s simulator session) share:
+///
+/// - **Release-lean preflight:** a legacy app that predates the `lean`
+///   feature has it dropped (with a one-time warning through `on_line`) so
+///   xcodebuild never threads an undeclared `--features lean` down to
+///   `cargo` — cargo's opaque hard error. A declaring app keeps byte-identical
+///   features and warns nothing.
+/// - **Facade key:** the template run-script hands the decoded CSV to
+///   `cargo build --features` verbatim, so each canonical `frust/<feature>`
+///   is spelled with the app's facade dependency key ([`FacadeKey`], resolved
+///   once from `project_dir`) — `frust-ui/devtools` for an app depending on
+///   `frust-ui = ".."`. A manifest naming the facade under two keys is an
+///   error here, before xcodebuild runs.
+///
+/// Pure host-side logic (no Xcode), so it is unit-tested on every host.
+pub(crate) fn resolve_features_b64(
+    project_dir: &Path,
+    mode: BuildMode,
+    extra_features: &[String],
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Option<String>> {
+    let (features, warning) =
+        crate::cargo_manifest::resolve_release_features(project_dir, mode, extra_features);
+    if let Some(warning) = warning {
+        on_line(&warning);
+    }
+    let key = FacadeKey::resolve(project_dir).context("resolving the app's frust dependency")?;
+    let features: Vec<String> = features.iter().map(|feature| key.map(feature)).collect();
+    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    Ok(encode_features(&feature_refs))
+}
+
 /// Streams an `xcrun xcodebuild …` invocation, prefixing each line, and turns
 /// a non-zero exit into an error whose message tails both stdout and stderr
 /// (xcodebuild reports most errors on stdout) plus a `frust doctor` hint —
@@ -231,6 +262,7 @@ fn preflight(runner: &dyn ProcessRunner, simulator: bool) -> Result<(), String> 
 fn run_xcodebuild(
     runner: &dyn ProcessRunner,
     root: &Path,
+    mode: BuildMode,
     argv: &[String],
     on_line: &mut dyn FnMut(&str),
 ) -> Result<()> {
@@ -240,12 +272,16 @@ fn run_xcodebuild(
         .run_streaming("xcrun", &refs, Some(root), &[], &mut prefixed)
         .with_context(|| format!("running `xcodebuild` in `{}`", root.display()))?;
     if !out.success {
-        bail!("{}", failure_message(&out));
+        bail!("{}", failure_message(&out, mode));
     }
     Ok(())
 }
 
-fn failure_message(out: &Output) -> String {
+/// A failed xcodebuild's report: both output tails, the dependency-key hint
+/// when a `mode` build's cargo step named a feature the package does not
+/// contain ([`crate::desktop_run::facade_feature_hint`]), then the doctor
+/// hint.
+fn failure_message(out: &Output, mode: BuildMode) -> String {
     let stdout_tail = tail_lines(&out.stdout, 50);
     let stderr_tail = tail_lines(&out.stderr, 50);
     let mut message = "`xcodebuild` failed".to_string();
@@ -254,6 +290,12 @@ fn failure_message(out: &Output) -> String {
     }
     if !stderr_tail.is_empty() {
         message.push_str(&format!("\n--- stderr (tail) ---\n{stderr_tail}"));
+    }
+    if let Some(hint) =
+        crate::desktop_run::facade_feature_hint(mode, &format!("{}\n{}", out.stdout, out.stderr))
+    {
+        message.push('\n');
+        message.push_str(hint);
     }
     message.push_str("\nhint: run `frust doctor` to check your Xcode/signing setup.");
     message
@@ -310,6 +352,8 @@ fn encode_defines(defines: &HashMap<String, String>) -> Option<String> {
 /// was dropped (`cargo_manifest::resolve_release_features`), in which case no
 /// `FRUST_FEATURES=` setting is emitted at all. Shared with the simulator run
 /// path (`ios_run::xcodebuild`) so the feature encoding has one source.
+/// `features` arrive already spelled with the app's facade key
+/// ([`resolve_features_b64`]); this encodes what it is given.
 pub(crate) fn encode_features(features: &[&str]) -> Option<String> {
     if features.is_empty() {
         return None;
@@ -819,5 +863,113 @@ mod tests {
         );
         assert!(message.contains("frust doctor"), "{message}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The decoded `FRUST_FEATURES` value for each key: the scaffolded
+    /// `frust` key (and a project with no manifest at all) keep the canonical
+    /// spelling; an app keyed `frust-ui` gets the mapped list, its
+    /// passthrough after the mode's own; release keeps the app's `lean`.
+    #[test]
+    fn resolve_features_b64_spells_the_facade_key() {
+        let decoded = |dir: &Path, mode: BuildMode, extra: &[String]| {
+            let encoded = resolve_features_b64(dir, mode, extra, &mut |_| {})
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                encoded,
+                base64_encode(decode_csv_for_test(&encoded).as_bytes()),
+                "round trip"
+            );
+            decode_csv_for_test(&encoded)
+        };
+
+        let bare = temp_project("features-no-manifest");
+        assert_eq!(
+            decoded(&bare, BuildMode::Debug, NO_EXTRA),
+            "frust/perf-trace,frust/devtools"
+        );
+
+        let scaffolded = temp_project("features-scaffolded");
+        fs::write(
+            scaffolded.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+             frust = { package = \"frust-ui\", version = \"0.6.0\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            decoded(&scaffolded, BuildMode::Debug, NO_EXTRA),
+            "frust/perf-trace,frust/devtools"
+        );
+
+        let keyed = temp_project("features-frust-ui");
+        fs::write(
+            keyed.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+             frust-ui = \"0.6.0\"\n\n[features]\nlean = []\n",
+        )
+        .unwrap();
+        assert_eq!(
+            decoded(&keyed, BuildMode::Debug, &["hybrid-tier".to_string()]),
+            "frust-ui/perf-trace,frust-ui/devtools,hybrid-tier"
+        );
+        assert_eq!(
+            decoded(&keyed, BuildMode::Profile, NO_EXTRA),
+            "frust-ui/perf-trace,frust-ui/devtools"
+        );
+        assert_eq!(decoded(&keyed, BuildMode::Release, NO_EXTRA), "lean");
+
+        for dir in [bare, scaffolded, keyed] {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_facade_key_fails_feature_resolution() {
+        let dir = temp_project("features-ambiguous");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+             frust = { package = \"frust-ui\", version = \"0.6.0\" }\n\
+             ui = { package = \"frust-ui\", version = \"0.6.0\" }\n",
+        )
+        .unwrap();
+        let err = resolve_features_b64(&dir, BuildMode::Debug, NO_EXTRA, &mut |_| {}).unwrap_err();
+        assert!(format!("{err:#}").contains("more than one key"), "{err:#}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_feature_failure_carries_the_facade_key_hint() {
+        let out = Output {
+            success: false,
+            stdout: "error: the package 'app' does not contain this feature: frust/devtools"
+                .to_string(),
+            stderr: String::new(),
+        };
+        let message = failure_message(&out, BuildMode::Debug);
+        assert!(message.contains(FacadeKey::hint()), "{message}");
+        assert!(message.ends_with("Xcode/signing setup."), "{message}");
+        assert!(!failure_message(&out, BuildMode::Release).contains(FacadeKey::hint()));
+    }
+
+    /// Standard base64 decode of a `FRUST_FEATURES` value, test-only (the
+    /// drive never decodes; the template's run-script does).
+    fn decode_csv_for_test(encoded: &str) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut bits: u32 = 0;
+        let mut count = 0;
+        let mut out = Vec::new();
+        for byte in encoded.bytes().filter(|b| *b != b'=') {
+            let value = TABLE.iter().position(|t| *t == byte).unwrap() as u32;
+            bits = (bits << 6) | value;
+            count += 6;
+            if count >= 8 {
+                count -= 8;
+                out.push((bits >> count) as u8);
+                bits &= (1 << count) - 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
     }
 }

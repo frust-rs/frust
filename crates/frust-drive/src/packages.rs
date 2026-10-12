@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::facade_key;
 use crate::process::{ProcessRunner, RealProcessRunner};
 
 /// Why a package directory could not be resolved — a library contract callers
@@ -173,35 +174,48 @@ impl<'r> CargoLocator<'r> {
         self
     }
 
-    /// The `cargo` argv for `project_dir`'s manifest at `manifest`.
+    /// The full-graph `cargo` argv for `project_dir`'s manifest at
+    /// `manifest`.
+    #[cfg(test)]
     fn metadata_args(&self, manifest: &Path) -> Vec<String> {
+        self.metadata_args_with(manifest, MetadataScope::Graph)
+    }
+
+    /// The `cargo` argv for `project_dir`'s manifest at `manifest` under
+    /// `scope`: the one `cargo metadata` shape this locator spawns,
+    /// `--no-deps` added for a [`MetadataScope::Members`] read.
+    fn metadata_args_with(&self, manifest: &Path, scope: MetadataScope) -> Vec<String> {
         let mut args = vec![
             "metadata".to_string(),
             "--format-version".to_string(),
             "1".to_string(),
-            "--manifest-path".to_string(),
-            manifest.to_string_lossy().into_owned(),
         ];
+        if scope == MetadataScope::Members {
+            args.push("--no-deps".to_string());
+        }
+        args.push("--manifest-path".to_string());
+        args.push(manifest.to_string_lossy().into_owned());
         if self.lockfile == LockfilePolicy::Locked {
             args.push("--locked".to_string());
         }
         args
     }
-}
 
-impl PackageLocator for CargoLocator<'_> {
-    fn locate_many(
+    /// Runs `cargo metadata` for the project at `project_dir` under `scope`
+    /// and returns its stdout, after the up-front manifest check every read
+    /// shares.
+    fn run_metadata(
         &self,
         project_dir: &Path,
-        packages: &[&str],
-    ) -> Result<Vec<PathBuf>, PackagesError> {
+        scope: MetadataScope,
+    ) -> Result<String, PackagesError> {
         let manifest = project_dir.join("Cargo.toml");
         if !manifest.is_file() {
             return Err(PackagesError::NoManifest {
                 project_dir: project_dir.to_path_buf(),
             });
         }
-        let args = self.metadata_args(&manifest);
+        let args = self.metadata_args_with(&manifest, scope);
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         let out =
             self.runner
@@ -216,8 +230,114 @@ impl PackageLocator for CargoLocator<'_> {
                 stderr: out.stderr.trim().to_string(),
             });
         }
-        packages_from_metadata(project_dir, &out.stdout, packages)
+        Ok(out.stdout)
     }
+
+    /// The declared dependencies of the root package of the project at
+    /// `project_dir`, read with `cargo metadata --no-deps` — cargo's own view
+    /// of the manifest, so a `workspace = true` entry carries the rename its
+    /// workspace declares. No dependency graph is resolved, so nothing is
+    /// downloaded.
+    pub(crate) fn root_dependencies(
+        &self,
+        project_dir: &Path,
+    ) -> Result<Vec<MetadataDependency>, PackagesError> {
+        let stdout = self.run_metadata(project_dir, MetadataScope::Members)?;
+        root_dependencies_from_metadata(project_dir, &stdout)
+    }
+}
+
+/// How much of the project a `cargo metadata` run reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataScope {
+    /// The full resolved dependency graph — what locating a package needs.
+    Graph,
+    /// Only the workspace members' own manifests (`--no-deps`).
+    Members,
+}
+
+impl PackageLocator for CargoLocator<'_> {
+    fn locate_many(
+        &self,
+        project_dir: &Path,
+        packages: &[&str],
+    ) -> Result<Vec<PathBuf>, PackagesError> {
+        let stdout = self.run_metadata(project_dir, MetadataScope::Graph)?;
+        packages_from_metadata(project_dir, &stdout, packages)
+    }
+}
+
+/// One `dependencies[]` entry of a package in a `cargo metadata` document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MetadataDependency {
+    /// The depended-on package's name.
+    pub(crate) name: String,
+    /// The key the manifest gives it, when that differs from `name`
+    /// (`ui = { package = "frust-ui" }` → `Some("ui")`).
+    pub(crate) rename: Option<String>,
+    /// `None` for a normal dependency, `Some("dev")`/`Some("build")`
+    /// otherwise.
+    pub(crate) kind: Option<String>,
+}
+
+/// The root package's `dependencies[]` out of a `cargo metadata
+/// --format-version 1` document: the package whose manifest sits in
+/// `project_dir`, or the only package listed. A virtual workspace manifest
+/// has no root package and answers an empty list. Split from
+/// [`CargoLocator::root_dependencies`] so the parse is tested against canned
+/// JSON rather than a cargo run.
+pub(crate) fn root_dependencies_from_metadata(
+    project_dir: &Path,
+    metadata: &str,
+) -> Result<Vec<MetadataDependency>, PackagesError> {
+    let unreadable = |reason: String| PackagesError::MetadataUnreadable {
+        project_dir: project_dir.to_path_buf(),
+        reason,
+    };
+    let doc: serde_json::Value =
+        serde_json::from_str(metadata).map_err(|err| unreadable(err.to_string()))?;
+    let listed = doc
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| unreadable("no `packages` array".to_string()))?;
+    let identity = |dir: &Path| dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let wanted = identity(project_dir);
+    let root = listed
+        .iter()
+        .find(|entry| {
+            entry
+                .get("manifest_path")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|manifest| Path::new(manifest).parent())
+                .is_some_and(|dir| identity(dir) == wanted)
+        })
+        .or(match listed.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        });
+    let Some(root) = root else {
+        return Ok(Vec::new());
+    };
+    let str_of = |entry: &serde_json::Value, key: &str| {
+        entry
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    root.get("dependencies")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|dep| {
+            let name = str_of(dep, "name")
+                .ok_or_else(|| unreadable("a dependency carries no `name`".to_string()))?;
+            Ok(MetadataDependency {
+                name,
+                rename: str_of(dep, "rename"),
+                kind: str_of(dep, "kind"),
+            })
+        })
+        .collect()
 }
 
 /// Picks `packages` out of a `cargo metadata --format-version 1` document:
@@ -354,26 +474,28 @@ fn root_closure(doc: &serde_json::Value) -> HashSet<String> {
     seen
 }
 
-/// How the project at `project_dir` declares its `frust` dependency, for an
-/// error message: the entry as written (`` `frust = { package = "frust-ui",
-/// version = "0.5.0" }` ``), or a sentence saying there is none.
+/// How the project at `project_dir` declares its framework-facade
+/// dependency, for an error message: the entry as written under whichever
+/// key names the facade package (`` `frust = { package = "frust-ui",
+/// version = "0.5.0" }` ``, `` `frust-ui = "0.6.0"` ``), or a sentence saying
+/// there is none. The facade is found by package name
+/// (`facade_key::facade_entries`), so a renamed key reads the same as the
+/// scaffolded `frust` one.
 pub fn describe_frust_dependency(project_dir: &Path) -> String {
     let declared = fs::read_to_string(project_dir.join("Cargo.toml"))
         .ok()
         .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
         .and_then(|doc| {
-            let item = doc.get("dependencies")?.as_table_like()?.get("frust")?;
+            let deps = doc.get("dependencies")?.as_table_like()?;
+            let (key, item) = facade_key::facade_entries(deps).next()?;
             let rendered = match item {
                 toml_edit::Item::Value(value) => value.to_string(),
                 toml_edit::Item::Table(table) => table.clone().into_inline_table().to_string(),
                 _ => return None,
             };
-            Some(rendered.trim().to_string())
+            Some(format!("`{key} = {}`", rendered.trim()))
         });
-    match declared {
-        Some(entry) => format!("`frust = {entry}`"),
-        None => "absent — its `[dependencies]` has no `frust` entry".to_string(),
-    }
+    declared.unwrap_or_else(|| "absent — its `[dependencies]` has no `frust` entry".to_string())
 }
 
 /// Wraps another locator and remembers each `(project, package)` answer —
@@ -666,6 +788,87 @@ mod tests {
             assert_eq!(describe_frust_dependency(&project), expected, "{tag}");
             let _ = fs::remove_dir_all(&project);
         }
+    }
+
+    /// The facade is found by package name: an app keying it `frust-ui` (the
+    /// crates.io name) or any rename is not "absent".
+    #[test]
+    fn the_frust_dependency_description_finds_the_facade_under_any_key() {
+        for (tag, manifest, expected) in [
+            (
+                "frust-ui",
+                "[dependencies]\nfrust-ui = \"0.6.0\"\n",
+                r#"`frust-ui = "0.6.0"`"#,
+            ),
+            (
+                "rename",
+                "[dependencies]\nlog = \"0.4\"\nui = { package = \"frust-ui\", version = \"0.6.0\" }\n",
+                r#"`ui = { package = "frust-ui", version = "0.6.0" }`"#,
+            ),
+            (
+                "other-package",
+                "[dependencies]\nfrust = { package = \"not-the-facade\", version = \"1\" }\n",
+                "absent — its `[dependencies]` has no `frust` entry",
+            ),
+        ] {
+            let project = project_with(tag, manifest);
+            assert_eq!(describe_frust_dependency(&project), expected, "{tag}");
+            let _ = fs::remove_dir_all(&project);
+        }
+    }
+
+    /// `--no-deps` lists every workspace member; the root dependencies are
+    /// those of the member whose manifest sits in the project directory.
+    #[test]
+    fn root_dependencies_come_from_the_project_directorys_package() {
+        let project = project_with("root-deps", "[package]\nname = \"app\"\n");
+        let manifest = serde_json::to_string(&project.join("Cargo.toml")).unwrap();
+        let metadata = format!(
+            r#"{{"packages":[
+                {{"name":"tool","manifest_path":"/elsewhere/tool/Cargo.toml",
+                  "dependencies":[{{"name":"serde","rename":null,"kind":null}}]}},
+                {{"name":"app","manifest_path":{manifest},
+                  "dependencies":[
+                    {{"name":"frust-ui","rename":"frust","kind":null,"target":null}},
+                    {{"name":"log","rename":null,"kind":"dev","target":null}}
+                  ]}}
+            ],"resolve":null,"version":1}}"#
+        );
+        let runner = FakeProcessRunner::new().with(
+            format!(
+                "cargo metadata --format-version 1 --no-deps --manifest-path {}",
+                project.join("Cargo.toml").display()
+            ),
+            ok(&metadata),
+        );
+        let deps = CargoLocator::new(&runner)
+            .root_dependencies(&project)
+            .unwrap();
+        assert_eq!(
+            deps,
+            vec![
+                MetadataDependency {
+                    name: "frust-ui".into(),
+                    rename: Some("frust".into()),
+                    kind: None,
+                },
+                MetadataDependency {
+                    name: "log".into(),
+                    rename: None,
+                    kind: Some("dev".into()),
+                },
+            ]
+        );
+        // A virtual workspace has no root package, so no root dependencies.
+        let virtual_ws = r#"{"packages":[
+            {"name":"a","manifest_path":"/x/a/Cargo.toml","dependencies":[]},
+            {"name":"b","manifest_path":"/x/b/Cargo.toml","dependencies":[]}
+        ]}"#;
+        assert_eq!(
+            root_dependencies_from_metadata(Path::new("/x"), virtual_ws).unwrap(),
+            Vec::new()
+        );
+        let _ = fs::remove_dir_all(&project);
     }
 
     #[test]

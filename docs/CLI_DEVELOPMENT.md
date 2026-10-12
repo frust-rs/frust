@@ -57,7 +57,10 @@ cargo test -p frust-cli --test create_e2e scaffolded_project_builds_from_the_reg
 The first checks the local.properties and symlink wiring (`assert_path_mode_wiring`); the second
 builds a registry-mode project and needs the release on crates.io. The facade package is
 `frust-ui` ([lloydmeta/frunk#258](https://github.com/lloydmeta/frunk/issues/258) — crates.io
-`frust` is another project's).
+`frust` is another project's); `frust create` writes `frust = { package = "frust-ui", .. }`.
+Debug/profile/hot builds enable `<key>/perf-trace`, `<key>/devtools` and `<key>/hotpatch`, where
+`<key>` is the app's dependency key for `frust-ui`, resolved by `frust-drive::facade_key` from
+cargo metadata (fallback: manifest read; default `frust`).
 
 ## Version Pins
 

@@ -53,6 +53,12 @@ fn capitalize(s: &str) -> String {
 /// extras ride this one CSV rather than a second property: the Gradle side
 /// decodes the whole value into a single `--features <csv>` argument, which is
 /// exactly cargo's own comma-separated syntax.
+///
+/// Because Gradle passes the CSV to `cargo ndk` verbatim, `features` must
+/// already be spelled with the app's facade dependency key
+/// ([`crate::facade_key::FacadeKey::map`], as `build` and `android_run` do):
+/// `frust-ui/devtools` for an app depending on `frust-ui = ".."`. This
+/// function encodes what it is given and maps nothing itself.
 pub fn gradle_properties(
     target: &AndroidArtifact,
     defines: &HashMap<String, String>,
@@ -293,6 +299,28 @@ mod tests {
                 "mode {mode:?}: {props:?}"
             );
         }
+    }
+
+    /// A key-mapped list rides the CSV exactly as given: decoded, the prop is
+    /// `frust-ui/perf-trace,frust-ui/devtools`.
+    #[test]
+    fn gradle_properties_encode_a_key_mapped_feature_list_verbatim() {
+        let target = apk(&["arm64-v8a"], false);
+        let mapped =
+            BuildMode::Debug.cargo_features_for(&crate::facade_key::FacadeKey::new("frust-ui"));
+        let refs: Vec<&str> = mapped.iter().map(String::as_str).collect();
+        let props = gradle_properties(&target, &HashMap::new(), &refs);
+        assert!(
+            props.contains(
+                &"-Pfrust.cargoFeatures=ZnJ1c3QtdWkvcGVyZi10cmFjZSxmcnVzdC11aS9kZXZ0b29scw=="
+                    .to_string()
+            ),
+            "{props:?}"
+        );
+        assert_eq!(
+            encode_features(&refs).as_deref(),
+            Some(base64_encode(b"frust-ui/perf-trace,frust-ui/devtools").as_str())
+        );
     }
 
     #[test]
