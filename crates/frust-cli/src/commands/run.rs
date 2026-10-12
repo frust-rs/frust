@@ -327,7 +327,8 @@ pub(crate) fn refresh_platform_wiring(
 /// go through, so `frust run` and a `frust-tui` desktop session cannot drift
 /// apart. This front-end contributes exactly one thing on top: the
 /// release-lean preflight's resolved feature list
-/// (`desktop_plan_with_features`).
+/// (`desktop_plan_with_features`), and an unresolvable facade key (the app
+/// naming the facade under two keys) fails the run with that error.
 ///
 /// What the plan carries is the resolved [`BuildInfo`] in full (verified
 /// pre-extraction gap — the old fallback ignored `--profile` and dropped
@@ -358,7 +359,8 @@ fn run_desktop_fallback(
         println!("{warning}");
     }
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
-    let plan = desktop_run::desktop_plan_with_features(&cwd, info, &feature_refs);
+    let plan = desktop_run::desktop_plan_with_features(&cwd, info, &feature_refs)
+        .context("resolving the app's frust dependency")?;
     let env = desktop_cargo_run_env(&plan);
 
     if watch {
@@ -2459,7 +2461,7 @@ mod tests {
     /// (unfiltered) feature list — the declaring-app case every expectation
     /// below is written against.
     fn plan_for(info: &BuildInfo) -> DesktopPlan {
-        desktop_run::desktop_plan(Path::new("/tmp/project"), info)
+        desktop_run::desktop_plan(Path::new("/tmp/project"), info).unwrap()
     }
 
     fn env_pairs(env: &[(String, String)]) -> Vec<(&str, &str)> {
@@ -2472,6 +2474,7 @@ mod tests {
     /// `frust_drive::desktop_run`'s own tests own).
     fn bare_run_plan() -> DesktopPlan {
         desktop_run::desktop_plan_with_features(Path::new("/tmp/project"), &debug_info(), &[])
+            .unwrap()
     }
 
     #[test]
@@ -2545,7 +2548,8 @@ mod tests {
             Path::new("/tmp/project"),
             &release_info(),
             &[],
-        );
+        )
+        .unwrap();
         assert_eq!(plan.args, vec!["run", "--release"]);
     }
 
@@ -2559,7 +2563,8 @@ mod tests {
             Path::new("/tmp/project"),
             &debug_info(),
             &["frust/perf-trace", "frust/devtools", "lean"],
-        );
+        )
+        .unwrap();
         assert_eq!(
             plan.args,
             vec![
@@ -2581,7 +2586,8 @@ mod tests {
     fn desktop_cargo_run_args_with_declared_lean_matches_pure_mapping() {
         let info = release_info();
         let plan =
-            desktop_run::desktop_plan_with_features(Path::new("/tmp/project"), &info, &["lean"]);
+            desktop_run::desktop_plan_with_features(Path::new("/tmp/project"), &info, &["lean"])
+                .unwrap();
         assert_eq!(plan.args, plan_for(&info).args);
         assert_eq!(plan.args, vec!["run", "--release", "--features", "lean"]);
     }

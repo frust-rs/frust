@@ -53,10 +53,7 @@ pub(super) fn build(
     info: &BuildInfo,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<(), DesktopBuildError> {
-    let key = FacadeKey::resolve(project_dir).map_err(|err| DesktopBuildError::CargoSpawn {
-        args: "build".to_string(),
-        reason: err.to_string(),
-    })?;
+    let key = FacadeKey::resolve(project_dir)?;
     let (features, warning) =
         crate::cargo_manifest::resolve_release_features(project_dir, info.mode, &[]);
     if let Some(warning) = warning {
@@ -294,6 +291,30 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("frust-ui/devtools"), "{message}");
         assert!(message.ends_with(FacadeKey::hint()), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A manifest naming the facade under two keys is a facade-key error
+    /// before cargo runs, not a `cargo build` spawn failure.
+    #[test]
+    fn an_ambiguous_facade_key_is_its_own_error_not_a_spawn_failure() {
+        let dir = temp_dir("ambiguous-key");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n\
+             frust = { package = \"frust-ui\", version = \"0.6.0\" }\n\
+             ui = { package = \"frust-ui\", version = \"0.6.0\" }\n",
+        )
+        .unwrap();
+        let runner = FakeProcessRunner::new();
+        let err = build(&runner, &dir, &info(BuildMode::Debug), &mut |_| {}).unwrap_err();
+        assert!(matches!(err, DesktopBuildError::FacadeKey(_)), "{err:?}");
+        let message = err.to_string();
+        assert!(
+            message.starts_with("resolving the app's frust dependency:"),
+            "{message}"
+        );
+        assert!(message.contains("more than one key"), "{message}");
         let _ = fs::remove_dir_all(&dir);
     }
 
