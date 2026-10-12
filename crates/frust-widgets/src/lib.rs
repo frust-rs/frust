@@ -1,8 +1,8 @@
 //! Baseline widget set: Text, Button, Image, Column/Row, Stack, ScrollView, etc.
 //!
 //! Ships the [`text`] leaf plus the primitive layout containers —
-//! [`Row`]/[`Column`] ([`FlexView`]), [`Stack`], [`Padding`], [`Align`], and
-//! [`SizedBox`] — built as `View`/`Widget` pairs over `frust-core`'s
+//! [`Row`]/[`Column`] ([`FlexView`]), [`Stack`], [`IndexedStack`], [`Padding`],
+//! [`Align`], and [`SizedBox`] — built as `View`/`Widget` pairs over `frust-core`'s
 //! [`AnyView`](frust_core::AnyView)/[`ChildPod`](frust_core::ChildPod)
 //! substrate. Containers own their children directly as `ChildPod`s (the arena
 //! stays single-root); see [`frust_core::widget::ChildPod`] for the rationale.
@@ -42,6 +42,7 @@ mod icon;
 mod icon_button;
 pub mod icons;
 mod image;
+mod indexed_stack;
 mod list_view;
 pub mod motion;
 pub mod nav;
@@ -92,6 +93,7 @@ pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
 pub use icon::{Icon, IconData, IconSource, IconView, IconWidget, icon};
 pub use icon_button::{IconButton, IconButtonView, IconButtonWidget, icon_button};
 pub use image::{Image, ImageError, ImageFit, ImageSource, ImageView, ImageWidget};
+pub use indexed_stack::{IndexedStack, IndexedStackView, IndexedStackWidget, indexed_stack};
 pub use list_view::{ListView, ListViewWidget, list_view};
 pub use nav::hero::{HeroView, HeroWidget, hero};
 pub use nav::navigator::{
