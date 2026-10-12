@@ -90,17 +90,24 @@ impl From<WidgetId> for u64 {
 
 /// Context threaded through [`View::build`] / [`View::rebuild`].
 ///
-/// Two responsibilities: allocating unique [`WidgetId`]s (it borrows the id
-/// counter owned by the render root so ids stay monotonic across passes), and
+/// Three responsibilities: allocating unique [`WidgetId`]s (it borrows the id
+/// counter owned by the render root so ids stay monotonic across passes),
 /// carrying the **effective focus chain** — whether every link from the root down
 /// to the node being built/rebuilt/torn down is focused (see
-/// [`BuildCtx::has_focus`]).
+/// [`BuildCtx::has_focus`]) — and carrying the **element-replaced signal** a
+/// same-typed element swap raises for its enclosing reconciler (see
+/// [`BuildCtx::mark_element_replaced`]).
 pub struct BuildCtx<'a> {
     next_id: &'a mut u64,
     /// The effective focus chain: `true` only while every recorded focus link
     /// from the root down to the current node is set. See
     /// [`BuildCtx::has_focus`].
     has_focus: bool,
+    /// Set by a view whose `rebuild` replaced its element's widget without
+    /// changing the element *type*; consumed by the nearest enclosing
+    /// [`BuildCtx::track_element_replaced`] scope. See
+    /// [`BuildCtx::mark_element_replaced`].
+    element_replaced: bool,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -120,6 +127,7 @@ impl<'a> BuildCtx<'a> {
         Self {
             next_id,
             has_focus: true,
+            element_replaced: false,
         }
     }
 
@@ -179,6 +187,48 @@ impl<'a> BuildCtx<'a> {
         let result = f(self);
         self.has_focus = outer;
         result
+    }
+
+    /// Report that this view's `rebuild` **replaced its element's widget while
+    /// keeping the element type** — an enum view switching arms (`Either`,
+    /// `EitherOf3` .. `EitherOf8` in `frust-widgets`) is the shape this exists
+    /// for.
+    ///
+    /// A reconciler detects an [`AnyView`] concrete-type swap by comparing the
+    /// boxed widget's type id across the rebuild; on a swap it drops the child
+    /// pod's capture (`active`) and focus (`focused`) links, because the fresh
+    /// widget never saw the `Down` and never claimed focus. An enum element keeps
+    /// one static type across an arm swap, so that comparison cannot see it.
+    /// Calling this makes the enclosing reconciler treat the rebuild exactly like
+    /// a concrete-type swap.
+    ///
+    /// **Scope rule.** The nearest enclosing
+    /// [`track_element_replaced`](BuildCtx::track_element_replaced) scope consumes
+    /// the signal. An enum nested *inline* inside another enum (no pod between
+    /// them) therefore propagates to the outer one's scope — the same pod lost
+    /// its widget — while a pod anywhere inside the swapped subtree runs its own
+    /// scope and consumes its own signal, leaving the outer pod's flags intact.
+    /// A signal raised where no scope encloses it (a root-level enum, or a
+    /// container that rebuilds a child without a pod) is inert or, at worst,
+    /// reaches the next scope up: an over-release, never an under-release.
+    pub fn mark_element_replaced(&mut self) {
+        self.element_replaced = true;
+    }
+
+    /// Run `f` as a **tracking scope** for
+    /// [`mark_element_replaced`](BuildCtx::mark_element_replaced), returning
+    /// `f`'s result and whether anything inside it raised the signal.
+    ///
+    /// The caller's pending value is saved and cleared before `f` runs and
+    /// restored afterwards, so a scope sees only signals raised inside it and a
+    /// signal raised by an earlier sibling is neither consumed nor lost. A
+    /// reconciler wraps each child's nested `rebuild` in this and ORs the result
+    /// into its own type-swap detection.
+    pub fn track_element_replaced<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> (R, bool) {
+        let outer = std::mem::replace(&mut self.element_replaced, false);
+        let result = f(self);
+        let replaced = std::mem::replace(&mut self.element_replaced, outer);
+        (result, replaced)
     }
 }
 
@@ -825,6 +875,49 @@ mod tests {
         ctx.set_has_focus(false);
         assert!(!ctx.has_focus());
         ctx.with_focus_link(true, |ctx| assert!(!ctx.has_focus()));
+    }
+
+    #[test]
+    fn build_ctx_element_replaced_is_consumed_by_the_nearest_scope() {
+        let mut counter = 0;
+        let mut ctx = BuildCtx::new(&mut counter);
+
+        // A scope with nothing raised inside reports nothing.
+        let ((), replaced) = ctx.track_element_replaced(|_| {});
+        assert!(!replaced);
+
+        // A signal raised inside is reported, and the result passes through.
+        let (n, replaced) = ctx.track_element_replaced(|ctx| {
+            ctx.mark_element_replaced();
+            7
+        });
+        assert_eq!(n, 7);
+        assert!(replaced);
+
+        // The nearest scope consumes it: an inner scope (a pod inside the
+        // subtree) takes its own signal, and the outer scope sees none.
+        let (inner, outer) = ctx.track_element_replaced(|ctx| {
+            let ((), inner) = ctx.track_element_replaced(|ctx| ctx.mark_element_replaced());
+            inner
+        });
+        assert!(inner, "the inner scope consumes its own signal");
+        assert!(!outer, "a consumed signal does not reach the outer scope");
+
+        // A pending signal raised outside any scope is neither consumed nor lost
+        // by a sibling's scope: it is restored when that scope returns.
+        ctx.mark_element_replaced();
+        let ((), sibling) = ctx.track_element_replaced(|_| {});
+        assert!(!sibling, "a scope sees only signals raised inside it");
+        let ((), outer) = ctx.track_element_replaced(|ctx| {
+            ctx.mark_element_replaced();
+        });
+        assert!(outer);
+        // The originally pending value came back after both scopes.
+        let ((), _) = ctx.track_element_replaced(|_| {});
+        assert!(
+            std::mem::take(&mut ctx.element_replaced),
+            "the caller's pending signal is restored, not clobbered"
+        );
     }
 
     // --- ViewSeq: child sequences erase once, in order. ---

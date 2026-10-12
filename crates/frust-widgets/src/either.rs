@@ -33,14 +33,24 @@
 //! [`EitherWidget`] (and every `EitherOfNWidget`) is an enum widget delegating
 //! every pass to the live arm; it holds no `AnyView` or `Box<dyn Widget>`
 //! field, so it is not the swap-blind wrapper shape
-//! (`focus-wrapper-erasure-swap-blind`). One gap remains: every arm shares the
-//! single element type (`EitherWidget<L, R>`, `EitherOf3Widget<A, B, C>`, ..),
-//! so a parent reconciler comparing element type ids across the rebuild cannot
-//! see an arm swap. Each enum therefore does the focus half of that bookkeeping
-//! itself: when an arm swap happens while the focus chain runs through this
-//! view ([`BuildCtx::has_focus`]), the focused widget just stopped existing and the
-//! root is told to release the focus/IME session
-//! ([`mark_focus_orphaned`](frust_core::mark_focus_orphaned)).
+//! (`focus-wrapper-erasure-swap-blind`). Every arm shares the single element
+//! type (`EitherWidget<L, R>`, `EitherOf3Widget<A, B, C>`, ..), so a parent
+//! reconciler comparing element type ids across the rebuild cannot see an arm
+//! swap by itself. Each enum therefore **reports** the swap
+//! ([`BuildCtx::mark_element_replaced`]), and the enclosing reconciler (the
+//! `ChildPod` that holds it, through `rebuild_child` / `rebuild_children`, or a
+//! component's child pod) drops the pod's capture and focus link exactly as for
+//! an `AnyView` concrete-type swap — and, in a positional list, cancels the
+//! recorded paths of every later sibling. An enum nested inline inside another
+//! enum propagates the report to the outer one's pod; a pod inside the swapped
+//! arm consumes its own.
+//!
+//! The enum also raises the focus orphan itself
+//! ([`mark_focus_orphaned`](frust_core::mark_focus_orphaned)) when the swap
+//! happens while the focus chain runs through it ([`BuildCtx::has_focus`]): a
+//! root-level enum, or one under a container that does not reconcile through a
+//! pod, has no enclosing reconciler to do it. The orphan flag is idempotent, so
+//! the two marks never double-release.
 
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
@@ -151,8 +161,12 @@ impl<State: 'static, L: View<State>, R: View<State>> View<State> for Either<L, R
                 // build the new arm fresh.
                 prev.teardown(element, ctx);
                 // Both arms share one element type, so the parent's type-id
-                // comparison cannot see this swap; raise the focus-orphan
-                // signal here when the live chain ran through this view.
+                // comparison cannot see this swap: report it, so the enclosing
+                // reconciler drops the pod's capture and focus link as for an
+                // `AnyView` swap. Raise the focus orphan here too when the live
+                // chain ran through this view — a root-level or pod-less parent
+                // has no reconciler to do it (the flag is idempotent).
+                ctx.mark_element_replaced();
                 if ctx.has_focus() {
                     mark_focus_orphaned();
                 }
@@ -247,6 +261,7 @@ macro_rules! either_of {
                     _ => {
                         // Arm swap: see `Either::rebuild`.
                         prev.teardown(element, ctx);
+                        ctx.mark_element_replaced();
                         if ctx.has_focus() {
                             mark_focus_orphaned();
                         }
@@ -511,6 +526,23 @@ mod tests {
                     let flags = next.rebuild(&same, &mut el, &mut ctx);
                     assert_eq!(flags, ChangeFlags::LAYOUT | ChangeFlags::PAINT);
                     assert!(matches!(el, $W::$b(_)));
+                }
+
+                #[test]
+                fn an_arm_swap_reports_element_replaced_and_same_variant_does_not() {
+                    let log = new_log();
+                    let mut counter = 0u64;
+                    let mut ctx = BuildCtx::new(&mut counter);
+                    let prev = pick(true, &log, (1.0, 1.0), (1.0, 1.0));
+                    let mut el = prev.build(&mut ctx);
+                    let same = pick(true, &log, (2.0, 2.0), (1.0, 1.0));
+                    let (_, replaced) =
+                        ctx.track_element_replaced(|ctx| same.rebuild(&prev, &mut el, ctx));
+                    assert!(!replaced, "a same-variant rebuild keeps the widget");
+                    let next = pick(false, &log, (1.0, 1.0), (1.0, 1.0));
+                    let (_, replaced) =
+                        ctx.track_element_replaced(|ctx| next.rebuild(&same, &mut el, ctx));
+                    assert!(replaced, "an arm swap reports the replaced widget");
                 }
 
                 #[test]

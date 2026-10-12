@@ -11,9 +11,18 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `EitherOf3` .. `EitherOf8` (variants `A`..`H`) in `frust-widgets`, re-exported by the facade and
   the prelude: a `match` with three to eight arms returns one typed view instead of erasing each
   arm, with `Either`'s swap semantics (a change of arm is a teardown and remount) (3a75095f).
+- `BuildCtx::mark_element_replaced` and `BuildCtx::track_element_replaced` in `frust-core`: a view
+  whose `rebuild` replaced its element's widget while keeping the element type (an enum view
+  switching arms) reports it, and the nearest enclosing reconciler's tracking scope treats the
+  rebuild like a concrete-type swap.
 
 ### Fixed
 
+- An `Either` / `EitherOf3`..`EitherOf8` arm swap now drops the enclosing child pod's pointer
+  capture and focus link (a single-child wrapper, a keyed list, or a component whose body is the
+  enum) and, in a positional list, cancels the recorded capture and focus of every later child,
+  matching an `AnyView` concrete-type swap; before, a swap mid-gesture kept forwarding `Move`/`Up`
+  to the fresh arm and starved its siblings until `Up`.
 - The CLI resolves the app's `frust-ui` dependency key, so both `frust-ui = ".."` and
   `frust = { package = "frust-ui", .. }` work for `run`, `build` and hot sessions: every cargo
   argument list, Android `-Pfrust.cargoFeatures`, iOS `FRUST_FEATURES` and hot-patch fat build
