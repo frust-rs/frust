@@ -60,7 +60,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
-- **API (tooling crates, so the next release is a minor version):** `frust-drive`'s
+- **API (tooling crates):** `frust-drive`'s
   `desktop_run::desktop_plan` and `desktop_plan_with_features` return
   `Result<DesktopPlan, FacadeKeyError>` instead of falling back to the `frust/` feature spelling,
   and `try_desktop_plan_with_features` is gone; `frust-drive`'s `DesktopBuildError` and
