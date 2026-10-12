@@ -759,14 +759,11 @@ impl<State: 'static> SelectionAppBarView<State> {
 /// Build the close affordance's view (`icon_button` over
 /// [`crate::icons::CLOSE`], firing `on_clear` directly) — mirrors
 /// `dialog.rs`'s `close_view` helper of the same shape.
-// erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
-fn close_view<State: 'static>(on_clear: OnClear<State>) -> AnyView<State> {
-    any(
-        icon_button(icon(crate::icons::CLOSE), move |state: &mut State| {
-            (on_clear)(state);
-        })
-        .semantic_label(CLEAR_SELECTION_LABEL),
-    )
+fn close_view<State: 'static>(on_clear: OnClear<State>) -> impl View<State> {
+    icon_button(icon(crate::icons::CLOSE), move |state: &mut State| {
+        (on_clear)(state);
+    })
+    .semantic_label(CLEAR_SELECTION_LABEL)
 }
 
 /// Build the selected-count label's view (`titleLargeEmphasized`,
@@ -787,21 +784,20 @@ fn count_view<State: 'static>(count: usize) -> AnyView<State> {
 /// flip exactly: the checkbox's own tap-cycle report is ignored (`_next`),
 /// and `on_all_selected` instead fires with `!all`, where `all` treats a
 /// partial selection the same as none (matching upstream's `all ?? false`).
-// erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
 fn select_all_checkbox_view<State: 'static>(
     selected: BTreeSet<usize>,
     item_count: usize,
     on_all_selected: Option<OnAllSelected<State>>,
-) -> AnyView<State> {
+) -> impl View<State> {
     let value = all_selected_for(&selected, item_count);
-    any(crate::checkbox::tristate_checkbox::<State, _>(
+    crate::checkbox::tristate_checkbox::<State, _>(
         value,
         move |state: &mut State, _next: Option<bool>| {
             if let Some(cb) = &on_all_selected {
                 cb(state, !matches!(value, Some(true)));
             }
         },
-    ))
+    )
 }
 
 /// Build the select-all row's label view (`bodyLarge` — `text`'s own

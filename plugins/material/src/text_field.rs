@@ -132,7 +132,7 @@ use frust::authoring::Role;
 use frust::authoring::text::{TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, any,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget,
 };
 use frust::{AnimationController, Theme, text_input};
 use kurbo::{Point, RoundedRect, Shape, Size};
@@ -375,8 +375,7 @@ impl<State: 'static> TextFieldView<State> {
 
     /// The wrapped baseline field, with its own chrome suppressed (see the
     /// [module docs](self)).
-    // erasure: keep feeds a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
-    fn field_view(&self) -> AnyView<State> {
+    fn field_view(&self) -> impl View<State> + use<State> {
         let on_change = self.on_change.clone();
         let mut field = text_input(self.value.clone(), move |state: &mut State, text| {
             on_change(state, text)
@@ -390,7 +389,7 @@ impl<State: 'static> TextFieldView<State> {
         if let Some(on_submit) = self.on_submit.clone() {
             field = field.on_submit(move |state: &mut State, text| on_submit(state, text));
         }
-        any(field)
+        field
     }
 }
 
