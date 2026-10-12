@@ -59,11 +59,13 @@ pub struct DesktopPlan {
 /// tool waiting on a discovery line would wait forever.
 ///
 /// Spawns no build: the only I/O is resolving the facade key from `root`'s
-/// manifest (see [`try_desktop_plan_with_features`] for how an unresolvable
-/// key is handled). See [`spawn_desktop_session`] for the side-effecting
-/// wrapper, and [`desktop_plan_with_features`] for the caller that resolved
-/// its own feature list first.
-pub fn desktop_plan(root: &Path, info: &BuildInfo) -> DesktopPlan {
+/// manifest ([`FacadeKey::resolve`]; a `root` without a `Cargo.toml` answers
+/// the default `frust` key). A manifest naming the facade under two keys is
+/// an error ([`FacadeKeyError::Ambiguous`]), never a silent fallback. See
+/// [`spawn_desktop_session`] for the side-effecting wrapper, and
+/// [`desktop_plan_with_features`] for the caller that resolved its own
+/// feature list first.
+pub fn desktop_plan(root: &Path, info: &BuildInfo) -> Result<DesktopPlan, FacadeKeyError> {
     desktop_plan_with_features(root, info, info.mode.cargo_features())
 }
 
@@ -80,23 +82,11 @@ pub fn desktop_plan(root: &Path, info: &BuildInfo) -> DesktopPlan {
 /// here is byte-identical to [`desktop_plan`].
 ///
 /// `features` are canonical (`frust/<feature>`); each is mapped to the app's
-/// facade key at this argv boundary. This builder cannot fail, so an app
-/// whose manifest names the facade under two keys
-/// ([`FacadeKeyError::Ambiguous`]) keeps the canonical spelling here — cargo
-/// then reports the feature it cannot resolve. A front-end that wants that
-/// ambiguity as its own error calls [`try_desktop_plan_with_features`];
-/// [`spawn_desktop_session`] does.
-pub fn desktop_plan_with_features(root: &Path, info: &BuildInfo, features: &[&str]) -> DesktopPlan {
-    try_desktop_plan_with_features(root, info, features)
-        .unwrap_or_else(|_| keyed_desktop_plan(root, info, features, &FacadeKey::default()))
-}
-
-/// [`desktop_plan_with_features`], surfacing an unresolvable facade key
-/// ([`FacadeKeyError::Ambiguous`]) instead of falling back to the canonical
-/// spelling. The key is resolved once, from `root`'s manifest
-/// ([`FacadeKey::resolve`]); a `root` without a `Cargo.toml` answers the
-/// default `frust` key, so its plan is unchanged.
-pub fn try_desktop_plan_with_features(
+/// facade key at this argv boundary. An unresolvable key (an app naming the
+/// facade under two keys, [`FacadeKeyError`]) is returned as an error so the
+/// caller can report it, rather than handing cargo a spelling it cannot
+/// resolve.
+pub fn desktop_plan_with_features(
     root: &Path,
     info: &BuildInfo,
     features: &[&str],
@@ -176,13 +166,13 @@ pub(crate) fn desktop_env(info: &BuildInfo) -> Vec<(String, String)> {
 /// The plan's whole shape is spawned, environment included — a caller that got
 /// the args but not the env would be running a different preview than the one
 /// this module resolved. A manifest naming the facade under two keys is an
-/// error here ([`try_desktop_plan_with_features`]), before anything spawns.
+/// error here ([`desktop_plan_with_features`]), before anything spawns.
 pub fn spawn_desktop_session(
     runner: &dyn ProcessRunner,
     root: &Path,
     info: &BuildInfo,
 ) -> Result<StreamHandle> {
-    let plan = try_desktop_plan_with_features(root, info, info.mode.cargo_features())
+    let plan = desktop_plan_with_features(root, info, info.mode.cargo_features())
         .with_context(|| format!("resolving the frust dependency of `{}`", root.display()))?;
     spawn_desktop_plan(runner, &plan)
 }
@@ -239,7 +229,7 @@ mod tests {
     #[test]
     fn debug_plan_carries_perf_trace_and_devtools_features() {
         let root = PathBuf::from("/tmp/project");
-        let plan = desktop_plan(&root, &build_info(BuildMode::Debug));
+        let plan = desktop_plan(&root, &build_info(BuildMode::Debug)).unwrap();
         assert_eq!(plan.program, "cargo");
         assert_eq!(
             plan.args,
@@ -258,7 +248,7 @@ mod tests {
     #[test]
     fn profile_plan_threads_the_profile_flag() {
         let root = PathBuf::from("/tmp/project");
-        let plan = desktop_plan(&root, &build_info(BuildMode::Profile));
+        let plan = desktop_plan(&root, &build_info(BuildMode::Profile)).unwrap();
         assert_eq!(
             plan.args,
             vec![
@@ -277,7 +267,7 @@ mod tests {
     #[test]
     fn release_plan_carries_lean() {
         let root = PathBuf::from("/tmp/project");
-        let plan = desktop_plan(&root, &build_info(BuildMode::Release));
+        let plan = desktop_plan(&root, &build_info(BuildMode::Release)).unwrap();
         assert_eq!(plan.args, vec!["run", "--release", "--features", "lean"]);
         assert_eq!(plan.cwd, root);
         assert!(plan.env.is_empty());
@@ -291,13 +281,15 @@ mod tests {
         let root = PathBuf::from("/tmp/project");
         let info = build_info(BuildMode::Release);
         assert_eq!(
-            desktop_plan_with_features(&root, &info, &[]).args,
+            desktop_plan_with_features(&root, &info, &[]).unwrap().args,
             vec!["run", "--release"]
         );
         // The declaring direction is byte-identical to `desktop_plan`.
         assert_eq!(
-            desktop_plan_with_features(&root, &info, &["lean"]).args,
-            desktop_plan(&root, &info).args
+            desktop_plan_with_features(&root, &info, &["lean"])
+                .unwrap()
+                .args,
+            desktop_plan(&root, &info).unwrap().args
         );
     }
 
@@ -306,7 +298,7 @@ mod tests {
         let mut info = build_info(BuildMode::Debug);
         info.defines.insert("Z_KEY".into(), "1".into());
         info.defines.insert("A_KEY".into(), "2".into());
-        let plan = desktop_plan(Path::new("/tmp/project"), &info);
+        let plan = desktop_plan(Path::new("/tmp/project"), &info).unwrap();
         assert_eq!(
             plan.env,
             vec![
@@ -318,7 +310,8 @@ mod tests {
 
     #[test]
     fn a_profile_plan_injects_frust_trace_unless_the_caller_defined_it() {
-        let plan = desktop_plan(Path::new("/tmp/project"), &build_info(BuildMode::Profile));
+        let plan =
+            desktop_plan(Path::new("/tmp/project"), &build_info(BuildMode::Profile)).unwrap();
         assert_eq!(
             plan.env,
             vec![("FRUST_TRACE".to_string(), "1".to_string())],
@@ -328,7 +321,7 @@ mod tests {
         let mut info = build_info(BuildMode::Profile);
         info.defines.insert("FRUST_TRACE".into(), "0".into());
         assert_eq!(
-            desktop_plan(Path::new("/tmp/project"), &info).env,
+            desktop_plan(Path::new("/tmp/project"), &info).unwrap().env,
             vec![("FRUST_TRACE".to_string(), "0".to_string())],
             "an explicit user define always wins over the auto-inject"
         );
@@ -337,7 +330,7 @@ mod tests {
     #[test]
     fn debug_and_release_plans_never_inject_frust_trace() {
         for mode in [BuildMode::Debug, BuildMode::Release] {
-            let plan = desktop_plan(Path::new("/tmp/project"), &build_info(mode));
+            let plan = desktop_plan(Path::new("/tmp/project"), &build_info(mode)).unwrap();
             assert!(plan.env.is_empty(), "{mode:?} must not inject FRUST_TRACE");
         }
     }
@@ -370,7 +363,7 @@ mod tests {
         assert_eq!(plan.program, exe.to_string_lossy());
         assert!(plan.args.is_empty(), "no cargo, no relink: {:?}", plan.args);
         assert_eq!(plan.cwd, root);
-        assert_eq!(plan.env, desktop_plan(&root, &info).env);
+        assert_eq!(plan.env, desktop_plan(&root, &info).unwrap().env);
     }
 
     #[test]
@@ -416,7 +409,7 @@ mod tests {
     #[test]
     fn a_frust_ui_keyed_app_gets_frust_ui_features() {
         let root = project_with_deps("frust-ui", "frust-ui = \"0.6.0\"\n");
-        let plan = desktop_plan(&root, &build_info(BuildMode::Debug));
+        let plan = desktop_plan(&root, &build_info(BuildMode::Debug)).unwrap();
         assert_eq!(
             plan.args,
             vec![
@@ -428,7 +421,9 @@ mod tests {
             ]
         );
         assert_eq!(
-            desktop_plan(&root, &build_info(BuildMode::Release)).args,
+            desktop_plan(&root, &build_info(BuildMode::Release))
+                .unwrap()
+                .args,
             vec!["run", "--release", "--features", "lean"]
         );
         // A caller-resolved list (a `--features` passthrough included) is
@@ -439,6 +434,7 @@ mod tests {
                 &build_info(BuildMode::Debug),
                 &["frust/devtools", "frust-material/extra"],
             )
+            .unwrap()
             .args,
             vec![
                 "run",
@@ -461,16 +457,17 @@ mod tests {
         );
         for mode in [BuildMode::Debug, BuildMode::Profile, BuildMode::Release] {
             assert_eq!(
-                desktop_plan(&root, &build_info(mode)).args,
-                desktop_plan(Path::new("/tmp/project"), &build_info(mode)).args,
+                desktop_plan(&root, &build_info(mode)).unwrap().args,
+                desktop_plan(Path::new("/tmp/project"), &build_info(mode))
+                    .unwrap()
+                    .args,
                 "{mode:?}"
             );
         }
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Two facade keys: the fallible builder (and the spawn) report it; the
-    /// infallible one keeps the canonical spelling.
+    /// Two facade keys: every builder (and the spawn) reports it.
     #[test]
     fn an_ambiguous_key_is_an_error_where_the_plan_can_fail() {
         let root = project_with_deps(
@@ -479,13 +476,10 @@ mod tests {
              ui = { package = \"frust-ui\", version = \"0.6.0\" }\n",
         );
         let info = build_info(BuildMode::Debug);
-        let err =
-            try_desktop_plan_with_features(&root, &info, info.mode.cargo_features()).unwrap_err();
+        let err = desktop_plan_with_features(&root, &info, info.mode.cargo_features()).unwrap_err();
         assert!(matches!(err, FacadeKeyError::Ambiguous { .. }), "{err:?}");
-        assert_eq!(
-            desktop_plan(&root, &info).args,
-            desktop_plan(Path::new("/tmp/project"), &info).args
-        );
+        let err = desktop_plan(&root, &info).unwrap_err();
+        assert!(matches!(err, FacadeKeyError::Ambiguous { .. }), "{err:?}");
         let runner = FakeProcessRunner::new();
         let err = spawn_desktop_session(&runner, &root, &info)
             .err()
