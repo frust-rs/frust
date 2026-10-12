@@ -278,9 +278,10 @@ pub fn erase_callback_arg<State: 'static, A: 'static>(
 /// - **A concrete child** (`V` is the child's own view type, or an
 ///   [`Either`](crate::Either) / [`EitherOf3`](crate::EitherOf3) ..
 ///   [`EitherOf8`](crate::EitherOf8) of several): the element is stored once,
-///   and the rebuild reconciles it in place with no erasure on the path. Choose this
-///   when the child's type is fixed by the container view's own type
-///   parameters (`struct Wrap<V> { child: V }`).
+///   and the rebuild reconciles it in place with no erasure on the path. An
+///   enum child's arm swap still counts as a swap for the pod's bookkeeping
+///   (see [`rebuild_child`]). Choose this when the child's type is fixed by the
+///   container view's own type parameters (`struct Wrap<V> { child: V }`).
 /// - **An [`AnyView`] child**: the element is itself a `Box<dyn Widget>`, so the
 ///   pod holds it double-boxed and the rebuild recovers `&mut Box<dyn Widget>`
 ///   — the type `AnyView`'s `rebuild` needs to swap the widget on a
@@ -302,17 +303,20 @@ pub fn build_child<State: 'static, V: View<State>>(view: &V, ctx: &mut BuildCtx<
 /// Reconcile one child in place through its `ChildPod` — `V` is the view type
 /// the pod was built from by [`build_child`].
 ///
-/// A concrete child (`V` = the child's own view type) is rebuilt in place and
-/// never reports a swap: its element type cannot change between frames. An
-/// [`Either`](crate::Either) child switching arms tears down and rebuilds
-/// inside its own `rebuild`, and raises the focus orphan there itself.
+/// A plain concrete child (`V` = the child's own view type) is rebuilt in
+/// place and never reports a swap: its element type cannot change between
+/// frames. An [`Either`](crate::Either) / [`EitherOf3`](crate::EitherOf3) ..
+/// [`EitherOf8`](crate::EitherOf8) child switching arms keeps its element type
+/// but replaces the widget inside it, and reports that
+/// ([`BuildCtx::mark_element_replaced`]), so it gets the same swap semantics as
+/// an [`AnyView`] concrete-type change.
 ///
-/// An [`AnyView`] child keeps the swap semantics below. A type-swapped child
-/// (see `rebuild_child_tracked`) that still holds a recorded capture has that
-/// capture dropped: `pod.set_active(false)`, no synthetic `Cancel`. The old
-/// armed widget was torn down inside `AnyView::rebuild` — its state died with
-/// it — and the fresh widget in its place never saw the original `Down`, so
-/// there is nothing to unwind; this mirrors [`rebuild_children`]'s documented
+/// A swapped child (see `rebuild_child_tracked`) that still holds a recorded
+/// capture has that capture dropped: `pod.set_active(false)`, no synthetic
+/// `Cancel`. The old armed widget was torn down inside the child's own
+/// `rebuild` (`AnyView`'s, or the enum's) — its state died with it — and the
+/// fresh widget in its place never saw the original `Down`, so there is
+/// nothing to unwind; this mirrors [`rebuild_children`]'s documented
 /// type-swap semantics for the single-child wrappers (`Padding`/`Align`/
 /// `SizedBox`, and the interactive widgets' own label/track children) that call
 /// this instead of `rebuild_children`.
@@ -357,19 +361,27 @@ pub fn rebuild_child<State: 'static, V: View<State>>(
 }
 
 /// Like [`rebuild_child`], but also reports whether the rebuild *replaced* the
-/// underlying widget (an [`AnyView`] concrete-type swap) rather than mutating it
-/// in place.
+/// underlying widget (an [`AnyView`] concrete-type swap, or an enum view's arm
+/// swap) rather than mutating it in place.
 ///
 /// The swap flag drives both callers' capture bookkeeping: [`rebuild_children`]'s
 /// (multi-child `Vec` containers — `Flex`/`Stack`, always `V` = [`AnyView`]) and
 /// [`rebuild_child`]'s (single-child wrappers). A fresh widget swapped in at a
 /// still-captured index/pod never saw the original `Down`, so its stale `active`
 /// path is dropped without a synthetic `Cancel` (there is nothing armed to
-/// unwind). Detection compares the element's widget
-/// [`TypeId`](std::any::TypeId) across the rebuild (see `widget_type_id`): the
-/// *inner* widget's for an [`AnyView`] element, so an `AnyView` child reports
-/// exactly the swaps it always has, and `V::Element`'s own for a concrete child,
-/// which therefore never reports one.
+/// unwind). Detection has two halves, ORed:
+///
+/// - the element's widget [`TypeId`](std::any::TypeId) compared across the
+///   rebuild (see `widget_type_id`): the *inner* widget's for an [`AnyView`]
+///   element, so an `AnyView` child reports exactly the swaps it always has, and
+///   `V::Element`'s own for a concrete child, which no rebuild can change;
+/// - the element-replaced signal, collected by running the nested rebuild as a
+///   [`BuildCtx::track_element_replaced`] scope: an
+///   [`Either`](crate::Either) / `EitherOfN` child (or one nested inline inside
+///   an `AnyView` or another enum) keeps its element type across an arm swap
+///   and reports the swap through [`BuildCtx::mark_element_replaced`] instead.
+///   This pod is the nearest scope, so it consumes the signal; a pod deeper in
+///   the swapped subtree ran its own scope and consumed its own.
 ///
 /// **This is the descent that extends the focus chain.** The nested rebuild runs
 /// under [`BuildCtx::with_focus_link`]`(pod.is_focused(), …)`, so a container
@@ -391,15 +403,18 @@ fn rebuild_child_tracked<State: 'static, V: View<State>>(
         .downcast_mut::<V::Element>()
         .expect("child pod element is the element type its view built (build_child)");
     let before = widget_type_id(element);
-    let flags = ctx.with_focus_link(link_focused, |ctx| next.rebuild(prev, element, ctx));
+    let (flags, replaced) = ctx.track_element_replaced(|ctx| {
+        ctx.with_focus_link(link_focused, |ctx| next.rebuild(prev, element, ctx))
+    });
     let after = widget_type_id(element);
-    (flags, before != after)
+    (flags, before != after || replaced)
 }
 
 /// The [`TypeId`](std::any::TypeId) of the widget an element *is*, for swap
 /// detection: the boxed widget's when the element is a `Box<dyn Widget>` (an
 /// [`AnyView`]'s element, whose contents a rebuild can replace), else the
-/// element's own static type — which no rebuild can change.
+/// element's own static type — which no rebuild can change (an enum element's
+/// arm swap is reported through [`BuildCtx::mark_element_replaced`] instead).
 fn widget_type_id<E: Widget>(element: &E) -> std::any::TypeId {
     match (element as &dyn Any).downcast_ref::<Box<dyn Widget>>() {
         Some(boxed) => {
@@ -602,7 +617,10 @@ fn cancel_active_children(pods: &mut [ChildPod], ctx: &BuildCtx<'_>) {
 /// intact and cancels only a torn-down or type-swapped child. A
 /// structural-change-free rebuild leaves every recorded path untouched, so an
 /// ordinary every-frame rebuild never breaks a captured drag or dismisses the
-/// keyboard for an unchanged child.
+/// keyboard for an unchanged child. A "type swap" here is whatever
+/// `rebuild_child_tracked` reports: an [`AnyView`] concrete-type change, or an
+/// [`Either`](crate::Either) / `EitherOfN` arm swap inside the child (reported
+/// through [`BuildCtx::mark_element_replaced`]) — both replace the widget.
 ///
 /// **A child that loses a LIVE focus path takes the root's session with it.**
 /// Every route that severs a recorded focus path here — a torn-down child
@@ -739,9 +757,9 @@ fn rebuild_children_positional<State: 'static, C>(
 /// event (or a captured `Move`/`Up`) still reaches the relocated child at its new
 /// index with nothing to update in a parent index. Only a child whose identity
 /// actually breaks loses its path: a torn-down (removed) key is cancelled in
-/// [`teardown_child`], and a key reused for a different concrete type is a swap
-/// (the old widget died inside `AnyView::rebuild`) whose stale `active`/`focused`
-/// flags are dropped inline below. A same-keys, same-order rebuild is likewise a
+/// [`teardown_child`], and a key reused for a different concrete type (or whose
+/// enum child switched arms) is a swap (the old widget died inside the child's
+/// `rebuild`) whose stale `active`/`focused` flags are dropped inline below. A same-keys, same-order rebuild is likewise a
 /// content-only rebuild that leaves every path untouched.
 fn rebuild_children_keyed<State: 'static, C>(
     prev: &[C],
@@ -791,8 +809,9 @@ fn rebuild_children_keyed<State: 'static, C>(
                 rebuild_child_tracked(view_of(&prev[old_index]), view_of(child), &mut pod, ctx);
             flags |= child_flags;
             if child_swapped {
-                // A key reused for a different concrete type: the old widget was
-                // torn down inside AnyView::rebuild, so its identity broke — drop
+                // A key reused for a different concrete type (or an enum arm
+                // swap): the old widget was torn down inside the child's
+                // rebuild, so its identity broke — drop
                 // the stale capture/focus paths (nothing armed to unwind). A
                 // key-matched non-swap relocates its pod (and thus its recorded
                 // focus/capture flags) intact, so no clearing happens there.
@@ -1233,7 +1252,7 @@ mod authoring_surface_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{leaf_any, swap_leaf};
+    use crate::test_support::{leaf, leaf_any, swap_leaf};
     use frust_core::{BoxConstraints, BuildCtx, LayoutCtx, PaintCtx, PaintScene, any};
     use kurbo::Size;
 
@@ -1646,21 +1665,180 @@ mod tests {
             "an unchanged child must not orphan the focus session"
         );
     }
+
+    /// An erased two-arm child for the list tests: `Leaf` on the left,
+    /// `SwapLeaf` on the right. The `AnyView`'s concrete type is the same
+    /// `Either` on both arms, so only the enum's own report reveals a swap.
+    fn either_any(right: bool) -> AnyView<()> {
+        type Arms = crate::Either<crate::test_support::Leaf, crate::test_support::SwapLeaf>;
+        if right {
+            any(Arms::Right(swap_leaf()))
+        } else {
+            any(Arms::Left(leaf(10.0, 10.0)))
+        }
+    }
+
+    /// The positional reconciler treats an `Either` arm swap at index `i` like an
+    /// `AnyView` type swap there: the swapped slot's capture is dropped, the
+    /// stable prefix before it keeps its paths, and every later pod's recorded
+    /// capture/focus is cancelled.
+    #[test]
+    fn a_positional_either_arm_swap_cancels_from_its_index_on() {
+        let _ = frust_core::take_focus_orphaned();
+        let mut counter = 0u64;
+        let prev: Vec<AnyView<()>> = vec![
+            leaf_any(10.0, 10.0),
+            either_any(false),
+            leaf_any(10.0, 10.0),
+        ];
+        let mut pods: Vec<ChildPod> = prev
+            .iter()
+            .map(|v| build_child(v, &mut ctx(&mut counter)))
+            .collect();
+        pods[0].set_focused(true);
+        pods[1].set_active(true);
+        pods[2].set_active(true);
+        pods[2].set_focused(true);
+
+        let next: Vec<AnyView<()>> =
+            vec![leaf_any(10.0, 10.0), either_any(true), leaf_any(10.0, 10.0)];
+        let flags = rebuild_children(
+            &prev,
+            &next,
+            &mut pods,
+            &mut ctx(&mut counter),
+            |v: &AnyView<()>| v,
+            |_: &AnyView<()>| None::<ChildKey>,
+        );
+        assert!(flags.needs_layout());
+        assert!(
+            pods[0].is_focused(),
+            "the stable prefix keeps its focus path"
+        );
+        assert!(
+            !pods[1].is_active(),
+            "the swapped slot's capture is dropped"
+        );
+        assert!(!pods[2].is_active(), "a later active child is cancelled");
+        assert!(!pods[2].is_focused(), "a later focused child is cleared");
+        assert!(
+            frust_core::take_focus_orphaned(),
+            "the cleared tail severed a live focus path"
+        );
+    }
+
+    /// The keyed reconciler treats a key-matched `Either` arm swap like a key
+    /// reused for a different concrete type: identity broke, so the pod's
+    /// capture and focus links are dropped.
+    #[test]
+    fn a_keyed_either_arm_swap_clears_the_pod() {
+        let _ = frust_core::take_focus_orphaned();
+        let mut counter = 0u64;
+        let key = ChildKey::new(1u32);
+        let prev: Vec<(AnyView<()>, ChildKey)> = vec![(either_any(false), key)];
+        let mut pods: Vec<ChildPod> = prev
+            .iter()
+            .map(|c| build_child(&c.0, &mut ctx(&mut counter)))
+            .collect();
+        pods[0].set_active(true);
+        pods[0].set_focused(true);
+
+        let next: Vec<(AnyView<()>, ChildKey)> = vec![(either_any(true), key)];
+        rebuild_children(
+            &prev,
+            &next,
+            &mut pods,
+            &mut ctx(&mut counter),
+            |c: &(AnyView<()>, ChildKey)| &c.0,
+            |c: &(AnyView<()>, ChildKey)| Some(c.1),
+        );
+        assert!(
+            !pods[0].is_active(),
+            "the arm-swapped pod's capture is dropped"
+        );
+        assert!(
+            !pods[0].is_focused(),
+            "the arm-swapped pod's focus is dropped"
+        );
+        assert!(frust_core::take_focus_orphaned());
+
+        // The same key on the same arm is a relocation-free content rebuild.
+        pods[0].set_active(true);
+        pods[0].set_focused(true);
+        let again: Vec<(AnyView<()>, ChildKey)> = vec![(either_any(true), key)];
+        rebuild_children(
+            &next,
+            &again,
+            &mut pods,
+            &mut ctx(&mut counter),
+            |c: &(AnyView<()>, ChildKey)| &c.0,
+            |c: &(AnyView<()>, ChildKey)| Some(c.1),
+        );
+        assert!(pods[0].is_active() && pods[0].is_focused());
+        assert!(!frust_core::take_focus_orphaned());
+    }
+
+    /// An `Either` swap inside a column-like container's child, inside an outer
+    /// pod: the container's own reconciler consumes the report and clears the
+    /// inner pod; the outer pod (whose widget, the container, survived) keeps
+    /// its capture and focus.
+    #[test]
+    fn an_either_swap_inside_a_container_child_clears_only_the_inner_pod() {
+        let _ = frust_core::take_focus_orphaned();
+        let mut counter = 0u64;
+        let prev: Vec<AnyView<()>> = vec![any(NestView {
+            children: vec![either_any(false)],
+        })];
+        let mut pods: Vec<ChildPod> = prev
+            .iter()
+            .map(|v| build_child(v, &mut ctx(&mut counter)))
+            .collect();
+        pods[0].set_active(true);
+        pods[0].set_focused(true);
+        let inner = &mut nest_in(&mut pods[0]).children[0];
+        inner.set_active(true);
+        inner.set_focused(true);
+
+        let next: Vec<AnyView<()>> = vec![any(NestView {
+            children: vec![either_any(true)],
+        })];
+        rebuild_children(
+            &prev,
+            &next,
+            &mut pods,
+            &mut ctx(&mut counter),
+            |v: &AnyView<()>| v,
+            |_: &AnyView<()>| None::<ChildKey>,
+        );
+        assert!(pods[0].is_active(), "the outer pod keeps its capture");
+        assert!(pods[0].is_focused(), "the outer pod keeps its focus");
+        let inner = &nest_in(&mut pods[0]).children[0];
+        assert!(
+            !inner.is_active(),
+            "the inner swapped pod's capture is dropped"
+        );
+        assert!(
+            !inner.is_focused(),
+            "the inner swapped pod's focus is dropped"
+        );
+        assert!(frust_core::take_focus_orphaned());
+    }
 }
 
 /// Typed child slots: [`build_child`]/[`rebuild_child`]/[`teardown_child`]
 /// driven with a concrete `V` through the hand-written `Wrap<V> { child: V }`
 /// container — a concrete leaf (stored once, reconciled in place), an
-/// [`Either`](crate::Either) (arm swaps handled inside `Either`), and an
-/// [`AnyView`] (the documented swap semantics, unchanged).
+/// [`Either`](crate::Either) / `EitherOf3` (an arm swap reported to the pod, so
+/// it gets the `AnyView` swap semantics), and an [`AnyView`] (the documented
+/// swap semantics, unchanged).
 #[cfg(test)]
 mod typed_child_tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
     use super::*;
-    use crate::Either;
     use crate::test_support::{leaf_any, swap_leaf};
+    use crate::{Either, EitherOf3};
     use frust_core::{
         BoxConstraints, DiscardScene, FrameTime, LayoutCtx, PaintCtx, PaintScene, RenderRoot,
         take_focus_orphaned,
@@ -1866,24 +2044,21 @@ mod typed_child_tests {
         let mut ctx = BuildCtx::new(&mut counter);
         let _ = take_focus_orphaned();
 
-        let a: Wrap<Either<Probe, Probe>> = Wrap {
-            child: Either::Left(probe("a", &log)),
-        };
+        // A pod whose typed child is the `Either` itself.
+        let a: Either<Probe, Probe> = Either::Left(probe("a", &log));
         let mut pod = build_child(&a, &mut ctx);
         assert_eq!(drain(&log), ["build a"]);
-        // The wrapper's pod and its child's pod both hold the recorded focus
-        // path, so the chain into `Either`'s rebuild is live.
+        // The pod holds the recorded focus path, so the chain into `Either`'s
+        // rebuild is live.
         pod.set_focused(true);
-        wrap_in(&mut pod).child.set_focused(true);
 
-        let b: Wrap<Either<Probe, Probe>> = Wrap {
-            child: Either::Right(probe("b", &log)),
-        };
+        let b: Either<Probe, Probe> = Either::Right(probe("b", &log));
         let (flags, swapped) = rebuild_child_tracked(&a, &b, &mut pod, &mut ctx);
         assert_eq!(flags, ChangeFlags::LAYOUT | ChangeFlags::PAINT);
         assert!(
-            !swapped,
-            "both arms share one element type; the swap is Either's own business"
+            swapped,
+            "both arms share one element type, but Either reports the arm swap \
+             (BuildCtx::mark_element_replaced), so the pod sees a swap like an AnyView one"
         );
         assert_eq!(drain(&log), ["teardown a", "build b", "drop a"]);
         assert!(
@@ -1893,6 +2068,229 @@ mod typed_child_tests {
 
         teardown_child(&b, &mut pod, &mut ctx);
         assert_eq!(drain(&log), ["teardown b"]);
+    }
+
+    /// What `rebuild_child` left on a `Wrap<V>` after one rebuild of its typed
+    /// child: the wrapper pod's own focus link, the child pod's capture and focus
+    /// links, and whether the focus orphan was raised.
+    struct WrapOutcome {
+        flags: ChangeFlags,
+        outer_focused: bool,
+        child_active: bool,
+        child_focused: bool,
+        orphaned: bool,
+    }
+
+    /// Rebuild `Wrap { child: prev }` into `Wrap { child: next }` through
+    /// `rebuild_child`, with the child pod holding a capture and the focus path;
+    /// `outer_focused` decides whether the wrapper's own link (and so the chain
+    /// into the child) is live.
+    fn rebuild_wrapped<V: View<()>>(prev: V, next: V, outer_focused: bool) -> WrapOutcome {
+        let _ = take_focus_orphaned();
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        let prev = Wrap { child: prev };
+        let next = Wrap { child: next };
+        let mut pod = build_child(&prev, &mut ctx);
+        pod.set_focused(outer_focused);
+        let child = &mut wrap_in(&mut pod).child;
+        child.set_active(true);
+        child.set_focused(true);
+
+        let flags = rebuild_child(&prev, &next, &mut pod, &mut ctx);
+        let orphaned = take_focus_orphaned();
+        let outer_focused = pod.is_focused();
+        let child = &wrap_in(&mut pod).child;
+        WrapOutcome {
+            flags,
+            outer_focused,
+            child_active: child.is_active(),
+            child_focused: child.is_focused(),
+            orphaned,
+        }
+    }
+
+    /// Assert the swap semantics an `AnyView` concrete-type swap gets
+    /// (`an_erased_child_keeps_the_swap_semantics`), on both chains.
+    fn assert_swap_semantics(live: WrapOutcome, blurred: WrapOutcome, what: &str) {
+        assert_eq!(
+            live.flags,
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT,
+            "{what}"
+        );
+        assert!(
+            live.outer_focused,
+            "{what}: the wrapper itself was not swapped, so its own link stands"
+        );
+        assert!(
+            !live.child_active,
+            "{what}: the fresh arm never saw the Down, so the capture is dropped"
+        );
+        assert!(
+            !live.child_focused,
+            "{what}: the fresh arm never claimed focus, so the link is dropped"
+        );
+        assert!(
+            live.orphaned,
+            "{what}: a live focus path died inside the swap"
+        );
+
+        assert!(
+            !blurred.child_active,
+            "{what}: dropped on a blurred chain too"
+        );
+        assert!(
+            !blurred.child_focused,
+            "{what}: dropped on a blurred chain too"
+        );
+        assert!(
+            !blurred.orphaned,
+            "{what}: the same swap below a cleared link owns no session to lose"
+        );
+    }
+
+    /// Assert a same-arm rebuild kept every recorded path and marked nothing.
+    fn assert_kept(outcome: WrapOutcome, what: &str) {
+        assert!(
+            outcome.child_active,
+            "{what}: the in-flight capture survives"
+        );
+        assert!(outcome.child_focused, "{what}: the focus path survives");
+        assert!(outcome.outer_focused, "{what}: the wrapper's link survives");
+        assert!(
+            !outcome.orphaned,
+            "{what}: an in-place rebuild orphans nothing"
+        );
+    }
+
+    #[test]
+    fn an_either_arm_swap_drops_the_child_pod_capture_and_focus() {
+        let log = new_log();
+        let swap = |outer_focused| {
+            rebuild_wrapped::<Either<Probe, Probe>>(
+                Either::Left(probe("a", &log)),
+                Either::Right(probe("b", &log)),
+                outer_focused,
+            )
+        };
+        assert_swap_semantics(swap(true), swap(false), "Either Left -> Right");
+    }
+
+    #[test]
+    fn an_either_of_3_arm_swap_drops_the_child_pod_capture_and_focus() {
+        let log = new_log();
+        let swap = |outer_focused| {
+            rebuild_wrapped::<EitherOf3<Probe, Probe, Probe>>(
+                EitherOf3::A(probe("a", &log)),
+                EitherOf3::C(probe("c", &log)),
+                outer_focused,
+            )
+        };
+        assert_swap_semantics(swap(true), swap(false), "EitherOf3 A -> C");
+    }
+
+    #[test]
+    fn a_same_arm_rebuild_keeps_the_child_pod_capture_and_focus() {
+        let log = new_log();
+        let kept = rebuild_wrapped::<Either<Probe, Probe>>(
+            Either::Left(probe("a", &log)),
+            Either::Left(probe("a", &log)),
+            true,
+        );
+        assert_eq!(kept.flags, ChangeFlags::NONE);
+        assert_kept(kept, "Either Left -> Left");
+
+        let kept = rebuild_wrapped::<EitherOf3<Probe, Probe, Probe>>(
+            EitherOf3::B(probe("b", &log)),
+            EitherOf3::B(probe("b", &log)),
+            true,
+        );
+        assert_eq!(kept.flags, ChangeFlags::NONE);
+        assert_kept(kept, "EitherOf3 B -> B");
+
+        // The tracked rebuild itself reports no swap for a same-arm rebuild.
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        let a: Either<Probe, Probe> = Either::Left(probe("a", &log));
+        let mut pod = build_child(&a, &mut ctx);
+        let (_, swapped) = rebuild_child_tracked(&a, &a, &mut pod, &mut ctx);
+        assert!(!swapped, "a same-arm rebuild keeps the widget");
+    }
+
+    #[test]
+    fn an_inline_nested_either_swap_reaches_the_enclosing_pod() {
+        // `Either<Either<A, B>, C>`: the outer enum stays on `Left` and the inner
+        // one swaps. No pod sits between them, so the inner report propagates
+        // through the outer enum's same-arm rebuild to the pod holding both.
+        let log = new_log();
+        type Nested = Either<Either<Probe, Probe>, Probe>;
+        let swap = |outer_focused| {
+            rebuild_wrapped::<Nested>(
+                Either::Left(Either::Left(probe("a", &log))),
+                Either::Left(Either::Right(probe("b", &log))),
+                outer_focused,
+            )
+        };
+        assert_swap_semantics(swap(true), swap(false), "inline inner arm swap");
+    }
+
+    #[test]
+    fn an_either_swap_inside_a_nested_pod_clears_only_that_pod() {
+        // `Wrap<Wrap<Either>>`: the Either sits in the INNER wrapper's pod, which
+        // consumes its own report; the outer wrapper's child pod (holding the
+        // inner wrapper, whose widget survived) keeps its flags.
+        let log = new_log();
+        let _ = take_focus_orphaned();
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        let prev: Wrap<Wrap<Either<Probe, Probe>>> = Wrap {
+            child: Wrap {
+                child: Either::Left(probe("a", &log)),
+            },
+        };
+        let next: Wrap<Wrap<Either<Probe, Probe>>> = Wrap {
+            child: Wrap {
+                child: Either::Right(probe("b", &log)),
+            },
+        };
+        let mut pod = build_child(&prev, &mut ctx);
+        pod.set_focused(true);
+        let outer_child = &mut wrap_in(&mut pod).child;
+        outer_child.set_active(true);
+        outer_child.set_focused(true);
+        let inner_child = &mut wrap_in(outer_child).child;
+        inner_child.set_active(true);
+        inner_child.set_focused(true);
+
+        let (flags, swapped) = rebuild_child_tracked(&prev, &next, &mut pod, &mut ctx);
+        assert_eq!(flags, ChangeFlags::LAYOUT | ChangeFlags::PAINT);
+        assert!(
+            !swapped,
+            "the inner pod consumed the report; the outermost widget survived"
+        );
+        assert!(pod.is_focused());
+        let outer_child = &mut wrap_in(&mut pod).child;
+        assert!(
+            outer_child.is_active(),
+            "the outer child pod keeps its capture"
+        );
+        assert!(
+            outer_child.is_focused(),
+            "the outer child pod keeps its focus"
+        );
+        let inner_child = &wrap_in(outer_child).child;
+        assert!(
+            !inner_child.is_active(),
+            "the swapped pod's capture is dropped"
+        );
+        assert!(
+            !inner_child.is_focused(),
+            "the swapped pod's focus is dropped"
+        );
+        assert!(
+            take_focus_orphaned(),
+            "a live focus path died inside the swap"
+        );
     }
 
     /// Swap `Wrap<AnyView<()>>`'s child Leaf -> SwapLeaf with a capture and the

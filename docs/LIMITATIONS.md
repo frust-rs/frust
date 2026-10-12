@@ -651,10 +651,12 @@ only: `ReorderableListView` (crates/frust-widgets/src/drag/reorderable.rs:202-22
 and every in-crate container's own child list — detects swaps correctly and is
 unaffected. `any(any(view))` is CLOSED by idempotent erasure (`AnyView::new`
 unwraps an `AnyView` argument), so the residual is only wrapper views.
-`frust_widgets::Either` is not this shape: its `EitherWidget` is an enum over
-two statically typed arms (no `AnyView` field) and it raises
-`mark_focus_orphaned` itself on an arm swap under focus, so it is not subject
-to this limitation.
+`frust_widgets::Either` and `EitherOf3`..`EitherOf8` are not this shape: their
+widgets are enums over statically typed arms (no `AnyView` field), and an arm
+swap is reported to the enclosing reconciler (`BuildCtx::mark_element_replaced`,
+collected by `rebuild_child_tracked` and `ComponentView::rebuild`), which drops
+the pod's capture and focus link exactly like an `AnyView` swap, so they are
+not subject to this limitation.
 
 **Why not fixed**: closing it needs shared `TypeId` reporting through
 `ErasedView` so nesting composes. Each reconciler today probes whatever boxed

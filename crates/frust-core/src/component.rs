@@ -338,17 +338,26 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
                 // the component descends into its pod through a fresh inner
                 // context rather than through the pod plumbing.
                 inner.set_has_focus(outer_has_focus && child_focused);
-                let flags = new_view.rebuild(&element.prev, boxed, &mut inner);
+                // Run the child rebuild as an element-replaced tracking scope: a
+                // body that is an enum view (`Either`, `EitherOfN`) keeps its
+                // concrete type across an arm swap, so the type-id comparison
+                // below cannot see it, and the enum reports it instead
+                // (`BuildCtx::mark_element_replaced`). A pod inside the body
+                // consumes its own signal, so only a swap of *this* child's
+                // widget reaches here.
+                let (flags, replaced) = inner
+                    .track_element_replaced(|inner| new_view.rebuild(&element.prev, boxed, inner));
                 let after = {
                     let any: &dyn Any = &**boxed;
                     any.type_id()
                 };
-                (flags, before != after)
+                (flags, before != after || replaced)
             };
             if swapped {
-                // The child AnyView swapped concrete type: the old widget was
-                // torn down inside `AnyView::rebuild`, so any capture/focus path
-                // it recorded is stale — drop it (mirrors `rebuild_child`).
+                // The child AnyView swapped concrete type (or its enum body
+                // switched arms): the old widget was torn down inside the
+                // child's `rebuild`, so any capture/focus path it recorded is
+                // stale — drop it (mirrors `rebuild_child`).
                 element.child.set_active(false);
                 element.child.set_focused(false);
                 // Dropping the flag is not the load-bearing part: the focused
@@ -1000,6 +1009,125 @@ mod tests {
             !marked,
             "the same swap under an already-blurred ancestor owns no session to release"
         );
+    }
+
+    /// A two-arm enum view in the shape of `frust-widgets`' `Either` (which this
+    /// crate cannot name): one element type for both arms, the old arm torn down
+    /// and the new one built on a swap, and the swap reported through
+    /// `BuildCtx::mark_element_replaced`.
+    enum Arms {
+        Left(Empty),
+        Right(OtherLeaf),
+    }
+    enum ArmsWidget {
+        Left(EmptyWidget),
+        Right(OtherWidget),
+    }
+    impl Widget for ArmsWidget {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            match self {
+                Self::Left(w) => w.layout(ctx, bc),
+                Self::Right(w) => w.layout(ctx, bc),
+            }
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+            match self {
+                Self::Left(w) => w.paint(ctx, scene),
+                Self::Right(w) => w.paint(ctx, scene),
+            }
+        }
+    }
+    impl View<()> for Arms {
+        type Element = ArmsWidget;
+        fn build(&self, ctx: &mut BuildCtx<'_>) -> ArmsWidget {
+            match self {
+                Self::Left(v) => ArmsWidget::Left(v.build(ctx)),
+                Self::Right(v) => ArmsWidget::Right(v.build(ctx)),
+            }
+        }
+        fn rebuild(
+            &self,
+            prev: &Self,
+            element: &mut ArmsWidget,
+            ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            match (self, prev, &mut *element) {
+                (Self::Left(v), Self::Left(p), ArmsWidget::Left(w)) => v.rebuild(p, w, ctx),
+                (Self::Right(v), Self::Right(p), ArmsWidget::Right(w)) => v.rebuild(p, w, ctx),
+                _ => {
+                    ctx.mark_element_replaced();
+                    *element = self.build(ctx);
+                    ChangeFlags::LAYOUT | ChangeFlags::PAINT
+                }
+            }
+        }
+    }
+
+    /// A component whose body is the enum view above, not erased by the
+    /// component itself: the child's boxed widget is `ArmsWidget` on both arms.
+    struct ArmsComp {
+        right: Rc<Cell<bool>>,
+    }
+    impl Component for ArmsComp {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> impl View<()> {
+            if self.right.get() {
+                Arms::Right(OtherLeaf)
+            } else {
+                Arms::Left(Empty)
+            }
+        }
+    }
+
+    #[test]
+    fn component_enum_body_arm_swap_clears_the_child_pod_flags() {
+        /// Rebuild the component with its body on the left arm then `right_now`,
+        /// the child pod holding a capture and the focus path, reporting
+        /// `(still active, still focused, orphan marked)`.
+        fn rebuild_arms(right_now: bool) -> (bool, bool, bool) {
+            let _ = crate::event::take_focus_orphaned();
+            let _owner = ambient();
+            let right = Rc::new(Cell::new(false));
+            let v1 = component(ArmsComp {
+                right: right.clone(),
+            });
+            let mut widget = build_widget::<(), _>(&v1);
+            widget.child.set_active(true);
+            widget.child.set_focused(true);
+
+            right.set(right_now);
+            let v2 = component(ArmsComp {
+                right: right.clone(),
+            });
+            let mut next_id = 0u64;
+            let mut ctx = BuildCtx::new(&mut next_id);
+            View::<()>::rebuild(&v2, &v1, &mut widget, &mut ctx);
+            (
+                widget.child.is_active(),
+                widget.child.is_focused(),
+                crate::event::take_focus_orphaned(),
+            )
+        }
+
+        let (active, focused, marked) = rebuild_arms(true);
+        assert!(
+            !active,
+            "the fresh arm never saw the Down: the capture is dropped"
+        );
+        assert!(
+            !focused,
+            "the fresh arm never claimed focus: the link is dropped"
+        );
+        assert!(
+            marked,
+            "a live focus path dying inside the arm swap releases the session"
+        );
+
+        let (active, focused, marked) = rebuild_arms(false);
+        assert!(active, "a same-arm rebuild keeps the in-flight capture");
+        assert!(focused, "a same-arm rebuild keeps the focus path");
+        assert!(!marked, "a same-arm rebuild orphans nothing");
     }
 
     #[test]
