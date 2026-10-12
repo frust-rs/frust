@@ -14,6 +14,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   spells features with the app's key, a missing-feature cargo failure on a debug or profile build
   carries a one-line hint naming both forms, and release lanes refuse devtools through either key
   (c801185c, 5fb139c6, fcbb1e91).
+- `frust build`'s release lanes also refuse cargo's weak `<key>?/devtools` spelling and the
+  `hotpatch` features (`hotpatch`, `<key>/hotpatch`, `<key>?/hotpatch`), which compile the devtools
+  listener in through the shells; when cargo cannot report the dependency key, or the app keys the
+  facade under a name no feature can spell, the app-alias check fails closed and counts any
+  `<dep>/devtools` or `<dep>/hotpatch` (601840eb).
 - Codemod (`scripts/codemod/frust_any_codemod.py`): the name-list callees and the
   `column`/`row`/`stack` builders resolve by import origin (a strict `frust*` path head), so an
   app fn or an app-imported builder that shares a listed name is skipped with a note (412dc49a);
