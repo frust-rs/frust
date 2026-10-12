@@ -152,9 +152,9 @@ fn main() {}
 mod app {
     use frust::authoring::text::FontFamily;
     use frust::{
-        Color, Component, CrossAxisAlignment, EdgeInsets, GestureDetector, Get, Padding, RwSignal,
-        TextView, Update, WindowMetrics, any, column, component, container, list_view, row,
-        scroll_view, text, text_input, use_context,
+        Color, Component, CrossAxisAlignment, EdgeInsets, EitherOf3, GestureDetector, Get, Padding,
+        RwSignal, TextView, Update, View, WindowMetrics, column, component, container, list_view,
+        row, scroll_view, text, text_input, use_context,
     };
     use frust_gallery::{Case, Design, Variant};
 
@@ -595,7 +595,7 @@ mod app {
     /// clickable [`nav_row`] — mouse/touch-tap exercise), the ticking-counter
     /// line ([`start_ticker`]'s zero-input-event proof), and the current
     /// [`WindowMetrics`] as in-UI evidence for the resize/DPR milestone.
-    fn index_view(state: &AppState) -> impl frust::View<AppState> {
+    fn index_view(state: &AppState) -> impl frust::View<AppState> + use<> {
         let filter_lower = state.filter.to_lowercase();
         let matches: Vec<&'static Case> = frust_gallery::cases()
             .iter()
@@ -672,12 +672,11 @@ mod app {
     /// [`AppState::case`] and [`AppState::embed`]. `embed` only chooses
     /// between the two case pages — a missing/unknown `?case=` still falls
     /// back to the index page exactly as before this task, `embed` or not.
-    fn view(state: &mut AppState) -> frust::AnyView<AppState> {
-        // erasure: keep three arms of distinct view types
+    fn view(state: &mut AppState) -> impl View<AppState> + use<> {
         match state.case {
-            Some(case) if state.embed => any(embedded_case_view(case)),
-            Some(case) => any(case_view(case)),
-            None => any(index_view(state)),
+            Some(case) if state.embed => EitherOf3::A(embedded_case_view(case)),
+            Some(case) => EitherOf3::B(case_view(case)),
+            None => EitherOf3::C(index_view(state)),
         }
     }
 

@@ -64,15 +64,16 @@ use std::time::{Duration, Instant};
 // file, entirely through the `frust` facade.
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, Point, Rect, SemanticsCtx, Size, Widget,
+    PaintCtx, PaintScene, Point, Rect, SemanticsCtx, Size, Widget, build_child, rebuild_child,
+    teardown_child,
 };
 use frust::motion::patterns::SharedAxis;
 use frust::motion::switcher::pattern_switcher;
 use frust::{
-    AnyView, Axis, ButtonStyle, Color, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView,
-    Get, GetUntracked, Image, ImageFit, ImageSource, NavigatorController, Padding, PopResult,
-    RwSignal, ScrollInfo, Set, SizedBox, Theme, View, any, button, checkbox, column, inflexible,
-    row, safe_area, scroll_view, spawn_local, text, use_context, views,
+    Axis, ButtonStyle, Color, Column, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Get,
+    GetUntracked, Image, ImageFit, ImageSource, NavigatorController, Padding, PopResult, RwSignal,
+    ScrollInfo, Set, SizedBox, Theme, View, button, checkbox, column, inflexible, row, safe_area,
+    scroll_view, spawn_local, text, use_context, views,
 };
 use frust_glyph::{
     BadgeVariant, BannerVariant, MenuEntry, TitleDirection, app_bar, banner_spec, glyph_list,
@@ -210,8 +211,8 @@ macro_rules! local_sig {
 /// `target` on every paint pass — see the [module docs](self)'s "genuine
 /// framework gap" section. Mirrors `examples/huddle::ui::fill_box::FilledBox`'s
 /// single-child `ChildPod` shape exactly.
-struct AnchorReporter<State: 'static> {
-    child: AnyView<State>,
+struct AnchorReporter<V> {
+    child: V,
     target: Rc<Cell<Rect>>,
 }
 
@@ -219,12 +220,8 @@ struct AnchorReporter<State: 'static> {
 fn anchor_reporter<State: 'static, V: View<State>>(
     child: V,
     target: Rc<Cell<Rect>>,
-) -> AnchorReporter<State> {
-    AnchorReporter {
-        // erasure: keep the hand-written view stores its child as a ChildPod element
-        child: any(child),
-        target,
-    }
+) -> AnchorReporter<V> {
+    AnchorReporter { child, target }
 }
 
 /// The retained widget for an [`AnchorReporter`].
@@ -233,41 +230,7 @@ struct AnchorReporterWidget {
     target: Rc<Cell<Rect>>,
 }
 
-/// Build a [`ChildPod`] wrapping an [`AnyView`]'s element (mirrors
-/// `frust-widgets::build_child`, re-derived because that helper is
-/// crate-private — the same re-derivation `ui::fill_box::FilledBox` uses).
-fn build_child<State: 'static>(view: &AnyView<State>, ctx: &mut BuildCtx<'_>) -> ChildPod {
-    let element: Box<dyn Widget> = view.build(ctx);
-    ChildPod::new(Box::new(element))
-}
-
-/// Reconcile the child through its `ChildPod` (mirrors
-/// `frust-widgets::rebuild_child`).
-fn rebuild_child<State: 'static>(
-    prev: &AnyView<State>,
-    next: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) -> ChangeFlags {
-    let element = pod
-        .widget_mut()
-        .downcast_mut::<Box<dyn Widget>>()
-        .expect("anchor_reporter child element is a boxed AnyView widget");
-    next.rebuild(prev, element, ctx)
-}
-
-/// Tear the child down (mirrors `frust-widgets::teardown_child`).
-fn teardown_child<State: 'static>(
-    view: &AnyView<State>,
-    pod: &mut ChildPod,
-    ctx: &mut BuildCtx<'_>,
-) {
-    if let Some(element) = pod.widget_mut().downcast_mut::<Box<dyn Widget>>() {
-        view.teardown(element, ctx);
-    }
-}
-
-impl<State: 'static> View<State> for AnchorReporter<State> {
+impl<State: 'static, V: View<State>> View<State> for AnchorReporter<V> {
     type Element = AnchorReporterWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> AnchorReporterWidget {
