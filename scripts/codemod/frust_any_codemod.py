@@ -96,7 +96,11 @@ code); the first matching bucket wins:
              method of a trait impl: the signature is the trait's.
   T7-arms    an `if`/`else` chain or a `match` as the tail, or an early
              `return` anywhere in the body: several exits of different types
-             (`Either` candidates, not T7's). A `return` inside a closure
+             (`either(..)` / `EitherOf<n>` candidates, not T7's; the listing
+             reports the arm count: `match tail, 4 arms`, `if/else tail, 2
+             arms`, and `--check` appends the suggestion — 2 arms: `either(..)`
+             when the types differ, one construction when they do not; 3-8:
+             `EitherOf<n>`; 9 or more: keep `any()`, a page table). A `return` inside a closure
              body (`move |_app| { ..; return; }`) leaves the closure, not the
              helper, and does not count.
   T7-ref     a recursive fn (`f(..)` in a free fn, `Self::f(..)`/`self.f(..)`
@@ -117,12 +121,17 @@ code); the first matching bucket wins:
              fn whose same-file call is the whole operand of a prefix `&` /
              `&mut` ("taken by reference": `&f(..)`, `&self.f(..)`,
              `&Self::f(..)`, `&prev.f(..)`) — the caller relies on
-             `&AnyView<S>`, private helpers included. A `&` over a larger
+             `&AnyView<S>`, private helpers included. Since the child-slot
+             trio (`build_child` / `rebuild_child` / `teardown_child`, bare or
+             path-qualified) is generic, a borrow that is an argument of one
+             of them is an ordinary `&V`, not a reliance on `&AnyView<S>`, and
+             does not count. A `&` over a larger
              expression (`&(a, f())`, `&vec![f()]`, `&f().x`) does not count. Also
              a fn whose same-file call is the whole initializer of an untyped
              `let [mut] x = f(..);` with a later bare `&x` / `&mut x` in the
              same block (`&x.field`, `&x[..]`, `&x.m()` do not count; a later
-             re-binding of `x` is not tracked, so still excluded).
+             re-binding of `x` is not tracked, so still excluded); a binding
+             whose every bare borrow is a trio argument is exempt.
   T7-public  a `pub fn` (a restricted `pub(..)` is not API) in a `crates/` or
              `plugins/` library source — not under a `tests/`, `examples/` or
              `src/corpus/` directory, and not inside a `#[cfg(test)] mod`:
@@ -1953,9 +1962,14 @@ def _t7_arms_tail(s: Source, body: int, a: int, b: int):
     if s.is_id(a, "match"):
         for k in range(a + 1, b + 1):
             if s.parent[k] == body and s.is_p(k, "{"):
-                return "match tail" if s.match[k] == b else None
+                if s.match[k] != b:
+                    return None
+                arms = sum(1 for m in range(k + 1, s.match[k])
+                           if s.parent[m] == k and s.is_p(m, "=>"))
+                return f"match tail, {arms} arms"
         return None
     j = a
+    arms = 1
     while s.is_id(j, "if"):
         blk = next((k for k in range(j + 1, b + 1) if s.parent[k] == body and s.is_p(k, "{")), None)
         if blk is None:
@@ -1964,9 +1978,23 @@ def _t7_arms_tail(s: Source, body: int, a: int, b: int):
         if not s.is_id(e + 1, "else"):
             return None
         if s.is_p(e + 2, "{"):
-            return "if/else tail" if s.match[e + 2] == b else None
+            return f"if/else tail, {arms + 1} arms" if s.match[e + 2] == b else None
         j = e + 2
+        arms += 1
     return None
+
+
+def _t7_arms_hint(reason: str) -> str:
+    """Suggestion appended to a `T7-arms` line from its `<tail>, N arms` reason."""
+    m = re.search(r", (\d+) arms$", reason)
+    if not m:
+        return ""
+    n = int(m.group(1))
+    if n <= 2:
+        return ": either(..) when the types differ, one construction when they do not"
+    if n <= 8:
+        return f": EitherOf{n}"
+    return ": keep any() (page table)"
 
 
 def _t7_tail(s: Source, f: T7Fn):
@@ -2023,11 +2051,29 @@ def _t7_prefix_amp(s: Source, k: int) -> bool:
     return not (tok.kind == PUNCT and tok.text in (")", "]", "?", "}"))
 
 
+T7_CHILD_TRIO = ("build_child", "rebuild_child", "teardown_child")
+
+
+def _t7_trio_arg(s: Source, a: int) -> bool:
+    """True when the prefix `&` at token `a` starts an argument of a call whose
+    callee is `build_child` / `rebuild_child` / `teardown_child`, bare or
+    path-qualified (`frust::authoring::build_child(..)`); a method call of the
+    same name does not count."""
+    if not (s.is_p(a - 1, "(") or s.is_p(a - 1, ",")):
+        return False
+    o = s.parent[a]
+    if o < 0 or not s.is_p(o, "(") or not s.is_id(o - 1) or s.t[o - 1].text not in T7_CHILD_TRIO:
+        return False
+    return not s.is_p(o - 2, ".")
+
+
 def _t7_taken_by_ref(s: Source, f: T7Fn, kind: str) -> bool:
     """True when a same-file call of the helper is the whole operand of a
     prefix `&` / `&mut` (`&name(..)`, `&self.name(..)`, `&Self::name(..)`,
     `&prev.name(..)`): the caller relies on `&AnyView<S>`. A `&` applying to a
-    larger expression (`&(a, name())`, `&vec![name()]`, `&name().x`) does not count."""
+    larger expression (`&(a, name())`, `&vec![name()]`, `&name().x`) does not
+    count, and neither does a borrow that is an argument of `build_child` /
+    `rebuild_child` / `teardown_child` (generic over the view type)."""
     name = s.t[f.name].text
     for k, tok in enumerate(s.t):
         if tok.kind != IDENT or tok.text != name or not s.is_p(k + 1, "(") or k == f.name:
@@ -2060,7 +2106,7 @@ def _t7_taken_by_ref(s: Source, f: T7Fn, kind: str) -> bool:
         a = pos - 1
         if s.is_id(a, "mut"):
             a -= 1
-        if _t7_prefix_amp(s, a):
+        if _t7_prefix_amp(s, a) and not _t7_trio_arg(s, a):
             return True
         if _t7_let_bound_borrowed(s, k, pos, end):
             return True
@@ -2071,7 +2117,9 @@ def _t7_let_bound_borrowed(s: Source, k: int, pos: int, end: int) -> bool:
     """True when the call spanning tokens `pos..end` (name token `k`) is the whole
     initializer of `let [mut] <ident> = <call>;` (no type annotation) and the bare
     binding is later borrowed (`&ident` / `&mut ident`) in the let's enclosing
-    block, which bounds the binding's scope. A borrow of a longer expression
+    block, which bounds the binding's scope; a borrow that is an argument of
+    `build_child` / `rebuild_child` / `teardown_child` does not count, so the
+    let is exempt only when every bare borrow is such an argument. A borrow of a longer expression
     (`&ident.f`, `&ident[..]`, `&ident.m()`, `&ident?`) does not count. A later
     re-binding of the same name is not tracked: it is conservatively still a hit."""
     if not (s.is_p(end + 1, ";") and s.is_p(pos - 1, "=") and s.is_id(pos - 2)):
@@ -2094,7 +2142,7 @@ def _t7_let_bound_borrowed(s: Source, k: int, pos: int, end: int) -> bool:
         a = j - 1
         if s.is_id(a, "mut"):
             a -= 1
-        if _t7_prefix_amp(s, a):
+        if _t7_prefix_amp(s, a) and not _t7_trio_arg(s, a):
             return True
     return False
 
@@ -3185,7 +3233,8 @@ def main(argv=None) -> int:
                          "erasure call returns impl View<S> instead (+ a type-only use<..> in "
                          "any edition when the fn or its impl has a lifetime parameter or the "
                          "fn takes an elided reference); "
-                         "trait fns, multi-arm bodies, recursive fns or fns used as values, and "
+                         "trait fns, bodies ending in an if/else chain or match (the listing reports the arm count "
+                         "and names either(..) / EitherOf<n>; nine or more arms keep any()), recursive fns or fns used as values, and "
                          "bare pub fns of crates/ and plugins/ library sources, and fns with any "
                          "visibility modifier (pub(crate), pub(super), pub(in ..), or pub in an "
                          "app) unless --t7-visible is given, are listed as "
@@ -3280,7 +3329,8 @@ def main(argv=None) -> int:
             for c in sorted(cands, key=lambda c: (c.line, c.span[0])):
                 print(f"{path}:{c.line}: {c.rule} {c.desc}")
             for line, bucket, name, reason in excluded:
-                print(f"{path}:{line}: {bucket} excluded: {name} ({reason})")
+                hint = _t7_arms_hint(reason) if bucket == "T7-arms" else ""
+                print(f"{path}:{line}: {bucket} excluded: {name} ({reason}){hint}")
             for line, msg in notes:
                 print(f"{path}:{line}: {msg}")
             for line in u_lines:
