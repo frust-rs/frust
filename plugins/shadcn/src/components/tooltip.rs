@@ -1023,12 +1023,11 @@ struct TooltipPanelWidget {
 
 impl TooltipPanel {
     /// The label child: `text-xs` in the live theme's `BodySmall` family.
-    // erasure: keep built into a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
-    fn label_view<State: 'static>(&self) -> AnyView<State> {
-        any(text(self.label.clone())
+    fn label_view<State: 'static>(&self) -> impl View<State> + use<State> {
+        text(self.label.clone())
             .size(style::TEXT_XS as f32)
             .themed_family(ThemeTextType::BodySmall)
-            .themed_role(ThemeTextColor::OnPrimary))
+            .themed_role(ThemeTextColor::OnPrimary)
     }
 }
 

@@ -269,19 +269,16 @@ impl<State: 'static> CommandView<State> {
     ///
     /// Its query text keeps the system UI family: `text_input` takes a style
     /// only at build and has no theme-resolved family to opt into.
-    // erasure: keep built into a ChildPod: build_child/rebuild_child/teardown_child take &AnyView
-    fn input(&self) -> AnyView<State> {
+    fn input(&self) -> impl View<State> + use<State> {
         let on_change = self.on_query_change.clone();
-        any(
-            text_input(self.query.clone(), move |state: &mut State, text| {
-                on_change(state, text)
-            })
-            .placeholder(self.placeholder.clone())
-            .padding(0.0, 0.0)
-            .border_width(0.0)
-            .corner_radius(0.0)
-            .focus_ring_width(0.0),
-        )
+        text_input(self.query.clone(), move |state: &mut State, text| {
+            on_change(state, text)
+        })
+        .placeholder(self.placeholder.clone())
+        .padding(0.0, 0.0)
+        .border_width(0.0)
+        .corner_radius(0.0)
+        .focus_ring_width(0.0)
     }
 
     /// The visible rows for the current query, as views plus their kinds.
