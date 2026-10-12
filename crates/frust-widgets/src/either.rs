@@ -1,16 +1,22 @@
-//! A two-arm view: [`Either`] and the lazy [`either`] helper.
+//! Statically-typed branching views: the two-arm [`Either`] with its lazy
+//! [`either`] helper, and the three-to-eight-arm [`EitherOf3`] ..
+//! [`EitherOf8`].
 //!
-//! A helper whose body is an `if`/`else` (or a two-arm `match`) over two
-//! different view types can return `impl View<State>` through [`either`]
-//! instead of erasing both arms into an [`AnyView`](frust_core::AnyView). Both
-//! arms stay statically typed; only the arm that is live is built.
+//! A helper whose body is an `if`/`else` (or a `match`) over several different
+//! view types can return `impl View<State>` through these enums instead of
+//! erasing the arms into an [`AnyView`](frust_core::AnyView). Every arm stays
+//! statically typed; only the arm that is live is built.
 //!
 //! # When to use it
 //!
 //! * **Two arms** of different concrete types: [`either`] / [`Either`].
-//! * **Three or more arms**: stay with [`any`](frust_core::any) /
-//!   [`AnyView`](frust_core::AnyView) (nest `Either`s only if the nesting reads
-//!   better than the erasure).
+//! * **Three to eight arms** of different concrete types: [`EitherOf3`] ..
+//!   [`EitherOf8`] (variants `A`, `B`, `C`, ..) built from a `match`.
+//! * **More than eight arms, or a stored page table**: stay with
+//!   [`any`](frust_core::any) / [`AnyView`](frust_core::AnyView).
+//! * **The same concrete type in every arm**: build that one type
+//!   conditionally instead. `Either` / `EitherOfN` remount on an arm swap, so
+//!   they would discard state a single conditionally-configured view keeps.
 //! * **An optional child** inside a container: use the container's `.when(..)` /
 //!   `.when_some(..)` sugar rather than an `Either` with an empty arm.
 //!
@@ -24,7 +30,7 @@
 //!
 //! # Focus and capture bookkeeping
 //!
-//! [`EitherWidget`] is an enum widget delegating every pass to the live arm; it
+//! [`EitherWidget`] (and every `EitherOfNWidget`) is an enum widget delegating every pass to the live arm; it
 //! holds no `AnyView` or `Box<dyn Widget>` field, so it is not the swap-blind
 //! wrapper shape (`focus-wrapper-erasure-swap-blind`). One gap remains: both
 //! arms share the single element type `EitherWidget<L, R>`, so a parent
@@ -52,9 +58,11 @@ pub enum Either<L, R> {
 /// Pick an arm by `cond`: `l` when true, `r` when false. Only the chosen
 /// closure runs, so the unused arm is never constructed.
 ///
-/// Use it for exactly two arms; for three or more, erase with
-/// [`any`](frust_core::any). For an optional child use `.when(..)` /
-/// `.when_some(..)` on the container.
+/// Use it for exactly two arms of different types; for three to eight arms use
+/// [`EitherOf3`] .. [`EitherOf8`], and for more than eight (or a stored page
+/// table) erase with [`any`](frust_core::any). When every arm is the same
+/// concrete type, build that one type conditionally instead (a swap remounts).
+/// For an optional child use `.when(..)` / `.when_some(..)` on the container.
 pub fn either<L, R>(cond: bool, l: impl FnOnce() -> L, r: impl FnOnce() -> R) -> Either<L, R> {
     if cond {
         Either::Left(l())
@@ -170,6 +178,138 @@ impl<State: 'static, L: View<State>, R: View<State>> View<State> for Either<L, R
     }
 }
 
+/// Generates `EitherOfN`, `EitherOfNWidget` and their `Widget` / `View` impls
+/// with exactly the semantics of [`Either`].
+macro_rules! either_of {
+    ($(#[$meta:meta])* $arity:literal, $E:ident, $W:ident; $($V:ident),+ $(,)?) => {
+        $(#[$meta])*
+        #[doc = ""]
+        #[doc = concat!("A view that is one of ", $arity, " statically-typed arms. Arm swaps behave as for [`Either`]: the old arm is torn down, the new one built fresh, and `LAYOUT | PAINT` is reported. See the [module docs](self).")]
+        pub enum $E<$($V),+> {
+            $(
+                #[doc = concat!("Arm `", stringify!($V), "`.")]
+                $V($V),
+            )+
+        }
+
+        #[doc = concat!("Retained widget for [`", stringify!($E), "`]: the live arm's widget, delegated to for every pass.")]
+        pub enum $W<$($V),+> {
+            $(
+                #[doc = concat!("Arm `", stringify!($V), "`'s widget.")]
+                $V($V),
+            )+
+        }
+
+        impl<$($V: Widget),+> Widget for $W<$($V),+> {
+            fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                match self { $(Self::$V(w) => w.layout(ctx, bc),)+ }
+            }
+
+            fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+                match self { $(Self::$V(w) => w.paint(ctx, scene),)+ }
+            }
+
+            fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+                match self { $(Self::$V(w) => w.event(ctx, event),)+ }
+            }
+
+            fn semantics(&self, ctx: &mut SemanticsCtx) {
+                match self { $(Self::$V(w) => w.semantics(ctx),)+ }
+            }
+
+            fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+                match self { $(Self::$V(w) => w.visit_children(visitor),)+ }
+            }
+
+            /// Report the live arm's name: the enum is a storage detail, never
+            /// a tree element in its own right.
+            fn type_name(&self) -> &'static str {
+                match self { $(Self::$V(w) => w.type_name(),)+ }
+            }
+        }
+
+        impl<State: 'static, $($V: View<State>),+> View<State> for $E<$($V),+> {
+            type Element = $W<$($V::Element),+>;
+
+            fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
+                match self { $(Self::$V(v) => $W::$V(v.build(ctx)),)+ }
+            }
+
+            fn rebuild(
+                &self,
+                prev: &Self,
+                element: &mut Self::Element,
+                ctx: &mut BuildCtx<'_>,
+            ) -> ChangeFlags {
+                match (self, prev, &mut *element) {
+                    $((Self::$V(v), Self::$V(p), $W::$V(w)) => v.rebuild(p, w, ctx),)+
+                    _ => {
+                        // Arm swap: see `Either::rebuild`.
+                        prev.teardown(element, ctx);
+                        if ctx.has_focus() {
+                            mark_focus_orphaned();
+                        }
+                        *element = self.build(ctx);
+                        ChangeFlags::LAYOUT | ChangeFlags::PAINT
+                    }
+                }
+            }
+
+            fn teardown(&self, element: &mut Self::Element, ctx: &mut BuildCtx<'_>) {
+                match (self, element) {
+                    $((Self::$V(v), $W::$V(w)) => v.teardown(w, ctx),)+
+                    _ => {}
+                }
+            }
+
+            fn message(&self, element: &mut Self::Element, state: &mut State) {
+                match (self, element) {
+                    $((Self::$V(v), $W::$V(w)) => v.message(w, state),)+
+                    _ => {}
+                }
+            }
+        }
+    };
+}
+
+either_of! {
+    /// Pick one of three view types from a `match` while keeping every arm
+    /// statically typed (no [`AnyView`](frust_core::AnyView) erasure).
+    ///
+    /// ```
+    /// use frust_core::View;
+    /// use frust_widgets::{EitherOf3, button, checkbox, text};
+    ///
+    /// enum Phase {
+    ///     Idle,
+    ///     Busy,
+    ///     Done,
+    /// }
+    ///
+    /// struct Screen;
+    ///
+    /// impl Screen {
+    ///     fn body(phase: Phase) -> impl View<()> {
+    ///         match phase {
+    ///             Phase::Idle => EitherOf3::A(text("Idle")),
+    ///             Phase::Busy => EitherOf3::B(button::<(), _>("Cancel", |_| {})),
+    ///             Phase::Done => EitherOf3::C(checkbox::<(), _>(true, "Ok", |_, _| {})),
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// let _ = Screen::body(Phase::Idle);
+    /// let _ = Screen::body(Phase::Busy);
+    /// let _ = Screen::body(Phase::Done);
+    /// ```
+    "three", EitherOf3, EitherOf3Widget; A, B, C
+}
+either_of! { "four", EitherOf4, EitherOf4Widget; A, B, C, D }
+either_of! { "five", EitherOf5, EitherOf5Widget; A, B, C, D, E }
+either_of! { "six", EitherOf6, EitherOf6Widget; A, B, C, D, E, F }
+either_of! { "seven", EitherOf7, EitherOf7Widget; A, B, C, D, E, F, G }
+either_of! { "eight", EitherOf8, EitherOf8Widget; A, B, C, D, E, F, G, H }
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -257,8 +397,6 @@ mod tests {
         std::mem::take(&mut *log.borrow_mut())
     }
 
-    type TwoArms = Either<Arm, Arm>;
-
     #[test]
     fn helper_is_lazy_and_picks_the_arm() {
         let built = Rc::new(RefCell::new(Vec::new()));
@@ -279,182 +417,228 @@ mod tests {
         assert!(matches!(either(false, || 1u8, || 2u8), Either::Right(2)));
     }
 
-    #[test]
-    fn layout_and_paint_delegate_to_the_active_arm() {
-        let log = new_log();
-        let mut root: RenderRoot<(), TwoArms> = RenderRoot::new();
-        let mut state = ();
-        let mut logic = |_: &mut ()| {
-            either(
-                false,
-                || arm("a", 10.0, 10.0, &log),
-                || arm("b", 30.0, 20.0, &log),
-            )
+    /// The behaviour matrix, instantiated per enum so `Either` and `EitherOfN`
+    /// cannot drift. `$a` / `$b` are the first two variants.
+    macro_rules! swap_matrix {
+        ($m:ident, $E:ident, $W:ident, $a:ident, $b:ident, $arms:ty, $ui:ty) => {
+            mod $m {
+                use super::*;
+
+                type Arms = $arms;
+                type Ui = $ui;
+
+                fn pick(first: bool, log: &Log, sa: (f64, f64), sb: (f64, f64)) -> Arms {
+                    if first {
+                        $E::$a(arm("a", sa.0, sa.1, log))
+                    } else {
+                        $E::$b(arm("b", sb.0, sb.1, log))
+                    }
+                }
+
+                #[test]
+                fn layout_and_paint_delegate_to_the_live_variant() {
+                    let log = new_log();
+                    let mut root: RenderRoot<(), Arms> = RenderRoot::new();
+                    let mut state = ();
+                    let mut logic = |_: &mut ()| pick(false, &log, (10.0, 10.0), (30.0, 20.0));
+                    root.rebuild(&mut logic, &mut state);
+                    root.layout(Size::new(200.0, 200.0));
+                    root.paint(&mut DiscardScene, FrameTime::from_nanos(0));
+                    let nodes = root.inspect();
+                    assert!(
+                        nodes[0].type_name.contains(stringify!($W)),
+                        "root is the enum widget, got {}",
+                        nodes[0].type_name
+                    );
+                    assert_eq!(nodes[0].bounds.size(), Size::new(30.0, 20.0));
+                    let seen = drain(&log);
+                    assert!(seen.contains(&"build b".to_string()));
+                    assert!(seen.contains(&"paint b #1".to_string()));
+                    assert!(
+                        !seen.iter().any(|e| e.contains(" a")),
+                        "inactive variant untouched: {seen:?}"
+                    );
+                }
+
+                #[test]
+                fn same_variant_rebuild_keeps_state_swap_resets_it() {
+                    let log = new_log();
+                    let mut root: RenderRoot<(), Arms> = RenderRoot::new();
+                    let mut state = ();
+                    let first = std::cell::Cell::new(true);
+                    let mut logic =
+                        |_: &mut ()| pick(first.get(), &log, (10.0, 10.0), (10.0, 10.0));
+                    root.rebuild(&mut logic, &mut state);
+                    root.layout(Size::new(100.0, 100.0));
+                    root.paint(&mut DiscardScene, FrameTime::from_nanos(0));
+                    root.paint(&mut DiscardScene, FrameTime::from_nanos(1));
+                    assert_eq!(drain(&log), ["build a", "paint a #1", "paint a #2"]);
+
+                    root.rebuild(&mut logic, &mut state);
+                    root.layout(Size::new(100.0, 100.0));
+                    root.paint(&mut DiscardScene, FrameTime::from_nanos(2));
+                    assert_eq!(drain(&log), ["paint a #3"]);
+
+                    first.set(false);
+                    root.rebuild(&mut logic, &mut state);
+                    root.layout(Size::new(100.0, 100.0));
+                    root.paint(&mut DiscardScene, FrameTime::from_nanos(3));
+                    assert_eq!(
+                        drain(&log),
+                        ["teardown a", "build b", "drop a", "paint b #1"]
+                    );
+
+                    first.set(true);
+                    root.rebuild(&mut logic, &mut state);
+                    root.paint(&mut DiscardScene, FrameTime::from_nanos(4));
+                    assert_eq!(
+                        drain(&log),
+                        ["teardown b", "build a", "drop b", "paint a #1"]
+                    );
+                }
+
+                #[test]
+                fn swap_reports_full_rebuild_flags_and_same_variant_does_not() {
+                    let log = new_log();
+                    let mut counter = 0u64;
+                    let mut ctx = BuildCtx::new(&mut counter);
+                    let prev = pick(true, &log, (1.0, 1.0), (1.0, 1.0));
+                    let mut el = prev.build(&mut ctx);
+                    let same = pick(true, &log, (1.0, 1.0), (1.0, 1.0));
+                    assert_eq!(same.rebuild(&prev, &mut el, &mut ctx), ChangeFlags::NONE);
+                    let next = pick(false, &log, (1.0, 1.0), (1.0, 1.0));
+                    let flags = next.rebuild(&same, &mut el, &mut ctx);
+                    assert_eq!(flags, ChangeFlags::LAYOUT | ChangeFlags::PAINT);
+                    assert!(matches!(el, $W::$b(_)));
+                }
+
+                #[test]
+                fn swap_under_a_live_focus_chain_orphans_focus_only_then() {
+                    let log = new_log();
+                    let mut counter = 0u64;
+                    let mut ctx = BuildCtx::new(&mut counter);
+                    let a = pick(true, &log, (1.0, 1.0), (1.0, 1.0));
+                    let b = pick(false, &log, (1.0, 1.0), (1.0, 1.0));
+                    let _ = take_focus_orphaned();
+
+                    ctx.set_has_focus(false);
+                    let mut el = a.build(&mut ctx);
+                    b.rebuild(&a, &mut el, &mut ctx);
+                    assert!(!take_focus_orphaned(), "unfocused swap marks nothing");
+
+                    ctx.set_has_focus(true);
+                    let b2 = pick(false, &log, (1.0, 1.0), (1.0, 1.0));
+                    b2.rebuild(&b, &mut el, &mut ctx);
+                    assert!(!take_focus_orphaned(), "same-variant rebuild marks nothing");
+
+                    a.rebuild(&b2, &mut el, &mut ctx);
+                    assert!(take_focus_orphaned(), "focused swap orphans focus");
+                }
+
+                fn ui(show_button: bool) -> Ui {
+                    if show_button {
+                        $E::$a(button::<(), _>("Go", |_| {}))
+                    } else {
+                        $E::$b(checkbox::<(), _>(true, "Agree", |_, _| {}))
+                    }
+                }
+
+                fn roles(u: &SemanticsUpdate) -> Vec<Role> {
+                    u.nodes.iter().map(|(_, n)| n.role()).collect()
+                }
+
+                #[test]
+                fn semantics_reflect_the_live_variant_and_follow_a_swap() {
+                    let mut root: RenderRoot<(), Ui> = RenderRoot::new();
+                    let mut state = ();
+                    let show_button = std::cell::Cell::new(true);
+                    let mut logic = |_: &mut ()| ui(show_button.get());
+                    let mut tcx = TextContext::new();
+                    root.rebuild(&mut logic, &mut state);
+                    root.layout_with_text(
+                        Size::new(300.0, 300.0),
+                        &mut tcx as &mut dyn std::any::Any,
+                    );
+                    let before = root.semantics();
+                    let top = &before
+                        .nodes
+                        .iter()
+                        .find(|(id, _)| *id == before.root)
+                        .unwrap()
+                        .1;
+                    assert_eq!(
+                        top.children().len(),
+                        1,
+                        "exactly the live variant contributes"
+                    );
+                    show_button.set(false);
+                    root.rebuild(&mut logic, &mut state);
+                    root.layout_with_text(
+                        Size::new(300.0, 300.0),
+                        &mut tcx as &mut dyn std::any::Any,
+                    );
+                    let after = root.semantics();
+                    assert!(roles(&before).contains(&Role::Button));
+                    assert!(!roles(&before).contains(&Role::CheckBox));
+                    assert!(roles(&after).contains(&Role::CheckBox));
+                    assert!(!roles(&after).contains(&Role::Button));
+                }
+            }
         };
-        root.rebuild(&mut logic, &mut state);
-        root.layout(Size::new(200.0, 200.0));
-        root.paint(&mut DiscardScene, FrameTime::from_nanos(0));
-        let nodes = root.inspect();
-        assert!(
-            nodes[0].type_name.contains("EitherWidget"),
-            "root is the either widget, got {}",
-            nodes[0].type_name
-        );
-        assert_eq!(nodes[0].bounds.size(), Size::new(30.0, 20.0));
-        let seen = drain(&log);
-        assert!(seen.contains(&"build b".to_string()));
-        assert!(seen.contains(&"paint b #1".to_string()));
-        assert!(
-            !seen.iter().any(|e| e.contains(" a")),
-            "inactive arm untouched: {seen:?}"
-        );
     }
 
-    #[test]
-    fn same_arm_rebuild_keeps_state_swap_resets_it() {
-        let log = new_log();
-        let mut root: RenderRoot<(), TwoArms> = RenderRoot::new();
-        let mut state = ();
-        let left = std::cell::Cell::new(true);
-        let mut logic = |_: &mut ()| {
-            either(
-                left.get(),
-                || arm("a", 10.0, 10.0, &log),
-                || arm("b", 10.0, 10.0, &log),
-            )
-        };
-        root.rebuild(&mut logic, &mut state);
-        root.layout(Size::new(100.0, 100.0));
-        root.paint(&mut DiscardScene, FrameTime::from_nanos(0));
-        root.paint(&mut DiscardScene, FrameTime::from_nanos(1));
-        assert_eq!(drain(&log), ["build a", "paint a #1", "paint a #2"]);
-
-        // Same arm: reconciled in place, the paint counter survives.
-        root.rebuild(&mut logic, &mut state);
-        root.layout(Size::new(100.0, 100.0));
-        root.paint(&mut DiscardScene, FrameTime::from_nanos(2));
-        assert_eq!(drain(&log), ["paint a #3"]);
-
-        // Swap: old arm torn down and dropped, new arm built fresh.
-        left.set(false);
-        root.rebuild(&mut logic, &mut state);
-        root.layout(Size::new(100.0, 100.0));
-        root.paint(&mut DiscardScene, FrameTime::from_nanos(3));
-        assert_eq!(
-            drain(&log),
-            ["teardown a", "build b", "drop a", "paint b #1"]
-        );
-
-        // Swap back: b's state is gone, a starts at #1 again.
-        left.set(true);
-        root.rebuild(&mut logic, &mut state);
-        root.paint(&mut DiscardScene, FrameTime::from_nanos(4));
-        assert_eq!(
-            drain(&log),
-            ["teardown b", "build a", "drop b", "paint a #1"]
-        );
-    }
+    swap_matrix!(
+        either_matrix,
+        Either,
+        EitherWidget,
+        Left,
+        Right,
+        Either<Arm, Arm>,
+        Either<ButtonView<()>, CheckboxView<()>>
+    );
+    swap_matrix!(
+        either_of_3_matrix,
+        EitherOf3,
+        EitherOf3Widget,
+        A,
+        B,
+        EitherOf3<Arm, Arm, Arm>,
+        EitherOf3<ButtonView<()>, CheckboxView<()>, ButtonView<()>>
+    );
+    swap_matrix!(
+        either_of_8_matrix,
+        EitherOf8,
+        EitherOf8Widget,
+        A,
+        B,
+        EitherOf8<Arm, Arm, Arm, Arm, Arm, Arm, Arm, Arm>,
+        EitherOf8<
+            ButtonView<()>,
+            CheckboxView<()>,
+            ButtonView<()>,
+            ButtonView<()>,
+            ButtonView<()>,
+            ButtonView<()>,
+            ButtonView<()>,
+            ButtonView<()>,
+        >
+    );
 
     #[test]
-    fn swap_reports_full_rebuild_flags_and_same_arm_does_not() {
+    fn eight_variant_instance_swaps_a_to_h() {
+        type Eight = EitherOf8<Arm, Arm, Arm, Arm, Arm, Arm, Arm, Arm>;
         let log = new_log();
         let mut counter = 0u64;
         let mut ctx = BuildCtx::new(&mut counter);
-        let prev: TwoArms = Either::Left(arm("a", 1.0, 1.0, &log));
-        let mut el = prev.build(&mut ctx);
-        let same: TwoArms = Either::Left(arm("a", 1.0, 1.0, &log));
-        assert_eq!(same.rebuild(&prev, &mut el, &mut ctx), ChangeFlags::NONE);
-        let next: TwoArms = Either::Right(arm("b", 1.0, 1.0, &log));
-        let flags = next.rebuild(&same, &mut el, &mut ctx);
-        assert_eq!(flags, ChangeFlags::LAYOUT | ChangeFlags::PAINT);
-        assert!(matches!(el, EitherWidget::Right(_)));
-    }
-
-    #[test]
-    fn swap_under_a_live_focus_chain_orphans_focus_only_then() {
-        let log = new_log();
-        let mut counter = 0u64;
-        let mut ctx = BuildCtx::new(&mut counter);
-        let a: TwoArms = Either::Left(arm("a", 1.0, 1.0, &log));
-        let b: TwoArms = Either::Right(arm("b", 1.0, 1.0, &log));
-        let _ = take_focus_orphaned();
-
-        // No live chain: a swap raises nothing.
-        ctx.set_has_focus(false);
+        let a: Eight = EitherOf8::A(arm("a", 1.0, 1.0, &log));
+        let h: Eight = EitherOf8::H(arm("h", 5.0, 5.0, &log));
         let mut el = a.build(&mut ctx);
-        b.rebuild(&a, &mut el, &mut ctx);
-        assert!(!take_focus_orphaned(), "unfocused swap marks nothing");
-
-        // Live chain, same arm: nothing.
-        ctx.set_has_focus(true);
-        let b2: TwoArms = Either::Right(arm("b", 1.0, 1.0, &log));
-        b2.rebuild(&b, &mut el, &mut ctx);
-        assert!(!take_focus_orphaned(), "same-arm rebuild marks nothing");
-
-        // Live chain, swap: the session is released.
-        a.rebuild(&b2, &mut el, &mut ctx);
-        assert!(take_focus_orphaned(), "focused swap orphans focus");
-    }
-
-    type Ui = Either<ButtonView<()>, CheckboxView<()>>;
-
-    fn semantics_for(show_button: bool) -> SemanticsUpdate {
-        let mut root: RenderRoot<(), Ui> = RenderRoot::new();
-        let mut state = ();
-        let mut logic = |_: &mut ()| -> Ui {
-            either(
-                show_button,
-                || button::<(), _>("Go", |_| {}),
-                || checkbox::<(), _>(true, "Agree", |_, _| {}),
-            )
-        };
-        root.rebuild(&mut logic, &mut state);
-        let mut tcx = TextContext::new();
-        root.layout_with_text(Size::new(300.0, 300.0), &mut tcx as &mut dyn std::any::Any);
-        root.semantics()
-    }
-
-    #[test]
-    fn semantics_tree_reflects_the_active_arm() {
-        let role_of_child = |u: &SemanticsUpdate| {
-            let root = &u.nodes.iter().find(|(id, _)| *id == u.root).unwrap().1;
-            let kids = root.children();
-            assert_eq!(kids.len(), 1, "exactly the live arm contributes");
-            u.nodes
-                .iter()
-                .find(|(id, _)| *id == kids[0])
-                .unwrap()
-                .1
-                .role()
-        };
-        assert_eq!(role_of_child(&semantics_for(true)), Role::Button);
-        assert_eq!(role_of_child(&semantics_for(false)), Role::CheckBox);
-    }
-
-    #[test]
-    fn semantics_follow_a_live_swap() {
-        let mut root: RenderRoot<(), Ui> = RenderRoot::new();
-        let mut state = ();
-        let show_button = std::cell::Cell::new(true);
-        let mut logic = |_: &mut ()| -> Ui {
-            either(
-                show_button.get(),
-                || button::<(), _>("Go", |_| {}),
-                || checkbox::<(), _>(true, "Agree", |_, _| {}),
-            )
-        };
-        let mut tcx = TextContext::new();
-        root.rebuild(&mut logic, &mut state);
-        root.layout_with_text(Size::new(300.0, 300.0), &mut tcx as &mut dyn std::any::Any);
-        let before = root.semantics();
-        show_button.set(false);
-        root.rebuild(&mut logic, &mut state);
-        root.layout_with_text(Size::new(300.0, 300.0), &mut tcx as &mut dyn std::any::Any);
-        let after = root.semantics();
-        let roles = |u: &SemanticsUpdate| u.nodes.iter().map(|(_, n)| n.role()).collect::<Vec<_>>();
-        assert!(roles(&before).contains(&Role::Button));
-        assert!(!roles(&before).contains(&Role::CheckBox));
-        assert!(roles(&after).contains(&Role::CheckBox));
-        assert!(!roles(&after).contains(&Role::Button));
+        assert!(matches!(el, EitherOf8Widget::A(_)));
+        let flags = h.rebuild(&a, &mut el, &mut ctx);
+        assert_eq!(flags, ChangeFlags::LAYOUT | ChangeFlags::PAINT);
+        assert!(matches!(el, EitherOf8Widget::H(_)));
+        assert_eq!(drain(&log), ["build a", "teardown a", "build h", "drop a"]);
+        h.teardown(&mut el, &mut ctx);
+        assert_eq!(drain(&log), ["teardown h"]);
     }
 }

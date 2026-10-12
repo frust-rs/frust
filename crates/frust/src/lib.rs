@@ -118,7 +118,11 @@
 
 pub use frust_core::component::{Component, ComponentView, component};
 pub use frust_core::view::{AnyView, View, ViewSeq, any, views};
-pub use frust_widgets::{Either, EitherWidget, either};
+pub use frust_widgets::{
+    Either, EitherOf3, EitherOf3Widget, EitherOf4, EitherOf4Widget, EitherOf5, EitherOf5Widget,
+    EitherOf6, EitherOf6Widget, EitherOf7, EitherOf7Widget, EitherOf8, EitherOf8Widget,
+    EitherWidget, either,
+};
 // [`NavigatorController::push_with_options`] (an existing method on the
 // already-flat-re-exported [`NavigatorController`] below) needed its argument
 // type actually constructible from `frust::` — added here as part of the
@@ -713,7 +717,11 @@ pub mod authoring {
         PointerPhase, ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, ViewSeq, Widget,
         WidgetId, any, views,
     };
-    pub use frust_widgets::{Either, EitherWidget, either};
+    pub use frust_widgets::{
+        Either, EitherOf3, EitherOf3Widget, EitherOf4, EitherOf4Widget, EitherOf5, EitherOf5Widget,
+        EitherOf6, EitherOf6Widget, EitherOf7, EitherOf7Widget, EitherOf8, EitherOf8Widget,
+        EitherWidget, either,
+    };
 
     /// The clipboard/selection vocabulary an editable widget matches on —
     /// [`InputEvent::EditCommand`] carries one of these four verbs, already
