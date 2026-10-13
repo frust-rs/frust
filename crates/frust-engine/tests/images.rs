@@ -37,7 +37,7 @@
 use std::sync::Arc;
 
 use frust_engine::cache::images::{
-    ATLAS_PADDING, AtlasBudget, ImageResidency, ImageSkip, MAX_UNSEEN_FRAMES,
+    ATLAS_PADDING, AtlasBudget, ImageResidency, ImageSkip, MAX_UNSEEN_FRAMES, choose_tier,
 };
 #[cfg(feature = "perf-trace")]
 use frust_engine::cache::images::{TierLogOnce, atlas_tier_line};
@@ -1272,6 +1272,30 @@ fn the_mobile_budget_is_chosen_for_a_downlevel_adapter_and_never_the_vello_defau
     }
 }
 
+#[test]
+fn a_mobile_family_adapter_takes_a_mobile_tier_whatever_its_driver_answers() {
+    // Adreno 618/620 answer a full profile and no transient savings, which the
+    // capability read alone takes for a desktop part. The adapter table names
+    // the family, and device memory picks the plain or the large budget.
+    let mut adreno = TierCaps::fake(DownlevelProfile::Full);
+    adreno.adapter_name = "Adreno (TM) 618".to_string();
+
+    let small = AtlasBudget::for_choice(choose_tier(&adreno, Some(3 << 30)), &adreno);
+    assert_eq!(small, AtlasBudget::MOBILE);
+
+    let large = AtlasBudget::for_choice(choose_tier(&adreno, Some(6 << 30)), &adreno);
+    assert_eq!(large, AtlasBudget::MOBILE_LARGE_WIDE);
+    assert!(large.total_bytes() < AtlasBudget::DESKTOP.total_bytes());
+    assert!(large.max_atlases <= usize::try_from(MAX_ATLAS_INDEX + 1).expect("fits"));
+
+    let mut nvidia = TierCaps::fake(DownlevelProfile::Full);
+    nvidia.adapter_name = "NVIDIA T400".to_string();
+    assert_eq!(
+        AtlasBudget::for_choice(choose_tier(&nvidia, Some(6 << 30)), &nvidia),
+        AtlasBudget::DESKTOP
+    );
+}
+
 /// `perf-trace`-only, with the line itself — see
 /// `the_per_frame_residency_line_is_written_only_when_something_happened`.
 #[cfg(feature = "perf-trace")]
@@ -1279,28 +1303,34 @@ fn the_mobile_budget_is_chosen_for_a_downlevel_adapter_and_never_the_vello_defau
 fn the_resolved_atlas_tier_is_reported_once_in_a_line_a_capture_keeps() {
     // Which of the two tiers a device takes is otherwise an inference from
     // whether its images went missing. The line is `frust-perf`-prefixed
-    // because that is what a benchmark capture keeps, and it names both signals
-    // `is_mobile_tier` reads so a surprising tier can be explained from the log
-    // alone rather than re-derived from the adapter.
+    // because that is what a benchmark capture keeps, and it names the rule
+    // that decided plus every signal `choose_tier` reads, so a surprising tier
+    // can be explained from the log alone rather than re-derived from the
+    // adapter.
     let caps = TierCaps::fake(DownlevelProfile::WebGl2);
+    let choice = choose_tier(&caps, None);
     assert_eq!(
-        atlas_tier_line(&caps, AtlasBudget::for_caps(&caps)),
-        "frust-perf atlas tier=mobile budget=1024x1024x4 downlevel=WebGl2 \
-         transient_saves_memory=false adapter=fake-webgl2"
+        atlas_tier_line(&caps, choice, AtlasBudget::for_caps(&caps)),
+        "frust-perf atlas tier=mobile rule=downlevel budget=1024x1024x4 downlevel=WebGl2 \
+         transient_saves_memory=false memory_mib=unknown adapter=fake-webgl2"
     );
 
     let desktop = TierCaps::fake(DownlevelProfile::Full);
-    let line = atlas_tier_line(&desktop, AtlasBudget::for_caps(&desktop));
-    assert!(line.starts_with("frust-perf atlas tier=desktop budget=2048x2048x8"));
+    let line = atlas_tier_line(
+        &desktop,
+        choose_tier(&desktop, None),
+        AtlasBudget::for_caps(&desktop),
+    );
+    assert!(line.starts_with("frust-perf atlas tier=desktop rule=heuristic budget=2048x2048x8"));
 
     // Once, not once per surface: the question is about the device.
     let latch = TierLogOnce::new();
     assert!(
-        latch.emit(&caps, AtlasBudget::MOBILE),
+        latch.emit(&caps, choice, AtlasBudget::MOBILE),
         "the first call writes it"
     );
     assert!(
-        !latch.emit(&caps, AtlasBudget::MOBILE),
+        !latch.emit(&caps, choice, AtlasBudget::MOBILE),
         "no later one repeats it"
     );
 }
