@@ -225,11 +225,38 @@ var atlas_texture_array: texture_2d_array<f32>;
 var external_texture: texture_2d<f32>;
 
 // Declared only by the image programs of the sampler family, together with
-// the layout entry it binds against (`gpu::bindings`); every other program —
-// and every program of the default family — declares no sampler at all.
+// the layout entry it binds against (`gpu::bindings`) and the one function
+// that samples through it; every other program — and every program of the
+// default family — declares no sampler at all.
 //#if IMAGE_SAMPLER
 @group(1) @binding(2)
 var atlas_sampler: sampler;
+
+// Bilinear filtering through a hardware sampler: what `bilinear_sample`
+// computes, in one filtered fetch instead of four loads.
+//
+// `coords` is the texel-space sample position with texel i's centre at
+// i + 0.5 — `bilinear_sample`'s own `coords` plus half a texel. It is clamped
+// to the centres of the image's edge texels, which is exactly the clamp the
+// manual path applies to its taps: a tap never leaves the image's own atlas
+// rectangle, so a neighbouring slot's texels never reach the filter, for any
+// source rectangle and any extend mode, with no padding around the slot. Only
+// the precision of the weights differs — a sampler interpolates at the
+// hardware's sub-texel resolution rather than in full `f32`. Lives here
+// rather than in the helper prelude because no other module may sample: the
+// filter program's one bilinear sample is its own region-bounded helper.
+fn sampled_bilinear(
+    tex: texture_2d_array<f32>,
+    linear_sampler: sampler,
+    coords: vec2<f32>,
+    atlas_idx: i32,
+    image_offset: vec2<f32>,
+    image_size: vec2<f32>,
+) -> vec4<f32> {
+    let centre = clamp(coords, image_offset + vec2(0.5), image_offset + image_size - vec2(0.5));
+    let uv = centre / vec2<f32>(textureDimensions(tex));
+    return textureSampleLevel(tex, linear_sampler, uv, atlas_idx, 0.0);
+}
 //#endif
 
 @group(2) @binding(0)
