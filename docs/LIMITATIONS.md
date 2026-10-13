@@ -4570,7 +4570,7 @@ back press delivered mid-exit-ramp.
 
 ---
 
-### `scroll-view-no-external-offset-seam` — `message_scroller` (both ports) and beUI's `scroll_to` still re-implement scroll physics instead of composing over `ScrollController`
+### `scroll-view-no-external-offset-seam` — the programmatic-scroll seam exists; only the `message_scroller` ports and beUI's `scroll_to` remain to migrate onto `ScrollController`
 
 **Observed**: the baseline programmatic-scroll seam now exists (`ScrollController`: an
 offset-write path usable outside event dispatch, applied at the attached surface's next layout or
@@ -4606,6 +4606,74 @@ apply to a surface).
 whose rows ahead were never measured can end with a small correction snap once the real extents are
 known — the settle-and-correct pass nudges to the re-resolved position rather than retargeting the
 animation mid-flight (see WIDGETS_ARCHITECTURE.md's *Virtualized ListView*).
+
+---
+
+### `list-view-anchor-same-frame-both-sides` — a same-frame mutation on both sides of a keyed `ListView`'s anchor can leave the scroll position uncorrected for one frame
+
+**Observed**: a keyed `ListView` re-anchors its scroll offset with an anchor-shift probe that tests
+only two candidate index shifts. A frame that mutates rows on both sides of the anchor (e.g. a
+prepend above and an append below) can miss that probe, leaving the scroll position uncorrected for
+that frame, a visible jump. Any pending measured-anchor correction is discarded rather than
+committed into geometry it can no longer explain.
+
+**Applies to**: keyed `ListView` (`ListView::builder_keyed`) rows when one frame mutates both sides
+of the anchor row.
+
+**Why accepted**: the cost is one frame's scroll position, never a misattached measurement or a
+leaked row entry. Correcting every two-sided mutation would re-key all `item_count` items, the O(N)
+work the keyed design exists to avoid.
+
+**Trigger for removal**: a two-sided correction that does not re-key every item (see the
+`list_view.rs` module doc, *Cache hygiene*), or a device report of the jump in a real app.
+
+**Evidence**: `crates/frust-widgets/src/list_view.rs:157-164` (module doc, "Two acknowledged gaps");
+`docs/WIDGETS_ARCHITECTURE.md` *Virtualized ListView* (keyed-list re-anchoring paragraph).
+
+---
+
+### `scroll-controller-desktop-frame-gate-gap` — a `ScrollController` write from a handler that requests no redraw waits for the next desktop frame
+
+**Observed**: a desktop shell does not consult the pending-result-flush flag the mobile frame gate
+uses. A `jump_to`/`animate_to` issued from a handler that itself requests no redraw is recorded, but
+it is applied only at the attached surface's next layout or paint, which waits for whichever desktop
+frame some other input produces. The scroll visibly lags until then.
+
+**Applies to**: desktop shells (macOS, Windows, Linux) driving a `ScrollView`/`ListView` (or
+`frust-shadcn`'s `scroll_area`) from a non-redrawing handler such as a timer or a background signal.
+
+**Why accepted**: the same mechanism gap `PanZoomController` already has. The queued write is never
+lost, only applied on a later frame.
+
+**Trigger for removal**: desktop shells consult the pending-result-flush flag (the mobile form is in
+SHELLS_ARCHITECTURE.md, *Mobile frame path*), or a controller write requests its own redraw.
+
+**Evidence**: `docs/WIDGETS_ARCHITECTURE.md` *Programmatic scroll* (desktop frame-gate paragraph);
+act_000001a10d6c24eeK3GHlKbH.
+
+---
+
+### `render-model-gaps` — render-model gaps, each retired by a named phase of the render-model plan
+
+**Observed**: the render model has these gaps, each listed with the phase of plan
+`fplan_000001a1347808dayUwoSOyz` that retires it:
+
+- no per-subtree layout skipping — Phase 1;
+- box-only layout protocol, no slivers — Phase 2;
+- no retained layers, no repaint boundaries, no blend/clip-path/backdrop primitives, no partial
+  repaint — Phase 3;
+- no per-slot platform-view interleaving, no in-scene video/camera textures — Phase 4.
+
+**Applies to**: apps whose layout or paint cost scales with the whole tree, or that need layered
+blending, sliver lists, or a platform view or video texture interleaved between scene slots.
+
+**Why accepted**: each gap is sequenced in the render-model plan and is retired piecewise as its
+phase lands.
+
+**Trigger for removal**: each line is deleted when its phase lands; the entry is deleted when its
+last line is retired.
+
+**Evidence**: research `rsa_000001a13475eca03WGtt6CU`; plan `fplan_000001a1347808dayUwoSOyz`.
 
 ---
 
