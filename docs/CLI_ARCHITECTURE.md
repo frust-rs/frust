@@ -304,9 +304,10 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes); a plugin's
   native module location is written through `platform_wiring` (`frust.plugin.<module>.dir`,
   `ios/<Package>`). The
-  registry holds eighteen top-level entries, including the four design-system plugins (`glyph`/
+  registry holds nineteen top-level entries, including the four design-system plugins (`glyph`/
   `material`/`cupertino`/`shadcn` — `beui` is still absent by design) — the TUI's Add Plugin dialog
-  lists all eighteen. The newest, `oauth-native`, is a pure-Rust, `CargoDep`-only OAuth 2.0
+  lists all nineteen. The newest, `network-image`, is a `CargoDep`-only entry with an optional
+  `webp` feature; `oauth-native` is likewise a pure-Rust, `CargoDep`-only OAuth 2.0
   native-app helper sitting beside `auth-session` (PKCE S256, `state`, authorization URL, and
   callback/token-response parsing; no HTTP client, no `frust-*` dependency). Each design-system entry's
   base contribution is a single `CargoDep` (installing it is still a manual `<crate>::install()`

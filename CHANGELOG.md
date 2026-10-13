@@ -8,6 +8,16 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `frust-network-image` (`plugins/network-image`): a `network_image(url)` view with placeholder,
+  error and fade-in slots, an `ImageFetcher` seam (default `ReqwestFetcher`: rustls on the ring
+  provider with bundled `webpki-roots`), a byte-budgeted memory cache, an LRU disk cache under the
+  app cache directory, single-flight fetches, and an opt-in `webp` feature. Install with
+  `NetworkImages::install()` in the `app!` setup block. Its Android compile gate needs
+  `cargo ndk` (ring compiles C).
+- `frust add plugin network-image` and the TUI's Add Plugin list offer the new plugin (the registry
+  now has nineteen entries).
+- The playground's Images section: six `network_image` views, a local-fixtures loopback toggle, a
+  cache stats row and a Clear caches button.
 - `IndexedStack` / `indexed_stack` in `frust-widgets`, re-exported by the facade: it keeps every
   child mounted, and only the selected child is painted, routed input and reachable for back, so
   per-tab navigator stacks route Android back to the selected tab.

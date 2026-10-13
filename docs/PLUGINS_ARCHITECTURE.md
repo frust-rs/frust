@@ -5,7 +5,7 @@
 PLUGINS is the leaf plugin tier sitting beside the `frust` facade. `frust-plugin` is the shared
 substrate, in two halves with opposite directions: the Android platform-handle slot
 (JavaVM/Context) a shell writes and a JNI-reaching plugin reads, and the desktop view-factory
-registry a plugin writes and a desktop shell reads. On top of it sit nine independent
+registry a plugin writes and a desktop shell reads. On top of it sit the independent
 OS-capability plugins — `shared-preferences`, `secure-storage`, `camera`, `clipboard`, `haptics`,
 `iap`, `video-player`, `url-launcher`, and `auth-session` — each exposing one platform-independent
 public API behind a per-platform backend. `url-launcher` opens an absolute `http`/`https` URL in the
@@ -22,7 +22,12 @@ rather than painting a frame itself.
 
 `clean-signals-frust` is a facade-tier plugin gluing the external `clean_signals`
 clean-architecture core into Frust's `Component`/reactive model; it is a standalone workspace
-excluded from the root Cargo graph pending a crates.io publication of its dependency. Three further
+excluded from the root Cargo graph pending a crates.io publication of its dependency.
+`plugins/network-image` (`frust-network-image`) is a facade-tier network image view: it fetches a
+URL over HTTPS (reqwest on rustls/ring with the bundled `webpki-roots` trust store, so no
+platform verifier on any target), decodes and fits it off-thread, and caches decoded images in
+memory and fetched bytes on disk; the fetch step sits behind an `ImageFetcher` trait so a host
+can swap the transport. Three further
 crates reach no real OS capability at all: `plugins/database` (`frust-database`), the tier's first
 such, a synchronous embedded SQL API over a swappable SQLite/Turso engine seam; `plugins/i18n`
 (`frust-i18n` plus its `frust-i18n-macros` companion — the tier's first proc-macro crate), a
@@ -68,6 +73,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/cupertino` | The Cupertino (iOS-styled) design-system plugin (`frust-cupertino`), including its own "Liquid Glass" `GlassScale` recipe |
 | `plugins/shadcn` | The shadcn/ui design-system plugin (`frust-shadcn`), the tier's first external-origin catalog: a port of shadcn/ui v4 (55 components, incl. an app-shell `sidebar`, a `message`/`message_scroller` chat pair, and a `questionnaire` step-sequence form), its own token system (vendored `neutral` base plus six sibling palettes folded onto the baseline `ColorScheme`, a `ShadcnTokens` extension for the roles it has no baseline analogue for), an `overlay` hosting seam for its anchored and modal panel families — every modal component animates its exit, and every anchored panel takes a prop-driven `.open(bool)` for the same (see *Design-System Plugins* below) — and its own bundled Inter + JetBrains Mono variable fonts |
 | `plugins/beui` | The beUI design-system plugin (`frust-beui`), the tier's second external-origin catalog: a port of beUI v2 (81 upstream registry slugs — 42 `components`, 17 `agents`, 22 `blocks`, module-family-prefixed rather than flat re-exported), its own `BeuiTokens` extension over an oklch-transcribed palette, three glass recipes, and catalog motion tokens (`SPRING_*`/`EASE_*`), an `overlay` hosting seam mirroring shadcn's (see *Design-System Plugins* below), a dedicated per-character text-cell substrate (`motion::chars`) and stagger/pointer/scroll-effect drivers making motion the catalog's distinguishing layer, its own bundled Geist + Geist Mono variable fonts (`plugins/beui/fonts`, OFL), and (behind the non-default `gpu-effects` feature) the `gpu_fx` perspective-quad substrate five components opt into (see *Design-System Plugins* below) |
+| `plugins/network-image` | Facade-tier network image view (`network_image(url)` / `NetworkImageView`): an `ImageLoader` runs memory cache, then disk cache, then a single-flight fetch through the `ImageFetcher` seam (default `ReqwestFetcher`, cap-bounded streaming), then an off-thread decode-and-fit; the view renders placeholder, fade-in image or error slot from a `LoadState`. `NetworkImages::install()` publishes the process-wide loader. Optional `webp` feature |
 
 ## Desktop Backend Status
 
@@ -92,6 +98,7 @@ preview or a `frust build macos|windows|linux`. See
 | `database` | platform-free | file IO via `rusqlite`/`turso`; no OS integration, so no platform split |
 | `i18n` | platform-free | reaches the OS only for a `sys_locale` read; no backend split |
 | `glyph` / `material` / `cupertino` / `shadcn` / `beui` | platform-free | pure widget/token crates over `frust::authoring`; no OS integration of any kind, desktop included |
+| `network-image` | platform-free | reqwest over rustls/ring with `webpki-roots` on every desktop OS; the disk cache lives under `frust_paths::cache_dir()` |
 | `native-widgets` (NATIVE_WIDGETS unit) | macOS-native only | an AppKit control arm (the eight shared controls plus `Segmented`/`Stepper`, hosted through `frust-shell-macos`'s Mode-A native-view host) and native alerts (`NSAlert` window sheets, presented independently of that host), desktop preview and bundle alike; the iOS-only `native_tab_bar` renders its refusal banner and `show_native_sheet` answers `PresentError::Unsupported` on macOS; Linux and Windows have no native-view host of their own, so native-widgets is unsupported there (see [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md)) |
 
 ## Layer Dependencies
@@ -134,6 +141,14 @@ feature layers ICU4X's `icu_decimal`/`icu_datetime`/`icu_plurals`/`icu_experimen
 on iOS and macOS alike, narrowed per OS by `objc2-ui-kit` plus `objc2-avf-audio` on iOS (the
 hosting `UIView` and the playback audio-session category) and `objc2-app-kit` on macOS (the hosting
 `NSView`). Its app-facing half rides the same default-on `frust-api` feature `i18n` uses.
+
+`network-image` is a facade-tier plugin like `clean-signals-frust`, with one sanctioned extra edge:
+it depends on `frust` (default features off) and on the `frust-paths` leaf for its cache
+directory, never `frust-plugin`. Its transport is the only optional part: the default `reqwest`
+feature gates `reqwest`/`rustls`/`webpki-roots`, and with it off the crate keeps the
+`ImageFetcher` seam, loader, caches and view for a host-supplied fetcher. The rustls config is
+built explicitly (ring provider, `webpki-roots`) and handed to reqwest, because reqwest's
+`rustls-no-provider` mode would otherwise pull `rustls-platform-verifier` into the TLS path.
 
 This is an architectural charter, not just current practice: a plugin depends on `frust-plugin`
 (plus `frust-paths` where needed) and FFI crates only if it reaches the OS through one, never

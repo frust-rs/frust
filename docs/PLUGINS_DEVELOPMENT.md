@@ -179,6 +179,20 @@ A device gate for `frust-i18n` (`plugins/i18n`), against an app depending on the
 
 Keep this checklist in sync with `plugins/i18n/README.md` §9.
 
+## Network-image manual test (desktop + Android + iOS)
+
+A device gate for `frust-network-image` (`plugins/network-image`), against the playground's
+**Images** page (six `network_image` views over `picsum.photos`, a stats row, *Clear caches*):
+
+- **Cold load:** each tile shows its placeholder, then fades to the image; the stats row's memory
+  and disk byte counts grow.
+- **Airplane mode, caches cleared:** tiles settle on their error slot (a `retry_on_tap` tile
+  retries on tap once the network returns).
+- **Cold relaunch offline:** after one online pass, force-quit, go offline, relaunch — tiles load
+  from the disk cache (disk hits, no error slots).
+- **Local fixtures:** the *Use local fixtures* toggle serves the same tiles from an in-process
+  loopback server (no internet needed), exercising the same fetch, cache and decode path.
+
 ## Material asset regeneration
 
 `frust-material`'s generated/bundled assets are checked in, not built by `build.rs`; regenerate by
@@ -225,6 +239,10 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 | `sha2 0.10` minor | `frust-oauth-native`'s PKCE S256 challenge (SHA-256 of the verifier) | already locked at 0.10.9 through other crates; pure-Rust; no platform arm; `frust-oauth-native`'s tests are the tripwire |
 | `subtle 2` stable | `frust-oauth-native`'s constant-time `state` comparison on the callback path | already locked at 2.6.1 through other crates; pure-Rust; no platform arm; `frust-oauth-native`'s tests are the tripwire |
 | `percent-encoding 2` stable | `frust-oauth-native`'s RFC 3986 component and form-urlencoded encoders | already locked at 2.3.2 through other crates; pure-Rust; no platform arm; `frust-oauth-native`'s tests are the tripwire |
+| `reqwest 0.13.5` (`default-features = false`; `rustls-no-provider`, `http2`, `stream`) minor | `frust-network-image`'s default `reqwest` feature. `rustls-no-provider` hard-wires `rustls-platform-verifier`, so the crate passes its own `rustls` `ClientConfig` (ring provider + `webpki-roots`) via `use_preconfigured_tls` to keep the platform verifier out of the TLS path; a bump re-checks that | `cargo test -p frust-network-image` (the acceptance suite runs through the real fetcher) + `cargo check --target aarch64-apple-ios-sim -p frust-network-image` + `cargo ndk -t arm64-v8a -P 26 check -p frust-network-image` (ring compiles C, so the plain Android `cargo check` needs `--no-default-features`) |
+| `rustls 0.23` (`ring`, `std`, `tls12`) / `webpki-roots 1.0.9` minor | The explicit TLS config above; same lockstep with reqwest's rustls line | same as the `reqwest` row |
+| `futures-util 0.3` (direct, std-only, no workspace row) / `sha2 0.10` | `frust-network-image`'s single-flight fetch and disk-cache filenames (`sha256(url)`); `sha2` shares the `frust-oauth-native` row below | `cargo test -p frust-network-image` |
+| `image` `webp` feature (opt-in `webp` feature; the `image` pin itself is RENDER-owned) | `frust-network-image`'s WebP decode; off by default, so a WebP URL fails with `UnsupportedFormat` | `cargo test -p frust-network-image --features webp --test decode_webp` |
 
 ## See Also
 
