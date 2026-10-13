@@ -118,7 +118,8 @@
 //! stolen out from under it. Clearing the veto does not retroactively replay
 //! the slop check that a live pinch suppressed — the very next claimant
 //! `Move` is measured against the gesture's original `down_start` as usual,
-//! so a drag that already travelled well past [`TOUCH_SLOP`](frust_core::TOUCH_SLOP) while the second
+//! so a drag that already travelled well past
+//! [`TOUCH_SLOP`](frust_core::TOUCH_SLOP) while the second
 //! finger was down takes over immediately once the veto lifts.
 //!
 //! # Fling driver (v1)
@@ -266,7 +267,8 @@ pub(crate) const SETTLE_STOP_PX: f64 = 0.5;
 /// therefore reported rather than guessed. Nothing in the shipped feel reads
 /// it — every constant above is dpr-independent, and it feeds only
 /// [`crate::physics::Tolerance::for_device_pixel_ratio`] for a physics that
-/// builds a [`Simulation`](crate::physics::Simulation). Shared with [`crate::list_view::ListViewWidget`]
+/// builds a [`Simulation`](crate::physics::Simulation). Shared with
+/// [`crate::list_view::ListViewWidget`]
 /// so the two surfaces cannot report different densities.
 pub(crate) const METRICS_FALLBACK_DPR: f64 = 1.0;
 
@@ -387,7 +389,8 @@ impl InnerScrollState {
     /// owns the gesture; one pinned against it does not, and the outer takes
     /// over as it always has.
     ///
-    /// Only ever asked past [`TOUCH_SLOP`](frust_core::TOUCH_SLOP), so `dy` is never zero; a zero would
+    /// Only ever asked past [`TOUCH_SLOP`](frust_core::TOUCH_SLOP), so `dy` is
+    /// never zero; a zero would
     /// read as an up-drag rather than warranting a third branch.
     pub(crate) fn defers(self, dy: f64) -> bool {
         if !self.registered {
@@ -818,7 +821,8 @@ impl ScrollWidget {
     }
 
     /// Whether post-release motion is in flight — the legacy fling, or a
-    /// physics-supplied [`Simulation`](crate::physics::Simulation) the generic driver is running (never
+    /// physics-supplied [`Simulation`](crate::physics::Simulation) the generic
+    /// driver is running (never
     /// both, and never either one under [`RubberBand`](crate::RubberBand)'s
     /// legacy-only path).
     pub fn is_flinging(&self) -> bool {

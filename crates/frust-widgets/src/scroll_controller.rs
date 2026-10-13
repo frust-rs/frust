@@ -499,7 +499,7 @@ impl ScrollController {
     /// Resets `animating` to `false` for the new binding — a stale tween
     /// reported by whichever surface held the handle before never leaks
     /// into the new attach; a widget whose tween genuinely survives the
-    /// rebind (see `ScrollWidget`/`ListViewWidget::attach_controller`)
+    /// rebind (see `ScrollSurfaceCore::attach_controller` in `scroll_core.rs`)
     /// republishes its live state on the freshly bound handle right after.
     pub(crate) fn bind(&self) -> ScrollBinding {
         let mut shared = self.shared.borrow_mut();
