@@ -157,19 +157,20 @@ pub use frust_widgets::{
     DragTargetId, DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, EdgeInsets,
     FlexChild, FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, HIGHLIGHT_FALLBACK,
     HeroView, Icon, IconButton, IconButtonView, IconData, IconSource, IconView, IconWidget, Image,
-    ImageError, ImageFit, ImageSource, ImageView, IndexedStack, IndexedStackView, ListView,
-    ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController,
-    NavigatorId, NavigatorView, NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView,
-    OverlaySide, OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition,
-    PageVisibility, PopResult, PushOptions, Radio, RadioView, RadioWidget, ReorderableListView,
-    ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollAxis, ScrollController,
-    ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox,
-    SizedBoxView, Slider, SliderView, SliverBoxView, SliverFillRemainingView,
-    SliverFixedExtentListView, SliverListView, SliverPaddingView, SourceFeedback,
-    SpringDescription, Stack, StackView, TextInput, TextInputView, TextView, Timing, Tolerance,
-    TransitionSpec, TransitionState, VisibilityCallback, auto_scroll_zone, button, checkbox,
-    colored_box, column, container, custom_scroll_view, divider, drag_target, draggable, flexible,
-    hero, icon, icon_button, indexed_stack, inflexible, keyed, list_view, overlay_portal, radio,
+    ImageError, ImageFit, ImageSource, ImageView, IndexedStack, IndexedStackView, KeepAliveHandle,
+    KeepAliveView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
+    MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
+    OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
+    PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
+    RadioView, RadioWidget, ReorderableListView, ResultCallback, Row, RubberBand, SafeAreaView,
+    ScaffoldView, ScrollAxis, ScrollController, ScrollInfo, ScrollMetrics, ScrollPhysics,
+    ScrollSubscription, ScrollView, Simulation, SizedBox, SizedBoxView, Slider, SliderView,
+    SliverBoxView, SliverFillRemainingView, SliverFixedExtentListView, SliverListView,
+    SliverPaddingView, SourceFeedback, SpringDescription, Stack, StackView, TextInput,
+    TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
+    VisibilityCallback, auto_scroll_zone, button, checkbox, colored_box, column, container,
+    custom_scroll_view, divider, drag_target, draggable, flexible, hero, icon, icon_button,
+    indexed_stack, inflexible, keep_alive, keyed, list_view, overlay_portal, radio,
     reorderable_list, row, safe_area, scaffold, scroll_view, slider, sliver_box,
     sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_list,
     sliver_padding, stack, text, text_input,
@@ -3188,12 +3189,13 @@ mod structural_slivers_reexport {
     }
 }
 
-/// Facade-level check that the lazy [`sliver_list`] resolves through the
-/// `frust` facade.
+/// Facade-level check that the lazy [`sliver_list`] (with [`keep_alive`]
+/// rows) resolves through the `frust` facade.
 #[cfg(test)]
 mod lazy_slivers_reexport {
     use crate::{
-        ChildKey, CustomScrollView, SliverListView, custom_scroll_view, sliver_list, text,
+        ChildKey, CustomScrollView, KeepAliveHandle, KeepAliveView, SliverListView,
+        custom_scroll_view, keep_alive, sliver_list, text,
     };
 
     #[test]
@@ -3201,13 +3203,20 @@ mod lazy_slivers_reexport {
         let rows: SliverListView<()> = sliver_list(
             5_000,
             |i| ChildKey::new(i as u64),
-            |i| text(format!("row {i}")),
+            |i| {
+                let row: KeepAliveView<()> = keep_alive(text(format!("row {i}"))).enabled(i < 3);
+                row
+            },
         )
         .estimated_item_extent(64.0)
         .on_near_start(|_: &mut ()| {}, 400.0)
         .on_near_end(|_: &mut ()| {}, 400.0);
         let view: CustomScrollView<()> = custom_scroll_view(rows);
         let _ = view;
+        assert!(
+            KeepAliveHandle::acquire().is_none(),
+            "no lazy-list row is being built here"
+        );
     }
 }
 

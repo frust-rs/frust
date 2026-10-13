@@ -28,6 +28,17 @@
 //! reconciliation (placing the pods, the measured-extent cache hygiene) stays
 //! with the list.
 //!
+//! # Keep-alive retention
+//!
+//! [`reconcile_keyed_retaining`] is [`reconcile_keyed`] plus a side map of
+//! rows kept alive outside the window ([`Retention`]): a departing pod that
+//! asked to be kept (and whose key still names a row of the data) is parked
+//! there with the view it was last built or rebuilt from instead of being torn
+//! down, and a slot whose key is parked re-adopts that pod, rebuilt from the
+//! parked view to this frame's. The parked view, not `prev(index)`, is the
+//! diff base on re-adoption: the row may have changed in the data while it was
+//! parked, and a rebuild diffing two later views would miss that change.
+//!
 //! # Measured extents
 //!
 //! A variable-extent list caches each laid-out row's extent under the row's
@@ -47,6 +58,7 @@
 //! amount (a prepend above plus an append below it) without keying all
 //! `item_count` items.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -167,6 +179,66 @@ pub(crate) fn reconcile_keyed<State: 'static>(
     duplicate_key_msg: &str,
     ctx: &mut BuildCtx<'_>,
 ) -> KeyedOutcome {
+    reconcile_keyed_retaining(
+        views,
+        rows,
+        key_index,
+        key_of,
+        range,
+        duplicate_key_msg,
+        None,
+        ctx,
+    )
+}
+
+/// A row kept alive outside a keyed list's window: its pod, parked (never laid
+/// out, painted or routed to), the view it was last built or rebuilt from, and
+/// the item index its key last resolved to.
+pub(crate) struct KeptRow {
+    pub(crate) pod: ChildPod,
+    /// The row's last view, an `AnyView<State>` erased to [`Any`] because the
+    /// widget parking it is not generic over the state.
+    pub(crate) view: Box<dyn Any>,
+    pub(crate) index: usize,
+}
+
+impl KeptRow {
+    /// Tear the parked row down through the view it was last rebuilt from.
+    pub(crate) fn teardown<State: 'static>(mut self, ctx: &mut BuildCtx<'_>) {
+        if let Some(view) = self.view.downcast_ref::<AnyView<State>>() {
+            crate::authoring::teardown_child(view, &mut self.pod, ctx);
+        }
+    }
+}
+
+/// The keep-alive half of [`reconcile_keyed_retaining`] (the module docs'
+/// *Keep-alive retention*).
+pub(crate) struct Retention<'a> {
+    /// The parked rows, by key.
+    pub(crate) kept: &'a mut HashMap<ChildKey, KeptRow>,
+    /// Whether a pod leaving the window asked to be kept alive.
+    pub(crate) wants: &'a dyn Fn(&ChildPod) -> bool,
+    /// Where a departing key sits in this frame's data, given the item index
+    /// it rendered last frame — `None` once it left the data.
+    pub(crate) locate: &'a dyn Fn(ChildKey, usize) -> Option<usize>,
+}
+
+/// [`reconcile_keyed`] with an optional keep-alive side map (the module docs'
+/// *Keep-alive retention*): a slot whose key is parked in `retention` re-adopts
+/// the parked pod, and a departing pod that asks to be kept — and whose key
+/// [`Retention::locate`] still finds in the data — is parked instead of torn
+/// down. [`KeyedOutcome::departed`] lists only the rows actually torn down.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reconcile_keyed_retaining<State: 'static>(
+    views: ItemViews<'_, State>,
+    rows: LiveRows<'_>,
+    key_index: &mut HashMap<ChildKey, usize>,
+    key_of: &dyn Fn(usize) -> ChildKey,
+    range: Range<usize>,
+    duplicate_key_msg: &str,
+    mut retention: Option<Retention<'_>>,
+    ctx: &mut BuildCtx<'_>,
+) -> KeyedOutcome {
     let (start, end) = (range.start, range.end);
     let capacity = end.saturating_sub(start);
     // One pass over the new window: each slot's key (so `key_of` runs exactly
@@ -228,8 +300,27 @@ pub(crate) fn reconcile_keyed<State: 'static>(
                 new_children.push(pod);
             }
             None => {
-                // A key with no live row: entering the window, or new data.
-                new_children.push(crate::authoring::build_child(&(views.next)(index), ctx));
+                // A key with no live row: entering the window (re-adopting a
+                // parked pod when it was kept alive), or new data.
+                let parked = retention
+                    .as_mut()
+                    .and_then(|retention| retention.kept.remove(&key));
+                let pod = match parked {
+                    Some(KeptRow { mut pod, view, .. }) => {
+                        let next_view = (views.next)(index);
+                        match view.downcast_ref::<AnyView<State>>() {
+                            Some(prev_view) => {
+                                flags |= crate::authoring::rebuild_child(
+                                    prev_view, &next_view, &mut pod, ctx,
+                                );
+                                pod
+                            }
+                            None => crate::authoring::build_child(&next_view, ctx),
+                        }
+                    }
+                    None => crate::authoring::build_child(&(views.next)(index), ctx),
+                };
+                new_children.push(pod);
                 structural = true;
             }
         }
@@ -237,14 +328,40 @@ pub(crate) fn reconcile_keyed<State: 'static>(
     }
 
     // The previous window's keys whose rows no slot claimed: they left the
-    // window or the data (the caller tells the two apart if it needs to).
-    let departed: Vec<(ChildKey, usize)> = prev_index_of
-        .iter()
-        .filter(|(_, prev_index)| old.contains_key(prev_index))
-        .map(|(key, prev_index)| (*key, *prev_index))
-        .collect();
+    // window or the data. A row asking to be kept alive whose key the data
+    // still holds is parked; every other one is torn down.
+    let mut departed: Vec<(ChildKey, usize)> = Vec::new();
+    for (key, prev_index) in prev_index_of {
+        let Some(mut pod) = old.remove(&prev_index) else {
+            continue;
+        };
+        structural = true;
+        if let Some(retention) = retention.as_mut()
+            && (retention.wants)(&pod)
+            && let Some(index) = (retention.locate)(key, prev_index)
+        {
+            // A parked pod is routed nothing, so a gesture it captured could
+            // never end: unwind it now, as a teardown would.
+            if pod.is_active() {
+                crate::authoring::cancel_pod(&mut pod);
+                pod.set_active(false);
+            }
+            retention.kept.insert(
+                key,
+                KeptRow {
+                    pod,
+                    view: Box::new((views.prev)(prev_index)),
+                    index,
+                },
+            );
+            continue;
+        }
+        crate::authoring::teardown_child(&(views.prev)(prev_index), &mut pod, ctx);
+        departed.push((key, prev_index));
+    }
 
-    // Every pod no slot claimed is a key that left the window or the data.
+    // A pod no key maps to any more (the later slot of a duplicate key in
+    // release) has no identity to keep: torn down.
     for (index, mut pod) in old.drain() {
         crate::authoring::teardown_child(&(views.prev)(index), &mut pod, ctx);
         structural = true;

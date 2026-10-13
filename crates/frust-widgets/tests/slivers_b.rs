@@ -1,7 +1,7 @@
 //! The lazy slivers inside a `CustomScrollView`: the keyed, variable-extent
 //! `sliver_list` (measurement, keyed anchoring through the viewport's
-//! correction loop, the channel-feed shape), plus the layout-skip audit over
-//! it.
+//! correction loop, the channel-feed shape) and its `keep_alive` rows, plus
+//! the layout-skip audit over them.
 //!
 //! The frame harness and the scroll script mirror `viewport.rs`'s.
 
@@ -19,7 +19,7 @@ use frust_core::{
 use frust_text::TextContext;
 use frust_widgets::{
     AnimateTo, ChildKey, ScrollController, SizedBox, SliverListWidget, ViewportWidget,
-    custom_scroll_view, sliver_box, sliver_list,
+    custom_scroll_view, keep_alive, sliver_box, sliver_list,
 };
 use kurbo::{Point, Rect, Size};
 
@@ -49,6 +49,10 @@ struct Ledger {
 }
 
 impl Ledger {
+    fn live(&self) -> Vec<u64> {
+        self.live.borrow().iter().copied().collect()
+    }
+
     /// Where row `id` last painted its top, in window space.
     fn top_of(&self, id: u64) -> f64 {
         *self.painted.borrow().get(&id).expect("the row painted")
@@ -356,6 +360,17 @@ impl Harness {
             &mut out,
         );
         out.expect("a sliver_list")
+    }
+
+    /// The pods of the first widget whose type name contains `name`, in
+    /// window order.
+    fn rows_of(&self, name: &str) -> Vec<WidgetId> {
+        self.root
+            .inspect()
+            .into_iter()
+            .find(|n| n.type_name.contains(name))
+            .expect("the sliver")
+            .children
     }
 
     /// The window bounds of every laid-out widget whose type name contains
@@ -759,6 +774,111 @@ fn the_channel_feed_shape_pages_older_rows_in_without_moving_the_reader() {
 }
 
 // ---------------------------------------------------------------------------
+// keep_alive.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keep_alive_rows_survive_leaving_the_window_and_plain_rows_do_not() {
+    let controller = ScrollController::new();
+    let ledger = Rc::new(Ledger::default());
+    let show = Rc::new(Cell::new(true));
+    let (l, c, s) = (Rc::clone(&ledger), controller.clone(), Rc::clone(&show));
+    let mut h = Harness::new(Size::new(400.0, 600.0), move |_| {
+        let l = Rc::clone(&l);
+        let list = sliver_list(
+            200,
+            |i| ChildKey::new(i as u64),
+            move |i| keep_alive(tile(i as u64, 50.0, &l)).enabled(i == 1),
+        )
+        .estimated_item_extent(50.0);
+        any(custom_scroll_view(s.get().then_some(list))
+            .cache_extent(0.0)
+            .controller(c.clone()))
+    });
+    h.frames(5);
+    let rows = h.rows_of("SliverListWidget");
+    assert_eq!(rows.len(), 12, "[0, 600) over 50 px rows");
+    let (kept_pod, plain_pod) = (rows[1], rows[2]);
+    let kept_rebuilds = ledger.rebuilds.borrow()[&1];
+    assert!(kept_rebuilds > 0);
+
+    // Both rows leave the window: only the kept one stays alive, parked.
+    controller.jump_to(3000.0);
+    h.frames(3);
+    assert_eq!(h.list(|l| l.kept_alive_count()), 1);
+    assert!(ledger.live.borrow().contains(&1), "the kept row lives on");
+    assert!(
+        !ledger.live.borrow().contains(&2),
+        "the plain row was torn down"
+    );
+    assert!(
+        !h.rows_of("SliverListWidget").contains(&kept_pod),
+        "parked rows are not visited"
+    );
+
+    // Back: the kept row is re-adopted, its pod and its state intact; the
+    // plain row is a new one.
+    controller.jump_to(0.0);
+    h.frames(3);
+    let rows = h.rows_of("SliverListWidget");
+    assert_eq!(rows[1], kept_pod, "the same pod");
+    assert_ne!(rows[2], plain_pod, "a fresh pod");
+    assert_eq!(h.list(|l| l.kept_alive_count()), 0);
+    let rebuilds = ledger.rebuilds.borrow();
+    assert!(
+        rebuilds[&1] > kept_rebuilds,
+        "the kept row's own counter carried on: {} after {kept_rebuilds}",
+        rebuilds[&1]
+    );
+    assert!(
+        rebuilds[&2] < kept_rebuilds,
+        "the plain row's counter restarted"
+    );
+    drop(rebuilds);
+
+    // A parked row is released with the list.
+    controller.jump_to(3000.0);
+    h.frames(3);
+    assert!(ledger.live.borrow().contains(&1));
+    show.set(false);
+    h.frames(2);
+    assert!(
+        ledger.live().is_empty(),
+        "every row, parked or not, torn down"
+    );
+}
+
+#[test]
+fn a_parked_row_whose_key_leaves_the_data_is_released() {
+    let controller = ScrollController::new();
+    let ledger = Rc::new(Ledger::default());
+    let ids: Ids = Rc::new(RefCell::new((0..200).collect()));
+    let (d, l, c) = (Rc::clone(&ids), Rc::clone(&ledger), controller.clone());
+    let mut h = Harness::new(Size::new(400.0, 600.0), move |_| {
+        let rows = Rc::new(d.borrow().clone());
+        let keys = Rc::clone(&rows);
+        let l = Rc::clone(&l);
+        any(custom_scroll_view(
+            sliver_list(
+                rows.len(),
+                move |i| ChildKey::new(keys[i]),
+                move |i| keep_alive(tile(rows[i], 50.0, &l)).enabled(rows[i] == 1),
+            )
+            .estimated_item_extent(50.0),
+        )
+        .cache_extent(0.0)
+        .controller(c.clone()))
+    });
+    controller.jump_to(3000.0);
+    h.frames(3);
+    assert_eq!(h.list(|l| l.kept_alive_count()), 1);
+    ids.borrow_mut().retain(|id| *id != 1);
+    h.frames(2);
+    assert_eq!(h.list(|l| l.kept_alive_count()), 0);
+    assert!(!ledger.live.borrow().contains(&1));
+}
+
+// ---------------------------------------------------------------------------
 // Semantics.
 // ---------------------------------------------------------------------------
 
@@ -796,7 +916,7 @@ fn the_layout_audit_finds_no_stale_pod_across_the_scroll_script() {
                 sliver_list(
                     rows.len(),
                     move |i| ChildKey::new(keys[i]),
-                    move |i| tile(rows[i], height(rows[i]), &l1),
+                    move |i| keep_alive(tile(rows[i], height(rows[i]), &l1)).enabled(i % 5 == 0),
                 )
                 .estimated_item_extent(ESTIMATE),
                 SizedBox::<()>(None, Some(400.0)),

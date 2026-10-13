@@ -14,11 +14,14 @@
 //!   (`fixed_extent_list`), reconciled through the windowed reconcilers it
 //!   shares with [`ListView`](crate::ListView) (`reconcile`);
 //! * [`sliver_list`] — a lazy, keyed list of rows that size themselves, with
-//!   scroll anchoring through the viewport's correction loop (`list`).
+//!   scroll anchoring through the viewport's correction loop (`list`);
+//! * [`keep_alive`] — keeps a lazy list's row alive outside its window
+//!   (`keep_alive`).
 
 pub mod adapter;
 pub mod fill_remaining;
 pub mod fixed_extent_list;
+pub mod keep_alive;
 pub mod list;
 pub mod padding;
 pub(crate) mod reconcile;
@@ -31,6 +34,7 @@ pub use fixed_extent_list::{
     SliverFixedExtentListView, SliverFixedExtentListWidget, sliver_fixed_extent_list,
     sliver_fixed_extent_list_keyed,
 };
+pub use keep_alive::{KeepAliveHandle, KeepAliveView, KeepAliveWidget, keep_alive};
 pub use list::{SliverListView, SliverListWidget, sliver_list};
 pub use padding::{SliverPaddingView, SliverPaddingWidget, sliver_padding};
 

@@ -69,6 +69,15 @@
 //!
 //! [`SliverListWidget::scroll_corrections`] counts the corrections reported.
 //!
+//! # Keep-alive
+//!
+//! Each row is built inside a keep-alive scope ([`keep_alive`](crate::keep_alive)'s
+//! module docs): a row asking to be kept that leaves the window while its key
+//! is still in the data is parked instead of torn down — not laid out,
+//! painted, routed to or visited — and re-adopted when its key re-enters the
+//! window. Parked rows are checked against the data every rebuild (released
+//! when their key is gone) and torn down with the list.
+//!
 //! # Near edges and semantics
 //!
 //! [`SliverListView::on_near_start`] / [`SliverListView::on_near_end`] are the
@@ -92,7 +101,8 @@ use frust_core::{
 use kurbo::Size;
 
 use super::adapter::{axis_point, finite_extent, non_negative};
-use super::reconcile::{self, ItemViews, LiveRows, Measured};
+use super::keep_alive::{RowScope, row_wants_keep_alive};
+use super::reconcile::{self, ItemViews, KeptRow, LiveRows, Measured, Retention};
 use super::{NearEdge, cache_offset, paint_offset};
 use crate::ChildKey;
 
@@ -110,7 +120,7 @@ const DEFAULT_ESTIMATED_ITEM_EXTENT: f64 = 48.0;
 /// summing extents both ways from the anchor: fixed silently, never reported.
 const DRIFT_TOLERANCE: f64 = 1e-6;
 
-/// A view-held item builder, erased per row.
+/// A view-held item builder, erased per row (inside its keep-alive scope).
 type ItemBuilder<State> = Rc<dyn Fn(usize) -> AnyView<State>>;
 
 /// A view-held stable-key function (`item index -> row identity`).
@@ -159,7 +169,7 @@ pub fn sliver_list<State: 'static, V: View<State>>(
     SliverListView {
         item_count,
         estimate: DEFAULT_ESTIMATED_ITEM_EXTENT,
-        builder: Rc::new(move |index| any(builder(index))),
+        builder: Rc::new(move |index| any(RowScope::new(builder(index)))),
         key_of: Rc::new(key_of),
         on_near_start: None,
         near_start_threshold: 0.0,
@@ -255,8 +265,8 @@ struct Plan {
 }
 
 /// The retained widget for a [`SliverListView`]: the materialised rows and
-/// their identities, the measured extents, the anchor, and the near-edge
-/// state.
+/// their identities, the parked keep-alive rows, the measured extents, the
+/// anchor, and the near-edge state.
 pub struct SliverListWidget {
     /// The materialised rows, parallel to [`Self::indices`].
     children: Vec<ChildPod>,
@@ -266,6 +276,8 @@ pub struct SliverListWidget {
     slot_keys: Vec<ChildKey>,
     /// `key -> the item index that row occupied` as of the last rebuild.
     key_index: HashMap<ChildKey, usize>,
+    /// The rows kept alive outside the window, by key.
+    kept: HashMap<ChildKey, KeptRow>,
     /// The view's key function, retained so layout and paint can look a
     /// row's measurement up without the view in scope.
     key_of: Option<KeyOf>,
@@ -307,6 +319,7 @@ impl SliverListWidget {
             indices: Vec::new(),
             slot_keys: Vec::new(),
             key_index: HashMap::new(),
+            kept: HashMap::new(),
             key_of: Some(key_of),
             measured: HashMap::new(),
             measured_sum: 0.0,
@@ -338,6 +351,11 @@ impl SliverListWidget {
     /// How many rows have a cached measured extent.
     pub fn measured_count(&self) -> usize {
         self.measured.len()
+    }
+
+    /// How many rows are parked, kept alive outside the window.
+    pub fn kept_alive_count(&self) -> usize {
+        self.kept.len()
     }
 
     /// How many scroll-offset corrections this list has reported to its
@@ -570,6 +588,27 @@ impl<State: 'static> View<State> for SliverListView<State> {
             element.near_end.armed = true;
         }
 
+        // A parked row whose key left the data is released.
+        if !element.kept.is_empty() {
+            let mut gone = Vec::new();
+            for (key, row) in element.kept.iter_mut() {
+                match reconcile::locate_key(*key, row.index, delta, count, key_of) {
+                    Some(index) => row.index = index,
+                    None => gone.push(*key),
+                }
+            }
+            for key in gone {
+                if let Some(row) = element.kept.remove(&key) {
+                    row.teardown::<State>(ctx);
+                }
+                reconcile::forget_measurement(
+                    &mut element.measured,
+                    &mut element.measured_sum,
+                    &key,
+                );
+            }
+        }
+
         if count < old_count {
             reconcile::evict_measurements_past(
                 &mut element.measured,
@@ -579,7 +618,10 @@ impl<State: 'static> View<State> for SliverListView<State> {
         }
 
         let plan = element.plan(element.pending_correction);
-        let outcome = reconcile::reconcile_keyed(
+        let locate = |key: ChildKey, prev_index: usize| {
+            reconcile::locate_key(key, prev_index, delta, count, key_of)
+        };
+        let outcome = reconcile::reconcile_keyed_retaining(
             ItemViews {
                 prev: &*prev.builder,
                 next: &*self.builder,
@@ -592,6 +634,11 @@ impl<State: 'static> View<State> for SliverListView<State> {
             key_of,
             plan.range.clone(),
             DUPLICATE_KEY_MSG,
+            Some(Retention {
+                kept: &mut element.kept,
+                wants: &row_wants_keep_alive,
+                locate: &locate,
+            }),
             ctx,
         );
         flags |= outcome.flags;
@@ -638,6 +685,9 @@ impl<State: 'static> View<State> for SliverListView<State> {
     fn teardown(&self, element: &mut SliverListWidget, ctx: &mut BuildCtx<'_>) {
         for (index, pod) in element.indices.iter().zip(element.children.iter_mut()) {
             crate::authoring::teardown_child(&(self.builder)(*index), pod, ctx);
+        }
+        for (_, row) in element.kept.drain() {
+            row.teardown::<State>(ctx);
         }
     }
 }
@@ -706,7 +756,7 @@ impl Widget for SliverListWidget {
     }
 
     /// Delivers a near-edge fire observed at layout, then routes the event to
-    /// the materialised rows.
+    /// the materialised rows (parked rows receive nothing).
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         self.near_start.deliver(ctx);
         self.near_end.deliver(ctx);
