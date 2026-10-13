@@ -56,16 +56,58 @@ windows over 180 untimed frames, plus the compile spans). Later cards append row
 
 | Ref | Host | Scene | Compile p50 (ms) | walk / glyphs (us) | upload (us) | replay (us) | draws / strips / alphas / glyph_draws |
 |-----|------|-------|------------------|--------------------|-------------|-------------|----------------------------------------|
-| main 43859eca + p0-01 scenes | i5-12600 Linux, NVIDIA T400 (Vulkan) | `s1_like` | 1.17 | 1152 / 249 | 126 | 0.1 | 637 / 9,560 / 296,464 / 516 |
-| same | same | `s6_like_cached` | 1.23 | 1153 / 1117 | 294 | 0.1 | 1,710 / 12,295 / 273,872 / 1,709 |
-| same | same | `s6_like_rebreak` | 1.24 | 1160 / 1127 | 564 | 0.1 | 1,710 / 12,295 / 273,872 / 1,709 |
-| same | same | `s5_like` | 0.089 | 87 / 0 | 66 | 0.1 | 10 / 2,326 / 71,104 / 0 |
+| feature/frust-fast-p0 eff23e65 | i5-12600 Linux, NVIDIA T400 (Vulkan) | `s1_like` | 1.17 | 1152 / 250 | 241 | 0.1 | 637 / 9,560 / 296,448 / 516 |
+| same | same | `s6_like_cached` | 1.18 | 1090 / 1057 | 293 | 0.1 | 1,710 / 12,295 / 273,872 / 1,709 |
+| same | same | `s6_like_rebreak` | 1.18 | 1096 / 1064 | 294 | 0.1 | 1,710 / 12,295 / 273,872 / 1,709 |
+| same | same | `s5_like` | 0.158 | 157 / 0 | 64 | 0.1 | 10 / 2,326 / 71,104 / 0 |
 
 Compile p50 is the encode's `compile_us`; the `scenes_encode` criterion mean (CPU wall of encode, submit and
-`end_frame`) was 1.43 / 1.69 / 1.67 / 0.28 ms for the four rows. Measured with the host loaded by other
-builds (1-minute load 12 to 24 on 12 threads), so absolute figures moved by up to 2x between runs; read
-before/after pairs from back-to-back runs, not against this table alone. Replay is near zero because every
-glyph is atlas-resident after the warm-up frames.
+`end_frame`) was 1.37 / 1.66 / 1.66 / 0.32 ms for the four rows, and `scenes_compile` alone 1.16 / 1.04 / 1.04 /
+0.051 ms. Measured on an otherwise idle host (1-minute load about 3 on 12 threads) with
+`cargo bench -p frust-engine --features perf-trace -- scenes --warm-up-time 2 --measurement-time 5`; a run taken
+while other builds were active moved the upload and `s5_like` figures by up to 2x, so read before/after pairs from
+back-to-back runs on a quiet host. Replay is near zero because every glyph is atlas-resident after the warm-up
+frames; the six atlas counts appended to the enc line (`replays`, `dirty_pages`, `atlas_refused`, `glyph_misses`,
+`glyph_evicted`, `run_keys`) read 0 / 0 / 0 / 0 / 0 / 2 for the text scenes.
+
+## Engine encode and GPU on two phones
+
+Before-numbers for the frust-fast plan, captured 2026-10-13 from `feature/frust-fast-p0` (eff23e65) with the
+protocol profile APK (`FRUST_TRACE_RAW=1`), `benchmarks/harness/run.sh <sN> --runs 12 --duration 30` (first two
+runs discarded; S3 at 4x20). Columns: harness total p50 / p95, `submit_us` p50, `gpu_main_us` p50 / p95 (ms); enc
+medians over the kept 60-frame windows for walk / glyphs / upload / replay / instances (us); draws / strips /
+alphas. Fairness gate warnings on both phones: airplane mode off, charging over USB (uncontrolled, identical
+across rows). Raw trees stay out of `benchmarks/raw`.
+
+Pixel 4a class (Adreno 618, 1080x2340 @ 60 Hz):
+
+| Scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | walk / glyphs / upload / replay / instances | draws / strips / alphas |
+|---|---|---|---|---|---|
+| S1 | 33.52 / 35.04 | 16.16 | 32.70 / 33.16 | 11536 / 6570 / 649 / 1016 / 362 | 536 / 14,788 / 494,448 |
+| S2 | 19.18 / 21.30 | 7.08 | 17.00 / 17.42 | 3480 / 2783 / 456 / 0.7 / 293 | 797 / 11,736 / 283,920 |
+| S3 | 13.56 / 16.26 | 5.97 | 10.35 / 11.03 | 1874 / 1640 / 399 / 0.8 / 130 | 356 / 4,981 / 115,744 |
+| S4 | 12.89 / 13.85 | 5.18 | 7.21 / 7.78 | 695 / 315 / 311 / 0.8 / 43 | 46 / 1,056 / 26,832 |
+| S5 | 33.31 / 37.01 | 6.05 | 26.27 / 26.68 | 1889 / 183 / 470 / 0.9 / 102 | 31 / 3,050 / 84,512 |
+| S6 | 13.95 / 17.55 | 7.28 | 13.02 / 14.46 | 3382 / 3072 / 380 / 0.8 / 268 | 512 / 8,925 / 216,120 |
+
+Pixel 4 class (Adreno 640, 1080x2280 @ 90 Hz; S1 ran warm — the phone sat at 38.8-39.6 C past the gate's
+120 s wait and its per-run frame count fell from 2650 to 2050, so the cool-phone S1 figure is the spike's 10.96):
+
+| Scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | walk / glyphs / upload / replay / instances | draws / strips / alphas |
+|---|---|---|---|---|---|
+| S1 | 14.18 / 16.52 | 13.77 | 11.15 / 11.38 | 10978 / 8804 / 316 / 1036 / 166 | 525 / 14,076 / 474,320 |
+| S2 | 8.74 / 9.91 | 6.15 | 8.00 / 9.24 | 2669 / 2126 / 399 / 0.3 / 224 | 796 / 11,336 / 281,336 |
+| S3 | 6.04 / 11.54 | 4.99 | 5.02 / 5.91 | 1691 / 1490 / 296 / 0.4 / 122 | 355 / 4,993 / 113,856 |
+| S4 | 4.41 / 4.99 | 3.88 | 2.02 / 2.21 | 624 / 297 / 244 / 0.3 / 39 | 45 / 1,025 / 27,696 |
+| S5 | 6.32 / 12.60 | 4.92 | 8.54 / 8.82 | 1840 / 129 / 586 / 0.3 / 72 | 30 / 3,001 / 92,448 |
+| S6 | 7.21 / 7.84 | 5.90 | 7.32 / 9.46 | 2373 / 2192 / 347 / 0.2 / 187 | 508 / 8,918 / 224,352 |
+
+Cold start (S7, `first_frame_presented` medians): Pixel 4a 211 ms of which `first_submit_pipeline_wait` 118,
+encode 6, queue 3; Pixel 4 172 ms of which pipeline wait 92, encode 5, queue 2. On both phones the pipeline
+cache is persisted 328 B about 70 ms after surface install with zero warm-up pipelines finished, and the second
+launch loads that same 328 B. S1's atlas on both phones: `glyph_draws == atlas_glyphs`, yet 37 of every 60
+frames replay with 69-81 evictions and zero misses per window (replay is eviction-driven). Thread sample
+during S1: main, `RenderThread` and both `frust-reactive` threads at nice -10, `frust-render` at nice -4.
 
 ## Dev loop
 
