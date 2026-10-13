@@ -151,25 +151,26 @@ pub use frust_widgets::{
     AUTO_SCROLL_EDGE_PX, AUTO_SCROLL_MAX_PX_PER_S, Align, AlignView, Alignment, AlwaysScrollable,
     AnimateTo, AutoScroll, AutoScrollZone, AutoScrollZoneWidget, Axis, BackPolicy, BorderStyle,
     Bouncing, Button, ButtonStyle, ButtonView, Checkbox, CheckboxView, ChildKey, Clamping, Column,
-    ContainerView, ContainerWidget, CrossAxisAlignment, DRAG_THRESHOLD, DecelerationRate,
-    DividerView, DividerWidget, DragCoordinator, DragHighlight, DragKind, DragPhase, DragPolicy,
-    DragSession, DragSourceId, DragState, DragStateChange, DragSubscription, DragTargetId,
-    DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, EdgeInsets, FlexChild,
-    FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, HIGHLIGHT_FALLBACK, HeroView,
-    Icon, IconButton, IconButtonView, IconData, IconSource, IconView, IconWidget, Image,
+    ContainerView, ContainerWidget, CrossAxisAlignment, CustomScrollView, DRAG_THRESHOLD,
+    DecelerationRate, DividerView, DividerWidget, DragCoordinator, DragHighlight, DragKind,
+    DragPhase, DragPolicy, DragSession, DragSourceId, DragState, DragStateChange, DragSubscription,
+    DragTargetId, DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, EdgeInsets,
+    FlexChild, FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, HIGHLIGHT_FALLBACK,
+    HeroView, Icon, IconButton, IconButtonView, IconData, IconSource, IconView, IconWidget, Image,
     ImageError, ImageFit, ImageSource, ImageView, IndexedStack, IndexedStackView, ListView,
     ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController,
     NavigatorId, NavigatorView, NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView,
     OverlaySide, OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition,
     PageVisibility, PopResult, PushOptions, Radio, RadioView, RadioWidget, ReorderableListView,
-    ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollController, ScrollInfo,
-    ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox,
-    SizedBoxView, Slider, SliderView, SourceFeedback, SpringDescription, Stack, StackView,
-    TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
-    VisibilityCallback, auto_scroll_zone, button, checkbox, colored_box, column, container,
-    divider, drag_target, draggable, flexible, hero, icon, icon_button, indexed_stack, inflexible,
-    keyed, list_view, overlay_portal, radio, reorderable_list, row, safe_area, scaffold,
-    scroll_view, slider, stack, text, text_input,
+    ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollAxis, ScrollController,
+    ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox,
+    SizedBoxView, Slider, SliderView, SliverBoxView, SourceFeedback, SpringDescription, Stack,
+    StackView, TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec,
+    TransitionState, VisibilityCallback, auto_scroll_zone, button, checkbox, colored_box, column,
+    container, custom_scroll_view, divider, drag_target, draggable, flexible, hero, icon,
+    icon_button, indexed_stack, inflexible, keyed, list_view, overlay_portal, radio,
+    reorderable_list, row, safe_area, scaffold, scroll_view, slider, sliver_box, stack, text,
+    text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -3129,6 +3130,30 @@ mod scroll_physics_reexport {
         // platform's default — is directly constructible through the facade
         // too, which is the whole point of it staying reachable.
         let _: RubberBand = RubberBand::new();
+    }
+}
+
+/// Facade-level check that the sliver viewport vocabulary
+/// ([`CustomScrollView`]/[`custom_scroll_view`], its [`ScrollAxis`], and the
+/// [`sliver_box`] adapter) resolves through the `frust` facade, so an app
+/// builds a sliver scroll surface without reaching into `frust_widgets`.
+#[cfg(test)]
+mod custom_scroll_view_reexport {
+    use crate::{
+        Clamping, CustomScrollView, OverscrollEffect, ScrollAxis, ScrollController, SliverBoxView,
+        custom_scroll_view, sliver_box, text,
+    };
+
+    #[test]
+    fn custom_scroll_view_and_slivers_resolve_through_facade() {
+        let header: SliverBoxView<()> = sliver_box(text("header"));
+        let view: CustomScrollView<()> = custom_scroll_view((header, text("body")))
+            .axis(ScrollAxis::Horizontal)
+            .cache_extent(120.0)
+            .physics(Clamping::new())
+            .overscroll_effect(OverscrollEffect::None)
+            .controller(ScrollController::new());
+        let _ = view;
     }
 }
 
