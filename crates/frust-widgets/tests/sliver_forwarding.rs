@@ -12,7 +12,7 @@ use frust_core::{
 use frust_widgets::{
     DragCoordinator, EitherOf3Widget, EitherOf4Widget, EitherOf5Widget, EitherOf6Widget,
     EitherOf7Widget, EitherOf8Widget, EitherWidget, GestureDetector, ScrollController,
-    auto_scroll_zone, shield,
+    auto_scroll_zone, hero, shield,
 };
 use kurbo::Size;
 
@@ -332,6 +332,12 @@ fn auto_scroll_zone_forwards_a_sliver_child_and_keeps_a_box_child_a_box() {
     assert_forwards_sliver(&mut build_element(&sliver_zone));
     let box_zone = auto_scroll_zone(box_child(), DragCoordinator::new(), ScrollController::new());
     assert_keeps_box(&mut build_element(&box_zone));
+}
+
+#[test]
+fn hero_forwards_a_sliver_child_and_keeps_a_box_child_a_box() {
+    assert_forwards_sliver(&mut build_element(&hero("tag", sliver_child())));
+    assert_keeps_box(&mut build_element(&hero("tag", box_child())));
 }
 
 #[test]

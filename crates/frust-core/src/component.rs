@@ -547,7 +547,13 @@ impl<C: Component> SliverWidget for ComponentWidget<C> {
         // inert answer if a caller reaches here directly anyway.
         self.child
             .layout_sliver_child(ctx, sc)
-            .unwrap_or(SliverGeometry::ZERO)
+            .unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "ComponentWidget::layout_sliver: the child stopped being a sliver between as_sliver and layout"
+                );
+                SliverGeometry::ZERO
+            })
     }
 }
 

@@ -511,7 +511,13 @@ impl SliverWidget for ShieldWidget {
         // it, so `None` is unreachable from a viewport.
         self.child
             .layout_sliver_child(ctx, sc)
-            .unwrap_or(SliverGeometry::ZERO)
+            .unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "ShieldWidget::layout_sliver: the child stopped being a sliver between as_sliver and layout"
+                );
+                SliverGeometry::ZERO
+            })
     }
 }
 
