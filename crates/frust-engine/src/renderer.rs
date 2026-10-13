@@ -625,10 +625,12 @@ impl EncodeTrace {
 
     /// The `frust-perf enc` line the current window reports.
     ///
-    /// Each column is its own median over the window and the trailing field is
-    /// the whole encode's 95th percentile, so a column answers "what does this
-    /// phase usually cost" while the tail answers "how bad is a bad frame".
-    /// Medians are taken per column and so do not sum to the `total_us`
+    /// The counts `replays` through `glyph_evicted` are window sums; every
+    /// other column (including `run_keys`) is its own median over the window.
+    /// The trailing field is the whole encode's 95th percentile, so a column
+    /// answers "what does this phase usually cost" while the tail answers "how
+    /// bad is a bad frame". Medians are taken per column and so do not sum to
+    /// the `total_us`
     /// median exactly — they are close on a steady scene, and the gap is
     /// itself the signal that the phases are not moving together.
     fn line(&mut self) -> String {
