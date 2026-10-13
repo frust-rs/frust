@@ -18,7 +18,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | Module | Responsibility |
 |--------|-----------------|
 | `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); also carries the `VisitPods` trait / `visit_children!` macro, the crate's introspection seam (see *Data Flow*) |
-| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`) |
+| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`, `IndexedStack`) |
 | `frust-widgets::canvas` | `CanvasView`/`CanvasWidget` — declarative custom painting over `PaintScene`, local-space, no semantics node |
 | `frust-widgets::pinch` | `PinchRecognizer` — a pure two-contact pinch state machine — and `pinch_detector`, the wrapper view feeding it from a gesture's contacts |
 | `frust-widgets::pan_zoom` | `PanZoomView`/`PanZoomWidget` — one child under a drag-pan/pinch-or-wheel-zoom transform, with inertia and a `PanZoomController` handle |
@@ -77,92 +77,93 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   sensors) — an authored `true` is never un-reduced by an OS report of `false`.
 - Navigation flow: `Navigator`/`Router` manage a page stack and declarative routes over the same
   container plumbing; `hero()` morphs a tagged child between pages during transitions.
-  - **Alpha-zero paint redirect:** the split-crossfade presets (`M3SharedAxisX`, `M3FadeThrough`,
-    `Glyph`) are hard, non-overlapping splits — before the split only the leaving page ramps 1→0,
-    after it only the entering page ramps 0→1, so at most one page is visible at any instant and
-    both resolve to alpha 0 at the split itself. Never assume a dual-visible crossfade window:
-    `IosPush` keeps both visible (parallax + dim, never reaching 0) and `ReducedCrossfade` is a
-    genuine crossfade, but the presets above are not. A page resolving to alpha 0 still runs its
-    paint pass — hero-rect capture and other paint-time state — redirected into
-    `frust_core::DiscardScene` so no scene command is emitted, because the engine rasterizes a
-    layer in full before applying its alpha and an invisible page is otherwise wasted GPU work.
+  - **Alpha-zero paint redirect:** the split-crossfade presets (`M3SharedAxisX`, `M3FadeThrough`, `Glyph`) are hard,
+    non-overlapping splits — before the split only the leaving page ramps 1→0, after it only the entering page ramps
+    0→1, so at most one page is visible at any instant and both resolve to alpha 0 at the split itself. Never assume a
+    dual-visible crossfade window: `IosPush` keeps both visible (parallax + dim, never reaching 0) and
+    `ReducedCrossfade` is a genuine crossfade, but the presets above are not. A page resolving to alpha 0 still runs
+    its paint pass — hero-rect capture and other paint-time state — redirected into `frust_core::DiscardScene` so no
+    scene command is emitted, because the engine rasterizes a layer in full before applying its alpha and an invisible
+    page is otherwise wasted GPU work.
   - **Snapshot bracket eligibility:** a page surviving that redirect brackets its paint with
-    `PaintScene::push_snapshot`/`pop_snapshot` when the transition is programmatic (not an
-    interactive edge-swipe) and the frame's hero directives for it are empty — unconditionally then,
-    even at alpha/scale identity, since the bracket itself is what tells a caching renderer the body
-    is worth caching (`push_snapshot`'s default still emulates the transform+layer pair for a plain
-    recorder). Each page and each `motion::switcher` child draws a process-unique snapshot key once
-    for its pod's lifetime, and the bracket rect's origin follows the pod's absolute paint origin,
-    keeping RENDER_ARCHITECTURE.md's frame-relative fingerprint slide-invariant.
-  - **Navigator observation seams:** `NavigatorController::transition()` publishes a `Copy` `TransitionState`
-    (active, progress, direction, depth pair, generation) on an `Rc<Cell<_>>` so chrome outside the
-    subtree can observe transitions; reads during paint from a widget painted *after* the navigator
-    are frame-exact, reads during `Component::build` are one frame stale. `PushOptions::on_visibility`
-    and `PageVisibility` (Current/Visible/Covered) provide page-level visibility observation; the opt-in
-    `cull_covered_builds` (default false) skips rebuilds for covered pages, but `on_cleanup` does **not**
-    fire under a covering push (retained-state guarantee).
-  - **Pop-result delivery:** `push_for_result`'s `on_result` callback needs `&mut State`, which the
-    state-free view diff doesn't carry, so a pop still queues it — but the queuing rebuild also
-    raises CORE's pending-result-flush flag, which the same rebuild drains via a `Housekeeping`
-    broadcast (see CORE_ARCHITECTURE.md). An eager pop delivers its result within the rebuild that
-    applied it; an interactive edge-swipe pop delivers on its settle frame. No further input event
-    is required either way.
-  - **RouteNavigator:** A thread-safe (`Arc<Mutex<Vec<NavRequest>>>`) navigation handle carrying no closures
-    or reactive types, making it `Send + Sync` and usable via `provide_context` from any thread; off-thread
-    requests wake the shell and apply in the next rebuild before the navigator reconciles.
+    `PaintScene::push_snapshot`/`pop_snapshot` when the transition is programmatic (not an interactive edge-swipe) and
+    the frame's hero directives for it are empty — unconditionally then, even at alpha/scale identity, since the
+    bracket itself is what tells a caching renderer the body is worth caching (`push_snapshot`'s default still
+    emulates the transform+layer pair for a plain recorder). Each page and each `motion::switcher` child draws a
+    process-unique snapshot key once for its pod's lifetime, and the bracket rect's origin follows the pod's absolute
+    paint origin, keeping RENDER_ARCHITECTURE.md's frame-relative fingerprint slide-invariant.
+  - **Navigator observation seams:** `NavigatorController::transition()` publishes a `Copy` `TransitionState` (active,
+    progress, direction, depth pair, generation) on an `Rc<Cell<_>>` so chrome outside the subtree can observe
+    transitions; reads during paint from a widget painted *after* the navigator are frame-exact, reads during
+    `Component::build` are one frame stale. `PushOptions::on_visibility` and `PageVisibility`
+    (Current/Visible/Covered) provide page-level visibility observation; the opt-in `cull_covered_builds` (default
+    false) skips rebuilds for covered pages, but `on_cleanup` does **not** fire under a covering push (retained-state
+    guarantee).
+  - **Pop-result delivery:** `push_for_result`'s `on_result` callback needs `&mut State`, which the state-free view diff
+    doesn't carry, so a pop still queues it — but the queuing rebuild also raises CORE's pending-result-flush flag,
+    which the same rebuild drains via a `Housekeeping` broadcast (see CORE_ARCHITECTURE.md). An eager pop delivers its
+    result within the rebuild that applied it; an interactive edge-swipe pop delivers on its settle frame. No further
+    input event is required either way.
+  - **RouteNavigator:** A thread-safe (`Arc<Mutex<Vec<NavRequest>>>`) navigation handle carrying no closures or reactive
+    types, making it `Send + Sync` and usable via `provide_context` from any thread; off-thread requests wake the
+    shell and apply in the next rebuild before the navigator reconciles.
   - **Route params:** Query parameters merge **under** path segment captures; path captures take precedence
     over query params of the same name, and named-route `path_for_name` round-trips unused params as query.
-  - **Route-state observable (R-B1):** `NavigatorController::route_stack()`/`route_generation()` publish a
-    `RouteStack` (route identities bottom→top, depth, generation) and a diffed `NavChange`
-    (Initial/Push/Pop/Replace/Reset) from every committed-mutation site inside `publish_state()`. Staleness
-    contract: an in-flight interactive edge-swipe pop is uncommitted, so the observable still reports the
-    pre-swipe stack until the settle-frame publish; a cancelled swipe publishes nothing (the pre-swipe stack
-    was already correct). Frame-accurate drag chrome wants `NavigatorController::transition()` instead.
-  - **shell_route (nested navigators):** `shell_route(inner, builder, children)` is a pathless route binding
-    a subtree to a second `NavigatorController` the app owns — the shell page stays retained on the enclosing
-    stack while its children resolve onto `inner` (go_router's `ShellRoute`). A chain crossing the boundary
-    splits there, one structural op per controller; the **keep rule** makes in-shell navigation issue zero
-    ops on the enclosing controller once the shell page is already placed, so it and its retained inner
-    navigator are never dropped. A deep link resolved before the shell page exists pre-queues its inner
-    segment onto `inner`'s op queue and drains on `inner`'s first `build` — no flash, no second navigation.
-    Chrome inside the shell page reads the **inner** navigator's `route_stack()` (or the facade's
-    `RouteObserver` over it) for live in-shell state, never the enclosing stack, since a keep-ruled
-    navigation never restamps the shell page's own route entry.
-  - **Gesture policy (interactive edge-swipe):** `NavigatorWidget::swipe_armable` gates arming on
-    `BackPolicy` — a `DismissAnimated` or `Veto` top page refuses to arm outright (arm-refusal, not a
-    dismiss-signal bump) — and resolves the navigator-wide default by rank: page override
-    (`PushOptions::pop_swipe`) > navigator explicit (`NavigatorView::pop_swipe`) > platform slot
-    (`platform_pop_swipe`) > preset default (on for `PageTransition::IosPush`, off otherwise); the facade
-    sets the platform slot from `cfg!(target_os = "ios")`. **R-B3-inner:** a left-edge `Down` does not
-    capture, so a nested navigator underneath can arm too; the outer navigator only defers at the `Move`
-    steal, after reading back the inner's claim — both navigators legitimately arm on `Down`.
-  - **overlay_host() constructor:** A `NavigatorView` with pop_swipe disabled and no-op transition
-    (not a new widget). Back-button interest is arbitrated by **rank taken from the wiring entry
-    point**, never from when or how often a controller wires: an overlay host always outranks a plain
-    navigator, and among navigator peers the order is **innermost-first** (most-recently-wired wins,
-    LIFO) — mirroring Android's `OnBackPressedDispatcher` dispatch order and UIKit/SwiftUI's
-    pop-from-top behavior. Host-first is the same topmost-layer rule, not an exception to it —
-    go_router's outermost-first order on Android is the counter-example this deliberately avoids. A
-    host with no overlays reports no interest and defers to the inner navigator. Registrants are
-    released by mount liveness (`NavigatorController::is_mounted()`), not by a wire-count heuristic.
-  - **Back reach follows input routing (R23):** ranking (above) decides who wins *among* claimants;
-    a separate reach check decides who may claim at all. A navigator whose hosting page is not in
-    its host navigator's `input_routed_pages()` reports `back_interest() == false` outright,
-    whatever its own stack looks like — so a press can never pop an off-screen nested stack while
-    the visible page stays put. Reach is input routing, not painting: a page under a *transparent*
-    overlay is still `PageVisibility::Visible` but claims no back. A top-level navigator has no
-    hosting page and is unconditionally reachable, so single-navigator apps are unaffected.
-  - **Controller binding is structural:** a `NavigatorView`'s published cells (depth, back interest,
-    transition, mount count) bind to the `NavigatorController` it was last built or rebuilt against;
-    a controller swap is detected by identity (not just view type) and re-bound in the same rebuild
-    pass, so ops and published state can never target different controllers and a swapped-away-from
-    controller reliably reports unmounted.
-  - **NavigatorWidget semantics (R23):** Now implements `Widget::semantics`, forwarding via
-    `ChildPod::semantics_child` to exactly the pages input routing can reach (covered pages and pages
-    under modals omitted outright), honoring the input-parity invariant documented in
-    CODE_STANDARDS.md. Back arbitration's reach check (above) derives from this same
-    `input_routed_pages()` set, so it is the single reach definition shared by input, semantics, and
-    back.
+  - **Route-state observable (R-B1):** `NavigatorController::route_stack()`/`route_generation()` publish a `RouteStack`
+    (route identities bottom→top, depth, generation) and a diffed `NavChange` (Initial/Push/Pop/Replace/Reset) from
+    every committed-mutation site inside `publish_state()`. Staleness contract: an in-flight interactive edge-swipe
+    pop is uncommitted, so the observable still reports the pre-swipe stack until the settle-frame publish; a
+    cancelled swipe publishes nothing (the pre-swipe stack was already correct). Frame-accurate drag chrome wants
+    `NavigatorController::transition()` instead.
+  - **shell_route (nested navigators):** `shell_route(inner, builder, children)` is a pathless route binding a subtree
+    to a second `NavigatorController` the app owns — the shell page stays retained on the enclosing stack while its
+    children resolve onto `inner` (go_router's `ShellRoute`). A chain crossing the boundary splits there, one
+    structural op per controller; the **keep rule** makes in-shell navigation issue zero ops on the enclosing
+    controller once the shell page is already placed, so it and its retained inner navigator are never dropped. A deep
+    link resolved before the shell page exists pre-queues its inner segment onto `inner`'s op queue and drains on
+    `inner`'s first `build` — no flash, no second navigation. Chrome inside the shell page reads the **inner**
+    navigator's `route_stack()` (or the facade's `RouteObserver` over it) for live in-shell state, never the enclosing
+    stack, since a keep-ruled navigation never restamps the shell page's own route entry.
+  - **Gesture policy (interactive edge-swipe):** `NavigatorWidget::swipe_armable` gates arming on `BackPolicy` — a
+    `DismissAnimated` or `Veto` top page refuses to arm outright (arm-refusal, not a dismiss-signal bump) — and
+    resolves the navigator-wide default by rank: page override (`PushOptions::pop_swipe`) > navigator explicit
+    (`NavigatorView::pop_swipe`) > platform slot (`platform_pop_swipe`) > preset default (on for
+    `PageTransition::IosPush`, off otherwise); the facade sets the platform slot from `cfg!(target_os = "ios")`.
+    **R-B3-inner:** a left-edge `Down` does not capture, so a nested navigator underneath can arm too; the outer
+    navigator defers only at the `Move` steal, after reading the inner's claim — both arm on `Down`.
+  - **overlay_host() constructor:** A `NavigatorView` with pop_swipe disabled and no-op transition (not a new widget).
+    Back-button interest is arbitrated by **rank taken from the wiring entry point**, never from when or how often a
+    controller wires: an overlay host always outranks a plain navigator, and among navigator peers the order is
+    **innermost-first** (most-recently-wired wins, LIFO) — mirroring Android's `OnBackPressedDispatcher` and
+    UIKit/SwiftUI pop-from-top. Host-first is the same topmost-layer rule (go_router's outermost-first order is the
+    counter-example avoided). A host with no overlays reports no interest and defers to the inner navigator.
+    Registrants are released by mount liveness (`NavigatorController::is_mounted()`), not by a wire-count heuristic.
+  - **Fallback rank and liveness:** `BackFallback` (an app rule, e.g. "back at a tab root returns to the home tab") is
+    not a navigator: it ranks after every navigator by role, whatever the wire order, and claims only when none does.
+    Wrap its subtree with `frust::back_fallback(&handle, child)` each build; it is live while a wrapper is mounted (the
+    mount rule, plus a first-wire grace until the wrapper's first reconcile) and removed once all wrappers unmount.
+    Accepted residual: a wrapper in a hidden branch (non-selected `IndexedStack` child, covered page) still counts as
+    live, so such a fallback gates its own interest closure on that branch being current.
+  - **Back reach follows input routing (R23):** ranking (above) decides who wins *among* claimants; a separate reach
+    check decides who may claim at all. A navigator whose hosting page is not in its host navigator's
+    `input_routed_pages()` reports `back_interest() == false` outright, whatever its own stack looks like — so a press
+    can never pop an off-screen nested stack while the visible page stays put. Reach is input routing, not painting: a
+    page under a *transparent* overlay is still `PageVisibility::Visible` but claims no back. `IndexedStack` is the
+    second reach installer: a navigator inside a non-selected child reports `back_interest() == false`, so per-tab
+    stacks route back to the selected tab only. A top-level navigator has no hosting page or `IndexedStack` child above
+    it and is unconditionally reachable, so single-navigator apps are unaffected.
+  - **Controller binding is structural:** a `NavigatorView`'s published cells (depth, back interest, transition, mount
+    count) bind to the `NavigatorController` it was last built or rebuilt against; a controller swap is detected by
+    identity (not just view type) and re-bound in the same rebuild pass, so ops and published state can never target
+    different controllers and a swapped-away-from controller reliably reports unmounted.
+  - **NavigatorWidget semantics (R23):** Implements `Widget::semantics`, forwarding via `ChildPod::semantics_child` to
+    exactly the pages input routing can reach (covered and modal-shadowed pages omitted), honoring the input-parity
+    invariant in CODE_STANDARDS.md. Back arbitration's reach check derives from the same `input_routed_pages()` set:
+    one reach definition for input, semantics and back.
+- IndexedStack flow: `IndexedStack(index, children)` (fluent `indexed_stack(index)`) builds, rebuilds and lays out
+  every child (each keeps its state, e.g. a tab's own navigator stack) but paints, routes input to and exposes to
+  semantics only the selected one (Flutter parity); non-input broadcasts reach every child. A selection change cancels
+  capture, clears focus and hides the IME for the outgoing child, like a navigator page switch.
 - Safe-area flow: `safe_area(child)` pads by the resolved `WindowInsets` on its enabled edges, then
   **removes** what it consumed from its subtree via `WindowInsets::consuming` — installed for the
   child through `LayoutCtx::with_window_insets`/`PaintCtx::with_window_insets` — so a self-insetting
@@ -176,21 +177,21 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   area in logical px; `safe_area` neither pads by nor removes them (`consuming` copies them) and
   `padding()` ignores them.
 - Scaffold flow: `scaffold(body)` assembles the four fixed chrome slots (`app_bar`/`body`/`bottom_bar`/`fab`)
-  most screens compose around, theme-agnostic (a design system's own bar/nav-bar/FAB widgets plug into the
-  slots from app code). **R-B4-inset:** the Scaffold itself consumes no window inset — `app_bar` and
+  most screens compose around, theme-agnostic (a design system's own bar/nav-bar/FAB widgets plug into
+  the slots from app code). **R-B4-inset:** the Scaffold itself consumes no window inset — `app_bar` and
   `bottom_bar` self-size for the top/bottom inset the same way (reading `ctx.window_insets()` in their own
-  `layout` — Material's `app_bar`/`search_app_bar` self-inset the top and the left/right edges by default and
-  `navigation_bar` the bottom only, see [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md); the sliver and
-  bottom app bars do not, wrap them in `safe_area`), and `body` is never pre-inset; `fab` is the one slot
-  the Scaffold insets on the caller's behalf, floating above `bottom_bar` when present and off the raw
-  window edge otherwise. **Bar contract:** the Glyph app bar and the Material top and sliver app bars
+  `layout` — Material's `app_bar`/`search_app_bar` self-inset the top and the left/right edges by default
+  and `navigation_bar` the bottom only, see [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md); the sliver
+  and bottom app bars do not, wrap them in `safe_area`), and `body` is never pre-inset; `fab` is the one
+  slot the Scaffold insets on the caller's behalf, floating above `bottom_bar` when present and off the
+  raw window edge otherwise. **Bar contract:** the Glyph app bar and the Material top and sliver app bars
   (listed in [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)) shift their leading slot right by
   `top_left.width` and their trailing edge left by `top_right.width` whenever that corner's height > 0;
-  the Scaffold is unchanged. The shift assumes the bar spans the window's top edge: layout cannot see a
-  bar's window-space position and corners are never consumed, so there is no automatic detection — a bar
-  hosted in a pane, sheet or dialog opts out with `corner_shift(false)`. Other catalogs' top bars
-  (Cupertino's navigation bar, the shadcn/beUI headers) do not yet apply the rule; see
-  `corner-insets-ios-26-only` in [LIMITATIONS.md](LIMITATIONS.md).
+  the Scaffold is unchanged. The shift assumes the bar spans the window's top edge (layout cannot see a
+  bar's window-space position and corners are never consumed, so nothing detects it): a bar hosted in a
+  pane, sheet or dialog opts out with `corner_shift(false)`. Other catalogs' top bars (Cupertino's
+  navigation bar, the shadcn/beUI headers) do not yet apply the rule; see `corner-insets-ios-26-only` in
+  [LIMITATIONS.md](LIMITATIONS.md).
 - Overlay flow: anchored placement is framework-owned — `place(anchor, content, area, placement)`
   and `OverlaySlot`, which resolve a side, a cross-axis alignment, an offset, a collision flip and a
   clamp-back-inside, pure and total — so a widget, a catalog and an app all place a floated surface
