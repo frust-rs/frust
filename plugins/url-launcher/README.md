@@ -476,6 +476,22 @@ more is promised about which app opens it.
 `Maps::directions_url`, `directions_to_url` and `show_url` return the string
 without opening it.
 
+### Native map schemes
+
+`UrlLauncher::open_maps_native(uri)` opens a `geo:`, `maps:`,
+`comgooglemaps:` or `google.navigation:` URI (scheme case-insensitive) through
+a separate validator; the http/https guard is untouched. The URI is at most
+2048 bytes, ASCII alphanumerics plus `? & = , . + - %` (every `%` followed by
+two hex digits), with no authority; `maps` and `comgooglemaps` may start with
+`//` followed by `?` or nothing.
+
+| Call | Android | iOS | macOS / Linux / Windows |
+|------|---------|-----|-------------------------|
+| `open_maps_native("geo:0,0?q=Pool")` | `ACTION_VIEW` on the URI | `openURL` (no app registers `geo:`; the call is a silent no-op) | `NoHandler` (use `Maps::directions`) |
+| `open_maps_native("maps://?daddr=1,2")` | `ACTION_VIEW` | `openURL` (Apple Maps) | `NoHandler` |
+
+Android 11+ package visibility for `geo:` is not yet verified on devices.
+
 ## Links and license
 
 Documentation: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
