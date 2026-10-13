@@ -23,10 +23,35 @@
 //! without the prelude. [`FILTER_KERNELS`] is a second prelude on the same
 //! terms, prepended to [`FILTER`] alone.
 //!
-//! Every module the engine compiles is assembled here and nowhere else, so
-//! [`MODULES`] is the whole list — the one
-//! [`crate::gpu::pipelines::EngineShaders::register`] walks, and the one the
-//! validation tests below walk.
+//! Every module the engine compiles is assembled here and nowhere else:
+//! [`MODULES`] lists the four fixed ones, and [`strip_class_source`] derives
+//! the strip program's paint-class specialisations from [`STRIP`] — together
+//! the whole list [`crate::gpu::pipelines::EngineShaders::register`] walks,
+//! and the one the validation tests below walk.
+//!
+//! ## The paint-class pre-pass
+//!
+//! The strip program is compiled once per [`PaintClass`] from the ONE source,
+//! by a line-oriented string pass ([`specialise`]) rather than a second copy of
+//! the shader: a block between a `//#if FEATURE` line and its `//#endif` line
+//! survives only in a class that enables `FEATURE` ([`class_features`]). The
+//! directives are ordinary WGSL comments, which is what makes the
+//! [`PaintClass::Uber`] program [`STRIP`] itself, byte for byte, and keeps the
+//! downlevel lint (which scans `shaders/`) reading the real source.
+//!
+//! A removed line is replaced by an empty one rather than dropped, so a naga
+//! diagnostic in a specialised module names the same line number as the source
+//! file. The pass emits only lines the source already contains, and the blocks
+//! are placed so that dropping any combination of them leaves well-formed WGSL
+//! (each block is a whole `else if` arm), so a specialisation uses no construct
+//! the Uber program does not — the property the WebGL2 arm's naga GLSL-ES
+//! lowering depends on. Overrides (`override` constants) were the alternative
+//! and are deliberately not used: no pipeline here sets one, and the pre-pass
+//! needs no new pipeline-description axis to carry them.
+
+use std::borrow::Cow;
+
+use super::strips::PaintClass;
 
 /// Binding-free helper functions shared by every entry-point module:
 /// packing, quad geometry, extend modes, encoded-paint accessors, gradient
@@ -36,8 +61,9 @@
 /// each of [`STRIP`], [`CLEAR`] and [`COPY`].
 pub const HELPERS: &str = include_str!("../../shaders/helpers.wgsl");
 
-/// The sparse-strip rasterizer: `vs_main` + `fs_main`, four pipeline variants
-/// (see [`crate::gpu::pipelines`]).
+/// The sparse-strip rasterizer: `vs_main` + `fs_main`, six render-state
+/// variants (see [`crate::gpu::pipelines`]) — and, unchanged, the
+/// [`PaintClass::Uber`] program every class specialisation is cut from.
 pub const STRIP: &str = concat!(
     include_str!("../../shaders/helpers.wgsl"),
     include_str!("../../shaders/strip.wgsl")
@@ -98,6 +124,110 @@ pub const FILTER: &str = concat!(
 /// The name [`STRIP`] is registered under in the shader library.
 pub const STRIP_NAME: &str = "frust-engine strip";
 
+/// The feature names a `//#if` directive in `strip.wgsl` may name.
+///
+/// - `IMAGE` — atlas image sampling at nearest and bilinear quality;
+/// - `IMAGE_FILTERED` — nested inside `IMAGE`: bicubic atlas sampling and the
+///   external texture;
+/// - `GRADIENT` — the linear, radial and sweep gradients;
+/// - `BLURRED_RECT` — the blurred rounded rectangle;
+/// - `LAYER` — the layer colour source a composite samples its page through.
+pub const STRIP_FEATURES: [&str; 5] = [
+    "IMAGE",
+    "IMAGE_FILTERED",
+    "GRADIENT",
+    "BLURRED_RECT",
+    "LAYER",
+];
+
+/// The `//#if` features `class` keeps.
+///
+/// Coverage, the solid paint and the vertex stage sit outside every block, so
+/// they are in every class; [`PaintClass::Uber`] keeps every feature.
+#[must_use]
+pub const fn class_features(class: PaintClass) -> &'static [&'static str] {
+    match class {
+        PaintClass::SolidCoverage => &[],
+        PaintClass::Gradient => &["GRADIENT"],
+        PaintClass::Image => &["IMAGE"],
+        PaintClass::ImageFiltered => &["IMAGE", "IMAGE_FILTERED"],
+        PaintClass::BlurredRect => &["BLURRED_RECT"],
+        PaintClass::LayerComposite => &["LAYER"],
+        PaintClass::Uber => &STRIP_FEATURES,
+    }
+}
+
+/// The name the strip program specialised for `class` is registered under in
+/// the shader library — [`STRIP_NAME`] itself for [`PaintClass::Uber`].
+#[must_use]
+pub const fn strip_class_name(class: PaintClass) -> &'static str {
+    match class {
+        PaintClass::SolidCoverage => "frust-engine strip/solid",
+        PaintClass::Gradient => "frust-engine strip/gradient",
+        PaintClass::Image => "frust-engine strip/image",
+        PaintClass::ImageFiltered => "frust-engine strip/image-filtered",
+        PaintClass::BlurredRect => "frust-engine strip/blurred-rect",
+        PaintClass::LayerComposite => "frust-engine strip/layer",
+        PaintClass::Uber => STRIP_NAME,
+    }
+}
+
+/// The strip program specialised for `class`: [`STRIP`] with every `//#if`
+/// block whose feature `class` does not keep blanked out.
+///
+/// [`PaintClass::Uber`] borrows [`STRIP`] unchanged — not a pass that happens
+/// to keep everything, but the source itself, so the kill switch
+/// (`FRUST_ENGINE_UBER_PROGRAM`) compiles exactly the program the engine
+/// shipped before the classes existed.
+#[must_use]
+pub fn strip_class_source(class: PaintClass) -> Cow<'static, str> {
+    match class {
+        PaintClass::Uber => Cow::Borrowed(STRIP),
+        _ => Cow::Owned(specialise(STRIP, class_features(class))),
+    }
+}
+
+/// The directive opening a feature block, followed by one feature name.
+const DIRECTIVE_IF: &str = "//#if ";
+
+/// The directive closing the innermost open feature block.
+const DIRECTIVE_ENDIF: &str = "//#endif";
+
+/// Runs the feature pre-pass over `source`, keeping the blocks whose feature
+/// is in `enabled`.
+///
+/// Line-oriented and total: a directive is a line whose trimmed text starts
+/// with `//#if ` (one feature name after it) or is exactly `//#endif`; blocks
+/// nest, and a line is kept only while every enclosing block is enabled. Each
+/// directive line, and each line of a disabled block, becomes an empty line,
+/// so the output has exactly the source's line count. An `//#endif` with no
+/// open block is ignored and an unclosed block runs to the end of the source;
+/// neither occurs in the shipped shaders, which the tests below pin.
+#[must_use]
+pub fn specialise(source: &str, enabled: &[&str]) -> String {
+    let mut out = String::with_capacity(source.len());
+    // Whether each open block is live, innermost last; a line is kept only
+    // when every entry is.
+    let mut open: Vec<bool> = Vec::new();
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim();
+        let newline = if line.ends_with('\n') { "\n" } else { "" };
+        if let Some(feature) = trimmed.strip_prefix(DIRECTIVE_IF) {
+            let feature = feature.trim();
+            open.push(enabled.contains(&feature));
+            out.push_str(newline);
+        } else if trimmed == DIRECTIVE_ENDIF {
+            open.pop();
+            out.push_str(newline);
+        } else if open.iter().all(|live| *live) {
+            out.push_str(line);
+        } else {
+            out.push_str(newline);
+        }
+    }
+    out
+}
+
 /// The name [`CLEAR`] is registered under in the shader library.
 pub const CLEAR_NAME: &str = "frust-engine clear";
 
@@ -110,6 +240,9 @@ pub const FILTER_NAME: &str = "frust-engine filter";
 /// Every module the engine compiles, as `(name, source)` pairs — the list
 /// [`crate::gpu::pipelines::EngineShaders::register`] walks, and the list the
 /// validation tests walk.
+///
+/// The strip program's class specialisations are not listed: they are derived
+/// at start-up by [`strip_class_source`] rather than assembled at compile time.
 pub const MODULES: [(&str, &str); 4] = [
     (STRIP_NAME, STRIP),
     (CLEAR_NAME, CLEAR),
@@ -163,6 +296,148 @@ mod tests {
         for (name, src) in MODULES {
             validate(name, src);
         }
+        for class in PaintClass::ALL {
+            validate(strip_class_name(class), &strip_class_source(class));
+        }
+    }
+
+    /// The kill switch's whole promise: the Uber class compiles the shipped
+    /// source, not a reconstruction of it.
+    #[test]
+    fn the_uber_class_is_the_strip_source_byte_for_byte() {
+        assert!(matches!(
+            strip_class_source(PaintClass::Uber),
+            Cow::Borrowed(src) if src == STRIP
+        ));
+        assert_eq!(strip_class_name(PaintClass::Uber), STRIP_NAME);
+    }
+
+    #[test]
+    fn every_directive_names_a_known_feature_and_every_block_closes() {
+        let mut depth = 0_usize;
+        let mut seen = Vec::new();
+        for (number, line) in STRIP.lines().enumerate() {
+            let trimmed = line.trim();
+            if let Some(feature) = trimmed.strip_prefix(DIRECTIVE_IF) {
+                assert!(
+                    STRIP_FEATURES.contains(&feature.trim()),
+                    "line {number} names an unknown feature `{feature}`"
+                );
+                seen.push(feature.trim().to_string());
+                depth += 1;
+            } else if trimmed == DIRECTIVE_ENDIF {
+                assert!(
+                    depth > 0,
+                    "line {number} closes a block that was never opened"
+                );
+                depth -= 1;
+            } else {
+                assert!(
+                    !trimmed.starts_with("//#"),
+                    "line {number} looks like a directive but is not one: `{trimmed}`"
+                );
+            }
+        }
+        assert_eq!(
+            depth, 0,
+            "a feature block is left open at the end of the source"
+        );
+        for feature in STRIP_FEATURES {
+            assert!(
+                seen.iter().any(|f| f == feature),
+                "feature {feature} gates nothing — a class enabling it would equal one that does not"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pre_pass_keeps_line_numbers_and_only_drops_disabled_blocks() {
+        let src = "a\n//#if X\nb\n//#if Y\nc\n//#endif\n//#endif\nd";
+        assert_eq!(specialise(src, &["X", "Y"]), "a\n\nb\n\nc\n\n\nd");
+        assert_eq!(specialise(src, &["X"]), "a\n\nb\n\n\n\n\nd");
+        assert_eq!(specialise(src, &["Y"]), "a\n\n\n\n\n\n\nd");
+        assert_eq!(specialise(src, &[]), "a\n\n\n\n\n\n\nd");
+        for class in PaintClass::SPECIALISED {
+            assert_eq!(
+                strip_class_source(class).lines().count(),
+                STRIP.lines().count(),
+                "{} must keep the source's line numbering",
+                class.label()
+            );
+        }
+    }
+
+    /// Every class keeps exactly its own colour-source branches: the fragment
+    /// entry point of each specialisation names only the paint types the
+    /// class owns, and the solid paint and both coverage paths in all of them.
+    #[test]
+    fn each_class_keeps_only_its_own_branches() {
+        let branch = |src: &str, needle: &str| src.contains(needle);
+        let image = "paint_type == PAINT_TYPE_IMAGE {";
+        let bicubic = "sample_color = bicubic_sample(";
+        let external = "sample_color = sample_external_image(";
+        let bilinear = "sample_color = bilinear_sample(";
+        let linear = "paint_type == PAINT_TYPE_LINEAR_GRADIENT {";
+        let radial = "paint_type == PAINT_TYPE_RADIAL_GRADIENT {";
+        let sweep = "paint_type == PAINT_TYPE_SWEEP_GRADIENT {";
+        let blurred = "paint_type == PAINT_TYPE_BLURRED_ROUNDED_RECT {";
+        let layer = "} else if color_source == COLOR_SOURCE_LAYER {\n        let layer_opacity";
+        for class in PaintClass::ALL {
+            let src = strip_class_source(class);
+            let fs = &src[src.find("fn fs_main(").expect("a fragment entry point")..];
+            let keeps = |feature: &str| class_features(class).contains(&feature);
+            assert!(
+                branch(fs, "paint_type == PAINT_TYPE_SOLID {"),
+                "{}",
+                class.label()
+            );
+            assert!(
+                branch(fs, "if is_rect && rect_frac != 0u {"),
+                "{}",
+                class.label()
+            );
+            assert_eq!(branch(fs, image), keeps("IMAGE"), "{}", class.label());
+            assert_eq!(branch(fs, bilinear), keeps("IMAGE"), "{}", class.label());
+            for filtered in [bicubic, external] {
+                assert_eq!(
+                    branch(fs, filtered),
+                    keeps("IMAGE_FILTERED"),
+                    "{}",
+                    class.label()
+                );
+            }
+            for gradient in [linear, radial, sweep] {
+                assert_eq!(branch(fs, gradient), keeps("GRADIENT"), "{}", class.label());
+            }
+            assert_eq!(
+                branch(fs, blurred),
+                keeps("BLURRED_RECT"),
+                "{}",
+                class.label()
+            );
+            assert_eq!(branch(&src, layer), keeps("LAYER"), "{}", class.label());
+        }
+    }
+
+    /// candB: the strip program addresses its alpha and LUT textures by the
+    /// `Config` shifts alone — no per-fragment `textureDimensions` query and no
+    /// integer `%`/`/` against a queried width (see `gpu::config`'s guard).
+    #[test]
+    fn the_strip_program_addresses_its_resource_textures_by_config_shifts() {
+        assert!(!STRIP.contains("textureDimensions("));
+        assert!(STRIP.contains("(1u << config.alphas_tex_width_bits) - 1u"));
+        assert_eq!(
+            STRIP
+                .matches(
+                    "get_gradient_texture_width(gradient_texel0),\n                \
+                     config.encoded_paints_tex_width_bits\n"
+                )
+                .count(),
+            3,
+            "each gradient kind passes the LUT width shift"
+        );
+        assert!(HELPERS.contains("flat_coord & ((1u << lut_width_bits) - 1u)"));
+        assert!(HELPERS.contains("flat_coord >> lut_width_bits"));
     }
 
     #[test]

@@ -33,9 +33,10 @@
 
 use frust_scene::{CornerRadii, DashPattern, Scene, SceneBuilder, ShaderProgram};
 use frust_text::{FontFamily, TextStyle};
-use kurbo::{BezPath, Point, Rect};
+use kurbo::{BezPath, Point, Rect, Shape};
+use peniko::color::DynamicColor;
 use peniko::color::palette::css::{BLACK, BLUE, GREEN, RED, WHITE, YELLOW};
-use peniko::{Blob, Brush, Color, ImageAlphaType, ImageData, ImageFormat};
+use peniko::{Blob, Brush, Color, ColorStop, Gradient, ImageAlphaType, ImageData, ImageFormat};
 
 use super::{CorpusCase, Expect, Probe};
 use crate::case::{BackendSet, CaseSpec, Tolerance};
@@ -1173,6 +1174,197 @@ fn snapshot_balance() -> CorpusCase {
     }
 }
 
+/// The paint-class cases: frames that put every strip paint class the engine
+/// specialises its fragment program by — solid coverage, gradient, image,
+/// blurred rectangle, layer composite — into ONE frame, in interleaved
+/// painter order.
+///
+/// `frust-engine` draws each pass in runs of one class through that class's
+/// own program, falling back to the whole (Uber) program for a run shorter than
+/// its threshold. A per-class program that rendered any paint differently from
+/// the whole one would show here, against the same `vello_cpu` reference every
+/// unit case is held to: these frames are built so the classes alternate, a
+/// run below the threshold sits between two long ones, and a layer composites
+/// over a gradient.
+///
+/// Kept as a list of their own rather than in [`unit_cases`] until their
+/// reviewed `cpu/` baselines are committed and the engine golden gate names
+/// them; until then `tests::the_paint_class_cases_hold_cpu_oracle_parity` holds
+/// them to the CPU oracle directly, at each case's own tolerance.
+#[must_use]
+pub fn paint_class_cases() -> Vec<CorpusCase> {
+    vec![
+        paint_class_mix(),
+        paint_class_short_run(),
+        paint_class_layer_over_gradient(),
+    ]
+}
+
+/// A two-stop gradient brush over `gradient`, from `a` to `b`.
+fn two_stops(gradient: Gradient, a: Color, b: Color) -> Brush {
+    Brush::Gradient(gradient.with_stops([
+        ColorStop {
+            offset: 0.0,
+            color: DynamicColor::from_alpha_color(a),
+        },
+        ColorStop {
+            offset: 1.0,
+            color: DynamicColor::from_alpha_color(b),
+        },
+    ]))
+}
+
+/// Every class in one 64x64 frame, one quadrant each over an opaque
+/// backdrop: a radial-gradient disc, a linear-gradient rounded rect, the
+/// magnified checkerboard image, and a blurred rounded rect — then a solid
+/// stroke crossing all four, so solid instances interleave with every other
+/// class in painter order.
+fn paint_class_mix() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        black_backdrop(&mut builder);
+        builder.fill_path(
+            kurbo::Circle::new((16.0, 16.0), 13.0).to_path(0.1),
+            two_stops(
+                Gradient::new_radial((14.0, 14.0), 13.0),
+                Color::from_rgb8(255, 220, 0),
+                Color::from_rgb8(200, 0, 60),
+            ),
+        );
+        builder.fill_rounded_rect(
+            Rect::new(36.0, 4.0, 60.0, 28.0),
+            5.0,
+            two_stops(
+                Gradient::new_linear((36.0, 4.0), (60.0, 28.0)),
+                Color::from_rgb8(0, 200, 255),
+                Color::from_rgb8(120, 0, 255),
+            ),
+        );
+        builder.draw_image(&checkerboard(), Rect::new(4.0, 36.0, 28.0, 60.0));
+        builder.draw_blurred_rounded_rect(Rect::new(38.0, 38.0, 58.0, 58.0), 4.0, 2.0, WHITE);
+        builder.stroke_line(
+            Point::new(2.0, 32.5),
+            Point::new(62.0, 32.5),
+            3.0,
+            Brush::Solid(GREEN),
+        );
+        builder.stroke_line(
+            Point::new(32.5, 2.0),
+            Point::new(32.5, 62.0),
+            3.0,
+            Brush::Solid(GREEN),
+        );
+    }
+    CorpusCase {
+        spec: case("unit-paint-class-mix"),
+        record,
+        probes: &[
+            Probe {
+                x: 32,
+                y: 10,
+                expect: Expect::Exact([0, 128, 0, 255]),
+                why: "the solid stroke is drawn over the gradient quadrants' gap in painter order",
+            },
+            Probe {
+                x: 6,
+                y: 38,
+                expect: Expect::AtLeast {
+                    channel: 3,
+                    min: 255,
+                },
+                why: "the opaque image keeps its quadrant opaque",
+            },
+        ],
+        eroded_interior: false,
+        about: "radial + linear gradients, an image, a blurred rect and solid strokes interleaved",
+    }
+}
+
+/// A run below the engine's split threshold between two long ones: a tall
+/// sweep-gradient band, a handful of tiny solid and image marks, then a tall
+/// linear-gradient band — the short middle run is drawn with the whole
+/// program, the bands with the gradient program.
+fn paint_class_short_run() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        builder.fill_rect(
+            Rect::new(2.5, 2.5, 30.5, 61.5),
+            two_stops(
+                Gradient::new_sweep((16.0, 32.0), 0.0, std::f32::consts::TAU),
+                Color::from_rgb8(255, 0, 0),
+                Color::from_rgba8(0, 0, 255, 160),
+            ),
+        );
+        builder.fill_rect(Rect::new(31.0, 10.0, 33.0, 12.0), Brush::Solid(WHITE));
+        builder.draw_image(&checkerboard(), Rect::new(30.0, 20.0, 34.0, 24.0));
+        builder.draw_blurred_rounded_rect(Rect::new(30.0, 40.0, 34.0, 44.0), 1.0, 0.5, YELLOW);
+        builder.fill_rect(
+            Rect::new(33.5, 2.5, 61.5, 61.5),
+            two_stops(
+                Gradient::new_linear((33.0, 2.0), (61.0, 61.0)),
+                Color::from_rgba8(0, 255, 0, 200),
+                Color::from_rgb8(255, 0, 255),
+            ),
+        );
+    }
+    CorpusCase {
+        spec: case("unit-paint-class-short-run"),
+        record,
+        probes: &[Probe {
+            x: 1,
+            y: 1,
+            expect: Expect::Exact([0, 0, 0, 0]),
+            why: "nothing is drawn outside the two bands",
+        }],
+        eroded_interior: false,
+        about: "two long gradient runs around a short mixed run below the split threshold",
+    }
+}
+
+/// A translucent layer composited over a gradient: the page round holds a
+/// solid, a radial gradient and the image, and its composite quad — the layer
+/// class — reads the page back over a linear-gradient backdrop.
+fn paint_class_layer_over_gradient() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut builder = SceneBuilder::new(scene);
+        builder.fill_rect(
+            Rect::new(0.0, 0.0, EDGE, EDGE),
+            two_stops(
+                Gradient::new_linear((0.0, 0.0), (EDGE, EDGE)),
+                Color::from_rgb8(20, 200, 120),
+                Color::from_rgb8(200, 20, 120),
+            ),
+        );
+        builder.push_layer(Rect::new(8.0, 8.0, 56.0, 56.0), 0.5);
+        builder.fill_rect(Rect::new(8.0, 8.0, 56.0, 32.0), Brush::Solid(WHITE));
+        builder.fill_path(
+            kurbo::Circle::new((32.0, 36.0), 16.0).to_path(0.1),
+            two_stops(
+                Gradient::new_radial((32.0, 36.0), 16.0),
+                Color::from_rgb8(0, 0, 255),
+                Color::from_rgb8(255, 255, 0),
+            ),
+        );
+        builder.draw_image(&checkerboard(), Rect::new(40.0, 40.0, 56.0, 56.0));
+        builder.pop_layer();
+    }
+    CorpusCase {
+        spec: case("unit-paint-class-layer-over-gradient"),
+        record,
+        probes: &[Probe {
+            x: 2,
+            y: 2,
+            expect: Expect::AtLeast {
+                channel: 3,
+                min: 255,
+            },
+            why: "the opaque gradient backdrop covers the frame outside the layer",
+        }],
+        eroded_interior: false,
+        about: "a half-opacity layer of solid, gradient and image composited over a gradient",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1330,6 +1522,103 @@ mod tests {
                     tolerance: 3,
                 }
         }));
+    }
+
+    #[test]
+    fn the_paint_class_cases_are_unit_shaped_and_outside_the_baselined_corpus() {
+        let baselined: BTreeSet<&str> = unit_cases().iter().map(|case| case.spec.name).collect();
+        let cases = paint_class_cases();
+        let names: BTreeSet<&str> = cases.iter().map(|case| case.spec.name).collect();
+        assert_eq!(names.len(), cases.len());
+        for case in &cases {
+            assert!(case.spec.name.starts_with("unit-paint-class-"));
+            assert!(!baselined.contains(case.spec.name));
+            assert!(!case.about.is_empty());
+            assert!(!case.scene().commands().is_empty());
+            assert_eq!((case.spec.width, case.spec.height), (SIZE, SIZE));
+            assert!(
+                case.spec.skip.is_empty(),
+                "both oracles draw every paint class"
+            );
+        }
+        // Together they draw every class the engine specialises by: solid,
+        // gradient, image, blurred rect, and a layer composite.
+        let mut seen = BTreeSet::new();
+        for case in &cases {
+            for command in case.scene().commands() {
+                seen.insert(variant_name(command));
+            }
+        }
+        for needed in [
+            "FillRect",
+            "Path",
+            "Image",
+            "BlurredRoundedRect",
+            "PushLayer",
+        ] {
+            assert!(
+                seen.contains(needed),
+                "no paint-class case records {needed}"
+            );
+        }
+    }
+
+    /// The paint-class cases against the CPU oracle, at each case's own
+    /// tolerance, plus their probes — the parity the engine's per-class
+    /// programs are held to. GPU-gated; the pinned-runner recipe is
+    /// `engine_goldens`'.
+    #[test]
+    #[ignore = "requires a GPU; run with `cargo test -p frust-testing --lib -- --ignored`"]
+    fn the_paint_class_cases_hold_cpu_oracle_parity() {
+        use crate::corpus::straighten_alpha;
+        use crate::diff::diff_images;
+        use crate::oracle_cpu::CpuOracle;
+        use crate::oracle_engine::{EngineOracle, EngineOracleOptions};
+        use crate::render::{RenderedImage, SceneRenderer};
+        use image::RgbaImage;
+
+        fn rgba(image: &RenderedImage) -> RgbaImage {
+            RgbaImage::from_raw(image.width, image.height, image.rgba8.clone())
+                .expect("a rendered frame is width*height*4 bytes")
+        }
+
+        let mut engine =
+            EngineOracle::new(&EngineOracleOptions::default()).expect("an engine oracle");
+        let mut cpu = CpuOracle::new();
+        let mut failures = Vec::new();
+        for case in paint_class_cases() {
+            let name = case.spec.name;
+            let scene = case.scene();
+            let spec = case.render_spec();
+            let gpu = engine
+                .render(&scene, &spec)
+                .expect("the engine renders the case");
+            let reference = cpu
+                .render(&scene, &spec)
+                .expect("the CPU oracle renders the case");
+            let outcome = diff_images(
+                &rgba(&reference),
+                &rgba(&gpu),
+                case.spec.tolerance,
+                case.eroded_interior,
+            );
+            println!(
+                "paint-class parity: [{name}] {} px differ, max |delta| {:?}",
+                outcome.report.pixel_count, outcome.report.max_difference
+            );
+            if !outcome.passed {
+                failures.push(format!(
+                    "[{name}] engine vs cpu beyond {:?}: {} px, max {:?}",
+                    case.spec.tolerance, outcome.report.pixel_count, outcome.report.max_difference
+                ));
+            }
+            for (arm, image) in [("engine", &gpu), ("cpu", &reference)] {
+                for message in case.failed_probes(&straighten_alpha(image)) {
+                    failures.push(format!("[{name}] {arm} probe: {message}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

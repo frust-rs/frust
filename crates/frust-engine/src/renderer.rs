@@ -116,8 +116,9 @@
 //!
 //! # Compositing a layer
 //!
-//! A finished page reaches its parent as ONE instanced quad through the same
-//! strip program every draw goes through, flagged as a whole rectangle and
+//! A finished page reaches its parent as ONE instanced quad through the strip
+//! program every draw goes through (its [`PaintClass::LayerComposite`]
+//! specialisation — see *Paint-class runs*), flagged as a whole rectangle and
 //! naming the layer colour source: the fragment stage then reads the page
 //! bound as `layer_input_texture` at the quad's own texel and scales it by the
 //! opacity packed into the instance's low byte. The page is bound through a
@@ -130,6 +131,26 @@
 //! translucent layer correctly ordered against the root round's own draws
 //! without giving the scheduler a depth model: every draw recorded before the
 //! layer sits behind that index and every draw recorded after it sits in front.
+//!
+//! # Paint-class runs
+//!
+//! Every strip pass is drawn in **runs**, each through the pipeline of one
+//! [`PaintClass`] — the strip program specialised to the paints the run holds
+//! (see [`crate::gpu::pipelines`]'s *The paint-class axis*). The runs are cut
+//! when a segment is planned (`Scratch::push_run`, by
+//! [`merge_class_runs`]): contiguous, in painter order, covering the segment
+//! exactly, so a pass draws the same instances in the same order it always did
+//! and only the program shading each run changes. A run shorter than the
+//! renderer's threshold ([`EngineRenderer::run_split_min`],
+//! [`crate::gpu::strips::RUN_SPLIT_MIN`] by default) is merged and drawn with
+//! [`PaintClass::Uber`] rather than paying a pipeline switch of its own; a
+//! composite always takes [`PaintClass::LayerComposite`], the opaque pass its
+//! own runs, and a punch [`PaintClass::SolidCoverage`]. A pass sets a pipeline
+//! only where the class changes between runs.
+//!
+//! `FRUST_ENGINE_UBER_PROGRAM` ([`EngineRenderer::set_uber_program`]) turns all
+//! of it off: no segment is split, every pass draws through its state's one
+//! Uber pipeline, and no class program is warmed or built.
 //!
 //! # Paint resolution
 //!
@@ -206,10 +227,13 @@ use crate::gpu::atlas::{
     AtlasPageBuffers, AtlasRenderReport, AtlasRenderer, lower_encoded_image, push_solid_strips,
 };
 use crate::gpu::bindings::{ExternalRuns, ExternalTextures, lower_encoded_external};
+use crate::gpu::config::resource_widths_agree;
 use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
-use crate::gpu::pipelines::{EnginePipeline, EngineShaders, atlas_strip_desc, warm_up_descs};
-use crate::gpu::strips::{PaintType, pack_paint_descriptor};
+use crate::gpu::pipelines::{EnginePipeline, EngineShaders, atlas_strip_desc, warm_up_descs_for};
+use crate::gpu::strips::{
+    ClassRun, ClassSet, PaintClass, PaintType, merge_class_runs, pack_paint_descriptor,
+};
 use crate::gpu::targets::{
     IntermediateTargets, IntermediateTexture, filter_data_texture_descriptor,
     filter_data_texture_height, filter_sampler,
@@ -729,6 +753,14 @@ pub struct EngineRenderer {
     textures: ExternalTextures,
     resources: FrameResources,
     scratch: Scratch,
+    /// How each pass's instances are split into paint-class runs — the kill
+    /// switch and the run threshold, settled at construction from
+    /// [`crate::config`] and overridable per renderer.
+    routing: ClassRouting,
+    /// The strip pipelines resolved so far, by state and class, so a frame
+    /// takes each one it draws with by a two-enum lookup rather than by
+    /// rebuilding and re-keying its description through the cache.
+    resolved: ResolvedPipelines,
     /// The render-to-atlas pass, created by the first frame that caches a
     /// glyph.
     ///
@@ -789,10 +821,11 @@ impl EngineRenderer {
             return Err(EngineError::AtlasError);
         }
 
+        let routing = ClassRouting::from_config();
         let mut library = ShaderLibrary::new();
         let shaders = EngineShaders::register(&mut library, device);
         let mut pipelines = PipelineCache::new(Arc::new(library), pipeline_cache.cloned());
-        pipelines.warm_up(device, &warm_up_descs(&shaders, format));
+        pipelines.warm_up(device, &warm_up_descs_for(&shaders, format, routing.uber));
 
         let level = Level::try_detect().unwrap_or(Level::baseline());
         let gradients = GradientCache::for_texture(GradientTextureLayout::square(dim), level);
@@ -817,6 +850,8 @@ impl EngineRenderer {
             textures: ExternalTextures::new(),
             resources: FrameResources::new(device, dim),
             scratch: Scratch::default(),
+            routing,
+            resolved: ResolvedPipelines::default(),
             atlas_glyphs: None,
             atlas_lowering: None,
             atlas_report: AtlasRenderReport::default(),
@@ -913,12 +948,47 @@ impl EngineRenderer {
     /// Each variant is requested through the cache, which builds a queued one
     /// inline and waits for one the worker has already started, so nothing is
     /// compiled twice and nothing is left for the worker to claim afterwards.
+    ///
+    /// "Every" is the warm-up list: the nine Uber states, plus — unless the
+    /// Uber program is forced — the warmed paint classes. A class variant
+    /// outside that list is created on the first frame that draws a run of it.
     pub fn finish_warm_up(&mut self, device: &wgpu::Device) {
-        for pipeline in EnginePipeline::ALL {
-            let _ = self
-                .pipelines
-                .get_or_create(device, &pipeline.desc(&self.shaders, self.format));
+        for desc in warm_up_descs_for(&self.shaders, self.format, self.routing.uber) {
+            let _ = self.pipelines.get_or_create(device, &desc);
         }
+    }
+
+    /// Forces every strip run through the whole (Uber) strip program, or
+    /// lets passes split into paint-class runs again — the programmatic
+    /// counterpart of `FRUST_ENGINE_UBER_PROGRAM`, which only sets the value a
+    /// renderer starts with.
+    ///
+    /// Takes effect from the next frame. With it set a frame draws exactly
+    /// what it drew before paint classes existed — one pipeline per pass, the
+    /// shipped `strip.wgsl` unchanged — which is what a caller comparing the
+    /// two needs without a process-global environment variable.
+    pub fn set_uber_program(&mut self, uber: bool) {
+        self.routing.uber = uber;
+    }
+
+    /// Whether every strip run is drawn with the Uber program.
+    #[must_use]
+    pub fn uber_program(&self) -> bool {
+        self.routing.uber
+    }
+
+    /// Sets the shortest paint-class run worth a pipeline switch of its own
+    /// (see [`merge_class_runs`]); shorter runs are merged and drawn with the
+    /// Uber program. `FRUST_ENGINE_RUN_SPLIT_MIN` only sets the value a
+    /// renderer starts with.
+    pub fn set_run_split_min(&mut self, min_run: u32) {
+        self.routing.min_run = min_run;
+    }
+
+    /// The run threshold this renderer splits passes at.
+    #[must_use]
+    pub fn run_split_min(&self) -> u32 {
+        self.routing.min_run
     }
 
     /// How many render pipelines this renderer has compiled so far.
@@ -1197,6 +1267,7 @@ impl EngineRenderer {
         self.resources
             .resolve_paints(&frame, &mut self.gradients, atlas_budget, &self.textures);
         let paints_span = clock.lap();
+        self.scratch.routing = self.routing;
         self.scratch.build(
             &frame,
             &rounds,
@@ -1521,8 +1592,11 @@ impl EngineRenderer {
     ///
     /// All of it happens before the first `begin_render_pass`: a pipeline
     /// compiled mid-recording would be the very stall the warm-up exists to
-    /// avoid, and a bind group is only valid against the pipeline that derived
-    /// its layout.
+    /// avoid. Each pass resolves exactly the paint classes its runs name
+    /// ([`Scratch`]'s class sets), folded to what its state serves; the bind
+    /// groups are built once per state, against any one of its class
+    /// pipelines — every strip pipeline shares one explicit layout, so a group
+    /// built against one binds under all of them.
     fn frame_pipelines(
         &mut self,
         device: &wgpu::Device,
@@ -1539,13 +1613,27 @@ impl EngineRenderer {
         } else {
             EnginePipeline::StripDestOut
         };
+        let uber = ClassSet::only(PaintClass::Uber);
+        if self.resolved.format != Some(format) {
+            self.resolved = ResolvedPipelines {
+                format: Some(format),
+                ..ResolvedPipelines::default()
+            };
+        }
 
+        // The surface's own pass is unconditional — it is what the frame's
+        // bind groups are built against even when it draws nothing — so a frame
+        // with no surface run still resolves one pipeline for it: the Uber one,
+        // which the warm-up already built.
+        let surface_classes = if self.scratch.surface_classes.is_empty() {
+            uber
+        } else {
+            self.scratch.surface_classes
+        };
         let mut frame = FramePipelines {
             alpha: (
                 alpha_variant,
-                self.pipelines
-                    .get_or_create(device, &alpha_variant.desc(&self.shaders, format))
-                    .clone(),
+                self.class_pipelines(device, format, alpha_variant, surface_classes),
             ),
             opaque: None,
             page: None,
@@ -1553,31 +1641,35 @@ impl EngineRenderer {
             filter: None,
         };
         if depth && !self.scratch.opaque.is_empty() {
-            frame.opaque = Some(
-                self.pipelines
-                    .get_or_create(
-                        device,
-                        &EnginePipeline::StripOpaque.desc(&self.shaders, format),
-                    )
-                    .clone(),
-            );
+            frame.opaque = Some(self.class_pipelines(
+                device,
+                format,
+                EnginePipeline::StripOpaque,
+                self.scratch.opaque_classes,
+            ));
         }
         if self.scratch.page_rounds() > 0 {
-            frame.page = Some(
-                self.pipelines
-                    .get_or_create(
-                        device,
-                        &EnginePipeline::StripIntermediate.desc(&self.shaders, format),
-                    )
-                    .clone(),
-            );
+            let page_classes = if self.scratch.page_classes.is_empty() {
+                uber
+            } else {
+                self.scratch.page_classes
+            };
+            frame.page = Some(self.class_pipelines(
+                device,
+                format,
+                EnginePipeline::StripIntermediate,
+                page_classes,
+            ));
         }
         if self.scratch.punches() {
             frame.punch = Some((
                 punch_variant,
-                self.pipelines
-                    .get_or_create(device, &punch_variant.desc(&self.shaders, format))
-                    .clone(),
+                self.class_pipelines(
+                    device,
+                    format,
+                    punch_variant,
+                    ClassSet::only(self.routing.punch_class()),
+                ),
             ));
         }
         if self.scratch.filter_passes > 0 {
@@ -1593,15 +1685,13 @@ impl EngineRenderer {
             );
         }
 
-        self.resources
-            .ensure_bind_groups(device, frame.alpha.0, &frame.alpha.1, format);
-        self.resources.ensure_external_groups(
-            device,
-            frame.alpha.0,
-            &frame.alpha.1,
-            &self.textures,
-        );
-        if let Some(pipeline) = frame.opaque.as_ref() {
+        if let Some(pipeline) = frame.alpha.1.any() {
+            self.resources
+                .ensure_bind_groups(device, frame.alpha.0, pipeline, format);
+            self.resources
+                .ensure_external_groups(device, frame.alpha.0, pipeline, &self.textures);
+        }
+        if let Some(pipeline) = frame.opaque.as_ref().and_then(ClassPipelines::any) {
             self.resources.ensure_bind_groups(
                 device,
                 EnginePipeline::StripOpaque,
@@ -1609,7 +1699,7 @@ impl EngineRenderer {
                 format,
             );
         }
-        if let Some(pipeline) = frame.page.as_ref() {
+        if let Some(pipeline) = frame.page.as_ref().and_then(ClassPipelines::any) {
             self.resources.ensure_bind_groups(
                 device,
                 EnginePipeline::StripIntermediate,
@@ -1625,7 +1715,9 @@ impl EngineRenderer {
                 &self.textures,
             );
         }
-        if let Some((variant, pipeline)) = frame.punch.as_ref() {
+        if let Some((variant, pipelines)) = frame.punch.as_ref()
+            && let Some(pipeline) = pipelines.any()
+        {
             self.resources
                 .ensure_bind_groups(device, *variant, pipeline, format);
         }
@@ -1633,6 +1725,42 @@ impl EngineRenderer {
             .ensure_page_configs(device, self.scratch.page_rounds());
 
         frame
+    }
+
+    /// The pipelines `state` draws `classes` with — each class folded to what
+    /// the state serves — resolved through this renderer's memo first and the
+    /// pipeline cache (warm-up, steal, or an inline compile on a class's first
+    /// use) only on a miss.
+    fn class_pipelines(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        state: EnginePipeline,
+        classes: ClassSet,
+    ) -> ClassPipelines {
+        let mut out = ClassPipelines::default();
+        for class in classes.iter() {
+            let class = state.fold_class(class);
+            if out.get(class).is_some() {
+                continue;
+            }
+            let slot = ResolvedPipelines::slot(state, class);
+            let pipeline = match self.resolved.entries.get(slot).and_then(Option::as_ref) {
+                Some(pipeline) => pipeline.clone(),
+                None => {
+                    let pipeline = self
+                        .pipelines
+                        .get_or_create(device, &state.class_desc(&self.shaders, format, class))
+                        .clone();
+                    if let Some(entry) = self.resolved.entries.get_mut(slot) {
+                        *entry = Some(pipeline.clone());
+                    }
+                    pipeline
+                }
+            };
+            out.set(class, pipeline);
+        }
+        out
     }
 
     /// Records the clear pass, every round's own pass, and the hole punch.
@@ -1718,7 +1846,8 @@ impl EngineRenderer {
                     view: target.view,
                     load: wgpu::LoadOp::Load,
                     depth: depth_view,
-                    pipeline: opaque,
+                    state: EnginePipeline::StripOpaque,
+                    pipelines: opaque,
                     groups: opaque_groups,
                     resources: &opaque_groups.resources,
                     composites: &[],
@@ -1727,7 +1856,10 @@ impl EngineRenderer {
                     external_keys: &[],
                     instances,
                     base: 0,
-                    segments: &[Segment::Strips(0, opaque_count)],
+                    // The whole opaque region, `(0, opaque_count)`, cut into
+                    // its own class runs when the frame was planned.
+                    segments: &self.scratch.opaque_segments,
+                    composite_class: self.routing.composite_class(),
                     timestamps: timestamps.writes(EngineSpan::Main),
                 },
             );
@@ -1736,11 +1868,13 @@ impl EngineRenderer {
         // The destination-out pass's own recording state, resolved once for the
         // frame: a punch can now land at any of the walk's cuts, and every one
         // of them erases the same target through the same pipeline.
-        let punch_pass = pipelines.punch.as_ref().and_then(|(variant, pipeline)| {
+        let punch_pass = pipelines.punch.as_ref().and_then(|(variant, punch)| {
             Some(PunchPass {
                 view: target.view,
                 depth: depth_view,
-                pipeline,
+                state: *variant,
+                pipelines: punch,
+                class: self.routing.punch_class(),
                 groups: self.resources.bind_groups.get(variant)?,
                 instances,
                 base,
@@ -1863,10 +1997,15 @@ impl EngineRenderer {
                 None => pipelines.alpha.0,
                 Some(_) => EnginePipeline::StripIntermediate,
             };
-            let pipeline = match (&own, pipelines.page.as_ref()) {
+            let class_pipelines = match (&own, pipelines.page.as_ref()) {
                 (None, _) => &pipelines.alpha.1,
                 (Some(_), Some(page)) => page,
                 (Some(_), None) => continue,
+            };
+            // The pipeline group 0 is built against: any of the pass's class
+            // pipelines will do, since every strip pipeline shares one layout.
+            let Some(pipeline) = class_pipelines.any() else {
+                continue;
             };
             let Some(groups) = self.resources.bind_groups.get(&variant) else {
                 continue;
@@ -1955,7 +2094,8 @@ impl EngineRenderer {
                         view,
                         load,
                         depth,
-                        pipeline,
+                        state: variant,
+                        pipelines: class_pipelines,
                         groups,
                         resources,
                         composites: &composites,
@@ -1963,6 +2103,7 @@ impl EngineRenderer {
                         instances,
                         base,
                         segments,
+                        composite_class: self.routing.composite_class(),
                         timestamps: timestamps.writes(span),
                     },
                 );
@@ -2004,16 +2145,128 @@ impl EngineRenderer {
 struct FramePipelines {
     /// The blended pass over the frame's own target, with its variant — which
     /// of the two it is depends on whether depth is in play.
-    alpha: (EnginePipeline, wgpu::RenderPipeline),
+    alpha: (EnginePipeline, ClassPipelines),
     /// The depth-writing pass, when depth is available and the frame has
     /// fully covered spans to route into it.
-    opaque: Option<wgpu::RenderPipeline>,
+    opaque: Option<ClassPipelines>,
     /// The pass a layer page is rendered through, when the frame has one.
-    page: Option<wgpu::RenderPipeline>,
+    page: Option<ClassPipelines>,
     /// The destination-out pass, with its variant, when the frame punches.
-    punch: Option<(EnginePipeline, wgpu::RenderPipeline)>,
+    punch: Option<(EnginePipeline, ClassPipelines)>,
     /// The pass one filter round runs through, when the frame filters a layer.
     filter: Option<wgpu::RenderPipeline>,
+}
+
+/// How a renderer cuts its passes into paint-class runs.
+///
+/// Settled from [`crate::config`] when the renderer is built
+/// (`FRUST_ENGINE_UBER_PROGRAM`, `FRUST_ENGINE_RUN_SPLIT_MIN`) and overridable
+/// per renderer, so a caller can compare the two arms in one process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClassRouting {
+    /// The kill switch: every run is drawn with [`PaintClass::Uber`] and no
+    /// segment is split.
+    uber: bool,
+    /// The shortest run worth a pipeline switch of its own.
+    min_run: u32,
+}
+
+impl Default for ClassRouting {
+    fn default() -> Self {
+        Self {
+            uber: false,
+            min_run: crate::gpu::strips::RUN_SPLIT_MIN,
+        }
+    }
+}
+
+impl ClassRouting {
+    /// The routing a renderer starts with, from the process configuration.
+    fn from_config() -> Self {
+        Self {
+            uber: config::uber_program_forced(),
+            min_run: config::run_split_min(),
+        }
+    }
+
+    /// The class a composite quad is drawn with.
+    fn composite_class(self) -> PaintClass {
+        if self.uber {
+            PaintClass::Uber
+        } else {
+            PaintClass::LayerComposite
+        }
+    }
+
+    /// The class a hole punch is drawn with.
+    fn punch_class(self) -> PaintClass {
+        if self.uber {
+            PaintClass::Uber
+        } else {
+            PaintClass::SolidCoverage
+        }
+    }
+}
+
+/// One strip state's pipelines, by paint class — the ones a pass resolved for
+/// the classes its runs name.
+#[derive(Debug, Default)]
+struct ClassPipelines {
+    by_class: [Option<wgpu::RenderPipeline>; PaintClass::ALL.len()],
+}
+
+impl ClassPipelines {
+    /// The pipeline drawing `class`, if the frame resolved one.
+    fn get(&self, class: PaintClass) -> Option<&wgpu::RenderPipeline> {
+        self.by_class.get(class.index()).and_then(Option::as_ref)
+    }
+
+    fn set(&mut self, class: PaintClass, pipeline: wgpu::RenderPipeline) {
+        if let Some(slot) = self.by_class.get_mut(class.index()) {
+            *slot = Some(pipeline);
+        }
+    }
+
+    /// Any one of the pipelines — what a bind group is built against, every
+    /// strip pipeline sharing one explicit layout.
+    fn any(&self) -> Option<&wgpu::RenderPipeline> {
+        self.by_class.iter().flatten().next()
+    }
+}
+
+/// The strip pipelines a renderer has resolved so far, by `(state, class)`,
+/// for the target format they were built against.
+///
+/// A memo in front of the pipeline cache: a steady-state frame takes every
+/// pipeline it draws with from here, by indexing a dense `state x class` table,
+/// rather than rebuilding each description (a vertex-layout allocation) and
+/// packing its cache key — which keeps the frame's `pipelines` phase from
+/// growing with the number of classes it draws.
+#[derive(Debug)]
+struct ResolvedPipelines {
+    /// The format every entry was built for; a change drops them all.
+    format: Option<wgpu::TextureFormat>,
+    /// Indexed by [`Self::slot`].
+    entries: [Option<wgpu::RenderPipeline>; RESOLVED_SLOTS],
+}
+
+/// One [`ResolvedPipelines`] entry per render state and paint class.
+const RESOLVED_SLOTS: usize = EnginePipeline::ALL.len() * PaintClass::ALL.len();
+
+impl Default for ResolvedPipelines {
+    fn default() -> Self {
+        Self {
+            format: None,
+            entries: [const { None }; RESOLVED_SLOTS],
+        }
+    }
+}
+
+impl ResolvedPipelines {
+    /// The table slot of `state` drawing `class`.
+    const fn slot(state: EnginePipeline, class: PaintClass) -> usize {
+        state.index() * PaintClass::ALL.len() + class.index()
+    }
 }
 
 /// One pass's full recording state, assembled before the pass is begun.
@@ -2026,7 +2279,12 @@ struct PassPlan<'a> {
     view: &'a wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
     depth: Option<&'a wgpu::TextureView>,
-    pipeline: &'a wgpu::RenderPipeline,
+    /// The render state the pass draws with, which folds each run's class to
+    /// one it serves.
+    state: EnginePipeline,
+    /// The state's pipeline per paint class — at least every class the pass's
+    /// segments name, folded.
+    pipelines: &'a ClassPipelines,
     /// The pipeline variant's own groups 1-3.
     groups: &'a StripBindGroups,
     /// Group 0 for the pass's ordinary strip segments.
@@ -2043,6 +2301,9 @@ struct PassPlan<'a> {
     /// The instance index every segment's own index is relative to.
     base: u32,
     segments: &'a [Segment],
+    /// The class a [`Segment::Composite`] is drawn with —
+    /// [`PaintClass::LayerComposite`], or Uber under the kill switch.
+    composite_class: PaintClass,
     /// The query pair this pass's GPU time is stamped into, `None` for an
     /// untimed pass — which is every pass of every frame encoded without a
     /// timestamp sink (see [`crate::diag`]).
@@ -2063,6 +2324,13 @@ struct PassPlan<'a> {
 /// than drawing with whatever group 1 last held: the texture was unbound
 /// between the frame's paint resolution and its recording, and a wrongly
 /// sampled run is worse than a missing one.
+///
+/// Each segment is one paint-class run, and the pipeline is set only where
+/// the class changes from the segment before — so a pass of one class (every
+/// pass under the kill switch) sets its pipeline exactly once, as it always
+/// did. A segment whose class has no resolved pipeline draws nothing, for the
+/// same reason; it cannot occur, since the frame resolves every class its
+/// segments name before recording.
 fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some(plan.label),
@@ -2074,13 +2342,19 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
         occlusion_query_set: None,
         multiview_mask: None,
     });
-    pass.set_pipeline(plan.pipeline);
     pass.set_vertex_buffer(0, plan.instances.slice(..));
 
     let mut composite = 0_usize;
+    let mut bound: Option<PaintClass> = None;
     for segment in plan.segments {
+        // Claimed before the class lookup, so a composite whose pipeline is
+        // missing still consumes its own group and the next one pairs up.
+        let class = plan.state.fold_class(match *segment {
+            Segment::Strips(_, _, class) | Segment::External(_, _, _, class) => class,
+            Segment::Composite(..) => plan.composite_class,
+        });
         let (group, images, range) = match *segment {
-            Segment::Strips(first, count) => {
+            Segment::Strips(first, count, _) => {
                 if count == 0 {
                     continue;
                 }
@@ -2090,7 +2364,7 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
                     GpuStrip::instance_range(plan.base.saturating_add(first), count),
                 )
             }
-            Segment::External(first, count, slot) => {
+            Segment::External(first, count, slot, _) => {
                 if count == 0 {
                     continue;
                 }
@@ -2119,6 +2393,13 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
                 )
             }
         };
+        if bound != Some(class) {
+            let Some(pipeline) = plan.pipelines.get(class) else {
+                continue;
+            };
+            pass.set_pipeline(pipeline);
+            bound = Some(class);
+        }
         plan.groups.bind_with(&mut pass, group, images);
         pass.draw(GpuStrip::vertex_range(), range);
     }
@@ -2137,7 +2418,13 @@ fn record_pass(encoder: &mut wgpu::CommandEncoder, plan: &PassPlan<'_>) {
 struct PunchPass<'a> {
     view: &'a wgpu::TextureView,
     depth: Option<&'a wgpu::TextureView>,
-    pipeline: &'a wgpu::RenderPipeline,
+    /// Which destination-out state the punch draws with.
+    state: EnginePipeline,
+    /// That state's pipelines, holding at least [`Self::class`].
+    pipelines: &'a ClassPipelines,
+    /// The class every punch run is drawn with: the solid program, or Uber
+    /// under the kill switch.
+    class: PaintClass,
     /// The destination-out variant's own groups 1-3.
     groups: &'a StripBindGroups,
     instances: &'a wgpu::Buffer,
@@ -2167,7 +2454,8 @@ impl PunchPass<'_> {
                 view: self.view,
                 load: wgpu::LoadOp::Load,
                 depth: self.depth,
-                pipeline: self.pipeline,
+                state: self.state,
+                pipelines: self.pipelines,
                 groups: self.groups,
                 resources: &self.groups.resources,
                 composites: &[],
@@ -2175,7 +2463,10 @@ impl PunchPass<'_> {
                 external_keys: &[],
                 instances: self.instances,
                 base: self.base,
-                segments: &[Segment::Strips(first, count)],
+                // Every punch instance is the same solid source, so the run
+                // is one class whole — no split to plan.
+                segments: &[Segment::Strips(first, count, self.class)],
+                composite_class: self.class,
                 timestamps,
             },
         );
@@ -2558,17 +2849,21 @@ fn grid_size(width: u32, height: u32) -> Result<(u16, u16), EngineError> {
 /// buffer, which is why [`PassPlan::base`] exists rather than the indices being
 /// absolute: the opaque region is laid out first and its own segment addresses
 /// from zero.
+///
+/// Every strip segment is also one paint-class run: it names the
+/// [`PaintClass`] whose program draws it, and a pass sets that class's
+/// pipeline where the class changes (see the module doc's *Paint-class runs*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Segment {
-    /// Ordinary strip instances, as `(first, count)`, drawn with the frame's
-    /// own atlas binding.
-    Strips(u32, u32),
+    /// Ordinary strip instances, as `(first, count, class)`, drawn with the
+    /// frame's own atlas binding.
+    Strips(u32, u32, PaintClass),
     /// Strip instances sampling an externally bound texture, as
-    /// `(first, count, slot)` — a *run*, in the sense
+    /// `(first, count, slot, class)` — a *run*, in the sense
     /// [`crate::gpu::bindings::ExternalRuns`] gives the word: the maximal span
     /// of consecutive instances that share one texture, drawn with that
     /// texture's own group 1 bound.
-    External(u32, u32, u32),
+    External(u32, u32, u32, PaintClass),
     /// One composite quad at `first`, sampling the finished page in the named
     /// group.
     Composite(u32, PageParity),
@@ -2679,6 +2974,31 @@ struct Scratch {
     /// How many filter passes this frame runs, and so how many instances its
     /// filter instance buffer has to hold.
     filter_passes: u32,
+    /// How segments are cut into paint-class runs this frame — copied in from
+    /// the renderer ahead of [`Self::build`].
+    routing: ClassRouting,
+    /// The opaque region's own segments: `(0, opaque.len())` cut into class
+    /// runs, drawn by the one depth-writing pass.
+    opaque_segments: Vec<Segment>,
+    /// The classes the opaque pass's runs name.
+    opaque_classes: ClassSet,
+    /// The classes the frame's surface rounds name — composites included.
+    surface_classes: ClassSet,
+    /// The classes the frame's page rounds name — composites included.
+    page_classes: ClassSet,
+    /// Whether the round being planned renders into a page, which decides the
+    /// class set [`Self::push_run`] records a run's class in.
+    planning_page: bool,
+    /// Reusable output of [`merge_class_runs`].
+    class_runs: Vec<ClassRun>,
+    /// Where the paint class changes in [`Self::alpha`], as `(first instance,
+    /// class)` in ascending order — one entry per draw whose class differs
+    /// from the draw before it. Every instance of a draw shares its paint, so
+    /// these are the only places a class run can start, and a segment is split
+    /// by walking them instead of re-reading every instance.
+    alpha_marks: Vec<(u32, PaintClass)>,
+    /// The same marks for [`Self::opaque`].
+    opaque_marks: Vec<(u32, PaintClass)>,
 }
 
 impl Scratch {
@@ -2709,6 +3029,12 @@ impl Scratch {
         self.filter_blocks.clear();
         self.filter_layers.clear();
         self.filter_passes = 0;
+        self.opaque_segments.clear();
+        self.alpha_marks.clear();
+        self.opaque_marks.clear();
+        self.opaque_classes = ClassSet::EMPTY;
+        self.surface_classes = ClassSet::EMPTY;
+        self.page_classes = ClassSet::EMPTY;
 
         let draws = frame.draws();
         let strips = frame.strip_buf();
@@ -2728,6 +3054,7 @@ impl Scratch {
             // column and clipped to it (see `PageWindow`).
             let window = page.map_or(PageWindow::ROOT, PageWindow::of);
             let split_opaque = page.is_none() && depth_active;
+            self.planning_page = page.is_some();
             // Only the frame's own target is punched — a punch inside an
             // isolated layer was hoisted out of it — so only a surface round is
             // ever cut.
@@ -2781,6 +3108,11 @@ impl Scratch {
                                 run_external = paint.external;
                             }
                             let to_opaque = paint.opaque && split_opaque;
+                            let class = paint.class;
+                            mark_class(&mut self.alpha_marks, self.alpha.len() as u32, class);
+                            if to_opaque {
+                                mark_class(&mut self.opaque_marks, self.opaque.len() as u32, class);
+                            }
 
                             // A generation's last strip is its sentinel, which
                             // is what carries the preceding strip's extent — so
@@ -2822,6 +3154,7 @@ impl Scratch {
                         deepest = deepest.max(depth);
                         self.segments
                             .push(Segment::Composite(end, composite.parity));
+                        self.note_class(self.routing.composite_class());
                         self.alpha
                             .push(composite_instance(composite, window.origin(), depth));
                         run_start = self.alpha.len() as u32;
@@ -2870,6 +3203,34 @@ impl Scratch {
         // is the ordinary shape of a platform-view slot.
         if !pending.is_empty() {
             self.punch = self.push_punches(pending, strips);
+        }
+
+        // The opaque region is one segment of the one depth-writing pass, cut
+        // into class runs like any other.
+        self.class_runs.clear();
+        merge_class_runs(
+            marked_runs(&self.opaque_marks, 0, self.opaque.len() as u32),
+            self.routing.min_run,
+            self.routing.uber,
+            &mut self.class_runs,
+        );
+        debug_assert!(
+            runs_draw(&self.class_runs, &self.opaque),
+            "the opaque marks disagree with the instances they mark"
+        );
+        for run in &self.class_runs {
+            self.opaque_segments
+                .push(Segment::Strips(run.first, run.count, run.class));
+            self.opaque_classes.insert(run.class);
+        }
+    }
+
+    /// Records that the round being planned draws a run of `class`.
+    fn note_class(&mut self, class: PaintClass) {
+        if self.planning_page {
+            self.page_classes.insert(class);
+        } else {
+            self.surface_classes.insert(class);
         }
     }
 
@@ -2929,21 +3290,43 @@ impl Scratch {
         *run_start = self.alpha.len() as u32;
     }
 
-    /// Records the open run of instances `first..end` as one segment, drawn
-    /// with the texture in `external` bound, or nothing at all when the run is
-    /// empty.
+    /// Records the open run of instances `first..end` as segments drawn with
+    /// the texture in `external` bound — one per paint-class run the span
+    /// splits into — or nothing at all when the run is empty.
     ///
-    /// The one place a strip segment is created, so the run-breaking rule —
-    /// a segment holds instances sharing one group-1 binding — is stated once
-    /// rather than at each of the four points a run can close.
+    /// The one place a strip segment is created, so both run-breaking rules —
+    /// a segment holds instances sharing one group-1 binding, and one paint
+    /// class ([`merge_class_runs`]) — are stated once rather than at each of
+    /// the four points a run can close. The class runs tile the span in order,
+    /// so the segments still draw `first..end` front to back exactly as one
+    /// segment did.
     fn push_run(&mut self, first: u32, end: u32, external: Option<u32>) {
-        let Some(count) = end.checked_sub(first).filter(|count| *count > 0) else {
+        if end.checked_sub(first).filter(|count| *count > 0).is_none() {
+            return;
+        }
+        let Some(span) = self.alpha.get(first as usize..end as usize) else {
             return;
         };
-        self.segments.push(match external {
-            Some(slot) => Segment::External(first, count, slot),
-            None => Segment::Strips(first, count),
-        });
+        self.class_runs.clear();
+        merge_class_runs(
+            marked_runs(&self.alpha_marks, first, end),
+            self.routing.min_run,
+            self.routing.uber,
+            &mut self.class_runs,
+        );
+        debug_assert!(
+            runs_draw(&self.class_runs, span),
+            "the alpha marks disagree with the instances they mark"
+        );
+        for index in 0..self.class_runs.len() {
+            let run = self.class_runs[index];
+            let at = first.saturating_add(run.first);
+            self.segments.push(match external {
+                Some(slot) => Segment::External(at, run.count, slot, run.class),
+                None => Segment::Strips(at, run.count, run.class),
+            });
+            self.note_class(run.class);
+        }
     }
 
     /// Turns `punches` into destination-out instances, appended to the alpha
@@ -2966,6 +3349,7 @@ impl Scratch {
                 // no colour for a later fragment to be rejected against.
                 opaque: false,
                 external: None,
+                class: PaintClass::SolidCoverage,
             };
             let Some(run) = strips.get(punch.strip_range.clone()) else {
                 continue;
@@ -3108,6 +3492,79 @@ impl Scratch {
             bytemuck::cast_slice(&self.alpha),
         )
     }
+}
+
+/// Records that the instances from `at` on carry `class`, unless the marks
+/// already say so.
+///
+/// A draw that emitted nothing leaves its mark at the same index as the next
+/// draw's, which then overwrites it — and drops it altogether when that leaves
+/// two neighbouring marks of one class.
+fn mark_class(marks: &mut Vec<(u32, PaintClass)>, at: u32, class: PaintClass) {
+    match marks.last_mut() {
+        Some(last) if last.1 == class => {}
+        Some(last) if last.0 == at => {
+            last.1 = class;
+            let len = marks.len();
+            if len >= 2 && marks[len - 2].1 == class {
+                marks.pop();
+            }
+        }
+        _ => marks.push((at, class)),
+    }
+}
+
+/// The class runs `marks` says cover instances `first..end`, relative to
+/// `first` — the per-draw input [`merge_class_runs`] merges.
+///
+/// Every instance of a planned segment was emitted after its draw's mark, so
+/// the mark at or before `first` names its class; a composite or punch
+/// instance between two marks is never inside a segment's range.
+fn marked_runs(
+    marks: &[(u32, PaintClass)],
+    first: u32,
+    end: u32,
+) -> impl Iterator<Item = ClassRun> + '_ {
+    let from = marks
+        .partition_point(|(at, _)| *at <= first)
+        .saturating_sub(1);
+    let tail = marks.get(from..).unwrap_or(&[]);
+    tail.iter()
+        .enumerate()
+        .take_while(move |(_, (at, _))| *at < end)
+        .filter_map(move |(index, (at, class))| {
+            let start = (*at).max(first);
+            let stop = tail.get(index + 1).map_or(end, |next| next.0.min(end));
+            (stop > start).then(|| ClassRun {
+                first: start - first,
+                count: stop - start,
+                class: *class,
+            })
+        })
+}
+
+/// Whether `runs` tile `instances` front to back and each run's program draws
+/// every instance in it, as far as the instance's own flag can tell
+/// ([`PaintClass::admits_flag`]) — what the marks must agree with, checked in
+/// debug builds.
+fn runs_draw(runs: &[ClassRun], instances: &[GpuStrip]) -> bool {
+    let mut next = 0_u32;
+    for run in runs {
+        if run.first != next || run.count == 0 {
+            return false;
+        }
+        let Some(span) = instances.get(run.first as usize..(run.first + run.count) as usize) else {
+            return false;
+        };
+        if !span
+            .iter()
+            .all(|instance| run.class.admits_flag(instance.paint_and_rect_flag))
+        {
+            return false;
+        }
+        next += run.count;
+    }
+    next as usize == instances.len()
 }
 
 /// The column of device space one round's target holds: the origin its
@@ -3298,6 +3755,10 @@ struct PackedPaint {
     /// external binding, so consecutive instances may share a segment only
     /// while this stays equal (see [`crate::gpu::bindings::ExternalRuns`]).
     external: Option<u32>,
+    /// The strip program class this paint's instances are drawn with — from
+    /// the resolved record, so an image is told apart by the path it samples
+    /// through (see [`PaintClass::of_image`]).
+    class: PaintClass,
 }
 
 impl PackedPaint {
@@ -3343,6 +3804,7 @@ fn pack_paint(
             depth_index: depth,
             opaque: color.is_opaque(),
             external: None,
+            class: PaintClass::SolidCoverage,
         }),
         Paint::Indexed(indexed) => {
             let Some(Some(resolved)) = paint_slots.get(indexed.index()) else {
@@ -3360,6 +3822,7 @@ fn pack_paint(
                 depth_index: depth,
                 opaque: resolved.opaque,
                 external: resolved.external,
+                class: resolved.class,
             })
         }
     }
@@ -3380,7 +3843,32 @@ struct ResolvedPaint {
     /// [`crate::gpu::bindings`]). `None` — the ordinary case — means the
     /// frame's atlas binding serves it.
     external: Option<u32>,
+    /// The strip program class the paint is drawn with ([`class_of_record`]).
+    class: PaintClass,
 }
+
+/// The strip program class a lowered record is drawn with.
+///
+/// The paint type decides it for every record but an image, whose record also
+/// names the path it samples through: nearest or bilinear from the atlas is
+/// [`PaintClass::Image`], bicubic or the external texture
+/// [`PaintClass::ImageFiltered`]. The bits are the ones the shader reads —
+/// quality in bits 0-1 of `image_params`, the source kind in bit 14.
+fn class_of_record(record: &GpuEncodedPaint) -> PaintClass {
+    match record {
+        GpuEncodedPaint::Image(image) => PaintClass::of_image(
+            image.image_params & IMAGE_QUALITY_BITS,
+            (image.image_params >> IMAGE_SOURCE_KIND_SHIFT) & 1 == 1,
+        ),
+        _ => PaintClass::of_flag(pack_paint_descriptor(record.paint_type(), 0)),
+    }
+}
+
+/// Bits 0-1 of an image record's `image_params`: the sampling quality.
+const IMAGE_QUALITY_BITS: u32 = 0b11;
+
+/// The bit of an image record's `image_params` marking an external texture.
+const IMAGE_SOURCE_KIND_SHIFT: u32 = 14;
 
 /// One resource texture and the extent it currently holds.
 #[derive(Debug)]
@@ -3467,9 +3955,12 @@ struct FrameResources {
     /// they were first named — the slot numbering the pass segments and the
     /// group-1 bind groups both address by.
     external_runs: ExternalRuns,
-    /// One set of bind groups per strip pipeline variant. Not one shared set:
-    /// every engine pipeline uses wgpu's derived layout, and a derived layout
-    /// is exclusive to the pipeline that derived it.
+    /// One set of bind groups per strip render state, built against any one
+    /// of that state's class pipelines. Every strip pipeline — each state,
+    /// each paint class — is built against one explicit layout
+    /// ([`crate::gpu::bindings::strip_pipeline_layout`]), so a state's set binds
+    /// under all of its classes; keeping one set per state is what the map
+    /// already did when each pipeline derived a layout of its own.
     bind_groups: HashMap<EnginePipeline, StripBindGroups>,
     /// The target format the live bind groups were built against; a change
     /// means different pipelines, so the whole map is dropped rather than
@@ -3630,6 +4121,7 @@ impl FrameResources {
                     texel_offset,
                     opaque: !paint.may_have_transparency(),
                     external,
+                    class: class_of_record(&record),
                 };
                 texel_offset += record.texel_len();
                 self.paints_data.push(record);
@@ -3941,6 +4433,25 @@ impl FrameResources {
             cache.mark_synced();
         }
 
+        // The strip program addresses all three resource textures by the
+        // config's width shifts alone — the LUT by the paint texture's — so
+        // the config built from `dim` is only sound while each of them really
+        // is `dim` wide (see `gpu::config`'s module doc). Every resize above
+        // grows height only, so this holds by construction; the assertion is
+        // what notices a change that breaks it.
+        debug_assert!(
+            resource_widths_agree(
+                dim,
+                self.alphas.width,
+                self.paints.width,
+                self.gradients.width
+            ),
+            "strip resource textures must all be resource_texture_dim ({dim}) wide: \
+             alphas {}, paints {}, gradients {}",
+            self.alphas.width,
+            self.paints.width,
+            self.gradients.width,
+        );
         let config = GpuConfig::new(u32::from(size.0), u32::from(size.1), dim, dim);
         queue.write_buffer(&self.config, 0, bytemuck::bytes_of(&config));
 
@@ -4402,9 +4913,8 @@ impl StripBindGroups {
 /// One function for both shapes the group takes — `external` is
 /// [`Placeholders::external`] for the frame-wide group, or a registered view
 /// for the group a run of external instances is drawn with (see
-/// [`crate::gpu::bindings`]). Built against one pipeline for the same reason
-/// [`resources_bind_group`] is: every engine pipeline uses wgpu's derived
-/// layout, which is exclusive to the pipeline that derived it.
+/// [`crate::gpu::bindings`]). Built against one pipeline's group layout, as
+/// [`resources_bind_group`] is.
 fn images_bind_group(
     device: &wgpu::Device,
     pipeline: &wgpu::RenderPipeline,
@@ -4430,11 +4940,10 @@ fn images_bind_group(
 /// Group 0 of a strip pass: the frame's coverage, the pass's own viewport
 /// uniform, and the texture a composite reads its finished page from.
 ///
-/// Built against one pipeline rather than shared, because every engine pipeline
-/// uses wgpu's *derived* layout — a layout derived from a shader module is
-/// exclusive to the pipeline that derived it, so a bind group built against one
-/// variant's layout is rejected by another's even when the two layouts are
-/// structurally identical.
+/// Built against one pipeline's group layout. Every strip pipeline names the
+/// one explicit strip layout ([`crate::gpu::bindings::strip_pipeline_layout`]),
+/// so the group binds under every strip state and paint class alike — which is
+/// what lets one pass switch class pipelines between runs without rebinding.
 fn resources_bind_group(
     device: &wgpu::Device,
     pipeline: &wgpu::RenderPipeline,
@@ -4674,6 +5183,31 @@ mod tests {
         );
     }
 
+    /// An image record is classed by the path it samples through — the one
+    /// split an instance's flag cannot make — and every other record by its
+    /// paint type.
+    #[test]
+    fn a_lowered_record_names_its_strip_program_class() {
+        use crate::gpu::atlas::pack_image_params;
+        use crate::gpu::paint_texture::GpuEncodedImage;
+
+        let image = |quality: u32, external: bool| {
+            GpuEncodedPaint::Image(GpuEncodedImage {
+                image_params: pack_image_params(quality, 0, 0, 3, external),
+                image_size: 0,
+                image_offset: 0,
+                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                tint: 0,
+                tint_mode: 0,
+                image_padding: 0,
+            })
+        };
+        assert_eq!(class_of_record(&image(0, false)), PaintClass::Image);
+        assert_eq!(class_of_record(&image(1, false)), PaintClass::Image);
+        assert_eq!(class_of_record(&image(2, false)), PaintClass::ImageFiltered);
+        assert_eq!(class_of_record(&image(1, true)), PaintClass::ImageFiltered);
+    }
+
     #[test]
     fn a_resolved_indexed_paint_samples_at_each_instances_own_position() {
         let slots = [Some(ResolvedPaint {
@@ -4681,6 +5215,7 @@ mod tests {
             texel_offset: 6,
             opaque: true,
             external: None,
+            class: PaintClass::Gradient,
         })];
         let paint = pack_paint(&Paint::Indexed(IndexedPaint::new(0)), 2, &slots)
             .expect("a lowered paint resolves");
@@ -4846,7 +5381,7 @@ mod tests {
             scratch.segments[range]
                 .iter()
                 .map(|segment| match *segment {
-                    Segment::Strips(first, count) | Segment::External(first, count, _) => {
+                    Segment::Strips(first, count, _) | Segment::External(first, count, _, _) => {
                         first + count
                     }
                     Segment::Composite(first, _) => first + 1,
@@ -4863,8 +5398,8 @@ mod tests {
             scratch.segments[after]
                 .iter()
                 .all(|segment| match *segment {
-                    Segment::Strips(first, _)
-                    | Segment::External(first, _, _)
+                    Segment::Strips(first, _, _)
+                    | Segment::External(first, _, _, _)
                     | Segment::Composite(first, _) => first >= punch_first + punch_count,
                 }),
             "and everything recorded after it lands on top of the erase"
@@ -4955,7 +5490,7 @@ mod tests {
         scratch.segments[plan.segments.clone()]
             .iter()
             .filter_map(|segment| match *segment {
-                Segment::Strips(first, count) | Segment::External(first, count, _) => {
+                Segment::Strips(first, count, _) | Segment::External(first, count, _, _) => {
                     Some((first as usize, count as usize))
                 }
                 Segment::Composite(..) => None,
