@@ -38,6 +38,29 @@
 //! C_scroll_only                layout          66.64        69.52        71.02
 //! C_scroll_only                paint          137.98       159.07       162.40
 //! ```
+//!
+//! # After p1-03 (per-pod layout skip, widget audit)
+//!
+//! Same host class (Linux workstation, i5-12600, 12 threads) and profile
+//! (unoptimized `test` profile + debuginfo). The host may have been loaded by a
+//! parallel build: a first run straight after one measured roughly double the
+//! paint figures below with layout still under 2.5 µs (A) and 15 µs (C); these
+//! are the middle of three back-to-back runs once it settled. Layout is what
+//! the skip changes: in (A) only the root widget's own layout runs and every
+//! pod below it returns its cached size, (B) lays out the changing row's path,
+//! (C) the scroll surface's path while its content stays cached (the
+//! `ScrollView` rebuild reports a queued jump as a layout change). Paint is
+//! unchanged by design.
+//!
+//! ```text
+//! scenario                     pass          mean_us       p95_us       p99_us
+//! A_static                     layout           0.51         0.57         0.60
+//! A_static                     paint          101.81       106.81       114.88
+//! B_one_leaf_changes           layout          92.92       104.58       111.84
+//! B_one_leaf_changes           paint          107.16       117.00       120.64
+//! C_scroll_only                layout           1.47         1.73         2.40
+//! C_scroll_only                paint          130.82       153.82       158.96
+//! ```
 
 use std::cell::Cell;
 use std::rc::Rc;
