@@ -47,8 +47,9 @@ moved every iteration, plus 120 short glyph runs), `s6_like_cached` (one 2,009-g
 laid out once, re-emitted unchanged) and `s6_like_rebreak` (the same paragraph, wrap width alternating
 between 1000 and 760 px per iteration, re-break untimed), `s5_like` (nine 256x256 RGBA images magnified
 into 1064x256 rows under a rect clip, same images every iteration). Text is shaped once with `frust-text`
-against the bundled `testing/fonts` Latin subset, whose few glyphs (`H e l o`, space, comma) make the glyph
-count real but the unique-glyph count tiny, so the atlas is a best case. Commands: `cargo bench -p frust-engine
+through a `TextContext` whose fallback chain is the host's font collection: the bundled `testing/fonts` Latin subset
+covers only `H e l o`, space, comma and `é`, so the `s6_like` paragraph shapes most of its glyphs against a host
+fallback face and those two rows are host-dependent, not a best-case atlas (`s1_like`'s short runs stay on the subset). Commands: `cargo bench -p frust-engine
 -- --quick` times `scenes_compile/*` (compile only) and `scenes_encode/*` (compile, upload and submit against
 an offscreen target on the host GPU; skipped with a note when no adapter exists or `FRUST_BENCH_NO_GPU` is
 set); add `--features perf-trace` for the span rows below (medians of warm 60-frame `frust-perf enc`
@@ -68,7 +69,8 @@ Compile p50 is the encode's `compile_us`; the `scenes_encode` criterion mean (CP
 while other builds were active moved the upload and `s5_like` figures by up to 2x, so read before/after pairs from
 back-to-back runs on a quiet host. Replay is near zero because every glyph is atlas-resident after the warm-up
 frames; the six atlas counts appended to the enc line (`replays`, `dirty_pages`, `atlas_refused`, `glyph_misses`,
-`glyph_evicted`, `run_keys`) read 0 / 0 / 0 / 0 / 0 / 2 for the text scenes.
+`glyph_evicted`, `run_keys`) read 0 / 0 / 0 / 0 / 0 / 2 for the text scenes (re-verified at 9e510235, where
+`glyph_misses` first counted the production path's misses).
 
 ## Engine encode and GPU on two phones
 
@@ -105,9 +107,14 @@ Pixel 4 class (Adreno 640, 1080x2280 @ 90 Hz; S1 ran warm — the phone sat at 3
 Cold start (S7, `first_frame_presented` medians): Pixel 4a 211 ms of which `first_submit_pipeline_wait` 118,
 encode 6, queue 3; Pixel 4 172 ms of which pipeline wait 92, encode 5, queue 2. On both phones the pipeline
 cache is persisted 328 B about 70 ms after surface install with zero warm-up pipelines finished, and the second
-launch loads that same 328 B. S1's atlas on both phones: `glyph_draws == atlas_glyphs`, yet 37 of every 60
-frames replay with 69-81 evictions and zero misses per window (replay is eviction-driven). Thread sample
-during S1: main, `RenderThread` and both `frust-reactive` threads at nice -10, `frust-render` at nice -4.
+launch loads that same 328 B. S1's atlas on both phones (re-captured at 9e510235 with `glyph_misses` on the
+production path, 6x30 s, first two runs discarded): `glyph_draws == atlas_glyphs` (466 / 458), yet per 60-frame
+window the Pixel 4a replays 37 pages with 66 misses and 69 evictions and the Pixel 4 replays 40 with 81 misses
+and 93 evictions; every window that replays also misses, misses track evictions (1.8-2.1 misses per replay) and
+nothing is refused. Replay is miss-driven, and the misses are re-rasterisations of glyphs the atlas evicted while
+they were still in use (the eviction policy, not the share rule, is the lever). Pixel 4 S1 re-captured cool
+(32.7 C start): p50 11.66 / p95 15.44 ms, drifting to 35 C by run 6. Thread sample during S1: main,
+`RenderThread` and both `frust-reactive` threads at nice -10, `frust-render` at nice -4.
 
 ## Dev loop
 
