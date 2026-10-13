@@ -66,8 +66,11 @@
 mod android;
 #[cfg(target_os = "ios")]
 mod apple;
+mod deeplink;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod desktop;
+pub mod maps;
+pub use maps::Maps;
 mod url;
 
 /// Errors from a [`UrlLauncher::open_external`] call.
@@ -163,6 +166,53 @@ impl UrlLauncher {
         // `frust-haptics`/`frust-clipboard`'s own dispatch functions, modulo
         // this crate's narrower error enum — see the crate doc's *Backends*
         // section).
+        #[cfg(not(any(
+            target_os = "android",
+            target_os = "ios",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )))]
+        {
+            Err(UrlLauncherError::Platform(
+                "url launcher not available on this platform".to_string(),
+            ))
+        }
+    }
+
+    /// Open a native map-app URI (`geo:`, `maps:`, `comgooglemaps:`,
+    /// `google.navigation:`), e.g. `geo:0,0?q=Pool` or `maps://?daddr=1,2`,
+    /// without relaxing the http/https guard of [`Self::open_external`].
+    ///
+    /// The URI passes a separate allowlist validator (scheme allowlist,
+    /// 2048-byte cap, alphanumerics and `? & = , . + - %` only, no
+    /// authority) and then reaches the same backend as `open_external`.
+    ///
+    /// | Platform | Behaviour |
+    /// |----------|-----------|
+    /// | Android | `ACTION_VIEW` intent on the parsed URI |
+    /// | iOS | `openURL` on the `NSURL` (fire-and-forget) |
+    /// | macOS / Linux / Windows | [`UrlLauncherError::NoHandler`]: native map schemes have no desktop handler; use [`Maps::directions`] (the https path) |
+    ///
+    /// # Errors
+    /// [`UrlLauncherError::InvalidUrl`] if the URI fails the validator;
+    /// otherwise as [`Self::open_external`], plus
+    /// [`UrlLauncherError::NoHandler`] on desktop.
+    pub fn open_maps_native(uri: &str) -> Result<(), UrlLauncherError> {
+        deeplink::validate_maps_native(uri)?;
+
+        #[cfg(target_os = "android")]
+        {
+            android::open_external(uri)
+        }
+        #[cfg(target_os = "ios")]
+        {
+            apple::open_external(uri)
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        {
+            Err(UrlLauncherError::NoHandler)
+        }
         #[cfg(not(any(
             target_os = "android",
             target_os = "ios",

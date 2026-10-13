@@ -222,3 +222,29 @@ fn second_loader_serves_from_disk_without_fetching() {
     });
     assert_eq!(second.calls.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn scope_none_and_some_are_distinct_files_without_the_url() {
+    let tmp = TempDir::new("scope");
+    let cache = DiskCache::open(tmp.path(), 1 << 20).unwrap();
+    let url = "https://secret.example/private-photo.png";
+    let (a, b) = ([1u8; 32], [2u8; 32]);
+    cache.put_scoped(url, None, b"plain").unwrap();
+    cache.put_scoped(url, Some(&a), b"for-a").unwrap();
+    cache.put_scoped(url, Some(&b), b"for-b").unwrap();
+    assert_eq!(cache.get_scoped(url, None).unwrap(), b"plain");
+    assert_eq!(cache.get(url).unwrap(), b"plain");
+    assert_eq!(cache.get_scoped(url, Some(&a)).unwrap(), b"for-a");
+    assert_eq!(cache.get_scoped(url, Some(&b)).unwrap(), b"for-b");
+    assert_eq!(cache.stats().entries, 3);
+
+    let names: Vec<String> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let data: Vec<_> = names.iter().filter(|n| n.ends_with(".img")).collect();
+    assert_eq!(data.len(), 3, "{names:?}");
+    for n in &names {
+        assert!(!n.contains("secret") && !n.contains("example"), "{n}");
+    }
+}

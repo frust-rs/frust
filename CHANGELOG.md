@@ -31,6 +31,21 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   while its wrapper is mounted.
 - The playground's Tabs section: per-tab navigators under an `IndexedStack` with a home-tab
   `back_fallback`, a device-gate surface for Android back routing.
+- `frust-share` (`plugins/share`): `Share::text` / `text_anchored` / `url` open the Android chooser or
+  the iOS activity sheet (an iPad popover anchored to a `ShareAnchor` rect, or centred); desktop
+  copies to the clipboard through `frust-clipboard` (`ShareOutcome::CopiedToClipboard`). Device
+  gates have not run yet.
+- `frust-qr` (`plugins/qr`): a `qr_code(payload)` view painted on a canvas with `.ecc`,
+  `.quiet_zone`, `.colors`, `.size` and `.semantic_label`, plus `encode` / `QrMatrix`. `frust add
+  plugin` and the TUI's Add Plugin list offer `share` and `qr` (the registry now has twenty-one
+  entries).
+- `frust-url-launcher` Maps helpers: `Maps::directions` / `directions_to` / `show` (Apple Maps on
+  iOS/macOS, Google Maps elsewhere) and `UrlLauncher::open_maps_native` for `geo:` / `maps:` /
+  `comgooglemaps:` / `google.navigation:` URIs (`NoHandler` on desktop).
+- `frust-secure-storage`: a debug-only, desktop-only plaintext `insecure_file` fallback for hosts
+  without a Secret Service, selected by `StoreOptions::with_insecure_file_fallback()` or
+  `FRUST_SECURE_STORAGE_INSECURE_FILE=1`; release builds refuse it.
+- The playground's URL page gains Share, QR and Maps groups.
 
 ### Changed
 

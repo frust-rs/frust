@@ -365,6 +365,36 @@ fn memory_hit_paints_on_first_frame_at_full_opacity() {
 }
 
 #[test]
+fn authenticated_memory_hit_paints_on_first_frame_at_full_opacity() {
+    let fetcher = FakeFetcher::new(0);
+    fetcher.gate.open();
+    let l = loader(&fetcher);
+    let auth = || vec![("Authorization".to_string(), "Bearer t".to_string())];
+
+    let (warm, headers) = (l.clone(), auth());
+    let mut first = Harness::new((), move |_: &mut ()| {
+        network_image("https://x/private.png")
+            .loader(warm.clone())
+            .headers(headers.clone())
+    });
+    first.frame_until("the warm-up image", |r| !r.images.is_empty());
+    assert_eq!(fetcher.calls(), 1);
+
+    let headers = auth();
+    let mut second = Harness::new((), move |_: &mut ()| {
+        network_image("https://x/private.png")
+            .loader(l.clone())
+            .headers(headers.clone())
+            .placeholder(Marker(PLACEHOLDER))
+    });
+    let frame1 = second.frame();
+    assert_eq!(frame1.images.len(), 1, "image on frame 1");
+    assert_eq!(frame1.layers, vec![1.0], "no fade on a memory hit");
+    assert!(!frame1.has_rect(PLACEHOLDER));
+    assert_eq!(fetcher.calls(), 1);
+}
+
+#[test]
 fn failure_shows_error_slot_and_tap_retries() {
     let fetcher = FakeFetcher::new(1);
     fetcher.gate.open();

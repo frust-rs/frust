@@ -8,8 +8,8 @@ use std::task::{Poll, Waker};
 use std::time::{Duration, Instant};
 
 use frust_network_image::{
-    DiskCacheConfig, FetchError, FetchFuture, FetchRequest, FetchedBytes, ImageFetcher,
-    ImageLoader, LoadError, LoadRequest, LoaderConfig, TargetPx,
+    DecodeError, DecodeLimits, DiskCacheConfig, FetchError, FetchFuture, FetchRequest,
+    FetchedBytes, ImageFetcher, ImageLoader, LoadError, LoadRequest, LoaderConfig, TargetPx,
 };
 
 /// Every fetch waits on it until it opens.
@@ -529,5 +529,135 @@ fn single_flight_survives_aborted_siblings() {
         assert_eq!(fetcher.calls(), 1);
         assert_eq!(loader.inflight_count(), 0);
         assert_eq!(loader.raw_entry_count(), 0);
+    });
+}
+
+fn req_h(url: &str, headers: &[(&str, &str)]) -> LoadRequest {
+    LoadRequest {
+        url: url.to_string(),
+        headers: headers
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect(),
+        target: None,
+    }
+}
+
+#[test]
+fn different_headers_are_separate_fetches_and_memory_entries() {
+    run(async {
+        let fetcher = FakeFetcher::new(Duration::ZERO);
+        let loader = loader(&fetcher, 1 << 20);
+        let url = "https://x/a.png";
+        let a = [("Authorization", "Bearer a")];
+        let b = [("Authorization", "Bearer b")];
+        loader.load(req_h(url, &a)).await.expect("a");
+        loader.load(req_h(url, &b)).await.expect("b");
+        assert_eq!(fetcher.calls(), 2);
+        assert_eq!(loader.memory_stats().entries, 2);
+        let hdr = |h: &[(&str, &str)]| -> Vec<(String, String)> {
+            h.iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect()
+        };
+        assert!(
+            loader
+                .peek_memory_with_headers(url, &hdr(&a), None)
+                .is_some()
+        );
+        assert!(
+            loader
+                .peek_memory_with_headers(url, &hdr(&b), None)
+                .is_some()
+        );
+        assert!(loader.peek_memory(url, None).is_none());
+    });
+}
+
+#[test]
+fn same_headers_share_one_fetch_regardless_of_order_and_name_case() {
+    run(async {
+        let fetcher = FakeFetcher::new(Duration::from_millis(50));
+        let loader = loader(&fetcher, 1 << 20);
+        let url = "https://x/a.png";
+        let one = [("Authorization", "Bearer a"), ("X-Tenant", "t")];
+        let two = [("x-tenant", "t"), ("authorization", "Bearer a")];
+        let loads = vec![
+            loader.load(req_h(url, &one)),
+            loader.load(req_h(url, &two)),
+            loader.load(req_h(url, &one)),
+        ];
+        let results = futures_join(loads.into_iter()).await;
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(fetcher.calls(), 1);
+        assert_eq!(loader.memory_stats().entries, 1);
+    });
+}
+
+#[test]
+fn concurrent_loads_with_different_headers_do_not_join() {
+    run(async {
+        let fetcher = FakeFetcher::new(Duration::from_millis(50));
+        let loader = loader(&fetcher, 1 << 20);
+        let url = "https://x/a.png";
+        let loads = vec![
+            loader.load(req_h(url, &[("Authorization", "Bearer a")])),
+            loader.load(req_h(url, &[("Authorization", "Bearer b")])),
+        ];
+        let results = futures_join(loads.into_iter()).await;
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(fetcher.calls(), 2);
+    });
+}
+
+#[test]
+fn headerless_key_is_the_url_only_key() {
+    run(async {
+        let fetcher = FakeFetcher::new(Duration::ZERO);
+        let loader = loader(&fetcher, 1 << 20);
+        let url = "https://x/a.png";
+        loader.load(req(url, None)).await.expect("load");
+        assert!(loader.peek_memory(url, None).is_some());
+        assert!(loader.peek_memory_with_headers(url, &[], None).is_some());
+        loader.load(req(url, None)).await.expect("hit");
+        assert_eq!(fetcher.calls(), 1);
+    });
+}
+
+#[test]
+fn configured_decode_limits_reject_an_oversized_image() {
+    let fetcher = FakeFetcher::new(Duration::ZERO);
+    let loader = ImageLoader::new(
+        fetcher.clone(),
+        LoaderConfig {
+            decode_limits: DecodeLimits {
+                max_width: 100,
+                ..DecodeLimits::default()
+            },
+            disk: DiskCacheConfig {
+                enabled: false,
+                ..DiskCacheConfig::default()
+            },
+            ..LoaderConfig::default()
+        },
+    );
+    run(async {
+        // The 4000x3000 JPEG exceeds the 100 px width limit.
+        let err = loader
+            .load(req("https://x/a.jpg", None))
+            .await
+            .expect_err("over the limit");
+        assert!(
+            matches!(
+                err,
+                LoadError::Decode(DecodeError::TooLarge { width: 4000, .. })
+            ),
+            "{err:?}"
+        );
+        // The 8x8 PNG fits.
+        loader
+            .load(req("https://x/a.png", None))
+            .await
+            .expect("fits");
     });
 }

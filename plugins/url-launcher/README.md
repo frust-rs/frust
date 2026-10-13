@@ -457,7 +457,48 @@ does not already exist.
 
 [`open_external`]: https://docs.rs/frust-url-launcher/latest/frust_url_launcher/struct.UrlLauncher.html#method.open_external
 
+## Maps
+
+`Maps` builds `https` map links and passes them through
+`UrlLauncher::open_external`, so the validator above runs on every launch;
+it is not relaxed. Coordinates are range-checked (lat +-90, lng +-180),
+formatted with up to six decimals, and NaN/infinite values return
+`InvalidUrl`. Free text is percent-encoded (everything but `A-Za-z0-9-._~`
+becomes `%XX`). The https URL is handed to the OS default handler; nothing
+more is promised about which app opens it.
+
+| Call | iOS / macOS | Android / Linux / Windows |
+|------|-------------|---------------------------|
+| `Maps::directions(lat, lng)` | `https://maps.apple.com/?daddr=LAT,LNG` | `https://www.google.com/maps/dir/?api=1&destination=LAT,LNG` |
+| `Maps::directions_to(query)` | `https://maps.apple.com/?daddr=QUERY` | `https://www.google.com/maps/dir/?api=1&destination=QUERY` |
+| `Maps::show(lat, lng, label)` | `https://maps.apple.com/?ll=LAT,LNG&q=LABEL` (`?ll=LAT,LNG` without a label) | `https://www.google.com/maps/search/?api=1&query=LAT,LNG` (label ignored) |
+
+`Maps::directions_url`, `directions_to_url` and `show_url` return the string
+without opening it. On Apple platforms `Maps::directions_to` uses `daddr`
+(the destination that starts directions), not `q`, because `q` is a place
+search and would show a pin instead of a route.
+
+### Native map schemes
+
+`UrlLauncher::open_maps_native(uri)` opens a `geo:`, `maps:`,
+`comgooglemaps:` or `google.navigation:` URI (scheme case-insensitive) through
+a separate validator; the http/https guard is untouched. The URI is at most
+2048 bytes, ASCII alphanumerics plus `? & = , . + - %` (every `%` followed by
+two hex digits), with no authority; `maps` and `comgooglemaps` may start with
+`//` followed by `?` or nothing.
+
+| Call | Android | iOS | macOS / Linux / Windows |
+|------|---------|-----|-------------------------|
+| `open_maps_native("geo:0,0?q=Pool")` | `ACTION_VIEW` on the URI | `openURL` (no app registers `geo:`; the call is a silent no-op) | `NoHandler` (use `Maps::directions`) |
+| `open_maps_native("maps://?daddr=1,2")` | `ACTION_VIEW` | `openURL` (Apple Maps) | `NoHandler` |
+
+Android 11+ package visibility for `geo:` is not yet verified on devices.
+
 ## Links and license
+
+Manual-test surface: the playground's URL page
+(`examples/playground/src/pages/url_launcher.rs`), whose Maps buttons exercise the helpers above.
+To share a maps link instead of opening it, see [`frust-share`](../share/README.md).
 
 Documentation: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
 

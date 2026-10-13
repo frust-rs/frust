@@ -6990,6 +6990,76 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
+### `share-desktop-clipboard-fallback` — desktop has no share sheet, so `frust-share` copies to the clipboard
+
+**Observed**: `Share::text`/`url` on macOS, Linux, and Windows copy the payload through `frust-clipboard` and return `ShareOutcome::CopiedToClipboard`; no sheet appears. The Android chooser and iOS activity sheet are unverified on device until the share device gate runs.
+
+**Applies to**: macOS, Linux, and Windows; every `Share` call.
+
+**Why accepted**: no desktop OS exposes a uniform share sheet worth a per-platform backend; a clipboard copy keeps the API usable in desktop previews, and the outcome variant tells the caller which path ran.
+
+**Trigger for removal**: a desktop share-sheet backend (e.g. the macOS `NSSharingServicePicker`) ships.
+
+**Evidence**: `plugins/share/src/desktop.rs`; `plugins/share/README.md`.
+
+---
+
+### `share-ipad-popover-anchor-optional` — the iPad popover anchor is optional and the playground passes a fixed rect
+
+**Observed**: on iPad the activity sheet is a popover; `Share::text_anchored` takes a `ShareAnchor` rect, and without one the popover is centred with `permittedArrowDirections = 0` (no arrow). The widget tier has no laid-out-rect seam, so the playground's URL page passes a fixed, known-position rect (`SHARE_ANCHOR_RECT`) that drifts if the page layout changes. Unverified on iPad until the share device gate runs.
+
+**Applies to**: iPad only; apps whose share button position is not known in window coordinates.
+
+**Why accepted**: the popover needs a source rect and the framework does not yet surface a widget's laid-out rect to app code; centred-without-arrow is a safe default that never raises.
+
+**Trigger for removal**: the widget tier exposes a laid-out-rect seam the playground (and apps) can read.
+
+**Evidence**: `plugins/share/src/apple.rs` (*iPad popover*); `examples/playground/src/pages/url_launcher.rs` (`SHARE_ANCHOR_RECT`).
+
+---
+
+### `url-launcher-native-maps-desktop-unsupported` — native map schemes have no desktop handler
+
+**Observed**: `UrlLauncher::open_maps_native` (allowlisted `geo`/`maps`/`comgooglemaps`/`google.navigation`) reuses the Android `ACTION_VIEW` and iOS `openURL` backends and returns `NoHandler` on desktop. Android 11+ package visibility for `geo:` is unverified on devices until the share/maps device gate runs.
+
+**Applies to**: macOS, Linux, and Windows; Android 11+ for `geo:` (unverified).
+
+**Why accepted**: desktops have no registered handler for these schemes; `Maps::directions` / `directions_to` / `show` are the https path that works everywhere.
+
+**Trigger for removal**: a desktop native-maps route, and a device run confirming `geo:` resolves under Android 11+ package visibility.
+
+**Evidence**: `plugins/url-launcher/src/deeplink.rs`; `plugins/url-launcher/src/maps.rs`.
+
+---
+
+### `secure-storage-insecure-file-debug-only` — the plaintext file fallback is debug-desktop-only and not hardened
+
+**Observed**: `frust-secure-storage`'s `insecure_file` backend (opt in via `StoreOptions::with_insecure_file_fallback()` or `FRUST_SECURE_STORAGE_INSECURE_FILE=1`) stores values as plaintext JSON at `data_dir()/frust-secure-storage/insecure-store.json` (0600 on unix, atomic writes). It is compiled only in debug builds on desktop; release builds and mobile log an error and use the native backend. The lock is in-process only, with no cross-process locking, and biometric-gated opens answer `NotAvailable(UnsupportedPlatform)`. Linux and Windows behaviour is verified by host tests and cross-target checks only, not on a device.
+
+**Applies to**: debug builds on macOS, Linux, and Windows that opt in.
+
+**Why accepted**: it exists so `cargo run` previews work on a box without a keyring; confining it to debug builds keeps plaintext secrets out of shipped apps.
+
+**Trigger for removal**: none anticipated; the fallback stays a development aid.
+
+**Evidence**: `plugins/secure-storage/src/insecure_file.rs`.
+
+---
+
+### `secure-storage-linux-no-secret-service` — Linux without a Secret Service daemon cannot open a secure store
+
+**Observed**: `frust-secure-storage`'s Linux backend goes through `keyring-core` and a Secret Service daemon; on a host with none (a bare session or container), store init fails. Debug builds can opt into the plaintext fallback (see `secure-storage-insecure-file-debug-only`); the error text hints `FRUST_SECURE_STORAGE_INSECURE_FILE=1`. Release builds have no fallback.
+
+**Applies to**: Linux hosts without a running Secret Service (e.g. gnome-keyring, KeePassXC).
+
+**Why accepted**: a secure store without an OS keyring would be plaintext; the debug-only fallback covers development, and production hosts are expected to run a keyring.
+
+**Trigger for removal**: a hardened non-keyring Linux backend, or a documented headless provisioning path.
+
+**Evidence**: `plugins/secure-storage/src/desktop.rs`; `plugins/secure-storage/src/insecure_file.rs`.
+
+---
+
 ### `auth-session-android-callback-rides-intent-filter` — Android cannot prove the OAuth callback scheme is bound to this app
 
 **Observed**: `FrustAuthSessionHost` observes the redirect through the same ordinary custom-scheme `<intent-filter>` (`action.VIEW` + `BROWSABLE` + `android:scheme`) every frust app registers for deep links (`examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` filter) — a plain custom scheme carries no Android App Links-style domain verification, so any other installed app that claims the same scheme string can intercept or forge the redirect before this host ever sees it. The slot is also exposed to injected intents from the same app (a compromised Activity can call `startActivity` with the callback scheme), and to tapped links in the browser or another app that claim the same scheme. The session generation does not narrow any of this: the host keeps only the latest launch's generation in its single `pending` slot and stamps whichever callback-scheme `Intent` it observes on the next Activity resume with that value — the generation never travels through the browser or the redirect URL, so a superseded tab's late redirect, or an injected `Intent`, is attributed to the live session by timing rather than evidence. The generation only lets the Rust side discard a result for a session that is no longer live (dropped future, already resolved).
@@ -7208,7 +7278,7 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 **Applies to**: every `network_image` view whose URL's content changes while the same URL stays cached (memory or disk).
 
-**Why accepted**: the cache keys on the URL alone and treats a successful fetch as immutable, which is right for the content-addressed and versioned URLs the plugin targets; revalidation needs a conditional-request path through the `ImageFetcher` seam.
+**Why accepted**: the cache keys on the URL (plus a digest of the request headers) and treats a successful fetch as immutable, which is right for the content-addressed and versioned URLs the plugin targets; revalidation needs a conditional-request path through the `ImageFetcher` seam.
 
 **Trigger for removal**: a card adding conditional requests (`If-None-Match`/`If-Modified-Since`) and expiry to the disk cache.
 
@@ -7216,15 +7286,29 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
+### `network-image-cache-holds-private-bodies` — bodies fetched with credentials persist unencrypted in the app cache directory
+
+**Observed**: an image fetched with request headers (for example `Authorization`) is cached like any other: decoded in memory and, with the disk cache enabled, as raw bytes in a file under the app cache directory. The cache key includes a digest of the headers, so another credential never receives it, but the file is not encrypted and stays until LRU eviction or `clear_disk`/`clear_all`. There is no TTL and no `Cache-Control: no-store`/`private` handling.
+
+**Applies to**: `network_image` views and `ImageLoader` loads carrying credential headers, with the disk cache enabled (the default).
+
+**Why accepted**: the app cache directory is sandboxed per app on Android and iOS, and the README tells apps to call `NetworkImages::loader().clear_all()` on logout or account switch; honouring cache directives needs the response-header path from the `network-image-no-http-cache-headers` entry.
+
+**Trigger for removal**: encrypted storage or `no-store`/`private` handling for responses fetched with credentials.
+
+**Evidence**: `plugins/network-image/src/disk_cache.rs` (`hex_key`, scope-folded file name) and `plugins/network-image/src/loader.rs` (`load`, `acquire_raw`).
+
+---
+
 ### `network-image-full-size-decode-peak` — a large image is fully decoded before it is downscaled
 
-**Observed**: `image` 0.25 has no JPEG DCT-scaled decode, so `target_px` shrinks the image only after a full-resolution decode; the peak transient allocation is the full decoded bitmap (width x height x 4 bytes) regardless of the display size. Only the downscaled result is cached in memory.
+**Observed**: `image` 0.25 has no JPEG DCT-scaled decode, so `target_px` shrinks the image only after a full-resolution decode; the peak transient allocation is the full decoded bitmap (width x height x 4 bytes) regardless of the display size, and the RGBA conversion plus resize can transiently need up to about twice that. Only the downscaled result is cached in memory. The decode is bounded by `DecodeLimits` (default 8192 px per side, 256 MiB decoded; `LoaderConfig::decode_limits`): a server-declared size over the limit is rejected from the header with `DecodeError::TooLarge` before any pixel is decoded.
 
-**Applies to**: decoding a high-resolution photo on a memory-constrained device; the fetch is capped (20 MiB by default) but the decoded size is not.
+**Applies to**: decoding a high-resolution photo on a memory-constrained device; the fetch is capped (20 MiB by default) and the decoded size is capped by `DecodeLimits`, but a within-limit photo still peaks near twice its RGBA size.
 
 **Why accepted**: the cap bounds download size, decode runs off the UI thread, and the resident cost after decode is the fitted bitmap; a scaled-decode path needs a different decoder.
 
-**Trigger for removal**: a decoder with DCT-scaled or tiled JPEG decode, or a pre-decode dimension limit in `decode_and_fit`.
+**Trigger for removal**: a decoder with DCT-scaled or tiled JPEG decode, (the pre-decode dimension limit already exists in `decode_and_fit`).
 
 **Evidence**: `plugins/network-image/src/decode.rs` (`decode_and_fit`: Triangle pre-shrink for >2x, then Lanczos3, after the full decode).
 
