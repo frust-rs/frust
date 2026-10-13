@@ -48,6 +48,14 @@ frust-oauth-native = { path = "../../plugins/oauth-native" }
 # Default `engine-sqlite` backend, not the opt-in `engine-turso` bridge.
 frust-database = { path = "../../plugins/database" }
 
+# Default features: the reqwest/rustls fetcher behind `NetworkImages::install()`, so the Images page
+# reaches real hosts. Pulls `ring` (the Android check needs `cargo ndk -P 26`).
+frust-network-image = { path = "../../plugins/network-image" }
+
+# The Images page's on-demand loopback fixture server only (`pages/images_server.rs`); the plugin's
+# own tokio is dev-only, so this row is the playground's. Matches the root's `version = "1"` row.
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "io-util"] }
+
 # Headless `tests/smoke.rs` harness only: `RenderRoot` is deliberately not in `frust::authoring`
 # (shell-owned), so it names these crates directly; production code names none of them.
 [dev-dependencies]
