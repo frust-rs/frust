@@ -8,6 +8,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `EventCtx::request_layout` / `needs_layout`, `ChildPod` layout-skip state,
+  `RenderRoot::{set_layout_skip, layout_skip}` and `WidgetTree::inspect_layout_dirty`.
+- Layout-audit mode: `RenderRoot::set_layout_audit` or `FRUST_LAYOUT_AUDIT` (any value but `0`)
+  compares each skipped pass with a forced one and logs `layout-audit:` warnings;
+  `layout_audit_mismatches()` counts them. Shells log `layout skip=.. audit=..` at startup.
 - `IndexedStack` / `indexed_stack` in `frust-widgets`, re-exported by the facade: it keeps every
   child mounted, and only the selected child is painted, routed input and reachable for back, so
   per-tab navigator stacks route Android back to the selected tab.
@@ -19,6 +24,15 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- Layout is skipped per pod by default: a pod laid out before returns its recorded size unless it
+  is dirty, its constraints, the window insets or the root layout epoch changed (theme, insets,
+  window size, a dirty floated overlay). Widgets must signal layout-affecting changes through
+  `LAYOUT` from rebuild, paint `request_layout`/`request_frame`, or a consumed event. Unoptimized
+  bench (`relayout_cost_bench`), skip off to on, mean layout us: static tree 76.3 to 0.52,
+  scroll-only 75.2 to 1.46, one changed leaf 160.1 to 93.6 (one-leaf vs no-change ratio 2.10x to
+  179.9x); paint unchanged. Set `FRUST_NO_LAYOUT_SKIP` to opt out.
+- `ScrollView`'s rebuild reports `LAYOUT` while a `ScrollController` command is queued, as
+  `ListView` already did.
 - `pattern_switcher` tears its outgoing child down when the switch starts, not when the exit
   animation ends; the outgoing child still paints its exit. A child that owns resources (a native
   widget, a subscription, a timer) releases them at the switch.

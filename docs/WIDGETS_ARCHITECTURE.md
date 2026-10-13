@@ -167,9 +167,9 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
     under modals omitted outright), honoring the input-parity invariant documented in CODE_STANDARDS.md.
     Back arbitration's reach check (above) derives from this same `input_routed_pages()` set, so it is
     the single reach definition shared by input, semantics, and back.
-- IndexedStack flow: `IndexedStack(index, children)` builds, rebuilds and lays out every child (each keeps its
-  state, e.g. a tab's navigator stack) but paints, routes input to and exposes semantics for the selected one only
-  (Flutter parity); broadcasts reach all. Deselecting a child cancels its capture and focus and hides its IME.
+- IndexedStack flow: `IndexedStack(index, children)` builds and rebuilds every child (each keeps its state, e.g. a
+  tab's navigator stack) but paints, routes input to and exposes semantics for the selected one only; broadcasts reach
+  all. Hidden tabs are skipped by the per-pod layout rule and reuse their cached layout when revealed unchanged. Deselecting cancels the child's capture and focus and hides its IME.
 - Safe-area flow: `safe_area(child)` pads by the resolved `WindowInsets` on its enabled edges, then
   **removes** what it consumed from its subtree via `WindowInsets::consuming` — installed for the
   child through `LayoutCtx::with_window_insets`/`PaintCtx::with_window_insets` — so a self-insetting
@@ -201,7 +201,7 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   and `OverlaySlot`, which resolve a side, a cross-axis alignment, an offset, a collision flip and a
   clamp-back-inside, pure and total — so a widget, a catalog and an app all place a floated surface
   the same way instead of each deriving the geometry again. A widget hosting its own pod keeps an
-  `OverlaySlot` and forwards four calls to it (rebuild; layout, loosely against the window;
+  `OverlaySlot` (whose substituted-state route forwards layout requests to the owner) and forwards four calls to it (rebuild; layout, loosely against the window;
   paint-time placement and registration; event, before its own children); `overlay_portal(child)`
   is the declarative case, anchoring a surface to that child's bounds and diffing it against the
   same application state. Three coordinate spaces meet in a slot — window space (the registered rect
@@ -488,7 +488,7 @@ re-export): one surface holds a handle at a time — the most recent attach wins
 steals a handle another surface already holds — and dropping the attached widget detaches it. A write (`jump_to`/`animate_to`, plus
 `scroll_to_item` on a keyed list) is recorded, not applied immediately; the attached surface drains
 its queue at the start of its next layout or paint (a `ListView` also drains at rebuild, before it
-plans its window), so the clamp lands against the freshly measured extent rather than a stale one.
+plans its window), so the clamp lands against the freshly measured extent; both report `LAYOUT` from rebuild while a command is queued.
 The queue is bounded by superseding within a segment — the offset commands recorded since the last
 item command: a jump supersedes every earlier offset command in its segment (cancelling any tween
 and setting the position outright), and an animate supersedes an earlier animate but keeps a
