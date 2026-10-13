@@ -157,19 +157,19 @@ pub use frust_widgets::{
     DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, EdgeInsets, FlexChild,
     FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, HIGHLIGHT_FALLBACK, HeroView,
     Icon, IconButton, IconButtonView, IconData, IconSource, IconView, IconWidget, Image,
-    ImageError, ImageFit, ImageSource, ImageView, ListView, ListViewWidget, MAX_FLING_VELOCITY,
-    MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView,
-    NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide,
-    OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult,
-    PushOptions, Radio, RadioView, RadioWidget, ReorderableListView, ResultCallback, Row,
-    RubberBand, SafeAreaView, ScaffoldView, ScrollController, ScrollInfo, ScrollMetrics,
-    ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox, SizedBoxView, Slider,
-    SliderView, SourceFeedback, SpringDescription, Stack, StackView, TextInput, TextInputView,
-    TextView, Timing, Tolerance, TransitionSpec, TransitionState, VisibilityCallback,
-    auto_scroll_zone, button, checkbox, colored_box, column, container, divider, drag_target,
-    draggable, flexible, hero, icon, icon_button, inflexible, keyed, list_view, overlay_portal,
-    radio, reorderable_list, row, safe_area, scaffold, scroll_view, slider, stack, text,
-    text_input,
+    ImageError, ImageFit, ImageSource, ImageView, IndexedStack, IndexedStackView, ListView,
+    ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController,
+    NavigatorId, NavigatorView, NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView,
+    OverlaySide, OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition,
+    PageVisibility, PopResult, PushOptions, Radio, RadioView, RadioWidget, ReorderableListView,
+    ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollController, ScrollInfo,
+    ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox,
+    SizedBoxView, Slider, SliderView, SourceFeedback, SpringDescription, Stack, StackView,
+    TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
+    VisibilityCallback, auto_scroll_zone, button, checkbox, colored_box, column, container,
+    divider, drag_target, draggable, flexible, hero, icon, icon_button, indexed_stack, inflexible,
+    keyed, list_view, overlay_portal, radio, reorderable_list, row, safe_area, scaffold,
+    scroll_view, slider, stack, text, text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -1105,7 +1105,92 @@ mod router_glue;
 /// `frust-reactive`'s back-press source together — see [`BackHandler`]'s doc
 /// for the consume/dedupe and timing contracts. Call [`BackHandler::track`]
 /// from every `Component::build`.
+///
+/// Per-tab navigator stacks that stay mounted should sit under an
+/// [`IndexedStack`], not side by side: the stack routes input and back only to
+/// its selected child, so just the selected tab's navigator claims the back
+/// press, and a hidden tab keeps its pages without competing for it.
 pub use back_glue::{BackHandler, attach_back_handler};
+
+/// An app-level back rule for per-tab navigator stacks: [`BackFallback`] claims
+/// a back press only when **no navigator does** (it ranks after every
+/// navigator, whatever the wire order), and [`back_fallback`] wraps the view it
+/// belongs to. The Android/Material tab convention — back at a tab root
+/// returns to the home tab, back at the home tab root exits — is one fallback:
+///
+/// ```no_run
+/// use frust::{
+///     BackFallback, Component, Get, GetUntracked, IndexedStack, NavigatorController, RwSignal,
+///     Set, View, back_fallback, navigator, text,
+/// };
+///
+/// const HOME: usize = 0;
+///
+/// #[derive(Default)]
+/// struct App;
+///
+/// struct AppState {
+///     selected: RwSignal<usize>,
+///     tabs: [NavigatorController<AppState>; 3],
+///     home_fallback: BackFallback,
+/// }
+///
+/// impl Component for App {
+///     type State = AppState;
+///
+///     fn init(&self) -> AppState {
+///         let selected = RwSignal::new(HOME);
+///         let tabs = [
+///             NavigatorController::new(),
+///             NavigatorController::new(),
+///             NavigatorController::new(),
+///         ];
+///         let probe = tabs.clone();
+///         // Constructed ONCE. It claims a press only off the home tab with the
+///         // selected tab at its root; any poppable tab claims first anyway.
+///         let home_fallback = BackFallback::new(
+///             move || {
+///                 let sel = selected.get_untracked();
+///                 sel != HOME && probe[sel].depth() <= 1
+///             },
+///             move || selected.set(HOME),
+///         );
+///         AppState { selected, tabs, home_fallback }
+///     }
+///
+///     fn build(&self, state: &mut AppState) -> impl View<AppState> {
+///         let [home, b, c] = &state.tabs;
+///         // A tracked read: a selection change rebuilds.
+///         let sel = state.selected.get();
+///         back_fallback(
+///             &state.home_fallback,
+///             IndexedStack(
+///                 Some(sel),
+///                 (
+///                     navigator(home, || text("home")),
+///                     navigator(b, || text("search")),
+///                     navigator(c, || text("profile")),
+///                 ),
+///             ),
+///         )
+///     }
+/// }
+///
+/// frust::app!(App);
+/// # fn main() {}
+/// ```
+///
+/// **Liveness contract.** A fallback claims only while a [`back_fallback`]
+/// wrapper over it is mounted: leaving the screen unmounts the wrapper and the
+/// fallback stops claiming, though the handle lives on in app state. Wrap the
+/// view every `Component::build` that should honor it, like
+/// [`navigator`](crate::navigator).
+///
+/// **Accepted residual.** A wrapper mounted inside a branch input does not
+/// reach — a non-selected [`IndexedStack`] child, or the page under a covering
+/// page whose own navigator does not claim — still counts as live (it is
+/// mounted). Gate the interest closure there on that branch being current.
+pub use back_glue::{BackFallback, BackFallbackView, back_fallback};
 
 /// Build a [`NavigatorView`] driven by `controller` — the facade's back-aware
 /// wrapper over [`frust_widgets::navigator`].

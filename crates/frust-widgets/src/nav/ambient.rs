@@ -29,6 +29,17 @@ thread_local! {
     /// `back_interest`/`transition`, never a signal. UI-thread-affine for the same
     /// reason those are — the cells are `Rc`-backed and only ever touched from a
     /// build pass.
+    ///
+    /// Two widgets install reach cells. The navigator installs one per page.
+    /// [`IndexedStack`](crate::IndexedStack) is the second installer: it keeps
+    /// every child mounted but routes input to the selected one only, so it
+    /// installs one cell per child, `true` only for the selected child, and
+    /// only while the stack's own ambient parent cell (if any) is `true`. A
+    /// navigator nested in an unselected child therefore claims no back press,
+    /// which is the same rule as for a navigator on a covered page. Both
+    /// installers stay inside this crate: a public reach scope could declare
+    /// "no reach" while its children still received input, which would break
+    /// the input/back parity R23 requires.
     static PAGE_REACH: RefCell<Vec<Rc<Cell<bool>>>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -50,7 +61,7 @@ impl Drop for PageReachGuard {
 /// The [`PAGE_REACH`] borrow is released *before* `f` runs, so `f` may nest
 /// another `with_page_reach` (a navigator inside a page inside a navigator) or
 /// call [`ambient_page_reach`] freely.
-pub(super) fn with_page_reach<R>(reach: &Rc<Cell<bool>>, f: impl FnOnce() -> R) -> R {
+pub(crate) fn with_page_reach<R>(reach: &Rc<Cell<bool>>, f: impl FnOnce() -> R) -> R {
     PAGE_REACH.with(|stack| stack.borrow_mut().push(Rc::clone(reach)));
     let _guard = PageReachGuard;
     f()
@@ -58,7 +69,7 @@ pub(super) fn with_page_reach<R>(reach: &Rc<Cell<bool>>, f: impl FnOnce() -> R) 
 
 /// The reach cell of the page currently being built/reconciled, or `None` at the
 /// top level (a root navigator, whose reach is unconditional).
-pub(super) fn ambient_page_reach() -> Option<Rc<Cell<bool>>> {
+pub(crate) fn ambient_page_reach() -> Option<Rc<Cell<bool>>> {
     PAGE_REACH.with(|stack| stack.borrow().last().cloned())
 }
 

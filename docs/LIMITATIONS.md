@@ -4664,6 +4664,27 @@ shipped `shell_route`/`navigator` composition produces.
 
 **Evidence**: `crates/frust/src/back_glue.rs`'s `#[ignore]`d test and its inline design-claim
 rationale (search `wiring_order_does_not_flip`).
+
+Not affected: sibling navigators under an `IndexedStack` (only the selected child is reachable, so no
+tie-break arises between siblings) and a `BackFallback` (it ranks after every navigator by role; wire
+order only orders fallbacks among themselves).
+
+---
+
+### `back-single-window` — back arbitration is per UI thread, so multi-window apps cannot route back per window
+
+**Observed**: back presses arrive only from the Android shell (`push_back_press`), and the arbitration
+state is process-wide on the UI thread: `back_glue`'s shared registrant list, `frust-reactive`'s
+press counter and live provider. Every navigator, overlay host and `BackFallback` in the process
+competes in one ranking; there is no per-window scope.
+
+**Applies to**: any app that would host more than one window or surface with independent back stacks.
+Relevant only once desktop multi-window lands (see `desktop-single-window` above); no shipping shell
+delivers back to more than one window today.
+
+**Why accepted**: a single window per process is the only supported shape, so one arbitration list is
+correct; a per-window registry is design work with no consumer yet.
+
 ---
 
 ### `render-blurred-shadow-corner-collapse` — a per-corner blurred shadow rounds to its largest corner

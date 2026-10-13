@@ -1,11 +1,12 @@
-//! The thirteen playground sections, one module per section: `platform_views`,
+//! The fourteen playground sections, one module per section: `platform_views`,
 //! `camera`, `responsive`, `terminal`, `keys`, `i18n`, `video_player`,
 //! `url_launcher`, `auth_session`, `database`, `graph_canvas`,
-//! `scroll_control`, and `drag_drop` — each one an OS-facing capability (or,
+//! `scroll_control`, `drag_drop`, and `tabs` — each one an OS-facing capability (or,
 //! for `graph_canvas`/`scroll_control`/`drag_drop`, a widget demo:
 //! `CanvasView`/`PanZoomView` for the first, a keyed `ListView` bound to a
 //! `ScrollController` for the second, `DragCoordinator`/`draggable`/
-//! `drag_target`/`reorderable_list` for the third) exercised end to end
+//! `drag_target`/`reorderable_list` for the third; `tabs` is the per-tab
+//! navigator and back-fallback gate) exercised end to end
 //! rather than a widget gallery.
 //!
 //! # Page-fn contract (fixed across every section)
@@ -13,7 +14,7 @@
 //! Each section module exposes exactly:
 //!
 //! ```ignore
-//! pub fn page(state: &PlaygroundState) -> AnyView<PlaygroundState>;
+//! pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState>;
 //! ```
 //!
 //! - **Argument**: `state: &PlaygroundState` — the shared reactive handle the
@@ -26,8 +27,8 @@
 //!   - `state.nav` — the shared [`NavigatorController`](frust::NavigatorController):
 //!     an overlay page pushes a dialog / sheet onto the same root stack the
 //!     shell mounts.
-//! - **Return**: a fully type-erased
-//!   [`AnyView<PlaygroundState>`](frust::AnyView). The shell wraps it in a
+//! - **Return**: an `impl View<PlaygroundState>`; the shell erases it once, at
+//!   [`current`]. The shell wraps it in a
 //!   [`scroll_view`](frust::scroll_view), so a page returns its content column
 //!   directly (no outer scroll of its own).
 //!
@@ -47,6 +48,7 @@ pub mod keys;
 pub mod platform_views;
 pub mod responsive;
 pub mod scroll_control;
+pub mod tabs;
 pub mod terminal;
 pub mod url_launcher;
 pub mod video_player;
@@ -55,7 +57,7 @@ use frust::{AnyView, any};
 
 use crate::PlaygroundState;
 
-/// The thirteen section labels, in order. Indexed by `PlaygroundState::section`
+/// The fourteen section labels, in order. Indexed by `PlaygroundState::section`
 /// and dispatched by [`current`].
 ///
 /// Kept short on purpose: at phone width the shell's narrow-width bottom nav
@@ -69,9 +71,9 @@ use crate::PlaygroundState;
 /// single line at that width. A page wanting a longer heading for itself
 /// (e.g. `platform_views`'s own on-page title) uses its own string literal
 /// rather than this array — see `pages/platform_views.rs`.
-pub const SECTION_LABELS: [&str; 13] = [
+pub const SECTION_LABELS: [&str; 14] = [
     "Platform", "Camera", "Layout", "Terminal", "Keys", "i18n", "Video", "URL", "Auth", "DB",
-    "Graph", "Scroll", "Drag",
+    "Graph", "Scroll", "Drag", "Tabs",
 ];
 
 /// How many of [`SECTION_LABELS`], in order, count as "primary" — shown
@@ -84,10 +86,10 @@ pub const SECTION_LABELS: [&str; 13] = [
 /// section off the shell, only off the bar's own direct row.
 pub const PRIMARY_NAV_COUNT: usize = 5;
 
-/// Dispatch to the section page for `section` (0..13), falling back to
+/// Dispatch to the section page for `section` (0..14), falling back to
 /// platform views for any out-of-range index (defensive — the navigation bar
 /// and side rail only ever yield a valid index).
-// erasure: keep the 14-arm section dispatch erases each page at this one boundary
+// erasure: keep the 15-arm section dispatch erases each page at this one boundary
 pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundState> {
     match section {
         0 => any(platform_views::page(state)),
@@ -103,6 +105,7 @@ pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundSta
         10 => any(graph_canvas::page(state)),
         11 => any(scroll_control::page(state)),
         12 => any(drag_drop::page(state)),
+        13 => any(tabs::page(state)),
         _ => any(platform_views::page(state)),
     }
 }

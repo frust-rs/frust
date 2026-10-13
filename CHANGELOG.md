@@ -6,13 +6,35 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Added
+
+- `IndexedStack` / `indexed_stack` in `frust-widgets`, re-exported by the facade: it keeps every
+  child mounted, and only the selected child is painted, routed input and reachable for back, so
+  per-tab navigator stacks route Android back to the selected tab.
+- `frust::BackFallback` and `frust::back_fallback(&fallback, child)`: a non-navigator back
+  registrant ranked after every navigator (for example back-to-home-tab at a tab root). It is live
+  while its wrapper is mounted.
+- The playground's Tabs section: per-tab navigators under an `IndexedStack` with a home-tab
+  `back_fallback`, a device-gate surface for Android back routing.
+
 ### Changed
 
+- `pattern_switcher` tears its outgoing child down when the switch starts, not when the exit
+  animation ends; the outgoing child still paints its exit. A child that owns resources (a native
+  widget, a subscription, a timer) releases them at the switch.
+- `NavigatorController::back_interest()` is false for a navigator that is not mounted.
+- A back press that no registrant claims at delivery is dropped instead of being handed to the
+  navigator whose wire consumed it.
 - Codemod: the accumulator `// erasure: keep` marker now also covers an untyped `let`, one seeded
   with a direct (unwrapped) `any(..)` element (`let mut body = vec![any(..)]`) or started as
   exactly `Vec::new()`, `Vec::with_capacity(..)` or `vec![]` and later pushed or inserted a direct
   `any(..)` in the same fn, so idiomatic accumulators no longer need a `: Vec<AnyView<_>>`
   annotation for rule U.
+
+### Fixed
+
+- A navigator inside a `pattern_switcher` child that had been switched away kept claiming Android
+  back, so back was swallowed on every other page and could not exit the app.
 
 ## 0.6.1 — 2026-10-12
 

@@ -17,7 +17,7 @@
 //! a real subtree swap with an animated hand-off. This mirrors Flutter's
 //! `PageTransitionSwitcher` "identity = type + key" rule.
 //!
-//! # Frozen exiting child: cancelled, never routed, dropped on settle
+//! # Frozen exiting child: cancelled, torn down at the switch, only pixels survive
 //!
 //! While a transition runs the exiting child is inert: it keeps *painting* its
 //! last state but is removed from the event path entirely — pointer routing
@@ -26,11 +26,38 @@
 //! **container-suppresses-routing** sequence verbatim (`docs/CODE_STANDARDS.md`):
 //! a synthetic `Cancel` unwinds any in-flight capture, its focus flag is
 //! cleared, and a cleared IME surface is published on the next paint — in that
-//! order. It is retained until progress reaches `1.0`, then dropped on the next
-//! rebuild; unlike the navigator (which retains a page *builder*), the switcher
-//! holds no retained view for the frozen widget, so its teardown is a drop —
-//! sound because [`frust_core::ComponentWidget`] disposes its reactive owner on
-//! `Drop` defensively (`docs/CODE_STANDARDS.md`'s State & Reactivity rule).
+//! order.
+//!
+//! **Then, in the same rebuild, the outgoing subtree is torn down**
+//! (`View::teardown` through the view that last built it). From that point it
+//! is logically out of the retained tree: every navigator under it reports
+//! `is_mounted() == false` (and so claims no back press), every back
+//! registrant's liveness count drops, and every
+//! [`Component`](frust_core::Component) disposes its reactive owner — on the
+//! very frame the key changes, not when the exit animation ends. What the
+//! switcher keeps is only the torn-down widget tree's **pixels**: the pod is
+//! laid out and painted until progress reaches `1.0`, never rebuilt and never
+//! routed, then dropped on the next rebuild (or when a newer switch supersedes
+//! it, or in the switcher's own teardown) — a plain drop each time, never a
+//! second teardown.
+//!
+//! The teardown has to happen at the freeze because that is the only point at
+//! which both halves are in hand: the old view (`prev.child`, gone after this
+//! rebuild — an [`AnyView`] is not `Clone`, and the widget is not generic over
+//! `State`, so it cannot be stashed until settle) and the old pod. A bare drop
+//! at settle would skip `View::teardown` entirely, so a navigator or a back
+//! fallback under a switched-away section would stay "mounted" forever and
+//! keep swallowing back presses everywhere else in the app.
+//!
+//! Painting after teardown is sound for the widgets a switcher hosts: a
+//! navigator's teardown finalizes any in-flight page transition and tears its
+//! pages down but keeps their pods, which it paints like any static stack; a
+//! [`frust_core::ComponentWidget`]'s paint is a pass-through to its pod that
+//! never touches its (now disposed) owner, and its defensive `Drop` disposal is
+//! idempotent; a plain leaf's teardown is a no-op. The focus contract above has
+//! already cleared the pod's focus link before the teardown runs, so the
+//! teardown's own focus-orphan gate sees no live link and releases nothing a
+//! second time.
 //!
 //! # Compositing: paint-only, route-to-incoming keeps input correct
 //!
@@ -221,13 +248,15 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> PatternSwitcherView
 
 /// The retained widget for a [`PatternSwitcherView`]. Generic only over the
 /// pattern `P` (the frozen exiting child is retained as a bare
-/// [`ChildPod`](frust_core::ChildPod), so no `State` is captured — see the
-/// [module docs](self)'s teardown note).
+/// [`ChildPod`](frust_core::ChildPod), so no `State` is captured — which is why
+/// it is torn down at the switch; see the [module docs](self)'s frozen-child
+/// section).
 pub struct PatternSwitcherWidget<P: TransitionPattern + Clone + 'static> {
     key: ChildKey,
     child: ChildPod,
-    /// The frozen outgoing child, retained (painting its last state) until the
-    /// transition settles, then dropped.
+    /// The frozen outgoing child: already torn down at the switch, retained
+    /// only to paint its last state until the transition settles, then
+    /// dropped (never torn down a second time).
     exiting: Option<ChildPod>,
     pattern: P,
     explicit_timing: Option<Timing>,
@@ -304,8 +333,9 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
         }
 
         // Finalize a just-settled transition (paint flagged `settled` and
-        // requested this frame): drop the frozen exiting child. `Option::take`
-        // via reassignment runs `ComponentWidget`'s defensive `Drop`.
+        // requested this frame): drop the frozen exiting child. It was already
+        // torn down at the switch, so this is a plain drop — never a second
+        // teardown (a `ComponentWidget`'s `Drop` disposal is idempotent).
         if element.settled {
             element.exiting = None;
             element.driver = None;
@@ -314,7 +344,8 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
 
         if self.key != element.key {
             // --- Identity change: stage a transition. ---
-            // A new switch supersedes any still-running one (drop its exiting).
+            // A new switch supersedes any still-running one: drop its exiting
+            // pod, which was torn down when IT was frozen — a plain drop here.
             element.exiting = None;
             element.driver = None;
             element.reduce_motion = false;
@@ -355,6 +386,18 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
                 }
             }
 
+            // Tear the outgoing subtree down NOW, through the view that last
+            // built it — the only point where `prev.child` and the old pod are
+            // both in hand (module docs). Navigators under it unmount and stop
+            // claiming back, back registrants drop their liveness, components
+            // dispose their owners. The pod is kept only to paint its pixels
+            // until settle. The capture/focus steps above already ran, so
+            // `teardown_child` finds the pod neither active (no second
+            // `Cancel`) nor focused (its orphan gate sees no live link, and the
+            // descent runs under a cleared chain, so nothing below re-releases
+            // the session the IME clear above already ends).
+            crate::authoring::teardown_child(&prev.child, &mut old, ctx);
+
             element.exiting = Some(old);
             element.key = self.key;
             element.pending_start = true;
@@ -370,9 +413,9 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
 
     fn teardown(&self, element: &mut PatternSwitcherWidget<P>, ctx: &mut BuildCtx<'_>) {
         crate::authoring::teardown_child(&self.child, &mut element.child, ctx);
-        // The frozen exiting child has no retained view to run `View::teardown`
-        // against; dropping it disposes any Component owner via the defensive
-        // `Drop` (module docs).
+        // The frozen exiting child (if a transition is still running) was torn
+        // down at the switch that froze it; only its pixels were left, so a
+        // plain drop finishes it — never a second teardown (module docs).
         element.exiting = None;
     }
 }
@@ -531,12 +574,16 @@ mod tests {
     }
 
     /// An interactive child that captures the pointer + takes focus on `Down`,
-    /// records a synthetic `Cancel` into a shared cell, and records its own
-    /// teardown (a drop) into a shared counter — the recording interactive child
-    /// the tests below assert against (mirrors the navigator's recording tests).
+    /// records a synthetic `Cancel` into a shared cell, records its widget's
+    /// drop into `torn`, and its `View::teardown` into `teardowns` — the
+    /// recording interactive child the tests below assert against (mirrors the
+    /// navigator's recording tests). The two counters are kept apart on
+    /// purpose: a frozen exiting child is torn down at the switch but dropped
+    /// only at settle.
     struct Recorder {
         cancelled: Rc<Cell<bool>>,
         torn: Rc<Cell<u32>>,
+        teardowns: Rc<Cell<u32>>,
     }
     struct RecorderWidget {
         cancelled: Rc<Cell<bool>>,
@@ -557,6 +604,9 @@ mod tests {
             _ctx: &mut BuildCtx<'_>,
         ) -> ChangeFlags {
             ChangeFlags::NONE
+        }
+        fn teardown(&self, _element: &mut RecorderWidget, _ctx: &mut BuildCtx<'_>) {
+            self.teardowns.set(self.teardowns.get() + 1);
         }
     }
     impl Widget for RecorderWidget {
@@ -594,6 +644,16 @@ mod tests {
         Recorder {
             cancelled: cancelled.clone(),
             torn: torn.clone(),
+            teardowns: Rc::new(Cell::new(0)),
+        }
+    }
+
+    /// A [`Recorder`] whose `View::teardown` count is observable too.
+    fn counting_recorder(torn: &Rc<Cell<u32>>, teardowns: &Rc<Cell<u32>>) -> Recorder {
+        Recorder {
+            cancelled: Rc::new(Cell::new(false)),
+            torn: torn.clone(),
+            teardowns: teardowns.clone(),
         }
     }
 
@@ -685,6 +745,51 @@ mod tests {
         assert!(!ime.active);
         assert!(ime.editing.text.is_empty());
         assert!(!w.needs_ime_clear, "the queued clear was consumed");
+    }
+
+    // --- The freeze-time teardown releases no session a second time: the
+    //     focus link is cleared before `teardown_child` runs, so its orphan
+    //     gate sees nothing live; the IME clear stays the one release. ---
+
+    #[test]
+    fn freeze_teardown_of_a_focused_child_raises_no_second_focus_release() {
+        let cancelled = Rc::new(Cell::new(false));
+        let torn = Rc::new(Cell::new(0u32));
+        let teardowns = Rc::new(Cell::new(0u32));
+        let v1: PatternSwitcherView<(), _> = pattern_switcher(
+            1u32,
+            FadeThrough,
+            Recorder {
+                cancelled: cancelled.clone(),
+                torn: torn.clone(),
+                teardowns: teardowns.clone(),
+            },
+        );
+        let mut w = build(&v1);
+        let size = w.layout(&mut LayoutCtx::new(), &loose());
+        let mut st = ();
+        let mut ectx = EventCtx::new(&mut st, Point::ZERO, size);
+        w.event(&mut ectx, &down(5.0, 5.0));
+        assert!(w.child.is_active() && w.child.is_focused());
+
+        let _ = frust_core::take_focus_orphaned();
+        let v2: PatternSwitcherView<(), _> =
+            pattern_switcher(2u32, FadeThrough, leaf_any(10.0, 10.0));
+        let mut counter = 0u64;
+        // `BuildCtx::new` seeds a live chain: the focused pod WAS on it.
+        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+
+        assert_eq!(
+            teardowns.get(),
+            1,
+            "the focused child was torn down at the switch"
+        );
+        assert!(cancelled.get(), "cancelled exactly as before");
+        assert!(w.needs_ime_clear, "the IME clear is the session release");
+        assert!(
+            !frust_core::take_focus_orphaned(),
+            "the teardown must not raise a second (orphan) release"
+        );
     }
 
     // --- Cross-subtree survival: a switcher whose OWN child never held focus
@@ -821,28 +926,31 @@ mod tests {
         );
     }
 
-    // --- Exiting retained until progress 1.0, then torn down ---
+    // --- Exiting torn down at the switch, its pod retained (painting) until
+    //     progress 1.0, then dropped — never torn down a second time. ---
 
     #[test]
-    fn exiting_child_is_retained_until_settle_then_torn_down() {
-        let cancelled = Rc::new(Cell::new(false));
+    fn exiting_child_is_torn_down_at_the_switch_and_dropped_after_settle() {
         let torn = Rc::new(Cell::new(0u32));
+        let teardowns = Rc::new(Cell::new(0u32));
         let short = Timing::Duration(Duration::from_millis(100), Curve::Linear);
         let v1: PatternSwitcherView<(), _> =
-            pattern_switcher(1u32, FadeThrough, recorder(&cancelled, &torn)).timing(short);
+            pattern_switcher(1u32, FadeThrough, counting_recorder(&torn, &teardowns)).timing(short);
         let mut w = build(&v1);
         let size = w.layout(&mut LayoutCtx::new(), &loose());
 
-        // Switch identity -> transition begins; exiting retained, not torn down.
+        // Switch identity -> transition begins. The outgoing subtree is torn
+        // down on this very rebuild; its pod is retained (not dropped).
         let v2: PatternSwitcherView<(), _> =
             pattern_switcher(2u32, FadeThrough, leaf_any(10.0, 10.0)).timing(short);
         let mut counter = 0u64;
         v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
         assert!(w.exiting.is_some());
+        assert_eq!(teardowns.get(), 1, "torn down at the switch, exactly once");
         assert_eq!(
             torn.get(),
             0,
-            "exiting not torn down while the transition runs"
+            "its pod is not dropped while the transition runs"
         );
 
         // First paint creates + seeds the driver (still mid-flight).
@@ -873,7 +981,8 @@ mod tests {
         );
         assert_eq!(torn.get(), 0);
 
-        // The finalize rebuild (same identity, key 2) tears the exiting child down.
+        // The finalize rebuild (same identity, key 2) drops the exiting pod —
+        // a plain drop, no second teardown.
         let v3: PatternSwitcherView<(), _> =
             pattern_switcher(2u32, FadeThrough, leaf_any(10.0, 10.0)).timing(short);
         v3.rebuild(&v2, &mut w, &mut BuildCtx::new(&mut counter));
@@ -881,10 +990,314 @@ mod tests {
         assert_eq!(
             torn.get(),
             1,
-            "exiting torn down exactly once, after progress 1.0"
+            "exiting dropped exactly once, after progress 1.0"
+        );
+        assert_eq!(
+            teardowns.get(),
+            1,
+            "the settle drop is not a second teardown"
         );
         assert!(!w.settled);
         assert!(w.driver.is_none());
+
+        // And the switcher's own teardown touches nothing already finished.
+        v3.teardown(&mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!((teardowns.get(), torn.get()), (1, 1));
+    }
+
+    // --- A navigator under the outgoing child leaves the tree AT the switch:
+    //     unmounted and claiming no back press on that very rebuild, while its
+    //     frozen pod keeps painting until settle. ---
+
+    #[test]
+    fn a_navigator_in_the_outgoing_child_unmounts_on_the_switch_but_still_paints() {
+        use crate::test_support::leaf;
+        use crate::{NavigatorController, navigator};
+
+        let ctrl: NavigatorController<()> = NavigatorController::new();
+        let short = Timing::Duration(Duration::from_millis(100), Curve::Linear);
+        let section = |key: u32| -> PatternSwitcherView<(), FadeThrough> {
+            let child = if key == 1 {
+                any(navigator(&ctrl, || leaf(10.0, 10.0)))
+            } else {
+                leaf_any(10.0, 10.0)
+            };
+            pattern_switcher(key, FadeThrough, child).timing(short)
+        };
+        let mut counter = 0u64;
+        let v1 = section(1);
+        let mut w = build(&v1);
+        assert!(ctrl.is_mounted());
+
+        // Depth 2 through a same-key rebuild: the navigator claims back.
+        ctrl.push(|| leaf(40.0, 40.0));
+        let v2 = section(1);
+        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!(ctrl.depth(), 2);
+        assert!(
+            ctrl.back_interest(),
+            "a mounted depth-2 navigator claims back"
+        );
+
+        // Switch the key: the very same rebuild unmounts it and silences it.
+        let v3 = section(2);
+        v3.rebuild(&v2, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(!ctrl.is_mounted(), "torn down at the switch, not at settle");
+        assert!(
+            !ctrl.back_interest(),
+            "a torn-down navigator claims nothing, with no re-wire in between"
+        );
+
+        // ...while its frozen pod keeps painting its top page (40x40) until
+        // settle. FadeThrough at p=0: the exiting child is fully opaque.
+        let size = w.layout(&mut LayoutCtx::new(), &loose());
+        let mut scene = RecordingScene::default();
+        w.paint(&mut PaintCtx::new(Point::ZERO, size), &mut scene);
+        assert!(
+            scene.rects.iter().any(|(_, s)| *s == Size::new(40.0, 40.0)),
+            "the torn-down navigator's top page still paints: {:?}",
+            scene.rects
+        );
+
+        // Settle and finalize: dropped, and still unmounted (no double count).
+        w.driver
+            .as_mut()
+            .expect("driver created on first paint")
+            .advance(ft_ms(10_000.0));
+        w.paint(
+            &mut PaintCtx::new(Point::ZERO, size),
+            &mut RecordingScene::default(),
+        );
+        assert!(w.settled);
+        let v4 = section(2);
+        v4.rebuild(&v3, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(w.exiting.is_none());
+        assert!(!ctrl.is_mounted());
+        assert!(!ctrl.back_interest());
+    }
+
+    // --- A Component in the outgoing child is torn down (its owner disposed)
+    //     exactly once across the freeze, the settle drop and the switcher's
+    //     own teardown. Its child view's `View::teardown` only runs from the
+    //     component's teardown (never from its `Drop`), so its count is the
+    //     component's teardown count; `State` drops with the widget. ---
+
+    struct ProbeComp {
+        teardowns: Rc<Cell<u32>>,
+        state_drops: Rc<Cell<u32>>,
+    }
+    struct ProbeState {
+        drops: Rc<Cell<u32>>,
+    }
+    impl Drop for ProbeState {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+    impl frust_core::Component for ProbeComp {
+        type State = ProbeState;
+        fn init(&self) -> ProbeState {
+            ProbeState {
+                drops: self.state_drops.clone(),
+            }
+        }
+        fn build(&self, _state: &mut ProbeState) -> impl View<ProbeState> {
+            TeardownLeaf {
+                teardowns: self.teardowns.clone(),
+            }
+        }
+    }
+    /// A leaf over any state that counts its `View::teardown`s.
+    struct TeardownLeaf {
+        teardowns: Rc<Cell<u32>>,
+    }
+    impl<S: 'static> View<S> for TeardownLeaf {
+        type Element = crate::test_support::LeafWidget;
+        fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
+            View::<()>::build(&crate::test_support::leaf(30.0, 30.0), ctx)
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut Self::Element,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+        fn teardown(&self, _element: &mut Self::Element, _ctx: &mut BuildCtx<'_>) {
+            self.teardowns.set(self.teardowns.get() + 1);
+        }
+    }
+
+    #[test]
+    fn a_component_in_the_outgoing_child_is_torn_down_exactly_once() {
+        let teardowns = Rc::new(Cell::new(0u32));
+        let state_drops = Rc::new(Cell::new(0u32));
+        let short = Timing::Duration(Duration::from_millis(100), Curve::Linear);
+        let comp = || {
+            any(frust_core::component(ProbeComp {
+                teardowns: teardowns.clone(),
+                state_drops: state_drops.clone(),
+            }))
+        };
+        let mut counter = 0u64;
+
+        // (1) Freeze -> settle drop -> switcher teardown.
+        let v1: PatternSwitcherView<(), _> =
+            pattern_switcher(1u32, FadeThrough, comp()).timing(short);
+        let mut w = build(&v1);
+        let size = w.layout(&mut LayoutCtx::new(), &loose());
+        let v2: PatternSwitcherView<(), _> =
+            pattern_switcher(2u32, FadeThrough, leaf_any(10.0, 10.0)).timing(short);
+        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!(
+            teardowns.get(),
+            1,
+            "the component is torn down at the freeze"
+        );
+        assert_eq!(
+            state_drops.get(),
+            0,
+            "its widget (and state) is still painting"
+        );
+
+        // A torn-down component still paints its pod (pass-through).
+        let mut scene = RecordingScene::default();
+        w.layout(&mut LayoutCtx::new(), &loose());
+        w.paint(&mut PaintCtx::new(Point::ZERO, size), &mut scene);
+        assert!(
+            scene.rects.iter().any(|(_, s)| *s == Size::new(30.0, 30.0)),
+            "the disposed component's subtree still paints: {:?}",
+            scene.rects
+        );
+
+        w.driver
+            .as_mut()
+            .expect("driver created on first paint")
+            .advance(ft_ms(10_000.0));
+        w.paint(
+            &mut PaintCtx::new(Point::ZERO, size),
+            &mut RecordingScene::default(),
+        );
+        let v3: PatternSwitcherView<(), _> =
+            pattern_switcher(2u32, FadeThrough, leaf_any(10.0, 10.0)).timing(short);
+        v3.rebuild(&v2, &mut w, &mut BuildCtx::new(&mut counter));
+        assert!(w.exiting.is_none());
+        assert_eq!(state_drops.get(), 1, "dropped once at settle");
+        assert_eq!(
+            teardowns.get(),
+            1,
+            "the settle drop is not a second teardown"
+        );
+        v3.teardown(&mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!((teardowns.get(), state_drops.get()), (1, 1));
+
+        // (2) Freeze -> switcher teardown mid-transition (the exiting pod is
+        //     still retained when the switcher itself leaves the tree).
+        teardowns.set(0);
+        state_drops.set(0);
+        let v1: PatternSwitcherView<(), _> =
+            pattern_switcher(1u32, FadeThrough, comp()).timing(short);
+        let mut w = build(&v1);
+        let v2: PatternSwitcherView<(), _> =
+            pattern_switcher(2u32, FadeThrough, leaf_any(10.0, 10.0)).timing(short);
+        v2.rebuild(&v1, &mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!((teardowns.get(), state_drops.get()), (1, 0));
+        v2.teardown(&mut w, &mut BuildCtx::new(&mut counter));
+        assert!(
+            w.exiting.is_none(),
+            "the switcher's teardown drops the exiting pod"
+        );
+        assert_eq!(
+            (teardowns.get(), state_drops.get()),
+            (1, 1),
+            "torn down once at the freeze, dropped once by the switcher's teardown"
+        );
+    }
+
+    // --- Supersede mid-transition (A -> B -> C before settle): each outgoing
+    //     child is torn down exactly once, at its own freeze. ---
+
+    #[test]
+    fn superseding_switches_tear_each_outgoing_child_down_exactly_once() {
+        let counters = || (Rc::new(Cell::new(0u32)), Rc::new(Cell::new(0u32)));
+        let (a_drop, a_td) = counters();
+        let (b_drop, b_td) = counters();
+        let (c_drop, c_td) = counters();
+        let mut counter = 0u64;
+
+        let va: PatternSwitcherView<(), _> =
+            pattern_switcher(1u32, FadeThrough, counting_recorder(&a_drop, &a_td));
+        let mut w = build(&va);
+        let vb: PatternSwitcherView<(), _> =
+            pattern_switcher(2u32, FadeThrough, counting_recorder(&b_drop, &b_td));
+        vb.rebuild(&va, &mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!(
+            (a_td.get(), a_drop.get()),
+            (1, 0),
+            "A frozen: torn down, kept"
+        );
+        assert_eq!((b_td.get(), b_drop.get()), (0, 0), "B is live");
+
+        // C supersedes before A's exit settles: A's pod is dropped (no second
+        // teardown), B is frozen and torn down.
+        let vc: PatternSwitcherView<(), _> =
+            pattern_switcher(3u32, FadeThrough, counting_recorder(&c_drop, &c_td));
+        vc.rebuild(&vb, &mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!(
+            (a_td.get(), a_drop.get()),
+            (1, 1),
+            "A superseded: dropped only"
+        );
+        assert_eq!(
+            (b_td.get(), b_drop.get()),
+            (1, 0),
+            "B frozen: torn down, kept"
+        );
+        assert_eq!((c_td.get(), c_drop.get()), (0, 0), "C is live");
+
+        // The switcher's own teardown: C (live) is torn down through its view,
+        // B (frozen) is only dropped.
+        vc.teardown(&mut w, &mut BuildCtx::new(&mut counter));
+        assert_eq!((a_td.get(), a_drop.get()), (1, 1));
+        assert_eq!((b_td.get(), b_drop.get()), (1, 1), "B dropped, not re-torn");
+        assert_eq!(
+            c_td.get(),
+            1,
+            "the live child is torn down by the switcher's teardown"
+        );
+        drop(w);
+        assert_eq!(
+            (a_td.get(), b_td.get(), c_td.get()),
+            (1, 1, 1),
+            "each child torn down exactly once"
+        );
+        assert_eq!((a_drop.get(), b_drop.get(), c_drop.get()), (1, 1, 1));
+    }
+
+    // --- Same-key rebuilds reconcile in place: no transition, no teardown. ---
+
+    #[test]
+    fn same_key_rebuilds_reconcile_in_place_with_no_teardown() {
+        let torn = Rc::new(Cell::new(0u32));
+        let teardowns = Rc::new(Cell::new(0u32));
+        let mut counter = 0u64;
+        let make = || -> PatternSwitcherView<(), FadeThrough> {
+            pattern_switcher(7u32, FadeThrough, counting_recorder(&torn, &teardowns))
+        };
+        let mut prev = make();
+        let mut w = build(&prev);
+        for _ in 0..3 {
+            let next = make();
+            next.rebuild(&prev, &mut w, &mut BuildCtx::new(&mut counter));
+            prev = next;
+        }
+        assert!(w.exiting.is_none(), "no transition staged");
+        assert_eq!(
+            (teardowns.get(), torn.get()),
+            (0, 0),
+            "the live child was reconciled in place: never torn down, never dropped"
+        );
     }
 
     // --- reduce_motion collapses to a fast crossfade ---

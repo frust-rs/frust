@@ -38,15 +38,20 @@
 //!
 //! > **R44-back — a root overlay host outranks every plain navigator; among
 //! > [`Role::Navigator`] peers the innermost (last-wired) ranks first, LIFO —
-//! > mirroring Android's `OnBackPressedDispatcher`; a back press goes to the
-//! > first registrant reporting
-//! > [`back_interest()`](NavigatorController::back_interest)` == true`.**
+//! > mirroring Android's `OnBackPressedDispatcher`; a [`BackFallback`]
+//! > ([`Role::Fallback`]) ranks after every navigator, so it claims a press
+//! > only when no navigator does; a back press goes to the first registrant
+//! > reporting interest
+//! > ([`back_interest()`](NavigatorController::back_interest)` == true` for a
+//! > navigator, the app's interest closure for a fallback).**
 //!
 //! [`SharedBack::registrants`] is that ordered list, sorted by ([`Role`], wire
 //! sequence): build order among hosts, *reversed* among navigators so the
-//! innermost wins. **Rank comes from the call site, not wire timing** —
-//! [`auto_wire_overlay_host`] registers [`Role::Host`], every other entry point
-//! [`Role::Navigator`] — because both *when* and *how often* a controller wires
+//! innermost wins, build order again among fallbacks. **Rank comes from the
+//! call site, not wire timing** — [`auto_wire_overlay_host`] registers
+//! [`Role::Host`], [`back_fallback`] registers [`Role::Fallback`], every other
+//! entry point [`Role::Navigator`] — because both *when* and *how often* a
+//! controller wires
 //! genuinely vary: a [`BackHandler`] built in `Component::init` wires before any
 //! view exists, and Huddle's documented pattern wires one controller **twice in
 //! one build pass** (`state.back.track()` beside
@@ -80,6 +85,27 @@
 //! the next). Before rule 1, that inference pruned the root overlay host
 //! mid-pass and re-created the root-modal double-claim bug.
 //!
+//! **A [`BackFallback`] obeys the same two rules**, which is why it is
+//! view-scoped: its liveness is the mount count of its [`back_fallback`]
+//! wrappers (rule 1 — `build` increments it, `teardown` decrements it, as a
+//! navigator's own `build`/`teardown` do), and rule 2 removes it once every
+//! wrapper is unmounted. An unmounted fallback also stops claiming at once:
+//! its interest is gated on that same liveness, so it never claims a press in
+//! the window before rule 2 reaches it.
+//!
+//! **First-wire grace (a fallback only).** [`back_fallback`] wires during view
+//! *construction*, before its wrapper's `build` runs — unlike a navigator,
+//! whose `build` publishes liveness before anything nested wires. So in the
+//! very pass that first mounts a wrapper, a navigator double-wiring later in
+//! that pass would see an unbuilt, hence unmounted, fallback and prune it.
+//! Rule: **a fallback wired but not yet built, rebuilt or torn down counts as
+//! mounted until one of those happens** (each clears the grace; the next
+//! [`back_fallback`] call over that handle sets it again). A wrapper is always
+//! reconciled in the pass that constructed it, so the grace never outlives that
+//! pass in practice; the one residual is a [`back_fallback`] view constructed
+//! and then discarded unbuilt, which keeps its fallback live until a wrapper
+//! over the same handle is reconciled or the handle is dropped.
+//!
 //! ## Reachability is upstream of arbitration, by design (R23)
 //!
 //! Ranking decides who wins *among the claimants*, never who may claim. A
@@ -106,12 +132,20 @@
 //! reads an `Rc`-backed controller through [`SHARED`]); `frust_reactive::back`'s
 //! module docs carry the source-side contract.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use frust_core::{BuildCtx, ChangeFlags, View};
 use frust_reactive::{CanPopRegistration, back_presses, set_can_pop_provider, set_handles_back};
 use frust_widgets::{NavigatorController, NavigatorId};
 use reactive_graph::traits::{Get, GetUntracked};
+
+thread_local! {
+    /// The UI-thread monotonic source of [`BackFallback`] ids
+    /// ([`RegistrantId::Fallback`]). Kept apart from [`SHARED`] so nothing that
+    /// resets the arbitration state can ever hand out an id twice.
+    static NEXT_FALLBACK_ID: Cell<u64> = const { Cell::new(0) };
+}
 
 thread_local! {
     /// The process-wide (UI-thread-affine) back-press wiring shared by BOTH the
@@ -124,15 +158,16 @@ thread_local! {
     /// see the module docs).
     ///
     /// UI-thread-affine because every [`Registrant`] holds an `Rc`-backed
-    /// `NavigatorController` (`!Send`), exactly like frust-reactive's live
-    /// provider slot it feeds.
+    /// `NavigatorController` or [`BackFallback`] (`!Send`), exactly like
+    /// frust-reactive's live provider slot it feeds.
     static SHARED: RefCell<SharedBack> = const { RefCell::new(SharedBack::new()) };
 }
 
 /// What a registrant *is*, which is what R44-back ranks it by — taken from the
 /// facade entry point that wired it, never inferred from wire timing.
 ///
-/// `Ord` is the arbitration order: [`Host`](Self::Host) sorts first.
+/// `Ord` is the arbitration order: [`Host`](Self::Host) sorts first,
+/// [`Fallback`](Self::Fallback) last.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Role {
     /// A root [`overlay_host`](crate::overlay_host). Its overlays are drawn over
@@ -142,15 +177,33 @@ enum Role {
     /// Any other wired navigator: [`navigator`](crate::navigator)'s auto-wiring
     /// or an explicit [`BackHandler`].
     Navigator,
+    /// A [`BackFallback`] wired by [`back_fallback`]: not a navigator at all,
+    /// but an app rule ("back at a tab root returns to the home tab"). Declared
+    /// last so it sorts after every navigator **whatever the wire order** — a
+    /// fallback claims a press only when no navigator does. Its liveness is its
+    /// wrappers' mount count (rule 1), and rule 2 removes it once unmounted (see
+    /// the module docs' release rules).
+    Fallback,
 }
 
-/// One wired navigator in [`SharedBack::registrants`] — the unit R44-back
-/// arbitrates over. The closures hold a controller clone, so a registrant keeps
-/// its navigator's op queue alive until it is pruned.
+/// Who a [`Registrant`] stands for — the identity a re-wire matches on to
+/// refresh an entry in place instead of appending a duplicate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RegistrantId {
+    /// A navigator, by its controller's id.
+    Navigator(NavigatorId),
+    /// A [`BackFallback`], by the id [`NEXT_FALLBACK_ID`] gave it.
+    Fallback(u64),
+}
+
+/// One wired navigator or fallback in [`SharedBack::registrants`] — the unit
+/// R44-back arbitrates over. A navigator's closures hold a controller clone, so
+/// a registrant keeps its navigator's op queue alive until it is pruned; a
+/// fallback's hold only a weak reference to its [`BackFallback`].
 struct Registrant {
-    /// Which controller this entry stands for, so a re-wire refreshes it in
-    /// place instead of appending a duplicate.
-    id: NavigatorId,
+    /// Which controller (or fallback) this entry stands for, so a re-wire
+    /// refreshes it in place instead of appending a duplicate.
+    id: RegistrantId,
     /// This entry's arbitration rank (see [`Role`]). Sticky-upgrades to
     /// [`Role::Host`]: a controller wired *once* as an overlay host is one, even
     /// on a re-wire that names it through a different entry point.
@@ -162,28 +215,35 @@ struct Registrant {
     /// one-cycle prune compares against it (see [`refresh_interest`]).
     seq: u64,
     /// `controller.is_mounted()` — is this navigator in the retained tree right
-    /// now? A `true` here vetoes the one-cycle prune (see the module docs'
-    /// release rules).
+    /// now? For a fallback, its wrappers' mount count > 0 or the first-wire
+    /// grace (see the module docs). A `true` here vetoes the one-cycle prune
+    /// (see the module docs' release rules). Only ever reads `Cell`s, so it is
+    /// safe to call under the [`SHARED`] borrow.
     mounted: Box<dyn Fn() -> bool>,
     /// `controller.back_interest()` — does this navigator claim the next press?
     /// Already `false` for a navigator whose hosting page input cannot reach
     /// (the R23 gate in `frust-widgets`; see the module docs), which is why
-    /// nothing here filters on visibility.
-    interest: Box<dyn Fn() -> bool>,
+    /// nothing here filters on visibility. For a fallback, the app's interest
+    /// closure, gated on the fallback's liveness. An `Rc` so it is cloned out
+    /// and called with **no** [`SHARED`] borrow outstanding — a fallback's
+    /// probe runs app code.
+    interest: Rc<dyn Fn() -> bool>,
     /// `controller.request_back()` — deliver the press to this navigator,
-    /// honoring its top page's `BackPolicy`. An `Rc` rather than a `Box` so
-    /// [`route_back`] can clone it out and call it with **no** [`SHARED`] borrow
-    /// outstanding.
+    /// honoring its top page's `BackPolicy` (a fallback's `on_back`). An `Rc`
+    /// rather than a `Box` so [`route_back`] can clone it out and call it with
+    /// **no** [`SHARED`] borrow outstanding.
     request_back: Rc<dyn Fn()>,
 }
 
 impl Registrant {
     /// The sort key R44-back orders the arbitration list by: rank first
-    /// ([`Role`], `Host` sorts ahead of every `Navigator`), then within
-    /// `Role::Navigator` **innermost-first** (highest `birth` — a nested
-    /// navigator always wires after the navigator hosting it, so the highest
-    /// `birth` among `Navigator` peers is the innermost one); `Role::Host`
-    /// peers keep first-wire order (`birth` ascending), unchanged.
+    /// ([`Role`], `Host` sorts ahead of every `Navigator`, `Fallback` after
+    /// every one), then within `Role::Navigator` **innermost-first** (highest
+    /// `birth` — a nested navigator always wires after the navigator hosting
+    /// it, so the highest `birth` among `Navigator` peers is the innermost
+    /// one); `Role::Host` and `Role::Fallback` peers keep first-wire order
+    /// (`birth` ascending). A fallback's rank against a navigator never
+    /// depends on wire order: `Role` alone decides it.
     ///
     /// Innermost-first is what lets a nested navigator take the press at all:
     /// ordering every rank by first wire (`birth` ascending) would leave an
@@ -195,7 +255,7 @@ impl Registrant {
     /// every Navigator, never a particular order among multiple hosts.
     fn key(&self) -> (Role, u64) {
         match self.role {
-            Role::Host => (self.role, self.birth),
+            Role::Host | Role::Fallback => (self.role, self.birth),
             // `u64::MAX - birth`: ascending sort on this puts the HIGHEST
             // birth (innermost, wired last) first among `Navigator` peers —
             // LIFO, mirroring Android's `OnBackPressedDispatcher`.
@@ -212,15 +272,16 @@ struct SharedBack {
     /// observing the same count does not re-fire (the `RouterDeepLinks`
     /// consumed-marker pattern, shared across both back entry points).
     consumed: Option<u64>,
-    /// Every wired navigator, sorted by [`Registrant::key`] — [`Role::Host`]
-    /// first (build order among hosts, unchanged), then [`Role::Navigator`]
-    /// peers innermost-first (LIFO: last-wired sorts first, the reverse of
-    /// build order) — the R44-back arbitration list. Kept sorted on every
-    /// wire, so a registrant's position never depends on how often its
-    /// controller wires per pass; an unmounted registrant that misses a
-    /// build cycle is pruned (see [`refresh_interest`]). The live provider
-    /// (below) reads through this list, so a press is decided against the
-    /// CURRENT navigators' interest.
+    /// Every wired navigator and fallback, sorted by [`Registrant::key`] —
+    /// [`Role::Host`] first (build order among hosts, unchanged), then
+    /// [`Role::Navigator`] peers innermost-first (LIFO: last-wired sorts first,
+    /// the reverse of build order), then [`Role::Fallback`] peers in build
+    /// order, after every navigator — the R44-back arbitration list. Kept
+    /// sorted on every wire, so a registrant's position never depends on how
+    /// often it wires per pass; an unmounted registrant that misses a build
+    /// cycle is pruned (see [`register`]), a fallback included once all its
+    /// wrappers are unmounted. The live provider (below) reads through this
+    /// list, so a press is decided against the CURRENT registrants' interest.
     registrants: Vec<Registrant>,
     /// Monotonic wire counter stamped into [`Registrant::birth`]/
     /// [`Registrant::seq`]; ordering and the one-cycle prune are both expressed
@@ -245,26 +306,62 @@ impl SharedBack {
     }
 }
 
-/// Whether **any** wired navigator claims the next back press — the value both
+/// Whether **any** wired registrant claims the next back press — the value both
 /// the live provider and the polled `handles_back` flag publish.
 ///
-/// Only ever called with no outstanding [`SHARED`] borrow: an `interest` probe
-/// reads an `Rc<Cell<bool>>` on its controller and never re-enters this module.
+/// The interest probes are CLONED OUT of the list and called with **no**
+/// [`SHARED`] borrow outstanding: a navigator's probe is a plain `Cell` read,
+/// but a [`BackFallback`]'s runs the app's interest closure, which must be free
+/// to read anything — this module included — without a `RefCell` panic.
 fn any_interest() -> bool {
-    SHARED.with(|shared| shared.borrow().registrants.iter().any(|r| (r.interest)()))
+    interest_probes().iter().any(|interest| interest())
+}
+
+/// Every registrant's interest probe, in arbitration order, cloned out of
+/// [`SHARED`] so the caller can run them with no borrow outstanding.
+fn interest_probes() -> Vec<Rc<dyn Fn() -> bool>> {
+    SHARED.with(|shared| {
+        shared
+            .borrow()
+            .registrants
+            .iter()
+            .map(|r| Rc::clone(&r.interest))
+            .collect()
+    })
 }
 
 /// Register (or refresh) `controller` in the R44-back arbitration list at
-/// `role`'s rank and republish the polled `handles_back` fallback flag,
-/// registering the live provider once. Called on every wire from both entry
-/// points ([`auto_wire`]/[`auto_wire_overlay_host`] and
+/// `role`'s rank — the controller-flavoured wrapper over [`register`]. Called on
+/// every wire from both navigator entry points
+/// ([`auto_wire`]/[`auto_wire_overlay_host`] and
 /// [`BackHandler::new`]/[`track`](BackHandler::track)).
+///
+/// # Panics
+///
+/// As [`register`].
+fn refresh_interest<State: 'static>(controller: &NavigatorController<State>, role: Role) {
+    let mounted_probe = controller.clone();
+    let interest_probe = controller.clone();
+    let request_probe = controller.clone();
+    register(
+        RegistrantId::Navigator(controller.id()),
+        role,
+        Box::new(move || mounted_probe.is_mounted()),
+        Rc::new(move || interest_probe.back_interest()),
+        Rc::new(move || request_probe.request_back()),
+    );
+}
+
+/// Register (or refresh) the registrant `id` in the R44-back arbitration list at
+/// `role`'s rank and republish the polled `handles_back` flag, registering the
+/// live provider once. The core every entry point funnels through — navigators
+/// via [`refresh_interest`], fallbacks via [`back_fallback`].
 ///
 /// Ordering and pruning are the whole mechanism — see the module docs' R44-back
 /// section. In short: the entry is (re-)inserted at its ([`Role`], first-wire)
-/// sort position, so neither *when* nor *how often* a controller wires can move
+/// sort position, so neither *when* nor *how often* a registrant wires can move
 /// it; and a repeat wire drops every **unmounted** registrant that did not wire
-/// since this controller's previous wire, a mounted one being in the tree by
+/// since this registrant's previous wire, a mounted one being in the tree by
 /// definition.
 ///
 /// # Panics
@@ -272,11 +369,13 @@ fn any_interest() -> bool {
 /// The first call registers the live provider via [`set_can_pop_provider`],
 /// which panics off the UI thread — always the case here (a rebuild / a
 /// `Component::init` runs on the UI thread).
-fn refresh_interest<State: 'static>(controller: &NavigatorController<State>, role: Role) {
-    let id = controller.id();
-    let mounted_probe = controller.clone();
-    let interest_probe = controller.clone();
-    let request_probe = controller.clone();
+fn register(
+    id: RegistrantId,
+    role: Role,
+    mounted: Box<dyn Fn() -> bool>,
+    interest: Rc<dyn Fn() -> bool>,
+    request_back: Rc<dyn Fn()>,
+) {
     SHARED.with(|shared| {
         let mut shared = shared.borrow_mut();
         shared.seq += 1;
@@ -289,16 +388,18 @@ fn refresh_interest<State: 'static>(controller: &NavigatorController<State>, rol
                 let previous = shared.registrants[index].seq;
                 let carried = (
                     // `Host` sorts first, so `min` IS the sticky upgrade: a
-                    // controller ever wired as an overlay host stays one.
+                    // controller ever wired as an overlay host stays one. (A
+                    // fallback id only ever wires as `Fallback`, so `min` is a
+                    // no-op for it.)
                     shared.registrants[index].role.min(role),
                     shared.registrants[index].birth,
                 );
                 // A repeat wire closes a window. Any registrant that neither
                 // wired within it nor is currently mounted is no longer in the
                 // tree — drop it rather than let it keep claiming presses. The
-                // mounted probe is a `Cell` read on the registrant's controller
-                // and never re-enters this module, so calling it under the
-                // `SHARED` borrow is safe (same contract as `any_interest`).
+                // mounted probe only reads `Cell`s (a navigator's controller, a
+                // fallback's mount count and grace) and never re-enters this
+                // module, so calling it under the `SHARED` borrow is safe.
                 shared
                     .registrants
                     .retain(|r| r.id == id || r.seq >= previous || (r.mounted)());
@@ -312,9 +413,9 @@ fn refresh_interest<State: 'static>(controller: &NavigatorController<State>, rol
             role,
             birth,
             seq,
-            mounted: Box::new(move || mounted_probe.is_mounted()),
-            interest: Box::new(move || interest_probe.back_interest()),
-            request_back: Rc::new(move || request_probe.request_back()),
+            mounted,
+            interest,
+            request_back,
         };
         // Re-insert at the sort position, never "wherever it already was": that
         // is what keeps arbitration order a function of what a registrant IS
@@ -329,69 +430,66 @@ fn refresh_interest<State: 'static>(controller: &NavigatorController<State>, rol
         if shared.provider.is_none() {
             // Register the stable live provider ONCE. It reads whatever
             // registrants are currently wired from `SHARED`, so a new
-            // controller joining the list needs no re-registration.
+            // registrant joining the list needs no re-registration.
             shared.provider = Some(set_can_pop_provider(Box::new(any_interest)));
         }
     });
     // Refresh the polled fallback flag (the live provider is authoritative; this
-    // only keeps the no-provider fallback roughly in sync — see the module docs).
+    // only keeps the no-provider flag roughly in sync — see the module docs).
     set_handles_back(any_interest());
 }
 
 /// Deliver a consumed back press under **R44-back**: to the first registrant in
-/// arbitration order (hosts first, then plain navigators innermost-first) that
-/// claims it via `back_interest()`.
+/// arbitration order (hosts first, then plain navigators innermost-first, then
+/// fallbacks) that claims it.
 ///
 /// No visibility/reachability filter here on purpose: `back_interest()` is
 /// already gated on the claimant's hosting page being input-routed (see the
 /// module docs' R23 note), so a navigator the user cannot reach is never in this
 /// list's answer to begin with.
 ///
-/// `fallback` is the controller whose wire consumed the press, used only when
-/// *no* registrant claims one — which preserves the pre-arbitration behaviour
-/// exactly (a press was always delivered to the wiring controller). Delivery
-/// there is a no-op by construction: `back_interest()` is false only at depth 1
-/// with a `BackPolicy::Pop` top page, and `request_back` on that stack pops
-/// nothing.
-fn route_back<State: 'static>(fallback: &NavigatorController<State>) {
-    // The claimant's `request_back` is CLONED OUT of the list (that is what the
-    // `Rc<dyn Fn()>` is for) and called with NO `SHARED` borrow outstanding.
-    // `request_back` only enqueues an op or bumps a dismiss signal today, but it
-    // is the one call here that reaches app-reachable machinery, and a re-entry
-    // into this module would panic on the already-borrowed `RefCell` — so the
-    // borrow ends before the call rather than that staying load-bearing. (The
-    // `interest` probe above is a plain `Cell` read, as `any_interest` notes.)
-    let claimant = SHARED.with(|shared| {
-        let shared = shared.borrow();
-        shared
-            .registrants
-            .iter()
-            .find(|r| (r.interest)())
-            .map(|r| Rc::clone(&r.request_back))
-    });
-    match claimant {
-        Some(request_back) => request_back(),
-        None => fallback.request_back(),
+/// A press no registrant claims at this point is dropped: delivering it to the
+/// navigator whose wire consumed it would not be a no-op (that navigator may be
+/// deep yet unreachable, e.g. a hidden `IndexedStack` tab, or torn down). The
+/// shell already consumed the press via `handles_back`, so if every interest
+/// lapsed between that decision and delivery the press is swallowed, not
+/// returned to the platform.
+fn route_back() {
+    // Both the interest probes and the claimant's `request_back` are CLONED OUT
+    // of the list (that is what the `Rc`s are for) and called with NO `SHARED`
+    // borrow outstanding. A navigator's are a `Cell` read and an op enqueue, but
+    // a fallback's are app closures, and a re-entry into this module under a
+    // borrow would panic on the already-borrowed `RefCell`.
+    let claimant = SHARED
+        .with(|shared| {
+            shared
+                .borrow()
+                .registrants
+                .iter()
+                .map(|r| (Rc::clone(&r.interest), Rc::clone(&r.request_back)))
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .find(|(interest, _)| interest())
+        .map(|(_, request_back)| request_back);
+    if let Some(request_back) = claimant {
+        request_back();
     }
 }
 
-/// Consume any new back press against the shared marker, routing it through
-/// [`NavigatorController::request_back`] (applies the top page's `BackPolicy`)
-/// on the navigator [`route_back`] arbitrates to. The tracked read of the
-/// back-press counter subscribes THIS rebuild, so a later `push_back_press`
-/// wakes it (State & Reactivity: the track-per-rebuild contract).
+/// Consume any new back press against the shared marker, reporting whether
+/// this call is the one that consumed it (and so must route it). The tracked
+/// read of the back-press counter subscribes THIS rebuild, so a later
+/// `push_back_press` wakes it (State & Reactivity: the track-per-rebuild
+/// contract).
 ///
 /// The shared marker is the single consumption source (see the module docs): if
-/// both entry points run in the same rebuild on the same controller, the first
-/// fires `request_back` and the second no-ops on the already-consumed count.
-///
-/// `controller` is the *wiring* controller, not necessarily the recipient —
-/// under R44-back the press goes to the first registrant claiming it, and
-/// `controller` is only the fallback when none does.
-fn consume_back<State: 'static>(controller: &NavigatorController<State>) {
+/// several entry points run in the same rebuild, the first consumes the press
+/// and every later one no-ops on the already-consumed count.
+fn consume_press() -> bool {
     // Tracked read — subscribes the rebuild to the back-press counter.
     let count = back_presses().count.get();
-    let fire = SHARED.with(|shared| {
+    SHARED.with(|shared| {
         let mut shared = shared.borrow_mut();
         match shared.consumed {
             // A fresh process/marker: seed to the current count WITHOUT firing,
@@ -410,9 +508,19 @@ fn consume_back<State: 'static>(controller: &NavigatorController<State>) {
                 true
             }
         }
-    });
-    if fire {
-        route_back(controller);
+    })
+}
+
+/// Consume any new back press ([`consume_press`]), routing it through
+/// [`NavigatorController::request_back`] (applies the top page's `BackPolicy`)
+/// on the registrant [`route_back`] arbitrates to.
+///
+/// Under R44-back the press goes to the first registrant claiming it; the
+/// wiring controller gets no special delivery, and an unclaimed press is
+/// dropped.
+fn consume_back() {
+    if consume_press() {
+        route_back();
     }
 }
 
@@ -444,7 +552,7 @@ fn seed_consumed() {
 /// Runs during a rebuild's build pass; the first call registers the live
 /// provider, which panics off the UI thread (always the UI thread here).
 pub(crate) fn auto_wire<State: 'static>(controller: &NavigatorController<State>) {
-    consume_back(controller);
+    consume_back();
     refresh_interest(controller, Role::Navigator);
 }
 
@@ -457,7 +565,7 @@ pub(crate) fn auto_wire<State: 'static>(controller: &NavigatorController<State>)
 ///
 /// As [`auto_wire`].
 pub(crate) fn auto_wire_overlay_host<State: 'static>(controller: &NavigatorController<State>) {
-    consume_back(controller);
+    consume_back();
     refresh_interest(controller, Role::Host);
 }
 
@@ -514,7 +622,7 @@ impl<State: 'static> BackHandler<State> {
     /// double-counts, and a `frust::navigator` on the same controller in the
     /// same rebuild cannot double-pop.
     pub fn track(&self) {
-        consume_back(&self.controller);
+        consume_back();
         refresh_interest(&self.controller, Role::Navigator);
     }
 
@@ -576,9 +684,220 @@ pub fn attach_back_handler<State: 'static>(
     BackHandler::new(controller)
 }
 
+/// An app-level back rule that claims a press only when **no navigator does** —
+/// the Android/Material "back at a tab root returns to the home tab; back at the
+/// home tab root exits" convention for per-tab navigator stacks.
+///
+/// Not a navigator: it ranks after every navigator in the back arbitration
+/// (R44-back's fallback rank), whatever the wire order, so a selected tab
+/// that can still pop (or a root overlay) always takes the press first.
+///
+/// Construct once — in `Component::init` or app state — and wrap the subtree it
+/// belongs to with [`back_fallback`] from every `Component::build`. Cheaply
+/// [`Clone`] (`Rc`-backed); every clone is the same fallback.
+///
+/// **Liveness is view-scoped.** The fallback claims presses only while at least
+/// one [`back_fallback`] wrapper over it is mounted: leaving the screen unmounts
+/// the wrapper, the fallback stops claiming at once, and the arbitration list
+/// releases it (see the module docs' release rules). Merely holding the handle
+/// claims nothing.
+///
+/// The facade's re-export docs carry a back-to-home-tab example and the
+/// accepted residual (a wrapper inside a hidden branch still counts as live).
+#[derive(Clone)]
+pub struct BackFallback {
+    inner: Rc<FallbackInner>,
+}
+
+/// The shared state behind a [`BackFallback`] and all its clones.
+struct FallbackInner {
+    /// This fallback's arbitration identity ([`RegistrantId::Fallback`]).
+    id: u64,
+    /// How many [`BackFallbackView`] wrappers over this fallback are mounted
+    /// right now — `build` increments it, `teardown` decrements it. The
+    /// fallback's rule-1 liveness: `> 0` is "in the retained tree".
+    mounted: Cell<usize>,
+    /// The first-wire grace (see the module docs): set by every
+    /// [`back_fallback`] wire, cleared by any wrapper's `build`, `rebuild` or
+    /// `teardown`. While set, the fallback counts as mounted even with
+    /// `mounted == 0` — it was wired by a wrapper that has not been built yet.
+    awaiting_build: Cell<bool>,
+    /// The app's "do I claim the next press?" closure.
+    interest: Box<dyn Fn() -> bool>,
+    /// The app's back action, run when this fallback receives a press.
+    on_back: Box<dyn Fn()>,
+}
+
+impl FallbackInner {
+    /// Rule-1 liveness plus the first-wire grace: a mounted wrapper, or a wire
+    /// whose wrapper has not been built yet.
+    fn live(&self) -> bool {
+        self.mounted.get() > 0 || self.awaiting_build.get()
+    }
+
+    /// One wrapper reconciled (built, rebuilt or torn down): the grace ends.
+    fn reconciled(&self) {
+        self.awaiting_build.set(false);
+    }
+}
+
+impl BackFallback {
+    /// Create a fallback that claims a back press while `interest()` is true
+    /// (and a [`back_fallback`] wrapper over it is mounted), running `on_back`
+    /// for each press it receives.
+    ///
+    /// Call once — from `Component::init` or wherever app state is built, on
+    /// the UI thread. Seeds the shared consumption marker to the current
+    /// back-press count, like [`BackHandler::new`], so a press delivered before
+    /// this fallback existed does not fire it. Registers nothing yet: a
+    /// fallback joins the arbitration when [`back_fallback`] first wraps a view
+    /// with it.
+    ///
+    /// `interest` is polled whenever the shell asks whether the app handles
+    /// back, and before each press is routed, with no back-arbitration borrow
+    /// outstanding; keep it a cheap, untracked read (`get_untracked`,
+    /// [`NavigatorController::depth`]). `on_back` runs during a rebuild's build
+    /// pass, like a navigator's `request_back`.
+    pub fn new(interest: impl Fn() -> bool + 'static, on_back: impl Fn() + 'static) -> Self {
+        seed_consumed();
+        let id = NEXT_FALLBACK_ID.with(|next| {
+            let id = next.get();
+            next.set(id + 1);
+            id
+        });
+        Self {
+            inner: Rc::new(FallbackInner {
+                id,
+                mounted: Cell::new(0),
+                awaiting_build: Cell::new(false),
+                interest: Box::new(interest),
+                on_back: Box::new(on_back),
+            }),
+        }
+    }
+
+    /// Whether this fallback currently counts as live: a wrapper over it is
+    /// mounted, or one was just wired and is awaiting its first build.
+    #[cfg(test)]
+    fn is_live(&self) -> bool {
+        self.inner.live()
+    }
+
+    /// Register (or refresh) this fallback in the R44-back arbitration list at
+    /// [`Role::Fallback`], and open the first-wire grace (see the module docs).
+    /// The probes hold only a [`Weak`](std::rc::Weak) reference, so the
+    /// arbitration list never keeps the app's closures alive.
+    fn wire(&self) {
+        self.inner.awaiting_build.set(true);
+        let mounted_probe = Rc::downgrade(&self.inner);
+        let interest_probe = Rc::downgrade(&self.inner);
+        let request_probe = Rc::downgrade(&self.inner);
+        register(
+            RegistrantId::Fallback(self.inner.id),
+            Role::Fallback,
+            Box::new(move || mounted_probe.upgrade().is_some_and(|inner| inner.live())),
+            Rc::new(move || {
+                interest_probe
+                    .upgrade()
+                    .is_some_and(|inner| inner.live() && (inner.interest)())
+            }),
+            Rc::new(move || {
+                if let Some(inner) = request_probe.upgrade() {
+                    (inner.on_back)();
+                }
+            }),
+        );
+    }
+}
+
+/// Wrap `child` so `fallback` takes part in back arbitration while this view is
+/// mounted — the view-scoped half of [`BackFallback`].
+///
+/// Call from every `Component::build`, exactly like
+/// [`navigator`](crate::navigator): at call time it consumes any new back press
+/// (the tracked read that subscribes the rebuild, routed under R44-back, so the
+/// fallback receives it only if no navigator claims it) and then registers or
+/// refreshes the fallback at the fallback rank. The returned
+/// [`BackFallbackView`] is a pass-through: it renders `child` unchanged and
+/// counts its own mounts, which is the fallback's liveness. It is a [`View`]
+/// for every `State` its child is one for, so the function itself names no
+/// `State` and a state-agnostic child (a `text`) needs no annotation.
+///
+/// The facade's re-export docs carry a back-to-home-tab example.
+///
+/// # Panics
+///
+/// Runs during a rebuild's build pass; the first wire registers the live
+/// `handles_back` provider, which panics off the UI thread (always the UI
+/// thread here).
+pub fn back_fallback<V>(fallback: &BackFallback, child: V) -> BackFallbackView<V> {
+    if consume_press() {
+        route_back();
+    }
+    fallback.wire();
+    BackFallbackView {
+        fallback: fallback.clone(),
+        child,
+    }
+}
+
+/// The pass-through view [`back_fallback`] returns: renders its child unchanged
+/// (`Element` is the child's own) and counts its own mounts into the
+/// [`BackFallback`]'s liveness — `build` increments it before the child builds,
+/// `teardown` decrements it after the child is torn down.
+pub struct BackFallbackView<V> {
+    fallback: BackFallback,
+    child: V,
+}
+
+impl<State: 'static, V: View<State>> View<State> for BackFallbackView<V> {
+    type Element = V::Element;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> Self::Element {
+        // Publish liveness FIRST, like a navigator's `build`: anything wiring
+        // from inside the child already sees this fallback as mounted.
+        let inner = &self.fallback.inner;
+        inner.mounted.set(inner.mounted.get() + 1);
+        inner.reconciled();
+        self.child.build(ctx)
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut Self::Element,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        let (next, old) = (&self.fallback.inner, &prev.fallback.inner);
+        if !Rc::ptr_eq(next, old) {
+            // The slot now wraps a DIFFERENT fallback: move this mount from the
+            // old handle to the new one, so `teardown` (which runs through the
+            // latest view) decrements the count it pairs with.
+            next.mounted.set(next.mounted.get() + 1);
+            old.mounted.set(old.mounted.get().saturating_sub(1));
+            old.reconciled();
+        }
+        next.reconciled();
+        self.child.rebuild(&prev.child, element, ctx)
+    }
+
+    fn teardown(&self, element: &mut Self::Element, ctx: &mut BuildCtx<'_>) {
+        self.child.teardown(element, ctx);
+        let inner = &self.fallback.inner;
+        inner.mounted.set(inner.mounted.get().saturating_sub(1));
+        inner.reconciled();
+    }
+
+    fn message(&self, element: &mut Self::Element, state: &mut State) {
+        self.child.message(element, state);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::motion::patterns::SharedAxis;
+    use crate::motion::switcher::PatternSwitcherView;
     use frust_core::{AnyView, RenderRoot, any};
     use frust_reactive::{
         ReactiveRuntime, clear_can_pop_provider, handles_back, push_back_press, set_handles_back,
@@ -891,6 +1210,17 @@ mod tests {
     /// The R44-back arbitration list, in order — the whitebox view the ordering
     /// and pruning rules are pinned against.
     fn registrant_ids() -> Vec<frust_widgets::NavigatorId> {
+        registrants()
+            .into_iter()
+            .filter_map(|id| match id {
+                RegistrantId::Navigator(id) => Some(id),
+                RegistrantId::Fallback(_) => None,
+            })
+            .collect()
+    }
+
+    /// The whole arbitration list, fallbacks included, in order.
+    fn registrants() -> Vec<RegistrantId> {
         SHARED.with(|shared| shared.borrow().registrants.iter().map(|r| r.id).collect())
     }
 
@@ -965,7 +1295,7 @@ mod tests {
         assert!(!handles_back(), "back at the root of both: bubbles again");
 
         // A press with nothing to do stays a safe no-op (nobody claims it, so it
-        // routes to the wiring controller, whose stack cannot pop).
+        // is dropped).
         push_back_press();
         h.rebuild();
         assert_eq!((h.host.depth(), h.inner.depth()), (1, 1));
@@ -1659,5 +1989,914 @@ mod tests {
         push_back_press();
         root.rebuild(&mut app, &mut ());
         assert_eq!(outer.depth(), 1, "outer popped its own shell page");
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-tab navigators kept mounted under an `IndexedStack`: only the
+    // selected tab may claim the back press, whatever the wire order.
+    // -----------------------------------------------------------------------
+
+    type TabsApp = Box<dyn FnMut(&mut ()) -> AnyView<()>>;
+
+    /// Two tab navigators inside `IndexedStack(selected, (tab0, tab1))`,
+    /// optionally under a root `overlay_host`. `last_wired_is_tab1` picks
+    /// which tab's `crate::navigator` call (and so its wiring) runs last.
+    struct TabsHarness {
+        tab0: NavigatorController<()>,
+        tab1: NavigatorController<()>,
+        host: NavigatorController<()>,
+        selected: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+        root: RenderRoot<(), AnyView<()>>,
+        app: TabsApp,
+    }
+
+    impl TabsHarness {
+        fn new(selected: usize, last_wired_is_tab1: bool, with_host: bool) -> Self {
+            Self::build(selected, last_wired_is_tab1, with_host, |_, _, _| None)
+        }
+
+        /// As [`new`](Self::new) (no host, tab 1 wired last), with the tabs
+        /// wrapped in `back_fallback` over the fallback `make_fallback` builds
+        /// from the two tab controllers and the selection cell.
+        fn with_fallback(
+            selected: usize,
+            make_fallback: impl FnOnce(
+                &NavigatorController<()>,
+                &NavigatorController<()>,
+                &std::rc::Rc<std::cell::Cell<Option<usize>>>,
+            ) -> BackFallback,
+        ) -> Self {
+            Self::build(selected, true, false, |tab0, tab1, sel| {
+                Some(make_fallback(tab0, tab1, sel))
+            })
+        }
+
+        fn build(
+            selected: usize,
+            last_wired_is_tab1: bool,
+            with_host: bool,
+            make_fallback: impl FnOnce(
+                &NavigatorController<()>,
+                &NavigatorController<()>,
+                &std::rc::Rc<std::cell::Cell<Option<usize>>>,
+            ) -> Option<BackFallback>,
+        ) -> Self {
+            let tab0: NavigatorController<()> = NavigatorController::new();
+            let tab1: NavigatorController<()> = NavigatorController::new();
+            let host: NavigatorController<()> = NavigatorController::new();
+            let sel = std::rc::Rc::new(std::cell::Cell::new(Some(selected)));
+            let fallback = make_fallback(&tab0, &tab1, &sel);
+            let app: TabsApp = {
+                let (tab0, tab1, host, sel) =
+                    (tab0.clone(), tab1.clone(), host.clone(), sel.clone());
+                Box::new(move |_: &mut ()| {
+                    let tabs = {
+                        let (tab0, tab1, sel) = (tab0.clone(), tab1.clone(), sel.clone());
+                        move || {
+                            let (n0, n1);
+                            if last_wired_is_tab1 {
+                                n0 = crate::navigator(&tab0, page);
+                                n1 = crate::navigator(&tab1, page);
+                            } else {
+                                n1 = crate::navigator(&tab1, page);
+                                n0 = crate::navigator(&tab0, page);
+                            }
+                            frust_widgets::IndexedStack(sel.get(), (n0, n1))
+                        }
+                    };
+                    if with_host {
+                        auto_wire_overlay_host(&host);
+                        any(raw_overlay_host(&host, move || any(tabs())))
+                    } else if let Some(fallback) = &fallback {
+                        any(back_fallback(fallback, tabs()))
+                    } else {
+                        any(tabs())
+                    }
+                })
+            };
+            let mut h = Self {
+                tab0,
+                tab1,
+                host,
+                selected: sel,
+                root: RenderRoot::new(),
+                app,
+            };
+            h.rebuild();
+            h
+        }
+
+        fn rebuild(&mut self) {
+            self.root.rebuild(&mut self.app, &mut ());
+        }
+
+        fn select(&mut self, i: usize) {
+            self.selected.set(Some(i));
+            self.rebuild();
+        }
+
+        fn depths(&self) -> (usize, usize) {
+            (self.tab0.depth(), self.tab1.depth())
+        }
+
+        /// Tab 0 to depth `d0`, tab 1 to depth `d1`.
+        fn deepen(&mut self, d0: usize, d1: usize) {
+            // Depth only updates on rebuild, so push by count from the
+            // current (settled) depth.
+            for _ in self.tab0.depth()..d0 {
+                self.tab0.push(page);
+            }
+            for _ in self.tab1.depth()..d1 {
+                self.tab1.push(page);
+            }
+            self.rebuild();
+            assert_eq!(self.depths(), (d0, d1));
+        }
+    }
+
+    /// (a) Selected tab 0 at its root: back bubbles to the platform even though
+    /// the hidden tab 1 (wired last) is deep.
+    #[test]
+    fn a_selected_tab_at_its_root_exits_even_if_a_hidden_tab_is_deep() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = TabsHarness::new(0, true, false);
+        h.deepen(1, 3);
+        assert!(
+            !handles_back(),
+            "selected tab at its root: the app would exit"
+        );
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 3), "the hidden tab was not popped");
+    }
+
+    /// (b) Switching to tab 1 hands it the press; tab 0 is untouched.
+    #[test]
+    fn switching_tabs_hands_the_back_press_to_the_newly_selected_tab() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = TabsHarness::new(0, true, false);
+        h.deepen(1, 3);
+        h.select(1);
+        assert!(handles_back(), "selected tab 1 is poppable");
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 2), "tab 1 popped one page, tab 0 untouched");
+    }
+
+    /// (c) Wire-order independence, both orders: the deep NON-selected tab is
+    /// wired last, yet the press goes to the selected tab.
+    #[test]
+    fn the_back_press_follows_selection_not_wire_order() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+
+        for last_wired_is_tab1 in [true, false] {
+            reset();
+            // Selected tab 0 (depth 2) vs hidden tab 1 (depth 3).
+            let mut h = TabsHarness::new(0, last_wired_is_tab1, false);
+            h.deepen(2, 3);
+            assert!(handles_back());
+            push_back_press();
+            h.rebuild();
+            assert_eq!(
+                h.depths(),
+                (1, 3),
+                "selected tab 0 took the press (tab1 wired last: {last_wired_is_tab1})"
+            );
+
+            // And the mirror: select tab 1, which now wins whichever wired last.
+            h.select(1);
+            h.tab0.push(page);
+            h.rebuild();
+            assert_eq!(h.depths(), (2, 3));
+            push_back_press();
+            h.rebuild();
+            assert_eq!(
+                h.depths(),
+                (2, 2),
+                "selected tab 1 took the press (tab1 wired last: {last_wired_is_tab1})"
+            );
+        }
+    }
+
+    /// (d) A root overlay host with an open overlay still outranks the
+    /// selected tab.
+    #[test]
+    fn a_root_overlay_outranks_the_selected_tab() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = TabsHarness::new(1, false, true);
+        h.deepen(1, 2);
+        h.host
+            .push_with_options(page, PushOptions::transparent().back(BackPolicy::Pop));
+        h.rebuild();
+        assert_eq!(h.host.depth(), 2);
+        assert!(handles_back());
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.host.depth(), 1, "the overlay was dismissed first");
+        assert_eq!(h.depths(), (1, 2), "the selected tab was untouched");
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(
+            h.depths(),
+            (1, 1),
+            "the next press reaches the selected tab"
+        );
+    }
+
+    /// (e) Hidden tabs stay mounted and registered: depth survives a round
+    /// trip with no re-push.
+    #[test]
+    fn a_hidden_tab_keeps_its_stack_and_registration() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = TabsHarness::new(0, true, false);
+        h.deepen(1, 3);
+        h.select(1);
+        h.select(0);
+        for _ in 0..3 {
+            h.rebuild();
+        }
+        assert_eq!(h.depths(), (1, 3), "the hidden tab's depth survived");
+        let ids = registrant_ids();
+        assert!(
+            ids.contains(&h.tab0.id()) && ids.contains(&h.tab1.id()),
+            "both tab controllers stay registered while hidden"
+        );
+
+        h.select(1);
+        assert!(handles_back());
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 2), "tab 1 resumes from its kept stack");
+    }
+
+    // -----------------------------------------------------------------------
+    // `BackFallback`: a non-navigator registrant ranked after every navigator,
+    // live while a `back_fallback` wrapper over it is mounted.
+    // -----------------------------------------------------------------------
+
+    /// A `RenderRoot` driving a concretely typed app closure — no erasure
+    /// needed when the root view's type is fixed.
+    struct Driver<V: View<()>, F: FnMut(&mut ()) -> V> {
+        root: RenderRoot<(), V>,
+        app: F,
+    }
+
+    impl<V: View<()>, F: FnMut(&mut ()) -> V> Driver<V, F> {
+        fn new(app: F) -> Self {
+            let mut driver = Self {
+                root: RenderRoot::new(),
+                app,
+            };
+            driver.rebuild();
+            driver
+        }
+
+        fn rebuild(&mut self) {
+            self.root.rebuild(&mut self.app, &mut ());
+        }
+    }
+
+    /// An `on_back` that counts its calls, and the count.
+    fn counting() -> (Rc<Cell<usize>>, impl Fn() + 'static) {
+        let hits = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&hits);
+        (hits, move || counter.set(counter.get() + 1))
+    }
+
+    /// `fallback`'s arbitration identity.
+    fn fallback_id(fallback: &BackFallback) -> RegistrantId {
+        RegistrantId::Fallback(fallback.inner.id)
+    }
+
+    /// Whether `fallback` is in the arbitration list at all.
+    fn is_registered(fallback: &BackFallback) -> bool {
+        registrants().contains(&fallback_id(fallback))
+    }
+
+    /// The root view [`wrapped_navigator`] drives, and its driver.
+    type WrappedNavigator = BackFallbackView<NavigatorView<()>>;
+    type WrappedDriver = Driver<WrappedNavigator, Box<dyn FnMut(&mut ()) -> WrappedNavigator>>;
+
+    /// A navigator (at its root) wrapped by `back_fallback`, plus the fallback
+    /// and its call count, with the fallback's interest fixed to `interest`.
+    fn wrapped_navigator(
+        interest: bool,
+    ) -> (
+        NavigatorController<()>,
+        BackFallback,
+        Rc<Cell<usize>>,
+        WrappedDriver,
+    ) {
+        let nav: NavigatorController<()> = NavigatorController::new();
+        let (hits, on_back) = counting();
+        let fallback = BackFallback::new(move || interest, on_back);
+        let driver = {
+            let (nav, fallback) = (nav.clone(), fallback.clone());
+            Driver::new(Box::new(move |_: &mut ()| {
+                back_fallback(&fallback, crate::navigator(&nav, page))
+            })
+                as Box<dyn FnMut(&mut ()) -> WrappedNavigator>)
+        };
+        (nav, fallback, hits, driver)
+    }
+
+    /// (a) A navigator that can pop outranks a mounted, interested fallback.
+    #[test]
+    fn a_poppable_navigator_outranks_a_fallback() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let (nav, _fallback, hits, mut d) = wrapped_navigator(true);
+        nav.push(page);
+        d.rebuild();
+        assert_eq!(nav.depth(), 2);
+
+        push_back_press();
+        d.rebuild();
+        assert_eq!(nav.depth(), 1, "the navigator took the press");
+        assert_eq!(hits.get(), 0, "and the fallback did not");
+    }
+
+    /// (b) With the navigator at its root, an interested fallback claims the
+    /// press: `handles_back()` is true, `on_back` runs once, and the navigator
+    /// is untouched.
+    #[test]
+    fn a_fallback_claims_the_press_when_no_navigator_does() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let (nav, _fallback, hits, mut d) = wrapped_navigator(true);
+        assert_eq!(nav.depth(), 1);
+        assert!(
+            handles_back(),
+            "the fallback claims the press ahead of time"
+        );
+
+        push_back_press();
+        d.rebuild();
+        assert_eq!(hits.get(), 1, "on_back ran once");
+        assert_eq!(nav.depth(), 1, "the navigator is unchanged");
+
+        d.rebuild();
+        assert_eq!(hits.get(), 1, "a rebuild with no new press does not refire");
+    }
+
+    /// (c) A fallback with no interest lets a root-level press exit.
+    #[test]
+    fn an_uninterested_fallback_lets_the_press_exit() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let (nav, _fallback, hits, mut d) = wrapped_navigator(false);
+        assert!(!handles_back(), "nobody claims: the app would exit");
+
+        push_back_press();
+        d.rebuild();
+        assert_eq!((hits.get(), nav.depth()), (0, 1));
+    }
+
+    /// (d) Rank comes from `Role`, never from wire order: a fallback wired
+    /// BEFORE the navigator and one wired AFTER it both rank after it, and
+    /// among themselves keep first-wire order.
+    #[test]
+    fn fallbacks_rank_after_the_navigator_whatever_the_wire_order() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let nav: NavigatorController<()> = NavigatorController::new();
+        let (before_hits, before_on_back) = counting();
+        let (after_hits, after_on_back) = counting();
+        let before = BackFallback::new(|| true, before_on_back);
+        let after = BackFallback::new(|| true, after_on_back);
+        let mut d = {
+            let (nav, before, after) = (nav.clone(), before.clone(), after.clone());
+            Driver::new(move |_: &mut ()| {
+                // Argument order is wire order: `before`, the navigator, `after`.
+                frust_widgets::stack()
+                    .child(back_fallback(&before, frust_widgets::text("x")))
+                    .child(back_fallback(&after, crate::navigator(&nav, page)))
+            })
+        };
+        assert_eq!(
+            registrants(),
+            vec![
+                RegistrantId::Navigator(nav.id()),
+                fallback_id(&before),
+                fallback_id(&after),
+            ],
+            "the navigator first, then the fallbacks in first-wire order"
+        );
+
+        nav.push(page);
+        d.rebuild();
+        push_back_press();
+        d.rebuild();
+        assert_eq!(nav.depth(), 1, "the navigator took the press");
+        assert_eq!((before_hits.get(), after_hits.get()), (0, 0));
+
+        push_back_press();
+        d.rebuild();
+        assert_eq!(
+            (before_hits.get(), after_hits.get()),
+            (1, 0),
+            "with the navigator at its root, the first-wired fallback took it"
+        );
+        assert_eq!(
+            registrants(),
+            vec![
+                RegistrantId::Navigator(nav.id()),
+                fallback_id(&before),
+                fallback_id(&after),
+            ],
+            "re-wiring never re-orders"
+        );
+    }
+
+    /// (e) Leaving the screen: the wrapper unmounts, the fallback stops
+    /// claiming at once, rule 2 prunes it, and a press does not reach it.
+    /// Re-adding the wrapper re-registers it.
+    #[test]
+    fn an_unmounted_fallback_stops_claiming_and_is_pruned() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let nav: NavigatorController<()> = NavigatorController::new();
+        let (hits, on_back) = counting();
+        let fallback = BackFallback::new(|| true, on_back);
+        let show = Rc::new(Cell::new(true));
+        let mut d = {
+            let (nav, fallback, show) = (nav.clone(), fallback.clone(), Rc::clone(&show));
+            Driver::new(move |_: &mut ()| {
+                frust_widgets::stack()
+                    .child(crate::navigator(&nav, page))
+                    .when(show.get(), |s| {
+                        s.child(back_fallback(&fallback, frust_widgets::text("x")))
+                    })
+            })
+        };
+        assert!(handles_back(), "mounted and interested");
+
+        show.set(false);
+        d.rebuild();
+        assert!(!fallback.is_live(), "the wrapper was torn down");
+        assert!(!handles_back(), "an unmounted fallback claims nothing");
+        d.rebuild();
+        d.rebuild();
+        assert!(!is_registered(&fallback), "rule 2 pruned it");
+        assert_eq!(registrant_ids(), vec![nav.id()]);
+
+        push_back_press();
+        d.rebuild();
+        assert_eq!(hits.get(), 0, "a press after the prune does not reach it");
+
+        show.set(true);
+        d.rebuild();
+        assert!(
+            is_registered(&fallback),
+            "re-adding the wrapper re-registers it"
+        );
+        assert!(handles_back());
+        push_back_press();
+        d.rebuild();
+        assert_eq!(hits.get(), 1, "and it claims presses again");
+    }
+
+    /// (f) A burst of presses before a rebuild collapses to one `on_back`.
+    #[test]
+    fn a_press_burst_calls_on_back_once() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let (_nav, _fallback, hits, mut d) = wrapped_navigator(true);
+        for _ in 0..3 {
+            push_back_press();
+        }
+        d.rebuild();
+        assert_eq!(hits.get(), 1, "three presses, one rebuild: one on_back");
+        d.rebuild();
+        assert_eq!(hits.get(), 1);
+    }
+
+    /// (g) Per-tab stacks under an `IndexedStack`, wrapped by a back-to-home
+    /// fallback: back at a non-home tab root switches to the home tab, and
+    /// back at the home tab root is not consumed (the app exits).
+    #[test]
+    fn back_at_a_tab_root_returns_home_then_exits() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        const HOME: usize = 0;
+        let mut h = TabsHarness::with_fallback(1, |tab0, tab1, sel| {
+            let (tab0, tab1) = (tab0.clone(), tab1.clone());
+            let (probe, set) = (Rc::clone(sel), Rc::clone(sel));
+            BackFallback::new(
+                move || match probe.get() {
+                    Some(HOME) | None => false,
+                    Some(i) => [&tab0, &tab1][i].depth() <= 1,
+                },
+                move || set.set(Some(HOME)),
+            )
+        });
+
+        // A poppable selected tab still takes the press first.
+        h.deepen(1, 2);
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 1), "tab B popped");
+        assert_eq!(h.selected.get(), Some(1), "and the selection stayed");
+
+        // Tab B at its root: the fallback switches to the home tab.
+        assert!(
+            handles_back(),
+            "off home at a tab root: the fallback claims"
+        );
+        push_back_press();
+        h.rebuild();
+        assert_eq!(
+            h.selected.get(),
+            Some(HOME),
+            "the press selected the home tab"
+        );
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 1), "no stack was popped");
+
+        // Home tab at its root: nobody claims, so the press would exit.
+        assert!(!handles_back(), "home at its root: back falls through");
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.selected.get(), Some(HOME));
+        assert_eq!(h.depths(), (1, 1));
+    }
+
+    /// (h) A navigator that wires twice per pass (`BackHandler::track` +
+    /// `navigator()` on one controller) never prunes a mounted fallback: rule 1
+    /// holds for a fallback exactly as for a navigator.
+    #[test]
+    fn a_mounted_fallback_survives_a_double_wiring_navigator() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let nav: NavigatorController<()> = NavigatorController::new();
+        let back = BackHandler::new(nav.clone());
+        let (hits, on_back) = counting();
+        let fallback = BackFallback::new(|| true, on_back);
+        let mut d = {
+            let (nav, fallback) = (nav.clone(), fallback.clone());
+            Driver::new(move |_: &mut ()| {
+                back.track();
+                back_fallback(&fallback, crate::navigator(&nav, page))
+            })
+        };
+        for pass in 0..4 {
+            d.rebuild();
+            assert!(is_registered(&fallback), "never pruned (pass {pass})");
+            assert!(handles_back(), "handles_back stays true (pass {pass})");
+        }
+
+        push_back_press();
+        d.rebuild();
+        assert_eq!(
+            (hits.get(), nav.depth()),
+            (1, 1),
+            "the fallback took it once"
+        );
+    }
+
+    /// (i) First-wire grace: `back_fallback()` wires before its wrapper is
+    /// built, and a double-wiring navigator constructed AFTER it in the same
+    /// first pass must not prune it while its mount count is still 0.
+    #[test]
+    fn first_wire_grace_keeps_an_unbuilt_fallback_through_a_double_wire() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let nav: NavigatorController<()> = NavigatorController::new();
+        let back = BackHandler::new(nav.clone());
+        let fallback = BackFallback::new(|| true, || {});
+        // What the double wire left behind, seen mid-pass: (registered, mount
+        // count) right after the navigator's second wire, before any build.
+        let mid_pass = Rc::new(Cell::new((false, usize::MAX)));
+        let d = {
+            let (nav, fallback, mid_pass) = (nav.clone(), fallback.clone(), Rc::clone(&mid_pass));
+            Driver::new(move |_: &mut ()| {
+                let wrapped = back_fallback(&fallback, frust_widgets::text("x"));
+                back.track();
+                let navigator = crate::navigator(&nav, page);
+                mid_pass.set((is_registered(&fallback), fallback.inner.mounted.get()));
+                frust_widgets::stack().child(wrapped).child(navigator)
+            })
+        };
+        assert_eq!(
+            mid_pass.get(),
+            (true, 0),
+            "unbuilt (mount count 0) yet not pruned by the navigator's double wire"
+        );
+        assert!(is_registered(&fallback), "still registered after the pass");
+        assert_eq!(fallback.inner.mounted.get(), 1, "and now mounted");
+        assert!(
+            handles_back(),
+            "handles_back reflects it on the first frame"
+        );
+        drop(d);
+    }
+
+    /// (j) Two wrappers sharing one handle: the fallback stays live while
+    /// either is mounted, and is pruned only once both are gone.
+    #[test]
+    fn a_fallback_shared_by_two_wrappers_lives_until_both_unmount() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let nav: NavigatorController<()> = NavigatorController::new();
+        let fallback = BackFallback::new(|| true, || {});
+        let show = Rc::new(Cell::new((true, true)));
+        let mut d = {
+            let (nav, fallback, show) = (nav.clone(), fallback.clone(), Rc::clone(&show));
+            Driver::new(move |_: &mut ()| {
+                let (a, b) = show.get();
+                frust_widgets::stack()
+                    .child(crate::navigator(&nav, page))
+                    .when(a, |s| {
+                        s.child(back_fallback(&fallback, frust_widgets::text("a")))
+                    })
+                    .when(b, |s| {
+                        s.child(back_fallback(&fallback, frust_widgets::text("b")))
+                    })
+            })
+        };
+        assert_eq!(fallback.inner.mounted.get(), 2);
+
+        show.set((true, false));
+        for _ in 0..3 {
+            d.rebuild();
+        }
+        assert_eq!(fallback.inner.mounted.get(), 1);
+        assert!(is_registered(&fallback), "one wrapper still mounted: live");
+        assert!(handles_back());
+
+        show.set((false, false));
+        d.rebuild();
+        assert!(!handles_back(), "both unmounted: claims nothing");
+        d.rebuild();
+        d.rebuild();
+        assert!(!is_registered(&fallback), "and rule 2 pruned it");
+    }
+
+    /// A slot that rebuilds against a DIFFERENT handle moves its mount: the
+    /// old fallback unmounts (and is pruned), the new one is live.
+    #[test]
+    fn a_wrapper_rebuilt_against_another_handle_moves_its_mount() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let nav: NavigatorController<()> = NavigatorController::new();
+        let first = BackFallback::new(|| true, || {});
+        let second = BackFallback::new(|| true, || {});
+        let use_first = Rc::new(Cell::new(true));
+        let mut d = {
+            let (nav, first, second, use_first) = (
+                nav.clone(),
+                first.clone(),
+                second.clone(),
+                Rc::clone(&use_first),
+            );
+            Driver::new(move |_: &mut ()| {
+                let fallback = if use_first.get() { &first } else { &second };
+                back_fallback(fallback, crate::navigator(&nav, page))
+            })
+        };
+        assert_eq!(
+            (first.inner.mounted.get(), second.inner.mounted.get()),
+            (1, 0)
+        );
+
+        use_first.set(false);
+        for _ in 0..3 {
+            d.rebuild();
+        }
+        assert_eq!(
+            (first.inner.mounted.get(), second.inner.mounted.get()),
+            (0, 1)
+        );
+        assert!(!is_registered(&first), "the old handle was released");
+        assert!(is_registered(&second), "the new one is live");
+    }
+
+    // -----------------------------------------------------------------------
+    // Unclaimed presses are dropped; tab navigators + fallback under a real
+    // `pattern_switcher`.
+    // -----------------------------------------------------------------------
+
+    /// (b) The opposite wire order of the first tabs test: the hidden deep tab
+    /// wires FIRST, the selected tab (wired last) is at its root, no fallback.
+    /// Nothing claims, and nothing pops.
+    #[test]
+    fn an_unclaimed_press_pops_nothing_when_the_hidden_deep_tab_wires_first() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = TabsHarness::new(0, false, false);
+        h.deepen(1, 3);
+        assert!(!handles_back(), "selected tab at its root: nothing claims");
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 3), "the hidden deep tab was not popped");
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 3));
+    }
+
+    /// (c) Lost-claim race: the fallback claims at poll time, the selection
+    /// flips to Home before the rebuild that consumes the press, and the
+    /// hidden Home tab is deep. The press pops nothing.
+    #[test]
+    fn a_claim_lost_before_the_press_is_consumed_pops_no_hidden_tab() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        const HOME: usize = 0;
+        let mut h = TabsHarness::with_fallback(1, |tab0, tab1, sel| {
+            let (tab0, tab1) = (tab0.clone(), tab1.clone());
+            let probe = Rc::clone(sel);
+            BackFallback::new(
+                move || match probe.get() {
+                    Some(HOME) | None => false,
+                    Some(i) => [&tab0, &tab1][i].depth() <= 1,
+                },
+                || {},
+            )
+        });
+        h.deepen(3, 1);
+        assert!(handles_back(), "tab B at its root: the fallback claims");
+
+        // The selection flips before the rebuild that consumes the press.
+        h.selected.set(Some(HOME));
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.depths(), (3, 1), "the hidden-then-selected Home tab held");
+        h.rebuild();
+        assert_eq!(h.depths(), (3, 1));
+    }
+
+    type SwitchedApp = Box<dyn FnMut(&mut ()) -> PatternSwitcherView<(), SharedAxis>>;
+
+    /// Two tab navigators (`IndexedStack`, optionally under a `back_fallback`)
+    /// inside the page of a real `frust::motion` `pattern_switcher` keyed 0;
+    /// key 1 is a page with no navigator.
+    struct SwitchHarness {
+        tab0: NavigatorController<()>,
+        tab1: NavigatorController<()>,
+        key: Rc<Cell<usize>>,
+        hits: Rc<Cell<usize>>,
+        driver: Driver<PatternSwitcherView<(), SharedAxis>, SwitchedApp>,
+    }
+
+    impl SwitchHarness {
+        fn new(with_fallback: bool) -> Self {
+            let tab0: NavigatorController<()> = NavigatorController::new();
+            let tab1: NavigatorController<()> = NavigatorController::new();
+            let key = Rc::new(Cell::new(0usize));
+            let (hits, on_back) = counting();
+            let fallback = {
+                let tab1 = tab1.clone();
+                BackFallback::new(move || tab1.depth() <= 1, on_back)
+            };
+            let app: SwitchedApp = {
+                let (tab0, tab1, key) = (tab0.clone(), tab1.clone(), key.clone());
+                Box::new(move |_: &mut ()| {
+                    let child: AnyView<()> = if key.get() == 0 {
+                        let n0 = crate::navigator(&tab0, page);
+                        let n1 = crate::navigator(&tab1, page);
+                        let tabs = frust_widgets::IndexedStack(Some(1), (n0, n1));
+                        if with_fallback {
+                            any(back_fallback(&fallback, tabs))
+                        } else {
+                            any(tabs)
+                        }
+                    } else {
+                        any(frust_widgets::text("no navigator here"))
+                    };
+                    crate::motion::switcher::pattern_switcher(key.get(), SharedAxis::X, child)
+                })
+            };
+            Self {
+                tab0,
+                tab1,
+                key,
+                hits,
+                driver: Driver::new(app),
+            }
+        }
+
+        /// Tab B (the selected one) to `depth`, by a counted number of pushes.
+        fn deepen_b(&mut self, depth: usize) {
+            for _ in self.tab1.depth()..depth {
+                self.tab1.push(page);
+            }
+            self.driver.rebuild();
+            assert_eq!(self.tab1.depth(), depth);
+        }
+
+        fn switch_away(&mut self) {
+            self.key.set(1);
+            self.driver.rebuild();
+        }
+    }
+
+    /// (a) The real switcher path, deep tab: switching to a page with no
+    /// navigator tears the tabs down on the switch rebuild itself, so nothing
+    /// claims and the press is not swallowed by the dead tab B.
+    #[test]
+    fn a_switcher_teardown_leaves_no_claim_on_a_deep_dead_tab() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = SwitchHarness::new(true);
+        h.deepen_b(3);
+        assert!(
+            handles_back(),
+            "deep selected tab B claims before the switch"
+        );
+
+        h.switch_away();
+        assert!(!handles_back(), "no claim on the switch rebuild itself");
+
+        push_back_press();
+        h.driver.rebuild();
+        assert_eq!(h.tab1.depth(), 3, "the dead tab B was not popped");
+        assert_eq!(h.tab0.depth(), 1);
+        assert_eq!(h.hits.get(), 0, "the fallback did not fire either");
+        assert!(!handles_back());
+    }
+
+    /// (a, cont.) The real switcher path, tab B at its root with the fallback
+    /// interested: after the switch the fallback is unmounted and does not fire.
+    #[test]
+    fn a_switcher_teardown_silences_an_interested_fallback() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = SwitchHarness::new(true);
+        assert!(handles_back(), "tab B at its root: the fallback claims");
+
+        h.switch_away();
+        assert!(!handles_back(), "the torn-down fallback stops claiming");
+
+        push_back_press();
+        h.driver.rebuild();
+        assert_eq!(h.hits.get(), 0, "the fallback did not fire");
+    }
+
+    /// (d) A torn-down navigator stops claiming immediately: no extra rebuild
+    /// cycle is needed before `handles_back` turns false.
+    #[test]
+    fn a_torn_down_navigator_stops_claiming_without_an_extra_rebuild() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = SwitchHarness::new(false);
+        h.deepen_b(3);
+        assert!(h.tab1.is_mounted());
+        assert!(handles_back());
+
+        h.switch_away();
+        assert!(!h.tab1.is_mounted(), "torn down at the switch");
+        assert!(
+            !handles_back(),
+            "and no longer claiming, with no extra pass"
+        );
     }
 }

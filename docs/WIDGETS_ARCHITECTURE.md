@@ -18,7 +18,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | Module | Responsibility |
 |--------|-----------------|
 | `frust-widgets::authoring` | Public container/callback toolkit every widget in the crate builds from, instead of touching `frust-core` primitives directly — reachable by app code as `frust::authoring` (the facade's re-export, CORE unit); also carries the `VisitPods` trait / `visit_children!` macro, the crate's introspection seam (see *Data Flow*) |
-| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`) |
+| `frust-widgets` (baseline) | Baseline layout containers and interactive leaf widgets (text, forms, gestures, scrolling, a virtualized `ListView`, a four-slot `Scaffold`, `IndexedStack`) |
 | `frust-widgets::canvas` | `CanvasView`/`CanvasWidget` — declarative custom painting over `PaintScene`, local-space, no semantics node |
 | `frust-widgets::pinch` | `PinchRecognizer` — a pure two-contact pinch state machine — and `pinch_detector`, the wrapper view feeding it from a gesture's contacts |
 | `frust-widgets::pan_zoom` | `PanZoomView`/`PanZoomWidget` — one child under a drag-pan/pinch-or-wheel-zoom transform, with inertia and a `PanZoomController` handle |
@@ -145,13 +145,18 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
     go_router's outermost-first order on Android is the counter-example this deliberately avoids. A
     host with no overlays reports no interest and defers to the inner navigator. Registrants are
     released by mount liveness (`NavigatorController::is_mounted()`), not by a wire-count heuristic.
+  - **Fallback rank:** a `BackFallback` (an app rule, e.g. back at a tab root returns home) ranks after every
+    navigator by role and claims only when none does; it is live while a `frust::back_fallback(&handle, child)`
+    wrapper is mounted (plus a first-wire grace) — one in a hidden branch still counts, so gate its interest.
   - **Back reach follows input routing (R23):** ranking (above) decides who wins *among* claimants;
     a separate reach check decides who may claim at all. A navigator whose hosting page is not in
     its host navigator's `input_routed_pages()` reports `back_interest() == false` outright,
     whatever its own stack looks like — so a press can never pop an off-screen nested stack while
     the visible page stays put. Reach is input routing, not painting: a page under a *transparent*
-    overlay is still `PageVisibility::Visible` but claims no back. A top-level navigator has no
-    hosting page and is unconditionally reachable, so single-navigator apps are unaffected.
+    overlay is still `PageVisibility::Visible` but claims no back. `IndexedStack` is the second reach
+    installer: a navigator in a non-selected child claims no back, so per-tab stacks route it to the
+    selected tab only. A top-level navigator (no hosting page, no `IndexedStack` above it) is
+    unconditionally reachable, so single-navigator apps are unaffected.
   - **Controller binding is structural:** a `NavigatorView`'s published cells (depth, back interest,
     transition, mount count) bind to the `NavigatorController` it was last built or rebuilt against;
     a controller swap is detected by identity (not just view type) and re-bound in the same rebuild
@@ -159,10 +164,12 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
     controller reliably reports unmounted.
   - **NavigatorWidget semantics (R23):** Now implements `Widget::semantics`, forwarding via
     `ChildPod::semantics_child` to exactly the pages input routing can reach (covered pages and pages
-    under modals omitted outright), honoring the input-parity invariant documented in
-    CODE_STANDARDS.md. Back arbitration's reach check (above) derives from this same
-    `input_routed_pages()` set, so it is the single reach definition shared by input, semantics, and
-    back.
+    under modals omitted outright), honoring the input-parity invariant documented in CODE_STANDARDS.md.
+    Back arbitration's reach check (above) derives from this same `input_routed_pages()` set, so it is
+    the single reach definition shared by input, semantics, and back.
+- IndexedStack flow: `IndexedStack(index, children)` builds, rebuilds and lays out every child (each keeps its
+  state, e.g. a tab's navigator stack) but paints, routes input to and exposes semantics for the selected one only
+  (Flutter parity); broadcasts reach all. Deselecting a child cancels its capture and focus and hides its IME.
 - Safe-area flow: `safe_area(child)` pads by the resolved `WindowInsets` on its enabled edges, then
   **removes** what it consumed from its subtree via `WindowInsets::consuming` — installed for the
   child through `LayoutCtx::with_window_insets`/`PaintCtx::with_window_insets` — so a self-insetting
@@ -173,8 +180,7 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   it saw under its owner's `LayoutCtx`; hit testing and event routing are unaffected.
   `WindowInsets` also carries `corner_insets: CornerInsets` — four physical corners (`top_left`,
   `top_right`, `bottom_left`, `bottom_right`), each the window control's protrusion beyond the safe
-  area in logical px; `safe_area` neither pads by nor removes them (`consuming` copies them) and
-  `padding()` ignores them.
+  area in logical px; `safe_area` neither pads by nor removes them (`consuming` copies them) and `padding()` ignores them.
 - Scaffold flow: `scaffold(body)` assembles the four fixed chrome slots (`app_bar`/`body`/`bottom_bar`/`fab`)
   most screens compose around, theme-agnostic (a design system's own bar/nav-bar/FAB widgets plug into the
   slots from app code). **R-B4-inset:** the Scaffold itself consumes no window inset — `app_bar` and
@@ -337,8 +343,7 @@ only `rebuild_children`'s `view_of` (mixed/keyed lists) and `OverlaySlot` stay `
 - **Fluent builders:** `column()`/`row()` (`FlexView`: `child`/`flex`/`keyed`/`children`/`push`/
   `when`/`when_some`) and `stack()` (`StackView`: `child`/`children`/`when`/`when_some`), flat
   re-exported through `frust_widgets` and `frust`. The `Column`/`Row`/`Stack` sugar remains,
-  taking `Vec<V>` with `V: View<State>` (a `Vec`, not an iterator, so `Column(iter.collect())`
-  still infers).
+  taking `Vec<V>` with `V: View<State>` (a `Vec`, not an iterator, so `Column(iter.collect())` still infers).
 - **Parameter contract** (widgets, facade, plugins): a single slot is `impl View<State>`
   (scaffold `app_bar`/`bottom_bar`/`fab`, plugin icon/leading/trailing/title/action); an
   optional slot is `Option<V>` (`app_bar_opt`, `bottom_bar_opt`, `overlay`); a plugin list is
@@ -347,8 +352,7 @@ only `rebuild_children`'s `view_of` (mixed/keyed lists) and `OverlaySlot` stay `
   `Router::error_builder`, `ListView` item builders, `DraggableView::ghost`; `reorderable_list`
   takes `impl IntoIterator<Item = (K, V)>`).
 - **Caller consequences:** a bare `None` on an optional slot becomes `None::<AnyView<S>>`; an
-  explicit turbofish gains a `_` for the view type; `.collect()` into an iterator parameter needs
-  `::<Vec<_>>()`.
+  explicit turbofish gains a `_` for the view type; `.collect()` into an iterator parameter needs `::<Vec<_>>()`.
 
 ### Reactive-Free Design
 `frust-widgets` contains no `reactive_graph` symbols — the crate is entirely signal-free. Reactive
@@ -504,8 +508,7 @@ does — the rest of the gesture's `Move`s and its `Up` fall through to the chil
 starts no fling or settle. A hold still inside touch slop stays armed instead: the slop takeover
 and the child's `Cancel` still happen, and the finger can go on to start the drag afterward, the
 way Flutter's `jumpTo` during a hold behaves. `animate_to` eases there through a `TweenSimulation`
-driven by the same ballistic
-pump a release fling uses, so paint cadence and boundary physics are shared, not duplicated — a
+driven by the same ballistic pump a release fling uses, so paint cadence and boundary physics are shared, not duplicated — a
 user `Down` or wheel interrupts it, a later command replaces it, and the theme's `reduce_motion`
 flag collapses it to a `jump_to`. Every post-release start — a fling, a release-settle, a
 controller tween — goes through that same single tear-down path first, so a fling, a settle and a
@@ -520,8 +523,7 @@ the handle ignores it (debug-build log) — and is covered in *Virtualized ListV
 maps pointer travel through the same `jump_to`. A desktop shell does not consult the
 pending-result-flush flag the way the mobile frame gate does (see SHELLS_ARCHITECTURE.md's *Mobile
 frame path*), so a `jump_to`/`animate_to` issued from a handler that itself requests no redraw
-waits for the next desktop frame some other input wakes — the same gap `PanZoomController` already
-has.
+waits for the next desktop frame some other input wakes — the same gap `PanZoomController` already has.
 
 ### Virtualized ListView (baseline)
 `ListView`/`ListViewWidget`/`list_view()` live in `frust-widgets` proper (`list_view.rs`), not a
@@ -583,9 +585,8 @@ correct re-resolves the aligned position each following layout and nudges to it,
 layouts or until within 0.5px of the target — a pending request never coexists with an established
 drag (the settle loop's drag guard is defensive only) — so an animated request over never-measured
 rows can end with a small correction snap rather than retargeting mid-animation.
-An unknown key, or any key
-on a positional (non-keyed) list, is a no-op
-(debug-build log); a `ScrollView` holding the handle ignores an item command the same way.
+An unknown key, or any key on a positional (non-keyed) list, is a no-op (debug-build log); a `ScrollView`
+holding the handle ignores an item command the same way.
 
 ### Recent Additions
 **Overlay, selection and drag-and-drop:** the `overlay` module and `TextInput`'s hosted
