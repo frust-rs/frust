@@ -984,7 +984,17 @@ where
         extensions,
         runtime,
         scope: TrackedScope::new(),
-        root: RenderRoot::new(),
+        root: {
+            // Resolve FRUST_NO_LAYOUT_SKIP / FRUST_LAYOUT_AUDIT once, beside the other
+            // FRUST_* reads (frust-core reads no env var).
+            let knobs = frust_shell_common::frame_gate::LayoutKnobs::from_env();
+            let mut root = RenderRoot::new();
+            root.set_layout_skip(knobs.skip);
+            root.set_layout_audit(knobs.audit);
+            knobs.log();
+            root
+        },
+        laid_out_for: None,
         text_ctx: TextContext::new(),
         executor,
         scene: Scene::new(),
@@ -1828,6 +1838,9 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// more frame. Re-tracked from scratch every rebuild.
     scope: TrackedScope,
     root: RenderRoot<State, V>,
+    /// The logical window size the last layout pass ran against (`None` before the
+    /// first); a mismatch (resize or scale change) forces layout despite clean flags.
+    laid_out_for: Option<Size>,
     text_ctx: TextContext,
     /// The frame executor: either the render-thread split or
     /// the single-thread fallback, chosen once at startup from the
@@ -3176,9 +3189,10 @@ where
                 }
 
                 // Rebuild the view tree every frame (build is cheap by
-                // construction). A real dirty-tracking loop would skip
-                // this when state is unchanged; the on-demand `Wait` control
-                // flow already keeps us from free-running.
+                // construction); the on-demand `Wait` control flow keeps us
+                // from free-running. Layout and paint are dirty-gated: layout
+                // runs per pod (the core skip rule) and per frame (below,
+                // only when the drained change flags need it).
                 //
                 // The rebuild runs under the reactive runtime's root `Owner`
                 // (so signals created during it are root-owned) and inside the
@@ -3215,7 +3229,15 @@ where
                 );
                 let text_ctx: &mut dyn Any = &mut self.text_ctx;
                 let layout_start = Instant::now();
-                self.root.layout_with_text(logical, text_ctx);
+                // Whole-frame layout gate (Android parity): drain the flags and
+                // lay out only when they need it, or the window size / scale
+                // changed, or this is the first layout. A static window thus
+                // makes zero layout calls between events (`layout_dur` is 0).
+                let needs_layout = self.root.take_change_flags().needs_layout();
+                if layout_needed(needs_layout, self.laid_out_for, logical) {
+                    self.root.layout_with_text(logical, text_ctx);
+                    self.laid_out_for = Some(logical);
+                }
                 let layout_dur = layout_start.elapsed();
 
                 // Push a fresh semantics tree to the accesskit adapter if it may
@@ -3395,8 +3417,32 @@ where
     }
 }
 
+/// Whether a running frame must call `layout`: the drained change flags need
+/// it, or no layout has run yet, or the logical window size (resize / scale
+/// change) differs from the one the last pass used.
+fn layout_needed(needs_layout: bool, laid_out_for: Option<Size>, logical: Size) -> bool {
+    needs_layout || laid_out_for != Some(logical)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn layout_gate_idles_when_static() {
+        use super::layout_needed;
+        use kurbo::Size;
+        let a = Size::new(800.0, 600.0);
+        assert!(layout_needed(false, None, a), "first layout is forced");
+        assert!(
+            !layout_needed(false, Some(a), a),
+            "static window: no layout"
+        );
+        assert!(layout_needed(true, Some(a), a), "dirty flags relayout");
+        assert!(
+            layout_needed(false, Some(a), Size::new(801.0, 600.0)),
+            "resize forces"
+        );
+    }
+
     use super::{
         ClipboardAccess, ClipboardError, ClipboardFailure, ClipboardRequest, ClipboardWarnings,
         ComposeLatch, DesktopConfig, DesktopExtensions, ElementState, FileDropAccumulator,

@@ -436,6 +436,12 @@ impl AndroidAppHandle {
         let scale = sanitize_scale(self.scale);
         let layout_start = perf_on.then(Instant::now);
         if needs_layout || force_layout {
+            if !self.first_layout_done {
+                // Resolve `FRUST_NO_LAYOUT_SKIP` / `FRUST_LAYOUT_AUDIT` once,
+                // before the first layout pass, beside the other `FRUST_*` reads.
+                frust_shell_common::frame_gate::LayoutKnobs::from_env()
+                    .apply_to_app(&mut *self.app);
+            }
             let (lw, lh) = logical_size(self.physical.0, self.physical.1, scale);
             let logical = Size::new(lw, lh);
             let text_ctx: &mut dyn Any = &mut self.text_ctx;
