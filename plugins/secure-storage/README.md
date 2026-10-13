@@ -50,6 +50,18 @@ let token = store.get("api_token")?;        // Some("s3cr3t")
 **Storage-only apps stop here.** No manifest, plist, permission, or Kotlin
 file is needed.
 
+### Previews without a keyring (debug builds, desktop only)
+
+On a Linux box with no Secret Service daemon, `cargo run` previews can opt in
+to an **insecure, plaintext** file backend. Either build the options with
+`StoreOptions::default().with_insecure_file_fallback()` (pass to `open_with`)
+or run with `FRUST_SECURE_STORAGE_INSECURE_FILE=1`. Values then live as JSON
+(`{ store: { key: value } }`) at `data_dir()/frust-secure-storage/insecure-store.json`
+(`0600` on unix), and a one-time `warn!` names that path. The biometric gate is
+reported unavailable there. **Release builds ignore the flag and env var**
+(with an `error!` log) and use the native backend; mobile targets do not
+compile the module.
+
 ---
 
 ## 2. Biometric gate — extra setup, only when you use it

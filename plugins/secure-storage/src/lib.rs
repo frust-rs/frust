@@ -26,6 +26,17 @@
 //! [`SecureStorageError::NotAvailable`]`(`[`Unavailability::UnsupportedPlatform`]`)`
 //! permanently — no platform biometric primitive exists there.
 //!
+//! # Insecure file backend (debug builds, desktop only)
+//!
+//! For `cargo run` previews on a machine with no Secret Service daemon, a
+//! **debug** build on Linux/Windows/macOS can store values as **plaintext**
+//! JSON at `data_dir()/frust-secure-storage/insecure-store.json` (`0600` on
+//! unix). It is opt-in via [`StoreOptions::with_insecure_file_fallback`] or
+//! `FRUST_SECURE_STORAGE_INSECURE_FILE=1`, logs a one-time `warn!` naming the
+//! path, and answers the biometric gate as unavailable. A release build
+//! ignores the flag/env with an `error!` log and uses the native backend;
+//! the module does not exist on mobile.
+//!
 //! # Named-store-handle model
 //!
 //! Unlike `SharedPreferences`' single standard store, secure storage is a
@@ -62,6 +73,12 @@ mod android;
 mod apple;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod desktop;
+// Opt-in plaintext preview backend; debug builds on desktop hosts only.
+#[cfg(all(
+    debug_assertions,
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod insecure_file;
 
 // Pure-Rust (FFI-free) helpers for the Android Keystore backend — Base64, IV
 // framing, and store-id/alias derivation. Split out of `android` (which is
@@ -176,6 +193,62 @@ pub struct StoreOptions {
     pub accessibility: Accessibility,
     /// Whether the store is behind a biometric gate.
     pub auth: AuthPolicy,
+    /// Request the debug-only plaintext file backend (see the module doc's
+    /// *Insecure file backend*). Ignored, with an `error!` log, in release
+    /// builds and on mobile. Set via [`Self::with_insecure_file_fallback`].
+    pub insecure_file_fallback: bool,
+}
+
+impl StoreOptions {
+    /// Request the **insecure, plaintext** file backend for desktop previews
+    /// without a keyring. Honored only in debug builds on Linux/Windows/macOS;
+    /// elsewhere it is ignored (release builds log an `error!`). The env var
+    /// `FRUST_SECURE_STORAGE_INSECURE_FILE=1` has the same effect.
+    #[must_use]
+    pub fn with_insecure_file_fallback(mut self) -> Self {
+        self.insecure_file_fallback = true;
+        self
+    }
+}
+
+/// Env var that selects the insecure file backend (value `1`).
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+const INSECURE_FILE_ENV: &str = "FRUST_SECURE_STORAGE_INSECURE_FILE";
+
+/// Whether the flag or the env var asks for the insecure backend.
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+fn insecure_file_requested(options: &StoreOptions) -> bool {
+    options.insecure_file_fallback
+        || env_value_enables(std::env::var(INSECURE_FILE_ENV).ok().as_deref())
+}
+
+/// Only the exact value `1` enables the env var.
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+fn env_value_enables(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// Debug desktop: the insecure backend is used when requested.
+#[cfg(all(
+    debug_assertions,
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+fn insecure_file_selected(options: &StoreOptions) -> bool {
+    insecure_file_requested(options)
+}
+
+/// Release desktop: a request is refused loudly and the native backend wins.
+#[cfg(all(
+    not(debug_assertions),
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+fn insecure_file_selected(options: &StoreOptions) -> bool {
+    if insecure_file_requested(options) {
+        log::error!(
+            "secure-storage: the insecure file backend is debug-only; ignoring the request and using the native backend"
+        );
+    }
+    false
 }
 
 /// The result of [`SecureStorage::can_authenticate`] — an availability probe
@@ -358,6 +431,34 @@ impl SecureStorage {
             AuthPolicy::Required(ref opts) => Some(opts.clone()),
         };
 
+        // Opt-in plaintext preview backend (debug desktop builds only).
+        #[cfg(all(
+            debug_assertions,
+            any(target_os = "linux", target_os = "windows", target_os = "macos")
+        ))]
+        if insecure_file_selected(&options) {
+            if auth.is_some() {
+                return Err(SecureStorageError::NotAvailable(
+                    Unavailability::UnsupportedPlatform,
+                ));
+            }
+            return Ok(Self {
+                backend: Arc::new(insecure_file::InsecureFileStore::open(name)?),
+            });
+        }
+        // Release builds log and ignore the request.
+        #[cfg(all(
+            not(debug_assertions),
+            any(target_os = "linux", target_os = "windows", target_os = "macos")
+        ))]
+        let _ = insecure_file_selected(&options);
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if options.insecure_file_fallback {
+            log::error!(
+                "secure-storage: the insecure file backend is desktop-only; ignoring the request"
+            );
+        }
+
         // Backend routing: apple targets -> `apple`, android ->
         // `android`, linux/windows -> `desktop`. Each backend takes the
         // optional biometric policy directly; the Apple/Android arms
@@ -442,5 +543,41 @@ impl SecureStorage {
     /// library's keys.
     pub fn clear(&self) -> Result<(), SecureStorageError> {
         self.backend.clear()
+    }
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn env_value_only_one_enables() {
+        assert!(env_value_enables(Some("1")));
+        assert!(!env_value_enables(Some("0")));
+        assert!(!env_value_enables(Some("true")));
+        assert!(!env_value_enables(None));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn flag_selects_and_default_leaves_native_untouched() {
+        assert!(insecure_file_selected(
+            &StoreOptions::default().with_insecure_file_fallback()
+        ));
+        // Env var is not set by the test suite; the default must stay native.
+        if std::env::var_os(INSECURE_FILE_ENV).is_none() {
+            assert!(!insecure_file_selected(&StoreOptions::default()));
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_ignores_the_flag() {
+        assert!(!insecure_file_selected(
+            &StoreOptions::default().with_insecure_file_fallback()
+        ));
     }
 }
