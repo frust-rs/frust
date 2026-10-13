@@ -2494,7 +2494,10 @@ name = "frust-network-image"
 version = "0.6.1"
 dependencies = [
  "frust-paths",
+ "frust-reactive",
  "frust-ui",
+ "futures-util",
+ "image",
  "log",
  "reqwest",
  "rustls",
