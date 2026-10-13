@@ -2493,6 +2493,7 @@ dependencies = [
 name = "frust-network-image"
 version = "0.6.1"
 dependencies = [
+ "frust-core",
  "frust-paths",
  "frust-reactive",
  "frust-ui",

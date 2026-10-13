@@ -85,6 +85,10 @@ pub enum LoadError {
     /// The bytes could not be decoded.
     #[error(transparent)]
     Decode(#[from] DecodeError),
+    /// No loader was reachable: neither `NetworkImages::install` nor a
+    /// per-view `.loader(..)` override supplied one.
+    #[error("no image loader installed")]
+    NotInstalled,
 }
 
 type LoadResult = Result<ImageSource, LoadError>;
@@ -266,6 +270,17 @@ impl ImageLoader {
             },
         );
         fut
+    }
+
+    /// The decoded image for `url` fitted to `target`, if the memory cache
+    /// holds it. Synchronous, so a view can paint a cached image on its first
+    /// frame instead of waiting a task round-trip. Counts as a use for LRU.
+    pub fn peek_memory(&self, url: &str, target: Option<TargetPx>) -> Option<ImageSource> {
+        let key = CacheKey {
+            url: url.to_string(),
+            target,
+        };
+        lock(&self.inner.memory).get(&key)
     }
 
     /// Memory cache occupancy.

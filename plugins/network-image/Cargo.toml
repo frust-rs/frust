@@ -38,4 +38,6 @@ reqwest = ["dep:reqwest", "dep:rustls", "dep:webpki-roots"]
 [dev-dependencies]
 # Dev-only: the facade does not re-export `ReactiveRuntime`, which `spawn_blocking` needs in tests.
 frust-reactive = { workspace = true }
+# Test-only: tests/view.rs drives a real `RenderRoot` (not re-exported by the facade).
+frust-core = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }

@@ -11,26 +11,34 @@
 //! crate to its own `Cargo.toml` alongside `frust`; the facade does not
 //! depend on or re-export it.
 //!
-//! # Status: fetch seam and loader core
+//! # Contents
 //!
-//! The crate carries the [`ImageFetcher`] trait, the default
-//! `ReqwestFetcher` (feature `reqwest`), and [`ImageLoader`]: single-flight
-//! fetches, decode/downscale on the blocking pool, and a byte-budgeted
-//! memory LRU, backed by a persistent [`DiskCache`] of raw response bytes
-//! (opened lazily on the first memory miss). The view arrives in a later phase.
+//! [`network_image`] is the app-facing view: placeholder, error slot, fit,
+//! decode target, fade-in and tap-to-retry. It loads through the
+//! [`ImageLoader`] that `NetworkImages::install()` (feature `reqwest`) or
+//! [`NetworkImages::install_with`] sets up from `frust::app!`'s setup block,
+//! or a per-view `.loader(..)` override. The loader runs single-flight
+//! fetches through an [`ImageFetcher`] (default `ReqwestFetcher`), decodes and
+//! downscales on the blocking pool, and caches in a byte-budgeted memory LRU
+//! backed by a persistent [`DiskCache`] of raw response bytes (opened lazily
+//! on the first memory miss).
 
 mod decode;
 mod disk_cache;
 pub mod fetch;
+mod install;
 mod loader;
 mod memory_cache;
 #[cfg(feature = "reqwest")]
 mod reqwest_fetcher;
+mod view;
 
 pub use decode::{DecodeError, TargetPx, decode_source};
 pub use disk_cache::{DiskCache, DiskStats};
 pub use fetch::*;
+pub use install::NetworkImages;
 pub use loader::{DiskCacheConfig, ImageLoader, LoadError, LoadFuture, LoadRequest, LoaderConfig};
 pub use memory_cache::MemoryStats;
 #[cfg(feature = "reqwest")]
 pub use reqwest_fetcher::ReqwestFetcher;
+pub use view::{LoadState, NetworkImage, NetworkImageView, NetworkImageWidget, network_image};
