@@ -335,9 +335,47 @@ impl AtlasBudget {
         max_atlases: 8,
     };
 
+    /// The large-mobile budget's preferred shape: four 2048-square layers,
+    /// 64 MiB in total — a quarter as many layers as
+    /// [`MOBILE_LARGE_DEEP`](Self::MOBILE_LARGE_DEEP) for the same texels, so
+    /// the array grows (and copies itself) a quarter as often.
+    pub const MOBILE_LARGE_WIDE: Self = Self {
+        atlas_size: (2048, 2048),
+        max_atlases: 4,
+    };
+
+    /// The large-mobile budget's shape on an adapter whose texture edge stops
+    /// short of 2048: sixteen 1024-square layers, the same 64 MiB.
+    pub const MOBILE_LARGE_DEEP: Self = Self {
+        atlas_size: (1024, 1024),
+        max_atlases: 16,
+    };
+
+    /// The large-mobile shape `caps`' adapter can create unclamped, or `None`
+    /// when it can create neither — the tier then falls back to
+    /// [`MOBILE`](Self::MOBILE) rather than to a large budget its ceilings
+    /// would have narrowed below the plain one's.
+    #[must_use]
+    pub fn mobile_large(caps: &TierCaps) -> Option<Self> {
+        [Self::MOBILE_LARGE_WIDE, Self::MOBILE_LARGE_DEEP]
+            .into_iter()
+            .find(|shape| shape.clamped(caps) == *shape)
+    }
+
+    /// The unclamped budget `tier` stands for on `caps`' adapter.
+    #[must_use]
+    pub fn for_tier(tier: AtlasTier, caps: &TierCaps) -> Self {
+        match tier {
+            AtlasTier::Mobile => Self::MOBILE,
+            AtlasTier::MobileLarge => Self::mobile_large(caps).unwrap_or(Self::MOBILE),
+            AtlasTier::Desktop => Self::DESKTOP,
+        }
+    }
+
     /// The budget for `caps`' adapter, clamped to what it can actually create.
     ///
-    /// The tier choice is [`is_mobile_tier`]; the clamps that follow are the
+    /// The tier choice is [`choose_tier`] over the adapter and the device's
+    /// own memory ([`device_memory_bytes`]); the clamps that follow are the
     /// adapter's own texture-edge and array-layer ceilings plus the eight-bit
     /// [`MAX_ATLAS_LAYERS`] the encoded-image record can address.
     ///
@@ -352,22 +390,33 @@ impl AtlasBudget {
     /// it can.
     ///
     /// The resolved budget is reported once per process through
-    /// `atlas_tier_line`, because which of the two tiers a given phone takes is
-    /// otherwise an inference from behaviour rather than an observation: the
-    /// signals [`is_mobile_tier`] reads are the driver's own answers, and a
-    /// device whose driver answers differently from the one it resembles is
-    /// exactly the case a benchmark capture has to be able to name. That line
-    /// is `perf-trace`-only, like every other `frust-perf` line the engine
-    /// emits — a build without the feature resolves the same budget and writes
-    /// nothing.
+    /// `atlas_tier_line`, because which tier a given phone takes is otherwise
+    /// an inference from behaviour rather than an observation: the adapter
+    /// name, the driver's own capability answers and the memory reading are
+    /// all device-reported, and a device answering differently from the one
+    /// it resembles is exactly the case a benchmark capture has to be able to
+    /// name. That line is `perf-trace`-only, like every other `frust-perf`
+    /// line the engine emits — a build without the feature resolves the same
+    /// budget and writes nothing.
     #[must_use]
     pub fn for_caps(caps: &TierCaps) -> Self {
-        let tier = if is_mobile_tier(caps) {
-            Self::MOBILE
-        } else {
-            Self::DESKTOP
-        };
-        let resolved = match config::atlas_size() {
+        let choice = choose_tier(caps, device_memory_bytes());
+        let resolved = Self::for_choice(choice, caps);
+
+        #[cfg(feature = "perf-trace")]
+        ATLAS_TIER_LOG.emit(caps, choice, resolved);
+        resolved
+    }
+
+    /// The budget `choice` resolves to on `caps`' adapter — [`for_caps`]
+    /// without reading the device's memory or writing the tier line, so the
+    /// table's outcome is testable for any adapter and memory size.
+    ///
+    /// [`for_caps`]: Self::for_caps
+    #[must_use]
+    pub fn for_choice(choice: TierChoice, caps: &TierCaps) -> Self {
+        let tier = Self::for_tier(choice.tier, caps);
+        match config::atlas_size() {
             None => tier.clamped(caps),
             Some(atlas_size) => Self {
                 atlas_size,
@@ -375,11 +424,7 @@ impl AtlasBudget {
             }
             .within_total_bytes(tier.total_bytes())
             .clamped(caps),
-        };
-
-        #[cfg(feature = "perf-trace")]
-        ATLAS_TIER_LOG.emit(caps, resolved);
-        resolved
+        }
     }
 
     /// This budget narrowed so a fully grown array costs at most `total_bytes`.
@@ -497,7 +542,30 @@ impl AtlasBudget {
 /// Bytes per texel of the atlas array (`Rgba8Unorm`).
 pub const ATLAS_FORMAT_BYTES: u64 = 4;
 
-/// Whether `caps`' adapter takes the mobile atlas budget.
+/// `evictions` less every rectangle one of `uploads` covers exactly.
+///
+/// Exact cover only — same layer, offset and extent: an upload writes every
+/// texel of its own rectangle (its pixels are exactly the region's extent), so
+/// a clear of that same rectangle ordered ahead of it is overwritten in full.
+/// A rectangle covered only partly, or only by several uploads together, keeps
+/// its clear: whatever texels no upload reaches must still read as zero to the
+/// next tenant. Order is preserved, so the clears stay in the order the
+/// residency reported them.
+#[must_use]
+pub fn uncovered_clears(evictions: &[AtlasRegion], uploads: &[ImageUpload]) -> Vec<AtlasRegion> {
+    if evictions.is_empty() || uploads.is_empty() {
+        return evictions.to_vec();
+    }
+    let written: HashSet<AtlasRegion> = uploads.iter().map(|upload| upload.region).collect();
+    evictions
+        .iter()
+        .copied()
+        .filter(|region| !written.contains(region))
+        .collect()
+}
+
+/// Whether `caps`' adapter reads as a mobile part by its capability answers
+/// alone.
 ///
 /// Two signals, either of which is enough:
 ///
@@ -507,11 +575,212 @@ pub const ATLAS_FORMAT_BYTES: u64 = 4;
 ///   tile-based renderer keeping attachments on-chip" — true on the mobile
 ///   TBDR parts and false on desktop immediate-mode ones.
 ///
-/// Neither reads the adapter *name*: a name match is a denylist that ages, and
-/// both signals above are capability answers the driver gives directly.
+/// This is the device-class read text hinting keys on, and the atlas tier's
+/// fallback for an adapter [`ADAPTER_FAMILIES`] does not name. It is not the
+/// atlas tier itself: some mobile drivers answer `transient_saves_memory`
+/// false (Adreno 618/620 do), which this read alone would put on the desktop
+/// budget — see [`choose_tier`].
 #[must_use]
 pub fn is_mobile_tier(caps: &TierCaps) -> bool {
     caps.downlevel_profile != DownlevelProfile::Full || caps.transient_saves_memory
+}
+
+/// Which class of part an adapter's name places it in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterFamily {
+    /// A phone/tablet GPU family: the atlas competes with the rest of a
+    /// shared-memory device's budget.
+    Mobile,
+    /// A discrete or desktop-integrated GPU family.
+    Desktop,
+}
+
+/// The adapter-name table the atlas tier is read from: a lowercase fragment
+/// and the family an adapter whose name contains it belongs to, first match
+/// winning.
+///
+/// A name table rather than capability answers alone because the capability
+/// answers disagree with the hardware: Adreno 618 and 620 report a full
+/// profile and `transient_saves_memory` false — the desktop answers — while
+/// sharing their device's memory with everything else on it. An adapter the
+/// table does not name keeps the capability read ([`is_mobile_tier`]), so a
+/// family missing here costs the old behaviour rather than a wrong one.
+///
+/// Apple is listed whole: Apple-silicon Macs already took the mobile budget
+/// through `transient_saves_memory`, so naming them changes nothing there.
+pub const ADAPTER_FAMILIES: &[(&str, AdapterFamily)] = &[
+    ("adreno", AdapterFamily::Mobile),
+    ("mali", AdapterFamily::Mobile),
+    ("immortalis", AdapterFamily::Mobile),
+    ("powervr", AdapterFamily::Mobile),
+    ("xclipse", AdapterFamily::Mobile),
+    ("maleoon", AdapterFamily::Mobile),
+    ("apple", AdapterFamily::Mobile),
+    ("tegra", AdapterFamily::Mobile),
+    ("nvidia", AdapterFamily::Desktop),
+    ("geforce", AdapterFamily::Desktop),
+    ("quadro", AdapterFamily::Desktop),
+    ("radeon", AdapterFamily::Desktop),
+    ("amd", AdapterFamily::Desktop),
+    ("intel", AdapterFamily::Desktop),
+];
+
+/// The family [`ADAPTER_FAMILIES`] places `adapter_name` in, matched
+/// case-insensitively; `None` for a name the table does not know.
+#[must_use]
+pub fn adapter_family(adapter_name: &str) -> Option<AdapterFamily> {
+    let name = adapter_name.to_ascii_lowercase();
+    ADAPTER_FAMILIES
+        .iter()
+        .find(|(fragment, _)| name.contains(fragment))
+        .map(|(_, family)| *family)
+}
+
+/// The atlas budget tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtlasTier {
+    /// [`AtlasBudget::MOBILE`].
+    Mobile,
+    /// [`AtlasBudget::mobile_large`]: a mobile family part on a device with at
+    /// least [`MOBILE_LARGE_MIN_MEMORY`] of memory.
+    MobileLarge,
+    /// [`AtlasBudget::DESKTOP`].
+    Desktop,
+}
+
+impl AtlasTier {
+    /// The tier's name as the tier line spells it.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mobile => "mobile",
+            Self::MobileLarge => "mobile_large",
+            Self::Desktop => "desktop",
+        }
+    }
+}
+
+/// Which rule of [`choose_tier`] decided a tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierRule {
+    /// The adapter's limits are clamped to the WebGL2 downlevel defaults.
+    Downlevel,
+    /// [`ADAPTER_FAMILIES`] named the adapter.
+    Table,
+    /// The table did not; [`is_mobile_tier`]'s capability read decided.
+    Heuristic,
+}
+
+impl TierRule {
+    /// The rule's name as the tier line spells it.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Downlevel => "downlevel",
+            Self::Table => "table",
+            Self::Heuristic => "heuristic",
+        }
+    }
+}
+
+/// The resolved tier, with what decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TierChoice {
+    /// The tier.
+    pub tier: AtlasTier,
+    /// The rule that chose it.
+    pub rule: TierRule,
+    /// The device memory the choice was made against, when it was known.
+    pub device_memory: Option<u64>,
+}
+
+/// The device memory from which a mobile family part takes the large budget:
+/// 4 GiB.
+///
+/// The large budget is 64 MiB of atlas, a sixteenth of that; below it the
+/// plain 16 MiB budget stays.
+pub const MOBILE_LARGE_MIN_MEMORY: u64 = 4 << 30;
+
+/// The atlas tier for `caps`' adapter on a device with `device_memory` bytes
+/// of memory (`None` when unknown).
+///
+/// In order:
+///
+/// 1. A downlevel (WebGL2/GLES) profile is [`AtlasTier::Mobile`], whatever the
+///    name: its limits are the browser ceiling, and the budget follows them.
+/// 2. An adapter [`ADAPTER_FAMILIES`] names takes its family's tier — a
+///    desktop family [`AtlasTier::Desktop`]; a mobile family
+///    [`AtlasTier::MobileLarge`] when the device reports at least
+///    [`MOBILE_LARGE_MIN_MEMORY`] and the adapter can create a large shape
+///    unclamped ([`AtlasBudget::mobile_large`]), else [`AtlasTier::Mobile`].
+///    Unknown memory is the small tier: the large one is earned, not assumed.
+/// 3. Any other adapter keeps [`is_mobile_tier`]'s capability read, mobile or
+///    desktop, exactly as before the table existed.
+#[must_use]
+pub fn choose_tier(caps: &TierCaps, device_memory: Option<u64>) -> TierChoice {
+    let (tier, rule) = if caps.downlevel_profile != DownlevelProfile::Full {
+        (AtlasTier::Mobile, TierRule::Downlevel)
+    } else {
+        match adapter_family(&caps.adapter_name) {
+            Some(AdapterFamily::Desktop) => (AtlasTier::Desktop, TierRule::Table),
+            Some(AdapterFamily::Mobile) => {
+                let large = device_memory.is_some_and(|bytes| bytes >= MOBILE_LARGE_MIN_MEMORY)
+                    && AtlasBudget::mobile_large(caps).is_some();
+                let tier = if large {
+                    AtlasTier::MobileLarge
+                } else {
+                    AtlasTier::Mobile
+                };
+                (tier, TierRule::Table)
+            }
+            None if is_mobile_tier(caps) => (AtlasTier::Mobile, TierRule::Heuristic),
+            None => (AtlasTier::Desktop, TierRule::Heuristic),
+        }
+    };
+    TierChoice {
+        tier,
+        rule,
+        device_memory,
+    }
+}
+
+/// The device's total memory in bytes, when this platform reports it.
+///
+/// Read once per process from `/proc/meminfo`'s `MemTotal` on Linux and
+/// Android — the kernel's own figure, readable without a permission on both —
+/// and `None` everywhere else, which keeps every other platform on the tier
+/// it took before the large one existed.
+#[must_use]
+pub fn device_memory_bytes() -> Option<u64> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::sync::OnceLock;
+        static MEMORY: OnceLock<Option<u64>> = OnceLock::new();
+        *MEMORY.get_or_init(|| {
+            std::fs::read_to_string("/proc/meminfo")
+                .ok()
+                .and_then(|text| parse_mem_total(&text))
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        None
+    }
+}
+
+/// `MemTotal` from a `/proc/meminfo` text, in bytes; `None` when the line is
+/// missing or not the `<n> kB` the kernel writes.
+#[must_use]
+pub fn parse_mem_total(meminfo: &str) -> Option<u64> {
+    let line = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?;
+    let mut fields = line.split_whitespace();
+    let kib: u64 = fields.next()?.parse().ok()?;
+    match fields.next() {
+        Some("kB") => kib.checked_mul(1024),
+        _ => None,
+    }
 }
 
 /// The process's latch for the resolved-tier line, held by
@@ -552,14 +821,14 @@ impl TierLogOnce {
         }
     }
 
-    /// Log [`atlas_tier_line`] for `caps` and `budget` if this latch has not
-    /// fired, answering whether this call was the one that did.
-    pub fn emit(&self, caps: &TierCaps, budget: AtlasBudget) -> bool {
+    /// Log [`atlas_tier_line`] for `caps`, `choice` and `budget` if this latch
+    /// has not fired, answering whether this call was the one that did.
+    pub fn emit(&self, caps: &TierCaps, choice: TierChoice, budget: AtlasBudget) -> bool {
         if self.emitted.swap(true, Ordering::Relaxed) {
             return false;
         }
 
-        log::info!("{}", atlas_tier_line(caps, budget));
+        log::info!("{}", atlas_tier_line(caps, choice, budget));
         true
     }
 }
@@ -572,21 +841,24 @@ impl TierLogOnce {
 /// `frust-perf`-prefixed deliberately: a benchmark capture keeps every line
 /// carrying that prefix and drops the rest, so this is what lets a run's own
 /// log say which budget the device was given rather than leaving it to be
-/// inferred from whether images went missing. The adapter name is last because
-/// it is the one field that can contain spaces, which keeps every `key=value`
-/// field ahead of it parseable by splitting on whitespace.
+/// inferred from whether images went missing. `rule` names which of
+/// [`choose_tier`]'s rules decided, and `memory_mib` the device memory it was
+/// decided against (`unknown` where the platform does not report it). The
+/// adapter name is last because it is the one field that can contain spaces,
+/// which keeps every `key=value` field ahead of it parseable by splitting on
+/// whitespace.
 #[cfg(feature = "perf-trace")]
 #[must_use]
-pub fn atlas_tier_line(caps: &TierCaps, budget: AtlasBudget) -> String {
-    let tier = if is_mobile_tier(caps) {
-        "mobile"
-    } else {
-        "desktop"
-    };
+pub fn atlas_tier_line(caps: &TierCaps, choice: TierChoice, budget: AtlasBudget) -> String {
+    let memory = choice
+        .device_memory
+        .map_or_else(|| "unknown".to_string(), |bytes| (bytes >> 20).to_string());
 
     format!(
-        "frust-perf atlas tier={tier} budget={}x{}x{} downlevel={:?} \
-         transient_saves_memory={} adapter={}",
+        "frust-perf atlas tier={} rule={} budget={}x{}x{} downlevel={:?} \
+         transient_saves_memory={} memory_mib={memory} adapter={}",
+        choice.tier.label(),
+        choice.rule.label(),
         budget.atlas_size.0,
         budget.atlas_size.1,
         budget.max_atlases,
@@ -997,9 +1269,24 @@ impl ImageResidency {
     /// on the next frame rather than losing it (see the module doc). The upload
     /// pixels are behind an `Arc`, so a re-emitted plan copies handles rather
     /// than texels, and the steady-state plan is empty on both counts.
+    ///
+    /// The clears are [`evictions`](Self::evictions) less every rectangle a
+    /// pending upload covers exactly (see [`uncovered_clears`]): that upload
+    /// writes every texel the clear would have zeroed, after it, in the same
+    /// plan — so the clear is pure cost, a rectangle's worth of zeroes per
+    /// churned image. Dropped from the plan rather than from `evictions`, so
+    /// the pending set and its acknowledgement are unchanged; a consumer
+    /// forgetting the evicted tenant by rectangle (the renderer's registry) is
+    /// left holding the old handle on that rectangle beside the new one, which
+    /// nothing reads — a handle is only looked up for a draw this frame
+    /// resolved, and a resolved handle is re-registered by its own upload — and
+    /// which the rectangle's next reported eviction removes with the new one.
     #[must_use]
     pub fn plan(&self) -> (Vec<AtlasRegion>, Vec<ImageUpload>) {
-        (self.evictions.clone(), self.uploads.clone())
+        (
+            uncovered_clears(&self.evictions, &self.uploads),
+            self.uploads.clone(),
+        )
     }
 
     /// Whether any part of the pending plan is still unserviced.
@@ -1828,6 +2115,150 @@ mod tests {
         assert!(is_mobile_tier(&tiler));
     }
 
+    fn named(name: &str) -> TierCaps {
+        let mut caps = TierCaps::fake(DownlevelProfile::Full);
+        caps.adapter_name = name.to_string();
+        caps
+    }
+
+    #[test]
+    fn the_adapter_table_names_the_mobile_and_desktop_families() {
+        for name in [
+            "Adreno (TM) 618",
+            "Adreno (TM) 660",
+            "Mali-G78 MP14",
+            "Immortalis-G715",
+            "PowerVR B-Series BXM-8-256",
+            "Samsung Xclipse 920",
+            "Maleoon 910",
+            "Apple A15 GPU",
+            "NVIDIA Tegra X1",
+        ] {
+            assert_eq!(adapter_family(name), Some(AdapterFamily::Mobile), "{name}");
+        }
+        for name in [
+            "NVIDIA T400",
+            "NVIDIA GeForce RTX 4090",
+            "Quadro P1000",
+            "AMD Radeon RX 7900 XTX",
+            "Intel(R) UHD Graphics 770",
+        ] {
+            assert_eq!(adapter_family(name), Some(AdapterFamily::Desktop), "{name}");
+        }
+        for name in ["llvmpipe (LLVM 19.1.7, 256 bits)", "fake-full", ""] {
+            assert_eq!(adapter_family(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_tier_table_overrides_a_mobile_driver_that_answers_like_a_desktop() {
+        const GIB: u64 = 1 << 30;
+        // Adreno 618/620 answer full profile and no transient savings — the
+        // desktop answers — and used to take the desktop budget on them.
+        let adreno = named("Adreno (TM) 618");
+        assert!(!is_mobile_tier(&adreno));
+
+        let small = choose_tier(&adreno, Some(3 * GIB));
+        assert_eq!(
+            (small.tier, small.rule),
+            (AtlasTier::Mobile, TierRule::Table)
+        );
+        assert_eq!(AtlasBudget::for_choice(small, &adreno), AtlasBudget::MOBILE);
+
+        let unknown = choose_tier(&adreno, None);
+        assert_eq!(
+            unknown.tier,
+            AtlasTier::Mobile,
+            "unknown memory earns nothing"
+        );
+
+        let large = choose_tier(&adreno, Some(6 * GIB));
+        assert_eq!(
+            (large.tier, large.rule),
+            (AtlasTier::MobileLarge, TierRule::Table)
+        );
+        assert_eq!(
+            AtlasBudget::for_choice(large, &adreno),
+            AtlasBudget::MOBILE_LARGE_WIDE
+        );
+        assert_eq!(
+            AtlasBudget::for_choice(choose_tier(&adreno, Some(MOBILE_LARGE_MIN_MEMORY)), &adreno),
+            AtlasBudget::MOBILE_LARGE_WIDE,
+            "the threshold is inclusive"
+        );
+        assert_eq!(AtlasBudget::MOBILE_LARGE_WIDE.total_bytes(), 64 << 20);
+        assert_eq!(AtlasBudget::MOBILE_LARGE_DEEP.total_bytes(), 64 << 20);
+
+        // A desktop family stays on the desktop budget whatever it answers.
+        let mut nvidia = named("NVIDIA T400");
+        nvidia.transient_saves_memory = true;
+        let desktop = choose_tier(&nvidia, Some(GIB));
+        assert_eq!(
+            (desktop.tier, desktop.rule),
+            (AtlasTier::Desktop, TierRule::Table)
+        );
+    }
+
+    #[test]
+    fn the_large_mobile_shape_is_the_one_the_adapter_can_create() {
+        let mut caps = named("Mali-G78 MP14");
+        assert_eq!(
+            AtlasBudget::mobile_large(&caps),
+            Some(AtlasBudget::MOBILE_LARGE_WIDE)
+        );
+
+        // An edge short of 2048 takes the deep shape instead.
+        caps.max_texture_dimension_2d = 1024;
+        assert_eq!(
+            AtlasBudget::mobile_large(&caps),
+            Some(AtlasBudget::MOBILE_LARGE_DEEP)
+        );
+
+        // Neither shape fits: the tier is the plain mobile one, never a large
+        // budget clamped below it.
+        caps.max_texture_array_layers = 8;
+        assert_eq!(AtlasBudget::mobile_large(&caps), None);
+        let choice = choose_tier(&caps, Some(16 << 30));
+        assert_eq!(choice.tier, AtlasTier::Mobile);
+        assert_eq!(AtlasBudget::for_choice(choice, &caps), AtlasBudget::MOBILE);
+    }
+
+    #[test]
+    fn an_unnamed_adapter_keeps_the_capability_read_and_downlevel_wins_over_the_table() {
+        let unnamed = TierCaps::fake(DownlevelProfile::Full);
+        let choice = choose_tier(&unnamed, Some(64 << 30));
+        assert_eq!(
+            (choice.tier, choice.rule),
+            (AtlasTier::Desktop, TierRule::Heuristic)
+        );
+
+        let mut tiler = unnamed.clone();
+        tiler.transient_saves_memory = true;
+        let choice = choose_tier(&tiler, Some(64 << 30));
+        assert_eq!(
+            (choice.tier, choice.rule),
+            (AtlasTier::Mobile, TierRule::Heuristic),
+            "the heuristic never reaches the large tier"
+        );
+
+        let mut gl_nvidia = TierCaps::fake(DownlevelProfile::WebGl2);
+        gl_nvidia.adapter_name = "ANGLE (NVIDIA, NVIDIA T400)".to_string();
+        let choice = choose_tier(&gl_nvidia, Some(64 << 30));
+        assert_eq!(
+            (choice.tier, choice.rule),
+            (AtlasTier::Mobile, TierRule::Downlevel)
+        );
+    }
+
+    #[test]
+    fn mem_total_is_read_in_bytes_from_meminfo() {
+        let meminfo = "MemTotal:        5768520 kB\nMemFree:          123456 kB\n";
+        assert_eq!(parse_mem_total(meminfo), Some(5_768_520 * 1024));
+        assert_eq!(parse_mem_total("MemFree: 1 kB\n"), None);
+        assert_eq!(parse_mem_total("MemTotal: lots\n"), None);
+        assert_eq!(parse_mem_total("MemTotal: 1024 MB\n"), None);
+    }
+
     #[test]
     fn a_budget_is_clamped_to_the_adapters_own_ceilings() {
         let mut caps = TierCaps::fake(DownlevelProfile::Full);
@@ -2215,6 +2646,69 @@ mod tests {
         assert!(!residency.has_pending_plan());
         assert!(residency.uploads().is_empty());
         assert!(residency.evictions().is_empty());
+    }
+
+    #[test]
+    fn a_clear_is_dropped_only_for_a_rectangle_an_upload_covers_exactly() {
+        let region = |layer, x, y, w, h| AtlasRegion {
+            layer,
+            offset: [x, y],
+            size: [w, h],
+        };
+        let upload = |region| ImageUpload {
+            id: ImageId::new(0),
+            region,
+            natural: region.size,
+            pixels: Arc::new(Pixmap::new(
+                u16::try_from(region.size[0]).expect("small"),
+                u16::try_from(region.size[1]).expect("small"),
+            )),
+            may_have_transparency: false,
+        };
+
+        let exact = region(0, 0, 0, 16, 16);
+        let other_layer = region(1, 0, 0, 16, 16);
+        let partial = region(0, 16, 0, 16, 16);
+        let evictions = [exact, other_layer, partial];
+        let uploads = [upload(exact), upload(region(0, 16, 0, 16, 8))];
+
+        assert_eq!(
+            uncovered_clears(&evictions, &uploads),
+            vec![other_layer, partial],
+            "only the exactly covered clear goes, the rest keep their order"
+        );
+        assert_eq!(uncovered_clears(&evictions, &[]), evictions.to_vec());
+        assert!(uncovered_clears(&[], &uploads).is_empty());
+    }
+
+    #[test]
+    fn a_pressure_eviction_into_the_same_rectangle_plans_no_clear() {
+        // One slot: the second image can only take the first one's rectangle.
+        let mut residency = ImageResidency::new(AtlasBudget {
+            atlas_size: (16, 16),
+            max_atlases: 1,
+        });
+        residency.begin_frame();
+        let first = residency.resolve(&image(16, 16)).expect("fits");
+        residency.acknowledge_plan();
+
+        residency.begin_frame();
+        let second = residency
+            .resolve(&image(16, 16))
+            .expect("displaces the first");
+        assert_eq!(second.region, first.region);
+        assert_eq!(
+            residency.evictions(),
+            &[first.region],
+            "the eviction itself is still pending"
+        );
+
+        let (clears, uploads) = residency.plan();
+        assert!(clears.is_empty(), "but the plan issues no clear for it");
+        assert_eq!(uploads.len(), 1);
+
+        residency.acknowledge_plan();
+        assert!(!residency.has_pending_plan());
     }
 
     #[test]
@@ -2808,35 +3302,38 @@ mod tests {
     #[test]
     fn the_resolved_tier_line_names_the_tier_and_is_written_once() {
         let mobile = TierCaps::fake(DownlevelProfile::WebGl2);
+        let choice = choose_tier(&mobile, None);
         assert_eq!(
-            atlas_tier_line(&mobile, AtlasBudget::MOBILE),
-            "frust-perf atlas tier=mobile budget=1024x1024x4 downlevel=WebGl2 \
-             transient_saves_memory=false adapter=fake-webgl2"
+            atlas_tier_line(&mobile, choice, AtlasBudget::MOBILE),
+            "frust-perf atlas tier=mobile rule=downlevel budget=1024x1024x4 downlevel=WebGl2 \
+             transient_saves_memory=false memory_mib=unknown adapter=fake-webgl2"
         );
 
+        let mut adreno = TierCaps::fake(DownlevelProfile::Full);
+        adreno.adapter_name = "Adreno (TM) 660".to_string();
+        let choice = choose_tier(&adreno, Some(8 << 30));
+        assert_eq!(
+            atlas_tier_line(&adreno, choice, AtlasBudget::MOBILE_LARGE_WIDE),
+            "frust-perf atlas tier=mobile_large rule=table budget=2048x2048x4 downlevel=Full \
+             transient_saves_memory=false memory_mib=8192 adapter=Adreno (TM) 660"
+        );
+
+        // An adapter the table does not name says which capability answer
+        // decided it.
         let mut tiler = TierCaps::fake(DownlevelProfile::Full);
-        tiler.adapter_name = "Adreno (TM) 660".to_string();
-        assert_eq!(
-            atlas_tier_line(&tiler, AtlasBudget::DESKTOP),
-            "frust-perf atlas tier=desktop budget=2048x2048x8 downlevel=Full \
-             transient_saves_memory=false adapter=Adreno (TM) 660"
-        );
-
-        // The signal that decides the tier is the one the line reports, so a
-        // tile-based adapter reading `Full` still says `mobile`.
         tiler.transient_saves_memory = true;
-        assert!(atlas_tier_line(&tiler, AtlasBudget::MOBILE).contains("tier=mobile"));
-        assert!(
-            atlas_tier_line(&tiler, AtlasBudget::MOBILE).contains("transient_saves_memory=true")
-        );
+        let line = atlas_tier_line(&tiler, choose_tier(&tiler, None), AtlasBudget::MOBILE);
+        assert!(line.contains("tier=mobile rule=heuristic"));
+        assert!(line.contains("transient_saves_memory=true"));
 
         let latch = TierLogOnce::new();
+        let choice = choose_tier(&mobile, None);
         assert!(
-            latch.emit(&mobile, AtlasBudget::MOBILE),
+            latch.emit(&mobile, choice, AtlasBudget::MOBILE),
             "the first call writes the line"
         );
         assert!(
-            !latch.emit(&mobile, AtlasBudget::MOBILE),
+            !latch.emit(&mobile, choice, AtlasBudget::MOBILE),
             "and no later one repeats it"
         );
     }

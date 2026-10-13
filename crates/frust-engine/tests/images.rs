@@ -37,7 +37,7 @@
 use std::sync::Arc;
 
 use frust_engine::cache::images::{
-    ATLAS_PADDING, AtlasBudget, ImageResidency, ImageSkip, MAX_UNSEEN_FRAMES,
+    ATLAS_PADDING, AtlasBudget, ImageResidency, ImageSkip, MAX_UNSEEN_FRAMES, choose_tier,
 };
 #[cfg(feature = "perf-trace")]
 use frust_engine::cache::images::{TierLogOnce, atlas_tier_line};
@@ -302,6 +302,74 @@ fn a_refused_frames_evictions_survive_it_too() {
     compiler.acknowledge_image_plan();
     let after = compile(&mut compiler, &empty);
     assert!(after.image_evictions.is_empty());
+}
+
+#[test]
+fn a_clear_an_upload_in_the_same_plan_covers_exactly_is_never_issued() {
+    // A churning atlas evicts a rectangle and hands it straight to an image of
+    // the same extent. The upload writes every texel the clear would have
+    // zeroed, after it, so the plan carries no clear for that rectangle — only
+    // the upload. One slot, so the second image can only land where the first
+    // one was.
+    let one_slot = AtlasBudget {
+        atlas_size: (32, 32),
+        max_atlases: 1,
+    };
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, one_slot);
+
+    let first = image_of(32, 32, [255, 0, 0, 255]);
+    let drawn = compile(&mut compiler, &scene_of(|b| b.draw_image(&first, DEST)));
+    let region = drawn.image_uploads[0].region;
+    compiler.acknowledge_image_plan();
+
+    let second = image_of(32, 32, [0, 0, 255, 255]);
+    let churned = compile(&mut compiler, &scene_of(|b| b.draw_image(&second, DEST)));
+    assert_eq!(
+        churned.image_draws, 1,
+        "the second image displaced the first"
+    );
+    assert_eq!(churned.image_uploads.len(), 1);
+    assert_eq!(
+        churned.image_uploads[0].region, region,
+        "into the very rectangle the first one held"
+    );
+    assert!(
+        churned.image_evictions.is_empty(),
+        "a clear the upload overwrites in full is dropped from the plan"
+    );
+
+    // Unacknowledged, the plan is re-offered on the same terms.
+    let again = compile(&mut compiler, &scene_of(|b| b.draw_image(&second, DEST)));
+    assert!(again.image_evictions.is_empty());
+    assert_eq!(again.image_uploads.len(), 1);
+}
+
+#[test]
+fn a_clear_an_upload_covers_only_partly_is_still_issued() {
+    // The same churn with a smaller arrival: the evicted rectangle's texels the
+    // new image does not reach must still read as zero, so the clear stays —
+    // ordered ahead of the upload, as every clear is.
+    let one_slot = AtlasBudget {
+        atlas_size: (32, 32),
+        max_atlases: 1,
+    };
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, one_slot);
+
+    let first = image_of(32, 32, [255, 0, 0, 255]);
+    let drawn = compile(&mut compiler, &scene_of(|b| b.draw_image(&first, DEST)));
+    let region = drawn.image_uploads[0].region;
+    compiler.acknowledge_image_plan();
+
+    let smaller = image_of(32, 16, [0, 0, 255, 255]);
+    let churned = compile(&mut compiler, &scene_of(|b| b.draw_image(&smaller, DEST)));
+    assert_eq!(churned.image_draws, 1);
+    assert_eq!(churned.image_uploads.len(), 1);
+    assert_ne!(churned.image_uploads[0].region, region);
+    assert_eq!(
+        churned.image_evictions,
+        vec![region],
+        "a partly covered rectangle keeps its clear"
+    );
 }
 
 #[test]
@@ -844,11 +912,12 @@ fn one_blob_drawn_at_two_extents_in_a_frame_keeps_the_first_draws_texels() {
 }
 
 #[test]
-fn a_pressure_eviction_reports_its_rectangle_once_and_hands_it_to_the_new_upload() {
+fn a_pressure_eviction_hands_its_rectangle_to_the_new_upload_without_a_clear() {
     // The consumer contract eviction has always kept, now reached by the second
-    // route: `image_evictions` names each freed rectangle once, and the plan is
-    // serviced clears-first, so the rectangle can be re-used by an upload in
-    // the very same plan without the clear erasing it.
+    // route: the plan is serviced clears-first, so the rectangle can be re-used
+    // by an upload in the very same plan without a clear erasing it — and when
+    // that upload covers the freed rectangle exactly, it writes every texel the
+    // clear would have, so the plan carries no clear for it at all.
     let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, FOUR_SLOT_BUDGET);
     let resident: Vec<ImageData> = (0..4).map(|_| image(32, 32)).collect();
 
@@ -872,16 +941,15 @@ fn a_pressure_eviction_reports_its_rectangle_once_and_hands_it_to_the_new_upload
     let frame = compile(&mut compiler, &scene_of(|b| b.draw_image(&arrival, DEST)));
 
     assert_eq!(frame.skipped_images, 0, "the fifth image still paints");
-    assert_eq!(
-        frame.image_evictions,
-        vec![displaced],
-        "exactly one rectangle, reported exactly once"
+    assert!(
+        frame.image_evictions.is_empty(),
+        "the displaced rectangle's clear is covered by the arrival's upload"
     );
     assert_eq!(frame.image_uploads.len(), 1);
     assert_eq!(
         frame.image_uploads[0].region, displaced,
-        "the freed rectangle is what the new occupant took, which is why the \
-         plan has to be serviced clears-first"
+        "the freed rectangle is what the new occupant took, which is why its \
+         upload alone leaves no stale texel behind"
     );
     assert!(
         FOUR_SLOT_BUDGET.contains(frame.image_uploads[0].region, frame.atlas_layers),
@@ -1272,6 +1340,30 @@ fn the_mobile_budget_is_chosen_for_a_downlevel_adapter_and_never_the_vello_defau
     }
 }
 
+#[test]
+fn a_mobile_family_adapter_takes_a_mobile_tier_whatever_its_driver_answers() {
+    // Adreno 618/620 answer a full profile and no transient savings, which the
+    // capability read alone takes for a desktop part. The adapter table names
+    // the family, and device memory picks the plain or the large budget.
+    let mut adreno = TierCaps::fake(DownlevelProfile::Full);
+    adreno.adapter_name = "Adreno (TM) 618".to_string();
+
+    let small = AtlasBudget::for_choice(choose_tier(&adreno, Some(3 << 30)), &adreno);
+    assert_eq!(small, AtlasBudget::MOBILE);
+
+    let large = AtlasBudget::for_choice(choose_tier(&adreno, Some(6 << 30)), &adreno);
+    assert_eq!(large, AtlasBudget::MOBILE_LARGE_WIDE);
+    assert!(large.total_bytes() < AtlasBudget::DESKTOP.total_bytes());
+    assert!(large.max_atlases <= usize::try_from(MAX_ATLAS_INDEX + 1).expect("fits"));
+
+    let mut nvidia = TierCaps::fake(DownlevelProfile::Full);
+    nvidia.adapter_name = "NVIDIA T400".to_string();
+    assert_eq!(
+        AtlasBudget::for_choice(choose_tier(&nvidia, Some(6 << 30)), &nvidia),
+        AtlasBudget::DESKTOP
+    );
+}
+
 /// `perf-trace`-only, with the line itself — see
 /// `the_per_frame_residency_line_is_written_only_when_something_happened`.
 #[cfg(feature = "perf-trace")]
@@ -1279,28 +1371,34 @@ fn the_mobile_budget_is_chosen_for_a_downlevel_adapter_and_never_the_vello_defau
 fn the_resolved_atlas_tier_is_reported_once_in_a_line_a_capture_keeps() {
     // Which of the two tiers a device takes is otherwise an inference from
     // whether its images went missing. The line is `frust-perf`-prefixed
-    // because that is what a benchmark capture keeps, and it names both signals
-    // `is_mobile_tier` reads so a surprising tier can be explained from the log
-    // alone rather than re-derived from the adapter.
+    // because that is what a benchmark capture keeps, and it names the rule
+    // that decided plus every signal `choose_tier` reads, so a surprising tier
+    // can be explained from the log alone rather than re-derived from the
+    // adapter.
     let caps = TierCaps::fake(DownlevelProfile::WebGl2);
+    let choice = choose_tier(&caps, None);
     assert_eq!(
-        atlas_tier_line(&caps, AtlasBudget::for_caps(&caps)),
-        "frust-perf atlas tier=mobile budget=1024x1024x4 downlevel=WebGl2 \
-         transient_saves_memory=false adapter=fake-webgl2"
+        atlas_tier_line(&caps, choice, AtlasBudget::for_caps(&caps)),
+        "frust-perf atlas tier=mobile rule=downlevel budget=1024x1024x4 downlevel=WebGl2 \
+         transient_saves_memory=false memory_mib=unknown adapter=fake-webgl2"
     );
 
     let desktop = TierCaps::fake(DownlevelProfile::Full);
-    let line = atlas_tier_line(&desktop, AtlasBudget::for_caps(&desktop));
-    assert!(line.starts_with("frust-perf atlas tier=desktop budget=2048x2048x8"));
+    let line = atlas_tier_line(
+        &desktop,
+        choose_tier(&desktop, None),
+        AtlasBudget::for_caps(&desktop),
+    );
+    assert!(line.starts_with("frust-perf atlas tier=desktop rule=heuristic budget=2048x2048x8"));
 
     // Once, not once per surface: the question is about the device.
     let latch = TierLogOnce::new();
     assert!(
-        latch.emit(&caps, AtlasBudget::MOBILE),
+        latch.emit(&caps, choice, AtlasBudget::MOBILE),
         "the first call writes it"
     );
     assert!(
-        !latch.emit(&caps, AtlasBudget::MOBILE),
+        !latch.emit(&caps, choice, AtlasBudget::MOBILE),
         "no later one repeats it"
     );
 }
