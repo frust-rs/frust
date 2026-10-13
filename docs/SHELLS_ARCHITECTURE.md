@@ -282,8 +282,9 @@ path is best-effort: startup never fails on cache I/O. See
 
 Both mobile shells gather an identical `FrameInputs` OR-list each tick — input-for-input
 comparable across platforms — and consult the shared `frame_gate` for a run/skip decision before
-rebuild → layout → paint → present. Android drives it from a Choreographer callback with a
-conditional layout; iOS from a CADisplayLink tick, unconditionally.
+rebuild → layout → paint → present. Android drives it from a Choreographer callback, iOS from a
+CADisplayLink tick. Every shell gates layout on the drained change flags or a force (first layout,
+surface size/scale change, iOS surface reinstall); the frame gate alone decides whether a frame runs.
 
 `focus_or_ime_changed` is an *edge* (derived from a focus/IME generation counter, cached per
 handle, committed only on a frame that actually runs), not a level: a steady focus session no

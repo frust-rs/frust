@@ -1021,6 +1021,13 @@ pub struct MultiSelectPanelWidget {
     hovered: Option<usize>,
     captured: Option<usize>,
     on_toggle: ErasedArgCallback<usize>,
+    /// The `(trigger width, list height)` the last `layout` sized the panel
+    /// from. Both move outside a rebuild — the trigger's paint writes the
+    /// anchor cell, and a reduce-motion snap lands the row presences in
+    /// `paint` without asking for a frame — so `paint` (and, for the anchor,
+    /// `rebuild`) compares them against the live values and asks for a
+    /// relayout on a difference (`docs/REVIEW_FOCUS.md`'s layout-skip pattern).
+    laid: (f64, f64),
 }
 
 /// The retained rows for `options`, each resting at its visibility under `query`.
@@ -1044,6 +1051,15 @@ fn visible_count(options: &[MultiSelectOption], query: &str) -> usize {
 }
 
 impl MultiSelectPanelWidget {
+    /// The trigger's current width, `0.0` without an anchor.
+    fn anchor_width(&self) -> f64 {
+        self.config
+            .borrow()
+            .anchor
+            .as_ref()
+            .map_or(0.0, |anchor| anchor.rect().width())
+    }
+
     /// Row `index`'s current height, in logical px.
     fn row_height(&self, index: usize) -> f64 {
         self.rows.get(index).map_or(0.0, |row| {
@@ -1104,6 +1120,7 @@ impl<State: 'static> View<State> for MultiSelectPanelView<State> {
             empty: LabelRun::new(combobox::EMPTY_LABEL),
             empty_presence: Lane::at_rest(Ramp::spring(SPRING_LAYOUT), f64::from(u8::from(empty))),
             content: Size::ZERO,
+            laid: (0.0, 0.0),
             hovered: None,
             captured: None,
             on_toggle: erase_callback_arg(&self.on_toggle),
@@ -1147,6 +1164,11 @@ impl<State: 'static> View<State> for MultiSelectPanelView<State> {
             element.selected = self.selected.clone();
             flags |= ChangeFlags::PAINT;
         }
+        // A trigger that resized since the last layout moves the width floor;
+        // the anchor cell is external, so nothing above reports it.
+        if element.anchor_width() != element.laid.0 {
+            flags |= ChangeFlags::LAYOUT;
+        }
         flags
     }
 }
@@ -1168,12 +1190,8 @@ impl Widget for MultiSelectPanelWidget {
                 .width,
         );
 
-        let anchor_width = self
-            .config
-            .borrow()
-            .anchor
-            .as_ref()
-            .map_or(0.0, |anchor| anchor.rect().width());
+        let anchor_width = self.anchor_width();
+        self.laid = (anchor_width, self.list_height());
         let natural = widest
             + (combobox::ITEM_PADDING_X + combobox::LIST_PADDING) * 2.0
             + select::TRIGGER_GAP
@@ -1200,6 +1218,8 @@ impl Widget for MultiSelectPanelWidget {
 
         let mut running = false;
         if reduce {
+            // A snap that moved a presence changed the list height; the
+            // laid-vs-live compare below asks for that relayout.
             for row in &mut self.rows {
                 row.presence.snap();
             }
@@ -1308,7 +1328,9 @@ impl Widget for MultiSelectPanelWidget {
 
         // The row heights *are* the panel's height, so a filtering list needs a
         // relayout rather than a bare frame.
-        if running {
+        // Also on a difference from what layout last ran with: the landing or
+        // snapping frame (which reports no `running`) and a resized trigger.
+        if running || (self.anchor_width(), self.list_height()) != self.laid {
             ctx.request_layout();
         }
     }

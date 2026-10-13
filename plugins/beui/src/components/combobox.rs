@@ -616,9 +616,25 @@ pub struct ComboboxPanelWidget {
     hovered: Option<usize>,
     captured: Option<usize>,
     on_select: ErasedArgCallback<usize>,
+    /// The `(trigger width, list height)` the last `layout` sized the panel
+    /// from. Both move outside a rebuild — the trigger's paint writes the
+    /// anchor cell, and a reduce-motion snap lands the row presences in
+    /// `paint` without asking for a frame — so `paint` (and, for the anchor,
+    /// `rebuild`) compares them against the live values and asks for a
+    /// relayout on a difference (`docs/REVIEW_FOCUS.md`'s layout-skip pattern).
+    laid: (f64, f64),
 }
 
 impl ComboboxPanelWidget {
+    /// The trigger's current width, `0.0` without an anchor.
+    fn anchor_width(&self) -> f64 {
+        self.config
+            .borrow()
+            .anchor
+            .as_ref()
+            .map_or(0.0, |anchor| anchor.rect().width())
+    }
+
     /// Row `index`'s current height, in logical px.
     fn row_height(&self, index: usize) -> f64 {
         self.rows.get(index).map_or(0.0, |row| {
@@ -731,6 +747,7 @@ impl<State: 'static> View<State> for ComboboxPanelView<State> {
             empty: LabelRun::new(EMPTY_LABEL),
             empty_presence: Lane::at_rest(Ramp::spring(SPRING_LAYOUT), f64::from(u8::from(empty))),
             content: Size::ZERO,
+            laid: (0.0, 0.0),
             hovered: None,
             captured: None,
             on_select: erase_callback_arg(&self.on_select),
@@ -768,6 +785,11 @@ impl<State: 'static> View<State> for ComboboxPanelView<State> {
             element.selected = self.selected;
             flags |= ChangeFlags::PAINT;
         }
+        // A trigger that resized since the last layout moves the width floor;
+        // the anchor cell is external, so nothing above reports it.
+        if element.anchor_width() != element.laid.0 {
+            flags |= ChangeFlags::LAYOUT;
+        }
         flags
     }
 }
@@ -785,12 +807,8 @@ impl Widget for ComboboxPanelWidget {
         }
         widest = widest.max(self.empty.layout_themed(ctx, &style, EMPTY_ROLE).width);
 
-        let anchor_width = self
-            .config
-            .borrow()
-            .anchor
-            .as_ref()
-            .map_or(0.0, |anchor| anchor.rect().width());
+        let anchor_width = self.anchor_width();
+        self.laid = (anchor_width, self.list_height());
         let natural = widest
             + (ITEM_PADDING_X + LIST_PADDING) * 2.0
             + select::TRIGGER_GAP
@@ -817,6 +835,8 @@ impl Widget for ComboboxPanelWidget {
 
         let mut running = false;
         if reduce {
+            // A snap that moved a presence changed the list height; the
+            // laid-vs-live compare below asks for that relayout.
             for row in &mut self.rows {
                 row.presence.snap();
             }
@@ -915,7 +935,9 @@ impl Widget for ComboboxPanelWidget {
 
         // The row heights *are* the panel's height, so a bare frame request
         // would let a filtering list freeze on the intra-frame layout skip.
-        if running {
+        // Also on a difference from what layout last ran with: the landing or
+        // snapping frame (which reports no `running`) and a resized trigger.
+        if running || (self.anchor_width(), self.list_height()) != self.laid {
             ctx.request_layout();
         }
     }
@@ -1204,11 +1226,20 @@ mod tests {
             rec.layers
         );
 
-        // Long past the run it is gone and nothing more is owed.
+        // Long past the run it is gone. The paint it lands on reports nothing
+        // running, yet the height the last layout ran with still holds the
+        // row, so that paint owes the relayout; once re-laid, nothing is owed.
         let mut ctx = PaintCtx::for_test(Point::ZERO, size, ft_ms(5_000.0));
         w.paint(&mut ctx, &mut Recorder::default());
         assert_eq!(w.rows[0].presence.value(), 0.0);
-        assert!(!ctx.needs_layout(), "a settled list owes no layout");
+        assert!(ctx.needs_layout(), "the landing frame owes its relayout");
+        let size = layout(&mut w, &BoxConstraints::loose(Size::new(400.0, 600.0)));
+        let mut ctx = PaintCtx::for_test(Point::ZERO, size, ft_ms(5_016.0));
+        w.paint(&mut ctx, &mut Recorder::default());
+        assert!(
+            !ctx.needs_layout(),
+            "a settled, re-laid list owes no layout"
+        );
     }
 
     #[test]
@@ -1391,7 +1422,14 @@ mod tests {
         let mut ctx = PaintCtx::for_test(Point::ZERO, size, ft_ms(0.0)).with_theme(&theme);
         w.paint(&mut ctx, &mut Recorder::default());
         assert_eq!(w.rows[0].presence.value(), 0.0, "collapsed on the spot");
-        assert!(!ctx.needs_layout());
+        assert!(
+            ctx.needs_layout(),
+            "the snap shortened the list, which the last layout did not run with"
+        );
+        let size = layout(&mut w, &BoxConstraints::loose(Size::new(400.0, 600.0)));
+        let mut ctx = PaintCtx::for_test(Point::ZERO, size, ft_ms(16.0)).with_theme(&theme);
+        w.paint(&mut ctx, &mut Recorder::default());
+        assert!(!ctx.needs_layout(), "re-laid, nothing more is owed");
     }
 
     // ---- The trigger ------------------------------------------------------

@@ -30,12 +30,20 @@
 //! the shell drives off `RenderRoot::take_change_flags` (exposed through
 //! [`crate::AppTree::take_change_flags`]): run `rebuild` → run `layout` iff the
 //! drained `ChangeFlags` need layout (or it's the first frame, or the surface
-//! resized) → always `paint`. The `set_theme ⇒ LAYOUT|PAINT` contract
+//! resized / rescaled) → always `paint`. Every shell now wires this seam
+//! (Android, iOS, desktop and web); iOS drains the flags both to idle the
+//! display link and to decide layout, and the frame gate above still decides
+//! whether the frame runs at all (the layout skip only elides the layout call
+//! inside a running frame). The `set_theme ⇒ LAYOUT|PAINT` contract
 //! (`docs/ARCHITECTURE.md`'s Theme delivery) is the correctness anchor there:
 //! `Text` bakes its themed glyph color at layout time, so a bare theme swap
 //! must force relayout even though no view changed — which
 //! `RenderRoot::set_theme` guarantees by marking `LAYOUT` pending. Encode and
 //! present are frame-level only: a frame the gate runs always presents.
+//!
+//! Beneath that whole-frame skip, `RenderRoot` skips clean pods per
+//! `ChildPod`; its two env knobs are read by the shells through [`LayoutKnobs`]
+//! (`frust-core` reads no environment variable).
 //!
 //! # Animation pacing (frame-gate pacing)
 //!
@@ -680,6 +688,70 @@ impl Default for FrameGate {
     }
 }
 
+/// Disables the per-pod layout skip when set to any value
+/// (`RenderRoot::set_layout_skip(false)`): every pod lays out on every pass.
+pub const NO_LAYOUT_SKIP_VAR: &str = "FRUST_NO_LAYOUT_SKIP";
+
+/// Turns the layout audit on (`RenderRoot::set_layout_audit(true)`) when set to
+/// a value other than `"0"`. A debug tool: it runs a second, full layout pass
+/// per frame.
+pub const LAYOUT_AUDIT_VAR: &str = "FRUST_LAYOUT_AUDIT";
+
+/// The two layout-skip knobs a shell resolves once at startup and applies to
+/// its `RenderRoot` (directly, or through [`crate::AppTree`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutKnobs {
+    /// Value for `RenderRoot::set_layout_skip` (`false` when
+    /// [`NO_LAYOUT_SKIP_VAR`] is set).
+    pub skip: bool,
+    /// Value for `RenderRoot::set_layout_audit` (`true` when
+    /// [`LAYOUT_AUDIT_VAR`] is set non-`"0"`).
+    pub audit: bool,
+}
+
+impl LayoutKnobs {
+    /// Resolve the knobs from the compile-time defines and the process
+    /// environment (the same `option_env!` + runtime-env shape as the other
+    /// `FRUST_*` switches; Android/iOS have no useful runtime env, so the
+    /// compile-time define is their route).
+    pub fn from_env() -> Self {
+        let skip_var = std::env::var(NO_LAYOUT_SKIP_VAR).ok();
+        let audit_var = std::env::var(LAYOUT_AUDIT_VAR).ok();
+        Self::resolve(
+            option_env!("FRUST_NO_LAYOUT_SKIP"),
+            skip_var.as_deref(),
+            option_env!("FRUST_LAYOUT_AUDIT"),
+            audit_var.as_deref(),
+        )
+    }
+
+    /// The pure resolution [`Self::from_env`] wraps, unit-testable without
+    /// touching the process environment.
+    pub fn resolve(
+        no_skip_compile: Option<&str>,
+        no_skip_runtime: Option<&str>,
+        audit_compile: Option<&str>,
+        audit_runtime: Option<&str>,
+    ) -> Self {
+        Self {
+            skip: no_skip_compile.is_none() && no_skip_runtime.is_none(),
+            audit: kill_switch(audit_compile, audit_runtime),
+        }
+    }
+
+    /// Apply to a type-erased app and log one info line.
+    pub fn apply_to_app(self, app: &mut dyn crate::AppTree) {
+        app.set_layout_skip(self.skip);
+        app.set_layout_audit(self.audit);
+        self.log();
+    }
+
+    /// Log the resolved knobs at info, once.
+    pub fn log(self) {
+        log::info!("layout skip={} audit={}", self.skip, self.audit);
+    }
+}
+
 /// Reads the [`NO_FRAME_GATE_VAR`] kill switch from the compile-time define
 /// and the process environment, mirroring [`crate::perf::enabled`]'s
 /// `option_env!` + runtime-env pattern: either source set to a non-`"0"`
@@ -717,6 +789,16 @@ fn kill_switch(compile_time: Option<&str>, runtime: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_knobs_resolve() {
+        let d = LayoutKnobs::resolve(None, None, None, None);
+        assert!(d.skip && !d.audit);
+        assert!(!LayoutKnobs::resolve(None, Some("1"), None, None).skip);
+        assert!(!LayoutKnobs::resolve(Some("0"), None, None, None).skip);
+        assert!(LayoutKnobs::resolve(None, None, None, Some("1")).audit);
+        assert!(!LayoutKnobs::resolve(None, None, None, Some("0")).audit);
+    }
 
     /// A `FrameInputs` with exactly one field set, by name — the driver for
     /// the exhaustive per-input table test below.

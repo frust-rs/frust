@@ -86,7 +86,8 @@ impl<State: 'static> View<State> for LabelView {
         }
         if prev.disabled != self.disabled {
             element.disabled = self.disabled;
-            flags |= ChangeFlags::PAINT;
+            // The dimmed ink is baked into the run `layout` shapes.
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         flags
     }
@@ -201,14 +202,16 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_repaints_on_a_disabled_flip() {
+    fn rebuild_relayouts_on_a_disabled_flip() {
+        // The dimmed ink is baked into the run `layout` shapes, so a flip that
+        // only repainted would keep the old ink under per-pod layout skipping.
         let prev = label("Email");
         let next = label("Email").disabled(true);
         let mut element = build(&prev);
         let mut counter = 0u64;
         let flags =
             View::<()>::rebuild(&next, &prev, &mut element, &mut BuildCtx::new(&mut counter));
-        assert_eq!(flags, ChangeFlags::PAINT);
+        assert_eq!(flags, ChangeFlags::LAYOUT | ChangeFlags::PAINT);
         assert!(element.disabled);
     }
 

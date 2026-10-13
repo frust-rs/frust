@@ -192,7 +192,9 @@ impl View<()> for BubbleView {
         }
         if element.variant != self.variant {
             element.variant = self.variant;
-            flags |= ChangeFlags::PAINT;
+            // The variant decides the pill's padding (`ghost` has none) and the
+            // ink the label is shaped with in `layout`, so it is a layout change.
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if element.align != self.align {
             element.align = self.align;

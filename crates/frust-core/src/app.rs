@@ -14,8 +14,10 @@
 //! ViewSequence / multiple children are explicitly out of scope for now.
 
 use std::any::Any;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kurbo::{Point, Rect, Size};
@@ -38,7 +40,7 @@ use crate::selection_toolbar::{
 use crate::semantics::{ROOT_NODE_ID, SemanticsCtx, SemanticsUpdate};
 use crate::tree::{InspectNode, WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
-use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene, PlatformViewFrame};
+use crate::widget::{ChildPod, LayoutCtx, PaintCtx, PaintOutcome, PaintScene, PlatformViewFrame};
 
 /// The window's shape and platform-occlusion state, delivered to app code as a
 /// plain [`provide_context`](reactive_graph::owner::provide_context)-carried
@@ -283,6 +285,26 @@ enum OverlayRoute {
     /// The event continues into today's dispatch; merge this outcome into
     /// whatever that produces.
     Continue(EventOutcome),
+}
+
+/// Layout-audit bookkeeping ([`RenderRoot::set_layout_audit`]).
+#[derive(Default)]
+struct LayoutAudit {
+    enabled: bool,
+    mismatches: u64,
+    /// Audited frames so far.
+    frame: u64,
+    /// Audited frame each `(type, label)` was last logged on.
+    last_logged: HashMap<(&'static str, Option<String>), u64>,
+}
+
+/// One node's geometry in a layout-audit snapshot.
+struct AuditGeom {
+    id: WidgetId,
+    type_name: &'static str,
+    label: Option<String>,
+    origin: Point,
+    size: Size,
 }
 
 /// Owns the retained tree and drives the rebuild/layout/paint passes for a
@@ -567,6 +589,12 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// wait for whatever input happens to arrive next, which is the exact
     /// failure this whole mechanism exists to remove.
     deferred_frame: bool,
+    /// Whether the last main-tree paint asked for a frame or a layout — the
+    /// root widget's own copy of `ChildPod`'s trailing-paint bit. The root
+    /// widget sits in no pod, so nothing else remembers that the paint an
+    /// animation lands on (the first that asks for nothing) still owes one
+    /// layout pass; [`RenderRoot::paint`] folds `LAYOUT` for it once.
+    painted_animating: bool,
     /// The routing half of the overlay entries the **last** [`RenderRoot::paint`]
     /// registered, in paint order (`Floating` band then `Tooltip`, registration
     /// order within each) — what [`RenderRoot::event`]'s overlay pre-pass
@@ -607,6 +635,40 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// clear: a shell diffs the generation to notice the menu went *away* just as
     /// much as to notice it appeared.
     selection_toolbar_gen: u64,
+    /// The global layout epoch threaded into every layout pass
+    /// ([`LayoutCtx::layout_epoch`]). Bumped for each global layout input that
+    /// does not reach a widget through its constraints — a theme swap
+    /// ([`RenderRoot::set_theme`], which is also the path a shell's text-context
+    /// font drain takes), an actual inset change ([`RenderRoot::set_insets`]), a
+    /// window-size change seen by [`RenderRoot::layout`] — and when a floated
+    /// surface's pod is found dirty (see `overlay_pods`). A pod that last laid
+    /// out under another epoch lays out again, so a bump invalidates every
+    /// cached layout at once. Starts at `1`, past a fresh pod's `0`.
+    layout_epoch: u64,
+    /// Whether layout passes may skip clean pods ([`RenderRoot::set_layout_skip`]);
+    /// `true` by default. `false` forces every pod to lay out every pass — the
+    /// kill switch a shell wires to an environment variable (this crate reads
+    /// none itself).
+    layout_skip: bool,
+    /// The layout audit's state ([`RenderRoot::set_layout_audit`]); off by default.
+    layout_audit: LayoutAudit,
+    /// Weak handles to the pods of the floated surfaces the **last** paint
+    /// drew, refreshed every paint beside `overlay_hits`.
+    ///
+    /// A floated pod is laid out by its *owner* (inside the owner's own
+    /// `layout`) but painted and fed paint-time requests by this root, outside
+    /// the owner's pod chain — so a paint-time frame request or a substituted
+    /// event dispatch can dirty the floated pod while every pod above its owner
+    /// stays clean, and the owner's layout (the only route to the floated pod)
+    /// would be skipped. [`RenderRoot::layout`] therefore checks these first and
+    /// bumps the epoch when any is dirty: conservative (the whole tree lays out
+    /// while a surface animates) but correct.
+    ///
+    /// Weak, never strong, so the root still co-owns no pod (see
+    /// `overlay_hits`): a surface whose owner dropped it simply fails to
+    /// upgrade. The check borrows each pod only for the length of one flag read,
+    /// at the start of a layout pass, when no pass holds a borrow.
+    overlay_pods: Vec<Weak<RefCell<ChildPod>>>,
     _state: core::marker::PhantomData<fn(&mut State)>,
 }
 
@@ -648,11 +710,95 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             root_semantics_id: Cell::new(None),
             semantics_gen: 0,
             deferred_frame: false,
+            painted_animating: false,
             overlay_hits: Vec::new(),
             selection_toolbar: None,
             selection_toolbar_gen: 0,
+            layout_epoch: 1,
+            layout_skip: true,
+            layout_audit: LayoutAudit::default(),
+            overlay_pods: Vec::new(),
             _state: core::marker::PhantomData,
         }
+    }
+
+    /// Switch the layout skip on (the default) or off.
+    ///
+    /// With the skip on, a layout pass lays out only the pods that are dirty,
+    /// whose constraints changed, or that last laid out under an older layout
+    /// epoch — see [`ChildPod::layout_child`] for the rule and its dirty
+    /// sources. `false` forces every pod to lay out on every pass, exactly the
+    /// pre-skip behaviour: the kill switch a shell exposes (this crate reads no
+    /// environment variable itself). Takes effect from the next
+    /// [`RenderRoot::layout`]; dirties nothing by itself.
+    pub fn set_layout_skip(&mut self, skip: bool) {
+        self.layout_skip = skip;
+    }
+
+    /// Whether layout passes may skip clean pods ([`RenderRoot::set_layout_skip`]).
+    pub fn layout_skip(&self) -> bool {
+        self.layout_skip
+    }
+
+    /// Turn the layout audit on or off (off by default; a debug tool).
+    ///
+    /// When on, and only while the skip is enabled ([`RenderRoot::set_layout_skip`]),
+    /// every [`RenderRoot::layout`] pass proves the skip rule: after the normal
+    /// (skipping) pass it snapshots every pod's geometry, runs a second, **forced**
+    /// full pass over the same constraints, and compares. A pod whose origin
+    /// (relative to its parent) or size differs by more than `1e-3` logical px
+    /// changed its layout without signalling dirty, which is exactly the bug the
+    /// skip would turn into stale geometry. Each is counted on
+    /// [`RenderRoot::layout_audit_mismatches`] and logged at `warn` through the
+    /// `log` crate, prefixed `layout-audit:` and naming the widget type and debug
+    /// label, at most once per `(type, label)` per 60 audited frames.
+    ///
+    /// **Cost:** two layout passes per frame, the second laying out the whole
+    /// tree, so this erases the skip's savings; never leave it on in a shipped
+    /// build. The forced pass's geometry is the geometry that stays, so the audit
+    /// never ships wrong geometry. The forced pass does not bump the layout epoch;
+    /// like any forced pass it leaves every pod clean (`layout_dirty` cleared,
+    /// `last_constraints`/`last_epoch`/`last_insets` refreshed to the current
+    /// values), which is the state the next frame's skip decisions start from.
+    /// This crate reads no environment variable; shells wire `FRUST_LAYOUT_AUDIT`.
+    /// With the audit off the cost is one `bool` check per layout pass.
+    pub fn set_layout_audit(&mut self, audit: bool) {
+        self.layout_audit.enabled = audit;
+    }
+
+    /// Whether the layout audit is on ([`RenderRoot::set_layout_audit`]).
+    pub fn layout_audit(&self) -> bool {
+        self.layout_audit.enabled
+    }
+
+    /// Total pods the layout audit has found with geometry that differed between
+    /// the skipping and the forced pass, since the root was created. Counts every
+    /// occurrence, unlike the rate-limited log.
+    pub fn layout_audit_mismatches(&self) -> u64 {
+        self.layout_audit.mismatches
+    }
+
+    /// The global layout epoch the next layout pass runs under — read-only, for
+    /// tooling and tests. It moves on a theme swap, an inset change, a window
+    /// resize, and a dirty floated surface (see [`ChildPod::layout_child`]).
+    pub fn layout_epoch(&self) -> u64 {
+        self.layout_epoch
+    }
+
+    /// Invalidate every pod's cached layout: the next pass lays out the whole
+    /// tree.
+    fn bump_layout_epoch(&mut self) {
+        self.layout_epoch = self.layout_epoch.wrapping_add(1);
+    }
+
+    /// Whether any floated surface the last paint drew is layout-dirty (see
+    /// `overlay_pods`). A pod already borrowed elsewhere — impossible between
+    /// passes, but cheap to tolerate — counts as dirty.
+    fn overlay_pod_dirty(&self) -> bool {
+        self.overlay_pods.iter().any(|weak| {
+            weak.upgrade()
+                .is_some_and(|pod| pod.try_borrow().map_or(true, |pod| pod.is_layout_dirty()))
+        })
     }
 
     /// Store the app's active theme, threaded into every subsequent
@@ -674,6 +820,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     pub fn set_theme(&mut self, theme: Box<dyn Any>) {
         self.theme = Some(theme);
         self.pending |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        // A theme is a global layout input no constraint carries: every cached
+        // layout is stale (the layout skip — see `layout_epoch`).
+        self.bump_layout_epoch();
         // A theme swap can change semantics-visible state (e.g. a relabelled or
         // re-bounded node once layout re-runs); treat it as semantics-dirty too.
         self.semantics_gen = self.semantics_gen.wrapping_add(1);
@@ -705,6 +854,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         }
         self.insets = insets;
         self.pending |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        // Global and constraint-free, like the theme: invalidate every cached
+        // layout (see `layout_epoch`).
+        self.bump_layout_epoch();
         // A moved inset shifts laid-out node bounds once layout re-runs; treat
         // it as semantics-dirty too (mirrors `set_theme`).
         self.semantics_gen = self.semantics_gen.wrapping_add(1);
@@ -1185,6 +1337,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.tree.inspect()
     }
 
+    /// Per-node layout-dirty state, in exactly [`RenderRoot::inspect`]'s
+    /// pre-order and with its ids — read-only, for tooling and tests. See
+    /// [`WidgetTree::inspect_layout_dirty`].
+    pub fn inspect_layout_dirty(&self) -> Vec<(WidgetId, bool)> {
+        self.tree.inspect_layout_dirty()
+    }
+
     /// Run the build closure, then build (first call) or rebuild (subsequent calls)
     /// the root widget, returning what changed.
     ///
@@ -1436,7 +1595,105 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// optional text context and the stored theme into a [`LayoutCtx`], and
     /// records the size the root returns.
     fn layout_inner(&mut self, window_size: Size, text_ctx: Option<&mut dyn Any>) -> Size {
+        // The window size is a global layout input (an overlay pod is laid out
+        // against it, not against its owner's constraints): a change invalidates
+        // every cached layout. Compared against what the last pass stored.
+        if self.window_size != window_size {
+            self.bump_layout_epoch();
+        }
         self.window_size = window_size;
+        // A floated surface dirtied outside its owner's pod chain (see
+        // `overlay_pods`) is reachable only through a full pass.
+        if self.overlay_pod_dirty() {
+            self.bump_layout_epoch();
+        }
+        if self.root_id.is_none() {
+            return Size::ZERO;
+        }
+        if !(self.layout_audit.enabled && self.layout_skip) {
+            return self.layout_pass(window_size, text_ctx, !self.layout_skip);
+        }
+        // Audit: the normal (skipping) pass, then a forced one over the same
+        // constraints and epoch; the forced geometry is what stays.
+        let mut text_ctx = text_ctx;
+        self.layout_pass(window_size, text_ctx.as_deref_mut(), false);
+        let before = self.audit_snapshot();
+        let size = self.layout_pass(window_size, text_ctx, true);
+        let after = self.audit_snapshot();
+        self.audit_compare(&before, &after);
+        size
+    }
+
+    /// Every node's `(id, type, label, origin relative to parent, size)`.
+    fn audit_snapshot(&self) -> Vec<AuditGeom> {
+        let nodes = self.tree.inspect();
+        let origins: HashMap<WidgetId, Point> =
+            nodes.iter().map(|n| (n.id, n.bounds.origin())).collect();
+        nodes
+            .into_iter()
+            .map(|n| {
+                let parent = n
+                    .parent
+                    .and_then(|p| origins.get(&p).copied())
+                    .unwrap_or(Point::ZERO);
+                AuditGeom {
+                    id: n.id,
+                    type_name: n.type_name,
+                    label: n.debug_label.map(|l| l.into_owned()),
+                    origin: Point::new(n.bounds.x0 - parent.x, n.bounds.y0 - parent.y),
+                    size: n.bounds.size(),
+                }
+            })
+            .collect()
+    }
+
+    /// Report every pod that differs between the two snapshots.
+    fn audit_compare(&mut self, before: &[AuditGeom], after: &[AuditGeom]) {
+        const TOLERANCE: f64 = 1e-3;
+        let frame = self.layout_audit.frame;
+        self.layout_audit.frame += 1;
+        let by_id: HashMap<WidgetId, &AuditGeom> = before.iter().map(|g| (g.id, g)).collect();
+        for now in after {
+            let Some(was) = by_id.get(&now.id) else {
+                continue;
+            };
+            let differs = (was.origin.x - now.origin.x).abs() > TOLERANCE
+                || (was.origin.y - now.origin.y).abs() > TOLERANCE
+                || (was.size.width - now.size.width).abs() > TOLERANCE
+                || (was.size.height - now.size.height).abs() > TOLERANCE;
+            if !differs {
+                continue;
+            }
+            self.layout_audit.mismatches += 1;
+            let key = (now.type_name, now.label.clone());
+            let due = self
+                .layout_audit
+                .last_logged
+                .get(&key)
+                .is_none_or(|last| frame.saturating_sub(*last) >= 60);
+            if due {
+                self.layout_audit.last_logged.insert(key, frame);
+                log::warn!(
+                    "layout-audit: {} (label {:?}) changed geometry without signalling layout: skipped pass origin {:?} size {:?}, forced pass origin {:?} size {:?}",
+                    now.type_name,
+                    now.label,
+                    was.origin,
+                    was.size,
+                    now.origin,
+                    now.size,
+                );
+            }
+        }
+    }
+
+    /// One layout pass over the root; `force` lays out every pod regardless of
+    /// the skip rule.
+    fn layout_pass(
+        &mut self,
+        window_size: Size,
+        text_ctx: Option<&mut dyn Any>,
+        force: bool,
+    ) -> Size {
         let Some(root_id) = self.root_id else {
             return Size::ZERO;
         };
@@ -1447,6 +1704,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // Copied out before the `&mut self.tree` borrow below (a disjoint,
         // `Copy` field read).
         let insets = self.insets;
+        let layout_epoch = self.layout_epoch;
         let Some(pod) = self.tree.pod_mut(root_id) else {
             return Size::ZERO;
         };
@@ -1459,6 +1717,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // lays it out against this rather than against its own constraints (see
         // `LayoutCtx::window_size`).
         ctx.set_window_size(window_size);
+        // The layout skip's two global inputs: the epoch every pod compares its
+        // own against, and the kill switch (see `ChildPod::layout_child`). The
+        // root widget itself sits in no `ChildPod` and is always laid out.
+        ctx.set_layout_epoch(layout_epoch);
+        ctx.set_layout_force(force);
         let size = pod.widget_mut().layout(&mut ctx, &bc);
         pod.set_layout(Point::ZERO, size);
         size
@@ -1520,6 +1783,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         sort_into_paint_order(&mut entries);
         // Retain the routing half — never the pods — for the next event pass.
         self.overlay_hits = entries.iter().map(OverlayHit::of).collect();
+        // ... and a weak handle to each pod, for the next layout pass's
+        // dirty-surface check (see `overlay_pods`).
+        self.overlay_pods = entries
+            .iter()
+            .map(|entry| Rc::downgrade(&entry.pod))
+            .collect();
         let (holder, holder_ime) = self.paint_overlays(&entries, scene, frame_time, &mut outcome);
         // Release the owners' pod clones before the pass ends: the root holds no
         // overlay pod at rest, so a pod's lifetime stays exactly its owner's.
@@ -1721,16 +1990,28 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // never keep stealing input from an interactive slot (see
             // `PaintCtx::report_input_shield`).
             self.input_shields = ctx.take_input_shields();
-            // Fold a bubbled `request_layout` into `pending` so the *next* frame
-            // relayouts. `pending` survives to the next frame and feeds both the
-            // frame gate (`has_pending_change_flags`) and the Android layout-skip
-            // (`take_change_flags().needs_layout()`), so no shell change is needed
-            // on any platform. Deliberately opt-in: `request_frame` alone never
-            // sets LAYOUT, keeping paint-only animations layout-free.
+            // Fold every paint-time layout dirtying into `pending` so the *next*
+            // frame relayouts. `pending` survives to the next frame and feeds both
+            // the frame gate (`has_pending_change_flags`) and the shells' layout
+            // gate (`take_change_flags().needs_layout()`), so no shell change is
+            // needed on any platform. Three sources: a bubbled `request_layout`;
+            // an unpaced frame request (an animating subtree's pods were marked,
+            // the conservative rule — the pass that follows is mostly skipped);
+            // and the path bit, which also carries the one trailing paint after
+            // an animation lands. A paced-only frame (`CosmeticLoop` requests
+            // alone) folds nothing: a pending flag would make the frame gate run
+            // it every vsync, and the pods it marked are laid out by the next
+            // pass that runs. The root widget has no pod to remember its own
+            // trailing paint, so `painted_animating` does that here. Only the
+            // first source is reported on the outcome's `needs_layout`.
             let needs_layout = ctx.needs_layout();
-            if needs_layout {
+            let animating = needs_layout || ctx.needs_frame();
+            let unpaced = needs_layout || (ctx.needs_frame() && !ctx.needs_frame_paced_only());
+            let landing = self.painted_animating && !animating;
+            if unpaced || landing || ctx.is_layout_path_dirty() {
                 self.pending |= ChangeFlags::LAYOUT;
             }
+            self.painted_animating = animating;
             // A rebuild that ran out of flush passes owes one more frame; surface
             // it here (and clear it) so a dirty-driven shell schedules the frame
             // that finishes the flush — see the `deferred_frame` field doc.
@@ -1878,9 +2159,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 (standing, asked) => standing.or(asked),
             };
             // A layout-animating widget inside a pod relayouts the next frame the
-            // same way one in the tree does.
+            // same way one in the tree does, and so does a pod this paint dirtied
+            // (an unpaced frame request or a trailing landing paint — the path
+            // bit, which `paint_child` already set for both). The floated pod's
+            // own mark makes the next pass a full one (see `overlay_pod_dirty`).
             if ctx.needs_layout() {
                 outcome.needs_layout = true;
+                self.pending |= ChangeFlags::LAYOUT;
+            }
+            if ctx.is_layout_path_dirty() {
                 self.pending |= ChangeFlags::LAYOUT;
             }
             // A focused editable inside a pod republishes its IME surface on every
@@ -2369,6 +2656,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             };
             root_opted_in = frame.close().0;
             let handled = matches!(result, EventResult::Handled);
+            // The event fold: every dirtying channel a shell gating layout on the
+            // pending flags must see (the mirror of `paint_main_tree`'s fold).
+            // `EventCtx::request_layout`, and the path bit — a pod below the
+            // root consumed the event or asked for a redraw, so it was marked and
+            // only a pass that runs lays it out. The root widget sits in no pod,
+            // so its own consumed event or redraw request is the same source.
+            if ctx.needs_layout() || ctx.is_layout_path_dirty() || handled || ctx.needs_redraw() {
+                self.pending |= ChangeFlags::LAYOUT;
+            }
             (
                 handled,
                 ctx.needs_redraw() || handled,
@@ -3609,13 +3905,16 @@ mod tests {
     }
 
     #[test]
-    fn paint_request_frame_only_does_not_fold_layout() {
+    fn paint_request_frame_only_folds_layout_into_pending() {
         let mut state = AppState {
             label: "x".to_string(),
         };
 
-        // A paint-only animation (request_frame, no request_layout) must NOT fold
-        // LAYOUT — the mobile layout-skip win depends on this staying opt-in.
+        // A paint-only animation (request_frame, no request_layout) dirties its
+        // path conservatively, so it folds LAYOUT into pending — a shell gating
+        // its layout pass on the flags must run the (mostly skipped) pass that
+        // reaches the marked pods. It does not report `needs_layout` on the
+        // outcome: that stays the `request_layout` channel.
         let mut anim: RenderRoot<AppState, FrameView> = RenderRoot::new();
         anim.rebuild(&mut |_s: &mut AppState| FrameView, &mut state);
         anim.layout(Size::new(100.0, 100.0));
@@ -3625,11 +3924,11 @@ mod tests {
         assert!(outcome.needs_frame);
         assert!(
             !outcome.needs_layout,
-            "request_frame alone: no needs_layout"
+            "request_frame alone: no needs_layout on the outcome"
         );
         assert!(
-            !anim.has_pending_change_flags(),
-            "request_frame alone must not fold LAYOUT into pending"
+            anim.take_change_flags().needs_layout(),
+            "request_frame alone folds LAYOUT into pending"
         );
     }
 

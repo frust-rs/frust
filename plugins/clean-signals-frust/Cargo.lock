@@ -1105,6 +1105,7 @@ dependencies = [
  "accesskit",
  "frust-scene",
  "kurbo",
+ "log",
  "peniko",
  "reactive_graph",
  "tree_arena",

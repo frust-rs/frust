@@ -383,27 +383,21 @@ impl IosAppHandle {
         // `FrameInputs::change_flags_pending` above reads
         // `has_pending_change_flags()`, a deliberately NON-draining peek, so a
         // frame the gate SKIPS leaves the dirtiness for the next frame that runs.
-        // Draining is the running frame's job — and this
-        // shell never did it: `RenderRoot::pending` is only ever cleared by
-        // `take_change_flags`, so from the very first frame on (construction's
-        // `push_theme` marks LAYOUT|PAINT, and the first rebuild marks
-        // LAYOUT|PAINT again) that input latched `true` forever and every
-        // `CADisplayLink` tick therefore decided `Run`. Measured on an iPhone SE
-        // before this drain: ~44-59 fps of full pipeline work on a screen where
-        // nothing changes, `skipped=0` on every raw line, against Android's zero
-        // frames in 60 s on the same page.
+        // Draining is the running frame's job, and it MUST happen on every
+        // running frame: `RenderRoot::pending` is only ever cleared by
+        // `take_change_flags`, so a shell that never drains latches that input
+        // `true` forever and every `CADisplayLink` tick decides `Run` (measured
+        // on an iPhone SE: ~44-59 fps of full pipeline work on a static page).
         //
-        // Android drains at exactly this point in its own frame body, as the
-        // input to its layout-skip seam (`take_change_flags().needs_layout()`),
-        // which is why its gate does idle. iOS still relayouts every `Run`
-        // unconditionally (the intra-frame layout skip is not wired here — see
-        // `docs/ARCHITECTURE.md`'s iOS frame pipeline), so the drained flags are
-        // deliberately dropped rather than gating the layout call below: this
-        // frame runs both passes regardless, so nothing is lost by clearing
-        // them. Anything that marks flags between frames (`set_theme`,
-        // `set_insets`, `set_surface_translucent`, a rebuild) still forces the
-        // next frame to run, exactly as on Android.
-        let _drained = self.app.take_change_flags();
+        // The drained flags now also gate the layout call below, exactly like
+        // Android: layout runs iff they need it, or on the first frame, or on a
+        // surface/scale change (`force_layout`). This only elides the layout
+        // call inside a frame the gate already decided to run; it never
+        // influences whether a frame runs, so the display link still idles.
+        // Anything that marks flags between frames (`set_theme`, `set_insets`,
+        // `set_surface_translucent`, a rebuild) still forces the next frame to
+        // run and to relayout.
+        let needs_layout = self.app.take_change_flags().needs_layout();
 
         // Sanitize once per frame; layout and the paint transform below MUST
         // consume this identical value (an untrusted `f32` scale from the FFI
@@ -411,10 +405,18 @@ impl IosAppHandle {
         let scale = sanitize_scale(self.scale);
         let (lw, lh) = logical_size(self.physical.0, self.physical.1, scale);
         let logical = Size::new(lw, lh);
+        let force_layout = surface_reinstalled || self.laid_out_for != Some((self.physical, scale));
         let layout_start = perf_on.then(Instant::now);
-        {
+        if needs_layout || force_layout {
+            if self.laid_out_for.is_none() {
+                // Resolve `FRUST_NO_LAYOUT_SKIP` / `FRUST_LAYOUT_AUDIT` once,
+                // before the first layout pass, beside the other `FRUST_*` reads.
+                frust_shell_common::frame_gate::LayoutKnobs::from_env()
+                    .apply_to_app(&mut *self.app);
+            }
             let text_ctx: &mut dyn Any = &mut self.text_ctx;
             self.app.layout(logical, text_ctx);
+            self.laid_out_for = Some((self.physical, scale));
         }
         let layout = layout_start.map(|t| t.elapsed()).unwrap_or_default();
 

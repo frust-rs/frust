@@ -45,6 +45,7 @@ use crate::event::{EventCtx, EventResult, InputEvent, PointerPhase};
 #[cfg(feature = "hotpatch")]
 use crate::hotpatch::SeamWitness;
 use crate::layout::BoxConstraints;
+use crate::sliver::{SliverConstraints, SliverGeometry, SliverWidget};
 use crate::view::{AnyView, BuildCtx, ChangeFlags, View};
 use crate::widget::{ChildPod, LayoutCtx, PaintCtx, PaintScene, Widget};
 
@@ -323,9 +324,11 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
             // Read before the `widget_mut` borrow below.
             let child_focused = element.child.is_focused();
             let (flags, swapped) = {
+                // The non-marking accessor: the pod is marked below from the
+                // rebuild's own flags (see `ChildPod::widget_mut_for_rebuild`).
                 let boxed = element
                     .child
-                    .widget_mut()
+                    .widget_mut_for_rebuild()
                     .downcast_mut::<Box<dyn Widget>>()
                     .expect("component child element is a boxed AnyView widget");
                 let before = {
@@ -371,6 +374,13 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
                 if outer_has_focus && child_focused {
                     crate::event::mark_focus_orphaned();
                 }
+            }
+            // The layout-skip dirty source for the component's own child pod: it
+            // is rebuilt here rather than through a reconciler, so the mark the
+            // reconcilers apply is spelled by hand. The component's *own* pod is
+            // marked by whoever rebuilt it, from the same `flags` returned below.
+            if swapped || flags.contains(ChangeFlags::LAYOUT) {
+                element.child.mark_layout_dirty();
             }
             element.prev = new_view;
             flags
@@ -436,6 +446,19 @@ impl<C: Component> Widget for ComponentWidget<C> {
         visitor(&self.child);
     }
 
+    /// A component is a sliver exactly when its child is: the boundary is as
+    /// transparent to the sliver protocol as it is to box layout. The sliver
+    /// face is the component itself rather than the child widget, so the
+    /// layout runs through the child pod and leaves it sized and recorded for
+    /// this component's own paint, hit test and semantics.
+    fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
+        if self.child.is_sliver() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // The state boundary: build an inner context over the component's *own*
         // local state, seeded with the outer focus flag, dispatch through the
@@ -461,7 +484,7 @@ impl<C: Component> Widget for ComponentWidget<C> {
         // per-context field (see `crate::event`'s `CURSOR_REQUEST`), so a
         // `set_cursor` below this boundary already reaches the root, and the
         // component boundary is transparent to it by construction.
-        let (result, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
+        let (result, needs_redraw, layout, captured, hover_claimed, focus_req, focus_rel, ime) = {
             // Spelled per field (not through `state_mut`) so the borrow stays
             // disjoint from `self.child` below.
             #[cfg(feature = "hotpatch")]
@@ -480,6 +503,7 @@ impl<C: Component> Widget for ComponentWidget<C> {
             (
                 result,
                 inner.needs_redraw(),
+                (inner.needs_layout(), inner.is_layout_path_dirty()),
                 inner.is_pointer_captured(),
                 inner.is_hover_claimed(),
                 inner.is_focus_requested(),
@@ -490,6 +514,10 @@ impl<C: Component> Widget for ComponentWidget<C> {
         if needs_redraw {
             ctx.request_redraw();
         }
+        // The layout request and the layout-dirty path bit cross the state
+        // boundary like the redraw: the inner pod marked itself, and the pods
+        // above this component must mark themselves too.
+        ctx.absorb_layout(layout.0, layout.1);
         if captured {
             ctx.capture_pointer();
         }
@@ -506,6 +534,26 @@ impl<C: Component> Widget for ComponentWidget<C> {
             ctx.publish_ime_state(ime);
         }
         result
+    }
+}
+
+impl<C: Component> SliverWidget for ComponentWidget<C> {
+    /// Pass-through, like [`Widget::layout`]: the child sits at the component's
+    /// origin and receives `sc` unchanged, under the child pod's layout skip.
+    fn layout_sliver(&mut self, ctx: &mut LayoutCtx, sc: &SliverConstraints) -> SliverGeometry {
+        self.child.set_origin(Point::ZERO);
+        // A viewport reaches this only through `ChildPod::layout_sliver_child`,
+        // which asks `as_sliver` first, so `None` here means a caller invoked
+        // `layout_sliver` on a wrapper whose `as_sliver` answered `None`: a
+        // contract breach that fails in debug builds; release builds fall back
+        // to an empty sliver.
+        self.child.layout_sliver_child(ctx, sc).unwrap_or_else(|| {
+            debug_assert!(
+                false,
+                "ComponentWidget::layout_sliver called on a wrapper whose as_sliver answered None"
+            );
+            SliverGeometry::ZERO
+        })
     }
 }
 

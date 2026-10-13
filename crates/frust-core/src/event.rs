@@ -2312,6 +2312,21 @@ pub struct EventOutcome {
 pub struct EventCtx<'a> {
     state: &'a mut dyn Any,
     needs_redraw: bool,
+    /// Set by [`EventCtx::request_layout`]; bubbles up through every
+    /// [`ChildPod::event_child`](crate::widget::ChildPod::event_child) exactly
+    /// like [`crate::widget::PaintCtx::request_layout`]'s flag does through
+    /// `paint_child`, and is folded into the render root's pending
+    /// [`ChangeFlags::LAYOUT`](crate::view::ChangeFlags::LAYOUT).
+    needs_layout: bool,
+    /// Whether a pod below this context was marked layout-dirty by this
+    /// dispatch (a consumed event, a redraw or layout request) — the event
+    /// pass's path bit, so the pod above marks itself too (see
+    /// [`ChildPod::layout_child`](crate::widget::ChildPod::layout_child)).
+    /// [`RenderRoot::event`](crate::app::RenderRoot::event) folds it into its
+    /// pending [`ChangeFlags::LAYOUT`](crate::view::ChangeFlags::LAYOUT) as well:
+    /// a dirtied pod is only laid out by a pass that runs, and a shell gating
+    /// its layout pass on those flags runs one only when they ask.
+    layout_path_dirty: bool,
     capture_requested: bool,
     /// Set by [`EventCtx::capture_contacts`]; bubbles up beside
     /// `capture_requested` so a container can see the opt-in.
@@ -2375,6 +2390,8 @@ impl<'a> EventCtx<'a> {
         Self {
             state,
             needs_redraw: false,
+            needs_layout: false,
+            layout_path_dirty: false,
             capture_requested: false,
             contacts_requested: false,
             capture_released: false,
@@ -2415,6 +2432,51 @@ impl<'a> EventCtx<'a> {
     /// Whether a redraw was requested during this (sub)dispatch.
     pub fn needs_redraw(&self) -> bool {
         self.needs_redraw
+    }
+
+    /// Request that layout re-run on the next pass because this event changed
+    /// layout-affecting state the widget holds itself (not through a rebuild).
+    ///
+    /// The event-pass mirror of [`crate::widget::PaintCtx::request_layout`]: the
+    /// flag bubbles up through every
+    /// [`ChildPod::event_child`](crate::widget::ChildPod::event_child), marking
+    /// each pod on the way layout-dirty (so the layout skip lays the whole path
+    /// out again — see
+    /// [`ChildPod::layout_child`](crate::widget::ChildPod::layout_child)), and
+    /// [`RenderRoot::event`](crate::app::RenderRoot::event) folds it into its
+    /// pending [`ChangeFlags::LAYOUT`](crate::view::ChangeFlags::LAYOUT), so a
+    /// shell gating layout on that seam runs it. It also implies
+    /// [`EventCtx::request_redraw`], as the paint one implies a frame request: a
+    /// layout change has to be shown.
+    pub fn request_layout(&mut self) {
+        self.needs_layout = true;
+        self.needs_redraw = true;
+        self.layout_path_dirty = true;
+    }
+
+    /// Whether a layout was requested during this (sub)dispatch
+    /// ([`EventCtx::request_layout`]).
+    pub fn needs_layout(&self) -> bool {
+        self.needs_layout
+    }
+
+    /// Whether this (sub)dispatch dirtied a pod below this context (see the
+    /// `layout_path_dirty` field).
+    pub(crate) fn is_layout_path_dirty(&self) -> bool {
+        self.layout_path_dirty
+    }
+
+    /// Fold a child dispatch's layout request and layout-dirty path bit back
+    /// into this context — the layout half of [`EventCtx::absorb_child`], kept
+    /// separate so the existing fold's arity is untouched. Also the seam a
+    /// context substituted across a state boundary
+    /// ([`crate::component::ComponentWidget`]) mirrors its inner context through.
+    pub(crate) fn absorb_layout(&mut self, child_needs_layout: bool, child_path_dirty: bool) {
+        if child_needs_layout {
+            self.needs_layout = true;
+            self.needs_redraw = true;
+        }
+        self.layout_path_dirty |= child_path_dirty || child_needs_layout;
     }
 
     /// Capture the pointer: subsequent moves/releases should route back to this
@@ -3055,6 +3117,8 @@ impl<'a> EventCtx<'a> {
         EventCtx {
             state: &mut *self.state,
             needs_redraw: false,
+            needs_layout: false,
+            layout_path_dirty: false,
             capture_requested: false,
             contacts_requested: false,
             capture_released: false,

@@ -207,7 +207,9 @@ impl<State: 'static> View<State> for BadgeView<State> {
         }
         if prev.variant != self.variant {
             element.variant = self.variant;
-            flags |= ChangeFlags::PAINT;
+            // The label's ink is baked into the run `layout` shapes, so a new
+            // variant's ink only lands through a relayout.
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         element.interactive = self.on_click.is_some();
         element.on_click = self.on_click.as_ref().map(erase_callback);

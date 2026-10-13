@@ -1551,6 +1551,9 @@ mod browser_loop {
         /// more frame. Re-tracked from scratch every rebuild.
         scope: TrackedScope,
         root: RenderRoot<State, V>,
+        /// The logical window size the last layout pass ran against (`None` before the
+        /// first); a mismatch (resize or scale change) forces layout despite clean flags.
+        laid_out_for: Option<Size>,
         text_ctx: TextContext,
         /// The frame executor, absent until its `async` bring-up lands — see
         /// [`SurfaceSlot`].
@@ -1890,7 +1893,14 @@ mod browser_loop {
             );
             let text_ctx: &mut dyn Any = &mut self.text_ctx;
             let layout_start = Instant::now();
-            self.root.layout_with_text(logical, text_ctx);
+            // Whole-frame layout gate (Android parity): drain the flags and lay
+            // out only when they need it, or the canvas size / DPR changed, or
+            // this is the first layout.
+            let needs_layout = self.root.take_change_flags().needs_layout();
+            if needs_layout || self.laid_out_for != Some(logical) {
+                self.root.layout_with_text(logical, text_ctx);
+                self.laid_out_for = Some(logical);
+            }
             let layout = layout_start.elapsed();
 
             self.scene.reset();
@@ -2288,7 +2298,17 @@ mod browser_loop {
             build,
             runtime,
             scope: TrackedScope::new(),
-            root: RenderRoot::new(),
+            root: {
+                // Resolve FRUST_NO_LAYOUT_SKIP / FRUST_LAYOUT_AUDIT once, beside the other
+                // FRUST_* reads (frust-core reads no env var).
+                let knobs = frust_shell_common::frame_gate::LayoutKnobs::from_env();
+                let mut root = RenderRoot::new();
+                root.set_layout_skip(knobs.skip);
+                root.set_layout_audit(knobs.audit);
+                knobs.log();
+                root
+            },
+            laid_out_for: None,
             text_ctx: TextContext::new(),
             surface: Rc::new(SurfaceSlot::default()),
             scene: Scene::new(),

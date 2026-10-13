@@ -25,15 +25,15 @@
 //! leaves post-release motion to [`ScrollWidget::tick`]/
 //! [`ScrollWidget::settle_tick`]), and the **wheel path**, which is a
 //! physics-independent hard clamp. A physics that *does* hand back a
-//! [`Simulation`] gets driven by the generic ballistic driver in
-//! [`ScrollWidget::pump_fling`] instead.
+//! [`Simulation`](crate::physics::Simulation) gets driven by the generic ballistic driver in
+//! [`ScrollSurface::pump_fling`] instead.
 //!
 //! ## Drag convention: a per-move delta against the live position
 //!
 //! Every drag `Move` hands [`ScrollPhysics::apply_physics_to_user_offset`]
 //! *that move's* raw finger delta, with metrics reporting the surface's real
 //! current position — past-edge displacement and all
-//! ([`ScrollWidget::apply_drag_offset`]). This is Flutter's own convention,
+//! ([`ScrollSurface::apply_drag_offset`]). This is Flutter's own convention,
 //! and it is what makes a depth-aware friction curve work: a physics whose
 //! resistance tightens with overscroll depth (`Bouncing`) reads a real depth
 //! rather than a permanent zero. The consequence is that the mapping is
@@ -51,7 +51,7 @@
 //! evolves identically under all three — only the paint changes.
 //!
 //! Stretch is a **paint-only** vertical scale about the held edge
-//! ([`stretch_about_edge`], driven by [`ScrollWidget::edge_pull`] so a
+//! ([`stretch_about_edge`], driven by [`ScrollSurfaceCore::edge_pull`] so a
 //! clamping physics stretches too): the content origin stays where an in-range
 //! offset would put it, and no layout pass reads the pull or the intensity
 //! derived from it. It is an affine approximation of Android 12's overscroll
@@ -67,7 +67,7 @@
 //!
 //! ScrollView captures the pointer on `Down` and forwards events to the child
 //! so descendant widgets stay interactive. It *observes* `Move` deltas before
-//! forwarding: once the accumulated drag passes [`TOUCH_SLOP`] it enters
+//! forwarding: once the accumulated drag passes [`TOUCH_SLOP`](frust_core::TOUCH_SLOP) it enters
 //! scrolling mode — it sends the child a synthetic `Cancel` (disarming any
 //! armed descendant tap/press), stops forwarding, and consumes the drag itself.
 //! This is how a scroll can be *taken* from a child after the slop, matching
@@ -83,7 +83,7 @@
 //! (`R-B3-inner`, `nav::ambient`) established: a scrollable pushes a fresh
 //! claim cell around the `Down` it forwards, any scrollable reached underneath
 //! reports what it could do with the gesture into it, and the outer reads that
-//! answer back ([`ScrollWidget::inner_at_down`]) before deciding at the slop.
+//! answer back ([`ScrollSurfaceCore::inner_at_down`]) before deciding at the slop.
 //! When the nested surface can consume the drag's *direction*, the outer
 //! **defers**: it takes nothing over, sends no `Cancel`, and keeps forwarding
 //! the real events for the rest of the gesture, so the inner's own slop
@@ -118,7 +118,8 @@
 //! stolen out from under it. Clearing the veto does not retroactively replay
 //! the slop check that a live pinch suppressed — the very next claimant
 //! `Move` is measured against the gesture's original `down_start` as usual,
-//! so a drag that already travelled well past [`TOUCH_SLOP`] while the second
+//! so a drag that already travelled well past
+//! [`TOUCH_SLOP`](frust_core::TOUCH_SLOP) while the second
 //! finger was down takes over immediately once the veto lifts.
 //!
 //! # Fling driver (v1)
@@ -138,59 +139,81 @@
 //!
 //! A [`ScrollController`] attached with [`ScrollView::controller`] is the one
 //! external write seam: its recorded commands are drained at the start of the
-//! widget's next layout or paint ([`ScrollWidget::drain_controller`]), after
+//! widget's next layout or paint ([`ScrollSurface::drain_controller`]), after
 //! the content has been measured, and every pass that moves the position
-//! publishes the new [`ScrollInfo`] back to the handle. A jump
-//! ([`ScrollWidget::apply_jump`]) stops any fling, settle or ballistic
+//! publishes the new [`ScrollInfo`] back to the handle. A rebuild that finds a
+//! command queued reports [`ChangeFlags::LAYOUT`], so the per-pod layout skip
+//! runs the layout drain rather than leaving the child at its pre-jump origin
+//! until paint (and a hidden surface, which never paints, undrained) — the
+//! same report `ListView`'s rebuild-time drain makes. A jump
+//! ([`ScrollSurface::apply_jump`]) stops any fling, settle or ballistic
 //! simulation in flight; its `on_scroll` notification has no `EventCtx` to
 //! fire through, so — like a fling frame's — it is owed to the next event,
 //! and a paint that applied one raises
 //! [`frust_core::mark_pending_result_flush`] so that event is the very next
 //! frame's `Housekeeping` flush. `ScrollController::animate_to` eases to its
-//! target the same way, through a [`TweenSimulation`] driven by the same
-//! [`ScrollWidget::ballistic`] field and [`ScrollWidget::drive_ballistic`]
-//! pump a release fling runs through
-//! ([`ScrollWidget::apply_animate_to`]) — so a jump, a fresh animate, or any
+//! target the same way, through a
+//! [`TweenSimulation`](crate::physics::simulation::TweenSimulation) driven by
+//! the same [`ScrollSurfaceCore::ballistic`] field and
+//! [`ScrollSurface::drive_ballistic`] pump a release fling runs through
+//! ([`ScrollSurface::apply_animate_to`]) — so a jump, a fresh animate, or any
 //! user pointer `Down`/wheel on the surface all end it the same way
-//! ([`ScrollWidget::stop_ballistic`]), and the app's `motion.reduce_motion`
-//! theme flag collapses it to an immediate jump. See
-//! [`crate::scroll_controller`] for the handle's side of the contract.
+//! ([`ScrollSurfaceCore::stop_ballistic`]), and the app's
+//! `motion.reduce_motion` theme flag collapses it to an immediate jump. Its
+//! notifications are flushed like a jump's, not left one event late like a
+//! fling's: every frame the tween moves the position, and the frame it lands
+//! on, owes the next frame's `Housekeeping` flush, so an app observing
+//! through `on_scroll` hears the whole tween with no input event to carry it.
+//! See [`crate::scroll_controller`] for the handle's side of the contract.
+
 //!
 //! **A command ends a live drag** (Flutter's `animateTo`/`jumpTo` semantics):
 //! a jump or animate applied while a finger is down replaces the drag instead
-//! of running alongside it ([`ScrollWidget::end_live_drag`]). The rest of that
-//! gesture's `Move`s fall through to the child/hover path and its `Up` to the
+//! of running alongside it ([`ScrollSurfaceCore::end_live_drag`]). The rest
+//! of that gesture's `Move`s fall through to the child/hover path and its `Up`
+//! to the
 //! non-scrolling branch, so the finger can no longer write the offset the
 //! command now owns, and the release starts no fling or settle of its own.
 //! Pointer capture is not touched — the drain runs in layout/paint, which
 //! carry no `EventCtx`, and the shell releases capture on the physical
 //! `Up`/`Cancel` regardless. Every post-release start (`Up`'s simulation,
 //! settle or fling) tears the previous motion down through
-//! [`ScrollWidget::stop_ballistic`] first, so a fling, a settle and a
+//! [`ScrollSurfaceCore::stop_ballistic`] first, so a fling, a settle and a
 //! simulation are never live together and `is_animating` cannot outlive a
 //! tween.
+//!
+//! # Shared core
+//!
+//! Everything above but the viewport geometry — the drag, takeover, claim and
+//! veto, fling, settle, ballistic driver and controller plumbing — is the
+//! shared [`crate::scroll_core`], which `ListView` runs on too: this widget
+//! owns only its viewport, its content measurement and its one child's origin
+//! (the [`ScrollSurface`] seam), so the two surfaces cannot drift apart.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use frust_core::accesskit::Role;
 use frust_core::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FLING_STOP,
-    FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent,
-    PointerPhase, ScrollDelta, SemanticsCtx, TOUCH_SLOP, VelocityTracker, View, WHEEL_LINE_PX,
-    Widget, any, fling_decay, fling_displacement,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
+    LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase, SemanticsCtx, View,
+    Widget, any,
 };
 use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, Size};
 
-use crate::authoring::{ErasedArgCallback, ErasedCallback, presses};
 use crate::physics::effect::OverscrollEffect;
-use crate::physics::simulation::TweenSimulation;
-use crate::physics::{
-    MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR, ScrollMetrics, ScrollPhysics, Simulation,
-    default_overscroll_effect, default_physics,
-};
-use crate::scroll_controller::{AnimateTo, ScrollBinding, ScrollCommand, ScrollController};
+use crate::physics::{ScrollMetrics, ScrollPhysics, default_overscroll_effect};
+use crate::scroll_controller::ScrollController;
+use crate::scroll_core::{ScrollSurface, ScrollSurfaceCore};
+// The in-file tests reach these through `use super::*`; production code here
+// no longer names them since the machinery moved into `crate::scroll_core`.
+#[cfg(test)]
+use crate::physics::{MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR, Simulation};
+#[cfg(test)]
+use crate::scroll_controller::AnimateTo;
+#[cfg(test)]
+use frust_core::{FrameTime, ScrollDelta, TOUCH_SLOP};
 
 /// iOS-style rubber-band resistance applied to the past-edge portion of a drag
 /// under [`RubberBand`](crate::RubberBand): the visible out-of-range
@@ -211,7 +234,7 @@ use crate::scroll_controller::{AnimateTo, ScrollBinding, ScrollCommand, ScrollCo
 /// (lazy-list 06) — never redeclare a second copy there.
 pub(crate) const OVERSCROLL_RESISTANCE: f64 = 0.5;
 
-/// Pull-past-top distance (logical px, measured on [`ScrollWidget::edge_pull`]
+/// Pull-past-top distance (logical px, measured on [`ScrollSurfaceCore::edge_pull`]
 /// — the physics-mapped pull, so a resisting physics needs proportionally more
 /// raw finger travel to reach it and a clamping one exactly this much) beyond
 /// which releasing fires [`ScrollView::on_refresh_release`] (and
@@ -244,7 +267,8 @@ pub(crate) const SETTLE_STOP_PX: f64 = 0.5;
 /// therefore reported rather than guessed. Nothing in the shipped feel reads
 /// it — every constant above is dpr-independent, and it feeds only
 /// [`crate::physics::Tolerance::for_device_pixel_ratio`] for a physics that
-/// builds a [`Simulation`]. Shared with [`crate::list_view::ListViewWidget`]
+/// builds a [`Simulation`](crate::physics::Simulation). Shared with
+/// [`crate::list_view::ListViewWidget`]
 /// so the two surfaces cannot report different densities.
 pub(crate) const METRICS_FALLBACK_DPR: f64 = 1.0;
 
@@ -274,7 +298,7 @@ pub(crate) const STRETCH_INTENSITY: f64 = 0.016;
 pub(crate) const STRETCH_EXP_SCALAR: f64 = std::f64::consts::E / 0.33;
 
 /// The added scale [`OverscrollEffect::Stretch`] paints for a pull of
-/// `edge_pull` (signed, in the [`ScrollWidget::edge_pull`] sense) against a
+/// `edge_pull` (signed, in the [`ScrollSurfaceCore::edge_pull`] sense) against a
 /// viewport `viewport_dimension` px along the scroll axis: a linear plus a
 /// saturating-exponential term over the normalized pull
 /// `x = |edge_pull| / viewport_dimension`, clamped to `[0, 1]`.
@@ -365,7 +389,8 @@ impl InnerScrollState {
     /// owns the gesture; one pinned against it does not, and the outer takes
     /// over as it always has.
     ///
-    /// Only ever asked past [`TOUCH_SLOP`], so `dy` is never zero; a zero would
+    /// Only ever asked past [`TOUCH_SLOP`](frust_core::TOUCH_SLOP), so `dy` is
+    /// never zero; a zero would
     /// read as an up-drag rather than warranting a third branch.
     pub(crate) fn defers(self, dy: f64) -> bool {
         if !self.registered {
@@ -570,12 +595,12 @@ pub struct ScrollInfo {
     pub overscroll: f64,
 }
 
-/// A view-held scroll-observation callback (erased to [`ErasedArgCallback`] on
-/// build).
+/// A view-held scroll-observation callback (erased to
+/// [`ErasedArgCallback`](crate::authoring::ErasedArgCallback) on build).
 type OnScroll<State> = Rc<dyn Fn(&mut State, ScrollInfo)>;
 
-/// A view-held pull-to-refresh release callback (erased to [`ErasedCallback`] on
-/// build).
+/// A view-held pull-to-refresh release callback (erased to
+/// [`ErasedCallback`](crate::authoring::ErasedCallback) on build).
 type OnRefresh<State> = Rc<dyn Fn(&mut State)>;
 
 /// A declarative vertical scroll surface. See the [module docs](self).
@@ -589,14 +614,14 @@ pub struct ScrollView<State: 'static> {
     on_refresh_release: Option<OnRefresh<State>>,
     /// A custom [`ScrollPhysics`] installed via [`ScrollView::physics`], or
     /// `None` to leave whatever is already installed on the widget alone.
-    /// `Rc`, not `Box`: [`ScrollWidget::physics`] is shared-immutable widget
+    /// `Rc`, not `Box`: [`ScrollSurfaceCore::physics`] is shared-immutable widget
     /// state, so a cheap `Rc::clone` is what a `rebuild` (which only ever sees
     /// `&self`) can hand across without a `Box<dyn ScrollPhysics>`-isn't-`Clone`
     /// reconstruction problem. See [`ScrollView::physics`] for the full
     /// build/rebuild contract.
     physics: Option<Rc<dyn ScrollPhysics>>,
     /// How past-edge pull is visualized, carried down to
-    /// [`ScrollWidget::effect`] on every build/rebuild. See
+    /// [`ScrollSurfaceCore::effect`] on every build/rebuild. See
     /// [`ScrollView::overscroll_effect`].
     pub(crate) effect: OverscrollEffect,
     /// The programmatic-scroll handle to attach, if any. See
@@ -663,7 +688,7 @@ impl<State: 'static> ScrollView<State> {
     /// default), but rebuilding *from* a `.physics(...)`-carrying view *to* a
     /// plain one does not revert it — there is no spelling for "go back to the
     /// default" versus "no opinion this rebuild", and this picks the latter,
-    /// the same shape [`ScrollWidget::effect`] already followed before this
+    /// the same shape [`ScrollSurfaceCore::effect`] already followed before this
     /// method existed.
     ///
     /// Defaults to the platform-adaptive physics
@@ -688,7 +713,7 @@ impl<State: 'static> ScrollView<State> {
     ///
     /// Plain view-owned data, unlike [`ScrollView::physics`]: every
     /// build/rebuild carries the current value down to
-    /// [`ScrollWidget::effect`] unconditionally.
+    /// [`ScrollSurfaceCore::effect`] unconditionally.
     ///
     /// Defaults to the effect paired with the platform's default physics
     /// ([`crate::physics::default_overscroll_effect`]): the M3E
@@ -732,184 +757,46 @@ pub fn scroll_view<State: 'static, V: View<State>>(child: V) -> ScrollView<State
     ScrollView::new(child)
 }
 
-/// A running [`Simulation`] and the frame clock it is measured from — the
-/// state behind the generic ballistic driver both scroll surfaces run when
-/// their physics hands one back (`pub(crate)`: shared with
-/// [`crate::list_view::ListViewWidget`]'s parallel pump rather than
-/// hand-copied, like the constants above).
-pub(crate) struct BallisticState {
-    /// The physics-built curve, in **seconds** from its own start.
-    pub(crate) sim: Box<dyn Simulation>,
-    /// The frame time the first paint-time pump seeded, or `None` before it —
-    /// the same zero-delta seeding convention `last_anim` uses, so the release
-    /// itself (which carries no clock) never has to guess a start.
-    pub(crate) start: Option<FrameTime>,
-}
-
-impl BallisticState {
-    /// Seconds elapsed at frame time `now`; `0.0` until the clock is seeded.
-    pub(crate) fn elapsed_secs(&self, now: FrameTime) -> f64 {
-        match self.start {
-            Some(start) => now.saturating_sub(start).as_secs_f64(),
-            None => 0.0,
-        }
-    }
-}
-
-/// The retained widget for a [`ScrollView`].
+/// The retained widget for a [`ScrollView`]: a thin owner of the viewport
+/// geometry (its own size, the child's measured content, the child origin)
+/// around the crate's shared scroll surface core, which runs the drag, fling,
+/// overscroll, nested-claim and controller machinery (the module docs'
+/// *Shared core*).
 pub struct ScrollWidget {
     child: ChildPod,
     /// Current *effective* scroll offset (px scrolled down). Normally in
-    /// `[0, max_offset]`, but a drag past an edge lets it go out of range (with
-    /// [`OVERSCROLL_RESISTANCE`] applied) until the release-settle brings it back;
-    /// the fling/wheel/layout paths still hard-clamp via [`ScrollWidget::set_offset`].
+    /// `[0, max_offset]`, but a drag past an edge lets it go out of range
+    /// (as far as the physics allows) until the release-settle brings it back;
+    /// the fling/wheel/layout paths still hard-clamp via
+    /// [`ScrollWidget::set_offset`]. Unlike a `ListView`'s clamped windowing
+    /// offset, this one value *is* the core's position, displacement and all.
     offset: f64,
     /// Resolved viewport size (this widget's own size).
     viewport: Size,
     /// The child's (content) size after an unbounded-height layout.
     content: Size,
-    /// Whether we have taken the gesture over as a scroll drag.
-    scrolling: bool,
-    /// The physics-mapped drag position accumulated during an active scroll
-    /// drag, **before** boundary rejection: seeded from `offset` at takeover
-    /// and advanced by each move's mapped delta
-    /// ([`ScrollWidget::apply_drag_offset`]). It equals `offset` under any
-    /// physics that rejects nothing, and runs off past the edge under a
-    /// clamping one — which is exactly what lets a pinned surface still report
-    /// how hard the finger is pulling.
-    drag_position: f64,
-    /// Whether a release-settle animation is returning an overscrolled surface to
-    /// its clamped edge (driven at paint via [`ScrollWidget::settle_tick`]).
-    settling: bool,
-    /// The installed scroll physics — [`crate::physics::default_physics`]'s
-    /// platform-adaptive choice unless [`ScrollView::physics`] replaces it.
-    /// `Rc`, not `Box`: every [`ScrollPhysics`] method takes `&self`, so a
-    /// shared, immutable handle is both cheap to (re)install (a `Rc::clone`,
-    /// not a fresh reconstruction — `Box<dyn ScrollPhysics>` isn't `Clone`)
-    /// and sufficient, since nothing here ever needs `&mut` access to it.
-    /// Survives a rebuild whose view carries no `.physics(...)` call
-    /// untouched; see [`ScrollView::physics`] for the full contract and the
-    /// [module docs](self)' *Physics seam*.
-    pub(crate) physics: Rc<dyn ScrollPhysics>,
-    /// How past-edge pull is visualized —
-    /// [`crate::physics::default_overscroll_effect`]'s platform pairing unless
-    /// [`ScrollView::overscroll_effect`] names one. Read at paint alone (see
-    /// [`ScrollWidget::painted_offset`] and the module docs' *Overscroll
-    /// visuals*), never by layout or by the physics.
-    pub(crate) effect: OverscrollEffect,
-    /// The signed pull past an edge, in the same sense as
-    /// [`ScrollInfo::overscroll`]: **negative past the top**, positive past the
-    /// bottom, `0.0` in range. Its two halves are the displacement the physics
-    /// *allowed* (what [`ScrollInfo::overscroll`] reports) plus whatever
-    /// [`ScrollPhysics::apply_boundary_conditions`] *rejected* while the
-    /// position was pinned at the edge — so a clamping physics, whose position
-    /// never leaves range, still reports how hard the finger is pulling
-    /// (`physics`' design ruling). Under a physics that rejects nothing
-    /// (`Bouncing`, [`RubberBand`](crate::RubberBand)) this is exactly the
-    /// overscroll, which is why basing the [`REFRESH_TRIGGER_PX`] check on it
-    /// changes no trigger distance for either of them.
-    ///
-    /// Re-derived from [`ScrollWidget::drag_position`] on every drag move
-    /// (never summed across moves, which would strand a rejected pull the
-    /// finger has since eased back), re-seeded from the live displacement on
-    /// `Down`, re-derived again on every ballistic pump, decayed by the
-    /// release-settle, and zeroed by the wheel/`Cancel` hard clamps. A
-    /// ballistic that ends with a pull outstanding hands it to that same settle
-    /// ([`ScrollWidget::settle_ballistic_residual`]) rather than leaving it
-    /// standing — the settle is the only path back to `0.0` that animates.
-    pub(crate) edge_pull: f64,
-    /// A generic ballistic simulation handed back by
-    /// [`ScrollPhysics::create_ballistic_simulation`] on release, or `None` —
-    /// always `None` under [`RubberBand`](crate::RubberBand), which keeps the
-    /// legacy [`ScrollWidget::fling`]/[`ScrollWidget::settling`] path instead.
-    ballistic: Option<BallisticState>,
-    /// Velocity (px/s of offset) of the motion a new `Down` interrupted, fed to
-    /// [`ScrollPhysics::carried_momentum`] at the next fling start. `Down` is
-    /// its only writer and always writes it (`0.0` when the press landed on a
-    /// resting surface), so it can never carry a stale value into a later
-    /// gesture.
-    carried_velocity: f64,
-    /// A scroll notification produced by the paint-time fling/settle pump (which
-    /// carries no [`EventCtx`]); delivered to `on_scroll` on the next event and
-    /// cleared by a `Cancel` without firing.
-    pending_scroll_notify: bool,
-    /// The scroll observation callback (`None` if the view set none).
-    on_scroll: Option<ErasedArgCallback<ScrollInfo>>,
-    /// The pull-to-refresh release callback (`None` if the view set none).
-    on_refresh_release: Option<ErasedCallback>,
-    /// Whether a `Down` has armed an active gesture (distinct from `scrolling`,
-    /// which only becomes true after the drag passes the slop). Set on `Down`
-    /// and cleared on `Up`/`Cancel`; the slop/takeover math runs only while it
-    /// is true, so a hover `Move` (dispatched on every cursor motion) is never
-    /// mistaken for a drag and can never take the gesture from a child.
-    down_active: bool,
-    /// What the nearest nested scroll surface claimed it could do with this
-    /// gesture, read back out of the claim cell this widget pushed around the
-    /// `Down`'s forward — the whole input to the innermost-wins decision at the
-    /// takeover site (the module docs' *Nested scrolling*). Reset on `Down`
-    /// (before that forward) and on `Up`/`Cancel`, so it can never carry a
-    /// previous gesture's answer.
-    ///
-    /// **Accepted staleness**: this is a `Down`-time snapshot. An inner
-    /// revealed (scrolled off the edge it was pinned against) or re-pinned
-    /// *during* the gesture never re-registers, and the decision taken from it
-    /// is never revisited — the same limitation the navigator's edge-swipe
-    /// claim accepts for exactly the same reason (one arbitration point per
-    /// gesture, decided once).
-    pub(crate) inner_at_down: InnerScrollState,
-    /// Whether this gesture was handed to the nested surface at the takeover
-    /// site. A **sticky** decision for the rest of the gesture: every remaining
-    /// `Move` is forwarded untouched and the takeover math never runs again, so
-    /// a mid-gesture direction reversal cannot steal the drag back (v1 — the
-    /// finger is already inside the inner's own drag by then, and taking over
-    /// would mean cancelling a scroll in flight). Cleared with
-    /// [`ScrollWidget::inner_at_down`].
-    pub(crate) deferring: bool,
-    /// A live veto a nested multi-contact recognizer (`pinch_detector`,
-    /// [`crate::pan_zoom`]'s child-owned-press branch) can raise for the rest
-    /// of this gesture once it is tracking more than the claimant's own
-    /// contact — the live counterpart to `inner_at_down` for a case the
-    /// `Down`-time snapshot cannot see (the module docs' *Multi-contact
-    /// veto*). Checked on every `Move` at the takeover site, not read once:
-    /// the recognizer flips it live as a second contact joins and leaves.
-    /// Replaced with a fresh, unset cell on every `Down` (and cleared again
-    /// on `Up`/`Cancel`) so a stale recognizer handle from a previous gesture
-    /// can never veto this one.
-    live_veto: Rc<Cell<bool>>,
-    down_start: Point,
-    last_drag: Point,
-    tracker: VelocityTracker,
-    /// Active fling velocity, in px/s of *offset* (opposite the finger), or
-    /// `None` when not flinging.
-    fling: Option<f64>,
-    /// The most recent frame time observed during [`Widget::paint`], reused as the
-    /// event-pass timestamp for velocity tracking (the event pass carries no clock
-    /// of its own — time is provided only at paint; the fling starts from the
-    /// last paint clock, which is today's behavior too).
-    last_frame_time: FrameTime,
-    /// Last animation frame time for the paint-time fling pump; `None` seeds the
-    /// clock (zero-delta) on the first paint after a release.
-    last_anim: Option<FrameTime>,
-    /// This surface's claim on an attached [`ScrollController`], or `None`.
-    /// Dropping it (with the widget, or on a rebuild that names no handle)
-    /// detaches the handle when this surface still holds it.
-    controller: Option<ScrollBinding>,
-    /// Whether a layout has run, so the extent a controller command clamps
-    /// against (and the snapshot it publishes) is a measured one rather than
-    /// the pre-layout zero.
-    laid_out: bool,
-    /// Whether a controller jump moved the position since the last paint —
-    /// the paint that sees it requests the `Housekeeping` flush that delivers
-    /// the owed `on_scroll` (the module docs' *Programmatic scrolling*).
-    jump_notify_owed: bool,
-    /// Whether [`ScrollWidget::ballistic`] is currently running a
-    /// controller-driven [`ScrollController::animate_to`] tween rather than a
-    /// release fling/spring — this surface's own mirror of the attached
-    /// [`ScrollController::is_animating`] flag, read back at every tear-down
-    /// site ([`ScrollWidget::stop_ballistic`]) so the controller is told the
-    /// instant it actually ends, and at [`ScrollWidget::drive_ballistic`]'s
-    /// own completion so a tween that finishes on its own is told too.
-    controller_animating: bool,
+    /// The shared scroll machinery and its state.
+    core: ScrollSurfaceCore,
+}
+
+/// The in-file tests predate the core and name its state as this widget's own
+/// fields (`w.scrolling`, `w.edge_pull`, …); a test-build `Deref` keeps every
+/// one of them reading the same state it always did. Production code names
+/// `self.core` explicitly.
+#[cfg(test)]
+impl std::ops::Deref for ScrollWidget {
+    type Target = ScrollSurfaceCore;
+
+    fn deref(&self) -> &ScrollSurfaceCore {
+        &self.core
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for ScrollWidget {
+    fn deref_mut(&mut self) -> &mut ScrollSurfaceCore {
+        &mut self.core
+    }
 }
 
 impl ScrollWidget {
@@ -919,31 +806,7 @@ impl ScrollWidget {
             offset: 0.0,
             viewport: Size::ZERO,
             content: Size::ZERO,
-            scrolling: false,
-            drag_position: 0.0,
-            settling: false,
-            physics: default_physics(),
-            effect: default_overscroll_effect(),
-            edge_pull: 0.0,
-            ballistic: None,
-            carried_velocity: 0.0,
-            pending_scroll_notify: false,
-            on_scroll: None,
-            on_refresh_release: None,
-            down_active: false,
-            inner_at_down: InnerScrollState::default(),
-            deferring: false,
-            live_veto: Rc::new(Cell::new(false)),
-            down_start: Point::ZERO,
-            last_drag: Point::ZERO,
-            tracker: VelocityTracker::new(),
-            fling: None,
-            last_frame_time: FrameTime::ZERO,
-            last_anim: None,
-            controller: None,
-            laid_out: false,
-            jump_notify_owed: false,
-            controller_animating: false,
+            core: ScrollSurfaceCore::default(),
         }
     }
 
@@ -958,122 +821,12 @@ impl ScrollWidget {
     }
 
     /// Whether post-release motion is in flight — the legacy fling, or a
-    /// physics-supplied [`Simulation`] the generic driver is running (never
+    /// physics-supplied [`Simulation`](crate::physics::Simulation) the generic
+    /// driver is running (never
     /// both, and never either one under [`RubberBand`](crate::RubberBand)'s
     /// legacy-only path).
     pub fn is_flinging(&self) -> bool {
-        self.fling.is_some() || self.ballistic.is_some()
-    }
-
-    /// This surface's extent/position snapshot for the physics, reading
-    /// `pixels` from a caller-supplied position rather than the live offset —
-    /// the drag path asks about the *raw* (un-resisted) drag position, clamped
-    /// into range, so resistance is derived from the accumulator instead of
-    /// compounding across moves.
-    fn metrics_at(&self, pixels: f64) -> ScrollMetrics {
-        ScrollMetrics {
-            pixels,
-            min_scroll_extent: 0.0,
-            max_scroll_extent: self.max_offset(),
-            viewport_dimension: self.viewport.height,
-            device_pixel_ratio: METRICS_FALLBACK_DPR,
-        }
-    }
-
-    /// This surface's extent/position snapshot at its current effective offset.
-    fn metrics(&self) -> ScrollMetrics {
-        self.metrics_at(self.offset)
-    }
-
-    /// The signed distance the effective offset currently sits past an edge
-    /// (negative past the top, positive past the bottom, `0.0` in range) — the
-    /// value [`ScrollInfo::overscroll`] reports and the allowed half of
-    /// [`ScrollWidget::edge_pull`].
-    fn displacement(&self) -> f64 {
-        self.offset - self.offset.clamp(0.0, self.max_offset())
-    }
-
-    /// The velocity (px/s of offset) of whatever post-release motion is live
-    /// right now — the legacy fling's own, or a running simulation's at the
-    /// last painted frame — and `0.0` when the surface is at rest.
-    fn live_velocity(&self) -> f64 {
-        if let Some(v) = self.fling {
-            return v;
-        }
-        match self.ballistic.as_ref() {
-            Some(state) => state.sim.dx(state.elapsed_secs(self.last_frame_time)),
-            None => 0.0,
-        }
-    }
-
-    /// A new fling's starting velocity: the `release` velocity plus whatever
-    /// [`ScrollPhysics::carried_momentum`] carries over from the motion this
-    /// gesture's `Down` interrupted. `Down` is the only writer of
-    /// [`ScrollWidget::carried_velocity`] (and always writes it), so the
-    /// remembered value is never stale; [`RubberBand`](crate::RubberBand)
-    /// carries `0.0`, leaving `release` untouched.
-    ///
-    /// **Momentum is carried only onto a release that plainly continues the
-    /// interrupted motion**: same sign, and faster than
-    /// [`MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR`] of the physics' own
-    /// **mapped** share of the interrupted velocity —
-    /// `physics.carried_momentum(carried)`, the exact value the release is
-    /// about to add, not the raw interrupted speed. Flutter's two
-    /// `ScrollDragController.end` guards compare against `carriedMomentum`
-    /// the same way; `Bouncing`'s fitted power curve sits below the raw speed
-    /// under ~1563 px/s and above it beyond, so gating on the mapped value
-    /// (rather than the raw one) changes where the threshold actually sits.
-    /// Both guards are load-bearing, not polish — the carried term is
-    /// comparable in magnitude to an ordinary release, so adding it to a
-    /// flick back the other way cancels the finger's own velocity out or
-    /// reverses it outright.
-    ///
-    /// **Accepted gap**: Flutter drops the carried velocity a third way, when
-    /// the finger held still before letting go (`_maybeLoseMomentum`); that
-    /// guard is not ported. A press that stalls live motion, pauses, then
-    /// releases slowly in the same direction still carries momentum here.
-    ///
-    /// The single carry site for both release branches — the generic
-    /// ballistic driver ([`ScrollWidget::release_simulation`]) and the legacy
-    /// fling — so neither can grow a rule of its own.
-    fn fling_start_velocity(&self, release: f64) -> f64 {
-        let mapped = self.physics.carried_momentum(self.carried_velocity);
-        let continues_it = release.signum() == mapped.signum()
-            && release.abs() > MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * mapped.abs();
-        if continues_it {
-            release + mapped
-        } else {
-            release
-        }
-    }
-
-    /// Ask the installed physics for post-release motion at the release
-    /// velocity its own bounds allow: under
-    /// [`ScrollPhysics::min_fling_velocity`] the release is not a fling at all
-    /// (the physics may still want to spring an overscrolled surface back,
-    /// just from rest), and over [`ScrollPhysics::max_fling_velocity`] it
-    /// clamps. **Those bounds govern the generic driver only** — the legacy
-    /// fling path keeps its own pinned [`FLING_STOP`] threshold and no upper
-    /// clamp, so installing a physics that returns `None` here (as
-    /// [`RubberBand`](crate::RubberBand) does) cannot change a single shipped
-    /// fling.
-    fn release_simulation(&self) -> Option<Box<dyn Simulation>> {
-        // The offset moves opposite the finger, like every other release path.
-        let released = self.fling_start_velocity(-self.tracker.velocity());
-        let max = self.physics.max_fling_velocity();
-        let velocity = if released.abs() < self.physics.min_fling_velocity() {
-            0.0
-        } else {
-            released.clamp(-max, max)
-        };
-        self.physics
-            .create_ballistic_simulation(&self.metrics(), velocity)
-    }
-
-    /// The last painted frame time as milliseconds — the event-pass timestamp
-    /// source for velocity tracking (see [`ScrollWidget::last_frame_time`]).
-    fn event_time_ms(&self) -> f64 {
-        self.last_frame_time.as_secs_f64() * 1000.0
+        self.core.is_flinging()
     }
 
     fn set_offset(&mut self, value: f64) {
@@ -1091,7 +844,7 @@ impl ScrollWidget {
     /// moves precisely as the physics dictates under every effect (the module
     /// docs' *Overscroll visuals*), so only this one read differs.
     fn painted_offset(&self) -> f64 {
-        match self.effect {
+        match self.core.effect {
             OverscrollEffect::Translate => self.offset,
             OverscrollEffect::Stretch | OverscrollEffect::None => self.offset - self.displacement(),
         }
@@ -1102,451 +855,19 @@ impl ScrollWidget {
             .set_origin(Point::new(0.0, -self.painted_offset()));
     }
 
-    /// A snapshot of the current scroll position for [`ScrollView::on_scroll`]:
-    /// the clamped `offset`, the `max_offset`, and the signed past-edge
-    /// `overscroll` (negative past the top). See [`ScrollInfo`].
-    fn scroll_info(&self) -> ScrollInfo {
-        let max = self.max_offset();
-        ScrollInfo {
-            offset: self.offset.clamp(0.0, max),
-            max_offset: max,
-            overscroll: self.displacement(),
-        }
-    }
-
-    /// Fire `on_scroll` (if set) with the current [`ScrollInfo`]. Called from the
-    /// event pass after an input-driven offset/overscroll change.
-    fn notify_scroll(&mut self, ctx: &mut EventCtx) {
-        let info = self.scroll_info();
-        if let Some(cb) = self.on_scroll.as_mut() {
-            cb(ctx, info);
-        }
-    }
-
-    /// Deliver a fling/settle notification recorded at paint time (which had no
-    /// [`EventCtx`]) on the next event — one event of latency, the same
-    /// controlled-component convention the fling clock already relies on.
-    fn deliver_pending_scroll(&mut self, ctx: &mut EventCtx) {
-        if self.pending_scroll_notify {
-            self.pending_scroll_notify = false;
-            self.notify_scroll(ctx);
-        }
-    }
-
-    /// Advance the drag by `delta` px of raw finger travel in offset space
-    /// (positive = the content scrolls down), asking the physics what that
-    /// delta is worth from where the surface actually sits — the module docs'
-    /// *Drag convention*.
-    ///
-    /// Three steps, in order: the physics maps the raw delta at metrics
-    /// reporting the **live** position (so a depth-aware curve reads a real
-    /// overscroll depth); the mapped delta accumulates into
-    /// [`ScrollWidget::drag_position`]; and the boundary rule decides how much
-    /// of that accumulated position the surface may actually hold. What it
-    /// rejects never reaches `offset` but is still reported through
-    /// [`ScrollWidget::edge_pull`], which is what lets a clamping surface drive
-    /// pull-to-refresh and a stretch effect.
-    fn apply_drag_offset(&mut self, delta: f64) {
-        let metrics = self.metrics_at(self.offset);
-        let mapped = self.physics.apply_physics_to_user_offset(&metrics, delta);
-        self.drag_position += mapped;
-        let rejected = self
-            .physics
-            .apply_boundary_conditions(&metrics, self.drag_position);
-        self.offset = self.drag_position - rejected;
-        // Read the allowed half back off the offset rather than reusing the
-        // term above, so this is the *same* number `scroll_info` reports and
-        // the two can never disagree by a rounding step at the bottom edge.
-        self.edge_pull = self.displacement() + rejected;
-    }
-
     /// Advance a release-settle by `dt_ms`, easing the effective `offset` back to
     /// its clamped edge and returning whether it is still animating. Pure and
     /// deterministic (mirrors [`ScrollWidget::tick`]); the paint pump and the
     /// tests both drive it.
     pub fn settle_tick(&mut self, dt_ms: f64) -> bool {
-        if !self.settling {
-            return false;
-        }
-        let max = self.max_offset();
-        let target = self.offset.clamp(0.0, max);
-        let remaining = target - self.offset;
-        // `edge_pull`'s boundary-rejected half (always `0.0` under
-        // `RubberBand`, where the pull *is* the displacement) has no position
-        // to ride back, so it decays on the same curve of its own — otherwise
-        // a clamping physics' stretch would snap off at release.
-        let rejected = self.edge_pull - self.displacement();
-        if remaining.abs() <= SETTLE_STOP_PX && rejected.abs() <= SETTLE_STOP_PX {
-            self.offset = target;
-            self.settling = false;
-            self.edge_pull = 0.0;
-            self.sync_child_origin();
-            return false;
-        }
-        let retained = SETTLE_DECAY.powf(dt_ms);
-        self.offset = target - remaining * retained;
-        self.edge_pull = self.displacement() + rejected * retained;
-        self.sync_child_origin();
-        true
+        self.advance_settle(dt_ms)
     }
 
     /// Advance an in-flight fling by `dt_ms`, returning whether it is still
     /// animating. Pure and deterministic — the paint-time pump and the tests
     /// both drive it.
     pub fn tick(&mut self, dt_ms: f64) -> bool {
-        let Some(v) = self.fling else {
-            return false;
-        };
-        self.set_offset(self.offset + fling_displacement(v, dt_ms));
-        self.sync_child_origin();
-        let next_v = fling_decay(v, dt_ms);
-        let at_bound = self.offset <= 0.0 || self.offset >= self.max_offset();
-        if next_v.abs() < FLING_STOP || at_bound {
-            self.fling = None;
-            false
-        } else {
-            self.fling = Some(next_v);
-            true
-        }
-    }
-
-    /// Whether the running simulation can no longer move anything on screen:
-    /// the position it proposed sits outside the range, the physics rejected
-    /// **all** of that excess (so the painted offset is already pinned at the
-    /// edge), and the curve is still travelling further out. Nothing it reports
-    /// after that can reach the offset, so the driver ends it here rather than
-    /// asking the shell for the rest of the spline's worth of frames — an
-    /// Android-style fling into an edge otherwise pumps a second of them with
-    /// the surface stock-still.
-    ///
-    /// **Deliberately conservative.** A *partial* rejection (a physics holding
-    /// some of the excess) and an inward velocity each keep the simulation
-    /// running, because either can still bring the position back in range: an
-    /// edge spring released outward crosses back within a few frames, and only
-    /// the fully-rejected-and-still-outward case is one-way for every curve in
-    /// [`crate::physics::simulation`]. The comparison against the raw excess is
-    /// exact rather than tolerant for the same reason — a physics whose
-    /// rejection merely rounds to the excess keeps the old pump-to-done
-    /// behavior instead of being guessed at.
-    fn ballistic_is_pinned_outward(&self, proposed: f64, rejected: f64, velocity: f64) -> bool {
-        let excess = proposed - proposed.clamp(0.0, self.max_offset());
-        excess != 0.0 && rejected == excess && velocity * excess > 0.0
-    }
-
-    /// Hand a residual [`ScrollWidget::edge_pull`] left behind by a finished
-    /// ballistic to the release-settle, so it decays on [`SETTLE_DECAY`]
-    /// exactly as a drag release's pull does instead of standing on screen
-    /// until the next `Down`/wheel/`Cancel`. Only the *rejected* half can be
-    /// left over — the offset is wherever the simulation put it — and
-    /// [`ScrollWidget::settle_tick`] already decays that half on its own curve.
-    ///
-    /// A simulation that ends in range leaves nothing to settle and this is a
-    /// no-op: the guard is [`SETTLE_STOP_PX`], the same distance `settle_tick`
-    /// itself calls settled, so a bouncing spring's sub-pixel float residue
-    /// never arms an animation that would stop on its first tick.
-    fn settle_ballistic_residual(&mut self) {
-        if self.edge_pull.abs() > SETTLE_STOP_PX {
-            self.settling = true;
-        }
-    }
-
-    /// End any live [`ScrollWidget::ballistic`] simulation — a release
-    /// fling/spring, or a controller [`ScrollController::animate_to`] tween —
-    /// telling the attached controller the animation stopped if it was one.
-    /// The single tear-down path for every place user input or a jump/animate
-    /// interrupts motion (`Down`, wheel, `Cancel`, [`ScrollWidget::apply_jump`],
-    /// [`ScrollWidget::apply_animate_to`], and [`ScrollWidget::drive_ballistic`]'s
-    /// own completion all call this instead of assigning `self.ballistic =
-    /// None` directly). **Every start goes through it too**: the `Up` release
-    /// clears the fling and settle and calls this before it starts a
-    /// simulation, settle or fling of its own, and a controller tween is only
-    /// ever installed by [`ScrollWidget::apply_animate_to`] after the same
-    /// tear-down — so a fling, a settle and a simulation are never live at
-    /// once, and [`ScrollController::is_animating`] cannot outlive the tween
-    /// it reports *while this widget stays current on the handle*. A tween
-    /// whose surface is dropped, taken over, or rebound to a different
-    /// handle mid-flight never calls this — that case is reconciled on the
-    /// handle's own side instead ([`ScrollController::bind`] and
-    /// `impl Drop for ScrollBinding` in `scroll_controller.rs`), since the
-    /// tween keeps running on `self.ballistic` regardless of which binding,
-    /// if any, is still current to report it.
-    fn stop_ballistic(&mut self) {
-        self.ballistic = None;
-        if std::mem::take(&mut self.controller_animating)
-            && let Some(binding) = self.controller.as_ref()
-        {
-            binding.set_animating(false);
-        }
-    }
-
-    /// End a live drag because a controller command just took the position
-    /// over — Flutter's `animateTo`/`jumpTo` semantics, where a programmatic
-    /// command replaces the user's drag rather than running alongside it (the
-    /// module docs' *Programmatic scrolling*). Resets exactly the per-gesture
-    /// state the `Down` arm resets (the drag/armed flags, the Down-time claim
-    /// snapshot, the sticky defer decision and the live multi-contact veto
-    /// cell), so the rest of the gesture's `Move`s take the unarmed
-    /// child/hover path and its `Up` the non-scrolling child-forward branch —
-    /// the finger can no longer write the offset and the release
-    /// starts no fling or settle.
-    ///
-    /// Only an *established* drag ends here. A gesture that is armed but has
-    /// not crossed [`TOUCH_SLOP`] yet is left exactly as it is: a pre-slop
-    /// finger does not write the offset, so there is nothing to race, and
-    /// the child under it already holds an uncancelled `Down` — disarming
-    /// now would skip the slop takeover (and the child `Cancel` it sends), so
-    /// the finger's later travel would never scroll and its lift would
-    /// activate the child. Flutter's `jumpTo` during a hold behaves the same
-    /// way: the drag is still startable at slop. A no-op when nothing is
-    /// scrolling.
-    ///
-    /// Pointer capture is deliberately left alone: the drain that calls this
-    /// runs in layout/paint, which carry no [`EventCtx`], and the shell clears
-    /// capture on the physical `Up`/`Cancel` whatever this flag says. The
-    /// caller re-seeds [`ScrollWidget::drag_position`] from the position it
-    /// applies.
-    fn end_live_drag(&mut self) {
-        if !self.scrolling {
-            return;
-        }
-        self.scrolling = false;
-        self.down_active = false;
-        self.inner_at_down = InnerScrollState::default();
-        self.deferring = false;
-        self.live_veto = Rc::new(Cell::new(false));
-    }
-
-    /// Advance a physics-supplied [`Simulation`] to frame time `now`: the
-    /// position it reports, minus whatever
-    /// [`ScrollPhysics::apply_boundary_conditions`] rejects of it. Subtracting
-    /// the rejection is what keeps the driver honest for **any** physics — a
-    /// clamping one can never paint an out-of-range offset even if its
-    /// simulation overshoots, while a bouncing one (rejecting nothing) is free
-    /// to run past the edge and back.
-    ///
-    /// Clears the simulation once it reports itself done — or once it is
-    /// [pinned outward](ScrollWidget::ballistic_is_pinned_outward) and can
-    /// never move the offset again — which is what stops the pump asking for
-    /// frames, and hands any pull the rejection left behind to the settle
-    /// ([`ScrollWidget::settle_ballistic_residual`]).
-    fn drive_ballistic(&mut self, now: FrameTime) {
-        let Some((proposed, velocity, done)) = self.ballistic.as_ref().map(|state| {
-            let t = state.elapsed_secs(now);
-            (state.sim.x(t), state.sim.dx(t), state.sim.is_done(t))
-        }) else {
-            return;
-        };
-        let rejected = self
-            .physics
-            .apply_boundary_conditions(&self.metrics(), proposed);
-        self.offset = proposed - rejected;
-        self.edge_pull = self.displacement() + rejected;
-        self.sync_child_origin();
-        if done || self.ballistic_is_pinned_outward(proposed, rejected, velocity) {
-            self.stop_ballistic();
-            self.settle_ballistic_residual();
-        }
-    }
-
-    /// Advance the ballistic simulation, the legacy fling, *or* the
-    /// release-settle by the delta since the last paint, and signal
-    /// [`PaintCtx::request_frame`] while any of them is still running so the
-    /// shell keeps scheduling frames (the desktop `ControlFlow::Wait` loop
-    /// would otherwise idle). A fling stops once [`ScrollWidget::tick`] brings it
-    /// to rest (`|velocity|` below [`FLING_STOP`], or a scroll bound reached); a
-    /// settle stops once [`ScrollWidget::settle_tick`] reaches the edge; a
-    /// simulation stops when it reports itself done or is pinned outward.
-    /// Because this path carries no [`EventCtx`], an offset change here records
-    /// a pending `on_scroll` notification delivered on the next event.
-    ///
-    /// The three are mutually exclusive at any one instant — a release picks
-    /// one, after tearing every one of them down through
-    /// [`ScrollWidget::stop_ballistic`], and a controller command ends the drag
-    /// a release would come from — though a simulation ending against an edge
-    /// hands the pull it left behind to the settle for the frames after it
-    /// ([`ScrollWidget::settle_ballistic_residual`]). Under
-    /// [`RubberBand`](crate::RubberBand) the simulation arm is never taken at
-    /// all.
-    fn pump_fling(&mut self, ctx: &mut PaintCtx) {
-        if self.fling.is_none() && !self.settling && self.ballistic.is_none() {
-            self.last_anim = None;
-            return;
-        }
-        let now = ctx.frame_time();
-        let dt = match self.last_anim {
-            Some(t) => now.saturating_sub(t).as_secs_f64() * 1000.0,
-            None => 0.0,
-        };
-        self.last_anim = Some(now);
-        // A simulation measures time from its own start, so the first pump
-        // after the release seeds it — the same zero-delta seeding frame
-        // `last_anim` takes, so neither clock ever jumps on frame one.
-        if let Some(state) = self.ballistic.as_mut() {
-            state.start.get_or_insert(now);
-        }
-        if dt > 0.0 {
-            if self.ballistic.is_some() {
-                self.drive_ballistic(now);
-            } else if self.fling.is_some() {
-                self.tick(dt);
-            } else {
-                self.settle_tick(dt);
-            }
-            // The offset moved from a non-input source — record a notification the
-            // next event delivers (the paint pass has no EventCtx to fire it now).
-            self.pending_scroll_notify = true;
-        }
-        // While any animation is still in flight, ask the shell for another
-        // frame to continue it.
-        if self.fling.is_some() || self.settling || self.ballistic.is_some() {
-            ctx.request_frame();
-        }
-    }
-
-    /// Reconcile the attached [`ScrollController`] with the one a view names
-    /// (see [`ScrollView::controller`]'s build/rebuild semantics), returning
-    /// whether the binding changed. Every fresh [`ScrollController::bind`]
-    /// resets the handle's `is_animating` to `false`; a tween that is
-    /// genuinely still running (`self.controller_animating`) belongs to this
-    /// widget, not the handle, so it is republished onto the new binding
-    /// right after bind() rather than stopped — the tween keeps running
-    /// either way, only the handle reporting it changes.
-    fn attach_controller(&mut self, requested: Option<&ScrollController>) -> bool {
-        match (requested, self.controller.as_ref()) {
-            (None, None) => false,
-            (None, Some(_)) => {
-                self.controller = None;
-                true
-            }
-            (Some(handle), Some(binding)) if binding.controller().same(handle) => {
-                if binding.is_current() || handle.is_attached() {
-                    false
-                } else {
-                    let binding = handle.bind();
-                    binding.set_animating(self.controller_animating);
-                    self.controller = Some(binding);
-                    true
-                }
-            }
-            (Some(handle), _) => {
-                let binding = handle.bind();
-                binding.set_animating(self.controller_animating);
-                self.controller = Some(binding);
-                true
-            }
-        }
-    }
-
-    /// Apply every command queued on the attached [`ScrollController`], in
-    /// recording order — once this surface has laid out (a command queued
-    /// earlier waits for the first measured extent) and only while it still
-    /// holds the handle.
-    fn drain_controller(&mut self, reduce_motion: bool) {
-        if !self.laid_out {
-            return;
-        }
-        let commands = match self.controller.as_ref() {
-            Some(binding) => binding.take_commands(),
-            None => return,
-        };
-        for command in commands {
-            match command {
-                ScrollCommand::JumpTo(target) => self.apply_jump(target),
-                ScrollCommand::AnimateTo(target, options) => {
-                    self.apply_animate_to(target, options, reduce_motion);
-                }
-            }
-        }
-    }
-
-    /// Move straight to `target`, clamped to `[0, max_offset]`, ending any
-    /// fling, release-settle or ballistic simulation (and the pull it rode) in
-    /// flight. A live drag ends here ([`ScrollWidget::end_live_drag`]) — the
-    /// rest of its gesture never moves the content. `NaN` is ignored.
-    fn apply_jump(&mut self, target: f64) {
-        if target.is_nan() {
-            return;
-        }
-        self.end_live_drag();
-        let before = self.scroll_info();
-        let was_moving = self.is_flinging() || self.settling;
-        self.fling = None;
-        self.stop_ballistic();
-        self.settling = false;
-        self.edge_pull = 0.0;
-        self.last_anim = None;
-        self.set_offset(target);
-        self.drag_position = self.offset;
-        self.sync_child_origin();
-        if was_moving || self.scroll_info() != before {
-            self.pending_scroll_notify = true;
-            self.jump_notify_owed = true;
-        }
-    }
-
-    /// Start (or replace) a controller-driven tween to `target`, clamped to
-    /// `[0, max_offset]`, ending any fling, release-settle or ballistic
-    /// simulation in flight first — the same replace semantics
-    /// [`ScrollWidget::apply_jump`] gives a jump. Drives the tween through a
-    /// [`TweenSimulation`] in [`ScrollWidget::ballistic`], the exact same
-    /// field and pump ([`ScrollWidget::drive_ballistic`]) a release fling
-    /// runs through, so paint cadence, `request_frame` and the installed
-    /// physics' boundary handling are shared rather than duplicated.
-    /// `reduce_motion` (or a non-positive/non-finite `duration_ms`) collapses
-    /// this to an immediate [`ScrollWidget::apply_jump`]. A live drag ends
-    /// here ([`ScrollWidget::end_live_drag`]), so the tween is the only writer
-    /// of the offset until it finishes or user input interrupts it. `NaN` is
-    /// ignored.
-    fn apply_animate_to(&mut self, target: f64, options: AnimateTo, reduce_motion: bool) {
-        if target.is_nan() {
-            return;
-        }
-        self.end_live_drag();
-        self.fling = None;
-        self.stop_ballistic();
-        self.settling = false;
-        self.edge_pull = 0.0;
-        self.last_anim = None;
-        if reduce_motion || !options.duration_ms.is_finite() || options.duration_ms <= 0.0 {
-            self.apply_jump(target);
-            return;
-        }
-        self.drag_position = self.offset;
-        let clamped = target.clamp(0.0, self.max_offset());
-        let sim = TweenSimulation::new(
-            self.offset,
-            clamped,
-            options.duration_ms / 1000.0,
-            options.curve,
-        );
-        self.ballistic = Some(BallisticState {
-            sim: Box::new(sim),
-            start: None,
-        });
-        self.controller_animating = true;
-        if let Some(binding) = self.controller.as_ref() {
-            binding.set_animating(true);
-        }
-    }
-
-    /// Publish the current position to the attached [`ScrollController`] (a
-    /// no-op before the first layout, or once another surface took it over).
-    fn publish_to_controller(&self) {
-        if !self.laid_out {
-            return;
-        }
-        if let Some(binding) = self.controller.as_ref() {
-            binding.publish(self.scroll_info(), self.viewport.height);
-        }
-    }
-
-    fn send_child_cancel(&mut self, ctx: &mut EventCtx, pos: Point) {
-        let cancel = InputEvent::Pointer(PointerEvent {
-            phase: PointerPhase::Cancel,
-            position: pos,
-            button: PointerButton::Primary,
-        });
-        self.child.event_child(ctx, &cancel);
+        self.advance_fling(dt_ms)
     }
 
     /// The event entry, parameterised on an explicit timestamp so velocity math
@@ -1559,10 +880,12 @@ impl ScrollWidget {
         result
     }
 
-    /// The event body behind [`ScrollWidget::event_at`].
+    /// The event body behind [`ScrollWidget::event_at`]: the non-gesture
+    /// variants are routed here, the wheel and pointer gesture by the core
+    /// ([`ScrollSurface::handle_wheel`], [`ScrollSurface::handle_pointer`]).
     fn route_event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
         // A fling/settle notification recorded at paint time is delivered on the
-        // next event — except a Cancel, which clears it without firing (below).
+        // next event — except a Cancel, which clears it without firing.
         if !matches!(
             event,
             InputEvent::Pointer(p) if p.phase == PointerPhase::Cancel
@@ -1591,222 +914,8 @@ impl ScrollWidget {
                     EventResult::Ignored
                 }
             }
-            InputEvent::Scroll { delta, .. } => {
-                let dy = match delta {
-                    ScrollDelta::Lines(_, y) => y * WHEEL_LINE_PX,
-                    ScrollDelta::Pixels(_, y) => *y,
-                };
-                // Wheel scrolling stays hard-clamped — no overscroll rubber-band on
-                // desktop wheel input, and no physics consulted: the clamp is a
-                // property of the input device, not of the installed feel, so
-                // this arm is identical under every physics.
-                self.fling = None;
-                self.settling = false;
-                self.stop_ballistic();
-                self.edge_pull = 0.0;
-                self.set_offset(self.offset + dy);
-                self.sync_child_origin();
-                self.notify_scroll(ctx);
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            InputEvent::Pointer(p) => match p.phase {
-                PointerPhase::Down => {
-                    // Only a primary press arms a drag. A secondary press is a
-                    // context gesture: it still reaches the child (a
-                    // context-menu consumer inside the viewport must see it),
-                    // but opens no capture and can never start a scroll. The
-                    // wheel arm above is unaffected — it carries no button.
-                    if !presses(p) {
-                        return self.child.event_child(ctx, event);
-                    }
-                    self.scrolling = false;
-                    self.down_active = true;
-                    self.inner_at_down = InnerScrollState::default();
-                    self.deferring = false;
-                    // A fresh, unset cell for this gesture — never the
-                    // previous one, which a since-torn-down recognizer may
-                    // still hold a clone of.
-                    self.live_veto = Rc::new(Cell::new(false));
-                    // Remember what this press interrupted before killing it —
-                    // the next fling asks the physics how much of it to carry
-                    // forward (`0.0` under `RubberBand`, i.e. start cold).
-                    self.carried_velocity = self.live_velocity();
-                    self.fling = None;
-                    self.settling = false;
-                    self.stop_ballistic();
-                    // A `Down` deliberately leaves a mid-bounce displacement on
-                    // screen (the regrab continues from it), so the pull is
-                    // re-seeded from that displacement rather than zeroed —
-                    // what "reset" means here is "carries nothing stale from
-                    // the previous gesture".
-                    self.edge_pull = self.displacement();
-                    self.last_anim = None;
-                    self.down_start = p.position;
-                    self.last_drag = p.position;
-                    self.tracker.clear();
-                    self.tracker.record(t_ms, p.position.y);
-                    ctx.capture_pointer();
-                    // Innermost-wins arbitration, both halves in dispatch
-                    // order. First report THIS surface into whatever cell is
-                    // ambient — the nearest *enclosing* scrollable's, if any —
-                    // while that is still the cell on top; only then push this
-                    // surface's own cell for the forward below, so a nested
-                    // scrollable's write lands here and never in the
-                    // grandparent's.
-                    if let Some(host) = ambient_scroll_claim() {
-                        host.set(inner_claim_state(self.physics.as_ref(), &self.metrics()));
-                    }
-                    let claim = Rc::new(Cell::new(InnerScrollState::default()));
-                    let veto = Rc::clone(&self.live_veto);
-                    let child = &mut self.child;
-                    with_scroll_claim(&claim, || {
-                        with_scroll_veto(&veto, || child.event_child(ctx, event))
-                    });
-                    self.inner_at_down = claim.get();
-                    EventResult::Handled
-                }
-                PointerPhase::Move => {
-                    // Without an armed `Down`, this is a hover move (the desktop
-                    // shell dispatches `Move` on every cursor motion): never run
-                    // the slop/takeover math against a stale `down_start`, just
-                    // forward it to the child.
-                    if !self.down_active {
-                        return self.child.event_child(ctx, event);
-                    }
-                    self.tracker.record(t_ms, p.position.y);
-                    if self.scrolling {
-                        let dy = p.position.y - self.last_drag.y;
-                        self.last_drag = p.position;
-                        // Hand the physics this move's raw delta (the offset
-                        // moves opposite the finger) and let it decide what
-                        // reaches the position past an edge.
-                        self.apply_drag_offset(-dy);
-                        self.sync_child_origin();
-                        self.notify_scroll(ctx);
-                        ctx.request_redraw();
-                    } else if !self.deferring
-                        && !self.live_veto.get()
-                        && (p.position.y - self.down_start.y).abs() > TOUCH_SLOP
-                        && self.physics.should_accept_user_offset(&self.metrics())
-                    {
-                        if self.inner_at_down.defers(p.position.y - self.down_start.y) {
-                            // Innermost wins: a nested scrollable registered on
-                            // this gesture's `Down` and can consume this
-                            // direction, so take nothing over — no `Cancel`, no
-                            // capture handover — and keep forwarding. The
-                            // decision is sticky (`deferring` gates this whole
-                            // branch), and the inner's own slop machinery
-                            // cancels its own child from here.
-                            self.deferring = true;
-                            self.child.event_child(ctx, event);
-                        } else {
-                            // Take the gesture over: cancel the child, stop
-                            // forwarding — unless the physics refuses drags
-                            // outright, in which case the move keeps flowing to
-                            // the child. `Bouncing`/`RubberBand` accept
-                            // unconditionally (even content that fits
-                            // rubber-bands), so that gate is inert on the
-                            // bouncing-family default.
-                            self.scrolling = true;
-                            self.settling = false;
-                            self.last_drag = p.position;
-                            // Seed the drag accumulator from the live position
-                            // — including a mid-bounce displacement, so a
-                            // regrab continues from what is on screen.
-                            self.drag_position = self.offset;
-                            self.send_child_cancel(ctx, p.position);
-                            // A takeover, not the gesture's end: releasing the
-                            // child through the context also ends a contact
-                            // opt-in held below it, so the root stops routing
-                            // other fingers to a captor that was just cancelled.
-                            ctx.release_captured_child(&mut self.child);
-                            ctx.request_redraw();
-                        }
-                    } else {
-                        self.child.event_child(ctx, event);
-                    }
-                    EventResult::Handled
-                }
-                PointerPhase::Up => {
-                    if self.scrolling {
-                        // Pull-to-refresh: released past the top trigger fires the
-                        // app hook (an Up, so mutating state is allowed). Measured
-                        // on `edge_pull`, so a clamping physics — which never lets
-                        // the position leave range — can still trigger it; under
-                        // `RubberBand` this is bit-for-bit the overscroll the
-                        // check has always read.
-                        if crossed_refresh_trigger(self.edge_pull)
-                            && let Some(cb) = self.on_refresh_release.as_mut()
-                        {
-                            cb(ctx);
-                        }
-                        // Whatever the release starts, it starts alone: tear
-                        // every motion down first, through the single
-                        // tear-down path, so no fling, settle or simulation
-                        // (a controller tween included) survives alongside the
-                        // one picked below and `is_animating` is never left
-                        // set by a tween this release replaced.
-                        self.fling = None;
-                        self.settling = false;
-                        self.stop_ballistic();
-                        self.last_anim = None;
-                        // Ask the physics for post-release motion first: one that
-                        // hands back a simulation owns the release outright, and
-                        // one that does not (`RubberBand`) falls through to the
-                        // legacy settle/fling below untouched.
-                        if let Some(sim) = self.release_simulation() {
-                            self.ballistic = Some(BallisticState { sim, start: None });
-                        } else if self.edge_pull != 0.0 {
-                            // Released while overscrolled: settle back to the edge,
-                            // never fling out of range.
-                            self.settling = true;
-                        } else {
-                            // The legacy path keeps its own FLING_STOP threshold
-                            // (the trait's min/max fling bounds govern the generic
-                            // driver only) and takes carried momentum, which is
-                            // `0.0` under `RubberBand`.
-                            let finger_v = self.tracker.velocity();
-                            if finger_v.abs() > FLING_STOP {
-                                // Offset moves opposite the finger.
-                                self.fling = Some(self.fling_start_velocity(-finger_v));
-                            }
-                        }
-                        self.notify_scroll(ctx);
-                    } else {
-                        self.child.event_child(ctx, event);
-                    }
-                    self.child.set_active(false);
-                    self.scrolling = false;
-                    self.down_active = false;
-                    self.inner_at_down = InnerScrollState::default();
-                    self.deferring = false;
-                    self.live_veto = Rc::new(Cell::new(false));
-                    ctx.request_redraw();
-                    EventResult::Handled
-                }
-                PointerPhase::Cancel => {
-                    self.child.event_child(ctx, event);
-                    self.child.set_active(false);
-                    self.scrolling = false;
-                    self.down_active = false;
-                    self.inner_at_down = InnerScrollState::default();
-                    self.deferring = false;
-                    self.live_veto = Rc::new(Cell::new(false));
-                    // Cancel never mutates state and never fires a callback: drop
-                    // any pending notification and snap an overscrolled surface back
-                    // into range (no settle animation, no on_scroll/on_refresh) —
-                    // including any live simulation and the pull it was riding.
-                    self.settling = false;
-                    self.stop_ballistic();
-                    self.edge_pull = 0.0;
-                    self.pending_scroll_notify = false;
-                    self.set_offset(self.offset);
-                    self.sync_child_origin();
-                    ctx.request_redraw();
-                    EventResult::Handled
-                }
-            },
+            InputEvent::Scroll { delta, .. } => self.handle_wheel(ctx, delta),
+            InputEvent::Pointer(p) => self.handle_pointer(ctx, event, p, t_ms),
             // Any other variant — a hit-tested `Scale` today — belongs to the
             // child, and so does its result: a child that handled it consumed
             // it, so an enclosing recognizer (a `pinch_detector` offered the
@@ -1826,24 +935,113 @@ impl ScrollWidget {
     }
 }
 
+/// The single-child owner side of the core: the effective `offset` is both
+/// the base position and the physics' pixels, so a past-edge pull lives in it
+/// directly and the displacement is read back off it against the range.
+impl ScrollSurface for ScrollWidget {
+    fn core(&self) -> &ScrollSurfaceCore {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut ScrollSurfaceCore {
+        &mut self.core
+    }
+
+    fn max_scroll_extent(&self) -> f64 {
+        self.max_offset()
+    }
+
+    fn viewport_extent(&self) -> f64 {
+        self.viewport.height
+    }
+
+    fn base_offset(&self) -> f64 {
+        self.offset
+    }
+
+    fn set_base_offset(&mut self, value: f64) {
+        self.set_offset(value);
+    }
+
+    fn pixels(&self) -> f64 {
+        self.offset
+    }
+
+    /// The signed distance the effective offset currently sits past an edge
+    /// (negative past the top, positive past the bottom, `0.0` in range) — the
+    /// value [`ScrollInfo::overscroll`] reports and the allowed half of the
+    /// core's edge pull.
+    fn displacement(&self) -> f64 {
+        self.offset - self.offset.clamp(0.0, self.max_offset())
+    }
+
+    fn set_allowed_position(&mut self, allowed: f64) {
+        self.offset = allowed;
+    }
+
+    fn decay_displacement(&mut self, retained: f64) {
+        let target = self.offset.clamp(0.0, self.max_offset());
+        let remaining = target - self.offset;
+        self.offset = target - remaining * retained;
+    }
+
+    fn settle_to_edge(&mut self) {
+        self.set_offset(self.offset);
+    }
+
+    fn sync_origins(&mut self) {
+        self.sync_child_origin();
+    }
+
+    /// A snapshot of the current scroll position for [`ScrollView::on_scroll`]:
+    /// the clamped `offset`, the `max_offset`, and the signed past-edge
+    /// `overscroll` (negative past the top). See [`ScrollInfo`].
+    fn scroll_info(&self) -> ScrollInfo {
+        let max = self.max_offset();
+        ScrollInfo {
+            offset: self.offset.clamp(0.0, max),
+            max_offset: max,
+            overscroll: self.displacement(),
+        }
+    }
+
+    fn forward_pointer(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        self.child.event_child(ctx, event)
+    }
+
+    fn take_over_from_content(&mut self, ctx: &mut EventCtx, position: Point) {
+        let cancel = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Cancel,
+            position,
+            button: PointerButton::Primary,
+        });
+        self.child.event_child(ctx, &cancel);
+        // A takeover, not the gesture's end: releasing the child through the
+        // context also ends a contact opt-in held below it, so the root stops
+        // routing other fingers to a captor that was just cancelled.
+        ctx.release_captured_child(&mut self.child);
+    }
+
+    fn release_content(&mut self) {
+        self.child.set_active(false);
+    }
+}
+
 impl<State: 'static> View<State> for ScrollView<State> {
     type Element = ScrollWidget;
 
     fn build(&self, ctx: &mut BuildCtx<'_>) -> ScrollWidget {
         let mut widget = ScrollWidget::new(crate::authoring::build_child(&self.child, ctx));
-        widget.on_scroll = self
+        widget.core.on_scroll = self
             .on_scroll
             .as_ref()
             .map(crate::authoring::erase_callback_arg);
-        widget.on_refresh_release = self
+        widget.core.on_refresh_release = self
             .on_refresh_release
             .as_ref()
             .map(crate::authoring::erase_callback);
-        if let Some(physics) = self.physics.clone() {
-            widget.physics = physics;
-        }
-        widget.effect = self.effect;
-        widget.attach_controller(self.controller.as_ref());
+        widget.core.install(self.physics.as_ref(), self.effect);
+        widget.core.attach_controller(self.controller.as_ref());
         widget
     }
 
@@ -1854,36 +1052,37 @@ impl<State: 'static> View<State> for ScrollView<State> {
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
         // Closures are not comparable — always reinstall the erased adapters.
-        element.on_scroll = self
+        element.core.on_scroll = self
             .on_scroll
             .as_ref()
             .map(crate::authoring::erase_callback_arg);
-        element.on_refresh_release = self
+        element.core.on_refresh_release = self
             .on_refresh_release
             .as_ref()
             .map(crate::authoring::erase_callback);
         // A `.physics(...)`-carrying view reinstalls it every rebuild, like the
         // erased callbacks above; a view with no opinion (`None`) leaves the
         // widget's currently-installed physics alone — see
-        // `ScrollView::physics`'s doc for the full contract.
-        if let Some(physics) = self.physics.clone() {
-            element.physics = physics;
-        }
-        // The visual effect is plain data the view owns and is always carried
-        // down unconditionally.
-        element.effect = self.effect;
+        // `ScrollView::physics`'s doc for the full contract. The visual effect
+        // is plain data the view owns and is always carried down.
+        element.core.install(self.physics.as_ref(), self.effect);
         let mut flags =
             crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         // A new binding publishes, and a queued command applies, at the next
         // layout or paint — make sure a frame-gated shell runs one.
-        let rebound = element.attach_controller(self.controller.as_ref());
-        if rebound
-            || element
-                .controller
-                .as_ref()
-                .is_some_and(ScrollBinding::has_pending)
-        {
+        let rebound = element.core.attach_controller(self.controller.as_ref());
+        if rebound {
             flags |= ChangeFlags::PAINT;
+        }
+        // A queued command moves the child's origin when it applies, and the
+        // layout drain is where it applies first: report LAYOUT so the
+        // reconciler dirties this pod and the layout skip runs that drain
+        // instead of keeping the pre-jump origin (a hidden surface — a covered
+        // tab — is never painted, so the paint drain alone would never reach
+        // it). `ListView`'s rebuild reports LAYOUT for its own drain the same
+        // way.
+        if element.core.has_pending_commands() {
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         flags
     }
@@ -1927,12 +1126,12 @@ impl Widget for ScrollWidget {
         // recomputes `scroll_info()`/settles/flings off the freshly-updated
         // `max_offset`, and any non-drag layout after the gesture ends clamps
         // normally on its own next pass.
-        if !self.scrolling && !self.settling && self.ballistic.is_none() {
+        if !self.core.scrolling && !self.core.settling && self.core.ballistic.is_none() {
             self.set_offset(self.offset); // re-clamp against new content/viewport
         }
         // A controller command clamps against the extent just measured, so a
         // jump recorded alongside a content change lands in the new range.
-        self.laid_out = true;
+        self.core.laid_out = true;
         let reduce_motion = Theme::from_layout_ctx(ctx)
             .map(|t| t.motion.reduce_motion)
             .unwrap_or(false);
@@ -1943,32 +1142,14 @@ impl Widget for ScrollWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        // Record the shared frame clock so the between-frames event pass (which
-        // carries no clock) has a timestamp for velocity tracking.
-        self.last_frame_time = ctx.frame_time();
-        // A command recorded since layout (or with layout skipped this frame)
-        // applies before the pump, so a jump ends a fling before it advances.
+        // Record the shared frame clock (the between-frames event pass carries
+        // none), apply a command recorded since layout before the pump so a
+        // jump ends a fling before it advances, pump post-release motion and
+        // publish — see `ScrollSurface::paint_motion`.
         let reduce_motion = Theme::from_paint_ctx(ctx)
             .map(|t| t.motion.reduce_motion)
             .unwrap_or(false);
-        self.drain_controller(reduce_motion);
-        self.pump_fling(ctx);
-        self.publish_to_controller();
-        if std::mem::take(&mut self.jump_notify_owed) && self.on_scroll.is_some() {
-            // Paint has no `&mut State`: owe the jump's `on_scroll` to the next
-            // frame's Housekeeping flush (the `pan_zoom` precedent).
-            frust_core::mark_pending_result_flush();
-            ctx.request_frame();
-        }
-        if self
-            .controller
-            .as_ref()
-            .is_some_and(ScrollBinding::has_pending)
-        {
-            // Recorded during this paint (a listener reacting to the publish
-            // above): the next frame applies it.
-            ctx.request_frame();
-        }
+        self.paint_motion(ctx, reduce_motion);
         scene.push_clip(ctx.origin(), ctx.size());
         self.sync_child_origin();
         // Publish this viewport as the paint-time visible rect (absolute coords),
@@ -1987,12 +1168,7 @@ impl Widget for ScrollWidget {
         // above already asks for every frame the decaying stretch needs.
         // Pushed INSIDE the viewport clip so stretched content can never
         // paint past the viewport's edges.
-        let stretch = match self.effect {
-            OverscrollEffect::Stretch => {
-                stretch_about_edge(ctx.origin(), ctx.size(), self.edge_pull)
-            }
-            OverscrollEffect::Translate | OverscrollEffect::None => None,
-        };
+        let stretch = self.core.stretch_transform(ctx.origin(), ctx.size());
         if let Some(transform) = stretch {
             scene.push_transform(transform);
         }
@@ -2004,7 +1180,7 @@ impl Widget for ScrollWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        let t = self.event_time_ms();
+        let t = self.core.event_time_ms();
         self.event_at(ctx, event, t)
     }
 
@@ -5089,6 +4265,29 @@ mod controller_tests {
     }
 
     #[test]
+    fn a_queued_command_reports_layout_so_a_skipped_layout_still_drains_it() {
+        // The layout skip lays a pod out only when it is dirty: a rebuild that
+        // reported PAINT alone left the jump for the paint drain, so the layout
+        // in between kept the pre-jump child origin (and a hidden surface that
+        // is never painted never drained at all). `ListView` parity.
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        controller.jump_to(42.0);
+        let same = self::view(&controller);
+        assert!(rebuild(&same, &view, &mut w).contains(ChangeFlags::LAYOUT));
+        lay(&mut w);
+        assert_eq!(w.offset(), 42.0);
+        // A fresh binding with nothing queued publishes at the next pass: a
+        // paint, not a layout.
+        let other = ScrollController::new();
+        let rebound = self::view(&other);
+        let flags = rebuild(&rebound, &same, &mut w);
+        assert!(flags.needs_paint() && !flags.contains(ChangeFlags::LAYOUT));
+    }
+
+    #[test]
     fn on_scroll_hears_a_jump_through_the_next_frames_flush() {
         let controller = ScrollController::new();
         let log = Rc::new(RefCell::new(Vec::<ScrollInfo>::new()));
@@ -5823,6 +5022,63 @@ mod controller_tests {
         assert!(
             !new_controller.is_animating(),
             "completion resolves is_animating on the current handle"
+        );
+    }
+
+    #[test]
+    fn on_scroll_hears_an_animate_to_on_every_frame_it_moves_and_where_it_lands() {
+        let controller = ScrollController::new();
+        let log = Rc::new(RefCell::new(Vec::<ScrollInfo>::new()));
+        let (handle, sink) = (controller.clone(), Rc::clone(&log));
+        let mut logic = move |_: &mut ()| {
+            let sink = Rc::clone(&sink);
+            scroll_view(leaf(200.0, CONTENT_H))
+                .on_scroll(move |_: &mut (), info| sink.borrow_mut().push(info))
+                .controller(handle.clone())
+        };
+        let mut root: RenderRoot<(), ScrollView<()>> = RenderRoot::new();
+        let mut state = ();
+        let mut now = 0u64;
+        let mut frame = |root: &mut RenderRoot<(), ScrollView<()>>| {
+            root.rebuild(&mut logic, &mut state);
+            root.layout(VIEWPORT);
+            now += 16;
+            root.paint(
+                &mut RecordingScene::default(),
+                FrameTime::from_nanos(now * 1_000_000),
+            )
+        };
+        frame(&mut root);
+        controller.animate_to(
+            320.0,
+            AnimateTo {
+                duration_ms: 64.0,
+                curve: Curve::Linear,
+            },
+        );
+        // Frames only — no input event anywhere: each frame the tween moved
+        // owes the next frame's Housekeeping flush, the landing frame included.
+        for _ in 0..12 {
+            frame(&mut root);
+        }
+        assert!(!controller.is_animating());
+        let log = log.borrow();
+        assert!(
+            log.len() >= 3,
+            "heard the tween while it ran, not only once it stopped: {log:?}"
+        );
+        assert!(
+            log.windows(2).all(|pair| pair[0].offset < pair[1].offset),
+            "one notification per moving frame, in order: {log:?}"
+        );
+        assert_eq!(
+            log.last().copied(),
+            Some(ScrollInfo {
+                offset: 320.0,
+                max_offset: MAX,
+                overscroll: 0.0,
+            }),
+            "and where it landed"
         );
     }
 }
