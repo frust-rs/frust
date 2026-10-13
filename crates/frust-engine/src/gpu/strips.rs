@@ -25,6 +25,16 @@ pub const RECT_STRIP_FLAG: u32 = 1 << 31;
 /// Bit the colour source starts at in [`GpuStrip::paint_and_rect_flag`].
 const COLOR_SOURCE_SHIFT: u32 = 29;
 
+/// Mask of the two colour-source bits once shifted down.
+const COLOR_SOURCE_MASK: u32 = 0x3;
+
+/// Mask of the three paint-type bits once shifted down.
+const PAINT_TYPE_MASK: u32 = 0x7;
+
+/// The colour source naming a rendered layer page — what a composite instance
+/// carries in bits 29-30.
+const COLOR_SOURCE_LAYER: u32 = 1;
+
 /// Bit the paint type starts at in [`GpuStrip::paint_and_rect_flag`].
 const PAINT_TYPE_SHIFT: u32 = 26;
 
@@ -290,5 +300,558 @@ impl GpuStrip {
     #[must_use]
     pub const fn paint(&self) -> u32 {
         self.paint_and_rect_flag & !RECT_STRIP_FLAG
+    }
+}
+
+/// Which specialised strip program an instance can be drawn with.
+///
+/// The strip fragment stage dispatches on the instance's colour source and
+/// paint type, and a mobile GPU charges every fragment for the branches that
+/// dispatch *could* take, not the one it does (the S1 ablation: a program
+/// keeping only coverage, solid and gradients ran S1's fragments at less than
+/// half the cost of the whole one). So the one `strip.wgsl` source is compiled
+/// once per class, each keeping only its own branches
+/// ([`crate::gpu::shader_src::strip_class_source`]), and a pass's instances are
+/// drawn in runs of one class each ([`split_class_runs`]).
+///
+/// Coverage (strip and rect) and the solid paint are in every class, which is
+/// what lets a short solid run be drawn by its non-solid neighbour's program
+/// (see [`Self::draws`]). [`Self::Uber`] is the whole program — the source
+/// unchanged — and draws everything.
+///
+/// Derived from the instance alone ([`Self::of_flag`]): bits 29-30 of
+/// [`GpuStrip::paint_and_rect_flag`] name the colour source and bits 26-28 the
+/// paint type, so the class needs no side table and cannot disagree with what
+/// the shader will read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PaintClass {
+    /// Coverage plus the inline solid colour — and nothing else.
+    SolidCoverage,
+    /// Adds the linear, radial and sweep gradients.
+    Gradient,
+    /// Adds atlas and external image sampling.
+    Image,
+    /// Adds the blurred rounded rectangle.
+    BlurredRect,
+    /// Adds the layer colour source a composite reads its finished page
+    /// through.
+    LayerComposite,
+    /// The whole program, every branch: what a run too short to be worth its
+    /// own pipeline switch, and every run under `FRUST_ENGINE_UBER_PROGRAM`,
+    /// is drawn with.
+    Uber,
+}
+
+impl PaintClass {
+    /// Every class, in index order.
+    pub const ALL: [Self; 6] = [
+        Self::SolidCoverage,
+        Self::Gradient,
+        Self::Image,
+        Self::BlurredRect,
+        Self::LayerComposite,
+        Self::Uber,
+    ];
+
+    /// The classes compiled from a specialisation of the source — every class
+    /// but [`Self::Uber`], which is the source itself.
+    pub const SPECIALISED: [Self; 5] = [
+        Self::SolidCoverage,
+        Self::Gradient,
+        Self::Image,
+        Self::BlurredRect,
+        Self::LayerComposite,
+    ];
+
+    /// The class of an instance whose packed descriptor is
+    /// `paint_and_rect_flag` ([`RECT_STRIP_FLAG`] may be set or not).
+    ///
+    /// A colour source or paint type the shader does not name maps to
+    /// [`Self::Uber`] rather than to a guess: the whole program reads it
+    /// exactly as it always did.
+    #[must_use]
+    pub const fn of_flag(paint_and_rect_flag: u32) -> Self {
+        let color_source = (paint_and_rect_flag >> COLOR_SOURCE_SHIFT) & COLOR_SOURCE_MASK;
+        if color_source == COLOR_SOURCE_LAYER {
+            return Self::LayerComposite;
+        }
+        if color_source != COLOR_SOURCE_PAYLOAD {
+            return Self::Uber;
+        }
+        match (paint_and_rect_flag >> PAINT_TYPE_SHIFT) & PAINT_TYPE_MASK {
+            0 => Self::SolidCoverage,
+            1 => Self::Image,
+            2..=4 => Self::Gradient,
+            5 => Self::BlurredRect,
+            _ => Self::Uber,
+        }
+    }
+
+    /// The class of `strip`.
+    #[must_use]
+    pub const fn of_instance(strip: &GpuStrip) -> Self {
+        Self::of_flag(strip.paint_and_rect_flag)
+    }
+
+    /// This class's position in [`Self::ALL`].
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// A short name for logs, pipeline labels and shader-library names.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SolidCoverage => "solid",
+            Self::Gradient => "gradient",
+            Self::Image => "image",
+            Self::BlurredRect => "blurred-rect",
+            Self::LayerComposite => "layer",
+            Self::Uber => "uber",
+        }
+    }
+
+    /// Whether this class's program draws an instance of class `other`
+    /// exactly as [`Self::Uber`] would.
+    ///
+    /// A class draws itself and the solid paint (coverage and solid are in
+    /// every program); [`Self::Uber`] draws everything.
+    #[must_use]
+    pub const fn draws(self, other: Self) -> bool {
+        matches!(self, Self::Uber)
+            || matches!(other, Self::SolidCoverage)
+            || self as usize == other as usize
+    }
+}
+
+/// A set of [`PaintClass`]es, as a bitmask — which class programs one pass
+/// needs, so a frame resolves exactly those pipelines and no others.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct ClassSet(u8);
+
+impl ClassSet {
+    /// The empty set.
+    pub const EMPTY: Self = Self(0);
+
+    /// The set holding `class` alone.
+    #[must_use]
+    pub const fn only(class: PaintClass) -> Self {
+        Self(1 << class as u8)
+    }
+
+    /// Adds `class`.
+    pub fn insert(&mut self, class: PaintClass) {
+        self.0 |= 1 << class as u8;
+    }
+
+    /// Whether `class` is in the set.
+    #[must_use]
+    pub const fn contains(self, class: PaintClass) -> bool {
+        self.0 & (1 << class as u8) != 0
+    }
+
+    /// Whether the set is empty.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The classes in the set, in [`PaintClass::ALL`] order.
+    pub fn iter(self) -> impl Iterator<Item = PaintClass> {
+        PaintClass::ALL
+            .into_iter()
+            .filter(move |class| self.contains(*class))
+    }
+}
+
+/// One run of consecutive instances drawn with one class's program, as an
+/// offset into the slice [`split_class_runs`] was handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassRun {
+    /// Index of the run's first instance within the split slice.
+    pub first: u32,
+    /// How many instances the run holds; never zero.
+    pub count: u32,
+    /// The program the run is drawn with.
+    pub class: PaintClass,
+}
+
+/// The default [`split_class_runs`] threshold: a run of fewer instances than
+/// this is not worth a pipeline switch of its own and is drawn with
+/// [`PaintClass::Uber`] instead.
+///
+/// Chosen by measurement on a Pixel 4a (Adreno 618) S1 capture at 16, 64 and
+/// 256 — see the task record. Overridable at build or launch time with
+/// `FRUST_ENGINE_RUN_SPLIT_MIN` ([`crate::config::run_split_min`]).
+pub const RUN_SPLIT_MIN: u32 = 16;
+
+/// Splits `instances` — one pass segment, in painter order — into consecutive
+/// runs, each drawn with one class's program, appending them to `out`.
+///
+/// Painter order is preserved by construction: the runs are contiguous,
+/// non-overlapping and cover the slice front to back, so drawing them in the
+/// order returned draws exactly the instances the unsplit segment did, in the
+/// same order. Only the program each instance is shaded by changes, and every
+/// program shades the instances it is handed exactly as the whole one would.
+///
+/// Three steps, each linear:
+///
+/// 1. maximal runs of equal [`PaintClass::of_instance`];
+/// 2. a solid run shorter than `min_run` is folded into a neighbouring
+///    non-solid run (the previous one, else the next) — every program draws
+///    solid, so this costs that neighbour nothing and saves a switch; runs of
+///    one class left adjacent by a fold are joined;
+/// 3. a remaining non-solid run shorter than `min_run` is drawn with
+///    [`PaintClass::Uber`], and adjacent Uber runs are joined — the short run
+///    is merged into its neighbours rather than paying for a pipeline switch
+///    of its own.
+///
+/// A solid run is never promoted to Uber: it only survives step 2 short when
+/// it has no non-solid neighbour at all, and then the solid program is the
+/// cheapest one that draws it. `min_run` 0 or 1 disables both merges.
+///
+/// `uber_only` is the kill switch (`FRUST_ENGINE_UBER_PROGRAM`): the whole
+/// slice becomes ONE Uber run, which is the unsplit segment exactly.
+pub fn split_class_runs(
+    instances: &[GpuStrip],
+    min_run: u32,
+    uber_only: bool,
+    out: &mut Vec<ClassRun>,
+) {
+    let start = out.len();
+    let total = u32::try_from(instances.len()).unwrap_or(u32::MAX);
+    if total == 0 {
+        return;
+    }
+    if uber_only {
+        out.push(ClassRun {
+            first: 0,
+            count: total,
+            class: PaintClass::Uber,
+        });
+        return;
+    }
+
+    // Steps 1 and 2 together, over a stack of closed runs: each maximal run is
+    // pushed, folding a short solid run into a non-solid neighbour as soon as
+    // both are known.
+    let mut index = 0_u32;
+    while index < total {
+        let class = PaintClass::of_instance(&instances[index as usize]);
+        let mut end = index + 1;
+        while end < total && PaintClass::of_instance(&instances[end as usize]) == class {
+            end += 1;
+        }
+        push_folding(
+            out,
+            start,
+            ClassRun {
+                first: index,
+                count: end - index,
+                class,
+            },
+            min_run,
+        );
+        index = end;
+    }
+
+    // Step 3, in place: a short non-solid run is drawn with Uber, and Uber
+    // runs left adjacent are joined.
+    let mut write = start;
+    for read in start..out.len() {
+        let mut run = out[read];
+        if run.class != PaintClass::SolidCoverage && run.count < min_run {
+            run.class = PaintClass::Uber;
+        }
+        if write > start && out[write - 1].class == run.class {
+            out[write - 1].count += run.count;
+        } else {
+            out[write] = run;
+            write += 1;
+        }
+    }
+    out.truncate(write);
+}
+
+/// Pushes `run` onto `out[start..]`, folding a short solid run into a
+/// non-solid neighbour and joining equal neighbours (step 2 of
+/// [`split_class_runs`]).
+fn push_folding(out: &mut Vec<ClassRun>, start: usize, mut run: ClassRun, min_run: u32) {
+    let short_solid =
+        |run: &ClassRun| run.class == PaintClass::SolidCoverage && run.count < min_run;
+    if let Some(top) = out.get_mut(start..).and_then(<[ClassRun]>::last_mut) {
+        if top.class == run.class || (short_solid(&run) && top.class != PaintClass::SolidCoverage) {
+            top.count += run.count;
+            return;
+        }
+        if short_solid(top) && run.class != PaintClass::SolidCoverage {
+            // The solid run before this one had no non-solid run to its left
+            // to fold into; it folds into this one instead.
+            run.first = top.first;
+            run.count += top.count;
+            out.pop();
+            // The fold can leave this run beside one of its own class.
+            if let Some(below) = out.get_mut(start..).and_then(<[ClassRun]>::last_mut)
+                && below.class == run.class
+            {
+                below.count += run.count;
+                return;
+            }
+        }
+    }
+    out.push(run);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strip(paint: u32) -> GpuStrip {
+        GpuStrip::solid_fill(
+            0,
+            0,
+            1,
+            StripDraw {
+                payload: 0,
+                paint,
+                depth_index: 0,
+            },
+        )
+    }
+
+    fn of(classes: &[(PaintType, u32)]) -> Vec<GpuStrip> {
+        classes
+            .iter()
+            .flat_map(|(paint, count)| {
+                std::iter::repeat_n(strip(pack_paint_descriptor(*paint, 7)), *count as usize)
+            })
+            .collect()
+    }
+
+    fn runs(instances: &[GpuStrip], min_run: u32) -> Vec<(u32, u32, PaintClass)> {
+        let mut out = Vec::new();
+        split_class_runs(instances, min_run, false, &mut out);
+        out.iter().map(|r| (r.first, r.count, r.class)).collect()
+    }
+
+    #[test]
+    fn every_paint_type_and_source_maps_to_its_class() {
+        use PaintClass as C;
+        assert_eq!(
+            C::of_flag(pack_paint_descriptor(PaintType::Solid, 0)),
+            C::SolidCoverage
+        );
+        assert_eq!(
+            C::of_flag(pack_paint_descriptor(PaintType::Image, 3)),
+            C::Image
+        );
+        for gradient in [
+            PaintType::LinearGradient,
+            PaintType::RadialGradient,
+            PaintType::SweepGradient,
+        ] {
+            assert_eq!(C::of_flag(pack_paint_descriptor(gradient, 9)), C::Gradient);
+        }
+        assert_eq!(
+            C::of_flag(pack_paint_descriptor(PaintType::BlurredRoundedRect, 1)),
+            C::BlurredRect
+        );
+        // A composite: layer source, opacity in the low byte, rect flag set.
+        assert_eq!(
+            C::of_flag((1 << 29) | 0x80 | RECT_STRIP_FLAG),
+            C::LayerComposite
+        );
+        // The rect flag never changes a class.
+        assert_eq!(
+            C::of_flag(pack_paint_descriptor(PaintType::Image, 3) | RECT_STRIP_FLAG),
+            C::Image
+        );
+        // Reserved sources and paint types fall back to the whole program.
+        assert_eq!(C::of_flag(2 << 29), C::Uber);
+        assert_eq!(C::of_flag(3 << 29), C::Uber);
+        assert_eq!(C::of_flag(6 << 26), C::Uber);
+        assert_eq!(C::of_flag(7 << 26), C::Uber);
+    }
+
+    #[test]
+    fn the_class_lattice_is_solid_below_everything_and_uber_above() {
+        for class in PaintClass::ALL {
+            assert!(class.draws(PaintClass::SolidCoverage));
+            assert!(class.draws(class));
+            assert!(PaintClass::Uber.draws(class));
+        }
+        assert!(!PaintClass::Gradient.draws(PaintClass::Image));
+        assert!(!PaintClass::SolidCoverage.draws(PaintClass::Gradient));
+        assert!(!PaintClass::Image.draws(PaintClass::Uber));
+        for (index, class) in PaintClass::ALL.iter().enumerate() {
+            assert_eq!(class.index(), index);
+        }
+        assert_eq!(PaintClass::SPECIALISED.len() + 1, PaintClass::ALL.len());
+        assert!(!PaintClass::SPECIALISED.contains(&PaintClass::Uber));
+    }
+
+    #[test]
+    fn a_class_set_round_trips() {
+        let mut set = ClassSet::EMPTY;
+        assert!(set.is_empty());
+        set.insert(PaintClass::Image);
+        set.insert(PaintClass::Uber);
+        set.insert(PaintClass::Image);
+        assert!(set.contains(PaintClass::Image));
+        assert!(!set.contains(PaintClass::Gradient));
+        assert_eq!(
+            set.iter().collect::<Vec<_>>(),
+            vec![PaintClass::Image, PaintClass::Uber]
+        );
+        assert_eq!(ClassSet::only(PaintClass::Gradient).iter().count(), 1);
+    }
+
+    #[test]
+    fn long_runs_keep_their_class_and_cover_the_slice_in_order() {
+        use PaintType as P;
+        let instances = of(&[
+            (P::LinearGradient, 20),
+            (P::Image, 30),
+            (P::RadialGradient, 17),
+        ]);
+        assert_eq!(
+            runs(&instances, 16),
+            vec![
+                (0, 20, PaintClass::Gradient),
+                (20, 30, PaintClass::Image),
+                (50, 17, PaintClass::Gradient),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_short_solid_run_folds_into_its_non_solid_neighbour() {
+        use PaintType as P;
+        // Behind a gradient: folds backwards.
+        let instances = of(&[
+            (P::LinearGradient, 20),
+            (P::Solid, 3),
+            (P::LinearGradient, 20),
+        ]);
+        assert_eq!(runs(&instances, 16), vec![(0, 43, PaintClass::Gradient)]);
+        // At the front: folds forwards into the first non-solid run.
+        let instances = of(&[(P::Solid, 3), (P::Image, 20)]);
+        assert_eq!(runs(&instances, 16), vec![(0, 23, PaintClass::Image)]);
+        // A long solid run stays a run of its own.
+        let instances = of(&[(P::Image, 20), (P::Solid, 40), (P::Image, 20)]);
+        assert_eq!(
+            runs(&instances, 16),
+            vec![
+                (0, 20, PaintClass::Image),
+                (20, 40, PaintClass::SolidCoverage),
+                (60, 20, PaintClass::Image),
+            ]
+        );
+        // An all-solid segment is one solid run however short.
+        assert_eq!(
+            runs(&of(&[(P::Solid, 2)]), 16),
+            vec![(0, 2, PaintClass::SolidCoverage)]
+        );
+    }
+
+    #[test]
+    fn a_run_below_the_threshold_is_merged_and_drawn_with_uber() {
+        use PaintType as P;
+        // S1's shape: a long gradient run, then a short text (image) run.
+        let instances = of(&[
+            (P::RadialGradient, 40),
+            (P::Image, 5),
+            (P::BlurredRoundedRect, 3),
+            (P::RadialGradient, 40),
+        ]);
+        assert_eq!(
+            runs(&instances, 16),
+            vec![
+                (0, 40, PaintClass::Gradient),
+                (40, 8, PaintClass::Uber),
+                (48, 40, PaintClass::Gradient),
+            ]
+        );
+        // The same slice under a higher threshold: the gradient runs are now
+        // short too, and the whole segment collapses into one Uber run.
+        assert_eq!(runs(&instances, 64), vec![(0, 88, PaintClass::Uber)]);
+        // Threshold 0 disables merging altogether.
+        assert_eq!(runs(&instances, 0).len(), 4);
+    }
+
+    #[test]
+    fn the_kill_switch_yields_one_uber_run() {
+        use PaintType as P;
+        let instances = of(&[(P::RadialGradient, 40), (P::Image, 40), (P::Solid, 40)]);
+        let mut out = Vec::new();
+        split_class_runs(&instances, 16, true, &mut out);
+        assert_eq!(
+            out,
+            vec![ClassRun {
+                first: 0,
+                count: 120,
+                class: PaintClass::Uber
+            }]
+        );
+        out.clear();
+        split_class_runs(&[], 16, false, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn appending_to_a_non_empty_vec_never_merges_across_calls() {
+        use PaintType as P;
+        let mut out = Vec::new();
+        split_class_runs(&of(&[(P::Image, 20)]), 16, false, &mut out);
+        split_class_runs(&of(&[(P::Image, 20)]), 16, false, &mut out);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1].first, 0);
+    }
+
+    /// Exhaustive over short sequences: the runs always tile the slice, never
+    /// hand an instance to a program that cannot draw it, and never leave two
+    /// adjacent runs of one class.
+    #[test]
+    fn the_split_always_tiles_and_every_run_draws_its_instances() {
+        let kinds = [
+            PaintType::Solid,
+            PaintType::Image,
+            PaintType::LinearGradient,
+            PaintType::BlurredRoundedRect,
+        ];
+        for len in 1..=6_u32 {
+            for code in 0..(kinds.len() as u32).pow(len) {
+                let mut instances = Vec::new();
+                let mut c = code;
+                for _ in 0..len {
+                    let kind = kinds[(c % kinds.len() as u32) as usize];
+                    c /= kinds.len() as u32;
+                    instances.push(strip(pack_paint_descriptor(kind, 1)));
+                }
+                for min_run in [0, 1, 2, 3, 16] {
+                    let mut out = Vec::new();
+                    split_class_runs(&instances, min_run, false, &mut out);
+                    let mut next = 0;
+                    for (i, run) in out.iter().enumerate() {
+                        assert_eq!(run.first, next, "{out:?}");
+                        assert!(run.count > 0);
+                        for instance in
+                            &instances[run.first as usize..(run.first + run.count) as usize]
+                        {
+                            assert!(
+                                run.class.draws(PaintClass::of_instance(instance)),
+                                "{out:?}"
+                            );
+                        }
+                        if i > 0 {
+                            assert_ne!(out[i - 1].class, run.class, "{out:?}");
+                        }
+                        next += run.count;
+                    }
+                    assert_eq!(next, len);
+                }
+            }
+        }
     }
 }

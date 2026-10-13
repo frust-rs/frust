@@ -27,6 +27,20 @@
 //! [`crate::compile::external::ExternalExtents`]: the walk needs it to compose
 //! a paint transform, while only a pass needs the view. The one call that
 //! writes both keeps them in step.
+//!
+//! ## The strip programs' one explicit layout
+//!
+//! Every strip pipeline — each render-state variant, and each
+//! [paint-class](super::strips::PaintClass) specialisation of it — is built
+//! against ONE explicit `wgpu::PipelineLayout`, [`strip_pipeline_layout`],
+//! rather than the layout wgpu would derive from its module. A derived layout
+//! is whatever bindings the module's entry points statically *use*, and a class
+//! program that no longer reads, say, the atlas array would derive a layout
+//! without it; the bind groups built for one class would then not fit another.
+//! The explicit layout is exactly the one the whole (Uber) program derives —
+//! [`strip_bind_group_layout_entries`] restates it entry for entry, and its
+//! test holds that restatement to the naga reflection of `strip.wgsl` — so a
+//! bind group built against any strip pipeline binds under every other one.
 
 use std::collections::HashMap;
 
@@ -34,7 +48,106 @@ use frust_gpu::SceneTextureId;
 use vello_common::encode::EncodedExternalTexture;
 
 use super::atlas::{extend_mode, pack_image_offset, pack_image_params, pack_image_size, pack_tint};
+use super::config::GpuConfig;
 use super::paint_texture::{GpuEncodedImage, GpuEncodedPaint};
+
+/// How many bind groups the strip programs declare — the WebGL2 ceiling of
+/// four, exactly (see [`crate::gpu::pipelines`]'s *Bind groups*).
+pub const STRIP_BIND_GROUP_COUNT: usize = 4;
+
+/// One sampled, non-multisampled texture binding read by `textureLoad` only:
+/// what every strip texture binding is.
+const fn load_only_texture(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    sample_type: wgpu::TextureSampleType,
+    view_dimension: wgpu::TextureViewDimension,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Texture {
+            sample_type,
+            view_dimension,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// The float sample type every strip `texture_2d<f32>` binding takes.
+///
+/// Unfilterable, because no strip binding is ever read through a sampler —
+/// exactly what wgpu derives for a float texture no sampler touches, and what
+/// lets the binding accept a filterable *and* an unfilterable float texture.
+const UNFILTERABLE: wgpu::TextureSampleType = wgpu::TextureSampleType::Float { filterable: false };
+
+/// The strip programs' bind-group layout entries, group by group, exactly as
+/// wgpu derives them from the whole (Uber) program — binding, type and
+/// visibility.
+///
+/// | Group | Binding | WGSL | Read by |
+/// |---|---|---|---|
+/// | 0 | 0 | `alphas_texture: texture_2d<u32>` | fragment |
+/// | 0 | 1 | `config: Config` (uniform, [`GpuConfig::SIZE`] bytes) | vertex, fragment |
+/// | 0 | 2 | `layer_input_texture: texture_2d<f32>` | fragment |
+/// | 1 | 0 | `atlas_texture_array: texture_2d_array<f32>` | fragment |
+/// | 1 | 1 | `external_texture: texture_2d<f32>` | fragment |
+/// | 2 | 0 | `encoded_paints_texture: texture_2d<u32>` | vertex, fragment |
+/// | 3 | 0 | `gradient_texture: texture_2d<f32>` | fragment |
+#[must_use]
+pub fn strip_bind_group_layout_entries() -> [Vec<wgpu::BindGroupLayoutEntry>; STRIP_BIND_GROUP_COUNT]
+{
+    use wgpu::ShaderStages as S;
+    use wgpu::TextureSampleType as T;
+    use wgpu::TextureViewDimension as D;
+    [
+        vec![
+            load_only_texture(0, S::FRAGMENT, T::Uint, D::D2),
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: S::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(GpuConfig::SIZE),
+                },
+                count: None,
+            },
+            load_only_texture(2, S::FRAGMENT, UNFILTERABLE, D::D2),
+        ],
+        vec![
+            load_only_texture(0, S::FRAGMENT, UNFILTERABLE, D::D2Array),
+            load_only_texture(1, S::FRAGMENT, UNFILTERABLE, D::D2),
+        ],
+        vec![load_only_texture(0, S::VERTEX_FRAGMENT, T::Uint, D::D2)],
+        vec![load_only_texture(0, S::FRAGMENT, UNFILTERABLE, D::D2)],
+    ]
+}
+
+/// The one explicit pipeline layout every strip pipeline is built against.
+///
+/// Created once per renderer, at shader registration
+/// ([`crate::gpu::pipelines::EngineShaders::register`]). A pipeline built
+/// against it hands out these same group layouts from
+/// `get_bind_group_layout`, so the renderer's existing bind-group construction
+/// is unchanged and its groups bind under every strip variant and class.
+#[must_use]
+pub fn strip_pipeline_layout(device: &wgpu::Device) -> wgpu::PipelineLayout {
+    let entries = strip_bind_group_layout_entries();
+    let groups = entries.each_ref().map(|entries| {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("frust-engine strip group"),
+            entries,
+        })
+    });
+    let refs = groups.each_ref().map(Some);
+    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("frust-engine strip layout"),
+        bind_group_layouts: &refs,
+        immediate_size: 0,
+    })
+}
 
 /// Every externally owned texture currently bound, keyed by the
 /// [`SceneTextureId`] its owner minted.
@@ -350,6 +463,99 @@ mod tests {
         };
         assert_eq!(image.image_offset, pack_image_offset(8, 4));
         assert_eq!(image.image_size, pack_image_size(16, 16));
+    }
+
+    /// The explicit strip layout is the layout wgpu would derive from the
+    /// whole strip program, entry for entry: every binding `strip.wgsl`
+    /// declares is present with the type naga reflects for it, visible to
+    /// exactly the stages whose entry point uses it, and nothing else is
+    /// declared. That is what makes switching the Uber program from a derived
+    /// to this explicit layout a no-op, and what lets every class program — a
+    /// subset of the Uber one's uses — validate against it.
+    #[test]
+    fn the_explicit_strip_layout_is_the_uber_programs_derived_layout() {
+        use wgpu::naga;
+        let src = crate::gpu::shader_src::STRIP;
+        let module = naga::front::wgsl::parse_str(src).expect("the strip source parses");
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("the strip source validates");
+
+        let entries = strip_bind_group_layout_entries();
+        let mut declared = 0;
+        for (handle, global) in module.global_variables.iter() {
+            let Some(binding) = &global.binding else {
+                continue;
+            };
+            declared += 1;
+            let entry = entries
+                .get(binding.group as usize)
+                .and_then(|group| group.iter().find(|e| e.binding == binding.binding))
+                .unwrap_or_else(|| panic!("no layout entry for {binding:?}"));
+
+            let mut stages = wgpu::ShaderStages::NONE;
+            for (index, entry_point) in module.entry_points.iter().enumerate() {
+                if !info.get_entry_point(index)[handle].is_empty() {
+                    stages |= match entry_point.stage {
+                        naga::ShaderStage::Vertex => wgpu::ShaderStages::VERTEX,
+                        naga::ShaderStage::Fragment => wgpu::ShaderStages::FRAGMENT,
+                        _ => wgpu::ShaderStages::NONE,
+                    };
+                }
+            }
+            assert_eq!(entry.visibility, stages, "{:?} visibility", global.name);
+
+            match (&module.types[global.ty].inner, entry.ty) {
+                (
+                    naga::TypeInner::Image {
+                        dim: naga::ImageDimension::D2,
+                        arrayed,
+                        class: naga::ImageClass::Sampled { kind, multi: false },
+                    },
+                    wgpu::BindingType::Texture {
+                        sample_type,
+                        view_dimension,
+                        multisampled: false,
+                    },
+                ) => {
+                    let expected_dim = if *arrayed {
+                        wgpu::TextureViewDimension::D2Array
+                    } else {
+                        wgpu::TextureViewDimension::D2
+                    };
+                    assert_eq!(view_dimension, expected_dim, "{:?}", global.name);
+                    let expected_sample = match kind {
+                        naga::ScalarKind::Uint => wgpu::TextureSampleType::Uint,
+                        naga::ScalarKind::Float => UNFILTERABLE,
+                        other => panic!("unexpected sample kind {other:?}"),
+                    };
+                    assert_eq!(sample_type, expected_sample, "{:?}", global.name);
+                }
+                (
+                    naga::TypeInner::Struct { span, .. },
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size,
+                    },
+                ) => {
+                    assert_eq!(global.space, naga::AddressSpace::Uniform);
+                    assert_eq!(
+                        min_binding_size.map(|size| size.get()),
+                        Some(u64::from(*span))
+                    );
+                }
+                (shader, layout) => panic!("{:?}: {shader:?} vs {layout:?}", global.name),
+            }
+        }
+        assert_eq!(
+            declared,
+            entries.iter().map(Vec::len).sum::<usize>(),
+            "the layout declares a binding the program does not"
+        );
     }
 
     /// A fresh [`SceneTextureId`], minted the only way this crate can: off a

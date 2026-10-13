@@ -22,10 +22,29 @@
 // packed color, an [x, y] sample coordinate, or a layer texture origin. See
 // the `StripInstance` comment below for the full bit layout.
 //
-// This module has four pipeline variants over the same two entry points
+// This module has six render-state variants over the same two entry points
 // (`gpu::pipelines`): an intermediate-target variant, an alpha-blended
-// variant with and without a depth attachment, and an opaque variant that
-// writes depth.
+// variant with and without a depth attachment, an opaque variant that writes
+// depth, and a destination-out pair for the hole punch.
+//
+// Paint-class specialisation. The fragment stage's colour-source dispatch is
+// what a fragment pays for whether or not it takes a branch, so the engine
+// compiles this ONE source into several programs, each keeping only the
+// branches one paint class needs (`gpu::shader_src::strip_class_source`).
+// A block between a `//#if FEATURE` line and its `//#endif` line is kept only
+// by the classes that enable FEATURE; everything outside such a block —
+// coverage, the solid paint, the vertex stage, every binding — is in every
+// class. The features are:
+//
+//   IMAGE        — atlas and external image sampling (bilinear/bicubic/nearest)
+//   GRADIENT     — linear, radial and sweep gradients
+//   BLURRED_RECT — the blurred rounded rectangle
+//   LAYER        — the layer colour source a composite reads its page through
+//
+// The directive lines are plain comments, so this file IS the Uber program
+// byte for byte: the class that enables every feature compiles it unchanged.
+// Every class binds the same groups through one explicit pipeline layout, so
+// a binding a class no longer reads is still declared here.
 
 // Color source modes: where the fragment shader gets color data from.
 // Use the payload (a color or image coordinates).
@@ -339,13 +358,14 @@ fn fs_main(
         // assumes a strip height of 4, i.e. each channel encodes the alpha
         // values of a single column within a strip.
         let alphas_index = x;
-        let tex_dimensions = textureDimensions(alphas_texture);
-        let alphas_tex_width = tex_dimensions.x;
         // Which texel holds the alpha values for this column.
         let texel_index = alphas_index / 4u;
         // Which channel (R,G,B,A) of that texel holds them.
         let channel_index = alphas_index % 4u;
-        let tex_x = texel_index & (alphas_tex_width - 1u);
+        // The texture's width is `1 << alphas_tex_width_bits` by construction
+        // (`gpu::config`), so the column within the row is a mask of the same
+        // shift the row is — no `textureDimensions` query per fragment.
+        let tex_x = texel_index & ((1u << config.alphas_tex_width_bits) - 1u);
         let tex_y = texel_index >> config.alphas_tex_width_bits;
 
         // Load all 4 channels from the texture.
@@ -367,6 +387,7 @@ fn fs_main(
         // coordinates for the other paint types.
         if paint_type == PAINT_TYPE_SOLID {
             final_color = alpha * unpack4x8unorm(payload);
+//#if IMAGE
         } else if paint_type == PAINT_TYPE_IMAGE {
             let paint_tex_idx = paint_and_rect_flag & PAINT_TEXTURE_INDEX_MASK;
             let image_texel0 = load_encoded_paint_texel(paint_tex_idx, 0u);
@@ -439,6 +460,8 @@ fn fs_main(
                 sample_color * image_tint,
                 is_multiply
             );
+//#endif
+//#if GRADIENT
         } else if paint_type == PAINT_TYPE_LINEAR_GRADIENT {
             let paint_tex_idx = paint_and_rect_flag & PAINT_TEXTURE_INDEX_MASK;
             let gradient_texel0 = load_encoded_paint_texel(paint_tex_idx, 0u);
@@ -456,7 +479,8 @@ fn fs_main(
                 t_value,
                 get_gradient_extend_mode(gradient_texel0),
                 get_gradient_start(gradient_texel0),
-                get_gradient_texture_width(gradient_texel0)
+                get_gradient_texture_width(gradient_texel0),
+                config.encoded_paints_tex_width_bits
             );
             final_color = alpha * gradient_color;
         } else if paint_type == PAINT_TYPE_RADIAL_GRADIENT {
@@ -476,7 +500,8 @@ fn fs_main(
                 gradient_result.x,
                 get_gradient_extend_mode(gradient_texel0),
                 get_gradient_start(gradient_texel0),
-                get_gradient_texture_width(gradient_texel0)
+                get_gradient_texture_width(gradient_texel0),
+                config.encoded_paints_tex_width_bits
             );
             final_color = select(
                 vec4<f32>(0.0, 0.0, 0.0, 0.0),
@@ -511,9 +536,12 @@ fn fs_main(
                 t_value,
                 get_gradient_extend_mode(gradient_texel0),
                 get_gradient_start(gradient_texel0),
-                get_gradient_texture_width(gradient_texel0)
+                get_gradient_texture_width(gradient_texel0),
+                config.encoded_paints_tex_width_bits
             );
             final_color = alpha * gradient_color;
+//#endif
+//#if BLURRED_RECT
         } else if paint_type == PAINT_TYPE_BLURRED_ROUNDED_RECT {
             let paint_tex_idx = paint_and_rect_flag & PAINT_TEXTURE_INDEX_MASK;
             let blurred_texel0 = load_encoded_paint_texel(paint_tex_idx, 0u);
@@ -529,10 +557,13 @@ fn fs_main(
                 blurred_texel3,
                 blurred_texel4,
             );
+//#endif
         }
+//#if LAYER
     } else if color_source == COLOR_SOURCE_LAYER {
         let layer_opacity = f32(paint_and_rect_flag & 0xffu) * (1.0 / 255.0);
         final_color = alpha * layer_opacity * textureLoad(layer_input_texture, vec2<i32>(sample_xy), 0);
+//#endif
     } else {
         final_color = vec4<f32>(0.0);
     }

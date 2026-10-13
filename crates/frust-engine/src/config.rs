@@ -66,6 +66,51 @@ pub fn depth_disabled() -> bool {
     })
 }
 
+/// Whether every strip run is forced through the whole (Uber) strip program
+/// via `FRUST_ENGINE_UBER_PROGRAM`. Cached: read once per process.
+///
+/// The kill switch over paint-class specialisation
+/// ([`crate::gpu::strips::PaintClass`]): when set, no pass segment is split
+/// into class runs, no class program is warmed up or built, and every strip
+/// pass draws exactly as the engine did before the classes existed — one
+/// pipeline per pass, the shipped `strip.wgsl` unchanged. The escape hatch for
+/// a driver that miscompiles a specialisation, and the off-arm of every
+/// before/after measurement of it. `EngineRenderer::set_uber_program` is its
+/// programmatic counterpart.
+pub fn uber_program_forced() -> bool {
+    static FORCED: OnceLock<bool> = OnceLock::new();
+    *FORCED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_ENGINE_UBER_PROGRAM"),
+            std::env::var("FRUST_ENGINE_UBER_PROGRAM").ok(),
+        )
+    })
+}
+
+/// The shortest class run worth a pipeline switch of its own, via
+/// `FRUST_ENGINE_RUN_SPLIT_MIN=<n>`; [`crate::gpu::strips::RUN_SPLIT_MIN`]
+/// when unset or unparsable. Cached: read once per process.
+///
+/// A diagnostic knob for re-measuring the threshold on a device (a build-time
+/// `--define` reaches it through `option_env!`); see
+/// [`crate::gpu::strips::split_class_runs`] for what it decides.
+pub fn run_split_min() -> u32 {
+    static MIN: OnceLock<u32> = OnceLock::new();
+    *MIN.get_or_init(|| {
+        parse_run_split_min(env_str(
+            option_env!("FRUST_ENGINE_RUN_SPLIT_MIN"),
+            std::env::var("FRUST_ENGINE_RUN_SPLIT_MIN").ok(),
+        ))
+    })
+}
+
+/// Parses a raw `FRUST_ENGINE_RUN_SPLIT_MIN` value (already resolved by
+/// [`env_str`]); an unset or unparsable value is the measured default.
+fn parse_run_split_min(raw: Option<String>) -> u32 {
+    raw.and_then(|s| s.trim().parse().ok())
+        .unwrap_or(crate::gpu::strips::RUN_SPLIT_MIN)
+}
+
 /// Whether atlas allocation is disabled via `FRUST_ENGINE_NO_ATLAS`.
 /// Cached: read once per process.
 ///
@@ -249,6 +294,24 @@ mod tests {
         // Runtime wins in both directions.
         assert!(env_flag_enabled(Some("0"), Some("1".to_string())));
         assert!(!env_flag_enabled(Some("1"), Some("0".to_string())));
+    }
+
+    /// Unset in the gate: the classes are on unless the switch says
+    /// otherwise.
+    #[test]
+    fn the_uber_program_is_not_forced_unless_the_switch_is_set() {
+        assert!(!uber_program_forced());
+    }
+
+    #[test]
+    fn the_run_split_threshold_parses_or_falls_back_to_the_measured_default() {
+        use crate::gpu::strips::RUN_SPLIT_MIN;
+        assert_eq!(parse_run_split_min(Some("64".to_string())), 64);
+        assert_eq!(parse_run_split_min(Some(" 256 ".to_string())), 256);
+        assert_eq!(parse_run_split_min(Some("0".to_string())), 0);
+        assert_eq!(parse_run_split_min(Some("many".to_string())), RUN_SPLIT_MIN);
+        assert_eq!(parse_run_split_min(None), RUN_SPLIT_MIN);
+        assert_eq!(run_split_min(), RUN_SPLIT_MIN, "unset in the gate");
     }
 
     #[test]

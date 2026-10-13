@@ -143,12 +143,19 @@ fn extend_mode_normalized(t: f32, mode: u32) -> f32 {
 // -----------------------------------------------------------------------------
 
 // Sample from the gradient LUT texture at the calculated position.
+//
+// `lut_width_bits` is `log2` of the LUT texture's own width, which is a power
+// of two by construction (`gpu::config`): the flat ramp index is split into a
+// column and a row by a mask and a shift rather than by `%` and `/` against a
+// `textureDimensions` query — the same addressing the encoded-paint texture
+// already uses, and a measurable saving per gradient fragment on a mobile GPU.
 fn sample_gradient_lut(
     tex: texture_2d<f32>,
     t_value: f32,
     mode: u32,
     gradient_start: u32,
     texture_width: u32,
+    lut_width_bits: u32,
 ) -> vec4<f32> {
     // Apply the extend mode to t_value.
     let clamped_t = extend_mode_normalized(t_value, mode);
@@ -156,8 +163,10 @@ fn sample_gradient_lut(
     let t_offset = u32(clamped_t * f32(texture_width - 1u));
     // Absolute position in the flat gradient texture.
     let flat_coord = gradient_start + t_offset;
-    let gradient_tex_width = textureDimensions(tex).x;
-    let texture_coord = flat_index_to_texture_coord(flat_coord, gradient_tex_width);
+    let texture_coord = vec2<u32>(
+        flat_coord & ((1u << lut_width_bits) - 1u),
+        flat_coord >> lut_width_bits
+    );
     return textureLoad(tex, texture_coord, 0);
 }
 

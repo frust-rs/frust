@@ -1,14 +1,54 @@
-//! The nine render pipelines the engine draws with, as plain values.
+//! The engine's render pipelines, as plain values.
 //!
-//! Six of them rasterize sparse strips out of the one `strip.wgsl` program,
-//! differing only in their render state; two more clear and copy intermediate
-//! textures, and the last runs one pass of a layer
-//! [filter](crate::filters). Each is described by a
-//! [`frust_gpu::RenderPipelineDesc`] — a value holding no GPU handle — so the
-//! whole set can be listed at start-up and handed to
+//! Nine render states ([`EnginePipeline::ALL`]): six of them rasterize sparse
+//! strips out of the one `strip.wgsl` source, differing only in their render
+//! state; two more clear and copy intermediate textures, and the last runs one
+//! pass of a layer [filter](crate::filters). Each strip state is further
+//! specialised along a second axis, the [`PaintClass`] — which program the
+//! strip source is compiled to (see *The paint-class axis* below). Every
+//! variant is described by a [`frust_gpu::RenderPipelineDesc`], a value whose
+//! only GPU handle is the shared strip layout, so the set the first frames are
+//! known to need can be listed at start-up and handed to
 //! [`frust_gpu::PipelineCache::warm_up`] before the first frame asks for one.
-//! That is the substrate's stated contract: a frame is never the first place a
-//! pipeline gets compiled.
+//!
+//! ## The paint-class axis
+//!
+//! The strip fragment stage's colour-source dispatch costs every fragment the
+//! branches it never takes (the S1 ablation on an Adreno 660: a program
+//! keeping only coverage, solid and gradients shaded S1 in under half the time
+//! of the whole one). So each strip state is compiled once per class it
+//! [serves](EnginePipeline::serves), from the class's specialisation of the one
+//! source ([`shader_src::strip_class_source`]), and a pass sets the pipeline of
+//! each run's class in turn (`renderer`'s class runs). [`PaintClass::Uber`] is
+//! the whole program, and the only one `FRUST_ENGINE_UBER_PROGRAM` uses.
+//!
+//! The axis is folded rather than multiplied out: the destination-out pair
+//! only ever draws the punch's solid source, and the opaque state never draws
+//! a composite or a blurred rectangle (neither is ever opaque), so
+//!
+//! | State | Classes served | Variants |
+//! |---|---|---|
+//! | [`EnginePipeline::StripIntermediate`] | all six | 6 |
+//! | [`EnginePipeline::StripAlpha`] | all six | 6 |
+//! | [`EnginePipeline::StripDepthAlpha`] | all six | 6 |
+//! | [`EnginePipeline::StripOpaque`] | solid, gradient, image, Uber | 4 |
+//! | [`EnginePipeline::StripDestOut`] | solid, Uber | 2 |
+//! | [`EnginePipeline::StripDepthDestOut`] | solid, Uber | 2 |
+//! | clear, copy, filter | their own program | 3 |
+//!
+//! — [`VARIANT_COUNT`], 29 at most. A run of a class its state does not serve
+//! is drawn with Uber ([`EnginePipeline::fold_class`]), which draws everything.
+//! Variants are created lazily, on the first frame that draws a run of that
+//! class through that state; [`warm_up_descs`] lists the nine Uber states plus
+//! [`WARM_CLASSES`] across [`WARM_CLASS_STATES`] — the solid, gradient and image
+//! programs of the two depth-tested surface states, which is what an ordinary
+//! frame draws through — so steady state compiles nothing.
+//!
+//! Every strip variant, Uber included, is built against one explicit pipeline
+//! layout ([`crate::gpu::bindings::strip_pipeline_layout`]) instead of the
+//! layout wgpu derives per module: a class that stops reading a binding would
+//! otherwise derive a different layout, and the renderer's bind groups would
+//! stop fitting it.
 //!
 //! ## The six strip variants
 //!
@@ -84,9 +124,10 @@
 //!
 //! ## Bind groups
 //!
-//! [`frust_gpu::RenderPipelineDesc`] has no explicit-layout axis: every
-//! pipeline uses wgpu's default layout, derived from the shader module. The
-//! group structure is therefore whatever the WGSL declares, and it matches the
+//! The clear, copy and filter pipelines use wgpu's default layout, derived
+//! from their shader module; the strip pipelines use the explicit layout above,
+//! which is exactly the one the whole strip program derives. The group
+//! structure is therefore whatever the WGSL declares, and it matches the
 //! reference renderer's explicit layouts group for group — strip programs bind
 //! groups 0..3 (alphas + config + layer input; atlas array + external texture;
 //! encoded paints; gradient LUT), which is the WebGL2 ceiling of four exactly,
@@ -100,8 +141,10 @@ use frust_gpu::lint::PipelineLayoutDesc;
 use frust_gpu::{PipelineCache, RenderPipelineDesc, ShaderId, ShaderLibrary, VertexLayout};
 
 use super::GpuStrip;
+use super::bindings::{STRIP_BIND_GROUP_COUNT, strip_pipeline_layout};
 use super::config::GpuConfig;
 use super::shader_src;
+use super::strips::PaintClass;
 
 /// The format every intermediate (off-screen) strip target uses.
 ///
@@ -151,7 +194,46 @@ pub const FS_MAIN: &str = "fs_main";
 
 /// Bind groups the strip programs declare: alphas/config/layer input, atlas
 /// array/external texture, encoded paints, gradient LUT.
-const STRIP_BIND_GROUPS: usize = 4;
+const STRIP_BIND_GROUPS: usize = STRIP_BIND_GROUP_COUNT;
+
+/// The classes whose programs are warmed up ahead of the first frame, beside
+/// the nine Uber states: the solid, gradient and image programs — what every
+/// ordinary frame's surface passes draw.
+pub const WARM_CLASSES: [PaintClass; 3] = [
+    PaintClass::SolidCoverage,
+    PaintClass::Gradient,
+    PaintClass::Image,
+];
+
+/// The strip states [`WARM_CLASSES`] are warmed up across: the two
+/// depth-tested surface states every frame with a depth attachment draws
+/// through.
+pub const WARM_CLASS_STATES: [EnginePipeline; 2] =
+    [EnginePipeline::StripOpaque, EnginePipeline::StripDepthAlpha];
+
+/// Every distinct pipeline the engine can create for one target format: each
+/// strip state times the classes it serves, plus the clear, copy and filter
+/// pipelines. See the module doc's table.
+pub const VARIANT_COUNT: usize = {
+    let mut count = 0;
+    let mut state = 0;
+    while state < EnginePipeline::ALL.len() {
+        let pipeline = EnginePipeline::ALL[state];
+        if pipeline.is_strip() {
+            let mut class = 0;
+            while class < PaintClass::ALL.len() {
+                if pipeline.serves(PaintClass::ALL[class]) {
+                    count += 1;
+                }
+                class += 1;
+            }
+        } else {
+            count += 1;
+        }
+        state += 1;
+    }
+    count
+};
 
 /// Bind groups the copy program declares: its source texture.
 const COPY_BIND_GROUPS: usize = 1;
@@ -160,15 +242,23 @@ const COPY_BIND_GROUPS: usize = 1;
 /// source page together with the sampler its kernels read it through.
 const FILTER_BIND_GROUPS: usize = 2;
 
-/// The engine's compiled shader modules, by id.
+/// The engine's compiled shader modules, by id, and the one explicit layout
+/// every strip pipeline is built against.
 ///
 /// Registered once at start-up into the [`ShaderLibrary`] a
 /// [`PipelineCache`] is built over; a [`RenderPipelineDesc`] then names its
 /// program by id rather than by source.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineShaders {
-    /// The sparse-strip rasterizer, shared by all four strip variants.
+    /// The whole sparse-strip rasterizer — the [`PaintClass::Uber`] program,
+    /// shared by all six strip states.
     pub strip: ShaderId,
+    /// The strip program's specialisations, one per
+    /// [`PaintClass::SPECIALISED`] entry, in that order.
+    pub strip_classes: [ShaderId; PaintClass::SPECIALISED.len()],
+    /// The explicit layout every strip pipeline, of every class, is built
+    /// against ([`crate::gpu::bindings::strip_pipeline_layout`]).
+    pub strip_layout: wgpu::PipelineLayout,
     /// Region and fullscreen clears.
     pub clear: ShaderId,
     /// Rectangular region copies.
@@ -178,19 +268,41 @@ pub struct EngineShaders {
 }
 
 impl EngineShaders {
-    /// Compiles every module in [`shader_src::MODULES`] into `library` and
-    /// returns their ids.
+    /// Compiles every module in [`shader_src::MODULES`], and the strip
+    /// program's class specialisations, into `library`, returning their ids
+    /// beside a freshly created strip layout.
     ///
     /// Insertion is idempotent per name, so calling this twice against the
-    /// same library returns the same ids without recompiling.
+    /// same library returns the same ids without recompiling (the layout is
+    /// a new object each call — a desc compares layouts by identity, so keep
+    /// one `EngineShaders` per cache).
     #[must_use]
     pub fn register(library: &mut ShaderLibrary, device: &wgpu::Device) -> Self {
         Self {
             strip: library.insert_wgsl(device, shader_src::STRIP_NAME, shader_src::STRIP),
+            strip_classes: PaintClass::SPECIALISED.map(|class| {
+                library.insert_wgsl(
+                    device,
+                    shader_src::strip_class_name(class),
+                    &shader_src::strip_class_source(class),
+                )
+            }),
+            strip_layout: strip_pipeline_layout(device),
             clear: library.insert_wgsl(device, shader_src::CLEAR_NAME, shader_src::CLEAR),
             copy: library.insert_wgsl(device, shader_src::COPY_NAME, shader_src::COPY),
             filter: library.insert_wgsl(device, shader_src::FILTER_NAME, shader_src::FILTER),
         }
+    }
+
+    /// The registered id of the strip program specialised for `class`.
+    #[must_use]
+    pub fn strip_class(&self, class: PaintClass) -> ShaderId {
+        PaintClass::SPECIALISED
+            .iter()
+            .position(|specialised| *specialised == class)
+            .and_then(|index| self.strip_classes.get(index))
+            .copied()
+            .unwrap_or(self.strip)
     }
 }
 
@@ -266,6 +378,46 @@ impl EnginePipeline {
             Self::Clear => "clear",
             Self::Copy => "copy",
             Self::Filter => "filter",
+        }
+    }
+
+    /// Whether this strip state is ever compiled with `class`'s program.
+    ///
+    /// Every strip state serves [`PaintClass::Uber`] and
+    /// [`PaintClass::SolidCoverage`]; the destination-out pair serves nothing
+    /// else (a punch erases with a solid source), and the opaque state serves
+    /// the classes a fully covered opaque span can have — solid, gradient,
+    /// image — but never a composite or a blurred rectangle, neither of which
+    /// is ever opaque. A non-strip pipeline serves only Uber, which for it
+    /// means "its own program".
+    #[must_use]
+    pub const fn serves(self, class: PaintClass) -> bool {
+        match class {
+            PaintClass::Uber => true,
+            PaintClass::SolidCoverage => self.is_strip(),
+            PaintClass::Gradient | PaintClass::Image => matches!(
+                self,
+                Self::StripIntermediate
+                    | Self::StripAlpha
+                    | Self::StripDepthAlpha
+                    | Self::StripOpaque
+            ),
+            PaintClass::BlurredRect | PaintClass::LayerComposite => matches!(
+                self,
+                Self::StripIntermediate | Self::StripAlpha | Self::StripDepthAlpha
+            ),
+        }
+    }
+
+    /// The class this state actually draws a run of `class` with: the class
+    /// itself when served, [`PaintClass::Uber`] — which draws everything —
+    /// when not.
+    #[must_use]
+    pub const fn fold_class(self, class: PaintClass) -> PaintClass {
+        if self.serves(class) {
+            class
+        } else {
+            PaintClass::Uber
         }
     }
 
@@ -384,18 +536,29 @@ impl EnginePipeline {
         }
     }
 
-    /// The registered id of the module this pipeline draws with.
+    /// The registered id of the module this pipeline draws with — for a
+    /// strip state, the whole ([`PaintClass::Uber`]) program.
     #[must_use]
-    pub const fn shader(self, shaders: &EngineShaders) -> ShaderId {
+    pub fn shader(self, shaders: &EngineShaders) -> ShaderId {
+        self.class_shader(shaders, PaintClass::Uber)
+    }
+
+    /// The registered id of the module this pipeline draws `class` with: the
+    /// class's specialisation for a strip state that serves it, the Uber
+    /// program for one that does not, and the pipeline's own module for a
+    /// non-strip pipeline (which has no class axis).
+    #[must_use]
+    pub fn class_shader(self, shaders: &EngineShaders, class: PaintClass) -> ShaderId {
         match self.module() {
-            EngineShaderModule::Strip => shaders.strip,
+            EngineShaderModule::Strip => shaders.strip_class(self.fold_class(class)),
             EngineShaderModule::Clear => shaders.clear,
             EngineShaderModule::Copy => shaders.copy,
             EngineShaderModule::Filter => shaders.filter,
         }
     }
 
-    /// The full pipeline description, ready for
+    /// The full pipeline description of this state's whole
+    /// ([`PaintClass::Uber`]) program, ready for
     /// [`PipelineCache::get_or_create`] or [`PipelineCache::warm_up`].
     ///
     /// `sample_count` is always 1: the engine never multisamples, since a
@@ -406,8 +569,25 @@ impl EnginePipeline {
         shaders: &EngineShaders,
         target_format: wgpu::TextureFormat,
     ) -> RenderPipelineDesc {
+        self.class_desc(shaders, target_format, PaintClass::Uber)
+    }
+
+    /// The full pipeline description of this state drawing `class` — folded
+    /// to Uber when the state does not serve it ([`Self::fold_class`]), and
+    /// ignored by a non-strip pipeline.
+    ///
+    /// A strip description names the shared explicit strip layout, so every
+    /// class of every strip state accepts the same bind groups; the clear,
+    /// copy and filter pipelines keep wgpu's derived layout.
+    #[must_use]
+    pub fn class_desc(
+        self,
+        shaders: &EngineShaders,
+        target_format: wgpu::TextureFormat,
+        class: PaintClass,
+    ) -> RenderPipelineDesc {
         RenderPipelineDesc {
-            shader: self.shader(shaders),
+            shader: self.class_shader(shaders, class),
             vs: VS_MAIN.into(),
             fs: FS_MAIN.into(),
             vertex_layouts: self.vertex_layouts(),
@@ -416,6 +596,7 @@ impl EnginePipeline {
             sample_count: 1,
             depth: self.depth(),
             topology: TOPOLOGY,
+            layout: self.is_strip().then(|| shaders.strip_layout.clone()),
         }
     }
 
@@ -539,20 +720,43 @@ pub fn atlas_strip_desc(shaders: &EngineShaders) -> RenderPipelineDesc {
     ATLAS_STRIP_PIPELINE.desc(shaders, INTERMEDIATE_FORMAT)
 }
 
-/// The full warm-up list: every pipeline in [`EnginePipeline::ALL`],
-/// described against `target_format`.
+/// The full warm-up list: every pipeline in [`EnginePipeline::ALL`] (each
+/// strip state's Uber program), then [`WARM_CLASSES`] across
+/// [`WARM_CLASS_STATES`], described against `target_format`.
+///
+/// The class entries are left out when `FRUST_ENGINE_UBER_PROGRAM` is set
+/// ([`crate::config::uber_program_forced`]): nothing would draw with them.
 #[must_use]
 pub fn warm_up_descs(
     shaders: &EngineShaders,
     target_format: wgpu::TextureFormat,
 ) -> Vec<RenderPipelineDesc> {
-    EnginePipeline::ALL
-        .iter()
-        .map(|pipeline| pipeline.desc(shaders, target_format))
-        .collect()
+    warm_up_descs_for(shaders, target_format, crate::config::uber_program_forced())
 }
 
-/// Queues every engine pipeline for background compilation.
+/// [`warm_up_descs`] with the kill switch stated rather than read: with
+/// `uber_only` set the list is exactly the nine Uber states.
+#[must_use]
+pub fn warm_up_descs_for(
+    shaders: &EngineShaders,
+    target_format: wgpu::TextureFormat,
+    uber_only: bool,
+) -> Vec<RenderPipelineDesc> {
+    let mut descs: Vec<_> = EnginePipeline::ALL
+        .iter()
+        .map(|pipeline| pipeline.desc(shaders, target_format))
+        .collect();
+    if !uber_only {
+        for state in WARM_CLASS_STATES {
+            for class in WARM_CLASSES {
+                descs.push(state.class_desc(shaders, target_format, class));
+            }
+        }
+    }
+    descs
+}
+
+/// Queues the [`warm_up_descs`] list for background compilation.
 ///
 /// Call it once the device and the frame's target format are known. It
 /// returns immediately; a variant the render thread needs before the worker
@@ -608,6 +812,51 @@ mod tests {
                     a.label(),
                     b.label()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn the_class_axis_is_folded_to_twenty_nine_variants() {
+        assert_eq!(VARIANT_COUNT, 29);
+        let served = |pipeline: EnginePipeline| {
+            PaintClass::ALL
+                .iter()
+                .filter(|class| pipeline.serves(**class))
+                .count()
+        };
+        assert_eq!(served(EnginePipeline::StripIntermediate), 6);
+        assert_eq!(served(EnginePipeline::StripAlpha), 6);
+        assert_eq!(served(EnginePipeline::StripDepthAlpha), 6);
+        assert_eq!(served(EnginePipeline::StripOpaque), 4);
+        assert_eq!(served(EnginePipeline::StripDestOut), 2);
+        assert_eq!(served(EnginePipeline::StripDepthDestOut), 2);
+        for pipeline in [
+            EnginePipeline::Clear,
+            EnginePipeline::Copy,
+            EnginePipeline::Filter,
+        ] {
+            assert_eq!(served(pipeline), 1);
+            assert!(pipeline.serves(PaintClass::Uber));
+        }
+        // An unserved class folds to the program that draws everything.
+        assert_eq!(
+            EnginePipeline::StripDestOut.fold_class(PaintClass::Gradient),
+            PaintClass::Uber
+        );
+        assert_eq!(
+            EnginePipeline::StripOpaque.fold_class(PaintClass::LayerComposite),
+            PaintClass::Uber
+        );
+        assert_eq!(
+            EnginePipeline::StripDestOut.fold_class(PaintClass::SolidCoverage),
+            PaintClass::SolidCoverage
+        );
+        // The warm-up classes are served by the states they are warmed on.
+        for state in WARM_CLASS_STATES {
+            assert!(state.is_strip() && state.depth().is_some());
+            for class in WARM_CLASSES {
+                assert!(state.serves(class));
             }
         }
     }
@@ -968,8 +1217,8 @@ mod tests {
         let shaders = EngineShaders::register(&mut library, &device);
         assert_eq!(
             library.len(),
-            shader_src::MODULES.len(),
-            "one module per engine shader source"
+            shader_src::MODULES.len() + PaintClass::SPECIALISED.len(),
+            "one module per engine shader source, plus one per strip class"
         );
         assert_eq!(
             EnginePipeline::ALL
@@ -981,13 +1230,39 @@ mod tests {
         );
 
         let mut cache = PipelineCache::new(std::sync::Arc::new(library), None);
-        let descs = warm_up_descs(&shaders, TARGET);
-        assert_eq!(descs.len(), EnginePipeline::ALL.len());
+        let warm = warm_up_descs_for(&shaders, TARGET, false);
+        assert_eq!(
+            warm.len(),
+            EnginePipeline::ALL.len() + WARM_CLASSES.len() * WARM_CLASS_STATES.len()
+        );
+        assert_eq!(
+            warm_up_descs_for(&shaders, TARGET, true).len(),
+            EnginePipeline::ALL.len(),
+            "the kill switch warms the Uber states alone"
+        );
+        // Every variant the engine can create, not just the warmed ones: each
+        // class program must validate against the shared explicit layout under
+        // every state that serves it.
+        let mut descs = Vec::new();
+        for pipeline in EnginePipeline::ALL {
+            for class in PaintClass::ALL {
+                if pipeline.serves(class) {
+                    descs.push(pipeline.class_desc(&shaders, TARGET, class));
+                }
+            }
+        }
+        assert_eq!(descs.len(), VARIANT_COUNT);
+        for desc in &warm {
+            assert!(
+                descs.contains(desc),
+                "a warmed variant the engine never builds"
+            );
+        }
         // The atlas pass draws through a description the warm-up list already
         // carries, so it never compiles a pipeline inline on a frame that
         // misses a glyph.
         assert!(
-            descs.contains(&atlas_strip_desc(&shaders)),
+            warm.contains(&atlas_strip_desc(&shaders)),
             "the atlas description must be one the warm-up list already covers"
         );
         for desc in &descs {
@@ -1002,8 +1277,8 @@ mod tests {
         assert!(error.is_none(), "pipeline creation raised {error:?}");
         assert_eq!(
             cache.compiled_variants(),
-            EnginePipeline::ALL.len() as u64,
-            "each engine pipeline must compile exactly once"
+            VARIANT_COUNT as u64,
+            "each engine pipeline variant must compile exactly once"
         );
     }
 }
