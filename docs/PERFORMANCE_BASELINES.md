@@ -108,11 +108,14 @@ Cold start (S7, `first_frame_presented` medians): Pixel 4a 211 ms of which `firs
 encode 6, queue 3; Pixel 4 172 ms of which pipeline wait 92, encode 5, queue 2. On both phones the pipeline
 cache is persisted 328 B about 70 ms after surface install with zero warm-up pipelines finished, and the second
 launch loads that same 328 B. S1's atlas on both phones (re-captured at 9e510235 with `glyph_misses` on the
-production path, 6x30 s, first two runs discarded): `glyph_draws == atlas_glyphs` (466 / 458), yet per 60-frame
-window the Pixel 4a replays 37 pages with 66 misses and 69 evictions and the Pixel 4 replays 40 with 81 misses
-and 93 evictions; every window that replays also misses, misses track evictions (1.8-2.1 misses per replay) and
-nothing is refused. Replay is miss-driven, and the misses are re-rasterisations of glyphs the atlas evicted while
-they were still in use (the eviction policy, not the share rule, is the lever). Pixel 4 S1 re-captured cool
+production path, 6x30 s, first two runs discarded): every drawn glyph is atlas-resident (`glyph_draws ==
+atlas_glyphs`: 466 on the Pixel 4a, 458 on the Pixel 4), yet per 60-frame window the Pixel 4a replays on 37
+frames with 66 misses and 69 evictions and the Pixel 4 on 40 frames with 81 misses and 93 evictions, and nothing
+is refused. Replay is gated on misses by construction, so the before-number to beat is the miss count; in steady
+state the misses roughly equal the evictions (1.8-2.1 per replaying frame). The working hypothesis for the
+replay-gating card is that evicted entries are re-rasterised while still in use (age-based eviction of the
+4-bucket subpixel variants of moving text fits the same counters), which needs per-key evidence — a miss on a key
+evicted earlier while its glyph kept being drawn — before it is treated as the lever. Pixel 4 S1 re-captured cool
 (32.7 C start): p50 11.66 / p95 15.44 ms, drifting to 35 C by run 6. Thread sample during S1: main,
 `RenderThread` and both `frust-reactive` threads at nice -10, `frust-render` at nice -4.
 
