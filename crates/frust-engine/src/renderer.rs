@@ -392,8 +392,47 @@ const ENCODE_TRACE_COLUMNS: [&str; 17] = [
 
 /// The unitless per-frame counts the line reports after its phases, in row
 /// order — what the phases above were spent on.
+///
+/// The field order is a capture contract: append only. The first five are
+/// per-frame medians over the window. The next five are **sums over the
+/// window** (frames' worth of events, not a typical frame):
+///
+/// - `replays` — frames in which the render-to-atlas replay pass ran.
+/// - `dirty_pages` — atlas pages those replays rendered.
+/// - `atlas_refused` — pages, clears and uploads the replays refused.
+/// - `glyph_misses` — glyphs that took the cache-miss path.
+/// - `glyph_evicted` — atlas rectangles the eviction pass freed.
+///
+/// The last, `run_keys`, is a per-frame median again: the distinct run
+/// identities (font, size, hinting) the policy classified in a frame. The
+/// replay figures read zero on a frame whose replay did not run.
 #[cfg(feature = "perf-trace")]
-const ENCODE_TRACE_COUNTS: [&str; 5] = ["draws", "strips", "alphas", "glyph_draws", "atlas_glyphs"];
+const ENCODE_TRACE_COUNTS: [&str; 11] = [
+    "draws",
+    "strips",
+    "alphas",
+    "glyph_draws",
+    "atlas_glyphs",
+    "replays",
+    "dirty_pages",
+    "atlas_refused",
+    "glyph_misses",
+    "glyph_evicted",
+    "run_keys",
+];
+
+/// Index into [`ENCODE_TRACE_COUNTS`] of the first count reported as a sum over
+/// the window rather than its median, up to and excluding
+/// [`ENCODE_TRACE_MEDIAN_AGAIN`]: `replays`, `dirty_pages`, `atlas_refused`,
+/// `glyph_misses` and `glyph_evicted` are events, mostly zero on a frame, so a
+/// median would hide exactly the frames the line exists to count.
+#[cfg(feature = "perf-trace")]
+const ENCODE_TRACE_FIRST_SUMMED: usize = 5;
+
+/// Index into [`ENCODE_TRACE_COUNTS`] of the first count after the summed run
+/// (`run_keys`, a per-frame level, reported as its median).
+#[cfg(feature = "perf-trace")]
+const ENCODE_TRACE_MEDIAN_AGAIN: usize = 10;
 
 /// Width of one window row: every phase column followed by every count.
 #[cfg(feature = "perf-trace")]
@@ -417,12 +456,30 @@ struct EncodeCounts {
     glyph_draws: u32,
     /// How many of those sampled the glyph atlas rather than rasterizing.
     atlas_glyphs: u32,
+    /// 1 when the render-to-atlas replay ran this frame, else 0.
+    replays: u32,
+    /// Atlas pages the replay rendered this frame.
+    dirty_pages: u32,
+    /// Atlas pages, clears and uploads the replay refused this frame.
+    atlas_refused: u32,
+    /// Glyphs that took the cache-miss path while compiling this frame.
+    glyph_misses: u32,
+    /// Atlas rectangles this frame's eviction freed.
+    glyph_evicted: u32,
+    /// Distinct run identities classified this frame.
+    run_keys: u32,
 }
 
 #[cfg(feature = "perf-trace")]
 impl EncodeCounts {
-    /// What `frame` drew.
-    fn of(frame: &CompiledFrame) -> Self {
+    /// What `frame` drew, with the atlas figures the frame's replay and policy
+    /// reported.
+    fn of(
+        frame: &CompiledFrame,
+        replayed: bool,
+        report: &AtlasRenderReport,
+        policy: &crate::text::atlas_policy::AtlasTrace,
+    ) -> Self {
         fn count(len: usize) -> u32 {
             u32::try_from(len).unwrap_or(u32::MAX)
         }
@@ -432,6 +489,12 @@ impl EncodeCounts {
             alphas: count(frame.alphas().len()),
             glyph_draws: frame.glyph_draws,
             atlas_glyphs: frame.atlas_glyph_draws,
+            replays: u32::from(replayed),
+            dirty_pages: report.pages,
+            atlas_refused: report.refused,
+            glyph_misses: policy.glyph_misses,
+            glyph_evicted: policy.glyph_evicted,
+            run_keys: policy.run_keys(),
         }
     }
 }
@@ -504,6 +567,12 @@ impl EncodeSpans {
             self.counts.alphas,
             self.counts.glyph_draws,
             self.counts.atlas_glyphs,
+            self.counts.replays,
+            self.counts.dirty_pages,
+            self.counts.atlas_refused,
+            self.counts.glyph_misses,
+            self.counts.glyph_evicted,
+            self.counts.run_keys,
         ]
     }
 }
@@ -556,10 +625,12 @@ impl EncodeTrace {
 
     /// The `frust-perf enc` line the current window reports.
     ///
-    /// Each column is its own median over the window and the trailing field is
-    /// the whole encode's 95th percentile, so a column answers "what does this
-    /// phase usually cost" while the tail answers "how bad is a bad frame".
-    /// Medians are taken per column and so do not sum to the `total_us`
+    /// The counts `replays` through `glyph_evicted` are window sums; every
+    /// other column (including `run_keys`) is its own median over the window.
+    /// The trailing field is the whole encode's 95th percentile, so a column
+    /// answers "what does this phase usually cost" while the tail answers "how
+    /// bad is a bad frame". Medians are taken per column and so do not sum to
+    /// the `total_us`
     /// median exactly — they are close on a steady scene, and the gap is
     /// itself the signal that the phases are not moving together.
     fn line(&mut self) -> String {
@@ -583,11 +654,20 @@ impl EncodeTrace {
         line.push_str(" total_p95_us=");
         line.push_str(&format_us(tail));
         for (offset, name) in ENCODE_TRACE_COUNTS.iter().enumerate() {
-            let p50 = self.percentile(ENCODE_TRACE_COLUMNS.len() + offset, 50);
+            let column = ENCODE_TRACE_COLUMNS.len() + offset;
+            let value = if (ENCODE_TRACE_FIRST_SUMMED..ENCODE_TRACE_MEDIAN_AGAIN).contains(&offset)
+            {
+                self.window
+                    .iter()
+                    .filter_map(|row| row.get(column))
+                    .fold(0_u64, |acc, v| acc.saturating_add(u64::from(*v)))
+            } else {
+                u64::from(self.percentile(column, 50))
+            };
             line.push(' ');
             line.push_str(name);
             line.push('=');
-            line.push_str(&p50.to_string());
+            line.push_str(&value.to_string());
         }
         line
     }
@@ -939,6 +1019,23 @@ impl EngineRenderer {
         self.depth.resize(device, width, height);
     }
 
+    /// Takes the time this renderer's pipeline cache has spent resolving
+    /// variants it did not already hold (waiting on the warm-up worker's
+    /// in-flight build, or building one inline) since the last call.
+    ///
+    /// `perf-trace`-only: it feeds the first frame's
+    /// `first_submit_pipeline_wait` startup span.
+    #[cfg(feature = "perf-trace")]
+    pub fn take_pipeline_wait(&mut self) -> Duration {
+        self.pipelines.take_resolve_wait()
+    }
+
+    /// How many pipelines the warm-up worker has finished building.
+    #[must_use]
+    pub fn warm_up_finished(&self) -> u64 {
+        self.pipelines.warm_up_finished()
+    }
+
     /// Closes the frame out: ages the intermediate pool by one frame and
     /// evicts the gradient cache down to its capacity.
     ///
@@ -1188,10 +1285,19 @@ impl EngineRenderer {
         // above are: acknowledging is what lifts the eviction deferral, so an
         // acknowledgement for a replay that returned early would let `glifo`
         // free and re-let the very rectangles those commands still name.
+        // The report describes only a frame whose replay ran: a frame that
+        // skipped it must not carry the last replay's numbers forward.
+        self.atlas_report = AtlasRenderReport::default();
+        #[cfg(feature = "perf-trace")]
+        let mut replayed = false;
         if self.compiler.glyph_replay_pending()
             && self.replay_glyph_pages(device, queue, timestamps)
         {
             self.compiler.acknowledge_glyph_replay();
+            #[cfg(feature = "perf-trace")]
+            {
+                replayed = true;
+            }
         }
 
         let replay_span = clock.lap();
@@ -1255,7 +1361,12 @@ impl EngineRenderer {
             replay: replay_span,
             pipelines: pipelines_span,
             record: clock.lap(),
-            counts: EncodeCounts::of(&frame),
+            counts: EncodeCounts::of(
+                &frame,
+                replayed,
+                &self.atlas_report,
+                self.compiler.glyph_atlas_trace(),
+            ),
         });
 
         Ok(())
@@ -4407,6 +4518,32 @@ mod tests {
                 ENCODE_TRACE_COLUMNS.len(),
                 counts.join(" "),
             ),
+        );
+    }
+
+    /// The event counts are sums over the window, the level counts medians,
+    /// and the pinned order puts them where the contract says.
+    #[cfg(feature = "perf-trace")]
+    #[test]
+    fn an_encode_trace_line_sums_events_and_takes_the_median_of_levels() {
+        let mut trace = EncodeTrace::default();
+        let base = ENCODE_TRACE_COLUMNS.len();
+        for frame in 0..3_u32 {
+            let mut row = [0_u32; ENCODE_TRACE_ROW];
+            row[base] = 10 + frame; // draws: median 11
+            row[base + 5] = 1; // replays: sum 3
+            row[base + 6] = 2; // dirty_pages: sum 6
+            row[base + 8] = frame; // glyph_misses: sum 3
+            row[base + 10] = 4 + frame; // run_keys: median 5
+            trace.window.push(row);
+        }
+        let line = trace.line();
+        let tail = line.split(" total_p95_us=").nth(1).unwrap();
+        let counts = tail.split_once(' ').unwrap().1;
+        assert_eq!(
+            counts,
+            "draws=11 strips=0 alphas=0 glyph_draws=0 atlas_glyphs=0 replays=3 \
+             dirty_pages=6 atlas_refused=0 glyph_misses=3 glyph_evicted=0 run_keys=5"
         );
     }
 

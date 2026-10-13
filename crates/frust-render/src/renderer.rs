@@ -272,6 +272,93 @@ pub struct SurfaceRenderer {
     /// `submit_us`. Compare whole frames across tiers, never `encode_us`
     /// against `encode_us`.
     engine_scene: frust_scene::Scene,
+    /// The first rendered frame's submit decomposition, until the shell takes
+    /// it (see [`Self::take_first_submit_breakdown`]).
+    #[cfg(feature = "perf-trace")]
+    first_submit: Option<FirstSubmitBreakdown>,
+    /// Whether a first rendered frame has been measured already.
+    #[cfg(feature = "perf-trace")]
+    first_submit_seen: bool,
+}
+
+/// Where the first rendered frame's `submit` time went.
+///
+/// The three parts partition the span: `encode` excludes `pipeline_wait`, and
+/// `queue` is `Queue::submit` plus `Queue::present` (the present is absent
+/// when the caller presents a deferred frame itself).
+#[cfg(feature = "perf-trace")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FirstSubmitBreakdown {
+    /// Time inside the pipeline cache resolving not-yet-held variants.
+    pub pipeline_wait: std::time::Duration,
+    /// The engine's encode, less `pipeline_wait`.
+    pub encode: std::time::Duration,
+    /// `Queue::submit` plus the present.
+    pub queue: std::time::Duration,
+}
+
+/// The first-frame timing probe `submit_impl` threads through its arms. A
+/// zero-sized no-op without `perf-trace`.
+#[cfg(feature = "perf-trace")]
+struct SubmitProbe {
+    armed: bool,
+    encode_start: Option<std::time::Instant>,
+    queue_start: Option<std::time::Instant>,
+    breakdown: FirstSubmitBreakdown,
+}
+
+#[cfg(feature = "perf-trace")]
+impl SubmitProbe {
+    fn new(armed: bool) -> Self {
+        Self {
+            armed,
+            encode_start: None,
+            queue_start: None,
+            breakdown: FirstSubmitBreakdown::default(),
+        }
+    }
+
+    fn encode_begin(&mut self, engine: &mut frust_engine::EngineRenderer) {
+        if self.armed {
+            // Discard whatever earlier work (the install's warm-up) accrued.
+            let _ = engine.take_pipeline_wait();
+            self.encode_start = Some(std::time::Instant::now());
+        }
+    }
+
+    fn encode_end(&mut self, engine: &mut frust_engine::EngineRenderer) {
+        if let Some(start) = self.encode_start.take() {
+            let total = start.elapsed();
+            self.breakdown.pipeline_wait = engine.take_pipeline_wait();
+            self.breakdown.encode = total.saturating_sub(self.breakdown.pipeline_wait);
+        }
+    }
+
+    fn queue_begin(&mut self) {
+        if self.armed {
+            self.queue_start = Some(std::time::Instant::now());
+        }
+    }
+
+    fn queue_end(&mut self) {
+        if let Some(start) = self.queue_start.take() {
+            self.breakdown.queue = start.elapsed();
+        }
+    }
+}
+
+#[cfg(not(feature = "perf-trace"))]
+struct SubmitProbe;
+
+#[cfg(not(feature = "perf-trace"))]
+impl SubmitProbe {
+    fn new(_armed: bool) -> Self {
+        Self
+    }
+    fn encode_begin(&mut self, _engine: &mut frust_engine::EngineRenderer) {}
+    fn encode_end(&mut self, _engine: &mut frust_engine::EngineRenderer) {}
+    fn queue_begin(&mut self) {}
+    fn queue_end(&mut self) {}
 }
 
 impl Default for SurfaceRenderer {
@@ -294,7 +381,20 @@ impl SurfaceRenderer {
             pending_present: None,
             pending_base_color: None,
             engine_scene: frust_scene::Scene::default(),
+            #[cfg(feature = "perf-trace")]
+            first_submit: None,
+            #[cfg(feature = "perf-trace")]
+            first_submit_seen: false,
         }
+    }
+
+    /// Takes the first rendered frame's submit decomposition, once.
+    ///
+    /// `Some` from the first [`FrameOutcome::Rendered`] submit until taken;
+    /// `None` before it, after it was taken, and on every later frame.
+    #[cfg(feature = "perf-trace")]
+    pub fn take_first_submit_breakdown(&mut self) -> Option<FirstSubmitBreakdown> {
+        self.first_submit.take()
     }
 
     /// Drops the in-flight frame's cross-call stash: the engine arm's
@@ -372,6 +472,19 @@ impl SurfaceRenderer {
         let (cache, key) = ready.pipeline_cache.as_ref()?;
         let data = cache.get_data()?;
         Some(frust_gpu::pipeline_cache::frame(key, &data))
+    }
+
+    /// How many pipelines the engine's warm-up worker has finished building,
+    /// or `None` outside [`SurfacePhase::SurfaceReady`].
+    ///
+    /// Diagnostic: a shell logs it beside the persisted pipeline-cache size so
+    /// a small blob can be read against how much of the warm-up had landed.
+    pub fn pipeline_warm_up_finished(&self) -> Option<u64> {
+        let SurfaceState::Ready(ready) = &self.state else {
+            return None;
+        };
+        let TierBackend::Engine { engine, .. } = &ready.backend;
+        Some(engine.warm_up_finished())
     }
 
     /// Whether the **live** surface actually resolved to a translucent
@@ -1062,9 +1175,18 @@ impl SurfaceRenderer {
     /// A caller that must issue the present itself, on another thread, calls
     /// [`Self::submit_deferred`] instead.
     pub fn submit(&mut self, ctx: &RenderContext) -> Result<FrameOutcome> {
+        #[cfg(feature = "perf-trace")]
+        let measuring = !self.first_submit_seen;
         let (outcome, presentable) = self.submit_impl(ctx)?;
         if let Some(surface_texture) = presentable {
+            #[cfg(feature = "perf-trace")]
+            let present_start =
+                (measuring && self.first_submit.is_some()).then(std::time::Instant::now);
             ctx.device_handle().queue.present(surface_texture);
+            #[cfg(feature = "perf-trace")]
+            if let (Some(start), Some(breakdown)) = (present_start, self.first_submit.as_mut()) {
+                breakdown.queue = breakdown.queue.saturating_add(start.elapsed());
+            }
         }
         Ok(outcome)
     }
@@ -1113,6 +1235,12 @@ impl SurfaceRenderer {
         // copied scene) lives on `self` — if the surface vanished between
         // `acquire` and `submit`, drop the texture and skip rather than
         // present a stale frame.
+        // Only the first rendered frame is measured; a refused or skipped one
+        // leaves the probe armed for the next.
+        #[cfg(feature = "perf-trace")]
+        let mut probe = SubmitProbe::new(!self.first_submit_seen);
+        #[cfg(not(feature = "perf-trace"))]
+        let mut probe = SubmitProbe::new(false);
         let Self {
             state,
             pending_base_color,
@@ -1186,6 +1314,7 @@ impl SurfaceRenderer {
                 // frame left mapped in it — the one place a reading becomes
                 // visible to `gpu_pass_timings`. A no-op on an inert ring.
                 timestamps.begin_frame(&device_handle.device);
+                probe.encode_begin(engine);
                 let result = engine.encode_traced(
                     &device_handle.device,
                     &device_handle.queue,
@@ -1219,6 +1348,7 @@ impl SurfaceRenderer {
                     Affine::IDENTITY,
                     frust_engine::FrameTimestamps::new(timestamps),
                 );
+                probe.encode_end(engine);
                 match result {
                     Ok(()) => {
                         // Recorded into the frame's own encoder, after every
@@ -1226,7 +1356,9 @@ impl SurfaceRenderer {
                         // a resolve in a second command buffer would race the
                         // passes it reads.
                         timestamps.resolve(&mut encoder);
+                        probe.queue_begin();
                         device_handle.queue.submit([encoder.finish()]);
+                        probe.queue_end();
                         timestamps.end_frame();
                         engine.end_frame(&device_handle.queue);
                     }
@@ -1309,6 +1441,7 @@ impl SurfaceRenderer {
                     engine,
                 );
                 timestamps.begin_frame(&device_handle.device);
+                probe.encode_begin(engine);
                 let result = engine.encode_traced(
                     &device_handle.device,
                     &device_handle.queue,
@@ -1337,6 +1470,7 @@ impl SurfaceRenderer {
                     Affine::IDENTITY,
                     frust_engine::FrameTimestamps::new(timestamps),
                 );
+                probe.encode_end(engine);
                 match result {
                     Ok(()) => {
                         // The conversion pass itself: charged to `blit` with a
@@ -1353,7 +1487,9 @@ impl SurfaceRenderer {
                                 .writes(frust_engine::EngineSpan::Blit),
                         );
                         timestamps.resolve(&mut encoder);
+                        probe.queue_begin();
                         device_handle.queue.submit([encoder.finish()]);
+                        probe.queue_end();
                         timestamps.end_frame();
                         engine.end_frame(&device_handle.queue);
                     }
@@ -1373,6 +1509,11 @@ impl SurfaceRenderer {
                     }
                 }
             }
+        }
+        #[cfg(feature = "perf-trace")]
+        if probe.armed && !self.first_submit_seen {
+            self.first_submit_seen = true;
+            self.first_submit = Some(probe.breakdown);
         }
         Ok((FrameOutcome::Rendered, Some(surface_texture)))
     }
