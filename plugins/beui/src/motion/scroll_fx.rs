@@ -10,10 +10,14 @@
 //!
 //! # The framework contract this adapter is shaped around
 //!
-//! **Offsets arrive only through the callback.** `ScrollView::on_scroll` is the
-//! sole delivery route for a scroll position — there is no mid-paint query, no
-//! readable controller, nothing to sample on demand. So an effect cannot pull;
-//! it is pushed, and this adapter is the retained thing in between.
+//! **Offsets arrive through the callback.** `ScrollView::on_scroll` is the
+//! delivery route this adapter is built on. The framework also has a readable,
+//! writable seam — `ScrollController` (`offset`/`on_change` to read,
+//! `jump_to`/`animate_to` to write, attached through `ScrollView::controller`
+//! or `ListView::controller`) — but beUI's scroll components have not been
+//! migrated onto it yet; that migration is tracked by `docs/LIMITATIONS.md`
+//! under `scroll-view-no-external-offset-seam`. Until then an effect here does
+//! not pull; it is pushed, and this adapter is the retained thing in between.
 //!
 //! **Paint-driven settle lands one event late.** Drag and wheel motion notifies
 //! within the pass that caused it, but fling and settle motion is integrated
