@@ -194,7 +194,8 @@
 //! can push the offset onto a bound, where [`ListViewWidget::tick`]'s at-bound
 //! check kills the fling early. So a correction taken during a fling only
 //! accumulates; the first rebuild after the fling stops (velocity below
-//! [`FLING_STOP`], a bound reached, or a `Down` taking the gesture over — all
+//! [`FLING_STOP`](frust_core::FLING_STOP), a bound reached, or a `Down` taking
+//! the gesture over — all
 //! three clear `fling`) commits the whole sum, invisibly, since placement honored
 //! it every frame anyway. The reversal is measured, not assumed: deleting the
 //! withhold makes this module's upward-fling test walk the offset backwards
@@ -231,9 +232,11 @@
 //!
 //! # Scroll machinery (reused, not reinvented)
 //!
-//! The widget owns its own vertical drag capture / wheel / fling, reusing
-//! `frust-core::input`'s constants + fling math and the spring-during-paint pump
-//! exactly like [`crate::ScrollView`] (see `scroll.rs`). During a scroll drag it
+//! The drag capture, wheel, fling, settle and ballistic pump are not this
+//! widget's own: it runs on the same shared scroll surface core
+//! (`crate::scroll_core`) [`crate::ScrollView`] does, supplying only its
+//! position storage and windowed geometry through the core's `ScrollSurface`
+//! seam — so the two surfaces cannot drift apart. During a scroll drag it
 //! captures the pointer and, on takeover, cancels any armed child (a `ListItem`'s
 //! press) via the structural-change contract — the accepted, Flutter-like
 //! tradeoff. An offset change requests a redraw; the fling advances the offset at
@@ -252,8 +255,9 @@
 //! [`crate::ScrollView`]'s, sharing `scroll.rs`'s `pub(crate)`
 //! resistance/trigger/settle items rather than a hand-copied second set so the
 //! two can never drift — the spoke doc's *Refresh/overscroll parity with
-//! ScrollView*. Only the settle animation is reimplemented, against a data shape
-//! `ScrollWidget` has no windowing concept to keep separate from.
+//! ScrollView*. The settle runs in the shared core too, over this widget's own
+//! split of the position (below), which `ScrollWidget` has no windowing concept
+//! to keep separate.
 //!
 //! **The feel itself comes from a [`ScrollPhysics`]** ([`crate::physics`]),
 //! installed as [`crate::physics::default_physics`]'s platform-adaptive choice
@@ -283,7 +287,7 @@
 //! [`ListViewWidget::painted_offset`] layers in, above; under
 //! [`OverscrollEffect::Stretch`] the rows stay where the windowing offset puts
 //! them and [`Widget::paint`] scales them about the held edge from
-//! [`ListViewWidget::edge_pull`] instead — paint-only either way.
+//! the core's edge pull instead — paint-only either way.
 //!
 //! **Resistance uses the *current*, converging `max_offset`.** Every drag `Move`
 //! re-splits the drag position against a freshly-read
@@ -311,10 +315,10 @@
 //! whose simulation is *allowed* past an edge — the bouncing default's spring
 //! is exactly that, `RubberBand` builds none.) A new
 //! `Down` does *not* reset it, only cancelling any in-progress settle
-//! (`ListViewWidget::settling = false`), so a regrab mid-bounce continues from
-//! wherever the surface sits rather than snapping first — mirroring
-//! `ScrollWidget::event_at`'s `Down` arm, which leaves its own `offset` untouched
-//! for the same reason.
+//! (the core's `settling = false`), so a regrab mid-bounce continues from
+//! wherever the surface sits rather than snapping first — the shared `Down` arm
+//! leaves `ScrollWidget`'s own out-of-range `offset` untouched for the same
+//! reason.
 //!
 //! # Nested scrolling: innermost wins
 //!
@@ -337,12 +341,13 @@
 //! side): `jump_to`/`animate_to` apply on the next pass, every pass that moves
 //! the position publishes a [`ScrollInfo`], a jump/animate replaces whatever
 //! fling, settle or tween is in flight, and a user `Down`, wheel or `Cancel`
-//! ends a tween through the one tear-down path
-//! ([`ListViewWidget::stop_ballistic`]). A command applied while a finger is
-//! down ends that drag ([`ListViewWidget::end_live_drag`], mirroring
-//! `ScrollWidget::end_live_drag`), and every post-release start tears the
+//! ends a tween through the one tear-down path (the shared core's
+//! `stop_ballistic`). A command applied while a finger is down ends that drag
+//! (the core's `end_live_drag`), and every post-release start tears the
 //! previous motion down through the same path first, so fling, settle and
-//! simulation are never live together. Three things are local to this widget:
+//! simulation are never live together. A controller tween's frames owe the
+//! next frame's flush for any near-start/near-end fire they record, as a
+//! jump's does. Three things are local to this widget:
 //!
 //! * **Drained at rebuild too.** Besides the start of layout and paint, the
 //!   queue is drained in [`View::rebuild`] once the anchor shift and measured
@@ -377,37 +382,33 @@
 //!   request waits it out, consuming none of its bounded frames, and resumes
 //!   once the drag ends.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use frust_core::accesskit::Role;
 use frust_core::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FLING_STOP,
-    FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent,
-    PointerPhase, ScrollDelta, SemanticsCtx, TOUCH_SLOP, VelocityTracker, View, WHEEL_LINE_PX,
-    Widget, fling_decay, fling_displacement,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
+    LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase, SemanticsCtx, View,
+    Widget,
 };
 use frust_theme::{MotionScheme, Theme};
 use kurbo::{Point, Size};
 
 use crate::ChildKey;
-use crate::authoring::{ErasedCallback, presses};
+use crate::authoring::ErasedCallback;
 use crate::physics::effect::OverscrollEffect;
-use crate::physics::simulation::TweenSimulation;
-use crate::physics::{
-    MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR, ScrollMetrics, ScrollPhysics, Simulation,
-    default_overscroll_effect, default_physics,
-};
-use crate::scroll::{
-    BallisticState, InnerScrollState, METRICS_FALLBACK_DPR, SETTLE_DECAY, SETTLE_STOP_PX,
-    ScrollInfo, ambient_scroll_claim, crossed_refresh_trigger, inner_claim_state,
-    stretch_about_edge, with_scroll_claim, with_scroll_veto,
-};
-use crate::scroll_controller::{
-    AnimateTo, ControllerCommand, ItemAlignment, ScrollBinding, ScrollCommand, ScrollController,
-    ScrollToItem,
-};
+use crate::physics::{ScrollPhysics, default_overscroll_effect};
+use crate::scroll::ScrollInfo;
+use crate::scroll_controller::{AnimateTo, ItemAlignment, ScrollController, ScrollToItem};
+use crate::scroll_core::{ScrollSurface, ScrollSurfaceCore};
+// The in-file tests reach these through `use super::*`; production code here
+// no longer names them since the machinery moved into `crate::scroll_core`.
+#[cfg(test)]
+use crate::physics::MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR;
+#[cfg(test)]
+use crate::scroll::{METRICS_FALLBACK_DPR, crossed_refresh_trigger};
+#[cfg(test)]
+use frust_core::{FrameTime, ScrollDelta, TOUCH_SLOP};
 
 /// Extra items materialized above and below the visible window, so a small
 /// scroll (or a fling's per-frame advance) reveals already-built rows instead of
@@ -586,8 +587,8 @@ pub struct ListView<State: 'static> {
     /// mirrors [`crate::ScrollView`]'s field of the same name/contract; see
     /// [`ListView::physics`] for the full build/rebuild semantics.
     physics: Option<Rc<dyn ScrollPhysics>>,
-    /// How past-edge pull is visualized, carried down to
-    /// [`ListViewWidget::effect`] on every build/rebuild. See
+    /// How past-edge pull is visualized, carried down to the widget's
+    /// installed effect on every build/rebuild. See
     /// [`ListView::overscroll_effect`] (mirrors [`crate::ScrollView`]'s field
     /// of the same name).
     pub(crate) effect: OverscrollEffect,
@@ -858,8 +859,8 @@ impl<State: 'static> ListView<State> {
     /// ```
     ///
     /// Plain view-owned data, unlike [`ListView::physics`]: every
-    /// build/rebuild carries the current value down to
-    /// [`ListViewWidget::effect`] unconditionally.
+    /// build/rebuild carries the current value down to the widget
+    /// unconditionally.
     ///
     /// Defaults to the effect paired with the platform's default physics
     /// ([`crate::physics::default_overscroll_effect`]): the M3E
@@ -1336,22 +1337,6 @@ pub struct ListViewWidget {
     /// the [module docs](self)' *Overscroll and pull-to-refresh* section for
     /// where a drag past an edge is represented instead.
     offset: f64,
-    /// The physics-mapped drag position accumulated during an active scroll
-    /// drag, **before** boundary rejection, in the same **raw-offset space**
-    /// [`ListViewWidget::offset`] itself lives in — never
-    /// [`ListViewWidget::placement_offset`]'s pending-corrected space, since
-    /// [`ListViewWidget::apply_drag_offset`] splits it straight into `offset`
-    /// plus `overscroll` by absolute assignment. Seeded at takeover from
-    /// `offset + overscroll` (the raw offset plus the live displacement — the
-    /// intentional regrab-mid-bounce term, so a regrab mid-bounce continues
-    /// smoothly from what is on screen) and advanced by each move's mapped
-    /// delta thereafter; deliberately **not**
-    /// [`ListViewWidget::painted_offset`], which would also fold in a nonzero
-    /// [`ListViewWidget::pending_correction`] and double-count it once
-    /// `placement_offset` re-adds it on the first post-takeover move.
-    /// Mirrors `ScrollWidget::drag_position`, including the part that runs off
-    /// past an edge under a clamping physics.
-    drag_position: f64,
     /// The signed, resisted past-edge visual displacement a drag shows beyond
     /// the windowing [`ListViewWidget::offset`]: negative past the top,
     /// positive past the bottom, `0.0` while in range. Only a drag ever sets
@@ -1360,79 +1345,15 @@ pub struct ListViewWidget {
     /// [`ListViewWidget::painted_offset`] and the [module docs](self)'
     /// *Overscroll and pull-to-refresh* section.
     overscroll: f64,
-    /// Whether a release-settle animation is easing an overscrolled
-    /// [`ListViewWidget::overscroll`] back to `0.0` (driven at paint via
-    /// [`ListViewWidget::settle_tick`], mirrors `ScrollWidget::settling`).
-    settling: bool,
-    /// The installed scroll physics — [`crate::physics::default_physics`]'s
-    /// platform-adaptive choice unless [`ListView::physics`] replaces it, the
-    /// same default `ScrollView` takes. `Rc`, not
-    /// `Box`: every [`ScrollPhysics`] method takes `&self`, so a shared,
-    /// immutable handle is both cheap to (re)install and sufficient (mirrors
-    /// `ScrollWidget::physics` — see its doc for the full rationale).
-    /// Survives a rebuild whose view carries no `.physics(...)` call
-    /// untouched; see [`ListView::physics`] for the full contract and the
-    /// [module docs](self)' *Overscroll and pull-to-refresh* section.
-    pub(crate) physics: Rc<dyn ScrollPhysics>,
-    /// How past-edge pull is visualized —
-    /// [`crate::physics::default_overscroll_effect`]'s platform pairing unless
-    /// [`ListView::overscroll_effect`] names one. Read at paint alone (see
-    /// [`ListViewWidget::painted_offset`] and `scroll.rs`'s *Overscroll
-    /// visuals*), never by layout, windowing, or the physics.
-    pub(crate) effect: OverscrollEffect,
-    /// The signed pull past an edge, negative past the top: the displacement
-    /// the physics allowed ([`ListViewWidget::overscroll`]) plus whatever
-    /// [`ScrollPhysics::apply_boundary_conditions`] rejected while the position
-    /// was pinned at the edge. Under a physics that rejects nothing
-    /// (`Bouncing`, [`RubberBand`](crate::RubberBand)) it *is* `overscroll` —
-    /// which is why basing the refresh trigger on it changes no trigger
-    /// distance for either. Same field, same contract, same sign as
-    /// `ScrollWidget::edge_pull`; see it for the full rule.
-    pub(crate) edge_pull: f64,
-    /// A generic ballistic simulation handed back by
-    /// [`ScrollPhysics::create_ballistic_simulation`] on release, or `None` —
-    /// always `None` under [`RubberBand`](crate::RubberBand), which keeps the
-    /// legacy [`ListViewWidget::fling`] path instead.
-    ballistic: Option<BallisticState>,
-    /// Velocity (px/s of offset) of the motion a new `Down` interrupted, fed to
-    /// [`ScrollPhysics::carried_momentum`] at the next fling start. Always
-    /// `0.0` when the press landed on a resting surface.
-    carried_velocity: f64,
     /// Resolved viewport size (this widget's own size), cached from the previous
     /// layout so rebuild can window against it (BuildCtx carries no viewport).
     viewport: Size,
-    /// Whether a scroll drag has taken the gesture over (past the slop).
-    scrolling: bool,
-    /// Whether a `Down` armed an active gesture (mirrors `ScrollWidget`).
-    down_active: bool,
-    /// What the nearest nested scroll surface inside a materialized row claimed
-    /// it could do with this gesture, read back out of the claim cell this
-    /// widget pushed around the `Down`'s routing — the input to the
-    /// innermost-wins decision at the takeover site. Same field, same contract,
-    /// same `Down`-time staleness window as `ScrollWidget::inner_at_down`; see
-    /// it for the full rule.
-    pub(crate) inner_at_down: InnerScrollState,
-    /// Whether this gesture was handed to that nested surface — sticky for the
-    /// rest of the gesture, exactly like `ScrollWidget::deferring`.
-    pub(crate) deferring: bool,
-    /// The live multi-contact veto cell for the *current* gesture (mirrors
-    /// `ScrollWidget::live_veto`). Checked on every `Move` at the takeover site, not read once:
-    /// the recognizer flips it live as a second contact joins and leaves.
-    /// Replaced with a fresh, unset cell on every `Down` (and cleared again
-    /// on `Up`/`Cancel`) so a stale recognizer handle from a previous gesture
-    /// can never veto this one.
-    live_veto: Rc<Cell<bool>>,
-    down_start: Point,
-    last_drag: Point,
-    tracker: VelocityTracker,
-    /// Active fling velocity (px/s of offset), or `None` when not flinging.
-    fling: Option<f64>,
-    /// Last painted frame time, reused as the event-pass timestamp for velocity
-    /// tracking (the event pass carries no clock).
-    last_frame_time: FrameTime,
-    /// Last animation frame time for the paint-time fling pump; `None` seeds the
-    /// clock (zero-delta) on the first paint after a release.
-    last_anim: Option<FrameTime>,
+    /// The shared scroll machinery and its state (`crate::scroll_core`): the
+    /// physics, drag and edge pull, takeover/claim/veto, fling/settle/ballistic
+    /// motion and the controller binding. The position it reasons about is
+    /// this widget's own [`ListViewWidget::offset`] plus
+    /// [`ListViewWidget::overscroll`].
+    core: ScrollSurfaceCore,
     /// The near-start "load older" callback (`None` if the view set none).
     on_near_start: Option<ErasedCallback>,
     /// Distance from content start (px) at which `on_near_start` fires.
@@ -1455,33 +1376,38 @@ pub struct ListViewWidget {
     /// A near-end fire detected by the paint-time fling pump (no `EventCtx`);
     /// delivered on the next event, cleared by a `Cancel` without firing.
     pending_near_end: bool,
-    /// The pull-to-refresh release callback (`None` if the view set none).
-    on_refresh_release: Option<ErasedCallback>,
-    /// This surface's claim on an attached [`ScrollController`], or `None`.
-    /// Dropping it (with the widget, or on a rebuild that names no handle)
-    /// detaches the handle when this surface still holds it.
-    controller: Option<ScrollBinding>,
-    /// Whether a layout has run, so the viewport and extent a controller
-    /// command resolves against (and the snapshot it publishes) are measured
-    /// ones rather than the pre-layout zero.
-    laid_out: bool,
-    /// Whether [`ListViewWidget::ballistic`] is running a controller-driven
-    /// tween rather than a release fling/spring — this surface's mirror of
-    /// [`ScrollController::is_animating`], cleared at the one tear-down site
-    /// ([`ListViewWidget::stop_ballistic`]). Mirrors
-    /// `ScrollWidget::controller_animating`.
-    controller_animating: bool,
     /// The motion tokens the last layout/paint resolved, for the rebuild-time
     /// drain (see [`ControllerMotion`]).
     motion: ControllerMotion,
     /// A [`ScrollController::scroll_to_item`] request still settling, or
     /// `None`. See the [module docs](self)' *Programmatic scrolling* section.
     item_target: Option<ItemTarget>,
-    /// Whether a controller jump recorded a near-start/near-end fire since the
-    /// last paint — the paint that sees it requests the `Housekeeping` flush
-    /// that delivers it (the fire has no `EventCtx` to go through when the
-    /// jump lands). Mirrors `ScrollWidget::jump_notify_owed`.
+    /// Whether a controller jump — or a frame of a controller tween — recorded
+    /// a near-start/near-end fire since the last paint: the paint that sees it
+    /// requests the `Housekeeping` flush that delivers it (the fire has no
+    /// `EventCtx` to go through when the position moves at layout or paint).
+    /// The near-edge counterpart of the core's own owed `on_scroll` flush.
     jump_notify_owed: bool,
+}
+
+/// The in-file tests predate the core and name its state as this widget's own
+/// fields (`w.scrolling`, `w.edge_pull`, …); a test-build `Deref` keeps every
+/// one of them reading the same state it always did. Production code names
+/// `self.core` explicitly.
+#[cfg(test)]
+impl std::ops::Deref for ListViewWidget {
+    type Target = ScrollSurfaceCore;
+
+    fn deref(&self) -> &ScrollSurfaceCore {
+        &self.core
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for ListViewWidget {
+    fn deref_mut(&mut self) -> &mut ScrollSurfaceCore {
+        &mut self.core
+    }
 }
 
 impl ListViewWidget {
@@ -1502,26 +1428,9 @@ impl ListViewWidget {
             item_count,
             item_extent,
             offset: 0.0,
-            drag_position: 0.0,
             overscroll: 0.0,
-            settling: false,
-            physics: default_physics(),
-            effect: default_overscroll_effect(),
-            edge_pull: 0.0,
-            ballistic: None,
-            carried_velocity: 0.0,
             viewport: Size::ZERO,
-            scrolling: false,
-            down_active: false,
-            inner_at_down: InnerScrollState::default(),
-            deferring: false,
-            live_veto: Rc::new(Cell::new(false)),
-            down_start: Point::ZERO,
-            last_drag: Point::ZERO,
-            tracker: VelocityTracker::new(),
-            fling: None,
-            last_frame_time: FrameTime::ZERO,
-            last_anim: None,
+            core: ScrollSurfaceCore::default(),
             on_near_start: None,
             near_start_threshold: 0.0,
             near_start_armed: true,
@@ -1530,10 +1439,6 @@ impl ListViewWidget {
             near_end_threshold: 0.0,
             near_end_armed: true,
             pending_near_end: false,
-            on_refresh_release: None,
-            controller: None,
-            laid_out: false,
-            controller_animating: false,
             motion: ControllerMotion::from_theme(None),
             item_target: None,
             jump_notify_owed: false,
@@ -1687,7 +1592,7 @@ impl ListViewWidget {
     /// itself still evolves identically under every effect; only this read
     /// differs (`scroll.rs`'s *Overscroll visuals*).
     fn painted_offset(&self) -> f64 {
-        match self.effect {
+        match self.core.effect {
             OverscrollEffect::Translate => self.placement_offset() + self.overscroll,
             OverscrollEffect::Stretch | OverscrollEffect::None => self.placement_offset(),
         }
@@ -1730,101 +1635,12 @@ impl ListViewWidget {
     }
 
     /// Whether post-release motion is in flight — the legacy fling, or a
-    /// physics-supplied [`Simulation`] the generic driver is running (never
+    /// physics-supplied [`Simulation`](crate::physics::Simulation) the generic
+    /// driver is running (never
     /// both, and never either one under [`RubberBand`](crate::RubberBand)'s
     /// legacy-only path).
     pub fn is_flinging(&self) -> bool {
-        self.fling.is_some() || self.ballistic.is_some()
-    }
-
-    /// This surface's extent/position snapshot for the physics, reading
-    /// `pixels` from a caller-supplied position rather than a field: the drag
-    /// path asks about the *raw* (un-resisted) drag position clamped into
-    /// range, so resistance is derived from the accumulator instead of
-    /// compounding across moves. `max_scroll_extent` is
-    /// [`ListViewWidget::max_offset`], read fresh, so a still-converging
-    /// variable-extent content extent is always what the physics sees.
-    fn metrics_at(&self, pixels: f64) -> ScrollMetrics {
-        ScrollMetrics {
-            pixels,
-            min_scroll_extent: 0.0,
-            max_scroll_extent: self.max_offset(),
-            viewport_dimension: self.viewport.height,
-            device_pixel_ratio: METRICS_FALLBACK_DPR,
-        }
-    }
-
-    /// This surface's extent/position snapshot at the scroll position a physics
-    /// reasons about: the **raw** windowing offset plus any live displacement,
-    /// which is the same space [`ListViewWidget::max_offset`] and
-    /// [`ListViewWidget::drag_raw`] live in. Deliberately not
-    /// [`ListViewWidget::painted_offset`], which also folds in an uncommitted
-    /// [`ListViewWidget::pending_correction`] — a physics answer fed back into
-    /// raw space would double-count it, exactly as it would at drag takeover.
-    fn metrics(&self) -> ScrollMetrics {
-        self.metrics_at(self.offset + self.overscroll)
-    }
-
-    /// The velocity (px/s of offset) of whatever post-release motion is live
-    /// right now — the legacy fling's own, or a running simulation's at the
-    /// last painted frame — and `0.0` when the list is at rest.
-    fn live_velocity(&self) -> f64 {
-        if let Some(v) = self.fling {
-            return v;
-        }
-        match self.ballistic.as_ref() {
-            Some(state) => state.sim.dx(state.elapsed_secs(self.last_frame_time)),
-            None => 0.0,
-        }
-    }
-
-    /// A new fling's starting velocity: the `release` velocity plus whatever
-    /// [`ScrollPhysics::carried_momentum`] carries over from the motion this
-    /// gesture's `Down` interrupted (`0.0` under
-    /// [`RubberBand`](crate::RubberBand), leaving `release` untouched).
-    /// Mirrors `ScrollWidget::fling_start_velocity`, gate included: momentum
-    /// is carried only onto a release that plainly continues the interrupted
-    /// motion — same sign, and faster than
-    /// [`MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR`] of the physics' own
-    /// **mapped** share of the interrupted velocity —
-    /// `physics.carried_momentum(carried)`, the exact value the release is
-    /// about to add, not the raw interrupted speed (see that method's doc
-    /// for why this matters) — since the carried term is comparable in
-    /// magnitude to an ordinary release and would otherwise cancel out or
-    /// reverse a flick back the other way. Flutter's third guard, dropping
-    /// the carried velocity when the finger held still before letting go, is
-    /// an accepted gap here too (see that method for the full contract).
-    fn fling_start_velocity(&self, release: f64) -> f64 {
-        let mapped = self.physics.carried_momentum(self.carried_velocity);
-        let continues_it = release.signum() == mapped.signum()
-            && release.abs() > MOMENTUM_RETAIN_VELOCITY_THRESHOLD_FACTOR * mapped.abs();
-        if continues_it {
-            release + mapped
-        } else {
-            release
-        }
-    }
-
-    /// Ask the installed physics for post-release motion, bounded by its own
-    /// [`ScrollPhysics::min_fling_velocity`]/[`ScrollPhysics::max_fling_velocity`]
-    /// — **the generic driver's bounds only**; the legacy fling below keeps its
-    /// pinned `FLING_STOP` threshold and no upper clamp. Mirrors
-    /// `ScrollWidget::release_simulation`.
-    fn release_simulation(&self) -> Option<Box<dyn Simulation>> {
-        // The offset moves opposite the finger, like every other release path.
-        let released = self.fling_start_velocity(-self.tracker.velocity());
-        let max = self.physics.max_fling_velocity();
-        let velocity = if released.abs() < self.physics.min_fling_velocity() {
-            0.0
-        } else {
-            released.clamp(-max, max)
-        };
-        self.physics
-            .create_ballistic_simulation(&self.metrics(), velocity)
-    }
-
-    fn event_time_ms(&self) -> f64 {
-        self.last_frame_time.as_secs_f64() * 1000.0
+        self.core.is_flinging()
     }
 
     fn set_offset(&mut self, value: f64) {
@@ -1833,35 +1649,6 @@ impl ListViewWidget {
 
     fn clamp_offset(&mut self) {
         self.set_offset(self.offset);
-    }
-
-    /// Advance the drag by `delta` px of raw finger travel in offset space
-    /// (positive = the content scrolls down) and re-split the result across the
-    /// windowing [`ListViewWidget::offset`], the
-    /// [`ListViewWidget::overscroll`] displacement and
-    /// [`ListViewWidget::edge_pull`], mirroring
-    /// [`crate::ScrollWidget::apply_drag_offset`] (see `scroll.rs`'s *Drag
-    /// convention* for why the physics is handed a per-move delta at the live
-    /// position rather than a whole excursion from a clamped base).
-    ///
-    /// The one thing local to this widget: because its windowing offset may
-    /// never leave range (the [module docs](self)' *Overscroll and
-    /// pull-to-refresh* section), the position the physics allows is clamped
-    /// into `offset` and whatever is left over lands in `overscroll` for paint
-    /// alone. `max_offset` is read fresh every call, so a variable-extent
-    /// list's still-converging content extent is always what that split runs
-    /// against.
-    fn apply_drag_offset(&mut self, delta: f64) {
-        let metrics = self.metrics();
-        let mapped = self.physics.apply_physics_to_user_offset(&metrics, delta);
-        self.drag_position += mapped;
-        let rejected = self
-            .physics
-            .apply_boundary_conditions(&metrics, self.drag_position);
-        let allowed = self.drag_position - rejected;
-        self.offset = allowed.clamp(0.0, self.max_offset());
-        self.overscroll = allowed - self.offset;
-        self.edge_pull = self.overscroll + rejected;
     }
 
     /// Advance a release-settle by `dt_ms`, easing
@@ -1873,26 +1660,7 @@ impl ListViewWidget {
     /// `max_offset`) the moment a drag overscrolls, so it needs no motion of
     /// its own here.
     pub fn settle_tick(&mut self, dt_ms: f64) -> bool {
-        if !self.settling {
-            return false;
-        }
-        // `edge_pull`'s boundary-rejected half (always `0.0` under
-        // `RubberBand`, where the pull *is* the displacement) has no
-        // displacement to ride back, so it decays on the same curve of its own
-        // — otherwise a clamping physics' stretch would snap off at release.
-        let rejected = self.edge_pull - self.overscroll;
-        if self.overscroll.abs() <= SETTLE_STOP_PX && rejected.abs() <= SETTLE_STOP_PX {
-            self.overscroll = 0.0;
-            self.edge_pull = 0.0;
-            self.settling = false;
-            self.sync_child_origins();
-            return false;
-        }
-        let retained = SETTLE_DECAY.powf(dt_ms);
-        self.overscroll *= retained;
-        self.edge_pull = self.overscroll + rejected * retained;
-        self.sync_child_origins();
-        true
+        self.advance_settle(dt_ms)
     }
 
     /// The `[start, end)` item range that should be materialized for the current
@@ -2251,358 +2019,33 @@ impl ListViewWidget {
     /// animating. Pure and deterministic — the paint-time pump and the tests
     /// both drive it (mirrors [`crate::ScrollWidget::tick`]).
     pub fn tick(&mut self, dt_ms: f64) -> bool {
-        let Some(v) = self.fling else {
-            return false;
-        };
-        self.set_offset(self.offset + fling_displacement(v, dt_ms));
-        self.sync_child_origins();
-        let next_v = fling_decay(v, dt_ms);
-        let at_bound = self.offset <= 0.0 || self.offset >= self.max_offset();
-        if next_v.abs() < FLING_STOP || at_bound {
-            self.fling = None;
-            false
-        } else {
-            self.fling = Some(next_v);
-            true
-        }
-    }
-
-    /// Advance a physics-supplied [`Simulation`] to frame time `now`, the
-    /// windowing/displacement split preserved: the position it reports, minus
-    /// whatever [`ScrollPhysics::apply_boundary_conditions`] rejects of it,
-    /// clamped into [`ListViewWidget::offset`] with the remainder left in
-    /// [`ListViewWidget::overscroll`] where paint (never the item-index math)
-    /// reads it. Subtracting the rejection is what keeps the driver honest for
-    /// **any** physics — a clamping one can never displace even if its
-    /// simulation overshoots, while a bouncing one (rejecting nothing) is free
-    /// to run past the edge and back. Mirrors
-    /// [`crate::ScrollWidget::drive_ballistic`], including its early stop for a
-    /// curve that is [pinned
-    /// outward](ListViewWidget::ballistic_is_pinned_outward) and the handoff of
-    /// any leftover pull to the settle
-    /// ([`ListViewWidget::settle_ballistic_residual`]).
-    fn drive_ballistic(&mut self, now: FrameTime) {
-        let Some((proposed, velocity, done)) = self.ballistic.as_ref().map(|state| {
-            let t = state.elapsed_secs(now);
-            (state.sim.x(t), state.sim.dx(t), state.sim.is_done(t))
-        }) else {
-            return;
-        };
-        let rejected = self
-            .physics
-            .apply_boundary_conditions(&self.metrics(), proposed);
-        let allowed = proposed - rejected;
-        self.offset = allowed.clamp(0.0, self.max_offset());
-        self.overscroll = allowed - self.offset;
-        self.edge_pull = self.overscroll + rejected;
-        self.sync_child_origins();
-        if done || self.ballistic_is_pinned_outward(proposed, rejected, velocity) {
-            self.stop_ballistic();
-            self.settle_ballistic_residual();
-        }
-    }
-
-    /// Whether the running simulation can no longer move anything on screen —
-    /// its proposal is outside the range, the physics rejected **all** of that
-    /// excess, and the curve is still travelling further out. See
-    /// [`crate::ScrollWidget::ballistic_is_pinned_outward`] for the full
-    /// contract and why the test is deliberately conservative.
-    ///
-    /// One caveat local to this widget: `max_offset` is a *converging* estimate
-    /// in variable-extent mode, so a fling stopped here against an
-    /// under-estimated end stays stopped rather than resuming when later
-    /// measurements push the end out. Accepted — the offset is already pinned
-    /// at that estimated end for as long as the estimate holds, so the
-    /// difference is a fling that ends where the surface had already stopped
-    /// moving.
-    fn ballistic_is_pinned_outward(&self, proposed: f64, rejected: f64, velocity: f64) -> bool {
-        let excess = proposed - proposed.clamp(0.0, self.max_offset());
-        excess != 0.0 && rejected == excess && velocity * excess > 0.0
-    }
-
-    /// Hand a residual [`ListViewWidget::edge_pull`] left behind by a finished
-    /// ballistic to the release-settle, so it decays on [`SETTLE_DECAY`]
-    /// exactly as a drag release's pull does instead of standing on screen
-    /// until the next `Down`/wheel/`Cancel`. Mirrors
-    /// [`crate::ScrollWidget::settle_ballistic_residual`], guard and all.
-    fn settle_ballistic_residual(&mut self) {
-        if self.edge_pull.abs() > SETTLE_STOP_PX {
-            self.settling = true;
-        }
-    }
-
-    /// Advance the ballistic simulation, the legacy fling, *or* the
-    /// release-settle by the delta since the last paint, and signal
-    /// [`PaintCtx::request_frame`] while any is still
-    /// running (mirrors [`crate::ScrollWidget::pump_fling`]). The continuation
-    /// frame is what re-runs the shell's rebuild → the window re-materializes
-    /// as the fling carries on; a settle never changes the window (it only
-    /// eases [`ListViewWidget::overscroll`], which windowing never reads), so
-    /// it needs the request purely to keep painting the animation.
-    ///
-    /// The three are mutually exclusive by construction — a release picks one,
-    /// after tearing every one of them down through
-    /// [`ListViewWidget::stop_ballistic`], and a controller command ends the
-    /// drag a release would come from — and under [`RubberBand`](crate::RubberBand) the simulation arm is never
-    /// taken at all.
-    fn pump_fling(&mut self, ctx: &mut PaintCtx) {
-        if self.fling.is_none() && !self.settling && self.ballistic.is_none() {
-            self.last_anim = None;
-            return;
-        }
-        let now = ctx.frame_time();
-        let dt = match self.last_anim {
-            Some(t) => now.saturating_sub(t).as_secs_f64() * 1000.0,
-            None => 0.0,
-        };
-        self.last_anim = Some(now);
-        // A simulation measures time from its own start, so the first pump
-        // after the release seeds it — the same zero-delta seeding frame
-        // `last_anim` takes, so neither clock ever jumps on frame one.
-        if let Some(state) = self.ballistic.as_mut() {
-            state.start.get_or_insert(now);
-        }
-        if dt > 0.0 {
-            if self.ballistic.is_some() {
-                self.drive_ballistic(now);
-            } else if self.fling.is_some() {
-                self.tick(dt);
-            } else {
-                self.settle_tick(dt);
-            }
-            // The fling moved the offset with no `EventCtx` in scope; if it
-            // crossed the near-start/near-end edge, record the fire for the
-            // next event. (A settle never moves `placement_offset()`, so this
-            // is a no-op there, not a special case worth branching out.)
-            if self.evaluate_near_start() {
-                self.pending_near_start = true;
-            }
-            if self.evaluate_near_end() {
-                self.pending_near_end = true;
-            }
-        }
-        if self.fling.is_some() || self.settling || self.ballistic.is_some() {
-            ctx.request_frame();
-        }
+        self.advance_fling(dt_ms)
     }
 
     // --- Programmatic scrolling (the attached `ScrollController`). See the
     //     module docs' *Programmatic scrolling* section. ---
 
-    /// End any live [`ListViewWidget::ballistic`] simulation — a release
-    /// fling/spring, or a controller tween — telling the attached controller
-    /// the animation stopped if it was one. The single tear-down path every
-    /// site that ends ballistic motion takes (`Down`, wheel, `Cancel`, a
-    /// controller jump/animate, and [`ListViewWidget::drive_ballistic`]'s own
-    /// completion), **and every start goes through it too**: the `Up` release
-    /// clears the fling and settle and calls this before it starts a
-    /// simulation, settle or fling of its own, and a controller tween is only
-    /// installed by [`ListViewWidget::apply_animate_to`] after the same
-    /// tear-down — so fling, settle and simulation are never live at once and
-    /// [`ScrollController::is_animating`] cannot outlive the tween it
-    /// reports *while this widget stays current on the handle*. A tween
-    /// whose surface is dropped, taken over, or rebound to a different
-    /// handle mid-flight never calls this — that case is reconciled on the
-    /// handle's own side instead ([`ScrollController::bind`] and
-    /// `impl Drop for ScrollBinding` in `scroll_controller.rs`), since the
-    /// tween keeps running on `self.ballistic` regardless of which binding,
-    /// if any, is still current to report it. Mirrors
-    /// `ScrollWidget::stop_ballistic`.
-    fn stop_ballistic(&mut self) {
-        self.ballistic = None;
-        if std::mem::take(&mut self.controller_animating)
-            && let Some(binding) = self.controller.as_ref()
-        {
-            binding.set_animating(false);
-        }
-    }
-
-    /// End a live drag because a controller command just took the position
-    /// over — a programmatic command replaces the user's drag rather than
-    /// running alongside it. Resets exactly the per-gesture state the `Down`
-    /// arm resets (the drag/armed flags, the Down-time claim snapshot, the
-    /// sticky defer decision and the live multi-contact veto cell), so the
-    /// rest of the gesture's `Move`s take the unarmed row/hover path and its
-    /// `Up` the non-scrolling row-forward branch. Only an *established* drag
-    /// ends here: a gesture armed but still inside [`TOUCH_SLOP`] is left as
-    /// it is (a pre-slop finger writes no offset, and the row under it holds
-    /// an uncancelled `Down` whose slop takeover and `Cancel` must still
-    /// happen), so a no-op when nothing is scrolling. Pointer capture is left
-    /// alone (no [`EventCtx`] in layout, paint or rebuild; the shell clears
-    /// it on the physical `Up`/`Cancel`), and the caller re-seeds
-    /// [`ListViewWidget::drag_position`] from the position it applies.
-    /// Mirrors `ScrollWidget::end_live_drag`.
-    fn end_live_drag(&mut self) {
-        if !self.scrolling {
-            return;
-        }
-        self.scrolling = false;
-        self.down_active = false;
-        self.inner_at_down = InnerScrollState::default();
-        self.deferring = false;
-        self.live_veto = Rc::new(Cell::new(false));
-    }
-
-    /// Reconcile the attached [`ScrollController`] with the one a view names
-    /// (see [`ListView::controller`]'s build/rebuild semantics), returning
-    /// whether the binding changed. Every fresh [`ScrollController::bind`]
-    /// resets the handle's `is_animating` to `false`; a tween that is
-    /// genuinely still running (`self.controller_animating`) belongs to this
-    /// widget, not the handle, so it is republished onto the new binding
-    /// right after bind() rather than stopped — the tween keeps running
-    /// either way, only the handle reporting it changes. Mirrors
-    /// `ScrollWidget::attach_controller`.
-    fn attach_controller(&mut self, requested: Option<&ScrollController>) -> bool {
-        match (requested, self.controller.as_ref()) {
-            (None, None) => false,
-            (None, Some(_)) => {
-                self.controller = None;
-                true
-            }
-            (Some(handle), Some(binding)) if binding.controller().same(handle) => {
-                if binding.is_current() || handle.is_attached() {
-                    false
-                } else {
-                    let binding = handle.bind();
-                    binding.set_animating(self.controller_animating);
-                    self.controller = Some(binding);
-                    true
-                }
-            }
-            (Some(handle), _) => {
-                let binding = handle.bind();
-                binding.set_animating(self.controller_animating);
-                self.controller = Some(binding);
-                true
-            }
-        }
-    }
-
-    /// Apply every command queued on the attached [`ScrollController`], in
-    /// recording order — once this surface has laid out (a command queued
-    /// earlier waits for the first measured viewport) and only while it still
-    /// holds the handle. Returns whether any command was drained.
-    fn drain_controller(&mut self) -> bool {
-        if !self.laid_out {
-            return false;
-        }
-        let commands = match self.controller.as_ref() {
-            Some(binding) => binding.take_all_commands(),
-            None => return false,
-        };
-        let drained = !commands.is_empty();
-        for command in commands {
-            match command {
-                ControllerCommand::Offset(command) => {
-                    // A later offset command replaces a settling item request
-                    // outright, like it replaces a tween.
-                    self.item_target = None;
-                    match command {
-                        ScrollCommand::JumpTo(target) => self.apply_jump(target),
-                        ScrollCommand::AnimateTo(target, options) => {
-                            self.apply_animate_to(target, options, self.motion.reduce_motion);
-                        }
-                    }
-                }
-                ControllerCommand::ScrollToItem(request) => self.apply_scroll_to_item(request),
-            }
-        }
-        drained
-    }
-
-    /// Move straight to the content-space offset `target`, clamped to
-    /// `[0, max_offset]`, ending any fling, release-settle, ballistic
-    /// simulation or overscroll in flight. Any uncommitted measured correction
-    /// is dropped rather than committed — `target` already names where the
-    /// content should sit, so the placement becomes exactly it. A live drag
-    /// ends here ([`ListViewWidget::end_live_drag`]). `NaN` is ignored.
-    /// Mirrors `ScrollWidget::apply_jump`; a near-start/near-end edge the jump
-    /// crosses is recorded for the next event, like a fling frame's.
-    fn apply_jump(&mut self, target: f64) {
-        if target.is_nan() {
-            return;
-        }
-        self.end_live_drag();
-        self.fling = None;
-        self.stop_ballistic();
-        self.settling = false;
-        self.overscroll = 0.0;
-        self.edge_pull = 0.0;
-        self.last_anim = None;
-        self.pending_correction = 0.0;
-        self.set_offset(target);
-        self.drag_position = self.offset;
-        self.sync_child_origins();
-        if self.evaluate_near_start() {
-            self.pending_near_start = true;
-            self.jump_notify_owed = true;
-        }
-        if self.evaluate_near_end() {
-            self.pending_near_end = true;
-            self.jump_notify_owed = true;
-        }
-    }
-
-    /// Start (or replace) a controller-driven tween to the content-space
-    /// offset `target`, clamped to `[0, max_offset]`, ending any fling,
-    /// release-settle or ballistic simulation first. Runs through a
-    /// [`TweenSimulation`] in [`ListViewWidget::ballistic`] — the field and
-    /// pump ([`ListViewWidget::drive_ballistic`]) a release fling runs
-    /// through. An uncommitted measured correction is committed first (the
-    /// placement does not move), so the tween starts from where the content
-    /// actually sits. `reduce_motion` (or a non-positive/non-finite
-    /// `duration_ms`) collapses this to [`ListViewWidget::apply_jump`]. A
-    /// live drag ends here ([`ListViewWidget::end_live_drag`]). `NaN` is
-    /// ignored. Mirrors `ScrollWidget::apply_animate_to`.
-    fn apply_animate_to(&mut self, target: f64, options: AnimateTo, reduce_motion: bool) {
-        if target.is_nan() {
-            return;
-        }
-        self.end_live_drag();
-        self.fling = None;
-        self.stop_ballistic();
-        self.settling = false;
-        self.overscroll = 0.0;
-        self.edge_pull = 0.0;
-        self.last_anim = None;
-        if reduce_motion || !options.duration_ms.is_finite() || options.duration_ms <= 0.0 {
-            self.apply_jump(target);
-            return;
-        }
-        self.offset = self.placement_offset();
-        self.pending_correction = 0.0;
-        self.drag_position = self.offset;
-        let clamped = target.clamp(0.0, self.max_offset());
-        let sim = TweenSimulation::new(
-            self.offset,
-            clamped,
-            options.duration_ms / 1000.0,
-            options.curve,
-        );
-        self.ballistic = Some(BallisticState {
-            sim: Box::new(sim),
-            start: None,
-        });
-        self.controller_animating = true;
-        if let Some(binding) = self.controller.as_ref() {
-            binding.set_animating(true);
-        }
-    }
-
     /// Apply a [`ScrollController::scroll_to_item`] request: resolve the key,
     /// decide `Nearest`, jump or tween to the aligned offset, and leave an
     /// [`ItemTarget`] for the settle loop ([`ListViewWidget::settle_item_target`]).
-    /// An unknown key (or any key on a positional list) is a no-op with a
-    /// debug-build log; `Nearest` on a fully visible row is a no-op too.
+    /// An unknown key (or any key on a positional list) moves nothing and logs
+    /// in a debug build; `Nearest` on a fully visible row moves nothing either.
+    /// Neither is a pure no-op, though: like every item request it supersedes
+    /// what an earlier controller command left in flight
+    /// ([`ListViewWidget::stand_still_for_item_request`]).
     fn apply_scroll_to_item(&mut self, request: ScrollToItem) {
         let Some(index) = self.resolve_key(request.key) else {
             unknown_item_key(&request, self.key_of.is_some());
+            self.stand_still_for_item_request();
             return;
         };
         let alignment = match request.alignment {
             ItemAlignment::Nearest => match self.nearest_alignment(index) {
                 Some(alignment) => alignment,
-                None => return,
+                None => {
+                    self.stand_still_for_item_request();
+                    return;
+                }
             },
             alignment => alignment,
         };
@@ -2618,6 +2061,19 @@ impl ListViewWidget {
             alignment,
             frames_left: ITEM_SETTLE_MAX_FRAMES,
         });
+    }
+
+    /// An item request that resolves to no movement (an unknown key, or
+    /// `Nearest` on a row already fully visible) still supersedes the
+    /// controller's own work in flight, exactly as a moving one replaces it:
+    /// an earlier request stops settling and a running controller tween — an
+    /// `animate_to` or an animated `scroll_to_item` — stops where it
+    /// stands. The list stays put, and user-driven motion (a fling, a
+    /// release-settle, a live drag) is left alone: a request naming no
+    /// position has no position to replace it with.
+    fn stand_still_for_item_request(&mut self) {
+        self.item_target = None;
+        self.supersede_controller_tween();
     }
 
     /// The item index currently carrying `key`, or `None` (an unknown key, or
@@ -2711,17 +2167,17 @@ impl ListViewWidget {
     /// tween is still carrying the list there. The `scrolling` guard below is
     /// defensive only: a pending request never coexists with an established
     /// drag in real event flow — applying the request ends the drag
-    /// ([`ListViewWidget::end_live_drag`]) and a later primary `Down`, wheel
+    /// (the core's `end_live_drag`) and a later primary `Down`, wheel
     /// or `Cancel` clears the request — so the guard documents the invariant
     /// rather than a resume-after-drag path.
     fn settle_item_target(&mut self) {
         let Some(mut target) = self.item_target else {
             return;
         };
-        if self.ballistic.is_some() {
+        if self.core.ballistic.is_some() {
             return;
         }
-        if self.scrolling {
+        if self.core.scrolling {
             return;
         }
         let Some(index) = self.resolve_key(target.key) else {
@@ -2740,28 +2196,6 @@ impl ListViewWidget {
         } else {
             Some(target)
         };
-    }
-
-    /// This surface's position as a [`ScrollInfo`]: the content-space
-    /// placement (what an app reads back after a jump), the converging
-    /// `max_offset`, and the signed overscroll.
-    fn scroll_info(&self) -> ScrollInfo {
-        ScrollInfo {
-            offset: self.placement_offset(),
-            max_offset: self.max_offset(),
-            overscroll: self.overscroll,
-        }
-    }
-
-    /// Publish the current position to the attached [`ScrollController`] (a
-    /// no-op before the first layout, or once another surface took it over).
-    fn publish_to_controller(&self) {
-        if !self.laid_out {
-            return;
-        }
-        if let Some(binding) = self.controller.as_ref() {
-            binding.publish(self.scroll_info(), self.viewport.height);
-        }
     }
 
     /// Deliver a synthetic `Cancel` to whichever child holds the capture path,
@@ -2794,16 +2228,19 @@ impl ListViewWidget {
         result
     }
 
-    /// The event body behind [`ListViewWidget::event_at`]. Adapted from
-    /// [`crate::ScrollWidget`], routing to the *window* of children via
-    /// [`crate::authoring::route_event`] rather than a single child.
+    /// The event body behind [`ListViewWidget::event_at`]: the non-gesture
+    /// variants are routed to the *window* of children here, the wheel and
+    /// pointer gesture by the shared core ([`ScrollSurface::handle_wheel`],
+    /// [`ScrollSurface::handle_pointer`]) exactly as for `ScrollView`.
     fn route_event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
-        // A fling-driven near-start fire recorded at paint time is delivered on
-        // the next event — except a Cancel, which clears it without firing.
+        // A fling-driven near-start/near-end fire recorded at paint time is
+        // delivered on the next event — except a Cancel, which clears it
+        // without firing.
         if !matches!(
             event,
             InputEvent::Pointer(p) if p.phase == PointerPhase::Cancel
         ) {
+            self.deliver_pending_scroll(ctx);
             self.deliver_pending_near_start(ctx);
             self.deliver_pending_near_end(ctx);
         }
@@ -2822,237 +2259,189 @@ impl ListViewWidget {
             InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::EditCommand(_) => {
                 crate::authoring::route_event(&mut self.children, ctx, event)
             }
-            InputEvent::Scroll { delta, .. } => {
-                let dy = match delta {
-                    ScrollDelta::Lines(_, y) => y * WHEEL_LINE_PX,
-                    ScrollDelta::Pixels(_, y) => *y,
-                };
-                // Wheel scrolling stays hard-clamped — no overscroll rubber-band
-                // on wheel input, matching `ScrollView`, and no physics
-                // consulted: the clamp is a property of the input device, not
-                // of the installed feel, so this arm is identical under every
-                // physics.
-                self.fling = None;
-                self.settling = false;
-                self.stop_ballistic();
-                // User input wins over a settling `scroll_to_item` too.
-                self.item_target = None;
-                self.overscroll = 0.0;
-                self.edge_pull = 0.0;
-                self.set_offset(self.offset + dy);
-                self.sync_child_origins();
-                self.fire_near_start(ctx);
-                self.fire_near_end(ctx);
-                ctx.request_redraw();
-                EventResult::Handled
-            }
-            InputEvent::Pointer(p) => match p.phase {
-                PointerPhase::Down => {
-                    // Only a primary press arms a drag. A secondary press is a
-                    // context gesture: it still reaches the realized rows (a
-                    // context-menu consumer in a row must see it), but opens no
-                    // capture and can never start a scroll — the `ScrollView`
-                    // rule, applied to the windowing list.
-                    if !presses(p) {
-                        return crate::authoring::route_event(&mut self.children, ctx, event);
-                    }
-                    self.scrolling = false;
-                    self.down_active = true;
-                    self.inner_at_down = InnerScrollState::default();
-                    self.deferring = false;
-                    // A fresh, unset cell for this gesture — never the
-                    // previous one, which a since-torn-down recognizer may
-                    // still hold a clone of.
-                    self.live_veto = Rc::new(Cell::new(false));
-                    // Remember what this press interrupted before killing it —
-                    // the next fling asks the physics how much of it to carry
-                    // forward (`0.0` under `RubberBand`, i.e. start cold).
-                    self.carried_velocity = self.live_velocity();
-                    self.fling = None;
-                    self.settling = false;
-                    self.stop_ballistic();
-                    // User input wins over a settling `scroll_to_item` too.
-                    self.item_target = None;
-                    // A `Down` deliberately leaves a mid-bounce displacement on
-                    // screen (the regrab continues from it), so the pull is
-                    // re-seeded from that displacement rather than zeroed —
-                    // "reset" here means "carries nothing stale from the
-                    // previous gesture".
-                    self.edge_pull = self.overscroll;
-                    self.last_anim = None;
-                    self.down_start = p.position;
-                    self.last_drag = p.position;
-                    self.tracker.clear();
-                    self.tracker.record(t_ms, p.position.y);
-                    ctx.capture_pointer();
-                    // Innermost-wins arbitration, in dispatch order: report
-                    // THIS list into whatever cell is ambient (the nearest
-                    // enclosing scrollable's, if any) while that is still the
-                    // top of the stack, then push this list's own cell for the
-                    // routing below so a row's nested scrollable writes here
-                    // rather than past this level. `scroll.rs` owns the seam;
-                    // this is the second consumer of it, not a second copy.
-                    if let Some(host) = ambient_scroll_claim() {
-                        host.set(inner_claim_state(self.physics.as_ref(), &self.metrics()));
-                    }
-                    let claim = Rc::new(Cell::new(InnerScrollState::default()));
-                    let veto = Rc::clone(&self.live_veto);
-                    let children = &mut self.children;
-                    with_scroll_claim(&claim, || {
-                        with_scroll_veto(&veto, || {
-                            crate::authoring::route_event(children, ctx, event)
-                        })
-                    });
-                    self.inner_at_down = claim.get();
-                    EventResult::Handled
-                }
-                PointerPhase::Move => {
-                    if !self.down_active {
-                        return crate::authoring::route_event(&mut self.children, ctx, event);
-                    }
-                    self.tracker.record(t_ms, p.position.y);
-                    if self.scrolling {
-                        let dy = p.position.y - self.last_drag.y;
-                        self.last_drag = p.position;
-                        // Hand the physics this move's raw delta (the offset
-                        // moves opposite the finger); whatever it makes of a
-                        // past-edge pull lands in `overscroll`, never in a
-                        // windowing offset outside `[0, max_offset]` (see the
-                        // module docs' *Overscroll and pull-to-refresh*).
-                        self.apply_drag_offset(-dy);
-                        self.sync_child_origins();
-                        self.fire_near_start(ctx);
-                        self.fire_near_end(ctx);
-                        ctx.request_redraw();
-                    } else if !self.deferring
-                        && !self.live_veto.get()
-                        && (p.position.y - self.down_start.y).abs() > TOUCH_SLOP
-                        && self.physics.should_accept_user_offset(&self.metrics())
-                    {
-                        if self.inner_at_down.defers(p.position.y - self.down_start.y) {
-                            // Innermost wins: a nested scrollable inside a row
-                            // registered on this gesture's `Down` and can
-                            // consume this direction, so take nothing over —
-                            // no `Cancel` to the rows, no capture handover —
-                            // and keep routing. Sticky for the rest of the
-                            // gesture (`deferring` gates this whole branch);
-                            // the inner's own slop machinery takes it from
-                            // here. See the module docs' *Nested scrolling*.
-                            self.deferring = true;
-                            crate::authoring::route_event(&mut self.children, ctx, event);
-                        } else {
-                            // Take the gesture over: cancel the armed child,
-                            // stop forwarding — the documented window-shift
-                            // capture-loss tradeoff's sibling. A physics that
-                            // refuses drags outright keeps the move flowing to
-                            // the row instead; `RubberBand` accepts
-                            // unconditionally (even content that fits
-                            // rubber-bands), so that gate is inert on the
-                            // default feel.
-                            self.scrolling = true;
-                            self.settling = false;
-                            self.last_drag = p.position;
-                            // Seed the drag accumulator from the raw offset
-                            // plus any live overscroll — never
-                            // `painted_offset`, which also folds in
-                            // `pending_correction`: `apply_drag_offset` splits
-                            // `drag_position` straight into `offset` by
-                            // absolute assignment, and `placement_offset`
-                            // unconditionally re-adds `pending_correction` on
-                            // top, so seeding from painted space would
-                            // double-count a nonzero pending correction on the
-                            // first post-takeover move. Including `overscroll`
-                            // (not just `offset`) is the intentional
-                            // regrab-mid-bounce term, so a regrab mid-bounce
-                            // still continues smoothly from what is on screen.
-                            self.drag_position = self.offset + self.overscroll;
-                            self.cancel_children(ctx, p.position);
-                            ctx.request_redraw();
-                        }
-                    } else {
-                        crate::authoring::route_event(&mut self.children, ctx, event);
-                    }
-                    EventResult::Handled
-                }
-                PointerPhase::Up => {
-                    if self.scrolling {
-                        // Pull-to-refresh: released past the top trigger fires the
-                        // app hook (an Up, so mutating state is allowed). Shares
-                        // the exact threshold check `ScrollView` uses — see the
-                        // module docs' *Overscroll and pull-to-refresh* section
-                        // — measured on `edge_pull`, which under `RubberBand` is
-                        // bit-for-bit the overscroll it has always read.
-                        if crossed_refresh_trigger(self.edge_pull)
-                            && let Some(cb) = self.on_refresh_release.as_mut()
-                        {
-                            cb(ctx);
-                        }
-                        // Whatever the release starts, it starts alone: tear
-                        // every motion down first, through the single
-                        // tear-down path (mirrors `ScrollWidget`'s release).
-                        self.fling = None;
-                        self.settling = false;
-                        self.stop_ballistic();
-                        self.last_anim = None;
-                        // Ask the physics for post-release motion first: one
-                        // that hands back a simulation owns the release
-                        // outright, and one that does not (`RubberBand`) falls
-                        // through to the legacy settle/fling below untouched.
-                        if let Some(sim) = self.release_simulation() {
-                            self.ballistic = Some(BallisticState { sim, start: None });
-                        } else if self.edge_pull != 0.0 {
-                            // Released while overscrolled: settle back to the
-                            // edge, never fling out of range.
-                            self.settling = true;
-                        } else {
-                            // The legacy path keeps its own FLING_STOP threshold
-                            // (the trait's min/max fling bounds govern the
-                            // generic driver only) and takes carried momentum,
-                            // which is `0.0` under `RubberBand`.
-                            let finger_v = self.tracker.velocity();
-                            if finger_v.abs() > FLING_STOP {
-                                self.fling = Some(self.fling_start_velocity(-finger_v));
-                            }
-                        }
-                    } else {
-                        crate::authoring::route_event(&mut self.children, ctx, event);
-                    }
-                    self.scrolling = false;
-                    self.down_active = false;
-                    self.inner_at_down = InnerScrollState::default();
-                    self.deferring = false;
-                    self.live_veto = Rc::new(Cell::new(false));
-                    ctx.request_redraw();
-                    EventResult::Handled
-                }
-                PointerPhase::Cancel => {
-                    crate::authoring::route_event(&mut self.children, ctx, event);
-                    self.scrolling = false;
-                    self.down_active = false;
-                    self.inner_at_down = InnerScrollState::default();
-                    self.deferring = false;
-                    self.live_veto = Rc::new(Cell::new(false));
-                    // Cancel never fires a callback and snaps any overscroll away
-                    // with no settle animation: drop any pending
-                    // near-start/near-end fire without invoking it, and never
-                    // fires on_refresh_release (mirrors `ScrollWidget`'s Cancel).
-                    self.pending_near_start = false;
-                    self.pending_near_end = false;
-                    self.settling = false;
-                    self.stop_ballistic();
-                    self.item_target = None;
-                    self.overscroll = 0.0;
-                    self.edge_pull = 0.0;
-                    self.sync_child_origins();
-                    ctx.request_redraw();
-                    EventResult::Handled
-                }
-            },
+            // Wheel scrolling stays hard-clamped, matching `ScrollView`; a
+            // drag's past-edge pull lands in `overscroll`, never in a
+            // windowing offset outside `[0, max_offset]` (see the module docs'
+            // *Overscroll and pull-to-refresh*).
+            InputEvent::Scroll { delta, .. } => self.handle_wheel(ctx, delta),
+            InputEvent::Pointer(p) => self.handle_pointer(ctx, event, p, t_ms),
             // `InputEvent` grows (a scale gesture and file drops are planned);
             // this widget handles only the variants named above, and hands any
             // other to its children exactly like the broadcast arm.
             _ => crate::authoring::route_event(&mut self.children, ctx, event),
         }
+    }
+}
+
+/// The windowing owner side of the core: the clamped windowing `offset` is
+/// the base position, `overscroll` carries the past-edge displacement, and
+/// the physics reasons about their sum — so no row is ever asked to
+/// materialize outside `[0, item_count)` (the module docs' *Overscroll and
+/// pull-to-refresh*).
+impl ScrollSurface for ListViewWidget {
+    fn core(&self) -> &ScrollSurfaceCore {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut ScrollSurfaceCore {
+        &mut self.core
+    }
+
+    /// [`ListViewWidget::max_offset`], read fresh, so a still-converging
+    /// variable-extent content extent is always what the physics sees.
+    fn max_scroll_extent(&self) -> f64 {
+        self.max_offset()
+    }
+
+    fn viewport_extent(&self) -> f64 {
+        self.viewport.height
+    }
+
+    fn base_offset(&self) -> f64 {
+        self.offset
+    }
+
+    fn set_base_offset(&mut self, value: f64) {
+        self.set_offset(value);
+    }
+
+    /// The **raw** windowing offset plus any live displacement — the space
+    /// [`ListViewWidget::max_offset`] lives in. Deliberately not
+    /// [`ListViewWidget::painted_offset`], which also folds in an uncommitted
+    /// [`ListViewWidget::pending_correction`]: a physics answer fed back into
+    /// raw space would double-count it (and seeding the drag accumulator from
+    /// it at takeover would too, once `placement_offset` re-adds it).
+    fn pixels(&self) -> f64 {
+        self.offset + self.overscroll
+    }
+
+    fn displacement(&self) -> f64 {
+        self.overscroll
+    }
+
+    /// The one thing local to this widget: because its windowing offset may
+    /// never leave range, the position the physics allows is clamped into
+    /// `offset` and whatever is left over lands in `overscroll` for paint
+    /// alone. `max_offset` is read fresh every call, so a variable-extent
+    /// list's still-converging content extent is always what the split runs
+    /// against.
+    fn set_allowed_position(&mut self, allowed: f64) {
+        self.offset = allowed.clamp(0.0, self.max_offset());
+        self.overscroll = allowed - self.offset;
+    }
+
+    /// Only ever eases `overscroll` — the windowing offset already sits at the
+    /// exact edge the moment a drag overscrolls, so it needs no motion of its
+    /// own.
+    fn decay_displacement(&mut self, retained: f64) {
+        self.overscroll *= retained;
+    }
+
+    fn settle_to_edge(&mut self) {
+        self.overscroll = 0.0;
+    }
+
+    fn sync_origins(&mut self) {
+        self.sync_child_origins();
+    }
+
+    /// This surface's position as a [`ScrollInfo`]: the content-space
+    /// placement (what an app reads back after a jump), the converging
+    /// `max_offset`, and the signed overscroll.
+    fn scroll_info(&self) -> ScrollInfo {
+        ScrollInfo {
+            offset: self.placement_offset(),
+            max_offset: self.max_offset(),
+            overscroll: self.overscroll,
+        }
+    }
+
+    fn forward_pointer(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        crate::authoring::route_event(&mut self.children, ctx, event)
+    }
+
+    fn take_over_from_content(&mut self, ctx: &mut EventCtx, position: Point) {
+        self.cancel_children(ctx, position);
+    }
+
+    /// User input wins over a settling `scroll_to_item`.
+    fn on_user_input(&mut self) {
+        self.item_target = None;
+    }
+
+    fn after_input_scroll(&mut self, ctx: &mut EventCtx) {
+        self.fire_near_start(ctx);
+        self.fire_near_end(ctx);
+    }
+
+    /// The pump moved the offset with no `EventCtx` in scope: a near-start or
+    /// near-end edge it crossed is recorded for the next event — and, when a
+    /// controller tween carried it there, owed the next frame's flush as a
+    /// jump's is, since no user event follows a programmatic move. (A settle
+    /// never moves `placement_offset()`, so this is a no-op there.)
+    fn after_motion_frame(&mut self, tween: bool) {
+        if self.evaluate_near_start() {
+            self.pending_near_start = true;
+            self.jump_notify_owed |= tween;
+        }
+        if self.evaluate_near_end() {
+            self.pending_near_end = true;
+            self.jump_notify_owed |= tween;
+        }
+    }
+
+    /// A near-start/near-end edge the jump crosses is recorded for the next
+    /// event, like a fling frame's, and owes the flush that delivers it.
+    fn after_jump(&mut self) {
+        if self.evaluate_near_start() {
+            self.pending_near_start = true;
+            self.jump_notify_owed = true;
+        }
+        if self.evaluate_near_end() {
+            self.pending_near_end = true;
+            self.jump_notify_owed = true;
+        }
+    }
+
+    fn on_cancel(&mut self) {
+        self.pending_near_start = false;
+        self.pending_near_end = false;
+    }
+
+    /// Any uncommitted measured correction is dropped rather than committed —
+    /// `target` already names where the content should sit, so the placement
+    /// becomes exactly it.
+    fn jump_position(&mut self, target: f64) {
+        self.overscroll = 0.0;
+        self.pending_correction = 0.0;
+        self.set_offset(target);
+    }
+
+    fn prepare_animate(&mut self) {
+        self.overscroll = 0.0;
+    }
+
+    /// An uncommitted measured correction is committed first (the placement
+    /// does not move), so the tween starts from where the content actually
+    /// sits.
+    fn tween_origin(&mut self) -> f64 {
+        self.offset = self.placement_offset();
+        self.pending_correction = 0.0;
+        self.offset
+    }
+
+    fn handles_item_commands(&self) -> bool {
+        true
+    }
+
+    /// A later offset command replaces a settling item request outright, like
+    /// it replaces a tween.
+    fn before_offset_command(&mut self) {
+        self.item_target = None;
+    }
+
+    fn apply_item_command(&mut self, request: ScrollToItem) {
+        self.apply_scroll_to_item(request);
     }
 }
 
@@ -3092,15 +2481,12 @@ impl<State: 'static> View<State> for ListView<State> {
             .as_ref()
             .map(crate::authoring::erase_callback);
         widget.near_end_threshold = self.near_end_threshold;
-        widget.on_refresh_release = self
+        widget.core.on_refresh_release = self
             .on_refresh_release
             .as_ref()
             .map(crate::authoring::erase_callback);
-        if let Some(physics) = self.physics.clone() {
-            widget.physics = physics;
-        }
-        widget.effect = self.effect;
-        widget.attach_controller(self.controller.as_ref());
+        widget.core.install(self.physics.as_ref(), self.effect);
+        widget.core.attach_controller(self.controller.as_ref());
         // The key function and the unmeasured-row estimate are widget state (the
         // window math and layout's measurement both run without the view in
         // scope), and must be installed before the first window is planned.
@@ -3151,20 +2537,16 @@ impl<State: 'static> View<State> for ListView<State> {
             .as_ref()
             .map(crate::authoring::erase_callback);
         element.near_end_threshold = self.near_end_threshold;
-        element.on_refresh_release = self
+        element.core.on_refresh_release = self
             .on_refresh_release
             .as_ref()
             .map(crate::authoring::erase_callback);
         // A `.physics(...)`-carrying view reinstalls it every rebuild, like the
         // erased callbacks above; a view with no opinion (`None`) leaves the
         // widget's currently-installed physics alone — see `ListView::physics`'s
-        // doc for the full contract.
-        if let Some(physics) = self.physics.clone() {
-            element.physics = physics;
-        }
-        // The visual effect is plain data the view owns and is always carried
-        // down unconditionally.
-        element.effect = self.effect;
+        // doc for the full contract. The visual effect is plain data the view
+        // owns and is always carried down unconditionally.
+        element.core.install(self.physics.as_ref(), self.effect);
         // Closures are not comparable either — reinstall the key function the
         // widget's own passes key indices with (never the builder; see the
         // module docs' *Variable extents* section).
@@ -3301,16 +2683,12 @@ impl<State: 'static> View<State> for ListView<State> {
         // *Programmatic scrolling* section). Anything it cannot apply yet (no
         // layout has measured a viewport) still owes a frame, and a settling
         // `scroll_to_item` owes the layout its next correction runs in.
-        let rebound = element.attach_controller(self.controller.as_ref());
-        if element.drain_controller() || element.item_target.is_some() {
+        let rebound = element.core.attach_controller(self.controller.as_ref());
+        let reduce_motion = element.motion.reduce_motion;
+        if element.drain_controller(reduce_motion) || element.item_target.is_some() {
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
-        if rebound
-            || element
-                .controller
-                .as_ref()
-                .is_some_and(ScrollBinding::has_pending)
-        {
+        if rebound || element.core.has_pending_commands() {
             flags |= ChangeFlags::PAINT;
         }
 
@@ -3368,9 +2746,9 @@ impl Widget for ListViewWidget {
         }
         // A controller command resolves against the viewport and extents just
         // measured; a settling `scroll_to_item` re-resolves against them too.
-        self.laid_out = true;
+        self.core.laid_out = true;
         self.motion = ControllerMotion::from_theme(Theme::from_layout_ctx(ctx));
-        self.drain_controller();
+        self.drain_controller(self.motion.reduce_motion);
         self.settle_item_target();
         self.sync_child_origins();
         self.publish_to_controller();
@@ -3378,28 +2756,19 @@ impl Widget for ListViewWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        self.last_frame_time = ctx.frame_time();
-        // A command recorded since layout (or with layout skipped this frame)
-        // applies before the pump, so a jump ends a fling before it advances.
+        // Record the frame clock, apply a command recorded since layout (or
+        // with layout skipped this frame) before the pump so a jump ends a
+        // fling before it advances, pump post-release motion and publish —
+        // see `ScrollSurface::paint_motion`.
         self.motion = ControllerMotion::from_theme(Theme::from_paint_ctx(ctx));
-        self.drain_controller();
-        self.pump_fling(ctx);
-        self.publish_to_controller();
+        self.paint_motion(ctx, self.motion.reduce_motion);
         if std::mem::take(&mut self.jump_notify_owed)
             && (self.pending_near_start || self.pending_near_end)
         {
-            // Paint has no `&mut State`: owe the jump's edge fire to the next
-            // frame's Housekeeping flush (the `ScrollWidget` precedent).
+            // Paint has no `&mut State`: owe the jump's (or tween's) edge fire
+            // to the next frame's Housekeeping flush (the `ScrollWidget`
+            // precedent).
             frust_core::mark_pending_result_flush();
-            ctx.request_frame();
-        }
-        if self
-            .controller
-            .as_ref()
-            .is_some_and(ScrollBinding::has_pending)
-        {
-            // Recorded during this paint (a listener reacting to the publish
-            // above): the next frame applies it.
             ctx.request_frame();
         }
         if self.item_target.is_some() {
@@ -3420,13 +2789,8 @@ impl Widget for ListViewWidget {
         // path either: the settle/ballistic pump above already asks for every
         // frame the decaying stretch needs. Pushed INSIDE the viewport clip
         // so stretched rows can never paint past the viewport's edges.
-        // Mirrors `ScrollWidget::paint`, over this widget's own `edge_pull`.
-        let stretch = match self.effect {
-            OverscrollEffect::Stretch => {
-                stretch_about_edge(ctx.origin(), ctx.size(), self.edge_pull)
-            }
-            OverscrollEffect::Translate | OverscrollEffect::None => None,
-        };
+        // Mirrors `ScrollWidget::paint`, over the core's `edge_pull`.
+        let stretch = self.core.stretch_transform(ctx.origin(), ctx.size());
         if let Some(transform) = stretch {
             scene.push_transform(transform);
         }
@@ -3458,7 +2822,7 @@ impl Widget for ListViewWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        let t = self.event_time_ms();
+        let t = self.core.event_time_ms();
         self.event_at(ctx, event, t)
     }
 
@@ -8802,6 +8166,143 @@ mod controller_tests {
         assert!(
             !new_controller.is_animating(),
             "completion resolves is_animating on the current handle"
+        );
+    }
+
+    #[test]
+    fn a_no_op_scroll_to_item_still_supersedes_the_tween_and_settle_in_flight() {
+        let controller = ScrollController::new();
+        let mut logic = variable_logic(300, &controller);
+        let mut root = converged(&mut logic);
+
+        // An unknown key arriving mid-tween: nothing to move to, but the
+        // animated request it follows stops where it stands.
+        controller.scroll_to_item(ChildKey::new(120u64), ItemAlignment::Start, true);
+        frame(&mut root, &mut logic, 100.0); // drains and seeds the tween
+        frame(&mut root, &mut logic, 200.0);
+        assert!(controller.is_animating(), "the tween is under way");
+        assert!(list(&root).item_target.is_some());
+        controller.scroll_to_item("no-such-row", ItemAlignment::Start, true);
+        frame(&mut root, &mut logic, 216.0);
+        assert!(!controller.is_animating(), "the unknown key ends the tween");
+        assert!(list(&root).ballistic.is_none(), "the tween is really gone");
+        assert!(
+            list(&root).item_target.is_none(),
+            "and the earlier request's settle loop"
+        );
+        let frozen = list(&root).placement_offset();
+        assert!(frozen > 0.0, "it stopped part-way ({frozen})");
+        frame(&mut root, &mut logic, 600.0);
+        frame(&mut root, &mut logic, 616.0);
+        assert_near(
+            list(&root).placement_offset(),
+            frozen,
+            "nothing carries the list on afterwards",
+        );
+
+        // `Nearest` on a row already fully on screen, mid-tween, the same way
+        // (a slow tween, so the window keeps up with it frame to frame).
+        controller.animate_to(
+            frozen + 100.0,
+            AnimateTo {
+                duration_ms: 400.0,
+                curve: Curve::Linear,
+            },
+        );
+        frame(&mut root, &mut logic, 700.0);
+        frame(&mut root, &mut logic, 800.0);
+        frame(&mut root, &mut logic, 816.0);
+        assert!(controller.is_animating());
+        let w = list(&root);
+        let visible = w
+            .keys
+            .iter()
+            .copied()
+            .find(|&index| {
+                row_rect(w, index)
+                    .is_some_and(|(top, h)| top >= 10.0 && top + h <= VIEWPORT.height - 10.0)
+            })
+            .expect("some row sits fully inside the viewport");
+        let before = list(&root).placement_offset();
+        controller.scroll_to_item(ChildKey::new(visible as u64), ItemAlignment::Nearest, false);
+        frame(&mut root, &mut logic, 832.0);
+        assert!(
+            !controller.is_animating(),
+            "a visible Nearest row ends it too"
+        );
+        assert!(list(&root).item_target.is_none());
+        assert_near(
+            list(&root).placement_offset(),
+            before,
+            "the list stays where the tween stood",
+        );
+    }
+
+    #[test]
+    fn a_no_op_scroll_to_item_leaves_a_user_fling_alone() {
+        let controller = ScrollController::new();
+        let mut logic = uniform_logic(100, &controller);
+        let mut root = converged(&mut logic);
+        let drag = |phase: PointerPhase, y: f64| {
+            InputEvent::Pointer(PointerEvent {
+                phase,
+                position: Point::new(10.0, y),
+                button: PointerButton::Primary,
+            })
+        };
+        // Velocity tracking reads the last paint's clock, so a frame between
+        // the moves gives the release a real speed.
+        frame(&mut root, &mut logic, 100.0);
+        root.event(&mut (), &drag(PointerPhase::Down, 180.0));
+        frame(&mut root, &mut logic, 116.0);
+        root.event(&mut (), &drag(PointerPhase::Move, 150.0));
+        frame(&mut root, &mut logic, 132.0);
+        root.event(&mut (), &drag(PointerPhase::Move, 100.0));
+        root.event(&mut (), &drag(PointerPhase::Up, 100.0));
+        assert!(list(&root).is_flinging(), "the release flings");
+        controller.scroll_to_item("no-such-row", ItemAlignment::Start, false);
+        frame(&mut root, &mut logic, 148.0);
+        assert!(
+            list(&root).is_flinging(),
+            "a request naming no position does not stop the user's own motion"
+        );
+    }
+
+    #[test]
+    fn a_near_end_fire_during_an_animate_to_reaches_the_app_through_the_frame_flush() {
+        use std::cell::Cell;
+
+        let controller = ScrollController::new();
+        let fired = Rc::new(Cell::new(0u32));
+        let (handle, sink) = (controller.clone(), Rc::clone(&fired));
+        let mut logic: Logic = Box::new(move |_: &mut ()| {
+            let sink = Rc::clone(&sink);
+            ListView::builder_keyed(
+                100,
+                ROW,
+                |i| ChildKey::new(i as u64),
+                |_| any::<(), _>(leaf(VIEWPORT.width, ROW)),
+            )
+            .on_near_end(move |_: &mut ()| sink.set(sink.get() + 1), ROW)
+            .controller(handle.clone())
+        });
+        let mut root = converged(&mut logic);
+        assert_eq!(fired.get(), 0);
+        controller.animate_to(
+            100.0 * ROW,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+        // Frames only — no input event anywhere — until the tween has landed
+        // and the owed flush has run.
+        settle(&mut root, &mut logic, 100.0, 40);
+        assert_eq!(controller.offset(), 100.0 * ROW - VIEWPORT.height);
+        assert_eq!(
+            fired.get(),
+            1,
+            "the edge the tween crossed fired through the next frame's flush"
         );
     }
 }
