@@ -695,6 +695,13 @@ impl<State: 'static> View<State> for AnchoredOverlayView<State> {
             flags |= ChangeFlags::PAINT;
         }
         element.anchor = self.anchor.clone();
+        // A trigger that moved since the last layout must re-place the content;
+        // the anchor cell is external, so no prop above reports it. Signal LAYOUT
+        // so per-pod layout skipping cannot keep the stale placement (the
+        // shadcn/beUI hosts' rule; `paint` covers a move with no rebuild).
+        if element.anchor.rect() != element.anchor_used {
+            flags |= ChangeFlags::LAYOUT;
+        }
         // Closures aren't comparable, so the dismiss adapter is reinstalled
         // unconditionally — cheap, and what every interactive widget does.
         element.on_dismiss = self.on_dismiss.as_ref().map(erase_callback);

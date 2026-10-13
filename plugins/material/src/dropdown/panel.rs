@@ -350,6 +350,11 @@ pub struct DropdownPanelWidget {
     max_height: f64,
     open: bool,
     anchor: OverlayAnchor,
+    /// The anchor width the last `layout` sized the panel from. The anchor cell
+    /// is written by the trigger's paint, outside this panel's pod, so `rebuild`
+    /// and `paint` compare it against the live cell and ask for a relayout on a
+    /// difference (`docs/REVIEW_FOCUS.md`'s layout-skip pattern).
+    laid_anchor_width: f64,
     on_change: ErasedArgCallback<Vec<String>>,
     on_open: Option<ErasedArgCallback<bool>>,
     /// The latched hovered row (the hover-flag half of the catalog's three-part
@@ -705,6 +710,7 @@ impl<State: 'static> View<State> for DropdownPanelView<State> {
             max_height: self.max_height,
             open: self.open,
             anchor: self.anchor.clone(),
+            laid_anchor_width: 0.0,
             on_change: erase_callback_arg(&self.on_change),
             on_open: self.on_open.as_ref().map(erase_callback_arg),
             hovered: None,
@@ -780,6 +786,11 @@ impl<State: 'static> View<State> for DropdownPanelView<State> {
         element.multi = self.multi;
         element.max_selections = self.max_selections;
         element.anchor = self.anchor.clone();
+        // The trigger's width is the panel's width: a trigger that resized since
+        // the last layout must reach it, and no prop above reports that.
+        if element.anchor.rect().width() != element.laid_anchor_width {
+            flags |= ChangeFlags::LAYOUT;
+        }
         // Closures aren't comparable, so the adapters are reinstalled
         // unconditionally — cheap, and what every interactive widget does.
         element.on_change = erase_callback_arg(&self.on_change);
@@ -848,6 +859,7 @@ impl Widget for DropdownPanelWidget {
         // reference's `SizedBox(width: renderBox.size.width)`. A never-painted
         // anchor falls back to the natural row width (see the module docs).
         let anchor_width = self.anchor.rect().width();
+        self.laid_anchor_width = anchor_width;
         self.width = if anchor_width > 0.0 {
             anchor_width
         } else {
@@ -952,6 +964,11 @@ impl Widget for DropdownPanelWidget {
         // nothing, so the latched row is cleared from path membership.
         if !ctx.is_hovered() {
             self.hovered = None;
+        }
+        // The trigger paints the anchor cell this panel's width comes from; a
+        // width the last layout did not run with owes one.
+        if self.anchor.rect().width() != self.laid_anchor_width {
+            ctx.request_layout();
         }
         let theme = Theme::from_paint_ctx(ctx);
         let chrome = Chrome {

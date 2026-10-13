@@ -179,8 +179,12 @@ impl PanelStyle {
 
     /// The width floor this style resolves for the current trigger rect.
     fn floor(&self) -> f64 {
-        let anchor = self.anchor.as_ref().map_or(0.0, |a| a.rect().width());
-        self.min_width.max(anchor)
+        self.min_width.max(self.anchor_width())
+    }
+
+    /// The trigger's current width, `0.0` without an anchor.
+    fn anchor_width(&self) -> f64 {
+        self.anchor.as_ref().map_or(0.0, |a| a.rect().width())
     }
 }
 
@@ -227,6 +231,11 @@ pub(crate) struct PanelWidget {
     /// `anim` itself only ever drives `0.0..=1.0`, eased; this is what maps
     /// that back onto the presence range (mirrors `ModalWidget::ramp`/`begin_ramp`).
     ramp: (f64, f64),
+    /// The trigger width the last `layout` floored the panel at. The anchor
+    /// cell is written by the trigger's paint, outside this panel's pod, so
+    /// `rebuild` and `paint` compare it against the live cell and ask for a
+    /// relayout on a difference (`docs/REVIEW_FOCUS.md`'s layout-skip pattern).
+    laid_anchor_width: f64,
 }
 
 impl PanelWidget {
@@ -323,6 +332,7 @@ impl<State: 'static> View<State> for PanelView<State> {
             was_open: false,
             presence: 0.0,
             ramp: (0.0, 0.0),
+            laid_anchor_width: 0.0,
             style,
         }
     }
@@ -346,6 +356,11 @@ impl<State: 'static> View<State> for PanelView<State> {
             // The paint is what starts the ramp, in either direction.
             flags |= ChangeFlags::PAINT;
         }
+        // A trigger that resized since the last layout moves the width floor;
+        // the anchor cell is external, so no prop above reports it.
+        if style.anchor_width() != element.laid_anchor_width {
+            flags |= ChangeFlags::LAYOUT;
+        }
         element.style = style;
         flags
     }
@@ -362,6 +377,7 @@ impl Widget for PanelWidget {
         } else {
             UNBOUNDED_WIDTH
         };
+        self.laid_anchor_width = self.style.anchor_width();
         let outer = self.style.width.unwrap_or(available).min(available);
         let inner_max = (outer - 2.0 * self.style.pad_x).max(0.0);
         let content = self.content.layout_child(
@@ -394,6 +410,11 @@ impl Widget for PanelWidget {
             )
         };
 
+        // The trigger paints the anchor cell the width floor comes from; a width
+        // the last layout did not run with owes one.
+        if self.style.anchor_width() != self.laid_anchor_width {
+            ctx.request_layout();
+        }
         let presence = self.ramp(ctx, reduce_motion);
         if !self.style.open && presence <= 0.0 {
             // Settled closed: the exit ramp is over and there is nothing left to

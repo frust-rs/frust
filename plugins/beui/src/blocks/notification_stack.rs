@@ -746,17 +746,23 @@ impl NotificationStackWidget {
 
     /// Advance every lane to `now`, returning whether anything is still moving.
     fn advance(&mut self, now: FrameTime, reduce_motion: bool) -> bool {
+        // A reduce-motion snap that moved a lane is a geometry change `layout`
+        // has not run with (the box height travels with the spread), though the
+        // snap itself owes no frame — it counts as moving so the caller asks for
+        // the relayout.
+        let mut snapped = false;
         if reduce_motion {
-            self.spread.snap();
-            self.background.snap();
-            self.roll.snap();
+            snapped |= self.spread.snap();
+            snapped |= self.background.snap();
+            snapped |= self.roll.snap();
             for row in &mut self.rows {
-                row.peek.snap();
-                row.inset.snap();
-                row.place.snap();
+                snapped |= row.peek.snap();
+                snapped |= row.inset.snap();
+                snapped |= row.place.snap();
             }
         }
-        let mut moving = self.spread.advance(now);
+        let mut moving = snapped;
+        moving |= self.spread.advance(now);
         moving |= self.background.advance(now);
         moving |= self.roll.advance(now);
         for row in &mut self.rows {
@@ -1757,7 +1763,8 @@ mod tests {
     }
 
     /// `reduce_motion` collapses every ramp: the box lands on its target height
-    /// on the first frame and owes no frame.
+    /// on the first frame, owes exactly the one relayout that jump needs, and
+    /// then no frame.
     #[test]
     fn reduced_motion_lands_the_spread_at_once() {
         let mut theme = crate::theme();
@@ -1771,10 +1778,17 @@ mod tests {
         let size = layout(&mut w);
         let mut ctx = PaintCtx::for_test(Point::ZERO, size, ft_ms(16.0)).with_theme(&theme);
         w.paint(&mut ctx, &mut rec);
-        assert!(!ctx.needs_frame(), "a collapsed ramp owes no frame");
-        assert_eq!(layout(&mut w).height, w.expanded_height);
+        assert!(
+            ctx.needs_layout(),
+            "the snap spread the box, which the last layout did not run with"
+        );
+        let landed = layout(&mut w);
+        assert_eq!(landed.height, w.expanded_height);
         assert_eq!(w.rows[2].peek.value(), 0.0);
         assert_eq!(w.rows[2].inset.value(), 0.0);
+        let mut ctx = PaintCtx::for_test(Point::ZERO, landed, ft_ms(32.0)).with_theme(&theme);
+        w.paint(&mut ctx, &mut rec);
+        assert!(!ctx.needs_frame(), "a collapsed ramp owes no frame");
     }
 
     /// The stack publishes one button, named by the count and by what a press

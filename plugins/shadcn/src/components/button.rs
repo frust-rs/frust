@@ -295,7 +295,9 @@ impl<State: 'static> View<State> for ButtonView<State> {
         }
         if prev.variant != self.variant {
             element.variant = self.variant;
-            flags |= ChangeFlags::PAINT;
+            // The variant's ink is baked into the shaped run, like the disabled
+            // ink below — see the [module docs](self).
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         if prev.size != self.size {
             element.size = self.size;

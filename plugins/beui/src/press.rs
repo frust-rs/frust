@@ -245,11 +245,16 @@ impl Lane {
     }
 
     /// Land on the target immediately, cancelling any flight — the
-    /// `reduce_motion` path.
-    pub(crate) fn snap(&mut self) {
+    /// `reduce_motion` path. Returns whether the displayed value moved: a
+    /// caller whose `layout` reads this lane owes a relayout for that jump,
+    /// since the snap itself asks for no frame (`docs/REVIEW_FOCUS.md`'s
+    /// layout-skip pattern).
+    pub(crate) fn snap(&mut self) -> bool {
+        let moved = self.displayed != self.to;
         self.from = self.to;
         self.displayed = self.to;
         self.start = None;
+        moved
     }
 
     /// Advance to frame time `now`, returning whether the lane is still in
