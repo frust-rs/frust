@@ -19,10 +19,14 @@
 //!
 //! Upstream's four components all sit on a continuously readable scroll value:
 //! Motion's `useScroll`, or the `useSmoothScroll()` context Lenis publishes.
-//! frust has no such thing. `ScrollView::on_scroll` is the **sole** delivery
-//! route for a scroll position — there is no mid-paint query and no readable
-//! controller — so every component here is a *controlled* one: the app folds the
-//! callback into a [`ScrollFx`](crate::motion::ScrollFx) and passes the
+//! frust does have a readable, writable seam: `ScrollController` (readable
+//! `offset`/`on_change`, writable `jump_to`/`animate_to`, attached via
+//! `ScrollView::controller` / `ListView::controller`). This component family
+//! has not been migrated onto it yet, so it still takes its position through
+//! `ScrollView::on_scroll`; the migration is tracked by `docs/LIMITATIONS.md`
+//! `scroll-view-no-external-offset-seam`. Until then every component here is a
+//! *controlled* one: the app folds the callback into a
+//! [`ScrollFx`](crate::motion::ScrollFx) and passes the
 //! resulting `0..=1` progress in as a prop, exactly the way
 //! [`crate::motion::scroll_fx`] describes.
 //!
