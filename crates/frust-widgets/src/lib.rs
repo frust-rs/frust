@@ -149,10 +149,12 @@ pub use selection_toolbar::selection_toolbar;
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
 pub use slivers::{
-    SliverBoxView, SliverBoxWidget, SliverFillRemainingView, SliverFillRemainingWidget,
-    SliverFixedExtentListView, SliverFixedExtentListWidget, SliverPaddingView, SliverPaddingWidget,
+    KeepAliveHandle, KeepAliveView, KeepAliveWidget, SliverBoxView, SliverBoxWidget,
+    SliverFillRemainingView, SliverFillRemainingWidget, SliverFixedExtentListView,
+    SliverFixedExtentListWidget, SliverGridDelegate, SliverGridView, SliverGridWidget,
+    SliverListView, SliverListWidget, SliverPaddingView, SliverPaddingWidget, keep_alive,
     sliver_box, sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed,
-    sliver_padding,
+    sliver_grid, sliver_grid_keyed, sliver_list, sliver_padding,
 };
 pub use stack::{Stack, StackView, StackWidget, stack};
 pub use text::{TextView, TextWidget, text};

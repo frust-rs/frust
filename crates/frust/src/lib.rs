@@ -157,22 +157,23 @@ pub use frust_widgets::{
     DragTargetId, DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, EdgeInsets,
     FlexChild, FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, HIGHLIGHT_FALLBACK,
     HeroView, Icon, IconButton, IconButtonView, IconData, IconSource, IconView, IconWidget, Image,
-    ImageError, ImageFit, ImageSource, ImageView, IndexedStack, IndexedStackView, ListView,
-    ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController,
-    NavigatorId, NavigatorView, NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView,
-    OverlaySide, OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition,
-    PageVisibility, PopResult, PushOptions, Radio, RadioView, RadioWidget, ReorderableListView,
-    ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollAxis, ScrollController,
-    ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox,
-    SizedBoxView, Slider, SliderView, SliverBoxView, SliverFillRemainingView,
-    SliverFixedExtentListView, SliverPaddingView, SourceFeedback, SpringDescription, Stack,
+    ImageError, ImageFit, ImageSource, ImageView, IndexedStack, IndexedStackView, KeepAliveHandle,
+    KeepAliveView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
+    MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
+    OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
+    PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
+    RadioView, RadioWidget, ReorderableListView, ResultCallback, Row, RubberBand, SafeAreaView,
+    ScaffoldView, ScrollAxis, ScrollController, ScrollInfo, ScrollMetrics, ScrollPhysics,
+    ScrollSubscription, ScrollView, Simulation, SizedBox, SizedBoxView, Slider, SliderView,
+    SliverBoxView, SliverFillRemainingView, SliverFixedExtentListView, SliverGridDelegate,
+    SliverGridView, SliverListView, SliverPaddingView, SourceFeedback, SpringDescription, Stack,
     StackView, TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec,
     TransitionState, VisibilityCallback, auto_scroll_zone, button, checkbox, colored_box, column,
     container, custom_scroll_view, divider, drag_target, draggable, flexible, hero, icon,
-    icon_button, indexed_stack, inflexible, keyed, list_view, overlay_portal, radio,
+    icon_button, indexed_stack, inflexible, keep_alive, keyed, list_view, overlay_portal, radio,
     reorderable_list, row, safe_area, scaffold, scroll_view, slider, sliver_box,
-    sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed,
-    sliver_padding, stack, text, text_input,
+    sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_grid,
+    sliver_grid_keyed, sliver_list, sliver_padding, stack, text, text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -3185,6 +3186,49 @@ mod structural_slivers_reexport {
             sliver_fill_remaining(text("footer")).has_scroll_body(false);
         let view: CustomScrollView<()> = custom_scroll_view((padded, rows, keyed, rest));
         let _ = view;
+    }
+}
+
+/// Facade-level check that the lazy slivers [`sliver_list`] (with
+/// [`keep_alive`] rows) and [`sliver_grid`] / [`sliver_grid_keyed`] with a
+/// [`SliverGridDelegate`] resolve through the `frust` facade.
+#[cfg(test)]
+mod lazy_slivers_reexport {
+    use crate::{
+        ChildKey, CustomScrollView, KeepAliveHandle, KeepAliveView, SliverGridDelegate,
+        SliverGridView, SliverListView, custom_scroll_view, keep_alive, sliver_grid,
+        sliver_grid_keyed, sliver_list, text,
+    };
+
+    #[test]
+    fn lazy_slivers_resolve_through_facade() {
+        let rows: SliverListView<()> = sliver_list(
+            5_000,
+            |i| ChildKey::new(i as u64),
+            |i| {
+                let row: KeepAliveView<()> = keep_alive(text(format!("row {i}"))).enabled(i < 3);
+                row
+            },
+        )
+        .estimated_item_extent(64.0)
+        .on_near_start(|_: &mut ()| {}, 400.0)
+        .on_near_end(|_: &mut ()| {}, 400.0);
+        let grid: SliverGridView<()> = sliver_grid(100, |i| text(format!("cell {i}"))).delegate(
+            SliverGridDelegate::MaxCrossAxisExtent {
+                max_cross_extent: 120.0,
+                main_spacing: 8.0,
+                cross_spacing: 8.0,
+                child_aspect_ratio: 1.0,
+            },
+        );
+        let keyed: SliverGridView<()> =
+            sliver_grid_keyed(10, ChildKey::new, |i| text(format!("photo {i}")));
+        let view: CustomScrollView<()> = custom_scroll_view((rows, grid, keyed));
+        let _ = view;
+        assert!(
+            KeepAliveHandle::acquire().is_none(),
+            "no lazy-list row is being built here"
+        );
     }
 }
 

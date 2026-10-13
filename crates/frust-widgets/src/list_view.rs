@@ -124,8 +124,10 @@
 //! offset, then out to cover the viewport ± [`BUFFER`]; each row is then placed
 //! at its own walked content `y` (`slot_y`) minus the offset. Reaching item 0
 //! re-pins `y = 0` exactly, erasing accumulated drift, and a jump farther than
-//! [`MAX_PREFIX_STEP`] items counts as a data reset rather than a scroll: its
-//! bulk resolves in closed form against the estimate, only the remainder walks.
+//! [`MAX_PREFIX_STEP`](reconcile::MAX_PREFIX_STEP) items counts as a data reset
+//! rather than a scroll: its bulk resolves in closed form against the estimate,
+//! only the remainder walks. The extent bookkeeping and the walk are
+//! `slivers/reconcile.rs`'s, shared with [`sliver_list`](crate::sliver_list).
 //!
 //! The builder still never runs outside rebuild, so a measurement that leaves the
 //! window no longer covering the viewport costs one convergence frame (*Viewport
@@ -401,7 +403,7 @@ use crate::physics::{ScrollPhysics, default_overscroll_effect};
 use crate::scroll::ScrollInfo;
 use crate::scroll_controller::{AnimateTo, ItemAlignment, ScrollController, ScrollToItem};
 use crate::scroll_core::{ScrollSurface, ScrollSurfaceCore};
-use crate::slivers::reconcile::{self, ItemViews, LiveRows};
+use crate::slivers::reconcile::{self, ItemViews, LiveRows, Measured};
 // The in-file tests reach these through `use super::*`; production code here
 // no longer names them since the machinery moved into `crate::scroll_core`.
 #[cfg(test)]
@@ -434,13 +436,6 @@ const ESTIMATE_NEEDS_KEYS_MSG: &str = "ListView::estimated_item_extent requires 
      ListView::builder_keyed: a measured extent is cached under the row's stable key, which a \
      positional list has none of (release: the estimate is ignored and the uniform extent path \
      runs)";
-
-/// The longest prefix walk a single frame will step item-by-item before
-/// resolving the remaining distance in closed form against the estimate. A
-/// scroll, a fling step, or a window shift moves the offset by far less than
-/// this; only a data reset or a programmatic jump reaches it, and the walk's
-/// result re-pins the anchor, so the very next frame is short again.
-const MAX_PREFIX_STEP: usize = 512;
 
 /// How many layouts a [`ScrollController::scroll_to_item`] request may spend
 /// settling — re-resolving the row's aligned position against freshly
@@ -475,18 +470,6 @@ type OnRefresh<State> = Rc<dyn Fn(&mut State)>;
 /// [`ListView::builder`]. Retained (an [`Rc`]) beside the builder, and — like the
 /// builder — a pure function of the index.
 type KeyOf = Rc<dyn Fn(usize) -> ChildKey>;
-
-/// One row's cached measurement in variable-extent mode, held under the row's
-/// stable key. See the [module docs](self)' *Variable extents* section.
-#[derive(Clone, Copy, Debug)]
-struct Measured {
-    /// The item index this row occupied the last time it was measured — the
-    /// only handle the cache has on "the current keying can no longer produce
-    /// this entry" when `item_count` shrinks.
-    index: usize,
-    /// The row's laid-out height (logical px).
-    extent: f64,
-}
 
 /// The motion tokens a controller command is applied with, resolved from the
 /// theme at every layout and paint and cached on the widget so the
@@ -1134,19 +1117,7 @@ impl<State: 'static> ListView<State> {
         item_count: usize,
         key_of: &KeyOf,
     ) -> bool {
-        if prev_index < item_count && key_of(prev_index) == key {
-            return true;
-        }
-        if delta != 0 {
-            let candidate = prev_index as isize + delta;
-            if candidate >= 0
-                && (candidate as usize) < item_count
-                && key_of(candidate as usize) == key
-            {
-                return true;
-            }
-        }
-        false
+        reconcile::probe_key(key, prev_index, delta, item_count, &**key_of).is_some()
     }
 }
 
@@ -1533,10 +1504,12 @@ impl ListViewWidget {
     /// docs](self)' *Variable extents* section.
     fn content_extent(&self) -> f64 {
         match self.variable_estimate() {
-            Some(estimate) => {
-                let unmeasured = self.item_count.saturating_sub(self.measured.len());
-                self.measured_sum + estimate * unmeasured as f64
-            }
+            Some(estimate) => reconcile::estimated_total(
+                self.measured_sum,
+                self.measured.len(),
+                self.item_count,
+                estimate,
+            ),
             None => self.item_count as f64 * self.item_extent,
         }
     }
@@ -1682,46 +1655,21 @@ impl ListViewWidget {
     /// first item the offset falls inside and that item's content-space top.
     ///
     /// O(step): a scroll/fling frame moves a few items; a jump farther than
-    /// [`MAX_PREFIX_STEP`] items resolves its bulk in closed form against the
-    /// estimate first. Reaching item 0 re-pins `y = 0` exactly, erasing any
-    /// floating-point drift the walk accumulated.
+    /// [`MAX_PREFIX_STEP`](reconcile::MAX_PREFIX_STEP) items resolves its bulk
+    /// in closed form against the estimate first. Reaching item 0 re-pins
+    /// `y = 0` exactly, erasing any floating-point drift the walk accumulated.
     fn walk_to_offset(&self, estimate: f64) -> (usize, f64) {
         let count = self.item_count;
         debug_assert!(count > 0, "walk_to_offset needs a non-empty list");
-        let target = self.placement_offset();
-        let mut index = self.anchor_index.min(count - 1);
-        let mut y = self.anchor_y;
-
-        let gap = target - y;
-        if gap.abs() > estimate * MAX_PREFIX_STEP as f64 {
-            // A data reset or a programmatic jump, never a scroll: cover the
-            // bulk against the estimate so the walk below stays bounded.
-            let jump = (gap / estimate).trunc();
-            let landed = (index as f64 + jump).clamp(0.0, (count - 1) as f64);
-            y += (landed - index as f64) * estimate;
-            index = landed as usize;
-        }
-
-        let mut steps = 0usize;
-        while y > target && index > 0 && steps < MAX_PREFIX_STEP {
-            index -= 1;
-            y -= self.extent_at(index, estimate);
-            steps += 1;
-        }
-        while index + 1 < count && steps < MAX_PREFIX_STEP {
-            let extent = self.extent_at(index, estimate);
-            if y + extent <= target {
-                y += extent;
-                index += 1;
-                steps += 1;
-            } else {
-                break;
-            }
-        }
-        if index == 0 {
-            y = 0.0;
-        }
-        (index, y)
+        let (index, y) = reconcile::walk_to_offset(
+            count,
+            self.anchor_index,
+            self.anchor_y,
+            self.placement_offset(),
+            estimate,
+            |index| self.extent_at(index, estimate),
+        );
+        if index == 0 { (0, 0.0) } else { (index, y) }
     }
 
     /// The variable-extent counterpart of [`ListViewWidget::desired_window`]:
@@ -1784,17 +1732,18 @@ impl ListViewWidget {
     /// Cache one row's laid-out extent under its stable key, keeping the running
     /// sum exact.
     fn record_measurement(&mut self, key: ChildKey, index: usize, extent: f64) {
-        match self.measured.insert(key, Measured { index, extent }) {
-            Some(previous) => self.measured_sum += extent - previous.extent,
-            None => self.measured_sum += extent,
-        }
+        reconcile::record_measurement(
+            &mut self.measured,
+            &mut self.measured_sum,
+            key,
+            index,
+            extent,
+        );
     }
 
     /// Drop one row's measurement (its key left the data).
     fn forget_measured(&mut self, key: &ChildKey) {
-        if let Some(previous) = self.measured.remove(key) {
-            self.measured_sum -= previous.extent;
-        }
+        reconcile::forget_measurement(&mut self.measured, &mut self.measured_sum, key);
     }
 
     /// Drop every measurement — a full replace, where no previous key survives.
@@ -1812,19 +1761,11 @@ impl ListViewWidget {
     /// index can evict a still-live row early; it is re-measured on its next
     /// visit, which is the conservative direction.
     fn evict_measured_stale_indices(&mut self) {
-        if self.measured.is_empty() {
-            return;
-        }
-        let count = self.item_count;
-        let mut dropped = 0.0;
-        self.measured.retain(|_, entry| {
-            let live = entry.index < count;
-            if !live {
-                dropped += entry.extent;
-            }
-            live
-        });
-        self.measured_sum -= dropped;
+        reconcile::evict_measurements_past(
+            &mut self.measured,
+            &mut self.measured_sum,
+            self.item_count,
+        );
     }
 
     /// Drop every variable-extent artifact: the measured cache, the per-slot
