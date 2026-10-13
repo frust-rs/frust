@@ -2286,6 +2286,7 @@ dependencies = [
  "criterion",
  "frust-gpu",
  "frust-scene",
+ "frust-text",
  "glifo",
  "kurbo",
  "log",
