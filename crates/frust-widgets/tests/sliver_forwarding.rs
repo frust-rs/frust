@@ -6,12 +6,13 @@
 //! in an arm that answered `None` would be laid out as a box instead.
 
 use frust_core::{
-    BoxConstraints, LayoutCtx, PaintCtx, PaintScene, SliverConstraints, SliverGeometry,
-    SliverWidget, Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, ScrollAxis,
+    ScrollDirection, SliverConstraints, SliverGeometry, SliverWidget, View, Widget, any,
 };
 use frust_widgets::{
-    EitherOf3Widget, EitherOf4Widget, EitherOf5Widget, EitherOf6Widget, EitherOf7Widget,
-    EitherOf8Widget, EitherWidget,
+    DragCoordinator, EitherOf3Widget, EitherOf4Widget, EitherOf5Widget, EitherOf6Widget,
+    EitherOf7Widget, EitherOf8Widget, EitherWidget, GestureDetector, ScrollController,
+    auto_scroll_zone, shield,
 };
 use kurbo::Size;
 
@@ -213,6 +214,132 @@ fn either_of_eight_forwards_every_arm() {
     }
 }
 
+/// A sliver of `extent` pixels of content, painting as much of it as the
+/// viewport's remaining paint extent allows.
+struct Extent(f64);
+
+impl Widget for Extent {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.max()
+    }
+
+    fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+
+    fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
+        Some(self)
+    }
+}
+
+impl SliverWidget for Extent {
+    fn layout_sliver(&mut self, _ctx: &mut LayoutCtx, sc: &SliverConstraints) -> SliverGeometry {
+        SliverGeometry::new(self.0, self.0.min(sc.remaining_paint_extent), self.0)
+    }
+}
+
+struct ExtentView(f64);
+
+impl<S: 'static> View<S> for ExtentView {
+    type Element = Extent;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> Extent {
+        Extent(self.0)
+    }
+
+    fn rebuild(&self, _prev: &Self, _element: &mut Extent, _ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        ChangeFlags::NONE
+    }
+}
+
+struct BoxedView;
+
+impl<S: 'static> View<S> for BoxedView {
+    type Element = Boxed;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> Boxed {
+        Boxed
+    }
+
+    fn rebuild(&self, _prev: &Self, _element: &mut Boxed, _ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        ChangeFlags::NONE
+    }
+}
+
+/// A sliver child, erased the way a caller hands a child to a wrapper.
+fn sliver_child() -> impl View<()> {
+    any(ExtentView(40.0))
+}
+
+/// A box child, erased the way a caller hands a child to a wrapper.
+fn box_child() -> impl View<()> {
+    any(BoxedView)
+}
+
+/// Build the element `view` produces, as a parent's reconciler does.
+fn build_element<V: View<()>>(view: &V) -> <V as View<()>>::Element {
+    let mut counter = 0u64;
+    view.build(&mut BuildCtx::new(&mut counter))
+}
+
+/// The constraints a vertical viewport hands a sliver at the top of its content.
+fn viewport_constraints() -> SliverConstraints {
+    SliverConstraints {
+        axis: ScrollAxis::Vertical,
+        scroll_offset: 0.0,
+        preceding_scroll_extent: 0.0,
+        overlap: 0.0,
+        remaining_paint_extent: 400.0,
+        cross_axis_extent: 300.0,
+        viewport_main_axis_extent: 400.0,
+        cache_origin: 0.0,
+        remaining_cache_extent: 400.0,
+        user_scroll_direction: ScrollDirection::Idle,
+    }
+}
+
+/// A wrapper over a sliver child answers `Some`, and laying it out the way a
+/// viewport does reports the child's paint extent.
+fn assert_forwards_sliver<W: Widget>(wrapper: &mut W) {
+    assert!(wrapper.as_sliver().is_some(), "sliver child must forward");
+    let mut ctx = LayoutCtx::new();
+    let geometry = wrapper
+        .as_sliver()
+        .expect("checked above")
+        .layout_sliver(&mut ctx, &viewport_constraints());
+    assert_eq!(
+        geometry.paint_extent, 40.0,
+        "paint extent of the sliver child"
+    );
+}
+
+/// A wrapper over a box child keeps answering `None`.
+fn assert_keeps_box<W: Widget>(wrapper: &mut W) {
+    assert!(wrapper.as_sliver().is_none(), "box child must stay a box");
+}
+
+#[test]
+fn shield_forwards_a_sliver_child_and_keeps_a_box_child_a_box() {
+    assert_forwards_sliver(&mut build_element(&shield(sliver_child())));
+    assert_keeps_box(&mut build_element(&shield(box_child())));
+}
+
+#[test]
+fn auto_scroll_zone_forwards_a_sliver_child_and_keeps_a_box_child_a_box() {
+    let sliver_zone = auto_scroll_zone(
+        sliver_child(),
+        DragCoordinator::new(),
+        ScrollController::new(),
+    );
+    assert_forwards_sliver(&mut build_element(&sliver_zone));
+    let box_zone = auto_scroll_zone(box_child(), DragCoordinator::new(), ScrollController::new());
+    assert_keeps_box(&mut build_element(&box_zone));
+}
+
+#[test]
+fn gesture_detector_forwards_a_sliver_child_and_keeps_a_box_child_a_box() {
+    assert_forwards_sliver(&mut build_element(&GestureDetector(sliver_child())));
+    assert_keeps_box(&mut build_element(&GestureDetector(box_child())));
+}
+
 /// Source-scan guard: every delegating wrapper that holds its arm or child
 /// directly must keep its `as_sliver` forward. A new transparent wrapper that
 /// omits the forward turns a sliver into a box, silently, so the list below is
@@ -222,7 +349,11 @@ fn either_of_eight_forwards_every_arm() {
 /// - `EitherWidget` (`src/either.rs`), and the `either_of!` macro that generates
 ///   `EitherOf3Widget` .. `EitherOf8Widget`;
 /// - `HeroWidget` (`src/nav/hero.rs`), the shared-element wrapper that answers as
-///   its own sliver face through its child pod.
+///   its own sliver face through its child pod;
+/// - `ShieldWidget` (`src/platform_view.rs`), the input-shield wrapper;
+/// - `AutoScrollZoneWidget` (`src/drag/auto_scroll.rs`), the drag auto-scroll
+///   zone;
+/// - `GestureDetectorWidget` (`src/gesture.rs`), the gesture recognizer wrapper.
 #[test]
 fn transparent_wrappers_forward_as_sliver() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -232,6 +363,12 @@ fn transparent_wrappers_forward_as_sliver() {
             "impl<L: Widget, R: Widget> Widget for EitherWidget<L, R> {",
         ),
         ("src/nav/hero.rs", "impl Widget for HeroWidget {"),
+        ("src/platform_view.rs", "impl Widget for ShieldWidget {"),
+        (
+            "src/drag/auto_scroll.rs",
+            "impl Widget for AutoScrollZoneWidget {",
+        ),
+        ("src/gesture.rs", "impl Widget for GestureDetectorWidget {"),
     ];
     for (path, header) in headers {
         let text = std::fs::read_to_string(manifest.join(path))
