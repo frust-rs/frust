@@ -7,11 +7,16 @@ substrate, in two halves with opposite directions: the Android platform-handle s
 (JavaVM/Context) a shell writes and a JNI-reaching plugin reads, and the desktop view-factory
 registry a plugin writes and a desktop shell reads. On top of it sit the independent
 OS-capability plugins — `shared-preferences`, `secure-storage`, `camera`, `clipboard`, `haptics`,
-`iap`, `video-player`, `url-launcher`, and `auth-session` — each exposing one platform-independent
+`iap`, `video-player`, `url-launcher`, `auth-session`, and `share` — each exposing one platform-independent
 public API behind a per-platform backend. `url-launcher` opens an absolute `http`/`https` URL in the
 platform's default external browser, fire-and-forget, over Android `ACTION_VIEW`, iOS
 `openURL:options:completionHandler:`, or a desktop opener — the launch half of an RFC 8252 OAuth
-round trip, whose completion returns through `frust::deep_links()`. `iap` is in-app purchases
+round trip, whose completion returns through `frust::deep_links()`. It also carries Maps https helpers
+(`Maps::directions` / `directions_to` / `show`: Apple Maps on iOS/macOS, Google Maps elsewhere, through
+the unchanged `url.rs` validator) and a native-scheme arm, `UrlLauncher::open_maps_native`, behind
+`deeplink.rs`'s allowlist (`geo`/`maps`/`comgooglemaps`/`google.navigation`; `NoHandler` on desktop).
+`share` opens the platform share sheet for text or a URL (Android chooser, iOS activity sheet, a
+clipboard copy on desktop). `iap` is in-app purchases
 and subscriptions over OpenIAP 3.0.1: Play
 Billing via the `openiap-google` Kotlin host on Android, StoreKit 2 via the `FrustIap` Swift glue on
 iOS, both sides speaking a JSON-string wire protocol, with purchase outcomes delivered on a
@@ -20,6 +25,7 @@ a bundled asset, or an `http(s)` URL — progressive download or HLS — over Me
 Android and AVPlayer on iOS *and* macOS, publishing its picture into a native platform-view slot
 rather than painting a frame itself.
 
+`plugins/qr` (`frust-qr`) is likewise facade-tier: a canvas-painted, scannable `qr_code(payload)` view.
 `clean-signals-frust` is a facade-tier plugin gluing the external `clean_signals`
 clean-architecture core into Frust's `Component`/reactive model; it is a standalone workspace
 excluded from the root Cargo graph pending a crates.io publication of its dependency.
@@ -56,13 +62,15 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 |--------|-----------------|
 | `crates/frust-plugin` | Android platform-handle substrate (JavaVM/Context) plus a scoped JNI-attach helper, and the process-global desktop view-factory registry a plugin publishes a native-view factory into and a desktop shell resolves a `view_type` through. The registry half is std-only and compiles on every target; the Android half is inert off Android, and there is no Apple-specific surface at all |
 | `plugins/shared-preferences` | Synchronous KV store routed to NSUserDefaults, Android SharedPreferences, or a JSON file backend |
-| `plugins/secure-storage` | Synchronous, named-store secure string storage with an optional biometric gate, routed to Keychain, Android Keystore, or keyring-core |
+| `plugins/secure-storage` | Synchronous, named-store secure string storage with an optional biometric gate, routed to Keychain, Android Keystore, or keyring-core; a debug-only, desktop-only `insecure_file` fallback stores plaintext JSON instead |
 | `plugins/camera` | Camera capability (permission, still capture, image stream, barcode/QR decode, torch) over CameraX (Android) or AVFoundation (Apple); preview surfaces as a native platform-view slot |
 | `plugins/clipboard` | Synchronous plain-text clipboard over Android `ClipboardManager` (10+ returns nothing to an unfocused reader), iOS `UIPasteboard` (14+ shows a one-time paste banner), or desktop `arboard` (X11 clipboard content dies with the owning process unless a clipboard manager adopts it) |
 | `plugins/haptics` | Fire-and-forget haptic effects over Android `Vibrator`/`VibrationEffect` or iOS `UI*FeedbackGenerator`; desktop is unavailable by design (no first-class API to route to) |
 | `plugins/iap` | In-app purchases and subscriptions (products, purchases, restore, deep-link to subscription management) over Play Billing (`openiap-google`) or StoreKit 2 (`FrustIap` Swift glue), both speaking OpenIAP 3.0.1; desktop is a v1 deferral, not a capability gap |
 | `plugins/video-player` | Video playback (file, bundled-asset, `http(s)` and HLS sources; play/pause/seek/rate/volume/loop; lifecycle state and events) over Media3 ExoPlayer on Android or AVPlayer on iOS and macOS; the picture is a native platform-view slot, never a frame this crate paints |
-| `plugins/url-launcher` | Fire-and-forget launch of an absolute http/https URL in the platform's default external browser over Android `ACTION_VIEW` (application-`Context` + `NEW_TASK`), iOS `openURL:options:completionHandler:` (async main-queue bounce), or desktop `xdg-open` / `open` / `ShellExecuteW`; the launch half of an RFC 8252 OAuth round trip — completion returns through `frust::deep_links()` |
+| `plugins/url-launcher` | Fire-and-forget launch of an absolute http/https URL in the platform's default external browser over Android `ACTION_VIEW` (application-`Context` + `NEW_TASK`), iOS `openURL:options:completionHandler:` (async main-queue bounce), or desktop `xdg-open` / `open` / `ShellExecuteW`; the launch half of an RFC 8252 OAuth round trip — completion returns through `frust::deep_links()`; `Maps` builds Apple/Google Maps https URLs and `open_maps_native` opens an allowlisted `geo:`/`maps:`/`comgooglemaps:`/`google.navigation:` URL |
+| `plugins/share` | Share sheet for text or a URL (`Share::text` / `text_anchored` / `url`, `ShareOutcome`) over Android `ACTION_SEND` chooser (plain JNI), iOS `UIActivityViewController` (main queue, iPad popover anchored to an optional `ShareAnchor` rect or centred), or a desktop clipboard copy |
+| `plugins/qr` | Facade-tier QR code view (`qr_code(payload)`, ECC level, quiet zone, colours) over `qrcode`, painted on a canvas; also `encode`/`QrMatrix` for the raw module matrix |
 | `plugins/auth-session` | OAuth authorization round trip in the platform auth user agent — `ASWebAuthenticationSession` (iOS/macOS; the callback URL returns in-process, no custom-scheme intent) or Chrome Custom Tabs (Android; a Gradle module whose Kotlin host launches from the resumed Activity and reads the callback Intent on resume) — resolving an awaitable `Callback(url)`/`Cancelled` with a one-session (Busy) guard and an ephemeral mode; plus a desktop RFC 8252 loopback-redirect backend (`LoopbackSession`, Linux/Windows/macOS) sharing the same Busy slot through `frust-url-launcher`'s system-browser launch — the custom-scheme `AuthSession::start` itself still reports `NoHandler` on Linux/Windows |
 | `plugins/oauth-native` | Pure-Rust RFC 8252 native-client helper: PKCE (S256), `state`, the authorization URL, and callback/token-response parsing (incl. RFC 9207 `iss`); no OS integration, no HTTP client, no `frust-*` dependency — pairs with `auth-session`'s or `url-launcher`'s transport |
 | `plugins/clean-signals-frust` | Facade-tier glue crate binding the `clean_signals` clean-architecture core into Frust's `Component`/reactive model |
@@ -86,13 +94,15 @@ preview or a `frust build macos|windows|linux`. See
 | Plugin | Desktop status | Detail |
 |--------|-----------------|--------|
 | `shared-preferences` | generic-desktop, macOS-native on macOS | NSUserDefaults (macOS, sharing the Apple arm with iOS) / a JSON file backend (Linux, Windows) |
-| `secure-storage` | generic-desktop, macOS-native on macOS | Keychain (macOS, sharing the Apple arm with iOS) / `keyring-core` + secret-service or Credential Manager (Linux, Windows) |
+| `secure-storage` | generic-desktop, macOS-native on macOS | Keychain (macOS, sharing the Apple arm with iOS) / `keyring-core` + secret-service or Credential Manager (Linux, Windows); debug builds may opt into a plaintext JSON file under `data_dir()` instead, refused in release |
 | `camera` | macOS-native only | AVFoundation (macOS, sharing the Apple arm with iOS); no backend at all on Linux/Windows |
 | `clipboard` | generic-desktop | `arboard` on macOS, Linux, and Windows alike — macOS shares this arm rather than its own Apple `UIPasteboard` one (UIKit-only) |
 | `haptics` | unavailable-by-design | no first-class OS API to route to, on macOS, Linux, or Windows |
 | `iap` | deferred (v1) | dependency-free, always-erroring stub on macOS, Linux, and Windows — mobile-first scope, not a capability gap (`iap-desktop-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
 | `video-player` | macOS-native (Mode A) via the desktop platform-view host | AVPlayer (macOS, sharing the Apple arm with iOS), its `NSView` hosted above the window's content view by the desktop shell; Windows and Linux have no backend at all (`video-web-windows-linux-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
-| `url-launcher` | generic-desktop | `xdg-open` (Linux), `open` (macOS), `ShellExecuteW` (Windows); desktop receives no deep links, so an OAuth round trip needs a typed-code fallback |
+| `url-launcher` | generic-desktop | `xdg-open` (Linux), `open` (macOS), `ShellExecuteW` (Windows); desktop receives no deep links, so an OAuth round trip needs a typed-code fallback; native map schemes: `NoHandler` on desktop, `Maps::directions` is the https path |
+| `share` | generic-desktop | clipboard copy through `frust-clipboard` (`CopiedToClipboard`), no sheet |
+| `qr` | platform-free | pure encode plus canvas paint over the facade; no OS integration |
 | `auth-session` | generic-desktop (loopback) plus macOS-native (custom scheme) | `ASWebAuthenticationSession` with an AppKit key-window anchor answers the custom-scheme `AuthSession::start` on macOS only (`NoHandler` on Linux/Windows); `LoopbackSession`'s RFC 8252 §7.3 listener (`127.0.0.1`, ephemeral port) plus `frust-url-launcher`'s system-browser launch backs all three desktop targets instead (exercised on Linux and Windows, 2026-10-01; `plugins/auth-session/README.md` §6 *Tested platforms*) |
 | `clean-signals-frust` | platform-free | facade-tier glue with no OS integration to split by platform at all |
 | `database` | platform-free | file IO via `rusqlite`/`turso`; no OS integration, so no platform split |
@@ -157,6 +167,7 @@ dependency always runs from an app's own manifest into the plugin, never through
 substrate is directional in both halves — **shells write platform handles and plugins read them;
 plugins write desktop view factories and desktop shells read them** — which is what keeps
 `frust-plugin` a leaf either way, with neither side ever naming the other.
+`share` adds a second such edge, `frust-clipboard`, desktop-gated (`macos`/`linux`/`windows`) for its copy fallback; `qr` depends on the `frust` facade only; `secure-storage` reaches the `frust-paths` leaf (desktop-gated) for the fallback file.
 `auth-session` is the tier's first plugin-to-plugin edge: its desktop `LoopbackSession` backend
 depends on `frust-url-launcher` (target-gated to `linux`/`windows`/`macos`) to open the
 authorization URL in the system browser rather than re-implementing that launch itself. The

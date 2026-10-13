@@ -230,6 +230,9 @@ contract that dialog encodes.
 
 ## Links and license
 
+The playground's URL page (`examples/playground/src/pages/url_launcher.rs`) is the manual-test
+surface for the sibling `frust-share`, `frust-qr` and `frust-url-launcher` plugins.
+
 Documentation: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
 
 ## License

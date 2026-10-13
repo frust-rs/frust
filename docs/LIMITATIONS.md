@@ -6990,6 +6990,76 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
+### `share-desktop-clipboard-fallback` — desktop has no share sheet, so `frust-share` copies to the clipboard
+
+**Observed**: `Share::text`/`url` on macOS, Linux, and Windows copy the payload through `frust-clipboard` and return `ShareOutcome::CopiedToClipboard`; no sheet appears. The Android chooser and iOS activity sheet are unverified on device until the share device gate runs.
+
+**Applies to**: macOS, Linux, and Windows; every `Share` call.
+
+**Why accepted**: no desktop OS exposes a uniform share sheet worth a per-platform backend; a clipboard copy keeps the API usable in desktop previews, and the outcome variant tells the caller which path ran.
+
+**Trigger for removal**: a desktop share-sheet backend (e.g. the macOS `NSSharingServicePicker`) ships.
+
+**Evidence**: `plugins/share/src/desktop.rs`; `plugins/share/README.md`.
+
+---
+
+### `share-ipad-popover-anchor-optional` — the iPad popover anchor is optional and the playground passes a fixed rect
+
+**Observed**: on iPad the activity sheet is a popover; `Share::text_anchored` takes a `ShareAnchor` rect, and without one the popover is centred with `permittedArrowDirections = 0` (no arrow). The widget tier has no laid-out-rect seam, so the playground's URL page passes a fixed, known-position rect (`SHARE_ANCHOR_RECT`) that drifts if the page layout changes. Unverified on iPad until the share device gate runs.
+
+**Applies to**: iPad only; apps whose share button position is not known in window coordinates.
+
+**Why accepted**: the popover needs a source rect and the framework does not yet surface a widget's laid-out rect to app code; centred-without-arrow is a safe default that never raises.
+
+**Trigger for removal**: the widget tier exposes a laid-out-rect seam the playground (and apps) can read.
+
+**Evidence**: `plugins/share/src/apple.rs` (*iPad popover*); `examples/playground/src/pages/url_launcher.rs` (`SHARE_ANCHOR_RECT`).
+
+---
+
+### `url-launcher-native-maps-desktop-unsupported` — native map schemes have no desktop handler
+
+**Observed**: `UrlLauncher::open_maps_native` (allowlisted `geo`/`maps`/`comgooglemaps`/`google.navigation`) reuses the Android `ACTION_VIEW` and iOS `openURL` backends and returns `NoHandler` on desktop. Android 11+ package visibility for `geo:` is unverified on devices until the share/maps device gate runs.
+
+**Applies to**: macOS, Linux, and Windows; Android 11+ for `geo:` (unverified).
+
+**Why accepted**: desktops have no registered handler for these schemes; `Maps::directions` / `directions_to` / `show` are the https path that works everywhere.
+
+**Trigger for removal**: a desktop native-maps route, and a device run confirming `geo:` resolves under Android 11+ package visibility.
+
+**Evidence**: `plugins/url-launcher/src/deeplink.rs`; `plugins/url-launcher/src/maps.rs`.
+
+---
+
+### `secure-storage-insecure-file-debug-only` — the plaintext file fallback is debug-desktop-only and not hardened
+
+**Observed**: `frust-secure-storage`'s `insecure_file` backend (opt in via `StoreOptions::with_insecure_file_fallback()` or `FRUST_SECURE_STORAGE_INSECURE_FILE=1`) stores values as plaintext JSON at `data_dir()/frust-secure-storage/insecure-store.json` (0600 on unix, atomic writes). It is compiled only in debug builds on desktop; release builds and mobile log an error and use the native backend. The lock is in-process only, with no cross-process locking, and biometric-gated opens answer `NotAvailable(UnsupportedPlatform)`. Linux and Windows behaviour is verified by host tests and cross-target checks only, not on a device.
+
+**Applies to**: debug builds on macOS, Linux, and Windows that opt in.
+
+**Why accepted**: it exists so `cargo run` previews work on a box without a keyring; confining it to debug builds keeps plaintext secrets out of shipped apps.
+
+**Trigger for removal**: none anticipated; the fallback stays a development aid.
+
+**Evidence**: `plugins/secure-storage/src/insecure_file.rs`.
+
+---
+
+### `secure-storage-linux-no-secret-service` — Linux without a Secret Service daemon cannot open a secure store
+
+**Observed**: `frust-secure-storage`'s Linux backend goes through `keyring-core` and a Secret Service daemon; on a host with none (a bare session or container), store init fails. Debug builds can opt into the plaintext fallback (see `secure-storage-insecure-file-debug-only`); the error text hints `FRUST_SECURE_STORAGE_INSECURE_FILE=1`. Release builds have no fallback.
+
+**Applies to**: Linux hosts without a running Secret Service (e.g. gnome-keyring, KeePassXC).
+
+**Why accepted**: a secure store without an OS keyring would be plaintext; the debug-only fallback covers development, and production hosts are expected to run a keyring.
+
+**Trigger for removal**: a hardened non-keyring Linux backend, or a documented headless provisioning path.
+
+**Evidence**: `plugins/secure-storage/src/desktop.rs`; `plugins/secure-storage/src/insecure_file.rs`.
+
+---
+
 ### `auth-session-android-callback-rides-intent-filter` — Android cannot prove the OAuth callback scheme is bound to this app
 
 **Observed**: `FrustAuthSessionHost` observes the redirect through the same ordinary custom-scheme `<intent-filter>` (`action.VIEW` + `BROWSABLE` + `android:scheme`) every frust app registers for deep links (`examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` filter) — a plain custom scheme carries no Android App Links-style domain verification, so any other installed app that claims the same scheme string can intercept or forge the redirect before this host ever sees it. The slot is also exposed to injected intents from the same app (a compromised Activity can call `startActivity` with the callback scheme), and to tapped links in the browser or another app that claim the same scheme. The session generation does not narrow any of this: the host keeps only the latest launch's generation in its single `pending` slot and stamps whichever callback-scheme `Intent` it observes on the next Activity resume with that value — the generation never travels through the browser or the redirect URL, so a superseded tab's late redirect, or an injected `Intent`, is attributed to the live session by timing rather than evidence. The generation only lets the Rust side discard a result for a session that is no longer live (dropped future, already resolved).

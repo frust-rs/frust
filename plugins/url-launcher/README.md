@@ -494,6 +494,10 @@ Android 11+ package visibility for `geo:` is not yet verified on devices.
 
 ## Links and license
 
+Manual-test surface: the playground's URL page
+(`examples/playground/src/pages/url_launcher.rs`), whose Maps buttons exercise the helpers above.
+To share a maps link instead of opening it, see [`frust-share`](../share/README.md).
+
 Documentation: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
 
 ## License

@@ -57,6 +57,13 @@ No `Info.plist` key or entitlement is needed.
 - [ ] iPad: popover anchors to the button rect.
 - [ ] Desktop: payload lands on the clipboard.
 
+## Related
+
+Manual-test surface: the playground's URL page
+(`examples/playground/src/pages/url_launcher.rs`, More -> URL). Desktop copies through
+[`frust-clipboard`](../clipboard/README.md); for maps links see
+[`frust-url-launcher`](../url-launcher/README.md)'s *Maps* section.
+
 ## License
 
 Licensed under either of Apache License 2.0 or MIT, at your option.

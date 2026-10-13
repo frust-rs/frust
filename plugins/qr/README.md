@@ -29,3 +29,9 @@ pixel grid; the remainder is split evenly around the symbol. An unencodable
 payload (empty or over capacity) paints only the background; see
 `QrCodeView::error`. The accessibility node is an image labelled "QR code"
 unless `semantic_label` says otherwise.
+
+## Related
+
+Manual-test surface: the 160 px tile on the playground's URL page
+(`examples/playground/src/pages/url_launcher.rs`); scan it with a phone camera and edit the
+payload to rescan.
