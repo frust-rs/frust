@@ -22,6 +22,9 @@ pub enum DecodeError {
     /// The bytes are not a supported image.
     #[error("image decode failed: {0}")]
     Decode(String),
+    /// The bytes are a recognised format this build cannot decode.
+    #[error("unsupported image format: {0} (enable the matching crate feature)")]
+    UnsupportedFormat(String),
     /// The blocking decode task did not complete.
     #[error("decode task failed: {0}")]
     Task(String),
@@ -56,6 +59,10 @@ pub(crate) fn decode_and_fit(
     let reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| DecodeError::Decode(e.to_string()))?;
+    #[cfg(not(feature = "webp"))]
+    if reader.format() == Some(image::ImageFormat::WebP) {
+        return Err(DecodeError::UnsupportedFormat("WebP".into()));
+    }
     let mut img = reader
         .decode()
         .map_err(|e| DecodeError::Decode(e.to_string()))?;
