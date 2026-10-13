@@ -14,6 +14,14 @@
 //! *manual* mode that performs the same comparison by hand — a skipping pass,
 //! a snapshot, a forced pass, a snapshot — and the panic names every widget
 //! type whose geometry differed and the script step it differed on.
+//!
+//! Every scenario then runs a second time **gated**, the way the shells drive
+//! a root: a frame lays out only when `take_change_flags().needs_layout()`
+//! asks. The audit cannot see a dirtying channel that never reaches the
+//! pending flags — it runs inside a pass, and the gate skips the pass — so a
+//! frame the gate skips is checked instead: a forced pass must find every
+//! pod's geometry already current. A difference there is a pod the shells
+//! would have left stale.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -71,8 +79,13 @@ struct Harness<S: 'static> {
     ms: f64,
     frames: u32,
     step: &'static str,
-    /// Manual mode: `step: Type` for every pod whose geometry differed.
+    /// Manual mode: `step: Type` for every pod whose geometry differed (and,
+    /// gated, every pod a skipped frame left stale, in any checking mode).
     named: Vec<String>,
+    /// Lay out only when the pending flags ask (see [`Harness::frame_gated`]).
+    gated: bool,
+    /// Gated: pods a frame the gate skipped left with stale geometry.
+    gate_misses: u64,
 }
 
 impl<S: 'static> Harness<S> {
@@ -94,9 +107,19 @@ impl<S: 'static> Harness<S> {
             frames: 0,
             step: "mount",
             named: Vec::new(),
+            gated: false,
+            gate_misses: 0,
         };
         harness.frames(3);
         harness
+    }
+
+    /// Switch to gated frames. The mount frames above ran ungated, standing in
+    /// for the shells' forced first frame; whatever they left pending is
+    /// drained by the first gated frame.
+    fn gate(mut self) -> Self {
+        self.gated = true;
+        self
     }
 
     fn step(&mut self, step: &'static str) {
@@ -128,34 +151,67 @@ impl<S: 'static> Harness<S> {
             }
             Mode::Manual => {
                 self.root.layout_with_text(WINDOW, &mut self.tcx);
-                let before = self.geometry();
-                self.root.set_layout_skip(false);
-                self.root.layout_with_text(WINDOW, &mut self.tcx);
-                self.root.set_layout_skip(true);
-                for (id, (name, origin, size)) in self.geometry() {
-                    let Some((_, was_origin, was_size)) = before.get(&id) else {
-                        continue;
-                    };
-                    let differs = (was_origin.x - origin.x).abs() > 1e-3
-                        || (was_origin.y - origin.y).abs() > 1e-3
-                        || (was_size.width - size.width).abs() > 1e-3
-                        || (was_size.height - size.height).abs() > 1e-3;
-                    if differs {
-                        let short = name.rsplit("::").next().unwrap_or(name);
-                        let entry = format!("{}: {short}", self.step);
-                        if !self.named.contains(&entry) {
-                            self.named.push(entry);
-                        }
-                    }
-                }
+                self.forced_pass_differs("");
             }
         }
     }
 
+    /// Run a forced pass over the current geometry and record (as
+    /// `step: Type`, with `tag` before the type) every pod it moved or
+    /// resized. Returns how many differed.
+    fn forced_pass_differs(&mut self, tag: &str) -> u64 {
+        let before = self.geometry();
+        self.root.set_layout_skip(false);
+        self.root.layout_with_text(WINDOW, &mut self.tcx);
+        self.root.set_layout_skip(true);
+        let mut count = 0;
+        for (id, (name, origin, size)) in self.geometry() {
+            let Some((_, was_origin, was_size)) = before.get(&id) else {
+                continue;
+            };
+            let differs = (was_origin.x - origin.x).abs() > 1e-3
+                || (was_origin.y - origin.y).abs() > 1e-3
+                || (was_size.width - size.width).abs() > 1e-3
+                || (was_size.height - size.height).abs() > 1e-3;
+            if differs {
+                count += 1;
+                let short = name.rsplit("::").next().unwrap_or(name);
+                let entry = format!("{}: {tag}{short}", self.step);
+                if !self.named.contains(&entry) {
+                    self.named.push(entry);
+                }
+            }
+        }
+        count
+    }
+
     /// One whole frame: rebuild, layout (checked), paint.
     fn frame(&mut self) {
+        if self.gated {
+            self.frame_gated();
+            return;
+        }
         self.root.rebuild(&mut self.logic, &mut self.state);
         self.layout();
+        self.paint();
+    }
+
+    /// One whole frame the way the shells run it: rebuild, then lay out only
+    /// when `take_change_flags().needs_layout()` asks (checked like any other
+    /// pass), then paint. A frame the gate skips is checked too, outside the
+    /// plain mode: a forced pass must find nothing to move — anything it does
+    /// move is a pod some channel dirtied without reaching the pending flags.
+    fn frame_gated(&mut self) {
+        self.root.rebuild(&mut self.logic, &mut self.state);
+        if self.root.take_change_flags().needs_layout() {
+            self.layout();
+        } else if self.mode != Mode::Plain {
+            self.gate_misses += self.forced_pass_differs("gate skipped ");
+        }
+        self.paint();
+    }
+
+    fn paint(&mut self) {
         self.ms += FRAME_MS;
         self.root.paint(
             &mut DiscardScene,
@@ -232,28 +288,37 @@ impl<S: 'static> Harness<S> {
     }
 }
 
-/// Run `script` under the audit; on any mismatch re-run it in manual mode and
-/// panic naming every widget whose geometry the skip left stale.
+/// Run `script` under the audit, then again gated (see [`Harness::frame_gated`]);
+/// on any mismatch re-run it in manual mode (gated alike) and panic naming
+/// every widget whose geometry the skip — or the gate — left stale.
 fn check<S: 'static>(
     name: &str,
     make: impl Fn(Mode) -> Harness<S>,
     script: impl Fn(&mut Harness<S>),
 ) {
-    let mut audited = make(Mode::Audit);
-    script(&mut audited);
-    assert!(
-        audited.frames >= MIN_FRAMES,
-        "{name}: the script ran {} frames, fewer than {MIN_FRAMES}",
-        audited.frames
-    );
-    let mismatches = audited.root.layout_audit_mismatches();
-    if mismatches != 0 {
-        let mut manual = make(Mode::Manual);
-        script(&mut manual);
-        panic!(
-            "{name}: the layout audit found {mismatches} stale pod(s); by hand: {:#?}",
-            manual.named
+    for gated in [false, true] {
+        let mut audited = make(Mode::Audit);
+        if gated {
+            audited = audited.gate();
+        }
+        script(&mut audited);
+        assert!(
+            audited.frames >= MIN_FRAMES,
+            "{name}: the script ran {} frames, fewer than {MIN_FRAMES}",
+            audited.frames
         );
+        let mismatches = audited.root.layout_audit_mismatches() + audited.gate_misses;
+        if mismatches != 0 {
+            let mut manual = make(Mode::Manual);
+            if gated {
+                manual = manual.gate();
+            }
+            script(&mut manual);
+            panic!(
+                "{name} (gated: {gated}): the layout audit found {mismatches} stale pod(s); by hand: {:#?}",
+                manual.named
+            );
+        }
     }
 }
 
@@ -680,6 +745,61 @@ fn text_input_ime_commits_stay_in_sync() {
             h.state.value
         );
     });
+}
+
+/// The lone-field shape: a multiline field with no sibling whose rebuild would
+/// report `LAYOUT` for it. Its growth reaches the pending flags only through
+/// the event itself (the edit is consumed and asks for a redraw) — the
+/// controlled value the next rebuild hands back already equals the editor's
+/// text, so that rebuild reports nothing.
+#[test]
+fn a_lone_multiline_text_input_grows_under_the_gate() {
+    #[derive(Default)]
+    struct App {
+        value: String,
+    }
+    let mut h = Harness::new(Mode::Plain, App::default(), |state: &mut App| {
+        any(Column(
+            text_input(state.value.clone(), |state: &mut App, value| {
+                state.value = value
+            })
+            .multiline(5),
+        ))
+    })
+    .gate();
+    let key = |key: Key| {
+        InputEvent::Key(KeyEvent {
+            key,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    };
+    let height = |h: &Harness<App>| {
+        h.root
+            .inspect()
+            .iter()
+            .find(|n| n.type_name.contains("TextInputWidget"))
+            .map(|n| n.bounds.height())
+            .expect("the field is in the tree")
+    };
+    h.step("focus");
+    let at = h.center_of("TextInputWidget");
+    h.tap(at);
+    h.frames(2);
+    let one_line = height(&h);
+    h.step("Enter + text");
+    h.event(key(Key::Character("a".into())));
+    h.frame();
+    h.event(key(Key::Named(NamedKey::Enter)));
+    h.frame();
+    h.event(key(Key::Character("b".into())));
+    h.frames(2);
+    assert_eq!(h.state.value, "a\nb", "the edits reached on_change");
+    assert!(
+        height(&h) > one_line,
+        "the field grew to two lines under the gate: {one_line} -> {}",
+        height(&h)
+    );
 }
 
 // ---------------------------------------------------------------------------
