@@ -2543,6 +2543,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-qr"
+version = "0.6.1"
+dependencies = [
+ "frust-core",
+ "frust-reactive",
+ "frust-ui",
+ "qrcode",
+ "rqrr",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "frust-reactive"
 version = "0.6.1"
 dependencies = [
