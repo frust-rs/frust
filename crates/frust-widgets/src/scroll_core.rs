@@ -51,7 +51,8 @@ use std::rc::Rc;
 
 use frust_core::{
     EventCtx, EventResult, FLING_STOP, FrameTime, InputEvent, PaintCtx, PointerEvent, PointerPhase,
-    ScrollDelta, TOUCH_SLOP, VelocityTracker, WHEEL_LINE_PX, fling_decay, fling_displacement,
+    ScrollAxis, ScrollDelta, TOUCH_SLOP, VelocityTracker, WHEEL_LINE_PX, fling_decay,
+    fling_displacement,
 };
 use kurbo::{Affine, Point, Size};
 
@@ -93,44 +94,23 @@ impl BallisticState {
     }
 }
 
-/// The axis a core reads pointer travel and wheel deltas along. Local to the
-/// core: `frust_core` has no crate-wide scroll-axis type for it to reuse.
-/// Only the event-space projection reads it — the owner's geometry decides
-/// what the position means on screen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum ScrollAxis {
-    /// Top-to-bottom: pointer `y`, a wheel's vertical delta.
-    #[default]
-    Vertical,
-    /// Leading-to-trailing: pointer `x`, a wheel's horizontal delta.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no shipped surface scrolls horizontally yet; the core's tests pin it"
-        )
-    )]
-    Horizontal,
+/// The component of `point` along `axis` (event-space projection only — the
+/// owner's geometry decides what the position means on screen).
+fn axis_along(axis: ScrollAxis, point: Point) -> f64 {
+    match axis {
+        ScrollAxis::Vertical => point.y,
+        ScrollAxis::Horizontal => point.x,
+    }
 }
 
-impl ScrollAxis {
-    /// The component of `point` along this axis.
-    fn along(self, point: Point) -> f64 {
-        match self {
-            ScrollAxis::Vertical => point.y,
-            ScrollAxis::Horizontal => point.x,
-        }
-    }
-
-    /// A wheel `delta`'s travel along this axis in logical px (a line is
-    /// [`WHEEL_LINE_PX`]).
-    fn wheel_delta(self, delta: &ScrollDelta) -> f64 {
-        match (self, delta) {
-            (ScrollAxis::Vertical, ScrollDelta::Lines(_, y)) => y * WHEEL_LINE_PX,
-            (ScrollAxis::Vertical, ScrollDelta::Pixels(_, y)) => *y,
-            (ScrollAxis::Horizontal, ScrollDelta::Lines(x, _)) => x * WHEEL_LINE_PX,
-            (ScrollAxis::Horizontal, ScrollDelta::Pixels(x, _)) => *x,
-        }
+/// A wheel `delta`'s travel along `axis` in logical px (a line is
+/// [`WHEEL_LINE_PX`]).
+fn axis_wheel_delta(axis: ScrollAxis, delta: &ScrollDelta) -> f64 {
+    match (axis, delta) {
+        (ScrollAxis::Vertical, ScrollDelta::Lines(_, y)) => y * WHEEL_LINE_PX,
+        (ScrollAxis::Vertical, ScrollDelta::Pixels(_, y)) => *y,
+        (ScrollAxis::Horizontal, ScrollDelta::Lines(x, _)) => x * WHEEL_LINE_PX,
+        (ScrollAxis::Horizontal, ScrollDelta::Pixels(x, _)) => *x,
     }
 }
 
@@ -1065,7 +1045,7 @@ pub(crate) trait ScrollSurface {
     /// physics consulted — the clamp is a property of the input device, not of
     /// the installed feel), ending any motion in flight.
     fn handle_wheel(&mut self, ctx: &mut EventCtx, delta: &ScrollDelta) -> EventResult {
-        let travel = self.core().axis.wheel_delta(delta);
+        let travel = axis_wheel_delta(self.core().axis, delta);
         self.core_mut().halt_motion();
         self.on_user_input();
         self.core_mut().edge_pull = 0.0;
@@ -1135,7 +1115,7 @@ pub(crate) trait ScrollSurface {
         core.down_start = p.position;
         core.last_drag = p.position;
         core.tracker.clear();
-        core.tracker.record(t_ms, core.axis.along(p.position));
+        core.tracker.record(t_ms, axis_along(core.axis, p.position));
         ctx.capture_pointer();
         // Innermost-wins arbitration, both halves in dispatch order. First
         // report THIS surface into whatever cell is ambient — the nearest
@@ -1173,10 +1153,10 @@ pub(crate) trait ScrollSurface {
             return self.forward_pointer(ctx, event);
         }
         let core = self.core_mut();
-        let along = core.axis.along(p.position);
+        let along = axis_along(core.axis, p.position);
         core.tracker.record(t_ms, along);
         if core.scrolling {
-            let delta = along - core.axis.along(core.last_drag);
+            let delta = along - axis_along(core.axis, core.last_drag);
             core.last_drag = p.position;
             // Hand the physics this move's raw delta (the offset moves
             // opposite the finger) and let it decide what reaches the
@@ -1188,7 +1168,7 @@ pub(crate) trait ScrollSurface {
             ctx.request_redraw();
             return EventResult::Handled;
         }
-        let travel = along - core.axis.along(core.down_start);
+        let travel = along - axis_along(core.axis, core.down_start);
         let armed = !core.deferring && !core.live_veto.get() && travel.abs() > TOUCH_SLOP;
         let accepts = armed && {
             let metrics = self.metrics();
