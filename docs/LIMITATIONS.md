@@ -4666,7 +4666,8 @@ shipped `shell_route`/`navigator` composition produces.
 rationale (search `wiring_order_does_not_flip`).
 
 Not affected: sibling navigators under an `IndexedStack` (only the selected child is reachable, so no
-tie-break arises between siblings) and a `BackFallback` (ranked by role, never by wire order).
+tie-break arises between siblings) and a `BackFallback` (it ranks after every navigator by role; wire
+order only orders fallbacks among themselves).
 
 ---
 
