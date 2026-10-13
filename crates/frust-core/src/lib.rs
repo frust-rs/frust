@@ -22,6 +22,10 @@
 //!   [`VelocityTracker`](input::VelocityTracker), and the fling-decay math the
 //!   interactive widgets build on.
 //! * [`layout`] — the [`BoxConstraints`](layout::BoxConstraints) box model.
+//! * [`sliver`] — the sliver protocol a scrolling viewport lays its children
+//!   out with: [`SliverConstraints`](sliver::SliverConstraints) in,
+//!   [`SliverGeometry`](sliver::SliverGeometry) out, offered by a widget
+//!   through [`Widget::as_sliver`](widget::Widget::as_sliver).
 //! * [`tree`] — the [`WidgetTree`](tree::WidgetTree) arena wrapper,
 //!   [`WidgetPod`](tree::WidgetPod), and the read-only
 //!   [`InspectNode`](tree::InspectNode) walk tooling reads the tree through.
@@ -53,6 +57,7 @@ pub mod layout;
 pub mod overlay;
 pub mod selection_toolbar;
 pub mod semantics;
+pub mod sliver;
 pub mod tree;
 pub mod view;
 pub mod widget;
@@ -227,6 +232,9 @@ pub use selection_toolbar::{
     set_selection_toolbar_builder, set_selection_toolbar_policy,
 };
 pub use semantics::{SemanticsCtx, SemanticsUpdate};
+pub use sliver::{
+    GrowthDirection, ScrollAxis, ScrollDirection, SliverConstraints, SliverGeometry, SliverWidget,
+};
 pub use tree::{InspectNode, WidgetPod, WidgetTree};
 pub use view::{AnyView, BuildCtx, ChangeFlags, View, ViewSeq, WidgetId, any, views};
 pub use widget::{
