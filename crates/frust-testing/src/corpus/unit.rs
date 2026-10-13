@@ -471,6 +471,98 @@ fn image() -> CorpusCase {
     }
 }
 
+/// Side of the source [`image_magnified`] draws, in pixels.
+const MAGNIFIED_SOURCE: u32 = 8;
+
+/// How much [`image_magnified`] magnifies its source by.
+const MAGNIFICATION: f64 = 4.0;
+
+/// The 8x8 source [`image_magnified`] draws: a one-pixel red checkerboard
+/// over green and blue ramps, opaque, whose last column and last row repeat
+/// the ones before them.
+///
+/// The red channel flips between 0 and 255 on every interior texel, which is
+/// the largest step a bilinear filter can interpolate across — so it is where
+/// a filter's weight precision shows most, and a 4x magnification puts three
+/// interpolated pixels between every pair of texel centres.
+///
+/// The repeated edge is deliberate. The engine's padded bilinear clamps the
+/// sample position to the image before taking its half-texel offset, so the
+/// last texel of a magnified image blends half-way into the one before it,
+/// where `vello_cpu` holds the edge texel; with the two equal, the case
+/// measures the filter rather than that edge rule — the same reason
+/// [`checkerboard`]'s cells are two pixels wide.
+fn magnified_source() -> ImageData {
+    let side = MAGNIFIED_SOURCE;
+    let mut data = Vec::with_capacity((side * side * 4) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            let (x, y) = (x.min(side - 2), y.min(side - 2));
+            let red = if (x + y).is_multiple_of(2) { 255 } else { 0 };
+            data.extend_from_slice(&[red, (x * 36) as u8, (y * 36) as u8, 255]);
+        }
+    }
+    ImageData {
+        data: Blob::from(data),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width: side,
+        height: side,
+    }
+}
+
+/// `Command::Image` magnified 4x — the scale the S5 image stream draws at —
+/// twice: on the pixel grid, and at a fractional offset, so every bilinear
+/// weight a 4x filter produces is sampled.
+///
+/// Not part of [`unit_cases`]: it carries no reviewed baseline. It exists to
+/// measure the engine's bilinear image filtering against the CPU oracle in
+/// both of the engine's strip program families — the manual four-tap path and
+/// the hardware sampler (`FRUST_ENGINE_IMAGE_SAMPLER`) — and
+/// `tests::the_image_sampler_cases_hold_cpu_oracle_parity` holds it there at
+/// the corpus default tolerance every image case is held to.
+fn image_magnified() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let data = magnified_source();
+        let extent = f64::from(MAGNIFIED_SOURCE) * MAGNIFICATION;
+        let mut builder = SceneBuilder::new(scene);
+        black_backdrop(&mut builder);
+        builder.draw_image(&data, Rect::new(0.0, 0.0, extent, extent));
+        builder.draw_image(
+            &data,
+            Rect::new(
+                extent - 0.375,
+                extent - 0.625,
+                2.0 * extent - 0.375,
+                2.0 * extent - 0.625,
+            ),
+        );
+    }
+    CorpusCase {
+        spec: case("unit-image-magnified"),
+        record,
+        probes: &[Probe {
+            x: 2,
+            y: 2,
+            expect: Expect::AtLeast {
+                channel: 3,
+                min: 255,
+            },
+            why: "a magnified opaque image stays opaque",
+        }],
+        eroded_interior: false,
+        about: "one 8x8 RGBA8 checkerboard-over-ramps magnified 4x, on and off the pixel grid",
+    }
+}
+
+/// The cases that measure the engine's image filtering rather than pin a
+/// command's contract — today [`image_magnified`] alone. Not registered in
+/// [`unit_cases`] (no reviewed baseline); see that case's doc.
+#[must_use]
+pub fn image_sampler_cases() -> Vec<CorpusCase> {
+    vec![image_magnified()]
+}
+
 /// `Command::BlurredRoundedRect` across four `std_dev` steps, the last of
 /// them with PER-CORNER radii.
 ///
@@ -1623,6 +1715,97 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The image-filtering cases against the CPU oracle, at each case's own
+    /// tolerance, plus their probes, through whichever strip program family
+    /// the process configuration names — run it once plain and once under
+    /// `FRUST_ENGINE_IMAGE_SAMPLER=1` to hold both. GPU-gated; the
+    /// pinned-runner recipe is `engine_goldens`'.
+    #[test]
+    #[ignore = "requires a GPU; run with `cargo test -p frust-testing --lib -- --ignored`"]
+    fn the_image_sampler_cases_hold_cpu_oracle_parity() {
+        use crate::corpus::straighten_alpha;
+        use crate::diff::diff_images;
+        use crate::oracle_cpu::CpuOracle;
+        use crate::oracle_engine::{EngineOracle, EngineOracleOptions};
+        use crate::render::{RenderedImage, SceneRenderer};
+        use image::RgbaImage;
+
+        fn rgba(image: &RenderedImage) -> RgbaImage {
+            RgbaImage::from_raw(image.width, image.height, image.rgba8.clone())
+                .expect("a rendered frame is width*height*4 bytes")
+        }
+
+        let mut engine =
+            EngineOracle::new(&EngineOracleOptions::default()).expect("an engine oracle");
+        let mut cpu = CpuOracle::new();
+        let mut failures = Vec::new();
+        for case in image_sampler_cases() {
+            let name = case.spec.name;
+            let scene = case.scene();
+            let spec = case.render_spec();
+            let gpu = engine
+                .render(&scene, &spec)
+                .expect("the engine renders the case");
+            let reference = cpu
+                .render(&scene, &spec)
+                .expect("the CPU oracle renders the case");
+            let outcome = diff_images(
+                &rgba(&reference),
+                &rgba(&gpu),
+                case.spec.tolerance,
+                case.eroded_interior,
+            );
+            println!(
+                "image-sampler parity (FRUST_ENGINE_IMAGE_SAMPLER={}): [{name}] {} px differ, max \
+                 |delta| {:?}",
+                std::env::var("FRUST_ENGINE_IMAGE_SAMPLER").unwrap_or_default(),
+                outcome.report.pixel_count,
+                outcome.report.max_difference
+            );
+            if !outcome.passed {
+                failures.push(format!(
+                    "[{name}] engine vs cpu beyond {:?}: {} px, max {:?}",
+                    case.spec.tolerance, outcome.report.pixel_count, outcome.report.max_difference
+                ));
+            }
+            for (arm, image) in [("engine", &gpu), ("cpu", &reference)] {
+                for message in case.failed_probes(&straighten_alpha(image)) {
+                    failures.push(format!("[{name}] {arm} probe: {message}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn the_image_sampler_cases_are_unit_shaped_and_magnify_four_times() {
+        let baselined: BTreeSet<&str> = unit_cases().iter().map(|case| case.spec.name).collect();
+        for case in image_sampler_cases() {
+            assert!(case.spec.name.starts_with("unit-image-"));
+            assert!(
+                !baselined.contains(case.spec.name),
+                "a measurement case carries no reviewed baseline"
+            );
+            assert_eq!((case.spec.width, case.spec.height), (SIZE, SIZE));
+            assert!(case.spec.skip.is_empty(), "both oracles draw images");
+            let images = case
+                .scene()
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Image { data, dest, .. } => Some(dest.width() / f64::from(data.width)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(!images.is_empty());
+            assert!(
+                images
+                    .iter()
+                    .all(|scale| (*scale - MAGNIFICATION).abs() < 1e-9)
+            );
+        }
     }
 
     #[test]

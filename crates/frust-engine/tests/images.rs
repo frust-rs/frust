@@ -1421,3 +1421,286 @@ fn the_atlas_texture_is_declared_the_way_the_shaders_binding_expects() {
     );
     assert!(descriptor.usage.contains(wgpu::TextureUsages::COPY_DST));
 }
+
+/// The image-sampler program family on a real device: a bilinear atlas image
+/// filtered through the hardware sampler (`FRUST_ENGINE_IMAGE_SAMPLER`,
+/// [`frust_engine::EngineRenderer::with_image_sampler`]) against the manual
+/// four-tap path every default-family program keeps.
+///
+/// The bar is the one `frust-testing` already holds every image case to
+/// against the CPU oracle — the corpus default of two levels per channel, no
+/// pixel beyond — applied here between the two families, so a sampled frame
+/// that drifted further from the manual one than an image case may drift from
+/// `vello_cpu` fails on this crate's own gate. (The oracle comparison itself,
+/// per family, is `frust-testing`'s: its engine goldens and the
+/// `unit-image-magnified` measurement case.) Each family is also held to its
+/// own Uber program byte for byte, and nearest sampling — which no family
+/// touches — to the other family byte for byte.
+///
+/// ```text
+/// WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 \
+///   cargo test -p frust-engine --test images -- --ignored
+/// ```
+#[cfg(not(target_arch = "wasm32"))]
+mod sampler_family {
+    use super::*;
+
+    use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
+    use frust_gpu::HeadlessTarget;
+    use peniko::{Color, Extend, ImageQuality};
+
+    /// Target extent every scene renders at.
+    const SIZE: u32 = 128;
+
+    /// The read-back format: R, G, B, A in byte order, no swizzle.
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+    /// The per-channel bar between the two families: the corpus default
+    /// tolerance every image case is held to against `vello_cpu`.
+    const IMAGE_TOLERANCE: u8 = 2;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn drain_error_scope(
+        device: &wgpu::Device,
+        scope: wgpu::ErrorScopeGuard,
+    ) -> Option<wgpu::Error> {
+        use std::task::{Context, Poll, Waker};
+
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut future = std::pin::pin!(scope.pop());
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(error) => return error,
+                Poll::Pending => {
+                    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                }
+            }
+        }
+    }
+
+    fn gpu() -> (wgpu::Device, wgpu::Queue, TierCaps) {
+        block_on(async {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
+                .await
+                .expect("no compatible GPU adapter");
+            println!(
+                "frust-engine image-sampler adapter: {:?}",
+                adapter.get_info()
+            );
+            let caps = TierCaps::probe(&adapter);
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust-engine image-sampler device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: frust_gpu::test_device_limits(&adapter, &caps),
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create the device");
+            (device, queue, caps)
+        })
+    }
+
+    /// An 8x8 opaque image: a one-texel red checkerboard over green and blue
+    /// ramps — the largest steps a bilinear filter interpolates across.
+    fn checker_ramps() -> ImageData {
+        let mut data = Vec::with_capacity(8 * 8 * 4);
+        for y in 0..8_u8 {
+            for x in 0..8_u8 {
+                let red = if (x + y) % 2 == 0 { 255 } else { 0 };
+                data.extend_from_slice(&[red, x * 36, y * 36, 255]);
+            }
+        }
+        ImageData {
+            data: Blob::new(Arc::new(data)),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 8,
+            height: 8,
+        }
+    }
+
+    /// A scene drawing the same atlas image several ways a bilinear filter
+    /// reaches past a texel: magnified 4x on and off the pixel grid, rotated,
+    /// two different images whose atlas slots touch magnified side by side
+    /// (a filter that left its own rectangle would show its neighbour's colour
+    /// along the shared edge), and a repeating brush magnified across its
+    /// seams.
+    fn bilinear_scene() -> Scene {
+        let checker = checker_ramps();
+        let green = image_of(4, 4, [0, 200, 40, 255]);
+        let magenta = image_of(4, 4, [220, 0, 180, 255]);
+        scene_of(|b| {
+            b.fill_rect(
+                Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)),
+                Brush::Solid(Color::from_rgb8(20, 20, 20)),
+            );
+            b.draw_image(&checker, Rect::new(0.0, 0.0, 32.0, 32.0));
+            b.draw_image(&checker, Rect::new(40.375, 8.625, 72.375, 40.625));
+            b.push_transform(Affine::rotate_about(0.3, (100.0, 20.0)));
+            b.draw_image(&checker, Rect::new(84.0, 4.0, 116.0, 36.0));
+            b.pop_transform();
+            b.draw_image(&green, Rect::new(0.0, 48.0, 32.0, 80.0));
+            b.draw_image(&magenta, Rect::new(32.0, 48.0, 64.0, 80.0));
+            b.push_transform(Affine::scale(4.0));
+            b.fill_rect(
+                Rect::new(17.0, 12.0, 31.0, 30.0),
+                Brush::Image(ImageBrush::new(checker.clone()).with_extend(Extend::Repeat)),
+            );
+            b.pop_transform();
+        })
+    }
+
+    /// The same image drawn at nearest quality, magnified: the path neither
+    /// family changes.
+    fn nearest_scene() -> Scene {
+        let checker = checker_ramps();
+        scene_of(|b| {
+            b.push_transform(Affine::scale(4.0));
+            b.fill_rect(
+                Rect::new(1.0, 1.0, 9.0, 9.0),
+                Brush::Image(
+                    ImageBrush::new(checker)
+                        .with_quality(ImageQuality::Low)
+                        .with_extend(Extend::Pad),
+                ),
+            );
+            b.pop_transform();
+        })
+    }
+
+    /// Renders `scene` twice — a cold frame and a steady one — through a fresh
+    /// renderer of the family `image_sampler` names, configured by `configure`,
+    /// returning the steady frame.
+    fn render(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        caps: &TierCaps,
+        scene: &Scene,
+        image_sampler: bool,
+        configure: impl FnOnce(&mut EngineRenderer),
+    ) -> Vec<u8> {
+        let mut renderer =
+            EngineRenderer::with_image_sampler(device, caps, FORMAT, None, image_sampler)
+                .expect("the engine builds on this device");
+        assert_eq!(renderer.image_sampler(), image_sampler);
+        configure(&mut renderer);
+        renderer.finish_warm_up(device);
+        let target = HeadlessTarget::new(device, SIZE, SIZE, FORMAT);
+        let mut frame = Vec::new();
+        for _ in 0..2 {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frust-engine image-sampler frame"),
+            });
+            renderer
+                .encode(
+                    device,
+                    queue,
+                    &mut encoder,
+                    scene,
+                    EngineTarget {
+                        view: target.view(),
+                        format: FORMAT,
+                        width: SIZE,
+                        height: SIZE,
+                        depth: None,
+                        output: OutputAlpha::Premultiplied,
+                    },
+                    Color::TRANSPARENT,
+                    Affine::IDENTITY,
+                )
+                .expect("a well-formed frame encodes");
+            queue.submit([encoder.finish()]);
+            renderer.end_frame(queue);
+            let error = drain_error_scope(device, scope);
+            assert!(error.is_none(), "the frame raised {error:?}");
+            frame = target.read_back(device, queue);
+        }
+        frame
+    }
+
+    /// How many pixels of `a` and `b` differ at all, and the largest
+    /// per-channel difference between them.
+    fn delta(a: &[u8], b: &[u8]) -> (usize, u8) {
+        assert_eq!(a.len(), b.len());
+        a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0).fold(
+            (0, 0),
+            |(count, max), (x, y)| {
+                let worst = x
+                    .iter()
+                    .zip(y)
+                    .map(|(p, q)| p.abs_diff(*q))
+                    .max()
+                    .unwrap_or(0);
+                (count + usize::from(worst != 0), max.max(worst))
+            },
+        )
+    }
+
+    #[test]
+    #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine -- --ignored`"]
+    fn the_sampler_family_draws_bilinear_images_within_the_image_tolerance() {
+        let (device, queue, caps) = gpu();
+        let scene = bilinear_scene();
+
+        let manual = render(&device, &queue, &caps, &scene, false, |_| {});
+        let sampled = render(&device, &queue, &caps, &scene, true, |_| {});
+        assert!(
+            manual.as_chunks::<4>().0.iter().any(|px| px[3] != 0),
+            "the manual frame drew nothing"
+        );
+        let (differing, max) = delta(&manual, &sampled);
+        println!("image sampler vs manual bilinear: {differing} px differ, max |delta| {max}");
+        assert!(
+            max <= IMAGE_TOLERANCE,
+            "the sampled frame drifts {max} levels from the manual one ({differing} px differ), \
+             past the {IMAGE_TOLERANCE}-level image tolerance"
+        );
+
+        // Within a family, routing changes no pixel: the Uber program of each
+        // family draws its images exactly as that family's image classes do.
+        for (image_sampler, routed) in [(false, &manual), (true, &sampled)] {
+            let uber = render(&device, &queue, &caps, &scene, image_sampler, |r| {
+                r.set_uber_program(true);
+            });
+            assert_eq!(
+                delta(routed, &uber),
+                (0, 0),
+                "image_sampler={image_sampler}: the class programs and the Uber program disagree"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine -- --ignored`"]
+    fn nearest_sampling_is_byte_identical_in_both_families() {
+        let (device, queue, caps) = gpu();
+        let scene = nearest_scene();
+
+        let manual = render(&device, &queue, &caps, &scene, false, |_| {});
+        let sampled = render(&device, &queue, &caps, &scene, true, |_| {});
+        assert!(
+            manual.as_chunks::<4>().0.iter().any(|px| px[3] != 0),
+            "the nearest frame drew nothing"
+        );
+        assert_eq!(delta(&manual, &sampled), (0, 0));
+    }
+}
