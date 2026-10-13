@@ -99,7 +99,13 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   window insets it sees changed. A pod (and every pod above it) turns dirty on a rebuild returning
   `LAYOUT` or a widget swap, `ChildPod::widget_mut` access (`widget_mut_for_rebuild` does not), a
   paint `request_layout`/`request_frame` (plus one trailing paint, so the landing frame is laid
-  out), a consumed event or redraw request, and `EventCtx::request_layout`. The root bumps the
+  out), a consumed event or redraw request, and `EventCtx::request_layout`. Each of those channels
+  also folds `LAYOUT` into the root's pending change flags (`RenderRoot::event` for the event-side
+  marks, `RenderRoot::paint` for the paint-side ones), so a shell that runs layout only when
+  `take_change_flags().needs_layout()` is true runs the pass that reaches the dirtied pods; the one
+  exception is a paced-only (`TickClass::CosmeticLoop`) frame request, which marks its pods but
+  folds nothing so frame-gate pacing keeps working (the next pass that runs lays those pods out),
+  and the trailing landing paint folds once. The root bumps the
   epoch, forcing a full pass, on a theme swap, insets change, window-size change and a dirty
   floated overlay pod. `RenderRoot::set_layout_skip(false)` disables skipping;
   `set_layout_audit(true)` runs a debug two-pass comparison (skipped vs forced geometry), logging
