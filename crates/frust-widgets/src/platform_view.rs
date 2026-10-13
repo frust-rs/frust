@@ -507,17 +507,18 @@ impl SliverWidget for ShieldWidget {
     /// receives `sc` unchanged, under the child pod's layout skip.
     fn layout_sliver(&mut self, ctx: &mut LayoutCtx, sc: &SliverConstraints) -> SliverGeometry {
         self.child.set_origin(Point::ZERO);
-        // `as_sliver` answered for a sliver child, and only a rebuild can swap
-        // it, so `None` is unreachable from a viewport.
-        self.child
-            .layout_sliver_child(ctx, sc)
-            .unwrap_or_else(|| {
-                debug_assert!(
-                    false,
-                    "ShieldWidget::layout_sliver: the child stopped being a sliver between as_sliver and layout"
-                );
-                SliverGeometry::ZERO
-            })
+        // A viewport reaches this only through `ChildPod::layout_sliver_child`,
+        // which asks `as_sliver` first, so `None` here means a caller invoked
+        // `layout_sliver` on a wrapper whose `as_sliver` answered `None`: a
+        // contract breach that fails in debug builds; release builds fall back
+        // to an empty sliver.
+        self.child.layout_sliver_child(ctx, sc).unwrap_or_else(|| {
+            debug_assert!(
+                false,
+                "ShieldWidget::layout_sliver called on a wrapper whose as_sliver answered None"
+            );
+            SliverGeometry::ZERO
+        })
     }
 }
 
