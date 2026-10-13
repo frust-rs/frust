@@ -1687,30 +1687,19 @@ fn fs_main() -> @location(0) vec4<f32> {
             1,
             "a repeat request must reuse the pipeline"
         );
-    }
 
-    #[test]
-    fn a_new_desc_derives_its_layout() {
-        assert!(
-            desc().layout.is_none(),
-            "every existing desc keeps wgpu's derived layout unless it names one"
-        );
-        // The layout field sits above every other axis, so a derived-layout
-        // key never reaches it.
-        let mut packer = KeyPacker::default();
-        let key = packer.key_for(&desc()).expect("key");
-        assert_eq!(key >> LAYOUT_SHIFT, 0);
+        // The explicit-layout axis, on the same device — one device per test
+        // binary run keeps this suite clear of the driver's teardown races.
+        explicit_layout_is_its_own_variant_and_shares_bind_groups(&device);
     }
 
     /// The explicit-layout axis on real hardware: a desc naming a layout is a
     /// variant of its own (never a hit on its derived-layout sibling), naming
-    /// the *same* layout object again is a hit, and the pipeline it builds
-    /// hands out that layout's bind-group layouts — which is what lets a
-    /// family of specialised programs share one set of bind groups.
-    #[test]
-    #[ignore = "requires a GPU (Metal/Vulkan); run locally with `cargo test -p frust-gpu -- --ignored`"]
-    fn an_explicit_layout_is_its_own_variant_and_shares_bind_groups() {
-        const WGSL: &str = r#"
+    /// the *same* layout object again is a hit, and two programs that read
+    /// different bindings accept one bind group under that shared layout —
+    /// which is what lets a family of specialised programs share bind groups.
+    fn explicit_layout_is_its_own_variant_and_shares_bind_groups(device: &wgpu::Device) {
+        const LAYOUT_WGSL: &str = r#"
 @group(0) @binding(0) var<uniform> tint: vec4<f32>;
 @vertex
 fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -1726,24 +1715,6 @@ fn fs_plain() -> @location(0) vec4<f32> {
     return vec4<f32>(0.0, 1.0, 0.0, 1.0);
 }
 "#;
-
-        let (device, _queue) = pollster::block_on(async {
-            let instance = wgpu::Instance::new(
-                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-            );
-            let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
-                .await
-                .expect("no compatible GPU adapter");
-            adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("frust-gpu explicit layout test device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    ..Default::default()
-                })
-                .await
-                .expect("failed to create the device")
-        });
 
         let group = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("explicit layout test group"),
@@ -1765,7 +1736,7 @@ fn fs_plain() -> @location(0) vec4<f32> {
         });
 
         let mut library = ShaderLibrary::new();
-        let shader = library.insert_wgsl(&device, "explicit-layout", WGSL);
+        let shader = library.insert_wgsl(device, "explicit-layout", LAYOUT_WGSL);
         let mut cache = PipelineCache::new(Arc::new(library), None);
         let tinted = RenderPipelineDesc::new(
             shader,
@@ -1802,10 +1773,10 @@ fn fs_plain() -> @location(0) vec4<f32> {
         );
 
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let _ = cache.get_or_create(&device, &tinted);
-        let a = cache.get_or_create(&device, &explicit_tinted).clone();
-        let b = cache.get_or_create(&device, &explicit_plain).clone();
-        let _ = cache.get_or_create(&device, &explicit_tinted);
+        let _ = cache.get_or_create(device, &tinted);
+        let a = cache.get_or_create(device, &explicit_tinted).clone();
+        let b = cache.get_or_create(device, &explicit_plain).clone();
+        let _ = cache.get_or_create(device, &explicit_tinted);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: 16,
@@ -1863,8 +1834,21 @@ fn fs_plain() -> @location(0) vec4<f32> {
         }
         drop(encoder.finish());
         drop(group);
-        let error = drain_error_scope(&device, scope);
+        let error = drain_error_scope(device, scope);
         assert!(error.is_none(), "pipeline creation raised {error:?}");
         assert_eq!(cache.compiled_variants(), 3);
+    }
+
+    #[test]
+    fn a_new_desc_derives_its_layout() {
+        assert!(
+            desc().layout.is_none(),
+            "every existing desc keeps wgpu's derived layout unless it names one"
+        );
+        // The layout field sits above every other axis, so a derived-layout
+        // key never reaches it.
+        let mut packer = KeyPacker::default();
+        let key = packer.key_for(&desc()).expect("key");
+        assert_eq!(key >> LAYOUT_SHIFT, 0);
     }
 }
