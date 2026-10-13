@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use frust_network_image::{
-    FetchFuture, FetchRequest, FetchedBytes, ImageFetcher, ImageLoader, LoadRequest, LoaderConfig,
-    TargetPx,
+    DiskCacheConfig, FetchFuture, FetchRequest, FetchedBytes, ImageFetcher, ImageLoader,
+    LoadRequest, LoaderConfig, TargetPx,
 };
 
 struct FakeFetcher {
@@ -86,6 +86,10 @@ fn loader(fetcher: &Arc<FakeFetcher>, budget: usize) -> ImageLoader {
         fetcher.clone(),
         LoaderConfig {
             memory_budget_bytes: budget,
+            disk: DiskCacheConfig {
+                enabled: false,
+                ..DiskCacheConfig::default()
+            },
             ..LoaderConfig::default()
         },
     )

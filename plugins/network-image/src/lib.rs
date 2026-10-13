@@ -16,9 +16,11 @@
 //! The crate carries the [`ImageFetcher`] trait, the default
 //! `ReqwestFetcher` (feature `reqwest`), and [`ImageLoader`]: single-flight
 //! fetches, decode/downscale on the blocking pool, and a byte-budgeted
-//! memory LRU. The view and disk cache arrive in a later phase.
+//! memory LRU, backed by a persistent [`DiskCache`] of raw response bytes
+//! (opened lazily on the first memory miss). The view arrives in a later phase.
 
 mod decode;
+mod disk_cache;
 pub mod fetch;
 mod loader;
 mod memory_cache;
@@ -26,8 +28,9 @@ mod memory_cache;
 mod reqwest_fetcher;
 
 pub use decode::{DecodeError, TargetPx, decode_source};
+pub use disk_cache::{DiskCache, DiskStats};
 pub use fetch::*;
-pub use loader::{ImageLoader, LoadError, LoadFuture, LoadRequest, LoaderConfig};
+pub use loader::{DiskCacheConfig, ImageLoader, LoadError, LoadFuture, LoadRequest, LoaderConfig};
 pub use memory_cache::MemoryStats;
 #[cfg(feature = "reqwest")]
 pub use reqwest_fetcher::ReqwestFetcher;
