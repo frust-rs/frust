@@ -29,9 +29,26 @@ absolute http/https URLs.
 | Platform | Behaviour | Outcome |
 |----------|-----------|---------|
 | Android | `ACTION_SEND` chooser (`text/plain`, `EXTRA_TEXT`, `EXTRA_SUBJECT`) via JNI | `Presented` |
-| iOS | activity sheet (landing in sh-02) | `Presented` |
+| iOS | `UIActivityViewController` from the key window's top view controller, on the main queue | `Presented` |
 | macOS / Linux / Windows | desktop = clipboard copy via `frust-clipboard` | `CopiedToClipboard` |
 | Other | `ShareError::Platform("unsupported platform")` | - |
+
+## iOS
+
+The activity sheet is presented from the key window's top view controller
+(its root controller, followed up the `presentedViewController` chain) on the
+main queue. `Share::url` hands the sheet an `NSURL`, `Share::text` an
+`NSString`; a `subject` is offered to targets that use one (Mail). Called on
+the main thread before any window exists, a share returns
+`ShareError::NoPresenter`.
+
+Popover rule: on an iPad the sheet is a popover. With a `ShareAnchor` it
+points at that rect (logical points are UIKit points, in the root view's
+space), so pass the tapped button's frame via `Share::text_anchored`; without
+one (and always for `Share::url`) it sits at the centre of the root view with
+no arrow. iPhone ignores the anchor.
+
+No `Info.plist` key or entitlement is needed.
 
 ## Device gate checklist (sh-03)
 
