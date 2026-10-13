@@ -2,7 +2,9 @@
 //! constraints and an unchanged layout epoch is not laid out again, and every
 //! dirty source — a rebuild returning `LAYOUT`, a paint-time `request_layout` /
 //! `request_frame`, a consumed event, `EventCtx::request_layout` — marks the
-//! whole path from the source up to the root.
+//! whole path from the source up to the root, and reaches the root's pending
+//! `LAYOUT`, so a shell running layout only on `take_change_flags()` lays the
+//! marked path out.
 //!
 //! Driven through a real `RenderRoot` with counting widgets: each widget logs
 //! its name on every `Widget::layout` call, so a test asserts exactly which
@@ -30,6 +32,8 @@ use reactive_graph::owner::Owner;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PaintReq {
     Frame,
+    /// A paced (`CosmeticLoop`) frame request — a decorative loop.
+    Paced,
     Layout,
 }
 
@@ -88,6 +92,7 @@ impl Widget for LeafWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
         match PAINT_REQ.with(|map| map.borrow().get(self.name).copied()) {
             Some(PaintReq::Frame) => ctx.request_frame(),
+            Some(PaintReq::Paced) => ctx.request_frame_paced(),
             Some(PaintReq::Layout) => ctx.request_layout(),
             None => {}
         }
@@ -549,14 +554,15 @@ fn paint_time_request_frame_dirties_the_path() {
     let mut h = Harness::new();
     set_paint_req("sib_leaf", Some(PaintReq::Frame));
     h.paint();
-    // An animating subtree is relaid out — conservatively — but a bare frame
-    // request asks for no layout pass of its own.
+    // An animating subtree is relaid out — conservatively — and the marked path
+    // reaches the pending flags, so a gated shell runs the pass.
     assert_eq!(h.dirty_nodes(), ["ColWidget", "LeafWidget"]);
-    assert!(!h.root.take_change_flags().needs_layout());
+    assert!(h.root.take_change_flags().needs_layout());
     h.layout();
     assert_eq!(take_layouts(), ["root", "sib", "sib_leaf"]);
     // Still animating: the next paint dirties the path again.
     h.paint();
+    assert!(h.root.take_change_flags().needs_layout());
     h.layout();
     assert_eq!(take_layouts(), ["root", "sib", "sib_leaf"]);
     // The paint the animation lands on asks for nothing, yet it is the one that
@@ -564,13 +570,45 @@ fn paint_time_request_frame_dirties_the_path() {
     set_paint_req("sib_leaf", None);
     h.paint();
     assert_eq!(h.dirty_nodes(), ["ColWidget", "LeafWidget"]);
+    assert!(
+        h.root.take_change_flags().needs_layout(),
+        "the trailing landing paint folds LAYOUT once"
+    );
     h.layout();
     assert_eq!(take_layouts(), ["root", "sib", "sib_leaf"]);
-    // At rest: nothing below the root.
+    // At rest: nothing below the root, and nothing pending.
     h.paint();
     assert!(h.dirty_nodes().is_empty());
+    assert!(!h.root.has_pending_change_flags(), "the fold goes quiet");
     h.layout();
     assert_eq!(take_layouts(), ["root"]);
+}
+
+#[test]
+fn a_paced_only_request_marks_the_path_but_forces_no_pass() {
+    let mut h = Harness::new();
+    set_paint_req("sib_leaf", Some(PaintReq::Paced));
+    for _ in 0..3 {
+        h.paint();
+        // The per-pod rule is unchanged: the looping subtree is marked...
+        assert_eq!(h.dirty_nodes(), ["ColWidget", "LeafWidget"]);
+        // ...but nothing is pending, so the frame gate can keep pacing the
+        // loop instead of running every vsync.
+        assert!(
+            !h.root.has_pending_change_flags(),
+            "a paced-only frame folds no LAYOUT"
+        );
+    }
+    // The next pass that does run lays the marked path out.
+    h.layout();
+    assert_eq!(take_layouts(), ["root", "sib", "sib_leaf"]);
+    // The loop ends: the landing paint folds once, then goes quiet.
+    set_paint_req("sib_leaf", None);
+    h.paint();
+    assert!(h.root.take_change_flags().needs_layout());
+    h.layout();
+    h.paint();
+    assert!(!h.root.has_pending_change_flags());
 }
 
 // ---------------------------------------------------------------------------
@@ -583,8 +621,10 @@ fn an_event_consumed_by_a_leaf_dirties_its_path() {
     set_event_mode("sib_leaf", EventMode::Consume);
     // sib_leaf sits at y 10..20 (below the 10px-tall target).
     h.down_at(15.0);
-    // The containers report `Ignored`; the path bit alone reaches the root.
+    // The containers report `Ignored`; the path bit alone reaches the root —
+    // and its pending flags.
     assert_eq!(h.dirty_nodes(), ["ColWidget", "LeafWidget"]);
+    assert!(h.root.take_change_flags().needs_layout());
     h.layout();
     assert_eq!(take_layouts(), ["root", "sib", "sib_leaf"]);
 }
@@ -626,6 +666,10 @@ fn an_ignored_event_dirties_nothing() {
     // No mode set: every widget ignores the press and asks for nothing.
     h.down_at(15.0);
     assert!(h.dirty_nodes().is_empty());
+    assert!(
+        !h.root.take_change_flags().needs_layout(),
+        "an ignored event asks for no pass"
+    );
     h.layout();
     assert_eq!(take_layouts(), ["root"]);
 }
@@ -789,4 +833,245 @@ fn widget_mut_marks_the_pod_and_widget_mut_for_rebuild_does_not() {
     assert!(!pod.is_layout_dirty());
     pod.widget_mut();
     assert!(pod.is_layout_dirty());
+}
+
+// ---------------------------------------------------------------------------
+// Through the shell gate: layout runs only when `take_change_flags()` asks for
+// it, the way every shell drives the root. A widget whose size changes only
+// through a consumed event, a bare frame request or the trailing landing paint
+// — never through a `LAYOUT` flag of its own — is still laid out at its new
+// size on the next gated pass.
+// ---------------------------------------------------------------------------
+
+/// What a `GrowWidget` does with a pointer `Down`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrowOnDown {
+    /// Take the next height, return `Handled` and request a redraw.
+    Consume,
+    /// Take the next height, request a redraw only, return `Ignored`.
+    Redraw,
+}
+
+thread_local! {
+    /// Heights the next `Down` adopts, front first.
+    static GROW_ON_DOWN: RefCell<Vec<(GrowOnDown, f64)>> = const { RefCell::new(Vec::new()) };
+    /// One step per paint, front first: the height that paint records and
+    /// whether it asks for another frame. Empty: the paint asks for nothing.
+    static GROW_PAINT: RefCell<Vec<(f64, bool)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A leaf whose reported height is widget state changed by its own event and
+/// paint — the shape of a growing multiline field or a paint-fed layout
+/// animation. Its view never reports `LAYOUT` after the build.
+struct GrowWidget {
+    height: f64,
+}
+
+impl Widget for GrowWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        log_layout("grow");
+        bc.constrain(Size::new(20.0, self.height))
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+        let step = GROW_PAINT.with(|steps| {
+            let mut steps = steps.borrow_mut();
+            (!steps.is_empty()).then(|| steps.remove(0))
+        });
+        if let Some((height, frame)) = step {
+            self.height = height;
+            if frame {
+                ctx.request_frame();
+            }
+        }
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let InputEvent::Pointer(pointer) = event else {
+            return EventResult::Ignored;
+        };
+        if pointer.phase != PointerPhase::Down {
+            return EventResult::Ignored;
+        }
+        let next = GROW_ON_DOWN.with(|downs| {
+            let mut downs = downs.borrow_mut();
+            (!downs.is_empty()).then(|| downs.remove(0))
+        });
+        match next {
+            Some((mode, height)) => {
+                self.height = height;
+                ctx.request_redraw();
+                match mode {
+                    GrowOnDown::Consume => EventResult::Handled,
+                    GrowOnDown::Redraw => EventResult::Ignored,
+                }
+            }
+            None => EventResult::Ignored,
+        }
+    }
+}
+
+struct GrowView;
+
+impl View<()> for GrowView {
+    type Element = GrowWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> GrowWidget {
+        GrowWidget { height: 10.0 }
+    }
+
+    fn rebuild(&self, _prev: &Self, _el: &mut GrowWidget, _ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        ChangeFlags::NONE
+    }
+}
+
+/// `root (Col) ─ box (Col) ─ grow`: the grower sits two pods down, so a
+/// pass reaches it only through a marked path.
+struct Gated {
+    root: RenderRoot<(), ColView<()>>,
+    _owner: Owner,
+}
+
+impl Gated {
+    fn new() -> Self {
+        let owner = Owner::new();
+        owner.set();
+        let mut gated = Self {
+            root: RenderRoot::new(),
+            _owner: owner,
+        };
+        // The first frame always lays out (every shell forces it).
+        gated.rebuild();
+        gated.root.layout(WINDOW);
+        gated.root.paint(&mut DiscardScene, FrameTime::ZERO);
+        gated.root.take_change_flags();
+        take_layouts();
+        gated
+    }
+
+    fn rebuild(&mut self) {
+        self.root.rebuild(
+            &mut |_s: &mut ()| {
+                col(
+                    "root",
+                    200.0,
+                    vec![any(col::<()>("box", 100.0, vec![any(GrowView)]))],
+                )
+            },
+            &mut (),
+        );
+    }
+
+    /// One shell frame: rebuild, lay out only if the pending flags ask, paint.
+    /// Returns whether layout ran and whether the paint asked for a frame.
+    fn frame(&mut self) -> (bool, bool) {
+        self.rebuild();
+        let laid_out = self.root.take_change_flags().needs_layout();
+        if laid_out {
+            self.root.layout(WINDOW);
+        }
+        let needs_frame = self
+            .root
+            .paint(&mut DiscardScene, FrameTime::ZERO)
+            .needs_frame;
+        (laid_out, needs_frame)
+    }
+
+    fn down(&mut self) {
+        self.root.event(
+            &mut (),
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::new(5.0, 5.0),
+                button: PointerButton::Primary,
+            }),
+        );
+    }
+
+    fn grow_height(&self) -> f64 {
+        self.root
+            .inspect()
+            .iter()
+            .find(|n| n.type_name.contains("GrowWidget"))
+            .map(|n| n.bounds.height())
+            .expect("the grower is in the tree")
+    }
+}
+
+#[test]
+fn a_handled_only_event_reaches_the_shell_gate() {
+    let mut g = Gated::new();
+    assert_eq!(g.grow_height(), 10.0);
+
+    // Consumed, redraw requested, size changed in widget state — no LAYOUT
+    // anywhere.
+    GROW_ON_DOWN.with(|d| d.borrow_mut().push((GrowOnDown::Consume, 30.0)));
+    g.down();
+    assert!(
+        g.root.has_pending_change_flags(),
+        "the consumed event leaves the gate something to drain"
+    );
+    let (laid_out, _) = g.frame();
+    assert!(laid_out, "take_change_flags reported needs_layout");
+    assert_eq!(take_layouts(), ["box", "grow", "root"]);
+    assert_eq!(g.grow_height(), 30.0, "the new size was laid out");
+
+    // A redraw request alone (the event ignored) is the same source.
+    GROW_ON_DOWN.with(|d| d.borrow_mut().push((GrowOnDown::Redraw, 45.0)));
+    g.down();
+    let (laid_out, _) = g.frame();
+    assert!(laid_out);
+    assert_eq!(g.grow_height(), 45.0);
+
+    // Quiet afterwards: nothing pending, no pass.
+    take_layouts();
+    let (laid_out, needs_frame) = g.frame();
+    assert!(!laid_out && !needs_frame, "an idle frame runs no layout");
+}
+
+#[test]
+fn a_request_frame_only_paint_and_its_landing_reach_the_shell_gate() {
+    let mut g = Gated::new();
+    // Two animating paints, then the landing one that asks for nothing.
+    GROW_PAINT.with(|p| {
+        p.borrow_mut()
+            .extend([(20.0, true), (30.0, true), (40.0, false)])
+    });
+
+    // Frame 1: nothing pending yet, so no pass; the paint records 20 and asks
+    // for a frame.
+    let (laid_out, needs_frame) = g.frame();
+    assert!(!laid_out && needs_frame);
+    assert_eq!(g.grow_height(), 10.0);
+
+    // Frame 2: the frame request folded LAYOUT; the pass lays out 20.
+    let (laid_out, needs_frame) = g.frame();
+    assert!(laid_out, "a bare request_frame reached the gate");
+    assert_eq!(take_layouts(), ["box", "grow", "root"]);
+    assert_eq!(g.grow_height(), 20.0);
+    assert!(needs_frame);
+
+    // Frame 3: lays out 30; its paint lands on 40 and asks for nothing.
+    let (laid_out, needs_frame) = g.frame();
+    assert!(laid_out);
+    assert_eq!(g.grow_height(), 30.0);
+    assert!(!needs_frame, "the landing paint asks for no frame");
+
+    // Frame 4: the trailing landing paint folded LAYOUT once; the settled
+    // value is laid out.
+    let (laid_out, needs_frame) = g.frame();
+    assert!(laid_out, "the trailing landing paint reached the gate");
+    assert_eq!(g.grow_height(), 40.0);
+    assert!(!needs_frame);
+
+    // Quiescent within two frames of the landing: nothing pending, no frame
+    // request, and the next frame runs no pass.
+    assert!(
+        !g.root.has_pending_change_flags(),
+        "the trailing fold went quiet"
+    );
+    take_layouts();
+    let (laid_out, needs_frame) = g.frame();
+    assert!(!laid_out && !needs_frame);
+    assert!(take_layouts().is_empty());
 }

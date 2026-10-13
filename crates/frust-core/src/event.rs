@@ -2322,8 +2322,10 @@ pub struct EventCtx<'a> {
     /// dispatch (a consumed event, a redraw or layout request) — the event
     /// pass's path bit, so the pod above marks itself too (see
     /// [`ChildPod::layout_child`](crate::widget::ChildPod::layout_child)).
-    /// Never folded into the root's pending flags: it dirties pods, it does not
-    /// ask for a layout pass.
+    /// [`RenderRoot::event`](crate::app::RenderRoot::event) folds it into its
+    /// pending [`ChangeFlags::LAYOUT`](crate::view::ChangeFlags::LAYOUT) as well:
+    /// a dirtied pod is only laid out by a pass that runs, and a shell gating
+    /// its layout pass on those flags runs one only when they ask.
     layout_path_dirty: bool,
     capture_requested: bool,
     /// Set by [`EventCtx::capture_contacts`]; bubbles up beside

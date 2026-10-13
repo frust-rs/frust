@@ -589,6 +589,12 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// wait for whatever input happens to arrive next, which is the exact
     /// failure this whole mechanism exists to remove.
     deferred_frame: bool,
+    /// Whether the last main-tree paint asked for a frame or a layout — the
+    /// root widget's own copy of `ChildPod`'s trailing-paint bit. The root
+    /// widget sits in no pod, so nothing else remembers that the paint an
+    /// animation lands on (the first that asks for nothing) still owes one
+    /// layout pass; [`RenderRoot::paint`] folds `LAYOUT` for it once.
+    painted_animating: bool,
     /// The routing half of the overlay entries the **last** [`RenderRoot::paint`]
     /// registered, in paint order (`Floating` band then `Tooltip`, registration
     /// order within each) — what [`RenderRoot::event`]'s overlay pre-pass
@@ -704,6 +710,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             root_semantics_id: Cell::new(None),
             semantics_gen: 0,
             deferred_frame: false,
+            painted_animating: false,
             overlay_hits: Vec::new(),
             selection_toolbar: None,
             selection_toolbar_gen: 0,
@@ -1983,16 +1990,28 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // never keep stealing input from an interactive slot (see
             // `PaintCtx::report_input_shield`).
             self.input_shields = ctx.take_input_shields();
-            // Fold a bubbled `request_layout` into `pending` so the *next* frame
-            // relayouts. `pending` survives to the next frame and feeds both the
-            // frame gate (`has_pending_change_flags`) and the Android layout-skip
-            // (`take_change_flags().needs_layout()`), so no shell change is needed
-            // on any platform. Deliberately opt-in: `request_frame` alone never
-            // sets LAYOUT, keeping paint-only animations layout-free.
+            // Fold every paint-time layout dirtying into `pending` so the *next*
+            // frame relayouts. `pending` survives to the next frame and feeds both
+            // the frame gate (`has_pending_change_flags`) and the shells' layout
+            // gate (`take_change_flags().needs_layout()`), so no shell change is
+            // needed on any platform. Three sources: a bubbled `request_layout`;
+            // an unpaced frame request (an animating subtree's pods were marked,
+            // the conservative rule — the pass that follows is mostly skipped);
+            // and the path bit, which also carries the one trailing paint after
+            // an animation lands. A paced-only frame (`CosmeticLoop` requests
+            // alone) folds nothing: a pending flag would make the frame gate run
+            // it every vsync, and the pods it marked are laid out by the next
+            // pass that runs. The root widget has no pod to remember its own
+            // trailing paint, so `painted_animating` does that here. Only the
+            // first source is reported on the outcome's `needs_layout`.
             let needs_layout = ctx.needs_layout();
-            if needs_layout {
+            let animating = needs_layout || ctx.needs_frame();
+            let unpaced = needs_layout || (ctx.needs_frame() && !ctx.needs_frame_paced_only());
+            let landing = self.painted_animating && !animating;
+            if unpaced || landing || ctx.is_layout_path_dirty() {
                 self.pending |= ChangeFlags::LAYOUT;
             }
+            self.painted_animating = animating;
             // A rebuild that ran out of flush passes owes one more frame; surface
             // it here (and clear it) so a dirty-driven shell schedules the frame
             // that finishes the flush — see the `deferred_frame` field doc.
@@ -2140,9 +2159,15 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 (standing, asked) => standing.or(asked),
             };
             // A layout-animating widget inside a pod relayouts the next frame the
-            // same way one in the tree does.
+            // same way one in the tree does, and so does a pod this paint dirtied
+            // (an unpaced frame request or a trailing landing paint — the path
+            // bit, which `paint_child` already set for both). The floated pod's
+            // own mark makes the next pass a full one (see `overlay_pod_dirty`).
             if ctx.needs_layout() {
                 outcome.needs_layout = true;
+                self.pending |= ChangeFlags::LAYOUT;
+            }
+            if ctx.is_layout_path_dirty() {
                 self.pending |= ChangeFlags::LAYOUT;
             }
             // A focused editable inside a pod republishes its IME surface on every
@@ -2631,11 +2656,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             };
             root_opted_in = frame.close().0;
             let handled = matches!(result, EventResult::Handled);
-            // The event fold of `EventCtx::request_layout`: a widget that changed
-            // its own layout-affecting state asks for a layout pass, which a
-            // shell gating layout on the pending flags must see (the mirror of
-            // `paint_main_tree`'s fold of `PaintCtx::request_layout`).
-            if ctx.needs_layout() {
+            // The event fold: every dirtying channel a shell gating layout on the
+            // pending flags must see (the mirror of `paint_main_tree`'s fold).
+            // `EventCtx::request_layout`, and the path bit — a pod below the
+            // root consumed the event or asked for a redraw, so it was marked and
+            // only a pass that runs lays it out. The root widget sits in no pod,
+            // so its own consumed event or redraw request is the same source.
+            if ctx.needs_layout() || ctx.is_layout_path_dirty() || handled || ctx.needs_redraw() {
                 self.pending |= ChangeFlags::LAYOUT;
             }
             (
@@ -3878,13 +3905,16 @@ mod tests {
     }
 
     #[test]
-    fn paint_request_frame_only_does_not_fold_layout() {
+    fn paint_request_frame_only_folds_layout_into_pending() {
         let mut state = AppState {
             label: "x".to_string(),
         };
 
-        // A paint-only animation (request_frame, no request_layout) must NOT fold
-        // LAYOUT — the mobile layout-skip win depends on this staying opt-in.
+        // A paint-only animation (request_frame, no request_layout) dirties its
+        // path conservatively, so it folds LAYOUT into pending — a shell gating
+        // its layout pass on the flags must run the (mostly skipped) pass that
+        // reaches the marked pods. It does not report `needs_layout` on the
+        // outcome: that stays the `request_layout` channel.
         let mut anim: RenderRoot<AppState, FrameView> = RenderRoot::new();
         anim.rebuild(&mut |_s: &mut AppState| FrameView, &mut state);
         anim.layout(Size::new(100.0, 100.0));
@@ -3894,11 +3924,11 @@ mod tests {
         assert!(outcome.needs_frame);
         assert!(
             !outcome.needs_layout,
-            "request_frame alone: no needs_layout"
+            "request_frame alone: no needs_layout on the outcome"
         );
         assert!(
-            !anim.has_pending_change_flags(),
-            "request_frame alone must not fold LAYOUT into pending"
+            anim.take_change_flags().needs_layout(),
+            "request_frame alone folds LAYOUT into pending"
         );
     }
 

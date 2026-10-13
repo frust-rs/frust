@@ -845,9 +845,22 @@ pub struct PaintCtx<'a> {
     /// and out of [`crate::app::RenderRoot::paint`] as [`PaintOutcome::needs_layout`],
     /// which folds into the render root's pending [`ChangeFlags`] so the mobile
     /// intra-frame layout skip re-runs layout while the animation is in flight.
-    /// Deliberately opt-in: [`PaintCtx::request_frame`] alone never sets it, so
-    /// paint-only animations stay layout-free.
+    /// [`PaintCtx::request_frame`] alone never sets it: a bare frame request
+    /// reaches the pending flags through `layout_path_dirty` instead, and is not
+    /// reported on [`PaintOutcome::needs_layout`].
     needs_layout: bool,
+    /// Whether a pod at or below this context was marked layout-dirty by this
+    /// (sub)paint in a way that must force a pass — the paint pass's path bit,
+    /// the mirror of the event pass's (see [`EventCtx::is_layout_path_dirty`]).
+    /// [`ChildPod::paint_child`] sets it when its child asked for layout or for
+    /// an unpaced frame, on the one trailing paint after any request, and when
+    /// a child's bit is set, so every pod on the path is marked and
+    /// [`crate::app::RenderRoot::paint`] folds it into the pending
+    /// [`ChangeFlags`] `LAYOUT`: a shell gating its layout pass on those flags
+    /// then actually runs the pass that lays the dirtied pods out. A paced-only
+    /// ([`TickClass::CosmeticLoop`]) request still marks its pods but does not
+    /// set it, so the frame gate can keep pacing the loop.
+    layout_path_dirty: bool,
     /// Whether any continuation-frame request this (sub)paint was
     /// [`TickClass::Transition`] (unpaced, must run every vsync). The
     /// max-lattice half of the tick-class aggregation: it starts `false` and
@@ -1006,6 +1019,7 @@ impl<'a> PaintCtx<'a> {
             size,
             needs_frame: false,
             needs_layout: false,
+            layout_path_dirty: false,
             frame_unpaced: false,
             paced_interval: None,
             ime_state: None,
@@ -1475,10 +1489,11 @@ impl<'a> PaintCtx<'a> {
     ///
     /// This is the layout counterpart to [`Self::request_frame`]: a widget whose
     /// animation only repaints (a color fade, a caret blink) calls
-    /// `request_frame` alone and stays layout-free under the mobile intra-frame
-    /// layout skip, whereas a widget whose animation resizes/repositions its
-    /// children (an expanding accordion) calls this so layout is re-run while the
-    /// animation is in flight. The flag bubbles up through
+    /// `request_frame` alone — its path is still laid out again, conservatively,
+    /// but that pass is mostly skipped and nothing reports
+    /// [`PaintOutcome::needs_layout`] — whereas a widget whose animation
+    /// resizes/repositions its children (an expanding accordion) calls this so
+    /// layout is re-run while the animation is in flight. The flag bubbles up through
     /// [`ChildPod::paint_child`] exactly like `needs_frame` and out of
     /// [`crate::app::RenderRoot::paint`] as [`PaintOutcome::needs_layout`], which
     /// folds into the render root's pending [`crate::view::ChangeFlags`]
@@ -1501,6 +1516,12 @@ impl<'a> PaintCtx<'a> {
     /// Whether a layout re-run was requested during this (sub)paint.
     pub fn needs_layout(&self) -> bool {
         self.needs_layout
+    }
+
+    /// Whether this (sub)paint marked a pod at or below this context
+    /// layout-dirty (see the `layout_path_dirty` field).
+    pub(crate) fn is_layout_path_dirty(&self) -> bool {
+        self.layout_path_dirty
     }
 
     /// Publish the focused editable's current IME surface during paint.
@@ -1697,6 +1718,7 @@ impl<'a> PaintCtx<'a> {
             size: self.size,
             needs_frame: false,
             needs_layout: false,
+            layout_path_dirty: false,
             frame_unpaced: false,
             paced_interval: None,
             ime_state: None,
@@ -1720,6 +1742,9 @@ impl<'a> PaintCtx<'a> {
         }
         if child.needs_layout {
             self.needs_layout = true;
+        }
+        if child.layout_path_dirty {
+            self.layout_path_dirty = true;
         }
         // Max-lattice OR: any Transition request inside dominates, keeping the
         // aggregate unpaced (mirrors `ChildPod::paint_child`'s absorb).
@@ -2037,7 +2062,9 @@ pub struct PaintOutcome {
     /// Whether the shell should schedule another frame to continue an animation.
     pub needs_frame: bool,
     /// Whether the render root folded a layout-continuation request into its
-    /// pending change flags (a widget called [`PaintCtx::request_layout`]).
+    /// pending change flags (a widget called [`PaintCtx::request_layout`]). The
+    /// root also folds `LAYOUT` for a pod an unpaced frame request or a
+    /// trailing landing paint dirtied; that fold is not reported here.
     pub needs_layout: bool,
     /// Whether a frame was requested and every request this frame was
     /// [`TickClass::CosmeticLoop`] — the paced-only state the mobile frame gate
@@ -2078,7 +2105,9 @@ pub trait Widget: Any {
     /// * a rebuild returning [`ChangeFlags::LAYOUT`](crate::view::ChangeFlags::LAYOUT);
     /// * [`PaintCtx::request_layout`] (or [`EventCtx::request_layout`]);
     /// * [`PaintCtx::request_frame`] (any frame request — an animating subtree is
-    ///   laid out again on the next pass, conservatively);
+    ///   laid out again on the next pass, conservatively; a paced
+    ///   [`TickClass::CosmeticLoop`] request marks the pod but forces no pass of
+    ///   its own, so a loop that changes layout must not be paced);
     /// * an event the widget consumed ([`EventResult::Handled`]) or that asked for
     ///   a redraw ([`EventCtx::request_redraw`]).
     ///
@@ -3098,9 +3127,26 @@ impl ChildPod {
         // onto its target returns `false`), yet it is the one that recorded the
         // final value a paint-fed layout reads — so a pod whose previous paint
         // asked is dirtied once more, and the settled geometry is laid out.
+        //
+        // The mark is reported upward as the path bit (and a child's bit marks
+        // this pod too), which the root folds into its pending `LAYOUT` so a
+        // shell running layout only on that flag reaches the dirtied pods. Two
+        // marks stay unreported. A paced-only request (`CosmeticLoop`, a
+        // decorative loop such as a caret blink) is marked but forces no pass:
+        // a pending flag would make the frame gate run every vsync and undo the
+        // pacing, and the next pass that does run still lays the pod out. And a
+        // loop still running reports nothing through `painted_animating`; the
+        // landing paint does, once — `painted_animating` tracks the child's own
+        // request, never the path bit, so the paint after it reports nothing.
         let animating = child_ctx.needs_layout() || child_ctx.needs_frame();
-        if animating || self.painted_animating {
+        if animating || self.painted_animating || child_ctx.layout_path_dirty {
             self.layout_dirty = true;
+        }
+        let unpaced = child_ctx.needs_layout()
+            || (child_ctx.needs_frame() && !child_ctx.needs_frame_paced_only());
+        let landing = self.painted_animating && !animating;
+        if unpaced || landing || child_ctx.layout_path_dirty {
+            ctx.layout_path_dirty = true;
         }
         self.painted_animating = animating;
         // Bubble a focused editable's republished IME surface up the paint path,
