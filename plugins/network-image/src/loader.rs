@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::task::{Context, Poll};
 
 use frust::{ImageSource, spawn_blocking};
 use futures_util::FutureExt;
@@ -92,24 +93,113 @@ pub enum LoadError {
 }
 
 type LoadResult = Result<ImageSource, LoadError>;
+type KeyedFuture = Shared<LoadFuture<LoadResult>>;
 type RawFuture = Shared<LoadFuture<Result<Arc<Vec<u8>>, FetchError>>>;
+
+/// One keyed load, alive while any [`Consumer`] of it is.
+struct InflightEntry {
+    fut: KeyedFuture,
+    /// Live consumers; the entry is removed (and its future dropped) at zero.
+    consumers: usize,
+    /// Tells this entry apart from a later one for the same key.
+    id: u64,
+}
 
 /// Shared raw-bytes fetch for one URL, alive while any keyed load uses it.
 struct RawEntry {
     fut: RawFuture,
+    /// Unreleased [`RawRelease`] guards; the entry is removed at zero.
     users: usize,
+    /// Tells this entry apart from a later one for the same URL.
+    id: u64,
 }
 
 struct Inner {
     fetcher: Arc<dyn ImageFetcher>,
     config: LoaderConfig,
     memory: Mutex<MemoryCache>,
-    inflight: Mutex<HashMap<CacheKey, Shared<LoadFuture<LoadResult>>>>,
-    /// Raw bytes by URL for the duration of the inflight set, so two targets
-    /// of one URL still fetch once. Dropped when the last user finishes.
+    inflight: Mutex<HashMap<CacheKey, InflightEntry>>,
+    /// Raw bytes by URL while keyed loads still need them, so two targets of
+    /// one URL fetch once. Transient: removed when the last user releases,
+    /// whether it finished or was dropped.
     raw: Mutex<HashMap<String, RawEntry>>,
     /// Opened once, lazily; `None` inside means memory-only.
     disk: OnceLock<Option<Arc<DiskCache>>>,
+    /// Source of [`InflightEntry::id`] / [`RawEntry::id`].
+    next_id: AtomicU64,
+}
+
+impl Inner {
+    fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+/// One caller's handle on a keyed load. Dropping it (completed or not)
+/// releases its consumer count; the last one out removes the entry, so the
+/// shared future is dropped rather than parked for a later caller to resume.
+struct Consumer {
+    fut: KeyedFuture,
+    inner: Arc<Inner>,
+    key: CacheKey,
+    id: u64,
+}
+
+impl Future for Consumer {
+    type Output = LoadResult;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<LoadResult> {
+        self.fut.poll_unpin(cx)
+    }
+}
+
+impl Drop for Consumer {
+    fn drop(&mut self) {
+        // Bound outside the lock: the entry's future drops after it is released.
+        let _removed = {
+            let mut inflight = lock(&self.inner.inflight);
+            match inflight.get_mut(&self.key) {
+                Some(entry) if entry.id == self.id => {
+                    entry.consumers = entry.consumers.saturating_sub(1);
+                    if entry.consumers == 0 {
+                        inflight.remove(&self.key)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+    }
+}
+
+/// One keyed load's share of a [`RawEntry`], released exactly once: when the
+/// load drops it after the bytes arrive, or when the load itself is dropped.
+struct RawRelease {
+    inner: Arc<Inner>,
+    url: String,
+    id: u64,
+}
+
+impl Drop for RawRelease {
+    fn drop(&mut self) {
+        // Bound outside the lock: a removed entry may hold the last handle on
+        // the fetch, whose drop cancels it.
+        let _removed = {
+            let mut raw = lock(&self.inner.raw);
+            match raw.get_mut(&self.url) {
+                Some(entry) if entry.id == self.id => {
+                    entry.users = entry.users.saturating_sub(1);
+                    if entry.users == 0 {
+                        raw.remove(&self.url)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+    }
 }
 
 /// Log a disk problem at `warn` the first time only, `debug` afterwards.
@@ -178,6 +268,7 @@ impl ImageLoader {
                 inflight: Mutex::new(HashMap::new()),
                 raw: Mutex::new(HashMap::new()),
                 disk: OnceLock::new(),
+                next_id: AtomicU64::new(0),
             }),
         }
     }
@@ -185,6 +276,12 @@ impl ImageLoader {
     /// Load `req`: memory hit, else join an in-flight load, else start one.
     /// Registration happens now (not on first poll), so concurrent calls
     /// always share one fetch.
+    ///
+    /// A load lives exactly as long as its consumers: when every future this
+    /// returned for a key is dropped before it completes (an unmounted view's
+    /// aborted task), the fetch is cancelled and the next call for that key
+    /// starts afresh. A finished load is never joined, so a failure is only
+    /// ever seen by the callers that were waiting on it.
     pub fn load(&self, req: LoadRequest) -> LoadFuture<LoadResult> {
         let key = CacheKey {
             url: req.url.clone(),
@@ -196,16 +293,24 @@ impl ImageLoader {
         if let Some(hit) = lock(&self.inner.memory).get(&key) {
             return Box::pin(std::future::ready(Ok(hit)));
         }
-        if let Some(existing) = inflight.get(&key) {
-            return Box::pin(existing.clone());
+        if let Some(entry) = inflight.get_mut(&key) {
+            entry.consumers += 1;
+            return Box::pin(Consumer {
+                fut: entry.fut.clone(),
+                inner: self.inner.clone(),
+                key,
+                id: entry.id,
+            });
         }
-        let raw = self.acquire_raw(&req);
+        let id = self.inner.next_id();
+        let (raw, release) = self.acquire_raw(&req);
         let inner = self.inner.clone();
         let task_key = key.clone();
         let target = req.target;
+        // Dropping this body before `raw` resolves drops `release` with it.
         let fut: LoadFuture<LoadResult> = Box::pin(async move {
             let fetched = raw.await;
-            release_raw(&inner, &task_key.url);
+            drop(release);
             let result = match fetched {
                 Ok(bytes) => decode_shared(bytes, target).await.map_err(LoadError::from),
                 Err(e) => Err(LoadError::Fetch(e)),
@@ -213,21 +318,48 @@ impl ImageLoader {
             if let Ok(source) = &result {
                 lock(&inner.memory).insert(task_key.clone(), source.clone());
             }
-            lock(&inner.inflight).remove(&task_key);
+            let _removed = {
+                let mut inflight = lock(&inner.inflight);
+                match inflight.get(&task_key) {
+                    Some(entry) if entry.id == id => inflight.remove(&task_key),
+                    _ => None,
+                }
+            };
             result
         });
         let shared = fut.shared();
-        inflight.insert(key, shared.clone());
-        Box::pin(shared)
+        inflight.insert(
+            key.clone(),
+            InflightEntry {
+                fut: shared.clone(),
+                consumers: 1,
+                id,
+            },
+        );
+        Box::pin(Consumer {
+            fut: shared,
+            inner: self.inner.clone(),
+            key,
+            id,
+        })
     }
 
     /// Join or start the raw fetch for `req.url`, counting one more user.
-    fn acquire_raw(&self, req: &LoadRequest) -> RawFuture {
+    /// A fetch that already finished with an error is replaced, not joined.
+    fn acquire_raw(&self, req: &LoadRequest) -> (RawFuture, RawRelease) {
         let mut raw = lock(&self.inner.raw);
-        if let Some(entry) = raw.get_mut(&req.url) {
+        if let Some(entry) = raw.get_mut(&req.url)
+            && !matches!(entry.fut.peek(), Some(Err(_)))
+        {
             entry.users += 1;
-            return entry.fut.clone();
+            let release = RawRelease {
+                inner: self.inner.clone(),
+                url: req.url.clone(),
+                id: entry.id,
+            };
+            return (entry.fut.clone(), release);
         }
+        let id = self.inner.next_id();
         let inner = self.inner.clone();
         let url = req.url.clone();
         let headers = req.headers.clone();
@@ -262,14 +394,22 @@ impl ImageLoader {
             Ok(bytes)
         });
         let fut = boxed.shared();
-        raw.insert(
+        // A replaced failed entry keeps serving the users that already hold it;
+        // their releases no longer match this URL's entry.
+        let _replaced = raw.insert(
             req.url.clone(),
             RawEntry {
                 fut: fut.clone(),
                 users: 1,
+                id,
             },
         );
-        fut
+        let release = RawRelease {
+            inner: self.inner.clone(),
+            url: req.url.clone(),
+            id,
+        };
+        (fut, release)
     }
 
     /// The decoded image for `url` fitted to `target`, if the memory cache
@@ -316,24 +456,26 @@ impl ImageLoader {
     }
 
     /// [`clear_memory`](Self::clear_memory) plus [`clear_disk`](Self::clear_disk).
+    ///
+    /// Raw response bytes are never cached in memory beyond the loads that
+    /// need them, so there is nothing else to clear: decoded images live in
+    /// the memory cache, bytes in the disk cache.
     pub fn clear_all(&self) {
         self.clear_memory();
         self.clear_disk();
     }
 
-    /// Number of loads in the inflight map. A load that was aborted (its
-    /// future dropped) stays counted until its key is requested again.
+    /// Number of keyed loads still running for at least one live consumer.
+    /// A load whose every future was dropped (an unmounted view) is not
+    /// counted: it was cancelled and removed with its last consumer.
     pub fn inflight_count(&self) -> usize {
         lock(&self.inner.inflight).len()
     }
-}
 
-fn release_raw(inner: &Inner, url: &str) {
-    let mut raw = lock(&inner.raw);
-    if let Some(entry) = raw.get_mut(url) {
-        entry.users = entry.users.saturating_sub(1);
-        if entry.users == 0 {
-            raw.remove(url);
-        }
+    /// Number of per-URL raw fetches held for running loads. Test hook: zero
+    /// once every load has finished or been dropped.
+    #[doc(hidden)]
+    pub fn raw_entry_count(&self) -> usize {
+        lock(&self.inner.raw).len()
     }
 }
