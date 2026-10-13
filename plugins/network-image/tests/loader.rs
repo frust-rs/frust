@@ -221,3 +221,87 @@ fn loader_is_send_sync() {
     fn assert_ss<T: Send + Sync>() {}
     assert_ss::<ImageLoader>();
 }
+
+/// A unique scratch dir under the system temp dir, removed on drop.
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("frust-ni-loader-{}-{tag}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Self(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn disk_stats_and_clear_all_with_disk_enabled() {
+    let tmp = TempDir::new("stats");
+    run(async {
+        let fetcher = FakeFetcher::new(Duration::from_millis(1));
+        let loader = ImageLoader::new(
+            fetcher.clone(),
+            LoaderConfig {
+                disk: DiskCacheConfig {
+                    enabled: true,
+                    dir_override: Some(tmp.0.clone()),
+                    ..DiskCacheConfig::default()
+                },
+                ..LoaderConfig::default()
+            },
+        );
+        assert!(loader.disk_stats().is_none());
+        loader
+            .load(req("https://x/a.png", None))
+            .await
+            .expect("load ok");
+        let stats = loader.disk_stats().expect("disk open after a load");
+        assert_eq!(stats.entries, 1);
+        assert!(stats.total_bytes > 0);
+        assert_eq!(loader.memory_stats().entries, 1);
+
+        loader.clear_all();
+        assert_eq!(loader.memory_stats().entries, 0);
+        let stats = loader.disk_stats().expect("still open");
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.total_bytes, 0);
+        assert!(tmp.0.is_dir());
+    });
+}
+
+#[test]
+fn disk_disabled_has_no_stats_and_clear_disk_is_noop() {
+    run(async {
+        let fetcher = FakeFetcher::new(Duration::from_millis(1));
+        let loader = loader(&fetcher, 1 << 20);
+        loader
+            .load(req("https://x/a.png", None))
+            .await
+            .expect("load ok");
+        assert!(loader.disk_stats().is_none());
+        loader.clear_disk();
+        assert!(loader.disk_stats().is_none());
+        assert_eq!(loader.memory_stats().entries, 1);
+    });
+}
+
+#[test]
+fn inflight_count_tracks_pending_load() {
+    run(async {
+        let fetcher = FakeFetcher::new(Duration::from_millis(200));
+        let loader = loader(&fetcher, 1 << 20);
+        assert_eq!(loader.inflight_count(), 0);
+        let pending = tokio::spawn(loader.load(req("https://x/a.png", None)));
+        assert_eq!(loader.inflight_count(), 1);
+        pending.await.expect("join").expect("load ok");
+        assert_eq!(loader.inflight_count(), 0);
+    });
+}

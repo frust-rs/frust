@@ -12,7 +12,7 @@ use futures_util::FutureExt;
 use futures_util::future::Shared;
 
 use crate::decode::{DecodeError, TargetPx, decode_shared};
-use crate::disk_cache::DiskCache;
+use crate::disk_cache::{DiskCache, DiskStats};
 use crate::fetch::{FetchError, FetchRequest, ImageFetcher};
 use crate::memory_cache::{CacheKey, DEFAULT_BUDGET_BYTES, MemoryCache, MemoryStats};
 
@@ -291,6 +291,40 @@ impl ImageLoader {
     /// Drop every cached decoded image (in-flight loads are unaffected).
     pub fn clear_memory(&self) {
         lock(&self.inner.memory).clear();
+    }
+
+    /// Disk cache occupancy, or `None` while the disk cache is disabled or
+    /// not yet opened. Never triggers the lazy open, and does no IO beyond
+    /// the cache's own mutex, so it is cheap enough to call every frame.
+    pub fn disk_stats(&self) -> Option<DiskStats> {
+        let cache = self.inner.disk.get()?.as_ref()?;
+        Some(cache.stats())
+    }
+
+    /// Remove every on-disk entry and the index; the directory itself stays.
+    /// A no-op while the disk cache is disabled or not yet opened.
+    ///
+    /// Synchronous: the removal is a handful of small unlinks plus one index
+    /// write, fine for a button handler. A failure is logged, not returned.
+    pub fn clear_disk(&self) {
+        let Some(Some(cache)) = self.inner.disk.get() else {
+            return;
+        };
+        if let Err(e) = cache.clear() {
+            warn_once(&format!("disk clear failed ({e})"));
+        }
+    }
+
+    /// [`clear_memory`](Self::clear_memory) plus [`clear_disk`](Self::clear_disk).
+    pub fn clear_all(&self) {
+        self.clear_memory();
+        self.clear_disk();
+    }
+
+    /// Number of loads in the inflight map. A load that was aborted (its
+    /// future dropped) stays counted until its key is requested again.
+    pub fn inflight_count(&self) -> usize {
+        lock(&self.inner.inflight).len()
     }
 }
 

@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — eighteen entries mirroring `plugins/`:
+//! The static plugin registry (v1) — nineteen entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -615,6 +615,38 @@ const SHADCN: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `network-image`'s single optional feature: pure-Rust WebP decoding in the
+/// plugin's own `image` dependency. Without it a WebP body is rejected as
+/// `UnsupportedFormat`.
+const NETWORK_IMAGE_WEBP: &[Contribution] = &[Contribution::CargoFeature {
+    name: "frust-network-image",
+    feature: "webp",
+}];
+
+/// `network-image`'s single base contribution — a Cargo dependency and
+/// nothing else. Facade-tier with no native arm: the image fetch, cache, and
+/// view all live in Rust, so there is no manifest permission, plist key,
+/// Gradle module, or Swift package to add. The `reqwest` default fetcher
+/// comes in through the plugin's own default feature, not through a registry
+/// contribution.
+const NETWORK_IMAGE_BASE: &[Contribution] = &[Contribution::CargoDep {
+    name: "frust-network-image",
+}];
+
+const NETWORK_IMAGE: PluginSpec = PluginSpec {
+    id: "network-image",
+    summary: "Network image view: URL images with an in-memory + disk cache \
+              (reqwest default fetcher).",
+    crate_dir: "network-image",
+    base: NETWORK_IMAGE_BASE,
+    optional_features: &[FeatureSpec {
+        id: "webp",
+        summary: "WebP decoding (pure-Rust image-webp).",
+        contributions: NETWORK_IMAGE_WEBP,
+    }],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -638,6 +670,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         MATERIAL,
         CUPERTINO,
         SHADCN,
+        NETWORK_IMAGE,
     ]
 }
 
@@ -657,7 +690,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_eighteen_v1_plugins() {
+    fn registry_lists_the_nineteen_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -680,8 +713,31 @@ mod tests {
                 "material",
                 "cupertino",
                 "shadcn",
+                "network-image",
             ]
         );
+    }
+
+    /// `network-image` is a facade-tier entry: one `CargoDep` on its own
+    /// crate, no native arm, and a single `webp` optional feature that maps
+    /// to the crate's own `webp` Cargo feature.
+    #[test]
+    fn network_image_is_a_cargo_dep_with_a_webp_feature() {
+        let spec = find_plugin("network-image").unwrap();
+        assert_eq!(spec.crate_dir, "network-image");
+        assert_eq!(spec.requires_sibling, None);
+        assert!(matches!(
+            spec.base,
+            [Contribution::CargoDep { name }] if *name == "frust-network-image"
+        ));
+        assert_eq!(spec.optional_features.len(), 1);
+        let webp = &spec.optional_features[0];
+        assert_eq!(webp.id, "webp");
+        assert!(matches!(
+            webp.contributions,
+            [Contribution::CargoFeature { name, feature }]
+                if *name == "frust-network-image" && *feature == "webp"
+        ));
     }
 
     /// The `glyph`/`material`/`cupertino`/`shadcn` entries are each exactly
