@@ -457,6 +457,25 @@ does not already exist.
 
 [`open_external`]: https://docs.rs/frust-url-launcher/latest/frust_url_launcher/struct.UrlLauncher.html#method.open_external
 
+## Maps
+
+`Maps` builds `https` map links and passes them through
+`UrlLauncher::open_external`, so the validator above runs on every launch;
+it is not relaxed. Coordinates are range-checked (lat +-90, lng +-180),
+formatted with up to six decimals, and NaN/infinite values return
+`InvalidUrl`. Free text is percent-encoded (everything but `A-Za-z0-9-._~`
+becomes `%XX`). The https URL is handed to the OS default handler; nothing
+more is promised about which app opens it.
+
+| Call | iOS / macOS | Android / Linux / Windows |
+|------|-------------|---------------------------|
+| `Maps::directions(lat, lng)` | `https://maps.apple.com/?daddr=LAT,LNG` | `https://www.google.com/maps/dir/?api=1&destination=LAT,LNG` |
+| `Maps::directions_to(query)` | `https://maps.apple.com/?q=QUERY` | `https://www.google.com/maps/dir/?api=1&destination=QUERY` |
+| `Maps::show(lat, lng, label)` | `https://maps.apple.com/?ll=LAT,LNG&q=LABEL` (`?ll=LAT,LNG` without a label) | `https://www.google.com/maps/search/?api=1&query=LAT,LNG` (label ignored) |
+
+`Maps::directions_url`, `directions_to_url` and `show_url` return the string
+without opening it.
+
 ## Links and license
 
 Documentation: <https://frust.dev>. Source: <https://github.com/frust-rs/frust>.
