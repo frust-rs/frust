@@ -1,6 +1,8 @@
 //! The windowed reconcilers a lazy list runs at rebuild time, shared by
-//! [`ListView`](crate::ListView) and
-//! [`sliver_fixed_extent_list`](crate::sliver_fixed_extent_list).
+//! [`ListView`](crate::ListView), the lazy slivers
+//! ([`sliver_fixed_extent_list`](crate::sliver_fixed_extent_list),
+//! [`sliver_list`](crate::sliver_list)),
+//! plus the measured-extent bookkeeping `ListView` and `sliver_list` share.
 //!
 //! A windowed list materialises only a contiguous, ascending run of item
 //! indices — its *window* — and keeps one [`ChildPod`] per materialised index.
@@ -23,8 +25,27 @@
 //! `ChangeFlags::LAYOUT | ChangeFlags::PAINT` on any frame that built, tore
 //! down, relocated or re-ranged a pod — a freshly built or relocated pod has
 //! never been laid out where it now sits. What a list does around the
-//! reconciliation (placing the pods, `ListView`'s measured-extent cache
-//! hygiene) stays with the list.
+//! reconciliation (placing the pods, the measured-extent cache hygiene) stays
+//! with the list.
+//!
+//! # Measured extents
+//!
+//! A variable-extent list caches each laid-out row's extent under the row's
+//! stable key ([`Measured`]) beside the running sum of those extents, so the
+//! content extent `Σ measured + estimate × unmeasured` is O(1)
+//! ([`estimated_total`]); [`record_measurement`], [`forget_measurement`] and
+//! [`evict_measurements_past`] keep the sum exact. [`walk_to_offset`] is the
+//! bounded prefix walk from a known `(index, y)` to an offset over those
+//! extents. `list_view.rs`'s *Variable extents* is the contract they implement.
+//!
+//! # Locating a key
+//!
+//! [`probe_key`] tests the two index hypotheses a keyed list's anchoring and
+//! cache hygiene rely on — the key's index unchanged, or shifted by the frame's
+//! net item-count delta. [`locate_key`] adds a bounded outward scan once both
+//! miss, which resolves a key a same-frame mutation moved by a different
+//! amount (a prepend above plus an append below it) without keying all
+//! `item_count` items.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -241,5 +262,270 @@ pub(crate) fn reconcile_keyed<State: 'static>(
         slot_keys,
         any_survivor,
         departed,
+    }
+}
+
+// --- Locating a key ----------------------------------------------------------
+
+/// How far either side of its last index [`locate_key`] scans for a key once
+/// both of [`probe_key`]'s hypotheses missed, in items. Bounds the scan's
+/// `key_of` calls at `2 × KEY_SCAN_RADIUS`, paid only on a frame whose
+/// mutation moved the key by something other than the net item-count delta.
+pub(crate) const KEY_SCAN_RADIUS: usize = 64;
+
+/// Where `key` sits in this frame's data, tested at the two hypotheses a keyed
+/// list's anchoring relies on: `prev_index` unchanged, or shifted by the
+/// frame's net item-count `delta` — at most two `key_of` calls. `None` when
+/// neither holds (the key left the data, or a mutation moved it by some other
+/// amount).
+pub(crate) fn probe_key(
+    key: ChildKey,
+    prev_index: usize,
+    delta: isize,
+    item_count: usize,
+    key_of: &dyn Fn(usize) -> ChildKey,
+) -> Option<usize> {
+    if prev_index < item_count && key_of(prev_index) == key {
+        return Some(prev_index);
+    }
+    if delta != 0 {
+        let candidate = prev_index as isize + delta;
+        if candidate >= 0 && (candidate as usize) < item_count && key_of(candidate as usize) == key
+        {
+            return Some(candidate as usize);
+        }
+    }
+    None
+}
+
+/// [`probe_key`], then — when both hypotheses miss — the nearest index within
+/// [`KEY_SCAN_RADIUS`] of `prev_index` (shifted by `delta`, clamped to the
+/// data) whose key is `key`, alternating below and above. `None` when the key
+/// is not within reach: it left the data, or moved farther than the scan.
+pub(crate) fn locate_key(
+    key: ChildKey,
+    prev_index: usize,
+    delta: isize,
+    item_count: usize,
+    key_of: &dyn Fn(usize) -> ChildKey,
+) -> Option<usize> {
+    if item_count == 0 {
+        return None;
+    }
+    if let Some(index) = probe_key(key, prev_index, delta, item_count, key_of) {
+        return Some(index);
+    }
+    // Scan around both hypotheses' midpoint, so a two-sided mutation (some
+    // rows above the key, some below) is reached in the fewest steps.
+    let centre = (prev_index as isize + delta / 2).clamp(0, item_count as isize - 1);
+    let matches = |candidate: isize| {
+        candidate >= 0 && (candidate as usize) < item_count && key_of(candidate as usize) == key
+    };
+    for step in 0..=KEY_SCAN_RADIUS as isize {
+        if matches(centre - step) {
+            return Some((centre - step) as usize);
+        }
+        if step > 0 && matches(centre + step) {
+            return Some((centre + step) as usize);
+        }
+    }
+    None
+}
+
+// --- Measured extents ----------------------------------------------------------
+
+/// How many items one prefix walk ([`walk_to_offset`]) steps over at most: a
+/// scroll or a fling frame moves a handful; a gap farther than this many
+/// estimated items is a jump or a data reset, resolved in closed form first.
+pub(crate) const MAX_PREFIX_STEP: usize = 512;
+
+/// One row's cached measurement in variable-extent mode, held under the row's
+/// stable key (the module docs' *Measured extents*).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Measured {
+    /// The item index this row occupied the last time it was measured — the
+    /// only handle the cache has on "the current keying can no longer produce
+    /// this entry" when `item_count` shrinks.
+    pub(crate) index: usize,
+    /// The row's laid-out main-axis extent (logical px).
+    pub(crate) extent: f64,
+}
+
+/// Cache one row's laid-out extent under its stable key, keeping `sum` (the
+/// running Σ of the cache's extents) exact.
+pub(crate) fn record_measurement(
+    cache: &mut HashMap<ChildKey, Measured>,
+    sum: &mut f64,
+    key: ChildKey,
+    index: usize,
+    extent: f64,
+) {
+    match cache.insert(key, Measured { index, extent }) {
+        Some(previous) => *sum += extent - previous.extent,
+        None => *sum += extent,
+    }
+}
+
+/// Drop one row's measurement (its key left the data), keeping `sum` exact.
+pub(crate) fn forget_measurement(
+    cache: &mut HashMap<ChildKey, Measured>,
+    sum: &mut f64,
+    key: &ChildKey,
+) {
+    if let Some(previous) = cache.remove(key) {
+        *sum -= previous.extent;
+    }
+}
+
+/// Drop the measurements the current keying provably cannot produce any more:
+/// entries recorded at an index at or past `item_count` (the just-shrunk end).
+/// A scan of the cache, for a frame whose item count shrank only. A stale
+/// recorded index can evict a still-live row early; it is re-measured on its
+/// next visit, which is the conservative direction.
+pub(crate) fn evict_measurements_past(
+    cache: &mut HashMap<ChildKey, Measured>,
+    sum: &mut f64,
+    item_count: usize,
+) {
+    if cache.is_empty() {
+        return;
+    }
+    let mut dropped = 0.0;
+    cache.retain(|_, entry| {
+        let live = entry.index < item_count;
+        if !live {
+            dropped += entry.extent;
+        }
+        live
+    });
+    *sum -= dropped;
+}
+
+/// The whole content's estimated extent: `Σ measured + estimate × unmeasured`
+/// — O(1), the sum being maintained as rows are measured.
+pub(crate) fn estimated_total(
+    measured_sum: f64,
+    measured_count: usize,
+    item_count: usize,
+    estimate: f64,
+) -> f64 {
+    let unmeasured = item_count.saturating_sub(measured_count);
+    measured_sum + estimate * unmeasured as f64
+}
+
+/// Walk from a known prefix point — item `index` starts at content offset `y`
+/// — to `target`, returning the first item `target` falls inside (clamped to
+/// the data) and that item's content offset, summing `extent_at` (a row's
+/// measured extent, or the estimate) on the way.
+///
+/// O(step), at most [`MAX_PREFIX_STEP`] steps: a gap farther than that many
+/// estimated items resolves its bulk in closed form against `estimate` first.
+/// The walk itself never re-pins item 0 to offset 0; a caller that owes that
+/// does it on the result.
+pub(crate) fn walk_to_offset(
+    item_count: usize,
+    index: usize,
+    y: f64,
+    target: f64,
+    estimate: f64,
+    extent_at: impl Fn(usize) -> f64,
+) -> (usize, f64) {
+    debug_assert!(item_count > 0, "walk_to_offset needs a non-empty list");
+    let mut index = index.min(item_count - 1);
+    let mut y = y;
+
+    let gap = target - y;
+    if estimate > 0.0 && gap.abs() > estimate * MAX_PREFIX_STEP as f64 {
+        // A data reset or a programmatic jump, never a scroll: cover the bulk
+        // against the estimate so the walk below stays bounded.
+        let jump = (gap / estimate).trunc();
+        let landed = (index as f64 + jump).clamp(0.0, (item_count - 1) as f64);
+        y += (landed - index as f64) * estimate;
+        index = landed as usize;
+    }
+
+    let mut steps = 0usize;
+    while y > target && index > 0 && steps < MAX_PREFIX_STEP {
+        index -= 1;
+        y -= extent_at(index);
+        steps += 1;
+    }
+    while index + 1 < item_count && steps < MAX_PREFIX_STEP {
+        let extent = extent_at(index);
+        if y + extent <= target {
+            y += extent;
+            index += 1;
+            steps += 1;
+        } else {
+            break;
+        }
+    }
+    (index, y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn locate_key_resolves_both_hypotheses_and_a_two_sided_move() {
+        let key = ChildKey::new(100u64);
+        // Three rows prepended above key 100: the shifted hypothesis, in at
+        // most two `key_of` calls.
+        let shifted: Vec<u64> = (1000..1003).chain(0..200).collect();
+        let calls = Cell::new(0u32);
+        let key_of_shifted = |i: usize| {
+            calls.set(calls.get() + 1);
+            ChildKey::new(shifted[i])
+        };
+        assert_eq!(
+            probe_key(key, 100, 3, shifted.len(), &key_of_shifted),
+            Some(103)
+        );
+        assert_eq!(calls.get(), 2);
+        // Three prepended above and five appended below: the net delta (8) is
+        // not the key's own shift (3), so only the scan finds it.
+        let both: Vec<u64> = (1000..1003).chain(0..200).chain(5000..5005).collect();
+        let key_of = |i: usize| ChildKey::new(both[i]);
+        assert_eq!(probe_key(key, 100, 8, both.len(), &key_of), None);
+        assert_eq!(locate_key(key, 100, 8, both.len(), &key_of), Some(103));
+        // Gone from the data, or no data at all: no match.
+        assert_eq!(
+            locate_key(ChildKey::new(9999u64), 100, 8, both.len(), &key_of),
+            None
+        );
+        assert_eq!(locate_key(key, 0, 0, 0, &key_of), None);
+    }
+
+    #[test]
+    fn the_measured_cache_keeps_its_sum_exact() {
+        let mut cache = HashMap::new();
+        let mut sum = 0.0;
+        record_measurement(&mut cache, &mut sum, ChildKey::new(1u64), 0, 40.0);
+        record_measurement(&mut cache, &mut sum, ChildKey::new(2u64), 1, 60.0);
+        record_measurement(&mut cache, &mut sum, ChildKey::new(1u64), 0, 45.0);
+        assert_eq!(sum, 105.0);
+        assert_eq!(estimated_total(sum, cache.len(), 10, 50.0), 505.0);
+        forget_measurement(&mut cache, &mut sum, &ChildKey::new(1u64));
+        assert_eq!(sum, 60.0);
+        evict_measurements_past(&mut cache, &mut sum, 1);
+        assert!(cache.is_empty());
+        assert_eq!(sum, 0.0);
+    }
+
+    #[test]
+    fn the_prefix_walk_steps_over_measured_extents_and_jumps_in_closed_form() {
+        let extent = |i: usize| if i.is_multiple_of(2) { 40.0 } else { 60.0 };
+        // From item 0 at 0: 130 lies in item 2, which starts at 100.
+        assert_eq!(walk_to_offset(100, 0, 0.0, 130.0, 50.0, extent), (2, 100.0));
+        // Backwards from item 4 (at 200) to 50: item 1 starts at 40.
+        assert_eq!(walk_to_offset(100, 4, 200.0, 50.0, 50.0, extent), (1, 40.0));
+        // Past the end clamps to the last item; nothing re-pins item 0.
+        assert_eq!(walk_to_offset(3, 0, 0.0, 10_000.0, 50.0, extent).0, 2);
+        assert_eq!(walk_to_offset(3, 2, 70.0, 0.0, 50.0, extent), (0, -30.0));
+        // A jump far beyond the step bound lands by the estimate.
+        let (index, y) = walk_to_offset(1_000_000, 0, 0.0, 5_000_000.0, 50.0, |_| 50.0);
+        assert_eq!((index, y), (100_000, 5_000_000.0));
     }
 }

@@ -165,13 +165,13 @@ pub use frust_widgets::{
     ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollAxis, ScrollController,
     ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox,
     SizedBoxView, Slider, SliderView, SliverBoxView, SliverFillRemainingView,
-    SliverFixedExtentListView, SliverPaddingView, SourceFeedback, SpringDescription, Stack,
-    StackView, TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec,
-    TransitionState, VisibilityCallback, auto_scroll_zone, button, checkbox, colored_box, column,
-    container, custom_scroll_view, divider, drag_target, draggable, flexible, hero, icon,
-    icon_button, indexed_stack, inflexible, keyed, list_view, overlay_portal, radio,
+    SliverFixedExtentListView, SliverListView, SliverPaddingView, SourceFeedback,
+    SpringDescription, Stack, StackView, TextInput, TextInputView, TextView, Timing, Tolerance,
+    TransitionSpec, TransitionState, VisibilityCallback, auto_scroll_zone, button, checkbox,
+    colored_box, column, container, custom_scroll_view, divider, drag_target, draggable, flexible,
+    hero, icon, icon_button, indexed_stack, inflexible, keyed, list_view, overlay_portal, radio,
     reorderable_list, row, safe_area, scaffold, scroll_view, slider, sliver_box,
-    sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed,
+    sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_list,
     sliver_padding, stack, text, text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
@@ -3184,6 +3184,29 @@ mod structural_slivers_reexport {
         let rest: SliverFillRemainingView<()> =
             sliver_fill_remaining(text("footer")).has_scroll_body(false);
         let view: CustomScrollView<()> = custom_scroll_view((padded, rows, keyed, rest));
+        let _ = view;
+    }
+}
+
+/// Facade-level check that the lazy [`sliver_list`] resolves through the
+/// `frust` facade.
+#[cfg(test)]
+mod lazy_slivers_reexport {
+    use crate::{
+        ChildKey, CustomScrollView, SliverListView, custom_scroll_view, sliver_list, text,
+    };
+
+    #[test]
+    fn lazy_slivers_resolve_through_facade() {
+        let rows: SliverListView<()> = sliver_list(
+            5_000,
+            |i| ChildKey::new(i as u64),
+            |i| text(format!("row {i}")),
+        )
+        .estimated_item_extent(64.0)
+        .on_near_start(|_: &mut ()| {}, 400.0)
+        .on_near_end(|_: &mut ()| {}, 400.0);
+        let view: CustomScrollView<()> = custom_scroll_view(rows);
         let _ = view;
     }
 }
