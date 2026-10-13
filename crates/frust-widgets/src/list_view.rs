@@ -401,6 +401,7 @@ use crate::physics::{ScrollPhysics, default_overscroll_effect};
 use crate::scroll::ScrollInfo;
 use crate::scroll_controller::{AnimateTo, ItemAlignment, ScrollController, ScrollToItem};
 use crate::scroll_core::{ScrollSurface, ScrollSurfaceCore};
+use crate::slivers::reconcile::{self, ItemViews, LiveRows};
 // The in-file tests reach these through `use super::*`; production code here
 // no longer names them since the machinery moved into `crate::scroll_core`.
 #[cfg(test)]
@@ -928,46 +929,19 @@ impl<State: 'static> ListView<State> {
         ctx: &mut BuildCtx<'_>,
         plan: WindowPlan,
     ) -> ChangeFlags {
-        let (start, end) = (plan.start, plan.end);
-        let mut flags = ChangeFlags::NONE;
-        // Move the live window out so surviving indices can be relocated by key.
-        let old_keys = std::mem::take(&mut element.keys);
-        let old_children = std::mem::take(&mut element.children);
-        let mut old: HashMap<usize, ChildPod> = old_keys.into_iter().zip(old_children).collect();
-
-        let mut new_children = Vec::with_capacity(end.saturating_sub(start));
-        let mut new_keys = Vec::with_capacity(end.saturating_sub(start));
-        let mut structural = false;
-
-        for index in start..end {
-            if let Some(mut pod) = old.remove(&index) {
-                // Survivor: rebuild in place against its own previous view
-                // (reconstructed from the pure builder) — state preserved.
-                let prev_view = (prev.builder)(index);
-                let next_view = (self.builder)(index);
-                flags |= crate::authoring::rebuild_child(&prev_view, &next_view, &mut pod, ctx);
-                new_children.push(pod);
-            } else {
-                new_children.push(crate::authoring::build_child(&(self.builder)(index), ctx));
-                structural = true;
-            }
-            new_keys.push(index);
-        }
-
-        // Indices that left the window are torn down (cancel-if-active inside
-        // teardown_child unwinds an armed child).
-        for (index, mut pod) in old.drain() {
-            crate::authoring::teardown_child(&(prev.builder)(index), &mut pod, ctx);
-            structural = true;
-        }
-
-        element.children = new_children;
-        element.keys = new_keys;
+        let flags = reconcile::reconcile_positional(
+            ItemViews {
+                prev: &*prev.builder,
+                next: &*self.builder,
+            },
+            LiveRows {
+                children: &mut element.children,
+                indices: &mut element.keys,
+            },
+            plan.start..plan.end,
+            ctx,
+        );
         element.sync_child_origins();
-
-        if structural {
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-        }
         flags
     }
 
@@ -982,7 +956,8 @@ impl<State: 'static> ListView<State> {
     /// `prev.builder(prev_index)` → `self.builder(index)`. Keys with no entry
     /// build fresh; pods no slot claimed are torn down with the same
     /// cancel-if-active [`crate::authoring::teardown_child`] path the positional
-    /// reconciler uses — nothing more.
+    /// reconciler uses — nothing more. The matching itself is the shared
+    /// [`reconcile::reconcile_keyed`].
     ///
     /// A duplicate key is ambiguous and trips a `debug_assert!` mirroring
     /// [`crate::authoring::rebuild_children`]'s; release builds carry on (first
@@ -1010,83 +985,30 @@ impl<State: 'static> ListView<State> {
         delta: isize,
         anchor_probe_missed: bool,
     ) -> ChangeFlags {
-        let (start, end) = (plan.start, plan.end);
-        let capacity = end.saturating_sub(start);
-        // One pass over the new window: each slot's key (so `key_of` runs exactly
-        // once per slot), the map this frame will retain, and the duplicate check
-        // — done up front, like the authoring reconciler's, so a debug build trips
-        // before any pod has been moved.
-        let mut slot_keys: Vec<ChildKey> = Vec::with_capacity(capacity);
-        let mut next_index_of: HashMap<ChildKey, usize> = HashMap::with_capacity(capacity);
-        let mut duplicate = false;
-        for index in start..end {
-            let key = key_of(index);
-            duplicate |= next_index_of.insert(key, index).is_some();
-            slot_keys.push(key);
-        }
-        debug_assert!(!duplicate, "{}", DUPLICATE_KEY_MSG);
-
-        // Move the live window out so surviving rows can be relocated by key: the
-        // previous frame's `key -> item index` map, and the pods by the item index
-        // each rendered.
-        let prev_index_of = std::mem::take(&mut element.key_index);
-        let old_keys = std::mem::take(&mut element.keys);
-        let old_children = std::mem::take(&mut element.children);
-        // A moved window range owes a layout pass on its own, without depending on
-        // the match outcome below to prove it (the window is a contiguous run, so
-        // first index + length pin it exactly).
-        let window_shifted = old_keys.first().copied() != (capacity > 0).then_some(start)
-            || old_keys.len() != capacity;
-        let mut old: HashMap<usize, ChildPod> = old_keys.into_iter().zip(old_children).collect();
-
-        let mut new_children = Vec::with_capacity(capacity);
-        let mut new_keys = Vec::with_capacity(capacity);
-        let mut flags = ChangeFlags::NONE;
-        let mut structural = window_shifted;
         // Whether any slot in this frame's reconciled window matched a key the
-        // previous window also held — an *exact* hashmap lookup, unlike the
-        // rebuild-time anchor-shift probe's two index hypotheses. Read below to
-        // decide the wholesale-replace half of the measured-cache hygiene
-        // rules.
-        let mut any_survivor = false;
-
-        for (index, key) in (start..end).zip(slot_keys.iter().copied()) {
-            let survivor = prev_index_of
-                .get(&key)
-                .copied()
-                .and_then(|prev_index| old.remove(&prev_index).map(|pod| (prev_index, pod)));
-            match survivor {
-                Some((prev_index, mut pod)) => {
-                    any_survivor = true;
-                    // The row survived under its key: relocate its live pod into
-                    // this slot and rebuild it in place against the view it
-                    // actually holds — `prev.builder(prev_index)`, the index it
-                    // rendered last frame. That redirection is the whole point of
-                    // the retained map; state (hosted component, press, toggle)
-                    // rides along with the pod.
-                    let prev_view = (prev.builder)(prev_index);
-                    let next_view = (self.builder)(index);
-                    flags |= crate::authoring::rebuild_child(&prev_view, &next_view, &mut pod, ctx);
-                    if prev_index != index {
-                        // Same row, different slot: its origin moves, so the frame
-                        // owes a layout pass even though nothing was built or torn
-                        // down.
-                        structural = true;
-                    }
-                    new_children.push(pod);
-                }
-                None => {
-                    // A key with no live row: entering the window, or new data.
-                    new_children.push(crate::authoring::build_child(&(self.builder)(index), ctx));
-                    structural = true;
-                }
-            }
-            new_keys.push(index);
-        }
+        // previous window also held (`any_survivor`) is an *exact* hashmap
+        // lookup, unlike the rebuild-time anchor-shift probe's two index
+        // hypotheses. Read below to decide the wholesale-replace half of the
+        // measured-cache hygiene rules.
+        let outcome = reconcile::reconcile_keyed(
+            ItemViews {
+                prev: &*prev.builder,
+                next: &*self.builder,
+            },
+            LiveRows {
+                children: &mut element.children,
+                indices: &mut element.keys,
+            },
+            &mut element.key_index,
+            &**key_of,
+            plan.start..plan.end,
+            DUPLICATE_KEY_MSG,
+            ctx,
+        );
 
         // Measured-cache hygiene (variable extents only).
         if element.is_variable() {
-            if anchor_probe_missed && !any_survivor {
+            if anchor_probe_missed && !outcome.any_survivor {
                 // The rebuild-time anchor-shift probe matched no previous-window
                 // key by hypothesis, *and* literally no previous-window key
                 // matched a slot in this frame's reconciled window by exact
@@ -1135,38 +1057,23 @@ impl<State: 'static> ListView<State> {
                 // own documented conservative direction — never a permanent
                 // leak.
                 let count = element.item_count;
-                for (key, prev_index) in prev_index_of.iter() {
-                    if old.contains_key(prev_index)
-                        && !Self::key_survives(*key, *prev_index, delta, count, key_of)
-                    {
+                for (key, prev_index) in &outcome.departed {
+                    if !Self::key_survives(*key, *prev_index, delta, count, key_of) {
                         element.forget_measured(key);
                     }
                 }
             }
         }
 
-        // Every pod no slot claimed is a key that left the window or the data.
-        for (index, mut pod) in old.drain() {
-            crate::authoring::teardown_child(&(prev.builder)(index), &mut pod, ctx);
-            structural = true;
-        }
-
-        element.children = new_children;
-        element.keys = new_keys;
-        element.key_index = next_index_of;
         if let Some(estimate) = element.variable_estimate() {
             // Retain this window's identities beside its slots, then re-pin the
             // prefix anchor and the per-slot content positions to the plan the
             // window was computed from (layout refines them from measurements).
-            element.slot_keys = slot_keys;
+            element.slot_keys = outcome.slot_keys;
             element.set_window_geometry(plan, estimate);
         }
         element.sync_child_origins();
-
-        if structural {
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-        }
-        flags
+        outcome.flags
     }
 
     /// Determine the keyed prepend/removal scroll-anchor correction for this

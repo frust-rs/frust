@@ -164,13 +164,15 @@ pub use frust_widgets::{
     PageVisibility, PopResult, PushOptions, Radio, RadioView, RadioWidget, ReorderableListView,
     ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollAxis, ScrollController,
     ScrollInfo, ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox,
-    SizedBoxView, Slider, SliderView, SliverBoxView, SourceFeedback, SpringDescription, Stack,
+    SizedBoxView, Slider, SliderView, SliverBoxView, SliverFillRemainingView,
+    SliverFixedExtentListView, SliverPaddingView, SourceFeedback, SpringDescription, Stack,
     StackView, TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec,
     TransitionState, VisibilityCallback, auto_scroll_zone, button, checkbox, colored_box, column,
     container, custom_scroll_view, divider, drag_target, draggable, flexible, hero, icon,
     icon_button, indexed_stack, inflexible, keyed, list_view, overlay_portal, radio,
-    reorderable_list, row, safe_area, scaffold, scroll_view, slider, sliver_box, stack, text,
-    text_input,
+    reorderable_list, row, safe_area, scaffold, scroll_view, slider, sliver_box,
+    sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed,
+    sliver_padding, stack, text, text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -3153,6 +3155,35 @@ mod custom_scroll_view_reexport {
             .physics(Clamping::new())
             .overscroll_effect(OverscrollEffect::None)
             .controller(ScrollController::new());
+        let _ = view;
+    }
+}
+
+/// Facade-level check that the structural slivers ([`sliver_padding`],
+/// [`sliver_fill_remaining`] and the lazy [`sliver_fixed_extent_list`] /
+/// [`sliver_fixed_extent_list_keyed`]) resolve through the `frust` facade
+/// beside [`custom_scroll_view`].
+#[cfg(test)]
+mod structural_slivers_reexport {
+    use crate::{
+        ChildKey, CustomScrollView, EdgeInsets, SliverFillRemainingView, SliverFixedExtentListView,
+        SliverPaddingView, custom_scroll_view, sliver_box, sliver_fill_remaining,
+        sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_padding, text,
+    };
+
+    #[test]
+    fn structural_slivers_resolve_through_facade() {
+        let padded: SliverPaddingView<()> =
+            sliver_padding(EdgeInsets::all(8.0), sliver_box(text("header")));
+        let rows: SliverFixedExtentListView<()> =
+            sliver_fixed_extent_list(1_000, 48.0, |i| text(format!("row {i}")))
+                .on_near_end(|_: &mut ()| {}, 200.0);
+        let keyed: SliverFixedExtentListView<()> =
+            sliver_fixed_extent_list_keyed(10, 48.0, ChildKey::new, |i| text(format!("item {i}")))
+                .on_near_start(|_: &mut ()| {}, 100.0);
+        let rest: SliverFillRemainingView<()> =
+            sliver_fill_remaining(text("footer")).has_scroll_body(false);
+        let view: CustomScrollView<()> = custom_scroll_view((padded, rows, keyed, rest));
         let _ = view;
     }
 }
