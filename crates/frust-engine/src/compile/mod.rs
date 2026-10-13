@@ -626,6 +626,13 @@ impl SceneCompiler {
         self.glyph_atlas.is_enabled()
     }
 
+    /// The glyph-atlas policy's counters for the last compiled frame — what
+    /// the `frust-perf enc` line's miss, eviction and run-key counts read.
+    #[cfg(feature = "perf-trace")]
+    pub(crate) fn glyph_atlas_trace(&self) -> &crate::text::atlas_policy::AtlasTrace {
+        self.glyph_atlas.trace()
+    }
+
     /// The images this compiler currently holds resident.
     pub fn images(&self) -> &ImageResidency {
         &self.images
