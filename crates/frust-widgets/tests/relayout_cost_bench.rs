@@ -66,13 +66,16 @@
 //!
 //! # After p1 (layout skip gated on pending LAYOUT; FRUST_NO_LAYOUT_SKIP arm)
 //!
-//! Same host class (Linux workstation, i5-12600, 12 threads) and profile
-//! (unoptimized `test` profile + debuginfo). Both arms ran back to back at a
-//! 1-minute load of 2.9-3.0 (below the ~4 threshold; an earlier arm started at
-//! load 4.7 and is not recorded). `arm: skip=on` is the default
-//! `set_layout_skip(true)`; `arm: skip=off` is `FRUST_NO_LAYOUT_SKIP=1`, which
-//! calls `set_layout_skip(false)` so every pod lays out on every pass. The off
-//! arm reproduces the baseline layout figures above, so the skip is the only variable.
+//! Measured at `feature/render-model-p1` @ 6e86476b plus the harness change
+//! be0cd57d (the `FRUST_NO_LAYOUT_SKIP` arm and these rows). Same host class
+//! (Linux workstation, i5-12600, 12 threads) and profile (unoptimized `test`
+//! profile + debuginfo). Both arms ran back to back at a 1-minute host load of
+//! 2.9-3.0 (below the ~4 threshold; an earlier arm started at load 4.7 and is
+//! not recorded). `arm: skip=on` is the default `set_layout_skip(true)`;
+//! `arm: skip=off` is `FRUST_NO_LAYOUT_SKIP=1`, which calls
+//! `set_layout_skip(false)` so every pod lays out on every pass. The off arm
+//! matches the baseline layout figures above within host noise, so the skip is
+//! the only variable.
 //! Paint is unchanged by design and varies run to run within a few percent.
 //!
 //! Layout ratio, one leaf changes / no change (mean): skip on
