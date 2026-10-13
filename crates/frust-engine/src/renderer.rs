@@ -116,8 +116,9 @@
 //!
 //! # Compositing a layer
 //!
-//! A finished page reaches its parent as ONE instanced quad through the same
-//! strip program every draw goes through, flagged as a whole rectangle and
+//! A finished page reaches its parent as ONE instanced quad through the strip
+//! program every draw goes through (its [`PaintClass::LayerComposite`]
+//! specialisation — see *Paint-class runs*), flagged as a whole rectangle and
 //! naming the layer colour source: the fragment stage then reads the page
 //! bound as `layer_input_texture` at the quad's own texel and scales it by the
 //! opacity packed into the instance's low byte. The page is bound through a
@@ -136,11 +137,11 @@
 //! Every strip pass is drawn in **runs**, each through the pipeline of one
 //! [`PaintClass`] — the strip program specialised to the paints the run holds
 //! (see [`crate::gpu::pipelines`]'s *The paint-class axis*). The runs are cut
-//! when a segment is planned ([`Scratch::push_run`], by
+//! when a segment is planned (`Scratch::push_run`, by
 //! [`split_class_runs`]): contiguous, in painter order, covering the segment
 //! exactly, so a pass draws the same instances in the same order it always did
 //! and only the program shading each run changes. A run shorter than the
-//! renderer's threshold ([`ClassRouting::min_run`],
+//! renderer's threshold ([`EngineRenderer::run_split_min`],
 //! [`crate::gpu::strips::RUN_SPLIT_MIN`] by default) is merged and drawn with
 //! [`PaintClass::Uber`] rather than paying a pipeline switch of its own; a
 //! composite always takes [`PaintClass::LayerComposite`], the opaque pass its
@@ -231,7 +232,8 @@ use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
 use crate::gpu::pipelines::{EnginePipeline, EngineShaders, atlas_strip_desc, warm_up_descs_for};
 use crate::gpu::strips::{
-    ClassRun, ClassSet, PaintClass, PaintType, pack_paint_descriptor, split_class_runs,
+    ClassRun, ClassSet, PaintClass, PaintType, merge_class_runs, pack_paint_descriptor,
+    split_class_runs,
 };
 use crate::gpu::targets::{
     IntermediateTargets, IntermediateTexture, filter_data_texture_descriptor,
@@ -2967,8 +2969,16 @@ struct Scratch {
     /// Whether the round being planned renders into a page, which decides the
     /// class set [`Self::push_run`] records a run's class in.
     planning_page: bool,
-    /// Reusable output of [`split_class_runs`].
+    /// Reusable output of [`merge_class_runs`].
     class_runs: Vec<ClassRun>,
+    /// Where the paint class changes in [`Self::alpha`], as `(first instance,
+    /// class)` in ascending order — one entry per draw whose class differs
+    /// from the draw before it. Every instance of a draw shares its paint, so
+    /// these are the only places a class run can start, and a segment is split
+    /// by walking them instead of re-reading every instance.
+    alpha_marks: Vec<(u32, PaintClass)>,
+    /// The same marks for [`Self::opaque`].
+    opaque_marks: Vec<(u32, PaintClass)>,
 }
 
 impl Scratch {
@@ -3000,6 +3010,8 @@ impl Scratch {
         self.filter_layers.clear();
         self.filter_passes = 0;
         self.opaque_segments.clear();
+        self.alpha_marks.clear();
+        self.opaque_marks.clear();
         self.opaque_classes = ClassSet::EMPTY;
         self.surface_classes = ClassSet::EMPTY;
         self.page_classes = ClassSet::EMPTY;
@@ -3076,6 +3088,11 @@ impl Scratch {
                                 run_external = paint.external;
                             }
                             let to_opaque = paint.opaque && split_opaque;
+                            let class = PaintClass::of_flag(paint.paint);
+                            mark_class(&mut self.alpha_marks, self.alpha.len() as u32, class);
+                            if to_opaque {
+                                mark_class(&mut self.opaque_marks, self.opaque.len() as u32, class);
+                            }
 
                             // A generation's last strip is its sentinel, which
                             // is what carries the preceding strip's extent — so
@@ -3171,11 +3188,16 @@ impl Scratch {
         // The opaque region is one segment of the one depth-writing pass, cut
         // into class runs like any other.
         self.class_runs.clear();
-        split_class_runs(
-            &self.opaque,
+        merge_class_runs(
+            marked_runs(&self.opaque_marks, 0, self.opaque.len() as u32),
             self.routing.min_run,
             self.routing.uber,
             &mut self.class_runs,
+        );
+        debug_assert_eq!(
+            self.class_runs,
+            scanned_runs(&self.opaque, self.routing),
+            "the opaque marks disagree with the instances they mark"
         );
         for run in &self.class_runs {
             self.opaque_segments
@@ -3267,11 +3289,16 @@ impl Scratch {
             return;
         };
         self.class_runs.clear();
-        split_class_runs(
-            span,
+        merge_class_runs(
+            marked_runs(&self.alpha_marks, first, end),
             self.routing.min_run,
             self.routing.uber,
             &mut self.class_runs,
+        );
+        debug_assert_eq!(
+            self.class_runs,
+            scanned_runs(span, self.routing),
+            "the alpha marks disagree with the instances they mark"
         );
         for index in 0..self.class_runs.len() {
             let run = self.class_runs[index];
@@ -3446,6 +3473,63 @@ impl Scratch {
             bytemuck::cast_slice(&self.alpha),
         )
     }
+}
+
+/// Records that the instances from `at` on carry `class`, unless the marks
+/// already say so.
+///
+/// A draw that emitted nothing leaves its mark at the same index as the next
+/// draw's, which then overwrites it — and drops it altogether when that leaves
+/// two neighbouring marks of one class.
+fn mark_class(marks: &mut Vec<(u32, PaintClass)>, at: u32, class: PaintClass) {
+    match marks.last_mut() {
+        Some(last) if last.1 == class => {}
+        Some(last) if last.0 == at => {
+            last.1 = class;
+            let len = marks.len();
+            if len >= 2 && marks[len - 2].1 == class {
+                marks.pop();
+            }
+        }
+        _ => marks.push((at, class)),
+    }
+}
+
+/// The class runs `marks` says cover instances `first..end`, relative to
+/// `first` — the per-draw input [`merge_class_runs`] merges.
+///
+/// Every instance of a planned segment was emitted after its draw's mark, so
+/// the mark at or before `first` names its class; a composite or punch
+/// instance between two marks is never inside a segment's range.
+fn marked_runs(
+    marks: &[(u32, PaintClass)],
+    first: u32,
+    end: u32,
+) -> impl Iterator<Item = ClassRun> + '_ {
+    let from = marks
+        .partition_point(|(at, _)| *at <= first)
+        .saturating_sub(1);
+    let tail = marks.get(from..).unwrap_or(&[]);
+    tail.iter()
+        .enumerate()
+        .take_while(move |(_, (at, _))| *at < end)
+        .filter_map(move |(index, (at, class))| {
+            let start = (*at).max(first);
+            let stop = tail.get(index + 1).map_or(end, |next| next.0.min(end));
+            (stop > start).then(|| ClassRun {
+                first: start - first,
+                count: stop - start,
+                class: *class,
+            })
+        })
+}
+
+/// The runs a full instance scan gives — what the marks must agree with,
+/// checked in debug builds.
+fn scanned_runs(instances: &[GpuStrip], routing: ClassRouting) -> Vec<ClassRun> {
+    let mut out = Vec::new();
+    split_class_runs(instances, routing.min_run, routing.uber, &mut out);
+    out
 }
 
 /// The column of device space one round's target holds: the origin its
@@ -3805,9 +3889,12 @@ struct FrameResources {
     /// they were first named — the slot numbering the pass segments and the
     /// group-1 bind groups both address by.
     external_runs: ExternalRuns,
-    /// One set of bind groups per strip pipeline variant. Not one shared set:
-    /// every engine pipeline uses wgpu's derived layout, and a derived layout
-    /// is exclusive to the pipeline that derived it.
+    /// One set of bind groups per strip render state, built against any one
+    /// of that state's class pipelines. Every strip pipeline — each state,
+    /// each paint class — is built against one explicit layout
+    /// ([`crate::gpu::bindings::strip_pipeline_layout`]), so a state's set binds
+    /// under all of its classes; keeping one set per state is what the map
+    /// already did when each pipeline derived a layout of its own.
     bind_groups: HashMap<EnginePipeline, StripBindGroups>,
     /// The target format the live bind groups were built against; a change
     /// means different pipelines, so the whole map is dropped rather than
@@ -4759,9 +4846,8 @@ impl StripBindGroups {
 /// One function for both shapes the group takes — `external` is
 /// [`Placeholders::external`] for the frame-wide group, or a registered view
 /// for the group a run of external instances is drawn with (see
-/// [`crate::gpu::bindings`]). Built against one pipeline for the same reason
-/// [`resources_bind_group`] is: every engine pipeline uses wgpu's derived
-/// layout, which is exclusive to the pipeline that derived it.
+/// [`crate::gpu::bindings`]). Built against one pipeline's group layout, as
+/// [`resources_bind_group`] is.
 fn images_bind_group(
     device: &wgpu::Device,
     pipeline: &wgpu::RenderPipeline,
@@ -4787,11 +4873,10 @@ fn images_bind_group(
 /// Group 0 of a strip pass: the frame's coverage, the pass's own viewport
 /// uniform, and the texture a composite reads its finished page from.
 ///
-/// Built against one pipeline rather than shared, because every engine pipeline
-/// uses wgpu's *derived* layout — a layout derived from a shader module is
-/// exclusive to the pipeline that derived it, so a bind group built against one
-/// variant's layout is rejected by another's even when the two layouts are
-/// structurally identical.
+/// Built against one pipeline's group layout. Every strip pipeline names the
+/// one explicit strip layout ([`crate::gpu::bindings::strip_pipeline_layout`]),
+/// so the group binds under every strip state and paint class alike — which is
+/// what lets one pass switch class pipelines between runs without rebinding.
 fn resources_bind_group(
     device: &wgpu::Device,
     pipeline: &wgpu::RenderPipeline,

@@ -519,41 +519,80 @@ pub fn split_class_runs(
     uber_only: bool,
     out: &mut Vec<ClassRun>,
 ) {
-    let start = out.len();
     let total = u32::try_from(instances.len()).unwrap_or(u32::MAX);
-    if total == 0 {
-        return;
-    }
-    if uber_only {
-        out.push(ClassRun {
-            first: 0,
-            count: total,
-            class: PaintClass::Uber,
-        });
-        return;
-    }
-
-    // Steps 1 and 2 together, over a stack of closed runs: each maximal run is
-    // pushed, folding a short solid run into a non-solid neighbour as soon as
-    // both are known.
     let mut index = 0_u32;
-    while index < total {
+    let maximal = std::iter::from_fn(|| {
+        if index >= total {
+            return None;
+        }
         let class = PaintClass::of_instance(&instances[index as usize]);
         let mut end = index + 1;
         while end < total && PaintClass::of_instance(&instances[end as usize]) == class {
             end += 1;
         }
-        push_folding(
-            out,
-            start,
-            ClassRun {
-                first: index,
-                count: end - index,
-                class,
-            },
-            min_run,
-        );
+        let run = ClassRun {
+            first: index,
+            count: end - index,
+            class,
+        };
         index = end;
+        Some(run)
+    });
+    merge_class_runs(maximal, min_run, uber_only, out);
+}
+
+/// [`split_class_runs`] over runs already known to share a class, rather than
+/// over the instances themselves — steps 2 and 3 alone.
+///
+/// `runs` must tile one span front to back (each run's `first` is the end of
+/// the one before it); an empty run is skipped, and adjacent runs sharing a
+/// class are joined before anything else, so the result is exactly what
+/// scanning the instances would give. This is how the renderer splits a segment without
+/// re-reading every instance: every instance of one draw carries the same
+/// paint, so the class changes only at draw boundaries, and it records those
+/// as it emits the draw.
+pub fn merge_class_runs(
+    runs: impl IntoIterator<Item = ClassRun>,
+    min_run: u32,
+    uber_only: bool,
+    out: &mut Vec<ClassRun>,
+) {
+    let start = out.len();
+    if uber_only {
+        let mut runs = runs.into_iter().filter(|run| run.count > 0);
+        if let Some(first) = runs.next() {
+            let count = runs.fold(first.count, |count, run| count.saturating_add(run.count));
+            out.push(ClassRun {
+                first: first.first,
+                count,
+                class: PaintClass::Uber,
+            });
+        }
+        return;
+    }
+
+    // Step 1's maximality first — adjacent runs of one class are joined before
+    // any fold decision looks at a length — then step 2, over a stack of closed
+    // runs: each maximal run is pushed, folding a short solid run into a
+    // non-solid neighbour as soon as both are known.
+    let mut pending: Option<ClassRun> = None;
+    for run in runs {
+        if run.count == 0 {
+            continue;
+        }
+        match pending.as_mut() {
+            Some(open) if open.class == run.class => {
+                open.count = open.count.saturating_add(run.count);
+            }
+            _ => {
+                if let Some(closed) = pending.replace(run) {
+                    push_folding(out, start, closed, min_run);
+                }
+            }
+        }
+    }
+    if let Some(closed) = pending {
+        push_folding(out, start, closed, min_run);
     }
 
     // Step 3, in place: a short non-solid run is drawn with Uber, and Uber
@@ -807,6 +846,49 @@ mod tests {
         split_class_runs(&of(&[(P::Image, 20)]), 16, false, &mut out);
         assert_eq!(out.len(), 2);
         assert_eq!(out[1].first, 0);
+    }
+
+    /// The renderer's draw-granular path agrees with the instance scan: the
+    /// same slice, handed over as per-draw runs that may repeat a class, splits
+    /// into exactly the runs the scan produces.
+    #[test]
+    fn merging_draw_runs_equals_scanning_their_instances() {
+        use PaintType as P;
+        let draws = [
+            (P::Solid, 3),
+            (P::RadialGradient, 20),
+            (P::Solid, 10),
+            (P::Solid, 10),
+            (P::LinearGradient, 9),
+            (P::Image, 5),
+            (P::Image, 4),
+            (P::Solid, 2),
+            (P::BlurredRoundedRect, 30),
+            (P::Solid, 40),
+        ];
+        let instances = of(&draws);
+        let mut first = 0;
+        let per_draw: Vec<ClassRun> = draws
+            .iter()
+            .map(|(paint, count)| {
+                let run = ClassRun {
+                    first,
+                    count: *count,
+                    class: PaintClass::of_flag(pack_paint_descriptor(*paint, 7)),
+                };
+                first += count;
+                run
+            })
+            .collect();
+        for min_run in [0, 1, 4, 16, 64] {
+            for uber in [false, true] {
+                let mut scanned = Vec::new();
+                split_class_runs(&instances, min_run, uber, &mut scanned);
+                let mut merged = Vec::new();
+                merge_class_runs(per_draw.iter().copied(), min_run, uber, &mut merged);
+                assert_eq!(scanned, merged, "threshold {min_run}, uber {uber}");
+            }
+        }
     }
 
     /// Exhaustive over short sequences: the runs always tile the slice, never
