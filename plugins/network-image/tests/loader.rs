@@ -8,8 +8,8 @@ use std::task::{Poll, Waker};
 use std::time::{Duration, Instant};
 
 use frust_network_image::{
-    DiskCacheConfig, FetchError, FetchFuture, FetchRequest, FetchedBytes, ImageFetcher,
-    ImageLoader, LoadError, LoadRequest, LoaderConfig, TargetPx,
+    DecodeError, DecodeLimits, DiskCacheConfig, FetchError, FetchFuture, FetchRequest,
+    FetchedBytes, ImageFetcher, ImageLoader, LoadError, LoadRequest, LoaderConfig, TargetPx,
 };
 
 /// Every fetch waits on it until it opens.
@@ -621,5 +621,43 @@ fn headerless_key_is_the_url_only_key() {
         assert!(loader.peek_memory_with_headers(url, &[], None).is_some());
         loader.load(req(url, None)).await.expect("hit");
         assert_eq!(fetcher.calls(), 1);
+    });
+}
+
+#[test]
+fn configured_decode_limits_reject_an_oversized_image() {
+    let fetcher = FakeFetcher::new(Duration::ZERO);
+    let loader = ImageLoader::new(
+        fetcher.clone(),
+        LoaderConfig {
+            decode_limits: DecodeLimits {
+                max_width: 100,
+                ..DecodeLimits::default()
+            },
+            disk: DiskCacheConfig {
+                enabled: false,
+                ..DiskCacheConfig::default()
+            },
+            ..LoaderConfig::default()
+        },
+    );
+    run(async {
+        // The 4000x3000 JPEG exceeds the 100 px width limit.
+        let err = loader
+            .load(req("https://x/a.jpg", None))
+            .await
+            .expect_err("over the limit");
+        assert!(
+            matches!(
+                err,
+                LoadError::Decode(DecodeError::TooLarge { width: 4000, .. })
+            ),
+            "{err:?}"
+        );
+        // The 8x8 PNG fits.
+        loader
+            .load(req("https://x/a.png", None))
+            .await
+            .expect("fits");
     });
 }

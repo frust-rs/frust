@@ -12,7 +12,7 @@ use frust::{ImageSource, spawn_blocking};
 use futures_util::FutureExt;
 use futures_util::future::Shared;
 
-use crate::decode::{DecodeError, TargetPx, decode_shared};
+use crate::decode::{DecodeError, DecodeLimits, TargetPx, decode_shared};
 use crate::disk_cache::{DiskCache, DiskStats};
 use crate::fetch::{FetchError, FetchRequest, ImageFetcher};
 use crate::memory_cache::{
@@ -55,6 +55,8 @@ pub struct LoaderConfig {
     pub max_fetch_bytes: usize,
     /// Persistent raw-bytes cache.
     pub disk: DiskCacheConfig,
+    /// Bounds on one decode (default 8192 px per side, 256 MiB).
+    pub decode_limits: DecodeLimits,
 }
 
 impl Default for LoaderConfig {
@@ -63,6 +65,7 @@ impl Default for LoaderConfig {
             memory_budget_bytes: DEFAULT_BUDGET_BYTES,
             max_fetch_bytes: 20 * 1024 * 1024,
             disk: DiskCacheConfig::default(),
+            decode_limits: DecodeLimits::default(),
         }
     }
 }
@@ -314,12 +317,15 @@ impl ImageLoader {
         let inner = self.inner.clone();
         let task_key = key.clone();
         let target = req.target;
+        let limits = self.inner.config.decode_limits;
         // Dropping this body before `raw` resolves drops `release` with it.
         let fut: LoadFuture<LoadResult> = Box::pin(async move {
             let fetched = raw.await;
             drop(release);
             let result = match fetched {
-                Ok(bytes) => decode_shared(bytes, target).await.map_err(LoadError::from),
+                Ok(bytes) => decode_shared(bytes, target, limits)
+                    .await
+                    .map_err(LoadError::from),
                 Err(e) => Err(LoadError::Fetch(e)),
             };
             if let Ok(source) = &result {

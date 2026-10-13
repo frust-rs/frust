@@ -7229,13 +7229,13 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `network-image-full-size-decode-peak` — a large image is fully decoded before it is downscaled
 
-**Observed**: `image` 0.25 has no JPEG DCT-scaled decode, so `target_px` shrinks the image only after a full-resolution decode; the peak transient allocation is the full decoded bitmap (width x height x 4 bytes) regardless of the display size. Only the downscaled result is cached in memory.
+**Observed**: `image` 0.25 has no JPEG DCT-scaled decode, so `target_px` shrinks the image only after a full-resolution decode; the peak transient allocation is the full decoded bitmap (width x height x 4 bytes) regardless of the display size, and the RGBA conversion plus resize can transiently need up to about twice that. Only the downscaled result is cached in memory. The decode is bounded by `DecodeLimits` (default 8192 px per side, 256 MiB decoded; `LoaderConfig::decode_limits`): a server-declared size over the limit is rejected from the header with `DecodeError::TooLarge` before any pixel is decoded.
 
-**Applies to**: decoding a high-resolution photo on a memory-constrained device; the fetch is capped (20 MiB by default) but the decoded size is not.
+**Applies to**: decoding a high-resolution photo on a memory-constrained device; the fetch is capped (20 MiB by default) and the decoded size is capped by `DecodeLimits`, but a within-limit photo still peaks near twice its RGBA size.
 
 **Why accepted**: the cap bounds download size, decode runs off the UI thread, and the resident cost after decode is the fitted bitmap; a scaled-decode path needs a different decoder.
 
-**Trigger for removal**: a decoder with DCT-scaled or tiled JPEG decode, or a pre-decode dimension limit in `decode_and_fit`.
+**Trigger for removal**: a decoder with DCT-scaled or tiled JPEG decode, (the pre-decode dimension limit already exists in `decode_and_fit`).
 
 **Evidence**: `plugins/network-image/src/decode.rs` (`decode_and_fit`: Triangle pre-shrink for >2x, then Lanczos3, after the full decode).
 
