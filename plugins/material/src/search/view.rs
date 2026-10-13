@@ -440,6 +440,7 @@ impl<State: 'static> View<State> for SearchViewContentView<State> {
         SearchViewContentWidget {
             mode: self.mode,
             anchor: self.anchor.clone(),
+            laid_anchor_width: 0.0,
             label: self.hint.clone(),
             field: build_child(&self.field_view(), ctx),
             leading: build_child(self.leading_ref(&default_leading), ctx),
@@ -459,6 +460,10 @@ impl<State: 'static> View<State> for SearchViewContentView<State> {
         element: &mut SearchViewContentWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
+        // The mode decides the header band and the panel size; the anchor cell
+        // (written by the docked bar's paint, outside this pod) decides the
+        // docked width. Neither reaches layout through a child's flags.
+        let geometry_moved = element.mode != self.mode;
         element.mode = self.mode;
         element.anchor = self.anchor.clone();
         element.label = self.hint.clone();
@@ -507,6 +512,9 @@ impl<State: 'static> View<State> for SearchViewContentView<State> {
             &mut element.body,
             ctx,
         );
+        if geometry_moved || element.anchor_width() != element.laid_anchor_width {
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
         flags
     }
 
@@ -542,6 +550,10 @@ impl<State: 'static> View<State> for SearchViewContentView<State> {
 pub struct SearchViewContentWidget {
     mode: SearchViewMode,
     anchor: Option<OverlayAnchor>,
+    /// The anchor width the last `layout` sized a docked panel from — compared
+    /// against the live cell by `rebuild` and `paint`, which ask for a relayout
+    /// on a difference (`docs/REVIEW_FOCUS.md`'s layout-skip pattern).
+    laid_anchor_width: f64,
     /// The hint, kept for the docked presentation's own accessibility node
     /// (full-screen, the modal host carries the label instead).
     label: Option<String>,
@@ -563,6 +575,11 @@ impl SearchViewContentWidget {
         self.mode.header_height()
     }
 
+    /// The anchor's current width, `0.0` without one.
+    fn anchor_width(&self) -> f64 {
+        self.anchor.as_ref().map_or(0.0, |a| a.rect().width())
+    }
+
     /// The panel size this content resolves for `area`: the whole area when
     /// full-screen, else the reference's own
     /// `clamp(anchorWidth, minWidth, maxWidth)` ×
@@ -571,7 +588,7 @@ impl SearchViewContentWidget {
         if self.mode.is_full_screen() {
             return area;
         }
-        let anchor_width = self.anchor.as_ref().map_or(0.0, |a| a.rect().width());
+        let anchor_width = self.anchor_width();
         // `.max(..).min(area)` rather than `clamp`: a viewport narrower/shorter
         // than the M3 minimum must win, and `clamp` would panic on the
         // inverted bounds that implies.
@@ -589,6 +606,7 @@ impl Widget for SearchViewContentWidget {
             finite_or_zero(bc.max().width),
             finite_or_zero(bc.max().height),
         );
+        self.laid_anchor_width = self.anchor_width();
         let panel = self.panel_size(area);
         let header_h = self.mode.header_height();
         let (hpad, vpad) = self.mode.header_padding();
@@ -634,6 +652,12 @@ impl Widget for SearchViewContentWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // A docked panel takes its width from the bar's anchor cell, which the
+        // bar's own paint writes; a width the last layout did not run with owes
+        // one.
+        if !self.mode.is_full_screen() && self.anchor_width() != self.laid_anchor_width {
+            ctx.request_layout();
+        }
         let theme = Theme::from_paint_ctx(ctx);
         let origin = ctx.origin();
         let size = ctx.size();

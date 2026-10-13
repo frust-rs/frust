@@ -448,6 +448,12 @@ pub struct InputWidget {
     error_blend: Lane,
     /// The message row's presence, `0.0` gone .. `1.0` shown.
     message_presence: Lane,
+    /// The message row height the last `layout` reserved. A leaving message
+    /// stops taking room on the paint its presence lands on — a frame that
+    /// asks for nothing, and a reduce-motion snap asks for nothing either — so
+    /// `paint` compares this against the live height and asks for the relayout
+    /// (`docs/REVIEW_FOCUS.md`'s layout-skip pattern).
+    laid_message_height: f64,
     /// An error that has just appeared and owes a shake; `paint` stamps the
     /// start (neither a `BuildCtx` nor an `EventCtx` carries a clock).
     shake_armed: bool,
@@ -492,6 +498,7 @@ impl<State: 'static> View<State> for InputView<State> {
             success_start: None,
             field: Rect::ZERO,
             was_focused: false,
+            laid_message_height: 0.0,
         }
     }
 
@@ -656,6 +663,7 @@ impl Widget for InputWidget {
         y += style::HEIGHT_INPUT;
 
         let message_height = self.message_height();
+        self.laid_message_height = message_height;
         if message_height > 0.0 {
             y += ROW_GAP + message_height;
         }
@@ -698,6 +706,7 @@ impl Widget for InputWidget {
             owes_frame |= self.error_blend.advance(now);
             owes_frame |= self.message_presence.advance(now);
         }
+        let owes_layout = self.message_height() != self.laid_message_height;
         let (shake, shaking) = self.shake_offset(now);
         if !shaking {
             self.shake_start = None;
@@ -774,7 +783,9 @@ impl Widget for InputWidget {
             scene.pop_layer();
         }
 
-        if owes_frame {
+        if owes_layout {
+            ctx.request_layout();
+        } else if owes_frame {
             ctx.request_frame();
         }
     }

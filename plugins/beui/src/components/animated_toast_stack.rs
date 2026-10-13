@@ -1138,13 +1138,20 @@ impl Widget for AnimatedToastStackWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        // `layout` is where the cards' places are retargeted (`retarget_places`
+        // reads `expanded` and the slot list), so a collapse latched here, or a
+        // finished exit dropped by `advance`, owes a relayout rather than a bare
+        // frame.
+        let mut owes_layout = false;
         if !ctx.is_hovered() && self.expanded {
-            self.set_expanded(false);
+            owes_layout |= self.set_expanded(false);
         }
         let theme = Theme::from_paint_ctx(ctx);
         let reduce_motion = theme.is_some_and(|t| t.motion.reduce_motion);
         let now = ctx.frame_time();
+        let slots_before = self.slots.len();
         let moving = self.advance(now, reduce_motion);
+        owes_layout |= self.slots.len() != slots_before;
         let origin = ctx.origin();
 
         let mut spinning = false;
@@ -1227,7 +1234,9 @@ impl Widget for AnimatedToastStackWidget {
             spinning |= slot.status.spins() && content > 0.0 && !reduce_motion;
         }
 
-        if moving {
+        if owes_layout {
+            ctx.request_layout();
+        } else if moving {
             ctx.request_frame();
         } else if spinning {
             // A perpetual decorative loop, not a transition with an endpoint.

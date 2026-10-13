@@ -1023,9 +1023,28 @@ pub struct SelectPanelWidget {
     hovered: Option<usize>,
     captured: Option<usize>,
     on_select: ErasedArgCallback<usize>,
+    /// The `(variant, trigger width)` the last `layout` sized the panel from.
+    /// Both live in the shared config, outside this panel's own props — the
+    /// trigger's paint writes the anchor cell — so `rebuild` and `paint`
+    /// compare them against the live values and ask for a relayout on a
+    /// difference (`docs/REVIEW_FOCUS.md`'s layout-skip pattern).
+    laid: (SelectVariant, f64),
 }
 
 impl SelectPanelWidget {
+    /// The trigger's current width, `0.0` without an anchor.
+    fn anchor_width(&self) -> f64 {
+        self.config
+            .borrow()
+            .anchor
+            .as_ref()
+            .map_or(0.0, |anchor| anchor.rect().width())
+    }
+
+    /// What `layout` sizes the panel from, read live.
+    fn layout_inputs(&self) -> (SelectVariant, f64) {
+        (self.variant(), self.anchor_width())
+    }
     /// The variant this panel is painting.
     fn variant(&self) -> SelectVariant {
         self.config.borrow().variant
@@ -1130,6 +1149,7 @@ impl<State: 'static> View<State> for SelectPanelView<State> {
             hovered: None,
             captured: None,
             on_select: erase_callback_arg(&self.on_select),
+            laid: (SelectVariant::default(), 0.0),
         }
     }
 
@@ -1164,6 +1184,12 @@ impl<State: 'static> View<State> for SelectPanelView<State> {
         if element.header.set_content(header) {
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
+        // The variant (the morph's header band) and the trigger width live in
+        // the shared config and the anchor cell; neither is a prop compared
+        // above.
+        if element.layout_inputs() != element.laid {
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
         flags
     }
 }
@@ -1191,12 +1217,8 @@ impl Widget for SelectPanelWidget {
         }
         // `min-w-[trigger width]`: a list never comes up narrower than the
         // control it dropped out of.
-        let anchor_width = self
-            .config
-            .borrow()
-            .anchor
-            .as_ref()
-            .map_or(0.0, |anchor| anchor.rect().width());
+        self.laid = self.layout_inputs();
+        let anchor_width = self.laid.1;
         let natural = widest
             + (ITEM_PADDING_X + PANEL_PADDING) * 2.0
             + TRIGGER_GAP
@@ -1214,6 +1236,11 @@ impl Widget for SelectPanelWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         if !ctx.is_hovered() {
             self.hovered = None;
+        }
+        // A trigger resized (its paint writes the anchor cell) or a variant
+        // swapped since the last layout owes one.
+        if self.layout_inputs() != self.laid {
+            ctx.request_layout();
         }
         let theme = Theme::from_paint_ctx(ctx);
         let colors = panel_colors(theme);
