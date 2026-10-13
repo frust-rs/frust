@@ -15,6 +15,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -284,6 +285,26 @@ enum OverlayRoute {
     /// The event continues into today's dispatch; merge this outcome into
     /// whatever that produces.
     Continue(EventOutcome),
+}
+
+/// Layout-audit bookkeeping ([`RenderRoot::set_layout_audit`]).
+#[derive(Default)]
+struct LayoutAudit {
+    enabled: bool,
+    mismatches: u64,
+    /// Audited frames so far.
+    frame: u64,
+    /// Audited frame each `(type, label)` was last logged on.
+    last_logged: HashMap<(&'static str, Option<String>), u64>,
+}
+
+/// One node's geometry in a layout-audit snapshot.
+struct AuditGeom {
+    id: WidgetId,
+    type_name: &'static str,
+    label: Option<String>,
+    origin: Point,
+    size: Size,
 }
 
 /// Owns the retained tree and drives the rebuild/layout/paint passes for a
@@ -623,6 +644,8 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// kill switch a shell wires to an environment variable (this crate reads
     /// none itself).
     layout_skip: bool,
+    /// The layout audit's state ([`RenderRoot::set_layout_audit`]); off by default.
+    layout_audit: LayoutAudit,
     /// Weak handles to the pods of the floated surfaces the **last** paint
     /// drew, refreshed every paint beside `overlay_hits`.
     ///
@@ -686,6 +709,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             selection_toolbar_gen: 0,
             layout_epoch: 1,
             layout_skip: true,
+            layout_audit: LayoutAudit::default(),
             overlay_pods: Vec::new(),
             _state: core::marker::PhantomData,
         }
@@ -707,6 +731,44 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// Whether layout passes may skip clean pods ([`RenderRoot::set_layout_skip`]).
     pub fn layout_skip(&self) -> bool {
         self.layout_skip
+    }
+
+    /// Turn the layout audit on or off (off by default; a debug tool).
+    ///
+    /// When on, and only while the skip is enabled ([`RenderRoot::set_layout_skip`]),
+    /// every [`RenderRoot::layout`] pass proves the skip rule: after the normal
+    /// (skipping) pass it snapshots every pod's geometry, runs a second, **forced**
+    /// full pass over the same constraints, and compares. A pod whose origin
+    /// (relative to its parent) or size differs by more than `1e-3` logical px
+    /// changed its layout without signalling dirty, which is exactly the bug the
+    /// skip would turn into stale geometry. Each is counted on
+    /// [`RenderRoot::layout_audit_mismatches`] and logged at `warn` through the
+    /// `log` crate, prefixed `layout-audit:` and naming the widget type and debug
+    /// label, at most once per `(type, label)` per 60 audited frames.
+    ///
+    /// **Cost:** two layout passes per frame, the second laying out the whole
+    /// tree, so this erases the skip's savings; never leave it on in a shipped
+    /// build. The forced pass's geometry is the geometry that stays, so the audit
+    /// never ships wrong geometry. The forced pass does not bump the layout epoch;
+    /// like any forced pass it leaves every pod clean (`layout_dirty` cleared,
+    /// `last_constraints`/`last_epoch`/`last_insets` refreshed to the current
+    /// values), which is the state the next frame's skip decisions start from.
+    /// This crate reads no environment variable; shells wire `FRUST_LAYOUT_AUDIT`.
+    /// With the audit off the cost is one `bool` check per layout pass.
+    pub fn set_layout_audit(&mut self, audit: bool) {
+        self.layout_audit.enabled = audit;
+    }
+
+    /// Whether the layout audit is on ([`RenderRoot::set_layout_audit`]).
+    pub fn layout_audit(&self) -> bool {
+        self.layout_audit.enabled
+    }
+
+    /// Total pods the layout audit has found with geometry that differed between
+    /// the skipping and the forced pass, since the root was created. Counts every
+    /// occurrence, unlike the rate-limited log.
+    pub fn layout_audit_mismatches(&self) -> u64 {
+        self.layout_audit.mismatches
     }
 
     /// The global layout epoch the next layout pass runs under — read-only, for
@@ -1538,6 +1600,93 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         if self.overlay_pod_dirty() {
             self.bump_layout_epoch();
         }
+        if self.root_id.is_none() {
+            return Size::ZERO;
+        }
+        if !(self.layout_audit.enabled && self.layout_skip) {
+            return self.layout_pass(window_size, text_ctx, !self.layout_skip);
+        }
+        // Audit: the normal (skipping) pass, then a forced one over the same
+        // constraints and epoch; the forced geometry is what stays.
+        let mut text_ctx = text_ctx;
+        self.layout_pass(window_size, text_ctx.as_deref_mut(), false);
+        let before = self.audit_snapshot();
+        let size = self.layout_pass(window_size, text_ctx, true);
+        let after = self.audit_snapshot();
+        self.audit_compare(&before, &after);
+        size
+    }
+
+    /// Every node's `(id, type, label, origin relative to parent, size)`.
+    fn audit_snapshot(&self) -> Vec<AuditGeom> {
+        let nodes = self.tree.inspect();
+        let origins: HashMap<WidgetId, Point> =
+            nodes.iter().map(|n| (n.id, n.bounds.origin())).collect();
+        nodes
+            .into_iter()
+            .map(|n| {
+                let parent = n
+                    .parent
+                    .and_then(|p| origins.get(&p).copied())
+                    .unwrap_or(Point::ZERO);
+                AuditGeom {
+                    id: n.id,
+                    type_name: n.type_name,
+                    label: n.debug_label.map(|l| l.into_owned()),
+                    origin: Point::new(n.bounds.x0 - parent.x, n.bounds.y0 - parent.y),
+                    size: n.bounds.size(),
+                }
+            })
+            .collect()
+    }
+
+    /// Report every pod that differs between the two snapshots.
+    fn audit_compare(&mut self, before: &[AuditGeom], after: &[AuditGeom]) {
+        const TOLERANCE: f64 = 1e-3;
+        let frame = self.layout_audit.frame;
+        self.layout_audit.frame += 1;
+        let by_id: HashMap<WidgetId, &AuditGeom> = before.iter().map(|g| (g.id, g)).collect();
+        for now in after {
+            let Some(was) = by_id.get(&now.id) else {
+                continue;
+            };
+            let differs = (was.origin.x - now.origin.x).abs() > TOLERANCE
+                || (was.origin.y - now.origin.y).abs() > TOLERANCE
+                || (was.size.width - now.size.width).abs() > TOLERANCE
+                || (was.size.height - now.size.height).abs() > TOLERANCE;
+            if !differs {
+                continue;
+            }
+            self.layout_audit.mismatches += 1;
+            let key = (now.type_name, now.label.clone());
+            let due = self
+                .layout_audit
+                .last_logged
+                .get(&key)
+                .is_none_or(|last| frame.saturating_sub(*last) >= 60);
+            if due {
+                self.layout_audit.last_logged.insert(key, frame);
+                log::warn!(
+                    "layout-audit: {} (label {:?}) changed geometry without signalling layout: skipped pass origin {:?} size {:?}, forced pass origin {:?} size {:?}",
+                    now.type_name,
+                    now.label,
+                    was.origin,
+                    was.size,
+                    now.origin,
+                    now.size,
+                );
+            }
+        }
+    }
+
+    /// One layout pass over the root; `force` lays out every pod regardless of
+    /// the skip rule.
+    fn layout_pass(
+        &mut self,
+        window_size: Size,
+        text_ctx: Option<&mut dyn Any>,
+        force: bool,
+    ) -> Size {
         let Some(root_id) = self.root_id else {
             return Size::ZERO;
         };
@@ -1549,7 +1698,6 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // `Copy` field read).
         let insets = self.insets;
         let layout_epoch = self.layout_epoch;
-        let layout_skip = self.layout_skip;
         let Some(pod) = self.tree.pod_mut(root_id) else {
             return Size::ZERO;
         };
@@ -1566,7 +1714,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // own against, and the kill switch (see `ChildPod::layout_child`). The
         // root widget itself sits in no `ChildPod` and is always laid out.
         ctx.set_layout_epoch(layout_epoch);
-        ctx.set_layout_force(!layout_skip);
+        ctx.set_layout_force(force);
         let size = pod.widget_mut().layout(&mut ctx, &bc);
         pod.set_layout(Point::ZERO, size);
         size
