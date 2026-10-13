@@ -1186,12 +1186,10 @@ pub use back_glue::{BackHandler, attach_back_handler};
 /// view every `Component::build` that should honor it, like
 /// [`navigator`](crate::navigator).
 ///
-/// **Accepted residual.** A wrapper mounted inside a *hidden* branch — a
-/// non-selected [`IndexedStack`] child, or a navigator page covered by another
-/// — still counts as live (it is mounted). A hosting navigator at depth > 1
-/// outranks it anyway, so the residual is a fallback on a covered page whose
-/// navigator cannot pop, or one in a hidden tab: if a fallback can sit in such
-/// a branch, gate its interest closure on that branch being current.
+/// **Accepted residual.** A wrapper mounted inside a branch input does not
+/// reach — a non-selected [`IndexedStack`] child, or the page under a covering
+/// page whose own navigator does not claim — still counts as live (it is
+/// mounted). Gate the interest closure there on that branch being current.
 pub use back_glue::{BackFallback, BackFallbackView, back_fallback};
 
 /// Build a [`NavigatorView`] driven by `controller` — the facade's back-aware
