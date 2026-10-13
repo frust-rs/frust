@@ -34,6 +34,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 [features]
 default = ["reqwest"]
 reqwest = ["dep:reqwest", "dep:rustls", "dep:webpki-roots"]
+# Optional WebP decode (pure Rust `image-webp`); without it a WebP body is `UnsupportedFormat`.
+webp = ["image/webp"]
 
 [dev-dependencies]
 # Dev-only: the facade does not re-export `ReactiveRuntime`, which `spawn_blocking` needs in tests.
