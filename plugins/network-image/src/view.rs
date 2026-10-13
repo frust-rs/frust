@@ -243,8 +243,8 @@ pub fn NetworkImage<S: 'static>(url: impl Into<String>) -> NetworkImageView<S> {
 }
 
 impl<S: 'static> NetworkImageView<S> {
-    /// Extra request headers (e.g. `Authorization`). Part of the load key, not
-    /// the cache key.
+    /// Extra request headers (e.g. `Authorization`). Their digest scopes the
+    /// load, memory and disk keys.
     pub fn headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.headers = headers;
         self
@@ -318,7 +318,8 @@ impl<S: 'static> NetworkImageView<S> {
             warn_not_installed();
             return Source::Fixed(LoadState::Failed(LoadError::NotInstalled));
         };
-        if let Some(source) = loader.peek_memory(&self.url, self.target) {
+        if let Some(source) = loader.peek_memory_with_headers(&self.url, &self.headers, self.target)
+        {
             return Source::Fixed(LoadState::Ready(source));
         }
         let out = Rc::new(RefCell::new(None));
