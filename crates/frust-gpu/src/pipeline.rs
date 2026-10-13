@@ -408,6 +408,8 @@ struct Inner<P> {
     /// Bumped every time liveness is claimed, so a departing worker can tell
     /// whether the flag it is about to clear is still its own.
     worker_epoch: u64,
+    /// How many warm-up jobs the worker has finished building.
+    warm_finished: u64,
 }
 
 impl<P> Default for Inner<P> {
@@ -420,6 +422,7 @@ impl<P> Default for Inner<P> {
             worker_live: false,
             shutdown: false,
             worker_epoch: 0,
+            warm_finished: 0,
         }
     }
 }
@@ -561,6 +564,11 @@ struct VariantCache<P> {
     warned_key_space: bool,
     /// The one warm-up worker, kept so [`VariantCache::shutdown`] can join it.
     worker: Option<std::thread::JoinHandle<()>>,
+    /// Time the render thread spent inside `resolve` since it was last taken:
+    /// waiting on a `Building` variant, or stealing and building a `Pending`
+    /// or unlisted one inline.
+    #[cfg(feature = "perf-trace")]
+    resolve_wait: std::time::Duration,
 }
 
 impl<P> Default for VariantCache<P> {
@@ -572,6 +580,8 @@ impl<P> Default for VariantCache<P> {
             keys: KeyPacker::default(),
             warned_key_space: false,
             worker: None,
+            #[cfg(feature = "perf-trace")]
+            resolve_wait: std::time::Duration::ZERO,
         }
     }
 }
@@ -610,7 +620,13 @@ impl<P> VariantCache<P> {
         };
 
         if !self.local.contains_key(&key) {
+            #[cfg(feature = "perf-trace")]
+            let started = std::time::Instant::now();
             let built = self.resolve(key, desc, &compile);
+            #[cfg(feature = "perf-trace")]
+            {
+                self.resolve_wait = self.resolve_wait.saturating_add(started.elapsed());
+            }
             self.local.insert(key, built);
         }
         &self.local[&key]
@@ -736,6 +752,9 @@ impl<P> VariantCache<P> {
                 let guard = BuildGuard::new(shared, key);
                 guard.publish(Arc::new(compile(&desc)));
             }));
+            if built.is_ok() {
+                lock(&shared.inner).warm_finished += 1;
+            }
             if built.is_err() {
                 log::error!(
                     "frust-gpu: a warm-up compile panicked; that variant is left to be \
@@ -803,6 +822,11 @@ impl<P> VariantCache<P> {
     /// How many compiles have run since this cache was created.
     fn compiled_variants(&self) -> u64 {
         lock(&self.shared.inner).compiles
+    }
+
+    /// How many warm-up jobs the worker has finished building.
+    fn warm_up_finished(&self) -> u64 {
+        lock(&self.shared.inner).warm_finished
     }
 
     /// How many warm-up jobs are still waiting to be built.
@@ -918,6 +942,23 @@ impl PipelineCache {
     #[must_use]
     pub fn queued_variants(&self) -> usize {
         self.core.queued_variants()
+    }
+
+    /// How many pipelines the warm-up worker has finished building (variants
+    /// the render thread stole or built itself are not counted).
+    #[must_use]
+    pub fn warm_up_finished(&self) -> u64 {
+        self.core.warm_up_finished()
+    }
+
+    /// Takes the time [`Self::get_or_create`] has spent resolving variants it
+    /// did not already hold — waiting for the worker's in-flight build, or
+    /// building a pending/unlisted one inline — since the last call.
+    ///
+    /// `perf-trace`-only, with the startup span it feeds.
+    #[cfg(feature = "perf-trace")]
+    pub fn take_resolve_wait(&mut self) -> std::time::Duration {
+        std::mem::take(&mut self.core.resolve_wait)
     }
 }
 

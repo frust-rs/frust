@@ -196,6 +196,17 @@ pub(crate) fn render_scene(
             signals.record_present(frame_id);
             // First successful present: close out the cold-start recorder once.
             if let Some(mut spans) = startup_spans.take() {
+                // The first frame's submit decomposition, timed inside
+                // `frust-render` (which cannot see this recorder).
+                #[cfg(feature = "perf-trace")]
+                if let Some(first) = renderer.take_first_submit_breakdown() {
+                    spans.record_duration(
+                        perf::SPAN_FIRST_SUBMIT_PIPELINE_WAIT,
+                        first.pipeline_wait,
+                    );
+                    spans.record_duration(perf::SPAN_FIRST_SUBMIT_ENCODE, first.encode);
+                    spans.record_duration(perf::SPAN_FIRST_SUBMIT_QUEUE, first.queue);
+                }
                 spans.record(perf::SPAN_FIRST_FRAME_PRESENTED);
                 spans.emit_log();
             }

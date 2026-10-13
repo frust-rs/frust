@@ -945,6 +945,34 @@ pub(crate) struct AtlasPolicy {
     serial: u64,
     /// Where in the two-phase frame this policy is.
     phase: Phase,
+    /// This frame's counters for the `frust-perf enc` line.
+    #[cfg(feature = "perf-trace")]
+    trace: AtlasTrace,
+}
+
+/// What one frame's policy calls did, for the `frust-perf enc` line.
+///
+/// Reset by [`AtlasPolicy::begin_frame`], so each value is the frame's own.
+/// `perf-trace`-only: a release build carries neither the type nor the
+/// bookkeeping that feeds it.
+#[cfg(feature = "perf-trace")]
+#[derive(Debug, Default)]
+pub(crate) struct AtlasTrace {
+    /// Distinct run identities (font, collection index, raw size, hinting)
+    /// that reached classification this frame.
+    run_keys: HashSet<(u64, u32, u32, bool)>,
+    /// Glyphs that took the miss path: claimed for rasterization this frame.
+    pub(crate) glyph_misses: u32,
+    /// Atlas rectangles the frame's eviction pass freed.
+    pub(crate) glyph_evicted: u32,
+}
+
+#[cfg(feature = "perf-trace")]
+impl AtlasTrace {
+    /// Distinct run identities classified this frame.
+    pub(crate) fn run_keys(&self) -> u32 {
+        u32::try_from(self.run_keys.len()).unwrap_or(u32::MAX)
+    }
 }
 
 impl AtlasPolicy {
@@ -982,7 +1010,16 @@ impl AtlasPolicy {
             unreplayed_since: None,
             serial: 0,
             phase: Phase::Idle,
+            #[cfg(feature = "perf-trace")]
+            trace: AtlasTrace::default(),
         }
+    }
+
+    /// The counters of the frame most recently compiled.
+    #[cfg(feature = "perf-trace")]
+    #[must_use]
+    pub(crate) fn trace(&self) -> &AtlasTrace {
+        &self.trace
     }
 
     /// Whether any glyph can be cached at all.
@@ -1125,6 +1162,12 @@ impl AtlasPolicy {
         // Read before anything this frame can miss, so `frame_misses` below is
         // this frame's own count rather than the process's.
         self.misses_at_frame_start = self.atlas.cache_misses();
+        #[cfg(feature = "perf-trace")]
+        {
+            self.trace.run_keys.clear();
+            self.trace.glyph_misses = 0;
+            self.trace.glyph_evicted = 0;
+        }
         self.phase = Phase::Collect;
     }
 
@@ -1177,6 +1220,14 @@ impl AtlasPolicy {
         let Some(size) = quantize_font_size(device_size) else {
             return RunRoute::Outline(OutlineReason::UnusableSize);
         };
+
+        #[cfg(feature = "perf-trace")]
+        self.trace.run_keys.insert((
+            run.font_id,
+            run.font_index,
+            run.font_size.to_bits(),
+            run.hinted,
+        ));
 
         let animating = self.observe_size((run.font_id, run.font_index), size);
         // Compared against the device size rather than the quantized one, on
@@ -1351,6 +1402,10 @@ impl AtlasPolicy {
             return GlyphRoute::Cached;
         }
         if self.claimed.insert(key.clone()) {
+            #[cfg(feature = "perf-trace")]
+            {
+                self.trace.glyph_misses = self.trace.glyph_misses.saturating_add(1);
+            }
             self.pending.push(key);
         }
         GlyphRoute::Pending
@@ -1477,6 +1532,13 @@ impl AtlasPolicy {
         self.serial = self.serial.saturating_add(1);
         self.discharge_evictions();
         let evicted: Vec<PendingClearRect> = self.atlas.drain_pending_clear_rects().collect();
+        #[cfg(feature = "perf-trace")]
+        {
+            self.trace.glyph_evicted = self
+                .trace
+                .glyph_evicted
+                .saturating_add(u32::try_from(evicted.len()).unwrap_or(u32::MAX));
+        }
         self.clears.extend(evicted);
         self.prune_sizes();
         self.phase = Phase::Idle;

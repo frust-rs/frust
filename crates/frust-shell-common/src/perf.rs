@@ -1297,6 +1297,18 @@ pub const SPAN_FIRST_ENCODE_DONE: &str = "first_encode_done";
 /// surface.
 pub const SPAN_FIRST_FRAME_PRESENTED: &str = "first_frame_presented";
 
+/// Startup-span name: how much of the first frame's `submit` went on resolving
+/// pipeline variants the cache did not already hold (waiting on the warm-up
+/// worker, or building inline). A **duration**, not an offset from the epoch —
+/// see [`StartupSpans::record_duration`].
+pub const SPAN_FIRST_SUBMIT_PIPELINE_WAIT: &str = "first_submit_pipeline_wait";
+/// Startup-span name: the first frame's engine encode, less the pipeline wait
+/// above. A duration (see [`StartupSpans::record_duration`]).
+pub const SPAN_FIRST_SUBMIT_ENCODE: &str = "first_submit_encode";
+/// Startup-span name: the first frame's `Queue::submit` plus the present. A
+/// duration (see [`StartupSpans::record_duration`]).
+pub const SPAN_FIRST_SUBMIT_QUEUE: &str = "first_submit_queue";
+
 /// A monotonic clock reading, injectable so [`StartupSpans`]'s deltas are
 /// deterministically testable without a real clock. Only differences
 /// between successive readings are meaningful — the absolute value has no
@@ -1385,6 +1397,22 @@ impl<C: Clock> StartupSpans<C> {
         self.spans.push((name, now.saturating_sub(self.begin)));
     }
 
+    /// Record `name` with an explicit `duration`, for a span measured
+    /// elsewhere (the first frame's submit sub-spans, timed inside
+    /// `frust-render`, which cannot see this recorder).
+    ///
+    /// Unlike [`Self::record`] the value is NOT an offset from the epoch: the
+    /// line prints it as-is, so `first_submit_*` fields read as milliseconds
+    /// spent, and the three sum to about the first frame's `submit` span. They
+    /// are inserted between `first_encode_done` and `first_frame_presented`.
+    /// A no-op when disabled.
+    pub fn record_duration(&mut self, name: &'static str, duration: Duration) {
+        if !self.enabled {
+            return;
+        }
+        self.spans.push((name, duration));
+    }
+
     /// The recorded `(name, delta)` pairs in insertion order.
     pub fn spans(&self) -> &[(&'static str, Duration)] {
         &self.spans
@@ -1415,6 +1443,19 @@ impl<C: Clock> StartupSpans<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_duration_pushes_the_value_unshifted_and_is_inert_when_disabled() {
+        let mut spans = StartupSpans::begin_with_enabled(|| Duration::from_millis(500), true);
+        spans.record_duration(SPAN_FIRST_SUBMIT_QUEUE, Duration::from_millis(7));
+        assert_eq!(
+            spans.spans(),
+            &[(SPAN_FIRST_SUBMIT_QUEUE, Duration::from_millis(7))]
+        );
+        let mut off = StartupSpans::begin_with_enabled(|| Duration::ZERO, false);
+        off.record_duration(SPAN_FIRST_SUBMIT_ENCODE, Duration::from_millis(1));
+        assert!(off.spans().is_empty());
+    }
 
     // ---------------------------------------------------------------
     // trace_switch (pure, directly testable — enabled()'s OnceLock cache
