@@ -1744,16 +1744,17 @@ impl EngineRenderer {
             if out.get(class).is_some() {
                 continue;
             }
-            let pipeline = match self.resolved.entries.get(&(state, class)) {
+            let slot = ResolvedPipelines::slot(state, class);
+            let pipeline = match self.resolved.entries.get(slot).and_then(Option::as_ref) {
                 Some(pipeline) => pipeline.clone(),
                 None => {
                     let pipeline = self
                         .pipelines
                         .get_or_create(device, &state.class_desc(&self.shaders, format, class))
                         .clone();
-                    self.resolved
-                        .entries
-                        .insert((state, class), pipeline.clone());
+                    if let Some(entry) = self.resolved.entries.get_mut(slot) {
+                        *entry = Some(pipeline.clone());
+                    }
                     pipeline
                 }
             };
@@ -2237,15 +2238,35 @@ impl ClassPipelines {
 /// for the target format they were built against.
 ///
 /// A memo in front of the pipeline cache: a steady-state frame takes every
-/// pipeline it draws with from here, by a lookup over two small enums, rather
-/// than rebuilding each description (a vertex-layout allocation) and packing
-/// its cache key — which keeps the frame's `pipelines` phase from growing with
-/// the number of classes it draws.
-#[derive(Debug, Default)]
+/// pipeline it draws with from here, by indexing a dense `state x class` table,
+/// rather than rebuilding each description (a vertex-layout allocation) and
+/// packing its cache key — which keeps the frame's `pipelines` phase from
+/// growing with the number of classes it draws.
+#[derive(Debug)]
 struct ResolvedPipelines {
     /// The format every entry was built for; a change drops them all.
     format: Option<wgpu::TextureFormat>,
-    entries: HashMap<(EnginePipeline, PaintClass), wgpu::RenderPipeline>,
+    /// Indexed by [`Self::slot`].
+    entries: [Option<wgpu::RenderPipeline>; RESOLVED_SLOTS],
+}
+
+/// One [`ResolvedPipelines`] entry per render state and paint class.
+const RESOLVED_SLOTS: usize = EnginePipeline::ALL.len() * PaintClass::ALL.len();
+
+impl Default for ResolvedPipelines {
+    fn default() -> Self {
+        Self {
+            format: None,
+            entries: [const { None }; RESOLVED_SLOTS],
+        }
+    }
+}
+
+impl ResolvedPipelines {
+    /// The table slot of `state` drawing `class`.
+    const fn slot(state: EnginePipeline, class: PaintClass) -> usize {
+        state.index() * PaintClass::ALL.len() + class.index()
+    }
 }
 
 /// One pass's full recording state, assembled before the pass is begun.

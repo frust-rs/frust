@@ -365,6 +365,23 @@ impl EnginePipeline {
         Self::Filter,
     ];
 
+    /// This pipeline's position in [`Self::ALL`] — a dense index for tables
+    /// keyed by render state.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::StripIntermediate => 0,
+            Self::StripAlpha => 1,
+            Self::StripDepthAlpha => 2,
+            Self::StripOpaque => 3,
+            Self::StripDestOut => 4,
+            Self::StripDepthDestOut => 5,
+            Self::Clear => 6,
+            Self::Copy => 7,
+            Self::Filter => 8,
+        }
+    }
+
     /// A human-readable name for logs and captures.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -858,6 +875,13 @@ mod tests {
             for class in WARM_CLASSES {
                 assert!(state.serves(class));
             }
+        }
+    }
+
+    #[test]
+    fn the_state_index_is_the_position_in_all() {
+        for (index, pipeline) in EnginePipeline::ALL.iter().enumerate() {
+            assert_eq!(pipeline.index(), index, "{}", pipeline.label());
         }
     }
 
