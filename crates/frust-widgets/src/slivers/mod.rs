@@ -16,11 +16,14 @@
 //! * [`sliver_list`] — a lazy, keyed list of rows that size themselves, with
 //!   scroll anchoring through the viewport's correction loop (`list`);
 //! * [`keep_alive`] — keeps a lazy list's row alive outside its window
-//!   (`keep_alive`).
+//!   (`keep_alive`);
+//! * [`sliver_grid`] / [`sliver_grid_keyed`] — a lazy grid of equal cells
+//!   laid out by a [`SliverGridDelegate`] (`grid`).
 
 pub mod adapter;
 pub mod fill_remaining;
 pub mod fixed_extent_list;
+pub mod grid;
 pub mod keep_alive;
 pub mod list;
 pub mod padding;
@@ -33,6 +36,9 @@ pub use fill_remaining::{
 pub use fixed_extent_list::{
     SliverFixedExtentListView, SliverFixedExtentListWidget, sliver_fixed_extent_list,
     sliver_fixed_extent_list_keyed,
+};
+pub use grid::{
+    SliverGridDelegate, SliverGridView, SliverGridWidget, sliver_grid, sliver_grid_keyed,
 };
 pub use keep_alive::{KeepAliveHandle, KeepAliveView, KeepAliveWidget, keep_alive};
 pub use list::{SliverListView, SliverListWidget, sliver_list};

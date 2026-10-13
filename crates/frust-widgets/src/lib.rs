@@ -151,9 +151,10 @@ pub use slider::{Slider, SliderView, SliderWidget, slider};
 pub use slivers::{
     KeepAliveHandle, KeepAliveView, KeepAliveWidget, SliverBoxView, SliverBoxWidget,
     SliverFillRemainingView, SliverFillRemainingWidget, SliverFixedExtentListView,
-    SliverFixedExtentListWidget, SliverListView, SliverListWidget, SliverPaddingView,
-    SliverPaddingWidget, keep_alive, sliver_box, sliver_fill_remaining, sliver_fixed_extent_list,
-    sliver_fixed_extent_list_keyed, sliver_list, sliver_padding,
+    SliverFixedExtentListWidget, SliverGridDelegate, SliverGridView, SliverGridWidget,
+    SliverListView, SliverListWidget, SliverPaddingView, SliverPaddingWidget, keep_alive,
+    sliver_box, sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed,
+    sliver_grid, sliver_grid_keyed, sliver_list, sliver_padding,
 };
 pub use stack::{Stack, StackView, StackWidget, stack};
 pub use text::{TextView, TextWidget, text};

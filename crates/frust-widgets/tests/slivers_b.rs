@@ -1,7 +1,7 @@
 //! The lazy slivers inside a `CustomScrollView`: the keyed, variable-extent
 //! `sliver_list` (measurement, keyed anchoring through the viewport's
-//! correction loop, the channel-feed shape) and its `keep_alive` rows, plus
-//! the layout-skip audit over them.
+//! correction loop, the channel-feed shape), `keep_alive` rows, and
+//! `sliver_grid` with both delegates, plus the layout-skip audit over them.
 //!
 //! The frame harness and the scroll script mirror `viewport.rs`'s.
 
@@ -18,8 +18,9 @@ use frust_core::{
 };
 use frust_text::TextContext;
 use frust_widgets::{
-    AnimateTo, ChildKey, ScrollController, SizedBox, SliverListWidget, ViewportWidget,
-    custom_scroll_view, keep_alive, sliver_box, sliver_list,
+    AnimateTo, ChildKey, ScrollController, SizedBox, SliverGridDelegate, SliverListWidget,
+    ViewportWidget, custom_scroll_view, keep_alive, sliver_box, sliver_grid, sliver_grid_keyed,
+    sliver_list,
 };
 use kurbo::{Point, Rect, Size};
 
@@ -879,6 +880,102 @@ fn a_parked_row_whose_key_leaves_the_data_is_released() {
 }
 
 // ---------------------------------------------------------------------------
+// sliver_grid.
+// ---------------------------------------------------------------------------
+
+/// Four 100 × 50 cells per 424 px row: 8 px between columns, 10 between rows.
+const FOUR_COLUMNS: SliverGridDelegate = SliverGridDelegate::FixedCrossAxisCount {
+    count: 4,
+    main_spacing: 10.0,
+    cross_spacing: 8.0,
+    child_aspect_ratio: 2.0,
+};
+
+#[test]
+fn a_grid_lays_out_four_column_rows_and_materialises_only_visible_rows() {
+    for delegate in [
+        FOUR_COLUMNS,
+        SliverGridDelegate::MaxCrossAxisExtent {
+            max_cross_extent: 120.0,
+            main_spacing: 10.0,
+            cross_spacing: 8.0,
+            child_aspect_ratio: 2.0,
+        },
+    ] {
+        let controller = ScrollController::new();
+        let ledger = Rc::new(Ledger::default());
+        let (l, c) = (Rc::clone(&ledger), controller.clone());
+        let mut h = Harness::new(Size::new(424.0, 600.0), move |_| {
+            let l = Rc::clone(&l);
+            any(custom_scroll_view(
+                sliver_grid(1000, move |i| tile(i as u64, 50.0, &l)).delegate(delegate),
+            )
+            .cache_extent(0.0)
+            .controller(c.clone()))
+        });
+        // Rows 0..10 fill [0, 600): cells 0..40.
+        assert_eq!(ledger.live(), (0..40).collect::<Vec<_>>());
+        let grid = h.viewport().sliver_geometry(0).expect("the grid");
+        assert_eq!(grid.scroll_extent, 250.0 * 60.0 - 10.0);
+        assert_eq!(controller.max_offset(), 14_990.0 - 600.0);
+        let cells = h.bounds_of("TileWidget");
+        assert_eq!(cells[0], Rect::new(0.0, 0.0, 100.0, 50.0));
+        assert_eq!(cells[5], Rect::new(108.0, 60.0, 208.0, 110.0));
+        assert_eq!(cells[39], Rect::new(324.0, 540.0, 424.0, 590.0));
+
+        controller.jump_to(6000.0);
+        h.frames(2);
+        assert_eq!(ledger.live(), (400..440).collect::<Vec<_>>());
+        assert_eq!(
+            h.bounds_of("TileWidget")[0],
+            Rect::new(0.0, 0.0, 100.0, 50.0)
+        );
+        assert!(
+            ledger.builds.get() < 100,
+            "{} cells built",
+            ledger.builds.get()
+        );
+
+        // The last row is partial; the extent ends at its cells.
+        controller.jump_to(f64::INFINITY);
+        h.frames(2);
+        assert_eq!(controller.offset(), 14_390.0);
+        assert_eq!(ledger.live().last().copied(), Some(999));
+        assert_eq!(h.bounds_of("TileWidget").last().expect("a cell").y1, 600.0);
+    }
+}
+
+#[test]
+fn a_keyed_grid_carries_cells_with_their_keys() {
+    let ledger = Rc::new(Ledger::default());
+    let ids: Ids = Rc::new(RefCell::new((0..100).collect()));
+    let (d, l) = (Rc::clone(&ids), Rc::clone(&ledger));
+    let mut h = Harness::new(Size::new(424.0, 600.0), move |_| {
+        let rows = Rc::new(d.borrow().clone());
+        let keys = Rc::clone(&rows);
+        let l = Rc::clone(&l);
+        any(custom_scroll_view(
+            sliver_grid_keyed(
+                rows.len(),
+                move |i| ChildKey::new(keys[i]),
+                move |i| tile(rows[i], 50.0, &l),
+            )
+            .delegate(FOUR_COLUMNS),
+        )
+        .cache_extent(0.0))
+    });
+    let before = h.rows_of("SliverGridWidget");
+    ids.borrow_mut().insert(0, 500);
+    h.frame();
+    let after = h.rows_of("SliverGridWidget");
+    assert_eq!(
+        after[1..],
+        before[..39],
+        "every surviving cell kept its pod"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Semantics.
 // ---------------------------------------------------------------------------
 
@@ -909,7 +1006,7 @@ fn the_layout_audit_finds_no_stale_pod_across_the_scroll_script() {
         let ids: Ids = Rc::new(RefCell::new((0..60).collect()));
         let (c, l, d) = (controller.clone(), Rc::clone(&ledger), Rc::clone(&ids));
         let mut h = Harness::boxed(Size::new(400.0, 600.0), move |_| {
-            let l1 = Rc::clone(&l);
+            let (l1, l2, l3) = (Rc::clone(&l), Rc::clone(&l), Rc::clone(&l));
             let rows = Rc::new(d.borrow().clone());
             let keys = Rc::clone(&rows);
             any(custom_scroll_view((
@@ -919,7 +1016,8 @@ fn the_layout_audit_finds_no_stale_pod_across_the_scroll_script() {
                     move |i| keep_alive(tile(rows[i], height(rows[i]), &l1)).enabled(i % 5 == 0),
                 )
                 .estimated_item_extent(ESTIMATE),
-                SizedBox::<()>(None, Some(400.0)),
+                sliver_grid(30, move |i| tile(1000 + i as u64, 50.0, &l2)).delegate(FOUR_COLUMNS),
+                sliver_grid_keyed(12, ChildKey::new, move |i| tile(2000 + i as u64, 50.0, &l3)),
             ))
             .controller(c.clone()))
         });

@@ -1,7 +1,7 @@
 //! The windowed reconcilers a lazy list runs at rebuild time, shared by
 //! [`ListView`](crate::ListView), the lazy slivers
 //! ([`sliver_fixed_extent_list`](crate::sliver_fixed_extent_list),
-//! [`sliver_list`](crate::sliver_list)),
+//! [`sliver_list`](crate::sliver_list), [`sliver_grid`](crate::sliver_grid)),
 //! plus the measured-extent bookkeeping `ListView` and `sliver_list` share.
 //!
 //! A windowed list materialises only a contiguous, ascending run of item
