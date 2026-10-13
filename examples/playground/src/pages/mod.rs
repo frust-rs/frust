@@ -1,7 +1,7 @@
-//! The fourteen playground sections, one module per section: `platform_views`,
+//! The fifteen playground sections, one module per section: `platform_views`,
 //! `camera`, `responsive`, `terminal`, `keys`, `i18n`, `video_player`,
 //! `url_launcher`, `auth_session`, `database`, `graph_canvas`,
-//! `scroll_control`, `drag_drop`, and `tabs` — each one an OS-facing capability (or,
+//! `scroll_control`, `drag_drop`, `tabs`, and `images` — each one an OS-facing capability (or,
 //! for `graph_canvas`/`scroll_control`/`drag_drop`, a widget demo:
 //! `CanvasView`/`PanZoomView` for the first, a keyed `ListView` bound to a
 //! `ScrollController` for the second, `DragCoordinator`/`draggable`/
@@ -44,6 +44,8 @@ pub mod database;
 pub mod drag_drop;
 pub mod graph_canvas;
 pub mod i18n;
+pub mod images;
+mod images_server;
 pub mod keys;
 pub mod platform_views;
 pub mod responsive;
@@ -57,7 +59,7 @@ use frust::{AnyView, any};
 
 use crate::PlaygroundState;
 
-/// The fourteen section labels, in order. Indexed by `PlaygroundState::section`
+/// The fifteen section labels, in order. Indexed by `PlaygroundState::section`
 /// and dispatched by [`current`].
 ///
 /// Kept short on purpose: at phone width the shell's narrow-width bottom nav
@@ -71,9 +73,9 @@ use crate::PlaygroundState;
 /// single line at that width. A page wanting a longer heading for itself
 /// (e.g. `platform_views`'s own on-page title) uses its own string literal
 /// rather than this array — see `pages/platform_views.rs`.
-pub const SECTION_LABELS: [&str; 14] = [
+pub const SECTION_LABELS: [&str; 15] = [
     "Platform", "Camera", "Layout", "Terminal", "Keys", "i18n", "Video", "URL", "Auth", "DB",
-    "Graph", "Scroll", "Drag", "Tabs",
+    "Graph", "Scroll", "Drag", "Tabs", "Images",
 ];
 
 /// How many of [`SECTION_LABELS`], in order, count as "primary" — shown
@@ -86,7 +88,7 @@ pub const SECTION_LABELS: [&str; 14] = [
 /// section off the shell, only off the bar's own direct row.
 pub const PRIMARY_NAV_COUNT: usize = 5;
 
-/// Dispatch to the section page for `section` (0..14), falling back to
+/// Dispatch to the section page for `section` (0..15), falling back to
 /// platform views for any out-of-range index (defensive — the navigation bar
 /// and side rail only ever yield a valid index).
 // erasure: keep the 15-arm section dispatch erases each page at this one boundary
@@ -106,6 +108,7 @@ pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundSta
         11 => any(scroll_control::page(state)),
         12 => any(drag_drop::page(state)),
         13 => any(tabs::page(state)),
+        14 => any(images::page(state)),
         _ => any(platform_views::page(state)),
     }
 }
