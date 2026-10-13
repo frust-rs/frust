@@ -17,6 +17,20 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - The playground's Tabs section: per-tab navigators under an `IndexedStack` with a home-tab
   `back_fallback`, a device-gate surface for Android back routing.
 
+### Changed
+
+- `pattern_switcher` tears its outgoing child down when the switch starts, not when the exit
+  animation ends; the outgoing child still paints its exit. A child that owns resources (a native
+  widget, a subscription, a timer) releases them at the switch.
+- `NavigatorController::back_interest()` is false for a navigator that is not mounted.
+- A back press that no registrant claims at delivery is dropped instead of being handed to the
+  navigator whose wire consumed it.
+
+### Fixed
+
+- A navigator inside a `pattern_switcher` child that had been switched away kept claiming Android
+  back, so back was swallowed on every other page and could not exit the app.
+
 ## 0.6.1 — 2026-10-12
 
 A patch release that also carries two narrow source changes for code that calls the authoring child

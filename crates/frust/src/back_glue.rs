@@ -451,8 +451,9 @@ fn register(
 /// A press no registrant claims at this point is dropped: delivering it to the
 /// navigator whose wire consumed it would not be a no-op (that navigator may be
 /// deep yet unreachable, e.g. a hidden `IndexedStack` tab, or torn down). The
-/// shell already decided via `handles_back`, so an unclaimed press is the
-/// platform's to handle.
+/// shell already consumed the press via `handles_back`, so if every interest
+/// lapsed between that decision and delivery the press is swallowed, not
+/// returned to the platform.
 fn route_back() {
     // Both the interest probes and the claimant's `request_back` are CLONED OUT
     // of the list (that is what the `Rc`s are for) and called with NO `SHARED`

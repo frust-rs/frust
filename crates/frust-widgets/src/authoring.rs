@@ -453,8 +453,9 @@ pub fn teardown_child<State: 'static, V: View<State>>(
     }
     let link_focused = pod.is_focused();
     if link_focused {
-        // The pod is dropped by the caller right after this returns, so clearing
-        // the flag is bookkeeping hygiene, not the load-bearing part — the mark is.
+        // The caller drops the pod right after this returns (or, in
+        // `pattern_switcher`, keeps it only to paint its exit), so clearing the
+        // flag is bookkeeping hygiene, not the load-bearing part — the mark is.
         pod.set_focused(false);
     }
     mark_orphan_if_live(ctx, link_focused);
