@@ -431,16 +431,28 @@ impl<State: 'static> View<State> for MorphingSearchTriggerView<State> {
                 // The fade is delayed, and timed from the frame it next paints.
                 element.staged = None;
             }
-            element
+            // A changed run is unshaped until `layout` runs again, and the
+            // trigger's row is laid out around both texts — a text change is a
+            // layout change.
+            let mut reshaped = element
                 .placeholder
                 .set_content(self.config.placeholder.clone());
             match (&mut element.shortcut, &self.config.shortcut) {
                 (Some(run), Some(text)) => {
-                    run.set_content(text.clone());
+                    reshaped |= run.set_content(text.clone());
                 }
-                (slot @ None, Some(text)) => *slot = Some(LabelRun::new(text.clone())),
-                (slot @ Some(_), None) => *slot = None,
+                (slot @ None, Some(text)) => {
+                    *slot = Some(LabelRun::new(text.clone()));
+                    reshaped = true;
+                }
+                (slot @ Some(_), None) => {
+                    *slot = None;
+                    reshaped = true;
+                }
                 (None, None) => {}
+            }
+            if reshaped {
+                flags |= ChangeFlags::LAYOUT;
             }
             element.config = self.config.clone();
             flags |= ChangeFlags::PAINT;
@@ -802,6 +814,11 @@ pub struct MorphingSearchWidget {
     pill_alpha: Lane,
     /// The trigger box the shell morphs out of, in this widget's own space.
     source: Rect,
+    /// The trigger width the last `layout` sized the panel and `source` from.
+    /// The anchor cell is written by the trigger's paint, outside this pod, so
+    /// `rebuild` and `paint` compare it against the live cell and ask for a
+    /// relayout on a difference (`docs/REVIEW_FOCUS.md`'s layout-skip pattern).
+    laid_anchor_width: f64,
     /// Whether the shell lanes still have to be seated on that source box.
     ///
     /// The lanes are built before the first layout has measured anything, and
@@ -1027,6 +1044,7 @@ impl<State: 'static> View<State> for SearchPanelView<State> {
                 if first.is_some() { 1.0 } else { 0.0 },
             ),
             source: Rect::ZERO,
+            laid_anchor_width: 0.0,
             seed_shell: true,
             on_query_change: erase_callback_arg(&self.on_query_change),
             on_select: erase_callback_arg(&self.on_select),
@@ -1062,6 +1080,11 @@ impl<State: 'static> View<State> for SearchPanelView<State> {
             let rows =
                 MorphingSearchWidget::build_rows(&element.items, &element.query, &config.empty);
             flags |= element.adopt_rows(rows);
+        }
+        // A trigger that resized since the last layout moves the panel's width
+        // floor and the morph's source box; the anchor cell is external.
+        if element.config.anchor.rect().width() != element.laid_anchor_width {
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         // Closures are not comparable; reinstalling the adapters is cheap.
         element.on_query_change = erase_callback_arg(&self.on_query_change);
@@ -1134,6 +1157,7 @@ impl Widget for MorphingSearchWidget {
         // The panel is as wide as the trigger at the least, capped at upstream's
         // `448` against the area it is placed inside.
         let anchor = self.config.anchor.rect();
+        self.laid_anchor_width = anchor.width();
         let area = if bc.max().width.is_finite() {
             bc.max().width
         } else {
@@ -1197,6 +1221,11 @@ impl Widget for MorphingSearchWidget {
         let chrome = resolve_panel(theme);
         let cap_fill = theme.map_or(crate::BEUI_LIGHT.background, |t| t.scheme().surface);
         let reduce = theme.is_some_and(|t| t.motion.reduce_motion);
+        // The trigger paints the anchor cell this panel is sized from; a width
+        // the last layout did not run with owes one.
+        if self.config.anchor.rect().width() != self.laid_anchor_width {
+            ctx.request_layout();
+        }
         self.sync_motion(reduce);
         let now = ctx.frame_time();
         let origin = ctx.origin();

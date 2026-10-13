@@ -697,6 +697,12 @@ pub struct SignupFormWidget {
     shows_strength: bool,
     /// Whether the strength meter was visible on the previous paint.
     strength_was_visible: bool,
+    /// The `(terms error, form error)` visibility the last `layout` reserved
+    /// rows for. Either row stops taking room on the paint its exit lands on —
+    /// a frame that asks for nothing, as does a reduce-motion collapse — so
+    /// `paint` compares this against the live presences and asks for the
+    /// relayout (`docs/REVIEW_FOCUS.md`'s layout-skip pattern).
+    laid_error_rows: (bool, bool),
     submitting: bool,
     /// The strength group's presence.
     strength_presence: Presence,
@@ -770,6 +776,10 @@ impl<State: 'static> View<State> for SignupFormView<State> {
             strength,
             shows_strength,
             strength_was_visible: strength_presence.is_visible(),
+            laid_error_rows: (
+                terms_error_presence.is_visible(),
+                form_error_presence.is_visible(),
+            ),
             submitting: self.status.is_submitting(),
             strength_presence,
             terms_error_presence,
@@ -1020,6 +1030,15 @@ fn plain(size: f64, color: Color) -> TextStyle {
 }
 
 impl SignupFormWidget {
+    /// Whether the terms error and the form error rows are visible right now —
+    /// what `layout` reserves their rows from.
+    fn error_rows_visible(&self) -> (bool, bool) {
+        (
+            self.terms_error_presence.is_visible(),
+            self.form_error_presence.is_visible(),
+        )
+    }
+
     /// Whether the reveal toggle answers a press at all.
     fn eye_enabled(&self) -> bool {
         !self.submitting
@@ -1065,6 +1084,7 @@ impl Widget for SignupFormWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let theme = Theme::from_layout_ctx(ctx);
         let colors = resolve_colors(theme);
+        self.laid_error_rows = self.error_rows_visible();
 
         let available = if bc.max().width.is_finite() {
             bc.max().width
@@ -1226,6 +1246,9 @@ impl Widget for SignupFormWidget {
             ctx.request_layout();
         }
         self.strength_was_visible = strength_is_visible;
+        if self.error_rows_visible() != self.laid_error_rows {
+            ctx.request_layout();
+        }
 
         // The card itself.
         let size = Size::new(self.width, self.height);

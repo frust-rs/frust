@@ -659,7 +659,12 @@ impl Widget for PreviewRailWidget {
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         if !ctx.is_hovered() && self.hovered.is_some() {
             let pinned = self.pinned;
-            self.set_displayed(None, pinned);
+            // The displayed preview decides the card `layout` measures (and so
+            // this widget's size), so a hover lost here — a departure the event
+            // pass never saw — owes a relayout.
+            if self.set_displayed(None, pinned) {
+                ctx.request_layout();
+            }
         }
 
         let theme = Theme::from_paint_ctx(ctx);

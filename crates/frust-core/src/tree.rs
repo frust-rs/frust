@@ -308,6 +308,55 @@ impl WidgetTree {
         out
     }
 
+    /// Per-node layout-dirty state for tooling and tests, read-only: one
+    /// `(id, layout_dirty)` pair for every node [`WidgetTree::inspect`] reports,
+    /// in exactly its pre-order and with exactly its ids, so the two zip.
+    ///
+    /// A [`ChildPod`] reports [`ChildPod::is_layout_dirty`] — whether its next
+    /// [`ChildPod::layout_child`] must lay it out whatever its constraints. An
+    /// arena [`WidgetPod`] always reports `false`: it sits in no `ChildPod`, and
+    /// the root lays it out on every pass unconditionally, so there is no skip
+    /// state to report. Kept beside `inspect` rather than inside
+    /// [`InspectNode`] so that plain struct's shape — which consumers construct
+    /// literally — does not change.
+    pub fn inspect_layout_dirty(&self) -> Vec<(WidgetId, bool)> {
+        let mut out = Vec::new();
+        let roots = self.arena.roots();
+        for id in self.roots() {
+            if let Some(node) = roots.into_item(id.0) {
+                self.layout_dirty_node(node, id, &mut out);
+            }
+        }
+        out
+    }
+
+    /// [`WidgetTree::inspect_layout_dirty`]'s arena step, mirroring
+    /// [`WidgetTree::inspect_node`]'s order: the node, its arena children, then
+    /// its widget's owned pods.
+    fn layout_dirty_node(
+        &self,
+        node: ArenaRef<'_, WidgetPod>,
+        id: WidgetId,
+        out: &mut Vec<(WidgetId, bool)>,
+    ) {
+        out.push((id, false));
+        for child_id in self.ordered_children(id, node) {
+            if let Some(child) = node.children.into_item(child_id.0) {
+                self.layout_dirty_node(child, child_id, out);
+            }
+        }
+        Self::layout_dirty_pods(node.item.widget(), out);
+    }
+
+    /// [`WidgetTree::inspect_layout_dirty`]'s pod step, mirroring
+    /// [`WidgetTree::inspect_pods`]/[`WidgetTree::inspect_child`].
+    fn layout_dirty_pods(widget: &dyn Widget, out: &mut Vec<(WidgetId, bool)>) {
+        widget.visit_children(&mut |child| {
+            out.push((child.inspect_id(), child.is_layout_dirty()));
+            Self::layout_dirty_pods(child.widget(), out);
+        });
+    }
+
     /// Push `node`'s snapshot, then recurse into its arena children and its
     /// widget's owned pods. `parent_origin` is the parent's absolute origin; a
     /// pod's own origin is relative to it.
