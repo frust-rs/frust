@@ -18,7 +18,10 @@
 //! * [`keep_alive`] — keeps a lazy list's row alive outside its window
 //!   (`keep_alive`);
 //! * [`sliver_grid`] / [`sliver_grid_keyed`] — a lazy grid of equal cells
-//!   laid out by a [`SliverGridDelegate`] (`grid`).
+//!   laid out by a [`SliverGridDelegate`] (`grid`);
+//! * [`sliver_persistent_header`] — a header shrinking from a maximum to a
+//!   minimum extent, optionally pinned or floating, built by a
+//!   [`SliverPersistentHeaderDelegate`] (`persistent_header`).
 
 pub mod adapter;
 pub mod fill_remaining;
@@ -27,6 +30,7 @@ pub mod grid;
 pub mod keep_alive;
 pub mod list;
 pub mod padding;
+pub mod persistent_header;
 pub(crate) mod reconcile;
 
 pub use adapter::{SliverBoxView, SliverBoxWidget, sliver_box};
@@ -43,6 +47,10 @@ pub use grid::{
 pub use keep_alive::{KeepAliveHandle, KeepAliveView, KeepAliveWidget, keep_alive};
 pub use list::{SliverListView, SliverListWidget, sliver_list};
 pub use padding::{SliverPaddingView, SliverPaddingWidget, sliver_padding};
+pub use persistent_header::{
+    SliverPersistentHeaderDelegate, SliverPersistentHeaderView, SliverPersistentHeaderWidget,
+    sliver_persistent_header,
+};
 
 use frust_core::{EventCtx, SliverConstraints};
 
