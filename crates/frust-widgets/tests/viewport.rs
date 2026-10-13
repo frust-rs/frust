@@ -618,6 +618,45 @@ fn a_horizontal_viewport_lays_out_across_and_scrolls_along_x() {
     assert_eq!(controller.offset(), 40.0);
 }
 
+/// Three 300 px columns in a 500 x 400 window, scrolling along x, with
+/// `controller` attached.
+fn three_columns(controller: &ScrollController) -> Harness {
+    let c = controller.clone();
+    Harness::new(Size::new(500.0, 400.0), move |_| {
+        any(custom_scroll_view((
+            sliver_box(SizedBox::<()>(Some(300.0), None)),
+            sliver_box(SizedBox::<()>(Some(300.0), None)),
+            sliver_box(SizedBox::<()>(Some(300.0), None)),
+        ))
+        .axis(ScrollAxis::Horizontal)
+        .physics(Clamping::new())
+        .controller(c.clone()))
+    })
+}
+
+#[test]
+fn a_horizontal_viewport_scrolls_its_core_along_x_and_a_diagonal_drag_moves_by_x_alone() {
+    let straight = ScrollController::new();
+    let mut flat = three_columns(&straight);
+    assert_eq!(flat.viewport().axis(), ScrollAxis::Horizontal);
+    flat.drag(Point::new(450.0, 200.0), Point::new(250.0, 200.0), 6);
+    flat.frames(30);
+
+    let diagonal = ScrollController::new();
+    let mut slanted = three_columns(&diagonal);
+    assert_eq!(slanted.viewport().axis(), ScrollAxis::Horizontal);
+    slanted.drag(Point::new(450.0, 200.0), Point::new(250.0, 260.0), 6);
+    slanted.frames(30);
+
+    assert!(straight.offset() > 100.0, "the flat drag scrolled");
+    assert!(
+        (diagonal.offset() - straight.offset()).abs() < 1e-9,
+        "the y component is off-axis: {} vs {}",
+        diagonal.offset(),
+        straight.offset()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // (vi) Scrolling parity with ScrollView.
 // ---------------------------------------------------------------------------
