@@ -71,7 +71,8 @@ fn black_backdrop(builder: &mut SceneBuilder<'_>) {
 
 /// Every case in the unit corpus, in the order a reviewer reads them: the
 /// paint primitives, then the grouping commands, then the two promoted
-/// pixel-exact cases and the snapshot pair.
+/// pixel-exact cases and the snapshot pair, then the paint-class frames
+/// (see [`paint_class_cases`]).
 #[must_use]
 pub fn unit_cases() -> Vec<CorpusCase> {
     vec![
@@ -95,6 +96,9 @@ pub fn unit_cases() -> Vec<CorpusCase> {
         shader_quad(),
         snapshot_bracket(),
         snapshot_balance(),
+        paint_class_mix(),
+        paint_class_short_run(),
+        paint_class_layer_over_gradient(),
     ]
 }
 
@@ -1187,10 +1191,10 @@ fn snapshot_balance() -> CorpusCase {
 /// run below the threshold sits between two long ones, and a layer composites
 /// over a gradient.
 ///
-/// Kept as a list of their own rather than in [`unit_cases`] until their
-/// reviewed `cpu/` baselines are committed and the engine golden gate names
-/// them; until then `tests::the_paint_class_cases_hold_cpu_oracle_parity` holds
-/// them to the CPU oracle directly, at each case's own tolerance.
+/// Registered in [`unit_cases`] with their reviewed `cpu/` baselines, and
+/// named in the engine golden gate's `PHASE_CASES`; the
+/// `tests::the_paint_class_cases_hold_cpu_oracle_parity` test additionally
+/// holds them to the CPU oracle directly, at each case's own tolerance.
 #[must_use]
 pub fn paint_class_cases() -> Vec<CorpusCase> {
     vec![
@@ -1525,14 +1529,14 @@ mod tests {
     }
 
     #[test]
-    fn the_paint_class_cases_are_unit_shaped_and_outside_the_baselined_corpus() {
+    fn the_paint_class_cases_are_unit_shaped_and_registered_in_the_unit_corpus() {
         let baselined: BTreeSet<&str> = unit_cases().iter().map(|case| case.spec.name).collect();
         let cases = paint_class_cases();
         let names: BTreeSet<&str> = cases.iter().map(|case| case.spec.name).collect();
         assert_eq!(names.len(), cases.len());
         for case in &cases {
             assert!(case.spec.name.starts_with("unit-paint-class-"));
-            assert!(!baselined.contains(case.spec.name));
+            assert!(baselined.contains(case.spec.name));
             assert!(!case.about.is_empty());
             assert!(!case.scene().commands().is_empty());
             assert_eq!((case.spec.width, case.spec.height), (SIZE, SIZE));

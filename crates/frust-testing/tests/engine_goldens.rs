@@ -110,6 +110,10 @@ const PHASE_CASES: &[&str] = &[
     "unit-path-dashed",
     "unit-snapshot-bracket",
     "unit-snapshot-balance",
+    // Paint-class — one frame per class mix, held to the CPU arm like every unit case.
+    "unit-paint-class-mix",
+    "unit-paint-class-short-run",
+    "unit-paint-class-layer-over-gradient",
     // Adversarial — the degenerate and stress shapes of the same commands.
     "adv-degenerate-path",
     "adv-subpixel-rrect",
