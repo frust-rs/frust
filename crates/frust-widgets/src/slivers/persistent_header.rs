@@ -56,8 +56,8 @@
 //! lags the geometry by one frame while the header resizes. A shrink-offset
 //! change below [`SHRINK_REBUILD_TOLERANCE`] does not rebuild at all (the child
 //! keeps the content built under the previous shrink offset), except a change
-//! onto either end of the range, `0` or `max_extent`, so a header at rest is
-//! always built at its exact end state.
+//! onto either end of the range, `0` or `max_extent`, so a header resting fully
+//! expanded or fully shrunk is always built at exactly that end.
 //!
 //! `build` must be a pure function of its two arguments and captured state:
 //! rebuild reconstructs the previous child from the previous view's `build`
@@ -66,8 +66,8 @@
 //! rebuild.
 //!
 //! Laid out as a box (outside a viewport) the header is unscrolled: its child is
-//! laid out at `max_extent` along the vertical axis, clamped into the incoming
-//! constraints.
+//! laid out at `max_extent` along the axis of its last sliver layout (vertical
+//! before one), clamped into the incoming constraints.
 
 use std::rc::Rc;
 
