@@ -945,6 +945,37 @@ pub(crate) struct AtlasPolicy {
     serial: u64,
     /// Where in the two-phase frame this policy is.
     phase: Phase,
+    /// This frame's counters for the `frust-perf enc` line.
+    #[cfg(feature = "perf-trace")]
+    trace: AtlasTrace,
+}
+
+/// What one frame's policy calls did, for the `frust-perf enc` line.
+///
+/// Reset by [`AtlasPolicy::begin_frame`], so each value is the frame's own.
+/// `perf-trace`-only: a release build carries neither the type nor the
+/// bookkeeping that feeds it.
+#[cfg(feature = "perf-trace")]
+#[derive(Debug, Default)]
+pub(crate) struct AtlasTrace {
+    /// Distinct run identities (font, collection index, raw size, hinting)
+    /// that reached classification this frame.
+    run_keys: HashSet<(u64, u32, u32, bool)>,
+    /// Glyph cache misses the frame took, as [`AtlasPolicy::frame_misses`]
+    /// counts them. Assigned once per frame by [`AtlasPolicy::end_frame`],
+    /// after `glifo` has run the frame's lookups; `collect_glyph` does not feed
+    /// it, since nothing on the production path reaches that half.
+    pub(crate) glyph_misses: u32,
+    /// Atlas rectangles the frame's eviction pass freed.
+    pub(crate) glyph_evicted: u32,
+}
+
+#[cfg(feature = "perf-trace")]
+impl AtlasTrace {
+    /// Distinct run identities classified this frame.
+    pub(crate) fn run_keys(&self) -> u32 {
+        u32::try_from(self.run_keys.len()).unwrap_or(u32::MAX)
+    }
 }
 
 impl AtlasPolicy {
@@ -982,7 +1013,16 @@ impl AtlasPolicy {
             unreplayed_since: None,
             serial: 0,
             phase: Phase::Idle,
+            #[cfg(feature = "perf-trace")]
+            trace: AtlasTrace::default(),
         }
+    }
+
+    /// The counters of the frame most recently compiled.
+    #[cfg(feature = "perf-trace")]
+    #[must_use]
+    pub(crate) fn trace(&self) -> &AtlasTrace {
+        &self.trace
     }
 
     /// Whether any glyph can be cached at all.
@@ -1125,6 +1165,12 @@ impl AtlasPolicy {
         // Read before anything this frame can miss, so `frame_misses` below is
         // this frame's own count rather than the process's.
         self.misses_at_frame_start = self.atlas.cache_misses();
+        #[cfg(feature = "perf-trace")]
+        {
+            self.trace.run_keys.clear();
+            self.trace.glyph_misses = 0;
+            self.trace.glyph_evicted = 0;
+        }
         self.phase = Phase::Collect;
     }
 
@@ -1177,6 +1223,14 @@ impl AtlasPolicy {
         let Some(size) = quantize_font_size(device_size) else {
             return RunRoute::Outline(OutlineReason::UnusableSize);
         };
+
+        #[cfg(feature = "perf-trace")]
+        self.trace.run_keys.insert((
+            run.font_id,
+            run.font_index,
+            run.font_size.to_bits(),
+            run.hinted,
+        ));
 
         let animating = self.observe_size((run.font_id, run.font_index), size);
         // Compared against the device size rather than the quantized one, on
@@ -1456,6 +1510,11 @@ impl AtlasPolicy {
         // total is one run behind until this settles it.
         self.charge_admissions();
 
+        #[cfg(feature = "perf-trace")]
+        {
+            self.trace.glyph_misses = u32::try_from(self.frame_misses()).unwrap_or(u32::MAX);
+        }
+
         if self.frame_misses() > 0 && self.unreplayed_since.is_none() {
             // This frame's own recording opens the window: the replay pass runs
             // *after* compiling — `end_frame` closes the compile and the caller
@@ -1477,6 +1536,13 @@ impl AtlasPolicy {
         self.serial = self.serial.saturating_add(1);
         self.discharge_evictions();
         let evicted: Vec<PendingClearRect> = self.atlas.drain_pending_clear_rects().collect();
+        #[cfg(feature = "perf-trace")]
+        {
+            self.trace.glyph_evicted = self
+                .trace
+                .glyph_evicted
+                .saturating_add(u32::try_from(evicted.len()).unwrap_or(u32::MAX));
+        }
         self.clears.extend(evicted);
         self.prune_sizes();
         self.phase = Phase::Idle;
@@ -1564,4 +1630,83 @@ impl AtlasPolicy {
 #[must_use]
 fn pack_context_color(color: AlphaColor<Srgb>) -> u32 {
     color.premultiply().to_rgba8().to_u32()
+}
+
+#[cfg(all(test, feature = "perf-trace"))]
+mod trace_tests {
+    use super::*;
+    use glifo::RasterMetrics;
+    use peniko::color::{AlphaColor, Srgb};
+    use vello_common::multi_atlas::AllocationStrategy;
+
+    const GLYPHS: [u32; 3] = [11, 12, 13];
+
+    fn images() -> ImageCache {
+        ImageCache::new_with_config(AtlasConfig {
+            initial_atlas_count: 0,
+            max_atlases: 4,
+            atlas_size: (1024, 1024),
+            auto_grow: true,
+            allocation_strategy: AllocationStrategy::FirstFit,
+        })
+    }
+
+    fn run_key() -> RunKey {
+        RunKey {
+            font_id: 0x7ace_0001,
+            font_index: 0,
+            font_size: 16.0,
+            distinct_glyphs: GLYPHS.len() as u32,
+            transform: Affine::IDENTITY,
+            hinted: false,
+            color_font: false,
+            context_color: AlphaColor::<Srgb>::new([0.0, 0.0, 0.0, 1.0]),
+        }
+    }
+
+    /// One frame through the production sequence, with `glifo`'s own lookup
+    /// (a `get`, then an `insert` on a miss) standing in for the draw that
+    /// really performs it. Returns the frame's `frame_misses()`.
+    fn frame(policy: &mut AtlasPolicy, images: &mut ImageCache) -> u64 {
+        policy.begin_frame();
+        let route = policy.classify_run(&run_key());
+        let route = policy.admit_run(route);
+        let Some(run) = route.atlas().copied() else {
+            // Surfaces as the caller's `first > 0` assertion failing.
+            return 0;
+        };
+        policy.build(images, |_| None);
+        for glyph in GLYPHS {
+            let key = run.key(glyph, 0.0);
+            if policy.atlas_mut().get(&key).is_none() {
+                let metrics = RasterMetrics {
+                    width: 8,
+                    height: 10,
+                    bearing_x: 0,
+                    bearing_y: 10,
+                };
+                let inserted = policy.atlas_mut().insert(images, key, metrics).is_some();
+                assert!(inserted, "the atlas has room");
+            }
+        }
+        let misses = policy.frame_misses();
+        policy.acknowledge_clears();
+        policy.end_frame(images);
+        policy.acknowledge_replay();
+        misses
+    }
+
+    #[test]
+    fn trace_glyph_misses_reports_the_production_frame_miss_count() {
+        let mut images = images();
+        let mut policy = AtlasPolicy::new(&images, false);
+
+        let first = frame(&mut policy, &mut images);
+        assert!(first > 0, "a cold run must miss");
+        assert_eq!(u64::from(policy.trace().glyph_misses), first);
+
+        let second = frame(&mut policy, &mut images);
+        assert_eq!(second, 0, "the resident run must hit");
+        assert_eq!(policy.trace().glyph_misses, 0);
+    }
 }

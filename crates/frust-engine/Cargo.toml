@@ -29,6 +29,8 @@ thiserror.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
+# Shapes the S1/S6-like bench scenes once (benches/scenes.rs); bench-only, not a runtime dependency.
+frust-text.workspace = true
 
 [features]
 default = []

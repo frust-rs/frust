@@ -686,6 +686,12 @@ fn install_surface(
     // "cache loaded before GPU bring-up" ordering the pre-split line had.
     let loaded_cache = if first_install {
         let lc = cache_path.and_then(load_pipeline_cache);
+        // Once per launch (first install only): the blob size the renderer is
+        // seeded with, 0 when there is none.
+        log::info!(
+            "frust-shell-android: pipeline cache loaded {} B",
+            lc.as_ref().map_or(0, Vec::len)
+        );
         renderer.set_initial_pipeline_cache_data(lc.clone());
         if let Some(spans) = startup_spans.as_mut() {
             spans.record(SPAN_CACHE_LOADED);
@@ -1334,14 +1340,28 @@ fn persist_pipeline_cache_if_changed(
     loaded: Option<&[u8]>,
     renderer: &frust_render::SurfaceRenderer,
 ) {
+    let warmed = renderer.pipeline_warm_up_finished().unwrap_or(0);
     let Some(data) = renderer.pipeline_cache_data() else {
+        log::info!(
+            "frust-shell-android: pipeline cache persisted 0 B (no blob; \
+             {warmed} warm-up pipelines finished)"
+        );
         return; // no cache to persist (Metal/desktop, or nothing compiled)
     };
     let cache_changed = pipeline_cache_differs(loaded, &data);
     if !cache_changed {
+        log::info!(
+            "frust-shell-android: pipeline cache persisted {} B (unchanged, not rewritten; \
+             {warmed} warm-up pipelines finished)",
+            data.len()
+        );
         return; // unchanged since load — skip the rewrite
     }
     let data_len = data.len();
+    log::info!(
+        "frust-shell-android: pipeline cache persisted {data_len} B ({warmed} warm-up \
+         pipelines finished)"
+    );
     let perf_enabled = perf::enabled();
     std::thread::spawn(move || match write_pipeline_cache_atomic(&path, &data) {
         Ok(()) => {
