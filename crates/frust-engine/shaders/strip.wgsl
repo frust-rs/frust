@@ -36,10 +36,12 @@
 // coverage, the solid paint, the vertex stage, every binding — is in every
 // class. The features are:
 //
-//   IMAGE        — atlas and external image sampling (bilinear/bicubic/nearest)
-//   GRADIENT     — linear, radial and sweep gradients
-//   BLURRED_RECT — the blurred rounded rectangle
-//   LAYER        — the layer colour source a composite reads its page through
+//   IMAGE          — atlas image sampling, nearest and bilinear
+//   IMAGE_FILTERED — inside IMAGE: bicubic atlas sampling and the external
+//                    texture (a caller-owned texture, any quality)
+//   GRADIENT       — linear, radial and sweep gradients
+//   BLURRED_RECT   — the blurred rounded rectangle
+//   LAYER          — the layer colour source a composite reads its page through
 //
 // The directive lines are plain comments, so this file IS the Uber program
 // byte for byte: the class that enables every feature compiles it unchanged.
@@ -414,6 +416,7 @@ fn fs_main(
             );
 
             var sample_color: vec4<f32>;
+//#if IMAGE_FILTERED
             if image_source_kind == IMAGE_SOURCE_EXTERNAL {
                 let final_xy = image_offset + extended_xy;
                 sample_color = sample_external_image(
@@ -434,7 +437,9 @@ fn fs_main(
                     image_extend_modes,
                     image_padding,
                 );
-            } else if image_quality == IMAGE_QUALITY_MEDIUM {
+            } else
+//#endif
+            if image_quality == IMAGE_QUALITY_MEDIUM {
                 let final_xy = image_offset + extended_xy - vec2(0.5);
                 sample_color = bilinear_sample(
                     atlas_texture_array,

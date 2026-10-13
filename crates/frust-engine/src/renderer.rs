@@ -138,7 +138,7 @@
 //! [`PaintClass`] — the strip program specialised to the paints the run holds
 //! (see [`crate::gpu::pipelines`]'s *The paint-class axis*). The runs are cut
 //! when a segment is planned (`Scratch::push_run`, by
-//! [`split_class_runs`]): contiguous, in painter order, covering the segment
+//! [`merge_class_runs`]): contiguous, in painter order, covering the segment
 //! exactly, so a pass draws the same instances in the same order it always did
 //! and only the program shading each run changes. A run shorter than the
 //! renderer's threshold ([`EngineRenderer::run_split_min`],
@@ -233,7 +233,6 @@ use crate::gpu::paint_texture::lower_encoded_paint;
 use crate::gpu::pipelines::{EnginePipeline, EngineShaders, atlas_strip_desc, warm_up_descs_for};
 use crate::gpu::strips::{
     ClassRun, ClassSet, PaintClass, PaintType, merge_class_runs, pack_paint_descriptor,
-    split_class_runs,
 };
 use crate::gpu::targets::{
     IntermediateTargets, IntermediateTexture, filter_data_texture_descriptor,
@@ -979,7 +978,7 @@ impl EngineRenderer {
     }
 
     /// Sets the shortest paint-class run worth a pipeline switch of its own
-    /// (see [`split_class_runs`]); shorter runs are merged and drawn with the
+    /// (see [`merge_class_runs`]); shorter runs are merged and drawn with the
     /// Uber program. `FRUST_ENGINE_RUN_SPLIT_MIN` only sets the value a
     /// renderer starts with.
     pub fn set_run_split_min(&mut self, min_run: u32) {
@@ -3088,7 +3087,7 @@ impl Scratch {
                                 run_external = paint.external;
                             }
                             let to_opaque = paint.opaque && split_opaque;
-                            let class = PaintClass::of_flag(paint.paint);
+                            let class = paint.class;
                             mark_class(&mut self.alpha_marks, self.alpha.len() as u32, class);
                             if to_opaque {
                                 mark_class(&mut self.opaque_marks, self.opaque.len() as u32, class);
@@ -3194,9 +3193,8 @@ impl Scratch {
             self.routing.uber,
             &mut self.class_runs,
         );
-        debug_assert_eq!(
-            self.class_runs,
-            scanned_runs(&self.opaque, self.routing),
+        debug_assert!(
+            runs_draw(&self.class_runs, &self.opaque),
             "the opaque marks disagree with the instances they mark"
         );
         for run in &self.class_runs {
@@ -3277,7 +3275,7 @@ impl Scratch {
     ///
     /// The one place a strip segment is created, so both run-breaking rules —
     /// a segment holds instances sharing one group-1 binding, and one paint
-    /// class ([`split_class_runs`]) — are stated once rather than at each of
+    /// class ([`merge_class_runs`]) — are stated once rather than at each of
     /// the four points a run can close. The class runs tile the span in order,
     /// so the segments still draw `first..end` front to back exactly as one
     /// segment did.
@@ -3295,9 +3293,8 @@ impl Scratch {
             self.routing.uber,
             &mut self.class_runs,
         );
-        debug_assert_eq!(
-            self.class_runs,
-            scanned_runs(span, self.routing),
+        debug_assert!(
+            runs_draw(&self.class_runs, span),
             "the alpha marks disagree with the instances they mark"
         );
         for index in 0..self.class_runs.len() {
@@ -3331,6 +3328,7 @@ impl Scratch {
                 // no colour for a later fragment to be rejected against.
                 opaque: false,
                 external: None,
+                class: PaintClass::SolidCoverage,
             };
             let Some(run) = strips.get(punch.strip_range.clone()) else {
                 continue;
@@ -3524,12 +3522,28 @@ fn marked_runs(
         })
 }
 
-/// The runs a full instance scan gives — what the marks must agree with,
-/// checked in debug builds.
-fn scanned_runs(instances: &[GpuStrip], routing: ClassRouting) -> Vec<ClassRun> {
-    let mut out = Vec::new();
-    split_class_runs(instances, routing.min_run, routing.uber, &mut out);
-    out
+/// Whether `runs` tile `instances` front to back and each run's program draws
+/// every instance in it, as far as the instance's own flag can tell
+/// ([`PaintClass::admits_flag`]) — what the marks must agree with, checked in
+/// debug builds.
+fn runs_draw(runs: &[ClassRun], instances: &[GpuStrip]) -> bool {
+    let mut next = 0_u32;
+    for run in runs {
+        if run.first != next || run.count == 0 {
+            return false;
+        }
+        let Some(span) = instances.get(run.first as usize..(run.first + run.count) as usize) else {
+            return false;
+        };
+        if !span
+            .iter()
+            .all(|instance| run.class.admits_flag(instance.paint_and_rect_flag))
+        {
+            return false;
+        }
+        next += run.count;
+    }
+    next as usize == instances.len()
 }
 
 /// The column of device space one round's target holds: the origin its
@@ -3720,6 +3734,10 @@ struct PackedPaint {
     /// external binding, so consecutive instances may share a segment only
     /// while this stays equal (see [`crate::gpu::bindings::ExternalRuns`]).
     external: Option<u32>,
+    /// The strip program class this paint's instances are drawn with — from
+    /// the resolved record, so an image is told apart by the path it samples
+    /// through (see [`PaintClass::of_image`]).
+    class: PaintClass,
 }
 
 impl PackedPaint {
@@ -3765,6 +3783,7 @@ fn pack_paint(
             depth_index: depth,
             opaque: color.is_opaque(),
             external: None,
+            class: PaintClass::SolidCoverage,
         }),
         Paint::Indexed(indexed) => {
             let Some(Some(resolved)) = paint_slots.get(indexed.index()) else {
@@ -3782,6 +3801,7 @@ fn pack_paint(
                 depth_index: depth,
                 opaque: resolved.opaque,
                 external: resolved.external,
+                class: resolved.class,
             })
         }
     }
@@ -3802,7 +3822,32 @@ struct ResolvedPaint {
     /// [`crate::gpu::bindings`]). `None` — the ordinary case — means the
     /// frame's atlas binding serves it.
     external: Option<u32>,
+    /// The strip program class the paint is drawn with ([`class_of_record`]).
+    class: PaintClass,
 }
+
+/// The strip program class a lowered record is drawn with.
+///
+/// The paint type decides it for every record but an image, whose record also
+/// names the path it samples through: nearest or bilinear from the atlas is
+/// [`PaintClass::Image`], bicubic or the external texture
+/// [`PaintClass::ImageFiltered`]. The bits are the ones the shader reads —
+/// quality in bits 0-1 of `image_params`, the source kind in bit 14.
+fn class_of_record(record: &GpuEncodedPaint) -> PaintClass {
+    match record {
+        GpuEncodedPaint::Image(image) => PaintClass::of_image(
+            image.image_params & IMAGE_QUALITY_BITS,
+            (image.image_params >> IMAGE_SOURCE_KIND_SHIFT) & 1 == 1,
+        ),
+        _ => PaintClass::of_flag(pack_paint_descriptor(record.paint_type(), 0)),
+    }
+}
+
+/// Bits 0-1 of an image record's `image_params`: the sampling quality.
+const IMAGE_QUALITY_BITS: u32 = 0b11;
+
+/// The bit of an image record's `image_params` marking an external texture.
+const IMAGE_SOURCE_KIND_SHIFT: u32 = 14;
 
 /// One resource texture and the extent it currently holds.
 #[derive(Debug)]
@@ -4055,6 +4100,7 @@ impl FrameResources {
                     texel_offset,
                     opaque: !paint.may_have_transparency(),
                     external,
+                    class: class_of_record(&record),
                 };
                 texel_offset += record.texel_len();
                 self.paints_data.push(record);
@@ -5116,6 +5162,31 @@ mod tests {
         );
     }
 
+    /// An image record is classed by the path it samples through — the one
+    /// split an instance's flag cannot make — and every other record by its
+    /// paint type.
+    #[test]
+    fn a_lowered_record_names_its_strip_program_class() {
+        use crate::gpu::atlas::pack_image_params;
+        use crate::gpu::paint_texture::GpuEncodedImage;
+
+        let image = |quality: u32, external: bool| {
+            GpuEncodedPaint::Image(GpuEncodedImage {
+                image_params: pack_image_params(quality, 0, 0, 3, external),
+                image_size: 0,
+                image_offset: 0,
+                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                tint: 0,
+                tint_mode: 0,
+                image_padding: 0,
+            })
+        };
+        assert_eq!(class_of_record(&image(0, false)), PaintClass::Image);
+        assert_eq!(class_of_record(&image(1, false)), PaintClass::Image);
+        assert_eq!(class_of_record(&image(2, false)), PaintClass::ImageFiltered);
+        assert_eq!(class_of_record(&image(1, true)), PaintClass::ImageFiltered);
+    }
+
     #[test]
     fn a_resolved_indexed_paint_samples_at_each_instances_own_position() {
         let slots = [Some(ResolvedPaint {
@@ -5123,6 +5194,7 @@ mod tests {
             texel_offset: 6,
             opaque: true,
             external: None,
+            class: PaintClass::Gradient,
         })];
         let paint = pack_paint(&Paint::Indexed(IndexedPaint::new(0)), 2, &slots)
             .expect("a lowered paint resolves");

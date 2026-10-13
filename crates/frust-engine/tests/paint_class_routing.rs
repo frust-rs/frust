@@ -29,11 +29,14 @@ use frust_engine::gpu::strips::{
 };
 use frust_engine::{CompiledFrame, EngineRenderer, EngineTarget, GpuStrip, OutputAlpha, StripDraw};
 use frust_engine::{SceneCompiler, config};
-use frust_gpu::{HeadlessTarget, TierCaps};
+use frust_gpu::{HeadlessTarget, SceneTextureId, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use kurbo::{Affine, Circle, Point, Rect, Shape};
 use peniko::color::DynamicColor;
-use peniko::{Blob, Brush, Color, ColorStop, Gradient, ImageAlphaType, ImageData, ImageFormat};
+use peniko::{
+    Blob, Brush, Color, ColorStop, Gradient, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
+    ImageQuality,
+};
 use vello_common::encode::{EncodedKind, EncodedPaint};
 use vello_common::paint::Paint;
 
@@ -476,6 +479,11 @@ fn mixed_scene() -> Scene {
                 Color::from_rgba8(255, 255, 0, 64),
             ),
         );
+        // A bicubic image brush: the filtered image class.
+        builder.fill_rect(
+            Rect::new(130.5, 150.5, 170.5, 190.5),
+            Brush::Image(ImageBrush::new(checkerboard(200)).with_quality(ImageQuality::High)),
+        );
         for i in 0..6_u8 {
             let x = 30.0 + f64::from(i % 3) * 80.0;
             let y = 40.0 + f64::from(i / 3) * 80.0;
@@ -558,6 +566,66 @@ fn punch_scene() -> Scene {
     scene
 }
 
+/// The checkerboard as a caller-owned texture, the way a host binds one.
+fn external_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> frust_gpu::Texture {
+    let data = checkerboard(60);
+    let desc = frust_gpu::TextureDesc {
+        width: 16,
+        height: 16,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        label: Some("paint-class external".to_string()),
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("paint-class external"),
+        size: wgpu::Extent3d {
+            width: 16,
+            height: 16,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        texture.as_image_copy(),
+        data.data.data(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(16 * 4),
+            rows_per_image: Some(16),
+        },
+        wgpu::Extent3d {
+            width: 16,
+            height: 16,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    frust_gpu::Texture::new(texture, view, desc)
+}
+
+/// An external texture between atlas images and gradients: the external run
+/// is drawn with the filtered image class, its neighbours with their own.
+fn external_scene(id: SceneTextureId) -> Scene {
+    let mut scene = mixed_scene();
+    {
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.scene_texture(id.get(), Rect::new(20.0, 120.0, 120.0, 220.0));
+        bubble(
+            &mut builder,
+            Point::new(70.0, 170.0),
+            30.0,
+            Color::from_rgb8(200, 200, 40),
+        );
+        builder.draw_image(&checkerboard(5), Rect::new(60.0, 160.0, 80.0, 180.0));
+    }
+    scene
+}
+
 /// Renders `scene` twice — a cold frame, then a steady one — through a fresh
 /// renderer configured by `configure`, returning both read-backs and how many
 /// pipelines the renderer compiled.
@@ -617,7 +685,13 @@ fn routed_frames_render_byte_identically_to_the_uber_program() {
     let _guard = render_lock();
     let (device, queue, caps) = gpu();
 
-    let cases: [(&str, Scene, Color); 4] = [
+    let external = external_texture(&device, &queue);
+    let id = external.as_scene_texture();
+    let bind = |renderer: &mut EngineRenderer| {
+        renderer.bind_texture(id, external.size(), external.view().clone());
+    };
+
+    let cases: [(&str, Scene, Color); 5] = [
         ("mixed", mixed_scene(), Color::TRANSPARENT),
         (
             "mixed-opaque-base",
@@ -626,10 +700,12 @@ fn routed_frames_render_byte_identically_to_the_uber_program() {
         ),
         ("layer-over-gradient", layer_scene(), Color::TRANSPARENT),
         ("punch", punch_scene(), Color::from_rgba8(0, 0, 0, 0)),
+        ("external", external_scene(id), Color::TRANSPARENT),
     ];
     for (name, scene, base) in &cases {
         let (uber, uber_compiled) = render_twice(&device, &queue, &caps, scene, *base, |r| {
-            r.set_uber_program(true)
+            r.set_uber_program(true);
+            bind(r);
         });
         assert!(
             uber[0].as_chunks::<4>().0.iter().any(|px| px[3] != 0),
@@ -644,6 +720,7 @@ fn routed_frames_render_byte_identically_to_the_uber_program() {
                 render_twice(&device, &queue, &caps, scene, *base, |r| {
                     r.set_uber_program(false);
                     r.set_run_split_min(min_run);
+                    bind(r);
                 });
             for (frame, (a, b)) in uber.iter().zip(&routed).enumerate() {
                 let differing = a

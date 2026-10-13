@@ -126,11 +126,19 @@ pub const STRIP_NAME: &str = "frust-engine strip";
 
 /// The feature names a `//#if` directive in `strip.wgsl` may name.
 ///
-/// - `IMAGE` — atlas and external image sampling;
+/// - `IMAGE` — atlas image sampling at nearest and bilinear quality;
+/// - `IMAGE_FILTERED` — nested inside `IMAGE`: bicubic atlas sampling and the
+///   external texture;
 /// - `GRADIENT` — the linear, radial and sweep gradients;
 /// - `BLURRED_RECT` — the blurred rounded rectangle;
 /// - `LAYER` — the layer colour source a composite samples its page through.
-pub const STRIP_FEATURES: [&str; 4] = ["IMAGE", "GRADIENT", "BLURRED_RECT", "LAYER"];
+pub const STRIP_FEATURES: [&str; 5] = [
+    "IMAGE",
+    "IMAGE_FILTERED",
+    "GRADIENT",
+    "BLURRED_RECT",
+    "LAYER",
+];
 
 /// The `//#if` features `class` keeps.
 ///
@@ -142,6 +150,7 @@ pub const fn class_features(class: PaintClass) -> &'static [&'static str] {
         PaintClass::SolidCoverage => &[],
         PaintClass::Gradient => &["GRADIENT"],
         PaintClass::Image => &["IMAGE"],
+        PaintClass::ImageFiltered => &["IMAGE", "IMAGE_FILTERED"],
         PaintClass::BlurredRect => &["BLURRED_RECT"],
         PaintClass::LayerComposite => &["LAYER"],
         PaintClass::Uber => &STRIP_FEATURES,
@@ -156,6 +165,7 @@ pub const fn strip_class_name(class: PaintClass) -> &'static str {
         PaintClass::SolidCoverage => "frust-engine strip/solid",
         PaintClass::Gradient => "frust-engine strip/gradient",
         PaintClass::Image => "frust-engine strip/image",
+        PaintClass::ImageFiltered => "frust-engine strip/image-filtered",
         PaintClass::BlurredRect => "frust-engine strip/blurred-rect",
         PaintClass::LayerComposite => "frust-engine strip/layer",
         PaintClass::Uber => STRIP_NAME,
@@ -364,6 +374,9 @@ mod tests {
     fn each_class_keeps_only_its_own_branches() {
         let branch = |src: &str, needle: &str| src.contains(needle);
         let image = "paint_type == PAINT_TYPE_IMAGE {";
+        let bicubic = "sample_color = bicubic_sample(";
+        let external = "sample_color = sample_external_image(";
+        let bilinear = "sample_color = bilinear_sample(";
         let linear = "paint_type == PAINT_TYPE_LINEAR_GRADIENT {";
         let radial = "paint_type == PAINT_TYPE_RADIAL_GRADIENT {";
         let sweep = "paint_type == PAINT_TYPE_SWEEP_GRADIENT {";
@@ -384,6 +397,15 @@ mod tests {
                 class.label()
             );
             assert_eq!(branch(fs, image), keeps("IMAGE"), "{}", class.label());
+            assert_eq!(branch(fs, bilinear), keeps("IMAGE"), "{}", class.label());
+            for filtered in [bicubic, external] {
+                assert_eq!(
+                    branch(fs, filtered),
+                    keeps("IMAGE_FILTERED"),
+                    "{}",
+                    class.label()
+                );
+            }
             for gradient in [linear, radial, sweep] {
                 assert_eq!(branch(fs, gradient), keeps("GRADIENT"), "{}", class.label());
             }

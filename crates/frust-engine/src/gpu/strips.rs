@@ -35,6 +35,10 @@ const PAINT_TYPE_MASK: u32 = 0x7;
 /// carries in bits 29-30.
 const COLOR_SOURCE_LAYER: u32 = 1;
 
+/// The shader's `IMAGE_QUALITY_MEDIUM` — bilinear, the highest quality the
+/// [`PaintClass::Image`] program samples at.
+const IMAGE_QUALITY_BILINEAR: u32 = 1;
+
 /// Bit the paint type starts at in [`GpuStrip::paint_and_rect_flag`].
 const PAINT_TYPE_SHIFT: u32 = 26;
 
@@ -319,18 +323,26 @@ impl GpuStrip {
 /// (see [`Self::draws`]). [`Self::Uber`] is the whole program — the source
 /// unchanged — and draws everything.
 ///
-/// Derived from the instance alone ([`Self::of_flag`]): bits 29-30 of
+/// Mostly derived from the instance alone ([`Self::of_flag`]): bits 29-30 of
 /// [`GpuStrip::paint_and_rect_flag`] name the colour source and bits 26-28 the
-/// paint type, so the class needs no side table and cannot disagree with what
-/// the shader will read.
+/// paint type. The one split the flag cannot make is an image's: whether it
+/// samples nearest/bilinear from the atlas ([`Self::Image`]) or needs the
+/// bicubic or external-texture path ([`Self::ImageFiltered`]) is in its
+/// encoded record, so [`Self::of_flag`] answers the superset and the renderer
+/// refines it per draw from the resolved record ([`Self::of_image`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PaintClass {
     /// Coverage plus the inline solid colour — and nothing else.
     SolidCoverage,
     /// Adds the linear, radial and sweep gradients.
     Gradient,
-    /// Adds atlas and external image sampling.
+    /// Adds atlas image sampling at nearest and bilinear quality — every
+    /// glyph, and every image not drawn bicubic.
     Image,
+    /// Adds every image path: [`Self::Image`]'s, plus bicubic atlas sampling
+    /// and the externally bound texture. Kept apart because the bicubic and
+    /// external code is what an image fragment pays for most, taken or not.
+    ImageFiltered,
     /// Adds the blurred rounded rectangle.
     BlurredRect,
     /// Adds the layer colour source a composite reads its finished page
@@ -344,10 +356,11 @@ pub enum PaintClass {
 
 impl PaintClass {
     /// Every class, in index order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::SolidCoverage,
         Self::Gradient,
         Self::Image,
+        Self::ImageFiltered,
         Self::BlurredRect,
         Self::LayerComposite,
         Self::Uber,
@@ -355,10 +368,11 @@ impl PaintClass {
 
     /// The classes compiled from a specialisation of the source — every class
     /// but [`Self::Uber`], which is the source itself.
-    pub const SPECIALISED: [Self; 5] = [
+    pub const SPECIALISED: [Self; 6] = [
         Self::SolidCoverage,
         Self::Gradient,
         Self::Image,
+        Self::ImageFiltered,
         Self::BlurredRect,
         Self::LayerComposite,
     ];
@@ -368,7 +382,9 @@ impl PaintClass {
     ///
     /// A colour source or paint type the shader does not name maps to
     /// [`Self::Uber`] rather than to a guess: the whole program reads it
-    /// exactly as it always did.
+    /// exactly as it always did. An image maps to [`Self::ImageFiltered`],
+    /// the class that draws every image — the flag does not say which path
+    /// the record takes (see [`Self::of_image`]).
     #[must_use]
     pub const fn of_flag(paint_and_rect_flag: u32) -> Self {
         let color_source = (paint_and_rect_flag >> COLOR_SOURCE_SHIFT) & COLOR_SOURCE_MASK;
@@ -380,17 +396,33 @@ impl PaintClass {
         }
         match (paint_and_rect_flag >> PAINT_TYPE_SHIFT) & PAINT_TYPE_MASK {
             0 => Self::SolidCoverage,
-            1 => Self::Image,
+            1 => Self::ImageFiltered,
             2..=4 => Self::Gradient,
             5 => Self::BlurredRect,
             _ => Self::Uber,
         }
     }
 
-    /// The class of `strip`.
+    /// The class of `strip`, as far as its flag says ([`Self::of_flag`]).
     #[must_use]
     pub const fn of_instance(strip: &GpuStrip) -> Self {
         Self::of_flag(strip.paint_and_rect_flag)
+    }
+
+    /// The class of an image paint whose encoded record samples at `quality`
+    /// (the shader's `IMAGE_QUALITY_*` numbering: 0 nearest, 1 bilinear, 2
+    /// bicubic) from the external texture (`external`) or the atlas.
+    ///
+    /// Only an atlas image at nearest or bilinear quality is [`Self::Image`];
+    /// a bicubic or external one needs [`Self::ImageFiltered`]. The renderer
+    /// asks this once per resolved paint, from the record it lowered.
+    #[must_use]
+    pub const fn of_image(quality: u32, external: bool) -> Self {
+        if external || quality > IMAGE_QUALITY_BILINEAR {
+            Self::ImageFiltered
+        } else {
+            Self::Image
+        }
     }
 
     /// This class's position in [`Self::ALL`].
@@ -406,6 +438,7 @@ impl PaintClass {
             Self::SolidCoverage => "solid",
             Self::Gradient => "gradient",
             Self::Image => "image",
+            Self::ImageFiltered => "image-filtered",
             Self::BlurredRect => "blurred-rect",
             Self::LayerComposite => "layer",
             Self::Uber => "uber",
@@ -416,12 +449,24 @@ impl PaintClass {
     /// exactly as [`Self::Uber`] would.
     ///
     /// A class draws itself and the solid paint (coverage and solid are in
-    /// every program); [`Self::Uber`] draws everything.
+    /// every program); [`Self::ImageFiltered`] also draws [`Self::Image`];
+    /// [`Self::Uber`] draws everything.
     #[must_use]
     pub const fn draws(self, other: Self) -> bool {
         matches!(self, Self::Uber)
             || matches!(other, Self::SolidCoverage)
+            || matches!((self, other), (Self::ImageFiltered, Self::Image))
             || self as usize == other as usize
+    }
+
+    /// Whether this class's program draws an instance whose flag is
+    /// `paint_and_rect_flag`, as far as the flag can tell: an image instance
+    /// is admitted by either image class, since which one its record needs is
+    /// not in the flag ([`Self::of_flag`]).
+    #[must_use]
+    pub const fn admits_flag(self, paint_and_rect_flag: u32) -> bool {
+        let class = Self::of_flag(paint_and_rect_flag);
+        self.draws(class) || (matches!(self, Self::Image) && matches!(class, Self::ImageFiltered))
     }
 }
 
@@ -683,7 +728,8 @@ mod tests {
         );
         assert_eq!(
             C::of_flag(pack_paint_descriptor(PaintType::Image, 3)),
-            C::Image
+            C::ImageFiltered,
+            "the flag alone answers the class that draws every image"
         );
         for gradient in [
             PaintType::LinearGradient,
@@ -704,8 +750,19 @@ mod tests {
         // The rect flag never changes a class.
         assert_eq!(
             C::of_flag(pack_paint_descriptor(PaintType::Image, 3) | RECT_STRIP_FLAG),
-            C::Image
+            C::ImageFiltered
         );
+        // The record refines an image: nearest and bilinear atlas images take
+        // the narrow program, bicubic and external ones the filtered one.
+        assert_eq!(C::of_image(0, false), C::Image);
+        assert_eq!(C::of_image(1, false), C::Image);
+        assert_eq!(C::of_image(2, false), C::ImageFiltered);
+        assert_eq!(C::of_image(0, true), C::ImageFiltered);
+        assert_eq!(C::of_image(1, true), C::ImageFiltered);
+        let image = pack_paint_descriptor(PaintType::Image, 3);
+        assert!(C::Image.admits_flag(image));
+        assert!(C::ImageFiltered.admits_flag(image));
+        assert!(!C::Gradient.admits_flag(image));
         // Reserved sources and paint types fall back to the whole program.
         assert_eq!(C::of_flag(2 << 29), C::Uber);
         assert_eq!(C::of_flag(3 << 29), C::Uber);
@@ -721,6 +778,8 @@ mod tests {
             assert!(PaintClass::Uber.draws(class));
         }
         assert!(!PaintClass::Gradient.draws(PaintClass::Image));
+        assert!(PaintClass::ImageFiltered.draws(PaintClass::Image));
+        assert!(!PaintClass::Image.draws(PaintClass::ImageFiltered));
         assert!(!PaintClass::SolidCoverage.draws(PaintClass::Gradient));
         assert!(!PaintClass::Image.draws(PaintClass::Uber));
         for (index, class) in PaintClass::ALL.iter().enumerate() {
@@ -758,7 +817,7 @@ mod tests {
             runs(&instances, 16),
             vec![
                 (0, 20, PaintClass::Gradient),
-                (20, 30, PaintClass::Image),
+                (20, 30, PaintClass::ImageFiltered),
                 (50, 17, PaintClass::Gradient),
             ]
         );
@@ -776,15 +835,18 @@ mod tests {
         assert_eq!(runs(&instances, 16), vec![(0, 43, PaintClass::Gradient)]);
         // At the front: folds forwards into the first non-solid run.
         let instances = of(&[(P::Solid, 3), (P::Image, 20)]);
-        assert_eq!(runs(&instances, 16), vec![(0, 23, PaintClass::Image)]);
+        assert_eq!(
+            runs(&instances, 16),
+            vec![(0, 23, PaintClass::ImageFiltered)]
+        );
         // A long solid run stays a run of its own.
         let instances = of(&[(P::Image, 20), (P::Solid, 40), (P::Image, 20)]);
         assert_eq!(
             runs(&instances, 16),
             vec![
-                (0, 20, PaintClass::Image),
+                (0, 20, PaintClass::ImageFiltered),
                 (20, 40, PaintClass::SolidCoverage),
-                (60, 20, PaintClass::Image),
+                (60, 20, PaintClass::ImageFiltered),
             ]
         );
         // An all-solid segment is one solid run however short.

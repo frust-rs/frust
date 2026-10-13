@@ -28,15 +28,15 @@
 //!
 //! | State | Classes served | Variants |
 //! |---|---|---|
-//! | [`EnginePipeline::StripIntermediate`] | all six | 6 |
-//! | [`EnginePipeline::StripAlpha`] | all six | 6 |
-//! | [`EnginePipeline::StripDepthAlpha`] | all six | 6 |
-//! | [`EnginePipeline::StripOpaque`] | solid, gradient, image, Uber | 4 |
+//! | [`EnginePipeline::StripIntermediate`] | all seven | 7 |
+//! | [`EnginePipeline::StripAlpha`] | all seven | 7 |
+//! | [`EnginePipeline::StripDepthAlpha`] | all seven | 7 |
+//! | [`EnginePipeline::StripOpaque`] | solid, gradient, image, image-filtered, Uber | 5 |
 //! | [`EnginePipeline::StripDestOut`] | solid, Uber | 2 |
 //! | [`EnginePipeline::StripDepthDestOut`] | solid, Uber | 2 |
 //! | clear, copy, filter | their own program | 3 |
 //!
-//! — [`VARIANT_COUNT`], 29 at most. A run of a class its state does not serve
+//! — [`VARIANT_COUNT`], 33 at most. A run of a class its state does not serve
 //! is drawn with Uber ([`EnginePipeline::fold_class`]), which draws everything.
 //! Variants are created lazily, on the first frame that draws a run of that
 //! class through that state; [`warm_up_descs`] lists the nine Uber states plus
@@ -387,15 +387,15 @@ impl EnginePipeline {
     /// [`PaintClass::SolidCoverage`]; the destination-out pair serves nothing
     /// else (a punch erases with a solid source), and the opaque state serves
     /// the classes a fully covered opaque span can have — solid, gradient,
-    /// image — but never a composite or a blurred rectangle, neither of which
-    /// is ever opaque. A non-strip pipeline serves only Uber, which for it
+    /// either image class — but never a composite or a blurred rectangle,
+    /// neither of which is ever opaque. A non-strip pipeline serves only Uber, which for it
     /// means "its own program".
     #[must_use]
     pub const fn serves(self, class: PaintClass) -> bool {
         match class {
             PaintClass::Uber => true,
             PaintClass::SolidCoverage => self.is_strip(),
-            PaintClass::Gradient | PaintClass::Image => matches!(
+            PaintClass::Gradient | PaintClass::Image | PaintClass::ImageFiltered => matches!(
                 self,
                 Self::StripIntermediate
                     | Self::StripAlpha
@@ -817,18 +817,18 @@ mod tests {
     }
 
     #[test]
-    fn the_class_axis_is_folded_to_twenty_nine_variants() {
-        assert_eq!(VARIANT_COUNT, 29);
+    fn the_class_axis_is_folded_to_thirty_three_variants() {
+        assert_eq!(VARIANT_COUNT, 33);
         let served = |pipeline: EnginePipeline| {
             PaintClass::ALL
                 .iter()
                 .filter(|class| pipeline.serves(**class))
                 .count()
         };
-        assert_eq!(served(EnginePipeline::StripIntermediate), 6);
-        assert_eq!(served(EnginePipeline::StripAlpha), 6);
-        assert_eq!(served(EnginePipeline::StripDepthAlpha), 6);
-        assert_eq!(served(EnginePipeline::StripOpaque), 4);
+        assert_eq!(served(EnginePipeline::StripIntermediate), 7);
+        assert_eq!(served(EnginePipeline::StripAlpha), 7);
+        assert_eq!(served(EnginePipeline::StripDepthAlpha), 7);
+        assert_eq!(served(EnginePipeline::StripOpaque), 5);
         assert_eq!(served(EnginePipeline::StripDestOut), 2);
         assert_eq!(served(EnginePipeline::StripDepthDestOut), 2);
         for pipeline in [
