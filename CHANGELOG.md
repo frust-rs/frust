@@ -6,6 +6,14 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Changed
+
+- Codemod: the accumulator `// erasure: keep` marker now also covers an untyped `let`, one seeded
+  with a direct (unwrapped) `any(..)` element (`let mut body = vec![any(..)]`) or started as
+  exactly `Vec::new()`, `Vec::with_capacity(..)` or `vec![]` and later pushed or inserted a direct
+  `any(..)` in the same fn, so idiomatic accumulators no longer need a `: Vec<AnyView<_>>`
+  annotation for rule U.
+
 ## 0.6.1 — 2026-10-12
 
 A patch release that also carries two narrow source changes for code that calls the authoring child

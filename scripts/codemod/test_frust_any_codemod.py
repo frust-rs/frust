@@ -2515,6 +2515,107 @@ class AccumulatorMarkerTest(unittest.TestCase):
             }
             """), [5, 8])
 
+    def test_vec_of_any_initializer_is_an_accumulator(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut body = vec![any(a())]; // erasure: keep accumulator
+                body.push(any(b(
+                    x,
+                )));
+                body.push(any(c())); // erasure: keep accumulator
+            }
+            """), [])
+
+    def test_empty_vec_pushed_any_is_an_accumulator(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                // erasure: keep accumulator
+                let mut rows = Vec::new();
+                rows.push(any(a()));
+                rows.insert(0, any(b()));
+                let mut more = vec![];  // erasure: keep accumulator
+                more.push(frust::any(c()));
+                let mut cap = Vec::with_capacity(4); // erasure: keep accumulator
+                cap.push(any(d()));
+            }
+            """), [])
+
+    def test_inferred_accumulator_needs_direct_any(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut pads = Vec::new(); // erasure: keep not a view vec
+                pads.push(Padding(any(a())));
+                let mut wrapped = vec![Padding(any(b()))]; // erasure: keep not a view vec
+                wrapped.push(Padding(any(c())));
+                let mut nums: Vec<u8> = vec![any(d())]; // erasure: keep typed, not AnyView
+                nums.push(any(e()));
+            }
+            """), [3, 5, 7])
+
+    def test_inferred_accumulator_stops_at_rebinding(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut rows = Vec::new(); // erasure: keep accumulator
+                rows.push(Padding(any(a())));
+                {
+                    let mut rows = Vec::new();
+                    rows.push(any(b()));
+                }
+            }
+            """), [3, 6])
+
+    def test_same_named_binding_does_not_qualify(self):
+        for binding in ("for pads in groups.iter_mut() {", "if let Some(pads) = slot {",
+                        "let f = |pads: &mut Vec<AnyView<S>>| {", "fn g(pads: &mut Vec<AnyView<S>>) {"):
+            with self.subTest(binding=binding):
+                self.assertEqual(unmarked(f"""\
+                    fn f() {{
+                        let mut pads = Vec::new(); // erasure: keep not a view vec
+                        pads.push(Padding(any(a())));
+                        {binding}
+                            pads.push(any(b()));
+                        }}
+                    }}
+                    """), [3, 5])
+
+    def test_receiver_must_be_the_binding_itself(self):
+        self.assertEqual(unmarked("""\
+            fn f(&mut self) {
+                let mut rows = Vec::new(); // erasure: keep accumulator
+                rows.push(Padding(any(a())));
+                self.rows.push(any(b()));
+            }
+            """), [3, 4])
+
+    def test_non_empty_initializer_does_not_qualify(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut rows = make(); // erasure: keep accumulator
+                rows.push(any(a()));
+                let mut more = Vec::default(); // erasure: keep accumulator
+                more.push(any(b()));
+            }
+            """), [3, 5])
+
+    def test_insert_alone_qualifies(self):
+        self.assertEqual(unmarked("""\
+            fn f() {
+                let mut rows = Vec::new(); // erasure: keep accumulator
+                rows.insert(0, any(a()));
+                rows.push(Padding(any(b())));
+            }
+            """), [])
+
+    def test_direct_any_must_start_the_element(self):
+        for elem in ("move || any(a())", "&any(a())", "base + any(a())"):
+            with self.subTest(elem=elem):
+                self.assertEqual(unmarked(f"""\
+                    fn f() {{
+                        let mut v = vec![{elem}]; // erasure: keep x
+                        v.push(Padding(any(b())));
+                    }}
+                    """), [3])
+
 
 class InCallMarkerTest(unittest.TestCase):
     def test_own_line_marker_inside_parens_covers_call(self):
