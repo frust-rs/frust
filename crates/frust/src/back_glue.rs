@@ -448,15 +448,12 @@ fn register(
 /// module docs' R23 note), so a navigator the user cannot reach is never in this
 /// list's answer to begin with.
 ///
-/// `wiring` is the delivery for the navigator whose wire consumed the press,
-/// used only when *no* registrant claims one — which preserves the
-/// pre-arbitration behaviour exactly (a press was always delivered to the
-/// wiring controller). Delivery there is a no-op by construction:
-/// `back_interest()` is false only at depth 1 with a `BackPolicy::Pop` top
-/// page, and `request_back` on that stack pops nothing. A [`back_fallback`]
-/// wire has no controller and passes `None`: unclaimed, the press it consumed
-/// does nothing (the shell already decided via `handles_back`).
-fn route_back(wiring: Option<&dyn Fn()>) {
+/// A press no registrant claims at this point is dropped: delivering it to the
+/// navigator whose wire consumed it would not be a no-op (that navigator may be
+/// deep yet unreachable, e.g. a hidden `IndexedStack` tab, or torn down). The
+/// shell already decided via `handles_back`, so an unclaimed press is the
+/// platform's to handle.
+fn route_back() {
     // Both the interest probes and the claimant's `request_back` are CLONED OUT
     // of the list (that is what the `Rc`s are for) and called with NO `SHARED`
     // borrow outstanding. A navigator's are a `Cell` read and an op enqueue, but
@@ -474,10 +471,8 @@ fn route_back(wiring: Option<&dyn Fn()>) {
         .into_iter()
         .find(|(interest, _)| interest())
         .map(|(_, request_back)| request_back);
-    match (claimant, wiring) {
-        (Some(request_back), _) => request_back(),
-        (None, Some(wiring)) => wiring(),
-        (None, None) => {}
+    if let Some(request_back) = claimant {
+        request_back();
     }
 }
 
@@ -519,12 +514,12 @@ fn consume_press() -> bool {
 /// [`NavigatorController::request_back`] (applies the top page's `BackPolicy`)
 /// on the registrant [`route_back`] arbitrates to.
 ///
-/// `controller` is the *wiring* controller, not necessarily the recipient —
-/// under R44-back the press goes to the first registrant claiming it, and
-/// `controller` is only the delivery when none does.
-fn consume_back<State: 'static>(controller: &NavigatorController<State>) {
+/// Under R44-back the press goes to the first registrant claiming it; the
+/// wiring controller gets no special delivery, and an unclaimed press is
+/// dropped.
+fn consume_back() {
     if consume_press() {
-        route_back(Some(&|| controller.request_back()));
+        route_back();
     }
 }
 
@@ -556,7 +551,7 @@ fn seed_consumed() {
 /// Runs during a rebuild's build pass; the first call registers the live
 /// provider, which panics off the UI thread (always the UI thread here).
 pub(crate) fn auto_wire<State: 'static>(controller: &NavigatorController<State>) {
-    consume_back(controller);
+    consume_back();
     refresh_interest(controller, Role::Navigator);
 }
 
@@ -569,7 +564,7 @@ pub(crate) fn auto_wire<State: 'static>(controller: &NavigatorController<State>)
 ///
 /// As [`auto_wire`].
 pub(crate) fn auto_wire_overlay_host<State: 'static>(controller: &NavigatorController<State>) {
-    consume_back(controller);
+    consume_back();
     refresh_interest(controller, Role::Host);
 }
 
@@ -626,7 +621,7 @@ impl<State: 'static> BackHandler<State> {
     /// double-counts, and a `frust::navigator` on the same controller in the
     /// same rebuild cannot double-pop.
     pub fn track(&self) {
-        consume_back(&self.controller);
+        consume_back();
         refresh_interest(&self.controller, Role::Navigator);
     }
 
@@ -836,7 +831,7 @@ impl BackFallback {
 /// thread here).
 pub fn back_fallback<V>(fallback: &BackFallback, child: V) -> BackFallbackView<V> {
     if consume_press() {
-        route_back(None);
+        route_back();
     }
     fallback.wire();
     BackFallbackView {
@@ -900,6 +895,8 @@ impl<State: 'static, V: View<State>> View<State> for BackFallbackView<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::motion::patterns::SharedAxis;
+    use crate::motion::switcher::PatternSwitcherView;
     use frust_core::{AnyView, RenderRoot, any};
     use frust_reactive::{
         ReactiveRuntime, clear_can_pop_provider, handles_back, push_back_press, set_handles_back,
@@ -1297,7 +1294,7 @@ mod tests {
         assert!(!handles_back(), "back at the root of both: bubbles again");
 
         // A press with nothing to do stays a safe no-op (nobody claims it, so it
-        // routes to the wiring controller, whose stack cannot pop).
+        // is dropped).
         push_back_press();
         h.rebuild();
         assert_eq!((h.host.depth(), h.inner.depth()), (1, 1));
@@ -2710,5 +2707,195 @@ mod tests {
         );
         assert!(!is_registered(&first), "the old handle was released");
         assert!(is_registered(&second), "the new one is live");
+    }
+
+    // -----------------------------------------------------------------------
+    // Unclaimed presses are dropped; tab navigators + fallback under a real
+    // `pattern_switcher`.
+    // -----------------------------------------------------------------------
+
+    /// (b) The opposite wire order of the first tabs test: the hidden deep tab
+    /// wires FIRST, the selected tab (wired last) is at its root, no fallback.
+    /// Nothing claims, and nothing pops.
+    #[test]
+    fn an_unclaimed_press_pops_nothing_when_the_hidden_deep_tab_wires_first() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = TabsHarness::new(0, false, false);
+        h.deepen(1, 3);
+        assert!(!handles_back(), "selected tab at its root: nothing claims");
+
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 3), "the hidden deep tab was not popped");
+        h.rebuild();
+        assert_eq!(h.depths(), (1, 3));
+    }
+
+    /// (c) Lost-claim race: the fallback claims at poll time, the selection
+    /// flips to Home before the rebuild that consumes the press, and the
+    /// hidden Home tab is deep. The press pops nothing.
+    #[test]
+    fn a_claim_lost_before_the_press_is_consumed_pops_no_hidden_tab() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        const HOME: usize = 0;
+        let mut h = TabsHarness::with_fallback(1, |tab0, tab1, sel| {
+            let (tab0, tab1) = (tab0.clone(), tab1.clone());
+            let probe = Rc::clone(sel);
+            BackFallback::new(
+                move || match probe.get() {
+                    Some(HOME) | None => false,
+                    Some(i) => [&tab0, &tab1][i].depth() <= 1,
+                },
+                || {},
+            )
+        });
+        h.deepen(3, 1);
+        assert!(handles_back(), "tab B at its root: the fallback claims");
+
+        // The selection flips before the rebuild that consumes the press.
+        h.selected.set(Some(HOME));
+        push_back_press();
+        h.rebuild();
+        assert_eq!(h.depths(), (3, 1), "the hidden-then-selected Home tab held");
+        h.rebuild();
+        assert_eq!(h.depths(), (3, 1));
+    }
+
+    type SwitchedApp = Box<dyn FnMut(&mut ()) -> PatternSwitcherView<(), SharedAxis>>;
+
+    /// Two tab navigators (`IndexedStack`, optionally under a `back_fallback`)
+    /// inside the page of a real `frust::motion` `pattern_switcher` keyed 0;
+    /// key 1 is a page with no navigator.
+    struct SwitchHarness {
+        tab0: NavigatorController<()>,
+        tab1: NavigatorController<()>,
+        key: Rc<Cell<usize>>,
+        hits: Rc<Cell<usize>>,
+        driver: Driver<PatternSwitcherView<(), SharedAxis>, SwitchedApp>,
+    }
+
+    impl SwitchHarness {
+        fn new(with_fallback: bool) -> Self {
+            let tab0: NavigatorController<()> = NavigatorController::new();
+            let tab1: NavigatorController<()> = NavigatorController::new();
+            let key = Rc::new(Cell::new(0usize));
+            let (hits, on_back) = counting();
+            let fallback = {
+                let tab1 = tab1.clone();
+                BackFallback::new(move || tab1.depth() <= 1, on_back)
+            };
+            let app: SwitchedApp = {
+                let (tab0, tab1, key) = (tab0.clone(), tab1.clone(), key.clone());
+                Box::new(move |_: &mut ()| {
+                    let child: AnyView<()> = if key.get() == 0 {
+                        let n0 = crate::navigator(&tab0, page);
+                        let n1 = crate::navigator(&tab1, page);
+                        let tabs = frust_widgets::IndexedStack(Some(1), (n0, n1));
+                        if with_fallback {
+                            any(back_fallback(&fallback, tabs))
+                        } else {
+                            any(tabs)
+                        }
+                    } else {
+                        any(frust_widgets::text("no navigator here"))
+                    };
+                    crate::motion::switcher::pattern_switcher(key.get(), SharedAxis::X, child)
+                })
+            };
+            Self {
+                tab0,
+                tab1,
+                key,
+                hits,
+                driver: Driver::new(app),
+            }
+        }
+
+        /// Tab B (the selected one) to `depth`, by a counted number of pushes.
+        fn deepen_b(&mut self, depth: usize) {
+            for _ in self.tab1.depth()..depth {
+                self.tab1.push(page);
+            }
+            self.driver.rebuild();
+            assert_eq!(self.tab1.depth(), depth);
+        }
+
+        fn switch_away(&mut self) {
+            self.key.set(1);
+            self.driver.rebuild();
+        }
+    }
+
+    /// (a) The real switcher path, deep tab: switching to a page with no
+    /// navigator tears the tabs down on the switch rebuild itself, so nothing
+    /// claims and the press is not swallowed by the dead tab B.
+    #[test]
+    fn a_switcher_teardown_leaves_no_claim_on_a_deep_dead_tab() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = SwitchHarness::new(true);
+        h.deepen_b(3);
+        assert!(
+            handles_back(),
+            "deep selected tab B claims before the switch"
+        );
+
+        h.switch_away();
+        assert!(!handles_back(), "no claim on the switch rebuild itself");
+
+        push_back_press();
+        h.driver.rebuild();
+        assert_eq!(h.tab1.depth(), 3, "the dead tab B was not popped");
+        assert_eq!(h.tab0.depth(), 1);
+        assert_eq!(h.hits.get(), 0, "the fallback did not fire either");
+        assert!(!handles_back());
+    }
+
+    /// (a, cont.) The real switcher path, tab B at its root with the fallback
+    /// interested: after the switch the fallback is unmounted and does not fire.
+    #[test]
+    fn a_switcher_teardown_silences_an_interested_fallback() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = SwitchHarness::new(true);
+        assert!(handles_back(), "tab B at its root: the fallback claims");
+
+        h.switch_away();
+        assert!(!handles_back(), "the torn-down fallback stops claiming");
+
+        push_back_press();
+        h.driver.rebuild();
+        assert_eq!(h.hits.get(), 0, "the fallback did not fire");
+    }
+
+    /// (d) A torn-down navigator stops claiming immediately: no extra rebuild
+    /// cycle is needed before `handles_back` turns false.
+    #[test]
+    fn a_torn_down_navigator_stops_claiming_without_an_extra_rebuild() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+        reset();
+
+        let mut h = SwitchHarness::new(false);
+        h.deepen_b(3);
+        assert!(h.tab1.is_mounted());
+        assert!(handles_back());
+
+        h.switch_away();
+        assert!(!h.tab1.is_mounted(), "torn down at the switch");
+        assert!(
+            !handles_back(),
+            "and no longer claiming, with no extra pass"
+        );
     }
 }
