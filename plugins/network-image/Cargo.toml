@@ -25,10 +25,15 @@ webpki-roots = { workspace = true, optional = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+image = { workspace = true }
+# No workspace row for futures: `Shared` (single-flight) needs only futures-util's std arm.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [features]
 default = ["reqwest"]
 reqwest = ["dep:reqwest", "dep:rustls", "dep:webpki-roots"]
 
 [dev-dependencies]
+# Dev-only: the facade does not re-export `ReactiveRuntime`, which `spawn_blocking` needs in tests.
+frust-reactive = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }

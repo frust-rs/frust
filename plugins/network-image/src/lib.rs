@@ -11,16 +11,23 @@
 //! crate to its own `Cargo.toml` alongside `frust`; the facade does not
 //! depend on or re-export it.
 //!
-//! # Status: fetch seam
+//! # Status: fetch seam and loader core
 //!
-//! Today the crate carries the [`ImageFetcher`] trait and the default
-//! `ReqwestFetcher` (feature `reqwest`). The view, loader and caches arrive
-//! in a later phase.
+//! The crate carries the [`ImageFetcher`] trait, the default
+//! `ReqwestFetcher` (feature `reqwest`), and [`ImageLoader`]: single-flight
+//! fetches, decode/downscale on the blocking pool, and a byte-budgeted
+//! memory LRU. The view and disk cache arrive in a later phase.
 
+mod decode;
 pub mod fetch;
+mod loader;
+mod memory_cache;
 #[cfg(feature = "reqwest")]
 mod reqwest_fetcher;
 
+pub use decode::{DecodeError, TargetPx, decode_source};
 pub use fetch::*;
+pub use loader::{ImageLoader, LoadError, LoadFuture, LoadRequest, LoaderConfig};
+pub use memory_cache::MemoryStats;
 #[cfg(feature = "reqwest")]
 pub use reqwest_fetcher::ReqwestFetcher;
