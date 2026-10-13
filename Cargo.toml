@@ -201,10 +201,9 @@ proptest = { version = "1.11.0", default-features = false, features = [
     "std",
     "bit-set",
 ] }
-# --- frust-network-image HTTP/TLS rows (plugin tier only; never a framework crate) ---------
-# reqwest 0.13.5 (MSRV 1.85 <= workspace 1.88), no crypto provider: the plugin selects ring and the
-# webpki roots below explicitly, so Android's platform verifier (Revoked for CRL-only roots) is
-# never consulted. `stream` feeds the disk cache; default charset/system-proxy stay off.
+# reqwest 0.13.5 (MSRV 1.85 <= workspace 1.88) for frust-network-image only, no crypto provider: the
+# plugin selects ring + the webpki roots below explicitly, so Android's platform verifier (Revoked for
+# CRL-only roots) is never consulted. `stream` feeds the disk cache; charset/system-proxy stay off.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "stream"] }
 # 0.23 is the line reqwest 0.13.5 resolves. Provider = ring (pure Rust); aws-lc-rs is a C/cmake build
 # unproven on cargo-ndk/iOS.
