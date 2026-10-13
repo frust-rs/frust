@@ -470,11 +470,13 @@ more is promised about which app opens it.
 | Call | iOS / macOS | Android / Linux / Windows |
 |------|-------------|---------------------------|
 | `Maps::directions(lat, lng)` | `https://maps.apple.com/?daddr=LAT,LNG` | `https://www.google.com/maps/dir/?api=1&destination=LAT,LNG` |
-| `Maps::directions_to(query)` | `https://maps.apple.com/?q=QUERY` | `https://www.google.com/maps/dir/?api=1&destination=QUERY` |
+| `Maps::directions_to(query)` | `https://maps.apple.com/?daddr=QUERY` | `https://www.google.com/maps/dir/?api=1&destination=QUERY` |
 | `Maps::show(lat, lng, label)` | `https://maps.apple.com/?ll=LAT,LNG&q=LABEL` (`?ll=LAT,LNG` without a label) | `https://www.google.com/maps/search/?api=1&query=LAT,LNG` (label ignored) |
 
 `Maps::directions_url`, `directions_to_url` and `show_url` return the string
-without opening it.
+without opening it. On Apple platforms `Maps::directions_to` uses `daddr`
+(the destination that starts directions), not `q`, because `q` is a place
+search and would show a pin instead of a route.
 
 ### Native map schemes
 
