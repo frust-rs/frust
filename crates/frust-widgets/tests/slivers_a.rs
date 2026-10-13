@@ -1,5 +1,5 @@
-//! The structural slivers inside a `CustomScrollView`: `sliver_padding`,
-//! plus the layout-skip audit over it.
+//! The structural slivers inside a `CustomScrollView`: `sliver_padding` and
+//! `sliver_fill_remaining`, plus the layout-skip audit over both.
 //!
 //! The frame harness and the scroll script mirror `viewport.rs`'s.
 
@@ -16,7 +16,7 @@ use frust_core::{
 use frust_text::TextContext;
 use frust_widgets::{
     AnimateTo, EdgeInsets, ScrollController, SizedBox, ViewportWidget, custom_scroll_view,
-    sliver_box, sliver_padding,
+    sliver_box, sliver_fill_remaining, sliver_padding,
 };
 use kurbo::{Point, Rect, Size};
 
@@ -418,6 +418,90 @@ fn horizontal_padding_takes_its_main_insets_from_left_and_right() {
 }
 
 // ---------------------------------------------------------------------------
+// sliver_fill_remaining.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fill_remaining_without_a_scroll_body_fills_exactly_the_rest() {
+    let ledger = Rc::new(Ledger::default());
+    let l = Rc::clone(&ledger);
+    let h = Harness::new(Size::new(400.0, 500.0), move |_| {
+        any(custom_scroll_view((
+            sliver_box(tile(1, 100.0, &l)),
+            sliver_fill_remaining(tile(2, 50.0, &l)).has_scroll_body(false),
+        )))
+    });
+    let fill = h.viewport().sliver_geometry(1).expect("the fill");
+    assert_eq!((fill.scroll_extent, fill.paint_extent), (400.0, 400.0));
+    assert_eq!(
+        h.viewport().max_offset(),
+        0.0,
+        "a short child adds no scrolling"
+    );
+    let tiles = h.bounds_of("TileWidget");
+    assert_eq!(tiles[1], Rect::new(0.0, 100.0, 400.0, 500.0));
+}
+
+#[test]
+fn fill_remaining_without_a_scroll_body_grows_the_scroll_extent_for_a_taller_child() {
+    let controller = ScrollController::new();
+    let ledger = Rc::new(Ledger::default());
+    let (c, l) = (controller.clone(), Rc::clone(&ledger));
+    let mut h = Harness::new(Size::new(400.0, 500.0), move |_| {
+        any(custom_scroll_view((
+            sliver_box(tile(1, 100.0, &l)),
+            sliver_fill_remaining(tile(2, 800.0, &l)).has_scroll_body(false),
+        ))
+        .controller(c.clone()))
+    });
+    let fill = h.viewport().sliver_geometry(1).expect("the fill");
+    assert_eq!((fill.scroll_extent, fill.paint_extent), (800.0, 400.0));
+    assert!(fill.has_visual_overflow);
+    assert_eq!(h.viewport().max_offset(), 400.0);
+    assert_eq!(h.bounds_of("TileWidget")[1].height(), 800.0);
+    controller.jump_to(f64::INFINITY);
+    h.frame();
+    assert_eq!(controller.offset(), 400.0);
+    assert_eq!(
+        h.bounds_of("TileWidget")[1],
+        Rect::new(0.0, -300.0, 400.0, 500.0)
+    );
+}
+
+#[test]
+fn fill_remaining_with_a_scroll_body_fills_the_paint_space_left_as_earlier_slivers_scroll_away() {
+    let controller = ScrollController::new();
+    let ledger = Rc::new(Ledger::default());
+    let (c, l) = (controller.clone(), Rc::clone(&ledger));
+    let mut h = Harness::new(Size::new(400.0, 500.0), move |_| {
+        any(custom_scroll_view((
+            sliver_box(tile(1, 100.0, &l)),
+            sliver_fill_remaining(tile(2, 50.0, &l)),
+        ))
+        .controller(c.clone()))
+    });
+    let fill = h.viewport().sliver_geometry(1).expect("the fill");
+    assert_eq!((fill.scroll_extent, fill.paint_extent), (500.0, 400.0));
+    assert_eq!(
+        h.viewport().max_offset(),
+        100.0,
+        "a whole viewport of scroll body"
+    );
+    assert_eq!(
+        h.bounds_of("TileWidget")[1],
+        Rect::new(0.0, 100.0, 400.0, 500.0)
+    );
+    controller.jump_to(100.0);
+    h.frame();
+    let fill = h.viewport().sliver_geometry(1).expect("the fill");
+    assert_eq!(fill.paint_extent, 500.0);
+    assert_eq!(
+        h.bounds_of("TileWidget")[1],
+        Rect::new(0.0, 0.0, 400.0, 500.0)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The layout-skip audit.
 // ---------------------------------------------------------------------------
 
@@ -434,6 +518,7 @@ fn the_layout_audit_finds_no_stale_pod_across_the_scroll_script() {
                     sliver_box(tile(0, 900.0, &l)),
                 ),
                 SizedBox::<()>(None, Some(1500.0)),
+                sliver_fill_remaining(tile(5000, 80.0, &l)).has_scroll_body(false),
             ))
             .controller(c.clone()))
         });

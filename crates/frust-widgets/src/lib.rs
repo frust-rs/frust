@@ -149,8 +149,8 @@ pub use selection_toolbar::selection_toolbar;
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
 pub use slivers::{
-    SliverBoxView, SliverBoxWidget, SliverPaddingView, SliverPaddingWidget, sliver_box,
-    sliver_padding,
+    SliverBoxView, SliverBoxWidget, SliverFillRemainingView, SliverFillRemainingWidget,
+    SliverPaddingView, SliverPaddingWidget, sliver_box, sliver_fill_remaining, sliver_padding,
 };
 pub use stack::{Stack, StackView, StackWidget, stack};
 pub use text::{TextView, TextWidget, text};

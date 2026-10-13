@@ -6,12 +6,18 @@
 //! and from the crate root:
 //!
 //! * [`sliver_box`] — one box child (`adapter`);
-//! * [`sliver_padding`] — insets around a sliver (`padding`).
+//! * [`sliver_padding`] — insets around a sliver (`padding`);
+//! * [`sliver_fill_remaining`] — one box child filling what is left of the
+//!   viewport (`fill_remaining`).
 
 pub mod adapter;
+pub mod fill_remaining;
 pub mod padding;
 
 pub use adapter::{SliverBoxView, SliverBoxWidget, sliver_box};
+pub use fill_remaining::{
+    SliverFillRemainingView, SliverFillRemainingWidget, sliver_fill_remaining,
+};
 pub use padding::{SliverPaddingView, SliverPaddingWidget, sliver_padding};
 
 use frust_core::SliverConstraints;
