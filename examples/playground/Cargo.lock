@@ -1263,6 +1263,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-clipboard"
+version = "0.6.1"
+dependencies = [
+ "arboard",
+ "frust-plugin",
+ "jni 0.22.4",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "frust-core"
 version = "0.6.1"
 dependencies = [
@@ -1408,6 +1421,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-qr"
+version = "0.6.1"
+dependencies = [
+ "frust-ui",
+ "qrcode",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "frust-reactive"
 version = "0.6.1"
 dependencies = [
@@ -1439,6 +1461,21 @@ version = "0.6.1"
 dependencies = [
  "kurbo",
  "peniko",
+]
+
+[[package]]
+name = "frust-share"
+version = "0.6.1"
+dependencies = [
+ "dispatch2",
+ "frust-clipboard",
+ "frust-plugin",
+ "jni 0.22.4",
+ "kurbo",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3900,8 +3937,10 @@ dependencies = [
  "frust-material",
  "frust-network-image",
  "frust-oauth-native",
+ "frust-qr",
  "frust-reactive",
  "frust-scene",
+ "frust-share",
  "frust-text",
  "frust-ui",
  "frust-url-launcher",
@@ -4061,6 +4100,12 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quick-xml"
@@ -4372,7 +4417,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
