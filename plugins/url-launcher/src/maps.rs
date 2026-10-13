@@ -34,6 +34,9 @@ impl Maps {
 
     /// Open directions to a free-text address or place `query`.
     ///
+    /// On Apple platforms the query is passed as `daddr` (the destination
+    /// that starts directions), not `q` (a place search).
+    ///
     /// # Errors
     /// [`UrlLauncherError::InvalidUrl`] for an empty/blank query; otherwise
     /// as [`UrlLauncher::open_external`].
@@ -63,7 +66,8 @@ impl Maps {
         })
     }
 
-    /// The directions URL for a free-text query, without opening it.
+    /// The directions URL for a free-text address or place query, without
+    /// opening it.
     ///
     /// # Errors
     /// [`UrlLauncherError::InvalidUrl`] for an empty/blank query.
@@ -73,7 +77,7 @@ impl Maps {
         }
         let q = encode(query);
         Ok(if APPLE {
-            format!("https://maps.apple.com/?q={q}")
+            format!("https://maps.apple.com/?daddr={q}")
         } else {
             format!("https://www.google.com/maps/dir/?api=1&destination={q}")
         })
@@ -153,7 +157,9 @@ mod tests {
         let url = Maps::directions_to_url("1 Main St & 2nd, #5").unwrap();
         let q = "1%20Main%20St%20%26%202nd%2C%20%235";
         if APPLE {
-            assert_eq!(url, format!("https://maps.apple.com/?q={q}"));
+            assert_eq!(url, format!("https://maps.apple.com/?daddr={q}"));
+            assert!(url.contains("?daddr="), "{url}");
+            assert!(!url.contains("?q="), "{url}");
         } else {
             assert_eq!(
                 url,
