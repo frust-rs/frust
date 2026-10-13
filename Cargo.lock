@@ -2543,6 +2543,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-qr"
+version = "0.6.1"
+dependencies = [
+ "frust-core",
+ "frust-reactive",
+ "frust-ui",
+ "qrcode",
+ "rqrr",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "frust-reactive"
 version = "0.6.1"
 dependencies = [
@@ -2582,9 +2594,11 @@ dependencies = [
 name = "frust-secure-storage"
 version = "0.6.1"
 dependencies = [
+ "frust-paths",
  "frust-plugin",
  "jni 0.22.4",
  "keyring-core",
+ "log",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
@@ -2605,6 +2619,21 @@ dependencies = [
  "frust-widgets",
  "kurbo",
  "peniko",
+]
+
+[[package]]
+name = "frust-share"
+version = "0.6.1"
+dependencies = [
+ "dispatch2",
+ "frust-clipboard",
+ "frust-plugin",
+ "jni 0.22.4",
+ "kurbo",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

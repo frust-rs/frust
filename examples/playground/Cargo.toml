@@ -40,6 +40,10 @@ frust-video-player = { path = "../../plugins/video-player" }
 
 frust-url-launcher = { path = "../../plugins/url-launcher" }
 
+# The URL page's Share group (text / URL / anchored) and QR tile.
+frust-share = { path = "../../plugins/share" }
+frust-qr = { path = "../../plugins/qr" }
+
 frust-auth-session = { path = "../../plugins/auth-session" }
 
 # PKCE and callback builders behind the Auth page's desktop `LoopbackSession`.

@@ -21,12 +21,24 @@
 //! page just reads it. The caption at the bottom of the page carries the two
 //! commands (`adb`/`simctl`) the human-run device gate drives, so a
 //! runner doesn't have to go find them in `docs/SHELLS_DEVELOPMENT.md`.
+//!
+//! # Share, QR and Maps groups
+//!
+//! The same page also hosts the manual-check surface for `frust-share`
+//! (share text / URL / anchored to the button), `frust-qr` (a 160 px code of
+//! an editable payload, defaulting to the playground's section deep link)
+//! and `frust-url-launcher`'s `Maps` (https directions by coordinate and by
+//! address, plus the native `geo:` URI). Every call writes its `Debug`
+//! result into [`status_sig`].
 
+use frust::authoring::Rect;
 use frust::{
     ButtonStyle, Color, EdgeInsets, FlexChild, Get, GetUntracked, Padding, RwSignal, Set, SizedBox,
-    Theme, View, button, column, deep_links, inflexible, row, text, use_context,
+    Theme, View, button, column, deep_links, inflexible, row, text, text_input, use_context,
 };
-use frust_url_launcher::UrlLauncher;
+use frust_qr::qr_code;
+use frust_share::{Share, ShareAnchor};
+use frust_url_launcher::{Maps, UrlLauncher};
 
 use crate::PlaygroundState;
 
@@ -58,6 +70,34 @@ macro_rules! local_sig {
 // The last `open_external` call's `Debug`-formatted result — empty until the
 // first button press.
 local_sig!(status_sig, String, String::new());
+
+// The QR group's editable payload.
+local_sig!(qr_payload_sig, String, DEEP_LINK_URL.to_string());
+
+/// The playground's own deep link to this page (`lib.rs`'s
+/// `frustplay://section/<label>` router): the QR default and the share-URL
+/// payload (an http/https URL is required by `Share::url`, so that button
+/// shares the project site instead).
+const DEEP_LINK_URL: &str = "frustplay://section/URL";
+
+/// A fixed point (Googleplex) for the coordinate Directions button.
+const MAPS_LAT: f64 = 37.4220;
+const MAPS_LNG: f64 = -122.0841;
+
+/// The native `geo:` URI the third Maps button hands to `open_maps_native`.
+const MAPS_GEO_URI: &str = "geo:37.4220,-122.0841?q=37.4220,-122.0841";
+
+/// Group labels, asserted present in the semantics tree by the test below.
+const SHARE_LABEL: &str = "Share";
+const QR_LABEL: &str = "QR";
+const MAPS_LABEL: &str = "Maps";
+
+/// Where the anchored-share button sits on the page, in logical points. The
+/// widget tier exposes no laid-out-rect seam (no `on_layout` hook), so this
+/// is the page's known button position (16 px page padding plus the content
+/// above it) rather than a measured rect; it only positions an iOS popover
+/// and is ignored on every other platform.
+const SHARE_ANCHOR_RECT: Rect = Rect::new(16.0, 300.0, 196.0, 332.0);
 
 /// The Android return-leg command — cold or warm, `singleTop` (see the
 /// manifest's `android:launchMode`) routes either one to `onNewIntent`. The
@@ -91,6 +131,119 @@ fn muted() -> Color {
 /// A fixed-width horizontal spacer between the two buttons.
 fn gap_h(w: f64) -> FlexChild<PlaygroundState> {
     inflexible(SizedBox(Some(w), None))
+}
+
+/// Namespace for the page's group builders (associated fns, not free view fns).
+struct UrlLauncherPage;
+
+impl UrlLauncherPage {
+    /// A small button that records `label -> result` into [`status_sig`].
+    fn action(
+        label: &'static str,
+        style: ButtonStyle,
+        call: impl Fn() -> String + 'static,
+    ) -> impl View<PlaygroundState> {
+        button(label, move |_state: &mut PlaygroundState| {
+            status_sig().set(call());
+        })
+        .style(style)
+        .small()
+    }
+
+    fn share_group() -> impl View<PlaygroundState> {
+        column()
+            .child(text(SHARE_LABEL).size(13.0).color(accent()))
+            .child(
+                row()
+                    .child(Self::action("Share text", ButtonStyle::Secondary, || {
+                        format!(
+                            "Share::text -> {:?}",
+                            Share::text("Frust playground share check", Some("Frust"))
+                        )
+                    }))
+                    .push(gap_h(8.0))
+                    .child(Self::action("Share URL", ButtonStyle::Secondary, || {
+                        format!(
+                            "Share::url -> {:?}",
+                            Share::url("https://frust.dev", Some("Frust"))
+                        )
+                    }))
+                    .push(gap_h(8.0))
+                    .child(Self::action(
+                        "Share anchored",
+                        ButtonStyle::Secondary,
+                        || {
+                            let anchor = ShareAnchor {
+                                rect: SHARE_ANCHOR_RECT,
+                            };
+                            format!(
+                                "Share::text_anchored -> {:?}",
+                                Share::text_anchored("Anchored share check", None, Some(&anchor))
+                            )
+                        },
+                    )),
+            )
+    }
+
+    fn qr_group() -> impl View<PlaygroundState> {
+        let payload = qr_payload_sig().get();
+        column()
+            .child(text(QR_LABEL).size(13.0).color(accent()))
+            .child(text_input(
+                payload.clone(),
+                |_state: &mut PlaygroundState, value| {
+                    qr_payload_sig().set(value);
+                },
+            ))
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                SizedBox(Some(160.0), Some(160.0)).child(
+                    qr_code::<PlaygroundState>(payload)
+                        .size(160.0)
+                        .semantic_label("Deep-link QR code"),
+                ),
+            )
+    }
+
+    fn maps_group() -> impl View<PlaygroundState> {
+        column()
+            .child(text(MAPS_LABEL).size(13.0).color(accent()))
+            .child(
+                row()
+                    .child(Self::action(
+                        "Directions (lat/lng)",
+                        ButtonStyle::Secondary,
+                        || {
+                            format!(
+                                "Maps::directions -> {:?}",
+                                Maps::directions(MAPS_LAT, MAPS_LNG)
+                            )
+                        },
+                    ))
+                    .push(gap_h(8.0))
+                    .child(Self::action(
+                        "Directions (address)",
+                        ButtonStyle::Secondary,
+                        || {
+                            format!(
+                                "Maps::directions_to -> {:?}",
+                                Maps::directions_to("1600 Amphitheatre Parkway, Mountain View")
+                            )
+                        },
+                    )),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(Self::action(
+                "Directions (native geo:)",
+                ButtonStyle::Secondary,
+                || {
+                    format!(
+                        "open_maps_native -> {:?}",
+                        UrlLauncher::open_maps_native(MAPS_GEO_URI)
+                    )
+                },
+            ))
+    }
 }
 
 /// See the page-fn contract in [`crate::pages`]. Reads no
@@ -158,6 +311,12 @@ pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
         .child(SizedBox(None, Some(12.0)))
         .child(text(latest_line).size(12.0).color(accent()))
         .child(SizedBox(None, Some(12.0)))
+        .child(UrlLauncherPage::share_group())
+        .child(SizedBox(None, Some(12.0)))
+        .child(UrlLauncherPage::qr_group())
+        .child(SizedBox(None, Some(12.0)))
+        .child(UrlLauncherPage::maps_group())
+        .child(SizedBox(None, Some(12.0)))
         .child(
             text(format!("Return leg (Android): {ADB_RETURN_COMMAND}"))
                 .size(10.0)
@@ -172,4 +331,47 @@ pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
         );
 
     Padding(EdgeInsets::all(16.0), body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frust::{AnyView, any};
+    use frust_core::RenderRoot;
+    use frust_reactive::ReactiveRuntime;
+    use frust_text::TextContext;
+    use kurbo::Size;
+    use reactive_graph::owner::Owner;
+    use std::any::Any;
+
+    /// Each group's labelled members reach the semantics tree.
+    #[test]
+    fn group_labels_are_in_the_semantics_tree() {
+        let _ = ReactiveRuntime::init(std::sync::Arc::new(|| {}));
+        let owner = Owner::new();
+        owner.set();
+        let mut tcx = TextContext::new();
+        let mut root: RenderRoot<PlaygroundState, AnyView<PlaygroundState>> = RenderRoot::new();
+        let mut state = PlaygroundState::new();
+        // erasure: keep the headless test root is typed `AnyView`; the page is erased once at this boundary
+        let mut logic = |s: &mut PlaygroundState| any(page(s));
+        root.rebuild(&mut logic, &mut state);
+        let tcx_any: &mut dyn Any = &mut tcx;
+        root.layout_with_text(Size::new(390.0, 1400.0), tcx_any);
+        let update = root.semantics();
+        let labels: Vec<&str> = update.nodes.iter().filter_map(|(_, n)| n.label()).collect();
+        // Plain `text` carries no semantics node; each group is detected by
+        // its interactive/labelled members (buttons, the QR image role).
+        for want in [
+            "Share text",
+            "Share URL",
+            "Share anchored",
+            "Deep-link QR code",
+            "Directions (lat/lng)",
+            "Directions (address)",
+            "Directions (native geo:)",
+        ] {
+            assert!(labels.contains(&want), "missing {want:?} in {labels:?}");
+        }
+    }
 }

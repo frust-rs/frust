@@ -20,27 +20,19 @@ off this index — read this plus the one that covers what you are touching:
   (`app_handler.rs`'s `WAKE_PROXY`). The sanctioned zones are raw-pointer boundaries a GPU/platform
   shell or loader cannot avoid, each isolated in one function/module with a `# Safety` doc comment:
   - `frust-gpu`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — turn a
-    caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`. `frust-render`'s
-    shell entry points `on_surface_created_from_android_window`/
-    `on_surface_created_from_metal_layer` (`renderer.rs`) only forward the raw pointer to them.
-  - `frust-shell-android`'s `jni_glue` module — the JNI FFI boundary (`extern "system"`
-    exports, `Box::into_raw`/`from_raw`, `ANativeWindow_fromSurface`, `nativeInitPlatform`'s
-    `JavaVM` stash), `android_app!`'s generated exports, and the render-thread split's
-    `unsafe impl Send` for `SendableWindowPtr` plus a bare `libc::setpriority` self-boost.
-  - `frust-shell-ios`'s `ffi_glue` module — the C-ABI FFI boundary (`extern "C"` exports,
-    `Box::into_raw`/`from_raw`, the call into `on_surface_created_from_metal_layer`),
-    `ios_app!`'s generated exports, and the split's `unsafe impl Send` for
-    `SendableMetalLayer` plus a bare `libc::pthread_set_qos_class_self_np` self-boost.
-  - `frust-shell-macos`'s `appkit_glue` module — four sites: the reopen-observer `define_class!`
-    block as one (its `#[unsafe(…)]` attributes and `unsafe impl NSObjectProtocol` share
-    one `SAFETY:` note at the macro head), `msg_send![super(this), init]`,
-    `addObserver_selector_name_object` plus the `NSApplicationDidBecomeActiveNotification` `extern`
-    static read, and `removeObserver` in `Drop`. Each is `SAFETY`-noted.
-  - `frust-shell-windows`'s `win32_glue` module — three sites:
-    `SetCurrentProcessExplicitAppUserModelID` (taskbar identity), the `TranslateAcceleratorW`
-    call inside the menu-accelerator message hook, and muda's `Menu::init_for_hwnd` attaching
-    the native menu bar to a live `HWND`. Each is `SAFETY`-noted; `frust-shell-linux` holds no
-    `unsafe` at all.
+    caller-owned raw `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`; `frust-render`'s
+    surface entry points (`renderer.rs`) only forward the pointer.
+  - `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue` modules — the FFI
+    boundary (`extern "system"`/`extern "C"` exports, `Box::into_raw`/`from_raw`, the surface
+    hand-off, `nativeInitPlatform`'s `JavaVM` stash), the `android_app!`/`ios_app!` generated
+    exports, and the render-thread split's `unsafe impl Send` for `SendableWindowPtr`/
+    `SendableMetalLayer` plus a bare `libc` priority/QoS self-boost.
+  - `frust-shell-macos`'s `appkit_glue` module — four `SAFETY`-noted sites: the reopen-observer
+    `define_class!` block, `msg_send![super(this), init]`, `addObserver_selector_name_object`
+    (plus its notification `extern` static read), and `removeObserver` in `Drop`.
+  - `frust-shell-windows`'s `win32_glue` module — three `SAFETY`-noted sites:
+    `SetCurrentProcessExplicitAppUserModelID`, the `TranslateAcceleratorW` call in the
+    menu-accelerator hook, and muda's `Menu::init_for_hwnd`; `frust-shell-linux` holds no `unsafe`.
   - `frust-plugin`'s `android` module — reconstructs the raw `JavaVM`/`jobject` plugins need
     from `ndk-context`-stored handles, one sanctioned module, scoped `AttachGuard` per call.
   - `frust-shared-preferences`'s `apple` backend — two `setObject:forKey:` calls (`objc2`
@@ -50,10 +42,18 @@ off this index — read this plus the one that covers what you are touching:
   - `frust-clipboard`'s `apple` backend — `UIPasteboard`'s `string`/`setString:`/
     `setItems_options:` calls plus one `extern` static read (`UIPasteboardOptionLocalOnly`), each
     `# Safety`-noted; its `android`/`desktop` backends hold no `unsafe`.
+  - `frust-share`'s `apple` backend — three `SAFETY`-noted sites (`apple.rs`):
+    `MainThreadMarker::new_unchecked()` inside the `dispatch_get_main_queue()` closure,
+    `UIActivityViewController::initWithActivityItems_applicationActivities` (NSString/NSURL items,
+    `None` application activities), and the subject `setValue_forKey` guarded by
+    `respondsToSelector(setSubject:)`; its `android`/`desktop` backends hold no `unsafe`.
+  - `frust-url-launcher`'s `apple` backend — `MainThreadMarker::new_unchecked()` in the main-queue
+    hop and the one `openURL:options:completionHandler:` call objc2-ui-kit marks unsafe (the
+    module doc explains why the modern selector is used); its `desktop` backend — the Windows
+    `ShellExecuteW` call (`SAFETY`-noted). Test-only `env::set_var` under `PATH_LOCK` is not backend code.
   - `frust-haptics`'s `apple` backend — one `MainThreadMarker::new_unchecked()` proving a
-    `dispatch_get_main_queue()` callback runs on the actual main thread; every
-    `UI*FeedbackGenerator` call itself is a plain safe binding. Its `android`/`desktop` backends
-    hold no `unsafe`.
+    `dispatch_get_main_queue()` callback runs on the main thread; the
+    `UI*FeedbackGenerator` calls are safe. Its `android`/`desktop` backends hold no `unsafe`.
   - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a
     `wgpu::PipelineCache` from a shell-persisted, adapter-fingerprint-validated blob (see
     `docs/RENDER_ARCHITECTURE.md`'s `frust-gpu::context` module row).

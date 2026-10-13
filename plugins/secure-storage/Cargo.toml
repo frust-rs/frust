@@ -14,6 +14,7 @@ readme = "README.md"
 [dependencies]
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+log = { workspace = true }
 
 # Platform-FFI deps are target-gated like `frust-shared-preferences` (platform-plugin
 # charter, docs/ARCHITECTURE.md).
@@ -73,3 +74,8 @@ zbus-secret-service-keyring-store = { version = "1.0", default-features = false,
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = { workspace = true }
+
+# Debug-only `insecure_file` backend: `data_dir()` locates its JSON file. macOS joins the
+# list because it uses the Keychain otherwise (the leaf crate is allowed by the charter).
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
+frust-paths = { path = "../../crates/frust-paths", version = "0.6.1" }
