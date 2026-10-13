@@ -2028,17 +2028,24 @@ impl ListViewWidget {
     /// Apply a [`ScrollController::scroll_to_item`] request: resolve the key,
     /// decide `Nearest`, jump or tween to the aligned offset, and leave an
     /// [`ItemTarget`] for the settle loop ([`ListViewWidget::settle_item_target`]).
-    /// An unknown key (or any key on a positional list) is a no-op with a
-    /// debug-build log; `Nearest` on a fully visible row is a no-op too.
+    /// An unknown key (or any key on a positional list) moves nothing and logs
+    /// in a debug build; `Nearest` on a fully visible row moves nothing either.
+    /// Neither is a pure no-op, though: like every item request it supersedes
+    /// what an earlier controller command left in flight
+    /// ([`ListViewWidget::stand_still_for_item_request`]).
     fn apply_scroll_to_item(&mut self, request: ScrollToItem) {
         let Some(index) = self.resolve_key(request.key) else {
             unknown_item_key(&request, self.key_of.is_some());
+            self.stand_still_for_item_request();
             return;
         };
         let alignment = match request.alignment {
             ItemAlignment::Nearest => match self.nearest_alignment(index) {
                 Some(alignment) => alignment,
-                None => return,
+                None => {
+                    self.stand_still_for_item_request();
+                    return;
+                }
             },
             alignment => alignment,
         };
@@ -2054,6 +2061,19 @@ impl ListViewWidget {
             alignment,
             frames_left: ITEM_SETTLE_MAX_FRAMES,
         });
+    }
+
+    /// An item request that resolves to no movement (an unknown key, or
+    /// `Nearest` on a row already fully visible) still supersedes the
+    /// controller's own work in flight, exactly as a moving one replaces it:
+    /// an earlier request stops settling and a running controller tween — an
+    /// `animate_to` or an animated `scroll_to_item` — stops where it
+    /// stands. The list stays put, and user-driven motion (a fling, a
+    /// release-settle, a live drag) is left alone: a request naming no
+    /// position has no position to replace it with.
+    fn stand_still_for_item_request(&mut self) {
+        self.item_target = None;
+        self.supersede_controller_tween();
     }
 
     /// The item index currently carrying `key`, or `None` (an unknown key, or
@@ -8146,6 +8166,143 @@ mod controller_tests {
         assert!(
             !new_controller.is_animating(),
             "completion resolves is_animating on the current handle"
+        );
+    }
+
+    #[test]
+    fn a_no_op_scroll_to_item_still_supersedes_the_tween_and_settle_in_flight() {
+        let controller = ScrollController::new();
+        let mut logic = variable_logic(300, &controller);
+        let mut root = converged(&mut logic);
+
+        // An unknown key arriving mid-tween: nothing to move to, but the
+        // animated request it follows stops where it stands.
+        controller.scroll_to_item(ChildKey::new(120u64), ItemAlignment::Start, true);
+        frame(&mut root, &mut logic, 100.0); // drains and seeds the tween
+        frame(&mut root, &mut logic, 200.0);
+        assert!(controller.is_animating(), "the tween is under way");
+        assert!(list(&root).item_target.is_some());
+        controller.scroll_to_item("no-such-row", ItemAlignment::Start, true);
+        frame(&mut root, &mut logic, 216.0);
+        assert!(!controller.is_animating(), "the unknown key ends the tween");
+        assert!(list(&root).ballistic.is_none(), "the tween is really gone");
+        assert!(
+            list(&root).item_target.is_none(),
+            "and the earlier request's settle loop"
+        );
+        let frozen = list(&root).placement_offset();
+        assert!(frozen > 0.0, "it stopped part-way ({frozen})");
+        frame(&mut root, &mut logic, 600.0);
+        frame(&mut root, &mut logic, 616.0);
+        assert_near(
+            list(&root).placement_offset(),
+            frozen,
+            "nothing carries the list on afterwards",
+        );
+
+        // `Nearest` on a row already fully on screen, mid-tween, the same way
+        // (a slow tween, so the window keeps up with it frame to frame).
+        controller.animate_to(
+            frozen + 100.0,
+            AnimateTo {
+                duration_ms: 400.0,
+                curve: Curve::Linear,
+            },
+        );
+        frame(&mut root, &mut logic, 700.0);
+        frame(&mut root, &mut logic, 800.0);
+        frame(&mut root, &mut logic, 816.0);
+        assert!(controller.is_animating());
+        let w = list(&root);
+        let visible = w
+            .keys
+            .iter()
+            .copied()
+            .find(|&index| {
+                row_rect(w, index)
+                    .is_some_and(|(top, h)| top >= 10.0 && top + h <= VIEWPORT.height - 10.0)
+            })
+            .expect("some row sits fully inside the viewport");
+        let before = list(&root).placement_offset();
+        controller.scroll_to_item(ChildKey::new(visible as u64), ItemAlignment::Nearest, false);
+        frame(&mut root, &mut logic, 832.0);
+        assert!(
+            !controller.is_animating(),
+            "a visible Nearest row ends it too"
+        );
+        assert!(list(&root).item_target.is_none());
+        assert_near(
+            list(&root).placement_offset(),
+            before,
+            "the list stays where the tween stood",
+        );
+    }
+
+    #[test]
+    fn a_no_op_scroll_to_item_leaves_a_user_fling_alone() {
+        let controller = ScrollController::new();
+        let mut logic = uniform_logic(100, &controller);
+        let mut root = converged(&mut logic);
+        let drag = |phase: PointerPhase, y: f64| {
+            InputEvent::Pointer(PointerEvent {
+                phase,
+                position: Point::new(10.0, y),
+                button: PointerButton::Primary,
+            })
+        };
+        // Velocity tracking reads the last paint's clock, so a frame between
+        // the moves gives the release a real speed.
+        frame(&mut root, &mut logic, 100.0);
+        root.event(&mut (), &drag(PointerPhase::Down, 180.0));
+        frame(&mut root, &mut logic, 116.0);
+        root.event(&mut (), &drag(PointerPhase::Move, 150.0));
+        frame(&mut root, &mut logic, 132.0);
+        root.event(&mut (), &drag(PointerPhase::Move, 100.0));
+        root.event(&mut (), &drag(PointerPhase::Up, 100.0));
+        assert!(list(&root).is_flinging(), "the release flings");
+        controller.scroll_to_item("no-such-row", ItemAlignment::Start, false);
+        frame(&mut root, &mut logic, 148.0);
+        assert!(
+            list(&root).is_flinging(),
+            "a request naming no position does not stop the user's own motion"
+        );
+    }
+
+    #[test]
+    fn a_near_end_fire_during_an_animate_to_reaches_the_app_through_the_frame_flush() {
+        use std::cell::Cell;
+
+        let controller = ScrollController::new();
+        let fired = Rc::new(Cell::new(0u32));
+        let (handle, sink) = (controller.clone(), Rc::clone(&fired));
+        let mut logic: Logic = Box::new(move |_: &mut ()| {
+            let sink = Rc::clone(&sink);
+            ListView::builder_keyed(
+                100,
+                ROW,
+                |i| ChildKey::new(i as u64),
+                |_| any::<(), _>(leaf(VIEWPORT.width, ROW)),
+            )
+            .on_near_end(move |_: &mut ()| sink.set(sink.get() + 1), ROW)
+            .controller(handle.clone())
+        });
+        let mut root = converged(&mut logic);
+        assert_eq!(fired.get(), 0);
+        controller.animate_to(
+            100.0 * ROW,
+            AnimateTo {
+                duration_ms: 200.0,
+                curve: Curve::Linear,
+            },
+        );
+        // Frames only — no input event anywhere — until the tween has landed
+        // and the owed flush has run.
+        settle(&mut root, &mut logic, 100.0, 40);
+        assert_eq!(controller.offset(), 100.0 * ROW - VIEWPORT.height);
+        assert_eq!(
+            fired.get(),
+            1,
+            "the edge the tween crossed fired through the next frame's flush"
         );
     }
 }

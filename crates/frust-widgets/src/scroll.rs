@@ -5024,4 +5024,61 @@ mod controller_tests {
             "completion resolves is_animating on the current handle"
         );
     }
+
+    #[test]
+    fn on_scroll_hears_an_animate_to_on_every_frame_it_moves_and_where_it_lands() {
+        let controller = ScrollController::new();
+        let log = Rc::new(RefCell::new(Vec::<ScrollInfo>::new()));
+        let (handle, sink) = (controller.clone(), Rc::clone(&log));
+        let mut logic = move |_: &mut ()| {
+            let sink = Rc::clone(&sink);
+            scroll_view(leaf(200.0, CONTENT_H))
+                .on_scroll(move |_: &mut (), info| sink.borrow_mut().push(info))
+                .controller(handle.clone())
+        };
+        let mut root: RenderRoot<(), ScrollView<()>> = RenderRoot::new();
+        let mut state = ();
+        let mut now = 0u64;
+        let mut frame = |root: &mut RenderRoot<(), ScrollView<()>>| {
+            root.rebuild(&mut logic, &mut state);
+            root.layout(VIEWPORT);
+            now += 16;
+            root.paint(
+                &mut RecordingScene::default(),
+                FrameTime::from_nanos(now * 1_000_000),
+            )
+        };
+        frame(&mut root);
+        controller.animate_to(
+            320.0,
+            AnimateTo {
+                duration_ms: 64.0,
+                curve: Curve::Linear,
+            },
+        );
+        // Frames only — no input event anywhere: each frame the tween moved
+        // owes the next frame's Housekeeping flush, the landing frame included.
+        for _ in 0..12 {
+            frame(&mut root);
+        }
+        assert!(!controller.is_animating());
+        let log = log.borrow();
+        assert!(
+            log.len() >= 3,
+            "heard the tween while it ran, not only once it stopped: {log:?}"
+        );
+        assert!(
+            log.windows(2).all(|pair| pair[0].offset < pair[1].offset),
+            "one notification per moving frame, in order: {log:?}"
+        );
+        assert_eq!(
+            log.last().copied(),
+            Some(ScrollInfo {
+                offset: 320.0,
+                max_offset: MAX,
+                overscroll: 0.0,
+            }),
+            "and where it landed"
+        );
+    }
 }

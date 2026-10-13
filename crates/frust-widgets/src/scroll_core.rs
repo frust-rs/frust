@@ -1016,6 +1016,16 @@ pub(crate) trait ScrollSurface {
         }
     }
 
+    /// End a controller tween in flight where it stands, leaving user-driven
+    /// motion (a fling, a settle, a live drag) alone — what a controller
+    /// command that resolves to no movement still owes the commands it
+    /// supersedes.
+    fn supersede_controller_tween(&mut self) {
+        if self.core().controller_animating {
+            self.core_mut().stop_ballistic();
+        }
+    }
+
     /// Publish the current position to the attached [`ScrollController`] (a
     /// no-op before the first layout, or once another surface took it over).
     fn publish_to_controller(&self) {
