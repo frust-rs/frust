@@ -36,6 +36,7 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use frust_engine::cache::images::{AtlasBudget, is_mobile_tier};
+use frust_engine::renderer::FramePass;
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{HeadlessTarget, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
@@ -1159,4 +1160,231 @@ fn a_blurred_rounded_rect_draw_paints_a_falloff_rather_than_leaving_its_draw_ski
     assert_eq!(pixel(&pixels, 250, 250), [0, 0, 0, 0]);
 
     warm_up_ran(&renderer);
+}
+
+// ---------------------------------------------------------------------
+// The frame's pass list: the surface opening, merged and apart
+//
+// Every case encodes one scene twice on one device — once with the surface
+// opening merged (the clear, the opaque strips and the first surface round
+// in one render pass) and once with it recorded apart, as
+// `FRUST_ENGINE_NO_PASS_MERGE` does — and pins both what each arm recorded
+// and that the two arms drew byte-identical pixels. Merging only removes pass
+// boundaries; a pixel that differs means it moved a draw.
+//
+// A filter frame is not among them: no `Scene` command records a filter
+// layer, so no `encode` call reaches a filter round. Its pass list is pinned
+// host-side instead (`renderer`'s
+// `a_filter_frame_records_its_filter_passes_before_the_opening`), against the
+// same planner every frame below is held to in a debug build.
+// ---------------------------------------------------------------------
+
+/// One arm of a pass-list case: the pixels it drew and the passes it recorded.
+struct Arm {
+    pixels: Vec<u8>,
+    passes: Vec<FramePass>,
+}
+
+/// Encodes `scene` over `base_color` merged and then apart, on one device and
+/// one renderer, failing on any validation error either arm raised.
+///
+/// With `caller_depth` the frame shares a depth attachment the case supplies
+/// and states pre-cleared, and the case clears it itself, in a pass of its own
+/// ahead of the frame, the way such a caller would — so the opening loads depth
+/// rather than clearing it. Without it the engine's own attachment is used and
+/// the opening clears it.
+fn both_arms(scene: &Scene, base_color: Color, caller_depth: bool) -> (Arm, Arm) {
+    let (device, queue, caps) = gpu();
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let mut renderer = EngineRenderer::new(&device, &caps, FORMAT, None)
+        .expect("the engine builds on this device");
+    let depth = caller_depth.then(|| {
+        device
+            .create_texture(&frust_engine::gpu::depth::depth_texture_descriptor(
+                SIZE, SIZE,
+            ))
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    });
+    renderer.set_depth_pre_cleared(caller_depth);
+
+    let mut arm = |merge: bool| {
+        renderer.set_pass_merge(merge);
+        assert_eq!(renderer.pass_merge(), merge);
+        let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frust-engine pass-list frame"),
+        });
+        if let Some(view) = depth.as_ref() {
+            // The caller's own depth clear, ahead of the frame.
+            drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("caller depth clear"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(frust_engine::gpu::depth::DEPTH_CLEAR),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            }));
+        }
+        renderer
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                scene,
+                EngineTarget {
+                    view: target.view(),
+                    format: FORMAT,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: depth.as_ref(),
+                    output: OutputAlpha::Premultiplied,
+                },
+                base_color,
+                Affine::IDENTITY,
+            )
+            .expect("a well-formed frame encodes");
+        queue.submit([encoder.finish()]);
+        renderer.end_frame(&queue);
+        Arm {
+            passes: renderer.last_frame_passes().to_vec(),
+            pixels: target.read_back(&device, &queue),
+        }
+    };
+    let merged = arm(true);
+    let apart = arm(false);
+
+    let error = drain_error_scope(&device, scope);
+    assert!(error.is_none(), "a pass-list frame raised {error:?}");
+
+    assert!(
+        merged.pixels == apart.pixels,
+        "merging the opening changed the frame's pixels: merged {:?}, apart {:?}",
+        merged.passes,
+        apart.passes
+    );
+    (merged, apart)
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn an_empty_frame_records_one_pass_and_still_clears_the_surface() {
+    let _serialized = render_lock();
+    let (merged, apart) = both_arms(&Scene::new(), BLUE, false);
+
+    // A fresh renderer has no instance buffer at all for an empty frame, so
+    // this is also the path that returns before the round walk.
+    assert_eq!(merged.passes, [FramePass::Opening]);
+    assert_eq!(apart.passes, [FramePass::Clear]);
+    assert!(
+        merged
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|texel| *texel == [0, 0, 255, 255]),
+        "the opening with nothing to draw is the clear"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn an_opaque_and_alpha_surface_frame_records_one_pass() {
+    let _serialized = render_lock();
+    let (merged, apart) = both_arms(&scene(), Color::TRANSPARENT, false);
+
+    assert_eq!(merged.passes, [FramePass::Opening]);
+    assert_eq!(
+        apart.passes,
+        [FramePass::Clear, FramePass::Opaque, FramePass::Surface]
+    );
+    // The opaque rectangle and the blended path both landed inside it.
+    assert_eq!(pixel(&merged.pixels, 64, 64), [255, 0, 0, 255]);
+    assert_eq!(pixel(&merged.pixels, 176, 176), [0, 0, 255, 255]);
+    assert_eq!(pixel(&merged.pixels, 4, 4), [0, 0, 0, 0]);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_pre_cleared_caller_depth_is_loaded_by_the_opening() {
+    let _serialized = render_lock();
+    let (merged, apart) = both_arms(&scene(), Color::TRANSPARENT, true);
+
+    assert_eq!(merged.passes, [FramePass::Opening]);
+    assert_eq!(apart.passes.len(), 3);
+    assert_eq!(pixel(&merged.pixels, 64, 64), [255, 0, 0, 255]);
+    assert_eq!(pixel(&merged.pixels, 176, 176), [0, 0, 255, 255]);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_page_round_frame_records_two_passes_fewer() {
+    let _serialized = render_lock();
+    let (merged, apart) = both_arms(&layer_scene(), Color::TRANSPARENT, false);
+
+    assert_eq!(
+        merged.passes.len() + 2,
+        apart.passes.len(),
+        "{:?} against {:?}",
+        merged.passes,
+        apart.passes
+    );
+    // The page first, then the surface opening carrying its composite.
+    assert_eq!(merged.passes, [FramePass::Page, FramePass::Opening]);
+    let inside = pixel(&merged.pixels, 128, 128);
+    assert!(
+        (i32::from(inside[0]) - 128).abs() <= 1,
+        "the layer still composites at its own alpha, got {inside:?}"
+    );
+}
+
+/// An opaque backdrop and a blended diamond, a clear over the left half, and a
+/// translucent chip drawn over the slot after it: the surface round is cut at
+/// the clear, so the punch goes between the two plans.
+fn punch_cut_scene() -> Scene {
+    let edge = f64::from(SIZE);
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    builder.fill_rect(Rect::new(0.0, 0.0, edge, edge), Brush::Solid(RED));
+    builder.fill_path(diamond(), Brush::Solid(BLUE));
+    builder.clear_rect(Rect::new(0.0, 0.0, PUNCH_EDGE, edge));
+    builder.fill_rect(
+        Rect::new(40.5, 40.5, 200.5, 88.5),
+        Brush::Solid(GREEN.with_alpha(0.5)),
+    );
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test encode_contract -- --ignored`"]
+fn a_punch_cut_frame_records_two_passes_fewer() {
+    let _serialized = render_lock();
+    let (merged, apart) = both_arms(&punch_cut_scene(), Color::TRANSPARENT, false);
+
+    assert_eq!(
+        merged.passes,
+        [FramePass::Opening, FramePass::Punch, FramePass::Surface]
+    );
+    assert_eq!(
+        apart.passes,
+        [
+            FramePass::Clear,
+            FramePass::Opaque,
+            FramePass::Surface,
+            FramePass::Punch,
+            FramePass::Surface
+        ]
+    );
+    // Erased where nothing was drawn over the slot, and the chip drawn over
+    // it after the cut survives the erase.
+    assert_eq!(pixel(&merged.pixels, 16, 200), [0, 0, 0, 0]);
+    assert_ne!(pixel(&merged.pixels, 64, 64)[3], 0);
+    assert_eq!(pixel(&merged.pixels, 200, 32), [255, 0, 0, 255]);
 }

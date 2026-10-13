@@ -87,6 +87,28 @@ pub fn uber_program_forced() -> bool {
     })
 }
 
+/// Whether the frame's surface opening stays three passes of its own via
+/// `FRUST_ENGINE_NO_PASS_MERGE`. Cached: read once per process.
+///
+/// The kill switch over pass merging: by default a frame clears its surface,
+/// draws its opaque strips and draws its first surface round's strips in ONE
+/// render pass (see `crate::renderer`'s *The frame's passes*), which on a
+/// tile-based GPU saves a whole-framebuffer load and store per pass folded
+/// away. When set, the clear and the opaque strips are recorded as passes of
+/// their own ahead of every round, and every surface round in a pass of its
+/// own — the off-arm of every before/after measurement of it, and the escape hatch for
+/// a driver that mishandles a pipeline switch inside a cleared pass.
+/// `EngineRenderer::set_pass_merge` is its programmatic counterpart.
+pub fn pass_merge_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_ENGINE_NO_PASS_MERGE"),
+            std::env::var("FRUST_ENGINE_NO_PASS_MERGE").ok(),
+        )
+    })
+}
+
 /// The shortest class run worth a pipeline switch of its own, via
 /// `FRUST_ENGINE_RUN_SPLIT_MIN=<n>`; [`crate::gpu::strips::RUN_SPLIT_MIN`]
 /// when unset or unparsable. Cached: read once per process.
@@ -301,6 +323,13 @@ mod tests {
     #[test]
     fn the_uber_program_is_not_forced_unless_the_switch_is_set() {
         assert!(!uber_program_forced());
+    }
+
+    /// Unset in the gate: the surface opening is merged unless the switch
+    /// says otherwise.
+    #[test]
+    fn pass_merging_is_on_unless_the_switch_is_set() {
+        assert!(!pass_merge_disabled());
     }
 
     #[test]

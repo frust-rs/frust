@@ -21,6 +21,12 @@
 //! the one before it left rather than clearing (see [`PageTarget::continued`]),
 //! so the sequence reads as one painter's-order walk however it was cut up.
 //!
+//! The surface's clear and the frame's opaque strips are not passes of their
+//! own: the renderer draws them inside the pass of the first surface round that
+//! draws, which clears the surface instead of loading it (see
+//! [`crate::renderer`]'s *The frame's passes*), so a frame with no isolated
+//! layer and no hole punch is one render pass in all.
+//!
 //! ## What this scheduler serves, and what it refuses
 //!
 //! Frust's layer needs are narrow. Clips lower to a scissor rectangle or a
@@ -354,7 +360,9 @@ pub enum RoundOp {
 ///
 /// A target is not a round: the surface, and a layer's page, can each take
 /// several, and the rounds of one target run in the order they are listed with
-/// every one after the first loading what the one before it left.
+/// every one after the first loading what the one before it left. The
+/// surface's first round that draws is the one that clears it — the renderer
+/// folds the frame's clear and its opaque strips into that round's pass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Round {
     /// What this pass renders into.
