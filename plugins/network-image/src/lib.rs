@@ -11,22 +11,16 @@
 //! crate to its own `Cargo.toml` alongside `frust`; the facade does not
 //! depend on or re-export it.
 //!
-//! # Status: pin gate only
+//! # Status: fetch seam
 //!
-//! Today the crate carries only its dependency rows, proving the HTTP/TLS
-//! stack compiles for every target. The view, loader and caches arrive in a
-//! later phase; [`pin_gate_marker`] is a placeholder until then.
+//! Today the crate carries the [`ImageFetcher`] trait and the default
+//! `ReqwestFetcher` (feature `reqwest`). The view, loader and caches arrive
+//! in a later phase.
 
-/// Placeholder proving the crate links on every target; removed when the
-/// real modules land.
-pub fn pin_gate_marker() {}
+pub mod fetch;
+#[cfg(feature = "reqwest")]
+mod reqwest_fetcher;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pin_gate_marker_is_callable() {
-        pin_gate_marker();
-    }
-}
+pub use fetch::*;
+#[cfg(feature = "reqwest")]
+pub use reqwest_fetcher::ReqwestFetcher;
