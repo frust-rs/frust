@@ -140,7 +140,11 @@
 //! external write seam: its recorded commands are drained at the start of the
 //! widget's next layout or paint ([`ScrollWidget::drain_controller`]), after
 //! the content has been measured, and every pass that moves the position
-//! publishes the new [`ScrollInfo`] back to the handle. A jump
+//! publishes the new [`ScrollInfo`] back to the handle. A rebuild that finds a
+//! command queued reports [`ChangeFlags::LAYOUT`], so the per-pod layout skip
+//! runs the layout drain rather than leaving the child at its pre-jump origin
+//! until paint (and a hidden surface, which never paints, undrained) — the
+//! same report `ListView`'s rebuild-time drain makes. A jump
 //! ([`ScrollWidget::apply_jump`]) stops any fling, settle or ballistic
 //! simulation in flight; its `on_scroll` notification has no `EventCtx` to
 //! fire through, so — like a fling frame's — it is owed to the next event,
@@ -1877,13 +1881,22 @@ impl<State: 'static> View<State> for ScrollView<State> {
         // A new binding publishes, and a queued command applies, at the next
         // layout or paint — make sure a frame-gated shell runs one.
         let rebound = element.attach_controller(self.controller.as_ref());
-        if rebound
-            || element
-                .controller
-                .as_ref()
-                .is_some_and(ScrollBinding::has_pending)
-        {
+        if rebound {
             flags |= ChangeFlags::PAINT;
+        }
+        // A queued command moves the child's origin when it applies, and the
+        // layout drain is where it applies first: report LAYOUT so the
+        // reconciler dirties this pod and the layout skip runs that drain
+        // instead of keeping the pre-jump origin (a hidden surface — a covered
+        // tab — is never painted, so the paint drain alone would never reach
+        // it). `ListView`'s rebuild reports LAYOUT for its own drain the same
+        // way.
+        if element
+            .controller
+            .as_ref()
+            .is_some_and(ScrollBinding::has_pending)
+        {
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         flags
     }
@@ -5086,6 +5099,29 @@ mod controller_tests {
         assert_eq!(w.offset(), 42.0);
         let same_again = self::view(&controller);
         assert_eq!(rebuild(&same_again, &same, &mut w), ChangeFlags::NONE);
+    }
+
+    #[test]
+    fn a_queued_command_reports_layout_so_a_skipped_layout_still_drains_it() {
+        // The layout skip lays a pod out only when it is dirty: a rebuild that
+        // reported PAINT alone left the jump for the paint drain, so the layout
+        // in between kept the pre-jump child origin (and a hidden surface that
+        // is never painted never drained at all). `ListView` parity.
+        let controller = ScrollController::new();
+        let view = view(&controller);
+        let mut w = build(&view);
+        lay(&mut w);
+        controller.jump_to(42.0);
+        let same = self::view(&controller);
+        assert!(rebuild(&same, &view, &mut w).contains(ChangeFlags::LAYOUT));
+        lay(&mut w);
+        assert_eq!(w.offset(), 42.0);
+        // A fresh binding with nothing queued publishes at the next pass: a
+        // paint, not a layout.
+        let other = ScrollController::new();
+        let rebound = self::view(&other);
+        let flags = rebuild(&rebound, &same, &mut w);
+        assert!(flags.needs_paint() && !flags.contains(ChangeFlags::LAYOUT));
     }
 
     #[test]
