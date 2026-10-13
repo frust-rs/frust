@@ -133,6 +133,99 @@ fn back_interest_publishes_through_the_controller() {
     );
 }
 
+// --- Liveness: only a MOUNTED navigator claims a press. `back_interest()`
+//     ANDs `is_mounted()` on at read time, so a navigator whose view never
+//     built, or was torn down, claims nothing — immediately, with no rebuild
+//     or re-wire in between (teardown writes `mounted` but never republishes
+//     the cell, which keeps its last answer). ---
+
+#[test]
+fn a_never_built_controller_claims_no_back_press() {
+    let controller: NavigatorController<()> = NavigatorController::new();
+    assert!(!controller.is_mounted());
+    assert!(!controller.back_interest(), "a fresh handle claims nothing");
+
+    // Even a published "claim" (driven straight into the cell, the shape no
+    // live navigator would leave behind before its first build) is vetoed
+    // while no view renders this controller.
+    controller
+        .back_interest
+        .set(compute_back_interest(2, BackPolicy::Pop));
+    assert!(
+        !controller.back_interest(),
+        "no mounted view: nothing could apply the pop, so nothing claims"
+    );
+}
+
+#[test]
+fn a_torn_down_depth_2_navigator_claims_nothing_immediately() {
+    let controller: NavigatorController<()> = NavigatorController::new();
+    let view = navigator(&controller, || sized_page(10.0, 10.0));
+    let mut next_id = 0u64;
+    let mut ctx = frust_core::BuildCtx::new(&mut next_id);
+    let mut widget = view.build(&mut ctx);
+
+    controller.push(|| sized_page(20.0, 20.0));
+    let next = navigator(&controller, || sized_page(10.0, 10.0));
+    next.rebuild(&view, &mut widget, &mut ctx);
+    assert_eq!(controller.depth(), 2);
+    assert!(controller.back_interest(), "mounted at depth 2: it claims");
+
+    next.teardown(&mut widget, &mut ctx);
+    assert!(!controller.is_mounted());
+    assert!(
+        !controller.back_interest(),
+        "torn down: it claims nothing on the very next read"
+    );
+    assert!(
+        controller.back_interest.get(),
+        "...while the published cell still holds the stack's last answer — \
+         the liveness gate is ANDed on at read time, never baked in"
+    );
+}
+
+/// The nested shape: a navigator at depth 2 on a page its host navigator pops
+/// INSTANTLY (no transition, so the hosting page is torn down in the same
+/// rebuild rather than stashed). The press after that rebuild must not go to
+/// the dead nested navigator.
+#[test]
+fn a_nested_depth_2_navigator_whose_page_is_popped_claims_nothing() {
+    let outer: NavigatorController<()> = NavigatorController::new();
+    let nested: NavigatorController<()> = NavigatorController::new();
+    let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+    let mut app = {
+        let outer = outer.clone();
+        move |_: &mut ()| navigator(&outer, || sized_page(10.0, 10.0))
+    };
+    let mut state = ();
+    root.rebuild(&mut app, &mut state);
+
+    {
+        let nested = nested.clone();
+        outer.push(move || {
+            let nested = nested.clone();
+            any(navigator(&nested, || sized_page(20.0, 20.0)))
+        });
+    }
+    root.rebuild(&mut app, &mut state);
+    nested.push(|| sized_page(30.0, 30.0));
+    root.rebuild(&mut app, &mut state);
+    assert_eq!(nested.depth(), 2);
+    assert!(
+        nested.back_interest(),
+        "on the current page: it claims back"
+    );
+
+    outer.pop();
+    root.rebuild(&mut app, &mut state);
+    assert_eq!(outer.depth(), 1, "the hosting page is gone");
+    assert!(!nested.is_mounted(), "its navigator was torn down with it");
+    assert!(
+        !nested.back_interest(),
+        "a torn-down nested navigator claims nothing, before any re-wire"
+    );
+}
+
 // --- R23 back reach: a nested navigator's back interest is gated on its
 //     HOSTING page being input-routed. These are the widget-level proofs;
 //     `frust::back_glue`'s tests prove the arbitration consequence (which
