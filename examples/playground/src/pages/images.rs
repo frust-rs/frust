@@ -7,11 +7,11 @@
 //!   network; in airplane mode every cell shows its error slot.
 //! - **Use local fixtures**: swaps the URLs for a loopback server the page starts on first
 //!   use, serving PNGs generated in memory (`images_server.rs`). Works offline.
-//! - **Stats row**: the shared loader's memory cache occupancy, refreshed every frame. The
-//!   loader exposes no disk statistics and no in-flight count at this revision, so the row
-//!   says so rather than guessing.
-//! - **Clear memory cache**: `ImageLoader::clear_memory`. Disk clearing is not exposed by
-//!   the loader either; to test a cold disk cache, clear the app's storage.
+//! - **Stats row**: the shared loader's memory-cache occupancy, disk-cache occupancy
+//!   (`ImageLoader::disk_stats`, `None` until the first miss opens the cache) and in-flight
+//!   load count, refreshed every frame.
+//! - **Clear caches**: `ImageLoader::clear_all` empties the memory cache and the on-disk
+//!   entries; relaunching afterwards proves a cold start.
 //!
 //! `NetworkImages::install()` runs once from `frust::app!`'s `setup` block in `lib.rs`.
 //!
@@ -28,7 +28,7 @@ use frust::{
     button, checkbox, colored_box, column, component, container, flexible, icon, icons, inflexible,
     row, text, use_context, views,
 };
-use frust_network_image::{NetworkImages, network_image};
+use frust_network_image::{ImageLoader, NetworkImages, network_image};
 
 use super::images_server::{self, FIXTURE_COUNT};
 use crate::PlaygroundState;
@@ -106,9 +106,9 @@ impl Component for ImagesPage {
             .child(component(StatsRow))
             .child(SizedBox(None, Some(8.0)))
             .child(
-                button("Clear memory cache", |_state: &mut ImagesState| {
+                button("Clear caches", |_state: &mut ImagesState| {
                     if let Some(loader) = NetworkImages::loader() {
-                        loader.clear_memory();
+                        loader.clear_all();
                     }
                 })
                 .style(ButtonStyle::Secondary)
@@ -180,7 +180,7 @@ impl ImagesPage {
     }
 }
 
-/// The memory-cache readout, rebuilt every frame by [`FrameTicker`].
+/// The cache readout (memory, disk, in-flight), rebuilt every frame by [`FrameTicker`].
 struct StatsRow;
 
 impl Component for StatsRow {
@@ -189,26 +189,42 @@ impl Component for StatsRow {
     fn init(&self) {}
 
     fn build(&self, _state: &mut ()) -> impl View<()> {
-        let memory = match NetworkImages::loader() {
-            Some(loader) => {
-                let stats = loader.memory_stats();
-                format!(
-                    "memory: {} images, {} / {} KiB decoded",
-                    stats.entries,
-                    stats.used_bytes / 1024,
-                    stats.budget_bytes / 1024
-                )
-            }
-            None => "memory: no loader installed".to_string(),
+        let (memory, disk) = match NetworkImages::loader() {
+            Some(loader) => (Self::memory_line(&loader), Self::disk_line(&loader)),
+            None => (
+                "memory: no loader installed".to_string(),
+                "disk: no loader installed".to_string(),
+            ),
         };
         column()
             .child(text(memory).size(12.0))
-            .child(
-                text("disk / in-flight: not exposed by the loader at this revision")
-                    .size(10.0)
-                    .color(ImagesPage::muted()),
-            )
+            .child(text(disk).size(12.0).color(ImagesPage::muted()))
             .child(FrameTicker)
+    }
+}
+
+impl StatsRow {
+    fn memory_line(loader: &ImageLoader) -> String {
+        let stats = loader.memory_stats();
+        format!(
+            "memory: {} images, {} / {} KiB decoded; in-flight: {}",
+            stats.entries,
+            stats.used_bytes / 1024,
+            stats.budget_bytes / 1024,
+            loader.inflight_count()
+        )
+    }
+
+    fn disk_line(loader: &ImageLoader) -> String {
+        match loader.disk_stats() {
+            Some(stats) => format!(
+                "disk: {} files, {} / {} KiB",
+                stats.entries,
+                stats.total_bytes / 1024,
+                stats.cap_bytes / 1024
+            ),
+            None => "disk: not opened yet (opens on the first cache miss)".to_string(),
+        }
     }
 }
 
