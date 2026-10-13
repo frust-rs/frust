@@ -118,7 +118,8 @@ Pre-1.0. APIs are unstable and may change without notice between commits.
 > still working on the following:
 >
 > - **No partial repaint / damage regions** — every rendered frame
->   re-rasterizes the full surface, a whole-stack gap shared with the wider
+>   re-rasterizes the full surface (tracked as `render-model-gaps` in
+>   `docs/LIMITATIONS.md`), a whole-stack gap shared with the wider
 >   ecosystem today ([wgpu#2869](https://github.com/gfx-rs/wgpu/issues/2869),
 >   [xilem#789](https://github.com/linebender/xilem/issues/789)). The mobile
 >   frame gate, cosmetic-loop pacing, and viewport culling bound *how many*
