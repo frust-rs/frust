@@ -104,11 +104,11 @@
 //! # Axis
 //!
 //! [`CustomScrollView::axis`] picks vertical (the default) or horizontal
-//! scrolling. The shared core reads pointer travel and wheel deltas along the
-//! vertical axis, so a horizontal viewport hands it each pointer position and
-//! wheel delta with the two axes swapped — the content still receives the
-//! untouched event — and paints the stretch overscroll effect through the same
-//! swap.
+//! scrolling. The shared core is built with the viewport's axis and reads
+//! pointer travel and wheel deltas along it, so every event reaches the core
+//! untouched. The one transposition left is the stretch overscroll effect: the
+//! core's stretch transform is vertical-only, so a horizontal viewport mirrors
+//! its origin and size through a swap around it.
 //!
 //! **Nested claims are axis-aware.** The ambient inner-scroll claim
 //! (`scroll.rs`'s *Nested scrolling*) carries no axis, and every other scroll
@@ -133,8 +133,7 @@ use frust_core::accesskit::Role;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase, ScrollAxis,
-    ScrollDelta, ScrollDirection, SemanticsCtx, SliverConstraints, SliverGeometry, View, ViewSeq,
-    Widget,
+    ScrollDirection, SemanticsCtx, SliverConstraints, SliverGeometry, View, ViewSeq, Widget,
 };
 use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, Size};
@@ -365,7 +364,7 @@ impl ViewportWidget {
             direction: ScrollDirection::Idle,
             arming_down: false,
             down_inner_axis: None,
-            core: ScrollSurfaceCore::default(),
+            core: ScrollSurfaceCore::with_axis(axis),
         }
     }
 
@@ -383,7 +382,7 @@ impl ViewportWidget {
 
     /// The axis this viewport scrolls along.
     pub fn axis(&self) -> ScrollAxis {
-        self.axis
+        self.core.axis()
     }
 
     /// How many children the viewport holds.
@@ -648,9 +647,8 @@ impl ViewportWidget {
         handled
     }
 
-    /// Hand a pointer event to the core along this viewport's axis, with the
-    /// axis-aware claim rule around a primary `Down` (the module docs'
-    /// *Axis*).
+    /// Hand a pointer event to the core, with the axis-aware claim rule around
+    /// a primary `Down` (the module docs' *Axis*).
     fn pointer_on_axis(
         &mut self,
         ctx: &mut EventCtx,
@@ -675,11 +673,7 @@ impl ViewportWidget {
         if primary_down {
             self.down_inner_axis = None;
         }
-        let along_axis = PointerEvent {
-            position: to_core(self.axis, p.position),
-            ..*p
-        };
-        let result = self.handle_pointer(ctx, event, &along_axis, t_ms);
+        let result = self.handle_pointer(ctx, event, p, t_ms);
         self.arming_down = false;
         if let Some((saved, host)) = restore {
             host.set(saved);
@@ -712,10 +706,7 @@ impl ViewportWidget {
             self.deliver_pending_scroll(ctx);
         }
         match event {
-            InputEvent::Scroll { delta, .. } => {
-                let delta = wheel_to_core(self.axis, delta);
-                self.handle_wheel(ctx, &delta)
-            }
+            InputEvent::Scroll { delta, .. } => self.handle_wheel(ctx, delta),
             InputEvent::Pointer(p) => self.pointer_on_axis(ctx, event, p, t_ms),
             // Broadcasts, focus-routed events and anything hit-tested (a
             // `Scale`, a file drop) belong to the content.
@@ -775,29 +766,6 @@ fn transpose_axis(axis: ScrollAxis) -> ScrollAxis {
 /// `point` with its two components swapped.
 fn transpose(point: Point) -> Point {
     Point::new(point.y, point.x)
-}
-
-/// A viewport-space position as the (vertical-reading) core sees it.
-fn to_core(axis: ScrollAxis, position: Point) -> Point {
-    match axis {
-        ScrollAxis::Vertical => position,
-        ScrollAxis::Horizontal => transpose(position),
-    }
-}
-
-/// A position the core reports back, in viewport space again (the swap is
-/// its own inverse).
-fn from_core(axis: ScrollAxis, position: Point) -> Point {
-    to_core(axis, position)
-}
-
-/// A wheel delta as the (vertical-reading) core sees it.
-fn wheel_to_core(axis: ScrollAxis, delta: &ScrollDelta) -> ScrollDelta {
-    match (axis, delta) {
-        (ScrollAxis::Vertical, _) => *delta,
-        (ScrollAxis::Horizontal, ScrollDelta::Lines(x, y)) => ScrollDelta::Lines(*y, *x),
-        (ScrollAxis::Horizontal, ScrollDelta::Pixels(x, y)) => ScrollDelta::Pixels(*y, *x),
-    }
 }
 
 // --- Axis-aware nested claims ------------------------------------------------
@@ -933,10 +901,9 @@ impl ScrollSurface for ViewportWidget {
     }
 
     fn take_over_from_content(&mut self, ctx: &mut EventCtx, position: Point) {
-        // `position` arrives in the core's axis-swapped space.
         let cancel = InputEvent::Pointer(PointerEvent {
             phase: PointerPhase::Cancel,
-            position: from_core(self.axis, position),
+            position,
             button: PointerButton::Primary,
         });
         // A takeover, not the gesture's end: the captured child gets its

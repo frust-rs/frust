@@ -286,6 +286,21 @@ impl Default for ScrollSurfaceCore {
 }
 
 impl ScrollSurfaceCore {
+    /// A core that reads pointer travel and wheel deltas along `axis`, with
+    /// every other field at its [`Default`] (a vertical surface's core is
+    /// `with_axis(ScrollAxis::Vertical)`).
+    pub(crate) fn with_axis(axis: ScrollAxis) -> Self {
+        Self {
+            axis,
+            ..Self::default()
+        }
+    }
+
+    /// The axis pointer travel and wheel deltas are read along.
+    pub(crate) fn axis(&self) -> ScrollAxis {
+        self.axis
+    }
+
     /// Carry a view's physics and overscroll effect down on build/rebuild: a
     /// `.physics(...)`-carrying view reinstalls it every time (a trait object
     /// isn't comparable, so this never diffs), a view with no opinion
