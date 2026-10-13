@@ -25,6 +25,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `NavigatorController::back_interest()` is false for a navigator that is not mounted.
 - A back press that no registrant claims at delivery is dropped instead of being handed to the
   navigator whose wire consumed it.
+- Codemod: the accumulator `// erasure: keep` marker now also covers an untyped `let`, one seeded
+  with a direct (unwrapped) `any(..)` element (`let mut body = vec![any(..)]`) or started as
+  exactly `Vec::new()`, `Vec::with_capacity(..)` or `vec![]` and later pushed or inserted a direct
+  `any(..)` in the same fn, so idiomatic accumulators no longer need a `: Vec<AnyView<_>>`
+  annotation for rule U.
 
 ### Fixed
 

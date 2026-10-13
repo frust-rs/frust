@@ -273,9 +273,14 @@ U   (`--unmarked` only; never auto-fixed: `--write` leaves every U site alone an
       a `let` statement or a `match` whose first line is kept, (c') it is an
       argument of `<v>.push(..)`, `<v>.insert(..)` or `<v>.extend(..)` in a fn
       body where `<v>` is the nearest preceding in-scope `let [mut] <v>` whose
-      type or initializer names `AnyView` and whose line is kept (a reasoned
-      marker on the `let` line or alone above it; it covers nothing outside
-      that fn, no other vec and no shadowing re-binding of `<v>`), or (d) a
+      type or initializer names `AnyView` (or, with no type annotation, whose
+      `vec![..]` initializer has a direct `any(..)` element, or which starts
+      as exactly `Vec::new()`, `Vec::with_capacity(..)` or `vec![]` and is later
+      pushed or inserted a direct `any(..)` in that fn before any other mention
+      of `<v>` that is not `<v>.`; direct = the whole element or argument,
+      optionally path-qualified) and whose line is kept (a reasoned marker on the `let` line or alone above it; it covers
+      nothing outside that fn, no other vec and no shadowing re-binding of
+      `<v>`), or (d) a
       reasoned own-line marker sits strictly inside the parentheses of the call
       (nested parentheses/brackets allowed, a nested closure or block body does
       not count) or immediately before the argument holding it in the
@@ -3127,8 +3132,12 @@ _ACC_METHODS = ("push", "insert", "extend")
 def _u_accumulator_kept(s: Source, k: int) -> bool:
     """True when the call at `k` is inside the arguments of `<v>.push(..)`,
     `<v>.insert(..)` or `<v>.extend(..)` and the nearest preceding in-scope
-    `let [mut] <v>` of the same fn body names `AnyView` and carries a reasoned
-    marker on its line or alone above it. A re-binding of `<v>` ends the cover."""
+    `let [mut] <v>` of the same fn body is an AnyView accumulator and carries a
+    reasoned marker on its line or alone above it. A re-binding of `<v>` ends the
+    cover. The let qualifies when its type or initializer names `AnyView`, or, with
+    no type annotation, when `any(..)` is a direct element of its `vec![..]`
+    initializer or it starts empty and is later pushed or inserted a direct
+    `any(..)` (see `_u_inferred_accumulator`)."""
     t = s.t
     chain, g = [], s.parent[k]
     while g >= 0:
@@ -3157,8 +3166,60 @@ def _u_accumulator_kept(s: Source, k: int) -> bool:
             e = n
             while e < len(t) and not s.is_p(e, ";") and t[e].text not in CLOSE:
                 e = s.match[e] + 1 if t[e].text in OPEN else e + 1
-            named = any(s.is_id(x, "AnyView") for x in range(n, min(e, len(t))))
-            return named and s.is_kept(s.line_of(t[j].start), reasoned=True)
+            if not s.is_kept(s.line_of(t[j].start), reasoned=True):
+                return False
+            if any(s.is_id(x, "AnyView") for x in range(n, min(e, len(t)))):
+                return True
+            return s.is_p(n + 1, "=") and _u_inferred_accumulator(s, name, n + 2, e, s.match[fn_body])
+    return False
+
+
+def _u_sites(s: Source) -> set:
+    if not hasattr(s, "_u_site_set"):
+        s._u_site_set = set(_u_call_sites(s))
+    return s._u_site_set
+
+
+def _u_direct_any(s: Source, g: int) -> bool:
+    """True when the group opening at g holds an `any(..)` call (path-qualified or
+    not) as one whole element/argument: it starts right after the opener or a
+    `,` and ends right before a `,` or the closer."""
+    for c in _u_sites(s):
+        if s.parent[c] != g:
+            continue
+        segs = s.path_before(c)
+        a = segs[0] if segs else c
+        close = s.match[s._call_open_after(c)]
+        if ((a - 1 == g or s.is_p(a - 1, ","))
+                and (s.is_p(close + 1, ",") or close + 1 == s.match[g])):
+            return True
+    return False
+
+
+def _u_inferred_accumulator(s: Source, name: str, a: int, e: int, body_end: int) -> bool:
+    """For an untyped `let <name> = <init>` with the initializer spanning [a, e):
+    `any(..)` is a direct element of a `vec![..]` initializer, or the initializer
+    is exactly `Vec::new()`, `Vec::with_capacity(..)` or `vec![]` and a later
+    `<name>.push(..)`/`<name>.insert(..)` of the fn takes a direct `any(..)`. The
+    scan stops at the first other mention of `<name>` that is not `<name>.` (a
+    re-binding, a pattern, a closure or fn parameter, a borrow), so a same-named
+    binding never makes this let qualify."""
+    g = a + 2 if s.is_id(a, "vec") and s.is_p(a + 1, "!") and s.is_p(a + 2, "[") else None
+    if g is not None and s.match[g] + 1 == e:
+        if g + 1 < s.match[g]:
+            return _u_direct_any(s, g)
+    elif not (s.is_id(a, "Vec") and s.is_p(a + 1, "::") and s.is_id(a + 2)
+              and s.t[a + 2].text in ("new", "with_capacity")
+              and s.is_p(a + 3, "(") and s.match[a + 3] + 1 == e):
+        return False
+    for j in range(e, body_end):
+        if not s.is_id(j, name) or s.is_p(j - 1, ".") or s.is_p(j - 1, "::"):
+            continue
+        if not s.is_p(j + 1, "."):
+            return False
+        if (s.is_id(j + 2) and s.t[j + 2].text in ("push", "insert")
+                and s.is_p(j + 3, "(") and _u_direct_any(s, j + 3)):
+            return True
     return False
 
 
