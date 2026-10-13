@@ -1,6 +1,7 @@
 //! `frust-share`: a platform plugin that hands text or an http/https URL to
 //! the platform share sheet — Android `ACTION_SEND` chooser via plain JNI,
-//! iOS activity sheet (sh-02), desktop clipboard copy as the fallback.
+//! iOS `UIActivityViewController` activity sheet, desktop clipboard copy as
+//! the fallback.
 //!
 //! # Charter: a platform plugin
 //!
@@ -15,6 +16,8 @@
 
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "ios")]
+mod apple;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod desktop;
 mod url;
@@ -86,7 +89,7 @@ impl Share {
         if text.is_empty() {
             return Err(ShareError::EmptyPayload);
         }
-        dispatch(text, subject, anchor)
+        dispatch(text, PayloadKind::Text, subject, anchor)
     }
 
     /// Share an absolute http/https `url`.
@@ -99,16 +102,57 @@ impl Share {
             return Err(ShareError::EmptyPayload);
         }
         crate::url::validate(url)?;
-        dispatch(url, subject, None)
+        dispatch(url, PayloadKind::Url, subject, None)
+    }
+}
+
+/// Which `Share` entry point a payload came from (iOS hands a URL over as an
+/// `NSURL`; the other backends treat both as text).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PayloadKind {
+    Text,
+    Url,
+}
+
+/// An iPad popover's source: `rect` in the root view's space, and whether
+/// UIKit may draw an arrow to it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct PopoverSource {
+    rect: kurbo::Rect,
+    arrows: bool,
+}
+
+/// Convert an optional [`ShareAnchor`] into the popover source within a root
+/// view whose bounds are `bounds`. Logical points are UIKit points (1:1), so
+/// the anchor is only normalised and offset by the bounds origin; a missing
+/// or non-finite anchor becomes a zero-size rect at the bounds' centre with
+/// no arrow.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+fn popover_source(anchor: Option<&ShareAnchor>, bounds: kurbo::Rect) -> PopoverSource {
+    match anchor.map(|a| a.rect) {
+        Some(rect) if rect.is_finite() => PopoverSource {
+            rect: rect.abs() + bounds.origin().to_vec2(),
+            arrows: true,
+        },
+        _ => PopoverSource {
+            rect: kurbo::Rect::from_center_size(bounds.center(), (0.0, 0.0)),
+            arrows: false,
+        },
     }
 }
 
 #[allow(unused_variables)]
 fn dispatch(
     text: &str,
+    kind: PayloadKind,
     subject: Option<&str>,
     anchor: Option<&ShareAnchor>,
 ) -> Result<ShareOutcome, ShareError> {
+    #[cfg(target_os = "ios")]
+    {
+        apple::share(text, kind, subject, anchor)
+    }
     #[cfg(target_os = "android")]
     {
         android::share(text, subject)
@@ -118,6 +162,7 @@ fn dispatch(
         desktop::share(text)
     }
     #[cfg(not(any(
+        target_os = "ios",
         target_os = "android",
         target_os = "macos",
         target_os = "linux",
@@ -162,6 +207,29 @@ mod tests {
         ] {
             assert!(!e.to_string().contains(MARKER));
         }
+    }
+
+    #[test]
+    fn popover_source_maps_anchor_one_to_one_or_centres() {
+        let bounds = kurbo::Rect::new(0.0, 0.0, 400.0, 800.0);
+        let anchor = ShareAnchor {
+            rect: kurbo::Rect::new(120.0, 40.0, 20.0, 10.0),
+        };
+        let anchored = popover_source(Some(&anchor), bounds);
+        assert_eq!(anchored.rect, kurbo::Rect::new(20.0, 10.0, 120.0, 40.0));
+        assert!(anchored.arrows);
+
+        let offset = popover_source(Some(&anchor), bounds + kurbo::Vec2::new(5.0, 7.0));
+        assert_eq!(offset.rect, kurbo::Rect::new(25.0, 17.0, 125.0, 47.0));
+
+        let centred = popover_source(None, bounds);
+        assert_eq!(centred.rect, kurbo::Rect::new(200.0, 400.0, 200.0, 400.0));
+        assert!(!centred.arrows);
+
+        let bad = ShareAnchor {
+            rect: kurbo::Rect::new(f64::NAN, 0.0, 1.0, 1.0),
+        };
+        assert_eq!(popover_source(Some(&bad), bounds), centred);
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
