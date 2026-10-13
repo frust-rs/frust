@@ -12,14 +12,16 @@
 //! separate, human-run gate this suite cannot replace — see `README.md`.
 
 use std::any::Any;
+use std::sync::Mutex;
 
 use frust::authoring::WindowInsets;
 use frust::{
-    AnyView, Brightness, GetUntracked, Theme, Update, WindowMetrics, component, provide_context,
+    AnyView, Brightness, GetUntracked, Set, Theme, Update, WindowMetrics, component, handles_back,
+    provide_context, push_back_press, text,
 };
 use frust_core::FrameTime;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
-use frust_reactive::ReactiveRuntime;
+use frust_reactive::{ReactiveRuntime, clear_can_pop_provider};
 use frust_scene::GlyphRun;
 use frust_text::TextContext;
 use kurbo::{BezPath, Point, Rect, Size};
@@ -476,12 +478,12 @@ fn graph_page_paints_nodes_edges_and_labels() {
 }
 
 /// At or past the shell's wide-nav breakpoint, `playground`'s home page shows
-/// its side rail's full thirteen-destination column instead of the narrow
+/// its side rail's full fourteen-destination column instead of the narrow
 /// bottom nav bar's six-item (five primary + "More") bar — a `WindowMetrics`
 /// context is how an app publishes window shape (`pages::responsive`'s own
 /// convention), so providing one at a wide size before mounting is what flips
 /// the home page onto that path. Asserted by nav-destination TEXT RUN COUNT:
-/// thirteen side-rail labels paint strictly more nav-destination text than the
+/// fourteen side-rail labels paint strictly more nav-destination text than the
 /// narrow bar's six.
 #[test]
 fn wide_width_shows_every_section_in_the_side_rail() {
@@ -615,4 +617,139 @@ fn drag_page_paints_and_kanban_columns_move_cards() {
         after[2].iter().any(|card| card.id == 0),
         "card 0 must have landed in column 2"
     );
+}
+
+/// Serializes the "Tabs" back-routing tests: back arbitration sits behind
+/// process-wide statics (`handles_back`), so two of them racing would read
+/// each other's registrants.
+static TABS_BACK_LOCK: Mutex<()> = Mutex::new(());
+
+/// A pre-built harness over the "Tabs" page (and any other section the test
+/// switches to through `state.section`).
+struct TabsHarness {
+    root: RenderRoot<PlaygroundState, AnyView<PlaygroundState>>,
+    state: PlaygroundState,
+    tcx: TextContext,
+    t_ms: u64,
+}
+
+impl TabsHarness {
+    fn new() -> Self {
+        clear_can_pop_provider();
+        frust::set_handles_back(false);
+        let state = PlaygroundState::new();
+        state
+            .section
+            .set(pages::section_index_for("tabs").expect("tabs is a known section"));
+        TabsHarness {
+            root: RenderRoot::new(),
+            state,
+            tcx: TextContext::new(),
+            t_ms: 0,
+        }
+    }
+
+    /// `count` frames: a build-time back press or a pending push/pop lands on
+    /// the first, and the route observers settle on the next.
+    fn frames(&mut self, count: usize) {
+        let mut logic = |s: &mut PlaygroundState| pages::current(s.section.get_untracked(), s);
+        for _ in 0..count {
+            self.t_ms += 16;
+            frame_at(
+                &mut self.root,
+                &mut logic,
+                &mut self.state,
+                &mut self.tcx,
+                self.t_ms,
+            );
+        }
+    }
+
+    fn select(&mut self, tab: usize) {
+        self.state.tabs.selected.set(tab);
+        self.frames(3);
+    }
+
+    /// Push `count` pages on tab `tab`'s navigator (a counted loop: `depth()`
+    /// only updates on rebuild, so it can never be polled in place).
+    fn push_pages(&mut self, tab: usize, count: usize) {
+        for _ in 0..count {
+            self.state.tabs.navs[tab].push(|| text("detail"));
+            self.frames(3);
+        }
+    }
+
+    fn depths(&self) -> [usize; 3] {
+        [0, 1, 2].map(|tab| self.state.tabs.navs[tab].depth())
+    }
+
+    fn selected(&self) -> usize {
+        self.state.tabs.selected.get_untracked()
+    }
+}
+
+/// Back with Home selected leaves a hidden tab's stack alone: only the
+/// selected tab's navigator may pop, and Home sits at its root.
+#[test]
+fn tabs_back_on_home_leaves_a_hidden_tab_untouched() {
+    let _guard = TABS_BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _owner = setup();
+    let mut h = TabsHarness::new();
+    h.frames(3);
+
+    h.select(1);
+    h.push_pages(1, 2);
+    assert_eq!(h.depths(), [1, 3, 1], "tab B holds three pages");
+
+    h.select(0);
+    push_back_press();
+    h.frames(3);
+    assert_eq!(h.depths(), [1, 3, 1], "Home unchanged, B still depth 3");
+    assert_eq!(h.selected(), 0, "the selection stays on Home");
+}
+
+/// Back at a non-home tab root returns to Home (the fallback claims it).
+#[test]
+fn tabs_back_at_a_tab_root_selects_home() {
+    let _guard = TABS_BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _owner = setup();
+    let mut h = TabsHarness::new();
+    h.frames(3);
+
+    h.select(1);
+    assert_eq!(h.depths()[1], 1, "tab B is at its root");
+    assert!(handles_back(), "the fallback claims back off Home");
+
+    push_back_press();
+    h.frames(3);
+    assert_eq!(h.selected(), 0, "back at B's root selected Home");
+}
+
+/// Leaving the Tabs section unmounts the `back_fallback` wrapper: once pruned,
+/// the fallback stops claiming and its `on_back` never fires.
+#[test]
+fn tabs_fallback_stops_claiming_after_the_section_unmounts() {
+    let _guard = TABS_BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _owner = setup();
+    let mut h = TabsHarness::new();
+    h.frames(3);
+
+    h.select(1);
+    assert!(handles_back(), "mounted fallback claims back at B's root");
+
+    // Switch the shell to another section and rebuild (a counted number of
+    // frames) until the wrapper has unmounted and the fallback is pruned.
+    h.state
+        .section
+        .set(pages::section_index_for("layout").expect("layout is a known section"));
+    h.frames(4);
+    assert!(
+        !handles_back(),
+        "an unmounted fallback claims nothing (no root navigator in this harness)"
+    );
+
+    push_back_press();
+    h.frames(3);
+    assert_eq!(h.selected(), 1, "on_back did not fire: B stays selected");
+    assert!(!handles_back());
 }
