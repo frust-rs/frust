@@ -32,6 +32,7 @@ use crate::event::{EventCtx, EventResult, ImeState, InputEvent};
 use crate::insets::WindowInsets;
 use crate::layout::BoxConstraints;
 use crate::semantics::SemanticsCtx;
+use crate::sliver::{SliverConstraints, SliverGeometry, SliverWidget};
 
 /// The renderer-agnostic paint target a widget draws into.
 ///
@@ -2188,6 +2189,20 @@ pub trait Widget: Any {
     /// visitor a pod it does not own would break that, which is why the visitor
     /// takes `&ChildPod` — there is no way to publish a shared one.
     fn visit_children(&self, _visitor: &mut dyn FnMut(&ChildPod)) {}
+
+    /// This widget as a sliver, if it speaks the sliver protocol — the opt-in
+    /// seam a scrolling viewport lays its children out through (see
+    /// [`crate::sliver`] and [`ChildPod::layout_sliver_child`]).
+    ///
+    /// **Defaulted to `None`**, exactly like [`Widget::visit_children`]: a box
+    /// widget needs no impl and is laid out through [`Widget::layout`] as
+    /// always. A type implementing [`SliverWidget`] overrides it to return
+    /// `Some(self)`. A transparent wrapper (a type-erasing box, a component
+    /// boundary, an either-arm) forwards it to what it wraps, so a sliver stays
+    /// a sliver however it was erased.
+    fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
+        None
+    }
 }
 
 impl dyn Widget {
@@ -2229,6 +2244,12 @@ impl Widget for Box<dyn Widget> {
 
     fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
         (**self).visit_children(visitor);
+    }
+
+    /// The *boxed* widget's sliver face, so type erasure never hides a sliver
+    /// from the viewport laying it out.
+    fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
+        (**self).as_sliver()
     }
 
     /// Report the *boxed* widget's name, not `Box<dyn Widget>` — the box is a
@@ -2393,6 +2414,15 @@ pub struct ChildPod {
     /// paint *after* an animation's last request still dirties the pod once
     /// more (see [`ChildPod::paint_child`]'s layout-skip note).
     painted_animating: bool,
+    /// The sliver constraints the last sliver layout that ran was handed —
+    /// the [`ChildPod::layout_sliver_child`] half of the skip key, beside
+    /// `last_constraints`. At most one of the two is `Some`: a layout under
+    /// either protocol clears the other, so a pod switching protocol never
+    /// skips on a stale result.
+    last_sliver_constraints: Option<SliverConstraints>,
+    /// The geometry the last sliver layout reported ([`ChildPod::sliver_geometry`]);
+    /// `None` until one has run and again after a box layout.
+    sliver_geometry: Option<SliverGeometry>,
 }
 
 thread_local! {
@@ -2550,6 +2580,8 @@ impl ChildPod {
             last_epoch: 0,
             last_insets: WindowInsets::default(),
             painted_animating: false,
+            last_sliver_constraints: None,
+            sliver_geometry: None,
         }
     }
 
@@ -2949,10 +2981,86 @@ impl ChildPod {
         let size = self.widget.layout(ctx, bc);
         self.size = size;
         self.last_constraints = Some(*bc);
+        self.last_sliver_constraints = None;
+        self.sliver_geometry = None;
         self.last_epoch = ctx.epoch;
         self.last_insets = ctx.window_insets;
         self.layout_dirty = false;
         size
+    }
+
+    /// Lay the child out as a sliver under `sc`, recording and returning its
+    /// geometry — or `None`, touching nothing, when the child does not speak the
+    /// sliver protocol ([`Widget::as_sliver`]); the caller then lays it out as a
+    /// box, typically through an adapter.
+    ///
+    /// On a sliver the pod records the geometry ([`ChildPod::sliver_geometry`])
+    /// and sizes itself to what was painted: `(cross_axis_extent, paint_extent)`
+    /// in axis terms ([`ScrollAxis::size`](crate::sliver::ScrollAxis::size)), so
+    /// [`ChildPod::contains`], [`ChildPod::paint_child`] and
+    /// [`ChildPod::semantics_child`] all see the painted extent. The caller
+    /// positions the pod with [`ChildPod::set_origin`] as for a box child.
+    ///
+    /// # The skip rule
+    ///
+    /// Exactly [`ChildPod::layout_child`]'s, with `sc` in place of the box
+    /// constraints: the stored geometry is returned without calling
+    /// [`SliverWidget::layout_sliver`] when the pass is not forced, the pod is
+    /// clean, `sc` equals the sliver constraints the last layout ran with, and
+    /// the layout epoch and window insets are unchanged. The dirty sources are
+    /// the same ones. A box layout in between clears the recorded sliver
+    /// constraints (and the reverse), so switching protocol always lays out.
+    ///
+    /// One addition: a geometry carrying a
+    /// [`scroll_offset_correction`](SliverGeometry::scroll_offset_correction)
+    /// leaves the pod dirty, because a correction asks the viewport to lay out
+    /// again and must never be replayed from the cache.
+    ///
+    /// In debug builds `sc` and the reported geometry are checked with
+    /// [`SliverConstraints::debug_assert_valid`] and
+    /// [`SliverGeometry::debug_assert_valid`].
+    pub fn layout_sliver_child(
+        &mut self,
+        ctx: &mut LayoutCtx,
+        sc: &SliverConstraints,
+    ) -> Option<SliverGeometry> {
+        if !ctx.force
+            && !self.layout_dirty
+            && self.last_sliver_constraints == Some(*sc)
+            && self.last_epoch == ctx.epoch
+            && self.last_insets == ctx.window_insets
+            && let Some(geometry) = self.sliver_geometry
+        {
+            return Some(geometry);
+        }
+        sc.debug_assert_valid();
+        let geometry = self.widget.as_sliver()?.layout_sliver(ctx, sc);
+        geometry.debug_assert_valid(sc);
+        self.size = sc.axis.size(geometry.paint_extent, sc.cross_axis_extent);
+        self.sliver_geometry = Some(geometry);
+        self.last_sliver_constraints = Some(*sc);
+        self.last_constraints = None;
+        self.last_epoch = ctx.epoch;
+        self.last_insets = ctx.window_insets;
+        self.layout_dirty = geometry.scroll_offset_correction.is_some();
+        Some(geometry)
+    }
+
+    /// The geometry the child reported from its last sliver layout
+    /// ([`ChildPod::layout_sliver_child`]) — `None` before one has run, or once
+    /// the pod has been laid out as a box since.
+    pub fn sliver_geometry(&self) -> Option<SliverGeometry> {
+        self.sliver_geometry
+    }
+
+    /// Whether the child speaks the sliver protocol ([`Widget::as_sliver`]).
+    ///
+    /// Takes `&mut self` only because `as_sliver` does; unlike
+    /// [`ChildPod::widget_mut`] it does not mark the pod layout-dirty. What a
+    /// transparent wrapper holding its child in a pod asks to decide its own
+    /// [`Widget::as_sliver`] answer.
+    pub fn is_sliver(&mut self) -> bool {
+        self.widget.as_sliver().is_some()
     }
 
     /// Paint the child, offsetting its paint origin by the container's origin
