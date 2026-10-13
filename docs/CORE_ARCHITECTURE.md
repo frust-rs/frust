@@ -93,7 +93,18 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
     `ReorderableListView`): such a wrapper hides inner type swaps from the check — see
     LIMITATIONS.md `focus-wrapper-erasure-swap-blind`.
 - `RenderRoot::layout` threads box constraints down and sizes up through the widget tree, kept
-  renderer- and text-crate-agnostic via a type-erased text context.
+  renderer- and text-crate-agnostic via a type-erased text context. Layout is skipped per pod:
+  `ChildPod::layout_child` returns the recorded size without calling `Widget::layout` unless the
+  pod is dirty, its constraints differ from last time's, the root's `layout_epoch` moved, or the
+  window insets it sees changed. A pod (and every pod above it) turns dirty on a rebuild returning
+  `LAYOUT` or a widget swap, `ChildPod::widget_mut` access (`widget_mut_for_rebuild` does not), a
+  paint `request_layout`/`request_frame` (plus one trailing paint, so the landing frame is laid
+  out), a consumed event or redraw request, and `EventCtx::request_layout`. The root bumps the
+  epoch, forcing a full pass, on a theme swap, insets change, window-size change and a dirty
+  floated overlay pod. `RenderRoot::set_layout_skip(false)` disables skipping;
+  `set_layout_audit(true)` runs a debug two-pass comparison (skipped vs forced geometry), logging
+  `layout-audit:` warnings and counting `layout_audit_mismatches()`. The widget-side contract is
+  the `Widget::layout` rustdoc.
 - `RenderRoot::paint` walks widgets into a renderer-agnostic `Scene`, later encoded for the GPU by
   `frust-render` (RENDER unit). `PaintCtx::origin` is the widget's **absolute window-space** origin:
   each `ChildPod::paint_child` accumulates it by adding the child's parent-relative offset to the
@@ -406,7 +417,8 @@ one binary cannot fight over it and an app's explicit choice survives a catalog 
 |------|---------|
 | `View<State>` / `Widget` | The declarative/retained pair every UI element implements |
 | `RenderRoot<State, V>` | Owns the widget tree and theme; drives rebuild/layout/paint/event |
-| `WidgetTree` / `InspectNode` | Read-only tree accessors (`roots`/`children`/`inspect`) and the plain owned snapshot node (id, type name, debug label, absolute bounds, children) they produce |
+| `ChildPod` | Child slot a container lays out through; carries the skip state (`layout_dirty`, last constraints/epoch/insets) |
+| `WidgetTree` / `InspectNode` | Read-only tree accessors (`roots`/`children`/`inspect`/`inspect_layout_dirty`) and the plain owned snapshot node (id, type name, debug label, absolute bounds, children) they produce |
 | `Component` / `ComponentView` / `ComponentWidget` | Stateful widget analog with a per-instance reactive `Owner`; `build` returns `impl View<Self::State>` |
 | `AnyView<State>` / `any()` | Type-erased `View` (`Element = Box<dyn Widget>`); construction is idempotent, so erasure happens once at an API boundary |
 | `ViewSeq<State, M>` / `views()` | Child-sequence trait a container's list parameter takes (`impl ViewSeq<State, M>`, `M` an inference marker): a `View`, a tuple ≤ 12, `Vec`, array, `Option`, or `views(iter)`; `extend_views` erases each element once into the container's `Vec<AnyView>` |
