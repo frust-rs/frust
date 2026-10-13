@@ -50,6 +50,19 @@
 //! otherwise derive a different layout, and the renderer's bind groups would
 //! stop fitting it.
 //!
+//! ## The program family
+//!
+//! The image sampler (`FRUST_ENGINE_IMAGE_SAMPLER`) is not a third axis: a
+//! renderer compiles ONE family of strip programs — the default one, or the
+//! one whose image programs filter bilinear atlas images through a hardware
+//! sampler ([`crate::gpu::shader_src`]'s *The two program families*) — so the
+//! table above holds for either, and [`VARIANT_COUNT`] is per family. The
+//! sampler family adds exactly one pipeline beside them: the atlas-layer
+//! target below keeps drawing through the default family's Uber program and
+//! layout, because the glyph pass's own bind groups
+//! ([`crate::gpu::atlas`]) carry no sampler. That pipeline is warmed with the
+//! rest, so the family costs no inline compile either.
+//!
 //! ## The six strip variants
 //!
 //! | Variant | Target | Blend | Depth |
@@ -72,7 +85,8 @@
 //! A pass that rasterizes glyph outlines into one layer of the atlas array
 //! draws through [`ATLAS_STRIP_PIPELINE`], which is
 //! [`EnginePipeline::StripIntermediate`] itself rather than a variant of its
-//! own. An atlas layer is an [`crate::gpu::atlas::ATLAS_FORMAT`] colour target
+//! own (in the default program family; see *The program family* above for
+//! the one pipeline the sampler family adds for it). An atlas layer is an [`crate::gpu::atlas::ATLAS_FORMAT`] colour target
 //! with no depth attachment, composited source-over so a COLR glyph's layers
 //! and a re-used slot's clear stack in the order they were recorded — which is
 //! the render state `StripIntermediate` already *is*, field for field. A second
@@ -250,6 +264,9 @@ const FILTER_BIND_GROUPS: usize = 2;
 /// program by id rather than by source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineShaders {
+    /// Whether the strip programs are the image-sampler family (see the
+    /// module doc's *The program family*).
+    pub image_sampler: bool,
     /// The whole sparse-strip rasterizer — the [`PaintClass::Uber`] program,
     /// shared by all six strip states.
     pub strip: ShaderId,
@@ -259,6 +276,12 @@ pub struct EngineShaders {
     /// The explicit layout every strip pipeline, of every class, is built
     /// against ([`crate::gpu::bindings::strip_pipeline_layout`]).
     pub strip_layout: wgpu::PipelineLayout,
+    /// The program the atlas-layer pass draws with: [`Self::strip`] in the
+    /// default family, the default family's Uber program in the sampler one.
+    pub atlas_strip: ShaderId,
+    /// The layout the atlas-layer pass is built against: [`Self::strip_layout`]
+    /// in the default family, the default family's layout in the sampler one.
+    pub atlas_layout: wgpu::PipelineLayout,
     /// Region and fullscreen clears.
     pub clear: ShaderId,
     /// Rectangular region copies.
@@ -268,26 +291,58 @@ pub struct EngineShaders {
 }
 
 impl EngineShaders {
-    /// Compiles every module in [`shader_src::MODULES`], and the strip
-    /// program's class specialisations, into `library`, returning their ids
-    /// beside a freshly created strip layout.
+    /// [`Self::register_family`] for the family the process configuration
+    /// names (`FRUST_ENGINE_IMAGE_SAMPLER`,
+    /// [`crate::config::image_sampler_enabled`]).
+    #[must_use]
+    pub fn register(library: &mut ShaderLibrary, device: &wgpu::Device) -> Self {
+        Self::register_family(library, device, crate::config::image_sampler_enabled())
+    }
+
+    /// Compiles the strip program of the family `image_sampler` names — its
+    /// Uber program and every class specialisation — and the clear, copy and
+    /// filter modules into `library`, returning their ids beside a freshly
+    /// created strip layout of that family.
+    ///
+    /// The sampler family also compiles the default family's Uber program and
+    /// layout, which its atlas-layer pass draws with (see the module doc's
+    /// *The program family*): one more module and one more layout, nothing
+    /// else.
     ///
     /// Insertion is idempotent per name, so calling this twice against the
     /// same library returns the same ids without recompiling (the layout is
     /// a new object each call — a desc compares layouts by identity, so keep
     /// one `EngineShaders` per cache).
     #[must_use]
-    pub fn register(library: &mut ShaderLibrary, device: &wgpu::Device) -> Self {
+    pub fn register_family(
+        library: &mut ShaderLibrary,
+        device: &wgpu::Device,
+        image_sampler: bool,
+    ) -> Self {
+        let mut strip_program = |class: PaintClass, image_sampler: bool| {
+            library.insert_wgsl(
+                device,
+                shader_src::strip_program_name(class, image_sampler),
+                &shader_src::strip_program_source(class, image_sampler),
+            )
+        };
+        let strip = strip_program(PaintClass::Uber, image_sampler);
+        let strip_classes =
+            PaintClass::SPECIALISED.map(|class| strip_program(class, image_sampler));
+        let atlas_strip = strip_program(PaintClass::Uber, false);
+        let strip_layout = strip_pipeline_layout(device, image_sampler);
+        let atlas_layout = if image_sampler {
+            strip_pipeline_layout(device, false)
+        } else {
+            strip_layout.clone()
+        };
         Self {
-            strip: library.insert_wgsl(device, shader_src::STRIP_NAME, shader_src::STRIP),
-            strip_classes: PaintClass::SPECIALISED.map(|class| {
-                library.insert_wgsl(
-                    device,
-                    shader_src::strip_class_name(class),
-                    &shader_src::strip_class_source(class),
-                )
-            }),
-            strip_layout: strip_pipeline_layout(device),
+            image_sampler,
+            strip,
+            strip_classes,
+            strip_layout,
+            atlas_strip,
+            atlas_layout,
             clear: library.insert_wgsl(device, shader_src::CLEAR_NAME, shader_src::CLEAR),
             copy: library.insert_wgsl(device, shader_src::COPY_NAME, shader_src::COPY),
             filter: library.insert_wgsl(device, shader_src::FILTER_NAME, shader_src::FILTER),
@@ -732,9 +787,19 @@ pub const ATLAS_STRIP_PIPELINE: EnginePipeline = EnginePipeline::StripIntermedia
 /// to negotiate. Already covered by [`warm_up_descs`] — an atlas pass is
 /// therefore never the first place a pipeline is compiled, on the frames that
 /// have one.
+///
+/// In the default program family this IS the intermediate state's Uber
+/// description. In the sampler family it is the same render state over the
+/// default family's Uber program and layout ([`EngineShaders::atlas_strip`],
+/// [`EngineShaders::atlas_layout`]): the glyph pass binds no sampler, and draws
+/// no atlas image while it writes into the atlas, so it has nothing to sample.
 #[must_use]
 pub fn atlas_strip_desc(shaders: &EngineShaders) -> RenderPipelineDesc {
-    ATLAS_STRIP_PIPELINE.desc(shaders, INTERMEDIATE_FORMAT)
+    RenderPipelineDesc {
+        shader: shaders.atlas_strip,
+        layout: Some(shaders.atlas_layout.clone()),
+        ..ATLAS_STRIP_PIPELINE.desc(shaders, INTERMEDIATE_FORMAT)
+    }
 }
 
 /// The full warm-up list: every pipeline in [`EnginePipeline::ALL`] (each
@@ -753,6 +818,10 @@ pub fn warm_up_descs(
 
 /// [`warm_up_descs`] with the kill switch stated rather than read: with
 /// `uber_only` set the list is exactly the nine Uber states.
+///
+/// A sampler-family `shaders` adds the atlas-layer pass's own description
+/// ([`atlas_strip_desc`]), which only that family does not share with the
+/// intermediate state.
 #[must_use]
 pub fn warm_up_descs_for(
     shaders: &EngineShaders,
@@ -763,6 +832,9 @@ pub fn warm_up_descs_for(
         .iter()
         .map(|pipeline| pipeline.desc(shaders, target_format))
         .collect();
+    if shaders.image_sampler {
+        descs.push(atlas_strip_desc(shaders));
+    }
     if !uber_only {
         for state in WARM_CLASS_STATES {
             for class in WARM_CLASSES {
@@ -1235,14 +1307,25 @@ mod tests {
                 .expect("failed to create the device")
         });
 
+        for image_sampler in [false, true] {
+            build_every_pipeline(&device, image_sampler);
+        }
+    }
+
+    /// One program family's half of [`every_pipeline_builds_on_a_real_device`]:
+    /// every variant of the family, plus the atlas pass's own pipeline in the
+    /// sampler family, built and validated against the family's layout.
+    fn build_every_pipeline(device: &wgpu::Device, image_sampler: bool) {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let mut library = ShaderLibrary::new();
-        let shaders = EngineShaders::register(&mut library, &device);
+        let shaders = EngineShaders::register_family(&mut library, device, image_sampler);
+        assert_eq!(shaders.image_sampler, image_sampler);
         assert_eq!(
             library.len(),
-            shader_src::MODULES.len() + PaintClass::SPECIALISED.len(),
-            "one module per engine shader source, plus one per strip class"
+            shader_src::MODULES.len() + PaintClass::SPECIALISED.len() + usize::from(image_sampler),
+            "one module per engine shader source, plus one per strip class — and, in the \
+             sampler family, the default Uber program the atlas pass draws with"
         );
         assert_eq!(
             EnginePipeline::ALL
@@ -1255,13 +1338,14 @@ mod tests {
 
         let mut cache = PipelineCache::new(std::sync::Arc::new(library), None);
         let warm = warm_up_descs_for(&shaders, TARGET, false);
+        let atlas_extra = usize::from(image_sampler);
         assert_eq!(
             warm.len(),
-            EnginePipeline::ALL.len() + WARM_CLASSES.len() * WARM_CLASS_STATES.len()
+            EnginePipeline::ALL.len() + WARM_CLASSES.len() * WARM_CLASS_STATES.len() + atlas_extra
         );
         assert_eq!(
             warm_up_descs_for(&shaders, TARGET, true).len(),
-            EnginePipeline::ALL.len(),
+            EnginePipeline::ALL.len() + atlas_extra,
             "the kill switch warms the Uber states alone"
         );
         // Every variant the engine can create, not just the warmed ones: each
@@ -1276,32 +1360,38 @@ mod tests {
             }
         }
         assert_eq!(descs.len(), VARIANT_COUNT);
+        // The atlas pass draws through a description the warm-up list already
+        // carries, so it never compiles a pipeline inline on a frame that
+        // misses a glyph. In the default family it is one of the variants; in
+        // the sampler family it is the one pipeline the family adds.
+        let atlas = atlas_strip_desc(&shaders);
+        assert!(
+            warm.contains(&atlas),
+            "the atlas description must be one the warm-up list already covers"
+        );
+        assert_eq!(descs.contains(&atlas), !image_sampler);
+        if image_sampler {
+            descs.push(atlas);
+        }
         for desc in &warm {
             assert!(
                 descs.contains(desc),
                 "a warmed variant the engine never builds"
             );
         }
-        // The atlas pass draws through a description the warm-up list already
-        // carries, so it never compiles a pipeline inline on a frame that
-        // misses a glyph.
-        assert!(
-            warm.contains(&atlas_strip_desc(&shaders)),
-            "the atlas description must be one the warm-up list already covers"
-        );
         for desc in &descs {
-            let _pipeline = cache.get_or_create(&device, desc);
+            let _pipeline = cache.get_or_create(device, desc);
         }
         // A second pass must be pure cache hits.
         for desc in &descs {
-            let _pipeline = cache.get_or_create(&device, desc);
+            let _pipeline = cache.get_or_create(device, desc);
         }
 
-        let error = drain_error_scope(&device, scope);
+        let error = drain_error_scope(device, scope);
         assert!(error.is_none(), "pipeline creation raised {error:?}");
         assert_eq!(
             cache.compiled_variants(),
-            VARIANT_COUNT as u64,
+            (VARIANT_COUNT + atlas_extra) as u64,
             "each engine pipeline variant must compile exactly once"
         );
     }

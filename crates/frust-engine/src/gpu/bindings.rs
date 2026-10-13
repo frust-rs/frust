@@ -41,6 +41,14 @@
 //! [`strip_bind_group_layout_entries`] restates it entry for entry, and its
 //! test holds that restatement to the naga reflection of `strip.wgsl` — so a
 //! bind group built against any strip pipeline binds under every other one.
+//!
+//! There is one such layout per program family
+//! ([`crate::gpu::shader_src`]'s *The two program families*): the default
+//! family's is the one above, and the sampler family's adds the one sampler
+//! its image programs filter the atlas through — group 1, binding 2 — and
+//! declares the atlas binding filterable. Every binding before it keeps its
+//! number, so the families differ by that one entry, and the four-group
+//! WebGL2 ceiling is untouched.
 
 use std::collections::HashMap;
 
@@ -55,8 +63,9 @@ use super::paint_texture::{GpuEncodedImage, GpuEncodedPaint};
 /// four, exactly (see [`crate::gpu::pipelines`]'s *Bind groups*).
 pub const STRIP_BIND_GROUP_COUNT: usize = 4;
 
-/// One sampled, non-multisampled texture binding read by `textureLoad` only:
-/// what every strip texture binding is.
+/// One sampled, non-multisampled texture binding: what every strip texture
+/// binding is, every one of them read by `textureLoad` but the sampler
+/// family's atlas array.
 const fn load_only_texture(
     binding: u32,
     visibility: wgpu::ShaderStages,
@@ -75,29 +84,41 @@ const fn load_only_texture(
     }
 }
 
-/// The float sample type every strip `texture_2d<f32>` binding takes.
+/// The float sample type every strip `texture_2d<f32>` binding takes but the
+/// sampler family's atlas array.
 ///
-/// Unfilterable, because no strip binding is ever read through a sampler —
-/// exactly what wgpu derives for a float texture no sampler touches, and what
-/// lets the binding accept a filterable *and* an unfilterable float texture.
+/// Unfilterable, because no other strip binding is ever read through a
+/// sampler — exactly what wgpu derives for a float texture no sampler touches,
+/// and what lets the binding accept a filterable *and* an unfilterable float
+/// texture.
 const UNFILTERABLE: wgpu::TextureSampleType = wgpu::TextureSampleType::Float { filterable: false };
 
+/// The float sample type of a texture a filtering sampler reads: the sampler
+/// family's atlas array, which is `Rgba8Unorm` and so always filterable.
+const FILTERABLE: wgpu::TextureSampleType = wgpu::TextureSampleType::Float { filterable: true };
+
+/// The sampler family's sampler binding: group 1, after the two image
+/// textures.
+pub const ATLAS_SAMPLER_BINDING: u32 = 2;
+
 /// The strip programs' bind-group layout entries, group by group, exactly as
-/// wgpu derives them from the whole (Uber) program — binding, type and
-/// visibility.
+/// wgpu derives them from the whole (Uber) program of the family
+/// `image_sampler` names — binding, type and visibility.
 ///
 /// | Group | Binding | WGSL | Read by |
 /// |---|---|---|---|
 /// | 0 | 0 | `alphas_texture: texture_2d<u32>` | fragment |
 /// | 0 | 1 | `config: Config` (uniform, [`GpuConfig::SIZE`] bytes) | vertex, fragment |
 /// | 0 | 2 | `layer_input_texture: texture_2d<f32>` | fragment |
-/// | 1 | 0 | `atlas_texture_array: texture_2d_array<f32>` | fragment |
+/// | 1 | 0 | `atlas_texture_array: texture_2d_array<f32>` (filterable in the sampler family) | fragment |
 /// | 1 | 1 | `external_texture: texture_2d<f32>` | fragment |
+/// | 1 | 2 | `atlas_sampler: sampler` (filtering; the sampler family only) | fragment |
 /// | 2 | 0 | `encoded_paints_texture: texture_2d<u32>` | vertex, fragment |
 /// | 3 | 0 | `gradient_texture: texture_2d<f32>` | fragment |
 #[must_use]
-pub fn strip_bind_group_layout_entries() -> [Vec<wgpu::BindGroupLayoutEntry>; STRIP_BIND_GROUP_COUNT]
-{
+pub fn strip_bind_group_layout_entries(
+    image_sampler: bool,
+) -> [Vec<wgpu::BindGroupLayoutEntry>; STRIP_BIND_GROUP_COUNT] {
     use wgpu::ShaderStages as S;
     use wgpu::TextureSampleType as T;
     use wgpu::TextureViewDimension as D;
@@ -116,16 +137,30 @@ pub fn strip_bind_group_layout_entries() -> [Vec<wgpu::BindGroupLayoutEntry>; ST
             },
             load_only_texture(2, S::FRAGMENT, UNFILTERABLE, D::D2),
         ],
-        vec![
-            load_only_texture(0, S::FRAGMENT, UNFILTERABLE, D::D2Array),
-            load_only_texture(1, S::FRAGMENT, UNFILTERABLE, D::D2),
-        ],
+        if image_sampler {
+            vec![
+                load_only_texture(0, S::FRAGMENT, FILTERABLE, D::D2Array),
+                load_only_texture(1, S::FRAGMENT, UNFILTERABLE, D::D2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: ATLAS_SAMPLER_BINDING,
+                    visibility: S::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ]
+        } else {
+            vec![
+                load_only_texture(0, S::FRAGMENT, UNFILTERABLE, D::D2Array),
+                load_only_texture(1, S::FRAGMENT, UNFILTERABLE, D::D2),
+            ]
+        },
         vec![load_only_texture(0, S::VERTEX_FRAGMENT, T::Uint, D::D2)],
         vec![load_only_texture(0, S::FRAGMENT, UNFILTERABLE, D::D2)],
     ]
 }
 
-/// The one explicit pipeline layout every strip pipeline is built against.
+/// The one explicit pipeline layout every strip pipeline of the family
+/// `image_sampler` names is built against.
 ///
 /// Created once per renderer, at shader registration
 /// ([`crate::gpu::pipelines::EngineShaders::register`]). A pipeline built
@@ -133,8 +168,8 @@ pub fn strip_bind_group_layout_entries() -> [Vec<wgpu::BindGroupLayoutEntry>; ST
 /// `get_bind_group_layout`, so the renderer's existing bind-group construction
 /// is unchanged and its groups bind under every strip variant and class.
 #[must_use]
-pub fn strip_pipeline_layout(device: &wgpu::Device) -> wgpu::PipelineLayout {
-    let entries = strip_bind_group_layout_entries();
+pub fn strip_pipeline_layout(device: &wgpu::Device, image_sampler: bool) -> wgpu::PipelineLayout {
+    let entries = strip_bind_group_layout_entries(image_sampler);
     let groups = entries.each_ref().map(|entries| {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frust-engine strip group"),
@@ -465,26 +500,44 @@ mod tests {
         assert_eq!(image.image_size, pack_image_size(16, 16));
     }
 
-    /// The explicit strip layout is the layout wgpu would derive from the
-    /// whole strip program, entry for entry: every binding `strip.wgsl`
-    /// declares is present with the type naga reflects for it, visible to
-    /// exactly the stages whose entry point uses it, and nothing else is
-    /// declared. That is what makes switching the Uber program from a derived
-    /// to this explicit layout a no-op, and what lets every class program — a
-    /// subset of the Uber one's uses — validate against it.
+    /// The explicit strip layout of each family is the layout wgpu would
+    /// derive from that family's whole strip program, entry for entry: every
+    /// binding the program declares is present with the type naga reflects for
+    /// it — a float texture filterable exactly when a sampler reads it —
+    /// visible to exactly the stages whose entry point uses it, and nothing
+    /// else is declared. That is what makes switching the Uber program from a
+    /// derived to this explicit layout a no-op, and what lets every class
+    /// program of the family — a subset of the Uber one's uses — validate
+    /// against it.
     #[test]
     fn the_explicit_strip_layout_is_the_uber_programs_derived_layout() {
+        for image_sampler in [false, true] {
+            explicit_layout_matches_derived(image_sampler);
+        }
+    }
+
+    fn explicit_layout_matches_derived(image_sampler: bool) {
+        use crate::gpu::shader_src::strip_program_source;
+        use crate::gpu::strips::PaintClass;
         use wgpu::naga;
-        let src = crate::gpu::shader_src::STRIP;
-        let module = naga::front::wgsl::parse_str(src).expect("the strip source parses");
+        let src = strip_program_source(PaintClass::Uber, image_sampler);
+        let module = naga::front::wgsl::parse_str(&src).expect("the strip source parses");
         let info = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::empty(),
         )
         .validate(&module)
         .expect("the strip source validates");
+        let sampled = |handle| {
+            (0..module.entry_points.len()).any(|index| {
+                info.get_entry_point(index)
+                    .sampling_set
+                    .iter()
+                    .any(|key| key.image == handle)
+            })
+        };
 
-        let entries = strip_bind_group_layout_entries();
+        let entries = strip_bind_group_layout_entries(image_sampler);
         let mut declared = 0;
         for (handle, global) in module.global_variables.iter() {
             let Some(binding) = &global.binding else {
@@ -529,10 +582,18 @@ mod tests {
                     assert_eq!(view_dimension, expected_dim, "{:?}", global.name);
                     let expected_sample = match kind {
                         naga::ScalarKind::Uint => wgpu::TextureSampleType::Uint,
+                        naga::ScalarKind::Float if sampled(handle) => FILTERABLE,
                         naga::ScalarKind::Float => UNFILTERABLE,
                         other => panic!("unexpected sample kind {other:?}"),
                     };
                     assert_eq!(sample_type, expected_sample, "{:?}", global.name);
+                }
+                (
+                    naga::TypeInner::Sampler { comparison: false },
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ) => {
+                    assert_eq!(binding.group, 1);
+                    assert_eq!(binding.binding, ATLAS_SAMPLER_BINDING);
                 }
                 (
                     naga::TypeInner::Struct { span, .. },
@@ -555,6 +616,11 @@ mod tests {
             declared,
             entries.iter().map(Vec::len).sum::<usize>(),
             "the layout declares a binding the program does not"
+        );
+        assert_eq!(
+            entries[1].len(),
+            if image_sampler { 3 } else { 2 },
+            "only the sampler family declares the sampler"
         );
     }
 

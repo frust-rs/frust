@@ -109,6 +109,27 @@ pub fn pass_merge_disabled() -> bool {
     })
 }
 
+/// Whether Medium-quality atlas images are filtered through the hardware
+/// sampler via `FRUST_ENGINE_IMAGE_SAMPLER`. Cached: read once per process.
+///
+/// Off by default. When set, the renderer compiles the image-sampling strip
+/// programs from their `IMAGE_SAMPLER` specialisation (see
+/// [`crate::gpu::shader_src`]): a bilinear atlas image is read with one
+/// filtered `textureSampleLevel` instead of four `textureLoad` taps, at the
+/// filtering precision of the hardware rather than in full `f32`. Unset, no
+/// strip layout declares a sampler and every program is the manual one —
+/// pixel for pixel what the engine drew before the switch existed.
+/// `EngineRenderer::with_image_sampler` is its programmatic counterpart.
+pub fn image_sampler_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_ENGINE_IMAGE_SAMPLER"),
+            std::env::var("FRUST_ENGINE_IMAGE_SAMPLER").ok(),
+        )
+    })
+}
+
 /// The shortest class run worth a pipeline switch of its own, via
 /// `FRUST_ENGINE_RUN_SPLIT_MIN=<n>`; [`crate::gpu::strips::RUN_SPLIT_MIN`]
 /// when unset or unparsable. Cached: read once per process.
@@ -330,6 +351,13 @@ mod tests {
     #[test]
     fn pass_merging_is_on_unless_the_switch_is_set() {
         assert!(!pass_merge_disabled());
+    }
+
+    /// Unset in the gate: images are filtered by the manual four-tap path
+    /// unless the switch says otherwise.
+    #[test]
+    fn the_image_sampler_is_off_unless_the_switch_is_set() {
+        assert!(!image_sampler_enabled());
     }
 
     #[test]

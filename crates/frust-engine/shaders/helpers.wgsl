@@ -542,6 +542,35 @@ fn bilinear_sample(
     return mix(mix(a, b, uv_frac.y), mix(c, d, uv_frac.y), uv_frac.x);
 }
 
+//#if IMAGE_SAMPLER
+// Bilinear filtering through a hardware sampler: what `bilinear_sample`
+// computes, in one filtered fetch instead of four loads.
+//
+// `coords` is the texel-space sample position with texel i's centre at
+// i + 0.5 — `bilinear_sample`'s own `coords` plus half a texel. It is clamped
+// to the centres of the image's edge texels, which is exactly the clamp the
+// manual path applies to its taps: a tap never leaves the image's own atlas
+// rectangle, so a neighbouring slot's texels never reach the filter, for any
+// source rectangle and any extend mode, with no padding around the slot. Only
+// the precision of the weights differs — a sampler interpolates at the
+// hardware's sub-texel resolution rather than in full `f32`. Takes the
+// sampler as a parameter, like every texture here, so this prelude still
+// declares no binding. Only the strip program's sampler family keeps it (see
+// `strip.wgsl`'s IMAGE_SAMPLER); every other module carries it unused.
+fn sampled_bilinear(
+    tex: texture_2d_array<f32>,
+    linear_sampler: sampler,
+    coords: vec2<f32>,
+    atlas_idx: i32,
+    image_offset: vec2<f32>,
+    image_size: vec2<f32>,
+) -> vec4<f32> {
+    let centre = clamp(coords, image_offset + vec2(0.5), image_offset + image_size - vec2(0.5));
+    let uv = centre / vec2<f32>(textureDimensions(tex));
+    return textureSampleLevel(tex, linear_sampler, uv, atlas_idx, 0.0);
+}
+//#endif
+
 // Bicubic filtering with a Mitchell filter (B=1/3, C=1/3): sample the 16
 // surrounding texels of the target point and interpolate them with a cubic
 // filter. The 4x4 matrix holds the coefficients of the cubic function used to

@@ -178,6 +178,13 @@
 //! of it off: no segment is split, every pass draws through its state's one
 //! Uber pipeline, and no class program is warmed or built.
 //!
+//! `FRUST_ENGINE_IMAGE_SAMPLER` ([`EngineRenderer::with_image_sampler`]) picks
+//! the program *family* the classes are compiled from, not a class: in the
+//! sampler family every program that reads atlas images (the image classes
+//! and Uber) filters a bilinear image through one hardware sampler, which
+//! every strip bind group then carries beside the atlas array. The runs, and
+//! the pipelines a frame resolves, are the same in both families.
+//!
 //! # Paint resolution
 //!
 //! A solid colour travels inside the strip instance itself. Anything else the
@@ -252,7 +259,9 @@ use crate::filters::{FilterStep, ServedFilter, served_filter};
 use crate::gpu::atlas::{
     AtlasPageBuffers, AtlasRenderReport, AtlasRenderer, lower_encoded_image, push_solid_strips,
 };
-use crate::gpu::bindings::{ExternalRuns, ExternalTextures, lower_encoded_external};
+use crate::gpu::bindings::{
+    ATLAS_SAMPLER_BINDING, ExternalRuns, ExternalTextures, lower_encoded_external,
+};
 use crate::gpu::config::resource_widths_agree;
 use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
@@ -849,6 +858,38 @@ impl EngineRenderer {
         format: wgpu::TextureFormat,
         pipeline_cache: Option<&wgpu::PipelineCache>,
     ) -> Result<Self, EngineError> {
+        Self::with_image_sampler(
+            device,
+            caps,
+            format,
+            pipeline_cache,
+            config::image_sampler_enabled(),
+        )
+    }
+
+    /// [`Self::new`] with the strip program family stated rather than read
+    /// from `FRUST_ENGINE_IMAGE_SAMPLER` — the programmatic counterpart of
+    /// that switch, which only sets the family [`Self::new`] picks.
+    ///
+    /// With `image_sampler` set, every strip program that reads atlas images
+    /// filters a bilinear one through a hardware sampler instead of four
+    /// `textureLoad` taps (see [`crate::gpu::shader_src`]'s *The two program
+    /// families*), and every strip bind group carries the one linear,
+    /// clamp-to-edge sampler this renderer creates for it. A family is a
+    /// construction-time choice rather than a per-frame setter because it
+    /// decides which programs are compiled and warmed: a caller comparing the
+    /// two builds one renderer of each.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    pub fn with_image_sampler(
+        device: &wgpu::Device,
+        caps: &TierCaps,
+        format: wgpu::TextureFormat,
+        pipeline_cache: Option<&wgpu::PipelineCache>,
+        image_sampler: bool,
+    ) -> Result<Self, EngineError> {
         let dim = caps.resource_texture_dim;
         if !dim.is_power_of_two() || dim < MIN_RESOURCE_TEXTURE_DIM {
             return Err(EngineError::AtlasError);
@@ -856,7 +897,7 @@ impl EngineRenderer {
 
         let routing = ClassRouting::from_config();
         let mut library = ShaderLibrary::new();
-        let shaders = EngineShaders::register(&mut library, device);
+        let shaders = EngineShaders::register_family(&mut library, device, image_sampler);
         let mut pipelines = PipelineCache::new(Arc::new(library), pipeline_cache.cloned());
         pipelines.warm_up(device, &warm_up_descs_for(&shaders, format, routing.uber));
 
@@ -881,7 +922,7 @@ impl EngineRenderer {
             targets: IntermediateTargets::new(caps),
             pages: PageConfig::default(),
             textures: ExternalTextures::new(),
-            resources: FrameResources::new(device, dim),
+            resources: FrameResources::new(device, dim, image_sampler),
             scratch: Scratch::default(),
             routing,
             pass_merge: !config::pass_merge_disabled(),
@@ -900,6 +941,13 @@ impl EngineRenderer {
     #[must_use]
     pub fn format(&self) -> wgpu::TextureFormat {
         self.format
+    }
+
+    /// Whether this renderer's strip programs filter bilinear atlas images
+    /// through the hardware sampler (see [`Self::with_image_sampler`]).
+    #[must_use]
+    pub fn image_sampler(&self) -> bool {
+        self.shaders.image_sampler
     }
 
     /// The adapter capabilities every sizing decision is made against.
@@ -4343,6 +4391,11 @@ struct FrameResources {
     /// Every declared binding has to be bound for a pass to validate, whether
     /// or not an instance samples it.
     placeholders: Placeholders,
+    /// The linear, clamp-to-edge sampler the image-sampler program family
+    /// filters bilinear atlas images through, bound beside the atlas array in
+    /// every strip group 1; `None` for the default family, whose layout
+    /// declares no sampler (see [`EngineRenderer::with_image_sampler`]).
+    atlas_sampler: Option<wgpu::Sampler>,
     config: wgpu::Buffer,
     /// One viewport uniform per page round of the busiest frame so far.
     ///
@@ -4404,7 +4457,7 @@ struct FrameResources {
 }
 
 impl FrameResources {
-    fn new(device: &wgpu::Device, dim: u32) -> Self {
+    fn new(device: &wgpu::Device, dim: u32, image_sampler: bool) -> Self {
         let min = gpu::MIN_RESOURCE_TEXTURE_HEIGHT;
         Self {
             alphas: ResourceTexture::new(device, &gpu::alpha_texture_descriptor(dim, min)),
@@ -4414,6 +4467,7 @@ impl FrameResources {
             ),
             gradients: ResourceTexture::new(device, &gradient_texture_descriptor(dim, min)),
             placeholders: Placeholders::new(device),
+            atlas_sampler: image_sampler.then(|| atlas_sampler(device)),
             config: device.create_buffer(&config_descriptor("frust-engine config uniform")),
             page_configs: Vec::new(),
             instances: None,
@@ -4939,6 +4993,7 @@ impl FrameResources {
             &self.config,
             &self.placeholders,
             atlas_view,
+            self.atlas_sampler.as_ref(),
             &self.paints.view,
             &self.gradients.view,
         );
@@ -4975,6 +5030,7 @@ impl FrameResources {
             external_runs,
             atlas,
             placeholders,
+            atlas_sampler,
             ..
         } = self;
         let atlas_view = atlas
@@ -4991,9 +5047,10 @@ impl FrameResources {
             let Some(view) = externals.view(*key) else {
                 continue;
             };
-            groups
-                .externals
-                .insert(*key, images_bind_group(device, pipeline, atlas_view, view));
+            groups.externals.insert(
+                *key,
+                images_bind_group(device, pipeline, atlas_view, view, atlas_sampler.as_ref()),
+            );
         }
     }
 
@@ -5256,7 +5313,8 @@ impl StripBindGroups {
     ///
     /// `atlas` is the live [`AtlasArray`] view once the renderer has one, or
     /// [`Placeholders::atlas_array`] until then — the caller picks, since
-    /// only it knows which the frame's own `atlas_layers` calls for.
+    /// only it knows which the frame's own `atlas_layers` calls for. `sampler`
+    /// is [`FrameResources::atlas_sampler`].
     #[expect(
         clippy::too_many_arguments,
         reason = "one bind-group build's full resource list; a struct would \
@@ -5270,12 +5328,13 @@ impl StripBindGroups {
         config: &wgpu::Buffer,
         placeholders: &Placeholders,
         atlas: &wgpu::TextureView,
+        sampler: Option<&wgpu::Sampler>,
         paints: &wgpu::TextureView,
         gradients: &wgpu::TextureView,
     ) -> Self {
         let resources_group =
             resources_bind_group(device, pipeline, alphas, config, &placeholders.layer_input);
-        let images = images_bind_group(device, pipeline, atlas, &placeholders.external);
+        let images = images_bind_group(device, pipeline, atlas, &placeholders.external, sampler);
         let paints = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("frust-engine strip paints"),
             layout: &pipeline.get_bind_group_layout(2),
@@ -5326,33 +5385,73 @@ impl StripBindGroups {
     }
 }
 
-/// Group 1 of a strip pass: the image atlas array, and the caller-owned
-/// texture an external image paint samples.
+/// Group 1 of a strip pass: the image atlas array, the caller-owned texture
+/// an external image paint samples, and — in the image-sampler program family
+/// only — the sampler the atlas array is filtered through.
 ///
 /// One function for both shapes the group takes — `external` is
 /// [`Placeholders::external`] for the frame-wide group, or a registered view
 /// for the group a run of external instances is drawn with (see
 /// [`crate::gpu::bindings`]). Built against one pipeline's group layout, as
-/// [`resources_bind_group`] is.
+/// [`resources_bind_group`] is; `sampler` is present exactly when that layout
+/// declares one, which [`FrameResources::atlas_sampler`] already decides.
 fn images_bind_group(
     device: &wgpu::Device,
     pipeline: &wgpu::RenderPipeline,
     atlas: &wgpu::TextureView,
     external: &wgpu::TextureView,
+    sampler: Option<&wgpu::Sampler>,
 ) -> wgpu::BindGroup {
+    let textures = [
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(atlas),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::TextureView(external),
+        },
+    ];
+    let with_sampler;
+    let entries: &[wgpu::BindGroupEntry<'_>] = match sampler {
+        Some(sampler) => {
+            let [atlas, external] = textures;
+            with_sampler = [
+                atlas,
+                external,
+                wgpu::BindGroupEntry {
+                    binding: ATLAS_SAMPLER_BINDING,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ];
+            &with_sampler
+        }
+        None => &textures,
+    };
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("frust-engine strip images"),
         layout: &pipeline.get_bind_group_layout(1),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(atlas),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(external),
-            },
-        ],
+        entries,
+    })
+}
+
+/// The sampler the image-sampler program family filters bilinear atlas
+/// images through: linear in both directions, clamped to the edge, one mip.
+///
+/// Clamp-to-edge is a backstop rather than the mechanism: the shader already
+/// clamps every sample position to the centres of the image's own edge texels
+/// (`shaders/helpers.wgsl`'s `sampled_bilinear`), so the filter never reaches
+/// past the image's rectangle in the first place.
+fn atlas_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("frust-engine atlas sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
     })
 }
 

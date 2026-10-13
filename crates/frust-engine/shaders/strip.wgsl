@@ -43,10 +43,18 @@
 //   BLURRED_RECT   — the blurred rounded rectangle
 //   LAYER          — the layer colour source a composite reads its page through
 //
-// The directive lines are plain comments, so this file IS the Uber program
-// byte for byte: the class that enables every feature compiles it unchanged.
-// Every class binds the same groups through one explicit pipeline layout, so
-// a binding a class no longer reads is still declared here.
+// One more feature is not a class but a program FAMILY, chosen per renderer
+// (`FRUST_ENGINE_IMAGE_SAMPLER`):
+//
+//   IMAGE_SAMPLER  — inside IMAGE: bilinear atlas sampling through a hardware
+//                    sampler instead of four loads; its `//#else` arm is the
+//                    manual path every program of the default family keeps
+//
+// The directive lines are plain comments, and every class feature's block is
+// a whole arm of its own, so the class that enables every class feature — the
+// Uber program — is this file with only the IMAGE_SAMPLER arm blanked out.
+// Every class of a family binds the same groups through one explicit pipeline
+// layout, so a binding a class no longer reads is still declared here.
 
 // Color source modes: where the fragment shader gets color data from.
 // Use the payload (a color or image coordinates).
@@ -215,6 +223,14 @@ var atlas_texture_array: texture_2d_array<f32>;
 
 @group(1) @binding(1)
 var external_texture: texture_2d<f32>;
+
+// Declared only by the image programs of the sampler family, together with
+// the layout entry it binds against (`gpu::bindings`); every other program —
+// and every program of the default family — declares no sampler at all.
+//#if IMAGE_SAMPLER
+@group(1) @binding(2)
+var atlas_sampler: sampler;
+//#endif
 
 @group(2) @binding(0)
 var encoded_paints_texture: texture_2d<u32>;
@@ -440,6 +456,16 @@ fn fs_main(
             } else
 //#endif
             if image_quality == IMAGE_QUALITY_MEDIUM {
+//#if IMAGE_SAMPLER
+                sample_color = sampled_bilinear(
+                    atlas_texture_array,
+                    atlas_sampler,
+                    image_offset + extended_xy,
+                    i32(image_atlas_index),
+                    image_offset,
+                    image_size,
+                );
+//#else
                 let final_xy = image_offset + extended_xy - vec2(0.5);
                 sample_color = bilinear_sample(
                     atlas_texture_array,
@@ -450,6 +476,7 @@ fn fs_main(
                     image_extend_modes,
                     image_padding,
                 );
+//#endif
             } else {
                 let final_xy = image_offset + extended_xy;
                 sample_color = textureLoad(
