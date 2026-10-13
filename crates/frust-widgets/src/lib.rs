@@ -148,7 +148,10 @@ pub use scroll_controller::{AnimateTo, ScrollController, ScrollSubscription};
 pub use selection_toolbar::selection_toolbar;
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
-pub use slivers::{SliverBoxView, SliverBoxWidget, sliver_box};
+pub use slivers::{
+    SliverBoxView, SliverBoxWidget, SliverPaddingView, SliverPaddingWidget, sliver_box,
+    sliver_padding,
+};
 pub use stack::{Stack, StackView, StackWidget, stack};
 pub use text::{TextView, TextWidget, text};
 pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
