@@ -2,7 +2,7 @@
 resolver = "3"
 # Members are `crates/*`, `examples/*` and the explicitly listed `plugins/*` crates: no glob reaches
 # `plugins/` (or nested `plugins/i18n/macros`), and `benchmarks/` sits outside every member glob.
-members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/oauth-native", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn"]
+members = ["crates/*", "examples/*", "plugins/shared-preferences", "plugins/secure-storage", "plugins/camera", "plugins/native-widgets", "plugins/clipboard", "plugins/haptics", "plugins/url-launcher", "plugins/auth-session", "plugins/oauth-native", "plugins/iap", "plugins/database", "plugins/i18n", "plugins/i18n/macros", "plugins/video-player", "plugins/beui", "plugins/cupertino", "plugins/glyph", "plugins/material", "plugins/shadcn", "plugins/network-image"]
 # Standalone workspaces (gate each from its dir). huddle, plugins/clean-signals-frust: keep crates.io clean-signals
 # out of the root graph (Version-Pin Policy); hotpatch-spike: dx/subsecond pins likewise. shadertoy, glyph-catalog,
 # playground, material3-demo, native-widgets-demo: `frust create` scaffolds. design-system-sample: facade-only. web-*: wasm-only.
@@ -190,6 +190,7 @@ axum = "0.8"
 base64 = "0.22"
 tokio-util = "0.7"
 getrandom = "0.3"
+# Already locked at 0.10.9 transitively; frust-network-image also uses it for disk-cache file names.
 sha2 = "0.10"
 subtle = "2"
 percent-encoding = "2"
@@ -200,6 +201,16 @@ proptest = { version = "1.11.0", default-features = false, features = [
     "std",
     "bit-set",
 ] }
+# --- frust-network-image HTTP/TLS rows (plugin tier only; never a framework crate) ---------
+# reqwest 0.13.5 (MSRV 1.85 <= workspace 1.88), no crypto provider: the plugin selects ring and the
+# webpki roots below explicitly, so Android's platform verifier (Revoked for CRL-only roots) is
+# never consulted. `stream` feeds the disk cache; default charset/system-proxy stay off.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "stream"] }
+# 0.23 is the line reqwest 0.13.5 resolves. Provider = ring (pure Rust); aws-lc-rs is a C/cmake build
+# unproven on cargo-ndk/iOS.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Mozilla roots on every target (muxr lesson: the Android platform verifier's CRL bug).
+webpki-roots = "1.0.9"
 # intra-workspace
 frust-core = { path = "crates/frust-core", version = "0.6.1" }
 frust-scene = { path = "crates/frust-scene", version = "0.6.1" }
