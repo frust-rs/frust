@@ -18,7 +18,7 @@ use std::any::Any;
 use std::collections::HashMap;
 
 use frust::authoring::text::TextContext;
-use frust::authoring::{AnyView, DiscardScene, PaintOutcome, PaintScene, WidgetId, any};
+use frust::authoring::{AnyView, DiscardScene, PaintOutcome, PaintScene, View, WidgetId, any};
 use frust::{SizedBox, Theme, column, stack};
 use frust_core::{FrameTime, RenderRoot};
 use frust_material::overlay::{OverlayAnchor, anchored_overlay, overlay_anchor};
@@ -176,7 +176,7 @@ struct Picker {
     field_width: f64,
 }
 
-fn picker(anchor: &OverlayAnchor, state: &Picker) -> AnyView<Picker> {
+fn picker(anchor: &OverlayAnchor, state: &Picker) -> impl View<Picker> + use<> {
     let items = || {
         vec![
             dropdown_item("Apple", "apple"),
@@ -184,7 +184,7 @@ fn picker(anchor: &OverlayAnchor, state: &Picker) -> AnyView<Picker> {
             dropdown_item("Cherry", "cherry"),
         ]
     };
-    any(stack()
+    stack()
         .child(
             SizedBox(Some(state.field_width), Some(56.0))
                 .child(dropdown_field::<Picker>(items()).anchor(anchor).open(true)),
@@ -193,7 +193,7 @@ fn picker(anchor: &OverlayAnchor, state: &Picker) -> AnyView<Picker> {
             dropdown(items(), |_: &mut Picker, _| {})
                 .anchor(anchor)
                 .open(true),
-        ))
+        )
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn a_dropdown_panel_follows_a_field_that_resizes() {
         let mut audit = Audit::new(
             Picker { field_width: 180.0 },
             theme,
-            move |state: &mut Picker| picker(&anchor, state),
+            move |state: &mut Picker| any(picker(&anchor, state)),
         );
         audit.frame();
         audit.settle();

@@ -483,12 +483,12 @@ fn pan_zoom_pan_glide_and_controller_stay_in_sync() {
 // Navigator: programmatic push/pop transitions and the interactive edge swipe.
 // ---------------------------------------------------------------------------
 
-fn page(label: &'static str) -> AnyView<()> {
-    any(scroll_view(Column(
+fn page(label: &'static str) -> impl View<()> {
+    scroll_view(Column(
         std::iter::once(any(text(label)))
             .chain(rows(30, 40.0))
             .collect::<Vec<_>>(),
-    )))
+    ))
 }
 
 #[test]

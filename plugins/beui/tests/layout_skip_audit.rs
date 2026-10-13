@@ -20,7 +20,7 @@ use std::any::Any;
 use std::collections::HashMap;
 
 use frust::authoring::text::TextContext;
-use frust::authoring::{AnyView, DiscardScene, PaintOutcome, PaintScene, WidgetId, any};
+use frust::authoring::{AnyView, DiscardScene, PaintOutcome, PaintScene, View, WidgetId, any};
 use frust::{SizedBox, Theme, column, stack};
 use frust_beui::blocks::dynamic_island::{dynamic_island, dynamic_island_slot};
 use frust_beui::blocks::expandable_tabs::{expandable_tabs, expandable_tabs_item};
@@ -193,7 +193,7 @@ enum List {
     MultiSelect,
 }
 
-fn list_view(which: List, anchor: &OverlayAnchor, state: &Lists) -> AnyView<Lists> {
+fn list_view(which: List, anchor: &OverlayAnchor, state: &Lists) -> impl View<Lists> + use<> {
     let fruits = ["Apple", "Banana", "Cherry", "Damson"];
     let trigger: AnyView<Lists> = match which {
         List::Select => any(select_trigger(anchor, Some("Apple".to_string()))),
@@ -235,9 +235,9 @@ fn list_view(which: List, anchor: &OverlayAnchor, state: &Lists) -> AnyView<List
         .anchor(anchor)
         .open(true)),
     };
-    any(stack()
+    stack()
         .child(SizedBox(Some(state.trigger_width), Some(40.0)).child(trigger))
-        .child(list))
+        .child(list)
 }
 
 fn list_audit(which: List, theme: Theme) -> Audit<Lists> {
@@ -248,7 +248,7 @@ fn list_audit(which: List, theme: Theme) -> Audit<Lists> {
             query: String::new(),
         },
         theme,
-        move |state: &mut Lists| list_view(which, &anchor, state),
+        move |state: &mut Lists| any(list_view(which, &anchor, state)),
     )
 }
 

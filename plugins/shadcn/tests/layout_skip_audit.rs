@@ -24,7 +24,7 @@ use frust::authoring::scene::GlyphRun;
 use frust::authoring::text::TextContext;
 use frust::authoring::{
     AnyView, DiscardScene, InputEvent, PaintOutcome, PaintScene, PointerButton, PointerEvent,
-    PointerPhase, WidgetId, any,
+    PointerPhase, View, WidgetId, any,
 };
 use frust::{Theme, column};
 use frust_core::{FrameTime, RenderRoot};
@@ -213,7 +213,7 @@ struct Picker {
     trigger_width: f64,
 }
 
-fn picker(anchor: &OverlayAnchor, state: &Picker) -> AnyView<Picker> {
+fn picker(anchor: &OverlayAnchor, state: &Picker) -> impl View<Picker> + use<> {
     let options = || {
         vec![
             select_option("Apple"),
@@ -221,7 +221,7 @@ fn picker(anchor: &OverlayAnchor, state: &Picker) -> AnyView<Picker> {
             select_option("Cherry"),
         ]
     };
-    any(frust::stack()
+    frust::stack()
         .child(
             frust::SizedBox(Some(state.trigger_width), Some(36.0)).child(select_trigger(
                 anchor,
@@ -233,7 +233,7 @@ fn picker(anchor: &OverlayAnchor, state: &Picker) -> AnyView<Picker> {
             select(options(), Some(0), |_: &mut Picker, _| {})
                 .anchor(anchor)
                 .open(true),
-        ))
+        )
 }
 
 fn picker_audit(theme: Theme) -> Audit<Picker> {
@@ -243,7 +243,7 @@ fn picker_audit(theme: Theme) -> Audit<Picker> {
             trigger_width: 140.0,
         },
         theme,
-        move |state: &mut Picker| picker(&anchor, state),
+        move |state: &mut Picker| any(picker(&anchor, state)),
     )
 }
 
