@@ -16,8 +16,8 @@ use std::sync::Mutex;
 
 use frust::authoring::WindowInsets;
 use frust::{
-    AnyView, Brightness, GetUntracked, Set, Theme, Update, WindowMetrics, component, handles_back,
-    provide_context, push_back_press, text,
+    AnyView, Brightness, Component, GetUntracked, Set, Theme, Update, WindowMetrics, component,
+    handles_back, provide_context, push_back_press, text,
 };
 use frust_core::FrameTime;
 use frust_core::{PaintOutcome, PaintScene, RenderRoot, View};
@@ -725,6 +725,10 @@ fn tabs_back_at_a_tab_root_selects_home() {
     assert_eq!(h.selected(), 0, "back at B's root selected Home");
 }
 
+/// Narrow check only: this drives `pages::current` as the ROOT, where a
+/// section change is an `AnyView` type swap that always tears down. It does
+/// NOT exercise the shell's `pattern_switcher`; the `shell_*` tests below do.
+///
 /// Leaving the Tabs section unmounts the `back_fallback` wrapper: once pruned,
 /// the fallback stops claiming and its `on_back` never fires.
 #[test]
@@ -752,4 +756,168 @@ fn tabs_fallback_stops_claiming_after_the_section_unmounts() {
     h.frames(3);
     assert_eq!(h.selected(), 1, "on_back did not fire: B stays selected");
     assert!(!handles_back());
+}
+
+/// A root component that is `PlaygroundApp` verbatim (same `init`, same
+/// `build`) but hands a clone of its state out, so a test can drive the real
+/// shell (`pattern_switcher` hosting the sections) and read the Tabs state.
+/// Every `PlaygroundState` field is a shared handle, so the clone is live.
+struct ShellProbe(std::rc::Rc<std::cell::RefCell<Option<PlaygroundState>>>);
+
+impl Component for ShellProbe {
+    type State = PlaygroundState;
+
+    fn init(&self) -> PlaygroundState {
+        let state = PlaygroundApp.init();
+        *self.0.borrow_mut() = Some(state.clone());
+        state
+    }
+
+    fn build(&self, state: &mut PlaygroundState) -> impl View<PlaygroundState> {
+        PlaygroundApp.build(state)
+    }
+}
+
+/// Harness over the whole shell, rooted at the real navigator + switcher.
+struct ShellHarness {
+    root: RenderRoot<(), frust::ComponentView<ShellProbe>>,
+    handle: std::rc::Rc<std::cell::RefCell<Option<PlaygroundState>>>,
+    tcx: TextContext,
+    t_ms: u64,
+}
+
+impl ShellHarness {
+    fn new() -> Self {
+        clear_can_pop_provider();
+        frust::set_handles_back(false);
+        let mut h = ShellHarness {
+            root: RenderRoot::new(),
+            handle: Default::default(),
+            tcx: TextContext::new(),
+            t_ms: 0,
+        };
+        h.frames(3);
+        h
+    }
+
+    fn state(&self) -> PlaygroundState {
+        self.handle.borrow().clone().expect("the shell initialised")
+    }
+
+    fn frames(&mut self, count: usize) {
+        let handle = self.handle.clone();
+        let mut logic = move |_s: &mut ()| component(ShellProbe(handle.clone()));
+        let mut unit = ();
+        for _ in 0..count {
+            self.t_ms += 50;
+            frame_at(
+                &mut self.root,
+                &mut logic,
+                &mut unit,
+                &mut self.tcx,
+                self.t_ms,
+            );
+        }
+    }
+
+    /// Switch section the way the nav bar does, then run past the switcher's
+    /// settle (a counted number of 50 ms frames, well over its duration).
+    fn go_to(&mut self, label: &str) {
+        let state = self.state();
+        let index = pages::section_index_for(label).expect("known section");
+        let current = state.section.get_untracked();
+        state.reverse.set(index < current);
+        state.section.set(index);
+        self.frames(30);
+    }
+
+    fn select(&mut self, tab: usize) {
+        self.state().tabs.selected.set(tab);
+        self.frames(3);
+    }
+
+    fn push_pages(&mut self, tab: usize, count: usize) {
+        let state = self.state();
+        for _ in 0..count {
+            state.tabs.navs[tab].push(|| text("detail"));
+            self.frames(3);
+        }
+    }
+
+    fn depth(&self, tab: usize) -> usize {
+        self.state().tabs.navs[tab].depth()
+    }
+
+    fn selected(&self) -> usize {
+        self.state().tabs.selected.get_untracked()
+    }
+}
+
+/// Through the real shell: leaving Tabs never swallows back. B holds three
+/// pages, the section is switched away, and the outgoing section's navigator
+/// no longer claims the press; the shell's root navigator is at its root, so
+/// nothing handles back and a press leaves B alone.
+#[test]
+fn shell_leaving_tabs_does_not_swallow_back() {
+    let _guard = TABS_BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _owner = setup();
+    let mut h = ShellHarness::new();
+
+    h.go_to("tabs");
+    h.select(1);
+    h.push_pages(1, 2);
+    assert_eq!(h.depth(1), 3, "tab B holds three pages");
+    assert!(handles_back(), "mounted Tabs claims back");
+
+    h.go_to("layout");
+    assert!(
+        !handles_back(),
+        "after the switch only the root navigator (at its root) is left: nothing claims back"
+    );
+    push_back_press();
+    h.frames(3);
+    assert_eq!(h.depth(1), 3, "back did not pop B while Tabs is off screen");
+    assert_eq!(h.selected(), 1, "the selection is untouched");
+
+    // `selected` lives in PlaygroundState and survives the round trip, but
+    // the navigator's page stack is torn down with the section (the pages are
+    // closures mounted by the navigator widget), so B returns at its root.
+    h.go_to("tabs");
+    assert_eq!(h.depth(1), 1, "B's stack was torn down with the section");
+    assert_eq!(h.selected(), 1);
+}
+
+/// Through the real shell: B at its root, section switched away, back must not
+/// fire the Home fallback.
+#[test]
+fn shell_fallback_does_not_fire_after_leaving_tabs() {
+    let _guard = TABS_BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _owner = setup();
+    let mut h = ShellHarness::new();
+
+    h.go_to("tabs");
+    h.select(1);
+    assert_eq!(h.depth(1), 1, "B is at its root");
+
+    h.go_to("layout");
+    push_back_press();
+    h.frames(3);
+    assert_eq!(h.selected(), 1, "on_back did not fire: B stays selected");
+}
+
+/// Through the real shell, no switch: back at B's root selects Home.
+#[test]
+fn shell_back_at_tab_root_selects_home() {
+    let _guard = TABS_BACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _owner = setup();
+    let mut h = ShellHarness::new();
+
+    h.go_to("tabs");
+    h.select(1);
+    assert_eq!(h.depth(1), 1);
+    assert!(handles_back(), "the fallback claims back at B's root");
+
+    push_back_press();
+    h.frames(3);
+    assert_eq!(h.selected(), 0, "back at B's root selected Home");
 }
