@@ -53,7 +53,8 @@
 
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FrameTime,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, any,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, SliverConstraints, SliverGeometry,
+    SliverWidget, View, Widget, any,
 };
 use kurbo::{Point, Rect, Size};
 
@@ -281,7 +282,41 @@ impl Widget for AutoScrollZoneWidget {
         self.child.semantics_child(ctx);
     }
 
+    /// A zone is a sliver exactly when its child is: the transparent layout
+    /// runs through the child pod, so the sliver face is the zone itself and
+    /// the pod stays sized for this wrapper's own paint (the
+    /// [`ComponentWidget`](frust_core::ComponentWidget) pattern).
+    fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
+        if self.child.is_sliver() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     crate::authoring::visit_children!(child);
+}
+
+impl SliverWidget for AutoScrollZoneWidget {
+    /// Pass-through, like [`Widget::layout`]: the child sits at the origin and
+    /// receives `sc` unchanged, under the child pod's layout skip.
+    fn layout_sliver(&mut self, ctx: &mut LayoutCtx, sc: &SliverConstraints) -> SliverGeometry {
+        self.child.set_origin(Point::ZERO);
+        // A viewport reaches this only through `ChildPod::layout_sliver_child`,
+        // which asks `as_sliver` first, so `None` here means a caller invoked
+        // `layout_sliver` on a wrapper whose `as_sliver` answered `None`: a
+        // contract breach that fails in debug builds; release builds fall back
+        // to an empty sliver.
+        self.child
+            .layout_sliver_child(ctx, sc)
+            .unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "AutoScrollZoneWidget::layout_sliver called on a wrapper whose as_sliver answered None"
+                );
+                SliverGeometry::ZERO
+            })
+    }
 }
 
 #[cfg(test)]

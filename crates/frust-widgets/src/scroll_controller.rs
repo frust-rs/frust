@@ -356,11 +356,16 @@ impl ScrollController {
     ///   for at most a few frames (the list's own docs state the bound) — so
     ///   the row ends aligned even when the rows ahead of it were never
     ///   measured. A user `Down`, wheel or `Cancel` ends the request at once.
-    /// - **An unknown key is a no-op.** A key no row carries — or any key on a
-    ///   positional [`ListView::builder`](crate::ListView::builder) list, which
-    ///   has no keys — leaves the list where it is and reports itself only
-    ///   through a debug-build log, since a recorded command has no caller left
-    ///   to return a `Result` to.
+    /// - **An unknown key moves nothing.** A key no row carries — or any key
+    ///   on a positional [`ListView::builder`](crate::ListView::builder) list,
+    ///   which has no keys — leaves the list where it is and reports itself
+    ///   only through a debug-build log, since a recorded command has no caller
+    ///   left to return a `Result` to. It still replaces what an earlier
+    ///   command left in flight, as every item request does: a running
+    ///   [`ScrollController::animate_to`] (or animated `scroll_to_item`) tween
+    ///   stops where it stands and an earlier request stops correcting, while a
+    ///   user's own fling, settle or drag is left alone. `Nearest` on a row
+    ///   already fully visible behaves the same way.
     /// - **Lists only.** A [`ScrollView`](crate::ScrollView) holding this handle
     ///   ignores the request (debug-build log); its offset commands are
     ///   unaffected.
@@ -499,7 +504,7 @@ impl ScrollController {
     /// Resets `animating` to `false` for the new binding — a stale tween
     /// reported by whichever surface held the handle before never leaks
     /// into the new attach; a widget whose tween genuinely survives the
-    /// rebind (see `ScrollWidget`/`ListViewWidget::attach_controller`)
+    /// rebind (see `ScrollSurfaceCore::attach_controller` in `scroll_core.rs`)
     /// republishes its live state on the freshly bound handle right after.
     pub(crate) fn bind(&self) -> ScrollBinding {
         let mut shared = self.shared.borrow_mut();

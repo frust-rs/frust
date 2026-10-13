@@ -54,7 +54,7 @@
 
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, SemanticsCtx, View, Widget, mark_focus_orphaned,
+    PaintCtx, PaintScene, SemanticsCtx, SliverWidget, View, Widget, mark_focus_orphaned,
 };
 use kurbo::Size;
 
@@ -133,6 +133,15 @@ impl<L: Widget, R: Widget> Widget for EitherWidget<L, R> {
         match self {
             Self::Left(w) => w.type_name(),
             Self::Right(w) => w.type_name(),
+        }
+    }
+
+    /// The live arm's sliver face: a sliver arm stays a sliver through the enum,
+    /// and a box arm keeps answering `None`.
+    fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
+        match self {
+            Self::Left(w) => w.as_sliver(),
+            Self::Right(w) => w.as_sliver(),
         }
     }
 }
@@ -240,6 +249,11 @@ macro_rules! either_of {
             /// a tree element in its own right.
             fn type_name(&self) -> &'static str {
                 match self { $(Self::$V(w) => w.type_name(),)+ }
+            }
+
+            /// The live arm's sliver face, forwarded as for [`EitherWidget`].
+            fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
+                match self { $(Self::$V(w) => w.as_sliver(),)+ }
             }
         }
 

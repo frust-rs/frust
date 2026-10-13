@@ -57,6 +57,7 @@ mod safe_area;
 mod scaffold;
 mod scroll;
 pub mod scroll_controller;
+mod scroll_core;
 mod selection_toolbar;
 mod sized;
 mod slider;

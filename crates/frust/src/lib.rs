@@ -723,6 +723,17 @@ pub mod authoring {
         EitherWidget, either,
     };
 
+    /// The sliver protocol a scrolling viewport lays its children out with —
+    /// a widget implements [`SliverWidget`] and overrides
+    /// [`Widget::as_sliver`] to answer [`SliverConstraints`] with a
+    /// [`SliverGeometry`]; a viewport lays such a child out through
+    /// [`ChildPod::layout_sliver_child`]. Lifted so an app's own sliver needs no
+    /// direct `frust-core` dependency.
+    pub use frust_core::{
+        GrowthDirection, ScrollAxis, ScrollDirection, SliverConstraints, SliverGeometry,
+        SliverWidget,
+    };
+
     /// The clipboard/selection vocabulary an editable widget matches on —
     /// [`InputEvent::EditCommand`] carries one of these four verbs, already
     /// decoded from whatever chord, hardware key or edit-menu tap produced it.
