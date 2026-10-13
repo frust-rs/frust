@@ -9,10 +9,40 @@ use crate::decode::TargetPx;
 /// Default memory budget: 32 MiB of decoded RGBA8.
 pub(crate) const DEFAULT_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
-/// Cache identity: the URL plus the pixel box it was fitted to.
+/// Digest of a request's headers; `None` when there are none.
+pub(crate) type Scope = Option<[u8; 32]>;
+
+/// The credential scope of a request: `None` for no headers (so header-less
+/// keys are exactly the URL-only keys), else sha256 over the canonical form.
+///
+/// Canonical form: every header as `name\nvalue\n` with the name
+/// lower-cased, the pairs sorted by name then value, concatenated.
+pub(crate) fn header_scope(headers: &[(String, String)]) -> Scope {
+    use sha2::{Digest, Sha256};
+    if headers.is_empty() {
+        return None;
+    }
+    let mut pairs: Vec<(String, &str)> = headers
+        .iter()
+        .map(|(n, v)| (n.to_ascii_lowercase(), v.as_str()))
+        .collect();
+    pairs.sort();
+    let mut hasher = Sha256::new();
+    for (name, value) in pairs {
+        hasher.update(name.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(value.as_bytes());
+        hasher.update(b"\n");
+    }
+    Some(hasher.finalize().into())
+}
+
+/// Cache identity: the URL, the request-header scope, and the pixel box the
+/// image was fitted to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct CacheKey {
     pub(crate) url: String,
+    pub(crate) scope: Scope,
     pub(crate) target: Option<TargetPx>,
 }
 

@@ -7,25 +7,25 @@ expression: rendered
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (11-19 of 19)       │▓▓                
- DEVICES ↻ R      │    ( ) iap                                                   │▓▓                
-   none found     │        In-app purchases and subscriptions over Play Billing  │▓▓                
-                  │    ( ) video-player                                          │▓▓                
- SESSIONS         │        Video playback (Media3 ExoPlayer / AVPlayer) with     │▓▓                
-   none running   │    ( ) database                                              │▓▓                
-                  │        Embedded SQL database (SQLite via rusqlite;           │▓▓                
- ACTIONS          │    ( ) i18n                                                  │▓▓                
-   New project · n│        Fluent Project-based                                  │▓▓                
-   Add plugin · a │    ( ) glyph                                                 │▓▓                
-   Doctor · i     │        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
-   Build · b      │    ( ) material                                              │▓▓                
-   Clean · c      │        Material 3 catalog; needs frust_material::install()   │▓▓                
-   MCP off · M    │    ( ) cupertino                                             │▓▓                
-   DAP off · D    │        Cupertino catalog; needs frust_cupertino::install()   │▓▓                
-                  │    ( ) shadcn                                                │▓▓                
-                  │        shadcn/ui catalog; needs frust_shadcn::install() in   │▓▓                
-                  │  ▸ (o) network-image                                         │▓▓                
-                  │        Network image view: URL images with an in-memory +    │▓▓                
+                  │  Choose a plugin to add to this project  (13-21 of 21)       │▓▓                
+ DEVICES ↻ R      │    ( ) database                                              │▓▓                
+   none found     │        Embedded SQL database (SQLite via rusqlite;           │▓▓                
+                  │    ( ) i18n                                                  │▓▓                
+ SESSIONS         │        Fluent Project-based                                  │▓▓                
+   none running   │    ( ) glyph                                                 │▓▓                
+                  │        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
+ ACTIONS          │    ( ) material                                              │▓▓                
+   New project · n│        Material 3 catalog; needs frust_material::install()   │▓▓                
+   Add plugin · a │    ( ) cupertino                                             │▓▓                
+   Doctor · i     │        Cupertino catalog; needs frust_cupertino::install()   │▓▓                
+   Build · b      │    ( ) shadcn                                                │▓▓                
+   Clean · c      │        shadcn/ui catalog; needs frust_shadcn::install() in   │▓▓                
+   MCP off · M    │    ( ) network-image                                         │▓▓                
+   DAP off · D    │        Network image view: URL images with an in-memory +    │▓▓                
+                  │    ( ) share                                                 │▓▓                
+                  │        Share text or a URL through the platform share sheet  │▓▓                
+                  │  ▸ (o) qr                                                    │▓▓                
+                  │        QR code view (qrcode encoder, canvas-painted)         │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                

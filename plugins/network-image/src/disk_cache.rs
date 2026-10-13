@@ -1,6 +1,7 @@
 //! Persistent raw-bytes cache: sha256-named files, a JSON index, LRU byte cap.
 //!
-//! The URL is only ever hashed; it is never written to disk.
+//! The URL is only ever hashed; it is never written to disk. A request-header
+//! scope digest, when present, is folded into the hash (see `hex_key`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -69,8 +70,16 @@ fn unix_ms(t: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-fn hex_key(url: &str) -> String {
-    let digest = Sha256::digest(url.as_bytes());
+/// File stem for `url` under `scope`: `hex(sha256(url))` without a scope
+/// (the pre-scope name, so existing files stay valid), else
+/// `hex(sha256(url || scope))` with the raw 32 scope bytes appended.
+fn hex_key(url: &str, scope: Option<&[u8; 32]>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(url.as_bytes());
+    if let Some(scope) = scope {
+        hasher.update(scope);
+    }
+    let digest = hasher.finalize();
     let mut out = String::with_capacity(64);
     for b in digest {
         out.push_str(&format!("{b:02x}"));
@@ -191,7 +200,12 @@ impl DiskCache {
 
     /// The cached body for `url`, refreshing its recency.
     pub fn get(&self, url: &str) -> Option<Vec<u8>> {
-        let key = hex_key(url);
+        self.get_scoped(url, None)
+    }
+
+    /// Like [`get`](Self::get), within a request-header `scope` digest.
+    pub fn get_scoped(&self, url: &str, scope: Option<&[u8; 32]>) -> Option<Vec<u8>> {
+        let key = hex_key(url, scope);
         if !self.lock().entries.contains_key(&key) {
             return None;
         }
@@ -220,11 +234,17 @@ impl DiskCache {
     /// Store `bytes` for `url`, evicting LRU files to stay under the cap.
     /// Bodies larger than the cap are not stored.
     pub fn put(&self, url: &str, bytes: &[u8]) -> io::Result<()> {
+        self.put_scoped(url, None, bytes)
+    }
+
+    /// Like [`put`](Self::put), within a request-header `scope` digest. The
+    /// same URL under different scopes occupies distinct files.
+    pub fn put_scoped(&self, url: &str, scope: Option<&[u8; 32]>, bytes: &[u8]) -> io::Result<()> {
         let size = bytes.len() as u64;
         if size > self.cap {
             return Ok(());
         }
-        let key = hex_key(url);
+        let key = hex_key(url, scope);
         let mut st = self.lock();
         frust_paths::atomic_write(&data_path(&self.dir, &key), bytes)?;
         let stamp = st.stamp();

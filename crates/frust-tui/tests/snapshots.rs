@@ -709,7 +709,7 @@ fn add_plugin_select_step_last_entry_scrolled_100x30() {
         );
     }
     assert!(
-        rendered.contains("\u{25b8} (o) network-image"),
+        rendered.contains("\u{25b8} (o) qr"),
         "the focused last card must be drawn:\n{rendered}"
     );
 

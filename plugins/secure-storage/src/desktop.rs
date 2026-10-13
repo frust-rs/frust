@@ -91,7 +91,11 @@ fn ensure_default_store() -> Result<(), SecureStorageError> {
             .map_err(|e| e.to_string())
     })
     .clone()
-    .map_err(SecureStorageError::Storage)
+    .map_err(|e| {
+        SecureStorageError::Storage(format!(
+            "{e} (debug builds without a keyring: set FRUST_SECURE_STORAGE_INSECURE_FILE=1 for the plaintext file backend)"
+        ))
+    })
 }
 
 /// Map a `keyring-core` error to the crate's error taxonomy. `keyring-core`

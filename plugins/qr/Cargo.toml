@@ -1,0 +1,26 @@
+[package]
+name = "frust-qr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "QR code view for Frust apps: a canvas-painted, scannable qr_code(payload) widget with ECC level, quiet zone and colours."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+# Facade-tier plugin (no OS arm). Published as frust-ui, imported as frust (crates.io `frust` is taken).
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.1", default-features = false }
+# Encoder only: the workspace row drops qrcode's image/svg renderers.
+qrcode = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Decoder for the round-trip matrix (greyscale closure input, no `image` feature needed).
+rqrr = { workspace = true }
+# Test-only: tests/paint.rs drives a real `RenderRoot` (not re-exported by the facade).
+frust-core = { workspace = true }
+frust-reactive = { workspace = true }
