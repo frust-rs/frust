@@ -19,10 +19,14 @@
 //!
 //! Upstream's four components all sit on a continuously readable scroll value:
 //! Motion's `useScroll`, or the `useSmoothScroll()` context Lenis publishes.
-//! frust has no such thing. `ScrollView::on_scroll` is the **sole** delivery
-//! route for a scroll position — there is no mid-paint query and no readable
-//! controller — so every component here is a *controlled* one: the app folds the
-//! callback into a [`ScrollFx`](crate::motion::ScrollFx) and passes the
+//! frust does have a readable, writable seam: `ScrollController` (readable
+//! `offset`/`on_change`, writable `jump_to`/`animate_to`, attached via
+//! `ScrollView::controller` / `ListView::controller`). This component family
+//! has not been migrated onto it yet, so it still takes its position through
+//! `ScrollView::on_scroll`; the migration is tracked by `docs/LIMITATIONS.md`
+//! `scroll-view-no-external-offset-seam`. Until then every component here is a
+//! *controlled* one: the app folds the callback into a
+//! [`ScrollFx`](crate::motion::ScrollFx) and passes the
 //! resulting `0..=1` progress in as a prop, exactly the way
 //! [`crate::motion::scroll_fx`] describes.
 //!
@@ -50,15 +54,14 @@
 //! velocity) and by [`scroll_to`] (the programmatic ease). This is a
 //! **non-port**, recorded for `docs/LIMITATIONS.md`, not an omission.
 //!
-//! # Degradation: `ScrollTo` animates an offset it cannot apply
+//! # Current state: `ScrollTo` animates a signal, not a surface
 //!
 //! Upstream's `scrollTo` calls into Lenis (or `window.scrollTo`) and the page
-//! moves. Verified against the assigned base: **frust's `ScrollView` exposes no
-//! programmatic-scroll seam at all** — its whole surface is `on_scroll`,
-//! `on_refresh_release`, `physics` and `overscroll_effect`, and while
-//! `ScrollWidget::offset()` reads the position there is no setter, no
-//! controller, and no view-level target prop. There is therefore nothing for a
-//! component in this tier to drive.
+//! moves. The framework's counterpart is [`frust::ScrollController`]: `animate_to`
+//! and `jump_to` move the `ScrollView` or `ListView` it is attached to, through
+//! `ScrollView::controller` / `ListView::controller`. This component does not
+//! drive a controller yet, so [`scroll_to`] publishes each frame's value into a
+//! caller-owned signal instead.
 //!
 //! What [`scroll_to`] ports is the *animation*: on activation it runs upstream's
 //! own Lenis easing ([`ease_scroll`]) over upstream's own default duration
@@ -66,8 +69,8 @@
 //! **publishes each frame's value into a caller-owned signal**. An app binds
 //! that signal to whatever consumes an offset. It is a real port of the curve,
 //! the duration and the reduced-motion jump; it is not a port of the effect on a
-//! scroll surface, and it cannot be until the framework grows a controller.
-//! Recorded as a framework finding rather than worked around here.
+//! scroll surface. Driving an attached controller from it is the migration tracked by
+//! `docs/LIMITATIONS.md` under `scroll-view-no-external-offset-seam`, and is not done here.
 //!
 //! # The two local springs
 //!

@@ -34,21 +34,19 @@
 //! # Why the widget owns its offset
 //!
 //! The card asks for this to be built on [`frust::scroll_view`] plus
-//! [`ScrollFx`](crate::motion::ScrollFx), and only half of that is reachable —
-//! for a reason worth recording rather than rediscovering, and the same one
-//! `frust_shadcn`'s port records:
+//! [`ScrollFx`](crate::motion::ScrollFx). The framework now has the offset seam
+//! the scroll side needs: [`frust::ScrollController`] writes the offset from
+//! outside event dispatch (`jump_to`, `animate_to`), reads it back (`offset`,
+//! `max_offset`) and reports changes (`on_change`), attached through
+//! `ScrollView::controller` / `ListView::controller`. This widget has not been
+//! migrated onto it yet; the migration is tracked by `docs/LIMITATIONS.md` under
+//! `scroll-view-no-external-offset-seam`.
 //!
-//! - **There is no offset *write* seam.** Nothing in the baseline's public
-//!   surface sets a scroll position from outside; the only way to move it is to
-//!   synthesize an `InputEvent::Scroll` into it, which needs an `EventCtx` —
-//!   available *only* during an event pass. Content growth arrives on a
-//!   rebuild, and a rebuild dispatches no event, so a wrapped `scroll_view`
-//!   would stay put until the reader next touched the screen: the one moment
-//!   pin-to-bottom exists for is exactly the moment it could not act.
-//! - **There is no offset *read* seam either.** `ScrollWidget::offset` sits on a
-//!   type the facade does not export.
+//! Pin-to-bottom has to act when content grows. Content growth arrives on a
+//! rebuild, which dispatches no event, so the pin is applied to the offset this
+//! widget owns rather than through an event pass.
 //!
-//! So this widget is a scroll surface in its own right: it clips a viewport,
+//! Until then, this widget is a scroll surface in its own right: it clips a viewport,
 //! owns the offset, and consumes the wheel/drag itself — over the framework's
 //! *shared* gesture vocabulary ([`frust::input`]'s `TOUCH_SLOP`,
 //! `WHEEL_LINE_PX`, `VelocityTracker` and the fling-decay math), so its feel is

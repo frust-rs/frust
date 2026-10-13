@@ -33,23 +33,21 @@
 //! # Why the manager owns the offset (and what that cost)
 //!
 //! The obvious shape — wrap [`frust::scroll_view`] the way
-//! [`scroll_area`](crate::components::scroll_area) does and drive it — does not
-//! work, for a reason worth recording rather than rediscovering:
+//! [`scroll_area`](crate::components::scroll_area) does and drive it — is the
+//! shape the framework's [`ScrollController`](frust::ScrollController) serves.
+//! It writes the offset from outside event dispatch (`jump_to`, `animate_to`,
+//! `scroll_to_item`), reads it back (`offset`, `max_offset`), reports changes
+//! (`on_change`), and attaches to a surface through `ScrollView::controller` or
+//! `ListView::controller`. This component has not been migrated onto that seam
+//! yet: it still owns its offset and consumes the wheel and drag itself, as
+//! described below. The migration is tracked by `docs/LIMITATIONS.md` under
+//! `scroll-view-no-external-offset-seam`.
 //!
-//! - **There is no offset *write* seam.** Nothing in the baseline's public
-//!   surface sets a scroll position from outside (the same limit
-//!   `scroll_area`'s docs record for its un-draggable thumb). The only way to
-//!   move it is to synthesize an `InputEvent::Scroll` into it, which needs an
-//!   `EventCtx` — available *only* during an event pass. Content growth arrives
-//!   on a rebuild, and a rebuild dispatches no event, so a wrapped baseline
-//!   would stay put until the reader next touched the screen: the one moment
-//!   stick-to-bottom exists for is exactly the moment it could not act.
-//! - **There is no offset *read* seam either.** `ScrollWidget::offset` sits on a
-//!   type the facade does not export, so a wrapper cannot ask its child where it
-//!   is; `scroll_area` solves that by making the app feed the position back,
-//!   which turns every frame of a fling into an app-state round trip.
+//! Stick-to-bottom has to act when content grows. Content growth arrives on a
+//! rebuild, which dispatches no event, so the pin is applied to the offset this
+//! widget owns rather than through an event pass.
 //!
-//! So this widget is a scroll surface in its own right: it clips a viewport,
+//! Until then, this widget is a scroll surface in its own right: it clips a viewport,
 //! owns the offset, and consumes the wheel/drag itself — using the framework's
 //! shared gesture vocabulary ([`frust::input`]'s `TOUCH_SLOP`, `WHEEL_LINE_PX`,
 //! `VelocityTracker` and the fling-decay math) so its feel matches the baseline
