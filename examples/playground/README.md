@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between thirteen sections
+`pattern_switcher`-hosted section body, selecting between fourteen sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all thirteen
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all fourteen
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -128,6 +128,12 @@ The sections, in order:
     keys cycle the drop gap, `Enter`/Space drops) with a live
     `from -> to` readout; and a desktop-only OS file-drop zone listing
     dropped files by name (never their contents).
+14. **Tabs** — the Android back-routing device-gate surface: three tabs, each
+    with its own `frust::navigator` stack, kept mounted in an `IndexedStack`
+    and wrapped in a home-tab `back_fallback`. Back pops the selected tab's
+    stack first, then returns a non-home tab root to Home, and at the Home
+    root exits the app. Tab B's root carries a text field for the focus/IME
+    leg; a status line prints the selected tab and every tab's depth.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with

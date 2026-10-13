@@ -124,9 +124,10 @@ Pre-1.0. APIs are unstable and may change without notice between commits.
 >   frame gate, cosmetic-loop pacing, and viewport culling bound *how many*
 >   frames render (a static screen renders none; a decorative loop is capped
 >   at the theme's cosmetic rate), not what each one costs.
-> - **Back handling is single-navigator, process-wide** — concurrently-live
->   navigators (per-tab stacks, multi-window) are unsupported until the
->   back provider slot is widened to a stack.
+> - **Back handling is single-window** — the Android back press is routed
+>   across nested and per-tab navigators, but the arbitration state is
+>   process-wide, so multi-window apps cannot route back per window (see
+>   `back-single-window` in `docs/LIMITATIONS.md`).
 >
 > `frust-engine`, the frust-owned strips-on-wgpu renderer, carries its own
 > named alpha-state gaps, notably:

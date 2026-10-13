@@ -6,6 +6,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Added
+
+- `IndexedStack` / `indexed_stack` in `frust-widgets`, re-exported by the facade: it keeps every
+  child mounted, and only the selected child is painted, routed input and reachable for back, so
+  per-tab navigator stacks route Android back to the selected tab.
+- `frust::BackFallback` and `frust::back_fallback(&fallback, child)`: a non-navigator back
+  registrant ranked after every navigator (for example back-to-home-tab at a tab root). It is live
+  while its wrapper is mounted.
+- The playground's Tabs section: per-tab navigators under an `IndexedStack` with a home-tab
+  `back_fallback`, a device-gate surface for Android back routing.
+
 ## 0.6.1 — 2026-10-12
 
 A patch release that also carries two narrow source changes for code that calls the authoring child
