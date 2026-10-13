@@ -353,6 +353,7 @@ mod tests {
         let mut tcx = TextContext::new();
         let mut root: RenderRoot<PlaygroundState, AnyView<PlaygroundState>> = RenderRoot::new();
         let mut state = PlaygroundState::new();
+        // erasure: keep the headless test root is typed `AnyView`; the page is erased once at this boundary
         let mut logic = |s: &mut PlaygroundState| any(page(s));
         root.rebuild(&mut logic, &mut state);
         let tcx_any: &mut dyn Any = &mut tcx;
