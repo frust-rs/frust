@@ -68,6 +68,8 @@ mod android;
 mod apple;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod desktop;
+pub mod maps;
+pub use maps::Maps;
 mod url;
 
 /// Errors from a [`UrlLauncher::open_external`] call.
