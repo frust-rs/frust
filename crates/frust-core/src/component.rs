@@ -323,9 +323,11 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
             // Read before the `widget_mut` borrow below.
             let child_focused = element.child.is_focused();
             let (flags, swapped) = {
+                // The non-marking accessor: the pod is marked below from the
+                // rebuild's own flags (see `ChildPod::widget_mut_for_rebuild`).
                 let boxed = element
                     .child
-                    .widget_mut()
+                    .widget_mut_for_rebuild()
                     .downcast_mut::<Box<dyn Widget>>()
                     .expect("component child element is a boxed AnyView widget");
                 let before = {
@@ -371,6 +373,13 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
                 if outer_has_focus && child_focused {
                     crate::event::mark_focus_orphaned();
                 }
+            }
+            // The layout-skip dirty source for the component's own child pod: it
+            // is rebuilt here rather than through a reconciler, so the mark the
+            // reconcilers apply is spelled by hand. The component's *own* pod is
+            // marked by whoever rebuilt it, from the same `flags` returned below.
+            if swapped || flags.contains(ChangeFlags::LAYOUT) {
+                element.child.mark_layout_dirty();
             }
             element.prev = new_view;
             flags
@@ -461,7 +470,7 @@ impl<C: Component> Widget for ComponentWidget<C> {
         // per-context field (see `crate::event`'s `CURSOR_REQUEST`), so a
         // `set_cursor` below this boundary already reaches the root, and the
         // component boundary is transparent to it by construction.
-        let (result, needs_redraw, captured, hover_claimed, focus_req, focus_rel, ime) = {
+        let (result, needs_redraw, layout, captured, hover_claimed, focus_req, focus_rel, ime) = {
             // Spelled per field (not through `state_mut`) so the borrow stays
             // disjoint from `self.child` below.
             #[cfg(feature = "hotpatch")]
@@ -480,6 +489,7 @@ impl<C: Component> Widget for ComponentWidget<C> {
             (
                 result,
                 inner.needs_redraw(),
+                (inner.needs_layout(), inner.is_layout_path_dirty()),
                 inner.is_pointer_captured(),
                 inner.is_hover_claimed(),
                 inner.is_focus_requested(),
@@ -490,6 +500,10 @@ impl<C: Component> Widget for ComponentWidget<C> {
         if needs_redraw {
             ctx.request_redraw();
         }
+        // The layout request and the layout-dirty path bit cross the state
+        // boundary like the redraw: the inner pod marked itself, and the pods
+        // above this component must mark themselves too.
+        ctx.absorb_layout(layout.0, layout.1);
         if captured {
             ctx.capture_pointer();
         }

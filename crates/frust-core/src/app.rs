@@ -14,8 +14,9 @@
 //! ViewSequence / multiple children are explicitly out of scope for now.
 
 use std::any::Any;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::num::NonZeroU64;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use kurbo::{Point, Rect, Size};
@@ -38,7 +39,7 @@ use crate::selection_toolbar::{
 use crate::semantics::{ROOT_NODE_ID, SemanticsCtx, SemanticsUpdate};
 use crate::tree::{InspectNode, WidgetPod, WidgetTree};
 use crate::view::{BuildCtx, ChangeFlags, View, WidgetId};
-use crate::widget::{LayoutCtx, PaintCtx, PaintOutcome, PaintScene, PlatformViewFrame};
+use crate::widget::{ChildPod, LayoutCtx, PaintCtx, PaintOutcome, PaintScene, PlatformViewFrame};
 
 /// The window's shape and platform-occlusion state, delivered to app code as a
 /// plain [`provide_context`](reactive_graph::owner::provide_context)-carried
@@ -607,6 +608,38 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// clear: a shell diffs the generation to notice the menu went *away* just as
     /// much as to notice it appeared.
     selection_toolbar_gen: u64,
+    /// The global layout epoch threaded into every layout pass
+    /// ([`LayoutCtx::layout_epoch`]). Bumped for each global layout input that
+    /// does not reach a widget through its constraints — a theme swap
+    /// ([`RenderRoot::set_theme`], which is also the path a shell's text-context
+    /// font drain takes), an actual inset change ([`RenderRoot::set_insets`]), a
+    /// window-size change seen by [`RenderRoot::layout`] — and when a floated
+    /// surface's pod is found dirty (see `overlay_pods`). A pod that last laid
+    /// out under another epoch lays out again, so a bump invalidates every
+    /// cached layout at once. Starts at `1`, past a fresh pod's `0`.
+    layout_epoch: u64,
+    /// Whether layout passes may skip clean pods ([`RenderRoot::set_layout_skip`]);
+    /// `true` by default. `false` forces every pod to lay out every pass — the
+    /// kill switch a shell wires to an environment variable (this crate reads
+    /// none itself).
+    layout_skip: bool,
+    /// Weak handles to the pods of the floated surfaces the **last** paint
+    /// drew, refreshed every paint beside `overlay_hits`.
+    ///
+    /// A floated pod is laid out by its *owner* (inside the owner's own
+    /// `layout`) but painted and fed paint-time requests by this root, outside
+    /// the owner's pod chain — so a paint-time frame request or a substituted
+    /// event dispatch can dirty the floated pod while every pod above its owner
+    /// stays clean, and the owner's layout (the only route to the floated pod)
+    /// would be skipped. [`RenderRoot::layout`] therefore checks these first and
+    /// bumps the epoch when any is dirty: conservative (the whole tree lays out
+    /// while a surface animates) but correct.
+    ///
+    /// Weak, never strong, so the root still co-owns no pod (see
+    /// `overlay_hits`): a surface whose owner dropped it simply fails to
+    /// upgrade. The check borrows each pod only for the length of one flag read,
+    /// at the start of a layout pass, when no pass holds a borrow.
+    overlay_pods: Vec<Weak<RefCell<ChildPod>>>,
     _state: core::marker::PhantomData<fn(&mut State)>,
 }
 
@@ -651,8 +684,52 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             overlay_hits: Vec::new(),
             selection_toolbar: None,
             selection_toolbar_gen: 0,
+            layout_epoch: 1,
+            layout_skip: true,
+            overlay_pods: Vec::new(),
             _state: core::marker::PhantomData,
         }
+    }
+
+    /// Switch the layout skip on (the default) or off.
+    ///
+    /// With the skip on, a layout pass lays out only the pods that are dirty,
+    /// whose constraints changed, or that last laid out under an older layout
+    /// epoch — see [`ChildPod::layout_child`] for the rule and its dirty
+    /// sources. `false` forces every pod to lay out on every pass, exactly the
+    /// pre-skip behaviour: the kill switch a shell exposes (this crate reads no
+    /// environment variable itself). Takes effect from the next
+    /// [`RenderRoot::layout`]; dirties nothing by itself.
+    pub fn set_layout_skip(&mut self, skip: bool) {
+        self.layout_skip = skip;
+    }
+
+    /// Whether layout passes may skip clean pods ([`RenderRoot::set_layout_skip`]).
+    pub fn layout_skip(&self) -> bool {
+        self.layout_skip
+    }
+
+    /// The global layout epoch the next layout pass runs under — read-only, for
+    /// tooling and tests. It moves on a theme swap, an inset change, a window
+    /// resize, and a dirty floated surface (see [`ChildPod::layout_child`]).
+    pub fn layout_epoch(&self) -> u64 {
+        self.layout_epoch
+    }
+
+    /// Invalidate every pod's cached layout: the next pass lays out the whole
+    /// tree.
+    fn bump_layout_epoch(&mut self) {
+        self.layout_epoch = self.layout_epoch.wrapping_add(1);
+    }
+
+    /// Whether any floated surface the last paint drew is layout-dirty (see
+    /// `overlay_pods`). A pod already borrowed elsewhere — impossible between
+    /// passes, but cheap to tolerate — counts as dirty.
+    fn overlay_pod_dirty(&self) -> bool {
+        self.overlay_pods.iter().any(|weak| {
+            weak.upgrade()
+                .is_some_and(|pod| pod.try_borrow().map_or(true, |pod| pod.is_layout_dirty()))
+        })
     }
 
     /// Store the app's active theme, threaded into every subsequent
@@ -674,6 +751,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     pub fn set_theme(&mut self, theme: Box<dyn Any>) {
         self.theme = Some(theme);
         self.pending |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        // A theme is a global layout input no constraint carries: every cached
+        // layout is stale (the layout skip — see `layout_epoch`).
+        self.bump_layout_epoch();
         // A theme swap can change semantics-visible state (e.g. a relabelled or
         // re-bounded node once layout re-runs); treat it as semantics-dirty too.
         self.semantics_gen = self.semantics_gen.wrapping_add(1);
@@ -705,6 +785,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         }
         self.insets = insets;
         self.pending |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        // Global and constraint-free, like the theme: invalidate every cached
+        // layout (see `layout_epoch`).
+        self.bump_layout_epoch();
         // A moved inset shifts laid-out node bounds once layout re-runs; treat
         // it as semantics-dirty too (mirrors `set_theme`).
         self.semantics_gen = self.semantics_gen.wrapping_add(1);
@@ -1185,6 +1268,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         self.tree.inspect()
     }
 
+    /// Per-node layout-dirty state, in exactly [`RenderRoot::inspect`]'s
+    /// pre-order and with its ids — read-only, for tooling and tests. See
+    /// [`WidgetTree::inspect_layout_dirty`].
+    pub fn inspect_layout_dirty(&self) -> Vec<(WidgetId, bool)> {
+        self.tree.inspect_layout_dirty()
+    }
+
     /// Run the build closure, then build (first call) or rebuild (subsequent calls)
     /// the root widget, returning what changed.
     ///
@@ -1436,7 +1526,18 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// optional text context and the stored theme into a [`LayoutCtx`], and
     /// records the size the root returns.
     fn layout_inner(&mut self, window_size: Size, text_ctx: Option<&mut dyn Any>) -> Size {
+        // The window size is a global layout input (an overlay pod is laid out
+        // against it, not against its owner's constraints): a change invalidates
+        // every cached layout. Compared against what the last pass stored.
+        if self.window_size != window_size {
+            self.bump_layout_epoch();
+        }
         self.window_size = window_size;
+        // A floated surface dirtied outside its owner's pod chain (see
+        // `overlay_pods`) is reachable only through a full pass.
+        if self.overlay_pod_dirty() {
+            self.bump_layout_epoch();
+        }
         let Some(root_id) = self.root_id else {
             return Size::ZERO;
         };
@@ -1447,6 +1548,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // Copied out before the `&mut self.tree` borrow below (a disjoint,
         // `Copy` field read).
         let insets = self.insets;
+        let layout_epoch = self.layout_epoch;
+        let layout_skip = self.layout_skip;
         let Some(pod) = self.tree.pod_mut(root_id) else {
             return Size::ZERO;
         };
@@ -1459,6 +1562,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // lays it out against this rather than against its own constraints (see
         // `LayoutCtx::window_size`).
         ctx.set_window_size(window_size);
+        // The layout skip's two global inputs: the epoch every pod compares its
+        // own against, and the kill switch (see `ChildPod::layout_child`). The
+        // root widget itself sits in no `ChildPod` and is always laid out.
+        ctx.set_layout_epoch(layout_epoch);
+        ctx.set_layout_force(!layout_skip);
         let size = pod.widget_mut().layout(&mut ctx, &bc);
         pod.set_layout(Point::ZERO, size);
         size
@@ -1520,6 +1628,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         sort_into_paint_order(&mut entries);
         // Retain the routing half — never the pods — for the next event pass.
         self.overlay_hits = entries.iter().map(OverlayHit::of).collect();
+        // ... and a weak handle to each pod, for the next layout pass's
+        // dirty-surface check (see `overlay_pods`).
+        self.overlay_pods = entries
+            .iter()
+            .map(|entry| Rc::downgrade(&entry.pod))
+            .collect();
         let (holder, holder_ime) = self.paint_overlays(&entries, scene, frame_time, &mut outcome);
         // Release the owners' pod clones before the pass ends: the root holds no
         // overlay pod at rest, so a pod's lifetime stays exactly its owner's.
@@ -2369,6 +2483,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             };
             root_opted_in = frame.close().0;
             let handled = matches!(result, EventResult::Handled);
+            // The event fold of `EventCtx::request_layout`: a widget that changed
+            // its own layout-affecting state asks for a layout pass, which a
+            // shell gating layout on the pending flags must see (the mirror of
+            // `paint_main_tree`'s fold of `PaintCtx::request_layout`).
+            if ctx.needs_layout() {
+                self.pending |= ChangeFlags::LAYOUT;
+            }
             (
                 handled,
                 ctx.needs_redraw() || handled,
