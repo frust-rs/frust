@@ -2608,6 +2608,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-share"
+version = "0.6.1"
+dependencies = [
+ "frust-clipboard",
+ "frust-plugin",
+ "jni 0.22.4",
+ "kurbo",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "frust-shared-preferences"
 version = "0.6.1"
 dependencies = [

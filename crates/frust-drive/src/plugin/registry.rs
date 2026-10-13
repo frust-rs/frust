@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — nineteen entries mirroring `plugins/`:
+//! The static plugin registry (v1) — twenty entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -647,6 +647,23 @@ const NETWORK_IMAGE: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `share`'s single base contribution: a Cargo dependency only. Android's
+/// `ACTION_SEND` chooser needs no permission or `<queries>` entry, and the iOS
+/// activity sheet needs no plist key.
+const SHARE_BASE: &[Contribution] = &[Contribution::CargoDep {
+    name: "frust-share",
+}];
+
+const SHARE: PluginSpec = PluginSpec {
+    id: "share",
+    summary: "Share text or a URL through the platform share sheet (Android chooser, iOS \
+              activity sheet, desktop clipboard fallback)",
+    crate_dir: "share",
+    base: SHARE_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -671,6 +688,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         CUPERTINO,
         SHADCN,
         NETWORK_IMAGE,
+        SHARE,
     ]
 }
 
@@ -690,7 +708,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_nineteen_v1_plugins() {
+    fn registry_lists_the_twenty_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -714,6 +732,7 @@ mod tests {
                 "cupertino",
                 "shadcn",
                 "network-image",
+                "share",
             ]
         );
     }
