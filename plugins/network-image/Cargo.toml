@@ -29,3 +29,6 @@ log = { workspace = true }
 [features]
 default = ["reqwest"]
 reqwest = ["dep:reqwest", "dep:rustls", "dep:webpki-roots"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
