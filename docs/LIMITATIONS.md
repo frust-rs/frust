@@ -7205,11 +7205,25 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 **Applies to**: every `network_image` view whose URL's content changes while the same URL stays cached (memory or disk).
 
-**Why accepted**: the cache keys on the URL alone and treats a successful fetch as immutable, which is right for the content-addressed and versioned URLs the plugin targets; revalidation needs a conditional-request path through the `ImageFetcher` seam.
+**Why accepted**: the cache keys on the URL (plus a digest of the request headers) and treats a successful fetch as immutable, which is right for the content-addressed and versioned URLs the plugin targets; revalidation needs a conditional-request path through the `ImageFetcher` seam.
 
 **Trigger for removal**: a card adding conditional requests (`If-None-Match`/`If-Modified-Since`) and expiry to the disk cache.
 
 **Evidence**: `plugins/network-image/src/disk_cache.rs` (index stores only size and last-access time) and `src/fetch.rs` (`FetchedBytes` carries bytes and content type only).
+
+---
+
+### `network-image-cache-holds-private-bodies` — bodies fetched with credentials persist unencrypted in the app cache directory
+
+**Observed**: an image fetched with request headers (for example `Authorization`) is cached like any other: decoded in memory and, with the disk cache enabled, as raw bytes in a file under the app cache directory. The cache key includes a digest of the headers, so another credential never receives it, but the file is not encrypted and stays until LRU eviction or `clear_disk`/`clear_all`. There is no TTL and no `Cache-Control: no-store`/`private` handling.
+
+**Applies to**: `network_image` views and `ImageLoader` loads carrying credential headers, with the disk cache enabled (the default).
+
+**Why accepted**: the app cache directory is sandboxed per app on Android and iOS, and the README tells apps to call `NetworkImages::loader().clear_all()` on logout or account switch; honouring cache directives needs the response-header path from the `network-image-no-http-cache-headers` entry.
+
+**Trigger for removal**: encrypted storage or `no-store`/`private` handling for responses fetched with credentials.
+
+**Evidence**: `plugins/network-image/src/disk_cache.rs` (`hex_key`, scope-folded file name) and `plugins/network-image/src/loader.rs` (`load`, `acquire_raw`).
 
 ---
 

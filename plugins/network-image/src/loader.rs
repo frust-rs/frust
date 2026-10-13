@@ -15,7 +15,9 @@ use futures_util::future::Shared;
 use crate::decode::{DecodeError, TargetPx, decode_shared};
 use crate::disk_cache::{DiskCache, DiskStats};
 use crate::fetch::{FetchError, FetchRequest, ImageFetcher};
-use crate::memory_cache::{CacheKey, DEFAULT_BUDGET_BYTES, MemoryCache, MemoryStats};
+use crate::memory_cache::{
+    CacheKey, DEFAULT_BUDGET_BYTES, MemoryCache, MemoryStats, Scope, header_scope,
+};
 
 /// The boxed future [`ImageLoader::load`] returns.
 pub type LoadFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
@@ -70,7 +72,9 @@ impl Default for LoaderConfig {
 pub struct LoadRequest {
     /// Absolute `http`/`https` URL.
     pub url: String,
-    /// Extra request headers. Not part of the cache key.
+    /// Extra request headers. Part of the cache identity: a digest of them
+    /// scopes the memory, single-flight and disk keys, so a body fetched with
+    /// one set of headers is never served to a request with another.
     pub headers: Vec<(String, String)>,
     /// Pixel box to fit the decoded image inside; `None` keeps natural size.
     pub target: Option<TargetPx>,
@@ -94,6 +98,8 @@ pub enum LoadError {
 
 type LoadResult = Result<ImageSource, LoadError>;
 type KeyedFuture = Shared<LoadFuture<LoadResult>>;
+/// Single-flight identity of a raw fetch: URL plus header scope.
+type RawKey = (String, Scope);
 type RawFuture = Shared<LoadFuture<Result<Arc<Vec<u8>>, FetchError>>>;
 
 /// One keyed load, alive while any [`Consumer`] of it is.
@@ -105,7 +111,7 @@ struct InflightEntry {
     id: u64,
 }
 
-/// Shared raw-bytes fetch for one URL, alive while any keyed load uses it.
+/// Shared raw-bytes fetch for one URL and header scope, alive while any keyed load uses it.
 struct RawEntry {
     fut: RawFuture,
     /// Unreleased [`RawRelease`] guards; the entry is removed at zero.
@@ -119,10 +125,10 @@ struct Inner {
     config: LoaderConfig,
     memory: Mutex<MemoryCache>,
     inflight: Mutex<HashMap<CacheKey, InflightEntry>>,
-    /// Raw bytes by URL while keyed loads still need them, so two targets of
+    /// Raw bytes by URL and header scope while keyed loads still need them, so two targets of
     /// one URL fetch once. Transient: removed when the last user releases,
     /// whether it finished or was dropped.
-    raw: Mutex<HashMap<String, RawEntry>>,
+    raw: Mutex<HashMap<RawKey, RawEntry>>,
     /// Opened once, lazily; `None` inside means memory-only.
     disk: OnceLock<Option<Arc<DiskCache>>>,
     /// Source of [`InflightEntry::id`] / [`RawEntry::id`].
@@ -177,7 +183,7 @@ impl Drop for Consumer {
 /// load drops it after the bytes arrive, or when the load itself is dropped.
 struct RawRelease {
     inner: Arc<Inner>,
-    url: String,
+    key: RawKey,
     id: u64,
 }
 
@@ -187,11 +193,11 @@ impl Drop for RawRelease {
         // the fetch, whose drop cancels it.
         let _removed = {
             let mut raw = lock(&self.inner.raw);
-            match raw.get_mut(&self.url) {
+            match raw.get_mut(&self.key) {
                 Some(entry) if entry.id == self.id => {
                     entry.users = entry.users.saturating_sub(1);
                     if entry.users == 0 {
-                        raw.remove(&self.url)
+                        raw.remove(&self.key)
                     } else {
                         None
                     }
@@ -285,6 +291,7 @@ impl ImageLoader {
     pub fn load(&self, req: LoadRequest) -> LoadFuture<LoadResult> {
         let key = CacheKey {
             url: req.url.clone(),
+            scope: header_scope(&req.headers),
             target: req.target,
         };
         let mut inflight = lock(&self.inner.inflight);
@@ -347,14 +354,16 @@ impl ImageLoader {
     /// Join or start the raw fetch for `req.url`, counting one more user.
     /// A fetch that already finished with an error is replaced, not joined.
     fn acquire_raw(&self, req: &LoadRequest) -> (RawFuture, RawRelease) {
+        let scope = header_scope(&req.headers);
+        let raw_key: RawKey = (req.url.clone(), scope);
         let mut raw = lock(&self.inner.raw);
-        if let Some(entry) = raw.get_mut(&req.url)
+        if let Some(entry) = raw.get_mut(&raw_key)
             && !matches!(entry.fut.peek(), Some(Err(_)))
         {
             entry.users += 1;
             let release = RawRelease {
                 inner: self.inner.clone(),
-                url: req.url.clone(),
+                key: raw_key,
                 id: entry.id,
             };
             return (entry.fut.clone(), release);
@@ -369,7 +378,9 @@ impl ImageLoader {
             let disk = disk_handle(inner.clone()).await;
             if let Some(disk) = &disk {
                 let (d, u) = (disk.clone(), url.clone());
-                if let Ok(Some(bytes)) = spawn_blocking(move || d.get(&u)).await {
+                if let Ok(Some(bytes)) =
+                    spawn_blocking(move || d.get_scoped(&u, scope.as_ref())).await
+                {
                     log::debug!("network-image: disk hit");
                     return Ok(Arc::new(bytes));
                 }
@@ -385,7 +396,7 @@ impl ImageLoader {
             let bytes = Arc::new(fetched.bytes);
             if let Some(disk) = disk {
                 let b = bytes.clone();
-                match spawn_blocking(move || disk.put(&url, &b)).await {
+                match spawn_blocking(move || disk.put_scoped(&url, scope.as_ref(), &b)).await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => warn_once(&format!("disk write failed ({e})")),
                     Err(e) => warn_once(&format!("disk write task failed ({e})")),
@@ -397,7 +408,7 @@ impl ImageLoader {
         // A replaced failed entry keeps serving the users that already hold it;
         // their releases no longer match this URL's entry.
         let _replaced = raw.insert(
-            req.url.clone(),
+            raw_key.clone(),
             RawEntry {
                 fut: fut.clone(),
                 users: 1,
@@ -406,18 +417,31 @@ impl ImageLoader {
         );
         let release = RawRelease {
             inner: self.inner.clone(),
-            url: req.url.clone(),
+            key: raw_key,
             id,
         };
         (fut, release)
     }
 
-    /// The decoded image for `url` fitted to `target`, if the memory cache
-    /// holds it. Synchronous, so a view can paint a cached image on its first
-    /// frame instead of waiting a task round-trip. Counts as a use for LRU.
+    /// The decoded image for header-less `url` fitted to `target`, if the
+    /// memory cache holds it. Synchronous, so a view can paint a cached image
+    /// on its first frame instead of waiting a task round-trip. Counts as a
+    /// use for LRU.
     pub fn peek_memory(&self, url: &str, target: Option<TargetPx>) -> Option<ImageSource> {
+        self.peek_memory_with_headers(url, &[], target)
+    }
+
+    /// [`peek_memory`](Self::peek_memory) for a request carrying `headers`:
+    /// only an image loaded with the same header set is found.
+    pub fn peek_memory_with_headers(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        target: Option<TargetPx>,
+    ) -> Option<ImageSource> {
         let key = CacheKey {
             url: url.to_string(),
+            scope: header_scope(headers),
             target,
         };
         lock(&self.inner.memory).get(&key)

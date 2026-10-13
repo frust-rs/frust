@@ -301,9 +301,10 @@ fn d_authorization_header_reaches_server() {
         .await;
         let l = loader(no_disk());
         let url = server.url("/auth.png");
+        let (view_loader, view_url) = (l.clone(), url.clone());
         let mut logic = move |_: &mut ()| {
-            network_image(url.clone())
-                .loader(l.clone())
+            network_image(view_url.clone())
+                .loader(view_loader.clone())
                 .headers(vec![("Authorization".into(), "Bearer t".into())])
         };
         let mut root = RenderRoot::new();
@@ -318,9 +319,17 @@ fn d_authorization_header_reaches_server() {
             assert!(start.elapsed() < TIMEOUT, "timed out");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        {
+            let log = server.requests.lock().unwrap();
+            assert_eq!(log.len(), 1);
+            assert_eq!(log[0].header("authorization"), Some("Bearer t"));
+        }
+        // The headers scope the cache: the same URL without them is not
+        // served from the authenticated entry; it reaches the server.
+        l.load(req(url, None)).await.expect("header-less load");
         let log = server.requests.lock().unwrap();
-        assert_eq!(log.len(), 1);
-        assert_eq!(log[0].header("authorization"), Some("Bearer t"));
+        assert_eq!(log.len(), 2, "header-less load must not hit the cache");
+        assert_eq!(log[1].header("authorization"), None);
     });
 }
 

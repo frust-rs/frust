@@ -37,6 +37,19 @@ A memory-cache hit paints on the first frame with no fade. `ImageLoader` (from
 `NetworkImages::loader()`) exposes `memory_stats`, `disk_stats`, `inflight_count`, `clear_memory`,
 `clear_disk` and `clear_all`.
 
+## Credentials and the cache
+
+Request headers are part of the cache identity: a SHA-256 digest of the (name-lower-cased,
+sorted) headers joins the memory key, the single-flight key and the disk file name. A body
+fetched with one `Authorization` header is never served to a request with a different or no
+header, and concurrent loads with different headers fetch separately. Requests with no headers
+keep the plain URL keys.
+
+Cached bodies persist **unencrypted** under the app cache directory, and private responses are
+cached like any other (there is no `Cache-Control` handling yet). On logout or account switch
+call `NetworkImages::loader().clear_all()` (or `clear_disk()` for the disk half alone). See the
+`network-image-cache-holds-private-bodies` entry in `docs/LIMITATIONS.md`.
+
 ## 3. Transport and TLS
 
 Fetching goes through the `ImageFetcher` trait. The default `ReqwestFetcher` (cargo feature
@@ -48,8 +61,8 @@ default). With `default-features = false` you supply your own `ImageFetcher` thr
 
 ## 4. Limits
 
-- The caches ignore HTTP caching headers; the disk key is the URL alone (headers are not part of
-  it), so a header-dependent response is not cached per header set.
+- The caches ignore HTTP caching headers (`Cache-Control`, `ETag`, ...); request headers scope the
+  cache keys (see Credentials and the cache).
 - A JPEG is fully decoded before `target_px` downscales it. SVG is not supported; WebP needs the
   `webp` feature.
 - Android's cache directory exists only after platform init; an earlier load is memory-only.
