@@ -18,6 +18,7 @@ peniko = { workspace = true }
 frust-scene = { workspace = true }
 accesskit = { workspace = true }
 reactive_graph = { workspace = true }
+log = { workspace = true }
 frust-hotpatch = { workspace = true, optional = true }
 
 [features]

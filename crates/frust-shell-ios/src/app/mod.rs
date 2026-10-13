@@ -226,6 +226,10 @@ pub struct IosAppHandle {
     /// pixel ratio the whole scene is scaled by so glyphs rasterise sharp. Stored
     /// raw and sanitised once per frame.
     scale: f32,
+    /// The `(physical, sanitized scale)` the last layout pass ran against;
+    /// `None` until the first layout. A mismatch forces the next running frame's
+    /// layout (the layout skip's surface-size/scale force).
+    laid_out_for: Option<((u32, u32), f64)>,
     /// Set by `frust_pause`/`frust_resume`; while paused, `frame()` is a
     /// no-op — Metal command submission from a backgrounded iOS app can get the
     /// process killed, so this is the Rust-side enforcement point.
@@ -595,6 +599,7 @@ impl IosAppHandle {
             metal_layer,
             physical,
             scale,
+            laid_out_for: None,
             paused: false,
             recreate_failures: 0,
             theme,

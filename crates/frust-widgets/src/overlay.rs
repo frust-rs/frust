@@ -941,14 +941,22 @@ impl<PodState: 'static> OverlaySlot<PodState> {
             // owner's context on its own.
             None => pod.event_child(ctx, local),
             Some(state) => {
-                let (result, needs_redraw) = {
+                let (result, needs_redraw, needs_layout) = {
                     let mut inner =
                         EventCtx::new(state, self.window_rect.origin(), self.window_rect.size());
                     let result = pod.event_child(&mut inner, local);
-                    (result, inner.needs_redraw())
+                    (result, inner.needs_redraw(), inner.needs_layout())
                 };
                 if needs_redraw {
                     ctx.request_redraw();
+                }
+                // A layout request crosses the substituted context like the
+                // redraw does, so the root's pending flags carry LAYOUT and a
+                // shell gating layout on them runs the pass. (The floated pod
+                // itself was marked dirty by `event_child`; the root reaches it
+                // through its dirty-surface check.)
+                if needs_layout {
+                    ctx.request_layout();
                 }
                 // Capture and focus are mirrored through the pod's own recorded
                 // links rather than the substituted context's flags: the pod
@@ -1487,6 +1495,8 @@ mod tests {
         Nothing,
         Capture,
         Focus,
+        /// Ask for a layout pass (`EventCtx::request_layout`).
+        Layout,
     }
 
     /// Which tree the fixture builds.
@@ -1617,6 +1627,7 @@ mod tests {
                             Reaction::Nothing => {}
                             Reaction::Capture => ctx.capture_pointer(),
                             Reaction::Focus => ctx.request_focus(),
+                            Reaction::Layout => ctx.request_layout(),
                         }
                     }
                     if self.handles {
@@ -2330,6 +2341,7 @@ mod tests {
                         Reaction::Nothing => {}
                         Reaction::Capture => ctx.capture_pointer(),
                         Reaction::Focus => ctx.request_focus(),
+                        Reaction::Layout => ctx.request_layout(),
                     }
                     ctx.dispatch_edit_command(EditCommand::Copy);
                     ctx.request_redraw();
@@ -2390,6 +2402,18 @@ mod tests {
         assert!(
             root.is_focus_active(),
             "the substituted context's focus claim is mirrored onto the owner"
+        );
+    }
+
+    #[test]
+    fn a_layout_request_from_a_substituted_pod_reaches_the_pending_flags() {
+        let (mut root, _log) = unit_harness(Reaction::Layout);
+        root.take_change_flags();
+        unit_pointer(&mut root, PointerPhase::Down, 40.0, 50.0);
+        assert!(
+            root.take_change_flags().contains(ChangeFlags::LAYOUT),
+            "the substituted context's layout request is mirrored onto the owner, \
+             so a shell gating layout on the pending flags runs the pass"
         );
     }
 

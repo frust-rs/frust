@@ -4658,7 +4658,10 @@ act_000001a10d6c24eeK3GHlKbH.
 **Observed**: the render model has these gaps, each listed with the phase of plan
 `fplan_000001a1347808dayUwoSOyz` that retires it:
 
-- no per-subtree layout skipping — Phase 1;
+- ~~no per-subtree layout skipping — Phase 1~~ closed at `feature/render-model-p1` @ 39c07d78
+  (checkpoint R2). Residual: a parent on a dirty path still runs its own layout, and there are no
+  parent-pointer relayout boundaries; material `NavigationBarWidget::selected_indicator_rect`
+  calls `widget_mut()` inside layout and so relays out the selected item every pass (a known cost);
 - box-only layout protocol, no slivers — Phase 2;
 - no retained layers, no repaint boundaries, no blend/clip-path/backdrop primitives, no partial
   repaint — Phase 3;

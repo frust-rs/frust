@@ -398,8 +398,10 @@ fn rebuild_child_tracked<State: 'static, V: View<State>>(
 ) -> (ChangeFlags, bool) {
     // Read before the `widget_mut` borrow below.
     let link_focused = pod.is_focused();
+    // The non-marking accessor: this function marks the pod itself, below, from
+    // the rebuild's flags — `widget_mut` would dirty it on every rebuild.
     let element = pod
-        .widget_mut()
+        .widget_mut_for_rebuild()
         .downcast_mut::<V::Element>()
         .expect("child pod element is the element type its view built (build_child)");
     let before = widget_type_id(element);
@@ -407,7 +409,18 @@ fn rebuild_child_tracked<State: 'static, V: View<State>>(
         ctx.with_focus_link(link_focused, |ctx| next.rebuild(prev, element, ctx))
     });
     let after = widget_type_id(element);
-    (flags, before != after || replaced)
+    let swapped = before != after || replaced;
+    // The layout-skip dirty source of the rebuild pass: a child whose rebuild
+    // reports `LAYOUT` (or whose widget was replaced) is laid out again on the
+    // next pass. PAINT-only does not dirty layout. Every reconciler route —
+    // `rebuild_child`, both `rebuild_children` paths, and `OverlaySlot` through
+    // `rebuild_child` — funnels through here, so this one mark covers them; the
+    // pods above are marked by their own rebuild sites from the flags this
+    // returns, which every container folds into its own.
+    if swapped || flags.contains(ChangeFlags::LAYOUT) {
+        pod.mark_layout_dirty();
+    }
+    (flags, swapped)
 }
 
 /// The [`TypeId`](std::any::TypeId) of the widget an element *is*, for swap
@@ -2638,5 +2651,123 @@ mod focus_tests {
         // Both paths survive intact.
         assert!(children[0].is_active());
         assert!(children[1].is_focused());
+    }
+}
+
+/// The layout-skip dirty source of the reconcilers: a child whose rebuild
+/// reports `LAYOUT` (or swaps its widget) leaves its pod layout-dirty; a
+/// `PAINT`-only or no-op rebuild leaves it clean.
+#[cfg(test)]
+mod layout_skip_tests {
+    use super::*;
+    use frust_core::{BoxConstraints, BuildCtx, LayoutCtx, PaintCtx, PaintScene, any};
+    use kurbo::Size;
+
+    /// A leaf whose rebuild reports exactly the flags its view carries.
+    struct FlagView(ChangeFlags);
+
+    struct FlagWidget;
+
+    impl View<()> for FlagView {
+        type Element = FlagWidget;
+
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> FlagWidget {
+            FlagWidget
+        }
+
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut FlagWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            self.0
+        }
+    }
+
+    impl Widget for FlagWidget {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(10.0, 10.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+    }
+
+    /// A different concrete type, for a swap.
+    struct OtherView;
+
+    impl View<()> for OtherView {
+        type Element = FlagWidget;
+
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> FlagWidget {
+            FlagWidget
+        }
+
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut FlagWidget,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    /// Lay `pod` out once through a plain context, which clears its dirty flag.
+    fn clean(pod: &mut ChildPod) {
+        pod.layout_child(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::loose(Size::new(50.0, 50.0)),
+        );
+        assert!(!pod.is_layout_dirty());
+    }
+
+    #[test]
+    fn rebuild_child_marks_the_pod_on_layout_only() {
+        let mut counter = 0;
+        let mut ctx = BuildCtx::new(&mut counter);
+        let mut pod = build_child(&FlagView(ChangeFlags::NONE), &mut ctx);
+        assert!(pod.is_layout_dirty(), "a freshly built pod starts dirty");
+        clean(&mut pod);
+
+        let none = FlagView(ChangeFlags::NONE);
+        let paint = FlagView(ChangeFlags::PAINT);
+        let layout = FlagView(ChangeFlags::LAYOUT);
+        rebuild_child(&none, &none, &mut pod, &mut ctx);
+        assert!(!pod.is_layout_dirty(), "a no-op rebuild leaves it clean");
+        rebuild_child(&none, &paint, &mut pod, &mut ctx);
+        assert!(!pod.is_layout_dirty(), "PAINT alone leaves it clean");
+        rebuild_child(&paint, &layout, &mut pod, &mut ctx);
+        assert!(pod.is_layout_dirty(), "LAYOUT dirties the pod");
+    }
+
+    #[test]
+    fn rebuild_children_marks_only_the_children_reporting_layout() {
+        let mut counter = 0;
+        let mut ctx = BuildCtx::new(&mut counter);
+        let prev: Vec<AnyView<()>> = vec![
+            any(FlagView(ChangeFlags::NONE)),
+            any(FlagView(ChangeFlags::NONE)),
+            any(FlagView(ChangeFlags::NONE)),
+        ];
+        let mut pods: Vec<ChildPod> = prev.iter().map(|v| build_child(v, &mut ctx)).collect();
+        pods.iter_mut().for_each(clean);
+
+        let next: Vec<AnyView<()>> = vec![
+            any(FlagView(ChangeFlags::PAINT)),
+            any(FlagView(ChangeFlags::LAYOUT)),
+            // A concrete-type swap: a fresh widget, laid out from scratch.
+            any(OtherView),
+        ];
+        let flags = rebuild_children(
+            &prev,
+            &next,
+            &mut pods,
+            &mut ctx,
+            |v: &AnyView<()>| v,
+            |_: &AnyView<()>| None::<ChildKey>,
+        );
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+        let dirty: Vec<bool> = pods.iter().map(ChildPod::is_layout_dirty).collect();
+        assert_eq!(dirty, [false, true, true]);
     }
 }

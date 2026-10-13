@@ -660,7 +660,10 @@ impl<State: 'static> View<State> for MorphingTabsView<State> {
                 element.focused = index;
             }
             element.sync_presences();
-            flags |= ChangeFlags::PAINT;
+            // `layout` is the pass that retargets the surface onto the newly
+            // active tab (it knows where the slot is), so a moved value is a
+            // layout change — a bare repaint would leave the surface parked.
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         flags
     }
@@ -986,6 +989,18 @@ impl MorphingTabsWidget {
         moving
     }
 
+    /// Whether any icon sits somewhere other than its tab's live slot — the
+    /// position `layout` placed it from has since moved (`docs/REVIEW_FOCUS.md`'s
+    /// laid-versus-live compare).
+    fn icon_lefts_moved(&self) -> bool {
+        self.order.iter().any(|&entry| {
+            self.entries[entry].icon_pod.is_some_and(|pod| {
+                let left = self.tab_rect(entry).x0 + MORPHING_TABS_TAB_PADDING_X;
+                self.pods[pod].origin().x != left
+            })
+        })
+    }
+
     /// The stage room `entry` is drawn at: `(alpha, rise)`.
     fn content_stage(&self, entry: usize, now: FrameTime) -> (f64, f64) {
         let presence = &self.entries[entry].presence;
@@ -1118,8 +1133,14 @@ impl Widget for MorphingTabsWidget {
         scene.pop_clip();
 
         // Everything that travels here is geometry inside a box the motion
-        // never resizes, so a bare frame request is enough.
-        if moving {
+        // never resizes — except a tab's icon, which `layout` places from that
+        // tab's travelling position: with icons mounted a moving rail owes a
+        // relayout, as does one whose icons sit off their tabs' live slots (the
+        // frame a lane lands on, a reduce-motion snap), else a bare frame.
+        let has_icons = self.entries.iter().any(|entry| entry.icon_pod.is_some());
+        if has_icons && (moving || self.icon_lefts_moved()) {
+            ctx.request_layout();
+        } else if moving {
             ctx.request_frame();
         }
     }

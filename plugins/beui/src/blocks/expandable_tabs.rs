@@ -702,18 +702,23 @@ impl ExpandableTabsWidget {
     /// Advance every lane and presence to `now`, returning whether anything is
     /// still moving.
     fn advance(&mut self, now: FrameTime, reduce_motion: bool) -> bool {
+        // A reduce-motion snap that moved a sized lane is a geometry change
+        // `layout` has not run with, though the snap itself owes no frame — it
+        // counts as moving so the caller asks for the relayout.
+        let mut snapped = false;
         if reduce_motion {
-            self.shell_w.snap();
-            self.shell_h.snap();
+            snapped |= self.shell_w.snap();
+            snapped |= self.shell_h.snap();
             for entry in &mut self.entries {
-                entry.width.snap();
-                entry.reveal.snap();
+                snapped |= entry.width.snap();
+                snapped |= entry.reveal.snap();
             }
             for presence in &mut self.presences {
                 *presence = presence.collapsed();
             }
         }
-        let mut moving = self.shell_w.advance(now);
+        let mut moving = snapped;
+        moving |= self.shell_w.advance(now);
         moving |= self.shell_h.advance(now);
         for entry in &mut self.entries {
             moving |= entry.width.advance(now);
@@ -1570,7 +1575,8 @@ mod tests {
     }
 
     /// `reduce_motion` collapses every ramp: the shell is on its target box on
-    /// the first frame and nothing owes a frame.
+    /// the first frame, owes exactly the one relayout that jump needs, and then
+    /// nothing owes a frame.
     #[test]
     fn reduced_motion_lands_the_shell_at_once() {
         let mut theme = crate::theme();
@@ -1584,10 +1590,16 @@ mod tests {
         let size = layout(&mut w);
         let mut ctx = PaintCtx::for_test(Point::ZERO, size, ft_ms(16.0)).with_theme(&theme);
         w.paint(&mut ctx, &mut rec);
-        assert!(!ctx.needs_frame(), "a collapsed ramp owes no frame");
+        assert!(
+            ctx.needs_layout(),
+            "the snap resized the shell, which the last layout did not run with"
+        );
         let landed = layout(&mut w);
         assert_eq!(landed, w.open_size);
         assert_eq!(w.entries[0].reveal.value(), 1.0);
+        let mut ctx = PaintCtx::for_test(Point::ZERO, landed, ft_ms(32.0)).with_theme(&theme);
+        w.paint(&mut ctx, &mut rec);
+        assert!(!ctx.needs_frame(), "a collapsed ramp owes no frame");
     }
 
     /// The shell paints its own card surface, and the open tab paints a

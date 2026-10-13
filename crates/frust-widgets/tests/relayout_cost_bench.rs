@@ -19,6 +19,8 @@
 //!   shared `Rc<Cell<u64>>` read by the page builder (frust-widgets has no
 //!   reactive dependency); the rebuild path it exercises is the same.
 //!   Run: `cargo test -p frust-widgets --test relayout_cost_bench -- --ignored --nocapture`.
+//!   Set `FRUST_NO_LAYOUT_SKIP=1` to run the skip-off arm (`set_layout_skip(false)`,
+//!   every pod lays out on every pass); the header prints `arm: skip=on|off`.
 //! - [`scene_builds_with_two_hundred_row_pods`] — always on; asserts the scene
 //!   actually materializes 200 row pods via `RenderRoot::inspect`. No timing.
 //!
@@ -37,6 +39,68 @@
 //! B_one_leaf_changes           paint          106.79       114.17       128.34
 //! C_scroll_only                layout          66.64        69.52        71.02
 //! C_scroll_only                paint          137.98       159.07       162.40
+//! ```
+//!
+//! # After p1-03 (per-pod layout skip, widget audit)
+//!
+//! Same host class (Linux workstation, i5-12600, 12 threads) and profile
+//! (unoptimized `test` profile + debuginfo). The host may have been loaded by a
+//! parallel build: a first run straight after one measured roughly double the
+//! paint figures below with layout still under 2.5 µs (A) and 15 µs (C); these
+//! are the middle of three back-to-back runs once it settled. Layout is what
+//! the skip changes: in (A) only the root widget's own layout runs and every
+//! pod below it returns its cached size, (B) lays out the changing row's path,
+//! (C) the scroll surface's path while its content stays cached (the
+//! `ScrollView` rebuild reports a queued jump as a layout change). Paint is
+//! unchanged by design.
+//!
+//! ```text
+//! scenario                     pass          mean_us       p95_us       p99_us
+//! A_static                     layout           0.51         0.57         0.60
+//! A_static                     paint          101.81       106.81       114.88
+//! B_one_leaf_changes           layout          92.92       104.58       111.84
+//! B_one_leaf_changes           paint          107.16       117.00       120.64
+//! C_scroll_only                layout           1.47         1.73         2.40
+//! C_scroll_only                paint          130.82       153.82       158.96
+//! ```
+//!
+//! # After p1 (layout skip gated on pending LAYOUT; FRUST_NO_LAYOUT_SKIP arm)
+//!
+//! Measured at `feature/render-model-p1` @ 6e86476b plus the harness change
+//! be0cd57d (the `FRUST_NO_LAYOUT_SKIP` arm and these rows). Same host class
+//! (Linux workstation, i5-12600, 12 threads) and profile (unoptimized `test`
+//! profile + debuginfo). Both arms ran back to back at a 1-minute host load of
+//! 2.9-3.0 (below the ~4 threshold; an earlier arm started at load 4.7 and is
+//! not recorded). `arm: skip=on` is the default `set_layout_skip(true)`;
+//! `arm: skip=off` is `FRUST_NO_LAYOUT_SKIP=1`, which calls
+//! `set_layout_skip(false)` so every pod lays out on every pass. The off arm
+//! matches the baseline layout figures above within host noise, so the skip is
+//! the only variable.
+//! Paint is unchanged by design and varies run to run within a few percent.
+//!
+//! Layout ratio, one leaf changes / no change (mean): skip on
+//! 93.56 / 0.52 = 179.9x; skip off 160.05 / 76.25 = 2.10x.
+//!
+//! ```text
+//! arm: skip=on
+//! scenario                     pass          mean_us       p95_us       p99_us
+//! A_static                     layout           0.52         0.56         1.32
+//! A_static                     paint          105.65       110.12       177.54
+//! B_one_leaf_changes           layout          93.56       104.18       107.76
+//! B_one_leaf_changes           paint          106.34       111.37       113.54
+//! C_scroll_only                layout           1.46         1.62         3.02
+//! C_scroll_only                paint          137.10       161.16       179.75
+//! ```
+//!
+//! ```text
+//! arm: skip=off
+//! scenario                     pass          mean_us       p95_us       p99_us
+//! A_static                     layout          76.25        79.35        80.54
+//! A_static                     paint          102.81       106.43       111.80
+//! B_one_leaf_changes           layout         160.05       172.42       176.47
+//! B_one_leaf_changes           paint          106.49       111.61       115.48
+//! C_scroll_only                layout          75.20        78.99        81.34
+//! C_scroll_only                paint          131.86       154.38       156.65
 //! ```
 
 use std::cell::Cell;
@@ -135,11 +199,14 @@ enum Scenario {
     ScrollOnly,
 }
 
-fn run(scenario: Scenario) -> (Vec<f64>, Vec<f64>) {
+fn run(scenario: Scenario, no_layout_skip: bool) -> (Vec<f64>, Vec<f64>) {
     let scroll = ScrollController::new();
     let tick = Rc::new(Cell::new(0u64));
     let mut logic = make_logic(scroll.clone(), tick.clone());
     let mut root: Root = RenderRoot::new();
+    if no_layout_skip {
+        root.set_layout_skip(false);
+    }
     let mut tcx = TextContext::new();
 
     // Settle: initial build, the navigator's queued push, text shaping caches.
@@ -198,8 +265,10 @@ fn print_row(config: &str, pass: &str, s: Stats) {
 #[ignore = "perf evidence, host-machine dependent (docs/TESTING.md T8): run via \
             `cargo test -p frust-widgets --test relayout_cost_bench -- --ignored --nocapture`"]
 fn relayout_and_paint_cost() {
+    let no_layout_skip = std::env::var_os("FRUST_NO_LAYOUT_SKIP").is_some();
+    println!("\narm: skip={}", if no_layout_skip { "off" } else { "on" });
     println!(
-        "\n{:<28} {:<8} {:>12} {:>12} {:>12}",
+        "{:<28} {:<8} {:>12} {:>12} {:>12}",
         "scenario", "pass", "mean_us", "p95_us", "p99_us"
     );
     for (name, scenario) in [
@@ -207,7 +276,7 @@ fn relayout_and_paint_cost() {
         ("B_one_leaf_changes", Scenario::OneLeaf),
         ("C_scroll_only", Scenario::ScrollOnly),
     ] {
-        let (layouts, paints) = run(scenario);
+        let (layouts, paints) = run(scenario, no_layout_skip);
         print_row(name, "layout", stats(layouts));
         print_row(name, "paint", stats(paints));
     }

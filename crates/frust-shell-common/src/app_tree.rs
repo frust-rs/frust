@@ -257,6 +257,13 @@ pub trait AppTree {
     /// live appearance change replaces the stored theme.
     fn set_theme(&mut self, theme: Box<dyn Any>);
 
+    /// Forward `RenderRoot::set_layout_skip` (the `FRUST_NO_LAYOUT_SKIP` kill
+    /// switch a shell resolves via `frame_gate::LayoutKnobs`). Default no-op.
+    fn set_layout_skip(&mut self, _skip: bool) {}
+
+    /// Forward `RenderRoot::set_layout_audit` (`FRUST_LAYOUT_AUDIT`). Default no-op.
+    fn set_layout_audit(&mut self, _audit: bool) {}
+
     /// Store the window's insets ([`WindowInsets`]), threaded into every
     /// subsequent layout/paint pass (delegates to [`RenderRoot::set_insets`]).
     ///
@@ -484,6 +491,14 @@ where
 
     fn selection_toolbar_generation(&self) -> u64 {
         self.root.selection_toolbar_generation()
+    }
+
+    fn set_layout_skip(&mut self, skip: bool) {
+        self.root.set_layout_skip(skip);
+    }
+
+    fn set_layout_audit(&mut self, audit: bool) {
+        self.root.set_layout_audit(audit);
     }
 
     fn set_theme(&mut self, theme: Box<dyn Any>) {

@@ -582,6 +582,20 @@ pub struct LayoutCtx<'a> {
     /// its own constraints, because the pod will be painted at an absolute window
     /// rect rather than inside its owner. See [`LayoutCtx::window_size`].
     window_size: Size,
+    /// The render root's global layout epoch for this pass
+    /// ([`LayoutCtx::layout_epoch`]). A [`ChildPod`] records the epoch it was
+    /// last laid out under and lays out again whenever it moved, so bumping it
+    /// invalidates every pod's cached layout at once — the root does so for
+    /// every *global* layout input that does not flow through constraints (a
+    /// theme swap, an inset change, a window resize). `0` outside a root.
+    epoch: u64,
+    /// Whether this pass lays out every pod regardless of its cached state
+    /// ([`LayoutCtx::is_forced`]) — the layout-skip kill switch. `true` for a
+    /// context built outside a [`crate::app::RenderRoot`] (every public
+    /// constructor), so a widget harness that lays out a pod directly keeps the
+    /// always-lay-out behaviour; the root seeds it from
+    /// [`crate::app::RenderRoot::set_layout_skip`].
+    force: bool,
 }
 
 impl<'a> LayoutCtx<'a> {
@@ -594,6 +608,8 @@ impl<'a> LayoutCtx<'a> {
             theme: None,
             window_insets: WindowInsets::default(),
             window_size: Size::ZERO,
+            epoch: 0,
+            force: true,
         }
     }
 
@@ -608,6 +624,8 @@ impl<'a> LayoutCtx<'a> {
             theme: None,
             window_insets: WindowInsets::default(),
             window_size: Size::ZERO,
+            epoch: 0,
+            force: true,
         }
     }
 
@@ -622,6 +640,8 @@ impl<'a> LayoutCtx<'a> {
             theme,
             window_insets: WindowInsets::default(),
             window_size: Size::ZERO,
+            epoch: 0,
+            force: true,
         }
     }
 
@@ -727,6 +747,34 @@ impl<'a> LayoutCtx<'a> {
     pub(crate) fn set_window_size(&mut self, size: Size) {
         self.window_size = size;
     }
+
+    /// The render root's global layout epoch for this pass — `0` for a context
+    /// built outside a root. Read-only: a [`ChildPod`] compares it against the
+    /// epoch it last laid out under (see [`ChildPod::layout_child`]).
+    pub fn layout_epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Seed the layout epoch lent by the render root
+    /// ([`crate::app::RenderRoot::layout`]); set once at the root and inherited
+    /// unchanged, exactly like [`LayoutCtx::set_window_size`].
+    pub(crate) fn set_layout_epoch(&mut self, epoch: u64) {
+        self.epoch = epoch;
+    }
+
+    /// Whether this pass lays out every pod regardless of its cached layout
+    /// state — the layout skip switched off. `true` for every context built
+    /// through a public constructor (no root, nothing to skip against); a
+    /// [`crate::app::RenderRoot`] pass reports `!`[`layout_skip`](crate::app::RenderRoot::layout_skip).
+    pub fn is_forced(&self) -> bool {
+        self.force
+    }
+
+    /// Seed the force flag for this pass ([`LayoutCtx::is_forced`]); the render
+    /// root sets it from [`crate::app::RenderRoot::set_layout_skip`].
+    pub(crate) fn set_layout_force(&mut self, force: bool) {
+        self.force = force;
+    }
 }
 
 impl Default for LayoutCtx<'static> {
@@ -797,9 +845,22 @@ pub struct PaintCtx<'a> {
     /// and out of [`crate::app::RenderRoot::paint`] as [`PaintOutcome::needs_layout`],
     /// which folds into the render root's pending [`ChangeFlags`] so the mobile
     /// intra-frame layout skip re-runs layout while the animation is in flight.
-    /// Deliberately opt-in: [`PaintCtx::request_frame`] alone never sets it, so
-    /// paint-only animations stay layout-free.
+    /// [`PaintCtx::request_frame`] alone never sets it: a bare frame request
+    /// reaches the pending flags through `layout_path_dirty` instead, and is not
+    /// reported on [`PaintOutcome::needs_layout`].
     needs_layout: bool,
+    /// Whether a pod at or below this context was marked layout-dirty by this
+    /// (sub)paint in a way that must force a pass — the paint pass's path bit,
+    /// the mirror of the event pass's (see [`EventCtx::is_layout_path_dirty`]).
+    /// [`ChildPod::paint_child`] sets it when its child asked for layout or for
+    /// an unpaced frame, on the one trailing paint after any request, and when
+    /// a child's bit is set, so every pod on the path is marked and
+    /// [`crate::app::RenderRoot::paint`] folds it into the pending
+    /// [`ChangeFlags`] `LAYOUT`: a shell gating its layout pass on those flags
+    /// then actually runs the pass that lays the dirtied pods out. A paced-only
+    /// ([`TickClass::CosmeticLoop`]) request still marks its pods but does not
+    /// set it, so the frame gate can keep pacing the loop.
+    layout_path_dirty: bool,
     /// Whether any continuation-frame request this (sub)paint was
     /// [`TickClass::Transition`] (unpaced, must run every vsync). The
     /// max-lattice half of the tick-class aggregation: it starts `false` and
@@ -958,6 +1019,7 @@ impl<'a> PaintCtx<'a> {
             size,
             needs_frame: false,
             needs_layout: false,
+            layout_path_dirty: false,
             frame_unpaced: false,
             paced_interval: None,
             ime_state: None,
@@ -1427,10 +1489,11 @@ impl<'a> PaintCtx<'a> {
     ///
     /// This is the layout counterpart to [`Self::request_frame`]: a widget whose
     /// animation only repaints (a color fade, a caret blink) calls
-    /// `request_frame` alone and stays layout-free under the mobile intra-frame
-    /// layout skip, whereas a widget whose animation resizes/repositions its
-    /// children (an expanding accordion) calls this so layout is re-run while the
-    /// animation is in flight. The flag bubbles up through
+    /// `request_frame` alone — its path is still laid out again, conservatively,
+    /// but that pass is mostly skipped and nothing reports
+    /// [`PaintOutcome::needs_layout`] — whereas a widget whose animation
+    /// resizes/repositions its children (an expanding accordion) calls this so
+    /// layout is re-run while the animation is in flight. The flag bubbles up through
     /// [`ChildPod::paint_child`] exactly like `needs_frame` and out of
     /// [`crate::app::RenderRoot::paint`] as [`PaintOutcome::needs_layout`], which
     /// folds into the render root's pending [`crate::view::ChangeFlags`]
@@ -1453,6 +1516,12 @@ impl<'a> PaintCtx<'a> {
     /// Whether a layout re-run was requested during this (sub)paint.
     pub fn needs_layout(&self) -> bool {
         self.needs_layout
+    }
+
+    /// Whether this (sub)paint marked a pod at or below this context
+    /// layout-dirty (see the `layout_path_dirty` field).
+    pub(crate) fn is_layout_path_dirty(&self) -> bool {
+        self.layout_path_dirty
     }
 
     /// Publish the focused editable's current IME surface during paint.
@@ -1649,6 +1718,7 @@ impl<'a> PaintCtx<'a> {
             size: self.size,
             needs_frame: false,
             needs_layout: false,
+            layout_path_dirty: false,
             frame_unpaced: false,
             paced_interval: None,
             ime_state: None,
@@ -1672,6 +1742,9 @@ impl<'a> PaintCtx<'a> {
         }
         if child.needs_layout {
             self.needs_layout = true;
+        }
+        if child.layout_path_dirty {
+            self.layout_path_dirty = true;
         }
         // Max-lattice OR: any Transition request inside dominates, keeping the
         // aggregate unpaced (mirrors `ChildPod::paint_child`'s absorb).
@@ -1989,7 +2062,9 @@ pub struct PaintOutcome {
     /// Whether the shell should schedule another frame to continue an animation.
     pub needs_frame: bool,
     /// Whether the render root folded a layout-continuation request into its
-    /// pending change flags (a widget called [`PaintCtx::request_layout`]).
+    /// pending change flags (a widget called [`PaintCtx::request_layout`]). The
+    /// root also folds `LAYOUT` for a pod an unpaced frame request or a
+    /// trailing landing paint dirtied; that fold is not reported here.
     pub needs_layout: bool,
     /// Whether a frame was requested and every request this frame was
     /// [`TickClass::CosmeticLoop`] — the paced-only state the mobile frame gate
@@ -2015,6 +2090,30 @@ pub struct PaintOutcome {
 pub trait Widget: Any {
     /// Choose a size within `bc` and return it. The chosen size must satisfy
     /// `bc` (callers may additionally clamp via [`BoxConstraints::constrain`]).
+    ///
+    /// # Layout may be skipped
+    ///
+    /// Under a [`crate::app::RenderRoot`] a widget sitting in a [`ChildPod`] is
+    /// **not** laid out every frame: [`ChildPod::layout_child`] returns the size
+    /// it recorded last time, without calling this method, when the pod is clean,
+    /// its constraints are equal to last time's, the window insets it sees are
+    /// unchanged, and the root's layout epoch has not moved (see that method for
+    /// the full rule). So the result of `layout` must be a function of `bc`, the
+    /// context's global inputs, and widget state that only changes through one of
+    /// the channels that dirty the pod:
+    ///
+    /// * a rebuild returning [`ChangeFlags::LAYOUT`](crate::view::ChangeFlags::LAYOUT);
+    /// * [`PaintCtx::request_layout`] (or [`EventCtx::request_layout`]);
+    /// * [`PaintCtx::request_frame`] (any frame request — an animating subtree is
+    ///   laid out again on the next pass, conservatively; a paced
+    ///   [`TickClass::CosmeticLoop`] request marks the pod but forces no pass of
+    ///   its own, so a loop that changes layout must not be paced);
+    /// * an event the widget consumed ([`EventResult::Handled`]) or that asked for
+    ///   a redraw ([`EventCtx::request_redraw`]).
+    ///
+    /// **A widget must not change layout-affecting state any other way** — a
+    /// change made behind the pod's back is invisible to the skip and lays out
+    /// stale until something else dirties the path.
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size;
 
     /// Emit draw commands for this widget into `scene`.
@@ -2268,6 +2367,32 @@ pub struct ChildPod {
     /// walk first reaches this pod, so a process that never inspects allocates
     /// nothing.
     inspect_id: Cell<Option<NonZeroU64>>,
+    /// Whether something this pod's subtree depends on may have changed since
+    /// its last layout — the pod must call [`Widget::layout`] on the next
+    /// [`ChildPod::layout_child`] whatever its constraints. `true` for a fresh
+    /// pod (it has never been laid out); set by every dirty source (a rebuild
+    /// returning `LAYOUT`, a paint-time layout or frame request, a consumed or
+    /// redraw-requesting event, [`ChildPod::widget_mut`],
+    /// [`ChildPod::mark_layout_dirty`]); cleared only
+    /// by a layout that actually ran.
+    layout_dirty: bool,
+    /// The constraints the last layout that ran was handed — `None` until one
+    /// has. Half of the skip key: a parent handing different constraints lays
+    /// the child out again.
+    last_constraints: Option<BoxConstraints>,
+    /// The root layout epoch ([`LayoutCtx::layout_epoch`]) the last layout ran
+    /// under. A root bumps it for a global layout input (theme, insets, window
+    /// size), which invalidates every pod at once.
+    last_epoch: u64,
+    /// The window insets ([`LayoutCtx::window_insets`]) the last layout ran
+    /// under. Global insets moving already bump the epoch; this additionally
+    /// covers an ancestor's *scoped* override
+    /// ([`LayoutCtx::with_window_insets`]) changing for this subtree alone.
+    last_insets: WindowInsets,
+    /// Whether the child's last paint requested a frame or a layout — so the
+    /// paint *after* an animation's last request still dirties the pod once
+    /// more (see [`ChildPod::paint_child`]'s layout-skip note).
+    painted_animating: bool,
 }
 
 thread_local! {
@@ -2419,6 +2544,12 @@ impl ChildPod {
             semantics_id: Cell::new(None),
             debug_label: None,
             inspect_id: Cell::new(None),
+            // A fresh pod has never been laid out.
+            layout_dirty: true,
+            last_constraints: None,
+            last_epoch: 0,
+            last_insets: WindowInsets::default(),
+            painted_animating: false,
         }
     }
 
@@ -2487,14 +2618,59 @@ impl ChildPod {
 
     /// Mutable access to the boxed child widget (e.g. to downcast during a
     /// container's own rebuild).
+    ///
+    /// **Marks the pod layout-dirty**, conservatively: a caller holding the
+    /// widget mutably may change state its layout depends on, and nothing tells
+    /// the layout skip whether it did (see [`ChildPod::layout_child`]). A
+    /// hand-rolled reconciler that rebuilds a child's own sub-pods through this
+    /// is thereby covered without knowing about the skip. A reconciler that
+    /// marks the pod itself from the rebuild's
+    /// [`ChangeFlags`](crate::view::ChangeFlags) uses
+    /// [`ChildPod::widget_mut_for_rebuild`] instead, so a rebuild that changed
+    /// nothing layout-visible leaves the pod clean.
     pub fn widget_mut(&mut self) -> &mut dyn Widget {
+        self.layout_dirty = true;
+        &mut *self.widget
+    }
+
+    /// Mutable access to the boxed child widget **without** marking the pod
+    /// layout-dirty — for a reconciler that rebuilds the child through it and
+    /// then marks the pod itself with [`ChildPod::mark_layout_dirty`] when the
+    /// rebuild returns [`ChangeFlags::LAYOUT`](crate::view::ChangeFlags::LAYOUT)
+    /// (`frust-widgets`' `rebuild_child`/`rebuild_children` and
+    /// [`crate::component::ComponentView`] do). Taking this accessor is taking
+    /// on that duty: a layout-affecting change made through it and not marked
+    /// lays out stale.
+    pub fn widget_mut_for_rebuild(&mut self) -> &mut dyn Widget {
         &mut *self.widget
     }
 
     /// Replace the boxed child widget (used when a type-changing rebuild swaps
-    /// the underlying widget).
+    /// the underlying widget). The fresh widget has never been laid out, so the
+    /// pod is marked layout-dirty.
     pub fn set_widget(&mut self, widget: Box<dyn Widget>) {
         self.widget = widget;
+        self.layout_dirty = true;
+    }
+
+    /// Whether the next [`ChildPod::layout_child`] must lay the child out even
+    /// under unchanged constraints (see that method for the rule). Read-only;
+    /// for tooling and tests ([`crate::tree::WidgetTree::inspect_layout_dirty`]).
+    pub fn is_layout_dirty(&self) -> bool {
+        self.layout_dirty
+    }
+
+    /// Mark this pod layout-dirty: its next [`ChildPod::layout_child`] calls
+    /// [`Widget::layout`] whatever its constraints.
+    ///
+    /// The reconcilers call this when a child's rebuild returns
+    /// [`ChangeFlags::LAYOUT`](crate::view::ChangeFlags::LAYOUT). **It marks this
+    /// pod only** — a dirty pod is reached only if every pod above it is laid
+    /// out too, so a caller outside a rebuild that reports `LAYOUT` upward must
+    /// also dirty its own path (by calling [`PaintCtx::request_layout`] or
+    /// [`EventCtx::request_layout`]).
+    pub fn mark_layout_dirty(&mut self) {
+        self.layout_dirty = true;
     }
 
     /// The child's origin in the container's coordinate space.
@@ -2721,10 +2897,61 @@ impl ChildPod {
         self.hover_epoch
     }
 
-    /// Lay the child out under `bc`, recording and returning its chosen size.
+    /// Lay the child out under `bc`, recording and returning its chosen size —
+    /// or, when nothing it depends on can have changed, return the size it
+    /// recorded last time **without calling [`Widget::layout`]**.
+    ///
+    /// # The skip rule
+    ///
+    /// The child is laid out again unless **all** of these hold:
+    ///
+    /// * the pass is not forced ([`LayoutCtx::is_forced`] — a context built
+    ///   outside a root, or a root with
+    ///   [`set_layout_skip(false)`](crate::app::RenderRoot::set_layout_skip));
+    /// * the pod is clean ([`ChildPod::is_layout_dirty`]);
+    /// * `bc` equals the constraints the last layout ran with;
+    /// * the root's layout epoch ([`LayoutCtx::layout_epoch`]) equals the one the
+    ///   last layout ran under — a root bumps it for a theme swap, an inset change
+    ///   and a window resize;
+    /// * the window insets the context carries equal last time's (an ancestor's
+    ///   scoped [`LayoutCtx::with_window_insets`] override counts).
+    ///
+    /// A pod is dirtied — and, because each source travels the pod chain, so is
+    /// every pod between it and the root — by:
+    ///
+    /// * a rebuild that returned [`ChangeFlags::LAYOUT`](crate::view::ChangeFlags::LAYOUT)
+    ///   for it (the reconcilers call [`ChildPod::mark_layout_dirty`]; a
+    ///   PAINT-only rebuild does not dirty layout), or a widget swap;
+    /// * a paint in which the child (or anything below it) called
+    ///   [`PaintCtx::request_layout`] **or any frame request** — conservatively,
+    ///   an animating subtree is laid out again on the next pass — and the one
+    ///   paint after the last such request, so the frame an animation lands on
+    ///   (the first to request nothing) is laid out too;
+    /// * an event the child consumed ([`EventResult::Handled`]), asked a redraw
+    ///   for, or called [`EventCtx::request_layout`] on;
+    /// * mutable access through [`ChildPod::widget_mut`] (conservatively — a
+    ///   reconciler marking from flags uses [`ChildPod::widget_mut_for_rebuild`]);
+    /// * being freshly built.
+    ///
+    /// A layout that runs records `bc`, the epoch and the insets, and clears the
+    /// dirty flag. Widgets keep their side of the contract on
+    /// [`Widget::layout`]: no layout-affecting state may change except through
+    /// one of the sources above.
     pub fn layout_child(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        if !ctx.force
+            && !self.layout_dirty
+            && self.last_constraints == Some(*bc)
+            && self.last_epoch == ctx.epoch
+            && self.last_insets == ctx.window_insets
+        {
+            return self.size;
+        }
         let size = self.widget.layout(ctx, bc);
         self.size = size;
+        self.last_constraints = Some(*bc);
+        self.last_epoch = ctx.epoch;
+        self.last_insets = ctx.window_insets;
+        self.layout_dirty = false;
         size
     }
 
@@ -2890,6 +3117,38 @@ impl ChildPod {
         if child_ctx.needs_layout() {
             ctx.request_layout();
         }
+        // The layout-skip half of the same two bubbles: a child that asked for
+        // layout, or for any frame at all (an animating subtree — the
+        // conservative rule), is laid out again on the next pass. Both flags
+        // bubble, so every pod from the requester up to the root is marked.
+        //
+        // One trailing paint more: the paint on which an animation *lands* is
+        // typically the first that asks for nothing (an `advance` that snaps
+        // onto its target returns `false`), yet it is the one that recorded the
+        // final value a paint-fed layout reads — so a pod whose previous paint
+        // asked is dirtied once more, and the settled geometry is laid out.
+        //
+        // The mark is reported upward as the path bit (and a child's bit marks
+        // this pod too), which the root folds into its pending `LAYOUT` so a
+        // shell running layout only on that flag reaches the dirtied pods. Two
+        // marks stay unreported. A paced-only request (`CosmeticLoop`, a
+        // decorative loop such as a caret blink) is marked but forces no pass:
+        // a pending flag would make the frame gate run every vsync and undo the
+        // pacing, and the next pass that does run still lays the pod out. And a
+        // loop still running reports nothing through `painted_animating`; the
+        // landing paint does, once — `painted_animating` tracks the child's own
+        // request, never the path bit, so the paint after it reports nothing.
+        let animating = child_ctx.needs_layout() || child_ctx.needs_frame();
+        if animating || self.painted_animating || child_ctx.layout_path_dirty {
+            self.layout_dirty = true;
+        }
+        let unpaced = child_ctx.needs_layout()
+            || (child_ctx.needs_frame() && !child_ctx.needs_frame_paced_only());
+        let landing = self.painted_animating && !animating;
+        if unpaced || landing || child_ctx.layout_path_dirty {
+            ctx.layout_path_dirty = true;
+        }
+        self.painted_animating = animating;
         // Bubble a focused editable's republished IME surface up the paint path,
         // so `RenderRoot::paint` can refresh the shell-facing state after a
         // rebuild-driven controlled change (see `PaintCtx::publish_ime_state`).
@@ -3097,6 +3356,7 @@ impl ChildPod {
             focus_req,
             focus_rel,
             redraw,
+            (layout_requested, layout_path_dirty),
             ime,
             result,
         ) = {
@@ -3122,10 +3382,25 @@ impl ChildPod {
                 child_ctx.is_focus_requested(),
                 child_ctx.is_focus_released(),
                 child_ctx.needs_redraw(),
+                (child_ctx.needs_layout(), child_ctx.is_layout_path_dirty()),
                 child_ctx.take_ime_state(),
                 result,
             )
         };
+        // The layout-skip dirty source of the event pass: a child that consumed
+        // the event, asked for a redraw or layout, or has a dirtied pod below it
+        // is laid out again on the next pass. The path bit is folded into `ctx`
+        // so the pod above marks itself in turn — a broadcast's container returns
+        // `Ignored` whatever its child did, so the result alone would not reach
+        // the root.
+        let path_dirty = layout_path_dirty
+            || layout_requested
+            || redraw
+            || matches!(result, EventResult::Handled);
+        if path_dirty {
+            self.layout_dirty = true;
+        }
+        ctx.absorb_layout(layout_requested, path_dirty);
         if captured {
             if !self.active {
                 // A fresh capture: whatever opt-in the last gesture recorded
