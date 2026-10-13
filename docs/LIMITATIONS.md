@@ -7255,20 +7255,6 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `network-image-aborted-load-lingers-in-flight` — an aborted network image load stays in the in-flight map
-
-**Observed**: when a view is torn down mid-fetch, its single-flight entry remains in the loader's in-flight map (`inflight_count` still counts it) until the same key is requested again; the stats row can show a nonzero in-flight count with nothing on screen.
-
-**Applies to**: `ImageLoader` users that drop views while loads are running.
-
-**Why accepted**: the entry holds no bytes and is replaced by the next request for the key; per-key cleanup would need cancellation plumbing through the fetcher seam.
-
-**Trigger for removal**: cancellation-aware single-flight cleanup in `ImageLoader`.
-
-**Evidence**: `plugins/network-image/src/loader.rs` (`inflight_count`); `plugins/network-image/tests/loader.rs`.
-
----
-
 ### `network-image-fade-ignores-reduce-motion` — the network image fade-in ignores the OS reduce-motion setting
 
 **Observed**: the 200 ms fade (`AnimatedOpacity`) runs even when the platform asks for reduced motion. An app opts out per view with `.fade(Duration::ZERO)`.

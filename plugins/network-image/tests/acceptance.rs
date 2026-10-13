@@ -193,20 +193,17 @@ fn a_eight_views_one_fetch() {
 }
 
 /// Criterion (b): unmounting during a 500 ms fetch writes no state and does not
-/// panic; the image never paints and nothing reaches the memory cache.
+/// panic; the image never paints and nothing reaches the memory cache. A
+/// remount of the same URL then fetches afresh (a second request) and paints,
+/// rather than resuming the aborted load.
 #[test]
 fn b_unmount_during_fetch_writes_nothing() {
     run(async {
         let rt = init_runtime();
-        // A 5-byte body trickled at 100 ms per byte keeps the fetch open for 500 ms.
-        let server = spawn(vec![(
-            "/slow.png",
-            Route::Slow {
-                body: vec![1; 5],
-                delay: Duration::from_millis(100),
-            },
-        )])
-        .await;
+        // A real PNG trickled one byte at a time keeps the fetch open for ~500 ms.
+        let body = png(8, 8, [40, 50, 60]);
+        let delay = Duration::from_millis((500 / body.len() as u64).max(1));
+        let server = spawn(vec![("/slow.png", Route::Slow { body, delay })]).await;
         let l = loader(no_disk());
         let probe = l.clone();
         let url = server.url("/slow.png");
@@ -235,6 +232,21 @@ fn b_unmount_during_fetch_writes_nothing() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(probe.memory_stats().entries, 0);
+        assert_eq!(probe.inflight_count(), 0, "the aborted load is gone");
+        assert_eq!(server.request_count(), 1);
+
+        state = true;
+        let start = Instant::now();
+        loop {
+            now += 16_000_000;
+            if frame(rt, &mut root, &mut logic, &mut state, now).images == 1 {
+                break;
+            }
+            assert!(start.elapsed() < TIMEOUT, "remount never painted");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(server.request_count(), 2, "the remount fetched afresh");
+        assert_eq!(probe.memory_stats().entries, 1);
     });
 }
 
