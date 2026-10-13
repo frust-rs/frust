@@ -305,6 +305,74 @@ fn a_refused_frames_evictions_survive_it_too() {
 }
 
 #[test]
+fn a_clear_an_upload_in_the_same_plan_covers_exactly_is_never_issued() {
+    // A churning atlas evicts a rectangle and hands it straight to an image of
+    // the same extent. The upload writes every texel the clear would have
+    // zeroed, after it, so the plan carries no clear for that rectangle — only
+    // the upload. One slot, so the second image can only land where the first
+    // one was.
+    let one_slot = AtlasBudget {
+        atlas_size: (32, 32),
+        max_atlases: 1,
+    };
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, one_slot);
+
+    let first = image_of(32, 32, [255, 0, 0, 255]);
+    let drawn = compile(&mut compiler, &scene_of(|b| b.draw_image(&first, DEST)));
+    let region = drawn.image_uploads[0].region;
+    compiler.acknowledge_image_plan();
+
+    let second = image_of(32, 32, [0, 0, 255, 255]);
+    let churned = compile(&mut compiler, &scene_of(|b| b.draw_image(&second, DEST)));
+    assert_eq!(
+        churned.image_draws, 1,
+        "the second image displaced the first"
+    );
+    assert_eq!(churned.image_uploads.len(), 1);
+    assert_eq!(
+        churned.image_uploads[0].region, region,
+        "into the very rectangle the first one held"
+    );
+    assert!(
+        churned.image_evictions.is_empty(),
+        "a clear the upload overwrites in full is dropped from the plan"
+    );
+
+    // Unacknowledged, the plan is re-offered on the same terms.
+    let again = compile(&mut compiler, &scene_of(|b| b.draw_image(&second, DEST)));
+    assert!(again.image_evictions.is_empty());
+    assert_eq!(again.image_uploads.len(), 1);
+}
+
+#[test]
+fn a_clear_an_upload_covers_only_partly_is_still_issued() {
+    // The same churn with a smaller arrival: the evicted rectangle's texels the
+    // new image does not reach must still read as zero, so the clear stays —
+    // ordered ahead of the upload, as every clear is.
+    let one_slot = AtlasBudget {
+        atlas_size: (32, 32),
+        max_atlases: 1,
+    };
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, one_slot);
+
+    let first = image_of(32, 32, [255, 0, 0, 255]);
+    let drawn = compile(&mut compiler, &scene_of(|b| b.draw_image(&first, DEST)));
+    let region = drawn.image_uploads[0].region;
+    compiler.acknowledge_image_plan();
+
+    let smaller = image_of(32, 16, [0, 0, 255, 255]);
+    let churned = compile(&mut compiler, &scene_of(|b| b.draw_image(&smaller, DEST)));
+    assert_eq!(churned.image_draws, 1);
+    assert_eq!(churned.image_uploads.len(), 1);
+    assert_ne!(churned.image_uploads[0].region, region);
+    assert_eq!(
+        churned.image_evictions,
+        vec![region],
+        "a partly covered rectangle keeps its clear"
+    );
+}
+
+#[test]
 fn a_capacity_refusal_leaves_no_region_recorded_for_an_image_it_refused() {
     // The second face of the same defect: a consumer records where each upload
     // lives so a later frame's paint can name it. A region outside the atlas
@@ -844,11 +912,12 @@ fn one_blob_drawn_at_two_extents_in_a_frame_keeps_the_first_draws_texels() {
 }
 
 #[test]
-fn a_pressure_eviction_reports_its_rectangle_once_and_hands_it_to_the_new_upload() {
+fn a_pressure_eviction_hands_its_rectangle_to_the_new_upload_without_a_clear() {
     // The consumer contract eviction has always kept, now reached by the second
-    // route: `image_evictions` names each freed rectangle once, and the plan is
-    // serviced clears-first, so the rectangle can be re-used by an upload in
-    // the very same plan without the clear erasing it.
+    // route: the plan is serviced clears-first, so the rectangle can be re-used
+    // by an upload in the very same plan without a clear erasing it — and when
+    // that upload covers the freed rectangle exactly, it writes every texel the
+    // clear would have, so the plan carries no clear for it at all.
     let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, FOUR_SLOT_BUDGET);
     let resident: Vec<ImageData> = (0..4).map(|_| image(32, 32)).collect();
 
@@ -872,16 +941,15 @@ fn a_pressure_eviction_reports_its_rectangle_once_and_hands_it_to_the_new_upload
     let frame = compile(&mut compiler, &scene_of(|b| b.draw_image(&arrival, DEST)));
 
     assert_eq!(frame.skipped_images, 0, "the fifth image still paints");
-    assert_eq!(
-        frame.image_evictions,
-        vec![displaced],
-        "exactly one rectangle, reported exactly once"
+    assert!(
+        frame.image_evictions.is_empty(),
+        "the displaced rectangle's clear is covered by the arrival's upload"
     );
     assert_eq!(frame.image_uploads.len(), 1);
     assert_eq!(
         frame.image_uploads[0].region, displaced,
-        "the freed rectangle is what the new occupant took, which is why the \
-         plan has to be serviced clears-first"
+        "the freed rectangle is what the new occupant took, which is why its \
+         upload alone leaves no stale texel behind"
     );
     assert!(
         FOUR_SLOT_BUDGET.contains(frame.image_uploads[0].region, frame.atlas_layers),

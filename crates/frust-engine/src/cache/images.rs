@@ -542,6 +542,28 @@ impl AtlasBudget {
 /// Bytes per texel of the atlas array (`Rgba8Unorm`).
 pub const ATLAS_FORMAT_BYTES: u64 = 4;
 
+/// `evictions` less every rectangle one of `uploads` covers exactly.
+///
+/// Exact cover only — same layer, offset and extent: an upload writes every
+/// texel of its own rectangle (its pixels are exactly the region's extent), so
+/// a clear of that same rectangle ordered ahead of it is overwritten in full.
+/// A rectangle covered only partly, or only by several uploads together, keeps
+/// its clear: whatever texels no upload reaches must still read as zero to the
+/// next tenant. Order is preserved, so the clears stay in the order the
+/// residency reported them.
+#[must_use]
+pub fn uncovered_clears(evictions: &[AtlasRegion], uploads: &[ImageUpload]) -> Vec<AtlasRegion> {
+    if evictions.is_empty() || uploads.is_empty() {
+        return evictions.to_vec();
+    }
+    let written: HashSet<AtlasRegion> = uploads.iter().map(|upload| upload.region).collect();
+    evictions
+        .iter()
+        .copied()
+        .filter(|region| !written.contains(region))
+        .collect()
+}
+
 /// Whether `caps`' adapter reads as a mobile part by its capability answers
 /// alone.
 ///
@@ -1247,9 +1269,24 @@ impl ImageResidency {
     /// on the next frame rather than losing it (see the module doc). The upload
     /// pixels are behind an `Arc`, so a re-emitted plan copies handles rather
     /// than texels, and the steady-state plan is empty on both counts.
+    ///
+    /// The clears are [`evictions`](Self::evictions) less every rectangle a
+    /// pending upload covers exactly (see [`uncovered_clears`]): that upload
+    /// writes every texel the clear would have zeroed, after it, in the same
+    /// plan — so the clear is pure cost, a rectangle's worth of zeroes per
+    /// churned image. Dropped from the plan rather than from `evictions`, so
+    /// the pending set and its acknowledgement are unchanged; a consumer
+    /// forgetting the evicted tenant by rectangle (the renderer's registry) is
+    /// left holding the old handle on that rectangle beside the new one, which
+    /// nothing reads — a handle is only looked up for a draw this frame
+    /// resolved, and a resolved handle is re-registered by its own upload — and
+    /// which the rectangle's next reported eviction removes with the new one.
     #[must_use]
     pub fn plan(&self) -> (Vec<AtlasRegion>, Vec<ImageUpload>) {
-        (self.evictions.clone(), self.uploads.clone())
+        (
+            uncovered_clears(&self.evictions, &self.uploads),
+            self.uploads.clone(),
+        )
     }
 
     /// Whether any part of the pending plan is still unserviced.
@@ -2609,6 +2646,69 @@ mod tests {
         assert!(!residency.has_pending_plan());
         assert!(residency.uploads().is_empty());
         assert!(residency.evictions().is_empty());
+    }
+
+    #[test]
+    fn a_clear_is_dropped_only_for_a_rectangle_an_upload_covers_exactly() {
+        let region = |layer, x, y, w, h| AtlasRegion {
+            layer,
+            offset: [x, y],
+            size: [w, h],
+        };
+        let upload = |region| ImageUpload {
+            id: ImageId::new(0),
+            region,
+            natural: region.size,
+            pixels: Arc::new(Pixmap::new(
+                u16::try_from(region.size[0]).expect("small"),
+                u16::try_from(region.size[1]).expect("small"),
+            )),
+            may_have_transparency: false,
+        };
+
+        let exact = region(0, 0, 0, 16, 16);
+        let other_layer = region(1, 0, 0, 16, 16);
+        let partial = region(0, 16, 0, 16, 16);
+        let evictions = [exact, other_layer, partial];
+        let uploads = [upload(exact), upload(region(0, 16, 0, 16, 8))];
+
+        assert_eq!(
+            uncovered_clears(&evictions, &uploads),
+            vec![other_layer, partial],
+            "only the exactly covered clear goes, the rest keep their order"
+        );
+        assert_eq!(uncovered_clears(&evictions, &[]), evictions.to_vec());
+        assert!(uncovered_clears(&[], &uploads).is_empty());
+    }
+
+    #[test]
+    fn a_pressure_eviction_into_the_same_rectangle_plans_no_clear() {
+        // One slot: the second image can only take the first one's rectangle.
+        let mut residency = ImageResidency::new(AtlasBudget {
+            atlas_size: (16, 16),
+            max_atlases: 1,
+        });
+        residency.begin_frame();
+        let first = residency.resolve(&image(16, 16)).expect("fits");
+        residency.acknowledge_plan();
+
+        residency.begin_frame();
+        let second = residency
+            .resolve(&image(16, 16))
+            .expect("displaces the first");
+        assert_eq!(second.region, first.region);
+        assert_eq!(
+            residency.evictions(),
+            &[first.region],
+            "the eviction itself is still pending"
+        );
+
+        let (clears, uploads) = residency.plan();
+        assert!(clears.is_empty(), "but the plan issues no clear for it");
+        assert_eq!(uploads.len(), 1);
+
+        residency.acknowledge_plan();
+        assert!(!residency.has_pending_plan());
     }
 
     #[test]
