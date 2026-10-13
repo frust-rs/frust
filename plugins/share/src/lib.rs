@@ -234,6 +234,7 @@ mod tests {
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     #[test]
+    #[ignore = "writes the host clipboard; run explicitly with -- --ignored"]
     fn desktop_falls_back_to_clipboard_or_reports_platform() {
         match Share::text("frust-share test", None) {
             Ok(outcome) => assert_eq!(outcome, ShareOutcome::CopiedToClipboard),
