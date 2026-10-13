@@ -8,15 +8,25 @@
 //! * [`sliver_box`] — one box child (`adapter`);
 //! * [`sliver_padding`] — insets around a sliver (`padding`);
 //! * [`sliver_fill_remaining`] — one box child filling what is left of the
-//!   viewport (`fill_remaining`).
+//!   viewport (`fill_remaining`);
+//! * [`sliver_fixed_extent_list`] / [`sliver_fixed_extent_list_keyed`] — a
+//!   lazy list of equal-extent rows materialised over the cache window
+//!   (`fixed_extent_list`), reconciled through the windowed reconcilers it
+//!   shares with [`ListView`](crate::ListView) (`reconcile`).
 
 pub mod adapter;
 pub mod fill_remaining;
+pub mod fixed_extent_list;
 pub mod padding;
+pub(crate) mod reconcile;
 
 pub use adapter::{SliverBoxView, SliverBoxWidget, sliver_box};
 pub use fill_remaining::{
     SliverFillRemainingView, SliverFillRemainingWidget, sliver_fill_remaining,
+};
+pub use fixed_extent_list::{
+    SliverFixedExtentListView, SliverFixedExtentListWidget, sliver_fixed_extent_list,
+    sliver_fixed_extent_list_keyed,
 };
 pub use padding::{SliverPaddingView, SliverPaddingWidget, sliver_padding};
 

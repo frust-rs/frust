@@ -1,5 +1,6 @@
-//! The structural slivers inside a `CustomScrollView`: `sliver_padding` and
-//! `sliver_fill_remaining`, plus the layout-skip audit over both.
+//! The structural slivers inside a `CustomScrollView`: `sliver_padding`,
+//! `sliver_fill_remaining` and the lazy `sliver_fixed_extent_list` (positional
+//! and keyed), plus the layout-skip audit over all three.
 //!
 //! The frame harness and the scroll script mirror `viewport.rs`'s.
 
@@ -15,8 +16,9 @@ use frust_core::{
 };
 use frust_text::TextContext;
 use frust_widgets::{
-    AnimateTo, EdgeInsets, ScrollController, SizedBox, ViewportWidget, custom_scroll_view,
-    sliver_box, sliver_fill_remaining, sliver_padding,
+    AnimateTo, ChildKey, EdgeInsets, ScrollController, SizedBox, ViewportWidget,
+    custom_scroll_view, sliver_box, sliver_fill_remaining, sliver_fixed_extent_list,
+    sliver_fixed_extent_list_keyed, sliver_padding,
 };
 use kurbo::{Point, Rect, Size};
 
@@ -265,6 +267,16 @@ impl Harness {
             .map(|n| n.bounds)
             .collect()
     }
+
+    /// The ids of the rows the first fixed-extent list holds, in window order.
+    fn list_rows(&self) -> Vec<WidgetId> {
+        self.root
+            .inspect()
+            .into_iter()
+            .find(|n| n.type_name.contains("SliverFixedExtentListWidget"))
+            .expect("a fixed-extent list")
+            .children
+    }
 }
 
 /// The drag/fling/overscroll/wheel/controller script `viewport.rs` runs.
@@ -502,6 +514,217 @@ fn fill_remaining_with_a_scroll_body_fills_the_paint_space_left_as_earlier_slive
 }
 
 // ---------------------------------------------------------------------------
+// sliver_fixed_extent_list.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_ten_thousand_row_list_materialises_only_the_cache_window_and_scrolls_to_its_end() {
+    let controller = ScrollController::new();
+    let ledger = Rc::new(Ledger::default());
+    let (c, l) = (controller.clone(), Rc::clone(&ledger));
+    let mut h = Harness::new(Size::new(400.0, 600.0), move |_| {
+        let l = Rc::clone(&l);
+        any(
+            custom_scroll_view(sliver_fixed_extent_list(10_000, 50.0, move |i| {
+                tile(i as u64, 50.0, &l)
+            }))
+            .controller(c.clone()),
+        )
+    });
+    let live = |ledger: &Ledger| ledger.live.borrow().iter().copied().collect::<Vec<_>>();
+    // The visible 600 px plus the 250 px cache below: rows 0..17.
+    assert_eq!(live(&ledger), (0..17).collect::<Vec<_>>());
+    assert_eq!(h.list_rows().len(), 17);
+    let list = h.viewport().sliver_geometry(0).expect("the list");
+    assert_eq!(
+        (list.scroll_extent, list.paint_extent, list.max_paint_extent),
+        (500_000.0, 600.0, 500_000.0)
+    );
+    let rows = h.bounds_of("TileWidget");
+    assert_eq!(rows[0], Rect::new(0.0, 0.0, 400.0, 50.0));
+    assert_eq!(rows[16], Rect::new(0.0, 800.0, 400.0, 850.0));
+
+    // Mid-list: [9750, 10850) — rows 195..217, every earlier row torn down.
+    controller.jump_to(10_000.0);
+    h.frames(2);
+    assert_eq!(live(&ledger), (195..217).collect::<Vec<_>>());
+    assert_eq!(h.list_rows().len(), 22);
+    let rows = h.bounds_of("TileWidget");
+    assert_eq!(rows[0].y0, -250.0);
+    assert_eq!(rows[5], Rect::new(0.0, 0.0, 400.0, 50.0));
+
+    // The end: the max extent is exactly the rows' total less the viewport.
+    controller.jump_to(f64::INFINITY);
+    h.frames(2);
+    assert_eq!(controller.offset(), 499_400.0);
+    assert_eq!(controller.max_offset(), 499_400.0);
+    assert_eq!(live(&ledger), (9983..10_000).collect::<Vec<_>>());
+    let rows = h.bounds_of("TileWidget");
+    assert_eq!(rows.last().expect("the last row").y1, 600.0);
+    assert!(
+        ledger.builds.get() < 100,
+        "only window rows were ever built: {}",
+        ledger.builds.get()
+    );
+}
+
+#[test]
+fn the_window_honours_the_cache_extent_and_the_slivers_before_the_list() {
+    let ledger = Rc::new(Ledger::default());
+    let l = Rc::clone(&ledger);
+    let _h = Harness::new(Size::new(400.0, 600.0), move |_| {
+        let l2 = Rc::clone(&l);
+        any(custom_scroll_view((
+            sliver_box(tile(1_000_000, 300.0, &l)),
+            sliver_padding(
+                EdgeInsets {
+                    left: 0.0,
+                    top: 100.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                },
+                sliver_fixed_extent_list(100, 50.0, move |i| tile(i as u64, 50.0, &l2)),
+            ),
+        ))
+        .cache_extent(0.0))
+    });
+    // The list starts at 400; 200 px of it are visible and nothing is cached.
+    let rows: Vec<u64> = ledger
+        .live
+        .borrow()
+        .iter()
+        .copied()
+        .filter(|id| *id < 1_000_000)
+        .collect();
+    assert_eq!(rows, (0..4).collect::<Vec<_>>());
+}
+
+#[test]
+fn keyed_rows_keep_their_pods_across_a_prepend() {
+    let controller = ScrollController::new();
+    let ledger = Rc::new(Ledger::default());
+    let data: Rc<RefCell<Vec<u64>>> = Rc::new(RefCell::new((0..1000).collect()));
+    let (c, l, d) = (controller.clone(), Rc::clone(&ledger), Rc::clone(&data));
+    let mut h = Harness::new(Size::new(400.0, 500.0), move |_| {
+        let ids = d.borrow().clone();
+        let keys = ids.clone();
+        let l = Rc::clone(&l);
+        any(custom_scroll_view(sliver_fixed_extent_list_keyed(
+            ids.len(),
+            50.0,
+            move |i| ChildKey::new(keys[i]),
+            move |i| tile(ids[i], 50.0, &l),
+        ))
+        .cache_extent(0.0)
+        .controller(c.clone()))
+    });
+    controller.jump_to(1000.0);
+    h.frames(2);
+    // [1000, 1500): rows 20..30.
+    assert_eq!(
+        ledger.live.borrow().iter().copied().collect::<Vec<_>>(),
+        (20..30).collect::<Vec<_>>()
+    );
+    let before = h.list_rows();
+    assert_eq!(before.len(), 10);
+
+    data.borrow_mut().insert(0, 5000);
+    h.frames(2);
+    // No anchoring: the window still covers indices 20..30, which now hold
+    // ids 19..=28 — every id that stayed in the window kept its pod.
+    assert_eq!(
+        ledger.live.borrow().iter().copied().collect::<Vec<_>>(),
+        (19..29).collect::<Vec<_>>()
+    );
+    let after = h.list_rows();
+    assert_eq!(after.len(), 10);
+    assert_eq!(
+        after[1..],
+        before[..9],
+        "ids 20..=28 kept their pods, one slot down"
+    );
+    assert!(
+        !before.contains(&after[0]),
+        "id 19 entered the window fresh"
+    );
+}
+
+#[test]
+fn positional_rows_are_reused_by_index() {
+    let ledger = Rc::new(Ledger::default());
+    let offset = Rc::new(Cell::new(0u64));
+    let (l, o) = (Rc::clone(&ledger), Rc::clone(&offset));
+    let mut h = Harness::new(Size::new(400.0, 500.0), move |_| {
+        let l = Rc::clone(&l);
+        let shift = o.get();
+        any(
+            custom_scroll_view(sliver_fixed_extent_list(100, 50.0, move |i| {
+                tile(i as u64 + shift, 50.0, &l)
+            }))
+            .cache_extent(0.0),
+        )
+    });
+    let before = h.list_rows();
+    offset.set(1000);
+    h.frame();
+    assert_eq!(
+        h.list_rows(),
+        before,
+        "the same pods, rebuilt with new content"
+    );
+    assert_eq!(
+        ledger.live.borrow().iter().copied().collect::<Vec<_>>(),
+        (1000..1010).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn near_edges_fire_once_per_approach_and_never_on_mount() {
+    let controller = ScrollController::new();
+    let ledger = Rc::new(Ledger::default());
+    let starts = Rc::new(Cell::new(0u32));
+    let ends = Rc::new(Cell::new(0u32));
+    let (c, l, s, e) = (
+        controller.clone(),
+        Rc::clone(&ledger),
+        Rc::clone(&starts),
+        Rc::clone(&ends),
+    );
+    let mut h = Harness::new(Size::new(400.0, 600.0), move |_| {
+        let l = Rc::clone(&l);
+        let (s, e) = (Rc::clone(&s), Rc::clone(&e));
+        any(custom_scroll_view(
+            sliver_fixed_extent_list(1000, 50.0, move |i| tile(i as u64, 50.0, &l))
+                .on_near_start(move |_: &mut ()| s.set(s.get() + 1), 200.0)
+                .on_near_end(move |_: &mut ()| e.set(e.get() + 1), 300.0),
+        )
+        .controller(c.clone()))
+    });
+    assert_eq!((starts.get(), ends.get()), (0, 0), "mounting fires nothing");
+
+    // 50 000 px of rows in a 600 px viewport: 1 400 px from the end, then 200.
+    controller.jump_to(48_000.0);
+    h.frames(2);
+    assert_eq!(ends.get(), 0);
+    controller.jump_to(49_200.0);
+    h.frames(2);
+    assert_eq!(ends.get(), 1, "the end came within 300 px");
+    controller.jump_to(49_300.0);
+    h.frames(2);
+    assert_eq!(ends.get(), 1, "edge-triggered: no refire while near");
+    controller.jump_to(40_000.0);
+    h.frames(2);
+    controller.jump_to(49_400.0);
+    h.frames(2);
+    assert_eq!(ends.get(), 2, "rearmed past twice the threshold");
+
+    assert_eq!(starts.get(), 0);
+    controller.jump_to(100.0);
+    h.frames(2);
+    assert_eq!(starts.get(), 1, "the start came within 200 px");
+}
+
+// ---------------------------------------------------------------------------
 // The layout-skip audit.
 // ---------------------------------------------------------------------------
 
@@ -512,12 +735,15 @@ fn the_layout_audit_finds_no_stale_pod_across_the_scroll_script() {
         let ledger = Rc::new(Ledger::default());
         let (c, l) = (controller.clone(), Rc::clone(&ledger));
         let mut h = Harness::boxed(Size::new(400.0, 600.0), move |_| {
+            let (l1, l2) = (Rc::clone(&l), Rc::clone(&l));
             any(custom_scroll_view((
                 sliver_padding(
                     EdgeInsets::symmetric(12.0, 30.0),
-                    sliver_box(tile(0, 900.0, &l)),
+                    sliver_fixed_extent_list(40, 45.0, move |i| tile(i as u64, 45.0, &l1)),
                 ),
-                SizedBox::<()>(None, Some(1500.0)),
+                sliver_fixed_extent_list_keyed(30, 60.0, ChildKey::new, move |i| {
+                    tile(1000 + i as u64, 60.0, &l2)
+                }),
                 sliver_fill_remaining(tile(5000, 80.0, &l)).has_scroll_body(false),
             ))
             .controller(c.clone()))
