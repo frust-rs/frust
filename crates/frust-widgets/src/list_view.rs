@@ -400,10 +400,11 @@ use crate::physics::{
     default_overscroll_effect, default_physics,
 };
 use crate::scroll::{
-    BallisticState, InnerScrollState, METRICS_FALLBACK_DPR, SETTLE_DECAY, SETTLE_STOP_PX,
+    InnerScrollState, METRICS_FALLBACK_DPR, SETTLE_DECAY, SETTLE_STOP_PX,
     ScrollInfo, ambient_scroll_claim, crossed_refresh_trigger, inner_claim_state,
     stretch_about_edge, with_scroll_claim, with_scroll_veto,
 };
+use crate::scroll_core::BallisticState;
 use crate::scroll_controller::{
     AnimateTo, ControllerCommand, ItemAlignment, ScrollBinding, ScrollCommand, ScrollController,
     ScrollToItem,
