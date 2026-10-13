@@ -672,17 +672,18 @@ fn wheel_drag_fling_jump_and_animate_match_scroll_view_frame_for_frame() {
 
 /// A vertical scroll view: an 80 px header, a 300 px slot holding `inner`,
 /// then twenty 50 px rows.
-fn outer_with(inner: AnyView<()>, outer: &ScrollController) -> AnyView<()> {
+fn outer_with(inner: AnyView<()>, outer: ScrollController) -> impl View<()> {
     let mut content: Vec<AnyView<()>> = vec![any(SizedBox::<()>(None, Some(80.0)))];
     content.push(any(SizedBox::<()>(None, Some(300.0)).child(inner)));
     content.extend(rows(20, 50.0));
-    any(scroll_view(Column(content))
+    scroll_view(Column(content))
         .physics(Clamping::new())
-        .controller(outer.clone()))
+        .controller(outer)
 }
 
 /// The nested script: drag the inner, run it to its end, drag on into the
-/// outer, then (outer back at the top) drag the inner back. Returns `(outer, inner)` offsets after each step.
+/// outer, then (outer back at the top) drag the inner back. Returns the
+/// `(outer, inner)` offsets after each step.
 fn nested_script(
     h: &mut Harness,
     outer: &ScrollController,
@@ -722,7 +723,7 @@ fn nested_in_a_scroll_view_the_claim_arbitration_matches_scroll_view_in_scroll_v
                     .physics(Clamping::new())
                     .controller(i.clone()))
             };
-            outer_with(nested, &o)
+            any(outer_with(nested, o.clone()))
         });
         nested_script(&mut h, &outer, &inner)
     };
