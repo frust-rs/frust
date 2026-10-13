@@ -7200,3 +7200,114 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 **Evidence**: deferred action item act_000001a1021c875bkG9kgNET; the 0.5.0 templates (`crates/frust-drive/templates/app/` before the platform-wiring change).
 
+---
+
+### `network-image-no-http-cache-headers` — the network image cache ignores HTTP caching headers
+
+**Observed**: `frust-network-image` never reads `ETag`, `Last-Modified`, `Cache-Control` or `Expires`, and sends no conditional request. A disk-cached image is served until evicted by the LRU cap or cleared, however stale the origin copy is.
+
+**Applies to**: every `network_image` view whose URL's content changes while the same URL stays cached (memory or disk).
+
+**Why accepted**: the cache keys on the URL alone and treats a successful fetch as immutable, which is right for the content-addressed and versioned URLs the plugin targets; revalidation needs a conditional-request path through the `ImageFetcher` seam.
+
+**Trigger for removal**: a card adding conditional requests (`If-None-Match`/`If-Modified-Since`) and expiry to the disk cache.
+
+**Evidence**: `plugins/network-image/src/disk_cache.rs` (index stores only size and last-access time) and `src/fetch.rs` (`FetchedBytes` carries bytes and content type only).
+
+---
+
+### `network-image-full-size-decode-peak` — a large image is fully decoded before it is downscaled
+
+**Observed**: `image` 0.25 has no JPEG DCT-scaled decode, so `target_px` shrinks the image only after a full-resolution decode; the peak transient allocation is the full decoded bitmap (width x height x 4 bytes) regardless of the display size. Only the downscaled result is cached in memory.
+
+**Applies to**: decoding a high-resolution photo on a memory-constrained device; the fetch is capped (20 MiB by default) but the decoded size is not.
+
+**Why accepted**: the cap bounds download size, decode runs off the UI thread, and the resident cost after decode is the fitted bitmap; a scaled-decode path needs a different decoder.
+
+**Trigger for removal**: a decoder with DCT-scaled or tiled JPEG decode, or a pre-decode dimension limit in `decode_and_fit`.
+
+**Evidence**: `plugins/network-image/src/decode.rs` (`decode_and_fit`: Triangle pre-shrink for >2x, then Lanczos3, after the full decode).
+
+---
+
+### `network-image-no-svg` — the network image view does not decode SVG
+
+**Observed**: an `.svg` URL fetches successfully and then fails to decode, so the view shows its error slot. WebP decodes only with the opt-in `webp` feature; without it the failure is `DecodeError::UnsupportedFormat`.
+
+**Applies to**: `network_image` with an SVG (or, without `webp`, a WebP) source.
+
+**Why accepted**: the plugin decodes raster formats through `image`; vector rendering is a separate capability the baseline widgets do not provide.
+
+**Trigger for removal**: a vector-image capability in the framework, or an SVG-rasterizing decode step.
+
+**Evidence**: `plugins/network-image/src/decode.rs` (`DecodeError`).
+
+---
+
+### `network-image-android-cache-dir-late` — an Android load issued before platform init is memory-only for that process
+
+**Observed**: `frust_paths::cache_dir()` is `None` until the shell runs `nativeInitPlatform`. A `network_image` load issued before then runs memory-only (one `log::info`), and the disk cache is not retried for the rest of that process.
+
+**Applies to**: Android, a load started before native platform initialization (for example from a static initializer).
+
+**Why accepted**: every shell initializes before the first frame, so views built from `build` are unaffected; the disk cache is opened lazily on the first miss and, once absent, stays absent.
+
+**Trigger for removal**: re-resolving `cache_dir()` on a later miss, or a shell ordering guarantee that makes the case unreachable.
+
+**Evidence**: `plugins/network-image/src/loader.rs` (lazy disk open on first miss); `crates/frust-paths` (shell-installed slot).
+
+---
+
+### `network-image-fade-ignores-reduce-motion` — the network image fade-in ignores the OS reduce-motion setting
+
+**Observed**: the 200 ms fade (`AnimatedOpacity`) runs even when the platform asks for reduced motion. An app opts out per view with `.fade(Duration::ZERO)`.
+
+**Applies to**: `network_image` views left on the default fade, with reduce-motion enabled in the OS.
+
+**Why accepted**: the fade is a short, opacity-only effect, and the view does not yet consult the theme's reduce-motion flag (`theme.motion.reduce_motion`).
+
+**Trigger for removal**: the view reading the theme's reduce-motion flag and skipping the fade when it is set.
+
+**Evidence**: `plugins/network-image/src/view.rs` (fade handling).
+
+---
+
+### `network-image-no-reinstall-recheck` — a network image view that found no loader does not re-check when one is installed
+
+**Observed**: a view built before `NetworkImages::install()` (or without a context loader) shows its error slot and logs once; it looks for a loader again only when its url, headers or target change, not when a loader appears later.
+
+**Applies to**: views built before install; in practice `install()` runs in the `app!` setup block, before any view.
+
+**Why accepted**: the supported call site (`frust::app!(App, setup = { NetworkImages::install(); })`) makes the case unreachable; a missing install is a programmer error surfaced by the error slot and the log line.
+
+**Trigger for removal**: none planned.
+
+**Evidence**: `plugins/network-image/src/view.rs` and `plugins/network-image/src/install.rs` (`NetworkImages::loader`).
+
+---
+
+### `network-image-disk-hit-decode-failure-not-evicted` — a disk cache entry that fails to decode is not evicted
+
+**Observed**: when bytes read from the disk cache fail to decode (corrupt file, unsupported format after the `webp` feature was turned off), the load fails and the entry stays; the view shows its error slot on every attempt until the entry is evicted by the LRU or `clear_disk`/`clear_all` is called.
+
+**Applies to**: disk-cache hits whose bytes no longer decode.
+
+**Why accepted**: fetched bytes are written only after a successful fetch and writes are atomic, so a corrupt entry is rare; automatic eviction would risk refetch loops for a genuinely undecodable origin image.
+
+**Trigger for removal**: evict-on-decode-failure plus a single refetch in `ImageLoader`.
+
+**Evidence**: `plugins/network-image/src/loader.rs` (disk-hit decode path); `plugins/network-image/src/disk_cache.rs`.
+
+---
+
+### `network-image-android-gate-needs-ndk` — the Android compile gate for the network image plugin needs the NDK C compiler
+
+**Observed**: `cargo check --target aarch64-linux-android -p frust-network-image` with default features fails without the NDK toolchain on `PATH` because `ring` compiles C. The gate is `cargo ndk -t arm64-v8a -P 26 check -p frust-network-image`; `examples/playground` links `ring` through the plugin's default feature, so its Android check takes the same form. The plain target check works only with `--no-default-features`.
+
+**Applies to**: contributors and CI running the Android compile gates without `cargo-ndk`.
+
+**Why accepted**: ring has no pure-Rust build; the TLS stack is the plugin's reason to exist, and `cargo-ndk` is already a prerequisite for Android builds.
+
+**Trigger for removal**: a pure-Rust TLS provider, or an NDK-configured environment in the plain gate.
+
+**Evidence**: [DEVELOPMENT.md](DEVELOPMENT.md) § Test (compile gates); `plugins/network-image/Cargo.toml`.

@@ -19,7 +19,7 @@ is additional or different for a plugin.
 - **No panics/unwinds near an FFI boundary**, the same rule as shell exports
   ([CODE_STANDARDS.md](CODE_STANDARDS.md)'s Language Idioms).
 - **Platform plugins never depend on `frust-*` framework crates** (`frust-plugin` +
-  `frust-paths` + FFI crates only); **facade plugins depend on `frust` alone**. A platform
+  `frust-paths` + FFI crates only); **facade plugins depend on `frust` alone** (sole exception: `frust-network-image` also depends on the `frust-paths` leaf for its cache directory, mirroring the platform-plugin allowance). A platform
   plugin MAY depend on another platform plugin instead, provided the edge is target-gated,
   the capability is literally reused rather than re-implemented, and it never forms a cycle —
   the forbidden thing is a dependency on a *framework* crate, and a sibling platform plugin has

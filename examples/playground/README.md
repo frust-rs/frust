@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between fourteen sections
+`pattern_switcher`-hosted section body, selecting between fifteen sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all fourteen
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all fifteen
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -134,6 +134,13 @@ The sections, in order:
     stack first, then returns a non-home tab root to Home, and at the Home
     root exits the app. Tab B's root carries a text field for the focus/IME
     leg; a status line prints the selected tab and every tab's depth.
+15. **Images** — the `frust-network-image` device-gate page: six `network_image`
+    views over `picsum.photos` (placeholder, fade-in, error slot), a *Use local
+    fixtures* toggle that serves the same tiles from an in-process loopback
+    server, a stats row (memory bytes, disk bytes, in-flight loads) and a
+    *Clear caches* button (`clear_all`). `NetworkImages::install()` runs in the
+    app's `setup` block. Manual checks:
+    [PLUGINS_DEVELOPMENT.md](../../docs/PLUGINS_DEVELOPMENT.md).
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with

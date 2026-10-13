@@ -1,0 +1,45 @@
+[package]
+name = "frust-network-image"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Network image view for Frust apps: URL images with memory + disk cache"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+# Facade-tier plugin (no OS arm): `frust` alone among the framework crates, plus the
+# `frust-paths` leaf for the disk-cache directory.
+# Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.1", default-features = false }
+frust-paths = { path = "../../crates/frust-paths", version = "0.6.1" }
+# HTTP/TLS stack (default `reqwest` feature); optional so `--no-default-features` is network-free.
+# Pins and the ring/webpki-roots rationale live on the root rows.
+reqwest = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+image = { workspace = true }
+# No workspace row for futures: `Shared` (single-flight) needs only futures-util's std arm.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[features]
+default = ["reqwest"]
+reqwest = ["dep:reqwest", "dep:rustls", "dep:webpki-roots"]
+# Optional WebP decode (pure Rust `image-webp`); without it a WebP body is `UnsupportedFormat`.
+webp = ["image/webp"]
+
+[dev-dependencies]
+# Dev-only: the facade does not re-export `ReactiveRuntime`, which `spawn_blocking` needs in tests.
+frust-reactive = { workspace = true }
+# Test-only: tests/view.rs drives a real `RenderRoot` (not re-exported by the facade).
+frust-core = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }

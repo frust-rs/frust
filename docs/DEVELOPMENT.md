@@ -11,7 +11,7 @@ none — everything they need is here):
 | CORE | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` pins |
 | RENDER | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) | `wgpu`, `image`, `vello_common`/`glifo`, `parley` pins |
 | SHELLS | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) | deep-link and safe-area/keyboard/back manual tests; `muda`, `windows-sys` pins |
-| PLUGINS | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) | shared-preferences, secure-storage, camera, and IAP manual tests; `ndk-context`, `objc2*`, CameraX, OpenIAP, `keyring-core`, `arboard` (shared with the desktop shell) pins |
+| PLUGINS | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) | shared-preferences, secure-storage, camera, and IAP manual tests; `ndk-context`, `objc2*`, CameraX, OpenIAP, `keyring-core`, `arboard` (shared with the desktop shell), `reqwest`/`rustls`/`webpki-roots` pins |
 | CLI | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) | template development; `notify` pin |
 | TUI | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` pins |
 
@@ -295,10 +295,11 @@ gates from its own directory like the chain above). Windows-only
 hot-patch tests: [TESTING.md](TESTING.md).
 
 ```bash
-# frust-database mobile compile gates: run separately from the facade-graph gates below
-# (this crate's C/bindgen build needs cargo-ndk's CC_*/AR_* passthrough, which a plain
-# `cargo check --target` does not supply; the iOS gate needs xcrun, so macOS-only).
+# frust-database / frust-network-image Android gates: C builds (bindgen, ring) need cargo-ndk's
+# CC_*/AR_* passthrough, which plain `cargo check --target` lacks (plain works only with
+# `-p frust-network-image --no-default-features`); playground links ring (same form); iOS gate needs xcrun (macOS-only).
 cargo ndk -t arm64-v8a check -p frust-database
+cargo ndk -t arm64-v8a -P 26 check -p frust-network-image
 cargo check -p frust-database --target aarch64-apple-ios
 ```
 
@@ -344,7 +345,7 @@ cargo check --all-targets --target aarch64-linux-android -p frust-shell-android 
 # or running an iOS app needs macOS, see Prerequisites): the whole facade graph must compile
 # for the Simulator target (frust-secure-storage also gates the device target).
 cargo check --target aarch64-apple-ios-sim \
-  -p frust-ui -p frust-shared-preferences -p frust-secure-storage -p frust-camera \
+  -p frust-ui -p frust-shared-preferences -p frust-secure-storage -p frust-camera -p frust-network-image \
   -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n -p frust-video-player
 cargo check --target aarch64-apple-ios -p frust-secure-storage
 cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
@@ -430,7 +431,7 @@ touching it. The pin rows themselves — pin, rationale, tripwire — live with 
 |------|-------|
 | `wgpu`, `image`, `vello_common`/`glifo`, `parley` | [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md) |
 | `reactive_graph`/`any_spawner`/`tokio`, `clean-signals`, `accesskit` + adapters, `frust-hotpatch`'s crate-local `libloading`/`memmap2`/`memfd`/`subsecond-types` | [CORE_DEVELOPMENT.md](CORE_DEVELOPMENT.md) |
-| `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard` (one pin, two consumers — `frust-clipboard` and `frust-shell-desktop`'s clipboard route — so its row carries two tripwires, `cargo check -p frust-clipboard` **and** `cargo check -p frust-shell-desktop`), `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `sys-locale` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
+| `ndk-context`, `objc2*` (Foundation/Security/LocalAuthentication/UIKit/QuartzCore/CoreText/CoreFoundation), `androidx.camera`, `openiap-google`/`OpenIAP`, `keyring-core`, `arboard` (one pin, two consumers — `frust-clipboard` and `frust-shell-desktop`'s clipboard route — so its row carries two tripwires, `cargo check -p frust-clipboard` **and** `cargo check -p frust-shell-desktop`), `fluent-rs`, `icu` (2.2/2.3), `icu_experimental`, `sys-locale`, `reqwest`/`rustls`/`webpki-roots` | [PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md) |
 | `muda`, `windows-sys` (desktop shells' native menu-bar/Win32 bindings; `objc2-app-kit` rides the objc2 pin family above); web shell tier: `wasm-bindgen` (=0.2.128 exact — must equal the host `wasm-bindgen-cli`), `wasm-bindgen-futures`, `js-sys`/`web-sys`, `web-time`, `console_log`, `console_error_panic_hook`, `wasm-bindgen-test` (=0.3.78 exact — crate-local, bumps in lockstep with `wasm-bindgen`) | [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) |
 | `notify`, `rmcp`, `axum`, `base64`, `tokio-util`, `icns`, the hot-patch builder's `object`/`ar`/`gimli`/`rustc-demangle`/`pdb` (+ `cargo-packager`/`winresource`, external-tool/template-side, not `[workspace.dependencies]`) | [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) |
 | `ratatui`/`crossterm`/`ansi-to-tui`, `toml_edit` | [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md) |
