@@ -1,0 +1,27 @@
+[package]
+name = "frust-share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Share plugin for Frust apps: opens the platform share sheet for text or a URL (Android chooser, iOS activity sheet, desktop clipboard fallback)."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+thiserror = { workspace = true }
+# Geometry type of `ShareAnchor` (the iOS popover rect, used from sh-02 on).
+kurbo = { workspace = true }
+# Only `frust-*` dependency a platform plugin may carry (docs/ARCHITECTURE.md).
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.1" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+# Plugin->plugin edge (docs/PLUGINS_CODE_STANDARDS.md): desktop has no share sheet,
+# so the fallback is the clipboard and reimplementing that would duplicate arboard.
+[target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
+frust-clipboard = { path = "../clipboard", version = "0.6.1" }

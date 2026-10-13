@@ -7,25 +7,25 @@ expression: rendered
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (11-19 of 19)       │▓▓                
- DEVICES ↻ R      │    ( ) iap                                                   │▓▓                
-   none found     │        In-app purchases and subscriptions over Play Billing  │▓▓                
-                  │    ( ) video-player                                          │▓▓                
- SESSIONS         │        Video playback (Media3 ExoPlayer / AVPlayer) with     │▓▓                
-   none running   │    ( ) database                                              │▓▓                
-                  │        Embedded SQL database (SQLite via rusqlite;           │▓▓                
- ACTIONS          │    ( ) i18n                                                  │▓▓                
-   New project · n│        Fluent Project-based                                  │▓▓                
-   Add plugin · a │    ( ) glyph                                                 │▓▓                
-   Doctor · i     │        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
-   Build · b      │    ( ) material                                              │▓▓                
-   Clean · c      │        Material 3 catalog; needs frust_material::install()   │▓▓                
-   MCP off · M    │    ( ) cupertino                                             │▓▓                
-   DAP off · D    │        Cupertino catalog; needs frust_cupertino::install()   │▓▓                
-                  │    ( ) shadcn                                                │▓▓                
-                  │        shadcn/ui catalog; needs frust_shadcn::install() in   │▓▓                
-                  │  ▸ (o) network-image                                         │▓▓                
+                  │  Choose a plugin to add to this project  (12-20 of 20)       │▓▓                
+ DEVICES ↻ R      │    ( ) video-player                                          │▓▓                
+   none found     │        Video playback (Media3 ExoPlayer / AVPlayer) with     │▓▓                
+                  │    ( ) database                                              │▓▓                
+ SESSIONS         │        Embedded SQL database (SQLite via rusqlite;           │▓▓                
+   none running   │    ( ) i18n                                                  │▓▓                
+                  │        Fluent Project-based                                  │▓▓                
+ ACTIONS          │    ( ) glyph                                                 │▓▓                
+   New project · n│        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
+   Add plugin · a │    ( ) material                                              │▓▓                
+   Doctor · i     │        Material 3 catalog; needs frust_material::install()   │▓▓                
+   Build · b      │    ( ) cupertino                                             │▓▓                
+   Clean · c      │        Cupertino catalog; needs frust_cupertino::install()   │▓▓                
+   MCP off · M    │    ( ) shadcn                                                │▓▓                
+   DAP off · D    │        shadcn/ui catalog; needs frust_shadcn::install() in   │▓▓                
+                  │    ( ) network-image                                         │▓▓                
                   │        Network image view: URL images with an in-memory +    │▓▓                
+                  │  ▸ (o) share                                                 │▓▓                
+                  │        Share text or a URL through the platform share sheet  │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
