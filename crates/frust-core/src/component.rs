@@ -45,6 +45,7 @@ use crate::event::{EventCtx, EventResult, InputEvent, PointerPhase};
 #[cfg(feature = "hotpatch")]
 use crate::hotpatch::SeamWitness;
 use crate::layout::BoxConstraints;
+use crate::sliver::{SliverConstraints, SliverGeometry, SliverWidget};
 use crate::view::{AnyView, BuildCtx, ChangeFlags, View};
 use crate::widget::{ChildPod, LayoutCtx, PaintCtx, PaintScene, Widget};
 
@@ -445,6 +446,19 @@ impl<C: Component> Widget for ComponentWidget<C> {
         visitor(&self.child);
     }
 
+    /// A component is a sliver exactly when its child is: the boundary is as
+    /// transparent to the sliver protocol as it is to box layout. The sliver
+    /// face is the component itself rather than the child widget, so the
+    /// layout runs through the child pod and leaves it sized and recorded for
+    /// this component's own paint, hit test and semantics.
+    fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
+        if self.child.is_sliver() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // The state boundary: build an inner context over the component's *own*
         // local state, seeded with the outer focus flag, dispatch through the
@@ -520,6 +534,20 @@ impl<C: Component> Widget for ComponentWidget<C> {
             ctx.publish_ime_state(ime);
         }
         result
+    }
+}
+
+impl<C: Component> SliverWidget for ComponentWidget<C> {
+    /// Pass-through, like [`Widget::layout`]: the child sits at the component's
+    /// origin and receives `sc` unchanged, under the child pod's layout skip.
+    fn layout_sliver(&mut self, ctx: &mut LayoutCtx, sc: &SliverConstraints) -> SliverGeometry {
+        self.child.set_origin(Point::ZERO);
+        // `as_sliver` answered for a sliver child and only a rebuild can swap
+        // it, so `None` is unreachable from a viewport; an empty sliver is the
+        // inert answer if a caller reaches here directly anyway.
+        self.child
+            .layout_sliver_child(ctx, sc)
+            .unwrap_or(SliverGeometry::ZERO)
     }
 }
 
