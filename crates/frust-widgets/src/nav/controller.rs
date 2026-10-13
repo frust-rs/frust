@@ -60,7 +60,10 @@ pub struct NavigatorController<State: 'static> {
     /// `handles_back` from — it differs from [`can_pop`](Self::can_pop) exactly
     /// in the depth-1-with-overlay case, where a raw pop would do nothing but the
     /// overlay still owns the press. Same plain `Rc<Cell<_>>` (reactive-free)
-    /// polled-at-rebuild contract as `depth`.
+    /// polled-at-rebuild contract as `depth`. The cell holds the stack's own
+    /// answer only: the reach gate and the liveness gate
+    /// ([`is_mounted`](Self::is_mounted)) are ANDed on at read time by
+    /// [`back_interest()`](Self::back_interest), never baked in.
     pub(super) back_interest: Rc<Cell<bool>>,
     /// The published snapshot of the navigator's single in-flight page
     /// transition, written by the attached [`NavigatorWidget`] at every
@@ -261,6 +264,17 @@ impl<State: 'static> NavigatorController<State> {
     /// stack while the visible page stays put. Unconditional `true` for the
     /// reach term at the top level, so a single-navigator app is unaffected.
     ///
+    /// # Only a mounted navigator claims
+    ///
+    /// A navigator whose view is not in the retained tree — never built yet,
+    /// or already torn down (a popped page hosting it, a switched-away section)
+    /// — cannot apply the op a claimed press would enqueue, so it claims
+    /// nothing: this is `false` whenever [`is_mounted`](Self::is_mounted) is.
+    /// The gate is exact at teardown (no rebuild or re-wire needed), so the
+    /// first press after a navigator leaves the tree already goes elsewhere.
+    /// A handle created ahead of its view (e.g. a back handler made in
+    /// `Component::init`) simply claims nothing until that view mounts.
+    ///
     /// **Advisory**, published at the last rebuild like [`depth`](Self::depth) —
     /// a query racing a same-frame stack change sees the previous value; the
     /// navigator's own [`request_back`](Self::request_back) routing stays
@@ -269,8 +283,11 @@ impl<State: 'static> NavigatorController<State> {
         // The published cell answers for this navigator's own stack; the reach
         // gate is ANDed HERE (live) rather than baked into the cell, because the
         // hosting page can stop being input-routed on a pass in which this
-        // navigator never rebuilds — see `host_reach`.
-        self.back_interest.get() && self.host_reachable()
+        // navigator never rebuilds — see `host_reach`. The liveness gate is
+        // live for the same reason: teardown writes `mounted` directly but
+        // never republishes the cell, so a torn-down navigator's last published
+        // answer would otherwise keep claiming presses.
+        self.back_interest.get() && self.host_reachable() && self.is_mounted()
     }
 
     /// The navigator's current [`TransitionState`] — the observation seam chrome
