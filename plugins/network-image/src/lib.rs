@@ -33,7 +33,7 @@ mod memory_cache;
 mod reqwest_fetcher;
 mod view;
 
-pub use decode::{DecodeError, TargetPx, decode_source};
+pub use decode::{DecodeError, DecodeLimits, TargetPx, decode_source};
 pub use disk_cache::{DiskCache, DiskStats};
 pub use fetch::*;
 pub use install::NetworkImages;

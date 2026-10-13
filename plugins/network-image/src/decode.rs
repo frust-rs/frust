@@ -25,9 +25,49 @@ pub enum DecodeError {
     /// The bytes are a recognised format this build cannot decode.
     #[error("unsupported image format: {0} (enable the matching crate feature)")]
     UnsupportedFormat(String),
+    /// The image exceeds the configured [`DecodeLimits`]; nothing was decoded
+    /// (or decoding was stopped by the allocation cap).
+    #[error("image {width}x{height} exceeds the decode limits ({max_width}x{max_height} max)")]
+    TooLarge {
+        /// Declared image width in pixels.
+        width: u32,
+        /// Declared image height in pixels.
+        height: u32,
+        /// Configured maximum width.
+        max_width: u32,
+        /// Configured maximum height.
+        max_height: u32,
+    },
     /// The blocking decode task did not complete.
     #[error("decode task failed: {0}")]
     Task(String),
+}
+
+/// Bounds on what one decode may allocate.
+///
+/// The declared dimensions are read from the header and checked before any
+/// pixel is decoded, and `image`'s own [`image::Limits`] are set from the same
+/// values. The post-decode RGBA conversion and resize can transiently need up
+/// to about twice the decoded RGBA size, so the defaults (8192 px per side,
+/// 256 MiB) keep the peak near 512 MiB for a single worst-case decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecodeLimits {
+    /// Maximum declared width in pixels (default 8192).
+    pub max_width: u32,
+    /// Maximum declared height in pixels (default 8192).
+    pub max_height: u32,
+    /// Maximum decoded RGBA bytes (default 256 MiB).
+    pub max_alloc_bytes: u64,
+}
+
+impl Default for DecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_width: 8192,
+            max_height: 8192,
+            max_alloc_bytes: 256 * 1024 * 1024,
+        }
+    }
 }
 
 /// Decoded straight-alpha RGBA8 pixels.
@@ -55,17 +95,42 @@ fn fit_dims(w: u32, h: u32, target: TargetPx) -> Option<(u32, u32, f64)> {
 pub(crate) fn decode_and_fit(
     bytes: &[u8],
     target: Option<TargetPx>,
+    limits: DecodeLimits,
 ) -> Result<DecodedImage, DecodeError> {
-    let reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| DecodeError::Decode(e.to_string()))?;
+    let open = || {
+        image::ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| DecodeError::Decode(e.to_string()))
+    };
+    let reader = open()?;
     #[cfg(not(feature = "webp"))]
     if reader.format() == Some(image::ImageFormat::WebP) {
         return Err(DecodeError::UnsupportedFormat("WebP".into()));
     }
-    let mut img = reader
-        .decode()
+    // Header only: reject before any pixel allocation.
+    let (dw, dh) = reader
+        .into_dimensions()
         .map_err(|e| DecodeError::Decode(e.to_string()))?;
+    let too_large = || DecodeError::TooLarge {
+        width: dw,
+        height: dh,
+        max_width: limits.max_width,
+        max_height: limits.max_height,
+    };
+    let rgba_bytes = u64::from(dw) * u64::from(dh) * 4;
+    if dw > limits.max_width || dh > limits.max_height || rgba_bytes > limits.max_alloc_bytes {
+        return Err(too_large());
+    }
+    let mut reader = open()?;
+    let mut lim = image::Limits::no_limits();
+    lim.max_image_width = Some(limits.max_width);
+    lim.max_image_height = Some(limits.max_height);
+    lim.max_alloc = Some(limits.max_alloc_bytes);
+    reader.limits(lim);
+    let mut img = reader.decode().map_err(|e| match e {
+        image::ImageError::Limits(_) => too_large(),
+        e => DecodeError::Decode(e.to_string()),
+    })?;
     if let Some((nw, nh, scale)) = target.and_then(|t| fit_dims(img.width(), img.height(), t)) {
         if scale < 0.5 {
             // Cheap Triangle pass to twice the final size, then Lanczos3 for quality.
@@ -89,8 +154,9 @@ pub(crate) fn decode_and_fit(
 pub(crate) async fn decode_shared(
     bytes: Arc<Vec<u8>>,
     target: Option<TargetPx>,
+    limits: DecodeLimits,
 ) -> Result<ImageSource, DecodeError> {
-    let joined = spawn_blocking(move || decode_and_fit(&bytes, target)).await;
+    let joined = spawn_blocking(move || decode_and_fit(&bytes, target, limits)).await;
     match joined {
         Ok(Ok(d)) => Ok(ImageSource::from_rgba8(d.pixels, d.width, d.height)),
         Ok(Err(e)) => Err(e),
@@ -98,10 +164,11 @@ pub(crate) async fn decode_shared(
     }
 }
 
-/// Decode `bytes` on the blocking pool and fit them inside `target`.
+/// Decode `bytes` on the blocking pool and fit them inside `target`, under
+/// the default [`DecodeLimits`].
 pub async fn decode_source(
     bytes: Vec<u8>,
     target: Option<TargetPx>,
 ) -> Result<ImageSource, DecodeError> {
-    decode_shared(Arc::new(bytes), target).await
+    decode_shared(Arc::new(bytes), target, DecodeLimits::default()).await
 }
