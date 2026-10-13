@@ -11,15 +11,15 @@
 //! mark, the "playground" title, and the brightness/reduce-motion/animations
 //! toggles folded into its trailing actions — over a
 //! [`pattern_switcher`](frust::motion::switcher::pattern_switcher) hosting one
-//! of thirteen section pages in a [`scroll_view`], the whole column inside one
+//! of fourteen section pages in a [`scroll_view`], the whole column inside one
 //! [`safe_area`] and under a toast overlay), and the [`frust::app!`] entry
 //! binding all three platforms. The section pages themselves live in
-//! [`pages`] — each a `page(&PlaygroundState) -> AnyView<PlaygroundState>`
+//! [`pages`] — each a `page(&PlaygroundState) -> impl View<PlaygroundState>`
 //! (see `pages/mod.rs` for the page-fn contract).
 //!
 //! # Responsive navigation
 //!
-//! [`pages::SECTION_LABELS`] carries thirteen destinations now — too many for a
+//! [`pages::SECTION_LABELS`] carries fourteen destinations now — too many for a
 //! single bottom nav bar to divide evenly without its labels wrapping (see
 //! that constant's own doc). [`home_page`] picks between two shapes, the same
 //! `use_context::<WindowMetrics>()` / named-breakpoint idiom
@@ -39,11 +39,11 @@
 //!
 //! [`bottom_nav_bar`] still rides the existing
 //! [`navigation_bar`](frust_material::navigation_bar)/[`nav_item`](frust_material::nav_item)
-//! chrome (neither needs an icon, so growing to 13 labels costs nothing
+//! chrome (neither needs an icon, so growing to 14 labels costs nothing
 //! there); [`side_rail`] and [`more_overlay`] are hand-rolled from baseline
 //! [`button`]s instead of `frust_material::navigation_rail`/
 //! `navigation_drawer` — those destinations carry a *mandatory* icon per
-//! entry, and playground names no icon set for its thirteen sections (the
+//! entry, and playground names no icon set for its fourteen sections (the
 //! module docs' design-neutral charter: "Nothing in this app demonstrates a
 //! design language"). [`pages::SECTION_LABELS`] stays the single source of
 //! truth every shape reads from.
@@ -409,6 +409,10 @@ pub struct PlaygroundState {
     /// [`PlaygroundState::scroll_controller`] uses, just three of them
     /// instead of one.
     pub kanban_scroll_controllers: Vec<ScrollController>,
+    /// The "Tabs" section's per-tab navigators, selection, and home-tab back
+    /// fallback (`pages::tabs`) — clone-shares-one-handle like the controllers
+    /// above, so the fallback built once here stays the one the page wraps.
+    pub tabs: pages::tabs::TabsState,
 }
 
 impl PlaygroundState {
@@ -444,6 +448,7 @@ impl PlaygroundState {
                 ScrollController::new(),
                 ScrollController::new(),
             ],
+            tabs: pages::tabs::TabsState::new(),
         }
     }
 }
