@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — twenty entries mirroring `plugins/`:
+//! The static plugin registry (v1) — twenty-one entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -664,6 +664,19 @@ const SHARE: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `qr`'s single base contribution: a Cargo dependency only (platform-free
+/// canvas widget; no permission, plist key or setup call).
+const QR_BASE: &[Contribution] = &[Contribution::CargoDep { name: "frust-qr" }];
+
+const QR: PluginSpec = PluginSpec {
+    id: "qr",
+    summary: "QR code view (qrcode encoder, canvas-painted)",
+    crate_dir: "qr",
+    base: QR_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -689,6 +702,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         SHADCN,
         NETWORK_IMAGE,
         SHARE,
+        QR,
     ]
 }
 
@@ -708,7 +722,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_twenty_v1_plugins() {
+    fn registry_lists_the_twenty_one_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -733,6 +747,7 @@ mod tests {
                 "shadcn",
                 "network-image",
                 "share",
+                "qr",
             ]
         );
     }

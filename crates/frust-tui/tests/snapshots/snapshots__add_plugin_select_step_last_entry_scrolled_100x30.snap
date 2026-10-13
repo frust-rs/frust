@@ -7,25 +7,25 @@ expression: rendered
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (12-20 of 20)       │▓▓                
- DEVICES ↻ R      │    ( ) video-player                                          │▓▓                
-   none found     │        Video playback (Media3 ExoPlayer / AVPlayer) with     │▓▓                
-                  │    ( ) database                                              │▓▓                
- SESSIONS         │        Embedded SQL database (SQLite via rusqlite;           │▓▓                
-   none running   │    ( ) i18n                                                  │▓▓                
-                  │        Fluent Project-based                                  │▓▓                
- ACTIONS          │    ( ) glyph                                                 │▓▓                
-   New project · n│        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
-   Add plugin · a │    ( ) material                                              │▓▓                
-   Doctor · i     │        Material 3 catalog; needs frust_material::install()   │▓▓                
-   Build · b      │    ( ) cupertino                                             │▓▓                
-   Clean · c      │        Cupertino catalog; needs frust_cupertino::install()   │▓▓                
-   MCP off · M    │    ( ) shadcn                                                │▓▓                
-   DAP off · D    │        shadcn/ui catalog; needs frust_shadcn::install() in   │▓▓                
-                  │    ( ) network-image                                         │▓▓                
-                  │        Network image view: URL images with an in-memory +    │▓▓                
-                  │  ▸ (o) share                                                 │▓▓                
+                  │  Choose a plugin to add to this project  (13-21 of 21)       │▓▓                
+ DEVICES ↻ R      │    ( ) database                                              │▓▓                
+   none found     │        Embedded SQL database (SQLite via rusqlite;           │▓▓                
+                  │    ( ) i18n                                                  │▓▓                
+ SESSIONS         │        Fluent Project-based                                  │▓▓                
+   none running   │    ( ) glyph                                                 │▓▓                
+                  │        Glyph catalog; needs frust_glyph::install() in app!   │▓▓                
+ ACTIONS          │    ( ) material                                              │▓▓                
+   New project · n│        Material 3 catalog; needs frust_material::install()   │▓▓                
+   Add plugin · a │    ( ) cupertino                                             │▓▓                
+   Doctor · i     │        Cupertino catalog; needs frust_cupertino::install()   │▓▓                
+   Build · b      │    ( ) shadcn                                                │▓▓                
+   Clean · c      │        shadcn/ui catalog; needs frust_shadcn::install() in   │▓▓                
+   MCP off · M    │    ( ) network-image                                         │▓▓                
+   DAP off · D    │        Network image view: URL images with an in-memory +    │▓▓                
+                  │    ( ) share                                                 │▓▓                
                   │        Share text or a URL through the platform share sheet  │▓▓                
+                  │  ▸ (o) qr                                                    │▓▓                
+                  │        QR code view (qrcode encoder, canvas-painted)         │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
