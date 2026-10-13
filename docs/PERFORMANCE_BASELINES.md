@@ -38,6 +38,35 @@ Method deviations: the base-side material3demo runs 2 and 3 overlapped a ~40 s u
 and the head-side frust-gallery run 1 a short formatting check; medians are reported, so neither
 changes the figure.
 
+## Engine bench scenes
+
+`crates/frust-engine/benches/` carries three phone-shaped scenes recorded straight through
+`frust_scene::SceneBuilder` (never the bench app) and compiled at 1080x2340 by a long-lived
+`SceneCompiler`: `s1_like` (60 radial-gradient circles at 0.7 to 0.3 alpha with a 0.6-alpha 2 px stroke,
+moved every iteration, plus 120 short glyph runs), `s6_like_cached` (one 2,009-glyph paragraph at 18 px,
+laid out once, re-emitted unchanged) and `s6_like_rebreak` (the same paragraph, wrap width alternating
+between 1000 and 760 px per iteration, re-break untimed), `s5_like` (nine 256x256 RGBA images magnified
+into 1064x256 rows under a rect clip, same images every iteration). Text is shaped once with `frust-text`
+against the bundled `testing/fonts` Latin subset, whose few glyphs (`H e l o`, space, comma) make the glyph
+count real but the unique-glyph count tiny, so the atlas is a best case. Commands: `cargo bench -p frust-engine
+-- --quick` times `scenes_compile/*` (compile only) and `scenes_encode/*` (compile, upload and submit against
+an offscreen target on the host GPU; skipped with a note when no adapter exists or `FRUST_BENCH_NO_GPU` is
+set); add `--features perf-trace` for the span rows below (medians of warm 60-frame `frust-perf enc`
+windows over 180 untimed frames, plus the compile spans). Later cards append rows.
+
+| Ref | Host | Scene | Compile p50 (ms) | walk / glyphs (us) | upload (us) | replay (us) | draws / strips / alphas / glyph_draws |
+|-----|------|-------|------------------|--------------------|-------------|-------------|----------------------------------------|
+| main 43859eca + p0-01 scenes | i5-12600 Linux, NVIDIA T400 (Vulkan) | `s1_like` | 1.17 | 1152 / 249 | 126 | 0.1 | 637 / 9,560 / 296,464 / 516 |
+| same | same | `s6_like_cached` | 1.23 | 1153 / 1117 | 294 | 0.1 | 1,710 / 12,295 / 273,872 / 1,709 |
+| same | same | `s6_like_rebreak` | 1.24 | 1160 / 1127 | 564 | 0.1 | 1,710 / 12,295 / 273,872 / 1,709 |
+| same | same | `s5_like` | 0.089 | 87 / 0 | 66 | 0.1 | 10 / 2,326 / 71,104 / 0 |
+
+Compile p50 is the encode's `compile_us`; the `scenes_encode` criterion mean (CPU wall of encode, submit and
+`end_frame`) was 1.43 / 1.69 / 1.67 / 0.28 ms for the four rows. Measured with the host loaded by other
+builds (1-minute load 12 to 24 on 12 threads), so absolute figures moved by up to 2x between runs; read
+before/after pairs from back-to-back runs, not against this table alone. Replay is near zero because every
+glyph is atlas-resident after the warm-up frames.
+
 ## Dev loop
 
 Measured baseline: default-config incremental `cargo build` medians 0.89s; edit-to-first-frame medians ~263ms once built. An alternate linker and `cranelift` both measured worse, so **no fast-dev template recipe ships** — re-run `scripts/devloop-measure.sh` if that changes. Measured 2026-09-25 (i5-12600, Linux): a watched relaunch's incremental build took 1.29s, matching the baseline above (`frust run --watch`, TUI `R`/`W`; see [DEVELOPMENT.md](DEVELOPMENT.md) § Dev Loop).
