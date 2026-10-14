@@ -379,8 +379,12 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
             // is rebuilt here rather than through a reconciler, so the mark the
             // reconcilers apply is spelled by hand. The component's *own* pod is
             // marked by whoever rebuilt it, from the same `flags` returned below.
+            // A LAYOUT rebuild dirties layout (which implies paint); a PAINT-only
+            // rebuild dirties just paint, so a retained layer is not reused stale.
             if swapped || flags.contains(ChangeFlags::LAYOUT) {
                 element.child.mark_layout_dirty();
+            } else if flags.contains(ChangeFlags::PAINT) {
+                element.child.mark_paint_dirty();
             }
             element.prev = new_view;
             flags
