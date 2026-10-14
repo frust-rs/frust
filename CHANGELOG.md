@@ -40,8 +40,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `NetworkImages::install()` in the `app!` setup block. Its Android compile gate needs
   `cargo ndk` (ring compiles C).
 - `frust-network-image`: `DecodeLimits::max_alloc_bytes` is now the budget for the header-predictable
-  decode-and-fit working set (resize working set included, default 512 MiB; the decoder's own
-  scratch, such as progressive-JPEG coefficients, stays outside it); over-budget images fail with
+  decode-and-fit working set (resize working set and a progressive JPEG's coefficient store,
+  counted from its header, included; default 512 MiB); over-budget images fail with
   `DecodeError::OverBudget`.
 - `frust add plugin network-image` and the TUI's Add Plugin list offer the new plugin (the registry
   now has nineteen entries).
