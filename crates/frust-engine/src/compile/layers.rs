@@ -5,7 +5,7 @@
 //! matching pop has to undo exactly what it did, and inside which a hoisted
 //! clear is confined (see [`clear`](super::clear)). [`GroupStack`] is that one
 //! stack. It is deliberately one stack and not three: `frust_scene` records
-//! `PopClip`, `PopLayer` and `PopSnapshot` as distinct commands, but a widget
+//! `PopClip`, `PopLayer` and `PopRetained` as distinct commands, but a widget
 //! tree can emit them unbalanced or interleaved, and three stacks would let one
 //! kind of pop lift a bracket another kind still relies on. One stack means the
 //! innermost open bracket is always what closes, whichever pop closes it.
@@ -33,7 +33,7 @@
 //! renderer that does not must do instead: paint the body inline, wrapped
 //! exactly as if the recorder had emitted `push_transform(scale_about(scale,
 //! rect.center()))` when `scale != 1.0` and `push_layer(rect, alpha)` when
-//! `alpha < 1.0`. [`SnapshotStack`] is that emulation.
+//! `alpha < 1.0`. [`RetainedStack`] is that emulation.
 //!
 //! The scale is applied as a *correction* composed ahead of every subsequent
 //! command's own transform rather than by rewriting the body's commands,
@@ -229,19 +229,19 @@ pub fn snapshot_correction(rect: Rect, scale: f64, transform: Affine) -> Affine 
 /// The snapshot bracket's inline emulation: how deep the walk is inside one,
 /// and what the outermost bracket installed.
 #[derive(Debug)]
-pub struct SnapshotStack {
+pub struct RetainedStack {
     depth: usize,
     correction: Affine,
     layer_bracket: Option<usize>,
 }
 
-impl Default for SnapshotStack {
+impl Default for RetainedStack {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SnapshotStack {
+impl RetainedStack {
     /// A stack with no bracket open and nothing corrected.
     #[must_use]
     pub fn new() -> Self {
@@ -303,7 +303,7 @@ impl SnapshotStack {
     /// group to close.
     ///
     /// A pop with no bracket open is ignored, the policy the display list
-    /// states for an unbalanced `PopSnapshot`. `open_brackets` is the group
+    /// states for an unbalanced `PopRetained`. `open_brackets` is the group
     /// stack's current depth: when a stray pop inside the bracket's body has
     /// already closed the group the snapshot opened, the recorded depth is no
     /// longer reachable and no group is reported — closing one anyway would
@@ -427,7 +427,7 @@ mod tests {
     fn only_the_outermost_bracket_installs_its_presentation() {
         let outer = Rect::new(0.0, 0.0, 20.0, 20.0);
         let inner = Rect::new(0.0, 0.0, 4.0, 4.0);
-        let mut stack = SnapshotStack::new();
+        let mut stack = RetainedStack::new();
 
         assert!(stack.enter(outer, 0.5, Affine::IDENTITY));
         let installed = stack.correction();
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn a_bracket_that_opened_a_layer_reports_it_once_at_its_own_pop() {
         let rect = Rect::new(0.0, 0.0, 20.0, 20.0);
-        let mut stack = SnapshotStack::new();
+        let mut stack = RetainedStack::new();
 
         stack.enter(rect, 1.0, Affine::IDENTITY);
         stack.record_layer(1);
@@ -459,8 +459,8 @@ mod tests {
     }
 
     #[test]
-    fn an_unbalanced_pop_snapshot_is_ignored() {
-        let mut stack = SnapshotStack::new();
+    fn an_unbalanced_pop_retained_is_ignored() {
+        let mut stack = RetainedStack::new();
         assert!(!stack.leave(0));
         assert!(!stack.leave(0));
         assert!(!stack.is_open());
@@ -468,9 +468,9 @@ mod tests {
     }
 
     #[test]
-    fn a_stray_pop_inside_a_snapshot_body_does_not_hand_its_group_to_pop_snapshot() {
+    fn a_stray_pop_inside_a_snapshot_body_does_not_hand_its_group_to_pop_retained() {
         let rect = Rect::new(0.0, 0.0, 20.0, 20.0);
-        let mut stack = SnapshotStack::new();
+        let mut stack = RetainedStack::new();
 
         stack.enter(rect, 1.0, Affine::IDENTITY);
         stack.record_layer(2);

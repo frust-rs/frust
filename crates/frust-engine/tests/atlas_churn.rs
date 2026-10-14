@@ -2214,7 +2214,7 @@ fn an_animating_size_never_reaches_the_atlas_through_the_compiler() {
 /// bracket's presentation scale.
 ///
 /// The bracket is where the frame's two walks could disagree: the draw walk
-/// enters a `PushSnapshot` whose composed transform leaves the device grid with
+/// enters a `PushRetained` whose composed transform leaves the device grid with
 /// a neutral presentation instead of the recorded one, and a collect walk that
 /// entered with the recorded one would classify every run inside against a
 /// different affine. `absorbed_scale`'s skew tolerance is absolute, so the two
@@ -2234,7 +2234,7 @@ fn a_skewed_run_inside_a_snapshot_bracket_never_routes_to_the_atlas() {
     // A presentation scale, so the bracket really does install a correction —
     // without one `snapshot_correction` is the identity and the case would pass
     // for the wrong reason.
-    builder.push_snapshot(1, bracket, 1.0, 1.5);
+    builder.push_retained(1, bracket, 1.0, 1.5);
     builder.draw_glyph_run(GlyphRun {
         font: latin_font(),
         font_size: WIRED_SIZE,
@@ -2250,7 +2250,7 @@ fn a_skewed_run_inside_a_snapshot_bracket_never_routes_to_the_atlas() {
             })
             .collect(),
     });
-    builder.pop_snapshot();
+    builder.pop_retained();
 
     let mut compiler = wired_compiler();
     let frame = compile_serviced(&mut compiler, &scene);
@@ -2272,7 +2272,7 @@ fn a_skewed_run_inside_a_snapshot_bracket_never_routes_to_the_atlas() {
     // this did not cache, the case above would be proving nothing.
     let mut scene = Scene::new();
     let mut builder = SceneBuilder::new(&mut scene);
-    builder.push_snapshot(1, bracket, 1.0, 1.5);
+    builder.push_retained(1, bracket, 1.0, 1.5);
     builder.draw_glyph_run(GlyphRun {
         font: latin_font(),
         font_size: WIRED_SIZE,
@@ -2288,7 +2288,7 @@ fn a_skewed_run_inside_a_snapshot_bracket_never_routes_to_the_atlas() {
             })
             .collect(),
     });
-    builder.pop_snapshot();
+    builder.pop_retained();
 
     let mut compiler = wired_compiler();
     let frame = compile_serviced(&mut compiler, &scene);

@@ -18,10 +18,10 @@ use std::time::Duration;
 // ---------------------------------------------------------------------
 
 /// A recording scene that separates the snapshot bracket
-/// (`push_snapshot`/`pop_snapshot`) from the plain `push_layer`/
+/// (`push_retained`/`pop_retained`) from the plain `push_layer`/
 /// `push_transform` bracket a snapshot-ineligible page still uses.
-/// `crate::test_support::RecordingScene` doesn't override `push_snapshot`, so
-/// it would fold an eligible page's bracket into [`PaintScene::push_snapshot`]'s
+/// `crate::test_support::RecordingScene` doesn't override `push_retained`, so
+/// it would fold an eligible page's bracket into [`PaintScene::push_retained`]'s
 /// emulating default (a `push_transform` + `push_layer` pair) —
 /// indistinguishable from the plain bracket even at identity alpha/scale,
 /// since the snapshot bracket, unlike the plain one, is never skipped at the
@@ -54,10 +54,10 @@ impl PaintScene for PageScene {
     fn pop_transform(&mut self) {
         self.transform_pops += 1;
     }
-    fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+    fn push_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
         self.snapshots.push((key, origin, size, alpha, scale));
     }
-    fn pop_snapshot(&mut self) {
+    fn pop_retained(&mut self) {
         self.snapshot_pops += 1;
     }
 }
@@ -262,7 +262,7 @@ fn shared_axis_x_push_seed_frame_discards_the_alpha_zero_entering_page() {
     // that bracket are both absent from the real scene; the leaving page (A),
     // at rest and fully opaque with the transition programmatic and no hero
     // in play, is snapshot-eligible — it paints through exactly one
-    // `push_snapshot`/`pop_snapshot` bracket instead of a plain one (the
+    // `push_retained`/`pop_retained` bracket instead of a plain one (the
     // snapshot bracket, unlike the plain bracket, is never skipped at
     // alpha/scale identity).
     root.rebuild(&mut app, &mut state);
@@ -331,7 +331,7 @@ fn shared_axis_x_past_the_split_the_visible_page_paints_through_its_snapshot_bra
     // has by now fully faded to alpha 0 and is discarded here exactly like B
     // was at the seed frame above. B, the only page with `0 < alpha < 1`, is
     // snapshot-eligible (a programmatic transition, no hero in play) and
-    // paints through exactly one `push_snapshot`/`pop_snapshot` bracket
+    // paints through exactly one `push_retained`/`pop_retained` bracket
     // carrying its genuine partial alpha — no plain `push_layer` of its own.
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
@@ -400,7 +400,7 @@ fn glyph_push_seed_frame_discards_the_alpha_zero_entering_page() {
     // M3SharedAxisX's 0.35 one — the entering page is exactly alpha 0, so it
     // paints into a `DiscardScene` sink instead of under a zero-opacity
     // layer; the leaving page, at rest and fully opaque, is
-    // snapshot-eligible and paints through a `push_snapshot`/`pop_snapshot`
+    // snapshot-eligible and paints through a `push_retained`/`pop_retained`
     // bracket instead of plainly.
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
@@ -818,7 +818,7 @@ fn reduce_motion_collapses_glyph_push_to_crossfade() {
     // the fade-through 0.92→1.0 zoom. At p=0.5 (60ms of the 120ms
     // REDUCE_MOTION_DURATION) both pages are genuinely visible at once (a
     // real crossfade, unlike the split presets) and both are
-    // snapshot-eligible — each paints through its own `push_snapshot`
+    // snapshot-eligible — each paints through its own `push_retained`
     // bracket, never a `push_transform` of its own, and the bracket's own
     // `scale` field is still exactly 1.0.
     root.rebuild(&mut app, &mut state);
@@ -872,7 +872,7 @@ fn fade_through_paint_scales_incoming_page_below_one() {
     // paints into a `DiscardScene` sink instead — NEITHER the scale bracket
     // nor an alpha one reaches the real scene. The outgoing page is still at
     // rest, fully opaque with the transition programmatic and no hero in
-    // play — it is snapshot-eligible and paints through a `push_snapshot`
+    // play — it is snapshot-eligible and paints through a `push_retained`
     // bracket at scale 1.0, not a `push_transform` of its own.
     root.rebuild(&mut app, &mut state);
     root.layout(Size::new(100.0, 100.0));
@@ -1138,7 +1138,7 @@ fn transparent_result_slide_up_composed_dialog_usage() {
 /// can assert the morph overlay's interpolated rect and that a suppressed
 /// endpoint painted nothing at its rest position.
 ///
-/// `push_snapshot`/`pop_snapshot` are overridden separately, recording into
+/// `push_retained`/`pop_retained` are overridden separately, recording into
 /// their own `snapshots`/`snapshot_pops` fields rather than falling into the
 /// trait's emulating default: a snapshot-eligible page's bracket is entirely
 /// unrelated to the hero morph's own `push_transform` (pushed from inside the
@@ -1161,10 +1161,10 @@ impl PaintScene for HeroScene {
             None => self.plain.push((origin, size)),
         }
     }
-    fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+    fn push_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
         self.snapshots.push((key, origin, size, alpha, scale));
     }
-    fn pop_snapshot(&mut self) {
+    fn pop_retained(&mut self) {
         self.snapshot_pops += 1;
     }
     fn draw_text(&mut self, _origin: Point, _text: &str) {}

@@ -331,9 +331,9 @@ fn a_snapshot_body_lowers_like_the_equivalent_transform_and_layer_pair() {
     let body = Rect::new(12.0, 12.0, 36.0, 36.0);
 
     let snapshot = compile(&scene_of(|builder| {
-        builder.push_snapshot(7, rect, HALF, 0.5);
+        builder.push_retained(7, rect, HALF, 0.5);
         builder.fill_rect(body, red());
-        builder.pop_snapshot();
+        builder.pop_retained();
     }));
     let equivalent = compile(&scene_of(|builder| {
         builder.push_transform(Affine::scale_about(0.5, rect.center()));
@@ -355,9 +355,9 @@ fn a_snapshot_scales_its_body_about_the_rectangle_centre() {
     let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
 
     let frame = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, 1.0, 0.5);
+        builder.push_retained(1, rect, 1.0, 0.5);
         builder.fill_rect(rect, red());
-        builder.pop_snapshot();
+        builder.pop_retained();
     }));
 
     // Halved about (24, 24): every edge moves halfway to the centre.
@@ -373,9 +373,9 @@ fn a_snapshot_scales_and_fades_together() {
     let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
 
     let frame = compile(&scene_of(|builder| {
-        builder.push_snapshot(2, rect, 0.25, 0.5);
+        builder.push_retained(2, rect, 0.25, 0.5);
         builder.fill_rect(rect, red());
-        builder.pop_snapshot();
+        builder.pop_retained();
     }));
 
     assert_eq!(covered_bbox(&coverage(&frame)), Some((16, 16, 32, 32)));
@@ -388,16 +388,16 @@ fn only_the_outermost_snapshot_bracket_is_honoured() {
     let inner = Rect::new(12.0, 12.0, 36.0, 36.0);
 
     let nested = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, HALF, 0.5);
-        builder.push_snapshot(2, inner, 0.25, 4.0);
+        builder.push_retained(1, rect, HALF, 0.5);
+        builder.push_retained(2, inner, 0.25, 4.0);
         builder.fill_rect(rect, red());
-        builder.pop_snapshot();
-        builder.pop_snapshot();
+        builder.pop_retained();
+        builder.pop_retained();
     }));
     let outer_only = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, HALF, 0.5);
+        builder.push_retained(1, rect, HALF, 0.5);
         builder.fill_rect(rect, red());
-        builder.pop_snapshot();
+        builder.pop_retained();
     }));
 
     assert_eq!(coverage(&nested), coverage(&outer_only));
@@ -409,14 +409,14 @@ fn only_the_outermost_snapshot_bracket_is_honoured() {
 }
 
 #[test]
-fn an_unbalanced_pop_snapshot_is_ignored() {
+fn an_unbalanced_pop_retained_is_ignored() {
     let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
 
     let frame = compile(&scene_of(|builder| {
-        builder.pop_snapshot();
-        builder.push_snapshot(1, rect, 1.0, 0.5);
-        builder.pop_snapshot();
-        builder.pop_snapshot();
+        builder.pop_retained();
+        builder.push_retained(1, rect, 1.0, 0.5);
+        builder.pop_retained();
+        builder.pop_retained();
         // The stray pops must leave no correction behind, so this paints where
         // it was recorded rather than scaled.
         builder.fill_rect(rect, red());
@@ -431,14 +431,14 @@ fn a_snapshot_left_open_stops_correcting_at_the_end_of_the_frame() {
     let rect = Rect::new(8.0, 8.0, 40.0, 40.0);
 
     let first = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, HALF, 0.5);
+        builder.push_retained(1, rect, HALF, 0.5);
         builder.fill_rect(rect, red());
     }));
     // The compiler holds no per-frame state between calls, so a second frame
     // through the same compiler must not inherit the first's correction.
     let mut compiler = SceneCompiler::new(VIEWPORT.0, VIEWPORT.1);
     let open = scene_of(|builder| {
-        builder.push_snapshot(1, rect, HALF, 0.5);
+        builder.push_retained(1, rect, HALF, 0.5);
         builder.fill_rect(rect, red());
     });
     let plain = scene_of(|builder| builder.fill_rect(rect, red()));
@@ -701,8 +701,8 @@ fn non_finite_group_geometry_is_refused_before_any_strip_is_generated() {
         (
             "a snapshot scale",
             scene_of(|builder| {
-                builder.push_snapshot(1, Rect::new(0.0, 0.0, 16.0, 16.0), 1.0, f64::NAN);
-                builder.pop_snapshot();
+                builder.push_retained(1, Rect::new(0.0, 0.0, 16.0, 16.0), 1.0, f64::NAN);
+                builder.pop_retained();
             }),
         ),
     ];
@@ -723,8 +723,8 @@ fn a_singular_snapshot_transform_drops_the_scale_rather_than_the_frame() {
         // A collapsed transform has no usable inverse, so the presentation
         // scale cannot be conjugated through it.
         builder.push_transform(Affine::scale(0.0));
-        builder.push_snapshot(1, rect, 1.0, 0.5);
-        builder.pop_snapshot();
+        builder.push_retained(1, rect, 1.0, 0.5);
+        builder.pop_retained();
         builder.pop_transform();
         builder.fill_rect(rect, red());
     }));
@@ -741,13 +741,13 @@ fn a_command_a_correction_pushes_off_the_grid_is_skipped_not_refused() {
     let rect = Rect::new(0.0, 0.0, 16.0, 16.0);
 
     let frame = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, 1.0, 1e200);
+        builder.push_retained(1, rect, 1.0, 1e200);
         // On its own this transform is finite; composed with the bracket's
         // correction it is not, and no `u16` pixel could hold what it maps to.
         builder.push_transform(Affine::scale(1e200));
         builder.fill_rect(rect, red());
         builder.pop_transform();
-        builder.pop_snapshot();
+        builder.pop_retained();
         builder.fill_rect(Rect::new(4.0, 4.0, 12.0, 12.0), red());
     }));
 
@@ -764,7 +764,7 @@ fn a_bracket_a_correction_pushes_off_the_grid_still_balances_its_own_pop() {
     let outside = Rect::new(20.0, 20.0, 36.0, 36.0);
 
     let frame = compile(&scene_of(|builder| {
-        builder.push_snapshot(1, rect, 1.0, 1e200);
+        builder.push_retained(1, rect, 1.0, 1e200);
         builder.push_transform(Affine::scale(1e200));
         // Composed with the bracket's correction this clip lands nowhere a
         // `u16` pixel could hold, so it admits nothing at all.
@@ -772,7 +772,7 @@ fn a_bracket_a_correction_pushes_off_the_grid_still_balances_its_own_pop() {
         builder.fill_rect(rect, red());
         builder.pop_clip();
         builder.pop_transform();
-        builder.pop_snapshot();
+        builder.pop_retained();
         builder.fill_rect(outside, red());
     }));
 

@@ -58,7 +58,7 @@ pub use clear::ClearPunch;
 pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
 pub use external::{ExternalExtents, ExternalSkip};
-pub use layers::{GroupStack, LayerLowering, SnapshotStack};
+pub use layers::{GroupStack, LayerLowering, RetainedStack};
 pub use parallel::{DEFAULT_PARALLEL_MIN_COST, DEFAULT_PARALLEL_WORKERS, MAX_PARALLEL_WORKERS};
 
 /// The most glyph runs a compiler's resident-run cache remembers at once (see
@@ -541,7 +541,7 @@ pub struct SceneCompiler {
     pool: Pool,
     clips: ClipStack,
     groups: GroupStack,
-    snapshots: SnapshotStack,
+    snapshots: RetainedStack,
     punches: Vec<StagedPunch>,
     images: ImageResidency,
     glyphs: GlyphPrepCache,
@@ -760,7 +760,7 @@ impl SceneCompiler {
             pool: Pool::default(),
             clips: ClipStack::new(),
             groups: GroupStack::new(),
-            snapshots: SnapshotStack::new(),
+            snapshots: RetainedStack::new(),
             punches: Vec::new(),
             // Built from the residency, so the policy's page geometry is read
             // off the allocator it will pack into rather than derived a second
@@ -971,6 +971,16 @@ impl SceneCompiler {
         for command in scene.commands() {
             if let Some(transform) = command_transform(command) {
                 check_finite(root * transform)?;
+            }
+            if matches!(command, Command::DrawRetained { .. }) {
+                // This compiler retains nothing, so no ledger can have
+                // declared a key resident and a `DrawRetained` here is a
+                // recorder error. Refused with the whole frame, before any
+                // strip is generated; the caller logs the reason and skips
+                // the frame.
+                return Err(EngineError::SchedulerEscalation {
+                    reason: "DrawRetained reached a compiler that retains no layers".into(),
+                });
             }
             check_geometry(command)?;
         }
@@ -1185,16 +1195,16 @@ impl SceneCompiler {
                 // The correction is the outermost bracket's, so a bracket
                 // reaching here is a nested one, whose presentation is ignored
                 // anyway; only its depth has to be counted. The substitution is
-                // still made through [`snapshot_entry`] rather than inline,
+                // still made through [`retained_entry`] rather than inline,
                 // because it is the collect walk's to make identically (see
                 // [`Self::classify_runs`]).
-                Command::PushSnapshot {
+                Command::PushRetained {
                     rect,
                     scale,
                     transform,
                     ..
                 } => {
-                    let (scale, transform) = snapshot_entry(on_grid, *scale, *transform);
+                    let (scale, transform) = retained_entry(on_grid, *scale, *transform);
                     self.snapshots.enter(*rect, scale, transform);
                 }
                 _ => {}
@@ -1274,7 +1284,7 @@ impl SceneCompiler {
                     });
                 }
             }
-            Command::PushSnapshot {
+            Command::PushRetained {
                 rect,
                 alpha,
                 scale,
@@ -1292,11 +1302,14 @@ impl SceneCompiler {
                     }
                 }
             }
-            Command::PopSnapshot => {
+            Command::PopRetained => {
                 if self.snapshots.leave(self.groups.depth()) {
                     self.close_group(frame);
                 }
             }
+            // Refused by the up-front walk in [`Self::compile`], so it never
+            // reaches the lowering; drawn as nothing should one slip through.
+            Command::DrawRetained { .. } => {}
             // An image is its destination rectangle's coverage under an image
             // paint — the same two rectangle paths a solid fill takes, so a
             // pixel-aligned image costs no flattening either.
@@ -1422,9 +1435,9 @@ impl SceneCompiler {
     /// are not size observations, and a size drawn on a frame is a size drawn
     /// on that frame whatever else happens to it.
     ///
-    /// The walk carries a [`SnapshotStack`] of its own for one reason: a run's
+    /// The walk carries a [`RetainedStack`] of its own for one reason: a run's
     /// route depends on the scale in its *device* transform (see
-    /// [`crate::text::atlas_policy`]), and inside a `PushSnapshot` bracket that
+    /// [`crate::text::atlas_policy`]), and inside a `PushRetained` bracket that
     /// transform carries the bracket's presentation scale as well as the frame
     /// root. Classifying against `root * run.transform` alone would answer for
     /// a size the run is not drawn at. Only the correction is tracked here —
@@ -1432,17 +1445,17 @@ impl SceneCompiler {
     /// nothing.
     ///
     /// A bracket is entered on the draw walk's exact terms, through the same
-    /// [`command_on_grid`] check and the same [`snapshot_entry`] substitution
+    /// [`command_on_grid`] check and the same [`retained_entry`] substitution
     /// it uses, so the correction the two walks carry is one decision made
     /// twice rather than two decisions that happen to agree.
     fn classify_runs(&mut self, scene: &Scene, root: Affine) {
         self.run_routes.clear();
         self.next_run = 0;
 
-        let mut snapshots = SnapshotStack::new();
+        let mut snapshots = RetainedStack::new();
         for command in scene.commands() {
             match command {
-                Command::PushSnapshot {
+                Command::PushRetained {
                     rect,
                     scale,
                     transform,
@@ -1450,7 +1463,7 @@ impl SceneCompiler {
                 } => {
                     // The draw walk's own entry, made here on exactly its
                     // terms: [`command_on_grid`] is the check it asks and
-                    // [`snapshot_entry`] is the substitution it makes. A
+                    // [`retained_entry`] is the substitution it makes. A
                     // bracket it enters neutrally installs no correction, so a
                     // walk that entered it with the recorded pair would
                     // classify every run inside against a device transform
@@ -1458,10 +1471,10 @@ impl SceneCompiler {
                     // magnitude and a draw made at another.
                     let combined = root * snapshots.correction();
                     let on_grid = command_on_grid(command, combined);
-                    let (scale, transform) = snapshot_entry(on_grid, *scale, *transform);
+                    let (scale, transform) = retained_entry(on_grid, *scale, *transform);
                     snapshots.enter(*rect, scale, transform);
                 }
-                Command::PopSnapshot => {
+                Command::PopRetained => {
                     // The group depth a real close would be tested against is
                     // the draw walk's; nothing here closes a group, so zero is
                     // the honest answer and the return value is unused.
@@ -2110,7 +2123,7 @@ fn note_shader_quad_unrendered(program_id: u64) {
 /// `bbox` answers `false` (never treated as culled — some other refusal
 /// accounts for it), and a shared edge counts as overlapping via
 /// [`kurbo::Rect::overlaps`]. Unlike the pre-pass's walk, this has no
-/// [`Command::PushSnapshot`]-bracket exemption to make: it is asked only
+/// [`Command::PushRetained`]-bracket exemption to make: it is asked only
 /// about the one quad instance actually being compiled right now, under its
 /// own already-composed `transform` (which, inside a bracket, already
 /// includes the enclosing snapshot's own presentation correction — see
@@ -2176,9 +2189,10 @@ fn command_transform(command: &Command) -> Option<Affine> {
         | Command::Path { transform, .. }
         | Command::ShaderQuad { transform, .. }
         | Command::SceneTexture { transform, .. }
-        | Command::PushSnapshot { transform, .. } => Some(*transform),
+        | Command::PushRetained { transform, .. }
+        | Command::DrawRetained { transform, .. } => Some(*transform),
         Command::GlyphRun(run) => Some(run.transform),
-        Command::PopClip | Command::PopLayer | Command::PopSnapshot => None,
+        Command::PopClip | Command::PopLayer | Command::PopRetained => None,
     }
 }
 
@@ -2188,8 +2202,8 @@ fn command_transform(command: &Command) -> Option<Affine> {
 ///
 /// Asked by both of the frame's walks, from one place, because they have to ask
 /// it the same way. The draw walk draws nothing for a command that answers
-/// `false` and enters a `PushSnapshot` neutrally instead (see
-/// [`snapshot_entry`]); the collect walk classifies against the transform that
+/// `false` and enters a `PushRetained` neutrally instead (see
+/// [`retained_entry`]); the collect walk classifies against the transform that
 /// entry implies. Two copies of this expression could drift a coefficient
 /// apart and route a run for a device size it is never drawn at.
 ///
@@ -2199,7 +2213,7 @@ fn command_on_grid(command: &Command, combined: Affine) -> bool {
     command_transform(command).is_none_or(|transform| check_finite(combined * transform).is_ok())
 }
 
-/// The presentation scale and transform a `PushSnapshot` bracket is entered
+/// The presentation scale and transform a `PushRetained` bracket is entered
 /// with: the recorded pair on the grid, and the neutral pair off it.
 ///
 /// The neutral pair is what makes an off-grid bracket *inert* rather than
@@ -2208,7 +2222,7 @@ fn command_on_grid(command: &Command, combined: Affine) -> bool {
 /// refused. Both walks substitute through this one function so that the route
 /// a run is given and the transform it is drawn through can never be decided
 /// from different magnitudes.
-fn snapshot_entry(on_grid: bool, scale: f64, transform: Affine) -> (f64, Affine) {
+fn retained_entry(on_grid: bool, scale: f64, transform: Affine) -> (f64, Affine) {
     if on_grid {
         (scale, transform)
     } else {
@@ -2314,7 +2328,10 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
         }
         Command::PushLayer { rect, alpha, .. } => rect.is_finite() && alpha.is_finite(),
         Command::ClearRect { rect, .. } => rect.is_finite(),
-        Command::PushSnapshot {
+        Command::PushRetained {
+            rect, alpha, scale, ..
+        }
+        | Command::DrawRetained {
             rect, alpha, scale, ..
         } => rect.is_finite() && alpha.is_finite() && scale.is_finite(),
         Command::Image { dest, .. } => dest.is_finite(),
@@ -2330,7 +2347,7 @@ fn check_geometry(command: &Command) -> Result<(), EngineError> {
         } => rect.is_finite() && radii_are_finite(*radii) && std_dev.is_finite(),
         Command::GlyphRun(run) => glyph_run_is_finite(run),
         // Carrying no geometry of their own — see above.
-        Command::PopClip | Command::PopLayer | Command::PopSnapshot => true,
+        Command::PopClip | Command::PopLayer | Command::PopRetained => true,
     };
 
     if finite {
@@ -2585,7 +2602,7 @@ mod tests {
         ));
     }
 
-    /// The substitution both walks make for an off-grid `PushSnapshot`, and why
+    /// The substitution both walks make for an off-grid `PushRetained`, and why
     /// making it in only one of them would matter.
     ///
     /// A bracket entered with the recorded presentation installs a correction;
@@ -2602,7 +2619,7 @@ mod tests {
         let combined = Affine::scale(1e200);
         let transform = Affine::scale(1e200);
         let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
-        let command = Command::PushSnapshot {
+        let command = Command::PushRetained {
             key: 0,
             rect,
             alpha: 1.0,
@@ -2613,25 +2630,25 @@ mod tests {
         assert!(!command_on_grid(&command, combined));
         assert!(command_on_grid(&command, Affine::IDENTITY));
 
-        let (scale, entered) = snapshot_entry(false, 2.0, transform);
+        let (scale, entered) = retained_entry(false, 2.0, transform);
         assert_eq!(scale, 1.0);
         assert_eq!(entered.as_coeffs(), Affine::IDENTITY.as_coeffs());
-        let (scale, entered) = snapshot_entry(true, 2.0, transform);
+        let (scale, entered) = retained_entry(true, 2.0, transform);
         assert_eq!(scale, 2.0);
         assert_eq!(entered.as_coeffs(), transform.as_coeffs());
 
         // And the difference reaches the quantity that is classified: an
         // outermost bracket entered with the recorded pair corrects, one
         // entered neutrally does not.
-        let mut recorded = SnapshotStack::new();
+        let mut recorded = RetainedStack::new();
         recorded.enter(rect, 2.0, transform);
         assert_ne!(
             recorded.correction().as_coeffs(),
             Affine::IDENTITY.as_coeffs()
         );
 
-        let mut neutral = SnapshotStack::new();
-        let (scale, entered) = snapshot_entry(false, 2.0, transform);
+        let mut neutral = RetainedStack::new();
+        let (scale, entered) = retained_entry(false, 2.0, transform);
         neutral.enter(rect, scale, entered);
         assert_eq!(
             neutral.correction().as_coeffs(),

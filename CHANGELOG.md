@@ -111,6 +111,15 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `any(..)` in the same fn, so idiomatic accumulators no longer need a `: Vec<AnyView<_>>`
   annotation for rule U.
 
+### Deprecated
+
+- `PaintScene::push_snapshot` / `pop_snapshot` are deprecated forwards to the new
+  `push_retained` / `pop_retained` (0.7 migration: rename the calls; the behaviour is unchanged).
+  `frust_scene::Command::PushSnapshot` / `PopSnapshot` are replaced by `PushRetained` /
+  `PopRetained`, and `Command::DrawRetained` plus `PaintScene::draw_retained` /
+  `SceneBuilder::draw_retained` are added. A renderer that does not retain paints a `PushRetained`
+  body inline exactly as the old snapshot bracket did and treats `DrawRetained` as an error.
+
 ### Fixed
 
 - `frust-shell-ios`: the AccessKit tree is published in the view's physical pixels through a root

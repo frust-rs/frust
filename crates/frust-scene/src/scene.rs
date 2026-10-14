@@ -302,9 +302,9 @@ pub enum Command {
         transform: Affine,
         time: f32,
     },
-    /// Marks the start of a cacheable "snapshot" bracket, under a transform.
+    /// Marks the start of a retained-layer bracket, under a transform.
     ///
-    /// The commands between this and the matching [`Command::PopSnapshot`] are
+    /// The commands between this and the matching [`Command::PopRetained`] are
     /// the BODY, recorded in the ordinary composed transform space (i.e. not
     /// pre-multiplied by `scale`). `rect` is the body's bounds in the local
     /// space of `transform` — the same convention [`Command::PushLayer`]'s
@@ -315,20 +315,21 @@ pub enum Command {
     /// NOT baked into the body's own commands, so a renderer can reuse a
     /// rasterized body while they animate.
     ///
-    /// A renderer that implements snapshots MAY rasterize the body once and
-    /// draw it as an image with `transform * scale_about(rect.center(),
-    /// scale)` inside an alpha layer. A renderer that does not MUST paint the
-    /// body inline wrapped exactly as if the recorder had emitted
+    /// A renderer that retains MAY rasterize the body once under `key` and
+    /// later honour a [`Command::DrawRetained`] with the same key from that
+    /// page, drawing it with `transform * scale_about(rect.center(), scale)`
+    /// inside an alpha layer. A renderer that does not MUST paint the body
+    /// inline wrapped exactly as if the recorder had emitted
     /// `push_transform(scale_about(rect.center(), scale))` (when `scale !=
     /// 1.0`) then `push_layer(rect, alpha)` (when `alpha < 1.0`) — pops
     /// reversed (see `frust-render::convert`'s miss path).
     ///
     /// Syntactic nesting is allowed, but only the OUTERMOST bracket needs
     /// honouring — an inner bracket's own `alpha`/`scale` may be ignored by a
-    /// non-implementing renderer. An unbalanced [`Command::PopSnapshot`] is
+    /// non-implementing renderer. An unbalanced [`Command::PopRetained`] is
     /// ignored, the same policy [`Command::PopLayer`] follows.
-    PushSnapshot {
-        /// Cache key identifying this bracket's body across frames.
+    PushRetained {
+        /// Key identifying this bracket's body across frames.
         key: u64,
         rect: Rect,
         alpha: f32,
@@ -336,9 +337,24 @@ pub enum Command {
         scale: f64,
         transform: Affine,
     },
-    /// Pop the most recently pushed snapshot bracket (see
-    /// [`Command::PushSnapshot`]).
-    PopSnapshot,
+    /// Pop the most recently pushed retained bracket (see
+    /// [`Command::PushRetained`]).
+    PopRetained,
+    /// Draw a previously retained body from its cached page, with the same
+    /// `key`, `rect`, `transform`, `alpha` and `scale` meanings as
+    /// [`Command::PushRetained`].
+    ///
+    /// A `DrawRetained` only appears in a scene when the resident-key ledger
+    /// said the key is resident, so a renderer that does not retain never sees
+    /// one: it MUST treat it as a renderer error (the CPU oracle panics in
+    /// tests; the engine logs once, skips the frame and clears its store).
+    DrawRetained {
+        key: u64,
+        rect: Rect,
+        transform: Affine,
+        alpha: f32,
+        scale: f64,
+    },
     /// Draw an externally owned GPU texture scaled to fill `dest` under
     /// `transform`.
     ///
@@ -368,15 +384,15 @@ pub struct Scene {
     /// to `[Affine::IDENTITY]` on construction, so behavior is unchanged.
     /// Not part of the stable widget-facing API.
     pub(crate) transform_stack: Vec<Affine>,
-    /// Depth counter for open [`Command::PushSnapshot`] brackets, incremented
-    /// by [`crate::SceneBuilder::push_snapshot`] and decremented — only when
-    /// greater than zero — by [`crate::SceneBuilder::pop_snapshot`], the same
+    /// Depth counter for open [`Command::PushRetained`] brackets, incremented
+    /// by [`crate::SceneBuilder::push_retained`] and decremented — only when
+    /// greater than zero — by [`crate::SceneBuilder::pop_retained`], the same
     /// unbalanced-pop policy [`Command::PopClip`]/[`Command::PopLayer`]
     /// follow. Reset alongside `commands` in [`Scene::reset`]; NOT reset by
     /// [`crate::SceneBuilder::new`] (unlike `transform_stack`), since it
     /// tracks bracket balance across the whole scene, not a builder session.
     /// Not part of the stable widget-facing API.
-    pub(crate) snapshot_depth: usize,
+    pub(crate) retained_depth: usize,
 }
 
 impl Scene {
@@ -388,7 +404,7 @@ impl Scene {
     /// Clears all recorded commands so the scene can be reused for the next frame.
     pub fn reset(&mut self) {
         self.commands.clear();
-        self.snapshot_depth = 0;
+        self.retained_depth = 0;
     }
 
     /// The recorded commands for this frame, in paint order.
@@ -402,19 +418,19 @@ impl Scene {
         self.commands.push(command);
     }
 
-    /// How many [`Command::PushSnapshot`] brackets are still open.
+    /// How many [`Command::PushRetained`] brackets are still open.
     ///
     /// `#[doc(hidden)]`, and deliberately not part of the stable widget-facing
     /// API: a widget has no business reading the bracket depth mid-recording,
     /// and nothing in the framework branches on it. It exists so a property
     /// test outside this crate can assert the balance contract the field's own
     /// docs state — that a balanced sequence leaves the depth at zero and an
-    /// unmatched [`crate::SceneBuilder::pop_snapshot`] never drives it below
+    /// unmatched [`crate::SceneBuilder::pop_retained`] never drives it below
     /// zero — which is otherwise unobservable from the command stream alone,
     /// since an ignored pop records nothing to observe.
     #[doc(hidden)]
-    pub fn snapshot_depth(&self) -> usize {
-        self.snapshot_depth
+    pub fn retained_depth(&self) -> usize {
+        self.retained_depth
     }
 }
 
@@ -442,11 +458,11 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_snapshot_depth() {
+    fn reset_clears_retained_depth() {
         let mut scene = Scene::new();
-        scene.snapshot_depth = 2;
+        scene.retained_depth = 2;
         scene.reset();
-        assert_eq!(scene.snapshot_depth, 0);
+        assert_eq!(scene.retained_depth, 0);
     }
 
     #[test]

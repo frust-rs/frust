@@ -738,8 +738,9 @@ fn the_generator_only_emits_primitives_the_engine_lowers() {
                 frust_scene::Command::PopLayer => "PopLayer",
                 frust_scene::Command::ClearRect { .. } => "ClearRect",
                 frust_scene::Command::ShaderQuad { .. } => "ShaderQuad",
-                frust_scene::Command::PushSnapshot { .. } => "PushSnapshot",
-                frust_scene::Command::PopSnapshot => "PopSnapshot",
+                frust_scene::Command::PushRetained { .. } => "PushRetained",
+                frust_scene::Command::PopRetained => "PopRetained",
+                frust_scene::Command::DrawRetained { .. } => "DrawRetained",
                 frust_scene::Command::SceneTexture { .. } => "SceneTexture",
             };
             unexpected.push(name);

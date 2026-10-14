@@ -160,9 +160,9 @@ fn paint_staged_child(
     }
 
     let bracket_origin = ctx.origin() + Vec2::new(layer.dx, layer.dy);
-    scene.push_snapshot(snapshot, bracket_origin, ctx.size(), alpha, layer.scale);
+    scene.push_retained(snapshot, bracket_origin, ctx.size(), alpha, layer.scale);
     pod.paint_child(ctx, scene);
-    scene.pop_snapshot();
+    scene.pop_retained();
 }
 
 /// The cleared/inactive IME surface published after a switch so the platform
@@ -277,7 +277,7 @@ pub struct PatternSwitcherWidget<P: TransitionPattern + Clone + 'static> {
     /// A cleared IME surface must be published on the next paint (deterministic
     /// keyboard hide after the switch).
     needs_ime_clear: bool,
-    /// This switcher's pair of [`PaintScene::push_snapshot`] cache keys,
+    /// This switcher's pair of [`PaintScene::push_retained`] cache keys,
     /// reserved once from [`NEXT_SNAPSHOT_KEY`] at construction (`fetch_add(2)`)
     /// and stable for the widget's lifetime, across every switch it ever
     /// stages: `snapshot_base` for the live (incoming) child,
@@ -539,9 +539,9 @@ mod tests {
         BoxConstraints::loose(Size::new(100.0, 100.0))
     }
 
-    /// A recording scene that separates `push_snapshot`/`pop_snapshot` calls
+    /// A recording scene that separates `push_retained`/`pop_retained` calls
     /// from `push_layer`/`push_transform` ones. `crate::test_support`'s shared
-    /// `RecordingScene` doesn't override `push_snapshot`, so it would fold a
+    /// `RecordingScene` doesn't override `push_retained`, so it would fold a
     /// snapshot bracket into the trait's emulating default — a `push_transform`
     /// and `push_layer` pair — indistinguishable from a plain bracket. This one
     /// keeps them apart so a test can assert a staged child painted through
@@ -565,10 +565,10 @@ mod tests {
         fn push_transform(&mut self, _transform: kurbo::Affine) {
             self.transform_pushes += 1;
         }
-        fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        fn push_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
             self.snapshots.push((key, origin, size, alpha, scale));
         }
-        fn pop_snapshot(&mut self) {
+        fn pop_retained(&mut self) {
             self.snapshot_pops += 1;
         }
     }
@@ -1414,8 +1414,8 @@ mod tests {
         );
     }
 
-    // --- Snapshot bracket: a staged child paints through push_snapshot/
-    //     pop_snapshot keyed by snapshot_base (incoming) / snapshot_base + 1
+    // --- Snapshot bracket: a staged child paints through push_retained/
+    //     pop_retained keyed by snapshot_base (incoming) / snapshot_base + 1
     //     (exiting), never a push_layer/push_transform bracket of its own —
     //     mirrors nav::navigator's paint_page_layer snapshot bracket. ---
 
