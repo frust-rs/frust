@@ -63,7 +63,10 @@
 //! ## Plan, then commit
 //!
 //! [`RetainedPages::plan`] decides everything from plain values and changes
-//! nothing but the frame clock (and, on a refusal, the store's contents):
+//! nothing of the store but its frame clock (and, on a refusal, its contents) —
+//! of the frame, only the bounds of the recorded layers enclosing a served
+//! `DrawRetained`, grown to hold its composite, since the empty layer standing
+//! for it put nothing of it into theirs:
 //! a frame can still be refused after it — by the scheduler, or a capacity
 //! check — and a refused frame must leave every page and every ledger entry as
 //! it was. [`RetainedPages::commit`] applies a plan once nothing can fail any
@@ -79,6 +82,7 @@
 use frust_gpu::{TextureAllocator, TierCaps};
 use vello_common::geometry::RectU16;
 use vello_common::record::RecordedLayer;
+use vello_common::tile::Tile;
 
 use crate::cache::images::{AtlasTier, choose_tier, device_memory_bytes};
 use crate::compile::{RetainedBracket, RetainedKind, RetainedPlacement};
@@ -386,7 +390,9 @@ impl<T, V> RetainedPages<T, V> {
     /// (see the module doc). Advances the frame clock; changes nothing else
     /// unless it refuses.
     ///
-    /// `layers` is the frame's recorded layers, for each body's drawn bounds.
+    /// `layers` is the frame's recorded layers, for each body's drawn bounds;
+    /// every layer enclosing a served draw has its bounds grown to hold the
+    /// draw's composite (rounded out to tiles) before any body is sized.
     ///
     /// # Errors
     ///
@@ -395,7 +401,7 @@ impl<T, V> RetainedPages<T, V> {
     pub fn plan(
         &mut self,
         brackets: &[RetainedBracket],
-        layers: &[RecordedLayer],
+        layers: &mut [RecordedLayer],
     ) -> Result<RetainedPlan, EngineError> {
         self.frame = self.frame.saturating_add(1);
         let mut decisions: Vec<Option<RetainedDecision>> = vec![None; brackets.len()];
@@ -415,9 +421,20 @@ impl<T, V> RetainedPages<T, V> {
             }
         }
 
+        // A served draw nested inside a recorded layer composites into that
+        // layer's page, which was sized from the draws the layer holds — and a
+        // `DrawRetained`'s own layer holds none. Every enclosing layer's bounds
+        // grow to take the composite in, before anything is sized from them.
+        grow_enclosing_layers(brackets, &decisions, layers);
+
         // Every key the frame names is off limits to eviction: a drawn page is
         // sampled this frame, and a recorded one is either reused or replaced.
         let named: Vec<u64> = brackets.iter().map(|bracket| bracket.key).collect();
+        let drawn: Vec<u64> = brackets
+            .iter()
+            .filter(|bracket| bracket.is_draw())
+            .map(|bracket| bracket.key)
+            .collect();
         let mut candidates: Vec<(u64, u64, u64)> = self
             .pages
             .iter()
@@ -427,7 +444,10 @@ impl<T, V> RetainedPages<T, V> {
         candidates.sort_unstable();
         let mut evicted = 0_usize;
         let mut projected = self.used_bytes();
-        let mut recorded: Vec<u64> = Vec::new();
+        // A key the frame draws is never re-recorded in the same frame: the
+        // draw samples the page the ledger promised, not one this frame
+        // rewrites.
+        let mut recorded: Vec<u64> = drawn;
 
         for (index, bracket) in brackets.iter().enumerate() {
             let RetainedKind::Record { rect, retainable } = bracket.kind else {
@@ -620,10 +640,16 @@ impl<T, V> RetainedPages<T, V> {
         if bounds.is_empty() {
             return refuse(RetainedRefusal::Empty);
         }
-        if !(bounds.x0 >= rect.x0
-            && bounds.y0 >= rect.y0
-            && bounds.x1 <= rect.x1
-            && bounds.y1 <= rect.y1)
+        // A recorded layer's bounds are `vello_common`'s strip bounds, which
+        // run one tile past a fill ending exactly on a tile edge; one tile of
+        // slack keeps that from reading as an overflow, and is all the slack
+        // there is — a body reaching further out than that drew outside its
+        // rectangle, where a scissor or the viewport may have cut it.
+        let slack = rect_grown_by_a_tile(rect);
+        if !(bounds.x0 >= slack.x0
+            && bounds.y0 >= slack.y0
+            && bounds.x1 <= slack.x1
+            && bounds.y1 <= slack.y1)
         {
             return refuse(RetainedRefusal::Overflow);
         }
@@ -677,6 +703,88 @@ impl<T, V> RetainedPages<T, V> {
             None => false,
         }
     }
+}
+
+/// Grow every recorded layer enclosing a served `DrawRetained` to cover the
+/// composite it now holds, rounded out to whole tiles.
+///
+/// A layer's bounds are the union of what was drawn into it, folded in as each
+/// draw was recorded; a `DrawRetained`'s own layer is empty, so nothing of the
+/// composite it stands for reached its ancestors — a translucent layer holding
+/// nothing but a drawn page would read as covering no pixel and be dropped, and
+/// one holding more would be sized short of the composite. Walked through the
+/// recording's own parent links, bounded by the layer count so a malformed
+/// recording cannot loop.
+fn grow_enclosing_layers(
+    brackets: &[RetainedBracket],
+    decisions: &[Option<RetainedDecision>],
+    layers: &mut [RecordedLayer],
+) {
+    let mut parents: Option<Vec<Option<usize>>> = None;
+    for (bracket, decision) in brackets.iter().zip(decisions) {
+        let Some(RetainedDecision::Draw { dest, .. }) = decision else {
+            continue;
+        };
+        let parents = parents.get_or_insert_with(|| parent_layers(layers));
+        let grown = tile_bounds_of(*dest);
+        let mut at = parents.get(bracket.layer as usize).copied().flatten();
+        let mut steps = 0_usize;
+        while let Some(index) = at {
+            steps += 1;
+            if steps > layers.len() {
+                break;
+            }
+            if let Some(layer) = layers.get_mut(index) {
+                if layer.bbox.is_empty() {
+                    layer.bbox = grown;
+                } else {
+                    layer.bbox.union(grown);
+                }
+            }
+            at = parents.get(index).copied().flatten();
+        }
+    }
+}
+
+/// Each recorded layer's enclosing layer, or `None` for one under the frame
+/// root.
+fn parent_layers(layers: &[RecordedLayer]) -> Vec<Option<usize>> {
+    let mut parents = vec![None; layers.len()];
+    for (index, layer) in layers.iter().enumerate() {
+        for node in &layer.nodes {
+            if let Some(child) = node.layer
+                && let Some(slot) = parents.get_mut(child as usize)
+            {
+                *slot = Some(index);
+            }
+        }
+    }
+    parents
+}
+
+/// `rect` rounded out to whole tiles, saturating at the grid's edge.
+fn tile_bounds_of(rect: RectU16) -> RectU16 {
+    let down = |value: u16, step: u16| value - value % step;
+    let up = |value: u16, step: u16| match value % step {
+        0 => value,
+        rest => value.saturating_add(step - rest),
+    };
+    RectU16::new(
+        down(rect.x0, Tile::WIDTH),
+        down(rect.y0, Tile::HEIGHT),
+        up(rect.x1, Tile::WIDTH),
+        up(rect.y1, Tile::HEIGHT),
+    )
+}
+
+/// `rect` grown by one tile on every side, saturating at the grid's edges.
+fn rect_grown_by_a_tile(rect: RectU16) -> RectU16 {
+    RectU16::new(
+        rect.x0.saturating_sub(Tile::WIDTH),
+        rect.y0.saturating_sub(Tile::HEIGHT),
+        rect.x1.saturating_add(Tile::WIDTH),
+        rect.y1.saturating_add(Tile::HEIGHT),
+    )
 }
 
 /// The bytes a page of `size` texels costs.

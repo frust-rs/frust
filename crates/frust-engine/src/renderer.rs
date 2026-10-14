@@ -1470,7 +1470,7 @@ impl EngineRenderer {
         // frame is past its last fallible step.
         let retained_plan = self
             .retained
-            .plan(&frame.retained, &frame.recorder.layers)?;
+            .plan(&frame.retained, &mut frame.recorder.layers)?;
         retained_roles(&frame, &retained_plan, &mut self.retained_layers);
         let rounds = Schedule::build_retained(
             &frame.recorder,

@@ -669,4 +669,49 @@ mod tests {
         assert!(!stack.leave(1), "a lost bracket reports no group to close");
         assert!(!stack.leave(1), "an unbalanced pop still closes nothing");
     }
+
+    #[test]
+    fn a_retained_group_closes_a_layer_and_no_clip_and_confines_nothing() {
+        let mut stack = GroupStack::new();
+        stack.push_retained();
+        let group = stack.pop().expect("a bracket is open");
+        assert!(group.closes_layer());
+        assert!(!group.closes_clip());
+        assert!(group.bounds().x0.is_infinite() && group.bounds().x1.is_infinite());
+    }
+
+    #[test]
+    fn a_placement_moves_by_whole_pixels_only_under_the_same_linear_part() {
+        let page = RetainedPlacement::of(Affine::translate((8.0, 8.0)) * Affine::scale(2.0));
+        let moved = RetainedPlacement::of(Affine::translate((20.4, 7.6)) * Affine::scale(2.0));
+        assert_eq!(page.offset_to(&moved), Some((12, 0)));
+        assert_eq!(page.offset_to(&page), Some((0, 0)));
+
+        let rescaled = RetainedPlacement::of(Affine::translate((8.0, 8.0)) * Affine::scale(1.9));
+        assert_eq!(
+            page.offset_to(&rescaled),
+            None,
+            "another scale is not a move"
+        );
+        let rotated = RetainedPlacement::of(Affine::rotate(0.1));
+        assert_eq!(page.offset_to(&rotated), None);
+        let far = RetainedPlacement::of(Affine::translate((1e9, 0.0)) * Affine::scale(2.0));
+        assert_eq!(
+            page.offset_to(&far),
+            None,
+            "a move off the grid is not representable"
+        );
+    }
+
+    #[test]
+    fn a_placement_reports_its_extent_and_scale_as_rasterized() {
+        let rect = Rect::new(0.0, 0.0, 50.0, 20.0);
+        let placement = RetainedPlacement::of(Affine::translate((3.0, 4.0)) * Affine::scale(2.5));
+        assert_eq!(placement.extent(rect), (125, 50));
+        assert_eq!(placement.scale(), 2.5);
+
+        let collapsed = RetainedPlacement::of(Affine::scale(0.0));
+        assert_eq!(collapsed.extent(rect), (0, 0));
+        assert_eq!(collapsed.scale(), 0.0);
+    }
 }
