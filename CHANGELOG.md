@@ -113,6 +113,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Fixed
 
+- `frust-shell-ios`: the AccessKit tree is published in the view's physical pixels through a root
+  transform equal to the display scale, so VoiceOver frames and hit-tests land on the drawn
+  elements on 2x/3x devices (they were half-scale before).
 - A navigator inside a `pattern_switcher` child that had been switched away kept claiming Android
   back, so back was swallowed on every other page and could not exit the app.
 - `ScrollController::animate_to` now flushes `on_scroll` (and `ListView` near-edge callbacks) on
