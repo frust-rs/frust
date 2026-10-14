@@ -404,6 +404,11 @@ impl<T, V> RetainedPages<T, V> {
         layers: &mut [RecordedLayer],
     ) -> Result<RetainedPlan, EngineError> {
         self.frame = self.frame.saturating_add(1);
+        if brackets.is_empty() {
+            // The common frame: nothing retained, nothing to decide, and no
+            // allocation spent deciding it.
+            return Ok(RetainedPlan::default());
+        }
         let mut decisions: Vec<Option<RetainedDecision>> = vec![None; brackets.len()];
 
         // Every draw first: one that cannot be served refuses the frame, and
