@@ -812,10 +812,10 @@ fn the_budget_follows_the_atlas_tier() {
         RetainedBudget::for_tier(AtlasTier::Desktop),
         RetainedBudget::DESKTOP
     );
-    assert!(RetainedBudget::MOBILE.bytes < RetainedBudget::MOBILE_LARGE.bytes);
-    assert!(RetainedBudget::MOBILE_LARGE.bytes < RetainedBudget::DESKTOP.bytes);
+    const { assert!(RetainedBudget::MOBILE.bytes < RetainedBudget::MOBILE_LARGE.bytes) };
+    const { assert!(RetainedBudget::MOBILE_LARGE.bytes < RetainedBudget::DESKTOP.bytes) };
     // A full-screen 1080x2400 page, three times over, fits a phone.
-    assert!(RetainedBudget::MOBILE.bytes >= 3 * 1080 * 2400 * 4);
+    const { assert!(RetainedBudget::MOBILE.bytes >= 3 * 1080 * 2400 * 4) };
 }
 
 // ---------------------------------------------------------------------
