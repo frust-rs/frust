@@ -151,25 +151,31 @@ pub use frust_widgets::{
     AUTO_SCROLL_EDGE_PX, AUTO_SCROLL_MAX_PX_PER_S, Align, AlignView, Alignment, AlwaysScrollable,
     AnimateTo, AutoScroll, AutoScrollZone, AutoScrollZoneWidget, Axis, BackPolicy, BorderStyle,
     Bouncing, Button, ButtonStyle, ButtonView, Checkbox, CheckboxView, ChildKey, Clamping, Column,
-    ContainerView, ContainerWidget, CrossAxisAlignment, DRAG_THRESHOLD, DecelerationRate,
-    DividerView, DividerWidget, DragCoordinator, DragHighlight, DragKind, DragPhase, DragPolicy,
-    DragSession, DragSourceId, DragState, DragStateChange, DragSubscription, DragTargetId,
-    DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, EdgeInsets, FlexChild,
-    FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, HIGHLIGHT_FALLBACK, HeroView,
-    Icon, IconButton, IconButtonView, IconData, IconSource, IconView, IconWidget, Image,
-    ImageError, ImageFit, ImageSource, ImageView, IndexedStack, IndexedStackView, ListView,
-    ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY, MainAxisAlignment, NavigatorController,
-    NavigatorId, NavigatorView, NeverScrollable, OverlayAlign, OverlayPlacement, OverlayPortalView,
-    OverlaySide, OverscrollEffect, Padding, PaddingView, PageBuilder, PageTransition,
-    PageVisibility, PopResult, PushOptions, Radio, RadioView, RadioWidget, ReorderableListView,
-    ResultCallback, Row, RubberBand, SafeAreaView, ScaffoldView, ScrollController, ScrollInfo,
-    ScrollMetrics, ScrollPhysics, ScrollSubscription, ScrollView, Simulation, SizedBox,
-    SizedBoxView, Slider, SliderView, SourceFeedback, SpringDescription, Stack, StackView,
-    TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
+    ContainerView, ContainerWidget, CrossAxisAlignment, CustomScrollView, DRAG_THRESHOLD,
+    DecelerationRate, DividerView, DividerWidget, DragCoordinator, DragHighlight, DragKind,
+    DragPhase, DragPolicy, DragSession, DragSourceId, DragState, DragStateChange, DragSubscription,
+    DragTargetId, DragTargetView, DragTargetWidget, DraggableView, DraggableWidget, EdgeInsets,
+    FlexChild, FlexView, GHOST_OPACITY, GestureDetector, GestureDetectorView, HIGHLIGHT_FALLBACK,
+    HeroView, Icon, IconButton, IconButtonView, IconData, IconSource, IconView, IconWidget, Image,
+    ImageError, ImageFit, ImageSource, ImageView, IndexedStack, IndexedStackView, KeepAliveHandle,
+    KeepAliveView, ListView, ListViewWidget, MAX_FLING_VELOCITY, MIN_FLING_VELOCITY,
+    MainAxisAlignment, NavigatorController, NavigatorId, NavigatorView, NeverScrollable,
+    OverlayAlign, OverlayPlacement, OverlayPortalView, OverlaySide, OverscrollEffect, Padding,
+    PaddingView, PageBuilder, PageTransition, PageVisibility, PopResult, PushOptions, Radio,
+    RadioView, RadioWidget, ReorderableListView, ResultCallback, Row, RubberBand, SafeAreaView,
+    ScaffoldView, ScrollAxis, ScrollController, ScrollInfo, ScrollMetrics, ScrollPhysics,
+    ScrollSubscription, ScrollView, Simulation, SizedBox, SizedBoxView, Slider, SliderView,
+    SliverBoxView, SliverFillRemainingView, SliverFixedExtentListView, SliverGridDelegate,
+    SliverGridView, SliverListView, SliverPaddingView, SliverPersistentHeaderDelegate,
+    SliverPersistentHeaderView, SourceFeedback, SpringDescription, Stack, StackView, TextInput,
+    TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
     VisibilityCallback, auto_scroll_zone, button, checkbox, colored_box, column, container,
-    divider, drag_target, draggable, flexible, hero, icon, icon_button, indexed_stack, inflexible,
-    keyed, list_view, overlay_portal, radio, reorderable_list, row, safe_area, scaffold,
-    scroll_view, slider, stack, text, text_input,
+    custom_scroll_view, divider, drag_target, draggable, flexible, hero, icon, icon_button,
+    indexed_stack, inflexible, keep_alive, keyed, list_view, overlay_portal, radio,
+    reorderable_list, row, safe_area, scaffold, scroll_view, slider, sliver_box,
+    sliver_fill_remaining, sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_grid,
+    sliver_grid_keyed, sliver_list, sliver_padding, sliver_persistent_header, stack, text,
+    text_input,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -3129,6 +3135,132 @@ mod scroll_physics_reexport {
         // platform's default — is directly constructible through the facade
         // too, which is the whole point of it staying reachable.
         let _: RubberBand = RubberBand::new();
+    }
+}
+
+/// Facade-level check that the sliver viewport vocabulary
+/// ([`CustomScrollView`]/[`custom_scroll_view`], its [`ScrollAxis`], and the
+/// [`sliver_box`] adapter) resolves through the `frust` facade, so an app
+/// builds a sliver scroll surface without reaching into `frust_widgets`.
+#[cfg(test)]
+mod custom_scroll_view_reexport {
+    use crate::{
+        Clamping, CustomScrollView, OverscrollEffect, ScrollAxis, ScrollController, SliverBoxView,
+        custom_scroll_view, sliver_box, text,
+    };
+
+    #[test]
+    fn custom_scroll_view_and_slivers_resolve_through_facade() {
+        let header: SliverBoxView<()> = sliver_box(text("header"));
+        let view: CustomScrollView<()> = custom_scroll_view((header, text("body")))
+            .axis(ScrollAxis::Horizontal)
+            .cache_extent(120.0)
+            .physics(Clamping::new())
+            .overscroll_effect(OverscrollEffect::None)
+            .controller(ScrollController::new());
+        let _ = view;
+    }
+}
+
+/// Facade-level check that the structural slivers ([`sliver_padding`],
+/// [`sliver_fill_remaining`] and the lazy [`sliver_fixed_extent_list`] /
+/// [`sliver_fixed_extent_list_keyed`]) resolve through the `frust` facade
+/// beside [`custom_scroll_view`].
+#[cfg(test)]
+mod structural_slivers_reexport {
+    use crate::{
+        ChildKey, CustomScrollView, EdgeInsets, SliverFillRemainingView, SliverFixedExtentListView,
+        SliverPaddingView, custom_scroll_view, sliver_box, sliver_fill_remaining,
+        sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_padding, text,
+    };
+
+    #[test]
+    fn structural_slivers_resolve_through_facade() {
+        let padded: SliverPaddingView<()> =
+            sliver_padding(EdgeInsets::all(8.0), sliver_box(text("header")));
+        let rows: SliverFixedExtentListView<()> =
+            sliver_fixed_extent_list(1_000, 48.0, |i| text(format!("row {i}")))
+                .on_near_end(|_: &mut ()| {}, 200.0);
+        let keyed: SliverFixedExtentListView<()> =
+            sliver_fixed_extent_list_keyed(10, 48.0, ChildKey::new, |i| text(format!("item {i}")))
+                .on_near_start(|_: &mut ()| {}, 100.0);
+        let rest: SliverFillRemainingView<()> =
+            sliver_fill_remaining(text("footer")).has_scroll_body(false);
+        let view: CustomScrollView<()> = custom_scroll_view((padded, rows, keyed, rest));
+        let _ = view;
+    }
+}
+
+/// Facade-level check that the lazy slivers [`sliver_list`] (with
+/// [`keep_alive`] rows) and [`sliver_grid`] / [`sliver_grid_keyed`] with a
+/// [`SliverGridDelegate`] resolve through the `frust` facade.
+#[cfg(test)]
+mod lazy_slivers_reexport {
+    use crate::{
+        ChildKey, CustomScrollView, KeepAliveHandle, KeepAliveView, SliverGridDelegate,
+        SliverGridView, SliverListView, custom_scroll_view, keep_alive, sliver_grid,
+        sliver_grid_keyed, sliver_list, text,
+    };
+
+    #[test]
+    fn lazy_slivers_resolve_through_facade() {
+        let rows: SliverListView<()> = sliver_list(
+            5_000,
+            |i| ChildKey::new(i as u64),
+            |i| {
+                let row: KeepAliveView<()> = keep_alive(text(format!("row {i}"))).enabled(i < 3);
+                row
+            },
+        )
+        .estimated_item_extent(64.0)
+        .on_near_start(|_: &mut ()| {}, 400.0)
+        .on_near_end(|_: &mut ()| {}, 400.0);
+        let grid: SliverGridView<()> = sliver_grid(100, |i| text(format!("cell {i}"))).delegate(
+            SliverGridDelegate::MaxCrossAxisExtent {
+                max_cross_extent: 120.0,
+                main_spacing: 8.0,
+                cross_spacing: 8.0,
+                child_aspect_ratio: 1.0,
+            },
+        );
+        let keyed: SliverGridView<()> =
+            sliver_grid_keyed(10, ChildKey::new, |i| text(format!("photo {i}")));
+        let view: CustomScrollView<()> = custom_scroll_view((rows, grid, keyed));
+        let _ = view;
+        assert!(
+            KeepAliveHandle::acquire().is_none(),
+            "no lazy-list row is being built here"
+        );
+    }
+}
+
+/// Facade-level check that [`sliver_persistent_header`] with its
+/// [`SliverPersistentHeaderDelegate`] and the pinned/floating options resolves
+/// through the `frust` facade.
+#[cfg(test)]
+mod persistent_header_reexport {
+    use crate::{
+        CustomScrollView, SliverPersistentHeaderDelegate, SliverPersistentHeaderView,
+        custom_scroll_view, sliver_fixed_extent_list, sliver_persistent_header, text,
+    };
+
+    #[test]
+    fn persistent_header_resolves_through_facade() {
+        let header: SliverPersistentHeaderView<()> =
+            sliver_persistent_header(SliverPersistentHeaderDelegate {
+                min_extent: 56.0,
+                max_extent: 160.0,
+                build: |shrink: f64, overlaps: bool| {
+                    text(format!("shrink {shrink:.0} overlaps {overlaps}"))
+                },
+            })
+            .pinned(true)
+            .floating(true);
+        let view: CustomScrollView<()> = custom_scroll_view((
+            header,
+            sliver_fixed_extent_list(100, 48.0, |i| text(format!("row {i}"))),
+        ));
+        let _ = view;
     }
 }
 

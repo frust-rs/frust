@@ -4,9 +4,10 @@
 // (retrieved 2026-08-20). Upstream:
 // https://github.com/paadevelopments/material_3_expressive
 // Porting decisions (each restated with its reference site in the module docs
-// below): the collapsing bar's scroll linkage is an app-fed controlled prop
-// rather than a sliver-protocol participant; the small/collapsed band keeps M3's
-// published 64dp rather than upstream's own 72dp content-padding model; the
+// below): the collapsing bar is a sliver-protocol participant inside a
+// viewport, and an app-fed controlled prop, when set, wins over it; the
+// small/collapsed band keeps M3's published 64dp rather than upstream's own
+// 72dp content-padding model; the
 // bar's slot edge insets and slot gap stay this catalog's 4dp rather than
 // upstream's 0/8dp pair, while a top bar's title keeps M3's 16dp edge inset.
 
@@ -132,10 +133,33 @@
 //! per-constructor defaults are ported as-is: square for the top/search bars,
 //! round for the collapsing one, square (unconfigurable) for the bottom one.
 //!
-//! # Scroll-linked collapse: the app owns the wiring
+//! # Scroll-linked collapse: two wirings
 //!
-//! A widget here has no window or scroll handle — [`frust::ScrollView`]'s two
-//! seams ([`on_scroll`](frust::ScrollView::on_scroll),
+//! **In a viewport, the bar wires itself.** Placed among the slivers of a
+//! [`frust::custom_scroll_view`] and left uncontrolled, [`sliver_app_bar`] is a
+//! sliver: the viewport's scroll offset collapses it from the expanded band to
+//! the collapsed one, pinned at the leading edge by default
+//! ([`SliverAppBarView::pinned`]) or revealed on a reverse scroll with
+//! [`SliverAppBarView::floating`]. Nothing is wired by the app; see
+//! [`mod@sliver`]'s *In a viewport*.
+//!
+//! ```
+//! use frust::{ChildKey, CustomScrollView, ScrollController, custom_scroll_view, sliver_list, text};
+//! use frust_material::{AppBarVariant, sliver_app_bar};
+//!
+//! fn inbox(controller: ScrollController) -> CustomScrollView<()> {
+//!     custom_scroll_view((
+//!         sliver_app_bar("Inbox").variant(AppBarVariant::Large),
+//!         sliver_list(500, ChildKey::new, |i| text(format!("message {i}"))),
+//!     ))
+//!     .controller(controller)
+//! }
+//! # let _ = inbox(ScrollController::new());
+//! ```
+//!
+//! **Anywhere else, the app owns the wiring.** Outside a viewport a widget here
+//! has no window or scroll handle — [`frust::ScrollView`]'s two seams
+//! ([`on_scroll`](frust::ScrollView::on_scroll),
 //! [`on_refresh_release`](frust::ScrollView::on_refresh_release)) are installed
 //! on the scroll view at construction, and only the app holds both it and the
 //! bar. So the collapse is a **controlled prop**, the same app-side-rule shape
@@ -144,6 +168,11 @@
 //! observes into [`SliverAppBarView::scroll_offset`] (or a fraction it computes
 //! itself into [`SliverAppBarView::collapse`]), and this widget is a pure
 //! function of it.
+//!
+//! **The prop wins.** A bar given either prop is that controlled box wherever
+//! it sits — in a viewport too, where it is laid out as a box child that
+//! scrolls away with the content and the viewport's offset never collapses it.
+//! An app already feeding `scroll_offset(..)` keeps exactly the bar it had.
 //!
 //! ```
 //! use frust::{Component, ScrollInfo, View, column, scroll_view, text};
@@ -218,11 +247,12 @@
 //!   to synthesize a back button; a widget here has no navigator handle, and
 //!   this catalog's convention is an explicit `leading` slot (supply
 //!   [`fn@crate::icon_button`] with [`crate::icons::ARROW_BACK`]).
-//! * **`floating`/`snap`.** Both need the scroll *direction* and a per-frame
-//!   sliver-protocol callback this framework has no seam for; an app that wants
-//!   reveal-on-scroll-up computes its own collapse fraction and feeds it in.
-//!   [`SliverAppBarView::pinned`] *is* ported — it selects whether the bar
-//!   bottoms out at the collapsed band or scrolls away entirely.
+//! * **`snap`.** A half-revealed floating bar stays half revealed when the
+//!   scroll stops: the persistent header [`SliverAppBarView::floating`] rides
+//!   on has no snap animation. `floating` and [`SliverAppBarView::pinned`]
+//!   *are* ported, for a bar inside a viewport; a controlled bar ignores
+//!   `floating`, and an app that wants reveal-on-scroll-up there computes its
+//!   own collapse fraction and feeds it in.
 //! * **`elevation` / `Material` shadow on the collapsing and bottom bars.**
 //!   Upstream's own default is `0`, so a ported default paints nothing; only
 //!   the fixed top bar takes [`AppBarView::elevation`].

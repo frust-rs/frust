@@ -9,7 +9,8 @@
 //! wrapping a real scrolling item list rather than faking the collapse with a
 //! slider — there is no sliver protocol here, so the bar and the scrolling
 //! body are two stacked widgets, not one participant in a shared viewport
-//! (see that module's own "why this is a box widget, not a sliver" section).
+//! (the controlled-prop mode of that module's "Two modes" section; the
+//! sliver mode lives in the playground's Slivers page).
 //!
 //! **Safe area** is a widget prop on the top and search bars
 //! (`AppBarView::safe_area`, default on): the toggle drives `.safe_area(on)`

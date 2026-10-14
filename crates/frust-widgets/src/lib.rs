@@ -1,4 +1,5 @@
-//! Baseline widget set: Text, Button, Image, Column/Row, Stack, ScrollView, etc.
+//! Baseline widget set: Text, Button, Image, Column/Row, Stack, ScrollView,
+//! CustomScrollView and its slivers, etc.
 //!
 //! Ships the [`text`] leaf plus the primitive layout containers —
 //! [`Row`]/[`Column`] ([`FlexView`]), [`Stack`], [`IndexedStack`], [`Padding`],
@@ -61,9 +62,11 @@ mod scroll_core;
 mod selection_toolbar;
 mod sized;
 mod slider;
+mod slivers;
 mod stack;
 mod text;
 mod textinput;
+mod viewport;
 
 use std::hash::{Hash, Hasher};
 
@@ -90,6 +93,9 @@ pub use flex::{
     Axis, Column, CrossAxisAlignment, FlexChild, FlexView, FlexWidget, MainAxisAlignment, Row,
     column, flexible, inflexible, keyed, row,
 };
+/// The axis a [`CustomScrollView`] scrolls along, re-exported so its
+/// [`axis`](CustomScrollView::axis) builder needs no direct `frust-core` import.
+pub use frust_core::ScrollAxis;
 pub use gesture::{GestureDetector, GestureDetectorView, GestureDetectorWidget};
 pub use icon::{Icon, IconData, IconSource, IconView, IconWidget, icon};
 pub use icon_button::{IconButton, IconButtonView, IconButtonWidget, icon_button};
@@ -142,9 +148,20 @@ pub use scroll_controller::{AnimateTo, ScrollController, ScrollSubscription};
 pub use selection_toolbar::selection_toolbar;
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
+pub use slivers::{
+    KeepAliveHandle, KeepAliveView, KeepAliveWidget, SliverBoxView, SliverBoxWidget,
+    SliverFillRemainingView, SliverFillRemainingWidget, SliverFixedExtentListView,
+    SliverFixedExtentListWidget, SliverGridDelegate, SliverGridView, SliverGridWidget,
+    SliverListView, SliverListWidget, SliverPaddingView, SliverPaddingWidget,
+    SliverPersistentHeaderDelegate, SliverPersistentHeaderView, SliverPersistentHeaderWidget,
+    keep_alive, sliver_box, sliver_fill_remaining, sliver_fixed_extent_list,
+    sliver_fixed_extent_list_keyed, sliver_grid, sliver_grid_keyed, sliver_list, sliver_padding,
+    sliver_persistent_header,
+};
 pub use stack::{Stack, StackView, StackWidget, stack};
 pub use text::{TextView, TextWidget, text};
 pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
+pub use viewport::{CustomScrollView, DEFAULT_CACHE_EXTENT, ViewportWidget, custom_scroll_view};
 
 /// A stable identity for a list child, so a container's reconciliation can match
 /// a child to its live widget *by key* across reorders/inserts instead of by

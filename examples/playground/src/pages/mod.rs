@@ -1,12 +1,13 @@
-//! The fifteen playground sections, one module per section: `platform_views`,
+//! The sixteen playground sections, one module per section: `platform_views`,
 //! `camera`, `responsive`, `terminal`, `keys`, `i18n`, `video_player`,
 //! `url_launcher`, `auth_session`, `database`, `graph_canvas`,
-//! `scroll_control`, `drag_drop`, `tabs`, and `images` — each one an OS-facing capability (or,
-//! for `graph_canvas`/`scroll_control`/`drag_drop`, a widget demo:
-//! `CanvasView`/`PanZoomView` for the first, a keyed `ListView` bound to a
-//! `ScrollController` for the second, `DragCoordinator`/`draggable`/
-//! `drag_target`/`reorderable_list` for the third; `tabs` is the per-tab
-//! navigator and back-fallback gate) exercised end to end
+//! `scroll_control`, `drag_drop`, `tabs`, `images`, and `slivers` — each one an
+//! OS-facing capability (or, for `graph_canvas`/`scroll_control`/`drag_drop`/
+//! `slivers`, a widget demo: `CanvasView`/`PanZoomView` for the first, a keyed
+//! `ListView` bound to a `ScrollController` for the second,
+//! `DragCoordinator`/`draggable`/`drag_target`/`reorderable_list` for the
+//! third, one `custom_scroll_view` composing every sliver kind for the last;
+//! `tabs` is the per-tab navigator and back-fallback gate) exercised end to end
 //! rather than a widget gallery.
 //!
 //! # Page-fn contract (fixed across every section)
@@ -50,6 +51,7 @@ pub mod keys;
 pub mod platform_views;
 pub mod responsive;
 pub mod scroll_control;
+pub mod slivers;
 pub mod tabs;
 pub mod terminal;
 pub mod url_launcher;
@@ -59,7 +61,7 @@ use frust::{AnyView, any};
 
 use crate::PlaygroundState;
 
-/// The fifteen section labels, in order. Indexed by `PlaygroundState::section`
+/// The sixteen section labels, in order. Indexed by `PlaygroundState::section`
 /// and dispatched by [`current`].
 ///
 /// Kept short on purpose: at phone width the shell's narrow-width bottom nav
@@ -73,9 +75,9 @@ use crate::PlaygroundState;
 /// single line at that width. A page wanting a longer heading for itself
 /// (e.g. `platform_views`'s own on-page title) uses its own string literal
 /// rather than this array — see `pages/platform_views.rs`.
-pub const SECTION_LABELS: [&str; 15] = [
+pub const SECTION_LABELS: [&str; 16] = [
     "Platform", "Camera", "Layout", "Terminal", "Keys", "i18n", "Video", "URL", "Auth", "DB",
-    "Graph", "Scroll", "Drag", "Tabs", "Images",
+    "Graph", "Scroll", "Drag", "Tabs", "Images", "Slivers",
 ];
 
 /// How many of [`SECTION_LABELS`], in order, count as "primary" — shown
@@ -88,10 +90,10 @@ pub const SECTION_LABELS: [&str; 15] = [
 /// section off the shell, only off the bar's own direct row.
 pub const PRIMARY_NAV_COUNT: usize = 5;
 
-/// Dispatch to the section page for `section` (0..15), falling back to
+/// Dispatch to the section page for `section` (0..16), falling back to
 /// platform views for any out-of-range index (defensive — the navigation bar
 /// and side rail only ever yield a valid index).
-// erasure: keep the 15-arm section dispatch erases each page at this one boundary
+// erasure: keep the 16-arm section dispatch erases each page at this one boundary
 pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundState> {
     match section {
         0 => any(platform_views::page(state)),
@@ -109,6 +111,7 @@ pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundSta
         12 => any(drag_drop::page(state)),
         13 => any(tabs::page(state)),
         14 => any(images::page(state)),
+        15 => any(slivers::page(state)),
         _ => any(platform_views::page(state)),
     }
 }
