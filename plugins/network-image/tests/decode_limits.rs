@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use frust_network_image::{
     DecodeError, DecodeLimits, DiskCacheConfig, FetchFuture, FetchRequest, FetchedBytes,
-    ImageFetcher, ImageLoader, LoadError, LoadRequest, LoaderConfig, decode_source,
+    ImageFetcher, ImageLoader, LoadError, LoadRequest, LoaderConfig, TargetPx, decode_source,
 };
 
 fn run<F: std::future::Future>(fut: F) -> F::Output {
@@ -118,9 +118,51 @@ fn alloc_cap_rejects_a_valid_image() {
     );
     let err = run(l.load(request())).expect_err("over the alloc cap");
     assert!(
-        matches!(err, LoadError::Decode(DecodeError::TooLarge { .. })),
+        matches!(err, LoadError::Decode(DecodeError::OverBudget { .. })),
         "{err:?}"
     );
+}
+
+#[test]
+fn resize_intermediate_counts_against_the_budget() {
+    let limits = DecodeLimits {
+        max_alloc_bytes: 12 * 1024 * 1024,
+        ..DecodeLimits::default()
+    };
+    let mut req = request();
+    req.target = Some(TargetPx {
+        width: 300,
+        height: 300,
+    });
+    let err = run(loader(png(1200, 1200), limits).load(req)).expect_err("resize set too big");
+    assert!(
+        matches!(err, LoadError::Decode(DecodeError::OverBudget { .. })),
+        "{err:?}"
+    );
+    let src = run(loader(png(1200, 1200), limits).load(request())).expect("fits unscaled");
+    let size = src.natural_size();
+    assert_eq!((size.width, size.height), (1200.0, 1200.0));
+}
+
+#[test]
+fn sixteen_bit_sources_are_estimated_at_their_depth() {
+    let img = image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_fn(500, 500, |x, y| {
+        image::Rgb([x as u16, y as u16, 7])
+    });
+    let mut out = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb16(img)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .expect("encode png");
+    let limits = DecodeLimits {
+        max_alloc_bytes: 2 * 1024 * 1024,
+        ..DecodeLimits::default()
+    };
+    let err = run(loader(out.into_inner(), limits).load(request())).expect_err("16-bit over");
+    assert!(
+        matches!(err, LoadError::Decode(DecodeError::OverBudget { .. })),
+        "{err:?}"
+    );
+    run(loader(png(500, 500), limits).load(request())).expect("8-bit fits");
 }
 
 #[test]
