@@ -4618,7 +4618,9 @@ that frame, a visible jump. Any pending measured-anchor correction is discarded 
 committed into geometry it can no longer explain.
 
 **Applies to**: keyed `ListView` (`ListView::builder_keyed`) rows when one frame mutates both sides
-of the anchor row.
+of the anchor row. Fixed for `sliver_list`, whose anchoring goes through `locate_key` (a scan of up
+to 64 items around the anchor) and the viewport's correction loop: a two-sided mutation is anchored
+exactly when the anchor row moved by no more than that radius.
 
 **Why accepted**: the cost is one frame's scroll position, never a misattached measurement or a
 leaked row entry. Correcting every two-sided mutation would re-key all `item_count` items, the O(N)
@@ -4628,7 +4630,61 @@ work the keyed design exists to avoid.
 `list_view.rs` module doc, *Cache hygiene*), or a device report of the jump in a real app.
 
 **Evidence**: `crates/frust-widgets/src/list_view.rs:157-164` (module doc, "Two acknowledged gaps");
-`docs/WIDGETS_ARCHITECTURE.md` *Virtualized ListView* (keyed-list re-anchoring paragraph).
+`docs/WIDGETS_ARCHITECTURE.md` *Virtualized ListView* (keyed-list re-anchoring paragraph) and
+*Slivers and the viewport* (correction-based anchoring).
+
+---
+
+### `sliver-v1-scope` — the sliver viewport ships a deliberately narrow v1
+
+**Observed**: `custom_scroll_view` and the sliver family lay out and scroll forward-growing content
+only, with these gaps:
+
+- forward growth only: no reverse growth and no `center` anchor sliver;
+- no overlap absorber or `NestedScrollView`-style coordination between a header and an inner scroller;
+- no snapping persistent headers, and no stretch or expansion past `max_extent` during overscroll;
+- a floating header reveals only under a drag or fling (the viewport reports Idle for a wheel step,
+  a controller `jump_to` or `animate_to`, as Flutter's pointer-scroll does);
+- header and content rebuild one frame after the geometry that drove them (paint requests the frame
+  and the next rebuild calls `build`), so a resizing header's content lags by one frame;
+- a gap above row 0 wider than the scroll position (rows above measured shorter than estimated) in a
+  `sliver_list` closes with a visible shift, as in Flutter;
+- a horizontal viewport needs a bounded height;
+- `scroll_to_item` is ignored by `CustomScrollView` (item commands are list-only); a controller
+  `animate_to` ignores a scroll-offset correction (absolute target, as in Flutter);
+- the shared core is built per axis and follows an axis change on rebuild; only the stretch
+  overscroll transform is still transposed for a horizontal viewport. `SliverConstraints` has no
+  constructor (needed before it could become `#[non_exhaustive]`).
+
+**Applies to**: apps composing a `custom_scroll_view` that need any behavior above.
+
+**Why accepted**: the v1 covers the common collapsing-header, lazy list and grid compositions; each
+gap needs protocol work (a second growth direction, an overlap absorber) not worth carrying before a
+real consumer asks.
+
+**Trigger for removal**: each bullet is deleted when it lands, the entry when the last one does.
+
+**Evidence**: `crates/frust-widgets/src/viewport.rs`, `crates/frust-widgets/src/slivers/` module
+docs; `docs/WIDGETS_ARCHITECTURE.md` *Slivers and the viewport*.
+
+---
+
+### `scroll-view-list-view-not-viewport-based` — `ScrollView` and `ListView` are not built on the sliver viewport
+
+**Observed**: `ScrollView` and `ListView` keep their own layout and windowing and share only the
+scroll surface core (`scroll_core.rs`) with the sliver viewport. They do not speak the sliver
+protocol, so they cannot be placed as slivers, and their windowing and anchoring logic duplicates the
+sliver lists' (shared only through the `slivers/reconcile.rs` reconcilers).
+
+**Applies to**: authors and maintainers extending scrolling behavior, which must land on both stacks.
+
+**Why accepted**: re-basing both widgets on the viewport is a behavior-preserving rewrite of the
+most heavily gated scroll surfaces; it is sequenced as its own follow-up plan.
+
+**Trigger for removal**: `ScrollView` and `ListView` become thin constructors over the viewport.
+
+**Evidence**: `crates/frust-widgets/src/scroll.rs`, `list_view.rs`, `viewport.rs`;
+`docs/WIDGETS_ARCHITECTURE.md` *Scroll Physics*.
 
 ---
 
@@ -4662,13 +4718,12 @@ act_000001a10d6c24eeK3GHlKbH.
   (checkpoint R2). Residual: a parent on a dirty path still runs its own layout, and there are no
   parent-pointer relayout boundaries; material `NavigationBarWidget::selected_indicator_rect`
   calls `widget_mut()` inside layout and so relays out the selected item every pass (a known cost);
-- box-only layout protocol, no slivers — Phase 2;
 - no retained layers, no repaint boundaries, no blend/clip-path/backdrop primitives, no partial
   repaint — Phase 3;
 - no per-slot platform-view interleaving, no in-scene video/camera textures — Phase 4.
 
 **Applies to**: apps whose layout or paint cost scales with the whole tree, or that need layered
-blending, sliver lists, or a platform view or video texture interleaved between scene slots.
+blending, or a platform view or video texture interleaved between scene slots.
 
 **Why accepted**: each gap is sequenced in the render-model plan and is retired piecewise as its
 phase lands.
@@ -5455,8 +5510,9 @@ lives with (**R-B3-inner**, `nav::ambient`'s `SWIPE_CLAIM`) — arbitrating once
 keeps the takeover decision a single read rather than a per-`Move` re-evaluation; the fix is a
 strictly larger seam (a live-updating claim), not a bug in the one shipped.
 
-**Evidence**: `crates/frust-widgets/src/scroll.rs`'s `SCROLL_CLAIM`/`InnerScrollState`/`deferring`
-module docs (*Nested scrolling: innermost wins*).
+**Evidence**: `crates/frust-widgets/src/scroll.rs`'s `SCROLL_CLAIM`/`InnerScrollState` module docs
+(*Nested scrolling: innermost wins*); the `deferring`/`inner_at_down` fields of `ScrollSurfaceCore`
+in `scroll_core.rs`.
 
 ---
 
@@ -5522,8 +5578,8 @@ in the same direction the interrupted motion was travelling.
 magnitude guards are the load-bearing pair (they prevent a flick back the other way from inheriting
 momentum it should cancel); the stall guard is a refinement on top, not ported in this pass.
 
-**Evidence**: `crates/frust-widgets/src/scroll.rs` and `list_view.rs`'s `fling_start_velocity` doc
-comments (*Accepted gap*).
+**Evidence**: `crates/frust-widgets/src/scroll_core.rs`'s `fling_start_velocity` doc comment
+(*Accepted gap*).
 
 ---
 
@@ -5547,8 +5603,7 @@ frames, both need the simulation still running; only the fully-rejected-and-stil
 one-way for every curve in `crate::physics::simulation`. The `ListView` estimate case is a strictly
 smaller version of the same tradeoff windowed virtualization already accepts elsewhere.
 
-**Evidence**: `crates/frust-widgets/src/scroll.rs` and `list_view.rs`'s `ballistic_is_pinned_outward`
-doc comments; `list_view.rs`'s local *One caveat* note on the same method.
+**Evidence**: `crates/frust-widgets/src/scroll_core.rs`'s `ballistic_is_pinned_outward` doc comment.
 
 ### `testing-vello-cpu-layer-recursion` — `vello_cpu` 0.2.0's nested-layer compositing recurses ~O(depth); deep-layer test renders need an oversized stack
 

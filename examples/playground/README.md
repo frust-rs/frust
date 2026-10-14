@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between fifteen sections
+`pattern_switcher`-hosted section body, selecting between sixteen sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all fifteen
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all sixteen
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -141,6 +141,10 @@ The sections, in order:
     *Clear caches* button (`clear_all`). `NetworkImages::install()` runs in the
     app's `setup` block. Manual checks:
     [PLUGINS_DEVELOPMENT.md](../../docs/PLUGINS_DEVELOPMENT.md).
+16. **Slivers** — one `custom_scroll_view` composing a pinned Material
+   `sliver_app_bar`, a floating `sliver_persistent_header`, a variable-extent
+   `sliver_list`, a 4-column `sliver_grid` and `sliver_fill_remaining`, with
+   `ScrollController` jump buttons; the reference surface for the sliver protocol.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with

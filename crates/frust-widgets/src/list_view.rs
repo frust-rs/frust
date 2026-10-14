@@ -124,8 +124,10 @@
 //! offset, then out to cover the viewport ± [`BUFFER`]; each row is then placed
 //! at its own walked content `y` (`slot_y`) minus the offset. Reaching item 0
 //! re-pins `y = 0` exactly, erasing accumulated drift, and a jump farther than
-//! [`MAX_PREFIX_STEP`] items counts as a data reset rather than a scroll: its
-//! bulk resolves in closed form against the estimate, only the remainder walks.
+//! [`MAX_PREFIX_STEP`](reconcile::MAX_PREFIX_STEP) items counts as a data reset
+//! rather than a scroll: its bulk resolves in closed form against the estimate,
+//! only the remainder walks. The extent bookkeeping and the walk are
+//! `slivers/reconcile.rs`'s, shared with [`sliver_list`](crate::sliver_list).
 //!
 //! The builder still never runs outside rebuild, so a measurement that leaves the
 //! window no longer covering the viewport costs one convergence frame (*Viewport
@@ -401,6 +403,7 @@ use crate::physics::{ScrollPhysics, default_overscroll_effect};
 use crate::scroll::ScrollInfo;
 use crate::scroll_controller::{AnimateTo, ItemAlignment, ScrollController, ScrollToItem};
 use crate::scroll_core::{ScrollSurface, ScrollSurfaceCore};
+use crate::slivers::reconcile::{self, ItemViews, LiveRows, Measured};
 // The in-file tests reach these through `use super::*`; production code here
 // no longer names them since the machinery moved into `crate::scroll_core`.
 #[cfg(test)]
@@ -433,13 +436,6 @@ const ESTIMATE_NEEDS_KEYS_MSG: &str = "ListView::estimated_item_extent requires 
      ListView::builder_keyed: a measured extent is cached under the row's stable key, which a \
      positional list has none of (release: the estimate is ignored and the uniform extent path \
      runs)";
-
-/// The longest prefix walk a single frame will step item-by-item before
-/// resolving the remaining distance in closed form against the estimate. A
-/// scroll, a fling step, or a window shift moves the offset by far less than
-/// this; only a data reset or a programmatic jump reaches it, and the walk's
-/// result re-pins the anchor, so the very next frame is short again.
-const MAX_PREFIX_STEP: usize = 512;
 
 /// How many layouts a [`ScrollController::scroll_to_item`] request may spend
 /// settling — re-resolving the row's aligned position against freshly
@@ -474,18 +470,6 @@ type OnRefresh<State> = Rc<dyn Fn(&mut State)>;
 /// [`ListView::builder`]. Retained (an [`Rc`]) beside the builder, and — like the
 /// builder — a pure function of the index.
 type KeyOf = Rc<dyn Fn(usize) -> ChildKey>;
-
-/// One row's cached measurement in variable-extent mode, held under the row's
-/// stable key. See the [module docs](self)' *Variable extents* section.
-#[derive(Clone, Copy, Debug)]
-struct Measured {
-    /// The item index this row occupied the last time it was measured — the
-    /// only handle the cache has on "the current keying can no longer produce
-    /// this entry" when `item_count` shrinks.
-    index: usize,
-    /// The row's laid-out height (logical px).
-    extent: f64,
-}
 
 /// The motion tokens a controller command is applied with, resolved from the
 /// theme at every layout and paint and cached on the widget so the
@@ -928,46 +912,19 @@ impl<State: 'static> ListView<State> {
         ctx: &mut BuildCtx<'_>,
         plan: WindowPlan,
     ) -> ChangeFlags {
-        let (start, end) = (plan.start, plan.end);
-        let mut flags = ChangeFlags::NONE;
-        // Move the live window out so surviving indices can be relocated by key.
-        let old_keys = std::mem::take(&mut element.keys);
-        let old_children = std::mem::take(&mut element.children);
-        let mut old: HashMap<usize, ChildPod> = old_keys.into_iter().zip(old_children).collect();
-
-        let mut new_children = Vec::with_capacity(end.saturating_sub(start));
-        let mut new_keys = Vec::with_capacity(end.saturating_sub(start));
-        let mut structural = false;
-
-        for index in start..end {
-            if let Some(mut pod) = old.remove(&index) {
-                // Survivor: rebuild in place against its own previous view
-                // (reconstructed from the pure builder) — state preserved.
-                let prev_view = (prev.builder)(index);
-                let next_view = (self.builder)(index);
-                flags |= crate::authoring::rebuild_child(&prev_view, &next_view, &mut pod, ctx);
-                new_children.push(pod);
-            } else {
-                new_children.push(crate::authoring::build_child(&(self.builder)(index), ctx));
-                structural = true;
-            }
-            new_keys.push(index);
-        }
-
-        // Indices that left the window are torn down (cancel-if-active inside
-        // teardown_child unwinds an armed child).
-        for (index, mut pod) in old.drain() {
-            crate::authoring::teardown_child(&(prev.builder)(index), &mut pod, ctx);
-            structural = true;
-        }
-
-        element.children = new_children;
-        element.keys = new_keys;
+        let flags = reconcile::reconcile_positional(
+            ItemViews {
+                prev: &*prev.builder,
+                next: &*self.builder,
+            },
+            LiveRows {
+                children: &mut element.children,
+                indices: &mut element.keys,
+            },
+            plan.start..plan.end,
+            ctx,
+        );
         element.sync_child_origins();
-
-        if structural {
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-        }
         flags
     }
 
@@ -982,7 +939,8 @@ impl<State: 'static> ListView<State> {
     /// `prev.builder(prev_index)` → `self.builder(index)`. Keys with no entry
     /// build fresh; pods no slot claimed are torn down with the same
     /// cancel-if-active [`crate::authoring::teardown_child`] path the positional
-    /// reconciler uses — nothing more.
+    /// reconciler uses — nothing more. The matching itself is the shared
+    /// [`reconcile::reconcile_keyed`].
     ///
     /// A duplicate key is ambiguous and trips a `debug_assert!` mirroring
     /// [`crate::authoring::rebuild_children`]'s; release builds carry on (first
@@ -1010,83 +968,30 @@ impl<State: 'static> ListView<State> {
         delta: isize,
         anchor_probe_missed: bool,
     ) -> ChangeFlags {
-        let (start, end) = (plan.start, plan.end);
-        let capacity = end.saturating_sub(start);
-        // One pass over the new window: each slot's key (so `key_of` runs exactly
-        // once per slot), the map this frame will retain, and the duplicate check
-        // — done up front, like the authoring reconciler's, so a debug build trips
-        // before any pod has been moved.
-        let mut slot_keys: Vec<ChildKey> = Vec::with_capacity(capacity);
-        let mut next_index_of: HashMap<ChildKey, usize> = HashMap::with_capacity(capacity);
-        let mut duplicate = false;
-        for index in start..end {
-            let key = key_of(index);
-            duplicate |= next_index_of.insert(key, index).is_some();
-            slot_keys.push(key);
-        }
-        debug_assert!(!duplicate, "{}", DUPLICATE_KEY_MSG);
-
-        // Move the live window out so surviving rows can be relocated by key: the
-        // previous frame's `key -> item index` map, and the pods by the item index
-        // each rendered.
-        let prev_index_of = std::mem::take(&mut element.key_index);
-        let old_keys = std::mem::take(&mut element.keys);
-        let old_children = std::mem::take(&mut element.children);
-        // A moved window range owes a layout pass on its own, without depending on
-        // the match outcome below to prove it (the window is a contiguous run, so
-        // first index + length pin it exactly).
-        let window_shifted = old_keys.first().copied() != (capacity > 0).then_some(start)
-            || old_keys.len() != capacity;
-        let mut old: HashMap<usize, ChildPod> = old_keys.into_iter().zip(old_children).collect();
-
-        let mut new_children = Vec::with_capacity(capacity);
-        let mut new_keys = Vec::with_capacity(capacity);
-        let mut flags = ChangeFlags::NONE;
-        let mut structural = window_shifted;
         // Whether any slot in this frame's reconciled window matched a key the
-        // previous window also held — an *exact* hashmap lookup, unlike the
-        // rebuild-time anchor-shift probe's two index hypotheses. Read below to
-        // decide the wholesale-replace half of the measured-cache hygiene
-        // rules.
-        let mut any_survivor = false;
-
-        for (index, key) in (start..end).zip(slot_keys.iter().copied()) {
-            let survivor = prev_index_of
-                .get(&key)
-                .copied()
-                .and_then(|prev_index| old.remove(&prev_index).map(|pod| (prev_index, pod)));
-            match survivor {
-                Some((prev_index, mut pod)) => {
-                    any_survivor = true;
-                    // The row survived under its key: relocate its live pod into
-                    // this slot and rebuild it in place against the view it
-                    // actually holds — `prev.builder(prev_index)`, the index it
-                    // rendered last frame. That redirection is the whole point of
-                    // the retained map; state (hosted component, press, toggle)
-                    // rides along with the pod.
-                    let prev_view = (prev.builder)(prev_index);
-                    let next_view = (self.builder)(index);
-                    flags |= crate::authoring::rebuild_child(&prev_view, &next_view, &mut pod, ctx);
-                    if prev_index != index {
-                        // Same row, different slot: its origin moves, so the frame
-                        // owes a layout pass even though nothing was built or torn
-                        // down.
-                        structural = true;
-                    }
-                    new_children.push(pod);
-                }
-                None => {
-                    // A key with no live row: entering the window, or new data.
-                    new_children.push(crate::authoring::build_child(&(self.builder)(index), ctx));
-                    structural = true;
-                }
-            }
-            new_keys.push(index);
-        }
+        // previous window also held (`any_survivor`) is an *exact* hashmap
+        // lookup, unlike the rebuild-time anchor-shift probe's two index
+        // hypotheses. Read below to decide the wholesale-replace half of the
+        // measured-cache hygiene rules.
+        let outcome = reconcile::reconcile_keyed(
+            ItemViews {
+                prev: &*prev.builder,
+                next: &*self.builder,
+            },
+            LiveRows {
+                children: &mut element.children,
+                indices: &mut element.keys,
+            },
+            &mut element.key_index,
+            &**key_of,
+            plan.start..plan.end,
+            DUPLICATE_KEY_MSG,
+            ctx,
+        );
 
         // Measured-cache hygiene (variable extents only).
         if element.is_variable() {
-            if anchor_probe_missed && !any_survivor {
+            if anchor_probe_missed && !outcome.any_survivor {
                 // The rebuild-time anchor-shift probe matched no previous-window
                 // key by hypothesis, *and* literally no previous-window key
                 // matched a slot in this frame's reconciled window by exact
@@ -1135,38 +1040,23 @@ impl<State: 'static> ListView<State> {
                 // own documented conservative direction — never a permanent
                 // leak.
                 let count = element.item_count;
-                for (key, prev_index) in prev_index_of.iter() {
-                    if old.contains_key(prev_index)
-                        && !Self::key_survives(*key, *prev_index, delta, count, key_of)
-                    {
+                for (key, prev_index) in &outcome.departed {
+                    if !Self::key_survives(*key, *prev_index, delta, count, key_of) {
                         element.forget_measured(key);
                     }
                 }
             }
         }
 
-        // Every pod no slot claimed is a key that left the window or the data.
-        for (index, mut pod) in old.drain() {
-            crate::authoring::teardown_child(&(prev.builder)(index), &mut pod, ctx);
-            structural = true;
-        }
-
-        element.children = new_children;
-        element.keys = new_keys;
-        element.key_index = next_index_of;
         if let Some(estimate) = element.variable_estimate() {
             // Retain this window's identities beside its slots, then re-pin the
             // prefix anchor and the per-slot content positions to the plan the
             // window was computed from (layout refines them from measurements).
-            element.slot_keys = slot_keys;
+            element.slot_keys = outcome.slot_keys;
             element.set_window_geometry(plan, estimate);
         }
         element.sync_child_origins();
-
-        if structural {
-            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-        }
-        flags
+        outcome.flags
     }
 
     /// Determine the keyed prepend/removal scroll-anchor correction for this
@@ -1227,19 +1117,7 @@ impl<State: 'static> ListView<State> {
         item_count: usize,
         key_of: &KeyOf,
     ) -> bool {
-        if prev_index < item_count && key_of(prev_index) == key {
-            return true;
-        }
-        if delta != 0 {
-            let candidate = prev_index as isize + delta;
-            if candidate >= 0
-                && (candidate as usize) < item_count
-                && key_of(candidate as usize) == key
-            {
-                return true;
-            }
-        }
-        false
+        reconcile::probe_key(key, prev_index, delta, item_count, &**key_of).is_some()
     }
 }
 
@@ -1626,10 +1504,12 @@ impl ListViewWidget {
     /// docs](self)' *Variable extents* section.
     fn content_extent(&self) -> f64 {
         match self.variable_estimate() {
-            Some(estimate) => {
-                let unmeasured = self.item_count.saturating_sub(self.measured.len());
-                self.measured_sum + estimate * unmeasured as f64
-            }
+            Some(estimate) => reconcile::estimated_total(
+                self.measured_sum,
+                self.measured.len(),
+                self.item_count,
+                estimate,
+            ),
             None => self.item_count as f64 * self.item_extent,
         }
     }
@@ -1775,46 +1655,21 @@ impl ListViewWidget {
     /// first item the offset falls inside and that item's content-space top.
     ///
     /// O(step): a scroll/fling frame moves a few items; a jump farther than
-    /// [`MAX_PREFIX_STEP`] items resolves its bulk in closed form against the
-    /// estimate first. Reaching item 0 re-pins `y = 0` exactly, erasing any
-    /// floating-point drift the walk accumulated.
+    /// [`MAX_PREFIX_STEP`](reconcile::MAX_PREFIX_STEP) items resolves its bulk
+    /// in closed form against the estimate first. Reaching item 0 re-pins
+    /// `y = 0` exactly, erasing any floating-point drift the walk accumulated.
     fn walk_to_offset(&self, estimate: f64) -> (usize, f64) {
         let count = self.item_count;
         debug_assert!(count > 0, "walk_to_offset needs a non-empty list");
-        let target = self.placement_offset();
-        let mut index = self.anchor_index.min(count - 1);
-        let mut y = self.anchor_y;
-
-        let gap = target - y;
-        if gap.abs() > estimate * MAX_PREFIX_STEP as f64 {
-            // A data reset or a programmatic jump, never a scroll: cover the
-            // bulk against the estimate so the walk below stays bounded.
-            let jump = (gap / estimate).trunc();
-            let landed = (index as f64 + jump).clamp(0.0, (count - 1) as f64);
-            y += (landed - index as f64) * estimate;
-            index = landed as usize;
-        }
-
-        let mut steps = 0usize;
-        while y > target && index > 0 && steps < MAX_PREFIX_STEP {
-            index -= 1;
-            y -= self.extent_at(index, estimate);
-            steps += 1;
-        }
-        while index + 1 < count && steps < MAX_PREFIX_STEP {
-            let extent = self.extent_at(index, estimate);
-            if y + extent <= target {
-                y += extent;
-                index += 1;
-                steps += 1;
-            } else {
-                break;
-            }
-        }
-        if index == 0 {
-            y = 0.0;
-        }
-        (index, y)
+        let (index, y) = reconcile::walk_to_offset(
+            count,
+            self.anchor_index,
+            self.anchor_y,
+            self.placement_offset(),
+            estimate,
+            |index| self.extent_at(index, estimate),
+        );
+        if index == 0 { (0, 0.0) } else { (index, y) }
     }
 
     /// The variable-extent counterpart of [`ListViewWidget::desired_window`]:
@@ -1877,17 +1732,18 @@ impl ListViewWidget {
     /// Cache one row's laid-out extent under its stable key, keeping the running
     /// sum exact.
     fn record_measurement(&mut self, key: ChildKey, index: usize, extent: f64) {
-        match self.measured.insert(key, Measured { index, extent }) {
-            Some(previous) => self.measured_sum += extent - previous.extent,
-            None => self.measured_sum += extent,
-        }
+        reconcile::record_measurement(
+            &mut self.measured,
+            &mut self.measured_sum,
+            key,
+            index,
+            extent,
+        );
     }
 
     /// Drop one row's measurement (its key left the data).
     fn forget_measured(&mut self, key: &ChildKey) {
-        if let Some(previous) = self.measured.remove(key) {
-            self.measured_sum -= previous.extent;
-        }
+        reconcile::forget_measurement(&mut self.measured, &mut self.measured_sum, key);
     }
 
     /// Drop every measurement — a full replace, where no previous key survives.
@@ -1905,19 +1761,11 @@ impl ListViewWidget {
     /// index can evict a still-live row early; it is re-measured on its next
     /// visit, which is the conservative direction.
     fn evict_measured_stale_indices(&mut self) {
-        if self.measured.is_empty() {
-            return;
-        }
-        let count = self.item_count;
-        let mut dropped = 0.0;
-        self.measured.retain(|_, entry| {
-            let live = entry.index < count;
-            if !live {
-                dropped += entry.extent;
-            }
-            live
-        });
-        self.measured_sum -= dropped;
+        reconcile::evict_measurements_past(
+            &mut self.measured,
+            &mut self.measured_sum,
+            self.item_count,
+        );
     }
 
     /// Drop every variable-extent artifact: the measured cache, the per-slot
