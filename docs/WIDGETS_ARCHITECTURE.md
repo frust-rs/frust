@@ -541,7 +541,8 @@ the sliver protocol (`frust_core::sliver`, see CORE_ARCHITECTURE.md). The layout
 
 Paint runs last to first, hit-testing first to last, within `hit_test_extent`; the semantics node is
 `Role::ScrollView` with `scroll_x`/`scroll_y` per axis. An unbounded main axis shrink-wraps; a
-horizontal viewport passes axis-swapped input to the core.
+horizontal viewport builds its core on its own axis (only the stretch overscroll transform is still
+transposed).
 
 | Sliver | Behavior |
 |--------|----------|
