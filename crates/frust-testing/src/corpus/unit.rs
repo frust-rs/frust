@@ -1719,9 +1719,9 @@ mod tests {
 
     /// The image-filtering cases against the CPU oracle, at each case's own
     /// tolerance, plus their probes, through whichever strip program family
-    /// the process configuration names — run it once plain and once under
-    /// `FRUST_ENGINE_IMAGE_SAMPLER=1` to hold both. GPU-gated; the
-    /// pinned-runner recipe is `engine_goldens`'.
+    /// the process configuration names — run it once plain (the sampler
+    /// family) and once under `FRUST_ENGINE_IMAGE_SAMPLER=0` (the manual one)
+    /// to hold both. GPU-gated; the pinned-runner recipe is `engine_goldens`'.
     #[test]
     #[ignore = "requires a GPU; run with `cargo test -p frust-testing --lib -- --ignored`"]
     fn the_image_sampler_cases_hold_cpu_oracle_parity() {
