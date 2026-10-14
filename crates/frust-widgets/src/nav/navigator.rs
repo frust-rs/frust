@@ -130,7 +130,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, DiscardScene, EditingState, EventCtx,
@@ -158,18 +157,6 @@ pub use super::options::{
     ResultCallback, RouteChangeCallback, VisibilityCallback,
 };
 pub use super::view::{NavigatorView, navigator, overlay_host};
-
-/// Process-wide, monotonically increasing source for
-/// [`PageEntry::snapshot_key`] and `motion::switcher`'s per-instance
-/// `snapshot_base` — every [`PaintScene::push_retained`] key handed to a
-/// renderer, across every navigator and switcher in the process, is drawn
-/// from this one counter. A renderer caches a snapshot's rasterized body by
-/// key alone, so two unrelated pods that happened to share a key would alias
-/// each other's cached content; per-navigator or per-switcher counters could
-/// collide with each other where this single process-wide one cannot.
-/// `Relaxed` ordering is sufficient: the counter's only job is producing
-/// distinct values, never synchronizing access to anything else.
-pub(crate) static NEXT_SNAPSHOT_KEY: AtomicU64 = AtomicU64::new(0);
 
 /// One retained page in the [`NavigatorWidget`]'s stack: its builder (re-run each
 /// rebuild), the last view it produced (for reconciliation), the retained child
@@ -238,7 +225,7 @@ pub(super) struct PageEntry<State: 'static> {
     /// truthfully.
     pub(super) reach: Rc<Cell<bool>>,
     /// This page's [`PaintScene::push_retained`] cache key, drawn once from
-    /// [`NEXT_SNAPSHOT_KEY`] when the page is constructed and stable for its
+    /// [`frust_core::RetainedKey::mint`] when the page is constructed and stable for its
     /// whole lifetime — including a pop/replace stash, since the same
     /// `PageEntry` moves into [`ActiveTransition::stashed`] rather than being
     /// rebuilt. A key that changed frame to frame (or page to page) would
@@ -1188,7 +1175,7 @@ impl<State: 'static> NavigatorWidget<State> {
                         route,
                         pop_swipe,
                         reach,
-                        snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
+                        snapshot_key: frust_core::RetainedKey::mint().get(),
                     });
                     // Full gate (`top_pod_focused`): the covered page's own link
                     // ANDed with the rebuild-pass chain down to this navigator.
@@ -1258,7 +1245,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             // page pushed with no override.
                             pop_swipe: None,
                             reach: Rc::clone(&reach),
-                            snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
+                            snapshot_key: frust_core::RetainedKey::mint().get(),
                         };
                         if spec.is_animated() {
                             // Stash the old top and animate the new one in over it
@@ -1287,7 +1274,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             route,
                             pop_swipe: None,
                             reach,
-                            snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
+                            snapshot_key: frust_core::RetainedKey::mint().get(),
                         });
                     }
                     // Full gate (`top_pod_focused`): the replaced page's own link
@@ -1748,7 +1735,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
                 // navigator's own resolved default.
                 pop_swipe: None,
                 reach: root_reach,
-                snapshot_key: NEXT_SNAPSHOT_KEY.fetch_add(1, Ordering::Relaxed),
+                snapshot_key: frust_core::RetainedKey::mint().get(),
             }],
             pending_results: Vec::new(),
             needs_ime_clear: false,

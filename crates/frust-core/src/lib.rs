@@ -55,6 +55,7 @@ pub mod input;
 pub mod insets;
 pub mod layout;
 pub mod overlay;
+pub mod retained;
 pub mod selection_toolbar;
 pub mod semantics;
 pub mod sliver;
@@ -225,6 +226,7 @@ pub use layout::BoxConstraints;
 pub use overlay::{
     OutsideTap, OverlayBand, OverlayEntry, OverlayHit, OverlayInput, OverlayKey, OverlayPod,
 };
+pub use retained::{RetainedEntry, RetainedKey, RetainedLedger};
 pub use selection_toolbar::{
     SelectionToolbarActions, SelectionToolbarBuilder, SelectionToolbarPolicy,
     SelectionToolbarRequest, install_selection_toolbar_builder_if_unset,

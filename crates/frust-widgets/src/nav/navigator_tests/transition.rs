@@ -177,7 +177,7 @@ fn settled_no_transition_paints_with_no_bracket_at_all() {
 
 // --- A page's snapshot key is stable across frames (the point of caching)
 //     and distinct from every other page's — drawn once, at construction,
-//     from the process-wide `NEXT_SNAPSHOT_KEY` counter. ---
+//     from the process-wide `RetainedKey::mint` counter. ---
 
 #[test]
 fn each_pages_snapshot_key_is_stable_across_frames_and_distinct_per_page() {

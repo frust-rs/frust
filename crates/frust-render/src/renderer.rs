@@ -281,6 +281,33 @@ pub struct SurfaceRenderer {
     first_submit_seen: bool,
 }
 
+/// One retained page the renderer holds resident: the key it was recorded
+/// under (`Command::PushRetained`'s `key`), its rasterized extent in physical
+/// pixels and the device scale it was rasterized at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResidentPage {
+    /// The raw retained key.
+    pub key: u64,
+    /// The page's extent in physical pixels.
+    pub extent_px: (u32, u32),
+    /// The device scale the page was rasterized at.
+    pub scale: f32,
+}
+
+/// The retained pages a [`SurfaceRenderer`] holds resident after its last
+/// frame — the renderer's side of the resident-key ledger.
+///
+/// Plain data, so this crate needs no `frust-core` edge: a shell converts it
+/// into `frust_core::RetainedLedger` (`RetainedLedger::from_entries`) and hands
+/// it to the UI tree for the next paint, one frame stale by design.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResidentPages {
+    /// Resident pages, in no particular order.
+    pub pages: Vec<ResidentPage>,
+    /// The renderer frame this describes (diagnostic).
+    pub frame: u64,
+}
+
 /// Where the first rendered frame's `submit` time went.
 ///
 /// The three parts partition the span: `encode` excludes `pipeline_wait`, and
@@ -485,6 +512,13 @@ impl SurfaceRenderer {
         };
         let TierBackend::Engine { engine, .. } = &ready.backend;
         Some(engine.warm_up_finished())
+    }
+
+    /// The retained pages the renderer holds resident after its last frame (see
+    /// [`ResidentPages`]). Empty until the engine's retained-page store reports
+    /// into it; never blocks and allocates nothing while empty.
+    pub fn retained_ledger(&self) -> ResidentPages {
+        ResidentPages::default()
     }
 
     /// Whether the **live** surface actually resolved to a translucent

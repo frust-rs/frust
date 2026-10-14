@@ -1034,6 +1034,9 @@ pub struct PaintCtx<'a> {
     /// Whether retained layers are enabled ([`crate::app::RenderRoot::set_retained_layers`]);
     /// `false` makes [`PaintCtx::subtree_clean`] always answer `false`.
     retained_layers: bool,
+    /// The renderer's resident-key ledger ([`crate::app::RenderRoot::set_retained_ledger`]),
+    /// copied down like `paint_epoch`; `None` reads as empty.
+    retained_ledger: Option<&'a crate::retained::RetainedLedger>,
 }
 
 impl<'a> PaintCtx<'a> {
@@ -1069,6 +1072,7 @@ impl<'a> PaintCtx<'a> {
             translucent: false,
             paint_epoch: 0,
             retained_layers: true,
+            retained_ledger: None,
         }
     }
 
@@ -1770,6 +1774,7 @@ impl<'a> PaintCtx<'a> {
             translucent: self.translucent,
             paint_epoch: self.paint_epoch,
             retained_layers: self.retained_layers,
+            retained_ledger: self.retained_ledger,
         };
         f(&mut child);
         if child.needs_frame {
@@ -1883,9 +1888,38 @@ impl<'a> PaintCtx<'a> {
     /// Seed the root's paint epoch and the retained-layers switch. Called by
     /// [`crate::app::RenderRoot`] at each paint root and by
     /// [`ChildPod::paint_child`] for each child (copied down unchanged).
-    pub(crate) fn set_paint_state(&mut self, paint_epoch: u64, retained_layers: bool) {
+    pub(crate) fn set_paint_state(
+        &mut self,
+        paint_epoch: u64,
+        retained_layers: bool,
+        retained_ledger: Option<&'a crate::retained::RetainedLedger>,
+    ) {
         self.paint_epoch = paint_epoch;
         self.retained_layers = retained_layers;
+        self.retained_ledger = retained_ledger;
+    }
+
+    /// Whether the renderer still holds a retained page for `key` at `rect_px`
+    /// (physical-pixel extent, rounded to whole pixels) and `scale` — the
+    /// query a boundary widget makes to choose between drawing the page
+    /// (`PaintScene::draw_retained`) and painting its body again. Answers from
+    /// the ledger the renderer published after the previous frame, so it can be
+    /// one frame stale; always `false` when retained layers are switched off
+    /// ([`crate::app::RenderRoot::set_retained_layers`]) or no ledger was set.
+    pub fn retained_available(
+        &self,
+        key: crate::retained::RetainedKey,
+        rect_px: kurbo::Size,
+        scale: f32,
+    ) -> bool {
+        let extent = (
+            rect_px.width.round().max(0.0) as u32,
+            rect_px.height.round().max(0.0) as u32,
+        );
+        self.retained_layers
+            && self
+                .retained_ledger
+                .is_some_and(|l| l.is_resident(key, extent, scale))
     }
 
     /// Whether nothing under `pod` changed since it was last painted — the
@@ -3235,7 +3269,7 @@ impl ChildPod {
         // bool, global and origin-independent), mirroring the theme/insets — the
         // platform-view hole-punch reads it (see `PaintCtx::is_translucent`).
         child_ctx.set_translucent(ctx.is_translucent());
-        child_ctx.set_paint_state(ctx.paint_epoch, ctx.retained_layers);
+        child_ctx.set_paint_state(ctx.paint_epoch, ctx.retained_layers, ctx.retained_ledger);
         // Thread the live focus epoch down unchanged (global, like the clock),
         // and seed this child's focus from its own recorded link against it —
         // the mirror of how `event_child` seeds the child `EventCtx`, so a
