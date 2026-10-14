@@ -645,6 +645,12 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     /// out under another epoch lays out again, so a bump invalidates every
     /// cached layout at once. Starts at `1`, past a fresh pod's `0`.
     layout_epoch: u64,
+    /// The paint epoch threaded into every paint pass ([`PaintCtx::subtree_clean`]):
+    /// bumped with every layout-epoch bump and by a surface-translucency flip,
+    /// so a pod painted under another epoch is never reported clean.
+    paint_epoch: u64,
+    /// Whether retained layers are enabled ([`RenderRoot::set_retained_layers`]).
+    retained_layers: bool,
     /// Whether layout passes may skip clean pods ([`RenderRoot::set_layout_skip`]);
     /// `true` by default. `false` forces every pod to lay out every pass — the
     /// kill switch a shell wires to an environment variable (this crate reads
@@ -715,6 +721,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             selection_toolbar: None,
             selection_toolbar_gen: 0,
             layout_epoch: 1,
+            paint_epoch: 1,
+            retained_layers: true,
             layout_skip: true,
             layout_audit: LayoutAudit::default(),
             overlay_pods: Vec::new(),
@@ -789,6 +797,20 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// tree.
     fn bump_layout_epoch(&mut self) {
         self.layout_epoch = self.layout_epoch.wrapping_add(1);
+        self.paint_epoch = self.paint_epoch.wrapping_add(1);
+    }
+
+    /// Enable or disable retained layers (default on). When off,
+    /// [`PaintCtx::subtree_clean`] answers `false` for every pod, so a boundary
+    /// widget repaints its child every frame. The core never reads the
+    /// environment: a shell wires `FRUST_NO_RETAINED_LAYERS` to this.
+    pub fn set_retained_layers(&mut self, enabled: bool) {
+        self.retained_layers = enabled;
+    }
+
+    /// Whether retained layers are enabled ([`RenderRoot::set_retained_layers`]).
+    pub fn retained_layers(&self) -> bool {
+        self.retained_layers
     }
 
     /// Whether any floated surface the last paint drew is layout-dirty (see
@@ -918,6 +940,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             return;
         }
         self.surface_translucent = translucent;
+        // Translucency is read at paint time only: no relayout, but every
+        // retained subtree is stale.
+        self.paint_epoch = self.paint_epoch.wrapping_add(1);
         self.pending |= ChangeFlags::PAINT;
     }
 
@@ -1342,6 +1367,12 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// [`WidgetTree::inspect_layout_dirty`].
     pub fn inspect_layout_dirty(&self) -> Vec<(WidgetId, bool)> {
         self.tree.inspect_layout_dirty()
+    }
+
+    /// Per-node paint-dirty state, read-only — see
+    /// [`WidgetTree::inspect_paint_dirty`].
+    pub fn inspect_paint_dirty(&self) -> Vec<(WidgetId, bool)> {
+        self.tree.inspect_paint_dirty()
     }
 
     /// Run the build closure, then build (first call) or rebuild (subsequent calls)
@@ -1890,6 +1921,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // Same disjoint `Copy` read: the surface-translucency flag the
         // platform-view hole-punch reads (see `PaintCtx::is_translucent`).
         let surface_translucent = self.surface_translucent;
+        let (paint_epoch, retained_layers) = (self.paint_epoch, self.retained_layers);
         if let Some(pod) = self.tree.pod_mut(root_id) {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
             // Seed the shared shell clock so the whole paint pass sees one time.
@@ -1906,6 +1938,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // platform-view hole-punch gates its rect-clear on it — see
             // `PaintCtx::is_translucent`).
             ctx.set_translucent(surface_translucent);
+            ctx.set_paint_state(paint_epoch, retained_layers);
             // Seed the root widget's paint-time focus from the session mirror so
             // a leaf-root editable observes its own focus, and thread the live
             // session's identity down beside it: deeper focus is resolved
@@ -2095,6 +2128,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // The same disjoint field borrows the main pass takes, for the same
         // reason: the theme is lent immutably into each context while other
         // fields of `self` are written.
+        let (paint_epoch, retained_layers) = (self.paint_epoch, self.retained_layers);
         let theme = self.theme.as_deref();
         let presented_frames = self.presented_frames;
         let surface_translucent = self.surface_translucent;
@@ -2117,6 +2151,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             ctx.set_window_insets(entry.insets);
             ctx.set_presented_frames(presented_frames);
             ctx.set_translucent(surface_translucent);
+            ctx.set_paint_state(paint_epoch, retained_layers);
             // Seeded from the root's own mirrors exactly as the root pod's
             // context is, so a focused editable inside a floated pod observes its
             // focus (and a hovered one its hover) through the ordinary

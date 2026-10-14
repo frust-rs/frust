@@ -1,0 +1,541 @@
+//! Per-pod paint dirtiness (`ChildPod::is_paint_dirty`, `PaintCtx::subtree_clean`):
+//! every dirty source marks the whole path from the source to the root, a pass
+//! that paints a subtree clears it, the kill switch
+//! (`RenderRoot::set_retained_layers(false)`) makes the query answer `false`,
+//! and a global paint input (theme, surface translucency) invalidates everything.
+//!
+//! Driven through a real `RenderRoot` with the same instrumented widgets as
+//! `layout_skip.rs`; the container logs `subtree_clean` for each child pod
+//! before painting it, the way a retained-layer boundary would.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use frust_core::{
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Component, DiscardScene, EventCtx,
+    EventResult, FrameTime, InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton,
+    PointerEvent, PointerPhase, RenderRoot, View, Widget, any, component,
+};
+use kurbo::{Point, Size};
+use reactive_graph::owner::Owner;
+
+// ---------------------------------------------------------------------------
+// Instrumentation: a per-thread layout log and per-widget behaviour switches.
+// Every test runs on its own thread, so the thread-locals never leak between
+// tests.
+// ---------------------------------------------------------------------------
+
+/// What a leaf does when painted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaintReq {
+    Frame,
+}
+
+/// What a leaf does with a pointer `Down`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EventMode {
+    /// Return `Handled`, request nothing.
+    Consume,
+    /// Call `EventCtx::request_layout`, return `Ignored`.
+    RequestLayout,
+}
+
+thread_local! {
+    static LAYOUT_LOG: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    static PAINT_REQ: RefCell<HashMap<&'static str, PaintReq>> = RefCell::new(HashMap::new());
+    static CLEAN_LOG: RefCell<Vec<(&'static str, usize, bool)>> = const { RefCell::new(Vec::new()) };
+    static EVENT_MODE: RefCell<HashMap<&'static str, EventMode>> = RefCell::new(HashMap::new());
+}
+
+fn log_layout(name: &'static str) {
+    LAYOUT_LOG.with(|log| log.borrow_mut().push(name));
+}
+
+/// Drain the layout log, sorted, so assertions read as sets.
+fn take_layouts() -> Vec<&'static str> {
+    let mut names = LAYOUT_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()));
+    names.sort_unstable();
+    names
+}
+
+fn set_paint_req(name: &'static str, req: Option<PaintReq>) {
+    PAINT_REQ.with(|map| match req {
+        Some(req) => map.borrow_mut().insert(name, req),
+        None => map.borrow_mut().remove(name),
+    });
+}
+
+fn set_event_mode(name: &'static str, mode: EventMode) {
+    EVENT_MODE.with(|map| map.borrow_mut().insert(name, mode));
+}
+
+// ---------------------------------------------------------------------------
+// A counting leaf.
+// ---------------------------------------------------------------------------
+
+struct LeafWidget {
+    name: &'static str,
+    size: Size,
+}
+
+impl Widget for LeafWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        log_layout(self.name);
+        bc.constrain(self.size)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+        match PAINT_REQ.with(|map| map.borrow().get(self.name).copied()) {
+            Some(PaintReq::Frame) => ctx.request_frame(),
+            None => {}
+        }
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let InputEvent::Pointer(pointer) = event else {
+            return EventResult::Ignored;
+        };
+        if pointer.phase != PointerPhase::Down {
+            return EventResult::Ignored;
+        }
+        match EVENT_MODE.with(|map| map.borrow().get(self.name).copied()) {
+            Some(EventMode::Consume) => EventResult::Handled,
+            Some(EventMode::RequestLayout) => {
+                ctx.request_layout();
+                EventResult::Ignored
+            }
+            None => EventResult::Ignored,
+        }
+    }
+}
+
+struct LeafView {
+    name: &'static str,
+    size: Size,
+    /// Paint-only state: a change rebuilds with `PAINT` alone.
+    tint: u32,
+}
+
+fn leaf(name: &'static str, w: f64) -> LeafView {
+    LeafView {
+        name,
+        size: Size::new(w, 10.0),
+        tint: 0,
+    }
+}
+
+impl<S: 'static> View<S> for LeafView {
+    type Element = LeafWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> LeafWidget {
+        LeafWidget {
+            name: self.name,
+            size: self.size,
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut LeafWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        if self.size != prev.size {
+            element.size = self.size;
+            ChangeFlags::LAYOUT | ChangeFlags::PAINT
+        } else if self.tint != prev.tint {
+            ChangeFlags::PAINT
+        } else {
+            ChangeFlags::NONE
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A counting vertical container. Hands every child the same fixed loose
+// constraints (`child_max` square), independent of its own, so a window resize
+// changes no child constraint and only the epoch can explain a relayout.
+// ---------------------------------------------------------------------------
+
+struct ColWidget {
+    name: &'static str,
+    child_max: f64,
+    children: Vec<ChildPod>,
+}
+
+impl Widget for ColWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        log_layout(self.name);
+        let child_bc = BoxConstraints::loose(Size::new(self.child_max, self.child_max));
+        let (mut width, mut y) = (0.0f64, 0.0);
+        for pod in &mut self.children {
+            let size = pod.layout_child(ctx, &child_bc);
+            pod.set_origin(Point::new(0.0, y));
+            y += size.height;
+            width = width.max(size.width);
+        }
+        bc.constrain(Size::new(width, y))
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        for (i, pod) in self.children.iter_mut().enumerate() {
+            let clean = ctx.subtree_clean(pod);
+            CLEAN_LOG.with(|log| log.borrow_mut().push((self.name, i, clean)));
+            pod.paint_child(ctx, scene);
+        }
+    }
+
+    /// Routes to the child under the pointer but always reports `Ignored`, like
+    /// a container forwarding a broadcast: the dirty path must reach the root
+    /// through the pods' own bookkeeping, not through a propagated result.
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let position = event.position();
+        for pod in &mut self.children {
+            if pod.contains(position) {
+                pod.event_child(ctx, event);
+                break;
+            }
+        }
+        EventResult::Ignored
+    }
+
+    fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        for pod in &self.children {
+            visitor(pod);
+        }
+    }
+}
+
+struct ColView<S: 'static> {
+    name: &'static str,
+    child_max: f64,
+    children: Vec<AnyView<S>>,
+}
+
+fn col<S: 'static>(name: &'static str, child_max: f64, children: Vec<AnyView<S>>) -> ColView<S> {
+    ColView {
+        name,
+        child_max,
+        children,
+    }
+}
+
+impl<S: 'static> View<S> for ColView<S> {
+    type Element = ColWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> ColWidget {
+        ColWidget {
+            name: self.name,
+            child_max: self.child_max,
+            children: self
+                .children
+                .iter()
+                .map(|child| ChildPod::new(Box::new(child.build(ctx))))
+                .collect(),
+        }
+    }
+
+    /// A same-length reconciler spelled the way `frust-widgets`' reconcilers
+    /// are: rebuild each child in its pod and mark the pod layout-dirty when the
+    /// child reports `LAYOUT`.
+    fn rebuild(&self, prev: &Self, element: &mut ColWidget, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        assert_eq!(
+            self.children.len(),
+            prev.children.len(),
+            "test views keep their arity"
+        );
+        let mut flags = ChangeFlags::NONE;
+        if self.child_max != prev.child_max {
+            element.child_max = self.child_max;
+            flags |= ChangeFlags::LAYOUT;
+        }
+        for (i, pod) in element.children.iter_mut().enumerate() {
+            let boxed = pod
+                .widget_mut_for_rebuild()
+                .downcast_mut::<Box<dyn Widget>>()
+                .expect("children are built from AnyView");
+            let child_flags = self.children[i].rebuild(&prev.children[i], boxed, ctx);
+            if child_flags.contains(ChangeFlags::LAYOUT) {
+                pod.mark_layout_dirty();
+            } else if child_flags.contains(ChangeFlags::PAINT) {
+                pod.mark_paint_dirty();
+            }
+            flags |= child_flags;
+        }
+        flags
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A component boundary in the path, so the core-owned marking
+// (`ComponentView::rebuild`, `ComponentWidget::event`) is exercised too.
+// ---------------------------------------------------------------------------
+
+struct Branch {
+    target_w: f64,
+}
+
+impl Component for Branch {
+    type State = ();
+
+    fn init(&self) {}
+
+    fn build(&self, _state: &mut ()) -> impl View<()> {
+        col::<()>("mid", 100.0, vec![any(leaf("target", self.target_w))])
+    }
+}
+
+/// The app shape every test drives:
+///
+/// ```text
+/// root (Col, the root widget — no pod, laid out every pass)
+/// ├── component(Branch) ─ mid (Col) ─ target (leaf, y 0..10)
+/// └── sib (Col) ─ sib_leaf (leaf, y 10..20)
+/// ```
+#[derive(Clone, Copy)]
+struct Shape {
+    /// The root's `child_max` — the constraint every root child receives.
+    root_child_max: f64,
+    target_w: f64,
+    sib_tint: u32,
+}
+
+impl Default for Shape {
+    fn default() -> Self {
+        Self {
+            root_child_max: 200.0,
+            target_w: 40.0,
+            sib_tint: 0,
+        }
+    }
+}
+
+fn app(shape: Shape) -> ColView<()> {
+    col(
+        "root",
+        shape.root_child_max,
+        vec![
+            any(component(Branch {
+                target_w: shape.target_w,
+            })),
+            any(col::<()>(
+                "sib",
+                100.0,
+                vec![any(LeafView {
+                    tint: shape.sib_tint,
+                    ..leaf("sib_leaf", 30.0)
+                })],
+            )),
+        ],
+    )
+}
+
+const WINDOW: Size = Size::new(300.0, 300.0);
+/// Drain the clean log.
+fn take_clean() -> Vec<(&'static str, usize, bool)> {
+    CLEAN_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
+}
+
+const EVERYTHING: [&str; 5] = ["mid", "root", "sib", "sib_leaf", "target"];
+
+struct Harness {
+    root: RenderRoot<(), ColView<()>>,
+    _owner: Owner,
+}
+
+impl Harness {
+    /// Build, lay out and paint the default shape once, then drain the log and
+    /// the pending flags, so each test starts from a fully clean tree.
+    fn new() -> Self {
+        let owner = Owner::new();
+        owner.set();
+        let mut harness = Self {
+            root: RenderRoot::new(),
+            _owner: owner,
+        };
+        harness.rebuild(Shape::default());
+        harness.layout();
+        harness.paint();
+        assert_eq!(
+            take_layouts(),
+            EVERYTHING,
+            "a fresh tree lays out every widget"
+        );
+        harness.root.take_change_flags();
+        harness
+    }
+
+    fn rebuild(&mut self, shape: Shape) -> ChangeFlags {
+        self.root.rebuild(&mut |_s: &mut ()| app(shape), &mut ())
+    }
+
+    fn layout(&mut self) {
+        self.root.layout(WINDOW);
+    }
+
+    fn paint(&mut self) {
+        self.root.paint(&mut DiscardScene, FrameTime::ZERO);
+    }
+
+    fn down_at(&mut self, y: f64) {
+        self.root.event(
+            &mut (),
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Down,
+                position: Point::new(5.0, y),
+                button: PointerButton::Primary,
+            }),
+        );
+    }
+
+    /// The y of the top edge of every currently paint-dirty node, in the
+    /// pre-order `RenderRoot::inspect` reports. The target path sits at
+    /// `y == 0`, the sibling path at `y == 10`.
+    fn dirty_ys(&self) -> Vec<f64> {
+        let nodes = self.root.inspect();
+        let dirty = self.root.inspect_paint_dirty();
+        assert_eq!(nodes.len(), dirty.len(), "the dirty walk zips with inspect");
+        nodes
+            .iter()
+            .zip(&dirty)
+            .filter_map(|(node, (id, is_dirty))| {
+                assert_eq!(node.id, *id, "same pre-order, same ids");
+                is_dirty.then_some(node.bounds.y0)
+            })
+            .collect()
+    }
+}
+
+// The target path (component pod, mid, target) sits at y 0; the sibling path
+// (sib, sib_leaf) at y 10.
+const TARGET_PATH: usize = 3;
+const SIB_PATH: usize = 2;
+
+fn assert_path(ys: &[f64], count: usize, sibling: bool) {
+    assert_eq!(ys.len(), count, "dirty path length: {ys:?}");
+    let want = if sibling { 10.0 } else { 0.0 };
+    assert!(ys.iter().all(|y| *y == want), "wrong subtree dirty: {ys:?}");
+}
+
+#[test]
+fn a_fully_painted_tree_is_clean() {
+    let h = Harness::new();
+    assert!(h.dirty_ys().is_empty(), "a painted tree is paint-clean");
+}
+
+#[test]
+fn a_leaf_paint_rebuild_dirties_exactly_its_path() {
+    let mut h = Harness::new();
+    let flags = h.rebuild(Shape {
+        sib_tint: 1,
+        ..Shape::default()
+    });
+    assert_eq!(flags, ChangeFlags::PAINT);
+    assert_path(&h.dirty_ys(), SIB_PATH, true);
+    // A paint pass clears it again.
+    h.paint();
+    assert!(h.dirty_ys().is_empty());
+}
+
+#[test]
+fn a_layout_rebuild_dirties_paint_on_its_path() {
+    let mut h = Harness::new();
+    h.rebuild(Shape {
+        target_w: 60.0,
+        ..Shape::default()
+    });
+    assert_path(&h.dirty_ys(), TARGET_PATH, false);
+}
+
+#[test]
+fn a_paint_time_frame_request_dirties_the_path_next_frame() {
+    let mut h = Harness::new();
+    set_paint_req("target", Some(PaintReq::Frame));
+    h.paint();
+    assert_path(&h.dirty_ys(), TARGET_PATH, false);
+    take_clean();
+    h.paint();
+    let log = take_clean();
+    assert!(
+        log.contains(&("sib", 0, true)) && log.contains(&("root", 1, true)),
+        "the sibling subtree stays clean: {log:?}"
+    );
+    assert!(
+        log.contains(&("mid", 0, false)) && log.contains(&("root", 0, false)),
+        "the animating path reports dirty: {log:?}"
+    );
+    // The request stops: the landing paint is still dirty, the one after is clean.
+    set_paint_req("target", None);
+    h.paint();
+    assert_path(&h.dirty_ys(), TARGET_PATH, false);
+    h.paint();
+    assert!(h.dirty_ys().is_empty());
+}
+
+#[test]
+fn a_clean_subtree_reports_clean_after_a_pass_that_painted_it() {
+    let mut h = Harness::new();
+    take_clean();
+    h.paint();
+    let log = take_clean();
+    assert!(!log.is_empty());
+    assert!(log.iter().all(|(_, _, clean)| *clean), "{log:?}");
+}
+
+#[test]
+fn the_kill_switch_makes_subtree_clean_false() {
+    let mut h = Harness::new();
+    assert!(h.root.retained_layers(), "on by default");
+    h.root.set_retained_layers(false);
+    take_clean();
+    h.paint();
+    let log = take_clean();
+    assert!(!log.is_empty());
+    assert!(log.iter().all(|(_, _, clean)| !*clean), "{log:?}");
+    h.root.set_retained_layers(true);
+    h.paint();
+    assert!(take_clean().iter().all(|(_, _, clean)| *clean));
+}
+
+#[test]
+fn layout_running_dirties_paint_and_a_skipped_layout_does_not() {
+    let mut h = Harness::new();
+    h.layout();
+    assert!(h.dirty_ys().is_empty(), "a skipped layout dirties nothing");
+    h.root.set_theme(Box::new(()));
+    h.layout();
+    assert_eq!(h.dirty_ys().len(), 5, "every pod's layout ran");
+    h.paint();
+    assert!(h.dirty_ys().is_empty());
+}
+
+#[test]
+fn a_surface_translucency_flip_invalidates_every_retained_subtree() {
+    let mut h = Harness::new();
+    h.root.set_surface_translucent(true);
+    // No pod is flagged (nothing was laid out), but the epoch covers them all.
+    take_clean();
+    h.paint();
+    let log = take_clean();
+    assert!(!log.is_empty());
+    assert!(log.iter().all(|(_, _, clean)| !*clean), "{log:?}");
+    take_clean();
+    h.paint();
+    assert!(take_clean().iter().all(|(_, _, clean)| *clean));
+}
+
+#[test]
+fn a_consumed_event_dirties_the_path() {
+    let mut h = Harness::new();
+    set_event_mode("target", EventMode::Consume);
+    h.down_at(5.0);
+    assert_path(&h.dirty_ys(), TARGET_PATH, false);
+}
+
+#[test]
+fn event_request_layout_dirties_the_path() {
+    let mut h = Harness::new();
+    set_event_mode("sib_leaf", EventMode::RequestLayout);
+    h.down_at(15.0);
+    assert_path(&h.dirty_ys(), SIB_PATH, true);
+}
