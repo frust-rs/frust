@@ -1010,6 +1010,43 @@ fn slivers_page_collapses_its_pinned_bar_and_jumps_through_the_controller() {
     assert_eq!(bar.height(), BAR_COLLAPSED, "pinned at its collapsed band");
     assert_eq!(bar.y0, viewport.y0, "pinned at the viewport's top");
 
+    // A short reverse drag reveals the floating header; it sits under the
+    // pinned bar, so only the extent past the bar's band is visible.
+    let at = Point::new(viewport.center().x, viewport.y0 + 300.0);
+    let pointer = |phase,
+                   y: f64,
+                   root: &mut RenderRoot<PlaygroundState, AnyView<PlaygroundState>>,
+                   state: &mut PlaygroundState| {
+        root.event(
+            state,
+            &InputEvent::Pointer(PointerEvent {
+                phase,
+                position: Point::new(at.x, at.y + y),
+                button: PointerButton::Primary,
+            }),
+        );
+    };
+    pointer(PointerPhase::Down, 0.0, &mut root, &mut state);
+    for step in 1..=14 {
+        pointer(
+            PointerPhase::Move,
+            10.0 * step as f64,
+            &mut root,
+            &mut state,
+        );
+        frames(&mut root, &mut state, 1);
+    }
+    let header = bounds_of(&root, "SliverPersistentHeaderWidget");
+    let bar = bounds_of(&root, "SliverAppBarWidget");
+    let visible = header.y1 - bar.y1;
+    assert!(
+        visible > 8.0 && close(visible, header.height() - BAR_COLLAPSED),
+        "the revealed header shows its extent past the bar's band, got {visible} of {}",
+        header.height()
+    );
+    pointer(PointerPhase::Up, 140.0, &mut root, &mut state);
+    frames(&mut root, &mut state, 1);
+
     // The far end, then back to the top, which re-expands it.
     state.slivers_controller.jump_to(f64::INFINITY);
     frames(&mut root, &mut state, 2);

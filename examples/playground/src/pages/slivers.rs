@@ -6,7 +6,10 @@
 //!    collapses it from the large expanded band to the collapsed one, where it
 //!    stays pinned;
 //! 2. a floating section header ([`frust::sliver_persistent_header`]) that
-//!    shrinks as it scrolls and comes back on any upward drag;
+//!    shrinks as it scrolls and comes back on any upward drag. Directly after
+//!    the pinned bar a floating header reveals underneath it, as in Flutter, so
+//!    only the part of its extent beyond the bar's collapsed band shows: its
+//!    expanded extent ([`HEADER_MAX`]) is set well above that band;
 //! 3. a lazy, keyed [`frust::sliver_list`] of [`ROW_COUNT`] rows, every
 //!    [`TALL_ROW_PERIOD`]th one taller than the rest;
 //! 4. a four-column [`frust::sliver_grid`];
@@ -75,8 +78,10 @@ pub const BAR_COLLAPSED: f64 = BAR_METRICS.collapsed_height;
 /// The section header's fully shrunk extent.
 const HEADER_MIN: f64 = 40.0;
 
-/// The section header's expanded extent — also how much it scrolls.
-const HEADER_MAX: f64 = 72.0;
+/// The section header's expanded extent — also how much it scrolls. Well above
+/// [`BAR_COLLAPSED`] plus [`HEADER_MIN`], since a reveal under the pinned bar
+/// shows only what lies beyond the bar's band.
+pub const HEADER_MAX: f64 = 144.0;
 
 /// The bounded height the scroll surface gets inside the page: the shell
 /// wraps every page in a `scroll_view`, so an unsized viewport would
