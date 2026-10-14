@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use frust_core::FrameTime;
+use frust_core::{FrameTime, RetainedLedger};
 use frust_render::{
     AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfacePhase, SurfaceRenderer,
 };
@@ -16,6 +16,7 @@ use frust_scene::Scene;
 use frust_shell_common::perf::{
     self, FramePasses, FrameStats, GpuPasses, RenderSpans, StartupSpans, UiSpans,
 };
+use frust_shell_common::render_split::{publish_retained_ledger, request_retained_repaint};
 use frust_shell_common::{
     FrameMeta, RenderCommand, RenderSender, SceneFrame, SceneReturnReceiver, SurfaceSize,
 };
@@ -899,6 +900,43 @@ fn pace_record(
 ) {
 }
 
+/// Publish the renderer's resident-key ledger for the UI thread's next paint
+/// when it changed since the last publish — after a frame, and at a surface
+/// (re)install or device-scale change (both of which leave it empty).
+///
+/// The slot behind `publish_retained_ledger` is process-global, which is sound
+/// only because a process runs ONE renderer: a second surface would publish
+/// over the first's ledger. The publish takes the slot's lock for an `Arc`
+/// swap and nothing else, and the UI thread only ever `try_lock`s it, so the
+/// UI thread never waits on this.
+pub(crate) fn publish_ledger(renderer: &mut SurfaceRenderer) {
+    if let Some(resident) = renderer.take_retained_ledger() {
+        publish_retained_ledger(RetainedLedger::from_entries(
+            resident.frame,
+            resident
+                .pages
+                .iter()
+                .map(|page| (page.key, page.extent_px, page.scale)),
+        ));
+    }
+}
+
+/// Hand the renderer the (sanitized) device scale a surface create or resize
+/// carries: a changed scale clears the retained store, and its empty ledger is
+/// published at once.
+pub(crate) fn note_scale(renderer: &mut SurfaceRenderer, scale: f64) {
+    if renderer.note_device_scale(scale) {
+        publish_ledger(renderer);
+    }
+}
+
+/// [`publish_ledger`] after a frame, answering whether that frame was refused
+/// for drawing a retained page the renderer no longer holds.
+fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
+    publish_ledger(renderer);
+    renderer.take_retained_refusal()
+}
+
 /// This surface's most recent real GPU pass timing, folded into the
 /// [`GpuPasses`] shape [`FramePasses::with_gpu`] takes, or `None` when the
 /// surface produces no such measurement (a device that never offered
@@ -1015,6 +1053,21 @@ pub(crate) fn render_scene(
             Err(err) => Err(err),
         };
         let submit_time = submit_start.map_or(Duration::ZERO, |t| t.elapsed());
+
+        // The resident-key ledger after this frame, for the UI thread's next
+        // paint. A frame the engine refused for drawing a page it no longer
+        // holds presented nothing and emptied the store, so the UI thread owes
+        // one more paint against the empty ledger just published: the
+        // process-wide repaint flag (this may be the render thread, which
+        // cannot touch the handle) forces the next `CADisplayLink` tick's gate
+        // to run instead of leaving an idle screen on the frame before.
+        if publish_retained(renderer) {
+            request_retained_repaint();
+            log::debug!(
+                "frust-shell-ios: a frame drew a retained page the renderer no longer holds; \
+                 the store was cleared and the next paint repaints every body"
+            );
+        }
 
         let mut startup_retired = false;
         let mut presented_this_frame = false;

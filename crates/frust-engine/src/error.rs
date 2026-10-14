@@ -57,6 +57,25 @@ pub enum EngineError {
         reason: String,
     },
 
+    /// A [`Command::DrawRetained`](frust_scene::Command::DrawRetained) named a
+    /// retained page the engine cannot composite it from: the key is not
+    /// resident (evicted, never recorded, or dropped with the store), or it is
+    /// resident at a placement the draw cannot be served from — another linear
+    /// transform or extent, or under a coverage-mask clip a composite cannot
+    /// honour (see [`crate::cache::retained`]).
+    ///
+    /// The frame is refused before anything is recorded, exactly like every
+    /// other variant here, and the retained store is cleared on the way out:
+    /// the resident-key ledger the widget tree painted against was wrong, and
+    /// the cheapest way back to an agreeing pair is an empty store whose empty
+    /// ledger makes the next frame paint every body again. Logged once per
+    /// refusal by the caller, like any refused frame.
+    #[error("retained page {key} is not resident at the placement a DrawRetained asked for")]
+    RetainedKeyMissing {
+        /// The raw key the `DrawRetained` carried.
+        key: u64,
+    },
+
     #[error("alpha capacity exhausted")]
     AlphaCapacity,
 

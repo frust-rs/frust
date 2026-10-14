@@ -473,7 +473,26 @@ impl Plan<'_> {
 /// tracked as the scissor that admits nothing it lowers to. The walk re-checks
 /// both before it takes a helper's run, so an approximation here can only
 /// waste work.
+#[cfg(test)]
 pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'a> {
+    plan_with(scene, root, viewport, false)
+}
+
+/// [`plan`] for a compiler whose retention is `retain`
+/// (`SceneCompiler::set_retained_layers`).
+///
+/// Retention changes one bracket decision the mirror has to make the same way
+/// the walk does: with it on, the outermost `PushRetained` opens a group
+/// whatever its alpha — a clipped layer below full opacity, an unclipped one at
+/// it — so the group count a stray pop inside the body is measured against
+/// agrees with the walk's. A `DrawRetained` stays a zero-strip command either
+/// way: the walk records an empty layer for it, which opens no bracket.
+pub(crate) fn plan_with<'a>(
+    scene: &'a Scene,
+    root: Affine,
+    viewport: Rect,
+    retain: bool,
+) -> Plan<'a> {
     let mut plan = Plan::default();
     let mut snapshots = RetainedStack::new();
     // One entry per open bracket: whether its clip lowered to a mask.
@@ -500,8 +519,9 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
             | Command::ClearRect { .. }
             | Command::ShaderQuad { .. }
             | Command::SceneTexture { .. }
-            // A zero-strip command: the walk draws nothing for it (and the
-            // up-front validation refuses a frame carrying one).
+            // A zero-strip command: the walk records at most an empty layer
+            // for it (and, with retention off, the up-front validation refuses
+            // a frame carrying one).
             | Command::DrawRetained { .. } => continue,
             Command::FillRect { .. }
             | Command::RoundedRect { .. }
@@ -583,8 +603,11 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
             } => {
                 if snapshots.enter(*rect, *scale, *transform) {
                     let corrected = root * snapshots.correction() * *transform;
-                    if *alpha < 1.0 && check_finite(corrected).is_ok() {
-                        let mask = fast_rect(*rect, corrected).is_none();
+                    if (retain || *alpha < 1.0) && check_finite(corrected).is_ok() {
+                        // Below full opacity the walk clips the body to its
+                        // rectangle; at it (retention on) the group clips
+                        // nothing at all.
+                        let mask = *alpha < 1.0 && fast_rect(*rect, corrected).is_none();
                         push(&mut brackets, &mut masks, mask);
                         snapshots.record_layer(brackets.len());
                     }

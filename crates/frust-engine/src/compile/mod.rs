@@ -58,7 +58,9 @@ pub use clear::ClearPunch;
 pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
 pub use external::{ExternalExtents, ExternalSkip};
-pub use layers::{GroupStack, LayerLowering, RetainedStack};
+pub use layers::{
+    GroupStack, LayerLowering, RetainedBracket, RetainedKind, RetainedPlacement, RetainedStack,
+};
 pub use parallel::{DEFAULT_PARALLEL_MIN_COST, DEFAULT_PARALLEL_WORKERS, MAX_PARALLEL_WORKERS};
 
 /// The most glyph runs a compiler's resident-run cache remembers at once (see
@@ -489,6 +491,13 @@ pub struct CompiledFrame {
     /// [`SceneCompiler::acknowledge_glyph_clears`]. A frame compiled and then
     /// refused takes none of them with it.
     pub glyph_clears: Vec<PendingClearRect>,
+    /// The retained brackets this frame recorded, in recording order — empty
+    /// unless retention is on ([`SceneCompiler::set_retained_layers`]).
+    ///
+    /// Each names the recorded layer standing for it; the renderer's
+    /// retained-page store (`crate::cache::retained`) resolves every one to a
+    /// page, a composite or the inline lowering before the frame is scheduled.
+    pub retained: Vec<RetainedBracket>,
     /// What compiling this frame cost, phase by phase — all zero without
     /// `perf-trace` (see [`CompileSpans`]).
     ///
@@ -542,6 +551,14 @@ pub struct SceneCompiler {
     clips: ClipStack,
     groups: GroupStack,
     snapshots: RetainedStack,
+    /// Whether a `PushRetained` bracket is recorded for the retained-page
+    /// store and a `DrawRetained` lowered rather than refused (see
+    /// [`Self::set_retained_layers`]). Off for a compiler built on its own.
+    retain: bool,
+    /// The [`CompiledFrame::retained`] entry of the outermost `PushRetained`
+    /// body the walk is inside, while it is inside one — what a hole punch or
+    /// an external texture drawn in the body marks unretainable.
+    retained_open: Option<usize>,
     punches: Vec<StagedPunch>,
     images: ImageResidency,
     glyphs: GlyphPrepCache,
@@ -697,6 +714,27 @@ impl SceneCompiler {
         self.glyph_run_cache
     }
 
+    /// Set whether retained brackets are recorded for a retained-page store.
+    ///
+    /// Off by default: a compiler built on its own has no store behind it, so
+    /// it lowers every `PushRetained` inline exactly as `frust_scene` tells a
+    /// renderer that does not retain to, and refuses a `DrawRetained` with
+    /// [`EngineError::RetainedKeyMissing`]. The renderer turns it on for the
+    /// compiler it owns (unless `FRUST_ENGINE_NO_LAYERS` is set): each
+    /// outermost bracket's body then becomes a recorded layer whatever its
+    /// alpha and is listed in [`CompiledFrame::retained`], and a `DrawRetained`
+    /// becomes an empty layer at its painter-order position (see
+    /// [`layers`]). Takes effect from the next frame.
+    pub fn set_retained_layers(&mut self, enabled: bool) {
+        self.retain = enabled;
+    }
+
+    /// Whether retained brackets are recorded for a retained-page store.
+    #[must_use]
+    pub fn retained_layers_enabled(&self) -> bool {
+        self.retain
+    }
+
     /// How many glyph runs the resident-run cache currently remembers.
     ///
     /// Bounded by [`MAX_RESIDENT_GLYPH_RUNS`] records (and a byte budget
@@ -761,6 +799,8 @@ impl SceneCompiler {
             clips: ClipStack::new(),
             groups: GroupStack::new(),
             snapshots: RetainedStack::new(),
+            retain: false,
+            retained_open: None,
             punches: Vec::new(),
             // Built from the residency, so the policy's page geometry is read
             // off the allocator it will pack into rather than derived a second
@@ -972,15 +1012,16 @@ impl SceneCompiler {
             if let Some(transform) = command_transform(command) {
                 check_finite(root * transform)?;
             }
-            if matches!(command, Command::DrawRetained { .. }) {
+            if let Command::DrawRetained { key, .. } = command
+                && !self.retain
+            {
                 // This compiler retains nothing, so no ledger can have
                 // declared a key resident and a `DrawRetained` here is a
                 // recorder error. Refused with the whole frame, before any
                 // strip is generated; the caller logs the reason and skips
-                // the frame.
-                return Err(EngineError::SchedulerEscalation {
-                    reason: "DrawRetained reached a compiler that retains no layers".into(),
-                });
+                // the frame. With retention on, whether the key is resident is
+                // the renderer's store's to answer, after the walk.
+                return Err(EngineError::RetainedKeyMissing { key: *key });
             }
             check_geometry(command)?;
         }
@@ -992,6 +1033,7 @@ impl SceneCompiler {
         self.clips.reset();
         self.groups.reset();
         self.snapshots.reset();
+        self.retained_open = None;
         self.punches.clear();
         // Ahead of the walk, so a rectangle this frame's reap frees is
         // available to this frame's own allocations and its clear is ordered
@@ -1057,6 +1099,7 @@ impl SceneCompiler {
             resident_glyph_runs: 0,
             parallel_draws: 0,
             glyph_clears,
+            retained: Vec::new(),
             compile_spans: CompileSpans::default(),
         };
         let mut depth = DepthCounter::new();
@@ -1068,10 +1111,11 @@ impl SceneCompiler {
         // charged to the phase it shortens.
         let helpers = self.parallel_workers.saturating_sub(1);
         let plan = if helpers > 0 {
-            parallel::plan(
+            parallel::plan_with(
                 scene,
                 root,
                 Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+                self.retain,
             )
         } else {
             parallel::Plan::default()
@@ -1271,6 +1315,10 @@ impl SceneCompiler {
             // be able to lift a bracket a sibling still relies on.
             Command::PopClip | Command::PopLayer => self.close_group(frame),
             Command::ClearRect { rect, transform } => {
+                // A punch is hoisted out of every bracket to the frame root, so
+                // a page could never carry it: a body that punches is drawn
+                // inline every frame.
+                self.mark_retained_body_unretainable(frame);
                 let transform = combined * *transform;
                 // Hoisted here rather than at the end of the frame because
                 // this is the only point the brackets confining it are still
@@ -1285,31 +1333,56 @@ impl SceneCompiler {
                 }
             }
             Command::PushRetained {
+                key,
                 rect,
                 alpha,
                 scale,
                 transform,
-                ..
             } => {
                 if self.snapshots.enter(*rect, *scale, *transform) {
                     // The bracket's own correction is the one that applies to
                     // the layer it opens, so the transform is recomposed here
                     // rather than reusing `combined` from before the entry.
                     let corrected = root * self.snapshots.correction() * *transform;
-                    if *alpha < 1.0 && check_finite(corrected).is_ok() {
-                        self.open_layer(frame, *rect, *alpha, corrected);
-                        self.snapshots.record_layer(self.groups.depth());
+                    if check_finite(corrected).is_ok() {
+                        if self.retain {
+                            self.open_retained(frame, *key, *rect, *alpha, corrected);
+                        } else if *alpha < 1.0 {
+                            self.open_layer(frame, *rect, *alpha, corrected);
+                            self.snapshots.record_layer(self.groups.depth());
+                        }
                     }
                 }
             }
             Command::PopRetained => {
-                if self.snapshots.leave(self.groups.depth()) {
+                let closes = self.snapshots.leave(self.groups.depth());
+                if closes {
                     self.close_group(frame);
                 }
+                // The outermost bracket just ended. A body whose own group a
+                // stray pop inside it already closed drew its tail outside the
+                // layer, so the layer is not the body and is never retained.
+                if !self.snapshots.is_open()
+                    && let Some(index) = self.retained_open.take()
+                    && !closes
+                {
+                    mark_unretainable(frame, index);
+                }
             }
-            // Refused by the up-front walk in [`Self::compile`], so it never
-            // reaches the lowering; drawn as nothing should one slip through.
-            Command::DrawRetained { .. } => {}
+            // Refused by the up-front walk in [`Self::compile`] when retention
+            // is off, so it reaches the lowering only with a store behind it.
+            Command::DrawRetained {
+                key,
+                rect,
+                transform,
+                alpha,
+                scale,
+            } => {
+                if self.retain {
+                    let mapped = combined * *transform * Affine::scale_about(*scale, rect.center());
+                    self.record_draw_retained(frame, depth, *key, *rect, *alpha, mapped);
+                }
+            }
             // An image is its destination rectangle's coverage under an image
             // paint — the same two rectangle paths a solid fill takes, so a
             // pixel-aligned image costs no flattening either.
@@ -1364,6 +1437,9 @@ impl SceneCompiler {
                 transform,
                 ..
             } => {
+                // A fragment program's pixels change with no command changing,
+                // so a body drawing one is never retained.
+                self.mark_retained_body_unretainable(frame);
                 if config::shader_effects_disabled() {
                     note_shader_effects_disabled();
                     return;
@@ -1394,6 +1470,10 @@ impl SceneCompiler {
                 dest,
                 transform,
             } => {
+                // An externally bound texture's pixels change with no command
+                // changing (a camera, a video, a 3D pass), so a body drawing
+                // one is never retained.
+                self.mark_retained_body_unretainable(frame);
                 self.draw_external_texture(*id, *dest, combined * *transform, frame, depth);
             }
         }
@@ -1653,6 +1733,117 @@ impl SceneCompiler {
             .push_layer(transform.transform_rect_bbox(rect), isolated);
     }
 
+    /// Open the outermost `PushRetained` bracket of a compiler with retention
+    /// on: the same lowering the inline emulation gives it, recorded as a
+    /// layer whatever its alpha, and listed for the retained-page store.
+    ///
+    /// Below full opacity that is exactly [`Self::open_layer`]. At full opacity
+    /// the inline emulation opens no layer and clips nothing, so the layer
+    /// opened here carries no clip either ([`GroupStack::push_retained`]) — the
+    /// body's draws are the inline lowering's draws, gathered — and the store
+    /// that refuses it leaves the scheduler a full-opacity layer it inlines.
+    ///
+    /// Whether the body can be retained at all is measured here, before the
+    /// bracket's own group narrows anything: a page can only hold what the
+    /// body really drew, so a body reaching past the viewport or a scissor
+    /// around it, or under a coverage mask, would be retained missing what was
+    /// clipped away — and composited somewhere else on a later frame, the loss
+    /// would show.
+    fn open_retained(
+        &mut self,
+        frame: &mut CompiledFrame,
+        key: u64,
+        rect: Rect,
+        alpha: f32,
+        transform: Affine,
+    ) {
+        let window = quad_window(&self.generator, &self.groups);
+        let device = transform.transform_rect_bbox(rect);
+        let retainable = self.clips.mask().is_none()
+            && !self.clips.blocks_everything()
+            && rect_within(device, window);
+        // The id `push_layer` is about to hand the layer, in either branch.
+        let layer = u32::try_from(frame.recorder.layers.len()).unwrap_or(u32::MAX);
+
+        if alpha < 1.0 {
+            self.open_layer(frame, rect, alpha, transform);
+        } else {
+            frame.recorder.push_layer(layers::layer_props(alpha), None);
+            self.groups.push_retained();
+        }
+        self.snapshots.record_layer(self.groups.depth());
+
+        let placement = RetainedPlacement::of(transform);
+        frame.retained.push(RetainedBracket {
+            key,
+            layer,
+            opacity: alpha,
+            placement,
+            extent_px: placement.extent(rect),
+            kind: RetainedKind::Record {
+                rect: tile_bounds(device),
+                retainable,
+            },
+        });
+        self.retained_open = Some(frame.retained.len() - 1);
+    }
+
+    /// Record a `DrawRetained` of a compiler with retention on: an empty layer
+    /// at the command's painter-order position, standing for the composite the
+    /// retained-page store resolves it to, plus what the store needs to place
+    /// that composite.
+    ///
+    /// `mapped` is the body's local space mapped onto the device grid with the
+    /// presentation scale folded in — the same composition a `PushRetained`
+    /// bracket's correction produces for its body. A non-finite one draws
+    /// nothing, the same answer every off-grid command gets.
+    fn record_draw_retained(
+        &mut self,
+        frame: &mut CompiledFrame,
+        depth: &mut DepthCounter,
+        key: u64,
+        rect: Rect,
+        alpha: f32,
+        mapped: Affine,
+    ) {
+        if check_finite(mapped).is_err() {
+            return;
+        }
+        let window = quad_window(&self.generator, &self.groups);
+        let masked = self.clips.mask().is_some();
+        let layer = u32::try_from(frame.recorder.layers.len()).unwrap_or(u32::MAX);
+        // Pushed and popped at once: a layer with no draws of its own, whose
+        // node is what puts the composite at this point of its stream.
+        frame.recorder.push_layer(layers::layer_props(alpha), None);
+        frame.recorder.pop_layer();
+
+        let placement = RetainedPlacement::of(mapped);
+        frame.retained.push(RetainedBracket {
+            key,
+            layer,
+            opacity: alpha,
+            placement,
+            extent_px: placement.extent(rect),
+            kind: RetainedKind::Draw {
+                depth: depth.advance(),
+                window: if self.clips.blocks_everything() {
+                    RectU16::new(0, 0, 0, 0)
+                } else {
+                    window
+                },
+                masked,
+            },
+        });
+    }
+
+    /// Mark the retained body the walk is inside, if any, as one no page may
+    /// hold.
+    fn mark_retained_body_unretainable(&mut self, frame: &mut CompiledFrame) {
+        if let Some(index) = self.retained_open {
+            mark_unretainable(frame, index);
+        }
+    }
+
     /// Open a bracket that admits nothing, for a push whose transform does not
     /// land on the device grid.
     ///
@@ -1695,6 +1886,11 @@ impl SceneCompiler {
             self.close_group(frame);
         }
         self.snapshots.reset();
+        // A body still open at the end of the frame never reached its own
+        // `PopRetained`, so where it would have ended is unknown.
+        if let Some(index) = self.retained_open.take() {
+            mark_unretainable(frame, index);
+        }
     }
 
     /// Generate the coverage for every punch the frame hoisted.
@@ -2487,6 +2683,52 @@ fn quad_window(generator: &StripGenerator, groups: &GroupStack) -> RectU16 {
                 coordinate(bounds.y1),
             ))
         },
+    )
+}
+
+/// Mark `frame`'s retained bracket `index`, a `PushRetained` body, as one no
+/// page may hold.
+fn mark_unretainable(frame: &mut CompiledFrame, index: usize) {
+    if let Some(RetainedBracket {
+        kind: RetainedKind::Record { retainable, .. },
+        ..
+    }) = frame.retained.get_mut(index)
+    {
+        *retainable = false;
+    }
+}
+
+/// Whether `device` lies wholly inside `window`.
+fn rect_within(device: Rect, window: RectU16) -> bool {
+    device.is_finite()
+        && !window.is_empty()
+        && device.x0 >= f64::from(window.x0)
+        && device.y0 >= f64::from(window.y0)
+        && device.x1 <= f64::from(window.x1)
+        && device.y1 <= f64::from(window.y1)
+}
+
+/// `device` rounded out to whole tiles and clamped onto the `u16` grid — the
+/// alignment a recorded layer's own bounds take.
+fn tile_bounds(device: Rect) -> RectU16 {
+    let snap = |value: f64, step: u16, up: bool| {
+        let step = f64::from(step);
+        let snapped = if up {
+            (value / step).ceil() * step
+        } else {
+            (value / step).floor() * step
+        };
+        if snapped.is_finite() {
+            snapped.clamp(0.0, f64::from(u16::MAX)) as u16
+        } else {
+            0
+        }
+    };
+    RectU16::new(
+        snap(device.x0, Tile::WIDTH, false),
+        snap(device.y0, Tile::HEIGHT, false),
+        snap(device.x1, Tile::WIDTH, true),
+        snap(device.y1, Tile::HEIGHT, true),
     )
 }
 

@@ -175,6 +175,15 @@ impl IosAppHandle {
         // probe line and marks this frame as the one that stamps `frame`.
         #[cfg(feature = "hotpatch")]
         let signals_dirty = signals_dirty | self.patch_probe.take_request();
+        // A frame the renderer refused for drawing a retained page it no longer
+        // held presented nothing; the render side (possibly the render thread,
+        // which cannot reach this handle) raised the process-wide repaint flag
+        // after publishing the emptied ledger. Taken past the ready/paused gate
+        // like the drains above and ORed into `signals_dirty` like the hot-patch
+        // request, so this tick runs and paints against that ledger instead of
+        // an idle screen keeping the frame before the refused one.
+        let signals_dirty =
+            signals_dirty | frust_shell_common::render_split::take_retained_repaint();
         // The focus/IME session's EDGE input, PEEKED here and committed only
         // past the skip return below (on a frame that actually runs), so
         // `focus_or_ime_changed` reports "the session moved since the last tick

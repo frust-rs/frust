@@ -21,7 +21,8 @@
 //! makes every image draw a logged skip, the second overrides the atlas extent
 //! the adapter's tier would otherwise choose, and
 //! `FRUST_ENGINE_NO_SHADER_EFFECTS` turns off [`effects::shader_quad`]'s user
-//! fragment programs.
+//! fragment programs. `FRUST_ENGINE_NO_LAYERS` turns off [`cache::retained`]'s
+//! retained pages and `FRUST_ENGINE_RETAINED_BUDGET_MB` overrides their budget.
 
 pub mod cache;
 pub mod compile;
@@ -37,14 +38,17 @@ pub(crate) mod text;
 
 pub use cache::{
     AtlasBudget, AtlasRegion, CachedRamp, GradientCache, GradientTextureLayout, ImageResidency,
-    ImageSkip, ImageUpload, ResidentImage,
+    ImageSkip, ImageUpload, ResidentImage, RetainedBudget, RetainedEntry, RetainedPages,
 };
 pub use compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
 pub use compile::paint::{
     BrushEncoding, ImageEncoding, LutRequest, encode_brush, encode_image, encode_image_brush,
     encode_image_command,
 };
-pub use compile::{CompiledFrame, DepthCounter, EngineDraw, SceneCompiler};
+pub use compile::{
+    CompiledFrame, DepthCounter, EngineDraw, RetainedBracket, RetainedKind, RetainedPlacement,
+    SceneCompiler,
+};
 pub use diag::{EngineSpan, FrameTimestamps};
 pub use effects::ShaderQuadPass;
 pub use error::EngineError;
@@ -54,7 +58,10 @@ pub use gpu::{
     StripDraw, lower_encoded_image,
 };
 pub use renderer::EngineRenderer;
-pub use schedule::{Composite, PageParity, PageTarget, Round, RoundOp, RoundTarget, Schedule};
+pub use schedule::{
+    Composite, PageParity, PageTarget, RetainedLayers, RetainedRole, RetainedSource,
+    RetainedTarget, Round, RoundOp, RoundTarget, Schedule,
+};
 
 /// Alpha output mode for the render target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

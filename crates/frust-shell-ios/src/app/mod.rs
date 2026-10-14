@@ -142,7 +142,8 @@ impl PatchFrameProbe {
 // The FFI layer (`crate::ffi_glue`) builds and drives the render path directly,
 // so every type it names stays reachable at its pre-split `crate::app::*` path.
 pub(crate) use executor::{
-    FrameExecutor, InlineExecutor, PaintedScene, SplitExecutor, render_scene,
+    FrameExecutor, InlineExecutor, PaintedScene, SplitExecutor, note_scale, publish_ledger,
+    render_scene,
 };
 pub(crate) use present_sync::PresentHandoff;
 

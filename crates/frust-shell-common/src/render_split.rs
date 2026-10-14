@@ -98,6 +98,7 @@
 //! [`UiSpans`]: crate::perf::UiSpans
 //! [`RenderSpans`]: crate::perf::RenderSpans
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -129,6 +130,15 @@ pub fn publish_retained_ledger(ledger: RetainedLedger) {
     *slot = Some(Arc::new(ledger));
 }
 
+/// Publish the EMPTY ledger — what a surface destroy or a device-scale change
+/// leaves the renderer holding. A shell calls it (or [`publish_retained_ledger`]
+/// with the renderer's own, equally empty, ledger) before a destroy returns or
+/// its barrier is acknowledged, so the UI thread's first paint over a
+/// re-created surface names no page the torn-down one held.
+pub fn publish_empty_retained_ledger() {
+    publish_retained_ledger(RetainedLedger::empty());
+}
+
 /// The most recently published ledger, for the UI thread to hand to
 /// `RenderRoot::set_retained_ledger` before painting. **Never blocks on the
 /// render thread**: if the render side is mid-publish (or nothing was ever
@@ -142,6 +152,34 @@ pub fn latest_retained_ledger() -> Option<Arc<RetainedLedger>> {
         Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().clone(),
         Err(std::sync::TryLockError::WouldBlock) => None,
     }
+}
+
+/// Whether the render side owes the UI thread one more paint because a frame
+/// was refused for drawing a retained page the renderer no longer held. One
+/// flag per process, like the ledger slot beside it.
+static RETAINED_REPAINT_OWED: AtomicBool = AtomicBool::new(false);
+
+/// Record that a frame was just refused for drawing a retained page the
+/// renderer no longer held (the store was cleared and the empty ledger
+/// published): the refused frame presented nothing, so the UI thread owes one
+/// more paint against that empty ledger. Called by the render side — which
+/// cannot reach the UI thread's state — right after it published; an atomic
+/// store, never blocks.
+///
+/// For the shells whose frame clock ticks on regardless of dirtiness (the
+/// Android Choreographer, the iOS `CADisplayLink`) and whose frame gate would
+/// otherwise skip every tick of an idle screen. The desktop and web shells
+/// turn the refusal into a `Redraw` follow-up of the frame itself instead.
+pub fn request_retained_repaint() {
+    RETAINED_REPAINT_OWED.store(true, Ordering::Release);
+}
+
+/// Take the owed repaint [`request_retained_repaint`] recorded: `true` once per
+/// request (however many requests landed since the last take), then `false`.
+/// Read by the UI thread's frame gate past its surface-ready check, ORed into
+/// an input that forces the frame to run. An atomic swap, never blocks.
+pub fn take_retained_repaint() -> bool {
+    RETAINED_REPAINT_OWED.swap(false, Ordering::AcqRel)
 }
 
 // ---------------------------------------------------------------------
@@ -899,9 +937,15 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
+    /// Serialises the tests touching the process-wide ledger slot (the test
+    /// harness runs tests in parallel).
+    static LEDGER_SLOT_TESTS: Mutex<()> = Mutex::new(());
+
     #[test]
     fn retained_ledger_slot_publishes_and_never_blocks() {
-        // The only test touching the process-wide slot.
+        let _serial = LEDGER_SLOT_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         publish_retained_ledger(RetainedLedger::from_entries(5, [(9, (4, 4), 1.0)]));
         let got = latest_retained_ledger().expect("published");
         assert_eq!(got.frame, 5);
@@ -912,6 +956,33 @@ mod tests {
         drop(guard);
         publish_retained_ledger(RetainedLedger::empty());
         assert!(latest_retained_ledger().unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn a_destroy_time_publish_leaves_the_empty_ledger_for_the_next_paint() {
+        let _serial = LEDGER_SLOT_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A live surface's ledger, then the surface goes away.
+        publish_retained_ledger(RetainedLedger::from_entries(7, [(3, (8, 8), 2.0)]));
+        publish_empty_retained_ledger();
+        let got = latest_retained_ledger().expect("the destroy published");
+        assert!(got.entries.is_empty(), "the next paint names no page");
+        assert!(!got.is_resident(frust_core::RetainedKey(3), (8, 8), 2.0));
+    }
+
+    #[test]
+    fn a_retained_repaint_is_taken_once_per_request() {
+        // The only test touching the process-wide repaint flag.
+        assert!(!take_retained_repaint(), "nothing owed at rest");
+        request_retained_repaint();
+        assert!(take_retained_repaint(), "a refusal owes one paint");
+        assert!(!take_retained_repaint(), "and only one");
+        // Requests that land before a take coalesce into one owed paint.
+        request_retained_repaint();
+        request_retained_repaint();
+        assert!(take_retained_repaint());
+        assert!(!take_retained_repaint());
     }
     use std::time::{Duration, Instant};
 

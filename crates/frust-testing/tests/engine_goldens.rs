@@ -2074,3 +2074,282 @@ fn filter_blur_oversized_is_refused_rather_than_rendered() {
          panicked (E17)"
     );
 }
+
+// ---------------------------------------------------------------------
+// Retained parity — a retained page drawn back is the inline frame, exactly
+// ---------------------------------------------------------------------
+//
+// Not a corpus case: a corpus case is one frame, and a retained page is only
+// observable across two — the frame that records a `PushRetained` body into a
+// page and the frame that draws it back with `DrawRetained` (which no
+// single-frame corpus scene may record; see the unit corpus's
+// `no_corpus_case_records_a_draw_retained`). So the case drives ONE
+// `EngineOracle`, whose renderer — and so whose retained store — lives across
+// every render it is asked for, through three frames per scenario: the inline
+// emulation `frust_scene` defines for a renderer that does not retain (the
+// body under `push_transform(scale_about(..))` inside `push_layer(rect,
+// alpha)`), the recording frame, and the draw-back frame. The comparison is
+// ZERO diff on the premultiplied frames, both retained frames against the
+// inline one: the page holds the body exactly as the inline lowering
+// rasterizes it and is composited by the same 1:1 layer quad, so there is no
+// rounding to tolerate below full opacity (at full opacity the inline frame
+// has no layer to match, and one 8-bit level is the stated bound — see
+// `ParityScenario::max_channel_diff`). It compares engine frames with engine
+// frames and so needs no baseline and promotes nothing.
+//
+// The four engine arms are the process environment's, read when the oracle's
+// renderer is built: run it as-is, and again under
+// `FRUST_ENGINE_UBER_PROGRAM=1`, `FRUST_ENGINE_NO_PARALLEL=1` and
+// `FRUST_ENGINE_PARALLEL_MIN_COST=0`.
+
+use frust_scene::{Scene as ParityScene, SceneBuilder as ParityBuilder};
+use frust_testing::render::RenderSpec;
+use peniko::Brush as ParityBrush;
+use peniko::color::palette::css::{
+    BLACK as PARITY_BLACK, GREEN as PARITY_GREEN, RED as PARITY_RED, WHITE as PARITY_WHITE,
+};
+
+/// The canvas every retained-parity frame renders at.
+const PARITY_CANVAS: (u32, u32) = (96, 64);
+
+/// One retained-parity scenario: a body recorded under `record_at` and drawn
+/// back under `draw_at`, both at `alpha` and presentation `scale`.
+struct ParityScenario {
+    name: &'static str,
+    key: u64,
+    alpha: f32,
+    scale: f64,
+    record_at: kurbo::Affine,
+    draw_at: kurbo::Affine,
+    /// The largest per-channel difference from the inline frame allowed:
+    /// zero — and no differing pixel at all — below full opacity, where the
+    /// inline lowering renders the body into a page and composites it exactly
+    /// as the retained path does. At full opacity the inline lowering draws the
+    /// body straight onto the frame instead, and source-over, associative in
+    /// exact arithmetic, rounds differently in 8 bits where the body's own
+    /// partial-alpha draws overlap: one level, nowhere more.
+    max_channel_diff: u8,
+    /// The alpha of a translucent layer every frame wraps the bracket in, or
+    /// `1.0` for none — the shape a page fading inside a transition records,
+    /// where the drawn page composites into the enclosing layer's page.
+    enclosing_alpha: f32,
+}
+
+/// The body every scenario retains, in its own 20x16 space: an opaque block, a
+/// half-alpha band over nothing (so the page really carries partial alpha),
+/// and a stroked diagonal (so its edges are antialiased, not pixel-aligned).
+fn parity_body(builder: &mut ParityBuilder<'_>) {
+    builder.fill_rect(
+        kurbo::Rect::new(0.0, 0.0, 20.0, 8.0),
+        ParityBrush::Solid(PARITY_RED),
+    );
+    builder.fill_rect(
+        kurbo::Rect::new(0.0, 8.0, 20.0, 12.0),
+        ParityBrush::Solid(PARITY_GREEN.with_alpha(0.5)),
+    );
+    builder.stroke_line(
+        kurbo::Point::new(1.0, 15.0),
+        kurbo::Point::new(19.0, 9.5),
+        1.5,
+        ParityBrush::Solid(PARITY_BLACK),
+    );
+}
+
+/// A frame around `middle`: a backdrop recorded before it and a marker
+/// recorded after it, so the bracket is ordered between two draws — and, below
+/// a full `enclosing_alpha`, a translucent layer around the bracket.
+fn parity_frame(enclosing_alpha: f32, middle: impl FnOnce(&mut ParityBuilder<'_>)) -> ParityScene {
+    let mut scene = ParityScene::new();
+    let mut builder = ParityBuilder::new(&mut scene);
+    builder.fill_rect(
+        kurbo::Rect::new(4.0, 4.0, 92.0, 60.0),
+        ParityBrush::Solid(PARITY_WHITE.with_alpha(0.75)),
+    );
+    let enclosed = enclosing_alpha < 1.0;
+    if enclosed {
+        builder.push_layer(
+            kurbo::Rect::new(
+                0.0,
+                0.0,
+                f64::from(PARITY_CANVAS.0),
+                f64::from(PARITY_CANVAS.1),
+            ),
+            enclosing_alpha,
+        );
+    }
+    middle(&mut builder);
+    if enclosed {
+        builder.pop_layer();
+    }
+    builder.fill_rect(
+        kurbo::Rect::new(40.0, 20.0, 48.0, 28.0),
+        ParityBrush::Solid(PARITY_BLACK),
+    );
+    scene
+}
+
+#[test]
+#[ignore = "requires a GPU; run locally with `cargo test -p frust-testing --test engine_goldens -- --ignored retained_parity`"]
+fn retained_parity_draws_a_page_back_exactly_as_the_inline_frame() {
+    let _serialized = render_lock();
+    let mut engine = EngineOracle::new(&EngineOracleOptions::default())
+        .expect("failed to create the engine oracle");
+    println!("retained parity: engine arm on {}", engine.adapter_meta());
+
+    let rect = kurbo::Rect::new(0.0, 0.0, 20.0, 16.0);
+    let device = kurbo::Affine::scale(2.0);
+    let scenarios = [
+        ParityScenario {
+            name: "retained-parity-fade",
+            key: 1,
+            alpha: 0.5,
+            scale: 1.0,
+            record_at: kurbo::Affine::translate((6.0, 6.0)) * device,
+            draw_at: kurbo::Affine::translate((6.0, 6.0)) * device,
+            max_channel_diff: 0,
+            enclosing_alpha: 1.0,
+        },
+        ParityScenario {
+            name: "retained-parity-scale",
+            key: 2,
+            alpha: 0.5,
+            scale: 0.9,
+            record_at: kurbo::Affine::translate((6.0, 6.0)) * device,
+            draw_at: kurbo::Affine::translate((6.0, 6.0)) * device,
+            max_channel_diff: 0,
+            enclosing_alpha: 1.0,
+        },
+        ParityScenario {
+            name: "retained-parity-opaque",
+            key: 4,
+            alpha: 1.0,
+            scale: 1.0,
+            record_at: kurbo::Affine::translate((6.0, 6.0)) * device,
+            draw_at: kurbo::Affine::translate((10.0, 14.0)) * device,
+            max_channel_diff: 1,
+            enclosing_alpha: 1.0,
+        },
+        ParityScenario {
+            name: "retained-parity-enclosed",
+            key: 5,
+            alpha: 0.5,
+            scale: 0.9,
+            record_at: kurbo::Affine::translate((6.0, 6.0)) * device,
+            draw_at: kurbo::Affine::translate((30.0, 10.0)) * device,
+            max_channel_diff: 0,
+            enclosing_alpha: 0.6,
+        },
+        ParityScenario {
+            name: "retained-parity-move",
+            key: 3,
+            alpha: 0.75,
+            scale: 0.9,
+            record_at: kurbo::Affine::translate((6.5, 6.25)) * device,
+            draw_at: kurbo::Affine::translate((40.5, 22.25)) * device,
+            max_channel_diff: 0,
+            enclosing_alpha: 1.0,
+        },
+    ];
+    let spec = RenderSpec {
+        width: PARITY_CANVAS.0,
+        height: PARITY_CANVAS.1,
+        base_color: peniko::Color::TRANSPARENT,
+        scale: 1.0,
+        root: kurbo::Affine::IDENTITY,
+    };
+
+    let mut failures: Vec<String> = Vec::new();
+    for scenario in &scenarios {
+        let inline = parity_frame(scenario.enclosing_alpha, |builder| {
+            builder.push_transform(scenario.draw_at);
+            builder.push_transform(kurbo::Affine::scale_about(scenario.scale, rect.center()));
+            builder.push_layer(rect, scenario.alpha);
+            parity_body(builder);
+            builder.pop_layer();
+            builder.pop_transform();
+            builder.pop_transform();
+        });
+        let recorded_inline = parity_frame(scenario.enclosing_alpha, |builder| {
+            builder.push_transform(scenario.record_at);
+            builder.push_transform(kurbo::Affine::scale_about(scenario.scale, rect.center()));
+            builder.push_layer(rect, scenario.alpha);
+            parity_body(builder);
+            builder.pop_layer();
+            builder.pop_transform();
+            builder.pop_transform();
+        });
+        let record = parity_frame(scenario.enclosing_alpha, |builder| {
+            builder.push_transform(scenario.record_at);
+            builder.push_retained(scenario.key, rect, scenario.alpha, scenario.scale);
+            parity_body(builder);
+            builder.pop_retained();
+            builder.pop_transform();
+        });
+        let redraw = parity_frame(scenario.enclosing_alpha, |builder| {
+            builder.push_transform(scenario.draw_at);
+            builder.draw_retained(scenario.key, rect, scenario.alpha, scenario.scale);
+            builder.pop_transform();
+        });
+
+        let mut render = |scene: &ParityScene, what: &str| -> Vec<u8> {
+            engine
+                .render(scene, &spec)
+                .unwrap_or_else(|err| {
+                    panic!("[{}] {what} failed to render: {err:#}", scenario.name)
+                })
+                .rgba8
+        };
+        let expected_record = render(&recorded_inline, "the inline recording frame");
+        let expected_redraw = render(&inline, "the inline draw-back frame");
+        let recorded = render(&record, "the recording frame");
+        let redrawn = render(&redraw, "the draw-back frame");
+
+        let differing =
+            |a: &[u8], b: &[u8]| a.chunks(4).zip(b.chunks(4)).filter(|(p, q)| p != q).count();
+        let painted = expected_redraw.chunks(4).filter(|p| p[3] != 0).count();
+        if painted == 0 {
+            failures.push(format!(
+                "[{}] the inline frame painted nothing",
+                scenario.name
+            ));
+        }
+        let worst = |a: &[u8], b: &[u8]| {
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| x.abs_diff(*y))
+                .max()
+                .unwrap_or(0)
+        };
+        let record_diff = differing(&recorded, &expected_record);
+        let redraw_diff = differing(&redrawn, &expected_redraw);
+        let record_worst = worst(&recorded, &expected_record);
+        let redraw_worst = worst(&redrawn, &expected_redraw);
+        println!(
+            "retained parity: {} — recording frame {record_diff} px off (worst channel \
+             {record_worst}), draw-back frame {redraw_diff} px off (worst channel \
+             {redraw_worst}), {painted} px painted",
+            scenario.name
+        );
+        let bound = scenario.max_channel_diff;
+        if (bound == 0 && record_diff != 0) || record_worst > bound {
+            failures.push(format!(
+                "[{}] the recording frame differs from the inline emulation in {record_diff} px \
+                 (worst channel {record_worst}, bound {bound})",
+                scenario.name
+            ));
+        }
+        if (bound == 0 && redraw_diff != 0) || redraw_worst > bound {
+            failures.push(format!(
+                "[{}] the draw-back frame differs from the inline emulation in {redraw_diff} px \
+                 (worst channel {redraw_worst}, bound {bound})",
+                scenario.name
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "retained parity failed:\n{}",
+        failures.join("\n")
+    );
+}

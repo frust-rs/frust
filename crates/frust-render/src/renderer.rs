@@ -279,11 +279,27 @@ pub struct SurfaceRenderer {
     /// Whether a first rendered frame has been measured already.
     #[cfg(feature = "perf-trace")]
     first_submit_seen: bool,
+    /// What [`Self::take_retained_ledger`] last handed out: the engine's
+    /// retained generation, or `Some(None)` for the empty ledger of a renderer
+    /// with no engine. `None` until the first take and again at every surface
+    /// episode's start or end, so the next take always publishes.
+    retained_published: Option<Option<u64>>,
+    /// The device scale (physical / logical) last handed to
+    /// [`Self::note_device_scale`], kept as raw bits so a change is an exact
+    /// comparison. Outlives surface episodes: a recreate at the same scale is
+    /// not a scale change (the fresh engine's store is empty anyway).
+    device_scale: Option<u64>,
 }
 
 /// One retained page the renderer holds resident: the key it was recorded
 /// under (`Command::PushRetained`'s `key`), its rasterized extent in physical
-/// pixels and the device scale it was rasterized at.
+/// pixels and the scale it was rasterized at.
+///
+/// Both are the page *as rasterized*: the bracket's rectangle mapped through
+/// its transform with the presentation scale applied, so `scale` is the device
+/// scale times the bracket's own `scale` (see `frust_engine::cache::retained`).
+/// A page is reusable by a `DrawRetained` with the same linear transform at any
+/// alpha and any translation, and by nothing else.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResidentPage {
     /// The raw retained key.
@@ -306,6 +322,23 @@ pub struct ResidentPages {
     pub pages: Vec<ResidentPage>,
     /// The renderer frame this describes (diagnostic).
     pub frame: u64,
+}
+
+/// `engine`'s retained store as the plain data a shell publishes — the one
+/// conversion [`SurfaceRenderer::retained_ledger`] makes, kept free so it is
+/// testable against a real engine with no surface in the loop.
+fn resident_pages(engine: &frust_engine::EngineRenderer) -> ResidentPages {
+    ResidentPages {
+        pages: engine
+            .retained_ledger()
+            .map(|entry| ResidentPage {
+                key: entry.key,
+                extent_px: entry.extent_px,
+                scale: entry.scale,
+            })
+            .collect(),
+        frame: engine.retained_frame(),
+    }
 }
 
 /// Where the first rendered frame's `submit` time went.
@@ -412,6 +445,8 @@ impl SurfaceRenderer {
             first_submit: None,
             #[cfg(feature = "perf-trace")]
             first_submit_seen: false,
+            retained_published: None,
+            device_scale: None,
         }
     }
 
@@ -447,10 +482,16 @@ impl SurfaceRenderer {
     /// reset here describes the surface being replaced or torn down: the
     /// streak belonged to it, and the stash describes one of its frames.
     /// Nothing else may assign `self.state`.
+    ///
+    /// The retained ledger last published is reset with them: a new episode's
+    /// engine starts with an empty store and an ended one has none, so the
+    /// next [`Self::take_retained_ledger`] publishes (the empty ledger, either
+    /// way) whatever generation the old engine had reached.
     fn adopt_surface_state(&mut self, state: SurfaceState) {
         self.state = state;
         self.consecutive_invalid = 0;
         self.clear_pending_frame();
+        self.retained_published = None;
     }
 
     /// Restores the persisted pipeline-cache blob a prior run produced via
@@ -515,10 +556,91 @@ impl SurfaceRenderer {
     }
 
     /// The retained pages the renderer holds resident after its last frame (see
-    /// [`ResidentPages`]). Empty until the engine's retained-page store reports
-    /// into it; never blocks and allocates nothing while empty.
+    /// [`ResidentPages`]): the engine's retained-page store, read as plain
+    /// data. Empty outside [`SurfacePhase::SurfaceReady`] — with no surface there
+    /// is no engine and no page. Never blocks, and allocates nothing while the
+    /// store is empty.
     pub fn retained_ledger(&self) -> ResidentPages {
-        ResidentPages::default()
+        let SurfaceState::Ready(ready) = &self.state else {
+            return ResidentPages::default();
+        };
+        let TierBackend::Engine { engine, .. } = &ready.backend;
+        resident_pages(engine)
+    }
+
+    /// [`Self::retained_ledger`], but only when it changed since the last call
+    /// — a page added, evicted or re-rendered at another extent, the store
+    /// cleared, or the surface created, recreated or destroyed (each of which
+    /// starts the next call over, so a fresh or torn-down surface always
+    /// publishes its empty ledger). `None` when nothing changed.
+    ///
+    /// What a shell calls after each frame's submit to publish the ledger
+    /// without re-publishing an unchanged one every frame.
+    pub fn take_retained_ledger(&mut self) -> Option<ResidentPages> {
+        let generation = match &self.state {
+            SurfaceState::Ready(ready) => {
+                let TierBackend::Engine { engine, .. } = &ready.backend;
+                Some(engine.retained_generation())
+            }
+            SurfaceState::NoSurface | SurfaceState::Lost => None,
+        };
+        if self.retained_published == Some(generation) {
+            return None;
+        }
+        self.retained_published = Some(generation);
+        Some(self.retained_ledger())
+    }
+
+    /// Whether a frame was refused since the last call because a
+    /// `DrawRetained` named a page the engine did not hold (the engine then
+    /// empties its store), clearing the flag.
+    ///
+    /// The refused frame presented nothing, so a shell seeing `true` owes the
+    /// widget tree one more paint, against the emptied ledger it publishes
+    /// alongside — otherwise an idle screen would keep the frame before the
+    /// refused one until something else asked for a paint.
+    pub fn take_retained_refusal(&mut self) -> bool {
+        match &mut self.state {
+            SurfaceState::Ready(ready) => {
+                let TierBackend::Engine { engine, .. } = &mut ready.backend;
+                engine.take_retained_refusal()
+            }
+            SurfaceState::NoSurface | SurfaceState::Lost => false,
+        }
+    }
+
+    /// Drop every retained page the engine holds — what a device-scale change
+    /// calls for, since every body is about to be laid out again. The next
+    /// [`Self::take_retained_ledger`] reports the empty store. A no-op with no
+    /// surface.
+    pub fn clear_retained(&mut self) {
+        if let SurfaceState::Ready(ready) = &mut self.state {
+            let TierBackend::Engine { engine, .. } = &mut ready.backend;
+            engine.clear_retained();
+        }
+    }
+
+    /// Note the device scale (physical / logical, already sanitized by the
+    /// shell) the coming frames are painted at — the one place a shell reports
+    /// a scale change to the retained store.
+    ///
+    /// When `scale` differs from the last noted one (or none was noted yet),
+    /// every resident page was rasterized for a scale no frame will name
+    /// again, so the store is cleared ([`Self::clear_retained`]) and the next
+    /// [`Self::take_retained_ledger`] publishes the empty ledger even when the
+    /// store was empty already — the UI thread then paints every retained
+    /// body again instead of naming pages that are gone. The same scale again
+    /// is a no-op, so a shell may call this at every surface create and
+    /// resize. Returns whether the scale changed.
+    pub fn note_device_scale(&mut self, scale: f64) -> bool {
+        let bits = scale.to_bits();
+        if self.device_scale == Some(bits) {
+            return false;
+        }
+        self.device_scale = Some(bits);
+        self.clear_retained();
+        self.retained_published = None;
+        true
     }
 
     /// Whether the **live** surface actually resolved to a translucent
@@ -1621,6 +1743,49 @@ fn log_engine_refusal(count: u32, error: &frust_engine::EngineError) {
 mod tests {
     use super::*;
 
+    /// Serializes every test in this binary that creates a GPU device, the
+    /// same guard the workspace's other GPU suites take: the NVIDIA Vulkan
+    /// driver serializes `vkDestroyDevice` against other Vulkan work on a
+    /// process-global mutex, and two tests tearing devices down at once
+    /// have deadlocked inside it. Poison is ignored deliberately — one
+    /// test's failure must not cascade into its siblings.
+    static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A device on the environment's adapter, with the limits production asks
+    /// for, and that adapter's capabilities.
+    fn test_device() -> (wgpu::Device, wgpu::Queue, frust_gpu::TierCaps) {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            // The environment-aware initializer, so `WGPU_ADAPTER_NAME` picks
+            // the GPU on a multi-adapter host instead of the run silently
+            // landing on whichever one enumerates first.
+            let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
+                .await
+                .expect("no compatible GPU adapter");
+            println!("frust-render engine arm adapter: {:?}", adapter.get_info());
+            let caps = frust_gpu::TierCaps::probe(&adapter);
+            // The limits production asks for, not the defaults, so the target
+            // this test builds is sized against the same ceiling
+            // `context::extent_within_limits` refuses on.
+            let limits = crate::context::effective_limits(
+                adapter.limits(),
+                crate::context::is_ios_simulator(),
+            );
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust-render engine arm test"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: limits,
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create device");
+            (device, queue, caps)
+        })
+    }
+
     #[test]
     fn starts_with_no_surface() {
         let renderer = SurfaceRenderer::new();
@@ -1787,49 +1952,13 @@ mod tests {
     #[test]
     #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
     fn engine_arm_records_a_frame_into_its_target_without_validation_errors() {
-        /// Serializes every test in this binary that creates a GPU device, the
-        /// same guard the workspace's other GPU suites take: the NVIDIA Vulkan
-        /// driver serializes `vkDestroyDevice` against other Vulkan work on a
-        /// process-global mutex, and two tests tearing devices down at once
-        /// have deadlocked inside it. Poison is ignored deliberately — one
-        /// test's failure must not cascade into its siblings.
-        static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _serialized = RENDER_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         const SIZE: u32 = 64;
 
-        let (device, queue, caps) = pollster::block_on(async {
-            let instance = wgpu::Instance::new(
-                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-            );
-            // The environment-aware initializer, so `WGPU_ADAPTER_NAME` picks
-            // the GPU on a multi-adapter host instead of the run silently
-            // landing on whichever one enumerates first.
-            let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
-                .await
-                .expect("no compatible GPU adapter");
-            println!("frust-render engine arm adapter: {:?}", adapter.get_info());
-            let caps = frust_gpu::TierCaps::probe(&adapter);
-            // The limits production asks for, not the defaults, so the target
-            // this test builds is sized against the same ceiling
-            // `context::extent_within_limits` refuses on.
-            let limits = crate::context::effective_limits(
-                adapter.limits(),
-                crate::context::is_ios_simulator(),
-            );
-            let (device, queue) = adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("frust-render engine arm test"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: limits,
-                    ..Default::default()
-                })
-                .await
-                .expect("failed to create device");
-            (device, queue, caps)
-        });
+        let (device, queue, caps) = test_device();
 
         let mut scene = frust_scene::Scene::new();
         {
@@ -1906,5 +2035,152 @@ mod tests {
                 "{format:?}: the target still holds its clear colour ({centre:?})"
             );
         }
+    }
+
+    /// The ledger a shell publishes, without a surface: empty, handed out once
+    /// by `take_retained_ledger` and not again until something changes — and a
+    /// surface episode starting or ending is such a change, so a fresh or
+    /// torn-down surface always publishes its empty ledger.
+    #[test]
+    fn the_retained_ledger_is_published_once_per_change_without_a_surface() {
+        let mut renderer = SurfaceRenderer::new();
+        assert_eq!(renderer.retained_ledger(), ResidentPages::default());
+
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default()),
+            "the first take always publishes"
+        );
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            None,
+            "nothing changed since"
+        );
+
+        renderer.adopt_surface_state(SurfaceState::NoSurface);
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default()),
+            "an episode ending publishes the empty ledger again"
+        );
+        assert!(!renderer.take_retained_refusal());
+        // Nothing to clear, and nothing to fail.
+        renderer.clear_retained();
+        assert_eq!(renderer.take_retained_ledger(), None);
+
+        renderer.on_surface_destroyed();
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default()),
+            "a surface destroy publishes the empty ledger, once"
+        );
+        assert_eq!(renderer.take_retained_ledger(), None);
+    }
+
+    /// A device-scale change clears the store and owes an EMPTY publish (even
+    /// over an already-empty store); the same scale again changes nothing.
+    #[test]
+    fn a_device_scale_change_clears_and_republishes_the_empty_ledger() {
+        let mut renderer = SurfaceRenderer::new();
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default())
+        );
+
+        assert!(renderer.note_device_scale(2.0), "the first scale noted");
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default()),
+            "a scale change publishes the empty ledger"
+        );
+
+        assert!(!renderer.note_device_scale(2.0), "same scale: a no-op");
+        assert_eq!(renderer.take_retained_ledger(), None, "and owes nothing");
+
+        assert!(renderer.note_device_scale(3.0));
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default())
+        );
+        assert_eq!(renderer.take_retained_ledger(), None);
+
+        // A surface episode ending is not a scale change: the scale survives
+        // it, so a recreate at the same scale owes nothing beyond the
+        // episode's own empty publish.
+        renderer.on_surface_destroyed();
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default())
+        );
+        assert!(!renderer.note_device_scale(3.0));
+        assert_eq!(renderer.take_retained_ledger(), None);
+    }
+
+    /// What `retained_ledger` reports for a live engine, on a real device: the
+    /// key a `PushRetained` body was recorded under, at the extent and scale
+    /// its rectangle covered.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn the_retained_ledger_reports_what_the_engine_holds() {
+        let _serialized = RENDER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        const SIZE: u32 = 64;
+        const KEY: u64 = 41;
+        let (device, queue, caps) = test_device();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = frust_gpu::HeadlessTarget::new(&device, SIZE, SIZE, format);
+        let mut engine = frust_engine::EngineRenderer::new(&device, &caps, format, None)
+            .expect("failed to create the engine renderer");
+
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            builder.push_transform(Affine::translate((8.0, 8.0)) * Affine::scale(2.0));
+            builder.push_retained(KEY, kurbo::Rect::new(0.0, 0.0, 16.0, 12.0), 0.5, 1.0);
+            builder.fill_rect(
+                kurbo::Rect::new(0.0, 0.0, 16.0, 12.0),
+                peniko::Brush::Solid(peniko::color::palette::css::RED),
+            );
+            builder.pop_retained();
+            builder.pop_transform();
+        }
+        assert!(resident_pages(&engine).pages.is_empty());
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        engine
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                &scene,
+                frust_engine::EngineTarget {
+                    view: target.view(),
+                    format,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: None,
+                    output: frust_engine::OutputAlpha::Premultiplied,
+                },
+                peniko::Color::BLACK,
+                Affine::IDENTITY,
+            )
+            .expect("the engine refused a retained frame");
+        queue.submit([encoder.finish()]);
+        engine.end_frame(&queue);
+
+        let resident = resident_pages(&engine);
+        assert_eq!(
+            resident.pages,
+            vec![ResidentPage {
+                key: KEY,
+                extent_px: (32, 24),
+                scale: 2.0,
+            }],
+            "the body's page is reported at its rasterized extent and scale"
+        );
+        assert_eq!(resident.frame, engine.retained_frame());
     }
 }

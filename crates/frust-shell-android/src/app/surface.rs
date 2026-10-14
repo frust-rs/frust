@@ -19,6 +19,7 @@ use ndk::native_window::NativeWindow;
 
 use super::AndroidAppHandle;
 use super::executor::FrameExecutor;
+use super::render::{note_scale, publish_ledger};
 
 /// Seed the two RESOLVED-translucency consumers at construction, before the
 /// first rebuild ([`AndroidAppHandle::new`]).
@@ -207,6 +208,14 @@ impl AndroidAppHandle {
         self.physical = physical;
         self.scale = density;
         self.window = Some(window);
+        // Inline only (the split does both render-side): the recreated
+        // engine starts with an empty retained store — publish its empty
+        // ledger before the next paint — and the surface may have come back at
+        // another density, which the renderer notes for the next resize.
+        if let FrameExecutor::Inline(inline) = &mut self.executor {
+            note_scale(&mut inline.renderer, sanitize_scale(density));
+            publish_ledger(&mut inline.renderer);
+        }
         // Surface (re)creation: force the next frame to run (and lay out at the
         // new dimensions) and open the gate's resume-warmup window — the first
         // ticks after a surface swap must not be gated away.
@@ -242,7 +251,11 @@ impl AndroidAppHandle {
             FrameExecutor::Inline(inline) => {
                 inline
                     .renderer
-                    .on_surface_changed(&inline.render_cx, physical.0, physical.1)
+                    .on_surface_changed(&inline.render_cx, physical.0, physical.1);
+                // A density change rides the same `surfaceChanged`: clear the
+                // retained store and publish its empty ledger before the next
+                // paint reads it.
+                note_scale(&mut inline.renderer, sanitize_scale(density));
             }
             FrameExecutor::Split(split) => split.resize(SurfaceSize {
                 width: physical.0,
@@ -379,7 +392,14 @@ impl AndroidAppHandle {
 
     pub(crate) fn destroy_surface(&mut self) {
         match &mut self.executor {
-            FrameExecutor::Inline(inline) => inline.renderer.on_surface_destroyed(),
+            FrameExecutor::Inline(inline) => {
+                inline.renderer.on_surface_destroyed();
+                // The torn-down engine's pages are gone: publish the empty
+                // ledger now, so the first paint after the surface comes back
+                // names none of them. (The split publishes render-side before
+                // acknowledging the barrier.)
+                publish_ledger(&mut inline.renderer);
+            }
             FrameExecutor::Split(split) => split.destroy_surface_barrier(),
         }
         // Barrier complete (split) / surface dropped (inline): releasing the
