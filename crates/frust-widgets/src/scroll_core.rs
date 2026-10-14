@@ -301,6 +301,26 @@ impl ScrollSurfaceCore {
         self.axis
     }
 
+    /// Follow a view's axis change on rebuild. Everything bound to the old
+    /// axis is dropped: the live gesture (drag accumulator, anchors, takeover,
+    /// claim and veto state), the velocity estimator, and any fling, settle or
+    /// simulation running along it. A pending controller command, the
+    /// installed physics and the callbacks survive. A no-op for an unchanged
+    /// axis.
+    pub(crate) fn set_axis(&mut self, axis: ScrollAxis) {
+        if self.axis == axis {
+            return;
+        }
+        self.axis = axis;
+        self.halt_motion();
+        self.reset_gesture();
+        self.edge_pull = 0.0;
+        self.carried_velocity = 0.0;
+        self.down_start = Point::ZERO;
+        self.last_drag = Point::ZERO;
+        self.tracker = VelocityTracker::new();
+    }
+
     /// Carry a view's physics and overscroll effect down on build/rebuild: a
     /// `.physics(...)`-carrying view reinstalls it every time (a trait object
     /// isn't comparable, so this never diffs), a view with no opinion

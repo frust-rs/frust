@@ -15,10 +15,16 @@
 //! acquires its own handle in [`View::build`] instead. Dropping a handle, or
 //! tearing down the widget holding it, withdraws its request.
 //!
-//! The binding is a scope the list opens around each row it builds or
-//! rebuilds: a handle binds to the innermost one, so a row of a list nested in
-//! another list's row binds to the nested list. Outside every list there is no
-//! scope, the handle is `None`, and `keep_alive` is inert.
+//! The binding is a scope that only [`sliver_list`](crate::sliver_list) opens
+//! around each row it builds or rebuilds. A `ListView`,
+//! `sliver_fixed_extent_list` or `sliver_grid` opens none, so a request inside
+//! one of their rows, nested in a `sliver_list` row, binds to the nearest
+//! enclosing `sliver_list` row and pins that whole row. Outside every
+//! `sliver_list` there is no scope, the handle is `None`, and `keep_alive` is
+//! inert.
+//!
+//! Parked rows are uncapped: memory grows with the rows scrolled past while
+//! they stay kept alive.
 //!
 //! # What the list does with it
 //!

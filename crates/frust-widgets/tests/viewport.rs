@@ -657,6 +657,45 @@ fn a_horizontal_viewport_scrolls_its_core_along_x_and_a_diagonal_drag_moves_by_x
     );
 }
 
+#[test]
+fn a_rebuild_that_changes_the_axis_carries_it_into_the_core() {
+    let horizontal = Rc::new(Cell::new(false));
+    let flag = Rc::clone(&horizontal);
+    let controller = ScrollController::new();
+    let c = controller.clone();
+    let mut h = Harness::new(Size::new(500.0, 400.0), move |_| {
+        let view = custom_scroll_view((
+            sliver_box(SizedBox::<()>(Some(300.0), Some(300.0))),
+            sliver_box(SizedBox::<()>(Some(300.0), Some(300.0))),
+            sliver_box(SizedBox::<()>(Some(300.0), Some(300.0))),
+        ))
+        .physics(Clamping::new())
+        .controller(c.clone());
+        any(if flag.get() {
+            view.axis(ScrollAxis::Horizontal)
+        } else {
+            view
+        })
+    });
+    assert_eq!(h.viewport().axis(), ScrollAxis::Vertical);
+    h.drag(Point::new(250.0, 350.0), Point::new(250.0, 150.0), 6);
+    h.frames(30);
+    assert!(controller.offset() > 100.0, "the vertical drag scrolled");
+
+    horizontal.set(true);
+    controller.jump_to(0.0);
+    h.frames(3);
+    assert_eq!(h.viewport().axis(), ScrollAxis::Horizontal);
+    assert_eq!(controller.offset(), 0.0);
+
+    h.drag(Point::new(250.0, 350.0), Point::new(250.0, 50.0), 6);
+    h.frames(30);
+    assert_eq!(controller.offset(), 0.0, "the old axis no longer scrolls");
+    h.drag(Point::new(450.0, 200.0), Point::new(250.0, 200.0), 6);
+    h.frames(30);
+    assert!(controller.offset() > 100.0, "the new axis scrolls");
+}
+
 // ---------------------------------------------------------------------------
 // (vi) Scrolling parity with ScrollView.
 // ---------------------------------------------------------------------------

@@ -4652,8 +4652,9 @@ only, with these gaps:
 - a horizontal viewport needs a bounded height;
 - `scroll_to_item` is ignored by `CustomScrollView` (item commands are list-only); a controller
   `animate_to` ignores a scroll-offset correction (absolute target, as in Flutter);
-- the shared core's axis is fixed, so a horizontal viewport swaps axes at its input boundary, and
-  `SliverConstraints` has no constructor (needed before it could become `#[non_exhaustive]`).
+- the shared core is built per axis and follows an axis change on rebuild; only the stretch
+  overscroll transform is still transposed for a horizontal viewport. `SliverConstraints` has no
+  constructor (needed before it could become `#[non_exhaustive]`).
 
 **Applies to**: apps composing a `custom_scroll_view` that need any behavior above.
 

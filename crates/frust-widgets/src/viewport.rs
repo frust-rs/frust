@@ -971,6 +971,7 @@ impl<State: 'static> View<State> for CustomScrollView<State> {
         let cache_extent = finite_extent(self.cache_extent);
         if element.axis != self.axis || element.cache_extent != cache_extent {
             element.axis = self.axis;
+            element.core.set_axis(self.axis);
             element.cache_extent = cache_extent;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
