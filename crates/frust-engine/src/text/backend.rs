@@ -64,8 +64,9 @@
 //! always lands on whole device pixels and each covered pixel samples exactly
 //! one slot texel. Such a glyph is a *glyph quad*: one rect instance whose
 //! payload names the atlas texel under its corner ([`GlyphQuad`]), painted by
-//! one record the whole run shares per atlas layer (its layer and tint), with
-//! coverage written directly as the rectangle it is.
+//! one record the whole run shares per atlas layer (its layer and tint), and
+//! no generated coverage at all outside an isolated layer
+//! ([`EngineGlyphSink::draw_quad`]).
 //!
 //! Only a run every glyph of which was already resident is drawn that way. A
 //! run that missed — rasterized a glyph into the atlas this frame — is drawn the
@@ -567,18 +568,20 @@ impl<'a> EngineGlyphSink<'a> {
         }
     }
 
-    /// Draw `glyph` as one [quad](GlyphQuad) trimmed to `window`: its
-    /// rectangle's coverage written directly, painted by the run's shared
-    /// record for its atlas layer and tint, and the quad itself — rectangle
-    /// and atlas texel — reported for the renderer's one rect instance.
+    /// Draw `glyph` as one [quad](GlyphQuad) trimmed to `window`: painted by
+    /// the run's shared record for its atlas layer and tint, and reported —
+    /// rectangle and atlas texel — for the renderer's one rect instance.
     ///
-    /// The coverage strips are the ones the general draw's flatten-and-tile of
-    /// the same whole-pixel rectangle produces — full inside, nothing outside —
-    /// written by the fast rectangle path instead; they keep the draw an
-    /// ordinary one to everything that reads strips (a layer's bounds among
-    /// them), while the renderer draws the quad from [`GlyphQuad`] alone.
-    /// Trimmed away entirely, the glyph records nothing and consumes no depth,
-    /// as the general draw does for a glyph clipped out of sight.
+    /// Outside every isolated layer the draw owns no coverage strips at all:
+    /// the renderer draws a quad from [`GlyphQuad`] alone, and generating the
+    /// rectangle's coverage only to have nothing read it was most of what a
+    /// quad would otherwise still cost. Inside one, the recorder folds each
+    /// draw's strip bounds into the layer's own bounds, which the layer's page
+    /// is sized from — so there the draw carries its rectangle's coverage,
+    /// written by the fast rectangle path: full inside, nothing outside, the
+    /// same pixels the general draw's flatten-and-tile of that rectangle
+    /// covers. Trimmed away entirely, the glyph records nothing and consumes no
+    /// depth, as the general draw does for a glyph clipped out of sight.
     fn draw_quad(&mut self, glyph: &PendingGlyphQuad, window: RectU16) {
         let Some([x0, y0, x1, y1]) = glyph.quad_rect() else {
             // Only candidates that are quads are ever held back.
@@ -594,20 +597,23 @@ impl<'a> EngineGlyphSink<'a> {
         }
         // Inside the window, which is inside the `u16` device grid.
         let narrow = |value: i64| u16::try_from(value).unwrap_or(u16::MAX);
-        let device = Rect::new(left as f64, top as f64, right as f64, bottom as f64);
 
         let start = self.frame.strips.strips.len();
-        let alpha_start = self.frame.strips.alphas.len();
-        // No mask: a run under one never collects (see this module's doc), and
-        // the scissor is already applied by the trim to `window`.
-        self.generator
-            .generate_filled_rect_fast(&device, &mut self.frame.strips, None);
-        let strip_range = start..self.frame.strips.strips.len();
-        if strip_range.len() < 2 {
-            self.frame.strips.strips.truncate(start);
-            self.frame.strips.alphas.truncate(alpha_start);
-            return;
+        if self.frame.recorder.has_layers() {
+            let alpha_start = self.frame.strips.alphas.len();
+            let device = Rect::new(left as f64, top as f64, right as f64, bottom as f64);
+            // No mask: a run under one never collects (see this module's
+            // doc), and the scissor is already applied by the trim.
+            self.generator
+                .generate_filled_rect_fast(&device, &mut self.frame.strips, None);
+            if self.frame.strips.strips.len() - start < 2 {
+                self.frame.strips.strips.truncate(start);
+                self.frame.strips.alphas.truncate(alpha_start);
+                return;
+            }
+            self.frame.fast_rect_draws = self.frame.fast_rect_draws.saturating_add(1);
         }
+        let strip_range = start..self.frame.strips.strips.len();
 
         let paint_index = self.run_record(glyph);
         let depth = self.depth.advance();
@@ -633,7 +639,6 @@ impl<'a> EngineGlyphSink<'a> {
             atlas_y: narrow(i64::from(slot.y) + (top - y0)),
         });
         self.note_atlas_draw(slot);
-        self.frame.fast_rect_draws = self.frame.fast_rect_draws.saturating_add(1);
     }
 
     /// The index of the record `glyph`'s run shares on `glyph`'s atlas layer

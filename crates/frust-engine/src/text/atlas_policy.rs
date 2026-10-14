@@ -797,9 +797,10 @@ impl RunKey {
     /// `crate::text::font_has_color_glyphs`) and would tie this module to a
     /// font parser it otherwise has no need of.
     ///
-    /// `seen` is scratch for the distinct-glyph count — a caller-owned set,
-    /// cleared here and reused across the runs of a walk, so counting a
-    /// ten-thousand-glyph run costs no allocation of its own.
+    /// `seen` is scratch for the distinct-glyph count — caller-owned, emptied
+    /// here and reused across the runs of a walk, so counting a
+    /// ten-thousand-glyph run costs no allocation of its own (see
+    /// [`DistinctGlyphs`]).
     #[must_use]
     pub(crate) fn for_run(
         run: &frust_scene::GlyphRun,
@@ -807,21 +808,52 @@ impl RunKey {
         hinted: bool,
         color_font: bool,
         context_color: AlphaColor<Srgb>,
-        seen: &mut HashSet<u32>,
+        seen: &mut impl DistinctGlyphs,
     ) -> Self {
         let font = run.font.font();
-        seen.clear();
-        seen.extend(run.glyphs.iter().map(|glyph| glyph.id));
+        let distinct = seen.count_distinct(run.glyphs.iter().map(|glyph| glyph.id));
         Self {
             font_id: font.data.id(),
             font_index: font.index,
             font_size: run.font_size,
-            distinct_glyphs: u32::try_from(seen.len()).unwrap_or(u32::MAX),
+            distinct_glyphs: u32::try_from(distinct).unwrap_or(u32::MAX),
             transform,
             hinted,
             color_font,
             context_color,
         }
+    }
+}
+
+/// Scratch a run's distinct glyph ids are counted in — what
+/// [`RunKey::for_run`] charges a run's admission at.
+///
+/// Counted once per run per frame, so the scratch is reused rather than
+/// allocated. The frame path counts in a `Vec`: sorting a run's ids and
+/// dropping repeats costs no hashing at all, and a run is a line or a label —
+/// tens of glyphs — where a sort beats rebuilding a hash set every time. A
+/// `HashSet` counts the same number, for a caller that already holds one.
+pub(crate) trait DistinctGlyphs {
+    /// How many distinct values `ids` holds; whatever the scratch held before
+    /// is discarded.
+    fn count_distinct(&mut self, ids: impl Iterator<Item = u32>) -> usize;
+}
+
+impl DistinctGlyphs for Vec<u32> {
+    fn count_distinct(&mut self, ids: impl Iterator<Item = u32>) -> usize {
+        self.clear();
+        self.extend(ids);
+        self.sort_unstable();
+        self.dedup();
+        self.len()
+    }
+}
+
+impl DistinctGlyphs for HashSet<u32> {
+    fn count_distinct(&mut self, ids: impl Iterator<Item = u32>) -> usize {
+        self.clear();
+        self.extend(ids);
+        self.len()
     }
 }
 
@@ -1630,6 +1662,35 @@ impl AtlasPolicy {
 #[must_use]
 fn pack_context_color(color: AlphaColor<Srgb>) -> u32 {
     color.premultiply().to_rgba8().to_u32()
+}
+
+#[cfg(test)]
+mod distinct_glyph_tests {
+    use super::*;
+
+    /// The sorting scratch the frame path counts in agrees with a set, run
+    /// after run, whatever the previous run left in it.
+    #[test]
+    fn the_sorting_scratch_counts_what_a_set_counts() {
+        let runs: [&[u32]; 5] = [
+            &[],
+            &[7],
+            &[5, 6, 7, 7, 8],
+            &[9, 9, 9, 9],
+            &[3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5],
+        ];
+        let mut sorted: Vec<u32> = Vec::new();
+        let mut set: HashSet<u32> = HashSet::new();
+        for ids in runs.iter().chain(runs.iter().rev()) {
+            let expected = ids.iter().collect::<HashSet<_>>().len();
+            assert_eq!(
+                sorted.count_distinct(ids.iter().copied()),
+                expected,
+                "{ids:?}"
+            );
+            assert_eq!(set.count_distinct(ids.iter().copied()), expected, "{ids:?}");
+        }
+    }
 }
 
 #[cfg(all(test, feature = "perf-trace"))]

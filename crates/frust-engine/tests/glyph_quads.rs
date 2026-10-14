@@ -391,6 +391,16 @@ fn quad_at(frame: &CompiledFrame, depth: u32) -> Option<&GlyphQuad> {
     frame.glyph_quads.iter().find(|quad| quad.depth == depth)
 }
 
+/// A quad's rectangle as `[x0, y0, x1, y1]`.
+fn quad_rect(quad: &GlyphQuad) -> [u32; 4] {
+    [
+        u32::from(quad.x),
+        u32::from(quad.y),
+        u32::from(quad.x) + u32::from(quad.width),
+        u32::from(quad.y) + u32::from(quad.height),
+    ]
+}
+
 // --- The premise: no fractional edge ever reaches a quad -------------------
 
 /// The proof a glyph quad needs no fractional edge coverage: on a settled
@@ -502,17 +512,13 @@ fn a_settled_run_draws_one_quad_per_inked_glyph_and_one_record_per_run() {
     assert_eq!(frame.draws().len(), 5);
     for draw in frame.draws() {
         assert!(matches!(draw.paint, Paint::Indexed(ref indexed) if indexed.index() == 0));
-        let quad = quad_at(&frame, draw.depth).expect("every draw of the run is a quad");
-        let rect = full_rect(&coverage(&frame, draw.strip_range.clone()))
-            .expect("a quad's strips are its rectangle at full coverage");
-        assert_eq!(
-            rect,
-            [
-                u32::from(quad.x),
-                u32::from(quad.y),
-                u32::from(quad.x) + u32::from(quad.width),
-                u32::from(quad.y) + u32::from(quad.height)
-            ]
+        assert!(
+            quad_at(&frame, draw.depth).is_some(),
+            "every draw of the run is a quad"
+        );
+        assert!(
+            draw.strip_range.is_empty(),
+            "outside a layer a quad generates no coverage"
         );
     }
     let depths: Vec<u32> = frame.glyph_quads.iter().map(|quad| quad.depth).collect();
@@ -520,7 +526,42 @@ fn a_settled_run_draws_one_quad_per_inked_glyph_and_one_record_per_run() {
         depths.windows(2).all(|pair| pair[0] < pair[1]),
         "in depth order"
     );
-    assert_eq!(frame.fast_rect_draws, 5);
+    assert_eq!(frame.fast_rect_draws, 0);
+    assert!(
+        frame.strip_buf().is_empty(),
+        "nothing in the frame generated strips"
+    );
+}
+
+#[test]
+fn a_quad_inside_a_layer_carries_its_rectangle_into_the_layer_bounds() {
+    let frame = settled(true, &placement_scene());
+    assert_eq!(frame.recorder.layers.len(), 1);
+    let bounds = frame.recorder.layers[0].bbox;
+    let mut inside = 0;
+    for draw in frame.draws() {
+        let Some(quad) = quad_at(&frame, draw.depth) else {
+            continue;
+        };
+        if draw.strip_range.is_empty() {
+            continue;
+        }
+        inside += 1;
+        let rect = full_rect(&coverage(&frame, draw.strip_range.clone()))
+            .expect("a quad's strips are its rectangle at full coverage");
+        assert_eq!(rect, quad_rect(quad));
+        assert!(
+            bounds.x0 <= quad.x
+                && bounds.y0 <= quad.y
+                && u32::from(bounds.x1) >= rect[2]
+                && u32::from(bounds.y1) >= rect[3],
+            "{quad:?} inside {bounds:?}"
+        );
+    }
+    assert_eq!(
+        inside, 7,
+        "the layer's run is drawn as quads, each with coverage"
+    );
 }
 
 #[test]
@@ -691,10 +732,15 @@ fn assert_lowerings_agree(name: &str, scene: &Scene) -> usize {
     for (index, (a, b)) in general.draws().iter().zip(quads.draws()).enumerate() {
         assert_eq!(a.depth, b.depth, "{name}: draw {index} depth");
         let general_cover = coverage(&general, a.strip_range.clone());
-        let quad_cover = coverage(&quads, b.strip_range.clone());
-        assert_eq!(general_cover, quad_cover, "{name}: draw {index} coverage");
+        let quad = quad_at(&quads, b.depth);
+        // A quad outside a layer generates no coverage; every other draw — a
+        // quad inside one included — covers exactly what the general one did.
+        if quad.is_none() || !b.strip_range.is_empty() {
+            let quad_cover = coverage(&quads, b.strip_range.clone());
+            assert_eq!(general_cover, quad_cover, "{name}: draw {index} coverage");
+        }
 
-        let Some(quad) = quad_at(&quads, b.depth) else {
+        let Some(quad) = quad else {
             // Not a quad: the same paint, though at a different index once an
             // earlier run's quads shared one record.
             let encoded = |frame: &CompiledFrame, paint: &Paint| match paint {
@@ -711,16 +757,7 @@ fn assert_lowerings_agree(name: &str, scene: &Scene) -> usize {
         let record = image_record(&general, &a.paint)
             .unwrap_or_else(|| panic!("{name}: draw {index} is an atlas glyph in both"));
         let rect = full_rect(&general_cover).expect("whole pixels");
-        assert_eq!(
-            rect,
-            [
-                u32::from(quad.x),
-                u32::from(quad.y),
-                u32::from(quad.x) + u32::from(quad.width),
-                u32::from(quad.y) + u32::from(quad.height)
-            ],
-            "{name}: draw {index} rectangle"
-        );
+        assert_eq!(rect, quad_rect(quad), "{name}: draw {index} rectangle");
         // Device x maps to image x by the record's inverse translation, then
         // into the atlas by the slot's offset.
         let [_, _, _, _, tx, ty] = record.transform.as_coeffs();

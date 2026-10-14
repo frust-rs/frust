@@ -58,7 +58,6 @@ pub use draw::{DepthCounter, EngineDraw};
 pub use external::{ExternalExtents, ExternalSkip};
 pub use layers::{GroupStack, LayerLowering, SnapshotStack};
 
-use std::collections::HashSet;
 use std::sync::Once;
 use std::time::Duration;
 
@@ -281,12 +280,13 @@ pub struct GlyphSlot {
 /// rect instance covers, and the atlas texel under that rectangle's top-left
 /// corner (see [`crate::text`]'s backend for when a glyph is one).
 ///
-/// The draw it belongs to is an ordinary [`EngineDraw`] — the run's shared
-/// record as its paint, the rectangle's own coverage as its strips — and is
-/// found by its painter-order depth, which no two draws of a frame share. The
-/// renderer draws the quad from this alone: one rect instance, no edge
-/// coverage (the rectangle lands on whole pixels), its payload this atlas
-/// texel.
+/// The draw it belongs to is an [`EngineDraw`] with the run's shared record as
+/// its paint, found by its painter-order depth, which no two draws of a frame
+/// share. Its strip range is empty unless the glyph was drawn inside an
+/// isolated layer, where it carries the rectangle's own coverage so the
+/// recorder can fold its bounds into the layer's: the renderer draws a quad
+/// from this alone — one rect instance, no edge coverage (the rectangle lands
+/// on whole pixels), its payload this atlas texel — and never from strips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlyphQuad {
     /// The depth of the draw this quad is.
@@ -429,7 +429,9 @@ pub struct CompiledFrame {
     /// atlas draw (see [`GlyphSlot`]).
     pub glyph_slots: Vec<GlyphSlot>,
     /// The frame's glyph quads, one per draw a fully resident glyph run drew
-    /// as one, in depth order (see [`GlyphQuad`]).
+    /// as one, in depth order (see [`GlyphQuad`]). A quad's draw is the one
+    /// kind of draw whose strip range may be empty: outside an isolated layer
+    /// nothing reads its coverage, so none is generated.
     ///
     /// A subset of [`atlas_glyph_draws`](Self::atlas_glyph_draws), and empty
     /// whenever quads are off (`FRUST_ENGINE_NO_GLYPH_QUADS`,
@@ -517,10 +519,11 @@ pub struct SceneCompiler {
     /// Scratch for the collect walk's distinct-glyph count, retained across
     /// runs and frames for its allocation alone. A run's admission is charged
     /// against the atlas budget at that count (see
-    /// [`crate::text::RunKey::distinct_glyphs`]), and counting it needs a set;
-    /// one owned here is one not allocated per run. It carries nothing between
-    /// calls — `RunKey::for_run` clears it before it counts.
-    run_glyph_ids: HashSet<u32>,
+    /// [`crate::text::RunKey::distinct_glyphs`]), counted by sorting the run's
+    /// ids and dropping repeats; one buffer owned here is one not allocated
+    /// per run. It carries nothing between calls — `RunKey::for_run` empties it
+    /// before it counts.
+    run_glyph_ids: Vec<u32>,
     /// Whether a glyph run resolved entirely out of the glyph atlas is drawn
     /// as glyph quads (see [`crate::text`]). On unless
     /// `FRUST_ENGINE_NO_GLYPH_QUADS` is set; [`Self::set_glyph_quads`] decides
@@ -638,7 +641,7 @@ impl SceneCompiler {
             glyphs: GlyphPrepCache::default(),
             run_routes: Vec::new(),
             next_run: 0,
-            run_glyph_ids: HashSet::new(),
+            run_glyph_ids: Vec::new(),
             glyph_quads: !config::glyph_quads_disabled(),
             glyph_quad_scratch: GlyphQuadScratch::default(),
             hint_text: false,
