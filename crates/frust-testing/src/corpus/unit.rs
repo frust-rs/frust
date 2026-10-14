@@ -1564,9 +1564,12 @@ mod tests {
     }
 
     /// Every `Command` variant a corpus case records, as `variant_name` spells
-    /// them. `DrawRetained` is deliberately absent: neither oracle retains
-    /// pages, so a corpus scene never records one (see
-    /// `no_corpus_case_records_a_draw_retained`).
+    /// them. `DrawRetained` is deliberately absent: a corpus case is one frame,
+    /// so no page can be resident when it is drawn, and the CPU oracle retains
+    /// nothing at all — so a corpus scene never records one (see
+    /// `no_corpus_case_records_a_draw_retained`). The engine's retained pages
+    /// are pinned across frames by `engine_goldens`'s `retained_parity` case
+    /// instead.
     const EVERY_VARIANT: &[&str] = &[
         "FillRect",
         "RoundedRect",
@@ -1621,7 +1624,7 @@ mod tests {
                     .commands()
                     .iter()
                     .any(|command| matches!(command, Command::DrawRetained { .. })),
-                "`{}` records a DrawRetained, which neither oracle can draw",
+                "`{}` records a DrawRetained, which no single-frame case can draw",
                 case.spec.name
             );
         }

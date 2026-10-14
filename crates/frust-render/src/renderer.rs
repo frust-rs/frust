@@ -319,6 +319,23 @@ pub struct ResidentPages {
     pub frame: u64,
 }
 
+/// `engine`'s retained store as the plain data a shell publishes — the one
+/// conversion [`SurfaceRenderer::retained_ledger`] makes, kept free so it is
+/// testable against a real engine with no surface in the loop.
+fn resident_pages(engine: &frust_engine::EngineRenderer) -> ResidentPages {
+    ResidentPages {
+        pages: engine
+            .retained_ledger()
+            .map(|entry| ResidentPage {
+                key: entry.key,
+                extent_px: entry.extent_px,
+                scale: entry.scale,
+            })
+            .collect(),
+        frame: engine.retained_frame(),
+    }
+}
+
 /// Where the first rendered frame's `submit` time went.
 ///
 /// The three parts partition the span: `encode` excludes `pipeline_wait`, and
@@ -542,17 +559,7 @@ impl SurfaceRenderer {
             return ResidentPages::default();
         };
         let TierBackend::Engine { engine, .. } = &ready.backend;
-        ResidentPages {
-            pages: engine
-                .retained_ledger()
-                .map(|entry| ResidentPage {
-                    key: entry.key,
-                    extent_px: entry.extent_px,
-                    scale: entry.scale,
-                })
-                .collect(),
-            frame: engine.retained_frame(),
-        }
+        resident_pages(engine)
     }
 
     /// [`Self::retained_ledger`], but only when it changed since the last call
@@ -1707,6 +1714,49 @@ fn log_engine_refusal(count: u32, error: &frust_engine::EngineError) {
 mod tests {
     use super::*;
 
+    /// Serializes every test in this binary that creates a GPU device, the
+    /// same guard the workspace's other GPU suites take: the NVIDIA Vulkan
+    /// driver serializes `vkDestroyDevice` against other Vulkan work on a
+    /// process-global mutex, and two tests tearing devices down at once
+    /// have deadlocked inside it. Poison is ignored deliberately — one
+    /// test's failure must not cascade into its siblings.
+    static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A device on the environment's adapter, with the limits production asks
+    /// for, and that adapter's capabilities.
+    fn test_device() -> (wgpu::Device, wgpu::Queue, frust_gpu::TierCaps) {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            // The environment-aware initializer, so `WGPU_ADAPTER_NAME` picks
+            // the GPU on a multi-adapter host instead of the run silently
+            // landing on whichever one enumerates first.
+            let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
+                .await
+                .expect("no compatible GPU adapter");
+            println!("frust-render engine arm adapter: {:?}", adapter.get_info());
+            let caps = frust_gpu::TierCaps::probe(&adapter);
+            // The limits production asks for, not the defaults, so the target
+            // this test builds is sized against the same ceiling
+            // `context::extent_within_limits` refuses on.
+            let limits = crate::context::effective_limits(
+                adapter.limits(),
+                crate::context::is_ios_simulator(),
+            );
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust-render engine arm test"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: limits,
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create device");
+            (device, queue, caps)
+        })
+    }
+
     #[test]
     fn starts_with_no_surface() {
         let renderer = SurfaceRenderer::new();
@@ -1873,49 +1923,13 @@ mod tests {
     #[test]
     #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
     fn engine_arm_records_a_frame_into_its_target_without_validation_errors() {
-        /// Serializes every test in this binary that creates a GPU device, the
-        /// same guard the workspace's other GPU suites take: the NVIDIA Vulkan
-        /// driver serializes `vkDestroyDevice` against other Vulkan work on a
-        /// process-global mutex, and two tests tearing devices down at once
-        /// have deadlocked inside it. Poison is ignored deliberately — one
-        /// test's failure must not cascade into its siblings.
-        static RENDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _serialized = RENDER_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         const SIZE: u32 = 64;
 
-        let (device, queue, caps) = pollster::block_on(async {
-            let instance = wgpu::Instance::new(
-                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-            );
-            // The environment-aware initializer, so `WGPU_ADAPTER_NAME` picks
-            // the GPU on a multi-adapter host instead of the run silently
-            // landing on whichever one enumerates first.
-            let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
-                .await
-                .expect("no compatible GPU adapter");
-            println!("frust-render engine arm adapter: {:?}", adapter.get_info());
-            let caps = frust_gpu::TierCaps::probe(&adapter);
-            // The limits production asks for, not the defaults, so the target
-            // this test builds is sized against the same ceiling
-            // `context::extent_within_limits` refuses on.
-            let limits = crate::context::effective_limits(
-                adapter.limits(),
-                crate::context::is_ios_simulator(),
-            );
-            let (device, queue) = adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some("frust-render engine arm test"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: limits,
-                    ..Default::default()
-                })
-                .await
-                .expect("failed to create device");
-            (device, queue, caps)
-        });
+        let (device, queue, caps) = test_device();
 
         let mut scene = frust_scene::Scene::new();
         {
@@ -1992,5 +2006,105 @@ mod tests {
                 "{format:?}: the target still holds its clear colour ({centre:?})"
             );
         }
+    }
+
+    /// The ledger a shell publishes, without a surface: empty, handed out once
+    /// by `take_retained_ledger` and not again until something changes — and a
+    /// surface episode starting or ending is such a change, so a fresh or
+    /// torn-down surface always publishes its empty ledger.
+    #[test]
+    fn the_retained_ledger_is_published_once_per_change_without_a_surface() {
+        let mut renderer = SurfaceRenderer::new();
+        assert_eq!(renderer.retained_ledger(), ResidentPages::default());
+
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default()),
+            "the first take always publishes"
+        );
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            None,
+            "nothing changed since"
+        );
+
+        renderer.adopt_surface_state(SurfaceState::NoSurface);
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default()),
+            "an episode ending publishes the empty ledger again"
+        );
+        assert!(!renderer.take_retained_refusal());
+        // Nothing to clear, and nothing to fail.
+        renderer.clear_retained();
+        assert_eq!(renderer.take_retained_ledger(), None);
+    }
+
+    /// What `retained_ledger` reports for a live engine, on a real device: the
+    /// key a `PushRetained` body was recorded under, at the extent and scale
+    /// its rectangle covered.
+    #[test]
+    #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+    fn the_retained_ledger_reports_what_the_engine_holds() {
+        let _serialized = RENDER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        const SIZE: u32 = 64;
+        const KEY: u64 = 41;
+        let (device, queue, caps) = test_device();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = frust_gpu::HeadlessTarget::new(&device, SIZE, SIZE, format);
+        let mut engine = frust_engine::EngineRenderer::new(&device, &caps, format, None)
+            .expect("failed to create the engine renderer");
+
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            builder.push_transform(Affine::translate((8.0, 8.0)) * Affine::scale(2.0));
+            builder.push_retained(KEY, kurbo::Rect::new(0.0, 0.0, 16.0, 12.0), 0.5, 1.0);
+            builder.fill_rect(
+                kurbo::Rect::new(0.0, 0.0, 16.0, 12.0),
+                peniko::Brush::Solid(peniko::color::palette::css::RED),
+            );
+            builder.pop_retained();
+            builder.pop_transform();
+        }
+        assert!(resident_pages(&engine).pages.is_empty());
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        engine
+            .encode(
+                &device,
+                &queue,
+                &mut encoder,
+                &scene,
+                frust_engine::EngineTarget {
+                    view: target.view(),
+                    format,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: None,
+                    output: frust_engine::OutputAlpha::Premultiplied,
+                },
+                peniko::Color::BLACK,
+                Affine::IDENTITY,
+            )
+            .expect("the engine refused a retained frame");
+        queue.submit([encoder.finish()]);
+        engine.end_frame(&queue);
+
+        let resident = resident_pages(&engine);
+        assert_eq!(
+            resident.pages,
+            vec![ResidentPage {
+                key: KEY,
+                extent_px: (32, 24),
+                scale: 2.0,
+            }],
+            "the body's page is reported at its rasterized extent and scale"
+        );
+        assert_eq!(resident.frame, engine.retained_frame());
     }
 }

@@ -321,3 +321,154 @@ async fn run_row_padding() {
         "a reused renderer must still render, got rgb=({r},{g},{b})"
     );
 }
+
+/// A retained page, on real hardware: frame N records a `PushRetained` body
+/// into a page, frame N+1 draws it back with `DrawRetained` at alpha 0.5 and
+/// presentation scale 0.9, and both frames are pixel-identical to the inline
+/// emulation `frust_scene` defines (the body under the scale correction inside
+/// a 0.5 layer) — the page holds the body exactly as the inline lowering
+/// rasterizes it and is composited 1:1. The ledger lists the key after frame N
+/// at the extent and scale it was rasterized at, and a `DrawRetained` naming a
+/// key the engine does not hold refuses the frame and empties the ledger.
+///
+/// Driven through `frust_engine::EngineRenderer` directly rather than
+/// `HeadlessRenderer`, because the claim spans frames of ONE renderer and
+/// reads that renderer's ledger between them — exactly what
+/// `SurfaceRenderer::submit` does for a surface, minus the swapchain.
+#[test]
+#[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
+fn retained_page_redraws_identically_to_the_inline_emulation() {
+    const KEY: u64 = 7;
+    const ALPHA: f32 = 0.5;
+    const SCALE: f64 = 0.9;
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+
+    let (device, queue, caps) = pollster::block_on(async {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
+            .await
+            .expect("no compatible GPU adapter");
+        println!("frust gpu_smoke retained adapter: {:?}", adapter.get_info());
+        let caps = frust_gpu::TierCaps::probe(&adapter);
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("frust-render gpu_smoke retained"),
+                required_features: wgpu::Features::empty(),
+                required_limits: frust_gpu::test_device_limits(&adapter, &caps),
+                ..Default::default()
+            })
+            .await
+            .expect("failed to create device");
+        (device, queue, caps)
+    });
+    let target = frust_gpu::HeadlessTarget::new(&device, SIZE, SIZE, format);
+    let mut engine = frust_engine::EngineRenderer::new(&device, &caps, format, None)
+        .expect("failed to create the engine renderer");
+    assert!(engine.retained_layers(), "a renderer retains by default");
+
+    // A 20x20 body in local space under a 2x device scale offset by (8, 8),
+    // with an opaque block, a half-alpha band over nothing and a bar.
+    let bracket = kurbo::Affine::translate((8.0, 8.0)) * kurbo::Affine::scale(2.0);
+    let rect = kurbo::Rect::new(0.0, 0.0, 20.0, 20.0);
+    let body = |builder: &mut SceneBuilder<'_>| {
+        builder.fill_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 10.0), Brush::Solid(RED));
+        builder.fill_rect(
+            kurbo::Rect::new(0.0, 10.0, 20.0, 15.0),
+            Brush::Solid(GREEN.with_alpha(0.5)),
+        );
+        builder.fill_rect(kurbo::Rect::new(5.0, 15.0, 15.0, 20.0), Brush::Solid(BLACK));
+    };
+    let frame = |middle: &dyn Fn(&mut SceneBuilder<'_>)| {
+        let mut scene = Scene::new();
+        let mut builder = SceneBuilder::new(&mut scene);
+        builder.fill_rect(
+            kurbo::Rect::new(0.0, 0.0, SIZE as f64, SIZE as f64),
+            Brush::Solid(BLUE),
+        );
+        builder.push_transform(bracket);
+        middle(&mut builder);
+        builder.pop_transform();
+        // Recorded after the bracket, so it lands on top of it.
+        builder.fill_rect(
+            kurbo::Rect::new(20.0, 20.0, 30.0, 30.0),
+            Brush::Solid(BLACK),
+        );
+        scene
+    };
+
+    let inline = frame(&|builder| {
+        builder.push_transform(kurbo::Affine::scale_about(SCALE, rect.center()));
+        builder.push_layer(rect, ALPHA);
+        body(builder);
+        builder.pop_layer();
+        builder.pop_transform();
+    });
+    let record = frame(&|builder| {
+        builder.push_retained(KEY, rect, ALPHA, SCALE);
+        body(builder);
+        builder.pop_retained();
+    });
+    let redraw = frame(&|builder| builder.draw_retained(KEY, rect, ALPHA, SCALE));
+    let missing = frame(&|builder| builder.draw_retained(KEY + 1, rect, ALPHA, SCALE));
+
+    let render = |engine: &mut frust_engine::EngineRenderer,
+                  scene: &Scene|
+     -> Result<Vec<u8>, frust_engine::EngineError> {
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let encoded = engine.encode(
+            &device,
+            &queue,
+            &mut encoder,
+            scene,
+            frust_engine::EngineTarget {
+                view: target.view(),
+                format,
+                width: SIZE,
+                height: SIZE,
+                depth: None,
+                output: frust_engine::OutputAlpha::Premultiplied,
+            },
+            peniko::Color::BLACK,
+            kurbo::Affine::IDENTITY,
+        );
+        queue.submit([encoder.finish()]);
+        engine.end_frame(&queue);
+        encoded.map(|()| target.read_back(&device, &queue))
+    };
+
+    let expected = render(&mut engine, &inline).expect("the inline frame renders");
+    let recorded = render(&mut engine, &record).expect("frame N renders");
+    let ledger: Vec<_> = engine.retained_ledger().collect();
+    assert_eq!(ledger.len(), 1, "frame N leaves its page resident");
+    assert_eq!(ledger[0].key, KEY);
+    assert_eq!(ledger[0].extent_px, (36, 36), "20 x 2 x 0.9 on each axis");
+    assert!((ledger[0].scale - 1.8).abs() < 1e-6, "{}", ledger[0].scale);
+
+    let redrawn = render(&mut engine, &redraw).expect("frame N+1 renders");
+    let differing =
+        |a: &[u8], b: &[u8]| a.chunks(4).zip(b.chunks(4)).filter(|(p, q)| p != q).count();
+    assert_eq!(
+        differing(&recorded, &expected),
+        0,
+        "the frame that records the page draws exactly the inline emulation"
+    );
+    assert_eq!(
+        differing(&redrawn, &expected),
+        0,
+        "the frame drawing the page back draws exactly the inline emulation"
+    );
+
+    let refused = render(&mut engine, &missing);
+    assert!(
+        matches!(
+            refused,
+            Err(frust_engine::EngineError::RetainedKeyMissing { key }) if key == KEY + 1
+        ),
+        "a DrawRetained of a key the engine does not hold refuses the frame: {:?}",
+        refused.map(|_| ())
+    );
+    assert_eq!(engine.retained_ledger().count(), 0, "and empties the store");
+    assert!(engine.take_retained_refusal());
+}
