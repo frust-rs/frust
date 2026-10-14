@@ -52,11 +52,14 @@ pub mod draw;
 
 pub mod external;
 
+pub(crate) mod parallel;
+
 pub use clear::ClearPunch;
 pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
 pub use external::{ExternalExtents, ExternalSkip};
 pub use layers::{GroupStack, LayerLowering, SnapshotStack};
+pub use parallel::{DEFAULT_PARALLEL_MIN_COST, DEFAULT_PARALLEL_WORKERS};
 
 /// The most glyph runs a compiler's resident-run cache remembers at once (see
 /// [`SceneCompiler::resident_glyph_run_count`]). A byte budget bounds the same
@@ -66,9 +69,7 @@ pub const MAX_RESIDENT_GLYPH_RUNS: usize = crate::text::atlas_policy::MAX_RESIDE
 use std::sync::Once;
 use std::time::Duration;
 
-use kurbo::{
-    Affine, BezPath, Cap, Join, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
-};
+use kurbo::{Affine, BezPath, Cap, Join, PathEl, Rect, RoundedRectRadii, Shape, Stroke};
 use peniko::{Brush, Color, Fill, ImageData};
 
 use frust_gpu::{SceneTextureId, TierCaps};
@@ -76,7 +77,6 @@ use frust_scene::{Command, CornerRadii, DashPattern, GlyphRun, PathStyle, Scene}
 
 use glifo::{GlyphAtlas, GlyphPrepCache, PendingClearRect};
 
-use vello_common::clip::PathDataRef;
 use vello_common::encode::EncodedPaint;
 use vello_common::fearless_simd::Level;
 use vello_common::geometry::RectU16;
@@ -89,11 +89,11 @@ use vello_common::util::is_axis_aligned;
 use crate::cache::images::{
     AtlasBudget, AtlasRegion, ImageResidency, ImageSkip, ImageUpload, is_mobile_tier,
 };
-use crate::compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
+use crate::compile::blur_rrect::encode_blurred_rounded_rect;
 use crate::compile::clear::StagedPunch;
-use crate::compile::cull::{generate_fill, generate_stroke, rounded_rect_elements};
 use crate::compile::external::encode_scene_texture;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
+use crate::compile::parallel::{Claim, Geometry, Merge, Pool};
 use crate::config;
 use crate::error::EngineError;
 use crate::text::{
@@ -206,7 +206,10 @@ impl PhaseClock {
 ///    the command walk itself: strip generation and paint encoding, and on a
 ///    text-heavy scene the bulk of the call. The part of it spent inside glyph
 ///    runs is reported separately by [`glyphs`](Self::glyphs), which is a
-///    subset of this rather than a phase of its own.
+///    subset of this rather than a phase of its own. It also carries the
+///    parallel walk's overhead: the planning pass that picks the shape
+///    commands helper threads generate, spawning the helpers and joining them
+///    (see the `parallel` module).
 /// 6. [`finish`](Self::finish) — closing open groups, generating the hole
 ///    punches, ageing the glyph atlas and taking the frame's image plan.
 ///
@@ -221,7 +224,8 @@ pub struct CompileSpans {
     pub classify: Duration,
     /// Glyph atlas admission, closing the routing pass.
     pub admit: Duration,
-    /// The command walk: strip generation and paint encoding.
+    /// The command walk: strip generation and paint encoding, with the
+    /// parallel walk's planning, spawn and join.
     pub walk: Duration,
     /// The part of [`walk`](Self::walk) spent inside glyph runs.
     ///
@@ -460,6 +464,16 @@ pub struct CompiledFrame {
     /// (`FRUST_ENGINE_NO_GLYPH_RUN_CACHE`, [`SceneCompiler::set_glyph_run_cache`])
     /// or quads are.
     pub resident_glyph_runs: u32,
+    /// How many of this frame's draws took strips a helper thread generated
+    /// rather than strips the walk generated itself (see the `parallel` module).
+    ///
+    /// Observational: a helper's run is byte-identical to the one the walk
+    /// would have generated, so nothing downstream tells the two apart. Zero
+    /// whenever the frame spawned no helper — one worker
+    /// (`FRUST_ENGINE_NO_PARALLEL`, [`SceneCompiler::set_parallel_workers`]),
+    /// planned work below [`SceneCompiler::parallel_min_cost`], or a walk that
+    /// reached every planned command before a helper did.
+    pub parallel_draws: u32,
     /// Atlas rectangles freed by the *previous* frame's glyph eviction, to be
     /// zeroed before this frame writes anything into the array.
     ///
@@ -509,6 +523,22 @@ impl CompiledFrame {
 #[derive(Debug)]
 pub struct SceneCompiler {
     generator: StripGenerator,
+    /// The SIMD level the walk's generator was built at, so a helper's
+    /// generator is built at the same one (see [`parallel`]).
+    level: Level,
+    /// How many threads generate a frame's strips, the calling thread
+    /// included; one is the sequential walk. Starts at
+    /// [`parallel::default_workers`]; [`Self::set_parallel_workers`] decides
+    /// it per compiler.
+    parallel_workers: usize,
+    /// The estimated cost a frame's planned helper work must reach before a
+    /// helper is spawned for it (see [`DEFAULT_PARALLEL_MIN_COST`]). Starts at
+    /// that default, or `FRUST_ENGINE_PARALLEL_MIN_COST`;
+    /// [`Self::set_parallel_min_cost`] decides it per compiler.
+    parallel_min_cost: u64,
+    /// The helpers' generators and the per-job slots their runs wait in,
+    /// retained across frames for their allocations alone.
+    pool: Pool,
     clips: ClipStack,
     groups: GroupStack,
     snapshots: SnapshotStack,
@@ -676,6 +706,42 @@ impl SceneCompiler {
         self.glyph_atlas.resident_runs()
     }
 
+    /// Set how many threads generate a frame's strips, the calling thread
+    /// included (see the `parallel` module). One — or zero, read as one — is the
+    /// sequential walk: no planning pass, no helper thread.
+    ///
+    /// The per-compiler counterpart of `FRUST_ENGINE_NO_PARALLEL`, on the same
+    /// terms as [`Self::set_glyph_quads`]: the variable sets the value a
+    /// compiler starts with ([`DEFAULT_PARALLEL_WORKERS`] capped by the
+    /// machine, or one with it set), this decides it for one compiler. Takes
+    /// effect from the next frame. The frame a compiler produces is the same
+    /// at every setting.
+    pub fn set_parallel_workers(&mut self, workers: usize) {
+        self.parallel_workers = workers.max(1);
+    }
+
+    /// How many threads generate a frame's strips, the calling thread
+    /// included.
+    #[must_use]
+    pub fn parallel_workers(&self) -> usize {
+        self.parallel_workers
+    }
+
+    /// Set the estimated cost a frame's planned helper work must reach before
+    /// a helper is spawned for it (see [`DEFAULT_PARALLEL_MIN_COST`] for the
+    /// unit). Zero spawns for any frame with a single planned command, which
+    /// is how a test drives the helpers over a scene too small to earn them.
+    pub fn set_parallel_min_cost(&mut self, cost: u64) {
+        self.parallel_min_cost = cost;
+    }
+
+    /// The estimated cost a frame's planned work must reach before a helper
+    /// is spawned.
+    #[must_use]
+    pub fn parallel_min_cost(&self) -> u64 {
+        self.parallel_min_cost
+    }
+
     /// A compiler sized for a `width` x `height` viewport, with image
     /// residency budgeted explicitly.
     pub fn with_atlas_budget(width: u16, height: u16, budget: AtlasBudget) -> Self {
@@ -683,6 +749,10 @@ impl SceneCompiler {
         let images = ImageResidency::new(budget);
         Self {
             generator: StripGenerator::new(width, height, level),
+            level,
+            parallel_workers: parallel::default_workers(),
+            parallel_min_cost: config::parallel_min_cost().unwrap_or(DEFAULT_PARALLEL_MIN_COST),
+            pool: Pool::default(),
             clips: ClipStack::new(),
             groups: GroupStack::new(),
             snapshots: SnapshotStack::new(),
@@ -970,13 +1040,42 @@ impl SceneCompiler {
             glyph_quads: Vec::new(),
             glyph_run_paints: Vec::new(),
             resident_glyph_runs: 0,
+            parallel_draws: 0,
             glyph_clears,
             compile_spans: CompileSpans::default(),
         };
         let mut depth = DepthCounter::new();
 
-        for command in scene.commands() {
-            self.compile_command(command, root, &mut frame, &mut depth);
+        // The walk proper, with its shape commands' strips generated by
+        // helper threads behind it whenever the plan earns one (see
+        // [`parallel`]). Planned and spawned inside the walk's lap, and the
+        // helpers joined before it closes, so the parallel walk's overhead is
+        // charged to the phase it shortens.
+        let helpers = self.parallel_workers.saturating_sub(1);
+        let plan = if helpers > 0 {
+            parallel::plan(
+                scene,
+                root,
+                Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+            )
+        } else {
+            parallel::Plan::default()
+        };
+        if helpers > 0 && !plan.is_empty() && plan.cost() >= self.parallel_min_cost {
+            // Moved out for the walk's duration: the helpers borrow it while
+            // the walk borrows the compiler.
+            let mut pool = std::mem::take(&mut self.pool);
+            let level = self.level;
+            pool.run(&plan, helpers, level, (width, height), |merge| {
+                for (index, command) in scene.commands().iter().enumerate() {
+                    self.compile_command(index, command, root, &mut frame, &mut depth, Some(merge));
+                }
+            });
+            self.pool = pool;
+        } else {
+            for (index, command) in scene.commands().iter().enumerate() {
+                self.compile_command(index, command, root, &mut frame, &mut depth, None);
+            }
         }
         let walk = clock.lap();
 
@@ -1025,16 +1124,24 @@ impl SceneCompiler {
 
     fn compile_command(
         &mut self,
+        index: usize,
         command: &Command,
         root: Affine,
         frame: &mut CompiledFrame,
         depth: &mut DepthCounter,
+        merge: Option<&Merge<'_, '_>>,
     ) {
         // The frame root with any open snapshot bracket's presentation scale
         // composed ahead of it (see [`layers`]). The identity outside a
         // bracket, so this is the plain frame root for every frame that
         // records none.
         let combined = root * self.snapshots.correction();
+
+        // Claimed for every command, drawn or not, ahead of every early return
+        // below: claiming is what moves the walk's position past a planned
+        // command, which is what stops a helper from starting work the walk
+        // has already gone by (see [`parallel`]).
+        let claim = merge.and_then(|merge| merge.claim(index, combined));
 
         // Taken here rather than inside the glyph arm, and taken for every
         // glyph run whether or not it goes on to be drawn: the collect walk
@@ -1086,164 +1193,30 @@ impl SceneCompiler {
         }
 
         match command {
+            // A shape is its geometry's coverage under its brush; the
+            // geometry is resolved by the one function a helper resolves it by
+            // too, so a helper's run and the walk's own can never differ.
             Command::FillRect {
-                rect,
-                brush,
-                transform,
+                brush, transform, ..
+            }
+            | Command::RoundedRect {
+                brush, transform, ..
+            }
+            | Command::Line {
+                brush, transform, ..
+            }
+            | Command::Path {
+                brush, transform, ..
             } => {
-                let transform = combined * *transform;
-
-                if let Some(device_rect) = fast_rect(*rect, transform) {
-                    let recorded = self.record(
+                if let Some(geometry) = Geometry::of(command, combined) {
+                    self.draw_shape(
                         frame,
                         depth,
                         PaintSource::Brush(brush),
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_rect_fast(&device_rect, storage, clip);
-                        },
+                        combined * *transform,
+                        geometry,
+                        claim,
                     );
-                    if recorded {
-                        frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
-                    }
-                } else {
-                    self.record(
-                        frame,
-                        depth,
-                        PaintSource::Brush(brush),
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_path(
-                                rect.path_elements(FLATTEN_TOLERANCE),
-                                Fill::NonZero,
-                                transform,
-                                None,
-                                storage,
-                                clip,
-                            );
-                        },
-                    );
-                }
-            }
-            Command::RoundedRect {
-                rect,
-                radii,
-                brush,
-                transform,
-            } => {
-                let transform = combined * *transform;
-                let shape = RoundedRect::from_rect(*rect, rounded_rect_radii(*radii));
-
-                self.record(
-                    frame,
-                    depth,
-                    PaintSource::Brush(brush),
-                    transform,
-                    |generator, storage, clip| {
-                        generate_fill(
-                            generator,
-                            rounded_rect_elements(&shape),
-                            transform,
-                            storage,
-                            clip,
-                        );
-                    },
-                );
-            }
-            Command::Line {
-                p0,
-                p1,
-                width,
-                brush,
-                transform,
-            } => {
-                let transform = combined * *transform;
-                // The two elements `kurbo::Line::path_elements` yields, spelled
-                // out so the stroke helper can walk them twice.
-                let line = [PathEl::MoveTo(*p0), PathEl::LineTo(*p1)];
-                let stroke = round_stroke(*width);
-
-                self.record(
-                    frame,
-                    depth,
-                    PaintSource::Brush(brush),
-                    transform,
-                    |generator, storage, clip| {
-                        generate_stroke(generator, line, &stroke, transform, storage, clip);
-                    },
-                );
-            }
-            Command::Path {
-                path,
-                style,
-                brush,
-                transform,
-            } => {
-                let transform = combined * *transform;
-
-                match style {
-                    PathStyle::Fill => {
-                        self.record(
-                            frame,
-                            depth,
-                            PaintSource::Brush(brush),
-                            transform,
-                            |generator, storage, clip| {
-                                generate_fill(generator, path.iter(), transform, storage, clip);
-                            },
-                        );
-                    }
-                    PathStyle::Stroke { width, dash } => {
-                        let stroke = round_stroke(*width);
-                        // A dash pattern is expanded into its own sub-paths
-                        // before the stroker runs, the same lowering the
-                        // display list's other consumers apply: the pattern
-                        // never reaches a backend's own dash support, so every
-                        // rasterizer sees the identical geometry.
-                        let dashed = match dash {
-                            Some(dash) if dash.is_effective() => Some(dash_path(path, *dash)),
-                            _ => None,
-                        };
-
-                        match &dashed {
-                            Some(dashed) => {
-                                self.record(
-                                    frame,
-                                    depth,
-                                    PaintSource::Brush(brush),
-                                    transform,
-                                    |generator, storage, clip| {
-                                        generate_stroke(
-                                            generator,
-                                            dashed.iter(),
-                                            &stroke,
-                                            transform,
-                                            storage,
-                                            clip,
-                                        );
-                                    },
-                                );
-                            }
-                            None => {
-                                self.record(
-                                    frame,
-                                    depth,
-                                    PaintSource::Brush(brush),
-                                    transform,
-                                    |generator, storage, clip| {
-                                        generate_stroke(
-                                            generator,
-                                            path.iter(),
-                                            &stroke,
-                                            transform,
-                                            storage,
-                                            clip,
-                                        );
-                                    },
-                                );
-                            }
-                        }
-                    }
                 }
             }
             Command::PushClip { rect, transform } => {
@@ -1314,49 +1287,24 @@ impl SceneCompiler {
                     self.close_group(frame);
                 }
             }
+            // An image is its destination rectangle's coverage under an image
+            // paint — the same two rectangle paths a solid fill takes, so a
+            // pixel-aligned image costs no flattening either.
             Command::Image {
                 data,
                 dest,
                 transform,
             } => {
-                let transform = combined * *transform;
-                let source = PaintSource::Image { data, dest: *dest };
-
-                // An image is its destination rectangle's coverage under an
-                // image paint — the same two rectangle paths a solid fill
-                // takes, so a pixel-aligned image costs no flattening either.
-                if let Some(device_rect) = fast_rect(*dest, transform) {
-                    let recorded = self.record(
-                        frame,
-                        depth,
-                        source,
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_rect_fast(&device_rect, storage, clip);
-                        },
-                    );
-                    if recorded {
-                        frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
-                    }
-                } else {
-                    self.record(
-                        frame,
-                        depth,
-                        source,
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_path(
-                                dest.path_elements(FLATTEN_TOLERANCE),
-                                Fill::NonZero,
-                                transform,
-                                None,
-                                storage,
-                                clip,
-                            );
-                        },
-                    );
+                if let Some(geometry) = Geometry::of(command, combined) {
+                    let source = PaintSource::Image { data, dest: *dest };
+                    self.draw_shape(frame, depth, source, combined * *transform, geometry, claim);
                 }
             }
+            // The strip generator rasterizes the padded bounding rectangle,
+            // not `rect` itself and not a rounded shape — see [`blur_rrect`]'s
+            // module doc for why. It takes the same fast rectangle path a fill
+            // or an image does whenever that padded rectangle lands
+            // pixel-aligned under the composed transform.
             Command::BlurredRoundedRect {
                 rect,
                 radii,
@@ -1364,50 +1312,14 @@ impl SceneCompiler {
                 color,
                 transform,
             } => {
-                let transform = combined * *transform;
-                let source = PaintSource::BlurredRect {
-                    rect: *rect,
-                    radii: *radii,
-                    std_dev: *std_dev,
-                    color: *color,
-                };
-                // The strip generator rasterizes the padded bounding
-                // rectangle, not `rect` itself and not a rounded shape — see
-                // [`blur_rrect`]'s module doc for why. It takes the same fast
-                // rectangle path a fill or an image does whenever that padded
-                // rectangle lands pixel-aligned under `transform`.
-                let bounds = inflated_bounds(*rect, *std_dev);
-
-                if let Some(device_rect) = fast_rect(bounds, transform) {
-                    let recorded = self.record(
-                        frame,
-                        depth,
-                        source,
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_rect_fast(&device_rect, storage, clip);
-                        },
-                    );
-                    if recorded {
-                        frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
-                    }
-                } else {
-                    self.record(
-                        frame,
-                        depth,
-                        source,
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_path(
-                                bounds.path_elements(FLATTEN_TOLERANCE),
-                                Fill::NonZero,
-                                transform,
-                                None,
-                                storage,
-                                clip,
-                            );
-                        },
-                    );
+                if let Some(geometry) = Geometry::of(command, combined) {
+                    let source = PaintSource::BlurredRect {
+                        rect: *rect,
+                        radii: *radii,
+                        std_dev: *std_dev,
+                        color: *color,
+                    };
+                    self.draw_shape(frame, depth, source, combined * *transform, geometry, claim);
                 }
             }
             Command::GlyphRun(run) => {
@@ -1482,38 +1394,8 @@ impl SceneCompiler {
         depth: &mut DepthCounter,
     ) {
         let source = PaintSource::SceneTexture { id, dest };
-
-        if let Some(device_rect) = fast_rect(dest, transform) {
-            let recorded = self.record(
-                frame,
-                depth,
-                source,
-                transform,
-                |generator, storage, clip| {
-                    generator.generate_filled_rect_fast(&device_rect, storage, clip);
-                },
-            );
-            if recorded {
-                frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
-            }
-        } else {
-            self.record(
-                frame,
-                depth,
-                source,
-                transform,
-                |generator, storage, clip| {
-                    generator.generate_filled_path(
-                        dest.path_elements(FLATTEN_TOLERANCE),
-                        Fill::NonZero,
-                        transform,
-                        None,
-                        storage,
-                        clip,
-                    );
-                },
-            );
-        }
+        let geometry = Geometry::rect(dest, transform);
+        self.draw_shape(frame, depth, source, transform, geometry, None);
     }
 
     /// Route every glyph run the scene records, in recording order.
@@ -1838,14 +1720,37 @@ impl SceneCompiler {
         }
     }
 
-    /// Run `generate` under the active clip, then record whatever strips
+    /// [`record`](Self::record) `geometry`, counting the draw as a fast
+    /// rectangle when it took that path (see [`fast_rect`]).
+    fn draw_shape(
+        &mut self,
+        frame: &mut CompiledFrame,
+        depth: &mut DepthCounter,
+        source: PaintSource<'_>,
+        transform: Affine,
+        geometry: Geometry<'_>,
+        claim: Option<Claim<'_>>,
+    ) {
+        let fast = geometry.is_fast_rect();
+        if self.record(frame, depth, source, transform, geometry, claim) && fast {
+            frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
+        }
+    }
+
+    /// Generate `geometry` under the active clip, then record whatever strips
     /// survived as one draw painted from `source` under `transform`.
     ///
-    /// `generate` is handed the clip stack's coverage mask to pass on to the
-    /// strip generator, which is what intersects a mask clip while the draw's
-    /// own coverage is produced; the scissor is applied afterwards, to the run
-    /// the generator appended. A scissor admitting nothing skips generation
-    /// entirely rather than generating coverage to throw away.
+    /// The clip stack's coverage mask is handed to the strip generator, which
+    /// is what intersects a mask clip while the draw's own coverage is
+    /// produced; the scissor is applied afterwards, to the run the generator
+    /// appended. A scissor admitting nothing skips generation entirely rather
+    /// than generating coverage to throw away.
+    ///
+    /// `claim` is the command's helper-generated run, when one was planned
+    /// (see [`parallel`]). It stands in for generating only while no mask is
+    /// open — a helper generates unclipped — and only when a helper actually
+    /// got to it; otherwise the run is generated here exactly as it would be
+    /// without one. Everything after generation is the same either way.
     ///
     /// Returns whether a draw was recorded. A generator call that produced no
     /// strips (fully culled, clipped away, degenerate, or empty geometry)
@@ -1858,24 +1763,27 @@ impl SceneCompiler {
     /// atlas refuses arrives *after* that point, so its coverage is rolled back
     /// to where the generator started rather than left behind as strips no draw
     /// references.
-    fn record<F>(
+    fn record(
         &mut self,
         frame: &mut CompiledFrame,
         depth: &mut DepthCounter,
         source: PaintSource<'_>,
         transform: Affine,
-        generate: F,
-    ) -> bool
-    where
-        F: FnOnce(&mut StripGenerator, &mut StripStorage, Option<PathDataRef<'_>>),
-    {
+        geometry: Geometry<'_>,
+        claim: Option<Claim<'_>>,
+    ) -> bool {
         if self.clips.blocks_everything() {
             return false;
         }
 
         let start = frame.strips.strips.len();
         let alpha_start = frame.strips.alphas.len();
-        generate(&mut self.generator, &mut frame.strips, self.clips.mask());
+        let mask = self.clips.mask();
+        let merged =
+            mask.is_none() && claim.is_some_and(|claim| claim.append_to(&mut frame.strips));
+        if !merged {
+            geometry.generate(&mut self.generator, &mut frame.strips, mask);
+        }
         self.clips.clip_run(&mut frame.strips, start, alpha_start);
         let strip_range = start..frame.strips.strips.len();
 
@@ -1912,6 +1820,9 @@ impl SceneCompiler {
         frame
             .recorder
             .push_draw(draw, &frame.strips.strips[strip_range]);
+        if merged {
+            frame.parallel_draws = frame.parallel_draws.saturating_add(1);
+        }
         true
     }
 
