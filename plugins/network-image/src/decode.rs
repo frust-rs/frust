@@ -64,20 +64,27 @@ pub enum DecodeError {
 /// before any pixel is decoded, and `image`'s own [`image::Limits`] are set
 /// from the same values as a safety net.
 ///
-/// `max_alloc_bytes` is the budget for one decode-and-fit's peak transient
-/// allocation, estimated from the header: the native decoded bytes plus either
-/// the RGBA copy (no resize) or the resize working set (an `f32` RGBA
-/// intermediate of source width x pass height x 16 bytes, plus the pass
-/// output). The default (8192 px per side, 512 MiB) admits an 8192x8192 RGBA8
-/// image with no resize, or a 48 MP photo fitted to a phone-sized target. The
-/// bound is per decode; concurrent decodes add up.
+/// `max_alloc_bytes` budgets the decode-and-fit working set the header can
+/// predict: the native decoded bytes plus either the RGBA copy (no resize) or
+/// the resize working set (an `f32` RGBA intermediate of source width x pass
+/// height x 16 bytes, plus the pass output). The default (8192 px per side,
+/// 512 MiB) admits an 8192x8192 RGBA8 image with no resize, or a 48 MP photo
+/// fitted to a phone-sized target of about 1440 px. The bound is per decode;
+/// concurrent decodes add up.
+///
+/// The decoder's own scratch is outside both this estimate and
+/// [`image::Limits`]. The worst case is a progressive JPEG, which keeps the
+/// whole image's coefficients while decoding (about 6 bytes per pixel for
+/// 4:4:4, 3 for 4:2:0 and 8 for CMYK) on top of the native bitmap, so such an
+/// image can exceed the estimate by up to about three times its native size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecodeLimits {
     /// Maximum declared width in pixels (default 8192).
     pub max_width: u32,
     /// Maximum declared height in pixels (default 8192).
     pub max_height: u32,
-    /// Peak decode-and-fit allocation budget in bytes (default 512 MiB).
+    /// Decode-and-fit allocation budget in bytes (default 512 MiB); see the
+    /// type docs for what the header-derived estimate excludes.
     pub max_alloc_bytes: u64,
 }
 
@@ -188,7 +195,9 @@ pub(crate) fn decode_and_fit(
     lim.max_alloc = Some(limits.max_alloc_bytes);
     reader.limits(lim);
     let mut img = reader.decode().map_err(|e| match e {
-        image::ImageError::Limits(_) => over_budget(peak_estimate(dw, dh, native_bpp, None)),
+        // Backstop for the decoder's own cap; the pre-check above normally
+        // rejects first, so report the same estimate it compared.
+        image::ImageError::Limits(_) => over_budget(estimate),
         e => DecodeError::Decode(e.to_string()),
     })?;
     if let Some((nw, nh, scale)) = target.and_then(|t| fit_dims(img.width(), img.height(), t)) {
