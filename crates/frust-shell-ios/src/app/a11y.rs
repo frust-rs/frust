@@ -50,8 +50,9 @@ impl IosAppHandle {
             return; // tree unchanged since the last push
         };
         let current_gen = self.app.semantics_generation();
+        let scale = self.display_scale();
         if let Some(a11y) = self.a11y.as_mut() {
-            a11y.publish(update, current_gen);
+            a11y.publish(update, current_gen, scale);
         }
     }
 }

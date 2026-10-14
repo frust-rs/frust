@@ -39,17 +39,41 @@ use frust_render::SurfacePhase;
 ///   is focused, since accesskit's `focus` is non-optional).
 ///
 /// `nodes` is moved through unchanged — our semantics pass already produces the
-/// exact `Vec<(NodeId, Node)>` shape `TreeUpdate` wants.
+/// exact `Vec<(NodeId, Node)>` shape `TreeUpdate` wants — except for the root's
+/// transform.
+///
+/// # Coordinate contract
+///
+/// Semantics bounds are **logical px** (= points on iOS), but `accesskit_ios`
+/// divides bounds by the view's `contentScaleFactor` and multiplies hit-test
+/// points by it, so it defines the tree space as **physical px**. The
+/// conversion is one `Affine::scale(scale)` transform on the root: accesskit
+/// applies ancestor transforms to every descendant's bounding box and
+/// `accesskit_ios` inverts it for hit-testing. Raw node bounds stay logical.
+/// At `scale == 1.0` (or with no root in `nodes`) nothing is touched.
 pub(crate) fn build_tree_update(
-    nodes: Vec<(NodeId, Node)>,
+    mut nodes: Vec<(NodeId, Node)>,
     root: NodeId,
     focus: NodeId,
+    scale: f64,
 ) -> TreeUpdate {
+    apply_root_scale(&mut nodes, root, scale);
     TreeUpdate {
         nodes,
         tree: Some(Tree::new(root)),
         tree_id: TreeId::ROOT,
         focus,
+    }
+}
+
+/// Set the root node's transform to the display scale (no-op at 1.0 or when the
+/// root is absent).
+fn apply_root_scale(nodes: &mut [(NodeId, Node)], root: NodeId, scale: f64) {
+    if scale == 1.0 {
+        return;
+    }
+    if let Some((_, node)) = nodes.iter_mut().find(|(id, _)| *id == root) {
+        node.set_transform(accesskit::Affine::scale(scale));
     }
 }
 
@@ -944,7 +968,7 @@ mod tests {
             (button, Node::new(Role::Button)),
             (root, Node::new(Role::Window)),
         ];
-        let update = build_tree_update(nodes, root, button);
+        let update = build_tree_update(nodes, root, button, 1.0);
         // A full-tree update MUST carry `tree` metadata rooted at `root`.
         assert_eq!(update.tree, Some(Tree::new(root)));
         // Single root tree — no subtrees.
@@ -965,8 +989,43 @@ mod tests {
         use accesskit::Role;
         let root = NodeId(1);
         let nodes = vec![(root, Node::new(Role::Window))];
-        let update = build_tree_update(nodes, root, root);
+        let update = build_tree_update(nodes, root, root, 1.0);
         assert_eq!(update.focus, root);
+    }
+
+    fn scaled_update(scale: f64) -> TreeUpdate {
+        use accesskit::{Rect, Role};
+        let (root, button) = (NodeId(1), NodeId(2));
+        let mut root_node = Node::new(Role::Window);
+        root_node.set_bounds(Rect::new(0.0, 0.0, 375.0, 667.0));
+        let mut button_node = Node::new(Role::Button);
+        button_node.set_bounds(Rect::new(312.0, 587.0, 374.0, 667.0));
+        let nodes = vec![(root, root_node), (button, button_node)];
+        build_tree_update(nodes, root, button, scale)
+    }
+
+    #[test]
+    fn tree_update_scales_the_root_transform_by_the_display_scale() {
+        use accesskit::{Affine, Rect};
+        for scale in [2.0, 3.0] {
+            let update = scaled_update(scale);
+            assert_eq!(update.nodes[0].1.transform(), Some(&Affine::scale(scale)));
+            assert_eq!(update.nodes[1].1.transform(), None);
+            assert_eq!(
+                update.nodes[1].1.bounds(),
+                Some(Rect::new(312.0, 587.0, 374.0, 667.0))
+            );
+        }
+        // 1x stays byte-identical: no transform anywhere.
+        assert_eq!(scaled_update(1.0).nodes[0].1.transform(), None);
+        // A node list without the root must not panic.
+        let update = build_tree_update(
+            vec![(NodeId(2), Node::new(accesskit::Role::Button))],
+            NodeId(1),
+            NodeId(1),
+            2.0,
+        );
+        assert_eq!(update.nodes[0].1.transform(), None);
     }
 
     #[test]
@@ -974,7 +1033,7 @@ mod tests {
         // A bare (unbuilt) tree still assembles a valid update — the adapter push
         // must never panic on an empty semantics pass.
         let root = NodeId(1);
-        let update = build_tree_update(Vec::new(), root, root);
+        let update = build_tree_update(Vec::new(), root, root, 2.0);
         assert!(update.nodes.is_empty());
         assert_eq!(update.tree, Some(Tree::new(root)));
     }

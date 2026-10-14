@@ -27,6 +27,12 @@
 //! accesskit_ios enforces main-thread-ness
 //! only via a one-time runtime `MainThreadMarker` panic in the adapter constructor,
 //! not compile-time typestate, so this is a documented contract.
+//!
+//! # Coordinates
+//!
+//! `accesskit_ios` treats the tree's space as the host view's physical pixels, while
+//! frust's semantics bounds are logical px (= points on iOS), so the tree is
+//! published in physical px via a root transform equal to the display scale.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -195,9 +201,10 @@ impl IosA11yAdapter {
     /// recorded so the next `publish_semantics` can gate again. The
     /// `QueuedEvents` is raised immediately: we are on the main thread and hold
     /// no app-tree borrow (see the module docs' threading model).
-    pub(crate) fn publish(&mut self, update: SemanticsUpdate, generation: u64) {
+    pub(crate) fn publish(&mut self, update: SemanticsUpdate, generation: u64, scale: f64) {
         let focus = update.focus_id();
-        let tree_update = crate::ffi_support::build_tree_update(update.nodes, update.root, focus);
+        let tree_update =
+            crate::ffi_support::build_tree_update(update.nodes, update.root, focus, scale);
         // Snapshot the full tree so a late-activating AT (one that connects on a
         // static screen the generation gate would otherwise skip) is served real
         // content immediately. Cloned once here, not per idle frame.
