@@ -5662,7 +5662,7 @@ semantics for non-finite input appears (none identified today).
 **Observed** (evidence: `crates/frust-engine/src/cache/images.rs`'s
 `fit_extent`/`minify` and `crates/frust-engine/tests/images.rs`): the engine's
 image path is atlas-resident, and a source larger than one atlas layer
-(capability-chosen per-layer extent, mobile 1024² / desktop 2048², overridable
+(tier-chosen per-layer extent — mobile 1024², `mobile_large` and desktop 2048² — overridable
 via `FRUST_ENGINE_ATLAS_SIZE`) is downscaled to fit with an aspect-preserving
 box filter at upload time, logged once per image. The filter averages
 sRGB-encoded premultiplied bytes — exact for a uniform-colour source, very
@@ -5679,6 +5679,27 @@ carry.
 **Trigger for removal**: tiled residency (splitting an oversized source across
 atlas rectangles) or a dedicated non-atlas texture path for oversized sources;
 either removes the ceiling rather than softening it.
+
+### `engine-padded-bilinear-edge-blend` — a magnified Pad image's last row and column blend half-way into the neighbouring texel
+
+**Observed**: in both strip program families (the manual four-tap path and the hardware sampler),
+the engine's padded bilinear clamps the sample position to the image before taking its half-texel
+offset, so the last row and column of a magnified Pad image blend half-way into the texel beside
+them where the CPU oracle (`vello_cpu`) holds the edge texel. It is invisible at the corpus's 2x
+checkerboard (two-pixel cells) and reaches a delta of 128 at 4x magnification on a one-pixel
+pattern.
+
+**Applies to**: the engine tier, a bilinear (Medium-quality) atlas image drawn magnified with the
+Pad extend mode.
+
+**Why not fixed**: measured, not yet ruled on: the delta only appears where a magnified image's edge
+texel differs from its neighbour, which the corpus's two-pixel cells never exercise. Correcting it
+changes the filter's edge rule in both program families at once.
+
+**Evidence**: `unit-image-magnified` (`frust_testing::corpus::unit::image_sampler_cases`) is a
+measurement case with no reviewed baseline; its source repeats the last row and column so the case
+measures the filter rather than this edge rule. Shader: `sampled_bilinear` in `strip.wgsl` and
+`bilinear_sample` in `helpers.wgsl`.
 
 ### `engine-scheduler-skip-on-escalation` — a layer shape the engine's scheduler cannot serve skips the frame rather than falling back
 
@@ -6226,23 +6247,6 @@ reading turned out not to name a real regression.
 
 **Trigger for removal**: a present-to-present (not cost-sum) measurement on a real device showing
 actual dropped vsyncs.
-
-### `engine-atlas-tier-by-driver-flag` — atlas tier is chosen by a single driver-reported flag, not a memory-class policy
-
-**Observed**: `AtlasBudget::for_caps` (`crates/frust-engine/src/cache/images.rs`) picks the desktop
-budget (2048x2048 x8 layers) or the mobile one (1024x1024 x4 layers) solely off
-`TierCaps::transient_saves_memory`, itself read from `wgpu::AdapterInfo`. Two Android devices of
-similar class resolve differently: the Pixel 5 (Adreno 620) resolves the desktop budget, the
-OnePlus 9 (Adreno 660) resolves mobile. Functionally harmless today — both devices show zero atlas
-skips — but the memory-class decision is made by a driver capability flag never intended as a
-memory-tier signal.
-
-**Accepted because**: no skip or measurable cost has been observed on either device; guessing at an
-adapter-name or device-class heuristic ahead of an actual failure would trade one arbitrary signal
-for another.
-
-**Trigger for removal**: an adapter-class heuristic, or a shell-provided memory-class hint
-`AtlasBudget::for_caps` can read instead of the driver flag alone.
 
 ### `engine-atlas-pressure-fit-model-blind-to-glyphs` — the pressure-eviction fit model cannot see glyph pages, so a committed plan can still be refused
 

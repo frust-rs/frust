@@ -63,9 +63,17 @@ above):**
 |---|---|---|
 | `FRUST_ENGINE_NO_DEPTH` | Disables the engine's depth attachment/test (`config::depth_disabled`); the two draw passes collapse into one blended painter-order pass. | Wired |
 | `FRUST_ENGINE_NO_ATLAS` | Routes every glyph/image atlas resolution to a logged skip instead. | Wired |
-| `FRUST_ENGINE_ATLAS_SIZE=<W>x<H>` | Overrides the capability-chosen per-layer atlas extent (e.g. `2048x2048`); runtime wins over compile-time. | Wired |
+| `FRUST_ENGINE_ATLAS_SIZE=<W>x<H>` | Overrides the tier-chosen per-layer atlas extent (e.g. `2048x2048`); runtime wins over compile-time. The override is budgeted against the resolved tier (`mobile`, `mobile_large` at 64 MiB, or `desktop`), so the layer count follows the tier's byte total. | Wired |
+| `FRUST_ENGINE_UBER_PROGRAM=1` | Draws every strip run with the whole (Uber) program: nothing is split into paint-class runs and no class program is warmed — the paint-class A/B off-arm. `EngineRenderer::set_uber_program` is the programmatic counterpart. | Wired |
+| `FRUST_ENGINE_RUN_SPLIT_MIN=<n>` | Shortest class run worth a pipeline switch (`config::run_split_min`); shorter runs merge into Uber. Default 16, measured on a Pixel 4a; runtime wins over the compile-time define. `EngineRenderer::set_run_split_min`. | Wired |
+| `FRUST_ENGINE_NO_PASS_MERGE=1` | Records the clear and the opaque strips as passes of their own ahead of every round, and every surface round in a pass of its own, instead of the one-pass surface opening. `EngineRenderer::set_pass_merge` is the programmatic counterpart; `last_frame_passes` shows which arm a frame took. | Wired |
+| `FRUST_ENGINE_IMAGE_SAMPLER` | On by default: bilinear atlas images use the hardware sampler program family. `0` or `false` selects the manual four-`textureLoad` family, pixel-identical to the engine before the sampler. Read once per process; `EngineRenderer::with_image_sampler` picks per renderer. `engine_goldens` are meant to run in both arms; the WebGL2 `wasm_goldens` re-run with the sampler family as default is still owed. | Wired |
 | `FRUST_ENGINE_DOWNLEVEL=1` | Rehearses the WebGL2/GLES3.0 limit ceiling (`downlevel_webgl2_defaults()`) against a desktop adapter — `frust-gpu`'s `TierCaps`/device-request path only (see GPU Substrate below). A real browser measurement now exists too (`examples/web-spike/RESULTS.md` §§ 16-17): Chrome WebGL2 (`Backend::Gl`/ANGLE) renders shapes, shaped text, images, gradients, blur and layers pixel-correct against the same Chrome WebGPU arm, after the atlas-array workaround (`engine-webgl2-atlas-target` in LIMITATIONS.md) landed. | Wired |
 | `FRUST_ENGINE_NO_LAYERS` / `FRUST_ENGINE_NO_POOL` / `FRUST_ENGINE_MAX_TEX=<n>` | Parsed and cached (`crates/frust-engine/src/config.rs`) but consulted by nothing yet — reserved for the layer-cache/resource-pool/texture-ceiling subsystems that will read them. | Reserved (no effect) |
+
+On Adreno the measured `gpu_main` moves with the governor's DCVS clock choice, so A/B GPU work with
+the kgsl `gpuclk`/`gpubusy` counters beside the timing (readable on the Pixel 4a, not the Pixel 4);
+see [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § After Phase 1.
 
 **Browser gate** (`crates/frust-testing`'s non-default `webgl` feature; headless Chrome via
 `wasm-bindgen-test-runner`/chromedriver): `tests/wasm_goldens.rs` renders every unit-corpus case

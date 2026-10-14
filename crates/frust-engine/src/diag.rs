@@ -11,8 +11,9 @@
 //! `gpu_prepass_us`/`gpu_main_us`/`gpu_composite_us`/`gpu_blit_us`.
 //!
 //! Several passes may be charged to one span, which is the ordinary case:
-//! [`EngineSpan::Main`] covers the clear, the opaque strip pass and every
-//! surface round's alpha strips, and [`EngineSpan::Composite`] covers every
+//! [`EngineSpan::Main`] covers the opening (the clear, the opaque strips and
+//! the first drawing surface round), the remaining surface rounds and the hole
+//! punch, and [`EngineSpan::Composite`] covers every
 //! layer page round and every filter pass. Their durations add up.
 //!
 //! # Labels
@@ -47,8 +48,9 @@ pub enum EngineSpan {
     /// Work recorded strictly ahead of the frame's own passes: the glyph-atlas
     /// replay that draws newly cached glyphs into their array layers.
     Prepass = 0,
-    /// The frame's own surface passes — the clear, the opaque depth-writing
-    /// strip pass, every surface round's alpha strips, and the hole punch.
+    /// The frame's own surface passes — the opening (clear + opaque strips + the
+    /// first drawing surface round), the remaining surface rounds, and the hole
+    /// punch.
     Main = 1,
     /// Everything drawn into an off-screen page rather than the surface: each
     /// isolated layer's page round and each pass of a filter's sequence.
