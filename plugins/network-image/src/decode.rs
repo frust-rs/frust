@@ -25,8 +25,8 @@ pub enum DecodeError {
     /// The bytes are a recognised format this build cannot decode.
     #[error("unsupported image format: {0} (enable the matching crate feature)")]
     UnsupportedFormat(String),
-    /// The image exceeds the configured [`DecodeLimits`]; nothing was decoded
-    /// (or decoding was stopped by the allocation cap).
+    /// The declared dimensions exceed the configured [`DecodeLimits`]; nothing
+    /// was decoded.
     #[error("image {width}x{height} exceeds the decode limits ({max_width}x{max_height} max)")]
     TooLarge {
         /// Declared image width in pixels.
@@ -38,6 +38,21 @@ pub enum DecodeError {
         /// Configured maximum height.
         max_height: u32,
     },
+    /// The estimated decode-and-fit peak exceeds
+    /// [`DecodeLimits::max_alloc_bytes`] (or the decoder hit its allocation cap).
+    #[error(
+        "image {width}x{height} would need about {estimated_peak_bytes} bytes to decode and fit, over the {max_alloc_bytes} byte budget"
+    )]
+    OverBudget {
+        /// Declared image width in pixels.
+        width: u32,
+        /// Declared image height in pixels.
+        height: u32,
+        /// Peak transient bytes estimated from the header.
+        estimated_peak_bytes: u64,
+        /// Configured peak budget.
+        max_alloc_bytes: u64,
+    },
     /// The blocking decode task did not complete.
     #[error("decode task failed: {0}")]
     Task(String),
@@ -45,18 +60,31 @@ pub enum DecodeError {
 
 /// Bounds on what one decode may allocate.
 ///
-/// The declared dimensions are read from the header and checked before any
-/// pixel is decoded, and `image`'s own [`image::Limits`] are set from the same
-/// values. The post-decode RGBA conversion and resize can transiently need up
-/// to about twice the decoded RGBA size, so the defaults (8192 px per side,
-/// 256 MiB) keep the peak near 512 MiB for a single worst-case decode.
+/// The declared dimensions and bit depth are read from the header and checked
+/// before any pixel is decoded, and `image`'s own [`image::Limits`] are set
+/// from the same values as a safety net.
+///
+/// `max_alloc_bytes` budgets the decode-and-fit working set the header can
+/// predict: the native decoded bytes plus either the RGBA copy (no resize) or
+/// the resize working set (an `f32` RGBA intermediate of source width x pass
+/// height x 16 bytes, plus the pass output). The default (8192 px per side,
+/// 512 MiB) admits an 8192x8192 RGBA8 image with no resize, or a 48 MP photo
+/// fitted to a phone-sized target of about 1440 px. The bound is per decode;
+/// concurrent decodes add up.
+///
+/// The decoder's own scratch is outside both this estimate and
+/// [`image::Limits`]. The worst case is a progressive JPEG, which keeps the
+/// whole image's coefficients while decoding (about 6 bytes per pixel for
+/// 4:4:4, 3 for 4:2:0 and 8 for CMYK) on top of the native bitmap, so such an
+/// image can exceed the estimate by up to about three times its native size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecodeLimits {
     /// Maximum declared width in pixels (default 8192).
     pub max_width: u32,
     /// Maximum declared height in pixels (default 8192).
     pub max_height: u32,
-    /// Maximum decoded RGBA bytes (default 256 MiB).
+    /// Decode-and-fit allocation budget in bytes (default 512 MiB); see the
+    /// type docs for what the header-derived estimate excludes.
     pub max_alloc_bytes: u64,
 }
 
@@ -65,7 +93,7 @@ impl Default for DecodeLimits {
         Self {
             max_width: 8192,
             max_height: 8192,
-            max_alloc_bytes: 256 * 1024 * 1024,
+            max_alloc_bytes: 512 * 1024 * 1024,
         }
     }
 }
@@ -91,6 +119,34 @@ fn fit_dims(w: u32, h: u32, target: TargetPx) -> Option<(u32, u32, f64)> {
     Some((nw, nh, scale))
 }
 
+/// Dimensions of the first resize pass for a shrink to `(nw, nh)` at `scale`:
+/// twice the final size below half scale (a cheap Triangle pass precedes the
+/// Lanczos3 pass), else the final size.
+fn first_pass_dims(nw: u32, nh: u32, scale: f64) -> (u32, u32) {
+    if scale < 0.5 {
+        (nw.saturating_mul(2).max(1), nh.saturating_mul(2).max(1))
+    } else {
+        (nw, nh)
+    }
+}
+
+/// Peak transient bytes of decoding a `dw` x `dh` image of `native_bpp` bytes
+/// per pixel and fitting it to `target`, estimated from the header.
+pub(crate) fn peak_estimate(dw: u32, dh: u32, native_bpp: u64, target: Option<TargetPx>) -> u64 {
+    let (w, h) = (u64::from(dw), u64::from(dh));
+    let native = w.saturating_mul(h).saturating_mul(native_bpp);
+    match target.and_then(|t| fit_dims(dw, dh, t)) {
+        None => native.saturating_add(w.saturating_mul(h).saturating_mul(4)),
+        Some((nw, nh, scale)) => {
+            let (pw, ph) = first_pass_dims(nw, nh, scale);
+            let (pw, ph) = (u64::from(pw), u64::from(ph));
+            let vertical = w.saturating_mul(ph).saturating_mul(16);
+            let output = pw.saturating_mul(ph).saturating_mul(native_bpp);
+            native.saturating_add(vertical).saturating_add(output)
+        }
+    }
+}
+
 /// Decode `bytes` (format guessed) and shrink to fit `target`, if any.
 pub(crate) fn decode_and_fit(
     bytes: &[u8],
@@ -108,18 +164,29 @@ pub(crate) fn decode_and_fit(
         return Err(DecodeError::UnsupportedFormat("WebP".into()));
     }
     // Header only: reject before any pixel allocation.
-    let (dw, dh) = reader
-        .into_dimensions()
+    let decoder = reader
+        .into_decoder()
         .map_err(|e| DecodeError::Decode(e.to_string()))?;
-    let too_large = || DecodeError::TooLarge {
+    let (dw, dh) = image::ImageDecoder::dimensions(&decoder);
+    let native_bpp = u64::from(image::ImageDecoder::color_type(&decoder).bytes_per_pixel());
+    drop(decoder);
+    if dw > limits.max_width || dh > limits.max_height {
+        return Err(DecodeError::TooLarge {
+            width: dw,
+            height: dh,
+            max_width: limits.max_width,
+            max_height: limits.max_height,
+        });
+    }
+    let over_budget = |estimated_peak_bytes| DecodeError::OverBudget {
         width: dw,
         height: dh,
-        max_width: limits.max_width,
-        max_height: limits.max_height,
+        estimated_peak_bytes,
+        max_alloc_bytes: limits.max_alloc_bytes,
     };
-    let rgba_bytes = u64::from(dw) * u64::from(dh) * 4;
-    if dw > limits.max_width || dh > limits.max_height || rgba_bytes > limits.max_alloc_bytes {
-        return Err(too_large());
+    let estimate = peak_estimate(dw, dh, native_bpp, target);
+    if estimate > limits.max_alloc_bytes {
+        return Err(over_budget(estimate));
     }
     let mut reader = open()?;
     let mut lim = image::Limits::no_limits();
@@ -128,15 +195,16 @@ pub(crate) fn decode_and_fit(
     lim.max_alloc = Some(limits.max_alloc_bytes);
     reader.limits(lim);
     let mut img = reader.decode().map_err(|e| match e {
-        image::ImageError::Limits(_) => too_large(),
+        // Backstop for the decoder's own cap; the pre-check above normally
+        // rejects first, so report the same estimate it compared.
+        image::ImageError::Limits(_) => over_budget(estimate),
         e => DecodeError::Decode(e.to_string()),
     })?;
     if let Some((nw, nh, scale)) = target.and_then(|t| fit_dims(img.width(), img.height(), t)) {
+        let (pw, ph) = first_pass_dims(nw, nh, scale);
         if scale < 0.5 {
             // Cheap Triangle pass to twice the final size, then Lanczos3 for quality.
-            let iw = nw.saturating_mul(2).max(1);
-            let ih = nh.saturating_mul(2).max(1);
-            img = img.resize_exact(iw, ih, FilterType::Triangle);
+            img = img.resize_exact(pw, ph, FilterType::Triangle);
         }
         img = img.resize_exact(nw, nh, FilterType::Lanczos3);
     }
@@ -171,4 +239,40 @@ pub async fn decode_source(
     target: Option<TargetPx>,
 ) -> Result<ImageSource, DecodeError> {
     decode_shared(Arc::new(bytes), target, DecodeLimits::default()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NATIVE_8K: u64 = 8192 * 8192 * 4;
+
+    #[test]
+    fn estimate_counts_the_resize_working_set() {
+        let t = Some(TargetPx {
+            width: 2560,
+            height: 2560,
+        });
+        assert_eq!(
+            peak_estimate(8192, 8192, 4, t),
+            NATIVE_8K + 8192 * 5120 * 16 + 5120 * 5120 * 4
+        );
+    }
+
+    #[test]
+    fn estimate_without_a_resize_adds_the_rgba_copy() {
+        assert_eq!(peak_estimate(8192, 8192, 4, None), 2 * NATIVE_8K);
+    }
+
+    #[test]
+    fn estimate_uses_the_native_depth() {
+        let t = Some(TargetPx {
+            width: 300,
+            height: 300,
+        });
+        assert_eq!(
+            peak_estimate(1200, 1200, 3, t),
+            1200 * 1200 * 3 + 1200 * 600 * 16 + 600 * 600 * 3
+        );
+    }
 }

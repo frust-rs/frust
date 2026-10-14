@@ -19,6 +19,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   app cache directory, single-flight fetches, and an opt-in `webp` feature. Install with
   `NetworkImages::install()` in the `app!` setup block. Its Android compile gate needs
   `cargo ndk` (ring compiles C).
+- `frust-network-image`: `DecodeLimits::max_alloc_bytes` is now the budget for the header-predictable
+  decode-and-fit working set (resize working set included, default 512 MiB; the decoder's own
+  scratch, such as progressive-JPEG coefficients, stays outside it); over-budget images fail with
+  `DecodeError::OverBudget`.
 - `frust add plugin network-image` and the TUI's Add Plugin list offer the new plugin (the registry
   now has nineteen entries).
 - The playground's Images section: six `network_image` views, a local-fixtures loopback toggle, a

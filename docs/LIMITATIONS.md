@@ -7357,15 +7357,15 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `network-image-full-size-decode-peak` — a large image is fully decoded before it is downscaled
 
-**Observed**: `image` 0.25 has no JPEG DCT-scaled decode, so `target_px` shrinks the image only after a full-resolution decode; the peak transient allocation is the full decoded bitmap (width x height x 4 bytes) regardless of the display size, and the RGBA conversion plus resize can transiently need up to about twice that. Only the downscaled result is cached in memory. The decode is bounded by `DecodeLimits` (default 8192 px per side, 256 MiB decoded; `LoaderConfig::decode_limits`): a server-declared size over the limit is rejected from the header with `DecodeError::TooLarge` before any pixel is decoded.
+**Observed**: `image` 0.25 has no JPEG DCT-scaled decode, so `target_px` shrinks the image only after a full-resolution decode; the native decoded bitmap is alive for the whole fit. The dominant transient is the resize's `f32` intermediate (source width x pass height x 16 bytes), held alongside the native image. `DecodeLimits::max_alloc_bytes` (default 512 MiB; `LoaderConfig::decode_limits`) budgets the decode-and-fit working set the header can predict (native bitmap plus the resize intermediate or the RGBA copy) and rejects with `DecodeError::OverBudget` before any pixel is decoded; declared dimensions over `max_width`/`max_height` (default 8192) are likewise rejected from the header with `DecodeError::TooLarge`. The decoder's own scratch is outside both that estimate and `image::Limits`: a progressive JPEG keeps the whole image's coefficients while decoding (about 6 bytes per pixel for 4:4:4, 3 for 4:2:0, 8 for CMYK) on top of the native bitmap, so a progressive 8192x8192 4:4:4 JPEG admitted under the default budget peaks near 576 MiB. Only the downscaled result is cached in memory.
 
-**Applies to**: decoding a high-resolution photo on a memory-constrained device; the fetch is capped (20 MiB by default) and the decoded size is capped by `DecodeLimits`, but a within-limit photo still peaks near twice its RGBA size.
+**Applies to**: decoding a high-resolution photo on a memory-constrained device; the fetch is capped (20 MiB by default) and the estimated peak is capped by `DecodeLimits`, but a within-budget photo still peaks near that budget, and a progressive JPEG exceeds the estimate by its coefficient store. The bound is PER DECODE: concurrent decodes add up.
 
 **Why accepted**: the cap bounds download size, decode runs off the UI thread, and the resident cost after decode is the fitted bitmap; a scaled-decode path needs a different decoder.
 
-**Trigger for removal**: a decoder with DCT-scaled or tiled JPEG decode, (the pre-decode dimension limit already exists in `decode_and_fit`).
+**Trigger for removal**: a decoder with DCT-scaled or tiled JPEG decode, or a JPEG decoder that exposes an allocation cap for its coefficient store.
 
-**Evidence**: `plugins/network-image/src/decode.rs` (`decode_and_fit`: Triangle pre-shrink for >2x, then Lanczos3, after the full decode).
+**Evidence**: `plugins/network-image/src/decode.rs` (`peak_estimate` and `decode_and_fit`: header pre-check, Triangle pre-shrink for >2x, then Lanczos3, after the full decode).
 
 ---
 

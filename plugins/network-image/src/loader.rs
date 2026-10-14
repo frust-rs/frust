@@ -55,7 +55,7 @@ pub struct LoaderConfig {
     pub max_fetch_bytes: usize,
     /// Persistent raw-bytes cache.
     pub disk: DiskCacheConfig,
-    /// Bounds on one decode (default 8192 px per side, 256 MiB).
+    /// Bounds on one decode (default 8192 px per side, 512 MiB peak).
     pub decode_limits: DecodeLimits,
 }
 
