@@ -46,6 +46,20 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   without a Secret Service, selected by `StoreOptions::with_insecure_file_fallback()` or
   `FRUST_SECURE_STORAGE_INSECURE_FILE=1`; release builds refuse it.
 - The playground's URL page gains Share, QR and Maps groups.
+- Sliver scrolling: `custom_scroll_view` (`CustomScrollView`, `.axis(ScrollAxis)`, `.cache_extent`,
+  `.controller`) composes slivers under a viewport with a cache window and correction-based anchoring,
+  with `sliver_box`, `sliver_padding`, `sliver_fill_remaining`, `sliver_fixed_extent_list` / `_keyed`,
+  `sliver_list`, `sliver_grid` / `_keyed` (`SliverGridDelegate`), `sliver_persistent_header`
+  (pinned and floating) and `keep_alive` / `KeepAliveHandle`. Transparent wrappers (`Either`,
+  `EitherOf3..8`, `hero`, `shield`, `auto_scroll_zone`, `GestureDetector`) forward slivers.
+- The `SliverWidget` seam in `frust-core`: `Widget::as_sliver`, `ChildPod::layout_sliver_child`,
+  `SliverConstraints` / `SliverGeometry`, re-exported by `frust::authoring` with `ScrollAxis`
+  (also flat in the facade).
+- Material `sliver_app_bar` works as a sliver inside a `custom_scroll_view` (pinned by default,
+  `.floating(bool)` opt-in); a set `collapse` / `scroll_offset` prop keeps the box form. The
+  playground gains a Slivers page.
+- `ScrollSurfaceCore` and the `ScrollSurface` trait: one shared scroll core under `ScrollView`,
+  `ListView` and the viewport.
 
 ### Changed
 
@@ -74,6 +88,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 - A navigator inside a `pattern_switcher` child that had been switched away kept claiming Android
   back, so back was swallowed on every other page and could not exit the app.
+- `ScrollController::animate_to` now flushes `on_scroll` (and `ListView` near-edge callbacks) on
+  every frame the tween moves and the frame it lands on, with no input event needed.
+- A `scroll_to_item` request that moves nothing (unknown key, or `Nearest` on a fully visible row)
+  now supersedes an in-flight controller tween instead of leaving it running.
 
 ## 0.6.1 — 2026-10-12
 

@@ -19,6 +19,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CORE relates to the other units.
 | `frust-core::app` / `tree` | `RenderRoot` owns the widget tree and theme, driving the rebuild → layout → paint → event pass; `WidgetTree`/`RenderRoot::inspect()` expose a read-only pre-order snapshot for external tooling |
 | `frust-core::component` | `Component`/`ComponentView`/`ComponentWidget` — a stateful-widget analog with retained state and its own reactive `Owner`. Under the opt-in `hotpatch` feature `ComponentWidget` is `repr(C)` and carries a `SeamWitness` first (see the `hotpatch` row) |
 | `frust-core::hotpatch` (feature `hotpatch`) | The hot-patch seam. `build_erased::<C>` routes `Component::build` through the jump table and erases the view **inside** the hot function (L1: the return type crossing the patch boundary is the fixed `Result<AnyView<State>, LayoutMismatch>`; the call carries the `// erasure: keep hot-patch boundary type must be layout-fixed` tripwire marker). `init` never goes through it and never re-runs on a patch. A `SeamWitness` (size/align of `C::State` and `C`) is written by the image that creates the state and checked before any `C`-generic code touches it; on a difference the toucher calls `report_layout_mismatch` and backs off — `rebuild` is skipped, `teardown` does not proceed, and `Drop` disposes the owner but leaks the state box (`mem::forget`) because `ComponentWidget` stores it as `Option<Box<State>>`, keeping `frust-core` `unsafe`-free. This witness (L2) covers only components hosted in their own `Box<dyn Widget>` (including a typed child pod); inline hosts (`Either`/`EitherOfN`, an app `View` whose `Element` embeds a child element) are covered by the host's layout gate (L3) alone, and soundness rests on L1 plus L3, with L2 a backstop. `set_patch_listener(Arc<dyn Fn() + Send + Sync>)` registers a callback (appended, not replaced) that runs on the thread that applied the patch and must only signal; each shell supplies one, see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md). `set_anchor` registers the app's `__frust_hotpatch_anchor` (defined by `frust::app!` in debug builds, registered through a `#[doc(hidden)]` facade fn that is a no-op without the feature) |
+| `frust-core::sliver` | The sliver layout protocol, opt-in beside `Widget::layout` and never inside it: `SliverConstraints` in, `SliverGeometry` out (Flutter's `RenderSliver`), `ScrollAxis`/`GrowthDirection` (Forward only)/`ScrollDirection`, and the `SliverWidget` trait; consumed by WIDGETS' sliver viewport |
 | `frust-core::event` / `animation` / `semantics` | Input/gesture routing, animation curve vocabulary, window insets (incl. window-control corners), and pull-based accesskit semantics |
 | `frust-scene::scene` / `builder` | `Scene`/`SceneBuilder`/`Command` — the renderer-agnostic vector display list consumed by `frust-render`. `Command::SceneTexture { id, dest, transform }` draws a caller-owned GPU texture scaled to fill `dest`; `id` is opaque scene-layer data (the same precedent `ShaderProgram`'s own id sets) only the render backend resolves — an unregistered id draws nothing. `Command::ShaderQuad`'s fragment-shader output is treated as premultiplied alpha and rendered by the engine into such a texture ahead of the scene pass |
 | `frust-scene::glyph` / `shader` | Carries shaped text and opaque WGSL shader handles from `frust-text` through the `Scene` |
@@ -111,6 +112,15 @@ the facade/plugin boundary described in the index; CORE itself never depends on 
   `set_layout_audit(true)` runs a debug two-pass comparison (skipped vs forced geometry), logging
   `layout-audit:` warnings and counting `layout_audit_mismatches()`. The widget-side contract is
   the `Widget::layout` rustdoc.
+- A widget offers the sliver protocol through `Widget::as_sliver` (default `None`); `Box<dyn Widget>`
+  and `ComponentWidget` forward it (a component answers as its own sliver face and lays out through
+  its inner pod). A viewport calls `ChildPod::layout_sliver_child(ctx, &SliverConstraints)`: `None`
+  for a box child (the caller adapts it, e.g. with `as_box_constraints()`); for a sliver it records
+  the geometry (`ChildPod::sliver_geometry`) and sizes the pod to `(cross_axis_extent,
+  paint_extent)` in axis terms, so contains, paint and semantics use the painted extent. It follows
+  the same skip rule as `layout_child`; a layout under one protocol clears the other's key, and a
+  geometry carrying `scroll_offset_correction` leaves the pod dirty. Debug builds check constraints
+  and geometry with `debug_assert_valid` (Flutter's invariants, 1e-10 tolerance).
 - `RenderRoot::paint` walks widgets into a renderer-agnostic `Scene`, later encoded for the GPU by
   `frust-render` (RENDER unit). `PaintCtx::origin` is the widget's **absolute window-space** origin:
   each `ChildPod::paint_child` accumulates it by adding the child's parent-relative offset to the
@@ -423,7 +433,8 @@ one binary cannot fight over it and an app's explicit choice survives a catalog 
 |------|---------|
 | `View<State>` / `Widget` | The declarative/retained pair every UI element implements |
 | `RenderRoot<State, V>` | Owns the widget tree and theme; drives rebuild/layout/paint/event |
-| `ChildPod` | Child slot a container lays out through; carries the skip state (`layout_dirty`, last constraints/epoch/insets) |
+| `ChildPod` | Child slot a container lays out through; carries the skip state (`layout_dirty`, last box constraints/epoch/insets) and the last sliver constraints and geometry |
+| `SliverConstraints` / `SliverGeometry` / `SliverWidget` | The sliver protocol's input, output and widget-side trait; re-exported by `frust::authoring` with `ScrollAxis`/`GrowthDirection`/`ScrollDirection` |
 | `WidgetTree` / `InspectNode` | Read-only tree accessors (`roots`/`children`/`inspect`/`inspect_layout_dirty`) and the plain owned snapshot node (id, type name, debug label, absolute bounds, children) they produce |
 | `Component` / `ComponentView` / `ComponentWidget` | Stateful widget analog with a per-instance reactive `Owner`; `build` returns `impl View<Self::State>` |
 | `AnyView<State>` / `any()` | Type-erased `View` (`Element = Box<dyn Widget>`); construction is idempotent, so erasure happens once at an API boundary |
