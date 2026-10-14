@@ -47,8 +47,10 @@
 //! [`PaintClass::ImageFiltered`] and [`PaintClass::Uber`] — reads a bilinear
 //! atlas image through one hardware-filtered `textureSampleLevel`; without it
 //! they keep the manual four-`textureLoad` path in the feature's `//#else` arm.
-//! A renderer compiles one family, so the switch adds no pipeline variant
-//! ([`strip_program_source`]). The default family's [`PaintClass::Uber`]
+//! The sampler family is the default; the switch's `0` is the kill switch
+//! that selects the manual one. A renderer compiles one family, so the switch
+//! adds no pipeline variant ([`strip_program_source`]). The manual family's
+//! [`PaintClass::Uber`]
 //! program is [`STRIP`] with only the `IMAGE_SAMPLER` arm blanked out — line
 //! for line the program the engine shipped before either axis existed.
 //!
@@ -191,7 +193,7 @@ pub const fn strip_class_name(class: PaintClass) -> &'static str {
     }
 }
 
-/// The strip program of the default family specialised for `class`:
+/// The strip program of the manual family specialised for `class`:
 /// [`STRIP`] with every `//#if` block whose feature `class` does not keep, and
 /// the [`IMAGE_SAMPLER`] arm, blanked out.
 ///
@@ -388,12 +390,12 @@ mod tests {
         trimmed.starts_with(DIRECTIVE_IF) || trimmed == DIRECTIVE_ELSE || trimmed == DIRECTIVE_ENDIF
     }
 
-    /// The kill switch's whole promise: the default family's Uber class
+    /// The kill switch's whole promise: the manual family's Uber class
     /// compiles the shipped source, not a reconstruction of it — every line of
     /// [`STRIP`] kept in place, save the directives and the sampler family's
     /// own arm, which are blanked rather than dropped.
     #[test]
-    fn the_default_uber_program_is_the_strip_source_without_the_sampler_arm() {
+    fn the_manual_uber_program_is_the_strip_source_without_the_sampler_arm() {
         let uber = strip_class_source(PaintClass::Uber);
         let sampled = strip_program_source(PaintClass::Uber, true);
         assert_eq!(strip_class_name(PaintClass::Uber), STRIP_NAME);
@@ -409,7 +411,7 @@ mod tests {
             }
             assert_eq!(
                 sampled, source,
-                "the default Uber program blanked `{source}`, which is not the sampler arm"
+                "the manual Uber program blanked `{source}`, which is not the sampler arm"
             );
             blanked += 1;
         }
@@ -585,7 +587,7 @@ mod tests {
     /// `Config` shifts alone — no per-fragment `textureDimensions` query and no
     /// integer `%`/`/` against a queried width (see `gpu::config`'s guard).
     /// The one query in the source is the sampler family's normalisation of an
-    /// atlas sample position, which no default-family program keeps.
+    /// atlas sample position, which no manual-family program keeps.
     #[test]
     fn the_strip_program_addresses_its_resource_textures_by_config_shifts() {
         assert_eq!(STRIP.matches("textureDimensions(").count(), 1);

@@ -180,10 +180,11 @@
 //!
 //! `FRUST_ENGINE_IMAGE_SAMPLER` ([`EngineRenderer::with_image_sampler`]) picks
 //! the program *family* the classes are compiled from, not a class: in the
-//! sampler family every program that reads atlas images (the image classes
-//! and Uber) filters a bilinear image through one hardware sampler, which
-//! every strip bind group then carries beside the atlas array. The runs, and
-//! the pipelines a frame resolves, are the same in both families.
+//! sampler family — the default — every program that reads atlas images (the
+//! image classes and Uber) filters a bilinear image through one hardware
+//! sampler, which every strip bind group then carries beside the atlas array;
+//! its kill switch (`0`) compiles the manual four-tap family instead. The
+//! runs, and the pipelines a frame resolves, are the same in both families.
 //!
 //! # Paint resolution
 //!
@@ -1048,8 +1049,9 @@ impl EngineRenderer {
     ///
     /// Takes effect from the next frame. With it set a frame draws exactly
     /// what it drew before paint classes existed — one pipeline per pass, the
-    /// shipped `strip.wgsl` unchanged — which is what a caller comparing the
-    /// two needs without a process-global environment variable.
+    /// whole `strip.wgsl` program of this renderer's family — which is what a
+    /// caller comparing the two needs without a process-global environment
+    /// variable.
     pub fn set_uber_program(&mut self, uber: bool) {
         self.routing.uber = uber;
     }
@@ -4393,7 +4395,7 @@ struct FrameResources {
     placeholders: Placeholders,
     /// The linear, clamp-to-edge sampler the image-sampler program family
     /// filters bilinear atlas images through, bound beside the atlas array in
-    /// every strip group 1; `None` for the default family, whose layout
+    /// every strip group 1; `None` for the manual family, whose layout
     /// declares no sampler (see [`EngineRenderer::with_image_sampler`]).
     atlas_sampler: Option<wgpu::Sampler>,
     config: wgpu::Buffer,

@@ -43,10 +43,11 @@
 //! bind group built against any strip pipeline binds under every other one.
 //!
 //! There is one such layout per program family
-//! ([`crate::gpu::shader_src`]'s *The two program families*): the default
-//! family's is the one above, and the sampler family's adds the one sampler
-//! its image programs filter the atlas through — group 1, binding 2 — and
-//! declares the atlas binding filterable. Every binding before it keeps its
+//! ([`crate::gpu::shader_src`]'s *The two program families*): the manual
+//! family's (`FRUST_ENGINE_IMAGE_SAMPLER=0`) is the one above, and the sampler
+//! family's — the default — adds the one sampler its image programs filter the
+//! atlas through — group 1, binding 2 — and declares the atlas binding
+//! filterable. Every binding before it keeps its
 //! number, so the families differ by that one entry, and the four-group
 //! WebGL2 ceiling is untouched.
 

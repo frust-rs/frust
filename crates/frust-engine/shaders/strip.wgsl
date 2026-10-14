@@ -44,15 +44,17 @@
 //   LAYER          — the layer colour source a composite reads its page through
 //
 // One more feature is not a class but a program FAMILY, chosen per renderer
-// (`FRUST_ENGINE_IMAGE_SAMPLER`):
+// (`FRUST_ENGINE_IMAGE_SAMPLER`, on unless set to 0):
 //
 //   IMAGE_SAMPLER  — inside IMAGE: bilinear atlas sampling through a hardware
 //                    sampler instead of four loads; its `//#else` arm is the
-//                    manual path every program of the default family keeps
+//                    manual path every program of the manual family keeps
 //
 // The directive lines are plain comments, and every class feature's block is
 // a whole arm of its own, so the class that enables every class feature — the
-// Uber program — is this file with only the IMAGE_SAMPLER arm blanked out.
+// Uber program — is this file with one of the two IMAGE_SAMPLER arms blanked
+// out: the `//#else` arm in the sampler family, the sampler arm in the manual
+// one.
 // Every class of a family binds the same groups through one explicit pipeline
 // layout, so a binding a class no longer reads is still declared here.
 
@@ -227,7 +229,7 @@ var external_texture: texture_2d<f32>;
 // Declared only by the image programs of the sampler family, together with
 // the layout entry it binds against (`gpu::bindings`) and the one function
 // that samples through it; every other program — and every program of the
-// default family — declares no sampler at all.
+// manual family — declares no sampler at all.
 //#if IMAGE_SAMPLER
 @group(1) @binding(2)
 var atlas_sampler: sampler;

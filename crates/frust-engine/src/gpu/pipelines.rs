@@ -53,12 +53,13 @@
 //! ## The program family
 //!
 //! The image sampler (`FRUST_ENGINE_IMAGE_SAMPLER`) is not a third axis: a
-//! renderer compiles ONE family of strip programs — the default one, or the
-//! one whose image programs filter bilinear atlas images through a hardware
-//! sampler ([`crate::gpu::shader_src`]'s *The two program families*) — so the
+//! renderer compiles ONE family of strip programs — by default the one whose
+//! image programs filter bilinear atlas images through a hardware sampler, or
+//! under `FRUST_ENGINE_IMAGE_SAMPLER=0` the manual four-tap one
+//! ([`crate::gpu::shader_src`]'s *The two program families*) — so the
 //! table above holds for either, and [`VARIANT_COUNT`] is per family. The
 //! sampler family adds exactly one pipeline beside them: the atlas-layer
-//! target below keeps drawing through the default family's Uber program and
+//! target below keeps drawing through the manual family's Uber program and
 //! layout, because the glyph pass's own bind groups
 //! ([`crate::gpu::atlas`]) carry no sampler. That pipeline is warmed with the
 //! rest, so the family costs no inline compile either.
@@ -85,7 +86,7 @@
 //! A pass that rasterizes glyph outlines into one layer of the atlas array
 //! draws through [`ATLAS_STRIP_PIPELINE`], which is
 //! [`EnginePipeline::StripIntermediate`] itself rather than a variant of its
-//! own (in the default program family; see *The program family* above for
+//! own (in the manual program family; see *The program family* above for
 //! the one pipeline the sampler family adds for it). An atlas layer is an [`crate::gpu::atlas::ATLAS_FORMAT`] colour target
 //! with no depth attachment, composited source-over so a COLR glyph's layers
 //! and a re-used slot's clear stack in the order they were recorded — which is
@@ -277,10 +278,10 @@ pub struct EngineShaders {
     /// against ([`crate::gpu::bindings::strip_pipeline_layout`]).
     pub strip_layout: wgpu::PipelineLayout,
     /// The program the atlas-layer pass draws with: [`Self::strip`] in the
-    /// default family, the default family's Uber program in the sampler one.
+    /// manual family, the manual family's Uber program in the sampler one.
     pub atlas_strip: ShaderId,
     /// The layout the atlas-layer pass is built against: [`Self::strip_layout`]
-    /// in the default family, the default family's layout in the sampler one.
+    /// in the manual family, the manual family's layout in the sampler one.
     pub atlas_layout: wgpu::PipelineLayout,
     /// Region and fullscreen clears.
     pub clear: ShaderId,
@@ -304,7 +305,7 @@ impl EngineShaders {
     /// filter modules into `library`, returning their ids beside a freshly
     /// created strip layout of that family.
     ///
-    /// The sampler family also compiles the default family's Uber program and
+    /// The sampler family also compiles the manual family's Uber program and
     /// layout, which its atlas-layer pass draws with (see the module doc's
     /// *The program family*): one more module and one more layout, nothing
     /// else.
@@ -788,9 +789,9 @@ pub const ATLAS_STRIP_PIPELINE: EnginePipeline = EnginePipeline::StripIntermedia
 /// therefore never the first place a pipeline is compiled, on the frames that
 /// have one.
 ///
-/// In the default program family this IS the intermediate state's Uber
+/// In the manual program family this IS the intermediate state's Uber
 /// description. In the sampler family it is the same render state over the
-/// default family's Uber program and layout ([`EngineShaders::atlas_strip`],
+/// manual family's Uber program and layout ([`EngineShaders::atlas_strip`],
 /// [`EngineShaders::atlas_layout`]): the glyph pass binds no sampler, and draws
 /// no atlas image while it writes into the atlas, so it has nothing to sample.
 #[must_use]
@@ -1325,7 +1326,7 @@ mod tests {
             library.len(),
             shader_src::MODULES.len() + PaintClass::SPECIALISED.len() + usize::from(image_sampler),
             "one module per engine shader source, plus one per strip class — and, in the \
-             sampler family, the default Uber program the atlas pass draws with"
+             sampler family, the manual Uber program the atlas pass draws with"
         );
         assert_eq!(
             EnginePipeline::ALL
@@ -1362,7 +1363,7 @@ mod tests {
         assert_eq!(descs.len(), VARIANT_COUNT);
         // The atlas pass draws through a description the warm-up list already
         // carries, so it never compiles a pipeline inline on a frame that
-        // misses a glyph. In the default family it is one of the variants; in
+        // misses a glyph. In the manual family it is one of the variants; in
         // the sampler family it is the one pipeline the family adds.
         let atlas = atlas_strip_desc(&shaders);
         assert!(

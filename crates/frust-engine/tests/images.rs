@@ -1425,7 +1425,7 @@ fn the_atlas_texture_is_declared_the_way_the_shaders_binding_expects() {
 /// The image-sampler program family on a real device: a bilinear atlas image
 /// filtered through the hardware sampler (`FRUST_ENGINE_IMAGE_SAMPLER`,
 /// [`frust_engine::EngineRenderer::with_image_sampler`]) against the manual
-/// four-tap path every default-family program keeps.
+/// four-tap path every manual-family program keeps.
 ///
 /// The bar is the one `frust-testing` already holds every image case to
 /// against the CPU oracle — the corpus default of two levels per channel, no
