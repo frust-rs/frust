@@ -455,6 +455,66 @@ pub(crate) fn glyph_atlas_policy(images: &ImageResidency) -> AtlasPolicy {
     )
 }
 
+/// What the font gate answered for one face: whether it is readable at all
+/// ([`font_is_readable`]) and whether it carries colour glyphs
+/// ([`font_has_color_glyphs`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FaceFacts {
+    /// [`font_is_readable`]'s answer.
+    pub(crate) readable: bool,
+    /// [`font_has_color_glyphs`]'s answer.
+    pub(crate) color: bool,
+}
+
+/// How many faces [`FontFacts`] remembers: a frame of mixed scripts draws a
+/// handful of fallback faces between its runs, and a memo of one would be
+/// re-read at every script change.
+const REMEMBERED_FACES: usize = 8;
+
+/// The font gate's answers for the faces drawn most recently, so a frame of
+/// many short runs over a few faces reads each face's table directory once
+/// rather than once per run and check.
+///
+/// Keyed by the blob's process-unique id and the collection index — the same
+/// pair `glifo` keys its caches on. A blob's bytes never change under its id
+/// (see [`FontData`]), so an answer cannot go stale; a face that is not
+/// remembered is simply read again, into the slot used least recently.
+#[derive(Debug, Default)]
+pub(crate) struct FontFacts {
+    /// `(blob id, index, answers, last use)` per remembered face.
+    faces: [Option<(u64, u32, FaceFacts, u64)>; REMEMBERED_FACES],
+    /// A use counter, for the least-recently-used replacement.
+    uses: u64,
+}
+
+impl FontFacts {
+    /// The gate's answers for `font`, read from its table directory only when
+    /// the face is not remembered.
+    pub(crate) fn of(&mut self, font: &FontData) -> FaceFacts {
+        let id = font.data.id();
+        self.uses = self.uses.wrapping_add(1);
+        let uses = self.uses;
+        for (face_id, index, facts, used) in self.faces.iter_mut().flatten() {
+            if *face_id == id && *index == font.index {
+                *used = uses;
+                return *facts;
+            }
+        }
+        let facts = FaceFacts {
+            readable: font_is_readable(font),
+            color: font_has_color_glyphs(font),
+        };
+        if let Some(slot) = self
+            .faces
+            .iter_mut()
+            .min_by_key(|face| face.map_or(0, |(_, _, _, used)| used))
+        {
+            *slot = Some((id, font.index, facts, uses));
+        }
+        facts
+    }
+}
+
 /// The OpenType table directory's own fixed header length.
 const TABLE_DIRECTORY_LEN: usize = 12;
 /// One table record: tag, checksum, offset, length.

@@ -1693,6 +1693,7 @@ impl AtlasPolicy {
             return ResidentAnswer::Bypassed;
         }
         let serial = self.serial;
+        let black = self.resident.black;
         let hash = run_hash(&identity, placed);
         let Some(run) = self.resident.open(hash, identity, placed, self.frame) else {
             return ResidentAnswer::Bypassed;
@@ -1703,7 +1704,6 @@ impl AtlasPolicy {
         run.used = serial;
         run.frame = self.frame;
 
-        let black = pack_context_color(BLACK);
         for (glyph, record) in placed.iter().zip(run.glyphs.iter_mut()) {
             let bucket = usize::from(glyph.bucket);
             let Some(known) = record.slots.get(bucket).copied() else {
@@ -2092,7 +2092,7 @@ fn outline_key(
 /// still does not fit is drawn by `glifo` and not remembered. A record also
 /// leaves at the first eviction pass after it was last drawn more than
 /// [`MAX_ENTRY_AGE`] serials ago.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ResidentRuns {
     /// The records, by [`run_hash`].
     runs: HashMap<u64, ResidentRun, BuildHasherDefault<RunHashHasher>>,
@@ -2102,6 +2102,21 @@ pub(crate) struct ResidentRuns {
     expected_entries: usize,
     /// Scratch for the bound's least-recently-drawn order.
     order: Vec<(u64, u64)>,
+    /// Black, packed as an outline key carries it — computed once rather than
+    /// per run.
+    black: u32,
+}
+
+impl Default for ResidentRuns {
+    fn default() -> Self {
+        Self {
+            runs: HashMap::default(),
+            bytes: 0,
+            expected_entries: 0,
+            order: Vec::new(),
+            black: pack_context_color(BLACK),
+        }
+    }
 }
 
 impl ResidentRuns {
@@ -2200,7 +2215,7 @@ impl ResidentRuns {
         // The serial `maintain` ticks to before it measures any age.
         let horizon = serial.saturating_add(1);
         let fresh = |used: u64| used != NEVER && horizon.saturating_sub(used) <= MAX_ENTRY_AGE;
-        let black = pack_context_color(BLACK);
+        let black = self.black;
         let mut freed = 0_usize;
         self.runs.retain(|_, run| {
             if !fresh(run.used) {

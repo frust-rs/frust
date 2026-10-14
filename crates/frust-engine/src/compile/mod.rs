@@ -97,8 +97,8 @@ use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode
 use crate::config;
 use crate::error::EngineError;
 use crate::text::{
-    AtlasPolicy, GlyphQuadScratch, GlyphQuadTargets, GlyphRunTargets, RunKey, RunRoute,
-    context_paint, font_has_color_glyphs, font_is_readable, glyph_atlas_policy, lower_glyph_run,
+    AtlasPolicy, FontFacts, GlyphQuadScratch, GlyphQuadTargets, GlyphRunTargets, RunKey, RunRoute,
+    context_paint, glyph_atlas_policy, lower_glyph_run,
 };
 
 /// Curve-flattening tolerance, in device pixels.
@@ -553,6 +553,10 @@ pub struct SceneCompiler {
     /// `FRUST_ENGINE_NO_GLYPH_RUN_CACHE` is set; [`Self::set_glyph_run_cache`]
     /// decides it per compiler.
     glyph_run_cache: bool,
+    /// The font gate's answers for the faces drawn most recently, so a frame
+    /// of many short runs reads each face's table directory once (see
+    /// [`crate::text::FontFacts`]).
+    font_facts: FontFacts,
     /// Whether a glyph run's outline is hinted before it is rasterized (see
     /// [`crate::text`]'s module doc for the split this half of the policy
     /// answers). Mobile-safe by default — `false`, the same "known nothing
@@ -695,6 +699,7 @@ impl SceneCompiler {
             glyph_quads: !config::glyph_quads_disabled(),
             glyph_quad_scratch: GlyphQuadScratch::default(),
             glyph_run_cache: !config::glyph_run_cache_disabled(),
+            font_facts: FontFacts::default(),
             hint_text: false,
             externals: ExternalExtents::new(),
             frame_extent: (width, height),
@@ -1583,7 +1588,7 @@ impl SceneCompiler {
                         run,
                         root * snapshots.correction() * run.transform,
                         self.hint_text,
-                        font_has_color_glyphs(run.font.font()),
+                        self.font_facts.of(run.font.font()).color,
                         context_color,
                         &mut self.run_glyph_ids,
                     );
@@ -1654,7 +1659,7 @@ impl SceneCompiler {
         if run.glyphs.is_empty() || self.clips.blocks_everything() {
             return;
         }
-        if !font_is_readable(run.font.font()) {
+        if !self.font_facts.of(run.font.font()).readable {
             note_font_skip();
             let glyphs = u32::try_from(run.glyphs.len()).unwrap_or(u32::MAX);
             frame.skipped_glyphs = frame.skipped_glyphs.saturating_add(glyphs);

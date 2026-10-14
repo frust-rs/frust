@@ -276,7 +276,14 @@ impl PendingGlyphQuad {
 /// Bounded far outside any device grid so the conversion to `i64` is exact;
 /// a glyph that far away is culled either way.
 fn whole_pixel(value: f64) -> bool {
-    value.is_finite() && value.fract() == 0.0 && value.abs() <= f64::from(1_u32 << 30)
+    value.fract() == 0.0 && on_quad_grid(value)
+}
+
+/// Whether `value` lies inside the bound [`whole_pixel`] holds a quad corner
+/// to — the half of it a coordinate already known to be whole still has to
+/// pass.
+fn on_quad_grid(value: f64) -> bool {
+    value.is_finite() && value.abs() <= f64::from(1_u32 << 30)
 }
 
 /// The record one run's quads on one atlas layer share, by tint.
@@ -304,6 +311,9 @@ pub(crate) struct GlyphQuadScratch {
     origins: Vec<(f64, f64)>,
     /// The slots a resident run's glyphs resolved to.
     slots: Vec<AtlasSlot>,
+    /// A resident run's quads — device rectangle and slot — once every one of
+    /// them is known to be one.
+    quads: Vec<([i64; 4], AtlasSlot)>,
 }
 
 /// What a run may draw glyph quads through: the retained scratch, and the
@@ -496,9 +506,11 @@ impl<'a> EngineGlyphSink<'a> {
     /// rectangle `glifo` fills over it — `floor(origin) + bearing`, the slot's
     /// own extent, sampled nearest through the run colour's alpha-mask tint.
     /// Those are exactly the quad candidates [`Self::draw_atlas_glyph`] holds
-    /// back, so the run is recorded by the same
-    /// [`finish_quads`](Self::finish_quads) a fully resident `glifo` run ends
-    /// in: same draws, same depths, same shared records, same slots reported.
+    /// back, and each is recorded by the same [`Self::emit_quad`] a fully
+    /// resident `glifo` run's quads end in: same draws, same depths, same
+    /// shared records, same slots reported. Only the candidate itself is
+    /// skipped — its rectangle is computed directly rather than re-derived from
+    /// a transform and an area built to be checked.
     ///
     /// Anything but [`ResidentAnswer::Resolved`] draws nothing and leaves the
     /// sink as it was, for the run to go to `glifo`: a glyph the cache could
@@ -544,37 +556,48 @@ impl<'a> EngineGlyphSink<'a> {
             quality: ImageQuality::Low,
             alpha: 1.0,
         };
-        scratch.pending.clear();
+        scratch.quads.clear();
         for (&(x, y), &slot) in scratch.origins.iter().zip(&scratch.slots) {
             if slot.width == 0 || slot.height == 0 {
                 // A glyph with no ink, skipped exactly as `draw_atlas_glyph`
                 // skips it.
                 continue;
             }
-            let glyph = PendingGlyphQuad {
-                image: Image {
-                    image: ImageSource::opaque_id(slot.image_id),
-                    sampler,
-                },
-                area: Rect::new(0.0, 0.0, f64::from(slot.width), f64::from(slot.height)),
-                transform: Affine::translate((
-                    x.floor() + f64::from(slot.bearing_x),
-                    y.floor() + f64::from(slot.bearing_y),
-                )),
-                paint_transform: Affine::IDENTITY,
-                tint,
-                slot,
-            };
-            if glyph.quad_rect().is_none() {
+            // The corner `glifo` translates the slot's rectangle to. Whole by
+            // construction — a floor plus an integer bearing — so of
+            // `quad_rect`'s questions only the grid bound is left to ask.
+            let left = x.floor() + f64::from(slot.bearing_x);
+            let top = y.floor() + f64::from(slot.bearing_y);
+            if !on_quad_grid(left) || !on_quad_grid(top) {
                 // Off the grid a quad can address: `glifo` draws it the
                 // general way, and so does the rest of the run.
-                scratch.pending.clear();
                 return ResidentAnswer::Bypassed;
             }
-            scratch.pending.push(glyph);
+            // Exact: whole numbers inside the bound just checked.
+            let (x0, y0) = (left as i64, top as i64);
+            scratch.quads.push((
+                [
+                    x0,
+                    y0,
+                    x0 + i64::from(slot.width),
+                    y0 + i64::from(slot.height),
+                ],
+                slot,
+            ));
         }
 
-        self.finish_quads(true);
+        // Taken out and put back so the loop can borrow the sink mutably; the
+        // allocation travels back with it.
+        let window = targets.window;
+        let quads = std::mem::take(&mut scratch.quads);
+        self.collecting = false;
+        for &(rect, slot) in &quads {
+            let source = ImageSource::opaque_id(slot.image_id);
+            self.emit_quad(rect, slot, tint, &source, sampler, window);
+        }
+        if let Some(targets) = self.quads.as_mut() {
+            targets.scratch.quads = quads;
+        }
         self.outcome.resident = true;
         ResidentAnswer::Resolved
     }
@@ -687,11 +710,35 @@ impl<'a> EngineGlyphSink<'a> {
     /// covers. Trimmed away entirely, the glyph records nothing and consumes no
     /// depth, as the general draw does for a glyph clipped out of sight.
     fn draw_quad(&mut self, glyph: &PendingGlyphQuad, window: RectU16) {
-        let Some([x0, y0, x1, y1]) = glyph.quad_rect() else {
+        let Some(rect) = glyph.quad_rect() else {
             // Only candidates that are quads are ever held back.
             self.draw_atlas_image(glyph);
             return;
         };
+        self.emit_quad(
+            rect,
+            glyph.slot,
+            glyph.tint,
+            &glyph.image.image,
+            glyph.image.sampler,
+            window,
+        );
+    }
+
+    /// Record one quad over device rectangle `[x0, y0, x1, y1]` sampling
+    /// `slot` from its corner, trimmed to `window` — the whole of
+    /// [`Self::draw_quad`] once a candidate is known to be a quad, shared with
+    /// [`Self::draw_resident`]. `source` and `sampler` are the atlas paint the
+    /// run's shared record is encoded from on the layer's first quad.
+    fn emit_quad(
+        &mut self,
+        [x0, y0, x1, y1]: [i64; 4],
+        slot: AtlasSlot,
+        tint: Option<Tint>,
+        source: &ImageSource,
+        sampler: ImageSampler,
+        window: RectU16,
+    ) {
         let left = x0.max(i64::from(window.x0));
         let top = y0.max(i64::from(window.y0));
         let right = x1.min(i64::from(window.x1));
@@ -719,7 +766,7 @@ impl<'a> EngineGlyphSink<'a> {
         }
         let strip_range = start..self.frame.strips.strips.len();
 
-        let paint_index = self.run_record(glyph);
+        let paint_index = self.run_record(slot.page_index, tint, source, sampler);
         let depth = self.depth.advance();
         let draw = EngineDraw::new(
             Paint::Indexed(IndexedPaint::new(paint_index)),
@@ -730,7 +777,6 @@ impl<'a> EngineGlyphSink<'a> {
             .recorder
             .push_draw(draw, &self.frame.strips.strips[strip_range]);
 
-        let slot = glyph.slot;
         self.frame.glyph_quads.push(GlyphQuad {
             depth,
             x: narrow(left),
@@ -745,34 +791,39 @@ impl<'a> EngineGlyphSink<'a> {
         self.note_atlas_draw(slot);
     }
 
-    /// The index of the record `glyph`'s run shares on `glyph`'s atlas layer
-    /// at `glyph`'s tint, encoding it on first use.
+    /// The index of the record the run shares on atlas layer `page` at
+    /// `tint`, encoding it from `source` and `sampler` on first use.
     ///
     /// Encoded at the first quad that is actually drawn on that layer, so the
     /// slot the record names is always one the frame reports — which is what
     /// resolves the record to its layer.
-    fn run_record(&mut self, glyph: &PendingGlyphQuad) -> usize {
-        let page = glyph.slot.page_index;
+    fn run_record(
+        &mut self,
+        page: u32,
+        tint: Option<Tint>,
+        source: &ImageSource,
+        sampler: ImageSampler,
+    ) -> usize {
         if let Some(record) = self.quads.as_ref().and_then(|targets| {
             targets
                 .scratch
                 .records
                 .iter()
-                .find(|record| record.page == page && record.tint == glyph.tint)
+                .find(|record| record.page == page && record.tint == tint)
         }) {
             return record.paint_index;
         }
         let paint_index = encode_glyph_run_record(
-            glyph.image.image.clone(),
-            glyph.image.sampler,
-            glyph.tint,
+            source.clone(),
+            sampler,
+            tint,
             &mut self.frame.encoded_paints,
         );
         self.frame.glyph_run_paints.push(paint_index);
         if let Some(targets) = self.quads.as_mut() {
             targets.scratch.records.push(RunRecord {
                 page,
-                tint: glyph.tint,
+                tint,
                 paint_index,
             });
         }
