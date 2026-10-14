@@ -40,8 +40,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `NetworkImages::install()` in the `app!` setup block. Its Android compile gate needs
   `cargo ndk` (ring compiles C).
 - `frust-network-image`: `DecodeLimits::max_alloc_bytes` is now the budget for the header-predictable
-  decode-and-fit working set (resize working set included, default 512 MiB; the decoder's own
-  scratch, such as progressive-JPEG coefficients, stays outside it); over-budget images fail with
+  decode-and-fit working set (resize working set and a progressive JPEG's coefficient store,
+  counted from its header, included; default 512 MiB); over-budget images fail with
   `DecodeError::OverBudget`.
 - `frust add plugin network-image` and the TUI's Add Plugin list offer the new plugin (the registry
   now has nineteen entries).
@@ -113,6 +113,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Fixed
 
+- `frust-shell-ios`: the AccessKit tree is published in the view's physical pixels through a root
+  transform equal to the display scale, so VoiceOver frames and hit-tests land on the drawn
+  elements on 2x/3x devices (they were half-scale before).
 - A navigator inside a `pattern_switcher` child that had been switched away kept claiming Android
   back, so back was swallowed on every other page and could not exit the app.
 - `ScrollController::animate_to` now flushes `on_scroll` (and `ListView` near-edge callbacks) on
