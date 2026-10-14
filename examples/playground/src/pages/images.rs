@@ -25,8 +25,8 @@ use frust::authoring::{
 };
 use frust::{
     ButtonStyle, Color, Component, EdgeInsets, ImageFit, Padding, RwSignal, Set, SizedBox, Theme,
-    button, checkbox, colored_box, column, component, container, flexible, icon, icons, inflexible,
-    row, text, use_context, views,
+    button, checkbox, colored_box, column, component, container, icon, icons, row, text,
+    use_context, views,
 };
 use frust_network_image::{ImageLoader, NetworkImages, network_image};
 
@@ -141,27 +141,28 @@ impl ImagesPage {
     }
 
     fn grid_row(line: usize, local_base: Option<&str>) -> impl View<ImagesState> {
-        let cells = (0..COLUMNS).map(move |col| {
+        let cells = (0..COLUMNS).fold(row(), |cells, col| {
             let index = line * COLUMNS + col;
-            let gap = if col + 1 < COLUMNS { GAP } else { 0.0 };
-            Self::cell(index, local_base, gap)
+            let cells = if col > 0 {
+                cells.child(SizedBox(Some(GAP), None))
+            } else {
+                cells
+            };
+            cells.flex(1, Self::cell(index, local_base))
         });
-        column()
-            .child(row().children(views(cells)))
-            .child(SizedBox(None, Some(GAP)))
+        column().child(cells).child(SizedBox(None, Some(GAP)))
     }
 
-    fn cell(index: usize, local_base: Option<&str>, trailing_gap: f64) -> impl View<ImagesState> {
-        let image = network_image::<ImagesState>(Self::url(index, local_base))
-            .placeholder(Self::skeleton())
-            .error(Self::error_slot())
-            .fit(ImageFit::Cover)
-            .target_px(400, 300)
-            .fade(Duration::from_millis(250))
-            .semantic_label(format!("Sample image {}", index + 1));
-        row()
-            .push(flexible(1, SizedBox(None, Some(CELL_HEIGHT)).child(image)))
-            .push(inflexible(SizedBox(Some(trailing_gap), None)))
+    fn cell(index: usize, local_base: Option<&str>) -> impl View<ImagesState> {
+        SizedBox(None, Some(CELL_HEIGHT)).child(
+            network_image::<ImagesState>(Self::url(index, local_base))
+                .placeholder(Self::skeleton())
+                .error(Self::error_slot())
+                .fit(ImageFit::Cover)
+                .target_px(400, 300)
+                .fade(Duration::from_millis(250))
+                .semantic_label(format!("Sample image {}", index + 1)),
+        )
     }
 
     fn skeleton() -> impl View<ImagesState> {
@@ -264,6 +265,13 @@ impl Widget for FrameTickerWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frust::{AnyView, any};
+    use frust_core::RenderRoot;
+    use frust_reactive::ReactiveRuntime;
+    use frust_text::TextContext;
+    use kurbo::Size;
+    use reactive_graph::owner::Owner;
+    use std::any::Any;
 
     #[test]
     fn urls_switch_between_picsum_and_fixtures() {
@@ -275,5 +283,39 @@ mod tests {
             ImagesPage::url(3, Some("http://127.0.0.1:9")),
             "http://127.0.0.1:9/img/3.png"
         );
+    }
+
+    /// Every grid cell gets a real width: an unbounded-main-axis layout would give the
+    /// image view a 0-width tight constraint and the engine would skip the draw.
+    #[test]
+    fn grid_cells_are_laid_out_with_a_real_width() {
+        let _ = ReactiveRuntime::init(std::sync::Arc::new(|| {}));
+        let owner = Owner::new();
+        owner.set();
+        let mut tcx = TextContext::new();
+        let mut root: RenderRoot<PlaygroundState, AnyView<PlaygroundState>> = RenderRoot::new();
+        let mut state = PlaygroundState::new();
+        // erasure: keep the headless test root is typed `AnyView`; the page is erased once at this boundary
+        let mut logic = |s: &mut PlaygroundState| any(page(s));
+        root.rebuild(&mut logic, &mut state);
+        let tcx_any: &mut dyn Any = &mut tcx;
+        root.layout_with_text(Size::new(390.0, 1400.0), tcx_any);
+        let update = root.semantics();
+        let cells: Vec<_> = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.label().is_some_and(|l| l.starts_with("Sample image ")))
+            .collect();
+        assert_eq!(cells.len(), FIXTURE_COUNT, "cells: {cells:?}");
+        for (_, node) in cells {
+            let rect = node.bounds().expect("cell has bounds");
+            assert!(
+                rect.width() > 100.0 && rect.height() > 100.0,
+                "{:?} is {} x {}",
+                node.label(),
+                rect.width(),
+                rect.height()
+            );
+        }
     }
 }
