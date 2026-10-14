@@ -52,6 +52,8 @@ pub mod draw;
 
 pub mod external;
 
+pub(crate) mod parallel;
+
 pub use clear::ClearPunch;
 pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
@@ -66,9 +68,7 @@ pub const MAX_RESIDENT_GLYPH_RUNS: usize = crate::text::atlas_policy::MAX_RESIDE
 use std::sync::Once;
 use std::time::Duration;
 
-use kurbo::{
-    Affine, BezPath, Cap, Join, PathEl, Rect, RoundedRect, RoundedRectRadii, Shape, Stroke,
-};
+use kurbo::{Affine, BezPath, Cap, Join, PathEl, Rect, RoundedRectRadii, Shape, Stroke};
 use peniko::{Brush, Color, Fill, ImageData};
 
 use frust_gpu::{SceneTextureId, TierCaps};
@@ -76,7 +76,6 @@ use frust_scene::{Command, CornerRadii, DashPattern, GlyphRun, PathStyle, Scene}
 
 use glifo::{GlyphAtlas, GlyphPrepCache, PendingClearRect};
 
-use vello_common::clip::PathDataRef;
 use vello_common::encode::EncodedPaint;
 use vello_common::fearless_simd::Level;
 use vello_common::geometry::RectU16;
@@ -89,11 +88,11 @@ use vello_common::util::is_axis_aligned;
 use crate::cache::images::{
     AtlasBudget, AtlasRegion, ImageResidency, ImageSkip, ImageUpload, is_mobile_tier,
 };
-use crate::compile::blur_rrect::{encode_blurred_rounded_rect, inflated_bounds};
+use crate::compile::blur_rrect::encode_blurred_rounded_rect;
 use crate::compile::clear::StagedPunch;
-use crate::compile::cull::{generate_fill, generate_stroke, rounded_rect_elements};
 use crate::compile::external::encode_scene_texture;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
+use crate::compile::parallel::Geometry;
 use crate::config;
 use crate::error::EngineError;
 use crate::text::{
@@ -1086,164 +1085,29 @@ impl SceneCompiler {
         }
 
         match command {
+            // A shape is its geometry's coverage under its brush; the
+            // geometry is resolved by the one function a helper resolves it by
+            // too, so a helper's run and the walk's own can never differ.
             Command::FillRect {
-                rect,
-                brush,
-                transform,
+                brush, transform, ..
+            }
+            | Command::RoundedRect {
+                brush, transform, ..
+            }
+            | Command::Line {
+                brush, transform, ..
+            }
+            | Command::Path {
+                brush, transform, ..
             } => {
-                let transform = combined * *transform;
-
-                if let Some(device_rect) = fast_rect(*rect, transform) {
-                    let recorded = self.record(
+                if let Some(geometry) = Geometry::of(command, combined) {
+                    self.draw_shape(
                         frame,
                         depth,
                         PaintSource::Brush(brush),
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_rect_fast(&device_rect, storage, clip);
-                        },
+                        combined * *transform,
+                        geometry,
                     );
-                    if recorded {
-                        frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
-                    }
-                } else {
-                    self.record(
-                        frame,
-                        depth,
-                        PaintSource::Brush(brush),
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_path(
-                                rect.path_elements(FLATTEN_TOLERANCE),
-                                Fill::NonZero,
-                                transform,
-                                None,
-                                storage,
-                                clip,
-                            );
-                        },
-                    );
-                }
-            }
-            Command::RoundedRect {
-                rect,
-                radii,
-                brush,
-                transform,
-            } => {
-                let transform = combined * *transform;
-                let shape = RoundedRect::from_rect(*rect, rounded_rect_radii(*radii));
-
-                self.record(
-                    frame,
-                    depth,
-                    PaintSource::Brush(brush),
-                    transform,
-                    |generator, storage, clip| {
-                        generate_fill(
-                            generator,
-                            rounded_rect_elements(&shape),
-                            transform,
-                            storage,
-                            clip,
-                        );
-                    },
-                );
-            }
-            Command::Line {
-                p0,
-                p1,
-                width,
-                brush,
-                transform,
-            } => {
-                let transform = combined * *transform;
-                // The two elements `kurbo::Line::path_elements` yields, spelled
-                // out so the stroke helper can walk them twice.
-                let line = [PathEl::MoveTo(*p0), PathEl::LineTo(*p1)];
-                let stroke = round_stroke(*width);
-
-                self.record(
-                    frame,
-                    depth,
-                    PaintSource::Brush(brush),
-                    transform,
-                    |generator, storage, clip| {
-                        generate_stroke(generator, line, &stroke, transform, storage, clip);
-                    },
-                );
-            }
-            Command::Path {
-                path,
-                style,
-                brush,
-                transform,
-            } => {
-                let transform = combined * *transform;
-
-                match style {
-                    PathStyle::Fill => {
-                        self.record(
-                            frame,
-                            depth,
-                            PaintSource::Brush(brush),
-                            transform,
-                            |generator, storage, clip| {
-                                generate_fill(generator, path.iter(), transform, storage, clip);
-                            },
-                        );
-                    }
-                    PathStyle::Stroke { width, dash } => {
-                        let stroke = round_stroke(*width);
-                        // A dash pattern is expanded into its own sub-paths
-                        // before the stroker runs, the same lowering the
-                        // display list's other consumers apply: the pattern
-                        // never reaches a backend's own dash support, so every
-                        // rasterizer sees the identical geometry.
-                        let dashed = match dash {
-                            Some(dash) if dash.is_effective() => Some(dash_path(path, *dash)),
-                            _ => None,
-                        };
-
-                        match &dashed {
-                            Some(dashed) => {
-                                self.record(
-                                    frame,
-                                    depth,
-                                    PaintSource::Brush(brush),
-                                    transform,
-                                    |generator, storage, clip| {
-                                        generate_stroke(
-                                            generator,
-                                            dashed.iter(),
-                                            &stroke,
-                                            transform,
-                                            storage,
-                                            clip,
-                                        );
-                                    },
-                                );
-                            }
-                            None => {
-                                self.record(
-                                    frame,
-                                    depth,
-                                    PaintSource::Brush(brush),
-                                    transform,
-                                    |generator, storage, clip| {
-                                        generate_stroke(
-                                            generator,
-                                            path.iter(),
-                                            &stroke,
-                                            transform,
-                                            storage,
-                                            clip,
-                                        );
-                                    },
-                                );
-                            }
-                        }
-                    }
                 }
             }
             Command::PushClip { rect, transform } => {
@@ -1314,49 +1178,24 @@ impl SceneCompiler {
                     self.close_group(frame);
                 }
             }
+            // An image is its destination rectangle's coverage under an image
+            // paint — the same two rectangle paths a solid fill takes, so a
+            // pixel-aligned image costs no flattening either.
             Command::Image {
                 data,
                 dest,
                 transform,
             } => {
-                let transform = combined * *transform;
-                let source = PaintSource::Image { data, dest: *dest };
-
-                // An image is its destination rectangle's coverage under an
-                // image paint — the same two rectangle paths a solid fill
-                // takes, so a pixel-aligned image costs no flattening either.
-                if let Some(device_rect) = fast_rect(*dest, transform) {
-                    let recorded = self.record(
-                        frame,
-                        depth,
-                        source,
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_rect_fast(&device_rect, storage, clip);
-                        },
-                    );
-                    if recorded {
-                        frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
-                    }
-                } else {
-                    self.record(
-                        frame,
-                        depth,
-                        source,
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_path(
-                                dest.path_elements(FLATTEN_TOLERANCE),
-                                Fill::NonZero,
-                                transform,
-                                None,
-                                storage,
-                                clip,
-                            );
-                        },
-                    );
+                if let Some(geometry) = Geometry::of(command, combined) {
+                    let source = PaintSource::Image { data, dest: *dest };
+                    self.draw_shape(frame, depth, source, combined * *transform, geometry);
                 }
             }
+            // The strip generator rasterizes the padded bounding rectangle,
+            // not `rect` itself and not a rounded shape — see [`blur_rrect`]'s
+            // module doc for why. It takes the same fast rectangle path a fill
+            // or an image does whenever that padded rectangle lands
+            // pixel-aligned under the composed transform.
             Command::BlurredRoundedRect {
                 rect,
                 radii,
@@ -1364,50 +1203,14 @@ impl SceneCompiler {
                 color,
                 transform,
             } => {
-                let transform = combined * *transform;
-                let source = PaintSource::BlurredRect {
-                    rect: *rect,
-                    radii: *radii,
-                    std_dev: *std_dev,
-                    color: *color,
-                };
-                // The strip generator rasterizes the padded bounding
-                // rectangle, not `rect` itself and not a rounded shape — see
-                // [`blur_rrect`]'s module doc for why. It takes the same fast
-                // rectangle path a fill or an image does whenever that padded
-                // rectangle lands pixel-aligned under `transform`.
-                let bounds = inflated_bounds(*rect, *std_dev);
-
-                if let Some(device_rect) = fast_rect(bounds, transform) {
-                    let recorded = self.record(
-                        frame,
-                        depth,
-                        source,
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_rect_fast(&device_rect, storage, clip);
-                        },
-                    );
-                    if recorded {
-                        frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
-                    }
-                } else {
-                    self.record(
-                        frame,
-                        depth,
-                        source,
-                        transform,
-                        |generator, storage, clip| {
-                            generator.generate_filled_path(
-                                bounds.path_elements(FLATTEN_TOLERANCE),
-                                Fill::NonZero,
-                                transform,
-                                None,
-                                storage,
-                                clip,
-                            );
-                        },
-                    );
+                if let Some(geometry) = Geometry::of(command, combined) {
+                    let source = PaintSource::BlurredRect {
+                        rect: *rect,
+                        radii: *radii,
+                        std_dev: *std_dev,
+                        color: *color,
+                    };
+                    self.draw_shape(frame, depth, source, combined * *transform, geometry);
                 }
             }
             Command::GlyphRun(run) => {
@@ -1482,38 +1285,8 @@ impl SceneCompiler {
         depth: &mut DepthCounter,
     ) {
         let source = PaintSource::SceneTexture { id, dest };
-
-        if let Some(device_rect) = fast_rect(dest, transform) {
-            let recorded = self.record(
-                frame,
-                depth,
-                source,
-                transform,
-                |generator, storage, clip| {
-                    generator.generate_filled_rect_fast(&device_rect, storage, clip);
-                },
-            );
-            if recorded {
-                frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
-            }
-        } else {
-            self.record(
-                frame,
-                depth,
-                source,
-                transform,
-                |generator, storage, clip| {
-                    generator.generate_filled_path(
-                        dest.path_elements(FLATTEN_TOLERANCE),
-                        Fill::NonZero,
-                        transform,
-                        None,
-                        storage,
-                        clip,
-                    );
-                },
-            );
-        }
+        let geometry = Geometry::rect(dest, transform);
+        self.draw_shape(frame, depth, source, transform, geometry);
     }
 
     /// Route every glyph run the scene records, in recording order.
@@ -1838,14 +1611,30 @@ impl SceneCompiler {
         }
     }
 
-    /// Run `generate` under the active clip, then record whatever strips
+    /// [`record`](Self::record) `geometry`, counting the draw as a fast
+    /// rectangle when it took that path (see [`fast_rect`]).
+    fn draw_shape(
+        &mut self,
+        frame: &mut CompiledFrame,
+        depth: &mut DepthCounter,
+        source: PaintSource<'_>,
+        transform: Affine,
+        geometry: Geometry<'_>,
+    ) {
+        let fast = geometry.is_fast_rect();
+        if self.record(frame, depth, source, transform, geometry) && fast {
+            frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
+        }
+    }
+
+    /// Generate `geometry` under the active clip, then record whatever strips
     /// survived as one draw painted from `source` under `transform`.
     ///
-    /// `generate` is handed the clip stack's coverage mask to pass on to the
-    /// strip generator, which is what intersects a mask clip while the draw's
-    /// own coverage is produced; the scissor is applied afterwards, to the run
-    /// the generator appended. A scissor admitting nothing skips generation
-    /// entirely rather than generating coverage to throw away.
+    /// The clip stack's coverage mask is handed to the strip generator, which
+    /// is what intersects a mask clip while the draw's own coverage is
+    /// produced; the scissor is applied afterwards, to the run the generator
+    /// appended. A scissor admitting nothing skips generation entirely rather
+    /// than generating coverage to throw away.
     ///
     /// Returns whether a draw was recorded. A generator call that produced no
     /// strips (fully culled, clipped away, degenerate, or empty geometry)
@@ -1858,24 +1647,21 @@ impl SceneCompiler {
     /// atlas refuses arrives *after* that point, so its coverage is rolled back
     /// to where the generator started rather than left behind as strips no draw
     /// references.
-    fn record<F>(
+    fn record(
         &mut self,
         frame: &mut CompiledFrame,
         depth: &mut DepthCounter,
         source: PaintSource<'_>,
         transform: Affine,
-        generate: F,
-    ) -> bool
-    where
-        F: FnOnce(&mut StripGenerator, &mut StripStorage, Option<PathDataRef<'_>>),
-    {
+        geometry: Geometry<'_>,
+    ) -> bool {
         if self.clips.blocks_everything() {
             return false;
         }
 
         let start = frame.strips.strips.len();
         let alpha_start = frame.strips.alphas.len();
-        generate(&mut self.generator, &mut frame.strips, self.clips.mask());
+        geometry.generate(&mut self.generator, &mut frame.strips, self.clips.mask());
         self.clips.clip_run(&mut frame.strips, start, alpha_start);
         let strip_range = start..frame.strips.strips.len();
 
