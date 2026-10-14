@@ -128,12 +128,11 @@ pub(crate) mod atlas_policy;
 pub(crate) mod backend;
 pub(crate) mod color;
 
-use glifo::{
-    AtlasCacher, FontEmbolden, Glyph, GlyphAtlas, GlyphPrepCache, GlyphRunBuilder, ImageCache,
-};
-use kurbo::Affine;
+use glifo::{AtlasCacher, FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder, ImageCache};
+use kurbo::{Affine, Point, Vec2};
 use peniko::FontData;
-use vello_common::paint::Paint;
+use peniko::color::{AlphaColor, Srgb};
+use vello_common::paint::{Paint, PaintType};
 use vello_common::strip_generator::StripGenerator;
 
 use frust_scene::GlyphRun;
@@ -145,6 +144,8 @@ use crate::config;
 
 pub(crate) use atlas_policy::AtlasPolicy;
 pub(crate) use atlas_policy::{RunKey, RunRoute};
+
+use atlas_policy::{ResidentAnswer, ResidentIdentity};
 
 pub(crate) use backend::{GlyphQuadScratch, GlyphQuadTargets, GlyphRunOutcome, context_paint};
 
@@ -198,15 +199,30 @@ pub(crate) struct GlyphRunTargets<'a> {
 /// glyph quads as quads, one that missed draws them the general way (see
 /// [`backend`]'s module doc).
 ///
+/// `resident` lets a run the atlas serves be drawn out of the policy's
+/// resident-run cache instead of through `glifo` — see [`ResidentPlan`] for
+/// when that is possible and why it draws exactly what `glifo` would. A run the
+/// cache cannot resolve whole goes to `glifo` as before, and a run `glifo` then
+/// draws without a miss of its own, after the cache missed it, is refused the
+/// cache from then on.
+///
 /// Returns what the run cost: how many glyphs became draws, and how many were
 /// refused.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the run, its two transforms' worth of placement, its brush in \
+              both encodings and the two routing switches are each read by a \
+              different half of the lowering; grouping them would only move \
+              the list"
+)]
 pub(crate) fn lower_glyph_run(
     run: &GlyphRun,
     transform: Affine,
     paint: Paint,
     context_brush: &peniko::Brush,
     hint: bool,
-    mut atlas: Option<(&mut GlyphAtlas, &mut ImageCache)>,
+    mut atlas: Option<(&mut AtlasPolicy, &mut ImageCache)>,
+    resident: bool,
     targets: GlyphRunTargets<'_>,
 ) -> GlyphRunOutcome {
     let GlyphRunTargets {
@@ -218,25 +234,41 @@ pub(crate) fn lower_glyph_run(
         quads,
     } = targets;
 
+    let context = context_paint(context_brush);
+    // Planned before the sink takes the context paint over.
+    let plan = if resident && atlas.is_some() && quads.is_some() {
+        ResidentPlan::new(run, transform, hint, &context)
+    } else {
+        None
+    };
     let mut sink = EngineGlyphSink::new(
         generator,
         clips,
         frame,
         depth,
         paint,
-        context_paint(context_brush),
+        context,
         // Quads only ever come out of the atlas.
         quads.filter(|_| atlas.is_some()),
     );
 
-    let misses = |atlas: &Option<(&mut GlyphAtlas, &mut ImageCache)>| {
+    let mut missed = None;
+    if let (Some(plan), Some((policy, _))) = (&plan, atlas.as_mut()) {
+        match sink.draw_resident(policy, plan) {
+            ResidentAnswer::Resolved => return sink.outcome(),
+            ResidentAnswer::Missed(handle) => missed = Some(handle),
+            ResidentAnswer::Bypassed => {}
+        }
+    }
+
+    let misses = |atlas: &Option<(&mut AtlasPolicy, &mut ImageCache)>| {
         atlas
             .as_ref()
-            .map(|(glyph_atlas, _)| glyph_atlas.cache_misses())
+            .map(|(policy, _)| policy.atlas().cache_misses())
     };
     let misses_before = misses(&atlas);
     let cacher = match &mut atlas {
-        Some((glyph_atlas, images)) => AtlasCacher::Enabled(glyph_atlas, images),
+        Some((policy, images)) => AtlasCacher::Enabled(policy.atlas_mut(), images),
         None => AtlasCacher::Disabled,
     };
     GlyphRunBuilder::new(
@@ -257,9 +289,137 @@ pub(crate) fn lower_glyph_run(
         x: glyph.x,
         y: glyph.y,
     }));
-    sink.finish_quads(misses(&atlas) == misses_before);
+    let all_resident = misses(&atlas) == misses_before;
+    sink.finish_quads(all_resident);
+    if let (Some(handle), true, Some((policy, _))) = (missed, all_resident, atlas.as_mut()) {
+        policy.refuse_resident_run(handle);
+    }
 
     sink.outcome()
+}
+
+/// What drawing one run out of the resident-run cache needs, derived once per
+/// run exactly as `glifo` derives it.
+///
+/// The cache remembers *which slot* each glyph of a run resolved to, per
+/// subpixel bucket; everything about *where* the glyph lands is recomputed
+/// every frame from the run's transform. That recomputation is `glifo`'s own
+/// arithmetic, operation for operation, so a glyph lands on the pixel and in
+/// the bucket `glifo` would put it in — not an approximation of them:
+///
+/// - the run is *absorbed* (the scale moved into the font size) under
+///   `glifo`'s own predicate, so only a transform
+///   [`atlas_policy::absorbed_scale`] accepts has a plan, and the font size
+///   the glyphs are keyed at is `font_size * d` in `f32`, as `glifo` computes
+///   it;
+/// - a glyph's position is mapped through the run transform's linear part,
+///   then translated by the effective transform, then mirrored vertically;
+///   its vertical origin is rounded when hinted;
+/// - it is cached only when `glifo` would cache it: a fill under a solid paint
+///   at a size inside the cache's ceiling.
+///
+/// The colour is the run's solid context colour — the tint `glifo` hands the
+/// sink for every cached outline glyph, and the reason the cache does not key
+/// on it.
+#[derive(Debug)]
+pub(crate) struct ResidentPlan<'r> {
+    /// The run's glyphs.
+    glyphs: &'r [frust_scene::Glyph],
+    /// The run transform's linear part, which positions each glyph.
+    positioning: Affine,
+    /// The transform each positioned glyph is placed through.
+    effective: Affine,
+    /// Whether the run is hinted — its vertical origins rounded and its keys
+    /// marked hinted.
+    hinted: bool,
+    /// The run's identity in the cache.
+    identity: ResidentIdentity,
+    /// The run's solid colour, which every glyph is tinted with.
+    color: AlphaColor<Srgb>,
+}
+
+impl<'r> ResidentPlan<'r> {
+    /// The plan for drawing `run` under `transform`, or `None` when `glifo`
+    /// would not draw it out of the atlas cache at all.
+    ///
+    /// `hint` is the compiler's hinting choice, as handed to `glifo`. Whether
+    /// `glifo` then really hints depends on whether the face yields a hinting
+    /// instance at that size, which only `glifo` can see; a plan assumes it
+    /// does, and a face that does not is caught by the cache itself (its
+    /// hinted keys never resolve, and the run is refused once `glifo` has drawn
+    /// it without a miss — see [`AtlasPolicy::refuse_resident_run`]).
+    pub(crate) fn new(
+        run: &'r GlyphRun,
+        transform: Affine,
+        hint: bool,
+        context: &PaintType,
+    ) -> Option<Self> {
+        // `glifo` tints a cached outline with the context colour and caches
+        // none under any other paint.
+        let PaintType::Solid(color) = context else {
+            return None;
+        };
+        // `glifo` composes the run transform with its (absent) glyph transform
+        // before deciding anything.
+        let full = transform * Affine::IDENTITY;
+        atlas_policy::absorbed_scale(full)?;
+        let [_, _, t_c, t_d, t_e, t_f] = full.as_coeffs();
+        let size = run.font_size * t_d as f32;
+        // `glifo` caches only at or under its ceiling, which a NaN size is
+        // not.
+        if size.is_nan() || size > atlas_policy::MAX_CACHED_FONT_SIZE {
+            return None;
+        }
+        let effective = if hint {
+            Affine::new([1.0, 0.0, t_c / t_d, 1.0, t_e, t_f])
+        } else {
+            Affine::new([1.0, 0.0, 0.0, 1.0, t_e, t_f])
+        };
+        let font = run.font.font();
+        Some(Self {
+            glyphs: &run.glyphs,
+            positioning: transform.with_translation(Vec2::ZERO),
+            effective,
+            hinted: hint,
+            identity: ResidentIdentity {
+                font_id: font.data.id(),
+                font_index: font.index,
+                size,
+                hinted: hint,
+            },
+            color: *color,
+        })
+    }
+
+    /// The run's glyphs.
+    pub(crate) fn glyphs(&self) -> &'r [frust_scene::Glyph] {
+        self.glyphs
+    }
+
+    /// The run's identity in the cache.
+    pub(crate) fn identity(&self) -> ResidentIdentity {
+        self.identity
+    }
+
+    /// The colour every glyph of the run is tinted with.
+    pub(crate) fn color(&self) -> AlphaColor<Srgb> {
+        self.color
+    }
+
+    /// Where `glifo` places `glyph`'s origin on the device: the translation of
+    /// its outline transform, whose fraction keys the glyph's subpixel bucket
+    /// and whose floor, plus the slot's bearing, is the corner its atlas
+    /// rectangle is drawn at.
+    pub(crate) fn origin(&self, glyph: &frust_scene::Glyph) -> (f64, f64) {
+        let translation = self.positioning * Point::new(f64::from(glyph.x), f64::from(glyph.y));
+        let mut coeffs = (Affine::translate(translation.to_vec2()) * self.effective)
+            .pre_scale_non_uniform(1.0, -1.0)
+            .as_coeffs();
+        if self.hinted {
+            coeffs[5] = coeffs[5].round();
+        }
+        (coeffs[4], coeffs[5])
+    }
 }
 
 /// The glyph-atlas policy for `images`' allocator.

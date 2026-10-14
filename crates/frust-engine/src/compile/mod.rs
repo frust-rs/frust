@@ -58,6 +58,11 @@ pub use draw::{DepthCounter, EngineDraw};
 pub use external::{ExternalExtents, ExternalSkip};
 pub use layers::{GroupStack, LayerLowering, SnapshotStack};
 
+/// The most glyph runs a compiler's resident-run cache remembers at once (see
+/// [`SceneCompiler::resident_glyph_run_count`]). A byte budget bounds the same
+/// records alongside it, so a scene of very long runs is held to fewer.
+pub const MAX_RESIDENT_GLYPH_RUNS: usize = crate::text::atlas_policy::MAX_RESIDENT_RUNS;
+
 use std::sync::Once;
 use std::time::Duration;
 
@@ -445,6 +450,16 @@ pub struct CompiledFrame {
     /// atlas layer and tint alone; a draw painted with one is drawn from its
     /// [`GlyphQuad`], never from the record's own placement.
     pub glyph_run_paints: Vec<usize>,
+    /// How many glyph runs this frame drew out of the resident-run cache —
+    /// every glyph resolved from slots remembered on an earlier frame, without
+    /// the run reaching `glifo` (see [`crate::text::ResidentPlan`]).
+    ///
+    /// Observational: a resident run draws exactly the quads, records and
+    /// slots `glifo`'s own fully resident run would, so nothing downstream
+    /// tells the two apart. Zero whenever the cache is off
+    /// (`FRUST_ENGINE_NO_GLYPH_RUN_CACHE`, [`SceneCompiler::set_glyph_run_cache`])
+    /// or quads are.
+    pub resident_glyph_runs: u32,
     /// Atlas rectangles freed by the *previous* frame's glyph eviction, to be
     /// zeroed before this frame writes anything into the array.
     ///
@@ -532,6 +547,12 @@ pub struct SceneCompiler {
     /// Where a run's glyph quads wait for the run to finish, retained for its
     /// allocations alone.
     glyph_quad_scratch: GlyphQuadScratch,
+    /// Whether a run drawn as glyph quads may be drawn out of the glyph-atlas
+    /// policy's resident-run cache rather than through `glifo` (see
+    /// [`crate::text::ResidentPlan`]). On unless
+    /// `FRUST_ENGINE_NO_GLYPH_RUN_CACHE` is set; [`Self::set_glyph_run_cache`]
+    /// decides it per compiler.
+    glyph_run_cache: bool,
     /// Whether a glyph run's outline is hinted before it is rasterized (see
     /// [`crate::text`]'s module doc for the split this half of the policy
     /// answers). Mobile-safe by default — `false`, the same "known nothing
@@ -622,6 +643,35 @@ impl SceneCompiler {
         self.glyph_quads
     }
 
+    /// Set whether a glyph run drawn as glyph quads may be drawn out of the
+    /// resident-run cache — its glyphs' slots remembered from an earlier
+    /// frame — instead of being resolved glyph by glyph through `glifo` (see
+    /// [`crate::text::ResidentPlan`]).
+    ///
+    /// The per-compiler counterpart of `FRUST_ENGINE_NO_GLYPH_RUN_CACHE`, on
+    /// the same terms as [`Self::set_glyph_quads`]: the variable sets the
+    /// value a compiler starts with, this decides it for one compiler. Takes
+    /// effect from the next run. The cache only ever serves quads, so turning
+    /// quads off turns it off too.
+    pub fn set_glyph_run_cache(&mut self, enabled: bool) {
+        self.glyph_run_cache = enabled;
+    }
+
+    /// Whether glyph runs may be drawn out of the resident-run cache.
+    #[must_use]
+    pub fn glyph_run_cache_enabled(&self) -> bool {
+        self.glyph_run_cache
+    }
+
+    /// How many glyph runs the resident-run cache currently remembers.
+    ///
+    /// Bounded by [`MAX_RESIDENT_GLYPH_RUNS`] records (and a byte budget
+    /// beside it), however many distinct runs have been drawn.
+    #[must_use]
+    pub fn resident_glyph_run_count(&self) -> usize {
+        self.glyph_atlas.resident_runs()
+    }
+
     /// A compiler sized for a `width` x `height` viewport, with image
     /// residency budgeted explicitly.
     pub fn with_atlas_budget(width: u16, height: u16, budget: AtlasBudget) -> Self {
@@ -644,6 +694,7 @@ impl SceneCompiler {
             run_glyph_ids: Vec::new(),
             glyph_quads: !config::glyph_quads_disabled(),
             glyph_quad_scratch: GlyphQuadScratch::default(),
+            glyph_run_cache: !config::glyph_run_cache_disabled(),
             hint_text: false,
             externals: ExternalExtents::new(),
             frame_extent: (width, height),
@@ -913,6 +964,7 @@ impl SceneCompiler {
             glyph_slots: Vec::new(),
             glyph_quads: Vec::new(),
             glyph_run_paints: Vec::new(),
+            resident_glyph_runs: 0,
             glyph_clears,
             compile_spans: CompileSpans::default(),
         };
@@ -1618,6 +1670,7 @@ impl SceneCompiler {
         // reading it through `self` after the destructure moved out its other
         // fields would fight the borrow checker for no reason.
         let hint_text = self.hint_text;
+        let glyph_run_cache = self.glyph_run_cache;
         // Destructured rather than passed as `self`, because the sink borrows
         // the generator and the clip stack mutably while the glyph caches, the
         // entry map and the shared allocator are borrowed mutably alongside
@@ -1638,7 +1691,7 @@ impl SceneCompiler {
         // is the outline path unchanged rather than a cache that declines every
         // lookup — those are the same pixels but not the same work.
         let atlas = match route {
-            Some(RunRoute::Atlas(_)) => Some((glyph_atlas.atlas_mut(), images.allocator_mut())),
+            Some(RunRoute::Atlas(_)) => Some((glyph_atlas, images.allocator_mut())),
             Some(RunRoute::Outline(_)) | None => None,
         };
         // Quads only for a run the atlas serves, and never under a coverage
@@ -1656,6 +1709,7 @@ impl SceneCompiler {
             &run.brush,
             hint_text,
             atlas,
+            glyph_run_cache,
             GlyphRunTargets {
                 generator,
                 clips,
@@ -1668,6 +1722,9 @@ impl SceneCompiler {
 
         frame.glyph_draws = frame.glyph_draws.saturating_add(outcome.drawn);
         frame.skipped_glyphs = frame.skipped_glyphs.saturating_add(outcome.skipped);
+        if outcome.resident {
+            frame.resident_glyph_runs = frame.resident_glyph_runs.saturating_add(1);
+        }
     }
 
     /// Open a layer bracket: its rectangle's clip, and — below full opacity —

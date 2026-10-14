@@ -128,12 +128,12 @@ use glifo::{
 use kurbo::{Affine, BezPath, Rect, Shape};
 use peniko::color::palette::css::BLACK;
 use peniko::color::{AlphaColor, Srgb};
-use peniko::{BlendMode, ImageQuality};
+use peniko::{BlendMode, Extend, ImageQuality, ImageSampler};
 use peniko::{Brush, Fill};
 use vello_common::clip::PathDataRef;
 use vello_common::encode::{EncodedImage, EncodedPaint};
 use vello_common::geometry::RectU16;
-use vello_common::paint::{Image, ImageSource, IndexedPaint, Paint, PaintType, Tint};
+use vello_common::paint::{Image, ImageSource, IndexedPaint, Paint, PaintType, Tint, TintMode};
 use vello_common::strip_generator::{StripGenerator, StripStorage};
 
 use crate::cache::images::AtlasRegion;
@@ -144,6 +144,8 @@ use crate::compile::{
     CompiledFrame, DepthCounter, EngineDraw, FLATTEN_TOLERANCE, GlyphQuad, GlyphSlot,
 };
 use crate::gpu::atlas::x_y_advances;
+use crate::text::ResidentPlan;
+use crate::text::atlas_policy::{AtlasPolicy, PlacedGlyph, ResidentAnswer, subpixel_bucket};
 use crate::text::color::{ColorGlyph, ColorLayer, LayerShape};
 
 /// What one glyph run cost the frame.
@@ -163,6 +165,9 @@ pub(crate) struct GlyphRunOutcome {
     /// Glyphs the sink refused to draw — a bitmap glyph, a stroked one, or a
     /// colour glyph whose layers have no exact engine spelling.
     pub(crate) skipped: u32,
+    /// Whether the run was drawn out of the resident-run cache, without
+    /// reaching `glifo` at all (see [`EngineGlyphSink::draw_resident`]).
+    pub(crate) resident: bool,
 }
 
 /// The paint a drawing command arriving at the sink is painted with.
@@ -293,6 +298,12 @@ pub(crate) struct GlyphQuadScratch {
     pending: Vec<PendingGlyphQuad>,
     /// The run's shared records, one per atlas layer and tint drawn.
     records: Vec<RunRecord>,
+    /// A resident run's glyphs with this frame's subpixel buckets.
+    placed: Vec<PlacedGlyph>,
+    /// A resident run's glyph origins in device space, as `glifo` places them.
+    origins: Vec<(f64, f64)>,
+    /// The slots a resident run's glyphs resolved to.
+    slots: Vec<AtlasSlot>,
 }
 
 /// What a run may draw glyph quads through: the retained scratch, and the
@@ -473,6 +484,99 @@ impl<'a> EngineGlyphSink<'a> {
             .recorder
             .push_draw(draw, &self.frame.strips.strips[strip_range]);
         true
+    }
+
+    /// Draw a run straight out of the resident-run cache, as quads, without
+    /// `glifo`.
+    ///
+    /// What `glifo`'s own walk would hand this sink for a run whose every glyph
+    /// hits the atlas, rebuilt from the remembered slots: per glyph, the device
+    /// origin `glifo` computes ([`ResidentPlan::origin`]), the subpixel bucket
+    /// it keys that origin under, the slot that bucket resolved to, and the
+    /// rectangle `glifo` fills over it — `floor(origin) + bearing`, the slot's
+    /// own extent, sampled nearest through the run colour's alpha-mask tint.
+    /// Those are exactly the quad candidates [`Self::draw_atlas_glyph`] holds
+    /// back, so the run is recorded by the same
+    /// [`finish_quads`](Self::finish_quads) a fully resident `glifo` run ends
+    /// in: same draws, same depths, same shared records, same slots reported.
+    ///
+    /// Anything but [`ResidentAnswer::Resolved`] draws nothing and leaves the
+    /// sink as it was, for the run to go to `glifo`: a glyph the cache could
+    /// not resolve, a glyph whose rectangle cannot be a quad, or a sink that
+    /// may not draw quads at all.
+    pub(crate) fn draw_resident(
+        &mut self,
+        policy: &mut AtlasPolicy,
+        plan: &ResidentPlan<'_>,
+    ) -> ResidentAnswer {
+        if !self.collecting {
+            return ResidentAnswer::Bypassed;
+        }
+        let Some(targets) = self.quads.as_mut() else {
+            return ResidentAnswer::Bypassed;
+        };
+        let scratch = &mut *targets.scratch;
+        scratch.placed.clear();
+        scratch.origins.clear();
+        for glyph in plan.glyphs() {
+            let origin = plan.origin(glyph);
+            scratch.placed.push(PlacedGlyph {
+                id: glyph.id,
+                // `glifo` keys the fraction of the f64 origin, narrowed.
+                bucket: subpixel_bucket(origin.0.fract() as f32),
+            });
+            scratch.origins.push(origin);
+        }
+
+        let answer =
+            policy.resolve_resident_run(plan.identity(), &scratch.placed, &mut scratch.slots);
+        if answer != ResidentAnswer::Resolved {
+            return answer;
+        }
+
+        let tint = Some(Tint {
+            color: plan.color(),
+            mode: TintMode::AlphaMask,
+        });
+        let sampler = ImageSampler {
+            x_extend: Extend::Pad,
+            y_extend: Extend::Pad,
+            quality: ImageQuality::Low,
+            alpha: 1.0,
+        };
+        scratch.pending.clear();
+        for (&(x, y), &slot) in scratch.origins.iter().zip(&scratch.slots) {
+            if slot.width == 0 || slot.height == 0 {
+                // A glyph with no ink, skipped exactly as `draw_atlas_glyph`
+                // skips it.
+                continue;
+            }
+            let glyph = PendingGlyphQuad {
+                image: Image {
+                    image: ImageSource::opaque_id(slot.image_id),
+                    sampler,
+                },
+                area: Rect::new(0.0, 0.0, f64::from(slot.width), f64::from(slot.height)),
+                transform: Affine::translate((
+                    x.floor() + f64::from(slot.bearing_x),
+                    y.floor() + f64::from(slot.bearing_y),
+                )),
+                paint_transform: Affine::IDENTITY,
+                tint,
+                slot,
+            };
+            if glyph.quad_rect().is_none() {
+                // Off the grid a quad can address: `glifo` draws it the
+                // general way, and so does the rest of the run.
+                scratch.pending.clear();
+                return ResidentAnswer::Bypassed;
+            }
+            scratch.pending.push(glyph);
+        }
+
+        self.finish_quads(true);
+        self.outcome.resident = true;
+        ResidentAnswer::Resolved
     }
 
     /// Draw one glyph out of the atlas: `area`, the slot's own rectangle,
