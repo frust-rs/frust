@@ -526,8 +526,10 @@ pub struct ClassRun {
 /// this is not worth a pipeline switch of its own and is drawn with
 /// [`PaintClass::Uber`] instead.
 ///
-/// Chosen by measurement on a Pixel 4a (Adreno 618) S1 capture at 16, 64 and
-/// 256 — see the task record. Overridable at build or launch time with
+/// Measured on a Pixel 4a (Adreno 618) S1 capture, `gpu_main` p50 in ms:
+/// 16 → 13.52 (repeat 13.69), 64 → 13.68, 256 → 13.43 — no GPU difference
+/// within noise, so the default keeps the most runs specialised at about
+/// +13 µs of `record_us`. Overridable at build or launch time with
 /// `FRUST_ENGINE_RUN_SPLIT_MIN` ([`crate::config::run_split_min`]).
 pub const RUN_SPLIT_MIN: u32 = 16;
 

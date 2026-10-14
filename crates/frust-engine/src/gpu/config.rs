@@ -22,8 +22,11 @@
 //!   uniform has no field of its own for it, and needs none, because the
 //!   renderer sizes every resource texture `resource_texture_dim` wide.
 //!
-//! [`resource_widths_agree`] is that rule as a check, asserted by the renderer
-//! wherever it builds a config. The one pass with a narrower stand-in — the
+//! [`resource_widths_agree`] is that rule as a check: a `debug_assert!` at the
+//! one site that builds the surface config from the resource textures
+//! (`renderer`'s config upload); the pooled-page configs are built from the
+//! same `dim` in the same frame and are not re-checked, and a release build
+//! checks nothing. The one pass with a narrower stand-in — the
 //! glyph-atlas replay, whose encoded-paint texture is a one-texel placeholder —
 //! draws solid instances only, which read neither the paint texture nor the
 //! LUT, so its config's paint shift addresses nothing.

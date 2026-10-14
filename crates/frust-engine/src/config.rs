@@ -356,26 +356,11 @@ mod tests {
         assert!(!env_flag_enabled(Some("1"), Some("0".to_string())));
     }
 
-    /// Unset in the gate: the classes are on unless the switch says
-    /// otherwise.
-    #[test]
-    fn the_uber_program_is_not_forced_unless_the_switch_is_set() {
-        assert!(!uber_program_forced());
-    }
-
-    /// Unset in the gate: the surface opening is merged unless the switch
-    /// says otherwise.
-    #[test]
-    fn pass_merging_is_on_unless_the_switch_is_set() {
-        assert!(!pass_merge_disabled());
-    }
-
-    /// Unset in the gate: images are filtered through the hardware sampler
-    /// unless the kill switch says otherwise.
-    #[test]
-    fn the_image_sampler_is_on_unless_the_kill_switch_is_set() {
-        assert!(image_sampler_enabled());
-    }
+    // The `OnceLock` getters (`uber_program_forced`, `pass_merge_disabled`,
+    // `image_sampler_enabled`, `run_split_min`) are deliberately not asserted
+    // here: they read the process environment, and a machine running the
+    // off-arm captures exports exactly these knobs. The pure parsers above
+    // and below are the contract.
 
     /// A kill switch reads the other way round from every other boolean
     /// here: unset — or set to anything but `0`/`false` — is on.
@@ -402,7 +387,6 @@ mod tests {
         assert_eq!(parse_run_split_min(Some("0".to_string())), 0);
         assert_eq!(parse_run_split_min(Some("many".to_string())), RUN_SPLIT_MIN);
         assert_eq!(parse_run_split_min(None), RUN_SPLIT_MIN);
-        assert_eq!(run_split_min(), RUN_SPLIT_MIN, "unset in the gate");
     }
 
     #[test]
