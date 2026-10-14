@@ -33,7 +33,7 @@
 
 use frust_scene::{CornerRadii, DashPattern, Scene, SceneBuilder, ShaderProgram};
 use frust_text::{FontFamily, TextStyle};
-use kurbo::{BezPath, Point, Rect, Shape};
+use kurbo::{Affine, BezPath, Point, Rect, Shape};
 use peniko::color::DynamicColor;
 use peniko::color::palette::css::{BLACK, BLUE, GREEN, RED, WHITE, YELLOW};
 use peniko::{Blob, Brush, Color, ColorStop, Gradient, ImageAlphaType, ImageData, ImageFormat};
@@ -561,6 +561,77 @@ fn image_magnified() -> CorpusCase {
 #[must_use]
 pub fn image_sampler_cases() -> Vec<CorpusCase> {
     vec![image_magnified()]
+}
+
+/// Three glyph runs in one frame, each taking a different route through the
+/// engine's text lowering: a Latin run the glyph atlas holds (drawn as glyph
+/// quads once its glyphs are resident), the same word rotated (no whole-pixel
+/// placement, so its outlines are rasterized every frame), and a COLRv1 emoji
+/// (a colour face never reaches the atlas; its layers are drawn as shapes).
+///
+/// Not part of [`unit_cases`]: it carries no reviewed baseline. It exists to
+/// hold the engine's glyph quads to the frame the same scene drew before its
+/// glyphs were resident — rendered three times through one engine, the
+/// second and third frames (quads) must read back byte-identical to the first
+/// (every glyph drawn the general way, because it was being rasterized) — and
+/// to the CPU oracle: `tests::the_glyph_quad_cases_hold_their_first_frame_and_cpu_oracle_parity`,
+/// run once per program family and once under the Uber program.
+///
+/// Its channel tolerance is the hint-policy delta `unit-glyph-run`'s engine
+/// gate row documents, measured on this case: a desktop-tier adapter hints
+/// its outlines while the CPU oracle never does, so a glyph's antialiased
+/// edge lands a fraction of a pixel apart on the two arms — max |delta|
+/// [129,129,129,0] on the pinned T400, identical with glyph quads off
+/// (`FRUST_ENGINE_NO_GLYPH_QUADS=1`), so none of it is the quads'. The byte
+/// identity across the engine's own frames is the bar the quads are held to.
+fn glyph_mixed_run() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        let mut cx = frust_text::TextContext::new();
+        let registered = register_test_fonts(&mut cx);
+        let family = FontFamily::stack(registered.iter().map(|f| f.name.clone()));
+        let style = |size: f32| TextStyle {
+            family: family.clone(),
+            ..TextStyle::new(size, BLACK)
+        };
+        let mut builder = SceneBuilder::new(scene);
+        builder.fill_rect(Rect::new(0.0, 0.0, EDGE, EDGE), Brush::Solid(WHITE));
+        // Cached: one size, so the atlas takes the run on its first frame.
+        let latin = cx.layout(SAMPLE_TEXT, &style(14.0), None);
+        for run in latin.to_scene_runs(Point::new(3.3, 15.0)) {
+            builder.draw_glyph_run(run);
+        }
+        // Outlines: the same word turned a quarter radian about its origin.
+        for mut run in latin.to_scene_runs(Point::new(6.0, 30.0)) {
+            run.transform = Affine::rotate_about(0.25, Point::new(6.0, 30.0)) * run.transform;
+            builder.draw_glyph_run(run);
+        }
+        // Colour: U+1F600, the one codepoint the bundled emoji subset carries;
+        // its glyph sits almost entirely below the baseline.
+        let emoji = cx.layout("\u{1F600}", &style(20.0), None);
+        for run in emoji.to_scene_runs(Point::new(36.0, 36.0)) {
+            builder.draw_glyph_run(run);
+        }
+    }
+    CorpusCase {
+        spec: case("unit-glyph-mixed-run").with_tolerance(Tolerance::new().with_channel(129)),
+        record,
+        probes: &[Probe {
+            x: 62,
+            y: 2,
+            expect: Expect::Exact([255, 255, 255, 255]),
+            why: "the backdrop outside every run is untouched white",
+        }],
+        eroded_interior: false,
+        about: "a cached Latin run, a rotated (outline) run and a COLRv1 emoji in one frame",
+    }
+}
+
+/// The cases that hold the engine's glyph quads to the frame drawn before its
+/// glyphs were resident — today [`glyph_mixed_run`] alone. Not registered in
+/// [`unit_cases`] (no reviewed baseline); see that case's doc.
+#[must_use]
+pub fn glyph_quad_cases() -> Vec<CorpusCase> {
+    vec![glyph_mixed_run()]
 }
 
 /// `Command::BlurredRoundedRect` across four `std_dev` steps, the last of
@@ -1806,6 +1877,171 @@ mod tests {
                     .all(|scale| (*scale - MAGNIFICATION).abs() < 1e-9)
             );
         }
+    }
+
+    /// The glyph-quad case mixes the three routes it exists to mix, and is a
+    /// measurement case rather than a baselined one.
+    #[test]
+    fn the_glyph_quad_cases_mix_cached_outline_and_colour_runs() {
+        use crate::fonts::test_fonts;
+
+        let baselined: BTreeSet<&str> = unit_cases().iter().map(|case| case.spec.name).collect();
+        let emoji = test_fonts()
+            .into_iter()
+            .find(|(label, _)| label.contains("COLR"))
+            .map(|(_, bytes)| bytes)
+            .expect("the bundled emoji face");
+        for case in glyph_quad_cases() {
+            assert!(case.spec.name.starts_with("unit-glyph-"));
+            assert!(
+                !baselined.contains(case.spec.name),
+                "a measurement case carries no reviewed baseline"
+            );
+            assert_eq!((case.spec.width, case.spec.height), (SIZE, SIZE));
+            assert!(case.spec.skip.is_empty(), "both oracles draw text");
+            let scene = case.scene();
+            let runs: Vec<&frust_scene::GlyphRun> = scene
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    Command::GlyphRun(run) => Some(run),
+                    _ => None,
+                })
+                .collect();
+            let colour = |run: &&frust_scene::GlyphRun| run.font.font().data.data() == emoji;
+            let rotated = |run: &&frust_scene::GlyphRun| {
+                let [a, b, c, d, _, _] = run.transform.as_coeffs();
+                b != 0.0 || c != 0.0 || a != d
+            };
+            assert!(runs.iter().any(colour), "a colour run");
+            assert!(
+                runs.iter().any(|run| !colour(run) && rotated(run)),
+                "an outline (rotated) run"
+            );
+            assert!(
+                runs.iter().any(|run| !colour(run) && !rotated(run)),
+                "a cached (translated) run"
+            );
+
+            // Through the engine's own compiler: the first frame rasterizes
+            // the cached run (drawn the general way), the second draws it as
+            // glyph quads, and every run draws on both.
+            let (width, height) = (case.spec.width as u16, case.spec.height as u16);
+            let mut compiler = frust_engine::SceneCompiler::new(width, height);
+            let mut frame = || {
+                let frame = compiler
+                    .compile(&scene, kurbo::Affine::IDENTITY, (width, height))
+                    .expect("the case compiles");
+                compiler.acknowledge_glyph_clears();
+                compiler.acknowledge_glyph_replay();
+                frame
+            };
+            let first = frame();
+            let second = frame();
+            assert!(first.atlas_glyph_draws > 0, "the Latin run is cached");
+            assert!(
+                first.glyph_quads.is_empty(),
+                "rasterized on the first frame"
+            );
+            assert_eq!(
+                second.glyph_quads.len(),
+                second.atlas_glyph_draws as usize,
+                "the cached run is all quads once resident"
+            );
+            assert!(!second.glyph_quads.is_empty());
+            assert!(
+                second.glyph_draws > second.atlas_glyph_draws,
+                "the rotated and colour runs draw too, off the atlas"
+            );
+            assert_eq!(first.glyph_draws, second.glyph_draws);
+        }
+    }
+
+    /// The glyph-quad cases rendered three times through one engine: the
+    /// frames after the first draw the cached run as glyph quads and must read
+    /// back byte-identical to the first, which drew it the general way while
+    /// rasterizing it — and each frame holds CPU-oracle parity at the case's
+    /// tolerance plus its probes. GPU-gated; run it plain, under
+    /// `FRUST_ENGINE_IMAGE_SAMPLER=0` and under `FRUST_ENGINE_UBER_PROGRAM=1`
+    /// to hold both program families and the Uber program. The
+    /// pinned-runner recipe is `engine_goldens`'.
+    #[test]
+    #[ignore = "requires a GPU; run with `cargo test -p frust-testing --lib -- --ignored`"]
+    fn the_glyph_quad_cases_hold_their_first_frame_and_cpu_oracle_parity() {
+        use crate::corpus::straighten_alpha;
+        use crate::diff::diff_images;
+        use crate::oracle_cpu::CpuOracle;
+        use crate::oracle_engine::{EngineOracle, EngineOracleOptions};
+        use crate::render::{RenderedImage, SceneRenderer};
+        use image::RgbaImage;
+
+        fn rgba(image: &RenderedImage) -> RgbaImage {
+            RgbaImage::from_raw(image.width, image.height, image.rgba8.clone())
+                .expect("a rendered frame is width*height*4 bytes")
+        }
+
+        let mut cpu = CpuOracle::new();
+        let mut failures = Vec::new();
+        for case in glyph_quad_cases() {
+            let name = case.spec.name;
+            let scene = case.scene();
+            let spec = case.render_spec();
+            // A fresh engine per case, so its first frame really is the one
+            // that rasterizes the case's glyphs.
+            let mut engine =
+                EngineOracle::new(&EngineOracleOptions::default()).expect("an engine oracle");
+            let frames: Vec<RenderedImage> = (0..3)
+                .map(|_| {
+                    engine
+                        .render(&scene, &spec)
+                        .expect("the engine renders the case")
+                })
+                .collect();
+            let reference = cpu
+                .render(&scene, &spec)
+                .expect("the CPU oracle renders the case");
+            for (index, frame) in frames.iter().enumerate() {
+                let differing = frame
+                    .rgba8
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(frames[0].rgba8.as_chunks::<4>().0)
+                    .filter(|(a, b)| a != b)
+                    .count();
+                let outcome = diff_images(
+                    &rgba(&reference),
+                    &rgba(frame),
+                    case.spec.tolerance,
+                    case.eroded_interior,
+                );
+                println!(
+                    "glyph-quad parity (sampler={}, uber={}): [{name}] frame {index}: {differing} \
+                     px differ from frame 0; vs cpu {} px differ, max |delta| {:?}",
+                    std::env::var("FRUST_ENGINE_IMAGE_SAMPLER").unwrap_or_default(),
+                    std::env::var("FRUST_ENGINE_UBER_PROGRAM").unwrap_or_default(),
+                    outcome.report.pixel_count,
+                    outcome.report.max_difference
+                );
+                if differing != 0 {
+                    failures.push(format!(
+                        "[{name}] frame {index}: {differing} px differ from the first frame"
+                    ));
+                }
+                if !outcome.passed {
+                    failures.push(format!(
+                        "[{name}] frame {index}: engine vs cpu beyond {:?}: {} px, max {:?}",
+                        case.spec.tolerance,
+                        outcome.report.pixel_count,
+                        outcome.report.max_difference
+                    ));
+                }
+                for message in case.failed_probes(&straighten_alpha(frame)) {
+                    failures.push(format!("[{name}] frame {index} probe: {message}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
