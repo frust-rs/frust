@@ -250,7 +250,7 @@ use crate::cache::{
 #[cfg(any(test, feature = "perf-trace"))]
 use crate::compile::CompileSpans;
 use crate::compile::paint::resolve_lut_request;
-use crate::compile::{ClearPunch, CompiledFrame, PhaseClock, SceneCompiler};
+use crate::compile::{ClearPunch, CompiledFrame, GlyphQuad, PhaseClock, SceneCompiler};
 use crate::config;
 use crate::diag::{EngineSpan, FrameTimestamps};
 use crate::error::EngineError;
@@ -1060,6 +1060,23 @@ impl EngineRenderer {
     #[must_use]
     pub fn uber_program(&self) -> bool {
         self.routing.uber
+    }
+
+    /// Draws a glyph run resolved entirely out of the glyph atlas as glyph
+    /// quads, or the general way — the programmatic counterpart of
+    /// `FRUST_ENGINE_NO_GLYPH_QUADS`, which only sets the value a renderer
+    /// starts with (see [`SceneCompiler::set_glyph_quads`]).
+    ///
+    /// Takes effect from the next frame. Both arms draw the same pixels, which
+    /// is what a caller comparing them in one process checks.
+    pub fn set_glyph_quads(&mut self, enabled: bool) {
+        self.compiler.set_glyph_quads(enabled);
+    }
+
+    /// Whether resident glyph runs are drawn as glyph quads.
+    #[must_use]
+    pub fn glyph_quads(&self) -> bool {
+        self.compiler.glyph_quads_enabled()
     }
 
     /// Sets the shortest paint-class run worth a pipeline switch of its own
@@ -3507,6 +3524,29 @@ impl Scratch {
                             else {
                                 continue;
                             };
+                            if paint.glyph_quad {
+                                // One rect instance, from the quad alone: the
+                                // draw's strips are its rectangle's coverage,
+                                // which the instance covers whole.
+                                let Some(quad) = glyph_quad(&frame.glyph_quads, draw.depth) else {
+                                    continue;
+                                };
+                                if paint.external != run_external {
+                                    let end = self.alpha.len() as u32;
+                                    self.push_run(run_start, end, run_external);
+                                    run_start = end;
+                                    run_external = paint.external;
+                                }
+                                mark_class(
+                                    &mut self.alpha_marks,
+                                    self.alpha.len() as u32,
+                                    paint.class,
+                                );
+                                if let Some(instance) = window.place_quad(quad, paint) {
+                                    self.alpha.push(instance);
+                                }
+                                continue;
+                            }
                             let Some(run) = strips.get(draw.strip_range.clone()) else {
                                 continue;
                             };
@@ -3762,6 +3802,7 @@ impl Scratch {
                 opaque: false,
                 external: None,
                 class: PaintClass::SolidCoverage,
+                glyph_quad: false,
             };
             let Some(run) = strips.get(punch.strip_range.clone()) else {
                 continue;
@@ -4156,6 +4197,54 @@ impl PageWindow {
         span.y = span.y.saturating_sub(self.y0);
         span.width > 0
     }
+
+    /// The rect instance drawing `quad` with `paint`, clipped to this window
+    /// and shifted into its target, or `None` when none of it survives.
+    ///
+    /// The same two rules [`Self::place`] keeps, for a whole rectangle: a quad
+    /// outside the column contributes nothing, and one straddling an edge is
+    /// trimmed — its atlas texel advanced by exactly the columns cut off its
+    /// left edge, so every surviving pixel still samples the texel it did. A
+    /// quad's coverage is its rectangle whole (it lands on whole pixels), so
+    /// there is no coverage column to advance and the instance carries no edge
+    /// fractions at all.
+    fn place_quad(self, quad: &GlyphQuad, paint: PackedPaint) -> Option<GpuStrip> {
+        let end = quad.x.saturating_add(quad.width);
+        if quad.width == 0 || quad.height == 0 || end <= self.x0 || quad.x >= self.x1 {
+            return None;
+        }
+        let cut = self.x0.saturating_sub(quad.x);
+        let x = quad.x.max(self.x0);
+        let width = end.min(self.x1).saturating_sub(x);
+        let instance = GpuStrip::from_rect(
+            x.saturating_sub(self.x0),
+            quad.y.saturating_sub(self.y0),
+            width,
+            quad.height,
+            0,
+            StripDraw {
+                payload: pack_u16_pair(quad.atlas_x.saturating_add(cut), quad.atlas_y),
+                paint: paint.paint,
+                depth_index: paint.depth_index,
+            },
+        );
+        (width > 0).then_some(instance)
+    }
+}
+
+/// The glyph quad the draw at `depth` is, out of a frame's quads in depth
+/// order — `None` only for a frame whose quads disagree with its draws, which
+/// then draws nothing for that glyph rather than something wrong.
+fn glyph_quad(quads: &[GlyphQuad], depth: u32) -> Option<&GlyphQuad> {
+    let found = quads
+        .binary_search_by_key(&depth, |quad| quad.depth)
+        .ok()
+        .and_then(|index| quads.get(index));
+    debug_assert!(
+        found.is_some(),
+        "a glyph-quad draw with no quad at depth {depth}"
+    );
+    found
 }
 
 /// The single quad that composites a finished page onto `origin`-shifted
@@ -4228,6 +4317,9 @@ struct PackedPaint {
     /// the resolved record, so an image is told apart by the path it samples
     /// through (see [`PaintClass::of_image`]).
     class: PaintClass,
+    /// Whether this is a glyph run's shared record, whose draws are each one
+    /// glyph quad ([`crate::compile::GlyphQuad`]) rather than a strip run.
+    glyph_quad: bool,
 }
 
 impl PackedPaint {
@@ -4274,6 +4366,7 @@ fn pack_paint(
             opaque: color.is_opaque(),
             external: None,
             class: PaintClass::SolidCoverage,
+            glyph_quad: false,
         }),
         Paint::Indexed(indexed) => {
             let Some(Some(resolved)) = paint_slots.get(indexed.index()) else {
@@ -4292,6 +4385,7 @@ fn pack_paint(
                 opaque: resolved.opaque,
                 external: resolved.external,
                 class: resolved.class,
+                glyph_quad: resolved.paint_type == PaintType::Glyph,
             })
         }
     }
@@ -4562,7 +4656,12 @@ impl FrameResources {
         }
 
         let mut texel_offset = 0;
+        // Ascending, like the walk below, so one cursor marks them.
+        let mut glyph_records = frame.glyph_run_paints.iter().copied().peekable();
         for (index, paint) in frame.encoded_paints.iter().enumerate() {
+            // A glyph run's shared record: lowered like any atlas image, but
+            // drawn by glyph quads (see `crate::compile::GlyphQuad`).
+            let glyph_record = glyph_records.next_if_eq(&index).is_some();
             // An external texture's slot travels with its record: the record
             // itself only says "sample the external binding", and which
             // texture that binding holds is settled per run when the pass is
@@ -4592,11 +4691,19 @@ impl FrameResources {
             };
             let slot = lowered.map(|record| {
                 let resolved = ResolvedPaint {
-                    paint_type: record.paint_type(),
+                    paint_type: if glyph_record {
+                        PaintType::Glyph
+                    } else {
+                        record.paint_type()
+                    },
                     texel_offset,
                     opaque: !paint.may_have_transparency(),
                     external,
-                    class: class_of_record(&record),
+                    class: if glyph_record {
+                        PaintClass::Glyph
+                    } else {
+                        class_of_record(&record)
+                    },
                 };
                 texel_offset += record.texel_len();
                 self.paints_data.push(record);

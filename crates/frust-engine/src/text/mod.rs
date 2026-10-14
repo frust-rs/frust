@@ -66,7 +66,12 @@
 //!
 //! - **Routed to the atlas.** `glifo` resolves each glyph against the policy's
 //!   [`GlyphAtlas`](glifo::GlyphAtlas), and a hit is one image draw sampling
-//!   the slot — no outline fetched, no path flattened, no coverage generated.
+//!   the slot — no outline fetched, no path flattened. A run whose every
+//!   glyph hit is cheaper still: each glyph is one rect instance over its slot
+//!   and the run shares one paint record per atlas layer (a *glyph quad*, see
+//!   [`backend`]'s module doc), unless `FRUST_ENGINE_NO_GLYPH_QUADS` or
+//!   [`SceneCompiler::set_glyph_quads`](crate::compile::SceneCompiler::set_glyph_quads)
+//!   turned quads off.
 //!   A miss allocates a slot out of the *shared* atlas allocator, records the
 //!   fills that rasterize it into that page's command recorder, and draws the
 //!   slot anyway; the recorded pages are replayed into the atlas by
@@ -123,7 +128,9 @@ pub(crate) mod atlas_policy;
 pub(crate) mod backend;
 pub(crate) mod color;
 
-use glifo::{AtlasCacher, FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder};
+use glifo::{
+    AtlasCacher, FontEmbolden, Glyph, GlyphAtlas, GlyphPrepCache, GlyphRunBuilder, ImageCache,
+};
 use kurbo::Affine;
 use peniko::FontData;
 use vello_common::paint::Paint;
@@ -139,7 +146,7 @@ use crate::config;
 pub(crate) use atlas_policy::AtlasPolicy;
 pub(crate) use atlas_policy::{RunKey, RunRoute};
 
-pub(crate) use backend::{GlyphRunOutcome, context_paint};
+pub(crate) use backend::{GlyphQuadScratch, GlyphQuadTargets, GlyphRunOutcome, context_paint};
 
 use backend::{EngineGlyphSink, EngineTextBackend};
 
@@ -161,6 +168,10 @@ pub(crate) struct GlyphRunTargets<'a> {
     pub(crate) frame: &'a mut CompiledFrame,
     /// The frame's painter-order depth counter.
     pub(crate) depth: &'a mut DepthCounter,
+    /// Where the run's glyph quads are held back until it is known whether
+    /// every glyph of it was resident, or `None` for a run that may not draw
+    /// quads at all (see [`backend`]'s module doc).
+    pub(crate) quads: Option<GlyphQuadTargets<'a>>,
 }
 
 /// Draw `run` into `targets`, painted with the already-encoded `paint`.
@@ -176,12 +187,16 @@ pub(crate) struct GlyphRunTargets<'a> {
 /// through unchanged; `glifo` still applies its transform-shape half on top
 /// (see the module doc).
 ///
-/// `cacher` is [`atlas_policy`]'s answer for this run, already decided:
-/// [`AtlasCacher::Enabled`] over the policy's own entry map and the shared
-/// atlas allocator for a run it routed to the atlas, [`AtlasCacher::Disabled`]
+/// `atlas` is [`atlas_policy`]'s answer for this run, already decided: the
+/// policy's own entry map and the shared atlas allocator for a run it routed
+/// to the atlas — handed to `glifo` as [`AtlasCacher::Enabled`] — and `None`
 /// for one it routed to outlines. Nothing here re-decides it — the
 /// classification happens once, before the brush is even encoded, so a run
-/// cannot be routed one way by the policy and drawn the other.
+/// cannot be routed one way by the policy and drawn the other. The entry map
+/// is borrowed rather than handed over as a cacher so its miss count can be
+/// read on both sides of the run: a run that missed nothing draws its held-back
+/// glyph quads as quads, one that missed draws them the general way (see
+/// [`backend`]'s module doc).
 ///
 /// Returns what the run cost: how many glyphs became draws, and how many were
 /// refused.
@@ -191,7 +206,7 @@ pub(crate) fn lower_glyph_run(
     paint: Paint,
     context_brush: &peniko::Brush,
     hint: bool,
-    cacher: AtlasCacher<'_>,
+    mut atlas: Option<(&mut GlyphAtlas, &mut ImageCache)>,
     targets: GlyphRunTargets<'_>,
 ) -> GlyphRunOutcome {
     let GlyphRunTargets {
@@ -200,6 +215,7 @@ pub(crate) fn lower_glyph_run(
         prep,
         frame,
         depth,
+        quads,
     } = targets;
 
     let mut sink = EngineGlyphSink::new(
@@ -209,8 +225,20 @@ pub(crate) fn lower_glyph_run(
         depth,
         paint,
         context_paint(context_brush),
+        // Quads only ever come out of the atlas.
+        quads.filter(|_| atlas.is_some()),
     );
 
+    let misses = |atlas: &Option<(&mut GlyphAtlas, &mut ImageCache)>| {
+        atlas
+            .as_ref()
+            .map(|(glyph_atlas, _)| glyph_atlas.cache_misses())
+    };
+    let misses_before = misses(&atlas);
+    let cacher = match &mut atlas {
+        Some((glyph_atlas, images)) => AtlasCacher::Enabled(glyph_atlas, images),
+        None => AtlasCacher::Disabled,
+    };
     GlyphRunBuilder::new(
         run.font.font().clone(),
         transform,
@@ -229,6 +257,7 @@ pub(crate) fn lower_glyph_run(
         x: glyph.x,
         y: glyph.y,
     }));
+    sink.finish_quads(misses(&atlas) == misses_before);
 
     sink.outcome()
 }

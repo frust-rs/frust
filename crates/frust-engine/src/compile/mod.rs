@@ -70,11 +70,12 @@ use peniko::{Brush, Color, Fill, ImageData};
 use frust_gpu::{SceneTextureId, TierCaps};
 use frust_scene::{Command, CornerRadii, DashPattern, GlyphRun, PathStyle, Scene};
 
-use glifo::{AtlasCacher, GlyphAtlas, GlyphPrepCache, PendingClearRect};
+use glifo::{GlyphAtlas, GlyphPrepCache, PendingClearRect};
 
 use vello_common::clip::PathDataRef;
 use vello_common::encode::EncodedPaint;
 use vello_common::fearless_simd::Level;
+use vello_common::geometry::RectU16;
 use vello_common::paint::ImageId;
 use vello_common::record::CommandRecorder;
 use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage};
@@ -92,8 +93,8 @@ use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode
 use crate::config;
 use crate::error::EngineError;
 use crate::text::{
-    AtlasPolicy, GlyphRunTargets, RunKey, RunRoute, context_paint, font_has_color_glyphs,
-    font_is_readable, glyph_atlas_policy, lower_glyph_run,
+    AtlasPolicy, GlyphQuadScratch, GlyphQuadTargets, GlyphRunTargets, RunKey, RunRoute,
+    context_paint, font_has_color_glyphs, font_is_readable, glyph_atlas_policy, lower_glyph_run,
 };
 
 /// Curve-flattening tolerance, in device pixels.
@@ -276,6 +277,35 @@ pub struct GlyphSlot {
     pub padding: u32,
 }
 
+/// One glyph drawn as a *glyph quad*: the whole-pixel rectangle its single
+/// rect instance covers, and the atlas texel under that rectangle's top-left
+/// corner (see [`crate::text`]'s backend for when a glyph is one).
+///
+/// The draw it belongs to is an ordinary [`EngineDraw`] — the run's shared
+/// record as its paint, the rectangle's own coverage as its strips — and is
+/// found by its painter-order depth, which no two draws of a frame share. The
+/// renderer draws the quad from this alone: one rect instance, no edge
+/// coverage (the rectangle lands on whole pixels), its payload this atlas
+/// texel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlyphQuad {
+    /// The depth of the draw this quad is.
+    pub depth: u32,
+    /// Left edge in device pixels, already trimmed to the viewport and the
+    /// clip stack's scissor.
+    pub x: u16,
+    /// Top edge in device pixels, trimmed likewise.
+    pub y: u16,
+    /// Width in device pixels; never zero.
+    pub width: u16,
+    /// Height in device pixels; never zero.
+    pub height: u16,
+    /// Atlas texel column under the rectangle's left edge.
+    pub atlas_x: u16,
+    /// Atlas texel row under the rectangle's top edge.
+    pub atlas_y: u16,
+}
+
 /// Everything one compiled frame produced.
 ///
 /// The strips and their alpha coverage share one
@@ -398,6 +428,21 @@ pub struct CompiledFrame {
     /// Where each of this frame's atlas-sampled glyphs lives, one entry per
     /// atlas draw (see [`GlyphSlot`]).
     pub glyph_slots: Vec<GlyphSlot>,
+    /// The frame's glyph quads, one per draw a fully resident glyph run drew
+    /// as one, in depth order (see [`GlyphQuad`]).
+    ///
+    /// A subset of [`atlas_glyph_draws`](Self::atlas_glyph_draws), and empty
+    /// whenever quads are off (`FRUST_ENGINE_NO_GLYPH_QUADS`,
+    /// [`SceneCompiler::set_glyph_quads`]).
+    pub glyph_quads: Vec<GlyphQuad>,
+    /// The indices into [`encoded_paints`](Self::encoded_paints) of the
+    /// records glyph quads are painted with — one per glyph run and atlas
+    /// layer — in ascending order.
+    ///
+    /// Each is an image record naming one of the run's slots, read for its
+    /// atlas layer and tint alone; a draw painted with one is drawn from its
+    /// [`GlyphQuad`], never from the record's own placement.
+    pub glyph_run_paints: Vec<usize>,
     /// Atlas rectangles freed by the *previous* frame's glyph eviction, to be
     /// zeroed before this frame writes anything into the array.
     ///
@@ -476,6 +521,14 @@ pub struct SceneCompiler {
     /// one owned here is one not allocated per run. It carries nothing between
     /// calls — `RunKey::for_run` clears it before it counts.
     run_glyph_ids: HashSet<u32>,
+    /// Whether a glyph run resolved entirely out of the glyph atlas is drawn
+    /// as glyph quads (see [`crate::text`]). On unless
+    /// `FRUST_ENGINE_NO_GLYPH_QUADS` is set; [`Self::set_glyph_quads`] decides
+    /// it per compiler.
+    glyph_quads: bool,
+    /// Where a run's glyph quads wait for the run to finish, retained for its
+    /// allocations alone.
+    glyph_quad_scratch: GlyphQuadScratch,
     /// Whether a glyph run's outline is hinted before it is rasterized (see
     /// [`crate::text`]'s module doc for the split this half of the policy
     /// answers). Mobile-safe by default — `false`, the same "known nothing
@@ -547,6 +600,25 @@ impl SceneCompiler {
         self.hint_text = hint_text;
     }
 
+    /// Set whether a glyph run resolved entirely out of the glyph atlas is
+    /// drawn as glyph quads — one rect instance per glyph, one record per run
+    /// and atlas layer — or the general way, one image record and one
+    /// generated rectangle per glyph (see [`crate::text`]).
+    ///
+    /// The per-compiler counterpart of `FRUST_ENGINE_NO_GLYPH_QUADS`, which
+    /// only sets the value a compiler starts with: a caller comparing the two
+    /// lowerings in one process sets it here rather than through a
+    /// process-global environment variable. Takes effect from the next run.
+    pub fn set_glyph_quads(&mut self, enabled: bool) {
+        self.glyph_quads = enabled;
+    }
+
+    /// Whether resident glyph runs are drawn as glyph quads.
+    #[must_use]
+    pub fn glyph_quads_enabled(&self) -> bool {
+        self.glyph_quads
+    }
+
     /// A compiler sized for a `width` x `height` viewport, with image
     /// residency budgeted explicitly.
     pub fn with_atlas_budget(width: u16, height: u16, budget: AtlasBudget) -> Self {
@@ -567,6 +639,8 @@ impl SceneCompiler {
             run_routes: Vec::new(),
             next_run: 0,
             run_glyph_ids: HashSet::new(),
+            glyph_quads: !config::glyph_quads_disabled(),
+            glyph_quad_scratch: GlyphQuadScratch::default(),
             hint_text: false,
             externals: ExternalExtents::new(),
             frame_extent: (width, height),
@@ -834,6 +908,8 @@ impl SceneCompiler {
             skipped_glyphs: 0,
             atlas_glyph_draws: 0,
             glyph_slots: Vec::new(),
+            glyph_quads: Vec::new(),
+            glyph_run_paints: Vec::new(),
             glyph_clears,
             compile_spans: CompileSpans::default(),
         };
@@ -1546,34 +1622,44 @@ impl SceneCompiler {
         let Self {
             generator,
             clips,
+            groups,
             glyphs,
             images,
             glyph_atlas,
+            glyph_quads,
+            glyph_quad_scratch,
             ..
         } = self;
         // The policy's decision, turned into the borrow `glifo` caches
         // through. A run it refused reaches `glifo` with no cache at all, which
         // is the outline path unchanged rather than a cache that declines every
         // lookup — those are the same pixels but not the same work.
-        let cacher = match route {
-            Some(RunRoute::Atlas(_)) => {
-                AtlasCacher::Enabled(glyph_atlas.atlas_mut(), images.allocator_mut())
-            }
-            Some(RunRoute::Outline(_)) | None => AtlasCacher::Disabled,
+        let atlas = match route {
+            Some(RunRoute::Atlas(_)) => Some((glyph_atlas.atlas_mut(), images.allocator_mut())),
+            Some(RunRoute::Outline(_)) | None => None,
         };
+        // Quads only for a run the atlas serves, and never under a coverage
+        // mask: a quad's rectangle can be trimmed to the scissor but cannot
+        // carry a mask (see [`crate::text`]'s backend).
+        let quads =
+            (*glyph_quads && atlas.is_some() && clips.mask().is_none()).then(|| GlyphQuadTargets {
+                scratch: glyph_quad_scratch,
+                window: quad_window(generator, groups),
+            });
         let outcome = lower_glyph_run(
             run,
             transform,
             paint,
             &run.brush,
             hint_text,
-            cacher,
+            atlas,
             GlyphRunTargets {
                 generator,
                 clips,
                 prep: glyphs,
                 frame,
                 depth,
+                quads,
             },
         );
 
@@ -2373,6 +2459,32 @@ fn fast_rect(rect: Rect, transform: Affine) -> Option<Rect> {
 
     let device = transform.transform_rect_bbox(rect);
     is_pixel_aligned(device).then_some(device)
+}
+
+/// The device window a glyph quad drawn now is trimmed to: the generator's
+/// viewport intersected with the scissor every open bracket's clip applies.
+///
+/// Only asked while no coverage mask is on the clip stack, and then every open
+/// bracket's clip is a scissor whose rectangle is exactly the bracket's
+/// recorded bounds: a bracket and its clip are pushed together from one
+/// rectangle under one transform ([`GroupStack`]'s invariant), and a clip
+/// scissors only when [`fast_rect`] admits that rectangle — the same
+/// `transform_rect_bbox` the bounds are recorded from, on whole pixels — clamped
+/// onto the `u16` grid the same way. So this is the rectangle the general
+/// draw's coverage is culled and scissored to, without a second clip stack.
+fn quad_window(generator: &StripGenerator, groups: &GroupStack) -> RectU16 {
+    let coordinate = |value: f64| value.clamp(0.0, f64::from(u16::MAX)) as u16;
+    groups.bounds().fold(
+        RectU16::new(0, 0, generator.width(), generator.height()),
+        |window, bounds| {
+            window.intersect(RectU16::new(
+                coordinate(bounds.x0),
+                coordinate(bounds.y0),
+                coordinate(bounds.x1),
+                coordinate(bounds.y1),
+            ))
+        },
+    )
 }
 
 /// Whether every edge of `rect` falls on a whole pixel.

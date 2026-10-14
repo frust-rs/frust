@@ -319,3 +319,39 @@ pub fn resolve_lut_request(
         _ => None,
     }
 }
+
+/// The one record a glyph run's quads on one atlas layer share, pushed onto
+/// `encoded_paints`, answering its index.
+///
+/// An image record over the run's first drawn slot on that layer: the
+/// renderer lowers it through the same registry and the same
+/// [`GpuEncodedImage`](crate::gpu::paint_texture::GpuEncodedImage) layout every
+/// atlas image takes, and the glyph program reads two things out of it — the
+/// atlas layer and the tint. The slot's own offset, extent and transform are
+/// never read for a quad: each quad's instance names its own atlas texel. The
+/// transform is therefore the identity rather than any one glyph's placement,
+/// so the record carries nothing that could be mistaken for a position.
+///
+/// `source` must name a slot whose rectangle the frame reports
+/// ([`crate::compile::GlyphSlot`]), which is what resolves it to its layer.
+pub fn encode_glyph_run_record(
+    source: vello_common::paint::ImageSource,
+    sampler: ImageSampler,
+    tint: Option<Tint>,
+    encoded_paints: &mut Vec<EncodedPaint>,
+) -> usize {
+    let (x_advance, y_advance) = x_y_advances(Affine::IDENTITY);
+    let index = encoded_paints.len();
+    encoded_paints.push(EncodedPaint::Image(EncodedImage {
+        // A glyph slot is an anti-aliased coverage mask; a quad is never
+        // claimed opaque, exactly as the per-glyph record never was.
+        may_have_transparency: true,
+        source,
+        sampler,
+        transform: Affine::IDENTITY,
+        x_advance,
+        y_advance,
+        tint,
+    }));
+    index
+}
