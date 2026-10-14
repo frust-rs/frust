@@ -477,6 +477,12 @@ pub struct IosAppHandle {
 }
 
 impl IosAppHandle {
+    /// The sanitized display scale accesskit_ios needs to convert the logical-px
+    /// semantics tree into the view's physical pixels.
+    pub(crate) fn display_scale(&self) -> f64 {
+        sanitize_scale(self.scale)
+    }
+
     /// Assemble a handle with an already-created, `SurfaceReady` renderer.
     ///
     /// Called from [`crate::ffi_glue`] after the surface has been built from the
