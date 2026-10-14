@@ -1915,6 +1915,11 @@ mod browser_loop {
             {
                 self.root.set_presented_frames(executor.presented_frames());
             }
+            // Hand the root the resident-key ledger the renderer last published
+            // (one frame stale by design; a try-lock read that never waits).
+            if let Some(ledger) = frust_shell_common::render_split::latest_retained_ledger() {
+                self.root.set_retained_ledger(&ledger);
+            }
             let paint_start = Instant::now();
             let paint_outcome = {
                 let mut builder = SceneBuilder::new(&mut self.scene);
@@ -2305,6 +2310,8 @@ mod browser_loop {
                 let mut root = RenderRoot::new();
                 root.set_layout_skip(knobs.skip);
                 root.set_layout_audit(knobs.audit);
+                // `FRUST_NO_RETAINED_LAYERS`, resolved beside the layout knobs.
+                root.set_retained_layers(knobs.retained);
                 knobs.log();
                 root
             },

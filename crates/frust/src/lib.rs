@@ -740,6 +740,11 @@ pub mod authoring {
         SliverWidget,
     };
 
+    /// The identity of a retained page: mint one with [`RetainedKey::mint`] and
+    /// hand it to `PaintScene::push_retained`/`draw_retained`, asking
+    /// `PaintCtx::retained_available` whether the renderer still holds the page.
+    pub use frust_core::RetainedKey;
+
     /// The clipboard/selection vocabulary an editable widget matches on —
     /// [`InputEvent::EditCommand`] carries one of these four verbs, already
     /// decoded from whatever chord, hardware key or edit-menu tap produced it.

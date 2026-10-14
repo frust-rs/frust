@@ -101,11 +101,48 @@
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use frust_core::RetainedLedger;
 use frust_core::anim::FrameTime;
 
 #[cfg(feature = "perf-trace")]
 use crate::perf::MarkerQueue;
 use crate::perf::UiSpans;
+
+// ---------------------------------------------------------------------
+// Resident-key ledger hand-off (render side -> UI thread)
+// ---------------------------------------------------------------------
+
+/// The resident-key ledger the render side last published. One slot per
+/// process: a shell runs one renderer, and the slot is the same whether that
+/// renderer lives on the UI thread (single-thread path) or on the render thread
+/// (the split). The lock is held only to swap or clone an `Arc`.
+static PUBLISHED_RETAINED_LEDGER: Mutex<Option<Arc<RetainedLedger>>> = Mutex::new(None);
+
+/// Publish the ledger describing the frame the renderer just finished. Called
+/// by the render side (after submit) with the retained pages it holds resident;
+/// replaces the previous one. May block only for the instant the UI thread
+/// holds the slot to clone an `Arc`.
+pub fn publish_retained_ledger(ledger: RetainedLedger) {
+    let mut slot = PUBLISHED_RETAINED_LEDGER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = Some(Arc::new(ledger));
+}
+
+/// The most recently published ledger, for the UI thread to hand to
+/// `RenderRoot::set_retained_ledger` before painting. **Never blocks on the
+/// render thread**: if the render side is mid-publish (or nothing was ever
+/// published) this returns `None` and the caller keeps the ledger it already
+/// has — a one-frame-stale ledger is the design, and the renderer refuses a
+/// stale `DrawRetained` itself. Empty until the engine's retained-page store
+/// publishes.
+pub fn latest_retained_ledger() -> Option<Arc<RetainedLedger>> {
+    match PUBLISHED_RETAINED_LEDGER.try_lock() {
+        Ok(slot) => slot.clone(),
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().clone(),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
 
 // ---------------------------------------------------------------------
 // Kill switch
@@ -861,6 +898,21 @@ mod tests {
     #[cfg(feature = "perf-trace")]
     use std::sync::mpsc;
     use std::thread;
+
+    #[test]
+    fn retained_ledger_slot_publishes_and_never_blocks() {
+        // The only test touching the process-wide slot.
+        publish_retained_ledger(RetainedLedger::from_entries(5, [(9, (4, 4), 1.0)]));
+        let got = latest_retained_ledger().expect("published");
+        assert_eq!(got.frame, 5);
+        assert!(got.is_resident(frust_core::RetainedKey(9), (4, 4), 1.0));
+        // A held slot (render side mid-publish) yields None rather than waiting.
+        let guard = PUBLISHED_RETAINED_LEDGER.lock().unwrap();
+        assert!(latest_retained_ledger().is_none());
+        drop(guard);
+        publish_retained_ledger(RetainedLedger::empty());
+        assert!(latest_retained_ledger().unwrap().entries.is_empty());
+    }
     use std::time::{Duration, Instant};
 
     // -----------------------------------------------------------------

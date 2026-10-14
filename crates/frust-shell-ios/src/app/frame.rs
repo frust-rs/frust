@@ -437,6 +437,13 @@ impl IosAppHandle {
             .set_presented_frames(self.executor.presented_frames());
 
         let paint_start = perf_on.then(Instant::now);
+        // Hand the app the resident-key ledger the render side last published
+        // (with its last completed frame; one frame stale by design). A try-lock
+        // read: the UI thread never waits on the render thread for it.
+        if let Some(ledger) = frust_shell_common::render_split::latest_retained_ledger() {
+            self.app.set_retained_ledger(&ledger);
+        }
+
         self.scene.reset();
         let paint_outcome = {
             let mut builder = SceneBuilder::new(&mut self.scene);

@@ -651,6 +651,9 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     paint_epoch: u64,
     /// Whether retained layers are enabled ([`RenderRoot::set_retained_layers`]).
     retained_layers: bool,
+    /// The renderer's resident-key ledger as of the previous frame
+    /// ([`RenderRoot::set_retained_ledger`]); empty until a shell sets one.
+    retained_ledger: crate::retained::RetainedLedger,
     /// Whether layout passes may skip clean pods ([`RenderRoot::set_layout_skip`]);
     /// `true` by default. `false` forces every pod to lay out every pass — the
     /// kill switch a shell wires to an environment variable (this crate reads
@@ -723,6 +726,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             layout_epoch: 1,
             paint_epoch: 1,
             retained_layers: true,
+            retained_ledger: crate::retained::RetainedLedger::empty(),
             layout_skip: true,
             layout_audit: LayoutAudit::default(),
             overlay_pods: Vec::new(),
@@ -806,6 +810,16 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// environment: a shell wires `FRUST_NO_RETAINED_LAYERS` to this.
     pub fn set_retained_layers(&mut self, enabled: bool) {
         self.retained_layers = enabled;
+    }
+
+    /// Hand the root the renderer's resident-key ledger, as published after the
+    /// previous frame (one frame stale by design). Consulted by
+    /// [`PaintCtx::retained_available`]; defaults to empty (nothing resident).
+    /// Cloned only when it differs from the stored one.
+    pub fn set_retained_ledger(&mut self, ledger: &crate::retained::RetainedLedger) {
+        if self.retained_ledger != *ledger {
+            self.retained_ledger.clone_from(ledger);
+        }
     }
 
     /// Whether retained layers are enabled ([`RenderRoot::set_retained_layers`]).
@@ -1922,6 +1936,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // platform-view hole-punch reads (see `PaintCtx::is_translucent`).
         let surface_translucent = self.surface_translucent;
         let (paint_epoch, retained_layers) = (self.paint_epoch, self.retained_layers);
+        let retained_ledger = &self.retained_ledger;
         if let Some(pod) = self.tree.pod_mut(root_id) {
             let mut ctx = PaintCtx::new(pod.origin(), pod.size());
             // Seed the shared shell clock so the whole paint pass sees one time.
@@ -1938,7 +1953,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // platform-view hole-punch gates its rect-clear on it — see
             // `PaintCtx::is_translucent`).
             ctx.set_translucent(surface_translucent);
-            ctx.set_paint_state(paint_epoch, retained_layers);
+            ctx.set_paint_state(paint_epoch, retained_layers, Some(retained_ledger));
             // Seed the root widget's paint-time focus from the session mirror so
             // a leaf-root editable observes its own focus, and thread the live
             // session's identity down beside it: deeper focus is resolved
@@ -2129,6 +2144,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         // reason: the theme is lent immutably into each context while other
         // fields of `self` are written.
         let (paint_epoch, retained_layers) = (self.paint_epoch, self.retained_layers);
+        let retained_ledger = &self.retained_ledger;
         let theme = self.theme.as_deref();
         let presented_frames = self.presented_frames;
         let surface_translucent = self.surface_translucent;
@@ -2151,7 +2167,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             ctx.set_window_insets(entry.insets);
             ctx.set_presented_frames(presented_frames);
             ctx.set_translucent(surface_translucent);
-            ctx.set_paint_state(paint_epoch, retained_layers);
+            ctx.set_paint_state(paint_epoch, retained_layers, Some(retained_ledger));
             // Seeded from the root's own mirrors exactly as the root pod's
             // context is, so a focused editable inside a floated pod observes its
             // focus (and a hovered one its hover) through the ordinary

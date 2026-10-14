@@ -264,6 +264,16 @@ pub trait AppTree {
     /// Forward `RenderRoot::set_layout_audit` (`FRUST_LAYOUT_AUDIT`). Default no-op.
     fn set_layout_audit(&mut self, _audit: bool) {}
 
+    /// Forward `RenderRoot::set_retained_layers` (`FRUST_NO_RETAINED_LAYERS`,
+    /// resolved via `frame_gate::LayoutKnobs`). Default no-op.
+    fn set_retained_layers(&mut self, _enabled: bool) {}
+
+    /// Forward `RenderRoot::set_retained_ledger`: the resident-key ledger the
+    /// render side last published, handed over before each paint (one frame
+    /// stale by design; see [`crate::render_split::latest_retained_ledger`]).
+    /// Default no-op.
+    fn set_retained_ledger(&mut self, _ledger: &frust_core::RetainedLedger) {}
+
     /// Store the window's insets ([`WindowInsets`]), threaded into every
     /// subsequent layout/paint pass (delegates to [`RenderRoot::set_insets`]).
     ///
@@ -499,6 +509,14 @@ where
 
     fn set_layout_audit(&mut self, audit: bool) {
         self.root.set_layout_audit(audit);
+    }
+
+    fn set_retained_layers(&mut self, enabled: bool) {
+        self.root.set_retained_layers(enabled);
+    }
+
+    fn set_retained_ledger(&mut self, ledger: &frust_core::RetainedLedger) {
+        self.root.set_retained_ledger(ledger);
     }
 
     fn set_theme(&mut self, theme: Box<dyn Any>) {

@@ -85,7 +85,6 @@
 //! re-exports `motion` wholesale, so these types ride along under
 //! `frust::motion::*`).
 
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use frust_core::{
@@ -99,7 +98,6 @@ use kurbo::{Point, Size, Vec2};
 use crate::ChildKey;
 use crate::Timing;
 use crate::motion::patterns::{FadeThrough, PatternLayer, TransitionPattern};
-use crate::nav::navigator::NEXT_SNAPSHOT_KEY;
 use crate::nav::transition::{TransitionDriver, make_driver};
 
 /// The unthemed fallback transition duration (the Glyph `base` token, 220ms) —
@@ -278,7 +276,7 @@ pub struct PatternSwitcherWidget<P: TransitionPattern + Clone + 'static> {
     /// keyboard hide after the switch).
     needs_ime_clear: bool,
     /// This switcher's pair of [`PaintScene::push_retained`] cache keys,
-    /// reserved once from [`NEXT_SNAPSHOT_KEY`] at construction (`fetch_add(2)`)
+    /// reserved once from [`frust_core::RetainedKey::mint_range`] at construction (`fetch_add(2)`)
     /// and stable for the widget's lifetime, across every switch it ever
     /// stages: `snapshot_base` for the live (incoming) child,
     /// `snapshot_base + 1` for the frozen exiting pod. A single-slot container
@@ -307,7 +305,7 @@ impl<State: 'static, P: TransitionPattern + Clone + 'static> View<State>
             settled: false,
             reduce_motion: false,
             needs_ime_clear: false,
-            snapshot_base: NEXT_SNAPSHOT_KEY.fetch_add(2, Ordering::Relaxed),
+            snapshot_base: frust_core::RetainedKey::mint_range(2).get(),
         }
     }
 
