@@ -71,7 +71,14 @@
 //!   and the run shares one paint record per atlas layer (a *glyph quad*, see
 //!   [`backend`]'s module doc), unless `FRUST_ENGINE_NO_GLYPH_QUADS` or
 //!   [`SceneCompiler::set_glyph_quads`](crate::compile::SceneCompiler::set_glyph_quads)
-//!   turned quads off.
+//!   turned quads off. A run drawn that way once is remembered with the slots
+//!   its glyphs resolved to, and on later frames it is drawn from them
+//!   without reaching `glifo` at all — its glyphs placed by `glifo`'s own
+//!   arithmetic, so on the same pixels and in the same subpixel buckets (see
+//!   [`ResidentPlan`], and `atlas_policy::ResidentRuns` for what keeps a
+//!   remembered slot and its LRU age true). `FRUST_ENGINE_NO_GLYPH_RUN_CACHE`
+//!   or [`SceneCompiler::set_glyph_run_cache`](crate::compile::SceneCompiler::set_glyph_run_cache)
+//!   sends every run back through `glifo`.
 //!   A miss allocates a slot out of the *shared* atlas allocator, records the
 //!   fills that rasterize it into that page's command recorder, and draws the
 //!   slot anyway; the recorded pages are replayed into the atlas by

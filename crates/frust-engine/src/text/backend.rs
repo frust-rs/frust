@@ -81,6 +81,11 @@
 //! changes. A run under a coverage-mask clip never collects at all: a quad's
 //! rectangle can be trimmed to a scissor but cannot carry a mask.
 //!
+//! A run the glyph-atlas policy remembers as resident skips `glifo` and the
+//! holding area both: [`EngineGlyphSink::draw_resident`] rebuilds each glyph's
+//! quad from its remembered slot and the origin `glifo` would compute for it,
+//! and records it exactly as the held-back candidate would have been.
+//!
 //! # The run's paint, encoded once
 //!
 //! A run carries one brush, and `glifo` hands the sink a per-glyph *relative*
