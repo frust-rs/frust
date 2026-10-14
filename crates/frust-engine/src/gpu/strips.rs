@@ -35,6 +35,9 @@ const PAINT_TYPE_MASK: u32 = 0x7;
 /// carries in bits 29-30.
 const COLOR_SOURCE_LAYER: u32 = 1;
 
+/// The paint type a glyph quad carries in bits 26-28 ([`PaintType::Glyph`]).
+const PAINT_TYPE_GLYPH: u32 = PaintType::Glyph as u32;
+
 /// The shader's `IMAGE_QUALITY_MEDIUM` — bilinear, the highest quality the
 /// [`PaintClass::Image`] program samples at.
 const IMAGE_QUALITY_BILINEAR: u32 = 1;
@@ -75,6 +78,13 @@ pub enum PaintType {
     /// The payload is a sample position; the record names a blurred rounded
     /// rectangle.
     BlurredRoundedRect = 5,
+    /// The payload is the atlas texel under the instance's top-left corner;
+    /// the record names the glyph atlas layer and tint of a whole glyph run.
+    ///
+    /// Only ever carried by a rect instance ([`RECT_STRIP_FLAG`]): the payload
+    /// addresses the atlas from the instance's own origin, which is the glyph's
+    /// corner only when the instance is the glyph's whole rectangle.
+    Glyph = 6,
 }
 
 /// The packed paint descriptor for a `paint_type` instance whose encoded-paint
@@ -337,7 +347,8 @@ pub enum PaintClass {
     /// Adds the linear, radial and sweep gradients.
     Gradient,
     /// Adds atlas image sampling at nearest and bilinear quality — every
-    /// glyph, and every image not drawn bicubic.
+    /// atlas glyph not drawn as a [glyph quad](Self::Glyph), and every image
+    /// not drawn bicubic.
     Image,
     /// Adds every image path: [`Self::Image`]'s, plus bicubic atlas sampling
     /// and the externally bound texture. Kept apart because the bicubic and
@@ -348,6 +359,11 @@ pub enum PaintClass {
     /// Adds the layer colour source a composite reads its finished page
     /// through.
     LayerComposite,
+    /// Adds the glyph quad: one nearest load from the atlas texel the
+    /// instance's payload names, with no paint transform and no extend mode —
+    /// what a cached glyph run draws with. Independent of the image program
+    /// family, since it never samples bilinearly.
+    Glyph,
     /// The whole program, every branch: what a run too short to be worth its
     /// own pipeline switch, and every run under `FRUST_ENGINE_UBER_PROGRAM`,
     /// is drawn with.
@@ -356,25 +372,27 @@ pub enum PaintClass {
 
 impl PaintClass {
     /// Every class, in index order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::SolidCoverage,
         Self::Gradient,
         Self::Image,
         Self::ImageFiltered,
         Self::BlurredRect,
         Self::LayerComposite,
+        Self::Glyph,
         Self::Uber,
     ];
 
     /// The classes compiled from a specialisation of the source — every class
     /// but [`Self::Uber`], which is the source itself.
-    pub const SPECIALISED: [Self; 6] = [
+    pub const SPECIALISED: [Self; 7] = [
         Self::SolidCoverage,
         Self::Gradient,
         Self::Image,
         Self::ImageFiltered,
         Self::BlurredRect,
         Self::LayerComposite,
+        Self::Glyph,
     ];
 
     /// The class of an instance whose packed descriptor is
@@ -385,6 +403,12 @@ impl PaintClass {
     /// exactly as it always did. An image maps to [`Self::ImageFiltered`],
     /// the class that draws every image — the flag does not say which path
     /// the record takes (see [`Self::of_image`]).
+    ///
+    /// A glyph quad is [`Self::Glyph`] only on a rect instance: its payload
+    /// names the atlas texel under the instance's own corner, which is only
+    /// the glyph's corner when the instance is the glyph's whole rectangle. A
+    /// strip carrying the glyph paint type is not an encoding the engine emits,
+    /// and is read as reserved.
     #[must_use]
     pub const fn of_flag(paint_and_rect_flag: u32) -> Self {
         let color_source = (paint_and_rect_flag >> COLOR_SOURCE_SHIFT) & COLOR_SOURCE_MASK;
@@ -399,6 +423,7 @@ impl PaintClass {
             1 => Self::ImageFiltered,
             2..=4 => Self::Gradient,
             5 => Self::BlurredRect,
+            PAINT_TYPE_GLYPH if paint_and_rect_flag & RECT_STRIP_FLAG != 0 => Self::Glyph,
             _ => Self::Uber,
         }
     }
@@ -441,6 +466,7 @@ impl PaintClass {
             Self::ImageFiltered => "image-filtered",
             Self::BlurredRect => "blurred-rect",
             Self::LayerComposite => "layer",
+            Self::Glyph => "glyph",
             Self::Uber => "uber",
         }
     }
@@ -474,6 +500,11 @@ impl PaintClass {
 /// needs, so a frame resolves exactly those pipelines and no others.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct ClassSet(u8);
+
+const _: () = assert!(
+    PaintClass::ALL.len() <= u8::BITS as usize,
+    "`ClassSet` holds one bit per paint class",
+);
 
 impl ClassSet {
     /// The empty set.
@@ -770,6 +801,31 @@ mod tests {
         assert_eq!(C::of_flag(3 << 29), C::Uber);
         assert_eq!(C::of_flag(6 << 26), C::Uber);
         assert_eq!(C::of_flag(7 << 26), C::Uber);
+    }
+
+    #[test]
+    fn a_glyph_quad_is_its_own_class_only_on_a_rect_instance() {
+        use PaintClass as C;
+        let glyph = pack_paint_descriptor(PaintType::Glyph, 12);
+        assert_eq!(C::of_flag(glyph | RECT_STRIP_FLAG), C::Glyph);
+        assert_eq!(
+            C::of_flag(glyph),
+            C::Uber,
+            "a strip carrying the glyph paint type is reserved"
+        );
+        assert!(C::Glyph.admits_flag(glyph | RECT_STRIP_FLAG));
+        assert!(C::Glyph.admits_flag(pack_paint_descriptor(PaintType::Solid, 0)));
+        assert!(!C::Glyph.admits_flag(pack_paint_descriptor(PaintType::Image, 3)));
+        assert!(!C::Image.admits_flag(glyph | RECT_STRIP_FLAG));
+        assert!(!C::ImageFiltered.draws(C::Glyph));
+        assert!(C::Uber.admits_flag(glyph | RECT_STRIP_FLAG));
+        assert_eq!(C::Glyph.label(), "glyph");
+        // Every class still fits the set's one bit each.
+        let mut set = ClassSet::EMPTY;
+        for class in C::ALL {
+            set.insert(class);
+        }
+        assert_eq!(set.iter().count(), C::ALL.len());
     }
 
     #[test]

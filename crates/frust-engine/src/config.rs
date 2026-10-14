@@ -186,6 +186,27 @@ pub fn atlas_disabled() -> bool {
     })
 }
 
+/// Whether glyph quads are disabled via `FRUST_ENGINE_NO_GLYPH_QUADS`.
+/// Cached: read once per process.
+///
+/// Consulted when a [`crate::compile::SceneCompiler`] is built: with it set, a
+/// glyph run resolved entirely out of the glyph atlas is lowered the way every
+/// atlas glyph was before glyph quads existed — one image record per glyph and
+/// coverage strips generated from the glyph's rectangle — instead of one
+/// record per run and one rect instance per glyph. The kill switch for a
+/// device whose glyph quads disagree with that lowering;
+/// [`crate::compile::SceneCompiler::set_glyph_quads`] is the per-compiler
+/// counterpart a caller comparing the two arms uses.
+pub fn glyph_quads_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_ENGINE_NO_GLYPH_QUADS"),
+            std::env::var("FRUST_ENGINE_NO_GLYPH_QUADS").ok(),
+        )
+    })
+}
+
 /// Whether offscreen fragment-shader effects are disabled via
 /// `FRUST_ENGINE_NO_SHADER_EFFECTS`. Cached: read once per process.
 ///
@@ -357,10 +378,10 @@ mod tests {
     }
 
     // The `OnceLock` getters (`uber_program_forced`, `pass_merge_disabled`,
-    // `image_sampler_enabled`, `run_split_min`) are deliberately not asserted
-    // here: they read the process environment, and a machine running the
-    // off-arm captures exports exactly these knobs. The pure parsers above
-    // and below are the contract.
+    // `image_sampler_enabled`, `run_split_min`, `glyph_quads_disabled`) are
+    // deliberately not asserted here: they read the process environment, and
+    // a machine running the off-arm captures exports exactly these knobs. The
+    // pure parsers above and below are the contract.
 
     /// A kill switch reads the other way round from every other boolean
     /// here: unset — or set to anything but `0`/`false` — is on.
