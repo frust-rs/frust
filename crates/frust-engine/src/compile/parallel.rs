@@ -45,12 +45,10 @@
 //! Helpers are spawned per frame inside [`std::thread::scope`] — there is no
 //! persistent pool, and no thread outlives the compile that spawned it — and
 //! only when the planned work is estimated to outweigh the spawn
-//! ([`DEFAULT_PARALLEL_MIN_COST`]). The walk spawns the first helper and that
-//! helper spawns the rest, because a spawn costs the spawning thread tens of
-//! microseconds on a phone. A helper that cannot be spawned (a target with no
-//! threads, an exhausted process) leaves its jobs to the walk, which generates
-//! them inline. `FRUST_ENGINE_NO_PARALLEL` turns the pool off; the walk is
-//! then the plain sequential one.
+//! ([`DEFAULT_PARALLEL_MIN_COST`]). A helper that cannot be spawned (a target
+//! with no threads, an exhausted process) leaves its jobs to the walk, which
+//! generates them inline. `FRUST_ENGINE_NO_PARALLEL` turns the pool off; the
+//! walk is then the plain sequential one.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -643,20 +641,11 @@ impl Pool {
             size: (width, height),
         };
         std::thread::scope(|scope| {
-            // The walk spawns one helper and that helper spawns the rest: a
-            // spawn costs the spawning thread tens of microseconds on a phone,
-            // and the walk is the thread that cannot spare them. A helper that
-            // cannot be spawned leaves its jobs to the walk, which generates
-            // every slot it finds pending inline.
-            let mut generators = self.helpers.iter_mut().take(helpers);
-            if let Some(first) = generators.next() {
-                let _spawned = std::thread::Builder::new().spawn_scoped(scope, move || {
-                    for generator in generators {
-                        let _spawned = std::thread::Builder::new()
-                            .spawn_scoped(scope, move || helper.work(generator));
-                    }
-                    helper.work(first);
-                });
+            for generator in self.helpers.iter_mut().take(helpers) {
+                // A helper that cannot be spawned leaves its jobs to the walk,
+                // which generates every slot it finds pending inline.
+                let _spawned =
+                    std::thread::Builder::new().spawn_scoped(scope, move || helper.work(generator));
             }
             let merge = Merge {
                 jobs,
