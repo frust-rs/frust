@@ -8,6 +8,26 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- Per-paint-class strip programs: `strip.wgsl` is specialised per `PaintClass` (solid + coverage,
+  gradient, image, image-filtered, blurred-rect, layer-composite, and the whole Uber program), the
+  variants created lazily against one explicit strip pipeline layout. `FRUST_ENGINE_UBER_PROGRAM=1`
+  draws every run with Uber again; `FRUST_ENGINE_RUN_SPLIT_MIN=<n>` (default 16) sets the shortest
+  run worth a pipeline switch. `EngineRenderer::set_uber_program` / `set_run_split_min` are the
+  programmatic counterparts.
+- One-pass surface opening: the clear, the opaque strips and the first drawing surface round record
+  as a single render pass. `FRUST_ENGINE_NO_PASS_MERGE=1` records them apart again;
+  `EngineRenderer::set_pass_merge` is its counterpart and `last_frame_passes` lists a frame's
+  `FramePass`es.
+- Atlas tier rule: an adapter-family name table places a mobile GPU on the mobile budget whatever
+  its capability flags say, and a mobile family with at least 4 GiB of `MemTotal` (Linux/Android)
+  earns the new `mobile_large` tier, 2048x2048x4 (1024x1024x16 when the wide shape is refused).
+  The tier log line gains `rule=` and `memory_mib=`. An eviction clear that a pending upload
+  covers exactly is no longer issued.
+- Hardware image sampler program family, on by default: bilinear atlas images are read with one
+  filtered fetch instead of four `textureLoad` taps. `FRUST_ENGINE_IMAGE_SAMPLER=0` selects the
+  manual family; `EngineRenderer::with_image_sampler` chooses per renderer.
+- `frust-gpu`: `RenderPipelineDesc` gains an optional explicit `layout`, the sixth field of the
+  pipeline key.
 - `EventCtx::request_layout` / `needs_layout`, `ChildPod` layout-skip state,
   `RenderRoot::{set_layout_skip, layout_skip}` and `WidgetTree::inspect_layout_dirty`.
 - Layout-audit mode: `RenderRoot::set_layout_audit` or `FRUST_LAYOUT_AUDIT` (any value but `0`)
@@ -67,6 +87,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- Measured `gpu_main` p50 on the S1 scene, before and after the FAST Phase 1 engine work: Pixel 4a
+  32.70 to 12.75 ms, Pixel 4 11.15 to 8.12 ms. Method and the other scenes are in
+  [docs/PERFORMANCE_BASELINES.md](docs/PERFORMANCE_BASELINES.md) § After Phase 1.
 - Layout is skipped per pod by default: a pod laid out before returns its recorded size unless it
   is dirty, its constraints, the window insets or the root layout epoch changed (theme, insets,
   window size, a dirty floated overlay). Widgets must signal layout-affecting changes through

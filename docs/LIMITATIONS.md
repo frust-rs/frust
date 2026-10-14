@@ -5680,6 +5680,27 @@ carry.
 atlas rectangles) or a dedicated non-atlas texture path for oversized sources;
 either removes the ceiling rather than softening it.
 
+### `engine-padded-bilinear-edge-blend` — a magnified Pad image's last row and column blend half-way into the neighbouring texel
+
+**Observed**: in both strip program families (the manual four-tap path and the hardware sampler),
+the engine's padded bilinear clamps the sample position to the image before taking its half-texel
+offset, so the last row and column of a magnified Pad image blend half-way into the texel beside
+them where the CPU oracle (`vello_cpu`) holds the edge texel. It is invisible at the corpus's 2x
+checkerboard (two-pixel cells) and reaches a delta of 128 at 4x magnification on a one-pixel
+pattern.
+
+**Applies to**: the engine tier, a bilinear (Medium-quality) atlas image drawn magnified with the
+Pad extend mode.
+
+**Why not fixed**: measured, not yet ruled on: the delta only appears where a magnified image's edge
+texel differs from its neighbour, which the corpus's two-pixel cells never exercise. Correcting it
+changes the filter's edge rule in both program families at once.
+
+**Evidence**: `unit-image-magnified` (`frust_testing::corpus::unit::image_sampler_cases`) is a
+measurement case with no reviewed baseline; its source repeats the last row and column so the case
+measures the filter rather than this edge rule. Shader: `sampled_bilinear` in `strip.wgsl` and
+`bilinear_sample` in `helpers.wgsl`.
+
 ### `engine-scheduler-skip-on-escalation` — a layer shape the engine's scheduler cannot serve skips the frame rather than falling back
 
 **Observed** (evidence: `crates/frust-engine/src/schedule/mod.rs`'s module

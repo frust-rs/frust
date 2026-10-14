@@ -62,13 +62,12 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
 
    | # | Pass (label) | Recorded when | Span |
    |---|---|---|---|
-   | a | `frust-engine clear` — `LoadOp::Clear` to the base colour, no pipeline | always | Main |
-   | b | `frust-engine opaque strips` — `LoadOp::Load`, depth **write** | `opaque_count > 0` and an opaque pipeline (depth on) | Main |
-   | c | loop over rounds: **either** a filter pass (`frust-engine filter pass`) **or** a strip pass (`frust-engine alpha strips` on the surface, `frust-engine layer page` on a page) — never both | once per round | Composite for pages and filters, Main for the surface |
-   | c′ | `frust-engine hole punch` after each *non-filter* round | the filter branch `continue`s past it (≈1726) | Main |
+   | a | `frust-engine surface opening` — `LoadOp::Clear` on colour (and depth), opaque strips with depth **write**, then the first drawing surface round's alpha strips, all in one pass | always (a frame whose surface draws nothing records it at the end) | Main |
+   | b | loop over the remaining rounds: **either** a filter pass (`frust-engine filter pass`) **or** a strip pass (`frust-engine alpha strips` on the surface, `frust-engine layer page` on a page) — never both; page and filter rounds scheduled before the first surface draw run ahead of the opening | once per round | Composite for pages and filters, Main for the surface |
+   | b′ | `frust-engine hole punch` after each *non-filter* round | the filter branch `continue`s past it (≈1726) | Main |
    | d | `frust-engine hole punch` after the loop (≈1873) | always *called* | Main |
 
-   Two details the table compresses: (c′) and (d) record a pass only when the frame has a punch
+   Two details the table compresses: (b′) and (d) record a pass only when the frame has a punch
    pipeline (a `ClearRect` was recorded and the base colour is not opaque, `let punches =` ≈1093)
    **and** that cut's instance count is non-zero (`PunchPass::record` returns early on
    `count == 0`); and a surface round with no segments records nothing, while a page round always
@@ -86,11 +85,12 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
    opaque one fails the depth test per fragment instead of blending over it.
    `FRUST_ENGINE_NO_DEPTH=1` (`config::depth_disabled`, read once per process) is consulted at
    `let depth_enabled` (≈1072): the scratch builder never splits opaque spans out (`split_opaque`
-   ≈2619), pass (b) disappears, and every instance goes through the surface rounds' blended pass
-   in painter order via `StripAlpha` instead of `StripDepthAlpha`. A measured observation recorded
-   outside the repo: a plain frame records **three** full-screen surface passes — the empty clear,
-   the opaque pass with `LoadOp::Load`, and the round with `LoadOp::Load`. That is how the code is
-   written today; do not "fix" it from this chapter.
+   ≈2619), the opening's opaque strips disappear, and every instance goes through the surface
+   rounds' blended pass in painter order via `StripAlpha` instead of `StripDepthAlpha`. A plain frame records **one**
+   full-screen surface pass, the opening; `FRUST_ENGINE_NO_PASS_MERGE=1`
+   (`EngineRenderer::set_pass_merge`) records the older three — the empty `frust-engine clear`,
+   `frust-engine opaque strips` with `LoadOp::Load`, and the round with `LoadOp::Load` — which is how
+   to see them apart in a capture. `last_frame_passes` lists what a frame recorded.
 
 4. **Nine WGSL files, five programs, nine pipelines.** `crates/frust-engine/shaders/` holds nine
    files, and the code treats them in three different ways:
@@ -111,14 +111,14 @@ the caller's encoder. Learn both and every pass label in a GPU capture has a lin
    `strip.wgsl` header's "four variants" is stale — `EnginePipeline::ALL` has **nine** pipelines:
    six strip variants (`StripIntermediate`, `StripAlpha`, `StripDepthAlpha`, `StripOpaque`,
    `StripDestOut`, `StripDepthDestOut`) plus `Clear`, `Copy`, `Filter`. `Clear` and `Copy` are
-   warmed up but `record_frame` never binds them — the clear pass is a load op. The rest of
+   warmed up but `record_frame` never binds them — the clear is a load op. The rest of
    `crates/frust-engine/src/gpu/` in one line each: `targets.rs` pools intermediates under
    `MAX_INTERMEDIATE_DIMENSION` (8192), answering an over-ceiling request with a value;
    `bindings.rs` holds `ExternalTextures`, the host-owned textures (video frames, imports) drawn in
    per-texture runs; `depth.rs` owns the depth attachment and the caller-shares-it contract;
    `present.rs` is `UnpremultiplyPass` for iOS's straight-alpha swapchain. Timing: every pass is
    charged to one of `EngineSpan::ALL = [Prepass, Main, Composite, Blit]` — Prepass is the glyph
-   atlas replay, Main the clear, opaque, alpha and punch passes, Composite every page and filter
+   atlas replay, Main the opening, alpha and punch passes, Composite every page and filter
    pass, Blit the unpremultiply pass. The ring is inert unless the build has `perf-trace` and the
    device got `TIMESTAMP_QUERY` (`crates/frust-gpu/src/diag.rs`).
 
@@ -207,14 +207,15 @@ row is the whole of "compositing a page": coverage times opacity times one texel
 In `benchmarks/frust_bench`, compare `FRUST_TRACE=1 cargo run` against
 `FRUST_ENGINE_NO_DEPTH=1 FRUST_TRACE=1 cargo run` on the default S1 scenario and read the
 `encode` p95 (lab 8). GPU spans only appear from a `perf-trace` build on a device with
-`TIMESTAMP_QUERY`. Expect pass (b) to vanish and the round's blended pass to carry every instance.
+`TIMESTAMP_QUERY`. Expect the opening's opaque strips to vanish and the round's blended pass to
+carry every instance.
 
 ## What to notice before moving on
 
 - The scheduler is plain data in, plain data out; every claim above about page counts is a
   CPU-only test you can run in under a second. Reach for `Schedule::build` before a GPU capture.
-- A pass label in a capture maps to exactly one site in `record_frame`: clear, opaque strips,
-  alpha strips, layer page, filter pass, hole punch. Anything else (atlas replay, unpremultiply,
+- A pass label in a capture maps to exactly one site in `record_frame`: surface opening, alpha
+  strips, layer page, filter pass, hole punch (clear and opaque strips too, with pass merging off). Anything else (atlas replay, unpremultiply,
   shader-quad prepass) is recorded outside it.
 - When prose and code disagree — the `strip.wgsl` "four variants" header, a "blend.wgsl
   composites layers" reading — the code wins. Read `record_frame` again after every engine change.
