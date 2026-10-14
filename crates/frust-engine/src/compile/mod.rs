@@ -59,7 +59,7 @@ pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
 pub use external::{ExternalExtents, ExternalSkip};
 pub use layers::{GroupStack, LayerLowering, SnapshotStack};
-pub use parallel::{DEFAULT_PARALLEL_MIN_COST, DEFAULT_PARALLEL_WORKERS};
+pub use parallel::{DEFAULT_PARALLEL_MIN_COST, DEFAULT_PARALLEL_WORKERS, MAX_PARALLEL_WORKERS};
 
 /// The most glyph runs a compiler's resident-run cache remembers at once (see
 /// [`SceneCompiler::resident_glyph_run_count`]). A byte budget bounds the same
@@ -715,12 +715,14 @@ impl SceneCompiler {
     /// compiler starts with ([`DEFAULT_PARALLEL_WORKERS`] capped by the
     /// machine, or one with it set), this decides it for one compiler. Takes
     /// effect from the next frame. The frame a compiler produces is the same
-    /// at every setting. Capped at the machine's thread count exactly as the
-    /// variable is — every helper is a thread spawned per frame and a strip
-    /// generator kept across them, so a count past the machine would only
-    /// pay for threads that cannot run.
+    /// at every setting. Capped at [`MAX_PARALLEL_WORKERS`] — every
+    /// helper is a thread spawned per frame and a strip generator kept across
+    /// them, so a count far past any machine would only pay for threads that
+    /// cannot run; the variable's path is capped by the machine's own thread
+    /// count instead, so that a test can ask for the helper count it means to
+    /// exercise on any host.
     pub fn set_parallel_workers(&mut self, workers: usize) {
-        self.parallel_workers = workers.clamp(1, parallel::available_threads());
+        self.parallel_workers = workers.clamp(1, parallel::MAX_PARALLEL_WORKERS);
     }
 
     /// How many threads generate a frame's strips, the calling thread
@@ -1067,11 +1069,11 @@ impl SceneCompiler {
         if helpers > 0 && !plan.is_empty() && plan.cost() >= self.parallel_min_cost {
             // Moved out for the walk's duration: the helpers borrow it while
             // the walk borrows the compiler. It is put back on the normal
-            // return only; a helper panic propagates out of the scope and
-            // aborts the process (the workspace builds with `panic = "abort"`),
-            // so an unwinding build would run on with an empty pool, which is
-            // the sequential walk plus a fresh pool's allocations — slower,
-            // never wrong.
+            // return only: a helper panic propagates out of the scope, which
+            // aborts a release build (`panic = "abort"` in the release profile)
+            // and, in a dev, test or downstream build that unwinds, leaves the
+            // compiler with an empty pool — the sequential walk plus a fresh
+            // pool's allocations on the next frame, slower and never wrong.
             let mut pool = std::mem::take(&mut self.pool);
             let level = self.level;
             pool.run(&plan, helpers, level, (width, height), |merge| {

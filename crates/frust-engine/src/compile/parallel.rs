@@ -105,12 +105,23 @@ const JOB_BASE_COST: u64 = 64;
 /// A slot holds one command's run until the walk takes it, so a frame of a
 /// thousand planned shapes needs a thousand slots that frame — and would
 /// otherwise keep them, each at the capacity of the largest run it ever
-/// held, for the compiler's lifetime. After each run the pool is trimmed back
-/// to these bounds; a frame past them pays the allocations again, a frame
-/// within them pays nothing.
+/// held, for the compiler's lifetime. After each run every slot is emptied
+/// and the pool is trimmed back to these bounds; a frame past them pays the
+/// allocations again, a frame within them pays nothing. The most a pool can
+/// hold is therefore `MAX_RETAINED_SLOTS * (RETAINED_SLOT_STRIPS *
+/// size_of::<Strip>() + RETAINED_SLOT_ALPHAS)`, about 20 MiB, and in practice
+/// the sum of the largest run each slot ever held: the S1 bench frame plans
+/// about 500 jobs totalling 8.7 k strips and 350 KB of alphas on the two
+/// phones, a few dozen strips and a few hundred bytes per slot.
 const MAX_RETAINED_SLOTS: usize = 1024;
-const RETAINED_SLOT_STRIPS: usize = 1024;
-const RETAINED_SLOT_ALPHAS: usize = 64 * 1024;
+const RETAINED_SLOT_STRIPS: usize = 256;
+const RETAINED_SLOT_ALPHAS: usize = 16 * 1024;
+
+/// The most threads [`crate::compile::SceneCompiler::set_parallel_workers`]
+/// accepts, the walk included: a caller's count past this is a mistake, not a
+/// bigger machine, and a count past the machine only pays for threads that
+/// cannot run. The variable's path is capped by the machine instead.
+pub const MAX_PARALLEL_WORKERS: usize = 8;
 
 /// How many chunks each helper's share of the planned cost is split into.
 ///
@@ -735,8 +746,10 @@ impl Pool {
     /// Give back what one unusually large frame left behind: slots past
     /// [`MAX_RETAINED_SLOTS`] and, in the slots kept, capacity past
     /// [`RETAINED_SLOT_STRIPS`] strips and [`RETAINED_SLOT_ALPHAS`] alpha bytes.
-    /// The helpers' generators are kept as they are: there is one per helper,
-    /// never more than the machine has threads.
+    /// Every slot is emptied first — nothing reads a run after its walk, and
+    /// `shrink_to` never cuts below a length — so a slot that held a huge run
+    /// gives that run back too. The helpers' generators are kept as they are:
+    /// there is one per helper, never more than the machine has threads.
     fn trim(&mut self) {
         self.slots.truncate(MAX_RETAINED_SLOTS);
         for slot in &mut self.slots {
@@ -744,6 +757,7 @@ impl Pool {
                 .get_mut()
                 .unwrap_or_else(PoisonError::into_inner)
                 .storage;
+            storage.clear();
             storage.strips.shrink_to(RETAINED_SLOT_STRIPS);
             storage.alphas.shrink_to(RETAINED_SLOT_ALPHAS);
         }
@@ -1066,19 +1080,24 @@ mod tests {
     }
 
     /// One oversized frame does not size the pool for good: slots past the
-    /// bound go, and a kept slot gives back the capacity a huge run left in it.
+    /// bound go, and a kept slot gives back the run — not just the spare
+    /// capacity — a huge command left in it.
     #[test]
     fn the_pool_is_trimmed_back_to_its_bounds_after_a_run() {
         let mut pool = Pool::default();
         pool.slots
             .resize_with(MAX_RETAINED_SLOTS + 500, Mutex::default);
         {
+            // A run four times the bound, still held: what a slot looks like
+            // after the walk has taken (or declined) a huge command's strips.
             let storage = &mut pool.slots[0]
                 .get_mut()
                 .unwrap_or_else(PoisonError::into_inner)
                 .storage;
-            storage.strips.reserve(RETAINED_SLOT_STRIPS * 4);
-            storage.alphas.reserve(RETAINED_SLOT_ALPHAS * 4);
+            storage
+                .strips
+                .resize(RETAINED_SLOT_STRIPS * 4, Strip::new(0, 0, 0, false));
+            storage.alphas.resize(RETAINED_SLOT_ALPHAS * 4, 0);
         }
         let (slots, strips, alphas) = pool.retained();
         assert_eq!(slots, MAX_RETAINED_SLOTS + 500);
