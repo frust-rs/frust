@@ -221,12 +221,14 @@
 )]
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use glifo::{
     AtlasConfig, AtlasSlot, FontEmbolden, GlyphAtlas, GlyphCacheConfig, GlyphCacheKey, ImageCache,
     PendingClearRect, RasterMetrics,
 };
 use kurbo::Affine;
+use peniko::color::palette::css::BLACK;
 use peniko::color::{AlphaColor, Srgb};
 
 /// Grid a font size is snapped to before it reaches a cache key, in pixels.
@@ -977,6 +979,15 @@ pub(crate) struct AtlasPolicy {
     serial: u64,
     /// Where in the two-phase frame this policy is.
     phase: Phase,
+    /// `glifo`'s last eviction serial, mirrored the same way as
+    /// [`serial`](Self::serial): `maintain` reaps exactly when the serial it
+    /// ticks to is [`EVICTION_FREQUENCY`] past this, so the policy knows which
+    /// call will evict before making it — which is when the resident runs'
+    /// slots have to be touched (see [`ResidentRuns`]).
+    last_eviction_serial: u64,
+    /// Glyph runs whose every glyph is resident, remembered with their slots so
+    /// a later frame can draw them without handing the run to `glifo`.
+    resident: ResidentRuns,
     /// This frame's counters for the `frust-perf enc` line.
     #[cfg(feature = "perf-trace")]
     trace: AtlasTrace,
@@ -1045,6 +1056,8 @@ impl AtlasPolicy {
             unreplayed_since: None,
             serial: 0,
             phase: Phase::Idle,
+            last_eviction_serial: 0,
+            resident: ResidentRuns::default(),
             #[cfg(feature = "perf-trace")]
             trace: AtlasTrace::default(),
         }
@@ -1097,6 +1110,13 @@ impl AtlasPolicy {
     /// ceiling — and that decision is made before this borrow is taken.
     pub(crate) fn atlas_mut(&mut self) -> &mut GlyphAtlas {
         &mut self.atlas
+    }
+
+    /// The entry map, read-only — for the counters a caller compares across a
+    /// run.
+    #[must_use]
+    pub(crate) fn atlas(&self) -> &GlyphAtlas {
+        &self.atlas
     }
 
     /// How many glyphs are currently resident.
@@ -1192,6 +1212,16 @@ impl AtlasPolicy {
     /// Open the frame's collect phase.
     pub(crate) fn begin_frame(&mut self) {
         self.frame = self.frame.saturating_add(1);
+        // Every way an entry leaves the map on this policy's watch goes through
+        // `end_frame`, which keeps the resident runs in step with it. The map is
+        // handed out between frames too (see [`atlas_mut`](Self::atlas_mut)), so
+        // a map that is somehow *smaller* than the one the last frame closed on
+        // lost entries nobody accounted for — and a remembered slot may name a
+        // rectangle that is no longer the glyph's. Forgetting every run is the
+        // answer that cannot draw a wrong pixel.
+        if self.atlas.len() < self.resident.expected_entries {
+            self.resident.forget_all();
+        }
         self.pending.clear();
         self.claimed.clear();
         // Read before anything this frame can miss, so `frame_misses` below is
@@ -1558,16 +1588,42 @@ impl AtlasPolicy {
 
         if self.eviction_deferred() {
             self.prune_sizes();
+            self.resident.expected_entries = self.atlas.len();
             self.phase = Phase::Idle;
             return;
         }
 
+        // A resident run is drawn without `glifo` probing its glyphs, so their
+        // entries' LRU ages stand still while it is on screen. The ages are only
+        // ever *read* by the reaping call, so that is the one call ahead of
+        // which they have to be true: the run's slots are touched here, once
+        // per eviction pass, instead of once per glyph per frame (see
+        // [`ResidentRuns`]).
+        let evicting = self
+            .serial
+            .saturating_add(1)
+            .saturating_sub(self.last_eviction_serial)
+            >= EVICTION_FREQUENCY;
+        if evicting {
+            self.resident.touch(&mut self.atlas, self.serial);
+        }
+        let entries_before = self.atlas.len();
         self.atlas.maintain(images);
         // `maintain` ticks the LRU serial exactly once per call, and this is its
         // only caller for this map (see [`serial`](Self::serial)).
         self.serial = self.serial.saturating_add(1);
+        if evicting {
+            self.last_eviction_serial = self.serial;
+        }
         self.discharge_evictions();
         let evicted: Vec<PendingClearRect> = self.atlas.drain_pending_clear_rects().collect();
+        // Reaped without the touch having run first: the mirror above disagreed
+        // with `glifo` about which call evicts. Nothing remembered can be
+        // trusted to have survived, so nothing is.
+        if !evicting && (!evicted.is_empty() || self.atlas.len() < entries_before) {
+            self.resident.forget_all();
+        }
+        self.resident.expected_entries = self.atlas.len();
         #[cfg(feature = "perf-trace")]
         {
             self.trace.glyph_evicted = self
@@ -1611,6 +1667,88 @@ impl AtlasPolicy {
     fn eviction_deferred(&self) -> bool {
         self.unreplayed_since
             .is_some_and(|since| self.serial.saturating_sub(since) >= MAX_ENTRY_AGE)
+    }
+
+    /// Resolve every glyph of a run out of the resident-run cache, probing
+    /// `glifo`'s map only for a glyph the cache has not seen at this subpixel
+    /// bucket since its slots were last known good.
+    ///
+    /// `placed` is the run's glyphs in order, each with the bucket its device
+    /// origin falls into *this* frame (see [`subpixel_bucket`]); `slots`
+    /// receives one slot per glyph, in the same order, when the answer is
+    /// [`ResidentAnswer::Resolved`]. Answers only in the draw phase, for the
+    /// same reason [`slot`](Self::slot) does.
+    ///
+    /// A probe that misses ends the attempt: the run goes to `glifo`, which
+    /// keys, allocates and records the glyph exactly as it always has, and the
+    /// record keeps what it learned so the next frame starts from there.
+    pub(crate) fn resolve_resident_run(
+        &mut self,
+        identity: ResidentIdentity,
+        placed: &[PlacedGlyph],
+        slots: &mut Vec<AtlasSlot>,
+    ) -> ResidentAnswer {
+        slots.clear();
+        if self.phase != Phase::Draw || placed.is_empty() {
+            return ResidentAnswer::Bypassed;
+        }
+        let serial = self.serial;
+        let hash = run_hash(&identity, placed);
+        let Some(run) = self.resident.open(hash, identity, placed, self.frame) else {
+            return ResidentAnswer::Bypassed;
+        };
+        if run.refused {
+            return ResidentAnswer::Bypassed;
+        }
+        run.used = serial;
+        run.frame = self.frame;
+
+        let black = pack_context_color(BLACK);
+        for (glyph, record) in placed.iter().zip(run.glyphs.iter_mut()) {
+            let bucket = usize::from(glyph.bucket);
+            let Some(known) = record.slots.get(bucket).copied() else {
+                // Out of range only for a bucket `subpixel_bucket` never
+                // produces; such a run is `glifo`'s to draw.
+                return ResidentAnswer::Bypassed;
+            };
+            let slot = match known {
+                Some(slot) => slot,
+                None => {
+                    let key = outline_key(&identity, glyph.id, glyph.bucket, black);
+                    let Some(slot) = self.atlas.get(&key) else {
+                        return ResidentAnswer::Missed(hash);
+                    };
+                    record.slots[bucket] = Some(slot);
+                    slot
+                }
+            };
+            record.used[bucket] = serial;
+            slots.push(slot);
+        }
+        ResidentAnswer::Resolved
+    }
+
+    /// Stop offering the run `handle` names the resident path.
+    ///
+    /// For a run the resident path missed and `glifo` then drew without a
+    /// single miss of its own — which means `glifo` resolved the run through
+    /// keys this path does not build (a bitmap strike, a face it could not
+    /// hint). Probing it again every frame would only repeat the miss, so the
+    /// record is kept as a refusal until it ages out.
+    pub(crate) fn refuse_resident_run(&mut self, handle: u64) {
+        self.resident.refuse(handle);
+    }
+
+    /// How many glyph runs the resident-run cache currently remembers.
+    #[must_use]
+    pub(crate) fn resident_runs(&self) -> usize {
+        self.resident.runs.len()
+    }
+
+    /// What the resident-run cache's records currently occupy, in bytes.
+    #[must_use]
+    pub(crate) fn resident_run_bytes(&self) -> usize {
+        self.resident.bytes
     }
 
     /// Record `size` against `font` and answer whether that font is currently
@@ -1664,6 +1802,436 @@ fn pack_context_color(color: AlphaColor<Srgb>) -> u32 {
     color.premultiply().to_rgba8().to_u32()
 }
 
+// ---------------------------------------------------------------------------
+// Resident runs
+// ---------------------------------------------------------------------------
+
+/// Horizontal subpixel buckets `glifo` quantizes a cached outline glyph's
+/// position into.
+///
+/// Restated because `glifo` 0.3.0 keeps the constant crate-private. The bucket
+/// a resident run resolves a glyph into has to be the one `glifo` would key it
+/// under — a neighbouring bucket names a slot rasterized at a different
+/// subpixel phase — so a test pins [`subpixel_bucket`] to
+/// `GlyphCacheKey::new`'s own quantization.
+const SUBPIXEL_BUCKETS: u8 = 4;
+
+/// The subpixel bucket `glifo` keys an outline glyph under when its device
+/// origin's horizontal fraction is `fractional_x`.
+///
+/// `glifo`'s private `quantize_subpixel`, restated: the fraction is wrapped
+/// into `[0, 1)`, scaled by the bucket count and rounded, and a value rounding
+/// up to a whole pixel clamps into the last bucket rather than wrapping to the
+/// first.
+#[must_use]
+pub(crate) fn subpixel_bucket(fractional_x: f32) -> u8 {
+    let normalized = fractional_x.fract();
+    let normalized = if normalized < 0.0 {
+        normalized + 1.0
+    } else {
+        normalized
+    };
+    // In `0.0..=4.0` (or NaN, which converts to zero) by construction.
+    let bucket = (normalized * f32::from(SUBPIXEL_BUCKETS)).round() as u8;
+    bucket.min(SUBPIXEL_BUCKETS - 1)
+}
+
+/// The most glyph runs the resident-run cache remembers at once.
+///
+/// A bound on the record count, beside [`MAX_RESIDENT_RUN_BYTES`]' bound on
+/// what the records hold: a scrolling list of strings that never repeat mints
+/// a record per new line, and neither number may grow with how long it
+/// scrolls.
+pub(crate) const MAX_RESIDENT_RUNS: usize = 1024;
+
+/// The most bytes the resident-run cache's records hold at once — every
+/// remembered run's glyph ids and per-bucket slots together.
+///
+/// Two mebibytes is a little over fifteen thousand glyph positions, several
+/// screens of dense text; past it the least recently drawn runs are forgotten
+/// first (see [`ResidentRuns`]).
+pub(crate) const MAX_RESIDENT_RUN_BYTES: usize = 2 * 1024 * 1024;
+
+/// The serial a bucket nothing has been drawn from is stamped with.
+const NEVER: u64 = u64::MAX;
+
+/// What a resident run is identified by besides its glyph ids: everything
+/// `glifo` builds an outline glyph's key from except the glyph and its
+/// subpixel bucket.
+///
+/// Neither the run's translation nor its brush colour is here. The
+/// translation only moves the glyphs — their buckets are re-derived from it
+/// every frame, and a bucket the record has not seen is probed like any new
+/// glyph — and the colour is the tint of the record the run's quads share,
+/// which `glifo` never keys an outline on.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResidentIdentity {
+    /// The font blob's process-unique id.
+    pub(crate) font_id: u64,
+    /// Index within a font collection.
+    pub(crate) font_index: u32,
+    /// The size `glifo` keys the run's glyphs at: the display list's size with
+    /// the run's absorbed scale multiplied in, exactly as `glifo` multiplies
+    /// it.
+    pub(crate) size: f32,
+    /// Whether the run's outlines are hinted.
+    pub(crate) hinted: bool,
+}
+
+/// One glyph of a run about to be resolved: its id, and the subpixel bucket
+/// its device origin falls into this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlacedGlyph {
+    /// The glyph id.
+    pub(crate) id: u32,
+    /// Its bucket, from [`subpixel_bucket`].
+    pub(crate) bucket: u8,
+}
+
+/// What [`AtlasPolicy::resolve_resident_run`] made of a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResidentAnswer {
+    /// Every glyph resolved, and its slot is in the caller's buffer.
+    Resolved,
+    /// A glyph was not resident. The run is `glifo`'s to draw; the handle names
+    /// its record, for [`AtlasPolicy::refuse_resident_run`].
+    Missed(u64),
+    /// The run is not offered the resident path at all: refused earlier, too
+    /// large to remember, or asked outside the draw phase.
+    Bypassed,
+}
+
+/// One glyph position of a remembered run: the slot it resolved to in each
+/// subpixel bucket it has been drawn in, and the LRU serial each was last
+/// drawn at.
+#[derive(Debug, Clone, Copy)]
+struct ResidentGlyph {
+    /// The slot per bucket, `None` until a probe found one.
+    slots: [Option<AtlasSlot>; SUBPIXEL_BUCKETS as usize],
+    /// The serial each bucket's slot was last drawn at, [`NEVER`] if not yet.
+    used: [u64; SUBPIXEL_BUCKETS as usize],
+}
+
+impl ResidentGlyph {
+    const EMPTY: Self = Self {
+        slots: [None; SUBPIXEL_BUCKETS as usize],
+        used: [NEVER; SUBPIXEL_BUCKETS as usize],
+    };
+}
+
+/// One remembered glyph run.
+#[derive(Debug)]
+struct ResidentRun {
+    /// What its glyphs are keyed under.
+    identity: ResidentIdentity,
+    /// Its glyph ids, in order — compared whole on every lookup, so two runs
+    /// sharing a hash can never share a record.
+    ids: Box<[u32]>,
+    /// Per glyph position, the slots it resolved to.
+    glyphs: Box<[ResidentGlyph]>,
+    /// The LRU serial it was last asked about at.
+    used: u64,
+    /// The frame it was last asked about on — the order the bound forgets in.
+    frame: u64,
+    /// Whether `glifo` was seen drawing it through keys this path does not
+    /// build (see [`AtlasPolicy::refuse_resident_run`]).
+    refused: bool,
+}
+
+impl ResidentRun {
+    fn new(identity: ResidentIdentity, placed: &[PlacedGlyph], frame: u64) -> Self {
+        Self {
+            identity,
+            ids: placed.iter().map(|glyph| glyph.id).collect(),
+            glyphs: vec![ResidentGlyph::EMPTY; placed.len()].into_boxed_slice(),
+            used: NEVER,
+            frame,
+            refused: false,
+        }
+    }
+
+    /// Whether this record is the run `identity` and `placed` describe.
+    fn matches(&self, identity: &ResidentIdentity, placed: &[PlacedGlyph]) -> bool {
+        self.identity.font_id == identity.font_id
+            && self.identity.font_index == identity.font_index
+            && self.identity.size.to_bits() == identity.size.to_bits()
+            && self.identity.hinted == identity.hinted
+            && self.ids.len() == placed.len()
+            && self
+                .ids
+                .iter()
+                .zip(placed)
+                .all(|(id, glyph)| *id == glyph.id)
+    }
+
+    /// What the record occupies, in bytes.
+    fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of_val(&*self.ids)
+            + std::mem::size_of_val(&*self.glyphs)
+    }
+}
+
+/// Multiplier of the run hash's mixing step (the Fx hash's).
+const RUN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
+
+/// One mixing step of the run hash.
+fn mix(hash: u64, word: u64) -> u64 {
+    (hash.rotate_left(5) ^ word).wrapping_mul(RUN_HASH_MULTIPLIER)
+}
+
+/// The hash a run's record is filed under: one pass over its identity and its
+/// glyph ids, a word per glyph — the once-per-run cost the record is looked up
+/// for.
+fn run_hash(identity: &ResidentIdentity, placed: &[PlacedGlyph]) -> u64 {
+    let mut hash = mix(0, identity.font_id);
+    hash = mix(hash, u64::from(identity.font_index));
+    hash = mix(hash, u64::from(identity.size.to_bits()));
+    hash = mix(hash, u64::from(identity.hinted));
+    hash = mix(hash, placed.len() as u64);
+    for glyph in placed {
+        hash = mix(hash, u64::from(glyph.id));
+    }
+    hash
+}
+
+/// The hasher the record map is keyed through: the key already *is* a hash.
+#[derive(Debug, Default)]
+struct RunHashHasher(u64);
+
+impl Hasher for RunHashHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = mix(self.0, u64::from(*byte));
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = mix(self.0, value);
+    }
+}
+
+/// The key `glifo` files an outline glyph of `identity`'s run under, for glyph
+/// `glyph_id` in subpixel bucket `bucket`.
+///
+/// Built field for field as `glifo` builds it for the outline probe it makes
+/// first for every glyph: the run's absorbed size and hinting, the bucket's
+/// own fractional offset (which quantizes back to the bucket), black as the
+/// context colour (an outline's ink is the tint, never the key), no synthetic
+/// embolden and no variation coordinates — the two the lowering states
+/// explicitly. `black` is black packed, computed once by the caller.
+fn outline_key(
+    identity: &ResidentIdentity,
+    glyph_id: u32,
+    bucket: u8,
+    black: u32,
+) -> GlyphCacheKey {
+    GlyphCacheKey::new(
+        identity.font_id,
+        identity.font_index,
+        glyph_id,
+        identity.size,
+        identity.hinted,
+        glifo::atlas::key::subpixel_offset(bucket),
+        BLACK,
+        black,
+        FontEmbolden::default(),
+        &[],
+    )
+}
+
+/// Glyph runs whose every glyph was resident, remembered with the slots they
+/// resolved to so a later frame can draw them without `glifo`.
+///
+/// `glifo` resolves a cached glyph by building its key, hashing it, probing the
+/// entry map and refreshing the entry's LRU serial — and drives the sink one
+/// glyph at a time while doing it. For a run drawn unchanged frame after frame
+/// that whole walk re-derives an answer it already gave. A record here is that
+/// answer kept: the run's glyph ids, and per glyph and per subpixel bucket the
+/// slot it resolved to, so a resident run costs one hash of its ids and one
+/// array read per glyph.
+///
+/// # What keeps a remembered slot true
+///
+/// A slot stays the glyph's for as long as its entry is in `glifo`'s map, and
+/// an entry leaves the map in exactly one way on this policy's watch: the
+/// eviction pass inside `maintain`, which only [`AtlasPolicy::end_frame`]
+/// calls. Insertion never moves an entry, so a frame that rasterizes new
+/// glyphs leaves every remembered slot as it was — which is why the records
+/// are not voided per insertion: a frame of animated text misses a glyph or two
+/// on most frames, and a cache emptied by each of them would never be read.
+///
+/// # What keeps the LRU true
+///
+/// A record drawn without `glifo` probes nothing, so its entries' ages would
+/// stand still and a run on screen would be reaped as though it were gone. But
+/// an entry's age is only *read* by the eviction pass, and the policy knows
+/// which `maintain` call runs one (see `last_eviction_serial`). So the ages
+/// are made true once, there: ahead of that call every bucket drawn within the
+/// last [`MAX_ENTRY_AGE`] serials is probed — one lookup per remembered slot,
+/// once per eviction pass — and stamped exactly as fresh as a per-frame probe
+/// would have left it, while a bucket drawn longer ago than that is forgotten,
+/// since the pass may reap it. A run in use is therefore never reaped and a
+/// stale one is reaped on the very pass it would have been without this cache.
+/// The ages are not merely kept *as* fresh: a slot not drawn within the window
+/// is not touched, so a stale entry ages out exactly as it always did.
+///
+/// A map that loses entries any other way — a reap the mirror did not predict,
+/// a map smaller at the start of a frame than at the end of the last — forgets
+/// every record, which costs one frame of probes and no pixel.
+///
+/// # Bounded
+///
+/// [`MAX_RESIDENT_RUNS`] records and [`MAX_RESIDENT_RUN_BYTES`] bytes. Past
+/// either, the least recently drawn records are forgotten first, down to three
+/// quarters of both, sparing every run drawn on the current frame; a run that
+/// still does not fit is drawn by `glifo` and not remembered. A record also
+/// leaves at the first eviction pass after it was last drawn more than
+/// [`MAX_ENTRY_AGE`] serials ago.
+#[derive(Debug, Default)]
+pub(crate) struct ResidentRuns {
+    /// The records, by [`run_hash`].
+    runs: HashMap<u64, ResidentRun, BuildHasherDefault<RunHashHasher>>,
+    /// What the records occupy, in bytes.
+    bytes: usize,
+    /// `glifo`'s entry count as the last frame closed.
+    expected_entries: usize,
+    /// Scratch for the bound's least-recently-drawn order.
+    order: Vec<(u64, u64)>,
+}
+
+impl ResidentRuns {
+    /// The record for `placed` under `identity`, created if there is none and
+    /// there is room; `None` when the run is not to be remembered.
+    fn open(
+        &mut self,
+        hash: u64,
+        identity: ResidentIdentity,
+        placed: &[PlacedGlyph],
+        frame: u64,
+    ) -> Option<&mut ResidentRun> {
+        let known = self
+            .runs
+            .get(&hash)
+            .is_some_and(|run| run.matches(&identity, placed));
+        if !known {
+            // A run filed under a hash another run already holds replaces it:
+            // the ids are compared whole, so the two can never share slots.
+            if let Some(previous) = self.runs.remove(&hash) {
+                self.bytes = self.bytes.saturating_sub(previous.bytes());
+            }
+            let run = ResidentRun::new(identity, placed, frame);
+            let bytes = run.bytes();
+            if !self.make_room(bytes, frame) {
+                return None;
+            }
+            self.bytes = self.bytes.saturating_add(bytes);
+            self.runs.insert(hash, run);
+        }
+        self.runs.get_mut(&hash)
+    }
+
+    /// Make room for a record of `bytes`, forgetting the least recently drawn
+    /// records first; whether it now fits.
+    ///
+    /// Sheds down to three quarters of both bounds at once, so a list
+    /// scrolling through strings it never repeats pays one sort per quarter of
+    /// the cache rather than one per new line. Runs drawn on `frame` are
+    /// spared: forgetting a run the same frame drew would only re-mint it on
+    /// the next.
+    fn make_room(&mut self, bytes: usize, frame: u64) -> bool {
+        let fits = |runs: &Self| {
+            runs.runs.len() < MAX_RESIDENT_RUNS
+                && runs.bytes.saturating_add(bytes) <= MAX_RESIDENT_RUN_BYTES
+        };
+        // A run that would take a quarter of the budget alone is not one to
+        // spend it on.
+        if bytes > MAX_RESIDENT_RUN_BYTES / 4 {
+            return false;
+        }
+        if fits(self) {
+            return true;
+        }
+
+        let mut order = std::mem::take(&mut self.order);
+        order.clear();
+        order.extend(
+            self.runs
+                .iter()
+                .filter(|(_, run)| run.frame != frame)
+                .map(|(hash, run)| (run.frame, *hash)),
+        );
+        order.sort_unstable();
+        let run_target = MAX_RESIDENT_RUNS / 4 * 3;
+        let byte_target = (MAX_RESIDENT_RUN_BYTES / 4 * 3).saturating_sub(bytes);
+        for (_, hash) in order.drain(..) {
+            if self.runs.len() <= run_target && self.bytes <= byte_target {
+                break;
+            }
+            if let Some(run) = self.runs.remove(&hash) {
+                self.bytes = self.bytes.saturating_sub(run.bytes());
+            }
+        }
+        self.order = order;
+        fits(self)
+    }
+
+    /// Mark the record `hash` names refused.
+    fn refuse(&mut self, hash: u64) {
+        if let Some(run) = self.runs.get_mut(&hash) {
+            run.refused = true;
+        }
+    }
+
+    /// Forget every record.
+    fn forget_all(&mut self) {
+        self.runs.clear();
+        self.bytes = 0;
+    }
+
+    /// Make `glifo`'s LRU ages true for every remembered slot ahead of the
+    /// eviction pass that `maintain` is about to run at LRU serial `serial`
+    /// (see this type's doc), and forget what that pass may reap.
+    fn touch(&mut self, atlas: &mut GlyphAtlas, serial: u64) {
+        // The serial `maintain` ticks to before it measures any age.
+        let horizon = serial.saturating_add(1);
+        let fresh = |used: u64| used != NEVER && horizon.saturating_sub(used) <= MAX_ENTRY_AGE;
+        let black = pack_context_color(BLACK);
+        let mut freed = 0_usize;
+        self.runs.retain(|_, run| {
+            if !fresh(run.used) {
+                freed = freed.saturating_add(run.bytes());
+                return false;
+            }
+            for (id, glyph) in run.ids.iter().zip(run.glyphs.iter_mut()) {
+                for bucket in 0..SUBPIXEL_BUCKETS {
+                    let index = usize::from(bucket);
+                    if glyph.slots[index].is_none() {
+                        continue;
+                    }
+                    // A probe stamps the entry with the serial a per-frame
+                    // probe at `serial` would have left on it.
+                    let current = if fresh(glyph.used[index]) {
+                        atlas.get(&outline_key(&run.identity, *id, bucket, black))
+                    } else {
+                        None
+                    };
+                    glyph.slots[index] = current;
+                    if current.is_none() {
+                        glyph.used[index] = NEVER;
+                    }
+                }
+            }
+            true
+        });
+        self.bytes = self.bytes.saturating_sub(freed);
+    }
+}
+
 #[cfg(test)]
 mod distinct_glyph_tests {
     use super::*;
@@ -1690,6 +2258,90 @@ mod distinct_glyph_tests {
             );
             assert_eq!(set.count_distinct(ids.iter().copied()), expected, "{ids:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod resident_run_tests {
+    use super::*;
+
+    /// The bucket the resident path resolves a glyph into is the bucket
+    /// `glifo` keys it under, for fractions across several whole pixels in
+    /// both directions — including the ones that round up to a whole pixel
+    /// and clamp into the last bucket.
+    #[test]
+    fn the_restated_bucket_is_glifos_own() {
+        let identity = ResidentIdentity {
+            font_id: 1,
+            font_index: 0,
+            size: 16.0,
+            hinted: false,
+        };
+        let black = pack_context_color(BLACK);
+        for step in -4096_i32..4096 {
+            let origin = f64::from(step) / 1024.0 + 0.000_7;
+            let fraction = origin.fract() as f32;
+            let theirs = GlyphCacheKey::new(
+                1,
+                0,
+                7,
+                16.0,
+                false,
+                fraction,
+                BLACK,
+                black,
+                FontEmbolden::default(),
+                &[],
+            );
+            let bucket = subpixel_bucket(fraction);
+            assert_eq!(bucket, theirs.subpixel_x, "fraction {fraction}");
+            assert_eq!(
+                outline_key(&identity, 7, bucket, black),
+                theirs,
+                "fraction {fraction}: the probe key is the key `glifo` builds"
+            );
+        }
+    }
+
+    /// The bound holds in records and in bytes whatever is offered, and spares
+    /// the runs drawn on the current frame.
+    #[test]
+    fn the_bound_sheds_the_least_recently_drawn_first() {
+        let mut runs = ResidentRuns::default();
+        let identity = ResidentIdentity {
+            font_id: 1,
+            font_index: 0,
+            size: 16.0,
+            hinted: false,
+        };
+        for serial in 0..(MAX_RESIDENT_RUNS as u32 * 3) {
+            let frame = u64::from(serial / 10);
+            let placed: Vec<PlacedGlyph> = (0..3)
+                .map(|digit| PlacedGlyph {
+                    id: serial.wrapping_mul(7).wrapping_add(digit),
+                    bucket: 0,
+                })
+                .collect();
+            let hash = run_hash(&identity, &placed);
+            assert!(runs.open(hash, identity, &placed, frame).is_some());
+            assert!(runs.runs.len() <= MAX_RESIDENT_RUNS);
+            assert!(runs.bytes <= MAX_RESIDENT_RUN_BYTES);
+            let current = runs.runs.values().filter(|run| run.frame == frame).count();
+            assert_eq!(
+                current as u32,
+                serial % 10 + 1,
+                "this frame's runs are all kept"
+            );
+        }
+        let total: usize = runs.runs.values().map(ResidentRun::bytes).sum();
+        assert_eq!(runs.bytes, total, "the byte count is the records' own");
+
+        // A run too large to be worth a quarter of the budget is never kept.
+        let huge: Vec<PlacedGlyph> = (0..MAX_RESIDENT_RUN_BYTES as u32 / 64)
+            .map(|id| PlacedGlyph { id, bucket: 0 })
+            .collect();
+        let hash = run_hash(&identity, &huge);
+        assert!(runs.open(hash, identity, &huge, 10_000).is_none());
     }
 }
 
