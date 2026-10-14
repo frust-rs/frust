@@ -576,7 +576,7 @@ only under a Forward `user_scroll_direction`, which the viewport sets only durin
 floating+pinned never paints below `min_extent`. Layout records shrink and `overlaps_content`; paint
 requests a frame when stale; the next `View::rebuild` calls `build` (against the previous view's, as
 `ListView` does), so `build` must be pure and the content lags geometry by one frame. A change under
-`SHRINK_REBUILD_TOLERANCE` (0.5px) skips the rebuild unless it lands on 0 or `max_extent`. An
+a 0.5 px tolerance (`SHRINK_REBUILD_TOLERANCE`, crate-internal) skips the rebuild unless it lands on 0 or `max_extent`. An
 outside sliver can hold `SliverPersistentHeaderWidget` (frust-widgets-only; not yet in the facade)
 as a geometry core, as Material's `sliver_app_bar` does.
 
