@@ -9,19 +9,59 @@
 //! content scrolls. Read [`super`]'s module docs first — the scroll-wiring
 //! contract, metric table, and shape families all live there.
 //!
-//! # Why this is a box widget with a controlled input, not a sliver
+//! # Two modes: a sliver in a viewport, a box under a controlled prop
 //!
 //! Upstream hands the whole job to Flutter's sliver protocol: `SliverAppBar`
 //! participates in a `CustomScrollView`, which drives its extent every frame
-//! from the shared scroll position. This framework has no sliver protocol and
-//! no seam by which a widget can observe the scroll surface above it — the two
-//! seams [`frust::ScrollView`] exposes are installed on the *view* at
-//! construction and are the app's to hold. So the collapse is a **controlled
-//! prop** ([`SliverAppBarView::scroll_offset`] /
-//! [`SliverAppBarView::collapse`]) and this widget is a pure function of it —
-//! the same app-side-rule shape [`crate::SearchViewMode::for_width`] takes.
-//! Every input is clamped and NaN-safe at the boundary
-//! ([`AppBarCollapse`]), so a degenerate offset can never reach a layout.
+//! from the shared scroll position. This bar does the same inside a
+//! [`frust::custom_scroll_view`] whenever it is **uncontrolled** — neither
+//! [`SliverAppBarView::scroll_offset`] nor [`SliverAppBarView::collapse`] set.
+//! Its widget then answers [`Widget::as_sliver`] and lays out as a persistent
+//! header: maximum extent the expanded band, minimum extent the collapsed band
+//! (the [`AppBarCollapse`] metrics), [`pinned`](SliverAppBarView::pinned) by
+//! default and [`floating`](SliverAppBarView::floating) on request. See
+//! *In a viewport* below.
+//!
+//! **A controlled prop wins.** Set either one and the bar is the box widget it
+//! has always been, wherever it sits: a pure function of the prop — the
+//! app-side-rule shape [`crate::SearchViewMode::for_width`] takes, fed from
+//! [`frust::ScrollView::on_scroll`] (see [`super`]'s wiring contract). Inside
+//! a viewport such a bar answers `as_sliver` with `None`, so the viewport lays
+//! it out as a box child ([`frust::sliver_box`]'s geometry: it scrolls away
+//! with the content, pinned or not) and the viewport's scroll offset never
+//! reaches it. A bar therefore never has two sources for one collapse, and an
+//! app already wiring `on_scroll` into `scroll_offset(..)` is unaffected.
+//! Outside a viewport an uncontrolled bar is that box at collapse `0.0`, fully
+//! expanded.
+//!
+//! Every input is clamped and NaN-safe at the boundary ([`AppBarCollapse`]),
+//! so a degenerate offset can never reach a layout.
+//!
+//! # In a viewport
+//!
+//! The sliver geometry — the scrolling, pinned, floating and floating-pinned
+//! behaviours, a floating bar's own scroll offset, the overlap the next sliver
+//! is told about — is not a second implementation here. The widget holds a
+//! [`frust::sliver_persistent_header`] core over an empty child, configured
+//! with the bar's two extents and its `pinned`/`floating` flags, answers the
+//! viewport with that core's geometry, and lays its own slots out at the
+//! collapse the core's shrink offset maps to through
+//! [`AppBarCollapse::fraction_for_offset`]. That band is exactly the extent
+//! the header paints in every behaviour: a pinned bar bottoms out at the
+//! collapsed band, and an unpinned (scrolling or floating) bar's band keeps
+//! shrinking with its top row bottom-anchored (*Geometry* below), which is the
+//! header pushing its content out past the leading edge.
+//!
+//! The title's type scale is composed when the view builds, so — like a
+//! persistent header's content — it follows the shrink offset one frame late:
+//! layout records the new collapse, paint requests a frame when the title was
+//! composed more than [`TITLE_REBUILD_TOLERANCE`] of headline travel away from
+//! it (or the headline has just reached either end), and the next rebuild
+//! composes it. The band, the slots and the headline's anchor follow at
+//! layout, with no lag.
+//!
+//! The bar is meant for a vertical viewport; in a horizontal one it is laid out
+//! across the viewport's cross extent as if that were its width.
 //!
 //! # Geometry
 //!
@@ -48,11 +88,15 @@
 //! `flexibleSpace` for it), so its title stays in the top row at every collapse
 //! value.
 
-use frust::Theme;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, View, ViewSeq, Widget, build_child,
-    rebuild_children, route_event, teardown_child, visit_children,
+    LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, SliverConstraints, SliverGeometry,
+    SliverWidget, View, ViewSeq, Widget, build_child, rebuild_children, route_event,
+    teardown_child, visit_children,
+};
+use frust::{
+    SizedBox, SliverPersistentHeaderDelegate, SliverPersistentHeaderView, Theme,
+    sliver_persistent_header,
 };
 use kurbo::{Point, Size};
 use peniko::Color;
@@ -78,6 +122,17 @@ enum CollapseInput {
     Offset(f64),
 }
 
+/// How far, in logical px of headline travel, the collapse a viewport laid the
+/// bar out at may move away from the one its title was composed at before the
+/// bar asks for a rebuild — the same half pixel `sliver_persistent_header`
+/// allows its content (the [module docs](self)' *In a viewport*).
+pub const TITLE_REBUILD_TOLERANCE: f64 = 0.5;
+
+/// The persistent-header core a [`SliverAppBarWidget`] holds for its sliver
+/// geometry. Named through the view's `Element` because the facade exports
+/// the header's view but not its widget type.
+type HeaderCore = <SliverPersistentHeaderView<()> as View<()>>::Element;
+
 /// A declarative M3 collapsing app bar. See the [module docs](self).
 pub struct SliverAppBarView<State: 'static> {
     title: TitleSlot<State>,
@@ -89,7 +144,10 @@ pub struct SliverAppBarView<State: 'static> {
     center_title: bool,
     corner_shift: bool,
     pinned: bool,
-    collapse: CollapseInput,
+    floating: bool,
+    /// `None` leaves the bar uncontrolled: a sliver in a viewport, expanded
+    /// elsewhere (the [module docs](self)).
+    collapse: Option<CollapseInput>,
     background: Option<Color>,
     semantic_label: Option<String>,
 }
@@ -98,8 +156,10 @@ pub struct SliverAppBarView<State: 'static> {
 /// `M3EAppBar.sliver`, with its own defaults ([`AppBarVariant::Medium`],
 /// [`AppBarShapeFamily::Round`], pinned).
 ///
-/// Feed it the scroll offset your body reports; see [`super`]'s scroll-wiring
-/// contract for the whole shape.
+/// Place it in a [`frust::custom_scroll_view`] and it collapses with the
+/// viewport's scroll offset; or feed it the offset your own body reports
+/// through [`SliverAppBarView::scroll_offset`]. See [`super`]'s scroll-wiring
+/// contract for both shapes.
 pub fn sliver_app_bar<State: 'static>(title: impl Into<String>) -> SliverAppBarView<State> {
     SliverAppBarView {
         title: TitleSlot::Text(title.into()),
@@ -111,7 +171,8 @@ pub fn sliver_app_bar<State: 'static>(title: impl Into<String>) -> SliverAppBarV
         center_title: false,
         corner_shift: true,
         pinned: true,
-        collapse: CollapseInput::Fraction(0.0),
+        floating: false,
+        collapse: None,
         background: None,
         semantic_label: None,
     }
@@ -190,17 +251,36 @@ impl<State: 'static> SliverAppBarView<State> {
     /// Whether the bar bottoms out at its collapsed band (`true`, the default
     /// and upstream's) or keeps shrinking to nothing (`false`).
     ///
-    /// Upstream's `floating`/`snap` companions are not ported — see [`super`]'s
-    /// *Not ported* list.
+    /// In a viewport an unpinned bar shrinks to its collapsed band and then
+    /// scrolls away with the content, as a scrolled-away `SliverAppBar` does.
+    /// Upstream's `snap` companion is not ported — see [`super`]'s *Not
+    /// ported* list.
     pub fn pinned(mut self, pinned: bool) -> Self {
         self.pinned = pinned;
         self
     }
 
+    /// Reveal the bar as soon as the user scrolls back toward the content's
+    /// start, wherever the content is (`false` by default; no snap) —
+    /// upstream's `floating`. Combined with [`Self::pinned`] the revealed bar
+    /// never shrinks below its collapsed band.
+    ///
+    /// Takes effect only for an uncontrolled bar inside a viewport, which
+    /// tracks the scroll direction for it (`sliver_persistent_header`'s
+    /// floating behaviour); a controlled or box-laid-out bar ignores it.
+    #[must_use]
+    pub fn floating(mut self, floating: bool) -> Self {
+        self.floating = floating;
+        self
+    }
+
     /// Set the collapse fraction directly: `0.0` fully expanded, `1.0` fully
     /// collapsed. Clamped (and NaN-mapped to `0.0`) on resolution.
+    ///
+    /// Makes the bar **controlled**: it stays a box even inside a viewport,
+    /// whose scroll offset no longer collapses it (the [module docs](self)).
     pub fn collapse(mut self, collapse: f64) -> Self {
-        self.collapse = CollapseInput::Fraction(collapse);
+        self.collapse = Some(CollapseInput::Fraction(collapse));
         self
     }
 
@@ -210,8 +290,10 @@ impl<State: 'static> SliverAppBarView<State> {
     /// Mapped through [`AppBarCollapse::fraction_for_offset`] against this
     /// bar's own final geometry, so the call order relative to
     /// [`Self::variant`]/[`Self::density`]/[`Self::pinned`] does not matter.
+    ///
+    /// Makes the bar **controlled**, exactly as [`Self::collapse`] does.
     pub fn scroll_offset(mut self, offset: f64) -> Self {
-        self.collapse = CollapseInput::Offset(offset);
+        self.collapse = Some(CollapseInput::Offset(offset));
         self
     }
 
@@ -233,12 +315,33 @@ impl<State: 'static> SliverAppBarView<State> {
         AppBarCollapse::new(self.variant, self.density, self.pinned)
     }
 
-    /// The resolved collapse fraction, whichever way the caller stated it.
+    /// The resolved collapse fraction, whichever way the caller stated it —
+    /// `0.0`, fully expanded, for an uncontrolled bar.
     fn collapse_fraction(&self) -> f64 {
         match self.collapse {
-            CollapseInput::Fraction(t) => super::clamp01(t),
-            CollapseInput::Offset(offset) => self.geometry().fraction_for_offset(offset),
+            None => 0.0,
+            Some(CollapseInput::Fraction(t)) => super::clamp01(t),
+            Some(CollapseInput::Offset(offset)) => self.geometry().fraction_for_offset(offset),
         }
+    }
+
+    /// Whether a collapse prop is set (the [module docs](self)' precedence).
+    fn controlled(&self) -> bool {
+        self.collapse.is_some()
+    }
+
+    /// The persistent-header core's view: the bar's two bands as its extents,
+    /// its `pinned`/`floating` flags, and an empty child — the bar lays its
+    /// own slots out, so the core contributes geometry only.
+    fn header_view(&self) -> SliverPersistentHeaderView<State> {
+        let geometry = self.geometry();
+        sliver_persistent_header(SliverPersistentHeaderDelegate::new(
+            geometry.collapsed_height(),
+            geometry.expanded_height(),
+            |_shrink: f64, _overlaps: bool| SizedBox::<State>(None, None),
+        ))
+        .pinned(self.pinned)
+        .floating(self.floating)
     }
 
     /// The label this bar's semantics container carries.
@@ -289,6 +392,13 @@ pub struct SliverAppBarWidget {
     geometry: AppBarCollapse,
     /// The resolved collapse fraction this widget last laid out with.
     collapse: f64,
+    /// The collapse fraction the live title was composed at (its type scale);
+    /// behind [`Self::collapse`] by up to a frame inside a viewport.
+    built_collapse: f64,
+    /// Whether a collapse prop is set — a controlled bar is never a sliver.
+    controlled: bool,
+    /// The sliver geometry this bar answers a viewport with.
+    header: HeaderCore,
     shape_family: AppBarShapeFamily,
     background: Option<Color>,
     label: Option<String>,
@@ -299,107 +409,25 @@ impl SliverAppBarWidget {
     fn title_index(&self) -> usize {
         usize::from(self.has_leading)
     }
-}
 
-impl<State: 'static> View<State> for SliverAppBarView<State> {
-    type Element = SliverAppBarWidget;
-
-    fn build(&self, ctx: &mut BuildCtx<'_>) -> SliverAppBarWidget {
-        let geometry = self.geometry();
-        let collapse = self.collapse_fraction();
-        let (size, line_height) = title_type_scale(geometry.headline(collapse));
-        let mut storage = None;
-        let title = title_ref(&self.title, &mut storage, size, line_height);
-        let slots = slot_views(self, title)
-            .into_iter()
-            .map(|view| build_child(view, ctx))
-            .collect();
-        SliverAppBarWidget {
-            slots,
-            has_leading: self.leading.is_some(),
-            center_title: self.center_title,
-            corner_shift: self.corner_shift,
-            geometry,
-            collapse,
-            shape_family: self.shape_family,
-            background: self.background,
-            label: self.label().map(str::to_string),
+    /// Whether the live title was composed too far from the collapse the last
+    /// layout found (the [module docs](self)' *In a viewport*): by at least
+    /// [`TITLE_REBUILD_TOLERANCE`] of headline travel, or onto either end of
+    /// it. Compared on the headline, which an unpinned bar saturates before
+    /// its band stops shrinking.
+    fn title_is_stale(&self) -> bool {
+        let built = self.geometry.headline(self.built_collapse);
+        let wanted = self.geometry.headline(self.collapse);
+        if built == wanted {
+            return false;
         }
+        let span = self.geometry.expanded_height() - self.geometry.collapsed_height();
+        (built - wanted).abs() * span >= TITLE_REBUILD_TOLERANCE || wanted <= 0.0 || wanted >= 1.0
     }
 
-    fn rebuild(
-        &self,
-        prev: &Self,
-        element: &mut SliverAppBarWidget,
-        ctx: &mut BuildCtx<'_>,
-    ) -> ChangeFlags {
-        let prev_geometry = prev.geometry();
-        let prev_collapse = prev.collapse_fraction();
-        let (prev_size, prev_line) = title_type_scale(prev_geometry.headline(prev_collapse));
-        let geometry = self.geometry();
-        let collapse = self.collapse_fraction();
-        let (size, line_height) = title_type_scale(geometry.headline(collapse));
-
-        let mut prev_storage = None;
-        let mut next_storage = None;
-        let prev_title = title_ref(&prev.title, &mut prev_storage, prev_size, prev_line);
-        let next_title = title_ref(&self.title, &mut next_storage, size, line_height);
-        let mut flags = rebuild_children(
-            &slot_views(prev, prev_title),
-            &slot_views(self, next_title),
-            &mut element.slots,
-            ctx,
-            |view: &&AnyView<State>| *view,
-            |_| None,
-        );
-
-        let has_leading = self.leading.is_some();
-        if element.has_leading != has_leading {
-            element.has_leading = has_leading;
-            flags |= ChangeFlags::LAYOUT;
-        }
-        if element.center_title != self.center_title {
-            element.center_title = self.center_title;
-            flags |= ChangeFlags::LAYOUT;
-        }
-        if element.corner_shift != self.corner_shift {
-            element.corner_shift = self.corner_shift;
-            flags |= ChangeFlags::LAYOUT;
-        }
-        // The collapse drives the band, the headline anchor, and the clip, so a
-        // changed value is a relayout even when the title view itself
-        // reconciled clean (an unstyled `title_view`).
-        if element.geometry != geometry || element.collapse != collapse {
-            element.geometry = geometry;
-            element.collapse = collapse;
-            flags |= ChangeFlags::LAYOUT;
-        }
-        if element.shape_family != self.shape_family || element.background != self.background {
-            element.shape_family = self.shape_family;
-            element.background = self.background;
-            flags |= ChangeFlags::PAINT;
-        }
-        element.label = self.label().map(str::to_string);
-        flags
-    }
-
-    fn teardown(&self, element: &mut SliverAppBarWidget, ctx: &mut BuildCtx<'_>) {
-        let geometry = self.geometry();
-        let (size, line_height) = title_type_scale(geometry.headline(self.collapse_fraction()));
-        let mut storage = None;
-        let title = title_ref(&self.title, &mut storage, size, line_height);
-        for (view, pod) in slot_views(self, title)
-            .into_iter()
-            .zip(element.slots.iter_mut())
-        {
-            teardown_child(view, pod, ctx);
-        }
-    }
-}
-
-impl Widget for SliverAppBarWidget {
-    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
-        let width = finite_or_zero(bc.max().width);
+    /// Lay the slots out for a bar `width` wide at [`Self::collapse`] and
+    /// return the band's height.
+    fn layout_slots(&mut self, ctx: &mut LayoutCtx, width: f64) -> f64 {
         let height = self.geometry.height(self.collapse);
         let headline = self.geometry.headline(self.collapse);
         let row = self.geometry.collapsed_height();
@@ -473,10 +501,154 @@ impl Widget for SliverAppBarWidget {
             lerp(expanded_x, collapsed_x, headline),
             lerp(expanded_y, collapsed_y, headline),
         ));
+        height
+    }
+}
 
+impl<State: 'static> View<State> for SliverAppBarView<State> {
+    type Element = SliverAppBarWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> SliverAppBarWidget {
+        let geometry = self.geometry();
+        let collapse = self.collapse_fraction();
+        let (size, line_height) = title_type_scale(geometry.headline(collapse));
+        let mut storage = None;
+        let title = title_ref(&self.title, &mut storage, size, line_height);
+        let slots = slot_views(self, title)
+            .into_iter()
+            .map(|view| build_child(view, ctx))
+            .collect();
+        let header = View::<State>::build(&self.header_view(), ctx);
+        SliverAppBarWidget {
+            slots,
+            has_leading: self.leading.is_some(),
+            center_title: self.center_title,
+            corner_shift: self.corner_shift,
+            geometry,
+            collapse,
+            built_collapse: collapse,
+            controlled: self.controlled(),
+            header,
+            shape_family: self.shape_family,
+            background: self.background,
+            label: self.label().map(str::to_string),
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut SliverAppBarWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        // The previous title is the one the live pod holds: composed at
+        // `built_collapse`. The next one composes at the prop when controlled,
+        // and otherwise at the collapse the last layout found once the live
+        // title has fallen far enough behind it.
+        let prev_geometry = prev.geometry();
+        let (prev_size, prev_line) =
+            title_type_scale(prev_geometry.headline(element.built_collapse));
+        let geometry = self.geometry();
+        let controlled = self.controlled();
+        let built = if controlled {
+            self.collapse_fraction()
+        } else if element.title_is_stale() {
+            element.collapse
+        } else {
+            element.built_collapse
+        };
+        let (size, line_height) = title_type_scale(geometry.headline(built));
+
+        let mut prev_storage = None;
+        let mut next_storage = None;
+        let prev_title = title_ref(&prev.title, &mut prev_storage, prev_size, prev_line);
+        let next_title = title_ref(&self.title, &mut next_storage, size, line_height);
+        let mut flags = rebuild_children(
+            &slot_views(prev, prev_title),
+            &slot_views(self, next_title),
+            &mut element.slots,
+            ctx,
+            |view: &&AnyView<State>| *view,
+            |_| None,
+        );
+
+        let has_leading = self.leading.is_some();
+        if element.has_leading != has_leading {
+            element.has_leading = has_leading;
+            flags |= ChangeFlags::LAYOUT;
+        }
+        if element.center_title != self.center_title {
+            element.center_title = self.center_title;
+            flags |= ChangeFlags::LAYOUT;
+        }
+        if element.corner_shift != self.corner_shift {
+            element.corner_shift = self.corner_shift;
+            flags |= ChangeFlags::LAYOUT;
+        }
+        element.built_collapse = built;
+        // A controlled collapse drives the band, the headline anchor, and the
+        // clip, so a changed value is a relayout even when the title view
+        // itself reconciled clean (an unstyled `title_view`). An uncontrolled
+        // bar's collapse belongs to its layout.
+        let collapse = if controlled {
+            self.collapse_fraction()
+        } else {
+            element.collapse
+        };
+        if element.geometry != geometry
+            || element.collapse != collapse
+            || element.controlled != controlled
+        {
+            element.geometry = geometry;
+            element.collapse = collapse;
+            element.controlled = controlled;
+            flags |= ChangeFlags::LAYOUT;
+        }
+        flags |= View::<State>::rebuild(
+            &self.header_view(),
+            &prev.header_view(),
+            &mut element.header,
+            ctx,
+        );
+        if element.shape_family != self.shape_family || element.background != self.background {
+            element.shape_family = self.shape_family;
+            element.background = self.background;
+            flags |= ChangeFlags::PAINT;
+        }
+        element.label = self.label().map(str::to_string);
+        flags
+    }
+
+    fn teardown(&self, element: &mut SliverAppBarWidget, ctx: &mut BuildCtx<'_>) {
+        let geometry = self.geometry();
+        let (size, line_height) = title_type_scale(geometry.headline(element.built_collapse));
+        let mut storage = None;
+        let title = title_ref(&self.title, &mut storage, size, line_height);
+        for (view, pod) in slot_views(self, title)
+            .into_iter()
+            .zip(element.slots.iter_mut())
+        {
+            teardown_child(view, pod, ctx);
+        }
+        View::<State>::teardown(&self.header_view(), &mut element.header, ctx);
+    }
+}
+
+impl Widget for SliverAppBarWidget {
+    /// The box layout: a controlled bar at its prop, an uncontrolled one fully
+    /// expanded (the [module docs](self)).
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        if !self.controlled {
+            self.collapse = 0.0;
+        }
+        let width = finite_or_zero(bc.max().width);
+        let height = self.layout_slots(ctx, width);
         bc.constrain(Size::new(width, height))
     }
 
+    /// Paints the band and the slots, and inside a viewport requests the frame
+    /// whose rebuild composes the title at the collapse this frame's layout
+    /// found.
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
         let theme = Theme::from_paint_ctx(ctx);
         let origin = ctx.origin();
@@ -496,6 +668,9 @@ impl Widget for SliverAppBarWidget {
         if clipped {
             scene.pop_clip();
         }
+        if !self.controlled && self.title_is_stale() {
+            ctx.request_frame();
+        }
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
@@ -506,7 +681,27 @@ impl Widget for SliverAppBarWidget {
         push_bar_semantics(ctx, Role::TitleBar, self.label.as_deref(), &self.slots);
     }
 
+    /// A sliver exactly while uncontrolled (the [module docs](self)).
+    fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
+        if self.controlled { None } else { Some(self) }
+    }
+
+    // The header core's empty child is an implementation detail, not part of
+    // the inspectable tree.
     visit_children!(slots);
+}
+
+impl SliverWidget for SliverAppBarWidget {
+    /// The header core's geometry, with the slots laid out at the collapse its
+    /// shrink offset maps to (the [module docs](self)' *In a viewport*).
+    fn layout_sliver(&mut self, ctx: &mut LayoutCtx, sc: &SliverConstraints) -> SliverGeometry {
+        let geometry = self.header.layout_sliver(ctx, sc);
+        self.collapse = self
+            .geometry
+            .fraction_for_offset(self.header.shrink_offset());
+        self.layout_slots(ctx, finite_or_zero(sc.cross_axis_extent));
+        geometry
+    }
 }
 
 #[cfg(test)]
@@ -514,6 +709,7 @@ mod tests {
     use super::*;
     use frust::authoring::text::TextContext;
     use frust::authoring::{CornerInset, CornerInsets, WindowInsets};
+    use frust::authoring::{ScrollAxis, ScrollDirection};
     use frust_widgets::test_support::leaf_any;
     use std::any::Any;
 
@@ -905,5 +1101,290 @@ mod tests {
             .find(|(_, n)| n.role() == Role::TitleBar)
             .expect("a TitleBar node is contributed");
         assert_eq!(node.label(), Some("Inbox"));
+    }
+
+    // -----------------------------------------------------------------------
+    // In a viewport.
+    // -----------------------------------------------------------------------
+
+    /// The large bar's expanded band.
+    const LARGE: f64 = 152.0;
+
+    /// Vertical sliver constraints for a bar at the top of a 400x600 viewport
+    /// scrolled to `scroll_offset`, moving in `direction`.
+    fn sliver_constraints(scroll_offset: f64, direction: ScrollDirection) -> SliverConstraints {
+        SliverConstraints {
+            axis: ScrollAxis::Vertical,
+            scroll_offset,
+            preceding_scroll_extent: 0.0,
+            overlap: 0.0,
+            remaining_paint_extent: 600.0,
+            cross_axis_extent: 400.0,
+            viewport_main_axis_extent: 600.0,
+            cache_origin: -scroll_offset.min(250.0),
+            remaining_cache_extent: 850.0 + scroll_offset.min(250.0),
+            user_scroll_direction: direction,
+        }
+    }
+
+    /// A sliver layout pass at `scroll_offset` with no user direction, its
+    /// geometry checked against the protocol.
+    fn layout_at(w: &mut SliverAppBarWidget, scroll_offset: f64) -> SliverGeometry {
+        layout_moving(w, scroll_offset, ScrollDirection::Idle)
+    }
+
+    fn layout_moving(
+        w: &mut SliverAppBarWidget,
+        scroll_offset: f64,
+        direction: ScrollDirection,
+    ) -> SliverGeometry {
+        let sc = sliver_constraints(scroll_offset, direction);
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        let geometry = w.layout_sliver(&mut lctx, &sc);
+        geometry.debug_assert_valid(&sc);
+        geometry
+    }
+
+    /// Whether painting `w` at `paint_extent` asks for another frame.
+    fn paint_requests_frame(w: &mut SliverAppBarWidget, paint_extent: f64) -> bool {
+        let mut pctx = PaintCtx::new(Point::ZERO, Size::new(400.0, paint_extent));
+        w.paint(&mut pctx, &mut ClipRecorder::default());
+        pctx.needs_frame()
+    }
+
+    #[test]
+    fn only_an_uncontrolled_bar_is_a_sliver() {
+        let mut uncontrolled = build(&sliver_app_bar("Inbox"));
+        assert!(uncontrolled.as_sliver().is_some());
+        let mut by_offset = build(&sliver_app_bar("Inbox").scroll_offset(0.0));
+        assert!(by_offset.as_sliver().is_none());
+        let mut by_fraction = build(&sliver_app_bar("Inbox").collapse(0.5));
+        assert!(by_fraction.as_sliver().is_none());
+    }
+
+    #[test]
+    fn in_a_viewport_the_bar_collapses_as_the_offset_grows() {
+        let view: SliverAppBarView<()> = sliver_app_bar("Inbox")
+            .variant(AppBarVariant::Large)
+            .leading(leaf_any(40.0, 40.0));
+        let mut w = build(&view);
+        let mut last_band = f64::INFINITY;
+        for (offset, band) in [(0.0, LARGE), (22.0, 130.0), (44.0, 108.0), (88.0, ROW)] {
+            let g = layout_at(&mut w, offset);
+            assert_eq!(g.scroll_extent, LARGE, "scroll extent at {offset}");
+            assert_eq!(g.paint_extent, band, "painted band at {offset}");
+            assert_eq!(
+                w.geometry.height(w.collapse),
+                band,
+                "laid-out band at {offset}"
+            );
+            assert!(band < last_band, "the band shrinks with the offset");
+            last_band = band;
+            // The leading slot stays centred in the top row throughout.
+            assert_eq!(w.slots[0].origin().y, (ROW - 40.0) / 2.0);
+        }
+        assert_eq!(w.collapse, 1.0);
+        // Fully collapsed, the headline sits in the top row beside the
+        // leading slot.
+        let title = &w.slots[w.title_index()];
+        assert_eq!(title.origin().y, (ROW - title.size().height) / 2.0);
+    }
+
+    #[test]
+    fn a_pinned_bar_in_a_viewport_stays_at_its_collapsed_band() {
+        let view: SliverAppBarView<()> = sliver_app_bar("Inbox").variant(AppBarVariant::Large);
+        let mut w = build(&view);
+        for offset in [88.0, 120.0, 151.0, 300.0, 5_000.0] {
+            let g = layout_at(&mut w, offset);
+            assert_eq!(g.paint_extent, ROW, "painted band at {offset}");
+            assert_eq!(g.paint_origin, 0.0, "stays at the leading edge at {offset}");
+            assert_eq!(g.layout_extent, (LARGE - offset).max(0.0), "at {offset}");
+            assert_eq!(w.collapse, 1.0, "collapse at {offset}");
+        }
+    }
+
+    #[test]
+    fn an_unpinned_bar_in_a_viewport_shrinks_then_scrolls_away() {
+        let view: SliverAppBarView<()> = sliver_app_bar("Inbox")
+            .variant(AppBarVariant::Large)
+            .pinned(false)
+            .leading(leaf_any(40.0, 40.0));
+        let mut w = build(&view);
+        let g = layout_at(&mut w, 44.0);
+        assert_eq!(g.paint_extent, 108.0);
+        assert_eq!(w.slots[0].origin().y, (ROW - 40.0) / 2.0);
+        // Past the collapsed band the top row leaves with the content.
+        let g = layout_at(&mut w, 120.0);
+        assert_eq!(g.paint_extent, 32.0);
+        assert_eq!(w.geometry.height(w.collapse), 32.0);
+        assert_eq!(w.slots[0].origin().y, 32.0 - ROW + (ROW - 40.0) / 2.0);
+        let g = layout_at(&mut w, 400.0);
+        assert!(!g.visible);
+        assert_eq!(g.paint_extent, 0.0);
+    }
+
+    #[test]
+    fn a_floating_bar_reveals_on_a_forward_user_scroll() {
+        let view: SliverAppBarView<()> = sliver_app_bar("Inbox")
+            .variant(AppBarVariant::Large)
+            .pinned(false)
+            .floating(true);
+        let mut w = build(&view);
+        assert_eq!(layout_at(&mut w, 1_000.0).paint_extent, 0.0);
+        // Back without a user direction (a controller jump): still hidden.
+        assert_eq!(layout_at(&mut w, 960.0).paint_extent, 0.0);
+        // Back under a forward user scroll: revealed by as much.
+        let g = layout_moving(&mut w, 920.0, ScrollDirection::Forward);
+        assert_eq!(g.paint_extent, 40.0);
+        assert_eq!(w.geometry.height(w.collapse), 40.0);
+
+        // Floating and pinned: never below the collapsed band.
+        let pinned: SliverAppBarView<()> = sliver_app_bar("Inbox")
+            .variant(AppBarVariant::Large)
+            .floating(true);
+        let mut w = build(&pinned);
+        assert_eq!(layout_at(&mut w, 1_000.0).paint_extent, ROW);
+        let g = layout_moving(&mut w, 900.0, ScrollDirection::Forward);
+        assert_eq!(g.paint_extent, 100.0);
+        assert_eq!(w.geometry.height(w.collapse), 100.0);
+    }
+
+    #[test]
+    fn the_title_follows_the_viewport_collapse_one_frame_late() {
+        let view: SliverAppBarView<()> = sliver_app_bar("Inbox").variant(AppBarVariant::Large);
+        let mut counter = 0u64;
+        let mut w = View::<()>::build(&view, &mut ctx(&mut counter));
+        layout_at(&mut w, 0.0);
+        assert!(!paint_requests_frame(&mut w, LARGE));
+
+        // Layout moves the band at once; the title still holds the expanded
+        // type scale, so paint asks for the frame that recomposes it.
+        layout_at(&mut w, 88.0);
+        assert_eq!((w.collapse, w.built_collapse), (1.0, 0.0));
+        assert!(paint_requests_frame(&mut w, ROW));
+        let flags = View::<()>::rebuild(&view, &view, &mut w, &mut ctx(&mut counter));
+        assert!(flags.needs_layout(), "the recomposed title relays out");
+        assert_eq!(w.built_collapse, 1.0);
+        layout_at(&mut w, 88.0);
+        assert!(!paint_requests_frame(&mut w, ROW));
+
+        // A move below the tolerance keeps the composed title.
+        layout_at(&mut w, 87.8);
+        assert!(!w.title_is_stale());
+        View::<()>::rebuild(&view, &view, &mut w, &mut ctx(&mut counter));
+        assert_eq!(w.built_collapse, 1.0);
+        // Back onto the expanded end always recomposes.
+        layout_at(&mut w, 0.0);
+        assert!(paint_requests_frame(&mut w, LARGE));
+        View::<()>::rebuild(&view, &view, &mut w, &mut ctx(&mut counter));
+        assert_eq!(w.built_collapse, 0.0);
+    }
+
+    #[test]
+    fn a_controlled_bar_never_requests_a_recomposing_frame() {
+        let view: SliverAppBarView<()> = sliver_app_bar("Inbox")
+            .variant(AppBarVariant::Large)
+            .scroll_offset(44.0);
+        let mut w = build(&view);
+        let size = layout(&mut w, 400.0);
+        assert!(!paint_requests_frame(&mut w, size.height));
+    }
+
+    /// The view function a [`Viewport`] rebuilds each frame.
+    type ViewportLogic = Box<dyn FnMut(&mut ()) -> frust::CustomScrollView<()>>;
+
+    /// A 400x600 `custom_scroll_view` holding `bar` above a 100-row list,
+    /// driven by a `ScrollController`, with the layout audit on.
+    struct Viewport {
+        root: frust_core::RenderRoot<(), frust::CustomScrollView<()>>,
+        logic: ViewportLogic,
+        controller: frust::ScrollController,
+        tcx: TextContext,
+        ms: u64,
+    }
+
+    impl Viewport {
+        fn new(bar: fn() -> SliverAppBarView<()>) -> Self {
+            let controller = frust::ScrollController::new();
+            let attached = controller.clone();
+            let mut root = frust_core::RenderRoot::new();
+            root.set_layout_audit(true);
+            let mut viewport = Self {
+                root,
+                logic: Box::new(move |_: &mut ()| {
+                    frust::custom_scroll_view((
+                        bar(),
+                        frust::sliver_fixed_extent_list(100, 50.0, |_| {
+                            frust_widgets::test_support::leaf(10.0, 50.0)
+                        }),
+                    ))
+                    .controller(attached.clone())
+                }),
+                controller,
+                tcx: TextContext::new(),
+                ms: 0,
+            };
+            viewport.frames(2);
+            viewport
+        }
+
+        fn frames(&mut self, count: usize) {
+            for _ in 0..count {
+                self.root.rebuild(&mut self.logic, &mut ());
+                self.root
+                    .layout_with_text(Size::new(400.0, 600.0), &mut self.tcx as &mut dyn Any);
+                self.ms += 16;
+                self.root.paint(
+                    &mut frust::authoring::DiscardScene,
+                    frust_core::FrameTime::from_nanos(self.ms * 1_000_000),
+                );
+            }
+        }
+
+        fn jump(&mut self, offset: f64) {
+            self.controller.jump_to(offset);
+            self.frames(2);
+        }
+
+        /// The bar's window bounds.
+        fn bar(&self) -> kurbo::Rect {
+            self.root
+                .inspect()
+                .iter()
+                .find(|node| node.type_name.contains("SliverAppBarWidget"))
+                .expect("the bar is laid out")
+                .bounds
+        }
+    }
+
+    #[test]
+    fn in_a_custom_scroll_view_an_uncontrolled_bar_follows_the_offset() {
+        let mut viewport = Viewport::new(|| sliver_app_bar("Inbox").variant(AppBarVariant::Large));
+        assert_eq!(viewport.bar().height(), LARGE);
+        viewport.jump(44.0);
+        assert_eq!(viewport.bar().y0, 0.0);
+        assert_eq!(viewport.bar().height(), 108.0);
+        viewport.jump(1_000.0);
+        assert_eq!(viewport.bar().y0, 0.0, "pinned at the leading edge");
+        assert_eq!(viewport.bar().height(), ROW, "pinned at the collapsed band");
+        viewport.jump(0.0);
+        assert_eq!(viewport.bar().height(), LARGE);
+        assert_eq!(viewport.root.layout_audit_mismatches(), 0);
+    }
+
+    #[test]
+    fn in_a_custom_scroll_view_a_controlled_prop_wins_over_the_offset() {
+        // The prop pins the bar fully expanded: the viewport lays it out as a
+        // box child that scrolls away with the content, never collapsing it.
+        let mut viewport = Viewport::new(|| {
+            sliver_app_bar("Inbox")
+                .variant(AppBarVariant::Large)
+                .scroll_offset(0.0)
+        });
+        viewport.jump(44.0);
+        assert_eq!(viewport.bar().height(), LARGE);
+        assert_eq!(viewport.bar().y0, -44.0);
+        assert_eq!(viewport.root.layout_audit_mismatches(), 0);
     }
 }
