@@ -607,7 +607,7 @@ enum Group {
     Clip(Option<RoundedRectRadii>),
     /// An opacity group, carrying the alpha to re-push with.
     Layer(f32),
-    /// The alpha layer `PushSnapshot`'s inline emulation pushes when its
+    /// The alpha layer `PushRetained`'s inline emulation pushes when its
     /// `alpha < 1.0`, backend-identical to [`Group::Layer`] (same
     /// `push_layer`/`pop_layer` calls) but tagged separately so it is VISIBLE
     /// to `PopClip`/`PopLayer`'s guard: a `SceneBuilder` can record either of
@@ -615,7 +615,7 @@ enum Group {
     /// policy), and since every group lives on one shared stack, such a pop
     /// consumes whatever is innermost — which can be this entry rather than
     /// its own kind. When that happens, `snapshot_layer_pushed` must be
-    /// cleared so the matching `PopSnapshot` does not pop the same
+    /// cleared so the matching `PopRetained` does not pop the same
     /// already-consumed backend layer a second time (the layer-stack
     /// underflow this variant exists to prevent — `vello_cpu` panics on it,
     /// unlike vello's GPU resolver, which tolerates the imbalance).
@@ -631,7 +631,7 @@ enum Group {
 /// from its root: there is no segment/prefix split (that is the GPU path's
 /// snapshot-compositor concern) and no shader-override map or hole set, so
 /// every [`Command::ShaderQuad`] takes its miss path and every
-/// [`Command::PushSnapshot`] its inline-emulation path.
+/// [`Command::PushRetained`] its inline-emulation path.
 fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>) -> usize {
     // Active clip/opacity groups, innermost last. A `ClearRect` must reach the
     // scene ROOT to erase what was painted outside the group it sits in (a
@@ -640,13 +640,13 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
     // bounded by the intersection of their clip bounds, then re-pushes them.
     let mut groups: Vec<(Group, Affine, Rect)> = Vec::new();
 
-    // `PushSnapshot`'s inline emulation, matching `frust-engine`'s own
-    // `SnapshotStack` (`compile/layers.rs`): only the
+    // `PushRetained`'s inline emulation, matching `frust-engine`'s own
+    // `RetainedStack` (`compile/layers.rs`): only the
     // OUTERMOST bracket is honoured, its `scale` becomes a correction affine
     // conjugated by the bracket's own transform (`M * S * M.inverse()`), and
     // its `alpha` an ordinary opacity layer on the same group stack. An
-    // unbalanced `PopSnapshot` is ignored, the policy `PopLayer` follows.
-    let mut snapshot_depth: usize = 0;
+    // unbalanced `PopRetained` is ignored, the policy `PopLayer` follows.
+    let mut retained_depth: usize = 0;
     let mut snapshot_correction = Affine::IDENTITY;
     let mut snapshot_layer_pushed = false;
     let mut routed = 0_usize;
@@ -713,7 +713,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 // it is the snapshot's own emulated layer, `pop_clip`'s
                 // backend call is still correct (it and `pop_layer` both
                 // reduce to the same `ctx.pop_layer()`), but the bookkeeping
-                // must say so or the matching `PopSnapshot` pops the same
+                // must say so or the matching `PopRetained` pops the same
                 // now-empty backend layer again (see `Group::SnapshotLayer`).
                 if let Some((kind, ..)) = groups.pop() {
                     painter.pop_clip();
@@ -847,7 +847,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                     dest,
                 );
             }
-            Command::PushSnapshot {
+            Command::PushRetained {
                 key: _,
                 rect,
                 alpha,
@@ -859,7 +859,7 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                 // painted exactly as if the recorder had emitted
                 // `push_transform(scale_about(rect.center(), scale))` then
                 // `push_layer(rect, alpha)`.
-                if snapshot_depth == 0 {
+                if retained_depth == 0 {
                     if *scale != 1.0 {
                         let m = *transform;
                         let s = Affine::scale_about(*scale, rect.center());
@@ -876,12 +876,21 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                         snapshot_layer_pushed = true;
                     }
                 }
-                snapshot_depth += 1;
+                retained_depth += 1;
             }
-            Command::PopSnapshot => {
-                if snapshot_depth > 0 {
-                    snapshot_depth -= 1;
-                    if snapshot_depth == 0 {
+            // The oracle keeps no retained pages and is handed no ledger, so a
+            // `DrawRetained` can only come from a recorder that did not honour
+            // that contract: a renderer error, loud in tests.
+            Command::DrawRetained { key, .. } => {
+                panic!(
+                    "DrawRetained {{ key: {key} }} reached the CPU oracle, which retains \
+                     nothing: a retained draw is only valid for a resident key"
+                );
+            }
+            Command::PopRetained => {
+                if retained_depth > 0 {
+                    retained_depth -= 1;
+                    if retained_depth == 0 {
                         // `snapshot_layer_pushed` is only true here when the
                         // `Group::SnapshotLayer` this bracket pushed is still
                         // on the stack: `PopClip`/`PopLayer` clear the flag
@@ -889,8 +898,8 @@ fn encode_commands(commands: &[Command], root: Affine, painter: &mut Painter<'_>
                         // `Group::SnapshotLayer`'s docs), so this pop can
                         // never underflow the backend's layer stack a second
                         // time — the review counterexample this guards
-                        // against (`push_snapshot` alpha < 1.0, an unbalanced
-                        // `PopClip`/`PopLayer`, then `pop_snapshot`).
+                        // against (`push_retained` alpha < 1.0, an unbalanced
+                        // `PopClip`/`PopLayer`, then `pop_retained`).
                         if snapshot_layer_pushed {
                             groups.pop();
                             painter.pop_layer();
@@ -1082,13 +1091,17 @@ mod tests {
             Command::ClearRect { .. } => "ClearRect",
             Command::Path { .. } => "Path",
             Command::ShaderQuad { .. } => "ShaderQuad",
-            Command::PushSnapshot { .. } => "PushSnapshot",
-            Command::PopSnapshot => "PopSnapshot",
+            Command::PushRetained { .. } => "PushRetained",
+            Command::PopRetained => "PopRetained",
+            Command::DrawRetained { .. } => "DrawRetained",
             Command::SceneTexture { .. } => "SceneTexture",
         }
     }
 
-    /// The complete variant list, in `Command`'s own declaration order.
+    /// The complete variant list, in `Command`'s own declaration order, minus
+    /// `DrawRetained`: the oracle refuses it (see
+    /// `a_draw_retained_is_a_renderer_error_in_the_oracle`), so the coverage
+    /// scene, which renders, cannot hold one.
     const ALL_VARIANTS: [&str; 17] = [
         "FillRect",
         "RoundedRect",
@@ -1104,8 +1117,8 @@ mod tests {
         "ClearRect",
         "Path",
         "ShaderQuad",
-        "PushSnapshot",
-        "PopSnapshot",
+        "PushRetained",
+        "PopRetained",
         "SceneTexture",
     ];
 
@@ -1171,7 +1184,7 @@ mod tests {
                 CornerRadii::new(6.0, 0.0, 3.0, 1.0),
             );
             builder.push_layer(Rect::new(2.0, 2.0, 16.0, 16.0), 0.5);
-            builder.push_snapshot(7, Rect::new(3.0, 3.0, 15.0, 15.0), 0.8, 1.25);
+            builder.push_retained(7, Rect::new(3.0, 3.0, 15.0, 15.0), 0.8, 1.25);
             builder.fill_path(triangle(), Brush::Solid(GREEN));
             builder.stroke_path_dashed(
                 triangle(),
@@ -1181,12 +1194,20 @@ mod tests {
             );
             builder.clear_rect(Rect::new(6.0, 6.0, 10.0, 10.0));
             builder.scene_texture(1, Rect::new(2.0, 2.0, 12.0, 12.0));
-            builder.pop_snapshot();
+            builder.pop_retained();
             builder.pop_layer();
             builder.pop_clip();
             builder.pop_clip();
         }
         scene
+    }
+
+    #[test]
+    #[should_panic(expected = "DrawRetained")]
+    fn a_draw_retained_is_a_renderer_error_in_the_oracle() {
+        let mut scene = Scene::new();
+        SceneBuilder::new(&mut scene).draw_retained(3, Rect::new(0.0, 0.0, 8.0, 8.0), 1.0, 1.0);
+        let _ = CpuOracle::new().render(&scene, &spec(20, Color::WHITE));
     }
 
     #[test]
@@ -1379,20 +1400,20 @@ mod tests {
 
     #[test]
     fn an_unbalanced_pop_clip_inside_a_snapshot_layer_does_not_panic() {
-        // The review counterexample: an alpha < 1.0 `PushSnapshot` bracket
+        // The review counterexample: an alpha < 1.0 `PushRetained` bracket
         // emulates its alpha as a `groups` entry and pushes ONE backend
         // layer; an unbalanced `PopClip` with no matching push then consumes
         // that same entry (`groups.pop()` does not distinguish which kind of
         // group is innermost) and pops the one backend layer that exists.
-        // The matching `PopSnapshot` must not pop a SECOND time — before the
+        // The matching `PopRetained` must not pop a SECOND time — before the
         // fix, it did unconditionally, underflowing `vello_cpu`'s layer
         // stack and panicking.
         let mut scene = Scene::new();
         {
             let mut builder = SceneBuilder::new(&mut scene);
-            builder.push_snapshot(1, Rect::new(0.0, 0.0, 8.0, 8.0), 0.5, 1.0);
+            builder.push_retained(1, Rect::new(0.0, 0.0, 8.0, 8.0), 0.5, 1.0);
             builder.pop_clip();
-            builder.pop_snapshot();
+            builder.pop_retained();
             builder.fill_rect(Rect::new(0.0, 0.0, 4.0, 4.0), Brush::Solid(RED));
         }
         let mut oracle = CpuOracle::new();
@@ -1413,9 +1434,9 @@ mod tests {
         let mut scene = Scene::new();
         {
             let mut builder = SceneBuilder::new(&mut scene);
-            builder.push_snapshot(1, Rect::new(0.0, 0.0, 8.0, 8.0), 0.5, 1.0);
+            builder.push_retained(1, Rect::new(0.0, 0.0, 8.0, 8.0), 0.5, 1.0);
             builder.pop_layer();
-            builder.pop_snapshot();
+            builder.pop_retained();
             builder.fill_rect(Rect::new(0.0, 0.0, 4.0, 4.0), Brush::Solid(RED));
         }
         let mut oracle = CpuOracle::new();

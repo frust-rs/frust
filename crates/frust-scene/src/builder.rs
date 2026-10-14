@@ -269,16 +269,16 @@ impl<'a> SceneBuilder<'a> {
         });
     }
 
-    /// Pushes a snapshot bracket, recording the current transform (see
-    /// [`Command::PushSnapshot`]) and incrementing the scene's snapshot
-    /// depth so the matching [`SceneBuilder::pop_snapshot`] knows a bracket
+    /// Pushes a retained bracket, recording the current transform (see
+    /// [`Command::PushRetained`]) and incrementing the scene's retained
+    /// depth so the matching [`SceneBuilder::pop_retained`] knows a bracket
     /// is open. `key` identifies the body's cache entry across frames;
     /// `rect`/`alpha`/`scale` are the presentation parameters a renderer may
     /// apply on top of the body as a whole.
-    pub fn push_snapshot(&mut self, key: u64, rect: Rect, alpha: f32, scale: f64) {
+    pub fn push_retained(&mut self, key: u64, rect: Rect, alpha: f32, scale: f64) {
         let transform = self.current_transform();
-        self.scene.snapshot_depth += 1;
-        self.scene.push(Command::PushSnapshot {
+        self.scene.retained_depth += 1;
+        self.scene.push(Command::PushRetained {
             key,
             rect,
             alpha,
@@ -287,14 +287,28 @@ impl<'a> SceneBuilder<'a> {
         });
     }
 
-    /// Pops the most recently pushed snapshot bracket. A no-op — matching
+    /// Pops the most recently pushed retained bracket. A no-op — matching
     /// [`Command::PopClip`]/[`Command::PopLayer`]'s unbalanced-pop policy —
     /// when no bracket is open.
-    pub fn pop_snapshot(&mut self) {
-        if self.scene.snapshot_depth > 0 {
-            self.scene.snapshot_depth -= 1;
-            self.scene.push(Command::PopSnapshot);
+    pub fn pop_retained(&mut self) {
+        if self.scene.retained_depth > 0 {
+            self.scene.retained_depth -= 1;
+            self.scene.push(Command::PopRetained);
         }
+    }
+
+    /// Records a [`Command::DrawRetained`] under the current transform: draw
+    /// the body retained under `key` from its cached page. Only valid when
+    /// the resident-key ledger said `key` is resident.
+    pub fn draw_retained(&mut self, key: u64, rect: Rect, alpha: f32, scale: f64) {
+        let transform = self.current_transform();
+        self.scene.push(Command::DrawRetained {
+            key,
+            rect,
+            transform,
+            alpha,
+            scale,
+        });
     }
 
     /// Records a fragment-shader-filled rectangle, scaled to fill `dest`,
@@ -832,20 +846,20 @@ mod tests {
     }
 
     #[test]
-    fn push_pop_snapshot_emit_commands_with_key_rect_alpha_scale_and_transform() {
+    fn push_pop_retained_emit_commands_with_key_rect_alpha_scale_and_transform() {
         let mut scene = Scene::new();
         let mut builder = SceneBuilder::new(&mut scene);
         let translate = Affine::translate((2.0, 3.0));
         builder.push_transform(translate);
         let rect = Rect::new(0.0, 0.0, 40.0, 40.0);
-        builder.push_snapshot(7, rect, 0.5, 0.9);
+        builder.push_retained(7, rect, 0.5, 0.9);
         builder.fill_rect(Rect::new(0.0, 0.0, 1.0, 1.0), red_brush());
-        builder.pop_snapshot();
+        builder.pop_retained();
 
         let commands = scene.commands();
         assert_eq!(commands.len(), 3);
         match &commands[0] {
-            Command::PushSnapshot {
+            Command::PushRetained {
                 key,
                 rect: got_rect,
                 alpha,
@@ -858,57 +872,57 @@ mod tests {
                 assert_eq!(*scale, 0.9);
                 assert_eq!(*transform, translate);
             }
-            other => panic!("expected PushSnapshot, got {other:?}"),
+            other => panic!("expected PushRetained, got {other:?}"),
         }
         assert!(matches!(commands[1], Command::FillRect { .. }));
-        assert!(matches!(commands[2], Command::PopSnapshot));
+        assert!(matches!(commands[2], Command::PopRetained));
     }
 
     #[test]
-    fn pop_snapshot_without_a_push_is_a_no_op() {
+    fn pop_retained_without_a_push_is_a_no_op() {
         let mut scene = Scene::new();
         let mut builder = SceneBuilder::new(&mut scene);
-        builder.pop_snapshot();
+        builder.pop_retained();
         assert!(scene.commands().is_empty());
-        assert_eq!(scene.snapshot_depth, 0);
+        assert_eq!(scene.retained_depth, 0);
     }
 
     #[test]
-    fn nested_snapshot_brackets_balance() {
+    fn nested_retained_brackets_balance() {
         let mut scene = Scene::new();
         let mut builder = SceneBuilder::new(&mut scene);
         let outer = Rect::new(0.0, 0.0, 100.0, 100.0);
         let inner = Rect::new(10.0, 10.0, 50.0, 50.0);
 
-        builder.push_snapshot(1, outer, 1.0, 1.0);
-        builder.push_snapshot(2, inner, 0.8, 1.2);
-        builder.pop_snapshot();
-        builder.pop_snapshot();
+        builder.push_retained(1, outer, 1.0, 1.0);
+        builder.push_retained(2, inner, 0.8, 1.2);
+        builder.pop_retained();
+        builder.pop_retained();
         // A further, unmatched pop is a no-op — depth never underflows.
-        builder.pop_snapshot();
+        builder.pop_retained();
 
         let commands = scene.commands();
         assert_eq!(commands.len(), 4);
-        assert!(matches!(commands[0], Command::PushSnapshot { key: 1, .. }));
-        assert!(matches!(commands[1], Command::PushSnapshot { key: 2, .. }));
-        assert!(matches!(commands[2], Command::PopSnapshot));
-        assert!(matches!(commands[3], Command::PopSnapshot));
-        assert_eq!(scene.snapshot_depth, 0);
+        assert!(matches!(commands[0], Command::PushRetained { key: 1, .. }));
+        assert!(matches!(commands[1], Command::PushRetained { key: 2, .. }));
+        assert!(matches!(commands[2], Command::PopRetained));
+        assert!(matches!(commands[3], Command::PopRetained));
+        assert_eq!(scene.retained_depth, 0);
     }
 
     #[test]
-    fn push_snapshot_increments_depth_and_pop_decrements_it() {
+    fn push_retained_increments_depth_and_pop_decrements_it() {
         let mut scene = Scene::new();
         {
             let mut builder = SceneBuilder::new(&mut scene);
-            builder.push_snapshot(1, Rect::new(0.0, 0.0, 1.0, 1.0), 1.0, 1.0);
+            builder.push_retained(1, Rect::new(0.0, 0.0, 1.0, 1.0), 1.0, 1.0);
         }
-        assert_eq!(scene.snapshot_depth, 1);
+        assert_eq!(scene.retained_depth, 1);
         {
             let mut builder = SceneBuilder::new(&mut scene);
-            builder.pop_snapshot();
+            builder.pop_retained();
         }
-        assert_eq!(scene.snapshot_depth, 0);
+        assert_eq!(scene.retained_depth, 0);
     }
 
     #[test]

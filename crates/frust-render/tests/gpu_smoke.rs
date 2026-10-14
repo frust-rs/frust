@@ -143,7 +143,7 @@ async fn run_clear_probe() {
     }
 }
 
-/// The inline lowering of a `Command::PushSnapshot` bracket, pixel for pixel
+/// The inline lowering of a `Command::PushRetained` bracket, pixel for pixel
 /// — the only lowering this crate has for one.
 ///
 /// Reached through the public headless seam alone: the bracket's
@@ -182,7 +182,7 @@ async fn run_snapshot() {
         );
         builder.fill_rect(kurbo::Rect::new(52.0, 52.0, 60.0, 60.0), Brush::Solid(BLUE));
         builder.push_transform(bracket);
-        builder.push_snapshot(1, rect, ALPHA, 1.0);
+        builder.push_retained(1, rect, ALPHA, 1.0);
         // An opaque red block, a half-alpha green band over NOTHING (so the
         // bracket really carries partial alpha — a double premultiply is
         // invisible where alpha is 1), and a black bar standing in for a line
@@ -193,7 +193,7 @@ async fn run_snapshot() {
             Brush::Solid(GREEN.with_alpha(0.5)),
         );
         builder.fill_rect(kurbo::Rect::new(5.0, 15.0, 15.0, 20.0), Brush::Solid(BLACK));
-        builder.pop_snapshot();
+        builder.pop_retained();
         builder.pop_transform();
         // Recorded AFTER the bracket, so it must land on top of it.
         builder.fill_rect(

@@ -1191,7 +1191,7 @@ fn shader_quad() -> CorpusCase {
 /// `snapshot_bracket_inline_emulation_matches_the_composite_arithmetic`,
 /// geometry and assertions verbatim.
 ///
-/// A `Command::PushSnapshot` bracket lowered INLINE — the only lowering this
+/// A `Command::PushRetained` bracket lowered INLINE — the only lowering this
 /// framework has for one, on every render path and every tier — and the
 /// absolute arithmetic it must hit:
 ///
@@ -1219,7 +1219,7 @@ fn snapshot_bracket() -> CorpusCase {
         black_backdrop(&mut builder);
         builder.fill_rect(Rect::new(52.0, 52.0, 60.0, 60.0), Brush::Solid(BLUE));
         builder.push_transform(bracket);
-        builder.push_snapshot(1, rect, ALPHA, 1.0);
+        builder.push_retained(1, rect, ALPHA, 1.0);
         // An opaque red block, a half-alpha green band over NOTHING (so the
         // bracket really carries partial alpha — a double premultiply is
         // invisible where alpha is 1), and a black bar standing in for a line
@@ -1230,7 +1230,7 @@ fn snapshot_bracket() -> CorpusCase {
             Brush::Solid(GREEN.with_alpha(0.5)),
         );
         builder.fill_rect(Rect::new(5.0, 15.0, 15.0, 20.0), Brush::Solid(BLACK));
-        builder.pop_snapshot();
+        builder.pop_retained();
         builder.pop_transform();
         // Recorded AFTER the bracket, so it must land on top of it.
         builder.fill_rect(Rect::new(20.0, 20.0, 30.0, 30.0), Brush::Solid(overlay));
@@ -1286,7 +1286,7 @@ fn snapshot_bracket() -> CorpusCase {
 /// Snapshot NESTING: two brackets, the inner one carrying a different alpha
 /// AND a different scale, both of which must be IGNORED.
 ///
-/// `Command::PushSnapshot`'s contract is that syntactic nesting is allowed
+/// `Command::PushRetained`'s contract is that syntactic nesting is allowed
 /// but only the OUTERMOST bracket needs honouring. The probes are stated as
 /// the outer bracket's 0.5 alone: if the inner bracket's 0.25 were composed
 /// in as well, the green band would land at `128 * 0.5 * 0.25` (16) instead
@@ -1299,13 +1299,13 @@ fn snapshot_balance() -> CorpusCase {
         let mut builder = SceneBuilder::new(scene);
         black_backdrop(&mut builder);
         builder.push_transform(bracket);
-        builder.push_snapshot(1, rect, 0.5, 1.0);
+        builder.push_retained(1, rect, 0.5, 1.0);
         builder.fill_rect(Rect::new(0.0, 0.0, 20.0, 10.0), Brush::Solid(WHITE));
         // Inner bracket: its own alpha and scale must not reach the pixels.
-        builder.push_snapshot(2, rect, 0.25, 2.0);
+        builder.push_retained(2, rect, 0.25, 2.0);
         builder.fill_rect(Rect::new(0.0, 10.0, 20.0, 20.0), Brush::Solid(GREEN));
-        builder.pop_snapshot();
-        builder.pop_snapshot();
+        builder.pop_retained();
+        builder.pop_retained();
         builder.pop_transform();
     }
     CorpusCase {
@@ -1556,13 +1556,17 @@ mod tests {
             Command::ClearRect { .. } => "ClearRect",
             Command::Path { .. } => "Path",
             Command::ShaderQuad { .. } => "ShaderQuad",
-            Command::PushSnapshot { .. } => "PushSnapshot",
-            Command::PopSnapshot => "PopSnapshot",
+            Command::PushRetained { .. } => "PushRetained",
+            Command::PopRetained => "PopRetained",
+            Command::DrawRetained { .. } => "DrawRetained",
             Command::SceneTexture { .. } => "SceneTexture",
         }
     }
 
-    /// Every `Command` variant, as `variant_name` spells them.
+    /// Every `Command` variant a corpus case records, as `variant_name` spells
+    /// them. `DrawRetained` is deliberately absent: neither oracle retains
+    /// pages, so a corpus scene never records one (see
+    /// `no_corpus_case_records_a_draw_retained`).
     const EVERY_VARIANT: &[&str] = &[
         "FillRect",
         "RoundedRect",
@@ -1578,8 +1582,8 @@ mod tests {
         "ClearRect",
         "Path",
         "ShaderQuad",
-        "PushSnapshot",
-        "PopSnapshot",
+        "PushRetained",
+        "PopRetained",
     ];
 
     #[test]
@@ -1603,6 +1607,24 @@ mod tests {
             EVERY_VARIANT.len(),
             "variant_name reported a name outside EVERY_VARIANT: {seen:?}"
         );
+    }
+
+    #[test]
+    fn no_corpus_case_records_a_draw_retained() {
+        for case in unit_cases()
+            .into_iter()
+            .chain(crate::corpus::adversarial::adversarial_cases())
+        {
+            assert!(
+                !case
+                    .scene()
+                    .commands()
+                    .iter()
+                    .any(|command| matches!(command, Command::DrawRetained { .. })),
+                "`{}` records a DrawRetained, which neither oracle can draw",
+                case.spec.name
+            );
+        }
     }
 
     #[test]

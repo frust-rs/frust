@@ -237,14 +237,14 @@ fn brackets(step: u32) -> Scene {
     builder.pop_clip();
     builder.pop_transform();
 
-    builder.push_snapshot(
+    builder.push_retained(
         7,
         Rect::new(0.0, 0.0, 360.0, 300.0),
         0.8,
         1.0 + f64::from(step % 5) * 0.05,
     );
     shapes(&mut builder, Point::new(40.0, 40.0));
-    builder.pop_snapshot();
+    builder.pop_retained();
 
     builder.clear_rect(Rect::new(300.0, 600.0, 350.0, 630.0));
     // Unbalanced: closes nothing.

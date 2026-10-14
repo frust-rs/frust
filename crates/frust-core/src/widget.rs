@@ -334,33 +334,51 @@ pub trait PaintScene {
     /// Defaulted to a no-op; see [`PaintScene::push_transform`].
     fn pop_transform(&mut self) {}
 
-    /// Push a snapshot bracket: the body is rasterizable once and cached by
+    /// Push a retained bracket: the body is rasterizable once and cached by
     /// `key` across frames. The `alpha` and `scale` are presentation parameters
     /// applied to the whole cached body (alpha blending, uniform scale).
     ///
     /// The default implementation emulates the presentation for recorders
-    /// that don't have a snapshot concept: it pushes a transform (scale about
-    /// the rect's center), then a layer (at the rect with the given alpha).
-    /// A renderer may cache and apply both as a whole; a recorder sees the
-    /// component pieces. The matching [`PaintScene::pop_snapshot`] pops both
-    /// in the reverse order.
+    /// that don't have a retained-layer concept: it pushes a transform (scale
+    /// about the rect's center), then a layer (at the rect with the given
+    /// alpha). A renderer may cache and apply both as a whole; a recorder sees
+    /// the component pieces. The matching [`PaintScene::pop_retained`] pops
+    /// both in the reverse order.
     ///
-    /// [`SceneBuilder`] overrides this to call the snapshot-aware builder
-    /// methods directly, which record `Command::PushSnapshot`/`PopSnapshot`
+    /// [`SceneBuilder`] overrides this to call the retained-aware builder
+    /// methods directly, which record `Command::PushRetained`/`PopRetained`
     /// and no extra transform/layer commands.
-    fn push_snapshot(&mut self, _key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+    fn push_retained(&mut self, _key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
         let center = Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
         self.push_transform(Affine::scale_about(scale, center));
         self.push_layer(origin, size, alpha);
     }
 
-    /// Pop the most recently pushed snapshot bracket. Defaulted to the reverse
-    /// of [`PaintScene::push_snapshot`]'s default: pop layer, then transform.
+    /// Pop the most recently pushed retained bracket. Defaulted to the reverse
+    /// of [`PaintScene::push_retained`]'s default: pop layer, then transform.
     /// Recorders that don't override both may see unbalanced stacks if only one
     /// is overridden; the default pair is provided for source compatibility.
-    fn pop_snapshot(&mut self) {
+    fn pop_retained(&mut self) {
         self.pop_layer();
         self.pop_transform();
+    }
+
+    /// Draw the body retained under `key` from its cached page (see
+    /// [`Command::DrawRetained`]). Only valid when the resident-key ledger
+    /// said `key` is resident; the default is a no-op for recorders with no
+    /// retained-layer concept, which never receive such a call.
+    fn draw_retained(&mut self, _key: u64, _origin: Point, _size: Size, _alpha: f32, _scale: f64) {}
+
+    /// Deprecated name of [`PaintScene::push_retained`].
+    #[deprecated(since = "0.7.0", note = "renamed to `push_retained`")]
+    fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        self.push_retained(key, origin, size, alpha, scale);
+    }
+
+    /// Deprecated name of [`PaintScene::pop_retained`].
+    #[deprecated(since = "0.7.0", note = "renamed to `pop_retained`")]
+    fn pop_snapshot(&mut self) {
+        self.pop_retained();
     }
 }
 
@@ -519,12 +537,16 @@ impl PaintScene for SceneBuilder<'_> {
         SceneBuilder::pop_transform(self);
     }
 
-    fn push_snapshot(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
-        SceneBuilder::push_snapshot(self, key, rect_at(origin, size), alpha, scale);
+    fn push_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        SceneBuilder::push_retained(self, key, rect_at(origin, size), alpha, scale);
     }
 
-    fn pop_snapshot(&mut self) {
-        SceneBuilder::pop_snapshot(self);
+    fn pop_retained(&mut self) {
+        SceneBuilder::pop_retained(self);
+    }
+
+    fn draw_retained(&mut self, key: u64, origin: Point, size: Size, alpha: f32, scale: f64) {
+        SceneBuilder::draw_retained(self, key, rect_at(origin, size), alpha, scale);
     }
 }
 
@@ -5676,7 +5698,7 @@ mod tests {
     }
 
     /// A minimal recorder that tracks only transform and layer stack operations
-    /// to verify the default [`PaintScene::push_snapshot`]/[`PaintScene::pop_snapshot`]
+    /// to verify the default [`PaintScene::push_retained`]/[`PaintScene::pop_retained`]
     /// implementation emulates the presentation correctly.
     #[derive(Default)]
     struct MinimalSnapshotRecorder {
@@ -5701,8 +5723,8 @@ mod tests {
     }
 
     #[test]
-    fn default_push_snapshot_pop_snapshot_emulates_presentation_for_recorders() {
-        // The default `push_snapshot` and `pop_snapshot` implementation
+    fn default_push_retained_pop_retained_emulates_presentation_for_recorders() {
+        // The default `push_retained` and `pop_retained` implementation
         // ensures recorders that override only the transform/layer methods
         // see a consistent sequence: push_transform, push_layer, paint body,
         // pop_layer, pop_transform — the reverse order matching the push ops.
@@ -5713,9 +5735,9 @@ mod tests {
         let scale = 0.9;
 
         // Emulate a body that doesn't call any paint methods (just has side effects).
-        recorder.push_snapshot(1, origin, size, alpha, scale);
+        recorder.push_retained(1, origin, size, alpha, scale);
         // Body paint code would go here
-        recorder.pop_snapshot();
+        recorder.pop_retained();
 
         // Verify the sequence: transform, layer, pop_layer, pop_transform.
         assert_eq!(
@@ -5730,30 +5752,30 @@ mod tests {
     }
 
     #[test]
-    fn scene_builder_records_push_pop_snapshot_commands_directly_without_extra_transforms() {
-        // The `SceneBuilder` impl overrides `push_snapshot`/`pop_snapshot` to
-        // record the snapshot commands directly, without the emulating
-        // transform/layer pairs. It records Command::PushSnapshot with the
+    fn scene_builder_records_push_pop_retained_commands_directly_without_extra_transforms() {
+        // The `SceneBuilder` impl overrides `push_retained`/`pop_retained` to
+        // record the retained commands directly, without the emulating
+        // transform/layer pairs. It records Command::PushRetained with the
         // key, rect (converted from origin/size), alpha, scale, and the current
-        // transform, and Command::PopSnapshot with no extra layer/transform commands.
+        // transform, and Command::PopRetained with no extra layer/transform commands.
         let mut scene = frust_scene::Scene::new();
         {
             let mut builder = frust_scene::SceneBuilder::new(&mut scene);
             let paint: &mut dyn PaintScene = &mut builder;
 
-            paint.push_snapshot(7, Point::new(5.0, 10.0), Size::new(80.0, 40.0), 0.5, 1.2);
-            // Paint some content inside the snapshot.
+            paint.push_retained(7, Point::new(5.0, 10.0), Size::new(80.0, 40.0), 0.5, 1.2);
+            // Paint some content inside the retained bracket.
             paint.fill_rect(Point::new(10.0, 15.0), Size::new(20.0, 25.0), Color::BLACK);
-            paint.pop_snapshot();
+            paint.pop_retained();
         }
 
-        // Verify the command sequence: PushSnapshot, FillRect, PopSnapshot.
+        // Verify the command sequence: PushRetained, FillRect, PopRetained.
         // No PushLayer, PopLayer, PushTransform, or PopTransform commands.
         let commands = scene.commands();
         assert_eq!(commands.len(), 3);
 
         match &commands[0] {
-            frust_scene::Command::PushSnapshot {
+            frust_scene::Command::PushRetained {
                 key,
                 rect,
                 alpha,
@@ -5765,7 +5787,7 @@ mod tests {
                 assert_eq!(*alpha, 0.5);
                 assert_eq!(*scale, 1.2);
             }
-            other => panic!("expected PushSnapshot, got {other:?}"),
+            other => panic!("expected PushRetained, got {other:?}"),
         }
 
         match &commands[1] {
@@ -5776,8 +5798,8 @@ mod tests {
         }
 
         assert!(
-            matches!(commands[2], frust_scene::Command::PopSnapshot),
-            "expected PopSnapshot, got {:?}",
+            matches!(commands[2], frust_scene::Command::PopRetained),
+            "expected PopRetained, got {:?}",
             commands[2]
         );
     }

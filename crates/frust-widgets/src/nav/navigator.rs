@@ -161,7 +161,7 @@ pub use super::view::{NavigatorView, navigator, overlay_host};
 
 /// Process-wide, monotonically increasing source for
 /// [`PageEntry::snapshot_key`] and `motion::switcher`'s per-instance
-/// `snapshot_base` — every [`PaintScene::push_snapshot`] key handed to a
+/// `snapshot_base` — every [`PaintScene::push_retained`] key handed to a
 /// renderer, across every navigator and switcher in the process, is drawn
 /// from this one counter. A renderer caches a snapshot's rasterized body by
 /// key alone, so two unrelated pods that happened to share a key would alias
@@ -237,7 +237,7 @@ pub(super) struct PageEntry<State: 'static> {
     /// [`cull_covered_builds`](NavigatorView::cull_covered_builds) still reports
     /// truthfully.
     pub(super) reach: Rc<Cell<bool>>,
-    /// This page's [`PaintScene::push_snapshot`] cache key, drawn once from
+    /// This page's [`PaintScene::push_retained`] cache key, drawn once from
     /// [`NEXT_SNAPSHOT_KEY`] when the page is constructed and stable for its
     /// whole lifetime — including a pop/replace stash, since the same
     /// `PageEntry` moves into [`ActiveTransition::stashed`] rather than being
@@ -1649,7 +1649,7 @@ fn scale_about(pivot: Point, scale: f64) -> Affine {
 /// When `snapshot` is `Some(key)` (see
 /// [`NavigatorWidget::paint_entering_heroes`] for the eligibility rule), the
 /// alpha-surviving page paints through
-/// [`PaintScene::push_snapshot`]/[`pop_snapshot`] instead, unconditionally —
+/// [`PaintScene::push_retained`]/[`pop_retained`] instead, unconditionally —
 /// no `has_scale`/`has_alpha` identity-skip, since the bracket itself is what
 /// tells a caching renderer this body is worth caching, whatever this
 /// particular frame's alpha/scale happen to be. **The bracket rect origin must
@@ -1676,9 +1676,9 @@ fn paint_page_layer(
 
     if let Some(key) = snapshot {
         let bracket_origin = ctx.origin() + Vec2::new(layer.dx, layer.dy);
-        scene.push_snapshot(key, bracket_origin, area, alpha, layer.scale);
+        scene.push_retained(key, bracket_origin, area, alpha, layer.scale);
         pod.paint_child(ctx, scene);
-        scene.pop_snapshot();
+        scene.pop_retained();
         return;
     }
 

@@ -288,13 +288,13 @@ enum Op {
         alpha: f32,
     },
     PopLayer,
-    PushSnapshot {
+    PushRetained {
         key: u64,
         rect: Rect,
         alpha: f32,
         scale: f64,
     },
-    PopSnapshot,
+    PopRetained,
     PushTransform(Affine),
     PopTransform,
 }
@@ -352,13 +352,13 @@ fn scene_of(ops: &[Op]) -> Scene {
             Op::PopClip => builder.pop_clip(),
             Op::PushLayer { rect, alpha } => builder.push_layer(*rect, *alpha),
             Op::PopLayer => builder.pop_layer(),
-            Op::PushSnapshot {
+            Op::PushRetained {
                 key,
                 rect,
                 alpha,
                 scale,
-            } => builder.push_snapshot(*key, *rect, *alpha, *scale),
-            Op::PopSnapshot => builder.pop_snapshot(),
+            } => builder.push_retained(*key, *rect, *alpha, *scale),
+            Op::PopRetained => builder.pop_retained(),
             Op::PushTransform(transform) => builder.push_transform(*transform),
             Op::PopTransform => builder.pop_transform(),
         }
@@ -611,14 +611,14 @@ fn op() -> impl Strategy<Value = Op> {
         (rect(), small_f32()).prop_map(|(rect, alpha)| Op::PushLayer { rect, alpha }),
         Just(Op::PopLayer),
         (any::<u64>(), rect(), small_f32(), coord()).prop_map(|(key, rect, alpha, scale)| {
-            Op::PushSnapshot {
+            Op::PushRetained {
                 key,
                 rect,
                 alpha,
                 scale,
             }
         }),
-        Just(Op::PopSnapshot),
+        Just(Op::PopRetained),
         transform().prop_map(Op::PushTransform),
         Just(Op::PopTransform),
     ]
@@ -954,7 +954,7 @@ fn allocation_stays_inside_the_bound(ops: &[Op], root: Affine) -> Result<(), Tes
 #[test]
 fn a_huge_snapshot_scale_under_a_rounded_clip_stays_inside_the_bound() {
     let ops = [
-        Op::PushSnapshot {
+        Op::PushRetained {
             key: 8_911_044_492_357_228_835,
             rect: Rect::new(-101.33478495360569, 0.0, -179.3764606917167, -0.0),
             alpha: -220.93674,

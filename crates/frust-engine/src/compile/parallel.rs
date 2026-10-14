@@ -66,10 +66,10 @@ use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage
 
 use super::blur_rrect::inflated_bounds;
 use super::cull::{generate_fill, generate_stroke, rounded_rect_elements};
-use super::layers::SnapshotStack;
+use super::layers::RetainedStack;
 use super::{
-    FLATTEN_TOLERANCE, check_finite, command_on_grid, dash_path, fast_rect, round_stroke,
-    rounded_rect_radii, snapshot_entry,
+    FLATTEN_TOLERANCE, check_finite, command_on_grid, dash_path, fast_rect, retained_entry,
+    round_stroke, rounded_rect_radii,
 };
 
 /// The most threads a frame's strip generation runs on, the calling thread
@@ -466,7 +466,7 @@ impl Plan<'_> {
 /// Plan `scene`'s helper work for a `viewport`-sized frame under `root`.
 ///
 /// Mirrors the walk's bracket handling on its exact terms — the same
-/// [`command_on_grid`] check, the same [`snapshot_entry`] substitution, the
+/// [`command_on_grid`] check, the same [`retained_entry`] substitution, the
 /// same snapshot-layer rule — but tracks only what decides whether a command
 /// is worth offering: the snapshot correction its transform composes with, and
 /// whether any open bracket lowered to a coverage mask. An off-grid bracket is
@@ -475,7 +475,7 @@ impl Plan<'_> {
 /// waste work.
 pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'a> {
     let mut plan = Plan::default();
-    let mut snapshots = SnapshotStack::new();
+    let mut snapshots = RetainedStack::new();
     // One entry per open bracket: whether its clip lowered to a mask.
     let mut brackets: Vec<bool> = Vec::new();
     let mut masks = 0_usize;
@@ -499,7 +499,10 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
             Command::GlyphRun(_)
             | Command::ClearRect { .. }
             | Command::ShaderQuad { .. }
-            | Command::SceneTexture { .. } => continue,
+            | Command::SceneTexture { .. }
+            // A zero-strip command: the walk draws nothing for it (and the
+            // up-front validation refuses a frame carrying one).
+            | Command::DrawRetained { .. } => continue,
             Command::FillRect { .. }
             | Command::RoundedRect { .. }
             | Command::Line { .. }
@@ -511,8 +514,8 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
             | Command::PopClip
             | Command::PushLayer { .. }
             | Command::PopLayer
-            | Command::PushSnapshot { .. }
-            | Command::PopSnapshot => {}
+            | Command::PushRetained { .. }
+            | Command::PopRetained => {}
         }
         let combined = root * snapshots.correction();
         let on_grid = command_on_grid(command, combined);
@@ -521,13 +524,13 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
                 Command::PushClip { .. }
                 | Command::PushClipRounded { .. }
                 | Command::PushLayer { .. } => push(&mut brackets, &mut masks, false),
-                Command::PushSnapshot {
+                Command::PushRetained {
                     rect,
                     scale,
                     transform,
                     ..
                 } => {
-                    let (scale, transform) = snapshot_entry(on_grid, *scale, *transform);
+                    let (scale, transform) = retained_entry(on_grid, *scale, *transform);
                     snapshots.enter(*rect, scale, transform);
                 }
                 // An off-grid shape is refused by the walk, and a pop carries
@@ -540,11 +543,12 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
                 | Command::Path { .. }
                 | Command::PopClip
                 | Command::PopLayer
-                | Command::PopSnapshot
+                | Command::PopRetained
                 | Command::GlyphRun(_)
                 | Command::ClearRect { .. }
                 | Command::ShaderQuad { .. }
-                | Command::SceneTexture { .. } => {}
+                | Command::SceneTexture { .. }
+                | Command::DrawRetained { .. } => {}
             }
             continue;
         }
@@ -570,7 +574,7 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
                 push(&mut brackets, &mut masks, mask);
             }
             Command::PopClip | Command::PopLayer => pop(&mut brackets, &mut masks),
-            Command::PushSnapshot {
+            Command::PushRetained {
                 rect,
                 alpha,
                 scale,
@@ -586,7 +590,7 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
                     }
                 }
             }
-            Command::PopSnapshot => {
+            Command::PopRetained => {
                 if snapshots.leave(brackets.len()) {
                     pop(&mut brackets, &mut masks);
                 }
@@ -615,7 +619,8 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
             Command::GlyphRun(_)
             | Command::ClearRect { .. }
             | Command::ShaderQuad { .. }
-            | Command::SceneTexture { .. } => {}
+            | Command::SceneTexture { .. }
+            | Command::DrawRetained { .. } => {}
         }
     }
     plan
