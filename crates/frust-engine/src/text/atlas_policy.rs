@@ -954,6 +954,9 @@ pub(crate) struct AtlasPolicy {
     /// `glifo`'s cumulative miss count as this frame opened, so the frame's own
     /// misses can be read as a difference.
     misses_at_frame_start: u64,
+    /// How many of this frame's misses were the resident-run cache's own
+    /// probes, which [`frame_misses`](Self::frame_misses) leaves out.
+    probe_misses: u64,
     /// The LRU serial at which the oldest still-unreplayed page recording was
     /// made, or `None` when nothing is outstanding.
     ///
@@ -1053,6 +1056,7 @@ impl AtlasPolicy {
             clears: Vec::new(),
             offered_clears: 0,
             misses_at_frame_start: 0,
+            probe_misses: 0,
             unreplayed_since: None,
             serial: 0,
             phase: Phase::Idle,
@@ -1227,6 +1231,7 @@ impl AtlasPolicy {
         // Read before anything this frame can miss, so `frame_misses` below is
         // this frame's own count rather than the process's.
         self.misses_at_frame_start = self.atlas.cache_misses();
+        self.probe_misses = 0;
         #[cfg(feature = "perf-trace")]
         {
             self.trace.run_keys.clear();
@@ -1244,11 +1249,18 @@ impl AtlasPolicy {
     /// a miss whose transform `glifo` then declines to cache records nothing —
     /// and deliberately so, since the cost of the extra answer is a replay call
     /// that finds nothing to do, while the cost of a missed one is stale ink.
+    ///
+    /// The resident-run cache's own probes are not among them: a probe is a
+    /// lookup and nothing else — it records, queues and allocates nothing —
+    /// and the run it missed for goes on to `glifo`, whose own lookup of the
+    /// same glyph is the miss that counts. Counting both would report every
+    /// glyph a resident run missed twice.
     #[must_use]
     fn frame_misses(&self) -> u64 {
         self.atlas
             .cache_misses()
             .saturating_sub(self.misses_at_frame_start)
+            .saturating_sub(self.probe_misses)
     }
 
     /// Decide how `run` is drawn, and record its size against the font's
@@ -1716,6 +1728,7 @@ impl AtlasPolicy {
                 None => {
                     let key = outline_key(&identity, glyph.id, glyph.bucket, black);
                     let Some(slot) = self.atlas.get(&key) else {
+                        self.probe_misses = self.probe_misses.saturating_add(1);
                         return ResidentAnswer::Missed(hash);
                     };
                     record.slots[bucket] = Some(slot);
@@ -2316,6 +2329,42 @@ mod resident_run_tests {
                 "fraction {fraction}: the probe key is the key `glifo` builds"
             );
         }
+    }
+
+    /// A resident-run probe that misses is a lookup and nothing more: it is
+    /// not one of the frame's misses, which stand for work `glifo` left
+    /// recorded — the lookup `glifo` then makes for the same glyph is.
+    #[test]
+    fn a_resident_probe_miss_is_not_a_frame_miss() {
+        use vello_common::multi_atlas::AllocationStrategy;
+
+        let mut images = ImageCache::new_with_config(AtlasConfig {
+            initial_atlas_count: 0,
+            max_atlases: 1,
+            atlas_size: (256, 256),
+            auto_grow: true,
+            allocation_strategy: AllocationStrategy::FirstFit,
+        });
+        let mut policy = AtlasPolicy::new(&images, false);
+        policy.begin_frame();
+        let _ = policy.build(&mut images, |_| None);
+        let identity = ResidentIdentity {
+            font_id: 9,
+            font_index: 0,
+            size: 16.0,
+            hinted: false,
+        };
+        let placed = [PlacedGlyph { id: 3, bucket: 1 }];
+        let mut slots = Vec::new();
+        assert!(matches!(
+            policy.resolve_resident_run(identity, &placed, &mut slots),
+            ResidentAnswer::Missed(_)
+        ));
+        assert_eq!(policy.frame_misses(), 0);
+
+        let key = outline_key(&identity, 3, 1, policy.resident.black);
+        assert!(policy.atlas_mut().get(&key).is_none());
+        assert_eq!(policy.frame_misses(), 1, "`glifo`'s own lookup counts");
     }
 
     /// The bound holds in records and in bytes whatever is offered, and spares
