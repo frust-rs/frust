@@ -215,6 +215,7 @@ or the external binding when the source-kind bit is set.
 - Residency is **committed only once serviced**: `ImageResidency::plan` keeps re-emitting uploads
   until `acknowledge_plan`, so a frame refused after compiling does not leave an image recorded as
   resident with unwritten texels.
-- The atlas tier choice is a driver answer, not a memory class — see
-  `engine-atlas-tier-by-driver-flag` in `docs/LIMITATIONS.md`, and compare its wording with
-  `is_mobile_tier` yourself.
+- The atlas tier is a rule, not a single driver answer: `choose_tier` takes a downlevel adapter as
+  mobile, then consults the `ADAPTER_FAMILIES` name table, and only then the `is_mobile_tier`
+  capability read; a mobile family with at least 4 GiB of `MemTotal` earns `mobile_large`. Read
+  the `rule=` field of the `frust-perf atlas` line against that order yourself.
