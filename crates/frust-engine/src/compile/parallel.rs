@@ -99,6 +99,19 @@ pub const DEFAULT_PARALLEL_MIN_COST: u64 = 8_000;
 /// renderer's per-call work, independent of the shape's extent.
 const JOB_BASE_COST: u64 = 64;
 
+/// How many slots the pool keeps across frames, and how many strips and
+/// alpha bytes one kept slot keeps its capacity for.
+///
+/// A slot holds one command's run until the walk takes it, so a frame of a
+/// thousand planned shapes needs a thousand slots that frame — and would
+/// otherwise keep them, each at the capacity of the largest run it ever
+/// held, for the compiler's lifetime. After each run the pool is trimmed back
+/// to these bounds; a frame past them pays the allocations again, a frame
+/// within them pays nothing.
+const MAX_RETAINED_SLOTS: usize = 1024;
+const RETAINED_SLOT_STRIPS: usize = 1024;
+const RETAINED_SLOT_ALPHAS: usize = 64 * 1024;
+
 /// How many chunks each helper's share of the planned cost is split into.
 ///
 /// More chunks balance several helpers better; fewer cost fewer claims. The
@@ -113,7 +126,7 @@ const MAX_ALPHA_INDEX: u32 = u32::MAX >> 1;
 /// How many threads the machine offers, read once per process: the standard
 /// library answers it from the affinity mask and cgroup quotas, which is file
 /// I/O that has no place on a per-frame path.
-fn available_threads() -> usize {
+pub(crate) fn available_threads() -> usize {
     static THREADS: OnceLock<usize> = OnceLock::new();
     *THREADS.get_or_init(|| std::thread::available_parallelism().map_or(1, usize::from))
 }
@@ -466,16 +479,29 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
     };
 
     for (index, command) in scene.commands().iter().enumerate() {
-        // Neither a shape nor a bracket: nothing to plan and nothing to track,
-        // so a page of text costs the planner one match per run.
-        if matches!(
-            command,
+        // Every match below is exhaustive on purpose: a command variant added
+        // to the walk fails to compile here until it is given a planning
+        // decision too, so the mirror cannot drift silently.
+        match command {
+            // Neither a shape nor a bracket: nothing to plan and nothing to
+            // track, so a page of text costs the planner one match per run.
             Command::GlyphRun(_)
-                | Command::ClearRect { .. }
-                | Command::ShaderQuad { .. }
-                | Command::SceneTexture { .. }
-        ) {
-            continue;
+            | Command::ClearRect { .. }
+            | Command::ShaderQuad { .. }
+            | Command::SceneTexture { .. } => continue,
+            Command::FillRect { .. }
+            | Command::RoundedRect { .. }
+            | Command::Line { .. }
+            | Command::Image { .. }
+            | Command::BlurredRoundedRect { .. }
+            | Command::Path { .. }
+            | Command::PushClip { .. }
+            | Command::PushClipRounded { .. }
+            | Command::PopClip
+            | Command::PushLayer { .. }
+            | Command::PopLayer
+            | Command::PushSnapshot { .. }
+            | Command::PopSnapshot => {}
         }
         let combined = root * snapshots.correction();
         let on_grid = command_on_grid(command, combined);
@@ -493,7 +519,21 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
                     let (scale, transform) = snapshot_entry(on_grid, *scale, *transform);
                     snapshots.enter(*rect, scale, transform);
                 }
-                _ => {}
+                // An off-grid shape is refused by the walk, and a pop carries
+                // no transform to be off the grid with.
+                Command::FillRect { .. }
+                | Command::RoundedRect { .. }
+                | Command::Line { .. }
+                | Command::Image { .. }
+                | Command::BlurredRoundedRect { .. }
+                | Command::Path { .. }
+                | Command::PopClip
+                | Command::PopLayer
+                | Command::PopSnapshot
+                | Command::GlyphRun(_)
+                | Command::ClearRect { .. }
+                | Command::ShaderQuad { .. }
+                | Command::SceneTexture { .. } => {}
             }
             continue;
         }
@@ -540,8 +580,15 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
                     pop(&mut brackets, &mut masks);
                 }
             }
-            _ if masks == 0 => {
-                if let Some(geometry) = Geometry::of(command, combined)
+            Command::FillRect { .. }
+            | Command::RoundedRect { .. }
+            | Command::Line { .. }
+            | Command::Image { .. }
+            | Command::BlurredRoundedRect { .. }
+            | Command::Path { .. } => {
+                // Under a mask the run is generated during the walk itself.
+                if masks == 0
+                    && let Some(geometry) = Geometry::of(command, combined)
                     && !geometry.is_fast_rect()
                 {
                     let cost = geometry.cost(viewport);
@@ -554,7 +601,10 @@ pub(crate) fn plan<'a>(scene: &'a Scene, root: Affine, viewport: Rect) -> Plan<'
                     });
                 }
             }
-            _ => {}
+            Command::GlyphRun(_)
+            | Command::ClearRect { .. }
+            | Command::ShaderQuad { .. }
+            | Command::SceneTexture { .. } => {}
         }
     }
     plan
@@ -630,6 +680,8 @@ impl Pool {
         let claimed = AtomicUsize::new(0);
         let reached = AtomicUsize::new(0);
         let done = AtomicBool::new(false);
+        #[cfg(test)]
+        let finished = AtomicUsize::new(0);
 
         let helper = Helper {
             jobs,
@@ -640,25 +692,78 @@ impl Pool {
             done: &done,
             size: (width, height),
         };
-        std::thread::scope(|scope| {
+        let result = std::thread::scope(|scope| {
             for generator in self.helpers.iter_mut().take(helpers) {
                 // A helper that cannot be spawned leaves its jobs to the walk,
-                // which generates every slot it finds pending inline.
-                let _spawned =
-                    std::thread::Builder::new().spawn_scoped(scope, move || helper.work(generator));
+                // which generates every slot it finds pending inline — said
+                // once per process, so a thread-starved target's sequential
+                // frames are attributable rather than silent.
+                #[cfg(test)]
+                let finished = &finished;
+                if let Err(err) = std::thread::Builder::new().spawn_scoped(scope, move || {
+                    helper.work(generator);
+                    #[cfg(test)]
+                    finished.fetch_add(1, Ordering::Release);
+                }) {
+                    static SAID: AtomicBool = AtomicBool::new(false);
+                    if !SAID.swap(true, Ordering::Relaxed) {
+                        log::warn!(
+                            "frust-engine: could not spawn a strip helper thread ({err}); the walk \
+                             generates its share inline"
+                        );
+                    }
+                }
             }
             let merge = Merge {
                 jobs,
                 slots,
                 next: std::cell::Cell::new(0),
                 reached: &reached,
+                #[cfg(test)]
+                finished: &finished,
             };
             let result = walk(&merge);
             // Nothing the walk has passed is read again; whatever a helper is
             // still holding is finished and dropped as the scope joins.
             done.store(true, Ordering::Release);
             result
-        })
+        });
+        self.trim();
+        result
+    }
+
+    /// Give back what one unusually large frame left behind: slots past
+    /// [`MAX_RETAINED_SLOTS`] and, in the slots kept, capacity past
+    /// [`RETAINED_SLOT_STRIPS`] strips and [`RETAINED_SLOT_ALPHAS`] alpha bytes.
+    /// The helpers' generators are kept as they are: there is one per helper,
+    /// never more than the machine has threads.
+    fn trim(&mut self) {
+        self.slots.truncate(MAX_RETAINED_SLOTS);
+        for slot in &mut self.slots {
+            let storage = &mut slot
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .storage;
+            storage.strips.shrink_to(RETAINED_SLOT_STRIPS);
+            storage.alphas.shrink_to(RETAINED_SLOT_ALPHAS);
+        }
+    }
+
+    /// How many slots the pool holds, and the largest strip and alpha
+    /// capacity any of them keeps.
+    #[cfg(test)]
+    fn retained(&mut self) -> (usize, usize, usize) {
+        let mut strips = 0;
+        let mut alphas = 0;
+        for slot in &mut self.slots {
+            let storage = &slot
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .storage;
+            strips = strips.max(storage.strips.capacity());
+            alphas = alphas.max(storage.alphas.capacity());
+        }
+        (self.slots.len(), strips, alphas)
     }
 }
 
@@ -757,9 +862,21 @@ pub(crate) struct Merge<'p, 'a> {
     /// The first job the walk has not yet passed.
     next: std::cell::Cell<usize>,
     reached: &'p AtomicUsize,
+    /// How many helpers have returned from their work loop: what a test
+    /// waits on instead of a slot, since a lock taken on a slot is, to the
+    /// helper, the walk having reached that job.
+    #[cfg(test)]
+    finished: &'p AtomicUsize,
 }
 
 impl<'p> Merge<'p, '_> {
+    /// How many helper threads have finished their share of the plan — every
+    /// helper, once the walk is past the last job any of them could claim.
+    #[cfg(test)]
+    fn helpers_finished(&self) -> usize {
+        self.finished.load(Ordering::Acquire)
+    }
+
     /// The claim on the run planned for display-list command `command` drawn
     /// under `combined`, or `None` when none was planned or it was planned
     /// under a different transform.
@@ -910,13 +1027,16 @@ mod tests {
 
         let mut pool = Pool::default();
         let merged = pool.run(&plan, 1, level, (256, 256), |merge| {
+            // Waited for without touching a slot: a lock taken here is, to
+            // the helper, the walk having reached that job, and it stops.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-            while merge.slots.iter().any(|slot| {
-                slot.lock().unwrap_or_else(PoisonError::into_inner).state != SlotState::Ready
-            }) {
+            while merge.helpers_finished() < 1 {
                 assert!(std::time::Instant::now() < deadline, "the helper finished");
                 std::thread::yield_now();
             }
+            assert!(merge.slots.iter().all(|slot| {
+                slot.lock().unwrap_or_else(PoisonError::into_inner).state == SlotState::Ready
+            }));
             let mut merged = StripStorage::new(GenerationMode::Append);
             for job in &plan.jobs {
                 let claim = merge.claim(job.command, Affine::IDENTITY).expect("planned");
@@ -943,6 +1063,39 @@ mod tests {
         storage.alphas.push(0);
         assert!(!append_rebased(&run, &mut storage));
         assert!(storage.strips.is_empty());
+    }
+
+    /// One oversized frame does not size the pool for good: slots past the
+    /// bound go, and a kept slot gives back the capacity a huge run left in it.
+    #[test]
+    fn the_pool_is_trimmed_back_to_its_bounds_after_a_run() {
+        let mut pool = Pool::default();
+        pool.slots
+            .resize_with(MAX_RETAINED_SLOTS + 500, Mutex::default);
+        {
+            let storage = &mut pool.slots[0]
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .storage;
+            storage.strips.reserve(RETAINED_SLOT_STRIPS * 4);
+            storage.alphas.reserve(RETAINED_SLOT_ALPHAS * 4);
+        }
+        let (slots, strips, alphas) = pool.retained();
+        assert_eq!(slots, MAX_RETAINED_SLOTS + 500);
+        assert!(strips >= RETAINED_SLOT_STRIPS * 4 && alphas >= RETAINED_SLOT_ALPHAS * 4);
+
+        pool.trim();
+
+        let (slots, strips, alphas) = pool.retained();
+        assert_eq!(slots, MAX_RETAINED_SLOTS);
+        assert!(strips <= RETAINED_SLOT_STRIPS, "{strips} strips kept");
+        assert!(alphas <= RETAINED_SLOT_ALPHAS, "{alphas} alpha bytes kept");
+
+        // An empty run through the pool leaves it trimmed as well.
+        let scene = Scene::new();
+        let plan = plan(&scene, Affine::IDENTITY, Rect::new(0.0, 0.0, 8.0, 8.0));
+        pool.run(&plan, 1, Level::baseline(), (8, 8), |_| ());
+        assert_eq!(pool.retained().0, MAX_RETAINED_SLOTS);
     }
 
     #[test]

@@ -208,6 +208,10 @@ and each switch moves only its own span (off-quads / off-run-cache raise `glyphs
 `walk` alone and leaves S6 at 867 vs 885, below the helper threshold). Pixel 4a S1 sits at 355 MHz with `gpu_main` 13.89
 against 430 MHz and 12.76 in every quads-off arm while frame p50 fell 16.64 to 11.98 (as p2-04 saw); Pixel 4 S1 `upload` 428
 and `replay` 1193 follow the run cache's quad emission (293 / 903 cache off, 314 / 919 quads off, 431 / 1257 parallel off).
+Tails of the parallel walk (per-run p95, off-parallel to default): `submit` Pixel 4a 9.8 to 7.4 ms, Pixel 4 7.7 to 6.2;
+`total` Pixel 4a 17.2 to 13.4-13.9 in six runs but 17.0-18.4 in four whose swapchain `acquire` p95 reached 11.4-12.5 ms
+(pooled p95 17.15 vs 17.23), Pixel 4 8.7 to 7.0 (one run display-paced at 11.6); no power arm was run — see
+`engine-parallel-walk-power-unmeasured` in LIMITATIONS.md.
 
 ## Dev loop
 

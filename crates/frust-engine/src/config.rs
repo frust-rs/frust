@@ -264,12 +264,19 @@ fn parse_parallel_workers(raw: Option<String>) -> Option<usize> {
 pub fn parallel_min_cost() -> Option<u64> {
     static MIN_COST: OnceLock<Option<u64>> = OnceLock::new();
     *MIN_COST.get_or_init(|| {
-        env_str(
+        parse_parallel_min_cost(env_str(
             option_env!("FRUST_ENGINE_PARALLEL_MIN_COST"),
             std::env::var("FRUST_ENGINE_PARALLEL_MIN_COST").ok(),
-        )
-        .and_then(|s| s.trim().parse().ok())
+        ))
     })
+}
+
+/// Parses a raw `FRUST_ENGINE_PARALLEL_MIN_COST` value (already resolved by
+/// [`env_str`]). Unlike the worker count, zero is a value here — every frame
+/// with a planned command spawns — so only an unset or unparsable value is no
+/// override.
+fn parse_parallel_min_cost(raw: Option<String>) -> Option<u64> {
+    raw.and_then(|s| s.trim().parse().ok())
 }
 
 /// Whether the resident glyph-run cache is disabled via
@@ -455,6 +462,19 @@ mod tests {
         assert_eq!(parse_parallel_workers(Some("0".into())), None);
         assert_eq!(parse_parallel_workers(Some("two".into())), None);
         assert_eq!(parse_parallel_workers(None), None);
+    }
+
+    /// Zero is the one value that differs from the worker count: it is a
+    /// threshold every planned frame reaches, not an absent override.
+    #[test]
+    fn parallel_min_cost_parses_any_count_including_zero() {
+        assert_eq!(parse_parallel_min_cost(Some("8000".into())), Some(8000));
+        assert_eq!(parse_parallel_min_cost(Some(" 12 ".into())), Some(12));
+        assert_eq!(parse_parallel_min_cost(Some("0".into())), Some(0));
+        assert_eq!(parse_parallel_min_cost(Some("-1".into())), None);
+        assert_eq!(parse_parallel_min_cost(Some("many".into())), None);
+        assert_eq!(parse_parallel_min_cost(Some(String::new())), None);
+        assert_eq!(parse_parallel_min_cost(None), None);
     }
 
     /// The switch's own parsing rules, exercised through the combinator every

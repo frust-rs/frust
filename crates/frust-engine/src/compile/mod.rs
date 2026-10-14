@@ -715,9 +715,12 @@ impl SceneCompiler {
     /// compiler starts with ([`DEFAULT_PARALLEL_WORKERS`] capped by the
     /// machine, or one with it set), this decides it for one compiler. Takes
     /// effect from the next frame. The frame a compiler produces is the same
-    /// at every setting.
+    /// at every setting. Capped at the machine's thread count exactly as the
+    /// variable is — every helper is a thread spawned per frame and a strip
+    /// generator kept across them, so a count past the machine would only
+    /// pay for threads that cannot run.
     pub fn set_parallel_workers(&mut self, workers: usize) {
-        self.parallel_workers = workers.max(1);
+        self.parallel_workers = workers.clamp(1, parallel::available_threads());
     }
 
     /// How many threads generate a frame's strips, the calling thread
@@ -1063,7 +1066,12 @@ impl SceneCompiler {
         };
         if helpers > 0 && !plan.is_empty() && plan.cost() >= self.parallel_min_cost {
             // Moved out for the walk's duration: the helpers borrow it while
-            // the walk borrows the compiler.
+            // the walk borrows the compiler. It is put back on the normal
+            // return only; a helper panic propagates out of the scope and
+            // aborts the process (the workspace builds with `panic = "abort"`),
+            // so an unwinding build would run on with an empty pool, which is
+            // the sequential walk plus a fresh pool's allocations — slower,
+            // never wrong.
             let mut pool = std::mem::take(&mut self.pool);
             let level = self.level;
             pool.run(&plan, helpers, level, (width, height), |merge| {

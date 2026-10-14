@@ -461,7 +461,7 @@ fn every_cached_outline_glyph_lands_on_whole_pixels_in_every_subpixel_bin() {
 
     // Which bins the scene's glyph positions fall in, by `glifo`'s own rule:
     // the fractional device x, in quarters, rounded and held below four.
-    for (step, command) in scene.commands().iter().enumerate() {
+    for command in scene.commands() {
         let frust_scene::Command::GlyphRun(run) = command else {
             continue;
         };
@@ -470,14 +470,8 @@ fn every_cached_outline_glyph_lands_on_whole_pixels_in_every_subpixel_bin() {
             let fraction = x - x.floor();
             bins.insert(((fraction * 4.0).round() as u32).min(3));
         }
-        let _ = step;
     }
 
-    println!(
-        "glyph quads: {whole} of {atlas_draws} cached glyph draws land on whole pixels across \
-         subpixel bins {bins:?} — rect_frac hit ratio {:.1} %",
-        100.0 * f64::from(whole) / f64::from(atlas_draws.max(1))
-    );
     assert!(atlas_draws >= 16 * 4, "the scene's glyphs are all cached");
     assert_eq!(whole, atlas_draws);
     assert_eq!(bins.len(), 4, "every subpixel bin is exercised: {bins:?}");
