@@ -66,7 +66,19 @@
 //!
 //! - **Routed to the atlas.** `glifo` resolves each glyph against the policy's
 //!   [`GlyphAtlas`](glifo::GlyphAtlas), and a hit is one image draw sampling
-//!   the slot — no outline fetched, no path flattened, no coverage generated.
+//!   the slot — no outline fetched, no path flattened. A run whose every
+//!   glyph hit is cheaper still: each glyph is one rect instance over its slot
+//!   and the run shares one paint record per atlas layer (a *glyph quad*, see
+//!   [`backend`]'s module doc), unless `FRUST_ENGINE_NO_GLYPH_QUADS` or
+//!   [`SceneCompiler::set_glyph_quads`](crate::compile::SceneCompiler::set_glyph_quads)
+//!   turned quads off. A run drawn that way once is remembered with the slots
+//!   its glyphs resolved to, and on later frames it is drawn from them
+//!   without reaching `glifo` at all — its glyphs placed by `glifo`'s own
+//!   arithmetic, so on the same pixels and in the same subpixel buckets (see
+//!   [`ResidentPlan`], and `atlas_policy::ResidentRuns` for what keeps a
+//!   remembered slot and its LRU age true). `FRUST_ENGINE_NO_GLYPH_RUN_CACHE`
+//!   or [`SceneCompiler::set_glyph_run_cache`](crate::compile::SceneCompiler::set_glyph_run_cache)
+//!   sends every run back through `glifo`.
 //!   A miss allocates a slot out of the *shared* atlas allocator, records the
 //!   fills that rasterize it into that page's command recorder, and draws the
 //!   slot anyway; the recorded pages are replayed into the atlas by
@@ -123,10 +135,11 @@ pub(crate) mod atlas_policy;
 pub(crate) mod backend;
 pub(crate) mod color;
 
-use glifo::{AtlasCacher, FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder};
-use kurbo::Affine;
+use glifo::{AtlasCacher, FontEmbolden, Glyph, GlyphPrepCache, GlyphRunBuilder, ImageCache};
+use kurbo::{Affine, Point, Vec2};
 use peniko::FontData;
-use vello_common::paint::Paint;
+use peniko::color::{AlphaColor, Srgb};
+use vello_common::paint::{Paint, PaintType};
 use vello_common::strip_generator::StripGenerator;
 
 use frust_scene::GlyphRun;
@@ -139,7 +152,9 @@ use crate::config;
 pub(crate) use atlas_policy::AtlasPolicy;
 pub(crate) use atlas_policy::{RunKey, RunRoute};
 
-pub(crate) use backend::{GlyphRunOutcome, context_paint};
+use atlas_policy::{ResidentAnswer, ResidentIdentity};
+
+pub(crate) use backend::{GlyphQuadScratch, GlyphQuadTargets, GlyphRunOutcome, context_paint};
 
 use backend::{EngineGlyphSink, EngineTextBackend};
 
@@ -161,6 +176,10 @@ pub(crate) struct GlyphRunTargets<'a> {
     pub(crate) frame: &'a mut CompiledFrame,
     /// The frame's painter-order depth counter.
     pub(crate) depth: &'a mut DepthCounter,
+    /// Where the run's glyph quads are held back until it is known whether
+    /// every glyph of it was resident, or `None` for a run that may not draw
+    /// quads at all (see [`backend`]'s module doc).
+    pub(crate) quads: Option<GlyphQuadTargets<'a>>,
 }
 
 /// Draw `run` into `targets`, painted with the already-encoded `paint`.
@@ -176,22 +195,41 @@ pub(crate) struct GlyphRunTargets<'a> {
 /// through unchanged; `glifo` still applies its transform-shape half on top
 /// (see the module doc).
 ///
-/// `cacher` is [`atlas_policy`]'s answer for this run, already decided:
-/// [`AtlasCacher::Enabled`] over the policy's own entry map and the shared
-/// atlas allocator for a run it routed to the atlas, [`AtlasCacher::Disabled`]
+/// `atlas` is [`atlas_policy`]'s answer for this run, already decided: the
+/// policy's own entry map and the shared atlas allocator for a run it routed
+/// to the atlas — handed to `glifo` as [`AtlasCacher::Enabled`] — and `None`
 /// for one it routed to outlines. Nothing here re-decides it — the
 /// classification happens once, before the brush is even encoded, so a run
-/// cannot be routed one way by the policy and drawn the other.
+/// cannot be routed one way by the policy and drawn the other. The entry map
+/// is borrowed rather than handed over as a cacher so its miss count can be
+/// read on both sides of the run: a run that missed nothing draws its held-back
+/// glyph quads as quads, one that missed draws them the general way (see
+/// [`backend`]'s module doc).
+///
+/// `resident` lets a run the atlas serves be drawn out of the policy's
+/// resident-run cache instead of through `glifo` — see [`ResidentPlan`] for
+/// when that is possible and why it draws exactly what `glifo` would. A run the
+/// cache cannot resolve whole goes to `glifo` as before, and a run `glifo` then
+/// draws without a miss of its own, after the cache missed it, is refused the
+/// cache from then on.
 ///
 /// Returns what the run cost: how many glyphs became draws, and how many were
 /// refused.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the run, its two transforms' worth of placement, its brush in \
+              both encodings and the two routing switches are each read by a \
+              different half of the lowering; grouping them would only move \
+              the list"
+)]
 pub(crate) fn lower_glyph_run(
     run: &GlyphRun,
     transform: Affine,
     paint: Paint,
     context_brush: &peniko::Brush,
     hint: bool,
-    cacher: AtlasCacher<'_>,
+    mut atlas: Option<(&mut AtlasPolicy, &mut ImageCache)>,
+    resident: bool,
     targets: GlyphRunTargets<'_>,
 ) -> GlyphRunOutcome {
     let GlyphRunTargets {
@@ -200,17 +238,46 @@ pub(crate) fn lower_glyph_run(
         prep,
         frame,
         depth,
+        quads,
     } = targets;
 
+    let context = context_paint(context_brush);
+    // Planned before the sink takes the context paint over.
+    let plan = if resident && atlas.is_some() && quads.is_some() {
+        ResidentPlan::new(run, transform, hint, &context)
+    } else {
+        None
+    };
     let mut sink = EngineGlyphSink::new(
         generator,
         clips,
         frame,
         depth,
         paint,
-        context_paint(context_brush),
+        context,
+        // Quads only ever come out of the atlas.
+        quads.filter(|_| atlas.is_some()),
     );
 
+    let mut missed = None;
+    if let (Some(plan), Some((policy, _))) = (&plan, atlas.as_mut()) {
+        match sink.draw_resident(policy, plan) {
+            ResidentAnswer::Resolved => return sink.outcome(),
+            ResidentAnswer::Missed(handle) => missed = Some(handle),
+            ResidentAnswer::Bypassed => {}
+        }
+    }
+
+    let misses = |atlas: &Option<(&mut AtlasPolicy, &mut ImageCache)>| {
+        atlas
+            .as_ref()
+            .map(|(policy, _)| policy.atlas().cache_misses())
+    };
+    let misses_before = misses(&atlas);
+    let cacher = match &mut atlas {
+        Some((policy, images)) => AtlasCacher::Enabled(policy.atlas_mut(), images),
+        None => AtlasCacher::Disabled,
+    };
     GlyphRunBuilder::new(
         run.font.font().clone(),
         transform,
@@ -229,8 +296,137 @@ pub(crate) fn lower_glyph_run(
         x: glyph.x,
         y: glyph.y,
     }));
+    let all_resident = misses(&atlas) == misses_before;
+    sink.finish_quads(all_resident);
+    if let (Some(handle), true, Some((policy, _))) = (missed, all_resident, atlas.as_mut()) {
+        policy.refuse_resident_run(handle);
+    }
 
     sink.outcome()
+}
+
+/// What drawing one run out of the resident-run cache needs, derived once per
+/// run exactly as `glifo` derives it.
+///
+/// The cache remembers *which slot* each glyph of a run resolved to, per
+/// subpixel bucket; everything about *where* the glyph lands is recomputed
+/// every frame from the run's transform. That recomputation is `glifo`'s own
+/// arithmetic, operation for operation, so a glyph lands on the pixel and in
+/// the bucket `glifo` would put it in — not an approximation of them:
+///
+/// - the run is *absorbed* (the scale moved into the font size) under
+///   `glifo`'s own predicate, so only a transform
+///   [`atlas_policy::absorbed_scale`] accepts has a plan, and the font size
+///   the glyphs are keyed at is `font_size * d` in `f32`, as `glifo` computes
+///   it;
+/// - a glyph's position is mapped through the run transform's linear part,
+///   then translated by the effective transform, then mirrored vertically;
+///   its vertical origin is rounded when hinted;
+/// - it is cached only when `glifo` would cache it: a fill under a solid paint
+///   at a size inside the cache's ceiling.
+///
+/// The colour is the run's solid context colour — the tint `glifo` hands the
+/// sink for every cached outline glyph, and the reason the cache does not key
+/// on it.
+#[derive(Debug)]
+pub(crate) struct ResidentPlan<'r> {
+    /// The run's glyphs.
+    glyphs: &'r [frust_scene::Glyph],
+    /// The run transform's linear part, which positions each glyph.
+    positioning: Affine,
+    /// The transform each positioned glyph is placed through.
+    effective: Affine,
+    /// Whether the run is hinted — its vertical origins rounded and its keys
+    /// marked hinted.
+    hinted: bool,
+    /// The run's identity in the cache.
+    identity: ResidentIdentity,
+    /// The run's solid colour, which every glyph is tinted with.
+    color: AlphaColor<Srgb>,
+}
+
+impl<'r> ResidentPlan<'r> {
+    /// The plan for drawing `run` under `transform`, or `None` when `glifo`
+    /// would not draw it out of the atlas cache at all.
+    ///
+    /// `hint` is the compiler's hinting choice, as handed to `glifo`. Whether
+    /// `glifo` then really hints depends on whether the face yields a hinting
+    /// instance at that size, which only `glifo` can see; a plan assumes it
+    /// does, and a face that does not is caught by the cache itself (its
+    /// hinted keys never resolve, and the run is refused once `glifo` has drawn
+    /// it without a miss — see [`AtlasPolicy::refuse_resident_run`]).
+    pub(crate) fn new(
+        run: &'r GlyphRun,
+        transform: Affine,
+        hint: bool,
+        context: &PaintType,
+    ) -> Option<Self> {
+        // `glifo` tints a cached outline with the context colour and caches
+        // none under any other paint.
+        let PaintType::Solid(color) = context else {
+            return None;
+        };
+        // `glifo` composes the run transform with its (absent) glyph transform
+        // before deciding anything.
+        let full = transform * Affine::IDENTITY;
+        atlas_policy::absorbed_scale(full)?;
+        let [_, _, t_c, t_d, t_e, t_f] = full.as_coeffs();
+        let size = run.font_size * t_d as f32;
+        // `glifo` caches only at or under its ceiling, which a NaN size is
+        // not.
+        if size.is_nan() || size > atlas_policy::MAX_CACHED_FONT_SIZE {
+            return None;
+        }
+        let effective = if hint {
+            Affine::new([1.0, 0.0, t_c / t_d, 1.0, t_e, t_f])
+        } else {
+            Affine::new([1.0, 0.0, 0.0, 1.0, t_e, t_f])
+        };
+        let font = run.font.font();
+        Some(Self {
+            glyphs: &run.glyphs,
+            positioning: transform.with_translation(Vec2::ZERO),
+            effective,
+            hinted: hint,
+            identity: ResidentIdentity {
+                font_id: font.data.id(),
+                font_index: font.index,
+                size,
+                hinted: hint,
+            },
+            color: *color,
+        })
+    }
+
+    /// The run's glyphs.
+    pub(crate) fn glyphs(&self) -> &'r [frust_scene::Glyph] {
+        self.glyphs
+    }
+
+    /// The run's identity in the cache.
+    pub(crate) fn identity(&self) -> ResidentIdentity {
+        self.identity
+    }
+
+    /// The colour every glyph of the run is tinted with.
+    pub(crate) fn color(&self) -> AlphaColor<Srgb> {
+        self.color
+    }
+
+    /// Where `glifo` places `glyph`'s origin on the device: the translation of
+    /// its outline transform, whose fraction keys the glyph's subpixel bucket
+    /// and whose floor, plus the slot's bearing, is the corner its atlas
+    /// rectangle is drawn at.
+    pub(crate) fn origin(&self, glyph: &frust_scene::Glyph) -> (f64, f64) {
+        let translation = self.positioning * Point::new(f64::from(glyph.x), f64::from(glyph.y));
+        let mut coeffs = (Affine::translate(translation.to_vec2()) * self.effective)
+            .pre_scale_non_uniform(1.0, -1.0)
+            .as_coeffs();
+        if self.hinted {
+            coeffs[5] = coeffs[5].round();
+        }
+        (coeffs[4], coeffs[5])
+    }
 }
 
 /// The glyph-atlas policy for `images`' allocator.
@@ -264,6 +460,66 @@ pub(crate) fn glyph_atlas_policy(images: &ImageResidency) -> AtlasPolicy {
         images.allocator(),
         images.is_disabled() || config::atlas_disabled(),
     )
+}
+
+/// What the font gate answered for one face: whether it is readable at all
+/// ([`font_is_readable`]) and whether it carries colour glyphs
+/// ([`font_has_color_glyphs`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FaceFacts {
+    /// [`font_is_readable`]'s answer.
+    pub(crate) readable: bool,
+    /// [`font_has_color_glyphs`]'s answer.
+    pub(crate) color: bool,
+}
+
+/// How many faces [`FontFacts`] remembers: a frame of mixed scripts draws a
+/// handful of fallback faces between its runs, and a memo of one would be
+/// re-read at every script change.
+const REMEMBERED_FACES: usize = 8;
+
+/// The font gate's answers for the faces drawn most recently, so a frame of
+/// many short runs over a few faces reads each face's table directory once
+/// rather than once per run and check.
+///
+/// Keyed by the blob's process-unique id and the collection index — the same
+/// pair `glifo` keys its caches on. A blob's bytes never change under its id
+/// (see [`FontData`]), so an answer cannot go stale; a face that is not
+/// remembered is simply read again, into the slot used least recently.
+#[derive(Debug, Default)]
+pub(crate) struct FontFacts {
+    /// `(blob id, index, answers, last use)` per remembered face.
+    faces: [Option<(u64, u32, FaceFacts, u64)>; REMEMBERED_FACES],
+    /// A use counter, for the least-recently-used replacement.
+    uses: u64,
+}
+
+impl FontFacts {
+    /// The gate's answers for `font`, read from its table directory only when
+    /// the face is not remembered.
+    pub(crate) fn of(&mut self, font: &FontData) -> FaceFacts {
+        let id = font.data.id();
+        self.uses = self.uses.wrapping_add(1);
+        let uses = self.uses;
+        for (face_id, index, facts, used) in self.faces.iter_mut().flatten() {
+            if *face_id == id && *index == font.index {
+                *used = uses;
+                return *facts;
+            }
+        }
+        let facts = FaceFacts {
+            readable: font_is_readable(font),
+            color: font_has_color_glyphs(font),
+        };
+        if let Some(slot) = self
+            .faces
+            .iter_mut()
+            .min_by_key(|face| face.map_or(0, |(_, _, _, used)| used))
+        {
+            *slot = Some((id, font.index, facts, uses));
+        }
+        facts
+    }
 }
 
 /// The OpenType table directory's own fixed header length.

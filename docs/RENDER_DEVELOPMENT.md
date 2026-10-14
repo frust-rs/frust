@@ -69,7 +69,18 @@ above):**
 | `FRUST_ENGINE_NO_PASS_MERGE=1` | Records the clear and the opaque strips as passes of their own ahead of every round, and every surface round in a pass of its own, instead of the one-pass surface opening. `EngineRenderer::set_pass_merge` is the programmatic counterpart; `last_frame_passes` shows which arm a frame took. | Wired |
 | `FRUST_ENGINE_IMAGE_SAMPLER` | On by default: bilinear atlas images use the hardware sampler program family. `0` or `false` selects the manual four-`textureLoad` family, pixel-identical to the engine before the sampler. Read once per process; `EngineRenderer::with_image_sampler` picks per renderer. `engine_goldens` are meant to run in both arms; the WebGL2 `wasm_goldens` re-run with the sampler family as default is still owed. | Wired |
 | `FRUST_ENGINE_DOWNLEVEL=1` | Rehearses the WebGL2/GLES3.0 limit ceiling (`downlevel_webgl2_defaults()`) against a desktop adapter — `frust-gpu`'s `TierCaps`/device-request path only (see GPU Substrate below). A real browser measurement now exists too (`examples/web-spike/RESULTS.md` §§ 16-17): Chrome WebGL2 (`Backend::Gl`/ANGLE) renders shapes, shaped text, images, gradients, blur and layers pixel-correct against the same Chrome WebGPU arm, after the atlas-array workaround (`engine-webgl2-atlas-target` in LIMITATIONS.md) landed. | Wired |
+| `FRUST_ENGINE_NO_GLYPH_QUADS=1` | Draws a cached atlas glyph the general way (one image record and one generated rectangle per glyph) instead of as a `PaintClass::Glyph` quad — the Phase 2 glyph-quad off-arm. `SceneCompiler::set_glyph_quads` is the per-compiler counterpart. | Wired |
+| `FRUST_ENGINE_NO_GLYPH_RUN_CACHE=1` | Disables the resident glyph-run cache, so every run goes through `glifo`'s per-glyph probe again (quads stay on unless also switched off). `SceneCompiler::set_glyph_run_cache`; `resident_glyph_run_count` reports the population. | Wired |
+| `FRUST_ENGINE_NO_PARALLEL=1` | The sequential strip walk: no planning pass, no helper thread — the parallel-walk off-arm and its revert path. Wins over the two knobs below. `SceneCompiler::set_parallel_workers(1)` per compiler. | Wired |
+| `FRUST_ENGINE_PARALLEL_WORKERS=<n>` | Threads generating a frame's strips, the walk included; default 3, capped by `available_parallelism`; `0` or unparsable is no override. `SceneCompiler::set_parallel_workers` (capped at `MAX_PARALLEL_WORKERS` 8 rather than the machine). | Wired |
+| `FRUST_ENGINE_PARALLEL_MIN_COST=<n>` | Planned-cost threshold below which no helper is spawned; default `DEFAULT_PARALLEL_MIN_COST` (8000, measured on the Pixel 4a — a spawn+join costs about 130 us there). `0` hands every planned frame to the helpers, which is how the goldens are run through them. `SceneCompiler::set_parallel_min_cost`. | Wired |
 | `FRUST_ENGINE_NO_LAYERS` / `FRUST_ENGINE_NO_POOL` / `FRUST_ENGINE_MAX_TEX=<n>` | Parsed and cached (`crates/frust-engine/src/config.rs`) but consulted by nothing yet — reserved for the layer-cache/resource-pool/texture-ceiling subsystems that will read them. | Reserved (no effect) |
+
+Every `FRUST_ENGINE_*` knob is read once per process and cached (`config.rs`'s `OnceLock` readers): a
+runtime variable wins over the build-time `option_env!` value a `frust build --define` bakes in, and
+neither can be toggled after the first read — a per-renderer or per-compiler A/B uses the programmatic
+counterpart named in its row. A `--define` left in a build is the trap to check when an arm will not
+switch.
 
 On Adreno the measured `gpu_main` moves with the governor's DCVS clock choice, so A/B GPU work with
 the kgsl `gpuclk`/`gpubusy` counters beside the timing (readable on the Pixel 4a, not the Pixel 4);

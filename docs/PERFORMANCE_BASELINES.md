@@ -168,6 +168,51 @@ readable, so the only clock evidence is the Pixel 4a's 347 vs 698 Mcyc/s; no S4 
 7.21 to 2.69, S6 13.02 to 8.79; Pixel 4 S4 2.02 to 0.90, S6 7.32 to 3.65). S1 atlas counters moved with the
 frame rate: Pixel 4a replays 50 / misses 126 / evictions 133 per window (before 37 / 66 / 69), Pixel 4 41 / 86 / 97.
 
+### After Phase 2
+
+Re-captured 2026-10-14 from `feature/frust-fast-p2` (c61ee81a: Phase 1 + glyph quads, resident glyph-run cache, parallel
+strip walk), same protocol (default build, S1 / S2 / S6 12x30 s, S3 4x20, first two runs discarded — one for S3 — same
+fairness warnings, clocks unpinned); every scenario started at 32.5-34.0 C except the Pixel 4 default S2 (34.2 C after the
+gate's 10-minute wait). Pixel 4a `kgsl-3d0` at 1 Hz, median clock / busy Mcyc/s: S1 355 MHz / 311 (86 % busy), S2 180 / 106,
+S3 180 / 37, S6 180 / 58; every quads-off arm ran S1 at 430 / 347.
+
+| Phone / scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | walk / glyphs / upload / replay / instances | draws / strips / alphas |
+|---|---|---|---|---|---|
+| Pixel 4a S1 | 11.98 / 17.15 | 5.88 | 13.89 / 14.17 | 2111 / 373 / 554 / 1244 / 156 | 536 / 8,699 / 349,296 |
+| Pixel 4a S2 | 9.95 / 12.47 | 3.43 | 10.61 / 11.03 | 870 / 303 / 401 / 0.6 / 102 | 797 / 2,492 / 67,904 |
+| Pixel 4a S3 | 11.68 / 16.20 | 4.41 | 3.10 / 3.40 | 640 / 274 / 401 / 0.9 / 82 | 356 / 424 / 11,392 |
+| Pixel 4a S6 | 12.63 / 17.89 | 4.83 | 4.90 / 5.33 | 885 / 459 / 429 / 0.9 / 108 | 512 / 424 / 11,424 |
+| Pixel 4 S1 | 5.87 / 11.67 | 4.93 | 7.34 / 7.67 | 1862 / 254 / 428 / 1193 / 136 | 525 / 8,284 / 338,240 |
+| Pixel 4 S2 | 5.01 / 6.80 | 2.98 | 2.69 / 2.75 | 814 / 287 / 330 / 0.3 / 80 | 796 / 2,446 / 72,144 |
+| Pixel 4 S3 | 4.40 / 11.90 | 3.35 | 1.09 / 1.18 | 543 / 231 / 279 / 0.4 / 73 | 355 / 384 / 11,136 |
+| Pixel 4 S6 | 5.01 / 5.70 | 3.73 | 1.48 / 1.51 | 728 / 386 / 319 / 0.4 / 97 | 508 / 384 / 11,136 |
+
+Kill switches (all three off as the all-off arm at the full matrix, then one at a time at S1 / S6 6x20; `glyphs` is a subset of `walk`):
+
+| Arm / scenario | 4a walk / glyphs / strips | 4a gpu_main | 4a clock / busy | P4 walk / glyphs / strips | P4 gpu_main | P4 total p50 |
+|---|---|---|---|---|---|---|
+| all-off S1 | 6858 / 3940 / 14,783 | 12.76 | 430 / 347 | 8255 / 6612 / 14,077 (*) | 8.12 | 11.03 (*) |
+| all-off S6 | 3048 / 2779 / 8,926 | 9.11 | 267 / 150 | 2691 / 2489 / 8,919 | 3.65 | 6.90 |
+| off-quads S1 | 5164 / 3899 / 14,790 | 12.76 | 430 / 347 | 7280 / 6632 / 14,081 | 8.12 | 10.09 |
+| off-run-cache S1 | 4592 / 3277 / 8,687 | 11.90 | 430 / 318 | 6849 / 6196 / 8,272 | 7.33 | 9.63 |
+| off-parallel S1 | 4000 / 413 / 8,686 | 11.75 | 430 / 321 | 3290 / 253 / 8,273 | 7.37 | 7.46 |
+
+(*) cool runs 3-5 of the two Pixel 4 all-off S1 captures, which throttled from run 6 (34.0 to 37.3-38.1 C, frames/run 2640
+to 2040; their 12-run walk / glyphs 10928 / 8750 and 9732 / 7788 are the p0-03 warm row). Acceptance: Pixel 4a S1 walk 2111
+<= 3000 and glyphs 373 <= 1200 MET (after Phase 1: 6813 / 3899); Pixel 4a S6 enc `total_us` 1870 <= 2000 MET (span sum 1423;
+the harness `encode_us` 0.18 is the shell step, the engine encode sits inside `submit`); Pixel 4 S1 enc `total_us` 3798 <= 3000
+NOT MET (walk 1862, replay 1193, upload 428, instances 136; all-off 9750; frame p50 5.87); S2 / S3 not worse MET (`gpu_main`
+Pixel 4a 17.00 to 10.61 and 10.35 to 3.10, Pixel 4 8.00 to 2.69 and 5.02 to 1.09). The all-off arm reproduces After Phase 1
+within 1-4 % (4a S1 12.76 / 6858 / 3940 vs 12.75 / 6813 / 3899; Pixel 4 cool S1 11.03 / 8255 / 6612 vs 11.15 / 8238 / 6593)
+and each switch moves only its own span (off-quads / off-run-cache raise `glyphs` and `walk` with it, off-parallel raises
+`walk` alone and leaves S6 at 867 vs 885, below the helper threshold). Pixel 4a S1 sits at 355 MHz with `gpu_main` 13.89
+against 430 MHz and 12.76 in every quads-off arm while frame p50 fell 16.64 to 11.98 (as p2-04 saw); Pixel 4 S1 `upload` 428
+and `replay` 1193 follow the run cache's quad emission (293 / 903 cache off, 314 / 919 quads off, 431 / 1257 parallel off).
+Tails of the parallel walk (per-run p95, off-parallel to default): `submit` Pixel 4a 9.8 to 7.4 ms, Pixel 4 7.7 to 6.2;
+`total` Pixel 4a 17.2 to 13.4-13.9 in six runs but 17.0-18.4 in four whose swapchain `acquire` p95 reached 11.4-12.5 ms
+(pooled p95 17.15 vs 17.23), Pixel 4 8.7 to 7.0 (one run display-paced at 11.6); no power arm was run — see
+`engine-parallel-walk-power-unmeasured` in LIMITATIONS.md.
+
 ## Dev loop
 
 Measured baseline: default-config incremental `cargo build` medians 0.89s; edit-to-first-frame medians ~263ms once built. An alternate linker and `cranelift` both measured worse, so **no fast-dev template recipe ships** — re-run `scripts/devloop-measure.sh` if that changes. Measured 2026-09-25 (i5-12600, Linux): a watched relaunch's incremental build took 1.29s, matching the baseline above (`frust run --watch`, TUI `R`/`W`; see [DEVELOPMENT.md](DEVELOPMENT.md) § Dev Loop).

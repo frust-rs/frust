@@ -28,21 +28,23 @@
 //!
 //! | State | Classes served | Variants |
 //! |---|---|---|
-//! | [`EnginePipeline::StripIntermediate`] | all seven | 7 |
-//! | [`EnginePipeline::StripAlpha`] | all seven | 7 |
-//! | [`EnginePipeline::StripDepthAlpha`] | all seven | 7 |
-//! | [`EnginePipeline::StripOpaque`] | solid, gradient, image, image-filtered, Uber | 5 |
+//! | [`EnginePipeline::StripIntermediate`] | all eight | 8 |
+//! | [`EnginePipeline::StripAlpha`] | all eight | 8 |
+//! | [`EnginePipeline::StripDepthAlpha`] | all eight | 8 |
+//! | [`EnginePipeline::StripOpaque`] | solid, gradient, image, image-filtered, glyph, Uber | 6 |
 //! | [`EnginePipeline::StripDestOut`] | solid, Uber | 2 |
 //! | [`EnginePipeline::StripDepthDestOut`] | solid, Uber | 2 |
 //! | clear, copy, filter | their own program | 3 |
 //!
-//! — [`VARIANT_COUNT`], 33 at most. A run of a class its state does not serve
-//! is drawn with Uber ([`EnginePipeline::fold_class`]), which draws everything.
-//! Variants are created lazily, on the first frame that draws a run of that
-//! class through that state; [`warm_up_descs`] lists the nine Uber states plus
-//! [`WARM_CLASSES`] across [`WARM_CLASS_STATES`] — the solid, gradient and image
-//! programs of the two depth-tested surface states, which is what an ordinary
-//! frame draws through — so steady state compiles nothing.
+//! — [`VARIANT_COUNT`], 37 at most. The glyph class is served wherever an
+//! image is, since a glyph quad is an atlas draw like any other. A run of a
+//! class its state does not serve is drawn with Uber
+//! ([`EnginePipeline::fold_class`]), which draws everything. Variants are
+//! created lazily, on the first frame that draws a run of that class through
+//! that state; [`warm_up_descs`] lists the nine Uber states plus
+//! [`WARM_CLASSES`] across [`WARM_CLASS_STATES`] — the solid, gradient, image
+//! and glyph programs of the two depth-tested surface states, which is what an
+//! ordinary frame draws through — so steady state compiles nothing.
 //!
 //! Every strip variant, Uber included, is built against one explicit pipeline
 //! layout ([`crate::gpu::bindings::strip_pipeline_layout`]) instead of the
@@ -212,12 +214,13 @@ pub const FS_MAIN: &str = "fs_main";
 const STRIP_BIND_GROUPS: usize = STRIP_BIND_GROUP_COUNT;
 
 /// The classes whose programs are warmed up ahead of the first frame, beside
-/// the nine Uber states: the solid, gradient and image programs — what every
-/// ordinary frame's surface passes draw.
-pub const WARM_CLASSES: [PaintClass; 3] = [
+/// the nine Uber states: the solid, gradient, image and glyph programs — what
+/// every ordinary frame's surface passes draw, settled text included.
+pub const WARM_CLASSES: [PaintClass; 4] = [
     PaintClass::SolidCoverage,
     PaintClass::Gradient,
     PaintClass::Image,
+    PaintClass::Glyph,
 ];
 
 /// The strip states [`WARM_CLASSES`] are warmed up across: the two
@@ -461,14 +464,18 @@ impl EnginePipeline {
     /// else (a punch erases with a solid source), and the opaque state serves
     /// the classes a fully covered opaque span can have — solid, gradient,
     /// either image class — but never a composite or a blurred rectangle,
-    /// neither of which is ever opaque. A non-strip pipeline serves only Uber, which for it
-    /// means "its own program".
+    /// neither of which is ever opaque. The glyph class is served wherever an
+    /// image is. A non-strip pipeline serves only Uber, which for it means
+    /// "its own program".
     #[must_use]
     pub const fn serves(self, class: PaintClass) -> bool {
         match class {
             PaintClass::Uber => true,
             PaintClass::SolidCoverage => self.is_strip(),
-            PaintClass::Gradient | PaintClass::Image | PaintClass::ImageFiltered => matches!(
+            PaintClass::Gradient
+            | PaintClass::Image
+            | PaintClass::ImageFiltered
+            | PaintClass::Glyph => matches!(
                 self,
                 Self::StripIntermediate
                     | Self::StripAlpha
@@ -907,18 +914,18 @@ mod tests {
     }
 
     #[test]
-    fn the_class_axis_is_folded_to_thirty_three_variants() {
-        assert_eq!(VARIANT_COUNT, 33);
+    fn the_class_axis_is_folded_to_thirty_seven_variants() {
+        assert_eq!(VARIANT_COUNT, 37);
         let served = |pipeline: EnginePipeline| {
             PaintClass::ALL
                 .iter()
                 .filter(|class| pipeline.serves(**class))
                 .count()
         };
-        assert_eq!(served(EnginePipeline::StripIntermediate), 7);
-        assert_eq!(served(EnginePipeline::StripAlpha), 7);
-        assert_eq!(served(EnginePipeline::StripDepthAlpha), 7);
-        assert_eq!(served(EnginePipeline::StripOpaque), 5);
+        assert_eq!(served(EnginePipeline::StripIntermediate), 8);
+        assert_eq!(served(EnginePipeline::StripAlpha), 8);
+        assert_eq!(served(EnginePipeline::StripDepthAlpha), 8);
+        assert_eq!(served(EnginePipeline::StripOpaque), 6);
         assert_eq!(served(EnginePipeline::StripDestOut), 2);
         assert_eq!(served(EnginePipeline::StripDepthDestOut), 2);
         for pipeline in [

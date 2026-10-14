@@ -19,7 +19,8 @@
 // reads color data from, the paint type says how it uses that data, and the
 // paint texture id locates the encoded paint record in
 // `encoded_paints_texture`. `StripInstance::payload` then carries either a
-// packed color, an [x, y] sample coordinate, or a layer texture origin. See
+// packed color, an [x, y] sample coordinate, a layer texture origin, or a
+// glyph quad's atlas texel. See
 // the `StripInstance` comment below for the full bit layout.
 //
 // This module has six render-state variants over the same two entry points
@@ -42,6 +43,8 @@
 //   GRADIENT       — linear, radial and sweep gradients
 //   BLURRED_RECT   — the blurred rounded rectangle
 //   LAYER          — the layer colour source a composite reads its page through
+//   GLYPH          — the glyph quad: one nearest atlas load at the texel the
+//                    payload names, no paint transform and no extend mode
 //
 // One more feature is not a class but a program FAMILY, chosen per renderer
 // (`FRUST_ENGINE_IMAGE_SAMPLER`, on unless set to 0):
@@ -71,6 +74,8 @@ const PAINT_TYPE_LINEAR_GRADIENT: u32 = 2u;
 const PAINT_TYPE_RADIAL_GRADIENT: u32 = 3u;
 const PAINT_TYPE_SWEEP_GRADIENT: u32 = 4u;
 const PAINT_TYPE_BLURRED_ROUNDED_RECT: u32 = 5u;
+// A cached glyph drawn as one rect instance; see the decision tree below.
+const PAINT_TYPE_GLYPH: u32 = 6u;
 
 // Paint texture index mask (the low 26 bits of the paint field).
 const PAINT_TEXTURE_INDEX_MASK: u32 = 0x03FFFFFFu;
@@ -118,6 +123,7 @@ struct Config {
 //   widths_or_rect_height | [width, dense_width]              | [width, height] (both snapped)
 //   col_idx_or_rect_frac  | Alpha column index                | Packed AA edge fractions (4 x u8)
 //   payload               | Color / scene coords / layer xy   | Color / scene coords / layer xy
+//                         |                                   | / glyph atlas xy
 //   paint_and_rect_flag   | Paint encoding                    | Paint encoding | RECT_STRIP_FLAG
 //
 // `paint_and_rect_flag` bit layout:
@@ -127,7 +133,8 @@ struct Config {
 //
 //     When color_source = 0 (COLOR_SOURCE_PAYLOAD):
 //       - Bits 26-28: `paint_type` (0 = solid, 1 = image, 2 = linear gradient,
-//         3 = radial gradient, 4 = sweep gradient, 5 = blurred rounded rect)
+//         3 = radial gradient, 4 = sweep gradient, 5 = blurred rounded rect,
+//         6 = glyph quad)
 //       - Bits 0-25:
 //         - If paint_type = 0: unused
 //         - If paint_type >= 1: `paint_texture_idx`
@@ -148,9 +155,14 @@ struct Config {
 // |-- paint_type = 2/3/4 (LINEAR / RADIAL / SWEEP gradient)
 // |   |-- payload = [x, y] scene coordinates (packed as u16s)
 // |   \-- bits 0-25 = paint_texture_idx
-// \-- paint_type = 5 (PAINT_TYPE_BLURRED_ROUNDED_RECT)
-//     |-- payload = [x, y] scene coordinates (packed as u16s)
-//     \-- bits 0-25 = paint_texture_idx
+// |-- paint_type = 5 (PAINT_TYPE_BLURRED_ROUNDED_RECT)
+// |   |-- payload = [x, y] scene coordinates (packed as u16s)
+// |   \-- bits 0-25 = paint_texture_idx
+// \-- paint_type = 6 (PAINT_TYPE_GLYPH), rect strips only
+//     |-- payload = [x, y] atlas texel under the rect's top-left corner
+//     |   (packed as u16s)
+//     \-- bits 0-25 = paint_texture_idx of the glyph run's record, read for
+//         its atlas layer and tint alone
 //
 // color_source = 1 (COLOR_SOURCE_LAYER) - use the rendered layer texture
 // |-- payload = [x, y] source layer texture origin (packed as u16s)
@@ -342,8 +354,10 @@ fn vs_main(
             out.sample_xy = get_image_translate(image_texel1, image_texel2)
                 + get_image_offset(image_texel0)
                 + get_image_transform(image_texel0, image_texel1) * pos;
-        } else if paint_type == PAINT_TYPE_LINEAR_GRADIENT || paint_type == PAINT_TYPE_RADIAL_GRADIENT || paint_type == PAINT_TYPE_SWEEP_GRADIENT || paint_type == PAINT_TYPE_BLURRED_ROUNDED_RECT {
+        } else if paint_type == PAINT_TYPE_LINEAR_GRADIENT || paint_type == PAINT_TYPE_RADIAL_GRADIENT || paint_type == PAINT_TYPE_SWEEP_GRADIENT || paint_type == PAINT_TYPE_BLURRED_ROUNDED_RECT || paint_type == PAINT_TYPE_GLYPH {
             // The gradient transform is likewise applied in global view space.
+            // A glyph quad's payload is already an atlas position, so the same
+            // interpolation walks the glyph's slot texel for texel.
             out.sample_xy = vec2<f32>(
                 f32(scene_strip.x) + x * f32(width),
                 f32(scene_strip.y) + y * f32(height)
@@ -617,6 +631,31 @@ fn fs_main(
                 blurred_texel2,
                 blurred_texel3,
                 blurred_texel4,
+            );
+//#endif
+//#if GLYPH
+        } else if paint_type == PAINT_TYPE_GLYPH {
+            // A glyph quad lands on whole pixels and its slot holds the glyph
+            // already rasterized at the run's subpixel offset, so a fragment
+            // centre maps to exactly one atlas texel: the one `textureLoad`
+            // the image path's nearest arm would reach through the transform,
+            // taken here with no transform and no extend mode at all. The
+            // record is the run's, read for its atlas layer and tint alone.
+            let paint_tex_idx = paint_and_rect_flag & PAINT_TEXTURE_INDEX_MASK;
+            let glyph_texel0 = load_encoded_paint_texel(paint_tex_idx, 0u);
+            let glyph_texel2 = load_encoded_paint_texel(paint_tex_idx, 2u);
+            let glyph_tint = unpack4x8unorm(glyph_texel2.y);
+            let glyph_multiply = glyph_texel2.z == TINT_MODE_MULTIPLY;
+            let glyph_color = textureLoad(
+                atlas_texture_array,
+                vec2<u32>(sample_xy),
+                i32(get_image_atlas_index(glyph_texel0)),
+                0,
+            );
+            final_color = alpha * select(
+                glyph_tint * glyph_color.a,
+                glyph_color * glyph_tint,
+                glyph_multiply
             );
 //#endif
         }

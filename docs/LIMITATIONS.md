@@ -6330,21 +6330,37 @@ and every scenario the gap affects still self-reports through its inline op rows
 **Trigger for removal**: re-siting the affected sub-markers onto the UI thread, or a route that
 forwards an off-thread marker onto the next frame some other way.
 
-### `engine-text-glyph-lowering-dominates-encode` — text-heavy CPU encode cost is dominated by glyph lowering even on atlas hits
+### `engine-parallel-walk-power-unmeasured` — the parallel strip walk spawns helper threads per frame; its tails are measured, its power cost is not
 
-**Observed**: on S3/S6-shaped scenes (iPhone SE and OnePlus 9), 87-92% of the compile walk's cost is
-spent lowering glyphs even when every glyph is an atlas hit: a cached glyph still pays a
-general-purpose flattener and a full image-paint record in
-`crates/frust-engine/src/text/backend.rs` rather than a cheaper cached-hit path. A candidate
-fast-rect-style shortcut (mirroring the compiler's own axis-aligned rect fast path) is unproven for
-glyphs.
+**Observed** (evidence: `docs/PERFORMANCE_BASELINES.md` § After Phase 2, the
+Phase 2 gate's run logs): `frust-engine::compile::parallel` spawns up to two
+scoped helper threads inside every frame whose planned shape work reaches
+`DEFAULT_PARALLEL_MIN_COST` (8000; a spawn+join costs 127-135 us on the
+Pixel 4a), with no persistent pool. The threshold and the three-thread default
+were chosen from the S1 stress scene and the host timing report
+(`parallel_walk.rs`'s ignored `timing_report`), not from a sweep. On both
+phones the CPU-side tails improve in every S1 run (per-run `submit` p95 Pixel 4a
+9.7-9.9 to 7.0-7.8 ms, Pixel 4 7.7 to 6.0-6.3 ms; `total` p95 per run Pixel 4a
+17.0-17.3 to 13.4-13.9 ms, Pixel 4 8.6-8.7 to 6.8-7.3 ms) and S6 is unchanged
+(below the threshold, no helper spawns). Two things the measurement does not
+settle: (1) on the Pixel 4a the GPU governor dropped from 430 to 355 MHz once
+the CPU stopped pacing the frame (`gpu_main` p50 12.76 to 13.89 ms, p95 14.2),
+and in 4 of 10 default-arm runs the swapchain `acquire` p95 rose to 11.4-12.5
+ms — a second display period, i.e. an occasional dropped frame the four
+off-parallel runs never showed (pooled `total` p95 17.15 vs 17.23 ms); (2) no
+battery, CPU-energy or thermal arm was run on either phone, so the cost of two
+extra threads per frame on the little cores is unknown.
 
-**Accepted because**: correctness came first — every glyph draws through one general path rather
-than a second, less-tested one — and the cost is measured but has no safe, proven lever behind it
-yet.
+**Accepted because**: the frame is byte-identical at every worker count (the
+goldens run with `FRUST_ENGINE_PARALLEL_MIN_COST=0` and `FRUST_ENGINE_NO_PARALLEL=1`
+alike), the median and the CPU-side tails improve on both phones, and
+`FRUST_ENGINE_NO_PARALLEL` is a one-variable revert documented in
+`RENDER_DEVELOPMENT.md`.
 
-**Trigger for removal**: a measured, proven fast path for a cached atlas-hit glyph in the text
-backend.
+**Trigger for removal**: a power/thermal A/B of the on and off arms (the FAST
+plan's thread-policy and ADPF cards own the governor interaction), or a parked
+persistent helper that removes the per-frame spawn, whichever lands first; the
+`acquire` tail on the Pixel 4a is re-checked by the Phase 3 gate.
 
 ### `cli-build-no-default-features-gap` — `frust build` forwards cargo `--features` only, never `--no-default-features`
 
