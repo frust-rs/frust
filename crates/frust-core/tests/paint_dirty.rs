@@ -273,6 +273,7 @@ impl<S: 'static> View<S> for ColView<S> {
 
 struct Branch {
     target_w: f64,
+    target_tint: u32,
 }
 
 impl Component for Branch {
@@ -281,7 +282,14 @@ impl Component for Branch {
     fn init(&self) {}
 
     fn build(&self, _state: &mut ()) -> impl View<()> {
-        col::<()>("mid", 100.0, vec![any(leaf("target", self.target_w))])
+        col::<()>(
+            "mid",
+            100.0,
+            vec![any(LeafView {
+                tint: self.target_tint,
+                ..leaf("target", self.target_w)
+            })],
+        )
     }
 }
 
@@ -297,6 +305,7 @@ struct Shape {
     /// The root's `child_max` — the constraint every root child receives.
     root_child_max: f64,
     target_w: f64,
+    target_tint: u32,
     sib_tint: u32,
 }
 
@@ -305,6 +314,7 @@ impl Default for Shape {
         Self {
             root_child_max: 200.0,
             target_w: 40.0,
+            target_tint: 0,
             sib_tint: 0,
         }
     }
@@ -317,6 +327,7 @@ fn app(shape: Shape) -> ColView<()> {
         vec![
             any(component(Branch {
                 target_w: shape.target_w,
+                target_tint: shape.target_tint,
             })),
             any(col::<()>(
                 "sib",
@@ -538,4 +549,40 @@ fn event_request_layout_dirties_the_path() {
     set_event_mode("sib_leaf", EventMode::RequestLayout);
     h.down_at(15.0);
     assert_path(&h.dirty_ys(), SIB_PATH, true);
+}
+
+/// The component's own child pod (`mid`) is rebuilt inside `ComponentView::rebuild`
+/// rather than by a reconciler: a PAINT-only rebuild below it must still mark it
+/// paint-dirty (and only paint), or a retained layer there would draw stale.
+#[test]
+fn a_paint_only_component_child_rebuild_marks_paint_not_layout() {
+    let mut h = Harness::new();
+    let flags = h.rebuild(Shape {
+        target_tint: 1,
+        ..Shape::default()
+    });
+    assert_eq!(flags, ChangeFlags::PAINT);
+    // component pod, its child pod (mid) and the target pod: the whole path,
+    // the sibling untouched.
+    assert_path(&h.dirty_ys(), TARGET_PATH, false);
+    h.layout();
+    assert_eq!(
+        take_layouts(),
+        ["root"],
+        "PAINT alone dirties no layout: only the pod-less root runs"
+    );
+    h.paint();
+    assert!(h.dirty_ys().is_empty());
+}
+
+#[test]
+fn a_layout_component_child_rebuild_still_marks_layout_and_paint() {
+    let mut h = Harness::new();
+    h.rebuild(Shape {
+        target_w: 60.0,
+        ..Shape::default()
+    });
+    assert_path(&h.dirty_ys(), TARGET_PATH, false);
+    h.layout();
+    assert_eq!(take_layouts(), ["mid", "root", "target"]);
 }
