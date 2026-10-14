@@ -804,6 +804,36 @@ fn quads_cover_order_and_sample_exactly_what_todays_lowering_does() {
     assert!(placement > 0, "the placement scene is drawn as quads");
 }
 
+/// The settled frames the equivalence cases above compare are drawn out of
+/// the resident-run cache — every run remembered from an earlier frame and
+/// drawn without reaching `glifo` — so the agreement they assert is the
+/// cache's as much as the quads' own; and with the cache switched off the same
+/// frames come back identical.
+#[test]
+fn the_settled_frames_compared_here_are_drawn_from_the_resident_run_cache() {
+    let subpixel = settled(true, &subpixel_scene());
+    assert_eq!(
+        subpixel.resident_glyph_runs, 16,
+        "every run of the subpixel scene"
+    );
+    assert!(settled(true, &placement_scene()).resident_glyph_runs > 0);
+    assert_eq!(settled(false, &subpixel_scene()).resident_glyph_runs, 0);
+
+    for scene in [subpixel_scene(), placement_scene()] {
+        let mut probing = compiler(true);
+        probing.set_glyph_run_cache(false);
+        for _ in 0..SETTLING_FRAMES {
+            compile(&mut probing, &scene);
+        }
+        let probed = compile(&mut probing, &scene);
+        let mut cached = settled(true, &scene);
+        assert_eq!(probed.resident_glyph_runs, 0);
+        assert!(cached.resident_glyph_runs > 0);
+        cached.resident_glyph_runs = 0;
+        assert_eq!(format!("{cached:?}"), format!("{probed:?}"));
+    }
+}
+
 #[test]
 fn a_quad_is_trimmed_to_the_clip_with_its_atlas_texel_moved_by_the_same_amount() {
     let frame = settled(true, &placement_scene());
