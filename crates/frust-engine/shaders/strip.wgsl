@@ -43,10 +43,20 @@
 //   BLURRED_RECT   — the blurred rounded rectangle
 //   LAYER          — the layer colour source a composite reads its page through
 //
-// The directive lines are plain comments, so this file IS the Uber program
-// byte for byte: the class that enables every feature compiles it unchanged.
-// Every class binds the same groups through one explicit pipeline layout, so
-// a binding a class no longer reads is still declared here.
+// One more feature is not a class but a program FAMILY, chosen per renderer
+// (`FRUST_ENGINE_IMAGE_SAMPLER`, on unless set to 0):
+//
+//   IMAGE_SAMPLER  — inside IMAGE: bilinear atlas sampling through a hardware
+//                    sampler instead of four loads; its `//#else` arm is the
+//                    manual path every program of the manual family keeps
+//
+// The directive lines are plain comments, and every class feature's block is
+// a whole arm of its own, so the class that enables every class feature — the
+// Uber program — is this file with one of the two IMAGE_SAMPLER arms blanked
+// out: the `//#else` arm in the sampler family, the sampler arm in the manual
+// one.
+// Every class of a family binds the same groups through one explicit pipeline
+// layout, so a binding a class no longer reads is still declared here.
 
 // Color source modes: where the fragment shader gets color data from.
 // Use the payload (a color or image coordinates).
@@ -215,6 +225,41 @@ var atlas_texture_array: texture_2d_array<f32>;
 
 @group(1) @binding(1)
 var external_texture: texture_2d<f32>;
+
+// Declared only by the image programs of the sampler family, together with
+// the layout entry it binds against (`gpu::bindings`) and the one function
+// that samples through it; every other program — and every program of the
+// manual family — declares no sampler at all.
+//#if IMAGE_SAMPLER
+@group(1) @binding(2)
+var atlas_sampler: sampler;
+
+// Bilinear filtering through a hardware sampler: what `bilinear_sample`
+// computes, in one filtered fetch instead of four loads.
+//
+// `coords` is the texel-space sample position with texel i's centre at
+// i + 0.5 — `bilinear_sample`'s own `coords` plus half a texel. It is clamped
+// to the centres of the image's edge texels, which is exactly the clamp the
+// manual path applies to its taps: a tap never leaves the image's own atlas
+// rectangle, so a neighbouring slot's texels never reach the filter, for any
+// source rectangle and any extend mode, with no padding around the slot. Only
+// the precision of the weights differs — a sampler interpolates at the
+// hardware's sub-texel resolution rather than in full `f32`. Lives here
+// rather than in the helper prelude because no other module may sample: the
+// filter program's one bilinear sample is its own region-bounded helper.
+fn sampled_bilinear(
+    tex: texture_2d_array<f32>,
+    linear_sampler: sampler,
+    coords: vec2<f32>,
+    atlas_idx: i32,
+    image_offset: vec2<f32>,
+    image_size: vec2<f32>,
+) -> vec4<f32> {
+    let centre = clamp(coords, image_offset + vec2(0.5), image_offset + image_size - vec2(0.5));
+    let uv = centre / vec2<f32>(textureDimensions(tex));
+    return textureSampleLevel(tex, linear_sampler, uv, atlas_idx, 0.0);
+}
+//#endif
 
 @group(2) @binding(0)
 var encoded_paints_texture: texture_2d<u32>;
@@ -440,6 +485,16 @@ fn fs_main(
             } else
 //#endif
             if image_quality == IMAGE_QUALITY_MEDIUM {
+//#if IMAGE_SAMPLER
+                sample_color = sampled_bilinear(
+                    atlas_texture_array,
+                    atlas_sampler,
+                    image_offset + extended_xy,
+                    i32(image_atlas_index),
+                    image_offset,
+                    image_size,
+                );
+//#else
                 let final_xy = image_offset + extended_xy - vec2(0.5);
                 sample_color = bilinear_sample(
                     atlas_texture_array,
@@ -450,6 +505,7 @@ fn fs_main(
                     image_extend_modes,
                     image_padding,
                 );
+//#endif
             } else {
                 let final_xy = image_offset + extended_xy;
                 sample_color = textureLoad(

@@ -34,10 +34,25 @@
 //! The strip program is compiled once per [`PaintClass`] from the ONE source,
 //! by a line-oriented string pass ([`specialise`]) rather than a second copy of
 //! the shader: a block between a `//#if FEATURE` line and its `//#endif` line
-//! survives only in a class that enables `FEATURE` ([`class_features`]). The
-//! directives are ordinary WGSL comments, which is what makes the
-//! [`PaintClass::Uber`] program [`STRIP`] itself, byte for byte, and keeps the
+//! survives only in a class that enables `FEATURE` ([`class_features`]), and a
+//! `//#else` line inside it opens the arm that survives exactly when the `//#if`
+//! arm does not. The directives are ordinary WGSL comments, which keeps the
 //! downlevel lint (which scans `shaders/`) reading the real source.
+//!
+//! ## The two program families
+//!
+//! [`IMAGE_SAMPLER`] is not a class feature but a family switch, settled per
+//! renderer (`FRUST_ENGINE_IMAGE_SAMPLER`, [`crate::config::image_sampler_enabled`]):
+//! with it, every program that keeps `IMAGE` — [`PaintClass::Image`],
+//! [`PaintClass::ImageFiltered`] and [`PaintClass::Uber`] — reads a bilinear
+//! atlas image through one hardware-filtered `textureSampleLevel`; without it
+//! they keep the manual four-`textureLoad` path in the feature's `//#else` arm.
+//! The sampler family is the default; the switch's `0` is the kill switch
+//! that selects the manual one. A renderer compiles one family, so the switch
+//! adds no pipeline variant ([`strip_program_source`]). The manual family's
+//! [`PaintClass::Uber`]
+//! program is [`STRIP`] with only the `IMAGE_SAMPLER` arm blanked out — line
+//! for line the program the engine shipped before either axis existed.
 //!
 //! A removed line is replaced by an empty one rather than dropped, so a naga
 //! diagnostic in a specialised module names the same line number as the source
@@ -124,7 +139,8 @@ pub const FILTER: &str = concat!(
 /// The name [`STRIP`] is registered under in the shader library.
 pub const STRIP_NAME: &str = "frust-engine strip";
 
-/// The feature names a `//#if` directive in `strip.wgsl` may name.
+/// The class feature names a `//#if` directive in `strip.wgsl` may name —
+/// [`IMAGE_SAMPLER`], the family switch, is the only other one.
 ///
 /// - `IMAGE` — atlas image sampling at nearest and bilinear quality;
 /// - `IMAGE_FILTERED` — nested inside `IMAGE`: bicubic atlas sampling and the
@@ -140,7 +156,12 @@ pub const STRIP_FEATURES: [&str; 5] = [
     "LAYER",
 ];
 
-/// The `//#if` features `class` keeps.
+/// The family feature: bilinear atlas images through a hardware sampler (see
+/// the module doc's *The two program families*). Kept by the image programs
+/// of the sampler family only, never by a class on its own.
+pub const IMAGE_SAMPLER: &str = "IMAGE_SAMPLER";
+
+/// The `//#if` class features `class` keeps.
 ///
 /// Coverage, the solid paint and the vertex stage sit outside every block, so
 /// they are in every class; [`PaintClass::Uber`] keeps every feature.
@@ -172,18 +193,65 @@ pub const fn strip_class_name(class: PaintClass) -> &'static str {
     }
 }
 
-/// The strip program specialised for `class`: [`STRIP`] with every `//#if`
-/// block whose feature `class` does not keep blanked out.
+/// The strip program of the manual family specialised for `class`:
+/// [`STRIP`] with every `//#if` block whose feature `class` does not keep, and
+/// the [`IMAGE_SAMPLER`] arm, blanked out.
 ///
-/// [`PaintClass::Uber`] borrows [`STRIP`] unchanged — not a pass that happens
-/// to keep everything, but the source itself, so the kill switch
-/// (`FRUST_ENGINE_UBER_PROGRAM`) compiles exactly the program the engine
+/// [`PaintClass::Uber`] keeps every class feature, so the kill switch
+/// (`FRUST_ENGINE_UBER_PROGRAM`) compiles [`STRIP`] with only the sampler arm
+/// and the directive lines blanked — line for line the program the engine
 /// shipped before the classes existed.
 #[must_use]
 pub fn strip_class_source(class: PaintClass) -> Cow<'static, str> {
+    strip_program_source(class, false)
+}
+
+/// Whether `class`'s program reads atlas images at all, and so whether the
+/// sampler family specialises it with [`IMAGE_SAMPLER`].
+#[must_use]
+pub fn samples_images(class: PaintClass) -> bool {
+    class_features(class).contains(&"IMAGE")
+}
+
+/// The features `class`'s program keeps in the family `image_sampler` names:
+/// [`class_features`], plus [`IMAGE_SAMPLER`] for an image program of the
+/// sampler family.
+#[must_use]
+pub fn strip_program_features(class: PaintClass, image_sampler: bool) -> Vec<&'static str> {
+    let mut features = class_features(class).to_vec();
+    if image_sampler && samples_images(class) {
+        features.push(IMAGE_SAMPLER);
+    }
+    features
+}
+
+/// The strip program for `class` in the family `image_sampler` names: [`STRIP`]
+/// with every block [`strip_program_features`] does not keep blanked out.
+///
+/// The two families differ only in the programs that keep `IMAGE`; every other
+/// class compiles the same source in both.
+#[must_use]
+pub fn strip_program_source(class: PaintClass, image_sampler: bool) -> Cow<'static, str> {
+    Cow::Owned(specialise(
+        STRIP,
+        &strip_program_features(class, image_sampler),
+    ))
+}
+
+/// The shader-library name of `class`'s program in the family `image_sampler`
+/// names — [`strip_class_name`] for every program the families share, with a
+/// suffix on the sampler family's image programs so a library never holds two
+/// different sources under one name.
+#[must_use]
+pub const fn strip_program_name(class: PaintClass, image_sampler: bool) -> &'static str {
+    if !image_sampler {
+        return strip_class_name(class);
+    }
     match class {
-        PaintClass::Uber => Cow::Borrowed(STRIP),
-        _ => Cow::Owned(specialise(STRIP, class_features(class))),
+        PaintClass::Image => "frust-engine strip/image+sampler",
+        PaintClass::ImageFiltered => "frust-engine strip/image-filtered+sampler",
+        PaintClass::Uber => "frust-engine strip+sampler",
+        _ => strip_class_name(class),
     }
 }
 
@@ -193,16 +261,20 @@ const DIRECTIVE_IF: &str = "//#if ";
 /// The directive closing the innermost open feature block.
 const DIRECTIVE_ENDIF: &str = "//#endif";
 
+/// The directive switching the innermost open feature block to its other arm.
+const DIRECTIVE_ELSE: &str = "//#else";
+
 /// Runs the feature pre-pass over `source`, keeping the blocks whose feature
 /// is in `enabled`.
 ///
 /// Line-oriented and total: a directive is a line whose trimmed text starts
-/// with `//#if ` (one feature name after it) or is exactly `//#endif`; blocks
-/// nest, and a line is kept only while every enclosing block is enabled. Each
-/// directive line, and each line of a disabled block, becomes an empty line,
-/// so the output has exactly the source's line count. An `//#endif` with no
-/// open block is ignored and an unclosed block runs to the end of the source;
-/// neither occurs in the shipped shaders, which the tests below pin.
+/// with `//#if ` (one feature name after it) or is exactly `//#else` or
+/// `//#endif`; blocks nest, a `//#else` inverts its block for the lines after
+/// it, and a line is kept only while every enclosing block is live. Each
+/// directive line, and each line of a dead arm, becomes an empty line, so the
+/// output has exactly the source's line count. An `//#else` or `//#endif` with
+/// no open block is ignored and an unclosed block runs to the end of the
+/// source; neither occurs in the shipped shaders, which the tests below pin.
 #[must_use]
 pub fn specialise(source: &str, enabled: &[&str]) -> String {
     let mut out = String::with_capacity(source.len());
@@ -215,6 +287,11 @@ pub fn specialise(source: &str, enabled: &[&str]) -> String {
         if let Some(feature) = trimmed.strip_prefix(DIRECTIVE_IF) {
             let feature = feature.trim();
             open.push(enabled.contains(&feature));
+            out.push_str(newline);
+        } else if trimmed == DIRECTIVE_ELSE {
+            if let Some(live) = open.last_mut() {
+                *live = !*live;
+            }
             out.push_str(newline);
         } else if trimmed == DIRECTIVE_ENDIF {
             open.pop();
@@ -237,12 +314,13 @@ pub const COPY_NAME: &str = "frust-engine copy";
 /// The name [`FILTER`] is registered under in the shader library.
 pub const FILTER_NAME: &str = "frust-engine filter";
 
-/// Every module the engine compiles, as `(name, source)` pairs — the list
-/// [`crate::gpu::pipelines::EngineShaders::register`] walks, and the list the
-/// validation tests walk.
+/// Every module source the engine assembles at compile time, as
+/// `(name, source)` pairs — the list the validation tests walk.
 ///
-/// The strip program's class specialisations are not listed: they are derived
-/// at start-up by [`strip_class_source`] rather than assembled at compile time.
+/// [`STRIP`] is listed as written, both [`IMAGE_SAMPLER`] arms present, which
+/// is valid WGSL in its own right; what a renderer compiles from it are the
+/// specialisations [`strip_program_source`] derives at start-up, the Uber
+/// program among them.
 pub const MODULES: [(&str, &str); 4] = [
     (STRIP_NAME, STRIP),
     (CLEAR_NAME, CLEAR),
@@ -296,20 +374,93 @@ mod tests {
         for (name, src) in MODULES {
             validate(name, src);
         }
-        for class in PaintClass::ALL {
-            validate(strip_class_name(class), &strip_class_source(class));
+        for image_sampler in [false, true] {
+            for class in PaintClass::ALL {
+                validate(
+                    strip_program_name(class, image_sampler),
+                    &strip_program_source(class, image_sampler),
+                );
+            }
         }
     }
 
-    /// The kill switch's whole promise: the Uber class compiles the shipped
-    /// source, not a reconstruction of it.
+    /// Whether `line` is a pre-pass directive.
+    fn is_directive(line: &str) -> bool {
+        let trimmed = line.trim();
+        trimmed.starts_with(DIRECTIVE_IF) || trimmed == DIRECTIVE_ELSE || trimmed == DIRECTIVE_ENDIF
+    }
+
+    /// The kill switch's whole promise: the manual family's Uber class
+    /// compiles the shipped source, not a reconstruction of it — every line of
+    /// [`STRIP`] kept in place, save the directives and the sampler family's
+    /// own arm, which are blanked rather than dropped.
     #[test]
-    fn the_uber_class_is_the_strip_source_byte_for_byte() {
-        assert!(matches!(
-            strip_class_source(PaintClass::Uber),
-            Cow::Borrowed(src) if src == STRIP
-        ));
+    fn the_manual_uber_program_is_the_strip_source_without_the_sampler_arm() {
+        let uber = strip_class_source(PaintClass::Uber);
+        let sampled = strip_program_source(PaintClass::Uber, true);
         assert_eq!(strip_class_name(PaintClass::Uber), STRIP_NAME);
+        assert_eq!(uber.lines().count(), STRIP.lines().count());
+        let mut blanked = 0;
+        for ((source, kept), sampled) in STRIP.lines().zip(uber.lines()).zip(sampled.lines()) {
+            if kept == source {
+                continue;
+            }
+            assert!(kept.is_empty(), "a kept line was rewritten: `{source}`");
+            if is_directive(source) || source.trim().is_empty() {
+                continue;
+            }
+            assert_eq!(
+                sampled, source,
+                "the manual Uber program blanked `{source}`, which is not the sampler arm"
+            );
+            blanked += 1;
+        }
+        assert!(blanked > 0, "the sampler arm is in the source");
+        assert!(!uber.contains("atlas_sampler"));
+        assert!(!uber.contains("textureSampleLevel("));
+        assert!(sampled.contains("var atlas_sampler: sampler;"));
+    }
+
+    /// The families differ exactly where the switch says: in the programs
+    /// that read atlas images, and nowhere else.
+    #[test]
+    fn the_families_differ_only_in_the_image_programs() {
+        for class in PaintClass::ALL {
+            let default = strip_program_source(class, false);
+            let sampled = strip_program_source(class, true);
+            assert_eq!(
+                default == sampled,
+                !samples_images(class),
+                "{}",
+                class.label()
+            );
+            assert_eq!(
+                strip_program_name(class, false) == strip_program_name(class, true),
+                !samples_images(class),
+                "{}",
+                class.label()
+            );
+            assert_eq!(strip_program_name(class, false), strip_class_name(class));
+            assert_eq!(default, strip_class_source(class));
+        }
+        assert!(samples_images(PaintClass::Image));
+        assert!(samples_images(PaintClass::ImageFiltered));
+        assert!(samples_images(PaintClass::Uber));
+        // The sampler arm replaces the manual one: neither family keeps both.
+        for class in [
+            PaintClass::Image,
+            PaintClass::ImageFiltered,
+            PaintClass::Uber,
+        ] {
+            let default = strip_program_source(class, false);
+            let sampled = strip_program_source(class, true);
+            let fs =
+                |src: &str| src[src.find("fn fs_main(").expect("a fragment stage")..].to_string();
+            assert!(fs(&default).contains("sample_color = bilinear_sample("));
+            assert!(!fs(&default).contains("sampled_bilinear("));
+            assert!(fs(&sampled).contains("sample_color = sampled_bilinear("));
+            assert!(!fs(&sampled).contains("bilinear_sample("));
+        }
     }
 
     #[test]
@@ -320,11 +471,16 @@ mod tests {
             let trimmed = line.trim();
             if let Some(feature) = trimmed.strip_prefix(DIRECTIVE_IF) {
                 assert!(
-                    STRIP_FEATURES.contains(&feature.trim()),
+                    STRIP_FEATURES.contains(&feature.trim()) || feature.trim() == IMAGE_SAMPLER,
                     "line {number} names an unknown feature `{feature}`"
                 );
                 seen.push(feature.trim().to_string());
                 depth += 1;
+            } else if trimmed == DIRECTIVE_ELSE {
+                assert!(
+                    depth > 0,
+                    "line {number} switches a block that was never opened"
+                );
             } else if trimmed == DIRECTIVE_ENDIF {
                 assert!(
                     depth > 0,
@@ -342,7 +498,7 @@ mod tests {
             depth, 0,
             "a feature block is left open at the end of the source"
         );
-        for feature in STRIP_FEATURES {
+        for feature in STRIP_FEATURES.into_iter().chain([IMAGE_SAMPLER]) {
             assert!(
                 seen.iter().any(|f| f == feature),
                 "feature {feature} gates nothing — a class enabling it would equal one that does not"
@@ -357,13 +513,21 @@ mod tests {
         assert_eq!(specialise(src, &["X"]), "a\n\nb\n\n\n\n\nd");
         assert_eq!(specialise(src, &["Y"]), "a\n\n\n\n\n\n\nd");
         assert_eq!(specialise(src, &[]), "a\n\n\n\n\n\n\nd");
-        for class in PaintClass::SPECIALISED {
-            assert_eq!(
-                strip_class_source(class).lines().count(),
-                STRIP.lines().count(),
-                "{} must keep the source's line numbering",
-                class.label()
-            );
+        // An `//#else` arm is live exactly when its `//#if` arm is not, and
+        // only while every enclosing block is.
+        let src = "a\n//#if X\nb\n//#if Y\nc\n//#else\ne\n//#endif\n//#endif\nd";
+        assert_eq!(specialise(src, &["X", "Y"]), "a\n\nb\n\nc\n\n\n\n\nd");
+        assert_eq!(specialise(src, &["X"]), "a\n\nb\n\n\n\ne\n\n\nd");
+        assert_eq!(specialise(src, &["Y"]), "a\n\n\n\n\n\n\n\n\nd");
+        for image_sampler in [false, true] {
+            for class in PaintClass::ALL {
+                assert_eq!(
+                    strip_program_source(class, image_sampler).lines().count(),
+                    STRIP.lines().count(),
+                    "{} must keep the source's line numbering",
+                    class.label()
+                );
+            }
         }
     }
 
@@ -422,9 +586,22 @@ mod tests {
     /// candB: the strip program addresses its alpha and LUT textures by the
     /// `Config` shifts alone — no per-fragment `textureDimensions` query and no
     /// integer `%`/`/` against a queried width (see `gpu::config`'s guard).
+    /// The one query in the source is the sampler family's normalisation of an
+    /// atlas sample position, which no manual-family program keeps.
     #[test]
     fn the_strip_program_addresses_its_resource_textures_by_config_shifts() {
-        assert!(!STRIP.contains("textureDimensions("));
+        assert_eq!(STRIP.matches("textureDimensions(").count(), 1);
+        assert!(STRIP.contains("vec2<f32>(textureDimensions(tex))"));
+        for class in PaintClass::ALL {
+            assert!(!strip_class_source(class).contains("textureDimensions("));
+            let sampled = strip_program_source(class, true);
+            assert_eq!(
+                sampled.contains("textureDimensions("),
+                samples_images(class),
+                "{}",
+                class.label()
+            );
+        }
         assert!(STRIP.contains("(1u << config.alphas_tex_width_bits) - 1u"));
         assert_eq!(
             STRIP
