@@ -24,7 +24,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-widgets::pan_zoom` | `PanZoomView`/`PanZoomWidget` — one child under a drag-pan/pinch-or-wheel-zoom transform, with inertia and a `PanZoomController` handle |
 | `frust-widgets::motion` | Implicit-animation and transition-pattern vocabulary |
 | `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions — internally split across six `nav/*.rs` files (see below); single public path via `navigator.rs`'s re-exports |
-| `frust-widgets::physics` | Pluggable scroll-motion strategy (`ScrollPhysics` trait, `OverscrollEffect`, `Simulation` ports, platform-adaptive defaults) that `ScrollView`/`ListView` consult instead of hard-coding a feel — see *Scroll Physics* below |
+| `frust-widgets::physics` | Pluggable scroll-motion strategy (`ScrollPhysics`, `OverscrollEffect`, `Simulation` ports, platform-adaptive defaults) the scroll surfaces consult — see *Scroll Physics* |
+| `frust-widgets::viewport` / `slivers` | `CustomScrollView`/`ViewportWidget` (the sliver viewport) and the sliver family (`slivers::adapter` holds `sliver_box`); `scroll_core` holds the shared `ScrollSurfaceCore` — see *Slivers and the viewport* |
 | `frust-widgets::scroll_controller` | `ScrollController` — a cloneable, reactive-free handle onto a `ScrollView` or `ListView`'s offset/item position — see *Scroll Physics* and *Virtualized ListView* below |
 | `frust-widgets::overlay` | The widget-author face of CORE's overlay portal: anchored placement geometry (`place`/`OverlayPlacement`), the `OverlaySlot` a widget hosting its own floated pod keeps, and the declarative `overlay_portal` wrapper |
 | `frust-widgets::drag` | Drag-and-drop session model: `DragCoordinator`, `draggable()` source, `drag_target()` target, `auto_scroll_zone()`, `reorderable_list()` — single public path `drag`, re-exported flat from the crate root and the `frust` facade |
@@ -291,6 +292,7 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
 | `ButtonStyle`, `ScrollInfo`, `IconData`/`IconSource`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set |
 | `ScrollController` / `ScrollSubscription` / `AnimateTo` / `ItemAlignment` | Programmatic-scroll handle for `ScrollView`/`ListView`, its `on_change` guard, the animate-to duration/curve, and the keyed-row landing alignment — see *Scroll Physics* and *Virtualized ListView* |
 | `ListView` / `ListViewWidget` | Baseline virtualized list: windowed rebuild-time materialization, positional or keyed (`ChildKey`) row identity, optional variable extents, refresh/overscroll parity with `ScrollView` |
+| `CustomScrollView` / `ViewportWidget` / `SliverBoxView` / `ScrollAxis` | Sliver viewport and its box adapter (`ViewportWidget`, `SliverBoxWidget` are frust-widgets-only); `ScrollAxis` is re-exported flat from frust-widgets and the facade |
 | `NavigatorController::transition()` / `TransitionState` / `PageVisibility` | Navigation state observation seams |
 | `RouteNavigator` / `NavRequest` | Off-thread-safe navigation handle (Arc-backed plain data, no reactive types) |
 | `NavigatorController::route_stack()` / `RouteStack` / `NavChange` | Route-state observable: page stack as route identities, diffed change label — see Data Flow |
@@ -430,171 +432,169 @@ true, .. }` (see CORE_ARCHITECTURE.md's Key Types for the shell obligation this 
 `enabled(false)` remains the stronger claim: it refuses focus outright regardless of `read_only`.
 
 ### Scroll Physics
-`ScrollView`/`ListView` (`scroll.rs`/`list_view.rs`) share a pluggable scroll-motion strategy
-(`crate::physics`, mirroring Flutter's `ScrollPhysics`) rather than a hard-coded feel: a
-`ScrollPhysics` trait (drag mapping, boundary rejection, ballistic simulation, fling thresholds,
-spring — composed by parenting via `.chain(parent)`, never inheritance) is orthogonal to
-`OverscrollEffect` (how a rejected/held displacement paints — `Translate`/`Stretch`/`None`) and to
-`Simulation` (the ballistic curve a physics hands back — Friction/Spring/Clamping/Bouncing ports of
-Flutter's own). `default_physics()`/`default_overscroll_effect()` (`crate::physics`) select the
-installed pair platform-adaptively — Android: `Clamping` + `Stretch`; every other platform:
-`Bouncing` + `Translate` — and both surfaces install that pair unless an app names its own.
-`RubberBand`, the flat-resistance feel both surfaces used to hard-code, is no longer any platform's
-default; it remains reachable as an explicit `.physics(RubberBand::new())` opt-in, and is the only
-physics still driving both widgets' legacy hand-rolled fling/settle path
-(`create_ballistic_simulation` returns `None` by design). Wheel input stays a physics-independent
-hard clamp on both surfaces. A release's fling velocity carries the interrupted motion's momentum
-forward only when it plainly continues it — same direction, and faster than half the physics' own
-mapped share of that carried velocity — mirroring Flutter's `ScrollDragController.end` guards
-rather than gating on the raw interrupted speed.
+`ScrollView`, `ListView` and the sliver viewport (`scroll.rs`/`list_view.rs`/`viewport.rs`) are thin
+owners (viewport geometry, child origins, list windowing) around one `ScrollSurfaceCore` plus the
+`ScrollSurface` trait in `scroll_core.rs` (crate-internal, not facade API). The core is the single
+copy of the drag accumulator and edge pull, the takeover with claim and veto, fling/settle/ballistic,
+controller attach/drain/jump/animate/publish, and the `on_scroll` owed-notification rule. Each owner
+supplies only its position arithmetic (`pixels`, `displacement`, `set_allowed_position`,
+`decay_displacement`, `settle_to_edge`, base offset): `ScrollWidget` keeps an out-of-range offset,
+`ListViewWidget` a clamped offset plus `overscroll`. A new surface implements `ScrollSurface` and
+copies none of the machinery.
 
-Every drag `Move` hands the physics *that move's* raw finger delta against the live position
-(Flutter's own per-move convention), so a depth-aware curve reads a real overscroll depth instead of
-a fixed zero — at the cost of a path-dependent mapping, where the same total pull split across a
-different number of moves need not land on the same pixel. Both widgets accumulate the physics'
-boundary-rejected excess as their own edge-pull state, outside the trait, so pull-to-refresh and
-`OverscrollEffect::Stretch`'s paint-side intensity both fire under a clamping physics at zero
-displacement and not only a bouncing one. Stretch is a paint-only affine scale about the held edge;
-no layout pass reads the pull. A ballistic simulation that ends fully pinned outward stops early
-rather than pumping the rest of its curve, handing the residual pull to the release-settle path.
+The feel is a pluggable strategy (`crate::physics`, mirroring Flutter): a `ScrollPhysics` trait (drag
+mapping, boundary rejection, ballistic simulation, fling thresholds, spring; composed with
+`.chain(parent)`, never inheritance) is orthogonal to `OverscrollEffect` (how a rejected displacement
+paints: `Translate`/`Stretch`/`None`) and to `Simulation` (Friction/Spring/Clamping/Bouncing ports).
+`default_physics()`/`default_overscroll_effect()` pick the pair per platform (Android `Clamping` +
+`Stretch`; elsewhere `Bouncing` + `Translate`) unless the app names its own. `RubberBand` is an
+explicit opt-in only, and the only physics still on the legacy hand-rolled fling/settle path
+(`create_ballistic_simulation` returns `None` by design). Wheel input is a physics-independent hard
+clamp. A release carries interrupted momentum forward only when it plainly continues it, as in Flutter's
+`ScrollDragController.end`.
 
-**Nested-scroll arbitration** (`scroll.rs`) runs the same ambient-claim shape as the navigator's
-edge-swipe arming (**R-B3-inner**, `nav::ambient`'s `SWIPE_CLAIM`, see *Data Flow* above): a scroll
-surface pushes a fresh claim cell around the `Down` it forwards (`with_scroll_claim`), the nearest
-scrollable reached underneath reports what it could do with the gesture into it (`InnerScrollState`,
-nearest-inner pairing — a claim always lands in its immediate enclosing surface's cell, never a
-grandparent's), and the outer reads that back at the touch-slop takeover, deferring instead of
-taking over when the inner can consume the drag's direction. A claim registers only with real
-scroll capacity (`max_scroll_extent > min_scroll_extent`) — without it, a content-fits inner under
-an always-accepting physics (the `Bouncing` family) would defer every drag to itself despite having
-nothing to scroll, a deliberate UIKit-default deviation from Flutter's own `BouncingScrollPhysics`,
-which still claims a fits-viewport surface. The report is a `Down`-time snapshot
-and the outer's defer decision is sticky for the rest of the gesture — content that becomes (or
-stops being) scrollable mid-drag never registers, and a deferred gesture never hands back — the same
-class of accepted tradeoff the navigator's own Down-time claim already lives with. Both `ScrollView`
-and `ListView` also run a live **multi-contact veto** alongside that Down-time claim: a per-gesture
-cell either surface replaces on every primary `Down` and consults on every `Move` takeover check, so
-a nested `pinch_detector`/`pan_zoom` that reports a second contact after the claim snapshot was taken
-still suppresses the takeover (see *Pinch flow*/*Pan-zoom flow* above).
+Each drag `Move` hands the physics that move's raw delta against the live position (a
+path-dependent mapping). The core accumulates the boundary-rejected excess as its own edge-pull
+state, so pull-to-refresh and `Stretch` fire under a clamping physics too. Stretch is a paint-only
+affine scale about the held edge (`stretch_transform`); no layout pass reads the pull. A ballistic
+simulation that ends fully pinned outward stops early, handing the residual pull to the settle path.
 
-`ScrollInfo`'s shape, wheel handling, and its consumers — `frust-shadcn`'s `scroll_area`,
-`frust-glyph`'s `app_bar` scroll-collapse — are unaffected: the seam changes only what computes
-drag/post-release motion, never `ScrollInfo`'s contract.
+**Nested-scroll arbitration** runs the ambient-claim shape of the navigator's edge-swipe arming
+(`nav::ambient`'s `SWIPE_CLAIM`, see *Data Flow*): a surface pushes a fresh claim cell around the
+`Down` it forwards, the nearest scrollable underneath reports what it could do with the drag
+(`InnerScrollState`, nearest-inner pairing), and the outer reads that at the touch-slop takeover,
+deferring when the inner can consume the direction. A claim registers only with real scroll capacity
+(a deliberate deviation from Flutter's `BouncingScrollPhysics`). The report is a `Down`-time
+snapshot and the defer decision is sticky for the gesture. All surfaces also run a live **multi-contact veto**, a per-gesture cell replaced on
+every primary `Down` and consulted on every `Move` takeover check, so a nested
+`pinch_detector`/`pan_zoom` reporting a second contact still suppresses the takeover. Claims are
+axis-aware: a viewport registers only into a same-axis host and drops a claim from a surface on the
+other axis.
 
 **Programmatic scroll (`scroll_controller.rs`).** `ScrollController` is a cloneable, reactive-free
-handle `ScrollView::controller`/`ListView::controller` attaches, reachable by app code as
-`frust::{ScrollController, ScrollSubscription, AnimateTo, ItemAlignment}` (the facade's
-re-export): one surface holds a handle at a time — the most recent attach wins, a rebuild never
-steals a handle another surface already holds — and dropping the attached widget detaches it. A write (`jump_to`/`animate_to`, plus
-`scroll_to_item` on a keyed list) is recorded, not applied immediately; the attached surface drains
-its queue at the start of its next layout or paint (a `ListView` also drains at rebuild, before it
-plans its window), so the clamp lands against the freshly measured extent; both report `LAYOUT` from rebuild while a command is queued.
-The queue is bounded by superseding within a segment — the offset commands recorded since the last
-item command: a jump supersedes every earlier offset command in its segment (cancelling any tween
-and setting the position outright), and an animate supersedes an earlier animate but keeps a
-preceding jump, its start position — so a segment holds at most one jump and one animate in
-whatever order they were recorded; superseding never crosses a queued `scroll_to_item`. Item
-commands keep their own ordered channel under a cap of 8 — recording one past the cap drops the
-oldest (debug-build log), re-applying the rule when the drop merges two segments — so the whole
-queue never exceeds the cap plus two offset entries per segment. A superseded jump no longer raises
-a transient near-start/near-end edge notification. A command queued before any surface attaches
-still waits for that surface's first layout, so an unattached handle accumulates at most that same
-bound rather than growing further. Recording raises CORE's pending-result-flush flag
-(`frust_core::mark_pending_result_flush`, see CORE_ARCHITECTURE.md) so a frame-gated mobile shell
-runs the frame that applies it even when nothing else is dirty. `jump_to` clamps to `[0,
-max_offset]` and stops any fling or release-settle in flight; like `animate_to` and
-`scroll_to_item`, it also ends an *established* live drag on the surface the same way a `Down`
-does — the rest of the gesture's `Move`s and its `Up` fall through to the child, and the release
-starts no fling or settle. A hold still inside touch slop stays armed instead: the slop takeover
-and the child's `Cancel` still happen, and the finger can go on to start the drag afterward, the
-way Flutter's `jumpTo` during a hold behaves. `animate_to` eases there through a `TweenSimulation`
-driven by the same ballistic pump a release fling uses, so paint cadence and boundary physics are shared, not duplicated — a
-user `Down` or wheel interrupts it, a later command replaces it, and the theme's `reduce_motion`
-flag collapses it to a `jump_to`. Every post-release start — a fling, a release-settle, a
-controller tween — goes through that same single tear-down path first, so a fling, a settle and a
-tween are never live together. `is_animating` is true only while the *currently attached* surface
-has a live controller tween: a handle that is dropped, taken over by another surface, or swapped
-for a different handle mid-tween reports `false`, and the new handle reports the widget's own live
-state. Reads (`offset`/`max_offset`/`viewport_extent`) are the surface's last published snapshot;
-`on_change` fires only when the published `ScrollInfo` actually changes, after a layout, paint or
-event pass. `scroll_to_item(key, ItemAlignment, animated)` is list-only — a `ScrollView` holding
-the handle ignores it (debug-build log) — and is covered in *Virtualized ListView* below.
-`frust-shadcn`'s `scroll_area` takes `.controller()` too, and a primary-button drag on its thumb
-maps pointer travel through the same `jump_to`. A desktop shell does not consult the
-pending-result-flush flag the way the mobile frame gate does (see SHELLS_ARCHITECTURE.md's *Mobile
-frame path*), so a `jump_to`/`animate_to` issued from a handler that itself requests no redraw
-waits for the next desktop frame some other input wakes — the same gap `PanZoomController` already has.
+handle that `ScrollView`/`ListView`/`CustomScrollView::controller` attaches (facade:
+`ScrollController`, `ScrollSubscription`, `AnimateTo`, `ItemAlignment`). One surface holds a handle
+at a time (the latest attach wins) and dropping the widget detaches it.
+Writes (`jump_to`/`animate_to`, plus `scroll_to_item` on a keyed list) are recorded, not applied;
+the surface drains them at its next layout or paint (a `ListView` also at rebuild), so the clamp
+lands against fresh extents. The queue is bounded by superseding within a segment (the offset
+commands since the last item command): a jump supersedes every earlier offset command in its segment,
+an animate supersedes an earlier animate but keeps a preceding jump; superseding never crosses a
+queued `scroll_to_item`. Item commands keep an ordered channel capped at 8 (the oldest drops, with a
+debug log). Recording raises CORE's pending-result-flush flag
+(`frust_core::mark_pending_result_flush`) so a frame-gated mobile shell runs the applying frame.
+`jump_to` clamps to `[0, max_offset]`, stops any fling or settle, and (like `animate_to` and
+`scroll_to_item`) ends an established live drag, whose remaining `Move`s and `Up` fall through to the
+child; a hold still inside slop stays armed. `animate_to` runs a `TweenSimulation` on the release
+fling's ballistic pump; a user `Down` or wheel interrupts it, a later command replaces it, and
+`reduce_motion` collapses it to a jump. A fling, a settle and a tween are never live together. Notifications flush like a jump's: every frame a
+tween moves, and the frame it lands on, owes the next frame's Housekeeping flush, so `on_scroll`
+(and `ListView` near-start/near-end) arrive with no input event; release flings and settles stay one
+event late. An item request that moves nothing (unknown key, or `Nearest` on a fully visible row)
+still ends a running controller tween where it stands and clears an earlier request's settle loop,
+but leaves a user fling, settle or drag alone. `is_animating` is true only while the attached
+surface has a live tween; `on_change` fires only when the published `ScrollInfo` changes.
+`scroll_to_item` is list-only (`CustomScrollView` and `ScrollView` ignore it with a debug log). A
+desktop shell ignores the pending-result-flush flag, so a command from a handler that requests no
+redraw waits for the next frame another input wakes (as `PanZoomController`).
 
 ### Virtualized ListView (baseline)
-`ListView`/`ListViewWidget`/`list_view()` live in `frust-widgets` proper (`list_view.rs`), not a
-design-system catalog — the facade re-exports them unconditionally regardless of which (if any)
-design-system plugin an app depends on. `frust_material::list_view` is a `#[deprecated]` alias set
-kept only so an existing call site resolves; new code uses the baseline path.
+`ListView`/`ListViewWidget`/`list_view()` live in `frust-widgets` proper (`list_view.rs`); the
+facade re-exports them unconditionally. `frust_material::list_view` is a `#[deprecated]` alias.
+Each `rebuild` reads the retained widget's scroll offset and cached viewport to materialize only the
+visible window plus a buffer; with `sliver_fixed_extent_list` it is among the few `View`s that
+read retained element state during `rebuild`. Layout measures only existing pods and paint builds nothing,
+so the row builder never runs outside `rebuild`. Refresh, overscroll, claim/veto and physics
+come from the shared core; the clamped-windowing/paint-only-overscroll split (`list_view.rs`) survives them.
 
-Each frame's `rebuild` reads the retained widget's own scroll offset and cached viewport to
-materialize only the visible window (plus a small buffer) — the only `View` in the framework that
-reads retained element state during `rebuild`. Layout only measures pods that already exist and
-paint builds nothing, so the row-builder closure never runs outside `rebuild` — the same invariant
-every other widget upholds, exercised here against a windowed rather than fixed child set.
-
-**Two row-identity models.** `ListView::builder` reconciles rows by raw index — correct for
-append-only, truncate-only, or full-replace data, but a mid-list insert/remove/reorder silently
-reattaches a row's retained state to whatever now sits at that index. `ListView::builder_keyed`
-adds a `ChildKey` per row (the same identity `keyed()` uses for `Flex`, see WIDGETS_CODE_STANDARDS.md) so
-state follows the row through a mutation instead; a keyed list additionally re-anchors its scroll
-offset in `rebuild`, before windowing, so a prepend/removal above the viewport never visibly jumps
-the content the user is looking at **when the mutation is single-sided** — a same-frame mutation on
-both sides of the anchor (e.g. a prepend above *and* an append below in one frame) can still miss
-the anchor-shift correction itself, a documented, deferred gap (`list_view.rs`'s module doc, *Cache
-hygiene*). Unlike `Flex`'s keyed reconciler, a duplicate key on `ListView`
-`debug_assert!`s but has **no positional fallback** in release — the first slot claiming a key wins
-deterministically, later duplicates rebuild fresh.
+**Two row-identity models.** `ListView::builder` reconciles by raw index (right for append-only,
+truncate-only or full-replace data; a mid-list mutation reattaches state to whatever now sits at the
+index). `builder_keyed` adds a `ChildKey` per row (as `keyed()` does for `Flex`, see WIDGETS_CODE_STANDARDS.md) so state follows the row, and re-anchors its offset in `rebuild`, before
+windowing, so a single-sided prepend/removal above the viewport never visibly jumps the content. A
+same-frame mutation on both sides of the anchor can still miss that correction (registered). A
+duplicate key `debug_assert!`s with no positional fallback in release: the first slot wins.
 
 **Variable extents are keyed-only.** `.estimated_item_extent(px)` switches a keyed list from the
-closed-form uniform path to a measured-by-key extent cache (an estimate for unvisited rows, the
-row's own layout height once visited); calling it on a positional list `debug_assert!`s and is
-inert in release. A measurement that revises a row's height above the viewport's top edge is
-corrected through the same rebuild-time anchoring path — recorded at layout, committed on the
-following rebuild so the anchor row never visibly moves. A correction observed mid-fling
-accumulates and commits only once the fling settles, so it never fights the fling pump.
+closed-form uniform path to a measured-by-key cache (estimate for unvisited rows, laid-out height
+once visited); on a positional list it `debug_assert!`s and is inert. A measurement revising a row
+above the viewport's top is committed on the following rebuild so the anchor row never moves; during
+a fling it accumulates and commits at settle.
 
-**Refresh/overscroll parity with ScrollView** (see *Scroll Physics*, above, for the shared seam
-itself). `on_refresh_release` and drag overscroll share `scroll.rs`'s `pub(crate)`
-resistance/trigger/settle constants *and* nested-scroll claim/veto cells with `ScrollView`, not just
-the constants — `ScrollView` is no longer the framework's only pull-to-refresh-capable or nest-aware
-widget, and the default feel is the same platform-adaptive physics rather than flat rubber-band.
-`ListView` replaces and consults the same live multi-contact veto `ScrollView` does (see *Nested-scroll
-arbitration*, above), so a pinch or pan-zoom beginning over a single-finger press inside a list
-survives the claimant's travel past slop the same way it does inside a `ScrollView`. The
-clamped-windowing/paint-only-overscroll split (`list_view.rs`'s module doc, *Windowing offset vs.
-painted offset*) survives every installed physics unchanged: only what computes the past-edge
-displacement differs, never how this widget stores or paints it.
+**Scroll-to-item.** `scroll_to_item(key, ItemAlignment, animated)` (`Start`/`Center`/`End`/`Nearest`)
+resolves `key` from measured extents plus the estimate for unlaid rows; a key outside the window
+costs one O(item count) `key_of` scan, not per frame. The jump lands on the estimate first when
+rows ahead were never measured, then settle-and-correct re-resolves each following layout, bounded
+to 4 layouts or within 0.5px, so an animated request over unmeasured rows can end with a small
+correction snap. An unknown key, or any key on a positional list, is a no-op (debug log).
 
-Virtualization exists because eager materialization doesn't scale: an in-repo host bench shows
-`ListView`'s rebuild+layout cost staying flat against item count while an eagerly-built
-`ScrollView`+`Column` scales roughly linearly, and a structural assertion beside it pins the
-windowed-materialization fact itself (not the timing) at `N = 10,000`.
+### Slivers and the viewport
+`custom_scroll_view((slivers...))` (`viewport.rs`, `CustomScrollView`/`ViewportWidget`, the third
+`ScrollSurface`; `.axis(ScrollAxis)`, `.cache_extent`, `.controller`) composes children that speak
+the sliver protocol (`frust_core::sliver`, see CORE_ARCHITECTURE.md). The layout loop:
 
-**Scroll-to-item.** A keyed list's `ScrollController::scroll_to_item(key, ItemAlignment, animated)`
-(`ItemAlignment`: `Start`/`Center`/`End`/`Nearest`) resolves `key` from the list's measured extents
-plus the variable-extent estimate for rows not yet laid out; a key outside the materialized window
-costs one `key_of` scan over the data in order (O(item count), not per frame). `ListView` publishes
-its own placement offset so the controller's reads agree with what is actually painted. The jump or
-animation lands on the estimate first when rows ahead of it were never measured, then settle-and-
-correct re-resolves the aligned position each following layout and nudges to it, bounded to 4
-layouts or until within 0.5px of the target — a pending request never coexists with an established
-drag (the settle loop's drag guard is defensive only) — so an animated request over never-measured
-rows can end with a small correction snap rather than retargeting mid-animation.
-An unknown key, or any key on a positional (non-keyed) list, is a no-op (debug-build log); a `ScrollView`
-holding the handle ignores an item command the same way.
+1. Sanitise `SliverConstraints` per child from the running scroll/overlap/cache state.
+2. Lay each child out via `ChildPod::layout_sliver_child`; a plain box child is wrapped by
+   `sliver_box`, any non-forwarding wrapper is laid out as a box at that geometry.
+3. A `scroll_offset_correction` restarts the pass (10 cycles max; debug asserts, release keeps the last).
+4. Clamp, drain the controller, relayout once if the position moved.
+5. Place children in layout only: paint requests a layout, so paint-driven motion shows a frame late.
+
+Paint runs last to first, hit-testing first to last, within `hit_test_extent`; the semantics node is
+`Role::ScrollView` with `scroll_x`/`scroll_y` per axis. An unbounded main axis shrink-wraps; a
+horizontal viewport builds its core on its own axis (only the stretch overscroll transform is still
+transposed).
+
+| Sliver | Behavior |
+|--------|----------|
+| `sliver_box(child)` | Adapts a box child; the geometry every box fallback uses |
+| `sliver_padding(insets, child)` | Main-axis insets scroll before/after the child, cross insets narrow it; the cache window is recomputed from the incoming one |
+| `sliver_fill_remaining(child)` | `has_scroll_body(true)`: tight to the remaining paint extent. `false`: fills viewport minus preceding scroll extent, or the child's extent if larger |
+| `sliver_fixed_extent_list` / `_keyed` | Lazy list of equal-extent rows, closed-form geometry |
+| `sliver_list(...)` | Lazy keyed rows that size themselves; measured-by-key extents shared with `ListView` |
+| `sliver_grid` / `_keyed` | Lazy grid; `SliverGridDelegate::FixedCrossAxisCount` or `MaxCrossAxisExtent` |
+| `sliver_persistent_header(delegate)` | `{min_extent, max_extent, build(shrink_offset, overlaps_content)}`, `.pinned`/`.floating` |
+| `keep_alive(child)` | Row scope in a `sliver_list`: parked rows keep their last view in a `ChildKey` side map, re-adopted when the key returns, released when it leaves the data or the list tears down; parking cancels a captured gesture |
+
+**Cache-window rule.** A lazy sliver materialises exactly the rows covering
+`[scroll_offset + cache_origin, + remaining_cache_extent)`; the viewport's `cache_extent`
+(`DEFAULT_CACHE_EXTENT`, frust-widgets-only) is the buffer, with no separate constant. Rows are built only at rebuild
+from the last layout's constraints; paint requests one more frame until the rows cover the window
+(`ListView`'s catch-up). `ListView` and the sliver lists share the windowed reconcilers and the
+`probe_key`/`locate_key` lookup in `slivers/reconcile.rs`. Near-edge callbacks are checked at layout,
+only once the list has moved, and delivered through the Housekeeping broadcast.
+
+**Correction-based anchoring.** `sliver_list` places rows from an anchor row. Keyed prepends and
+removals above the anchor (and a leading edge disagreeing with the list's start) are reported as
+`scroll_offset_correction` and applied by the retry loop, not a private nudge. It applies only while
+the list's start is at or above the viewport's leading edge; `locate_key` scans up to 64 items
+around the anchor.
+
+**Persistent header.** The child is laid out tight at `max(min, max - shrink)`,
+`shrink = min(scroll_offset, max)`. Pinned: `paint_origin = overlap` (pinned headers stack), the
+header paints at least `min_extent` while its layout extent shrinks to 0, so the next sliver scrolls
+under it (`overlaps_content = overlap > 0`). Floating: it keeps its own effective offset and reveals
+only under a Forward `user_scroll_direction`, which the viewport sets only during a drag or fling;
+floating+pinned never paints below `min_extent`. Layout records shrink and `overlaps_content`; paint
+requests a frame when stale; the next `View::rebuild` calls `build` (against the previous view's, as
+`ListView` does), so `build` must be pure and the content lags geometry by one frame. A change under
+a 0.5 px tolerance (`SHRINK_REBUILD_TOLERANCE`, crate-internal) skips the rebuild unless it lands on 0 or `max_extent`. An
+outside sliver can hold `SliverPersistentHeaderWidget` (frust-widgets-only; not yet in the facade)
+as a geometry core, as Material's `sliver_app_bar` does.
+
+**Forwarding wrappers** forward `Widget::as_sliver`: `Either`/`EitherOf3..8`, `hero`, `shield`,
+`auto_scroll_zone`, `GestureDetector`, plus `AnyView`/component boundaries (CORE). Others are boxes.
+
+**Reference surface and limits.** The playground Slivers page
+(`examples/playground/src/pages/slivers.rs`) composes a pinned Material `sliver_app_bar`, a floating
+`sliver_persistent_header`, a variable-extent `sliver_list`, a 4-column `sliver_grid` and
+`sliver_fill_remaining` under a `ScrollController`; its smoke test covers bar heights, wheel, jumps
+and zero layout-audit mismatches. v1 scope limits are registered as
+`sliver-v1-scope`; `ScrollView`/`ListView` are not yet viewport-based
+(`scroll-view-list-view-not-viewport-based`).
 
 ### Recent Additions
-**Overlay, selection and drag-and-drop:** the `overlay` module and `TextInput`'s hosted
-`selection_toolbar()` (see *Overlay flow*, *Text Selection and the Clipboard*); the `drag` module —
-coordinator, draggable source, drop target, auto-scroll, reorderable list (see *Drag-and-drop
-flow*). **Navigator observation:** `TransitionState`/`PageVisibility`; `overlay_host()`; route
-params merge query under path captures; `RouteNavigator` off-thread navigation. **Text:**
-`TextInput` read-only mode and `content_type` IME hints; `TextView` alignment, `.max_lines`,
-`.overflow(TextOverflow)` (see RENDER_ARCHITECTURE.md). **Baseline primitives:**
-`container()`/`colored_box()`, `divider()`, `icon_button()`. **Authoring:** `column()`/`row()`/
-`stack()` builders and `impl View<State>` slot/builder parameters (*Erasure at the API Boundary*).
+`overlay` and `TextInput`'s hosted `selection_toolbar()` (*Overlay flow*, *Text Selection and the
+Clipboard*); the `drag` module (*Drag-and-drop flow*); `TransitionState`/`PageVisibility`,
+`overlay_host()`, `RouteNavigator`; `TextInput` read-only mode and `content_type` IME hints;
+`TextView` alignment, `.max_lines`, `.overflow(TextOverflow)`; `container()`/`colored_box()`,
+`divider()`, `icon_button()`; `column()`/`row()`/`stack()` builders (*Erasure at the API Boundary*).
