@@ -136,8 +136,8 @@ Pixel 4a:
 | S5 | 14.19 / 18.48 | 6.15 | 13.30 / 13.71 | 2459 / 167 / 732 / 1.0 / 97 | 31 / 3,050 / 84,512 |
 | S6 | 13.78 / 15.23 | 6.55 | 8.79 / 10.75 | 2972 / 2704 / 446 / 0.8 / 249 | 512 / 8,925 / 216,336 |
 
-Pixel 4 (S1 `gpu_main` held at 8.11-8.12 in all 12 runs while `submit` drifted 10.5 to 14.1 ms as the phone
-reached 36.5 C from run 9):
+Pixel 4 (S1 `gpu_main` held at 8.11-8.12 in every captured run, discarded ones included, while `submit`
+drifted 10.5 to 14.1 ms as the phone reached 36.5 C from run 9):
 
 | Scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | walk / glyphs / upload / replay / instances | draws / strips / alphas |
 |---|---|---|---|---|---|
@@ -160,9 +160,10 @@ The off-arm reproduces the Pixel 4 before-rows within noise (S1 10.70 vs 11.15, 
 9.16-9.18 before the throttle from run 5; S5 8.55 vs 8.54) but not the Pixel 4a ones: 27.10 vs 32.70 and
 21.97 vs 26.27 (16-17 % below) with the governor at 700 MHz and 100 % busy. The three switches account for
 27.10 to 12.75 and 21.97 to 13.30; the unswitched atlas tier rule + clear skip, and the unsampled before-clock,
-are the candidates for the rest. Acceptance: Pixel 4a S1 `gpu_main` <= 16 ms MET at 12.75 (before 32.70, S1 now
-holds 60 Hz at 16.61 total); Pixel 4 S1 `gpu_main` <= 5.0 ms NOT MET at 8.12 (before 11.15) — that frame is
-CPU-bound, `submit` p50 10.66 ms with walk 8.2 ms against the 11.1 ms 90 Hz budget, and the Pixel 4's kgsl is not
+are the candidates for the rest. Acceptance: Pixel 4a S1 `gpu_main` <= 16 ms MET at 12.75 (before 32.70; S1 total
+p50 16.61 sits at the 60 Hz budget, p95 18.39 still over it); Pixel 4 S1 `gpu_main` <= 5.0 ms NOT MET at 8.12 (before
+11.15) — that frame is CPU-bound, `submit` p50 10.66 ms with walk 8.2 ms against the 11.1 ms 90 Hz budget, and the
+Pixel 4's kgsl is not
 readable, so the only clock evidence is the Pixel 4a's 347 vs 698 Mcyc/s; no S4 / S6 regression MET (Pixel 4a S4
 7.21 to 2.69, S6 13.02 to 8.79; Pixel 4 S4 2.02 to 0.90, S6 7.32 to 3.65). S1 atlas counters moved with the
 frame rate: Pixel 4a replays 50 / misses 126 / evictions 133 per window (before 37 / 66 / 69), Pixel 4 41 / 86 / 97.
