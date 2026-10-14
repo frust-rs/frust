@@ -1004,6 +1004,14 @@ pub struct PaintCtx<'a> {
     /// desktop app. Read by the platform-view hole-punch (see
     /// [`PaintCtx::is_translucent`]).
     translucent: bool,
+    /// The root's paint epoch, copied into each child like `translucent`: a
+    /// pod painted under another epoch is not clean ([`PaintCtx::subtree_clean`]).
+    /// Covers the paint-only global inputs the layout epoch does not (surface
+    /// translucency) and every layout-epoch bump (theme, insets, window size).
+    paint_epoch: u64,
+    /// Whether retained layers are enabled ([`crate::app::RenderRoot::set_retained_layers`]);
+    /// `false` makes [`PaintCtx::subtree_clean`] always answer `false`.
+    retained_layers: bool,
 }
 
 impl<'a> PaintCtx<'a> {
@@ -1037,6 +1045,8 @@ impl<'a> PaintCtx<'a> {
             platform_views: Vec::new(),
             input_shields: Vec::new(),
             translucent: false,
+            paint_epoch: 0,
+            retained_layers: true,
         }
     }
 
@@ -1736,6 +1746,8 @@ impl<'a> PaintCtx<'a> {
             platform_views: Vec::new(),
             input_shields: Vec::new(),
             translucent: self.translucent,
+            paint_epoch: self.paint_epoch,
+            retained_layers: self.retained_layers,
         };
         f(&mut child);
         if child.needs_frame {
@@ -1844,6 +1856,30 @@ impl<'a> PaintCtx<'a> {
     /// threaded (copied down unchanged).
     pub(crate) fn set_translucent(&mut self, translucent: bool) {
         self.translucent = translucent;
+    }
+
+    /// Seed the root's paint epoch and the retained-layers switch. Called by
+    /// [`crate::app::RenderRoot`] at each paint root and by
+    /// [`ChildPod::paint_child`] for each child (copied down unchanged).
+    pub(crate) fn set_paint_state(&mut self, paint_epoch: u64, retained_layers: bool) {
+        self.paint_epoch = paint_epoch;
+        self.retained_layers = retained_layers;
+    }
+
+    /// Whether nothing under `pod` changed since it was last painted — the
+    /// query a boundary widget makes about the child pod it owns **before**
+    /// painting it. The boundary's own pod is dirty whenever anything beneath
+    /// it changed, so ask about the child, not about yourself.
+    ///
+    /// Clean means: no dirty source reached the pod since its last paint (a
+    /// PAINT/LAYOUT rebuild, layout running, a frame or layout request, a
+    /// consumed or redraw-requesting event), and the global paint epoch (theme,
+    /// insets, window size, surface translucency) is unchanged. Always `false`
+    /// when retained layers are switched off
+    /// ([`crate::app::RenderRoot::set_retained_layers`]), and for a pod that
+    /// has never been painted.
+    pub fn subtree_clean(&self, pod: &ChildPod) -> bool {
+        self.retained_layers && !pod.paint_dirty && pod.painted_epoch == self.paint_epoch
     }
 }
 
@@ -2397,6 +2433,15 @@ pub struct ChildPod {
     /// [`ChildPod::mark_layout_dirty`]); cleared only
     /// by a layout that actually ran.
     layout_dirty: bool,
+    /// Whether anything under this pod may have changed since its subtree was
+    /// last painted ([`PaintCtx::subtree_clean`]). `true` for a fresh pod. Set
+    /// by every layout-dirty source (those marks imply it), by
+    /// [`ChildPod::mark_paint_dirty`] (a PAINT-only rebuild), and by this pod's
+    /// own layout actually running; cleared only by a pass whose
+    /// [`ChildPod::paint_child`] painted the child.
+    paint_dirty: bool,
+    /// The paint epoch the last paint that cleared `paint_dirty` ran under.
+    painted_epoch: u64,
     /// The constraints the last layout that ran was handed — `None` until one
     /// has. Half of the skip key: a parent handing different constraints lays
     /// the child out again.
@@ -2576,6 +2621,8 @@ impl ChildPod {
             inspect_id: Cell::new(None),
             // A fresh pod has never been laid out.
             layout_dirty: true,
+            paint_dirty: true,
+            painted_epoch: 0,
             last_constraints: None,
             last_epoch: 0,
             last_insets: WindowInsets::default(),
@@ -2662,6 +2709,7 @@ impl ChildPod {
     /// nothing layout-visible leaves the pod clean.
     pub fn widget_mut(&mut self) -> &mut dyn Widget {
         self.layout_dirty = true;
+        self.paint_dirty = true;
         &mut *self.widget
     }
 
@@ -2683,6 +2731,7 @@ impl ChildPod {
     pub fn set_widget(&mut self, widget: Box<dyn Widget>) {
         self.widget = widget;
         self.layout_dirty = true;
+        self.paint_dirty = true;
     }
 
     /// Whether the next [`ChildPod::layout_child`] must lay the child out even
@@ -2703,6 +2752,24 @@ impl ChildPod {
     /// [`EventCtx::request_layout`]).
     pub fn mark_layout_dirty(&mut self) {
         self.layout_dirty = true;
+        self.paint_dirty = true;
+    }
+
+    /// Whether the pod's subtree must be painted afresh (see
+    /// [`PaintCtx::subtree_clean`]). Read-only; for tooling and tests
+    /// ([`crate::tree::WidgetTree::inspect_paint_dirty`]).
+    pub fn is_paint_dirty(&self) -> bool {
+        self.paint_dirty
+    }
+
+    /// Mark this pod paint-dirty only: layout is untouched. A reconciler calls
+    /// this when a child's rebuild returns
+    /// [`ChangeFlags::PAINT`](crate::view::ChangeFlags::PAINT) (a LAYOUT rebuild
+    /// already implies it through [`ChildPod::mark_layout_dirty`]). Like that
+    /// method it marks this pod only; the pods above are marked by their own
+    /// reconcilers from the same flags.
+    pub fn mark_paint_dirty(&mut self) {
+        self.paint_dirty = true;
     }
 
     /// The child's origin in the container's coordinate space.
@@ -2986,6 +3053,8 @@ impl ChildPod {
         self.last_epoch = ctx.epoch;
         self.last_insets = ctx.window_insets;
         self.layout_dirty = false;
+        // Layout actually ran: geometry may differ, so the painted output is stale.
+        self.paint_dirty = true;
         size
     }
 
@@ -3043,6 +3112,7 @@ impl ChildPod {
         self.last_epoch = ctx.epoch;
         self.last_insets = ctx.window_insets;
         self.layout_dirty = geometry.scroll_offset_correction.is_some();
+        self.paint_dirty = true;
         Some(geometry)
     }
 
@@ -3143,6 +3213,7 @@ impl ChildPod {
         // bool, global and origin-independent), mirroring the theme/insets — the
         // platform-view hole-punch reads it (see `PaintCtx::is_translucent`).
         child_ctx.set_translucent(ctx.is_translucent());
+        child_ctx.set_paint_state(ctx.paint_epoch, ctx.retained_layers);
         // Thread the live focus epoch down unchanged (global, like the clock),
         // and seed this child's focus from its own recorded link against it —
         // the mirror of how `event_child` seeds the child `EventCtx`, so a
@@ -3247,9 +3318,16 @@ impl ChildPod {
         // landing paint does, once — `painted_animating` tracks the child's own
         // request, never the path bit, so the paint after it reports nothing.
         let animating = child_ctx.needs_layout() || child_ctx.needs_frame();
-        if animating || self.painted_animating || child_ctx.layout_path_dirty {
+        let dirtied = animating || self.painted_animating || child_ctx.layout_path_dirty;
+        if dirtied {
             self.layout_dirty = true;
         }
+        // The paint-dirty twin of the same channels: the subtree was painted
+        // this pass, so the bit clears unless the paint itself asked for another
+        // frame/layout (the output is still changing), the previous paint did
+        // (the landing paint), or a pod below was dirtied during it.
+        self.paint_dirty = dirtied;
+        self.painted_epoch = ctx.paint_epoch;
         let unpaced = child_ctx.needs_layout()
             || (child_ctx.needs_frame() && !child_ctx.needs_frame_paced_only());
         let landing = self.painted_animating && !animating;
@@ -3507,6 +3585,7 @@ impl ChildPod {
             || matches!(result, EventResult::Handled);
         if path_dirty {
             self.layout_dirty = true;
+            self.paint_dirty = true;
         }
         ctx.absorb_layout(layout_requested, path_dirty);
         if captured {

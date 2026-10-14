@@ -330,6 +330,49 @@ impl WidgetTree {
         out
     }
 
+    /// Per-node paint-dirty state for tooling and tests: the exact twin of
+    /// [`WidgetTree::inspect_layout_dirty`] (same order, same ids) reporting
+    /// [`ChildPod::is_paint_dirty`]. An arena [`WidgetPod`] reports `false`.
+    pub fn inspect_paint_dirty(&self) -> Vec<(WidgetId, bool)> {
+        let mut out = Vec::new();
+        let roots = self.arena.roots();
+        for id in self.roots() {
+            if let Some(node) = roots.into_item(id.0) {
+                self.pod_flag_node(node, id, &ChildPod::is_paint_dirty, &mut out);
+            }
+        }
+        out
+    }
+
+    /// [`WidgetTree::inspect_paint_dirty`]'s arena step.
+    fn pod_flag_node(
+        &self,
+        node: ArenaRef<'_, WidgetPod>,
+        id: WidgetId,
+        flag: &dyn Fn(&ChildPod) -> bool,
+        out: &mut Vec<(WidgetId, bool)>,
+    ) {
+        out.push((id, false));
+        for child_id in self.ordered_children(id, node) {
+            if let Some(child) = node.children.into_item(child_id.0) {
+                self.pod_flag_node(child, child_id, flag, out);
+            }
+        }
+        Self::pod_flag_pods(node.item.widget(), flag, out);
+    }
+
+    /// [`WidgetTree::inspect_paint_dirty`]'s pod step.
+    fn pod_flag_pods(
+        widget: &dyn Widget,
+        flag: &dyn Fn(&ChildPod) -> bool,
+        out: &mut Vec<(WidgetId, bool)>,
+    ) {
+        widget.visit_children(&mut |child| {
+            out.push((child.inspect_id(), flag(child)));
+            Self::pod_flag_pods(child.widget(), flag, out);
+        });
+    }
+
     /// [`WidgetTree::inspect_layout_dirty`]'s arena step, mirroring
     /// [`WidgetTree::inspect_node`]'s order: the node, its arena children, then
     /// its widget's owned pods.
