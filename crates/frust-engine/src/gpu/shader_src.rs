@@ -147,13 +147,17 @@ pub const STRIP_NAME: &str = "frust-engine strip";
 ///   external texture;
 /// - `GRADIENT` — the linear, radial and sweep gradients;
 /// - `BLURRED_RECT` — the blurred rounded rectangle;
-/// - `LAYER` — the layer colour source a composite samples its page through.
-pub const STRIP_FEATURES: [&str; 5] = [
+/// - `LAYER` — the layer colour source a composite samples its page through;
+/// - `GLYPH` — the glyph quad: one nearest atlas load at the texel the
+///   instance's payload names. Not nested inside `IMAGE` and never reading the
+///   sampler, so it compiles identically in both program families.
+pub const STRIP_FEATURES: [&str; 6] = [
     "IMAGE",
     "IMAGE_FILTERED",
     "GRADIENT",
     "BLURRED_RECT",
     "LAYER",
+    "GLYPH",
 ];
 
 /// The family feature: bilinear atlas images through a hardware sampler (see
@@ -174,6 +178,7 @@ pub const fn class_features(class: PaintClass) -> &'static [&'static str] {
         PaintClass::ImageFiltered => &["IMAGE", "IMAGE_FILTERED"],
         PaintClass::BlurredRect => &["BLURRED_RECT"],
         PaintClass::LayerComposite => &["LAYER"],
+        PaintClass::Glyph => &["GLYPH"],
         PaintClass::Uber => &STRIP_FEATURES,
     }
 }
@@ -189,6 +194,7 @@ pub const fn strip_class_name(class: PaintClass) -> &'static str {
         PaintClass::ImageFiltered => "frust-engine strip/image-filtered",
         PaintClass::BlurredRect => "frust-engine strip/blurred-rect",
         PaintClass::LayerComposite => "frust-engine strip/layer",
+        PaintClass::Glyph => "frust-engine strip/glyph",
         PaintClass::Uber => STRIP_NAME,
     }
 }
@@ -615,6 +621,39 @@ mod tests {
         );
         assert!(HELPERS.contains("flat_coord & ((1u << lut_width_bits) - 1u)"));
         assert!(HELPERS.contains("flat_coord >> lut_width_bits"));
+    }
+
+    /// The glyph program keeps the glyph quad's one atlas load and nothing of
+    /// the image paths — and, holding no `IMAGE` feature, is the same program in
+    /// both families.
+    #[test]
+    fn the_glyph_class_keeps_only_the_glyph_branch() {
+        let glyph_arm = "paint_type == PAINT_TYPE_GLYPH {";
+        for image_sampler in [false, true] {
+            let src = strip_program_source(PaintClass::Glyph, image_sampler);
+            let fs = &src[src.find("fn fs_main(").expect("a fragment entry point")..];
+            assert!(fs.contains(glyph_arm));
+            assert!(!fs.contains("paint_type == PAINT_TYPE_IMAGE {"));
+            assert!(!fs.contains("sampled_bilinear("));
+            assert!(!fs.contains("bilinear_sample("));
+            assert!(!src.contains("var atlas_sampler: sampler;"));
+            assert!(fs.contains("paint_type == PAINT_TYPE_SOLID {"));
+        }
+        assert_eq!(
+            strip_program_source(PaintClass::Glyph, false),
+            strip_program_source(PaintClass::Glyph, true)
+        );
+        for class in PaintClass::ALL {
+            let src = strip_class_source(class);
+            let fs = &src[src.find("fn fs_main(").expect("a fragment entry point")..];
+            assert_eq!(
+                fs.contains(glyph_arm),
+                class_features(class).contains(&"GLYPH"),
+                "{}",
+                class.label()
+            );
+        }
+        assert!(strip_class_source(PaintClass::Uber).contains(glyph_arm));
     }
 
     #[test]
