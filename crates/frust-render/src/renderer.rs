@@ -279,11 +279,22 @@ pub struct SurfaceRenderer {
     /// Whether a first rendered frame has been measured already.
     #[cfg(feature = "perf-trace")]
     first_submit_seen: bool,
+    /// What [`Self::take_retained_ledger`] last handed out: the engine's
+    /// retained generation, or `Some(None)` for the empty ledger of a renderer
+    /// with no engine. `None` until the first take and again at every surface
+    /// episode's start or end, so the next take always publishes.
+    retained_published: Option<Option<u64>>,
 }
 
 /// One retained page the renderer holds resident: the key it was recorded
 /// under (`Command::PushRetained`'s `key`), its rasterized extent in physical
-/// pixels and the device scale it was rasterized at.
+/// pixels and the scale it was rasterized at.
+///
+/// Both are the page *as rasterized*: the bracket's rectangle mapped through
+/// its transform with the presentation scale applied, so `scale` is the device
+/// scale times the bracket's own `scale` (see `frust_engine::cache::retained`).
+/// A page is reusable by a `DrawRetained` with the same linear transform at any
+/// alpha and any translation, and by nothing else.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResidentPage {
     /// The raw retained key.
@@ -412,6 +423,7 @@ impl SurfaceRenderer {
             first_submit: None,
             #[cfg(feature = "perf-trace")]
             first_submit_seen: false,
+            retained_published: None,
         }
     }
 
@@ -447,10 +459,16 @@ impl SurfaceRenderer {
     /// reset here describes the surface being replaced or torn down: the
     /// streak belonged to it, and the stash describes one of its frames.
     /// Nothing else may assign `self.state`.
+    ///
+    /// The retained ledger last published is reset with them: a new episode's
+    /// engine starts with an empty store and an ended one has none, so the
+    /// next [`Self::take_retained_ledger`] publishes (the empty ledger, either
+    /// way) whatever generation the old engine had reached.
     fn adopt_surface_state(&mut self, state: SurfaceState) {
         self.state = state;
         self.consecutive_invalid = 0;
         self.clear_pending_frame();
+        self.retained_published = None;
     }
 
     /// Restores the persisted pipeline-cache blob a prior run produced via
@@ -515,10 +533,78 @@ impl SurfaceRenderer {
     }
 
     /// The retained pages the renderer holds resident after its last frame (see
-    /// [`ResidentPages`]). Empty until the engine's retained-page store reports
-    /// into it; never blocks and allocates nothing while empty.
+    /// [`ResidentPages`]): the engine's retained-page store, read as plain
+    /// data. Empty outside [`SurfacePhase::SurfaceReady`] — with no surface there
+    /// is no engine and no page. Never blocks, and allocates nothing while the
+    /// store is empty.
     pub fn retained_ledger(&self) -> ResidentPages {
-        ResidentPages::default()
+        let SurfaceState::Ready(ready) = &self.state else {
+            return ResidentPages::default();
+        };
+        let TierBackend::Engine { engine, .. } = &ready.backend;
+        ResidentPages {
+            pages: engine
+                .retained_ledger()
+                .map(|entry| ResidentPage {
+                    key: entry.key,
+                    extent_px: entry.extent_px,
+                    scale: entry.scale,
+                })
+                .collect(),
+            frame: engine.retained_frame(),
+        }
+    }
+
+    /// [`Self::retained_ledger`], but only when it changed since the last call
+    /// — a page added, evicted or re-rendered at another extent, the store
+    /// cleared, or the surface created, recreated or destroyed (each of which
+    /// starts the next call over, so a fresh or torn-down surface always
+    /// publishes its empty ledger). `None` when nothing changed.
+    ///
+    /// What a shell calls after each frame's submit to publish the ledger
+    /// without re-publishing an unchanged one every frame.
+    pub fn take_retained_ledger(&mut self) -> Option<ResidentPages> {
+        let generation = match &self.state {
+            SurfaceState::Ready(ready) => {
+                let TierBackend::Engine { engine, .. } = &ready.backend;
+                Some(engine.retained_generation())
+            }
+            SurfaceState::NoSurface | SurfaceState::Lost => None,
+        };
+        if self.retained_published == Some(generation) {
+            return None;
+        }
+        self.retained_published = Some(generation);
+        Some(self.retained_ledger())
+    }
+
+    /// Whether a frame was refused since the last call because a
+    /// `DrawRetained` named a page the engine did not hold (the engine then
+    /// empties its store), clearing the flag.
+    ///
+    /// The refused frame presented nothing, so a shell seeing `true` owes the
+    /// widget tree one more paint, against the emptied ledger it publishes
+    /// alongside — otherwise an idle screen would keep the frame before the
+    /// refused one until something else asked for a paint.
+    pub fn take_retained_refusal(&mut self) -> bool {
+        match &mut self.state {
+            SurfaceState::Ready(ready) => {
+                let TierBackend::Engine { engine, .. } = &mut ready.backend;
+                engine.take_retained_refusal()
+            }
+            SurfaceState::NoSurface | SurfaceState::Lost => false,
+        }
+    }
+
+    /// Drop every retained page the engine holds — what a device-scale change
+    /// calls for, since every body is about to be laid out again. The next
+    /// [`Self::take_retained_ledger`] reports the empty store. A no-op with no
+    /// surface.
+    pub fn clear_retained(&mut self) {
+        if let SurfaceState::Ready(ready) = &mut self.state {
+            let TierBackend::Engine { engine, .. } = &mut ready.backend;
+            engine.clear_retained();
+        }
     }
 
     /// Whether the **live** surface actually resolved to a translucent

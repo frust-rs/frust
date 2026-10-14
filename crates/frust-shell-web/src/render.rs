@@ -45,12 +45,14 @@
 
 use std::sync::Arc;
 
+use frust_core::RetainedLedger;
 use frust_render::{
     AcquireOutcome, EncodeOutcome, FrameOutcome, RenderContext, SurfaceAlphaRequest, SurfacePhase,
     SurfaceRenderer,
 };
 use frust_scene::Scene;
 use frust_shell_common::perf::{FramePasses, FrameStats, RenderSpans, UiSpans};
+use frust_shell_common::render_split::publish_retained_ledger;
 use web_time::{Duration, Instant};
 use winit::window::Window;
 
@@ -317,6 +319,28 @@ impl Default for WebFrameExecutor {
     }
 }
 
+/// Publish the renderer's resident-key ledger for the UI thread's next paint
+/// when it changed since the last frame, answering whether a frame was just
+/// refused for drawing a retained page the renderer no longer holds.
+///
+/// The slot behind `publish_retained_ledger` is process-global, which is sound
+/// only because a process runs ONE renderer: a second surface would publish
+/// over the first's ledger. The publish takes the slot's lock for an `Arc`
+/// swap and nothing else, and the UI thread only ever `try_lock`s it, so the
+/// UI thread never waits on this.
+fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
+    if let Some(resident) = renderer.take_retained_ledger() {
+        publish_retained_ledger(RetainedLedger::from_entries(
+            resident.frame,
+            resident
+                .pages
+                .iter()
+                .map(|page| (page.key, page.extent_px, page.scale)),
+        ));
+    }
+    renderer.take_retained_refusal()
+}
+
 /// Run the encode → acquire → submit tail for one painted `scene`, timing each
 /// span with its own clock read and recording the folded [`FramePasses`]
 /// through the frame-stats emitter.
@@ -367,6 +391,17 @@ fn render_frame(
         Err(err) => Err(err),
     };
     let submit = submit_start.elapsed();
+
+    // The resident-key ledger after this frame, for the next paint. A frame
+    // the engine refused for drawing a page it no longer holds presented
+    // nothing and emptied the store, so it owes the loop an immediate redraw
+    // against the empty ledger just published — the same follow-up a stale
+    // swapchain gets.
+    let refused_retained = publish_retained(renderer);
+    let render_outcome = match render_outcome {
+        Ok(FrameOutcome::Skipped) if refused_retained => Ok(FrameOutcome::Redraw),
+        other => other,
+    };
 
     frame_stats.record(FramePasses::from_split(
         ui_spans,
