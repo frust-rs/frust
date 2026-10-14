@@ -119,6 +119,55 @@ evicted earlier while its glyph kept being drawn — before it is treated as the
 (32.7 C start): p50 11.66 / p95 15.44 ms, drifting to 35 C by run 6. Thread sample during S1: main,
 `RenderThread` and both `frust-reactive` threads at nice -10, `frust-render` at nice -4.
 
+### After Phase 1
+
+Re-captured 2026-10-14 from `feature/frust-fast-p1` (2acaf544: paint-class programs, one-pass opening, atlas
+tier rule + clear skip, hardware image sampler) with the same protocol (default build, 12x30 s, first two runs
+discarded, same fairness warnings, clocks unpinned); every scenario started below 34.0 C (Pixel 4 S1 / S5 / S6 /
+S4 at 31.5 / 33.8 / 34.0 / 33.8 C, the Pixel 4a within 31.5-34.0 C). Pixel 4a `kgsl-3d0` sampled at 1 Hz,
+median governor clock / busy Mcyc/s: S1 430 MHz / 347 (81 % busy), S4 180 / 34, S5 355 / 295, S6 267 / 150.
+
+Pixel 4a:
+
+| Scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | walk / glyphs / upload / replay / instances | draws / strips / alphas |
+|---|---|---|---|---|---|
+| S1 | 16.61 / 18.39 | 10.60 | 12.75 / 12.99 | 6813 / 3899 / 585 / 1233 / 234 | 536 / 14,783 / 494,208 |
+| S4 | 11.97 / 12.79 | 4.25 | 2.69 / 2.75 | 697 / 318 / 313 / 0.8 / 52 | 46 / 1,056 / 26,832 |
+| S5 | 14.19 / 18.48 | 6.15 | 13.30 / 13.71 | 2459 / 167 / 732 / 1.0 / 97 | 31 / 3,050 / 84,512 |
+| S6 | 13.78 / 15.23 | 6.55 | 8.79 / 10.75 | 2972 / 2704 / 446 / 0.8 / 249 | 512 / 8,925 / 216,336 |
+
+Pixel 4 (S1 `gpu_main` held at 8.11-8.12 in every captured run, discarded ones included, while `submit`
+drifted 10.5 to 14.1 ms as the phone reached 36.5 C from run 9):
+
+| Scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | walk / glyphs / upload / replay / instances | draws / strips / alphas |
+|---|---|---|---|---|---|
+| S1 | 11.15 / 14.70 | 10.66 | 8.12 / 8.40 | 8238 / 6593 / 315 / 864 / 139 | 525 / 14,077 / 474,272 |
+| S4 | 3.78 / 4.33 | 3.25 | 0.90 / 0.93 | 654 / 320 / 248 / 0.4 / 46 | 45 / 1,025 / 27,696 |
+| S5 | 6.41 / 7.17 | 4.78 | 5.52 / 5.59 | 1849 / 140 / 510 / 0.4 / 85 | 30 / 3,001 / 92,448 |
+| S6 | 6.90 / 7.52 | 5.61 | 3.65 / 3.69 | 2642 / 2444 / 348 / 0.3 / 211 | 508 / 8,918 / 224,184 |
+
+Kill-switch off-arm (`FRUST_ENGINE_UBER_PROGRAM=1 FRUST_ENGINE_NO_PASS_MERGE=1 FRUST_ENGINE_IMAGE_SAMPLER=0`,
+same APK recipe otherwise; before-row `gpu_main` p50 in the last column):
+
+| Phone / scenario | total p50 / p95 | submit p50 | gpu_main p50 / p95 | 4a clock / busy | before |
+|---|---|---|---|---|---|
+| Pixel 4a S1 | 32.57 / 35.99 | 14.10 | 27.10 / 27.50 | 700 MHz / 698 (100 %) | 32.70 |
+| Pixel 4a S5 | 17.84 / 37.02 | 5.68 | 21.97 / 22.42 | 700 MHz / 699 (100 %) | 26.27 |
+| Pixel 4 S1 | 14.01 / 16.04 | 13.56 | 10.70 / 10.93 | - | 11.15 |
+| Pixel 4 S5 | 12.02 / 12.86 | 4.76 | 8.55 / 8.83 | - | 8.54 |
+
+The off-arm reproduces the Pixel 4 before-rows within noise (S1 10.70 vs 11.15, both warm: runs 1-4 sat at
+9.16-9.18 before the throttle from run 5; S5 8.55 vs 8.54) but not the Pixel 4a ones: 27.10 vs 32.70 and
+21.97 vs 26.27 (16-17 % below) with the governor at 700 MHz and 100 % busy. The three switches account for
+27.10 to 12.75 and 21.97 to 13.30; the unswitched atlas tier rule + clear skip, and the unsampled before-clock,
+are the candidates for the rest. Acceptance: Pixel 4a S1 `gpu_main` <= 16 ms MET at 12.75 (before 32.70; S1 total
+p50 16.61 sits at the 60 Hz budget, p95 18.39 still over it); Pixel 4 S1 `gpu_main` <= 5.0 ms NOT MET at 8.12 (before
+11.15) — that frame is CPU-bound, `submit` p50 10.66 ms with walk 8.2 ms against the 11.1 ms 90 Hz budget, and the
+Pixel 4's kgsl is not
+readable, so the only clock evidence is the Pixel 4a's 347 vs 698 Mcyc/s; no S4 / S6 regression MET (Pixel 4a S4
+7.21 to 2.69, S6 13.02 to 8.79; Pixel 4 S4 2.02 to 0.90, S6 7.32 to 3.65). S1 atlas counters moved with the
+frame rate: Pixel 4a replays 50 / misses 126 / evictions 133 per window (before 37 / 66 / 69), Pixel 4 41 / 86 / 97.
+
 ## Dev loop
 
 Measured baseline: default-config incremental `cargo build` medians 0.89s; edit-to-first-frame medians ~263ms once built. An alternate linker and `cranelift` both measured worse, so **no fast-dev template recipe ships** — re-run `scripts/devloop-measure.sh` if that changes. Measured 2026-09-25 (i5-12600, Linux): a watched relaunch's incremental build took 1.29s, matching the baseline above (`frust run --watch`, TUI `R`/`W`; see [DEVELOPMENT.md](DEVELOPMENT.md) § Dev Loop).

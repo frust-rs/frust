@@ -96,7 +96,10 @@ pub fn depth_texture_descriptor(width: u32, height: u32) -> wgpu::TextureDescrip
     }
 }
 
-/// The load operation a frame's first depth-using pass applies.
+/// The load operation a frame's first depth-using pass applies — the surface
+/// opening, which clears colour and depth and draws the opaque strips in one
+/// pass, or the bare clear pass when the renderer records them apart (see
+/// `crate::renderer`'s *The frame's passes*). Every later pass loads.
 ///
 /// `pre_cleared` is the caller's statement that the attachment it supplied
 /// already holds the depth it wants tested against.

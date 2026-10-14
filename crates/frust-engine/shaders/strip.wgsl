@@ -22,10 +22,41 @@
 // packed color, an [x, y] sample coordinate, or a layer texture origin. See
 // the `StripInstance` comment below for the full bit layout.
 //
-// This module has four pipeline variants over the same two entry points
+// This module has six render-state variants over the same two entry points
 // (`gpu::pipelines`): an intermediate-target variant, an alpha-blended
-// variant with and without a depth attachment, and an opaque variant that
-// writes depth.
+// variant with and without a depth attachment, an opaque variant that writes
+// depth, and a destination-out pair for the hole punch.
+//
+// Paint-class specialisation. The fragment stage's colour-source dispatch is
+// what a fragment pays for whether or not it takes a branch, so the engine
+// compiles this ONE source into several programs, each keeping only the
+// branches one paint class needs (`gpu::shader_src::strip_class_source`).
+// A block between a `//#if FEATURE` line and its `//#endif` line is kept only
+// by the classes that enable FEATURE; everything outside such a block —
+// coverage, the solid paint, the vertex stage, every binding — is in every
+// class. The features are:
+//
+//   IMAGE          — atlas image sampling, nearest and bilinear
+//   IMAGE_FILTERED — inside IMAGE: bicubic atlas sampling and the external
+//                    texture (a caller-owned texture, any quality)
+//   GRADIENT       — linear, radial and sweep gradients
+//   BLURRED_RECT   — the blurred rounded rectangle
+//   LAYER          — the layer colour source a composite reads its page through
+//
+// One more feature is not a class but a program FAMILY, chosen per renderer
+// (`FRUST_ENGINE_IMAGE_SAMPLER`, on unless set to 0):
+//
+//   IMAGE_SAMPLER  — inside IMAGE: bilinear atlas sampling through a hardware
+//                    sampler instead of four loads; its `//#else` arm is the
+//                    manual path every program of the manual family keeps
+//
+// The directive lines are plain comments, and every class feature's block is
+// a whole arm of its own, so the class that enables every class feature — the
+// Uber program — is this file with one of the two IMAGE_SAMPLER arms blanked
+// out: the `//#else` arm in the sampler family, the sampler arm in the manual
+// one.
+// Every class of a family binds the same groups through one explicit pipeline
+// layout, so a binding a class no longer reads is still declared here.
 
 // Color source modes: where the fragment shader gets color data from.
 // Use the payload (a color or image coordinates).
@@ -195,6 +226,41 @@ var atlas_texture_array: texture_2d_array<f32>;
 @group(1) @binding(1)
 var external_texture: texture_2d<f32>;
 
+// Declared only by the image programs of the sampler family, together with
+// the layout entry it binds against (`gpu::bindings`) and the one function
+// that samples through it; every other program — and every program of the
+// manual family — declares no sampler at all.
+//#if IMAGE_SAMPLER
+@group(1) @binding(2)
+var atlas_sampler: sampler;
+
+// Bilinear filtering through a hardware sampler: what `bilinear_sample`
+// computes, in one filtered fetch instead of four loads.
+//
+// `coords` is the texel-space sample position with texel i's centre at
+// i + 0.5 — `bilinear_sample`'s own `coords` plus half a texel. It is clamped
+// to the centres of the image's edge texels, which is exactly the clamp the
+// manual path applies to its taps: a tap never leaves the image's own atlas
+// rectangle, so a neighbouring slot's texels never reach the filter, for any
+// source rectangle and any extend mode, with no padding around the slot. Only
+// the precision of the weights differs — a sampler interpolates at the
+// hardware's sub-texel resolution rather than in full `f32`. Lives here
+// rather than in the helper prelude because no other module may sample: the
+// filter program's one bilinear sample is its own region-bounded helper.
+fn sampled_bilinear(
+    tex: texture_2d_array<f32>,
+    linear_sampler: sampler,
+    coords: vec2<f32>,
+    atlas_idx: i32,
+    image_offset: vec2<f32>,
+    image_size: vec2<f32>,
+) -> vec4<f32> {
+    let centre = clamp(coords, image_offset + vec2(0.5), image_offset + image_size - vec2(0.5));
+    let uv = centre / vec2<f32>(textureDimensions(tex));
+    return textureSampleLevel(tex, linear_sampler, uv, atlas_idx, 0.0);
+}
+//#endif
+
 @group(2) @binding(0)
 var encoded_paints_texture: texture_2d<u32>;
 
@@ -339,13 +405,14 @@ fn fs_main(
         // assumes a strip height of 4, i.e. each channel encodes the alpha
         // values of a single column within a strip.
         let alphas_index = x;
-        let tex_dimensions = textureDimensions(alphas_texture);
-        let alphas_tex_width = tex_dimensions.x;
         // Which texel holds the alpha values for this column.
         let texel_index = alphas_index / 4u;
         // Which channel (R,G,B,A) of that texel holds them.
         let channel_index = alphas_index % 4u;
-        let tex_x = texel_index & (alphas_tex_width - 1u);
+        // The texture's width is `1 << alphas_tex_width_bits` by construction
+        // (`gpu::config`), so the column within the row is a mask of the same
+        // shift the row is — no `textureDimensions` query per fragment.
+        let tex_x = texel_index & ((1u << config.alphas_tex_width_bits) - 1u);
         let tex_y = texel_index >> config.alphas_tex_width_bits;
 
         // Load all 4 channels from the texture.
@@ -367,6 +434,7 @@ fn fs_main(
         // coordinates for the other paint types.
         if paint_type == PAINT_TYPE_SOLID {
             final_color = alpha * unpack4x8unorm(payload);
+//#if IMAGE
         } else if paint_type == PAINT_TYPE_IMAGE {
             let paint_tex_idx = paint_and_rect_flag & PAINT_TEXTURE_INDEX_MASK;
             let image_texel0 = load_encoded_paint_texel(paint_tex_idx, 0u);
@@ -393,6 +461,7 @@ fn fs_main(
             );
 
             var sample_color: vec4<f32>;
+//#if IMAGE_FILTERED
             if image_source_kind == IMAGE_SOURCE_EXTERNAL {
                 let final_xy = image_offset + extended_xy;
                 sample_color = sample_external_image(
@@ -413,7 +482,19 @@ fn fs_main(
                     image_extend_modes,
                     image_padding,
                 );
-            } else if image_quality == IMAGE_QUALITY_MEDIUM {
+            } else
+//#endif
+            if image_quality == IMAGE_QUALITY_MEDIUM {
+//#if IMAGE_SAMPLER
+                sample_color = sampled_bilinear(
+                    atlas_texture_array,
+                    atlas_sampler,
+                    image_offset + extended_xy,
+                    i32(image_atlas_index),
+                    image_offset,
+                    image_size,
+                );
+//#else
                 let final_xy = image_offset + extended_xy - vec2(0.5);
                 sample_color = bilinear_sample(
                     atlas_texture_array,
@@ -424,6 +505,7 @@ fn fs_main(
                     image_extend_modes,
                     image_padding,
                 );
+//#endif
             } else {
                 let final_xy = image_offset + extended_xy;
                 sample_color = textureLoad(
@@ -439,6 +521,8 @@ fn fs_main(
                 sample_color * image_tint,
                 is_multiply
             );
+//#endif
+//#if GRADIENT
         } else if paint_type == PAINT_TYPE_LINEAR_GRADIENT {
             let paint_tex_idx = paint_and_rect_flag & PAINT_TEXTURE_INDEX_MASK;
             let gradient_texel0 = load_encoded_paint_texel(paint_tex_idx, 0u);
@@ -456,7 +540,8 @@ fn fs_main(
                 t_value,
                 get_gradient_extend_mode(gradient_texel0),
                 get_gradient_start(gradient_texel0),
-                get_gradient_texture_width(gradient_texel0)
+                get_gradient_texture_width(gradient_texel0),
+                config.encoded_paints_tex_width_bits
             );
             final_color = alpha * gradient_color;
         } else if paint_type == PAINT_TYPE_RADIAL_GRADIENT {
@@ -476,7 +561,8 @@ fn fs_main(
                 gradient_result.x,
                 get_gradient_extend_mode(gradient_texel0),
                 get_gradient_start(gradient_texel0),
-                get_gradient_texture_width(gradient_texel0)
+                get_gradient_texture_width(gradient_texel0),
+                config.encoded_paints_tex_width_bits
             );
             final_color = select(
                 vec4<f32>(0.0, 0.0, 0.0, 0.0),
@@ -511,9 +597,12 @@ fn fs_main(
                 t_value,
                 get_gradient_extend_mode(gradient_texel0),
                 get_gradient_start(gradient_texel0),
-                get_gradient_texture_width(gradient_texel0)
+                get_gradient_texture_width(gradient_texel0),
+                config.encoded_paints_tex_width_bits
             );
             final_color = alpha * gradient_color;
+//#endif
+//#if BLURRED_RECT
         } else if paint_type == PAINT_TYPE_BLURRED_ROUNDED_RECT {
             let paint_tex_idx = paint_and_rect_flag & PAINT_TEXTURE_INDEX_MASK;
             let blurred_texel0 = load_encoded_paint_texel(paint_tex_idx, 0u);
@@ -529,10 +618,13 @@ fn fs_main(
                 blurred_texel3,
                 blurred_texel4,
             );
+//#endif
         }
+//#if LAYER
     } else if color_source == COLOR_SOURCE_LAYER {
         let layer_opacity = f32(paint_and_rect_flag & 0xffu) * (1.0 / 255.0);
         final_color = alpha * layer_opacity * textureLoad(layer_input_texture, vec2<i32>(sample_xy), 0);
+//#endif
     } else {
         final_color = vec4<f32>(0.0);
     }

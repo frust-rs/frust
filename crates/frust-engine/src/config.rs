@@ -15,6 +15,17 @@ fn env_flag_enabled(compile_time: Option<&str>, runtime: Option<String>) -> bool
     }
 }
 
+/// Parse a default-on environment flag — a kill switch: enabled unless the
+/// resolved value is `0` or `false` (any case).
+///
+/// The same compile-time-or-runtime precedence as [`env_flag_enabled`],
+/// resolved through [`env_str`] so an empty runtime value falls through to
+/// the compile-time half rather than reading as off.
+fn env_flag_default_on(compile_time: Option<&'static str>, runtime: Option<String>) -> bool {
+    env_str(compile_time, runtime)
+        .is_none_or(|val| !(val.eq_ignore_ascii_case("0") || val.eq_ignore_ascii_case("false")))
+}
+
 /// The precedence-resolved value of a string-or-number-valued `FRUST_ENGINE_*`
 /// env knob, mirroring `frust-render::context`'s `env_str` combinator: a
 /// non-empty runtime (`std::env::var`) value wins even when a compile-time
@@ -64,6 +75,100 @@ pub fn depth_disabled() -> bool {
             std::env::var("FRUST_ENGINE_NO_DEPTH").ok(),
         )
     })
+}
+
+/// Whether every strip run is forced through the whole (Uber) strip program
+/// via `FRUST_ENGINE_UBER_PROGRAM`. Cached: read once per process.
+///
+/// The kill switch over paint-class specialisation
+/// ([`crate::gpu::strips::PaintClass`]): when set, no pass segment is split
+/// into class runs, no class program is warmed up or built, and every strip
+/// pass draws exactly as the engine did before the classes existed — one
+/// pipeline per pass, the whole `strip.wgsl` program (of the family
+/// [`image_sampler_enabled`] picks). The escape hatch for
+/// a driver that miscompiles a specialisation, and the off-arm of every
+/// before/after measurement of it. `EngineRenderer::set_uber_program` is its
+/// programmatic counterpart.
+pub fn uber_program_forced() -> bool {
+    static FORCED: OnceLock<bool> = OnceLock::new();
+    *FORCED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_ENGINE_UBER_PROGRAM"),
+            std::env::var("FRUST_ENGINE_UBER_PROGRAM").ok(),
+        )
+    })
+}
+
+/// Whether the frame's surface opening stays three passes of its own via
+/// `FRUST_ENGINE_NO_PASS_MERGE`. Cached: read once per process.
+///
+/// The kill switch over pass merging: by default a frame clears its surface,
+/// draws its opaque strips and draws its first surface round's strips in ONE
+/// render pass (see `crate::renderer`'s *The frame's passes*), which on a
+/// tile-based GPU saves a whole-framebuffer load and store per pass folded
+/// away. When set, the clear and the opaque strips are recorded as passes of
+/// their own ahead of every round, and every surface round in a pass of its
+/// own — the off-arm of every before/after measurement of it, and the escape hatch for
+/// a driver that mishandles a pipeline switch inside a cleared pass.
+/// `EngineRenderer::set_pass_merge` is its programmatic counterpart.
+pub fn pass_merge_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_ENGINE_NO_PASS_MERGE"),
+            std::env::var("FRUST_ENGINE_NO_PASS_MERGE").ok(),
+        )
+    })
+}
+
+/// Whether Medium-quality atlas images are filtered through the hardware
+/// sampler — on unless `FRUST_ENGINE_IMAGE_SAMPLER=0` (or `false`) says
+/// otherwise. Cached: read once per process.
+///
+/// On, the renderer compiles the image-sampling strip programs from their
+/// `IMAGE_SAMPLER` specialisation (see [`crate::gpu::shader_src`]): a bilinear
+/// atlas image is read with one filtered `textureSampleLevel` instead of four
+/// `textureLoad` taps, at the filtering precision of the hardware rather than
+/// in full `f32` — within the image tolerance the CPU-oracle gate already
+/// holds, at about three quarters of the GPU cost on a magnified image stream.
+/// The kill switch (`0`) compiles the manual family instead: no strip layout
+/// declares a sampler and every program is the four-tap one — pixel for pixel
+/// what the engine drew before the sampler existed — which is the escape hatch
+/// for a driver that filters wrongly, and the off-arm of every before/after
+/// measurement of it. `EngineRenderer::with_image_sampler` is its
+/// programmatic counterpart.
+pub fn image_sampler_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        env_flag_default_on(
+            option_env!("FRUST_ENGINE_IMAGE_SAMPLER"),
+            std::env::var("FRUST_ENGINE_IMAGE_SAMPLER").ok(),
+        )
+    })
+}
+
+/// The shortest class run worth a pipeline switch of its own, via
+/// `FRUST_ENGINE_RUN_SPLIT_MIN=<n>`; [`crate::gpu::strips::RUN_SPLIT_MIN`]
+/// when unset or unparsable. Cached: read once per process.
+///
+/// A diagnostic knob for re-measuring the threshold on a device (a build-time
+/// `--define` reaches it through `option_env!`); see
+/// [`crate::gpu::strips::split_class_runs`] for what it decides.
+pub fn run_split_min() -> u32 {
+    static MIN: OnceLock<u32> = OnceLock::new();
+    *MIN.get_or_init(|| {
+        parse_run_split_min(env_str(
+            option_env!("FRUST_ENGINE_RUN_SPLIT_MIN"),
+            std::env::var("FRUST_ENGINE_RUN_SPLIT_MIN").ok(),
+        ))
+    })
+}
+
+/// Parses a raw `FRUST_ENGINE_RUN_SPLIT_MIN` value (already resolved by
+/// [`env_str`]); an unset or unparsable value is the measured default.
+fn parse_run_split_min(raw: Option<String>) -> u32 {
+    raw.and_then(|s| s.trim().parse().ok())
+        .unwrap_or(crate::gpu::strips::RUN_SPLIT_MIN)
 }
 
 /// Whether atlas allocation is disabled via `FRUST_ENGINE_NO_ATLAS`.
@@ -249,6 +354,39 @@ mod tests {
         // Runtime wins in both directions.
         assert!(env_flag_enabled(Some("0"), Some("1".to_string())));
         assert!(!env_flag_enabled(Some("1"), Some("0".to_string())));
+    }
+
+    // The `OnceLock` getters (`uber_program_forced`, `pass_merge_disabled`,
+    // `image_sampler_enabled`, `run_split_min`) are deliberately not asserted
+    // here: they read the process environment, and a machine running the
+    // off-arm captures exports exactly these knobs. The pure parsers above
+    // and below are the contract.
+
+    /// A kill switch reads the other way round from every other boolean
+    /// here: unset — or set to anything but `0`/`false` — is on.
+    #[test]
+    fn a_default_on_flag_is_off_only_when_switched_off() {
+        assert!(env_flag_default_on(None, None));
+        assert!(env_flag_default_on(None, Some("1".to_string())));
+        assert!(env_flag_default_on(None, Some(String::new())));
+        assert!(!env_flag_default_on(None, Some("0".to_string())));
+        assert!(!env_flag_default_on(None, Some("FALSE".to_string())));
+        assert!(!env_flag_default_on(Some("0"), None));
+        // Runtime wins in both directions; an empty runtime value falls
+        // through to the compile-time half.
+        assert!(env_flag_default_on(Some("0"), Some("1".to_string())));
+        assert!(!env_flag_default_on(Some("1"), Some("0".to_string())));
+        assert!(!env_flag_default_on(Some("0"), Some(String::new())));
+    }
+
+    #[test]
+    fn the_run_split_threshold_parses_or_falls_back_to_the_measured_default() {
+        use crate::gpu::strips::RUN_SPLIT_MIN;
+        assert_eq!(parse_run_split_min(Some("64".to_string())), 64);
+        assert_eq!(parse_run_split_min(Some(" 256 ".to_string())), 256);
+        assert_eq!(parse_run_split_min(Some("0".to_string())), 0);
+        assert_eq!(parse_run_split_min(Some("many".to_string())), RUN_SPLIT_MIN);
+        assert_eq!(parse_run_split_min(None), RUN_SPLIT_MIN);
     }
 
     #[test]

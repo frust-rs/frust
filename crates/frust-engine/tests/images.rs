@@ -37,7 +37,7 @@
 use std::sync::Arc;
 
 use frust_engine::cache::images::{
-    ATLAS_PADDING, AtlasBudget, ImageResidency, ImageSkip, MAX_UNSEEN_FRAMES,
+    ATLAS_PADDING, AtlasBudget, ImageResidency, ImageSkip, MAX_UNSEEN_FRAMES, choose_tier,
 };
 #[cfg(feature = "perf-trace")]
 use frust_engine::cache::images::{TierLogOnce, atlas_tier_line};
@@ -302,6 +302,74 @@ fn a_refused_frames_evictions_survive_it_too() {
     compiler.acknowledge_image_plan();
     let after = compile(&mut compiler, &empty);
     assert!(after.image_evictions.is_empty());
+}
+
+#[test]
+fn a_clear_an_upload_in_the_same_plan_covers_exactly_is_never_issued() {
+    // A churning atlas evicts a rectangle and hands it straight to an image of
+    // the same extent. The upload writes every texel the clear would have
+    // zeroed, after it, so the plan carries no clear for that rectangle — only
+    // the upload. One slot, so the second image can only land where the first
+    // one was.
+    let one_slot = AtlasBudget {
+        atlas_size: (32, 32),
+        max_atlases: 1,
+    };
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, one_slot);
+
+    let first = image_of(32, 32, [255, 0, 0, 255]);
+    let drawn = compile(&mut compiler, &scene_of(|b| b.draw_image(&first, DEST)));
+    let region = drawn.image_uploads[0].region;
+    compiler.acknowledge_image_plan();
+
+    let second = image_of(32, 32, [0, 0, 255, 255]);
+    let churned = compile(&mut compiler, &scene_of(|b| b.draw_image(&second, DEST)));
+    assert_eq!(
+        churned.image_draws, 1,
+        "the second image displaced the first"
+    );
+    assert_eq!(churned.image_uploads.len(), 1);
+    assert_eq!(
+        churned.image_uploads[0].region, region,
+        "into the very rectangle the first one held"
+    );
+    assert!(
+        churned.image_evictions.is_empty(),
+        "a clear the upload overwrites in full is dropped from the plan"
+    );
+
+    // Unacknowledged, the plan is re-offered on the same terms.
+    let again = compile(&mut compiler, &scene_of(|b| b.draw_image(&second, DEST)));
+    assert!(again.image_evictions.is_empty());
+    assert_eq!(again.image_uploads.len(), 1);
+}
+
+#[test]
+fn a_clear_an_upload_covers_only_partly_is_still_issued() {
+    // The same churn with a smaller arrival: the evicted rectangle's texels the
+    // new image does not reach must still read as zero, so the clear stays —
+    // ordered ahead of the upload, as every clear is.
+    let one_slot = AtlasBudget {
+        atlas_size: (32, 32),
+        max_atlases: 1,
+    };
+    let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, one_slot);
+
+    let first = image_of(32, 32, [255, 0, 0, 255]);
+    let drawn = compile(&mut compiler, &scene_of(|b| b.draw_image(&first, DEST)));
+    let region = drawn.image_uploads[0].region;
+    compiler.acknowledge_image_plan();
+
+    let smaller = image_of(32, 16, [0, 0, 255, 255]);
+    let churned = compile(&mut compiler, &scene_of(|b| b.draw_image(&smaller, DEST)));
+    assert_eq!(churned.image_draws, 1);
+    assert_eq!(churned.image_uploads.len(), 1);
+    assert_ne!(churned.image_uploads[0].region, region);
+    assert_eq!(
+        churned.image_evictions,
+        vec![region],
+        "a partly covered rectangle keeps its clear"
+    );
 }
 
 #[test]
@@ -844,11 +912,12 @@ fn one_blob_drawn_at_two_extents_in_a_frame_keeps_the_first_draws_texels() {
 }
 
 #[test]
-fn a_pressure_eviction_reports_its_rectangle_once_and_hands_it_to_the_new_upload() {
+fn a_pressure_eviction_hands_its_rectangle_to_the_new_upload_without_a_clear() {
     // The consumer contract eviction has always kept, now reached by the second
-    // route: `image_evictions` names each freed rectangle once, and the plan is
-    // serviced clears-first, so the rectangle can be re-used by an upload in
-    // the very same plan without the clear erasing it.
+    // route: the plan is serviced clears-first, so the rectangle can be re-used
+    // by an upload in the very same plan without a clear erasing it — and when
+    // that upload covers the freed rectangle exactly, it writes every texel the
+    // clear would have, so the plan carries no clear for it at all.
     let mut compiler = SceneCompiler::with_atlas_budget(VIEWPORT.0, VIEWPORT.1, FOUR_SLOT_BUDGET);
     let resident: Vec<ImageData> = (0..4).map(|_| image(32, 32)).collect();
 
@@ -872,16 +941,15 @@ fn a_pressure_eviction_reports_its_rectangle_once_and_hands_it_to_the_new_upload
     let frame = compile(&mut compiler, &scene_of(|b| b.draw_image(&arrival, DEST)));
 
     assert_eq!(frame.skipped_images, 0, "the fifth image still paints");
-    assert_eq!(
-        frame.image_evictions,
-        vec![displaced],
-        "exactly one rectangle, reported exactly once"
+    assert!(
+        frame.image_evictions.is_empty(),
+        "the displaced rectangle's clear is covered by the arrival's upload"
     );
     assert_eq!(frame.image_uploads.len(), 1);
     assert_eq!(
         frame.image_uploads[0].region, displaced,
-        "the freed rectangle is what the new occupant took, which is why the \
-         plan has to be serviced clears-first"
+        "the freed rectangle is what the new occupant took, which is why its \
+         upload alone leaves no stale texel behind"
     );
     assert!(
         FOUR_SLOT_BUDGET.contains(frame.image_uploads[0].region, frame.atlas_layers),
@@ -1272,6 +1340,30 @@ fn the_mobile_budget_is_chosen_for_a_downlevel_adapter_and_never_the_vello_defau
     }
 }
 
+#[test]
+fn a_mobile_family_adapter_takes_a_mobile_tier_whatever_its_driver_answers() {
+    // Adreno 618/620 answer a full profile and no transient savings, which the
+    // capability read alone takes for a desktop part. The adapter table names
+    // the family, and device memory picks the plain or the large budget.
+    let mut adreno = TierCaps::fake(DownlevelProfile::Full);
+    adreno.adapter_name = "Adreno (TM) 618".to_string();
+
+    let small = AtlasBudget::for_choice(choose_tier(&adreno, Some(3 << 30)), &adreno);
+    assert_eq!(small, AtlasBudget::MOBILE);
+
+    let large = AtlasBudget::for_choice(choose_tier(&adreno, Some(6 << 30)), &adreno);
+    assert_eq!(large, AtlasBudget::MOBILE_LARGE_WIDE);
+    assert!(large.total_bytes() < AtlasBudget::DESKTOP.total_bytes());
+    assert!(large.max_atlases <= usize::try_from(MAX_ATLAS_INDEX + 1).expect("fits"));
+
+    let mut nvidia = TierCaps::fake(DownlevelProfile::Full);
+    nvidia.adapter_name = "NVIDIA T400".to_string();
+    assert_eq!(
+        AtlasBudget::for_choice(choose_tier(&nvidia, Some(6 << 30)), &nvidia),
+        AtlasBudget::DESKTOP
+    );
+}
+
 /// `perf-trace`-only, with the line itself — see
 /// `the_per_frame_residency_line_is_written_only_when_something_happened`.
 #[cfg(feature = "perf-trace")]
@@ -1279,28 +1371,34 @@ fn the_mobile_budget_is_chosen_for_a_downlevel_adapter_and_never_the_vello_defau
 fn the_resolved_atlas_tier_is_reported_once_in_a_line_a_capture_keeps() {
     // Which of the two tiers a device takes is otherwise an inference from
     // whether its images went missing. The line is `frust-perf`-prefixed
-    // because that is what a benchmark capture keeps, and it names both signals
-    // `is_mobile_tier` reads so a surprising tier can be explained from the log
-    // alone rather than re-derived from the adapter.
+    // because that is what a benchmark capture keeps, and it names the rule
+    // that decided plus every signal `choose_tier` reads, so a surprising tier
+    // can be explained from the log alone rather than re-derived from the
+    // adapter.
     let caps = TierCaps::fake(DownlevelProfile::WebGl2);
+    let choice = choose_tier(&caps, None);
     assert_eq!(
-        atlas_tier_line(&caps, AtlasBudget::for_caps(&caps)),
-        "frust-perf atlas tier=mobile budget=1024x1024x4 downlevel=WebGl2 \
-         transient_saves_memory=false adapter=fake-webgl2"
+        atlas_tier_line(&caps, choice, AtlasBudget::for_caps(&caps)),
+        "frust-perf atlas tier=mobile rule=downlevel budget=1024x1024x4 downlevel=WebGl2 \
+         transient_saves_memory=false memory_mib=unknown adapter=fake-webgl2"
     );
 
     let desktop = TierCaps::fake(DownlevelProfile::Full);
-    let line = atlas_tier_line(&desktop, AtlasBudget::for_caps(&desktop));
-    assert!(line.starts_with("frust-perf atlas tier=desktop budget=2048x2048x8"));
+    let line = atlas_tier_line(
+        &desktop,
+        choose_tier(&desktop, None),
+        AtlasBudget::for_caps(&desktop),
+    );
+    assert!(line.starts_with("frust-perf atlas tier=desktop rule=heuristic budget=2048x2048x8"));
 
     // Once, not once per surface: the question is about the device.
     let latch = TierLogOnce::new();
     assert!(
-        latch.emit(&caps, AtlasBudget::MOBILE),
+        latch.emit(&caps, choice, AtlasBudget::MOBILE),
         "the first call writes it"
     );
     assert!(
-        !latch.emit(&caps, AtlasBudget::MOBILE),
+        !latch.emit(&caps, choice, AtlasBudget::MOBILE),
         "no later one repeats it"
     );
 }
@@ -1322,4 +1420,287 @@ fn the_atlas_texture_is_declared_the_way_the_shaders_binding_expects() {
             .contains(wgpu::TextureUsages::TEXTURE_BINDING)
     );
     assert!(descriptor.usage.contains(wgpu::TextureUsages::COPY_DST));
+}
+
+/// The image-sampler program family on a real device: a bilinear atlas image
+/// filtered through the hardware sampler (`FRUST_ENGINE_IMAGE_SAMPLER`,
+/// [`frust_engine::EngineRenderer::with_image_sampler`]) against the manual
+/// four-tap path every manual-family program keeps.
+///
+/// The bar is the one `frust-testing` already holds every image case to
+/// against the CPU oracle — the corpus default of two levels per channel, no
+/// pixel beyond — applied here between the two families, so a sampled frame
+/// that drifted further from the manual one than an image case may drift from
+/// `vello_cpu` fails on this crate's own gate. (The oracle comparison itself,
+/// per family, is `frust-testing`'s: its engine goldens and the
+/// `unit-image-magnified` measurement case.) Each family is also held to its
+/// own Uber program byte for byte, and nearest sampling — which no family
+/// touches — to the other family byte for byte.
+///
+/// ```text
+/// WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 \
+///   cargo test -p frust-engine --test images -- --ignored
+/// ```
+#[cfg(not(target_arch = "wasm32"))]
+mod sampler_family {
+    use super::*;
+
+    use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
+    use frust_gpu::HeadlessTarget;
+    use peniko::{Color, Extend, ImageQuality};
+
+    /// Target extent every scene renders at.
+    const SIZE: u32 = 128;
+
+    /// The read-back format: R, G, B, A in byte order, no swizzle.
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+    /// The per-channel bar between the two families: the corpus default
+    /// tolerance every image case is held to against `vello_cpu`.
+    const IMAGE_TOLERANCE: u8 = 2;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn drain_error_scope(
+        device: &wgpu::Device,
+        scope: wgpu::ErrorScopeGuard,
+    ) -> Option<wgpu::Error> {
+        use std::task::{Context, Poll, Waker};
+
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut future = std::pin::pin!(scope.pop());
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(error) => return error,
+                Poll::Pending => {
+                    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                }
+            }
+        }
+    }
+
+    fn gpu() -> (wgpu::Device, wgpu::Queue, TierCaps) {
+        block_on(async {
+            let instance = wgpu::Instance::new(
+                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            );
+            let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
+                .await
+                .expect("no compatible GPU adapter");
+            println!(
+                "frust-engine image-sampler adapter: {:?}",
+                adapter.get_info()
+            );
+            let caps = TierCaps::probe(&adapter);
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("frust-engine image-sampler device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: frust_gpu::test_device_limits(&adapter, &caps),
+                    ..Default::default()
+                })
+                .await
+                .expect("failed to create the device");
+            (device, queue, caps)
+        })
+    }
+
+    /// An 8x8 opaque image: a one-texel red checkerboard over green and blue
+    /// ramps — the largest steps a bilinear filter interpolates across.
+    fn checker_ramps() -> ImageData {
+        let mut data = Vec::with_capacity(8 * 8 * 4);
+        for y in 0..8_u8 {
+            for x in 0..8_u8 {
+                let red = if (x + y) % 2 == 0 { 255 } else { 0 };
+                data.extend_from_slice(&[red, x * 36, y * 36, 255]);
+            }
+        }
+        ImageData {
+            data: Blob::new(Arc::new(data)),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 8,
+            height: 8,
+        }
+    }
+
+    /// A scene drawing the same atlas image several ways a bilinear filter
+    /// reaches past a texel: magnified 4x on and off the pixel grid, rotated,
+    /// two different images whose atlas slots touch magnified side by side
+    /// (a filter that left its own rectangle would show its neighbour's colour
+    /// along the shared edge), and a repeating brush magnified across its
+    /// seams.
+    fn bilinear_scene() -> Scene {
+        let checker = checker_ramps();
+        let green = image_of(4, 4, [0, 200, 40, 255]);
+        let magenta = image_of(4, 4, [220, 0, 180, 255]);
+        scene_of(|b| {
+            b.fill_rect(
+                Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)),
+                Brush::Solid(Color::from_rgb8(20, 20, 20)),
+            );
+            b.draw_image(&checker, Rect::new(0.0, 0.0, 32.0, 32.0));
+            b.draw_image(&checker, Rect::new(40.375, 8.625, 72.375, 40.625));
+            b.push_transform(Affine::rotate_about(0.3, (100.0, 20.0)));
+            b.draw_image(&checker, Rect::new(84.0, 4.0, 116.0, 36.0));
+            b.pop_transform();
+            b.draw_image(&green, Rect::new(0.0, 48.0, 32.0, 80.0));
+            b.draw_image(&magenta, Rect::new(32.0, 48.0, 64.0, 80.0));
+            b.push_transform(Affine::scale(4.0));
+            b.fill_rect(
+                Rect::new(17.0, 12.0, 31.0, 30.0),
+                Brush::Image(ImageBrush::new(checker.clone()).with_extend(Extend::Repeat)),
+            );
+            b.pop_transform();
+        })
+    }
+
+    /// The same image drawn at nearest quality, magnified: the path neither
+    /// family changes.
+    fn nearest_scene() -> Scene {
+        let checker = checker_ramps();
+        scene_of(|b| {
+            b.push_transform(Affine::scale(4.0));
+            b.fill_rect(
+                Rect::new(1.0, 1.0, 9.0, 9.0),
+                Brush::Image(
+                    ImageBrush::new(checker)
+                        .with_quality(ImageQuality::Low)
+                        .with_extend(Extend::Pad),
+                ),
+            );
+            b.pop_transform();
+        })
+    }
+
+    /// Renders `scene` twice — a cold frame and a steady one — through a fresh
+    /// renderer of the family `image_sampler` names, configured by `configure`,
+    /// returning the steady frame.
+    fn render(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        caps: &TierCaps,
+        scene: &Scene,
+        image_sampler: bool,
+        configure: impl FnOnce(&mut EngineRenderer),
+    ) -> Vec<u8> {
+        let mut renderer =
+            EngineRenderer::with_image_sampler(device, caps, FORMAT, None, image_sampler)
+                .expect("the engine builds on this device");
+        assert_eq!(renderer.image_sampler(), image_sampler);
+        configure(&mut renderer);
+        renderer.finish_warm_up(device);
+        let target = HeadlessTarget::new(device, SIZE, SIZE, FORMAT);
+        let mut frame = Vec::new();
+        for _ in 0..2 {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frust-engine image-sampler frame"),
+            });
+            renderer
+                .encode(
+                    device,
+                    queue,
+                    &mut encoder,
+                    scene,
+                    EngineTarget {
+                        view: target.view(),
+                        format: FORMAT,
+                        width: SIZE,
+                        height: SIZE,
+                        depth: None,
+                        output: OutputAlpha::Premultiplied,
+                    },
+                    Color::TRANSPARENT,
+                    Affine::IDENTITY,
+                )
+                .expect("a well-formed frame encodes");
+            queue.submit([encoder.finish()]);
+            renderer.end_frame(queue);
+            let error = drain_error_scope(device, scope);
+            assert!(error.is_none(), "the frame raised {error:?}");
+            frame = target.read_back(device, queue);
+        }
+        frame
+    }
+
+    /// How many pixels of `a` and `b` differ at all, and the largest
+    /// per-channel difference between them.
+    fn delta(a: &[u8], b: &[u8]) -> (usize, u8) {
+        assert_eq!(a.len(), b.len());
+        a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0).fold(
+            (0, 0),
+            |(count, max), (x, y)| {
+                let worst = x
+                    .iter()
+                    .zip(y)
+                    .map(|(p, q)| p.abs_diff(*q))
+                    .max()
+                    .unwrap_or(0);
+                (count + usize::from(worst != 0), max.max(worst))
+            },
+        )
+    }
+
+    #[test]
+    #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine -- --ignored`"]
+    fn the_sampler_family_draws_bilinear_images_within_the_image_tolerance() {
+        let (device, queue, caps) = gpu();
+        let scene = bilinear_scene();
+
+        let manual = render(&device, &queue, &caps, &scene, false, |_| {});
+        let sampled = render(&device, &queue, &caps, &scene, true, |_| {});
+        assert!(
+            manual.as_chunks::<4>().0.iter().any(|px| px[3] != 0),
+            "the manual frame drew nothing"
+        );
+        let (differing, max) = delta(&manual, &sampled);
+        println!("image sampler vs manual bilinear: {differing} px differ, max |delta| {max}");
+        assert!(
+            max <= IMAGE_TOLERANCE,
+            "the sampled frame drifts {max} levels from the manual one ({differing} px differ), \
+             past the {IMAGE_TOLERANCE}-level image tolerance"
+        );
+
+        // Within a family, routing changes no pixel: the Uber program of each
+        // family draws its images exactly as that family's image classes do.
+        for (image_sampler, routed) in [(false, &manual), (true, &sampled)] {
+            let uber = render(&device, &queue, &caps, &scene, image_sampler, |r| {
+                r.set_uber_program(true);
+            });
+            assert_eq!(
+                delta(routed, &uber),
+                (0, 0),
+                "image_sampler={image_sampler}: the class programs and the Uber program disagree"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine -- --ignored`"]
+    fn nearest_sampling_is_byte_identical_in_both_families() {
+        let (device, queue, caps) = gpu();
+        let scene = nearest_scene();
+
+        let manual = render(&device, &queue, &caps, &scene, false, |_| {});
+        let sampled = render(&device, &queue, &caps, &scene, true, |_| {});
+        assert!(
+            manual.as_chunks::<4>().0.iter().any(|px| px[3] != 0),
+            "the nearest frame drew nothing"
+        );
+        assert_eq!(delta(&manual, &sampled), (0, 0));
+    }
 }

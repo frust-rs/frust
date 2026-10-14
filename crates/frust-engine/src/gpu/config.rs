@@ -6,6 +6,30 @@
 //!
 //! Field order and size are part of the shader contract — see the module
 //! header of [`super`].
+//!
+//! ## The width shifts are the source of truth
+//!
+//! The strip program addresses its resource textures by shift and mask alone:
+//! a flat texel index `i` in a texture `1 << bits` wide is the texel
+//! `(i & ((1 << bits) - 1), i >> bits)`. It never asks a texture for its own
+//! width (`textureDimensions` per fragment was measurably not free on a mobile
+//! GPU), so the two shifts here are the only statement of those widths the GPU
+//! sees, and three textures depend on them:
+//!
+//! - the alpha texture, by [`GpuConfig::alphas_tex_width_bits`];
+//! - the encoded-paint texture, by [`GpuConfig::encoded_paints_tex_width_bits`];
+//! - the gradient LUT, by the *same* `encoded_paints_tex_width_bits` — the
+//!   uniform has no field of its own for it, and needs none, because the
+//!   renderer sizes every resource texture `resource_texture_dim` wide.
+//!
+//! [`resource_widths_agree`] is that rule as a check: a `debug_assert!` at the
+//! one site that builds the surface config from the resource textures
+//! (`renderer`'s config upload); the pooled-page configs are built from the
+//! same `dim` in the same frame and are not re-checked, and a release build
+//! checks nothing. The one pass with a narrower stand-in — the
+//! glyph-atlas replay, whose encoded-paint texture is a one-texel placeholder —
+//! draws solid instances only, which read neither the paint texture nor the
+//! LUT, so its config's paint shift addresses nothing.
 
 use bytemuck::{Pod, Zeroable};
 use vello_common::tile::Tile;
@@ -30,7 +54,9 @@ pub struct GpuConfig {
     /// dividing.
     pub alphas_tex_width_bits: u32,
     /// `log2` of the encoded-paint texture's width in texels, pre-computed
-    /// for the same reason as [`Self::alphas_tex_width_bits`].
+    /// for the same reason as [`Self::alphas_tex_width_bits`] — and, because
+    /// the gradient LUT is sized to the same width, `log2` of the LUT's
+    /// width too (see the module doc).
     pub encoded_paints_tex_width_bits: u32,
     /// Horizontal offset applied to every strip, in pixels.
     pub strip_offset_x: i32,
@@ -104,6 +130,19 @@ impl GpuConfig {
     }
 }
 
+/// Whether a frame's three strip resource textures are exactly as wide as
+/// the config built for `dim` says — the precondition of the strip program's
+/// shift-and-mask addressing (see the module doc).
+///
+/// `dim` is `TierCaps::resource_texture_dim`; the alpha and encoded-paint
+/// textures must be `dim` wide because their config shifts are taken from it,
+/// and the gradient LUT must be too because the shader addresses it by the
+/// encoded-paint shift.
+#[must_use]
+pub fn resource_widths_agree(dim: u32, alphas: u32, paints: u32, lut: u32) -> bool {
+    dim.is_power_of_two() && alphas == dim && paints == dim && lut == dim
+}
+
 /// `log2` of a resource texture's width in texels.
 ///
 /// `width` must be a power of two — every resource texture is sized from
@@ -118,4 +157,45 @@ pub fn tex_width_bits(width: u32) -> u32 {
         "resource texture width must be a power of two, got {width}",
     );
     width.trailing_zeros()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_lut_and_paint_textures_share_one_width_shift() {
+        let config = GpuConfig::new(800, 600, 2048, 2048);
+        // The LUT is addressed by the paint shift: a ramp texel at flat
+        // index `i` lands at `(i & mask, i >> bits)` of a 2048-wide LUT.
+        let bits = config.encoded_paints_tex_width_bits;
+        let flat = 2048 * 3 + 17;
+        assert_eq!((flat & ((1 << bits) - 1), flat >> bits), (17, 3));
+        assert!(resource_widths_agree(2048, 2048, 2048, 2048));
+    }
+
+    #[test]
+    fn a_resource_texture_of_another_width_breaks_the_guard() {
+        assert!(!resource_widths_agree(2048, 1024, 2048, 2048));
+        assert!(!resource_widths_agree(2048, 2048, 4096, 2048));
+        assert!(!resource_widths_agree(2048, 2048, 2048, 1024));
+        assert!(!resource_widths_agree(1000, 1000, 1000, 1000));
+    }
+
+    /// Shift-and-mask addressing equals `%`/`/` for every power-of-two width —
+    /// the arithmetic the LUT and alpha lookups moved from — over indices past
+    /// several rows.
+    #[test]
+    fn shift_and_mask_addressing_equals_division_for_power_of_two_widths() {
+        for bits in 0..=13_u32 {
+            let width = 1_u32 << bits;
+            for index in (0..width * 5).step_by(((width / 7) as usize).max(1)) {
+                let mask = (1_u32 << bits) - 1;
+                assert_eq!(
+                    (index & mask, index >> bits),
+                    (index % width, index / width)
+                );
+            }
+        }
+    }
 }

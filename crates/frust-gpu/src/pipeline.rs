@@ -4,10 +4,11 @@
 //! pipeline state object gets compiled. Three pieces implement that here.
 //!
 //! - [`RenderPipelineDesc`] is a **value** describing one pipeline variant —
-//!   a [`ShaderId`] plus entry points, vertex layouts, topology, and the four
-//!   render-state axes (`blend`, `format`, `sample_count`, `depth`). It holds
-//!   no GPU handle, so it can be listed up front, sent to a worker thread, and
-//!   hashed.
+//!   a [`ShaderId`] plus entry points, vertex layouts, topology, the four
+//!   render-state axes (`blend`, `format`, `sample_count`, `depth`) and an
+//!   optional explicit pipeline layout. Apart from that last, reference-counted
+//!   `wgpu::PipelineLayout` handle it holds no GPU object, so it can be listed
+//!   up front, sent to a worker thread, and hashed.
 //! - [`PipelineCache::warm_up`] takes a list of those descs and builds them on
 //!   a worker thread when the surface is installed, so the variants an app is
 //!   known to need exist before the first frame asks for one. At most one such
@@ -24,7 +25,7 @@
 //!
 //! ## The variant key
 //!
-//! Every desc collapses to a `u64` packed from five axes, the same trick as
+//! Every desc collapses to a `u64` packed from six axes, the same trick as
 //! Impeller's `ContentContextOptions::ToKey`: fixed-width bit fields, one per
 //! axis, so lookup is an integer hash and two descs that differ in any axis
 //! can never collide.
@@ -36,14 +37,30 @@
 //! | `[28..40)` | blend state (`None` is its own value) |
 //! | `[40..52)` | depth/stencil state (`None` is its own value) |
 //! | `[52..56)` | `log2(sample_count)` |
+//! | `[56..64)` | pipeline layout (`None` — wgpu's derived layout — is its own value) |
 //!
 //! wgpu's render-state types are far too wide to pack literally (a
-//! `BlendState` alone is six enums), so the three wide axes are **interned**:
+//! `BlendState` alone is six enums), so the four wide axes are **interned**:
 //! each distinct value seen gets the next index in a small side table, and the
 //! index is what the bit field holds. That is exact — unlike a truncated
 //! content hash, no two distinct values can ever share a field — at the cost
 //! of a key being meaningful only within one cache instance, which is all it
 //! is ever used for.
+//!
+//! ## The layout axis
+//!
+//! A desc whose `layout` is `None` builds against wgpu's **derived** layout —
+//! the bind-group layout deduced from the bindings each entry point statically
+//! uses. That is the right default, and it is also why a family of programs
+//! specialised from one source needs the explicit axis: a specialisation that
+//! stops reading a binding derives a *different* layout, and a bind group
+//! built against one sibling's layout no longer fits the other. Naming one
+//! explicit `wgpu::PipelineLayout` on every member keeps their bind groups
+//! interchangeable. The layout is a reference-counted handle compared by
+//! identity (wgpu's own `Eq`/`Hash` on it), so two descs naming the same
+//! layout object share the field and two structurally equal but distinct
+//! layout objects do not — which is exactly when wgpu would treat their bind
+//! groups as incompatible too.
 //!
 //! The first axis is the whole *program*, not just the [`ShaderId`], because a
 //! variant that reused one module under a different entry point or vertex
@@ -103,12 +120,20 @@ const BLEND_BITS: u32 = 12;
 const DEPTH_BITS: u32 = 12;
 /// Width of the packed key's `log2(sample_count)` field.
 const SAMPLE_BITS: u32 = 4;
+/// Width of the packed key's pipeline-layout field.
+const LAYOUT_BITS: u32 = 8;
 
 const PROGRAM_SHIFT: u32 = 0;
 const FORMAT_SHIFT: u32 = PROGRAM_SHIFT + PROGRAM_BITS;
 const BLEND_SHIFT: u32 = FORMAT_SHIFT + FORMAT_BITS;
 const DEPTH_SHIFT: u32 = BLEND_SHIFT + BLEND_BITS;
 const SAMPLE_SHIFT: u32 = DEPTH_SHIFT + DEPTH_BITS;
+const LAYOUT_SHIFT: u32 = SAMPLE_SHIFT + SAMPLE_BITS;
+
+const _: () = assert!(
+    LAYOUT_SHIFT + LAYOUT_BITS <= u64::BITS,
+    "the packed variant key must fit one u64",
+);
 
 /// One vertex buffer's layout, owned so a [`RenderPipelineDesc`] can be stored,
 /// cloned, hashed and sent to the warm-up worker.
@@ -158,9 +183,9 @@ impl VertexLayout {
 /// [`PipelineCache::get_or_create`] takes one by reference and never allocates
 /// on a hit.
 ///
-/// The pipeline's bind-group layout is always wgpu's **default layout**,
-/// deduced from the shader modules — there is no explicit-layout axis in v1,
-/// so a variant set that needs one is out of this cache's scope.
+/// The pipeline's bind-group layout is wgpu's **default layout**, deduced
+/// from the shader module, unless [`Self::layout`] names an explicit one —
+/// see the module docs' *The layout axis* for when a variant set needs that.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RenderPipelineDesc {
     /// The module holding both entry points, from the cache's own library.
@@ -183,6 +208,13 @@ pub struct RenderPipelineDesc {
     /// Primitive topology. Strip topologies here are non-indexed only: the
     /// desc carries no `strip_index_format`.
     pub topology: wgpu::PrimitiveTopology,
+    /// An explicit pipeline layout, or `None` for wgpu's layout derived from
+    /// the shader module.
+    ///
+    /// Set it when several programs must accept the same bind groups even
+    /// though they do not all read every binding (see the module docs' *The
+    /// layout axis*). Compared and hashed by handle identity.
+    pub layout: Option<wgpu::PipelineLayout>,
 }
 
 impl RenderPipelineDesc {
@@ -206,6 +238,7 @@ impl RenderPipelineDesc {
             sample_count: 1,
             depth: None,
             topology: wgpu::PrimitiveTopology::TriangleList,
+            layout: None,
         }
     }
 }
@@ -323,6 +356,7 @@ struct KeyPacker {
     formats: AxisTable<wgpu::TextureFormat>,
     blends: AxisTable<Option<wgpu::BlendState>>,
     depths: AxisTable<Option<wgpu::DepthStencilState>>,
+    layouts: AxisTable<Option<wgpu::PipelineLayout>>,
 }
 
 impl Default for KeyPacker {
@@ -332,6 +366,7 @@ impl Default for KeyPacker {
             formats: AxisTable::new(FORMAT_BITS),
             blends: AxisTable::new(BLEND_BITS),
             depths: AxisTable::new(DEPTH_BITS),
+            layouts: AxisTable::new(LAYOUT_BITS),
         }
     }
 }
@@ -347,12 +382,14 @@ impl KeyPacker {
         let format = self.formats.intern(&desc.format)?;
         let blend = self.blends.intern(&desc.blend)?;
         let depth = self.depths.intern(&desc.depth)?;
+        let layout = self.layouts.intern(&desc.layout)?;
         Some(
             (program << PROGRAM_SHIFT)
                 | (format << FORMAT_SHIFT)
                 | (blend << BLEND_SHIFT)
                 | (depth << DEPTH_SHIFT)
-                | (sample << SAMPLE_SHIFT),
+                | (sample << SAMPLE_SHIFT)
+                | (layout << LAYOUT_SHIFT),
         )
     }
 }
@@ -1004,8 +1041,9 @@ fn build_render_pipeline(
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(&label),
-        // No explicit-layout axis in v1 — see `RenderPipelineDesc`'s docs.
-        layout: None,
+        // `None` asks wgpu to derive the layout from the module — see the
+        // module docs' *The layout axis* for when a desc names one instead.
+        layout: desc.layout.as_ref(),
         vertex: wgpu::VertexState {
             module,
             entry_point: Some(desc.vs.as_ref()),
@@ -1649,5 +1687,168 @@ fn fs_main() -> @location(0) vec4<f32> {
             1,
             "a repeat request must reuse the pipeline"
         );
+
+        // The explicit-layout axis, on the same device — one device per test
+        // binary run keeps this suite clear of the driver's teardown races.
+        explicit_layout_is_its_own_variant_and_shares_bind_groups(&device);
+    }
+
+    /// The explicit-layout axis on real hardware: a desc naming a layout is a
+    /// variant of its own (never a hit on its derived-layout sibling), naming
+    /// the *same* layout object again is a hit, and two programs that read
+    /// different bindings accept one bind group under that shared layout —
+    /// which is what lets a family of specialised programs share bind groups.
+    fn explicit_layout_is_its_own_variant_and_shares_bind_groups(device: &wgpu::Device) {
+        const LAYOUT_WGSL: &str = r#"
+@group(0) @binding(0) var<uniform> tint: vec4<f32>;
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment
+fn fs_tinted() -> @location(0) vec4<f32> {
+    return tint;
+}
+@fragment
+fn fs_plain() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+}
+"#;
+
+        let group = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("explicit layout test group"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(16),
+                },
+                count: None,
+            }],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("explicit layout test"),
+            bind_group_layouts: &[Some(&group)],
+            immediate_size: 0,
+        });
+
+        let mut library = ShaderLibrary::new();
+        let shader = library.insert_wgsl(device, "explicit-layout", LAYOUT_WGSL);
+        let mut cache = PipelineCache::new(Arc::new(library), None);
+        let tinted = RenderPipelineDesc::new(
+            shader,
+            "vs_main",
+            "fs_tinted",
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let explicit_tinted = RenderPipelineDesc {
+            layout: Some(layout.clone()),
+            ..tinted.clone()
+        };
+        // `fs_plain` reads no binding at all, so its derived layout would be
+        // empty; under the explicit layout it accepts the tinted program's
+        // group all the same.
+        let explicit_plain = RenderPipelineDesc {
+            layout: Some(layout.clone()),
+            ..RenderPipelineDesc::new(
+                shader,
+                "vs_main",
+                "fs_plain",
+                wgpu::TextureFormat::Rgba8Unorm,
+            )
+        };
+
+        let mut packer = KeyPacker::default();
+        assert_ne!(packer.key_for(&tinted), packer.key_for(&explicit_tinted));
+        assert_eq!(
+            packer.key_for(&explicit_tinted),
+            packer.key_for(&RenderPipelineDesc {
+                layout: Some(layout.clone()),
+                ..tinted.clone()
+            }),
+            "the same layout object is the same variant"
+        );
+
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _ = cache.get_or_create(device, &tinted);
+        let a = cache.get_or_create(device, &explicit_tinted).clone();
+        let b = cache.get_or_create(device, &explicit_plain).clone();
+        let _ = cache.get_or_create(device, &explicit_tinted);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        // One group, built against the first pipeline's layout, bound under
+        // both: valid only because both name the explicit layout.
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &a.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_pipeline(&a);
+            pass.draw(0..3, 0..1);
+            pass.set_pipeline(&b);
+            pass.draw(0..3, 0..1);
+        }
+        drop(encoder.finish());
+        drop(group);
+        let error = drain_error_scope(device, scope);
+        assert!(error.is_none(), "pipeline creation raised {error:?}");
+        assert_eq!(cache.compiled_variants(), 3);
+    }
+
+    #[test]
+    fn a_new_desc_derives_its_layout() {
+        assert!(
+            desc().layout.is_none(),
+            "every existing desc keeps wgpu's derived layout unless it names one"
+        );
+        // The layout field sits above every other axis, so a derived-layout
+        // key never reaches it.
+        let mut packer = KeyPacker::default();
+        let key = packer.key_for(&desc()).expect("key");
+        assert_eq!(key >> LAYOUT_SHIFT, 0);
     }
 }

@@ -17,6 +17,12 @@
 //! ancestor holds another is served on the one spill page beside the pair, and a
 //! shape that still finds no page after a cut and the spill is refused with a
 //! reason a log can be read from rather than rendered incorrectly.
+//!
+//! A round is one render pass, and the counts pinned here are the frame's whole
+//! pass count, punches aside: the renderer draws the surface's clear and the
+//! frame's opaque strips inside the first surface round's own pass rather than
+//! in passes of their own (see `frust_engine::renderer`'s *The frame's
+//! passes*; the recorded list itself is pinned by `tests/encode_contract.rs`).
 
 use frust_engine::schedule::{
     Composite, MAX_CHAIN_DEPTH, MAX_LIVE_PAGES, PING_PONG_GROUPS, PageConfig, PageParity, Round,
@@ -282,6 +288,8 @@ fn a_recording_with_no_layers_schedules_to_exactly_one_round() {
 
     let rounds = schedule(&recorder);
 
+    // One round is one render pass in all: the clear and the opaque strips
+    // are drawn inside it rather than ahead of it.
     assert_eq!(
         rounds.len(),
         1,
@@ -319,6 +327,8 @@ fn one_opacity_layer_schedules_to_two_rounds() {
     draw(&mut recorder, 64, 32, 16);
 
     let rounds = schedule(&recorder);
+    // Two rounds, two render passes: the page's, and the surface's — which
+    // also carries the clear and the opaque strips.
     assert_eq!(
         rounds.len(),
         2,
@@ -725,6 +735,10 @@ fn a_three_wide_sibling_fan_cuts_the_root_round_and_reuses_the_first_page() {
     assert!(rounds[2].is_root() && rounds[4].is_root());
     assert_eq!(rounds[2].released, vec![PageParity::Odd, PageParity::Even]);
     assert_eq!(rounds[4].released, vec![PageParity::Odd]);
+    // "Always loads" is the scheduler's statement — a surface round has no
+    // page to continue. In render passes the first surface round that draws
+    // clears the surface instead, carrying the frame's opening, and every
+    // later one, the round after this cut included, loads.
     assert!(
         rounds
             .iter()
