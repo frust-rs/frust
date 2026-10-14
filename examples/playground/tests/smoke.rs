@@ -921,3 +921,113 @@ fn shell_back_at_tab_root_selects_home() {
     h.frames(3);
     assert_eq!(h.selected(), 0, "back at B's root selected Home");
 }
+
+/// The window bounds of the first laid-out widget whose type name contains
+/// `name`.
+fn bounds_of<S: 'static, V: View<S>>(root: &RenderRoot<S, V>, name: &str) -> Rect {
+    root.inspect()
+        .iter()
+        .find(|node| node.type_name.contains(name))
+        .map(|node| node.bounds)
+        .unwrap_or_else(|| panic!("no laid-out {name}"))
+}
+
+/// The "Slivers" section's one `custom_scroll_view`, headless: the Material
+/// bar is a real sliver (the viewport's own offset collapses it, and it stays
+/// pinned at the viewport's top at its collapsed band), a wheel step scrolls
+/// the surface, the shared [`PlaygroundState::slivers_controller`] jumps it to
+/// a row, and the layout audit finds no pod whose geometry changed without
+/// signalling dirty — beyond the generic per-section paint sweep above.
+#[test]
+fn slivers_page_collapses_its_pinned_bar_and_jumps_through_the_controller() {
+    use frust_core::{InputEvent, PointerButton, PointerEvent, PointerPhase, ScrollDelta};
+    use playground::pages::slivers::{BAR_COLLAPSED, BAR_EXPANDED, item_offset};
+
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+    let slivers_index = pages::section_index_for("slivers").expect("slivers is a known section");
+
+    let mut root: RenderRoot<PlaygroundState, AnyView<PlaygroundState>> = RenderRoot::new();
+    root.set_layout_audit(true);
+    let mut state = PlaygroundState::new();
+    let mut logic = |s: &mut PlaygroundState| pages::current(slivers_index, s);
+    let mut t_ms = 0;
+    let mut frames = |root: &mut RenderRoot<PlaygroundState, AnyView<PlaygroundState>>,
+                      state: &mut PlaygroundState,
+                      count: usize| {
+        let mut text_runs = 0;
+        for _ in 0..count {
+            t_ms += 16;
+            let (scene, _outcome) = frame_at(root, &mut logic, state, &mut tcx, t_ms);
+            text_runs = scene.text_runs;
+        }
+        text_runs
+    };
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+
+    assert!(
+        frames(&mut root, &mut state, 3) > 0,
+        "the Slivers page must paint text"
+    );
+    let viewport = bounds_of(&root, "ViewportWidget");
+    let bar = bounds_of(&root, "SliverAppBarWidget");
+    assert_eq!(bar.height(), BAR_EXPANDED, "the bar starts expanded");
+    assert_eq!(bar.y0, viewport.y0, "the bar heads the viewport");
+
+    // A 44 px wheel step over the surface collapses the bar by as much.
+    let over = viewport.center();
+    root.event(
+        &mut state,
+        &InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Move,
+            position: over,
+            button: PointerButton::Primary,
+        }),
+    );
+    root.event(
+        &mut state,
+        &InputEvent::Scroll {
+            delta: ScrollDelta::Pixels(0.0, 44.0),
+            position: over,
+        },
+    );
+    frames(&mut root, &mut state, 2);
+    assert!(
+        close(state.slivers_controller.offset(), 44.0),
+        "the wheel step scrolls the surface, got {}",
+        state.slivers_controller.offset(),
+    );
+    assert!(close(
+        bounds_of(&root, "SliverAppBarWidget").height(),
+        BAR_EXPANDED - 44.0
+    ));
+
+    // A jump to row 40 collapses the bar fully; it stays pinned at the top.
+    state.slivers_controller.jump_to(item_offset(40));
+    frames(&mut root, &mut state, 2);
+    assert!(close(state.slivers_controller.offset(), item_offset(40)));
+    let bar = bounds_of(&root, "SliverAppBarWidget");
+    assert_eq!(bar.height(), BAR_COLLAPSED, "pinned at its collapsed band");
+    assert_eq!(bar.y0, viewport.y0, "pinned at the viewport's top");
+
+    // The far end, then back to the top, which re-expands it.
+    state.slivers_controller.jump_to(f64::INFINITY);
+    frames(&mut root, &mut state, 2);
+    assert!(state.slivers_controller.offset() > item_offset(40));
+    assert_eq!(
+        bounds_of(&root, "SliverAppBarWidget").height(),
+        BAR_COLLAPSED
+    );
+    state.slivers_controller.jump_to(0.0);
+    assert!(frames(&mut root, &mut state, 2) > 0);
+    assert_eq!(
+        bounds_of(&root, "SliverAppBarWidget").height(),
+        BAR_EXPANDED
+    );
+
+    assert_eq!(
+        root.layout_audit_mismatches(),
+        0,
+        "the layout audit found pods laid out stale on the Slivers page"
+    );
+}
