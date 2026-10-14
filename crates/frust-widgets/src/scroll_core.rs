@@ -302,11 +302,12 @@ impl ScrollSurfaceCore {
     }
 
     /// Follow a view's axis change on rebuild. Everything bound to the old
-    /// axis is dropped: the live gesture (drag accumulator, anchors, takeover,
+    /// axis is dropped: the live gesture (its anchors, edge pull, takeover,
     /// claim and veto state), the velocity estimator, and any fling, settle or
-    /// simulation running along it. A pending controller command, the
-    /// installed physics and the callbacks survive. A no-op for an unchanged
-    /// axis.
+    /// simulation running along it. `drag_position` is left alone: nothing
+    /// reads it until the next takeover or controller command re-seeds it
+    /// from the live position. A pending controller command, the installed
+    /// physics and the callbacks survive. A no-op for an unchanged axis.
     pub(crate) fn set_axis(&mut self, axis: ScrollAxis) {
         if self.axis == axis {
             return;
