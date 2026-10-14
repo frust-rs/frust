@@ -553,7 +553,7 @@ transposed).
 | `sliver_list(...)` | Lazy keyed rows that size themselves; measured-by-key extents shared with `ListView` |
 | `sliver_grid` / `_keyed` | Lazy grid; `SliverGridDelegate::FixedCrossAxisCount` or `MaxCrossAxisExtent` |
 | `sliver_persistent_header(delegate)` | `{min_extent, max_extent, build(shrink_offset, overlaps_content)}`, `.pinned`/`.floating` |
-| `keep_alive(child)` | Row scope in a `sliver_list`: parked rows keep their last view in a `ChildKey` side map, re-adopted when the key returns, released when it leaves the data or the list tears down; parking cancels a captured gesture |
+| `keep_alive(child)` | Row scope of `sliver_list` only (a request in a nested list's row pins the enclosing `sliver_list` row): parked rows sit uncapped in a `ChildKey` side map, re-adopted when the key returns, released when it leaves the data or the list tears down; parking cancels a gesture |
 
 **Cache-window rule.** A lazy sliver materialises exactly the rows covering
 `[scroll_offset + cache_origin, + remaining_cache_extent)`; the viewport's `cache_extent`
