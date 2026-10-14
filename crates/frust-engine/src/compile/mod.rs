@@ -59,6 +59,7 @@ pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
 pub use external::{ExternalExtents, ExternalSkip};
 pub use layers::{GroupStack, LayerLowering, SnapshotStack};
+pub use parallel::{DEFAULT_PARALLEL_MIN_COST, DEFAULT_PARALLEL_WORKERS};
 
 /// The most glyph runs a compiler's resident-run cache remembers at once (see
 /// [`SceneCompiler::resident_glyph_run_count`]). A byte budget bounds the same
@@ -92,7 +93,7 @@ use crate::compile::blur_rrect::encode_blurred_rounded_rect;
 use crate::compile::clear::StagedPunch;
 use crate::compile::external::encode_scene_texture;
 use crate::compile::paint::{LutRequest, encode_brush, encode_image_brush, encode_image_command};
-use crate::compile::parallel::Geometry;
+use crate::compile::parallel::{Claim, Geometry, Merge, Pool};
 use crate::config;
 use crate::error::EngineError;
 use crate::text::{
@@ -205,7 +206,10 @@ impl PhaseClock {
 ///    the command walk itself: strip generation and paint encoding, and on a
 ///    text-heavy scene the bulk of the call. The part of it spent inside glyph
 ///    runs is reported separately by [`glyphs`](Self::glyphs), which is a
-///    subset of this rather than a phase of its own.
+///    subset of this rather than a phase of its own. It also carries the
+///    parallel walk's overhead: the planning pass that picks the shape
+///    commands helper threads generate, spawning the helpers and joining them
+///    (see the `parallel` module).
 /// 6. [`finish`](Self::finish) — closing open groups, generating the hole
 ///    punches, ageing the glyph atlas and taking the frame's image plan.
 ///
@@ -220,7 +224,8 @@ pub struct CompileSpans {
     pub classify: Duration,
     /// Glyph atlas admission, closing the routing pass.
     pub admit: Duration,
-    /// The command walk: strip generation and paint encoding.
+    /// The command walk: strip generation and paint encoding, with the
+    /// parallel walk's planning, spawn and join.
     pub walk: Duration,
     /// The part of [`walk`](Self::walk) spent inside glyph runs.
     ///
@@ -459,6 +464,16 @@ pub struct CompiledFrame {
     /// (`FRUST_ENGINE_NO_GLYPH_RUN_CACHE`, [`SceneCompiler::set_glyph_run_cache`])
     /// or quads are.
     pub resident_glyph_runs: u32,
+    /// How many of this frame's draws took strips a helper thread generated
+    /// rather than strips the walk generated itself (see the `parallel` module).
+    ///
+    /// Observational: a helper's run is byte-identical to the one the walk
+    /// would have generated, so nothing downstream tells the two apart. Zero
+    /// whenever the frame spawned no helper — one worker
+    /// (`FRUST_ENGINE_NO_PARALLEL`, [`SceneCompiler::set_parallel_workers`]),
+    /// planned work below [`SceneCompiler::parallel_min_cost`], or a walk that
+    /// reached every planned command before a helper did.
+    pub parallel_draws: u32,
     /// Atlas rectangles freed by the *previous* frame's glyph eviction, to be
     /// zeroed before this frame writes anything into the array.
     ///
@@ -508,6 +523,22 @@ impl CompiledFrame {
 #[derive(Debug)]
 pub struct SceneCompiler {
     generator: StripGenerator,
+    /// The SIMD level the walk's generator was built at, so a helper's
+    /// generator is built at the same one (see [`parallel`]).
+    level: Level,
+    /// How many threads generate a frame's strips, the calling thread
+    /// included; one is the sequential walk. Starts at
+    /// [`parallel::default_workers`]; [`Self::set_parallel_workers`] decides
+    /// it per compiler.
+    parallel_workers: usize,
+    /// The estimated cost a frame's planned helper work must reach before a
+    /// helper is spawned for it (see [`DEFAULT_PARALLEL_MIN_COST`]). Starts at
+    /// that default, or `FRUST_ENGINE_PARALLEL_MIN_COST`;
+    /// [`Self::set_parallel_min_cost`] decides it per compiler.
+    parallel_min_cost: u64,
+    /// The helpers' generators and the per-job slots their runs wait in,
+    /// retained across frames for their allocations alone.
+    pool: Pool,
     clips: ClipStack,
     groups: GroupStack,
     snapshots: SnapshotStack,
@@ -675,6 +706,42 @@ impl SceneCompiler {
         self.glyph_atlas.resident_runs()
     }
 
+    /// Set how many threads generate a frame's strips, the calling thread
+    /// included (see the `parallel` module). One — or zero, read as one — is the
+    /// sequential walk: no planning pass, no helper thread.
+    ///
+    /// The per-compiler counterpart of `FRUST_ENGINE_NO_PARALLEL`, on the same
+    /// terms as [`Self::set_glyph_quads`]: the variable sets the value a
+    /// compiler starts with ([`DEFAULT_PARALLEL_WORKERS`] capped by the
+    /// machine, or one with it set), this decides it for one compiler. Takes
+    /// effect from the next frame. The frame a compiler produces is the same
+    /// at every setting.
+    pub fn set_parallel_workers(&mut self, workers: usize) {
+        self.parallel_workers = workers.max(1);
+    }
+
+    /// How many threads generate a frame's strips, the calling thread
+    /// included.
+    #[must_use]
+    pub fn parallel_workers(&self) -> usize {
+        self.parallel_workers
+    }
+
+    /// Set the estimated cost a frame's planned helper work must reach before
+    /// a helper is spawned for it (see [`DEFAULT_PARALLEL_MIN_COST`] for the
+    /// unit). Zero spawns for any frame with a single planned command, which
+    /// is how a test drives the helpers over a scene too small to earn them.
+    pub fn set_parallel_min_cost(&mut self, cost: u64) {
+        self.parallel_min_cost = cost;
+    }
+
+    /// The estimated cost a frame's planned work must reach before a helper
+    /// is spawned.
+    #[must_use]
+    pub fn parallel_min_cost(&self) -> u64 {
+        self.parallel_min_cost
+    }
+
     /// A compiler sized for a `width` x `height` viewport, with image
     /// residency budgeted explicitly.
     pub fn with_atlas_budget(width: u16, height: u16, budget: AtlasBudget) -> Self {
@@ -682,6 +749,10 @@ impl SceneCompiler {
         let images = ImageResidency::new(budget);
         Self {
             generator: StripGenerator::new(width, height, level),
+            level,
+            parallel_workers: parallel::default_workers(),
+            parallel_min_cost: config::parallel_min_cost().unwrap_or(DEFAULT_PARALLEL_MIN_COST),
+            pool: Pool::default(),
             clips: ClipStack::new(),
             groups: GroupStack::new(),
             snapshots: SnapshotStack::new(),
@@ -969,13 +1040,42 @@ impl SceneCompiler {
             glyph_quads: Vec::new(),
             glyph_run_paints: Vec::new(),
             resident_glyph_runs: 0,
+            parallel_draws: 0,
             glyph_clears,
             compile_spans: CompileSpans::default(),
         };
         let mut depth = DepthCounter::new();
 
-        for command in scene.commands() {
-            self.compile_command(command, root, &mut frame, &mut depth);
+        // The walk proper, with its shape commands' strips generated by
+        // helper threads behind it whenever the plan earns one (see
+        // [`parallel`]). Planned and spawned inside the walk's lap, and the
+        // helpers joined before it closes, so the parallel walk's overhead is
+        // charged to the phase it shortens.
+        let helpers = self.parallel_workers.saturating_sub(1);
+        let plan = if helpers > 0 {
+            parallel::plan(
+                scene,
+                root,
+                Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+            )
+        } else {
+            parallel::Plan::default()
+        };
+        if helpers > 0 && !plan.is_empty() && plan.cost() >= self.parallel_min_cost {
+            // Moved out for the walk's duration: the helpers borrow it while
+            // the walk borrows the compiler.
+            let mut pool = std::mem::take(&mut self.pool);
+            let level = self.level;
+            pool.run(&plan, helpers, level, (width, height), |merge| {
+                for (index, command) in scene.commands().iter().enumerate() {
+                    self.compile_command(index, command, root, &mut frame, &mut depth, Some(merge));
+                }
+            });
+            self.pool = pool;
+        } else {
+            for (index, command) in scene.commands().iter().enumerate() {
+                self.compile_command(index, command, root, &mut frame, &mut depth, None);
+            }
         }
         let walk = clock.lap();
 
@@ -1024,16 +1124,24 @@ impl SceneCompiler {
 
     fn compile_command(
         &mut self,
+        index: usize,
         command: &Command,
         root: Affine,
         frame: &mut CompiledFrame,
         depth: &mut DepthCounter,
+        merge: Option<&Merge<'_, '_>>,
     ) {
         // The frame root with any open snapshot bracket's presentation scale
         // composed ahead of it (see [`layers`]). The identity outside a
         // bracket, so this is the plain frame root for every frame that
         // records none.
         let combined = root * self.snapshots.correction();
+
+        // Claimed for every command, drawn or not, ahead of every early return
+        // below: claiming is what moves the walk's position past a planned
+        // command, which is what stops a helper from starting work the walk
+        // has already gone by (see [`parallel`]).
+        let claim = merge.and_then(|merge| merge.claim(index, combined));
 
         // Taken here rather than inside the glyph arm, and taken for every
         // glyph run whether or not it goes on to be drawn: the collect walk
@@ -1107,6 +1215,7 @@ impl SceneCompiler {
                         PaintSource::Brush(brush),
                         combined * *transform,
                         geometry,
+                        claim,
                     );
                 }
             }
@@ -1188,7 +1297,7 @@ impl SceneCompiler {
             } => {
                 if let Some(geometry) = Geometry::of(command, combined) {
                     let source = PaintSource::Image { data, dest: *dest };
-                    self.draw_shape(frame, depth, source, combined * *transform, geometry);
+                    self.draw_shape(frame, depth, source, combined * *transform, geometry, claim);
                 }
             }
             // The strip generator rasterizes the padded bounding rectangle,
@@ -1210,7 +1319,7 @@ impl SceneCompiler {
                         std_dev: *std_dev,
                         color: *color,
                     };
-                    self.draw_shape(frame, depth, source, combined * *transform, geometry);
+                    self.draw_shape(frame, depth, source, combined * *transform, geometry, claim);
                 }
             }
             Command::GlyphRun(run) => {
@@ -1286,7 +1395,7 @@ impl SceneCompiler {
     ) {
         let source = PaintSource::SceneTexture { id, dest };
         let geometry = Geometry::rect(dest, transform);
-        self.draw_shape(frame, depth, source, transform, geometry);
+        self.draw_shape(frame, depth, source, transform, geometry, None);
     }
 
     /// Route every glyph run the scene records, in recording order.
@@ -1620,9 +1729,10 @@ impl SceneCompiler {
         source: PaintSource<'_>,
         transform: Affine,
         geometry: Geometry<'_>,
+        claim: Option<Claim<'_>>,
     ) {
         let fast = geometry.is_fast_rect();
-        if self.record(frame, depth, source, transform, geometry) && fast {
+        if self.record(frame, depth, source, transform, geometry, claim) && fast {
             frame.fast_rect_draws = frame.fast_rect_draws.saturating_add(1);
         }
     }
@@ -1635,6 +1745,12 @@ impl SceneCompiler {
     /// produced; the scissor is applied afterwards, to the run the generator
     /// appended. A scissor admitting nothing skips generation entirely rather
     /// than generating coverage to throw away.
+    ///
+    /// `claim` is the command's helper-generated run, when one was planned
+    /// (see [`parallel`]). It stands in for generating only while no mask is
+    /// open — a helper generates unclipped — and only when a helper actually
+    /// got to it; otherwise the run is generated here exactly as it would be
+    /// without one. Everything after generation is the same either way.
     ///
     /// Returns whether a draw was recorded. A generator call that produced no
     /// strips (fully culled, clipped away, degenerate, or empty geometry)
@@ -1654,6 +1770,7 @@ impl SceneCompiler {
         source: PaintSource<'_>,
         transform: Affine,
         geometry: Geometry<'_>,
+        claim: Option<Claim<'_>>,
     ) -> bool {
         if self.clips.blocks_everything() {
             return false;
@@ -1661,7 +1778,12 @@ impl SceneCompiler {
 
         let start = frame.strips.strips.len();
         let alpha_start = frame.strips.alphas.len();
-        geometry.generate(&mut self.generator, &mut frame.strips, self.clips.mask());
+        let mask = self.clips.mask();
+        let merged =
+            mask.is_none() && claim.is_some_and(|claim| claim.append_to(&mut frame.strips));
+        if !merged {
+            geometry.generate(&mut self.generator, &mut frame.strips, mask);
+        }
         self.clips.clip_run(&mut frame.strips, start, alpha_start);
         let strip_range = start..frame.strips.strips.len();
 
@@ -1698,6 +1820,9 @@ impl SceneCompiler {
         frame
             .recorder
             .push_draw(draw, &frame.strips.strips[strip_range]);
+        if merged {
+            frame.parallel_draws = frame.parallel_draws.saturating_add(1);
+        }
         true
     }
 

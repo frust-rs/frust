@@ -207,6 +207,71 @@ pub fn glyph_quads_disabled() -> bool {
     })
 }
 
+/// Whether parallel strip generation is disabled via
+/// `FRUST_ENGINE_NO_PARALLEL`. Cached: read once per process.
+///
+/// Consulted when a [`crate::compile::SceneCompiler`] is built: with it set,
+/// the compiler starts with one worker, so every command's strips are
+/// generated on the calling thread during the walk and no helper thread is
+/// ever spawned. The kill switch for a device or a host where the per-frame
+/// helper costs more than it saves;
+/// [`crate::compile::SceneCompiler::set_parallel_workers`] is the
+/// per-compiler counterpart a caller comparing the two arms uses.
+pub fn parallel_walk_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        env_flag_enabled(
+            option_env!("FRUST_ENGINE_NO_PARALLEL"),
+            std::env::var("FRUST_ENGINE_NO_PARALLEL").ok(),
+        )
+    })
+}
+
+/// The number of threads a frame's strips are generated on, the calling
+/// thread included, via `FRUST_ENGINE_PARALLEL_WORKERS=<n>`; `None` when unset
+/// or unparsable, which leaves the compiler's own default. Cached: read once
+/// per process.
+///
+/// A diagnostic knob for re-measuring the worker count on a device (a
+/// build-time `--define` reaches it through `option_env!`).
+/// `FRUST_ENGINE_NO_PARALLEL` wins over it.
+pub fn parallel_workers() -> Option<usize> {
+    static WORKERS: OnceLock<Option<usize>> = OnceLock::new();
+    *WORKERS.get_or_init(|| {
+        parse_parallel_workers(env_str(
+            option_env!("FRUST_ENGINE_PARALLEL_WORKERS"),
+            std::env::var("FRUST_ENGINE_PARALLEL_WORKERS").ok(),
+        ))
+    })
+}
+
+/// Parses a raw `FRUST_ENGINE_PARALLEL_WORKERS` value (already resolved by
+/// [`env_str`]); zero, like an unset or unparsable value, is no override.
+fn parse_parallel_workers(raw: Option<String>) -> Option<usize> {
+    raw.and_then(|s| s.trim().parse().ok())
+        .filter(|workers: &usize| *workers > 0)
+}
+
+/// The estimated cost a frame's planned strip generation must reach before a
+/// helper thread is spawned for it, via `FRUST_ENGINE_PARALLEL_MIN_COST=<n>`;
+/// `None` when unset or unparsable, which leaves
+/// [`crate::compile::DEFAULT_PARALLEL_MIN_COST`]. Cached: read once per
+/// process.
+///
+/// A diagnostic knob: `0` hands every frame with a planned shape command to
+/// the helpers, which is how a suite of small scenes — the golden images —
+/// is run through them.
+pub fn parallel_min_cost() -> Option<u64> {
+    static MIN_COST: OnceLock<Option<u64>> = OnceLock::new();
+    *MIN_COST.get_or_init(|| {
+        env_str(
+            option_env!("FRUST_ENGINE_PARALLEL_MIN_COST"),
+            std::env::var("FRUST_ENGINE_PARALLEL_MIN_COST").ok(),
+        )
+        .and_then(|s| s.trim().parse().ok())
+    })
+}
+
 /// Whether the resident glyph-run cache is disabled via
 /// `FRUST_ENGINE_NO_GLYPH_RUN_CACHE`. Cached: read once per process.
 ///
@@ -381,6 +446,15 @@ mod tests {
     #[test]
     fn shader_effects_are_enabled_unless_the_switch_is_set() {
         assert!(!shader_effects_disabled());
+    }
+
+    #[test]
+    fn parallel_workers_parses_a_positive_count_only() {
+        assert_eq!(parse_parallel_workers(Some("3".into())), Some(3));
+        assert_eq!(parse_parallel_workers(Some(" 2 ".into())), Some(2));
+        assert_eq!(parse_parallel_workers(Some("0".into())), None);
+        assert_eq!(parse_parallel_workers(Some("two".into())), None);
+        assert_eq!(parse_parallel_workers(None), None);
     }
 
     /// The switch's own parsing rules, exercised through the combinator every
