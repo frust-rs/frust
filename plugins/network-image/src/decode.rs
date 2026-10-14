@@ -6,6 +6,8 @@ use std::sync::Arc;
 use frust::{ImageSource, spawn_blocking};
 use image::imageops::FilterType;
 
+use crate::jpeg_header;
+
 /// A pixel box a decoded image must fit inside (aspect ratio preserved).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TargetPx {
@@ -72,11 +74,13 @@ pub enum DecodeError {
 /// fitted to a phone-sized target of about 1440 px. The bound is per decode;
 /// concurrent decodes add up.
 ///
-/// The decoder's own scratch is outside both this estimate and
-/// [`image::Limits`]. The worst case is a progressive JPEG, which keeps the
-/// whole image's coefficients while decoding (about 6 bytes per pixel for
-/// 4:4:4, 3 for 4:2:0 and 8 for CMYK) on top of the native bitmap, so such an
-/// image can exceed the estimate by up to about three times its native size.
+/// The estimate also counts a progressive JPEG's coefficient store, read from
+/// the SOF2 header: 2 bytes per coefficient per component, held alongside the
+/// native bitmap (about 6 B/px for 4:4:4, 3 B/px for 4:2:0, 8 B/px for CMYK).
+/// An 8192x8192 progressive 4:4:4 JPEG is therefore rejected under the default
+/// budget (about 576 MiB estimated), while a 48 MP progressive 4:2:0 photo
+/// fitted to about 1440 px still fits (about 420 MiB). What stays outside the
+/// estimate and [`image::Limits`] is row- or MCU-sized decoder scratch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecodeLimits {
     /// Maximum declared width in pixels (default 8192).
@@ -84,7 +88,7 @@ pub struct DecodeLimits {
     /// Maximum declared height in pixels (default 8192).
     pub max_height: u32,
     /// Decode-and-fit allocation budget in bytes (default 512 MiB); see the
-    /// type docs for what the header-derived estimate excludes.
+    /// type docs for what the header-derived estimate counts.
     pub max_alloc_bytes: u64,
 }
 
@@ -130,21 +134,47 @@ fn first_pass_dims(nw: u32, nh: u32, scale: f64) -> (u32, u32) {
     }
 }
 
-/// Peak transient bytes of decoding a `dw` x `dh` image of `native_bpp` bytes
-/// per pixel and fitting it to `target`, estimated from the header.
-pub(crate) fn peak_estimate(dw: u32, dh: u32, native_bpp: u64, target: Option<TargetPx>) -> u64 {
+/// Extra bytes of fitting a `dw` x `dh` image to `target` beyond the native
+/// bitmap: the RGBA copy (no resize) or the resize working set.
+fn fit_extra(dw: u32, dh: u32, native_bpp: u64, target: Option<TargetPx>) -> u64 {
     let (w, h) = (u64::from(dw), u64::from(dh));
-    let native = w.saturating_mul(h).saturating_mul(native_bpp);
     match target.and_then(|t| fit_dims(dw, dh, t)) {
-        None => native.saturating_add(w.saturating_mul(h).saturating_mul(4)),
+        None => w.saturating_mul(h).saturating_mul(4),
         Some((nw, nh, scale)) => {
             let (pw, ph) = first_pass_dims(nw, nh, scale);
             let (pw, ph) = (u64::from(pw), u64::from(ph));
             let vertical = w.saturating_mul(ph).saturating_mul(16);
             let output = pw.saturating_mul(ph).saturating_mul(native_bpp);
-            native.saturating_add(vertical).saturating_add(output)
+            vertical.saturating_add(output)
         }
     }
+}
+
+/// Peak transient bytes of decoding a `dw` x `dh` image of `native_bpp` bytes
+/// per pixel and fitting it to `target`, estimated from the header. The
+/// decoder's `decoder_scratch` (a progressive JPEG's coefficient store) is
+/// freed before the fit starts, so the larger of the two stacks on the native
+/// bitmap.
+pub(crate) fn peak_estimate(
+    dw: u32,
+    dh: u32,
+    native_bpp: u64,
+    target: Option<TargetPx>,
+    decoder_scratch: u64,
+) -> u64 {
+    let native = u64::from(dw)
+        .saturating_mul(u64::from(dh))
+        .saturating_mul(native_bpp);
+    let extra = fit_extra(dw, dh, native_bpp, target).max(decoder_scratch);
+    native.saturating_add(extra)
+}
+
+/// Whole-image coefficient bytes a progressive JPEG needs while decoding.
+fn decoder_scratch(bytes: &[u8], format: Option<image::ImageFormat>) -> u64 {
+    if format != Some(image::ImageFormat::Jpeg) {
+        return 0;
+    }
+    jpeg_header::progressive_coefficient_bytes(bytes).unwrap_or(0)
 }
 
 /// Decode `bytes` (format guessed) and shrink to fit `target`, if any.
@@ -163,6 +193,7 @@ pub(crate) fn decode_and_fit(
     if reader.format() == Some(image::ImageFormat::WebP) {
         return Err(DecodeError::UnsupportedFormat("WebP".into()));
     }
+    let scratch = decoder_scratch(bytes, reader.format());
     // Header only: reject before any pixel allocation.
     let decoder = reader
         .into_decoder()
@@ -184,7 +215,7 @@ pub(crate) fn decode_and_fit(
         estimated_peak_bytes,
         max_alloc_bytes: limits.max_alloc_bytes,
     };
-    let estimate = peak_estimate(dw, dh, native_bpp, target);
+    let estimate = peak_estimate(dw, dh, native_bpp, target, scratch);
     if estimate > limits.max_alloc_bytes {
         return Err(over_budget(estimate));
     }
@@ -254,14 +285,14 @@ mod tests {
             height: 2560,
         });
         assert_eq!(
-            peak_estimate(8192, 8192, 4, t),
+            peak_estimate(8192, 8192, 4, t, 0),
             NATIVE_8K + 8192 * 5120 * 16 + 5120 * 5120 * 4
         );
     }
 
     #[test]
     fn estimate_without_a_resize_adds_the_rgba_copy() {
-        assert_eq!(peak_estimate(8192, 8192, 4, None), 2 * NATIVE_8K);
+        assert_eq!(peak_estimate(8192, 8192, 4, None, 0), 2 * NATIVE_8K);
     }
 
     #[test]
@@ -271,8 +302,30 @@ mod tests {
             height: 300,
         });
         assert_eq!(
-            peak_estimate(1200, 1200, 3, t),
+            peak_estimate(1200, 1200, 3, t, 0),
             1200 * 1200 * 3 + 1200 * 600 * 16 + 600 * 600 * 3
+        );
+    }
+
+    #[test]
+    fn progressive_store_dominates_the_rgba_copy() {
+        // 4:4:4: native 3 + store 6 = 9 B/px, not 3 + 4.
+        let px = 1000 * 1000;
+        assert_eq!(peak_estimate(1000, 1000, 3, None, 6 * px), 9 * px);
+    }
+
+    #[test]
+    fn a_larger_resize_set_beats_the_store() {
+        let t = Some(TargetPx {
+            width: 600,
+            height: 600,
+        });
+        let resize = 1200 * 600 * 16 + 600 * 600 * 3;
+        let native = 1200 * 1200 * 3;
+        assert_eq!(peak_estimate(1200, 1200, 3, t, 1000), native + resize);
+        assert_eq!(
+            peak_estimate(1200, 1200, 3, t, u64::MAX / 2),
+            u64::MAX / 2 + native
         );
     }
 }

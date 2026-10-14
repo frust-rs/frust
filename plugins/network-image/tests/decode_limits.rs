@@ -190,3 +190,97 @@ fn loader_honours_dimension_limits() {
         "{err:?}"
     );
 }
+
+const PROGRESSIVE_444: &[u8] = include_bytes!("fixtures/progressive-444.jpg");
+const PROGRESSIVE_420: &[u8] = include_bytes!("fixtures/progressive-420.jpg");
+const BASELINE_444: &[u8] = include_bytes!("fixtures/baseline-444.jpg");
+
+/// 64x48 px fixtures; 3 B/px native; no target, so the RGBA copy is 4 B/px.
+const FIXTURE_PX: u64 = 64 * 48;
+const RGBA_COPY: u64 = 4 * FIXTURE_PX;
+/// 4:4:4 store: 2 B x 3 components x 1x1 = 6 B/px (64x48 is whole 8x8 MCUs).
+const STORE_444: u64 = 6 * FIXTURE_PX;
+const ESTIMATE_444: u64 = 3 * FIXTURE_PX + STORE_444;
+/// The 4:2:0 store (2 B x 6 blocks per 16x16 MCU = 3 B/px) is below the 4 B/px RGBA copy, which then dominates.
+const ESTIMATE_420: u64 = 3 * FIXTURE_PX + RGBA_COPY;
+
+/// Component sampling factors `(h, v)` of the first SOF in `jpeg`, with its marker.
+fn sof(jpeg: &[u8]) -> (u8, Vec<(u8, u8)>) {
+    let at = jpeg
+        .windows(2)
+        .position(|w| w[0] == 0xFF && matches!(w[1], 0xC0 | 0xC2))
+        .expect("SOF marker");
+    let count = usize::from(jpeg[at + 9]);
+    let factors = (0..count)
+        .map(|i| {
+            let hv = jpeg[at + 11 + i * 3];
+            (hv >> 4, hv & 0x0F)
+        })
+        .collect();
+    (jpeg[at + 1], factors)
+}
+
+fn over_budget_estimate(body: &[u8], budget: u64) -> u64 {
+    let limits = DecodeLimits {
+        max_alloc_bytes: budget,
+        ..DecodeLimits::default()
+    };
+    match run(loader(body.to_vec(), limits).load(request())) {
+        Err(LoadError::Decode(DecodeError::OverBudget {
+            estimated_peak_bytes,
+            ..
+        })) => estimated_peak_bytes,
+        other => panic!("expected OverBudget, got {:?}", other.map(|_| ())),
+    }
+}
+
+fn decodes_under(body: &[u8], budget: u64) -> bool {
+    let limits = DecodeLimits {
+        max_alloc_bytes: budget,
+        ..DecodeLimits::default()
+    };
+    run(loader(body.to_vec(), limits).load(request())).is_ok()
+}
+
+#[test]
+fn fixtures_carry_the_expected_frame_headers() {
+    assert_eq!(sof(PROGRESSIVE_444), (0xC2, vec![(1, 1); 3]));
+    assert_eq!(sof(PROGRESSIVE_420), (0xC2, vec![(2, 2), (1, 1), (1, 1)]));
+    assert_eq!(sof(BASELINE_444).0, 0xC0);
+}
+
+#[test]
+fn a_progressive_jpeg_decodes_under_the_default_limits() {
+    let src = run(decode_source(PROGRESSIVE_444.to_vec(), None)).expect("decode");
+    let size = src.natural_size();
+    assert_eq!((size.width, size.height), (64.0, 48.0));
+}
+
+#[test]
+fn a_progressive_jpeg_counts_its_coefficient_store() {
+    assert_eq!(
+        over_budget_estimate(PROGRESSIVE_444, ESTIMATE_444 - 1),
+        ESTIMATE_444
+    );
+    assert!(decodes_under(PROGRESSIVE_444, ESTIMATE_444));
+}
+
+#[test]
+fn a_420_progressive_store_is_smaller_than_a_444_one() {
+    assert_eq!(
+        over_budget_estimate(PROGRESSIVE_420, ESTIMATE_420 - 1),
+        ESTIMATE_420
+    );
+    assert_eq!(ESTIMATE_444 - ESTIMATE_420, STORE_444 - RGBA_COPY);
+}
+
+#[test]
+fn a_baseline_jpeg_is_not_charged_the_store() {
+    // Rejects the progressive twin, but baseline only pays native + RGBA copy.
+    assert!(!decodes_under(PROGRESSIVE_444, ESTIMATE_444 - 1));
+    assert!(decodes_under(BASELINE_444, ESTIMATE_444 - 1));
+    assert_eq!(
+        over_budget_estimate(BASELINE_444, 3 * FIXTURE_PX + RGBA_COPY - 1),
+        3 * FIXTURE_PX + RGBA_COPY
+    );
+}

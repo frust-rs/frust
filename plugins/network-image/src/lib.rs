@@ -27,6 +27,7 @@ mod decode;
 mod disk_cache;
 pub mod fetch;
 mod install;
+mod jpeg_header;
 mod loader;
 mod memory_cache;
 #[cfg(feature = "reqwest")]
