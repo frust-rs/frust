@@ -29,11 +29,26 @@
 //!
 //! ## Snapshot brackets
 //!
-//! The engine implements no snapshot cache. `frust_scene` states what a
-//! renderer that does not must do instead: paint the body inline, wrapped
-//! exactly as if the recorder had emitted `push_transform(scale_about(scale,
-//! rect.center()))` when `scale != 1.0` and `push_layer(rect, alpha)` when
-//! `alpha < 1.0`. [`RetainedStack`] is that emulation.
+//! `frust_scene` states what a renderer that does not retain must do with a
+//! `PushRetained` bracket: paint the body inline, wrapped exactly as if the
+//! recorder had emitted `push_transform(scale_about(scale, rect.center()))`
+//! when `scale != 1.0` and `push_layer(rect, alpha)` when `alpha < 1.0`.
+//! [`RetainedStack`] is that emulation, and it is also the whole of what a
+//! compiler with retention off does (see `SceneCompiler::set_retained_layers`).
+//!
+//! A compiler with retention on lowers the outermost bracket the same way and
+//! additionally records it as a [`RetainedBracket`]: the body becomes a
+//! recorded layer of its own *whatever* its alpha — at full opacity one with no
+//! clip of its own ([`GroupStack::push_retained`]), so the inline lowering's
+//! geometry is unchanged — which the renderer's retained-page store
+//! (`crate::cache::retained`) either admits, rendering the layer into a page it
+//! keeps across frames, or refuses, in which case the scheduler serves it as
+//! the ordinary layer the inline emulation describes. A `DrawRetained` becomes
+//! an empty recorded layer standing at its painter-order position, which the
+//! store resolves to a composite of the resident page. The page holds the body
+//! *with* the presentation scale baked in, exactly as the inline lowering
+//! rasterizes it, and *without* the alpha, so a page is reusable under any
+//! alpha and any whole-pixel move of the same transform ([`RetainedPlacement`]).
 //!
 //! The scale is applied as a *correction* composed ahead of every subsequent
 //! command's own transform rather than by rewriting the body's commands,
@@ -49,6 +64,7 @@
 
 use kurbo::{Affine, Rect};
 use peniko::BlendMode;
+use vello_common::geometry::RectU16;
 use vello_common::record::LayerProps;
 
 /// One open bracket: what its matching pop has to undo, and the device-space
@@ -129,6 +145,27 @@ impl GroupStack {
             clip: true,
             layer: isolated,
             bounds,
+        });
+    }
+
+    /// Open the bracket a retained body at full opacity records: a layer of
+    /// its own with no clip behind it.
+    ///
+    /// The inline lowering of such a bracket clips nothing, so neither does
+    /// this — the body draws exactly the pixels it would have drawn unwrapped,
+    /// and the layer only gathers them for the retained page. Its bounds are
+    /// unbounded for the same reason: nothing hoisted past it is confined by
+    /// it, and nothing drawn inside it is windowed by it.
+    pub fn push_retained(&mut self) {
+        self.entries.push(Group {
+            clip: false,
+            layer: true,
+            bounds: Rect::new(
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                f64::INFINITY,
+            ),
         });
     }
 
@@ -223,6 +260,157 @@ pub fn snapshot_correction(rect: Rect, scale: f64, transform: Affine) -> Affine 
         correction
     } else {
         Affine::IDENTITY
+    }
+}
+
+/// Where a retained body lands on the device grid: the composed transform
+/// its local coordinates are mapped through, split into the linear part and
+/// the translation.
+///
+/// A page holds the body rasterized under one placement. Another placement
+/// can be served from it only when the linear parts agree — the same scale,
+/// rotation and skew, so the page's pixels are the pixels the body would draw
+/// there — and the translations differ by a move a 1:1 composite can make
+/// ([`Self::offset_to`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RetainedPlacement {
+    /// The transform's linear part, `[a, b, c, d]` in `kurbo`'s coefficient
+    /// order.
+    pub linear: [f64; 4],
+    /// The transform's translation, in device pixels.
+    pub translation: (f64, f64),
+}
+
+impl RetainedPlacement {
+    /// How far apart two linear parts may be and still be read as one: well
+    /// below anything a scale animation or a device-scale change produces, and
+    /// well above the rounding a transform recomposed from the same factors
+    /// accumulates.
+    pub const LINEAR_EPSILON: f64 = 1e-6;
+
+    /// The placement `transform` describes.
+    #[must_use]
+    pub fn of(transform: Affine) -> Self {
+        let [a, b, c, d, e, f] = transform.as_coeffs();
+        Self {
+            linear: [a, b, c, d],
+            translation: (e, f),
+        }
+    }
+
+    /// The whole-pixel move from `self` to `other`, or `None` when the two
+    /// differ in anything but their translation.
+    ///
+    /// A fractional move is rounded to the nearest whole pixel: a composite is
+    /// a 1:1 copy of the page's texels and cannot land between them, so a body
+    /// sliding by a fraction of a pixel per frame is drawn at most half a pixel
+    /// from where an inline lowering would rasterize it. A whole-pixel move
+    /// (the common case of a scroll or a pixel-snapped transition) is exact.
+    #[must_use]
+    pub fn offset_to(&self, other: &Self) -> Option<(i32, i32)> {
+        let same_linear = self
+            .linear
+            .iter()
+            .zip(other.linear.iter())
+            .all(|(a, b)| (a - b).abs() <= Self::LINEAR_EPSILON);
+        if !same_linear {
+            return None;
+        }
+        let dx = (other.translation.0 - self.translation.0).round();
+        let dy = (other.translation.1 - self.translation.1).round();
+        let representable = |value: f64| value.is_finite() && value.abs() <= f64::from(u16::MAX);
+        (representable(dx) && representable(dy)).then_some((dx as i32, dy as i32))
+    }
+
+    /// The device extent `rect` covers under this placement, per axis, rounded
+    /// to whole pixels — the extent the resident-key ledger reports.
+    #[must_use]
+    pub fn extent(&self, rect: Rect) -> (u32, u32) {
+        let [a, b, c, d] = self.linear;
+        let x_scale = a.hypot(b);
+        let y_scale = c.hypot(d);
+        let pixels = |value: f64| {
+            if value.is_finite() {
+                value.round().clamp(0.0, f64::from(u32::MAX)) as u32
+            } else {
+                0
+            }
+        };
+        (
+            pixels(rect.width() * x_scale),
+            pixels(rect.height() * y_scale),
+        )
+    }
+
+    /// The uniform scale this placement rasterizes at — the square root of the
+    /// linear part's determinant, which is the device scale for an
+    /// axis-aligned body and the presentation scale folded into it.
+    #[must_use]
+    pub fn scale(&self) -> f32 {
+        let [a, b, c, d] = self.linear;
+        let scale = (a * d - b * c).abs().sqrt();
+        if scale.is_finite() { scale as f32 } else { 0.0 }
+    }
+}
+
+/// One retained bracket a compiler with retention on recorded this frame,
+/// for the renderer's store (`crate::cache::retained`) to resolve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetainedBracket {
+    /// The key the bracket carried.
+    pub key: u64,
+    /// The recorded layer standing for the bracket, indexed into
+    /// [`CommandRecorder::layers`](vello_common::record::CommandRecorder::layers).
+    pub layer: u32,
+    /// The bracket's alpha — what the page is composited at. Never baked into
+    /// the page itself.
+    pub opacity: f32,
+    /// Where the body's local space lands on the device grid, presentation
+    /// scale included.
+    pub placement: RetainedPlacement,
+    /// The device extent the bracket's `rect` covers under
+    /// [`placement`](Self::placement) — the ledger's `extent_px`.
+    pub extent_px: (u32, u32),
+    /// Which of the two commands this is, with what each one needs.
+    pub kind: RetainedKind,
+}
+
+/// The two retained commands, as the store needs to see them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedKind {
+    /// A `PushRetained` body: rendered into a page when the store admits it.
+    Record {
+        /// The bracket's `rect` on the device grid, rounded out to whole tiles
+        /// and clamped to the viewport — the most a page of this body may
+        /// hold. A body whose own drawn bounds leave it painted outside its
+        /// rectangle, which a page holding `rect` cannot carry anywhere else.
+        rect: RectU16,
+        /// Whether the body can be retained at all: it lay wholly inside the
+        /// viewport and every scissor around it under no coverage mask (so
+        /// nothing of it was clipped away on the way in), it drew no hole
+        /// punch and no externally bound texture (whose pixels change with no
+        /// command changing), and its bracket closed where it was opened.
+        retainable: bool,
+    },
+    /// A `DrawRetained`: a composite of a resident page.
+    Draw {
+        /// The painter-order index the composite takes — the slot the command
+        /// was recorded at.
+        depth: u32,
+        /// The device rectangle the composite may write: the viewport
+        /// intersected with every scissor open around the command.
+        window: RectU16,
+        /// Whether a coverage-mask clip is open around the command, which a
+        /// 1:1 composite cannot honour.
+        masked: bool,
+    },
+}
+
+impl RetainedBracket {
+    /// Whether this is a `DrawRetained`.
+    #[must_use]
+    pub fn is_draw(&self) -> bool {
+        matches!(self.kind, RetainedKind::Draw { .. })
     }
 }
 

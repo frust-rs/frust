@@ -322,8 +322,14 @@ pub fn shader_effects_disabled() -> bool {
 /// Whether layer caching is disabled via `FRUST_ENGINE_NO_LAYERS`.
 /// Cached: read once per process.
 ///
-/// Reserved: parsed and cached, consulted by nothing yet; wired when its
-/// subsystem lands.
+/// The engine-side kill switch over retained pages
+/// ([`crate::cache::retained`]): when set, the renderer's compiler records no
+/// retained bracket and lowers every `PushRetained` inline, so the store stays
+/// empty, the resident-key ledger stays empty, and a widget tree reading it
+/// never emits a `DrawRetained`. The upstream switch, `FRUST_NO_RETAINED_LAYERS`,
+/// stops the widgets emitting the commands at all; this one is for a driver
+/// that mishandles the page round itself. `SceneCompiler::set_retained_layers`
+/// is its programmatic counterpart.
 pub fn layers_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| {
@@ -332,6 +338,28 @@ pub fn layers_disabled() -> bool {
             std::env::var("FRUST_ENGINE_NO_LAYERS").ok(),
         )
     })
+}
+
+/// The retained-page budget in MiB via `FRUST_ENGINE_RETAINED_BUDGET_MB=<n>`,
+/// overriding the adapter tier's own (see
+/// [`RetainedBudget::for_caps`](crate::cache::retained::RetainedBudget::for_caps)).
+/// `None` when unset, empty or not a whole number; `Some(0)` is a budget no
+/// page fits in, which refuses every bracket and retains nothing. Cached: read
+/// once per process.
+pub fn retained_budget_mb() -> Option<u64> {
+    static BUDGET: OnceLock<Option<u64>> = OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        parse_retained_budget_mb(env_str(
+            option_env!("FRUST_ENGINE_RETAINED_BUDGET_MB"),
+            std::env::var("FRUST_ENGINE_RETAINED_BUDGET_MB").ok(),
+        ))
+    })
+}
+
+/// Parses a raw `FRUST_ENGINE_RETAINED_BUDGET_MB` value (already resolved by
+/// [`env_str`]): a whole number of MiB, or `None`.
+fn parse_retained_budget_mb(raw: Option<String>) -> Option<u64> {
+    raw.and_then(|value| value.trim().parse().ok())
 }
 
 /// Whether resource pooling is disabled via `FRUST_ENGINE_NO_POOL`.
@@ -524,6 +552,15 @@ mod tests {
         assert_eq!(parse_run_split_min(Some("0".to_string())), 0);
         assert_eq!(parse_run_split_min(Some("many".to_string())), RUN_SPLIT_MIN);
         assert_eq!(parse_run_split_min(None), RUN_SPLIT_MIN);
+    }
+
+    #[test]
+    fn the_retained_budget_parses_a_whole_number_of_mib_only() {
+        assert_eq!(parse_retained_budget_mb(None), None);
+        assert_eq!(parse_retained_budget_mb(Some("64".into())), Some(64));
+        assert_eq!(parse_retained_budget_mb(Some(" 0 ".into())), Some(0));
+        assert_eq!(parse_retained_budget_mb(Some("1.5".into())), None);
+        assert_eq!(parse_retained_budget_mb(Some("lots".into())), None);
     }
 
     #[test]

@@ -152,6 +152,15 @@
 //! carries both the pass's viewport uniform and that layer input, and a page
 //! round's viewport is its own.
 //!
+//! A retained page ([`crate::cache::retained`]) is composited by exactly the
+//! same quad, bound the same way; only the texture differs — the store's own,
+//! named by the retained bracket rather than by a page group. A round
+//! rendering a body into one is a page round in every respect above (cleared on
+//! its first round, loaded on a continued one, through its own viewport
+//! uniform, never taking the surface opening) and is listed as a
+//! [`FramePass::Page`]. A `DrawRetained`'s composite carries the painter-order
+//! index the command itself was recorded at.
+//!
 //! A composite carries the deepest painter's-order index of everything inside
 //! the layer it composites, nested layers included. That is what keeps a
 //! translucent layer correctly ordered against the root round's own draws
@@ -244,13 +253,18 @@ use vello_common::paint::{ImageId, ImageSource, Paint};
 use vello_common::strip::Strip;
 
 use crate::cache::images::{ATLAS_PADDING, AtlasRegion};
+use crate::cache::retained::{
+    RetainedBudget, RetainedDecision, RetainedEntry, RetainedPages, RetainedPlan,
+};
 use crate::cache::{
     AtlasBudget, BYTES_PER_TEXEL, CachedRamp, GradientCache, GradientTextureLayout, ResidentImage,
 };
 #[cfg(any(test, feature = "perf-trace"))]
 use crate::compile::CompileSpans;
 use crate::compile::paint::resolve_lut_request;
-use crate::compile::{ClearPunch, CompiledFrame, GlyphQuad, PhaseClock, SceneCompiler};
+use crate::compile::{
+    ClearPunch, CompiledFrame, GlyphQuad, PhaseClock, RetainedKind, SceneCompiler,
+};
 use crate::config;
 use crate::diag::{EngineSpan, FrameTimestamps};
 use crate::error::EngineError;
@@ -277,7 +291,8 @@ use crate::gpu::targets::{
 use crate::gpu::{self, AtlasArray, GpuConfig, GpuEncodedPaint, GpuStrip, StripDraw};
 use crate::schedule::pages::{PageConfig, PageSize};
 use crate::schedule::{
-    Composite, MAX_LIVE_PAGES, PageParity, PageTarget, Round, RoundOp, Schedule,
+    Composite, MAX_LIVE_PAGES, PageParity, PageTarget, RetainedLayers, RetainedRole,
+    RetainedTarget, Round, RoundOp, Schedule,
 };
 use crate::{EngineTarget, OutputAlpha};
 use vello_common::geometry::SizeU16;
@@ -831,6 +846,13 @@ pub struct EngineRenderer {
     /// never blurs should own neither a sampler nor a resource texture it will
     /// not read. Created by the first frame that schedules a filter round.
     filters: Option<FilterResources>,
+    /// The retained pages `PushRetained` bodies render into and
+    /// `DrawRetained`s composite from, kept across frames (see
+    /// [`crate::cache::retained`]).
+    retained: RetainedPages,
+    /// The roles the store gave this frame's retained layers, handed to the
+    /// scheduler — retained across frames for its allocation alone.
+    retained_layers: RetainedLayers,
     /// The rolling CPU-phase window `frust-perf enc` lines are emitted from.
     ///
     /// Absent entirely from a build without `perf-trace`, along with the type
@@ -917,7 +939,14 @@ impl EngineRenderer {
             // `FRUST_ENGINE_ATLAS_SIZE` override), and the adapter is known
             // exactly here — a compiler built without it would silently keep
             // the mobile budget on every device.
-            compiler: SceneCompiler::for_caps(1, 1, caps),
+            compiler: {
+                let mut compiler = SceneCompiler::for_caps(1, 1, caps);
+                // A renderer has a store behind its compiler, so retained
+                // brackets are recorded for it — unless the engine-side kill
+                // switch says otherwise.
+                compiler.set_retained_layers(!config::layers_disabled());
+                compiler
+            },
             gradients,
             depth: DepthAttachment::new(),
             targets: IntermediateTargets::new(caps),
@@ -933,6 +962,8 @@ impl EngineRenderer {
             atlas_lowering: None,
             atlas_report: AtlasRenderReport::default(),
             filters: None,
+            retained: RetainedPages::for_caps(caps),
+            retained_layers: RetainedLayers::new(),
             #[cfg(feature = "perf-trace")]
             encode_trace: EncodeTrace::default(),
         })
@@ -1217,9 +1248,80 @@ impl EngineRenderer {
     /// for again — and the engine-owned depth attachment, which has to match
     /// its colour attachment exactly. Reallocating the depth buffer here rather
     /// than on the next frame keeps it off the frame path.
+    ///
+    /// Every retained page goes too: a page holds its body as it was laid out
+    /// for the old extent, and the resident-key ledger published after the
+    /// next frame reports the empty store, so every body is painted (and
+    /// re-recorded) at the new one.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.targets.drop_parked();
         self.depth.resize(device, width, height);
+        self.retained.clear();
+    }
+
+    /// The retained pages this renderer holds resident after its last frame —
+    /// the renderer's half of the resident-key ledger (see
+    /// [`crate::cache::retained`]), in no particular order.
+    pub fn retained_ledger(&self) -> impl Iterator<Item = RetainedEntry> + '_ {
+        self.retained.entries()
+    }
+
+    /// The retained store's frame clock — how many frames it has planned —
+    /// for a ledger's diagnostic frame stamp.
+    #[must_use]
+    pub fn retained_frame(&self) -> u64 {
+        self.retained.frame()
+    }
+
+    /// A counter advanced whenever what [`Self::retained_ledger`] reports
+    /// changes; a host publishing the ledger only when it moved publishes
+    /// every change and nothing else.
+    #[must_use]
+    pub fn retained_generation(&self) -> u64 {
+        self.retained.generation()
+    }
+
+    /// Whether a frame was refused with [`EngineError::RetainedKeyMissing`]
+    /// (and the store cleared) since the last call, clearing the flag. A host
+    /// that sees `true` owes the widget tree one more paint against the
+    /// now-empty ledger: the refused frame presented nothing.
+    pub fn take_retained_refusal(&mut self) -> bool {
+        self.retained.take_refusal()
+    }
+
+    /// Drop every retained page — what a surface recreate or a device-scale
+    /// change calls for. The next ledger read reports the empty store.
+    pub fn clear_retained(&mut self) {
+        self.retained.clear();
+    }
+
+    /// The byte budget the retained store is held to.
+    #[must_use]
+    pub fn retained_budget(&self) -> RetainedBudget {
+        self.retained.budget()
+    }
+
+    /// Re-budget the retained store, evicting least recently used pages until
+    /// what it holds fits.
+    pub fn set_retained_budget(&mut self, budget: RetainedBudget) {
+        self.retained.set_budget(budget);
+    }
+
+    /// Set whether this renderer records retained brackets at all — the
+    /// programmatic counterpart of `FRUST_ENGINE_NO_LAYERS` (see
+    /// [`SceneCompiler::set_retained_layers`]). Turning it off clears the
+    /// store, since nothing would ever draw from it again.
+    pub fn set_retained_layers(&mut self, enabled: bool) {
+        self.compiler.set_retained_layers(enabled);
+        if !enabled {
+            self.retained.clear();
+        }
+    }
+
+    /// Whether this renderer records retained brackets.
+    #[must_use]
+    pub fn retained_layers(&self) -> bool {
+        self.compiler.retained_layers_enabled()
     }
 
     /// Takes the time this renderer's pipeline cache has spent resolving
@@ -1359,7 +1461,23 @@ impl EngineRenderer {
         // recorded: a layer shape this scheduler does not serve, or one larger
         // than a page can be sized to, refuses the whole frame here so the
         // caller can skip it cleanly rather than present it half-drawn.
-        let rounds = Schedule::build(&frame.recorder, &self.caps, &self.pages)?;
+        //
+        // The retained store decides first, because its answers are roles the
+        // scheduler serves: which bodies render into a kept page, where each
+        // `DrawRetained` composites — or that one cannot be served, which
+        // refuses the frame here and empties the store (see
+        // `crate::cache::retained`). Nothing it decides is applied until the
+        // frame is past its last fallible step.
+        let retained_plan = self
+            .retained
+            .plan(&frame.retained, &frame.recorder.layers)?;
+        retained_roles(&frame, &retained_plan, &mut self.retained_layers);
+        let rounds = Schedule::build_retained(
+            &frame.recorder,
+            &self.caps,
+            &self.pages,
+            &self.retained_layers,
+        )?;
         let ceiling = self.targets.max_texture_size();
         for round in &rounds {
             if let Some(page) = round.page()
@@ -1433,7 +1551,15 @@ impl EngineRenderer {
         )?;
         let gradients_grown = self.resources.grown_gradient_height(&self.gradients)?;
 
-        // Past the last fallible step. The atlas is created or grown first, so
+        // Past the last fallible step. The retained store applies its plan
+        // first — evictions, then a page for every body a round really renders
+        // into — so every retained page the frame's rounds name exists before
+        // they are recorded.
+        let rendered = retained_rendered(&frame, &rounds);
+        self.retained
+            .commit(device, &frame.retained, &retained_plan, &rendered);
+
+        // The atlas is created or grown first, so
         // the growth copy's own submit precedes the frame's atlas writes below
         // (see `gpu::atlas`) and the array is deep enough for every region they
         // name.
@@ -2173,18 +2299,37 @@ impl EngineRenderer {
                 continue;
             }
 
+            // The off-screen texture this round draws into, when it is not the
+            // surface: the pooled page acquired above, or the retained page the
+            // store bound to this round's body (`crate::cache::retained`). A
+            // retained round whose page is missing — unreachable, the store
+            // committed one for every body a round renders — draws nothing
+            // rather than drawing onto the surface.
+            let retained_page = plan
+                .retained
+                .and_then(|retained| self.retained.page_for(retained.bracket));
+            if plan.retained.is_some() && retained_page.is_none() {
+                settle_pages(&mut self.targets, &mut live, plan.released, own);
+                continue;
+            }
+            let offscreen = own
+                .as_ref()
+                .map(|(_, pooled)| (pooled.view(), pooled.size()))
+                .or(retained_page);
+            let continued = plan.page.is_some_and(|page| page.continued)
+                || plan.retained.is_some_and(|retained| retained.continued);
+
             // The round's viewport uniform. A page's is written here rather
             // than with the frame's other uploads because only the pool knows
             // the extent it quantized the request up to, and NDC is computed
             // against the attachment's real extent. Distinct buffers, so the
             // write ordering against the frame's own config never matters.
-            let config = match &own {
+            let config = match offscreen {
                 None => &self.resources.config,
-                Some((_, pooled)) => {
+                Some((_, (width, height))) => {
                     let Some(config) = self.resources.page_configs.get(page_slot) else {
                         continue;
                     };
-                    let (width, height) = pooled.size();
                     queue.write_buffer(
                         config,
                         0,
@@ -2195,11 +2340,11 @@ impl EngineRenderer {
                 }
             };
 
-            let variant = match &own {
+            let variant = match offscreen {
                 None => pipelines.alpha.0,
                 Some(_) => EnginePipeline::StripIntermediate,
             };
-            let class_pipelines = match (&own, pipelines.page.as_ref()) {
+            let class_pipelines = match (offscreen, pipelines.page.as_ref()) {
                 (None, _) => &pipelines.alpha.1,
                 (Some(_), Some(page)) => page,
                 (Some(_), None) => continue,
@@ -2215,7 +2360,7 @@ impl EngineRenderer {
 
             // A page round binds its own viewport uniform; the root round's is
             // already the one the shared set carries.
-            let page_resources = own.as_ref().map(|_| {
+            let page_resources = offscreen.map(|_| {
                 resources_bind_group(
                     device,
                     pipeline,
@@ -2233,14 +2378,21 @@ impl EngineRenderer {
                 .unwrap_or(&[]);
             let mut composites: Vec<wgpu::BindGroup> = Vec::new();
             for segment in segments {
-                if let Segment::Composite(_, parity) = *segment {
-                    // A group with no live page samples the transparent
-                    // placeholder, which composites nothing — the same "draw
-                    // less, never wrong" answer an unresolvable paint gets.
-                    let view = live[parity.index()].as_ref().map_or(
-                        &self.resources.placeholders.layer_input,
-                        PooledTexture::view,
-                    );
+                if let Segment::Composite(_, source) = *segment {
+                    // A group with no live page — or a retained bracket with no
+                    // page bound — samples the transparent placeholder, which
+                    // composites nothing: the same "draw less, never wrong"
+                    // answer an unresolvable paint gets.
+                    let view = match source {
+                        CompositeSource::Page(parity) => live[parity.index()].as_ref().map_or(
+                            &self.resources.placeholders.layer_input,
+                            PooledTexture::view,
+                        ),
+                        CompositeSource::Retained(bracket) => self
+                            .retained
+                            .page_for(bracket)
+                            .map_or(&self.resources.placeholders.layer_input, |(view, _)| view),
+                    };
                     composites.push(resources_bind_group(
                         device,
                         pipeline,
@@ -2253,21 +2405,22 @@ impl EngineRenderer {
 
             // A page round draws into an off-screen layer page, the frame's own
             // rounds into the surface — the split the two spans name.
-            let span = if own.is_some() {
+            let span = if offscreen.is_some() {
                 EngineSpan::Composite
             } else {
                 EngineSpan::Main
             };
 
-            let (view, pass, load, depth) = match &own {
-                Some((_, pooled)) => (
-                    pooled.view(),
+            let (view, pass, load, depth) = match offscreen {
+                Some((view, _)) => (
+                    view,
                     FramePass::Page,
                     // A pooled texture holds whatever its last holder left
-                    // there, so a layer's first round into a page clears it —
+                    // there, and a retained one whatever this body's last frame
+                    // left, so a layer's first round into a page clears it —
                     // and a round continuing that same page loads it, because
                     // clearing again would wipe the half already drawn.
-                    if plan.page.is_some_and(|page| page.continued) {
+                    if continued {
                         wgpu::LoadOp::Load
                     } else {
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
@@ -2290,7 +2443,7 @@ impl EngineRenderer {
             // opening stays owed past it either way. A *page* plan with no
             // segments still records its pass, because that is what clears the
             // pooled page.
-            if !segments.is_empty() || own.is_some() {
+            if !segments.is_empty() || offscreen.is_some() {
                 let round = PassPlan {
                     pass,
                     view,
@@ -2312,7 +2465,11 @@ impl EngineRenderer {
                 // segments in order — the pipeline switching between them
                 // inside the pass — and ends where this round's pass would
                 // have ended.
-                let opening = if own.is_none() { opening.take() } else { None };
+                let opening = if offscreen.is_none() {
+                    opening.take()
+                } else {
+                    None
+                };
                 match opening {
                     Some(opening) => opening.record(
                         encoder,
@@ -3293,9 +3450,28 @@ enum Segment {
     /// of consecutive instances that share one texture, drawn with that
     /// texture's own group 1 bound.
     External(u32, u32, u32, PaintClass),
-    /// One composite quad at `first`, sampling the finished page in the named
-    /// group.
-    Composite(u32, PageParity),
+    /// One composite quad at `first`, sampling the finished page it names.
+    Composite(u32, CompositeSource),
+}
+
+/// The page a [`Segment::Composite`] samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompositeSource {
+    /// The live pooled page in this group.
+    Page(PageParity),
+    /// The retained page of this retained bracket (see
+    /// [`crate::schedule::RetainedSource`]).
+    Retained(u32),
+}
+
+/// The retained page one round renders a body into.
+#[derive(Debug, Clone, Copy)]
+struct RetainedRound {
+    /// The retained bracket the page belongs to.
+    bracket: u32,
+    /// Whether an earlier round of the same body already rendered into the
+    /// page this frame, so this one loads it rather than clearing it.
+    continued: bool,
 }
 
 /// One scheduled round, resolved to the instances and target it draws with.
@@ -3306,8 +3482,12 @@ enum Segment {
 /// [`Scratch::cut_for_punches`]).
 #[derive(Debug, Clone)]
 struct RoundPlan {
-    /// The page this round renders into, or `None` for the frame's own target.
+    /// The page this round renders into, or `None` for the frame's own target
+    /// and for a retained page.
     page: Option<PagePlan>,
+    /// The retained page this round renders a body into, if it does — an
+    /// off-screen round like a page one, into the store's texture.
+    retained: Option<RetainedRound>,
     /// This round's slice of [`Scratch::segments`], in execution order.
     segments: Range<usize>,
     /// Page groups this round consumed, indexed by
@@ -3455,6 +3635,16 @@ impl Scratch {
         self.punch = (0, 0);
         self.layer_depth.clear();
         self.layer_depth.resize(frame.recorder.layers.len(), 0);
+        // A `DrawRetained`'s layer holds no draw, so its composite's depth is
+        // the slot the command itself was recorded at rather than the deepest
+        // index inside it.
+        for bracket in &frame.retained {
+            if let RetainedKind::Draw { depth, .. } = bracket.kind
+                && let Some(slot) = self.layer_depth.get_mut(bracket.layer as usize)
+            {
+                *slot = depth;
+            }
+        }
         self.filter_blocks.clear();
         self.filter_layers.clear();
         self.filter_passes = 0;
@@ -3477,17 +3667,24 @@ impl Scratch {
 
         for round in rounds {
             let page = round.page();
+            let retained = round.retained();
+            let offscreen = page.is_some() || retained.is_some();
             let filter = self.plan_filter(frame, round);
             // A page holds its layer — or one column band of it — at the page's
             // own origin, so every instance of the round is shifted into that
-            // column and clipped to it (see `PageWindow`).
-            let window = page.map_or(PageWindow::ROOT, PageWindow::of);
-            let split_opaque = page.is_none() && depth_active;
-            self.planning_page = page.is_some();
+            // column and clipped to it (see `PageWindow`). A retained page holds
+            // its body the same way.
+            let window = match (page, retained) {
+                (Some(page), _) => PageWindow::of(page),
+                (None, Some(retained)) => PageWindow::of_retained(retained),
+                (None, None) => PageWindow::ROOT,
+            };
+            let split_opaque = !offscreen && depth_active;
+            self.planning_page = offscreen;
             // Only the frame's own target is punched — a punch inside an
             // isolated layer was hoisted out of it — so only a surface round is
             // ever cut.
-            let cuts = page.is_none();
+            let cuts = !offscreen;
 
             let mut first_segment = self.segments.len();
             let mut deepest = 0_u32;
@@ -3604,8 +3801,11 @@ impl Scratch {
                         self.push_run(run_start, end, run_external);
 
                         deepest = deepest.max(depth);
-                        self.segments
-                            .push(Segment::Composite(end, composite.parity));
+                        let source = match composite.retained {
+                            Some(retained) => CompositeSource::Retained(retained.bracket),
+                            None => CompositeSource::Page(composite.parity),
+                        };
+                        self.segments.push(Segment::Composite(end, source));
                         self.note_class(self.routing.composite_class());
                         self.alpha
                             .push(composite_instance(composite, window.origin(), depth));
@@ -3623,8 +3823,11 @@ impl Scratch {
             // Accumulated rather than assigned: a layer whose round was cut
             // renders in several rounds, and the depth its composite carries is
             // the deepest index across all of them.
-            if let Some(page) = page
-                && let Some(slot) = self.layer_depth.get_mut(page.layer as usize)
+            let own_layer = page
+                .map(|page| page.layer)
+                .or(retained.map(|retained| retained.layer));
+            if let Some(layer) = own_layer
+                && let Some(slot) = self.layer_depth.get_mut(layer as usize)
             {
                 *slot = (*slot).max(deepest);
             }
@@ -3641,6 +3844,10 @@ impl Scratch {
                     parity: page.parity,
                     size: page.size,
                     continued: page.continued,
+                }),
+                retained: retained.map(|retained| RetainedRound {
+                    bracket: retained.bracket,
+                    continued: retained.continued,
                 }),
                 segments: first_segment..self.segments.len(),
                 released,
@@ -3729,6 +3936,7 @@ impl Scratch {
         let punch = self.push_punches(issued, strips);
         self.rounds.push(RoundPlan {
             page: None,
+            retained: None,
             segments: *first_segment..self.segments.len(),
             // The pages a cut round consumed are handed back when its LAST plan
             // ends: nothing between two plans of one round acquires a page, and
@@ -3933,7 +4141,9 @@ impl Scratch {
     fn page_rounds(&self) -> usize {
         self.rounds
             .iter()
-            .filter(|plan| plan.page.is_some() && plan.filter.is_none())
+            .filter(|plan| {
+                (plan.page.is_some() || plan.retained.is_some()) && plan.filter.is_none()
+            })
             .count()
     }
 
@@ -3968,7 +4178,7 @@ impl Scratch {
                 out.push(FramePass::Filter);
                 continue;
             }
-            if plan.page.is_some() {
+            if plan.page.is_some() || plan.retained.is_some() {
                 out.push(FramePass::Page);
             } else if !plan.segments.is_empty() {
                 out.push(if owed {
@@ -4142,6 +4352,16 @@ impl PageWindow {
         }
     }
 
+    /// The window a retained page's round renders through: the body's own
+    /// tile-aligned bounds, never banded.
+    fn of_retained(target: &RetainedTarget) -> Self {
+        Self {
+            x0: target.bounds.x0,
+            x1: target.bounds.x1,
+            y0: target.bounds.y0,
+        }
+    }
+
     /// The origin instances are shifted by.
     fn origin(self) -> (u16, u16) {
         (self.x0, self.y0)
@@ -4245,6 +4465,43 @@ fn glyph_quad(quads: &[GlyphQuad], depth: u32) -> Option<&GlyphQuad> {
         "a glyph-quad draw with no quad at depth {depth}"
     );
     found
+}
+
+/// The scheduler roles `plan` gives `frame`'s retained layers, written into
+/// `roles` (cleared first). A body the store refused gets none and is
+/// scheduled as the ordinary layer it lowered to.
+fn retained_roles(frame: &CompiledFrame, plan: &RetainedPlan, roles: &mut RetainedLayers) {
+    roles.clear();
+    for (index, (bracket, decision)) in frame.retained.iter().zip(&plan.decisions).enumerate() {
+        let id = u32::try_from(index).unwrap_or(u32::MAX);
+        let role = match *decision {
+            RetainedDecision::Record { .. } => RetainedRole::Record { bracket: id },
+            RetainedDecision::Draw { dest, origin } => RetainedRole::Draw {
+                bracket: id,
+                dest,
+                origin,
+            },
+            RetainedDecision::Hidden => RetainedRole::Hidden,
+            RetainedDecision::Inline(_) => continue,
+        };
+        roles.set(bracket.layer, role);
+    }
+}
+
+/// Which of `frame`'s retained brackets the schedule renders into a retained
+/// page — the bodies whose pages the store may commit. A body the store
+/// admitted can still render nothing, nested inside a layer that composites
+/// nothing.
+fn retained_rendered(frame: &CompiledFrame, rounds: &[Round]) -> Vec<bool> {
+    let mut rendered = vec![false; frame.retained.len()];
+    for round in rounds {
+        if let Some(target) = round.retained()
+            && let Some(slot) = rendered.get_mut(target.bracket as usize)
+        {
+            *slot = true;
+        }
+    }
+    rendered
 }
 
 /// The single quad that composites a finished page onto `origin`-shifted
