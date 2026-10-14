@@ -1981,6 +1981,7 @@ mod browser_loop {
                     // reports 0x0 until its `ResizeObserver` has run. See
                     // `WebFrameExecutor::ensure_size`.
                     executor.ensure_size(physical.width, physical.height);
+                    executor.note_device_scale(scale);
                     executor.submit_frame(&self.scene, base_color, ui_spans)
                 }),
                 Err(_) => None,
@@ -2145,6 +2146,10 @@ mod browser_loop {
                         && let Some(executor) = slot.as_mut()
                     {
                         executor.resize_surface(size.width, size.height);
+                        // A `devicePixelRatio` change arrives as this
+                        // `Resized`: clear the retained store before the
+                        // repaint it requests.
+                        executor.note_device_scale(window.scale_factor());
                     }
                     super::publish_window_metrics(
                         self.runtime,

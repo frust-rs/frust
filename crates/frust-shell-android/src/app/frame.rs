@@ -199,6 +199,16 @@ impl AndroidAppHandle {
         // stamps the `applied` probe line and marks this frame as the one that stamps `frame`.
         #[cfg(feature = "hotpatch")]
         let signals_dirty = signals_dirty | self.patch_probe.take_request();
+        // A frame the renderer refused for drawing a retained page it no longer
+        // held presented nothing; the render side (possibly the render thread,
+        // which cannot reach this handle) raised the process-wide repaint flag
+        // after publishing the emptied ledger. Taken past the surface-ready gate
+        // like the drains above and ORed into `signals_dirty` like the hot-patch
+        // request, so this tick runs and paints against that ledger — without
+        // forcing a relayout — instead of an idle screen keeping the frame
+        // before the refused one.
+        let signals_dirty =
+            signals_dirty | frust_shell_common::render_split::take_retained_repaint();
 
         // Gather the remaining inputs from the tree's existing accessors and the
         // handle-side latches, then let the gate decide. `mem::take` clears each

@@ -15,7 +15,7 @@ use frust_shell_common::{
 };
 
 use super::IosAppHandle;
-use super::executor::FrameExecutor;
+use super::executor::{FrameExecutor, note_scale, publish_ledger};
 
 /// The construction-time half of the resolved-translucency contract, called
 /// once from [`IosAppHandle::new`] before the first rebuild.
@@ -303,6 +303,13 @@ impl IosAppHandle {
     pub(crate) fn set_surface(&mut self, physical: (u32, u32), scale: f32) {
         self.physical = physical;
         self.scale = scale;
+        // The recreated engine starts with an empty retained store: publish its
+        // empty ledger before the next paint, and note the scale it came back
+        // at (inline only — this is the inline recover path's commit).
+        if let FrameExecutor::Inline(inline) = &mut self.executor {
+            note_scale(&mut inline.renderer, sanitize_scale(scale));
+            publish_ledger(&mut inline.renderer);
+        }
         // A successful recreate ends the SurfaceLost episode; future losses get a
         // fresh retry budget.
         self.recreate_failures = 0;
@@ -333,7 +340,11 @@ impl IosAppHandle {
             FrameExecutor::Inline(inline) => {
                 inline
                     .renderer
-                    .on_surface_changed(&inline.render_cx, physical.0, physical.1)
+                    .on_surface_changed(&inline.render_cx, physical.0, physical.1);
+                // A scale change (a move between screens) rides the same
+                // resize: clear the retained store and publish its empty
+                // ledger before the next paint reads it.
+                note_scale(&mut inline.renderer, sanitize_scale(scale));
             }
             FrameExecutor::Split(split) => split.resize(SurfaceSize {
                 width: physical.0,

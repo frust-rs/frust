@@ -284,6 +284,11 @@ pub struct SurfaceRenderer {
     /// with no engine. `None` until the first take and again at every surface
     /// episode's start or end, so the next take always publishes.
     retained_published: Option<Option<u64>>,
+    /// The device scale (physical / logical) last handed to
+    /// [`Self::note_device_scale`], kept as raw bits so a change is an exact
+    /// comparison. Outlives surface episodes: a recreate at the same scale is
+    /// not a scale change (the fresh engine's store is empty anyway).
+    device_scale: Option<u64>,
 }
 
 /// One retained page the renderer holds resident: the key it was recorded
@@ -441,6 +446,7 @@ impl SurfaceRenderer {
             #[cfg(feature = "perf-trace")]
             first_submit_seen: false,
             retained_published: None,
+            device_scale: None,
         }
     }
 
@@ -612,6 +618,29 @@ impl SurfaceRenderer {
             let TierBackend::Engine { engine, .. } = &mut ready.backend;
             engine.clear_retained();
         }
+    }
+
+    /// Note the device scale (physical / logical, already sanitized by the
+    /// shell) the coming frames are painted at — the one place a shell reports
+    /// a scale change to the retained store.
+    ///
+    /// When `scale` differs from the last noted one (or none was noted yet),
+    /// every resident page was rasterized for a scale no frame will name
+    /// again, so the store is cleared ([`Self::clear_retained`]) and the next
+    /// [`Self::take_retained_ledger`] publishes the empty ledger even when the
+    /// store was empty already — the UI thread then paints every retained
+    /// body again instead of naming pages that are gone. The same scale again
+    /// is a no-op, so a shell may call this at every surface create and
+    /// resize. Returns whether the scale changed.
+    pub fn note_device_scale(&mut self, scale: f64) -> bool {
+        let bits = scale.to_bits();
+        if self.device_scale == Some(bits) {
+            return false;
+        }
+        self.device_scale = Some(bits);
+        self.clear_retained();
+        self.retained_published = None;
+        true
     }
 
     /// Whether the **live** surface actually resolved to a translucent
@@ -2037,6 +2066,53 @@ mod tests {
         assert!(!renderer.take_retained_refusal());
         // Nothing to clear, and nothing to fail.
         renderer.clear_retained();
+        assert_eq!(renderer.take_retained_ledger(), None);
+
+        renderer.on_surface_destroyed();
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default()),
+            "a surface destroy publishes the empty ledger, once"
+        );
+        assert_eq!(renderer.take_retained_ledger(), None);
+    }
+
+    /// A device-scale change clears the store and owes an EMPTY publish (even
+    /// over an already-empty store); the same scale again changes nothing.
+    #[test]
+    fn a_device_scale_change_clears_and_republishes_the_empty_ledger() {
+        let mut renderer = SurfaceRenderer::new();
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default())
+        );
+
+        assert!(renderer.note_device_scale(2.0), "the first scale noted");
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default()),
+            "a scale change publishes the empty ledger"
+        );
+
+        assert!(!renderer.note_device_scale(2.0), "same scale: a no-op");
+        assert_eq!(renderer.take_retained_ledger(), None, "and owes nothing");
+
+        assert!(renderer.note_device_scale(3.0));
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default())
+        );
+        assert_eq!(renderer.take_retained_ledger(), None);
+
+        // A surface episode ending is not a scale change: the scale survives
+        // it, so a recreate at the same scale owes nothing beyond the
+        // episode's own empty publish.
+        renderer.on_surface_destroyed();
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages::default())
+        );
+        assert!(!renderer.note_device_scale(3.0));
         assert_eq!(renderer.take_retained_ledger(), None);
     }
 

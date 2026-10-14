@@ -180,7 +180,13 @@ impl FrameExecutor {
     /// until the render thread has released its surface resources.
     pub(crate) fn destroy_surface(&mut self) {
         match self {
-            FrameExecutor::Inline(inline) => inline.renderer.on_surface_destroyed(),
+            FrameExecutor::Inline(inline) => {
+                inline.renderer.on_surface_destroyed();
+                // The torn-down engine held no page the next surface will:
+                // publish the empty ledger now, so the first paint after a
+                // resume names none.
+                publish_ledger(&mut inline.renderer);
+            }
             FrameExecutor::Split(split) => split.destroy_surface(),
         }
     }
@@ -192,7 +198,8 @@ impl FrameExecutor {
             FrameExecutor::Inline(inline) => {
                 inline
                     .renderer
-                    .on_surface_changed(&inline.render_cx, size.width, size.height)
+                    .on_surface_changed(&inline.render_cx, size.width, size.height);
+                note_scale(&mut inline.renderer, size.scale);
             }
             FrameExecutor::Split(split) => split.resize_surface(size),
         }
@@ -330,6 +337,7 @@ impl InlineExecutor {
             SurfaceAlphaRequest::Opaque,
         ))
         .context("frust: failed to create render surface")?;
+        note_scale(&mut self.renderer, size.scale);
         persist_and_record(
             &self.renderer,
             &mut self.startup,
@@ -622,13 +630,19 @@ fn render_loop(
                         let _ = proxy.send_event(ShellUserEvent::RenderFatal(err));
                         return;
                     }
+                    note_scale(&mut renderer, size.scale);
                     window = Some(w);
                 }
                 RenderCommand::SurfaceChanged { size } => {
                     renderer.on_surface_changed(&render_cx, size.width, size.height);
+                    note_scale(&mut renderer, size.scale);
                 }
                 RenderCommand::SurfaceDestroyed { ack } => {
                     renderer.on_surface_destroyed();
+                    // The empty ledger is published BEFORE the barrier is
+                    // acknowledged, so the UI thread's first paint after a
+                    // resume already sees it and names no torn-down page.
+                    publish_ledger(&mut renderer);
                     window = None;
                     // Acknowledge only after the surface resources are dropped —
                     // the window-release barrier.
@@ -808,15 +822,15 @@ fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
 }
 
 /// Publish the renderer's resident-key ledger for the UI thread's next paint
-/// when it changed since the last frame, answering whether a frame was just
-/// refused for drawing a retained page the renderer no longer holds.
+/// when it changed since the last publish — after a frame, and at a surface
+/// destroy or device-scale change (both of which leave it empty).
 ///
 /// The slot behind `publish_retained_ledger` is process-global, which is sound
 /// only because a process runs ONE renderer: a second surface would publish
 /// over the first's ledger. The publish takes the slot's lock for an `Arc`
 /// swap and nothing else, and the UI thread only ever `try_lock`s it, so the
 /// UI thread never waits on this.
-fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
+fn publish_ledger(renderer: &mut SurfaceRenderer) {
     if let Some(resident) = renderer.take_retained_ledger() {
         publish_retained_ledger(RetainedLedger::from_entries(
             resident.frame,
@@ -826,6 +840,22 @@ fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
                 .map(|page| (page.key, page.extent_px, page.scale)),
         ));
     }
+}
+
+/// Hand the renderer the device scale a surface create or resize carries
+/// (winit folds `ScaleFactorChanged` into the `Resized` that reaches
+/// [`FrameExecutor::resize_surface`]): a changed scale clears the retained
+/// store, and its empty ledger is published at once.
+fn note_scale(renderer: &mut SurfaceRenderer, scale: f64) {
+    if renderer.note_device_scale(scale) {
+        publish_ledger(renderer);
+    }
+}
+
+/// [`publish_ledger`] after a frame, answering whether that frame was refused
+/// for drawing a retained page the renderer no longer holds.
+fn publish_retained(renderer: &mut SurfaceRenderer) -> bool {
+    publish_ledger(renderer);
     renderer.take_retained_refusal()
 }
 

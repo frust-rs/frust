@@ -61,7 +61,7 @@ use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
     AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceMode,
     SurfaceModeWatcher, SurfaceSize, ViewCommand, declare_host_translucent_surface, guard,
-    next_render_phase, render_channel, render_thread_enabled, run_guarded_thread,
+    next_render_phase, render_channel, render_thread_enabled, run_guarded_thread, sanitize_scale,
     scene_return_channel,
 };
 use frust_text::TextContext;
@@ -761,6 +761,23 @@ fn install_surface(
 /// is logged, never fatal.
 const THREAD_PRIORITY_DISPLAY: libc::c_int = -4;
 
+/// Publish the EMPTY retained ledger for a renderer that just lost its store —
+/// a surface destroyed or (re)installed, or a device-scale change — when it
+/// owes one (`take_retained_ledger` answers each such change once, empty).
+///
+/// The render thread's lifecycle arms only; a frame's own ledger is published
+/// by [`render_scene`](crate::app::render_scene). The slot is process-global
+/// (one renderer per process) and the UI thread only ever `try_lock`s it.
+fn publish_cleared_ledger(renderer: &mut frust_render::SurfaceRenderer) {
+    if let Some(resident) = renderer.take_retained_ledger() {
+        debug_assert!(
+            resident.pages.is_empty(),
+            "a cleared retained store reports no page"
+        );
+        frust_shell_common::render_split::publish_empty_retained_ledger();
+    }
+}
+
 /// The dedicated render thread's loop: adopt the `JNI_OnLoad`
 /// GPU pre-init [`RenderContext`](frust_render::RenderContext) *on this thread*,
 /// own the `SurfaceRenderer` + surface wholesale, drain lifecycle commands and
@@ -861,7 +878,14 @@ pub(crate) fn render_loop(
                         first_install,
                         &translucent_resolved,
                     ) {
-                        Ok(()) => first_install_done = true,
+                        Ok(()) => {
+                            first_install_done = true;
+                            // A (re)created engine starts with an empty
+                            // retained store; publish it now, and note the
+                            // density so a later change is recognised.
+                            renderer.note_device_scale(sanitize_scale(size.scale as f32));
+                            publish_cleared_ledger(&mut renderer);
+                        }
                         Err(err) => {
                             // A failed (re)install leaves no surface whose
                             // translucency we can vouch for — clear the flag
@@ -887,6 +911,10 @@ pub(crate) fn render_loop(
                 }
                 RenderCommand::SurfaceChanged { size } => {
                     renderer.on_surface_changed(&render_cx, size.width, size.height);
+                    // A density change rides the same `surfaceChanged`.
+                    if renderer.note_device_scale(sanitize_scale(size.scale as f32)) {
+                        publish_cleared_ledger(&mut renderer);
+                    }
                 }
                 RenderCommand::SurfaceDestroyed { ack } => {
                     // Drop the surface resources FIRST, then acknowledge — the UI
@@ -894,6 +922,10 @@ pub(crate) fn render_loop(
                     // `ANativeWindow`, so the window is never touched after
                     // release (a known Android surface-lifecycle-race hazard).
                     renderer.on_surface_destroyed();
+                    // The empty ledger goes out BEFORE the ack, so the UI
+                    // thread's first paint after the surface comes back already
+                    // names no page the torn-down engine held.
+                    publish_cleared_ledger(&mut renderer);
                     ack.acknowledge();
                 }
                 RenderCommand::Pause { ack } => {
@@ -1100,6 +1132,7 @@ fn create_handle(
             startup_spans,
             &window,
             physical,
+            scale,
             cache_dir,
             &translucent_resolved,
         )?
@@ -1155,6 +1188,7 @@ fn build_inline_executor(
     mut startup_spans: StartupSpans,
     window: &NativeWindow,
     physical: (u32, u32),
+    scale: jfloat,
     cache_dir: Option<String>,
     translucent_resolved: &AtomicBool,
 ) -> Result<(FrameExecutor, TextContext)> {
@@ -1207,6 +1241,9 @@ fn build_inline_executor(
         )
     })
     .context("frust-shell-android: failed to create Android render surface")?;
+    // The scale the first surface is painted at, so a later density change is
+    // recognised as one (the fresh store is empty; the first frame publishes).
+    renderer.note_device_scale(sanitize_scale(scale));
 
     // Replace the request-seeded optimism with the real resolution —
     // on this path the renderer lives on the UI thread, so the
@@ -1571,6 +1608,12 @@ pub fn native_on_destroy(handle: jlong) {
         // is reclaimed exactly once here; the JVM zeroes its copy afterwards so it
         // is never passed back in.
         drop(unsafe { Box::from_raw(handle as *mut AndroidAppHandle) });
+        // The renderer is gone with the handle (the split's render thread was
+        // joined by the drop), so nothing can publish after this: leave the
+        // process-wide slot EMPTY, or a handle created later in this process (an
+        // activity recreate) would paint its first frame against the torn-down
+        // engine's pages.
+        frust_shell_common::render_split::publish_empty_retained_ledger();
     });
 }
 

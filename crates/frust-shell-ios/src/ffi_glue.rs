@@ -64,14 +64,14 @@ use frust_shell_common::perf::{self, FrameStats, StartupSpans};
 use frust_shell_common::{
     AppTree, RenderCommand, RenderPhase, RenderReceiver, SceneReturnSender, SurfaceMode,
     SurfaceModeWatcher, SurfaceSize, guard, next_render_phase, render_channel,
-    render_thread_enabled, run_guarded_thread, scene_return_channel,
+    render_thread_enabled, run_guarded_thread, sanitize_scale, scene_return_channel,
 };
 use frust_text::TextContext;
 
 use crate::accessibility::IosA11yAdapter;
 use crate::app::{
     FrameExecutor, InlineExecutor, IosAppHandle, PaintedScene, PresentHandoff, SplitExecutor,
-    render_scene,
+    note_scale, publish_ledger, render_scene,
 };
 use crate::ffi_support::{
     CaretRect, EditCommandKind, ToolbarActions, ToolbarAnchor, publish_resolved_translucency,
@@ -624,6 +624,11 @@ pub(crate) fn render_loop(
                         Ok(()) => {
                             first_install_done = true;
                             recreate_failures = 0;
+                            // A (re)installed engine starts with an empty
+                            // retained store: publish it now, and note the
+                            // scale so a later change is recognised.
+                            note_scale(&mut renderer, sanitize_scale(size.scale as f32));
+                            publish_ledger(&mut renderer);
                         }
                         Err(err) => {
                             // A failed (re)install leaves no surface whose
@@ -651,13 +656,16 @@ pub(crate) fn render_loop(
                 RenderCommand::SurfaceChanged { size } => {
                     physical = (size.width, size.height);
                     renderer.on_surface_changed(&render_cx, size.width, size.height);
+                    // A scale change rides the same resize.
+                    note_scale(&mut renderer, sanitize_scale(size.scale as f32));
                 }
                 RenderCommand::SurfaceDestroyed { ack } => {
                     // iOS never sends `SurfaceDestroyed` in v1 (the layer is
                     // permanent, so there is no UI-side destroy path); honor the
                     // barrier defensively so a stray one can never deadlock the UI
-                    // thread.
+                    // thread. Its empty ledger still goes out before the ack.
                     renderer.on_surface_destroyed();
+                    publish_ledger(&mut renderer);
                     ack.acknowledge();
                 }
                 RenderCommand::Pause { ack } => {
@@ -754,7 +762,14 @@ pub(crate) fn render_loop(
                         alpha,
                         &translucent_resolved,
                     ) {
-                        Ok(()) => recreate_failures = 0,
+                        Ok(()) => {
+                            recreate_failures = 0;
+                            // The self-healed engine starts with an empty
+                            // retained store; the UI thread's next paint (the
+                            // reinstall flag above forces one) must name none
+                            // of the lost engine's pages.
+                            publish_ledger(&mut renderer);
+                        }
                         Err(err) => {
                             // Same clear-on-failure contract as the install arm
                             // above — a failed self-heal must not
@@ -888,6 +903,7 @@ fn create_handle(
             startup,
             metal_layer,
             physical,
+            scale,
             font_preinit,
             alpha,
             &translucent_resolved,
@@ -962,6 +978,7 @@ fn build_inline_executor(
     mut startup: StartupSpans,
     metal_layer: *mut c_void,
     physical: (u32, u32),
+    scale: f32,
     font_preinit: std::thread::JoinHandle<TextContext>,
     alpha: SurfaceAlphaRequest,
     translucent_resolved: &AtomicBool,
@@ -982,6 +999,9 @@ fn build_inline_executor(
         )
     })
     .context("frust-shell-ios: failed to create Metal render surface")?;
+    // The scale the first surface is painted at, so a later change is
+    // recognised as one (the fresh store is empty; the first frame publishes).
+    renderer.note_device_scale(sanitize_scale(scale));
     // Replace the request-seeded optimism with the real resolution —
     // on this path the renderer lives on the UI thread, so the
     // handle's per-frame sync re-reads it from the renderer anyway; storing it
@@ -2074,6 +2094,11 @@ pub fn destroy(handle: *mut c_void) {
         // is reclaimed exactly once here; the Swift side nulls its copy afterwards
         // so it is never passed back in.
         drop(unsafe { Box::from_raw(handle as *mut IosAppHandle) });
+        // The renderer is gone with the handle (the split's render thread was
+        // joined by the drop), so nothing can publish after this: leave the
+        // process-wide slot EMPTY, or a handle created later in this process
+        // would paint its first frame against the torn-down engine's pages.
+        frust_shell_common::render_split::publish_empty_retained_ledger();
     });
 }
 
