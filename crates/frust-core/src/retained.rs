@@ -7,8 +7,30 @@
 //! before the next paint; a widget then asks
 //! [`PaintCtx::retained_available`](crate::PaintCtx::retained_available) whether
 //! to draw the page or paint the body again. The ledger is one frame stale by
-//! design: the UI thread never waits on the render thread for it, and a stale
-//! "resident" answer is repaired by the renderer's own refusal path.
+//! design: the UI thread never waits on the render thread for it.
+//!
+//! # Which recording a resident page holds
+//!
+//! Staleness has two shapes, and the renderer can repair only one of them. A
+//! page the ledger lists that the renderer has since dropped is refused at
+//! draw time (the frame presents nothing and the UI paints again against the
+//! emptied ledger). A page that is resident but holds an **older recording**
+//! than the body the widget last recorded is not detectable by the renderer at
+//! all: the scene that carried the newer recording can be dropped on its way
+//! to the renderer (the split's scene slot is latest-wins), leaving the old
+//! page standing under the same key, extent and scale.
+//!
+//! The paint serial closes that second gap. Every
+//! [`RenderRoot::paint`](crate::RenderRoot::paint) mints a serial (`1`, `2`,
+//! ... — [`PaintCtx::paint_serial`](crate::PaintCtx::paint_serial),
+//! [`PaintOutcome::paint_serial`](crate::PaintOutcome::paint_serial)); the
+//! shell carries it with the scene and hands it to the renderer before the
+//! encode, and the ledger's [`frame`](RetainedLedger::frame) is the serial of
+//! the last scene whose retained-store commit the renderer completed. A widget
+//! that recorded a page at serial `n` therefore draws it only when the ledger
+//! [covers](RetainedLedger::covers) `n` — a ledger published before that
+//! scene was committed (or after it was dropped and a later one committed
+//! instead) cannot vouch for it.
 //!
 //! [`RenderRoot::set_retained_ledger`]: crate::RenderRoot::set_retained_ledger
 
@@ -65,7 +87,12 @@ pub struct RetainedEntry {
 pub struct RetainedLedger {
     /// Resident pages by raw [`RetainedKey`].
     pub entries: HashMap<u64, RetainedEntry>,
-    /// The renderer frame this ledger describes (diagnostic).
+    /// The paint serial ([`PaintOutcome::paint_serial`](crate::PaintOutcome::paint_serial))
+    /// of the most recent scene whose retained-store commit the renderer
+    /// completed before publishing this ledger. A refused or failed frame does
+    /// not advance it; the empty ledger a store clear, surface destroy or
+    /// scale change publishes carries the last committed serial (`0` before
+    /// any). See [`RetainedLedger::covers`].
     pub frame: u64,
 }
 
@@ -78,7 +105,8 @@ impl RetainedLedger {
         Self::default()
     }
 
-    /// Build a ledger from `(key, extent_px, scale)` triples.
+    /// Build a ledger from `(key, extent_px, scale)` triples, describing the
+    /// store after the scene painted at serial `frame` was committed.
     pub fn from_entries(
         frame: u64,
         entries: impl IntoIterator<Item = (u64, (u32, u32), f32)>,
@@ -90,6 +118,13 @@ impl RetainedLedger {
                 .collect(),
             frame,
         }
+    }
+
+    /// Whether the renderer had committed the scene painted at `serial` (or a
+    /// later one) when it published this ledger: `frame >= serial`. Serial `0`
+    /// — a paint no render root numbered — is covered by every ledger.
+    pub fn covers(&self, serial: u64) -> bool {
+        self.frame >= serial
     }
 
     /// Whether `key` is resident at exactly `extent_px` and (within `1e-3`)
@@ -127,6 +162,17 @@ mod tests {
     }
 
     #[test]
+    fn a_ledger_covers_its_own_serial_and_every_earlier_one() {
+        let ledger = RetainedLedger::from_entries(5, [(7, (1, 1), 1.0)]);
+        assert!(ledger.covers(0));
+        assert!(ledger.covers(4));
+        assert!(ledger.covers(5));
+        assert!(!ledger.covers(6), "a later recording is not vouched for");
+        assert!(RetainedLedger::empty().covers(0));
+        assert!(!RetainedLedger::empty().covers(1));
+    }
+
+    #[test]
     fn empty_ledger_is_never_resident() {
         let ledger = RetainedLedger::empty();
         assert!(!ledger.is_resident(RetainedKey(0), (0, 0), 1.0));
@@ -139,7 +185,7 @@ mod tests {
 /// `PaintCtx::retained_available` and records the answers it saw.
 #[cfg(test)]
 mod paint_tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use crate::{
         AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, DiscardScene, FrameTime,
@@ -151,6 +197,10 @@ mod paint_tests {
 
     thread_local! {
         static ANSWERS: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+        /// The recording serial the boundary hands `retained_available`.
+        static RECORDED: Cell<u64> = const { Cell::new(0) };
+        /// The paint serials the boundary saw.
+        static SERIALS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     }
 
     const KEY: RetainedKey = RetainedKey(42);
@@ -164,8 +214,9 @@ mod paint_tests {
             bc.constrain(Size::new(100.0, 50.0))
         }
         fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
-            let available = ctx.retained_available(KEY, PAGE, 2.0);
+            let available = ctx.retained_available(KEY, PAGE, 2.0, RECORDED.with(Cell::get));
             ANSWERS.with(|a| a.borrow_mut().push(available));
+            SERIALS.with(|s| s.borrow_mut().push(ctx.paint_serial()));
         }
     }
 
@@ -224,6 +275,8 @@ mod paint_tests {
     }
 
     fn root() -> (RenderRoot<(), HostView>, Owner) {
+        RECORDED.with(|r| r.set(0));
+        SERIALS.with(|s| s.borrow_mut().clear());
         let owner = Owner::new();
         owner.set();
         let mut root = RenderRoot::new();
@@ -273,6 +326,38 @@ mod paint_tests {
         root.set_retained_layers(false);
         assert!(!paint_once(&mut root));
         root.set_retained_layers(true);
+        assert!(paint_once(&mut root));
+    }
+
+    #[test]
+    fn each_paint_mints_the_next_serial_and_reports_it() {
+        let (mut root, _owner) = root();
+        root.layout(Size::new(300.0, 300.0));
+        let first = root.paint(&mut DiscardScene, FrameTime::ZERO);
+        let second = root.paint(&mut DiscardScene, FrameTime::ZERO);
+        assert_eq!((first.paint_serial, second.paint_serial), (1, 2));
+        assert_eq!(
+            SERIALS.with(|s| s.borrow().clone()),
+            vec![1, 2],
+            "the pod below the root painted under the same serials"
+        );
+    }
+
+    #[test]
+    fn a_ledger_that_predates_the_recording_does_not_vouch_for_it() {
+        let (mut root, _owner) = root();
+        // The page was recorded in paint 3; the ledger describes the store
+        // after scene 2 was committed.
+        RECORDED.with(|r| r.set(3));
+        root.set_retained_ledger(&RetainedLedger::from_entries(
+            2,
+            [(KEY.get(), (200, 100), 2.0)],
+        ));
+        assert!(!paint_once(&mut root));
+        root.set_retained_ledger(&RetainedLedger::from_entries(
+            3,
+            [(KEY.get(), (200, 100), 2.0)],
+        ));
         assert!(paint_once(&mut root));
     }
 }

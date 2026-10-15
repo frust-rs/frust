@@ -301,10 +301,13 @@ impl WebFrameExecutor {
     /// next.
     ///
     /// A render error is log-and-continue, never fatal: one bad frame must not
-    /// kill a page.
+    /// kill a page. `paint_serial` is the paint's `PaintOutcome::paint_serial`,
+    /// named to the renderer before the encode so the ledger published once
+    /// this scene is committed carries it.
     pub fn submit_frame(
         &mut self,
         scene: &Scene,
+        paint_serial: u64,
         base_color: peniko::Color,
         ui_spans: UiSpans,
     ) -> FrameFollowUp {
@@ -312,6 +315,7 @@ impl WebFrameExecutor {
             &mut self.renderer,
             &self.render_cx,
             scene,
+            paint_serial,
             base_color,
             ui_spans,
             &mut self.frame_stats,
@@ -381,6 +385,7 @@ fn render_frame(
     renderer: &mut SurfaceRenderer,
     render_cx: &RenderContext,
     scene: &Scene,
+    paint_serial: u64,
     base_color: peniko::Color,
     ui_spans: UiSpans,
     frame_stats: &mut FrameStats,
@@ -400,6 +405,9 @@ fn render_frame(
         }
         renderer.set_frame_damage(damage);
     }
+    // The paint serial this scene was painted under (see
+    // `SurfaceRenderer::note_scene_serial`).
+    renderer.note_scene_serial(paint_serial);
     let encode_start = Instant::now();
     let encode_outcome = renderer.encode(render_cx, scene, base_color);
     let encode = encode_start.elapsed();

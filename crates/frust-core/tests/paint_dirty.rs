@@ -732,3 +732,181 @@ fn paint_damage_unions_with_full_absorbing_and_clean_as_identity() {
         PaintDamage::Rect(Rect::new(0.0, 0.0, 40.0, 20.0))
     );
 }
+
+// ---------------------------------------------------------------------------
+// Hover and focus links: both are read at paint time from links the root moves
+// without visiting the pod that loses one, so a link change makes every
+// subtree unclean on the next paint — and a pointer move that keeps the link
+// where it was moves nothing.
+// ---------------------------------------------------------------------------
+
+/// A leaf that claims hover on every uncaptured `Move` over it and takes focus
+/// on a `Down` over it — the two paint-time links a retained page could freeze.
+struct LinkLeafWidget {
+    size: Size,
+}
+
+impl Widget for LinkLeafWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.constrain(self.size)
+    }
+
+    fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        match event {
+            InputEvent::Pointer(p) if p.phase == PointerPhase::Move => {
+                ctx.claim_hover();
+                EventResult::Ignored
+            }
+            InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                ctx.request_focus();
+                EventResult::Handled
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+}
+
+struct LinkLeaf(f64);
+
+impl<S: 'static> View<S> for LinkLeaf {
+    type Element = LinkLeafWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> LinkLeafWidget {
+        LinkLeafWidget {
+            size: Size::new(self.0, 10.0),
+        }
+    }
+
+    fn rebuild(&self, _: &Self, _: &mut LinkLeafWidget, _ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+        ChangeFlags::NONE
+    }
+}
+
+/// ```text
+/// links (Col, the root widget)
+/// ├── held (Col) ─ inner leaf (y 0..10)   <- stands for a boundary's child
+/// └── outer leaf (y 10..20)
+/// ```
+fn links_app() -> ColView<()> {
+    col(
+        "links",
+        200.0,
+        vec![
+            any(col::<()>("held", 100.0, vec![any(LinkLeaf(40.0))])),
+            any(LinkLeaf(30.0)),
+        ],
+    )
+}
+
+struct LinkHarness {
+    root: RenderRoot<(), ColView<()>>,
+    _owner: Owner,
+}
+
+impl LinkHarness {
+    fn new() -> Self {
+        let owner = Owner::new();
+        owner.set();
+        let mut h = Self {
+            root: RenderRoot::new(),
+            _owner: owner,
+        };
+        h.root.rebuild(&mut |_: &mut ()| links_app(), &mut ());
+        h.root.layout(WINDOW);
+        h.root.paint(&mut DiscardScene, FrameTime::ZERO);
+        h
+    }
+
+    fn pointer(&mut self, phase: PointerPhase, y: f64) {
+        self.root.event(
+            &mut (),
+            &InputEvent::Pointer(PointerEvent {
+                phase,
+                position: Point::new(5.0, y),
+                button: PointerButton::Primary,
+            }),
+        );
+    }
+
+    /// Lay out and paint, answering whether the root found the `held` pod
+    /// clean before painting it — what a boundary over it would ask.
+    fn held_clean(&mut self) -> bool {
+        take_clean();
+        self.root.layout(WINDOW);
+        self.root.paint(&mut DiscardScene, FrameTime::ZERO);
+        let log = take_clean();
+        log.iter()
+            .find(|(name, i, _)| *name == "links" && *i == 0)
+            .map(|(_, _, clean)| *clean)
+            .expect("the root painted the held pod")
+    }
+}
+
+#[test]
+fn a_hover_moving_off_a_held_subtree_makes_it_unclean_and_a_same_claimant_move_does_not() {
+    let mut h = LinkHarness::new();
+    assert!(h.held_clean(), "settled");
+
+    // Hover begins inside the held subtree.
+    h.pointer(PointerPhase::Move, 5.0);
+    assert!(
+        !h.held_clean(),
+        "a hover beginning re-records every boundary"
+    );
+    assert!(h.held_clean(), "and the paint after it is clean again");
+
+    // The pointer moves within the same claimant: the epoch advanced, the link
+    // did not.
+    h.pointer(PointerPhase::Move, 6.0);
+    assert!(
+        h.held_clean(),
+        "a move that keeps the claimant changes nothing"
+    );
+
+    // The hover moves to a claimant OUTSIDE the held subtree: the Move routes
+    // along the new hit path only, never visiting the held pod.
+    h.pointer(PointerPhase::Move, 15.0);
+    assert!(
+        !h.held_clean(),
+        "the held subtree painted its claimant hovered; that page must not be drawn now"
+    );
+    assert!(h.held_clean());
+
+    // Moving within the new claimant leaves it clean.
+    h.pointer(PointerPhase::Move, 16.0);
+    assert!(h.held_clean());
+
+    // Hover ending (the pointer over nothing that claims) is a link change too.
+    h.pointer(PointerPhase::Move, 150.0);
+    assert!(!h.held_clean(), "a hover that ended re-records");
+    h.pointer(PointerPhase::Move, 160.0);
+    assert!(h.held_clean(), "and no link standing is no change either");
+}
+
+#[test]
+fn a_focus_moving_off_a_held_subtree_makes_it_unclean() {
+    let mut h = LinkHarness::new();
+    h.pointer(PointerPhase::Down, 5.0);
+    h.pointer(PointerPhase::Up, 5.0);
+    assert!(!h.held_clean(), "focus taken inside it");
+    assert!(h.held_clean());
+
+    // Focus moves to the outer leaf; the held pod is not on that dispatch's path.
+    h.pointer(PointerPhase::Down, 15.0);
+    h.pointer(PointerPhase::Up, 15.0);
+    assert!(
+        !h.held_clean(),
+        "the held subtree painted its leaf focused; that page must not be drawn now"
+    );
+    assert!(h.held_clean());
+
+    // A dispatch that records no focus claim (the housekeeping broadcast)
+    // leaves the session, and so the link, standing.
+    h.root.event(&mut (), &InputEvent::Housekeeping);
+    assert!(
+        h.held_clean(),
+        "a dispatch that moves no focus changes nothing"
+    );
+}

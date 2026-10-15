@@ -544,9 +544,15 @@ impl IosAppHandle {
             scale: self.scale as f64,
         };
         let meta_time = FrameTime::from_nanos(timestamp_ns);
-        let encode_time =
-            self.executor
-                .submit_frame(&mut self.scene, base_color, ui, meta_time, size, perf_on);
+        let encode_time = self.executor.submit_frame(
+            &mut self.scene,
+            base_color,
+            ui,
+            meta_time,
+            size,
+            paint_outcome.paint_serial,
+            perf_on,
+        );
 
         // The frame has left the UI thread (either executor arm): release any `apply_patch`
         // answer parked on the devtools frame gate and stamp the `frame` probe line when due. The

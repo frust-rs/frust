@@ -1084,6 +1084,10 @@ pub struct PaintCtx<'a> {
     /// The renderer's resident-key ledger ([`crate::app::RenderRoot::set_retained_ledger`]),
     /// copied down like `paint_epoch`; `None` reads as empty.
     retained_ledger: Option<&'a crate::retained::RetainedLedger>,
+    /// The serial the render root minted for this paint pass, copied down like
+    /// `paint_epoch` ([`PaintCtx::paint_serial`]); `0` for a context no root
+    /// numbered.
+    paint_serial: u64,
     /// How many paint-time side-channel publications this (sub)paint made — an
     /// IME surface, a platform view, an input shield, an overlay registration,
     /// a selection-toolbar request, a hero report — summed up through
@@ -1131,6 +1135,7 @@ impl<'a> PaintCtx<'a> {
             paint_epoch: 0,
             retained_layers: true,
             retained_ledger: None,
+            paint_serial: 0,
             paint_publications: 0,
             damage: None,
         }
@@ -1851,6 +1856,7 @@ impl<'a> PaintCtx<'a> {
             paint_epoch: self.paint_epoch,
             retained_layers: self.retained_layers,
             retained_ledger: self.retained_ledger,
+            paint_serial: self.paint_serial,
             paint_publications: 0,
             damage: None,
         };
@@ -1969,18 +1975,36 @@ impl<'a> PaintCtx<'a> {
         self.translucent = translucent;
     }
 
-    /// Seed the root's paint epoch and the retained-layers switch. Called by
-    /// [`crate::app::RenderRoot`] at each paint root and by
-    /// [`ChildPod::paint_child`] for each child (copied down unchanged).
+    /// Seed the root's paint epoch, the retained-layers switch, the renderer's
+    /// ledger and the pass's paint serial. Called by [`crate::app::RenderRoot`]
+    /// at each paint root and by [`ChildPod::paint_child`] for each child
+    /// (copied down unchanged).
     pub(crate) fn set_paint_state(
         &mut self,
         paint_epoch: u64,
         retained_layers: bool,
         retained_ledger: Option<&'a crate::retained::RetainedLedger>,
+        paint_serial: u64,
     ) {
         self.paint_epoch = paint_epoch;
         self.retained_layers = retained_layers;
         self.retained_ledger = retained_ledger;
+        self.paint_serial = paint_serial;
+    }
+
+    /// The serial [`crate::app::RenderRoot::paint`] minted for this pass: `1`
+    /// for a root's first paint, one more for each paint after it, and `0` for
+    /// a context no root numbered ([`PaintCtx::new`], [`PaintCtx::for_test`]).
+    /// The same value leaves the pass on [`PaintOutcome::paint_serial`], rides
+    /// to the renderer with the scene, and comes back as the
+    /// [`frame`](crate::retained::RetainedLedger::frame) of the ledger
+    /// published once that scene was committed.
+    ///
+    /// A boundary widget remembers the serial it recorded its page in and
+    /// hands it to [`PaintCtx::retained_available`]: the ledger vouches for a
+    /// resident page only once it covers the scene that recorded it.
+    pub fn paint_serial(&self) -> u64 {
+        self.paint_serial
     }
 
     /// Fold `rect` (device space) into the damage this context reports.
@@ -1997,17 +2021,25 @@ impl<'a> PaintCtx<'a> {
     }
 
     /// Whether the renderer still holds a retained page for `key` at `rect_px`
-    /// (physical-pixel extent, rounded to whole pixels) and `scale` — the
-    /// query a boundary widget makes to choose between drawing the page
-    /// (`PaintScene::draw_retained`) and painting its body again. Answers from
-    /// the ledger the renderer published after the previous frame, so it can be
-    /// one frame stale; always `false` when retained layers are switched off
-    /// ([`crate::app::RenderRoot::set_retained_layers`]) or no ledger was set.
+    /// (physical-pixel extent, rounded to whole pixels) and `scale`, **and**
+    /// had committed the scene painted at `recorded_serial` (the
+    /// [`PaintCtx::paint_serial`] of the pass that recorded the page) when it
+    /// said so — the query a boundary widget makes to choose between drawing
+    /// the page (`PaintScene::draw_retained`) and painting its body again.
+    ///
+    /// Answers from the ledger the renderer published after an earlier frame,
+    /// so it can be stale; the serial is what keeps a stale answer from naming
+    /// an older recording than the widget's latest one (a scene dropped on its
+    /// way to the renderer leaves the previous page resident under the same
+    /// key — see [`crate::retained`]). Always `false` when retained layers are
+    /// switched off ([`crate::app::RenderRoot::set_retained_layers`]) or no
+    /// ledger was set.
     pub fn retained_available(
         &self,
         key: crate::retained::RetainedKey,
         rect_px: kurbo::Size,
         scale: f32,
+        recorded_serial: u64,
     ) -> bool {
         let extent = (
             rect_px.width.round().max(0.0) as u32,
@@ -2016,7 +2048,7 @@ impl<'a> PaintCtx<'a> {
         self.retained_layers
             && self
                 .retained_ledger
-                .is_some_and(|l| l.is_resident(key, extent, scale))
+                .is_some_and(|l| l.covers(recorded_serial) && l.is_resident(key, extent, scale))
     }
 
     /// Whether nothing under `pod` changed since it was last painted — the
@@ -2027,10 +2059,23 @@ impl<'a> PaintCtx<'a> {
     /// Clean means: no dirty source reached the pod since its last paint (a
     /// PAINT/LAYOUT rebuild, layout running, a frame or layout request, a
     /// consumed or redraw-requesting event), and the global paint epoch (theme,
-    /// insets, window size, surface translucency) is unchanged. Always `false`
-    /// when retained layers are switched off
-    /// ([`crate::app::RenderRoot::set_retained_layers`]), and for a pod that
-    /// has never been painted.
+    /// insets, window size, surface translucency, the hover link, the focus
+    /// session) is unchanged. Always `false` when retained layers are switched
+    /// off ([`crate::app::RenderRoot::set_retained_layers`]), and for a pod
+    /// that has never been painted.
+    ///
+    /// **Hover and focus.** [`PaintCtx::is_hovered`] and
+    /// [`PaintCtx::has_focus`] are read at paint time from links the root moves
+    /// without visiting the pod that loses one (the pointer leaving a claimant
+    /// for a widget elsewhere routes along the new hit path only; a new focus
+    /// session strands the old holder by arithmetic). So the root folds both
+    /// into the paint epoch: a paint that follows a hover-link change (a hover
+    /// beginning, moving to another claimant, or ending) or a focus-session
+    /// change bumps it, and every boundary records its page again on that
+    /// paint. The cost is one re-record per boundary per hover/focus
+    /// transition — a transition already repaints the frame — and that frame's
+    /// damage is the whole surface ([`PaintDamage::Full`]); a pointer move that
+    /// keeps the same claimant, or none, moves nothing.
     pub fn subtree_clean(&self, pod: &ChildPod) -> bool {
         self.retained_layers && !pod.paint_dirty && pod.painted_epoch == self.paint_epoch
     }
@@ -2299,6 +2344,13 @@ pub struct PaintOutcome {
     /// `needs_frame_paced_only`; a shell latches it beside that flag and hands it
     /// to the frame gate, which resolves it against the live theme's cap.
     pub paced_interval: Option<Duration>,
+    /// The serial the render root minted for this paint
+    /// ([`PaintCtx::paint_serial`]): `1` for a root's first paint, one more for
+    /// each paint after it. A shell carries it with the painted scene and hands
+    /// it to the renderer before encoding that scene, so the resident-key
+    /// ledger the renderer publishes names the last scene it committed (see
+    /// [`crate::retained`]). `0` only from a `Default` outcome.
+    pub paint_serial: u64,
 }
 
 /// What one [`crate::app::RenderRoot::paint`] pass painted differently from
@@ -2719,6 +2771,14 @@ thread_local! {
     /// behind `&self` with no allocator in scope to thread down.
     static NEXT_INSPECT_ID: Cell<u64> = const { Cell::new(ChildPod::INSPECT_ID_BASE) };
 
+    /// The pod that recorded this dispatch's hover claim — the claimant's own
+    /// pod, the first (deepest) one to stamp the claim on its way back up —
+    /// named by its [`ChildPod::inspect_id`]. Cleared by the render root before
+    /// a dispatch and taken after it ([`take_hover_claimant`]), so the root can
+    /// tell a hover that moved to another claimant from one that stayed: the
+    /// epoch alone advances on every hover pass.
+    static HOVER_CLAIMANT: Cell<Option<u64>> = const { Cell::new(None) };
+
     /// The focus session standing on this thread right now, as `(root identity,
     /// live epoch, claim epoch)` — published by [`crate::app::RenderRoot`] and
     /// compared against by every [`ChildPod`] that records, reads or drops a
@@ -2828,6 +2888,19 @@ impl Drop for ChildPod {
             crate::event::mark_focus_orphaned();
         }
     }
+}
+
+/// Forget any hover claimant recorded on this thread — called by the render root
+/// before a dispatch, so [`take_hover_claimant`] answers for that dispatch alone.
+pub(crate) fn clear_hover_claimant() {
+    HOVER_CLAIMANT.with(|claimant| claimant.set(None));
+}
+
+/// Take the [`ChildPod::inspect_id`] of the pod that recorded the last
+/// dispatch's hover claim (see `HOVER_CLAIMANT`), or `None` when no pod did —
+/// no claim at all, or one the root widget made itself.
+pub(crate) fn take_hover_claimant() -> Option<u64> {
+    HOVER_CLAIMANT.with(Cell::take)
 }
 
 impl ChildPod {
@@ -3468,7 +3541,12 @@ impl ChildPod {
         // bool, global and origin-independent), mirroring the theme/insets — the
         // platform-view hole-punch reads it (see `PaintCtx::is_translucent`).
         child_ctx.set_translucent(ctx.is_translucent());
-        child_ctx.set_paint_state(ctx.paint_epoch, ctx.retained_layers, ctx.retained_ledger);
+        child_ctx.set_paint_state(
+            ctx.paint_epoch,
+            ctx.retained_layers,
+            ctx.retained_ledger,
+            ctx.paint_serial,
+        );
         // Thread the live focus epoch down unchanged (global, like the clock),
         // and seed this child's focus from its own recorded link against it —
         // the mirror of how `event_child` seeds the child `EventCtx`, so a
@@ -3881,6 +3959,13 @@ impl ChildPod {
         if hover_claimed {
             self.hover_epoch = claim_epoch;
             self.hover_root = ctx.hover_root();
+            // The first stamp of the pass is the claimant's own pod (stamps land
+            // bottom-up, as each nested dispatch returns); record which pod it
+            // was for the root's hover-link comparison.
+            if HOVER_CLAIMANT.with(Cell::get).is_none() {
+                let id = self.inspect_id().0;
+                HOVER_CLAIMANT.with(|claimant| claimant.set(Some(id)));
+            }
         }
         // Focus is the second recorded path, maintained exactly like `active`: a
         // `focus_requested` bubble records this child as the focused one; a
@@ -6182,7 +6267,7 @@ mod tests {
             ctx.retained_enabled(),
             "an empty ledger still enables brackets"
         );
-        ctx.set_paint_state(0, false, Some(&ledger));
+        ctx.set_paint_state(0, false, Some(&ledger), 0);
         assert!(!ctx.retained_enabled(), "the kill switch disables them");
     }
 

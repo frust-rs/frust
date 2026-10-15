@@ -1982,7 +1982,12 @@ mod browser_loop {
                     // `WebFrameExecutor::ensure_size`.
                     executor.ensure_size(physical.width, physical.height);
                     executor.note_device_scale(scale);
-                    executor.submit_frame(&self.scene, base_color, ui_spans)
+                    executor.submit_frame(
+                        &self.scene,
+                        paint_outcome.paint_serial,
+                        base_color,
+                        ui_spans,
+                    )
                 }),
                 Err(_) => None,
             };

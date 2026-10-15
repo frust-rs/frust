@@ -284,6 +284,23 @@ pub struct SurfaceRenderer {
     /// with no engine. `None` until the first take and again at every surface
     /// episode's start or end, so the next take always publishes.
     retained_published: Option<Option<u64>>,
+    /// The paint serial the shell named for the next scene
+    /// ([`Self::note_scene_serial`]); `0` until one is noted.
+    scene_serial: u64,
+    /// The scene [`Self::encode`] took last, until a `submit` commits or
+    /// drops it: its paint serial, and whether it records a retained page.
+    /// `None` outside an in-flight frame.
+    pending_serial: Option<(u64, bool)>,
+    /// The paint serial of the last scene a `submit` committed — the
+    /// [`ResidentPages::frame`] every published ledger carries. A refused or
+    /// skipped frame does not advance it; it outlives surface episodes.
+    committed_serial: u64,
+    /// Whether a scene recording a retained page was committed since the
+    /// ledger was last handed out: the UI waits for a ledger covering that
+    /// scene before drawing the page, so the next
+    /// [`Self::take_retained_ledger`] publishes even when the store itself did
+    /// not change (a page re-recorded at the same extent).
+    recording_committed: bool,
     /// The device scale (physical / logical) last handed to
     /// [`Self::note_device_scale`], kept as raw bits so a change is an exact
     /// comparison. Outlives surface episodes: a recreate at the same scale is
@@ -431,14 +448,21 @@ pub struct ResidentPage {
 pub struct ResidentPages {
     /// Resident pages, in no particular order.
     pub pages: Vec<ResidentPage>,
-    /// The renderer frame this describes (diagnostic).
+    /// The paint serial ([`SurfaceRenderer::note_scene_serial`]) of the last
+    /// scene whose retained-store commit the renderer completed before this
+    /// was taken — what lets the UI tell a page holding its latest recording
+    /// from one holding an older recording under the same key. A refused or
+    /// failed frame does not advance it; the empty ledger a store clear,
+    /// surface destroy or scale change leaves carries the last committed
+    /// serial (`0` before any).
     pub frame: u64,
 }
 
-/// `engine`'s retained store as the plain data a shell publishes — the one
-/// conversion [`SurfaceRenderer::retained_ledger`] makes, kept free so it is
-/// testable against a real engine with no surface in the loop.
-fn resident_pages(engine: &frust_engine::EngineRenderer) -> ResidentPages {
+/// `engine`'s retained store as the plain data a shell publishes, stamped with
+/// `frame`, the serial of the last committed scene — the one conversion
+/// [`SurfaceRenderer::retained_ledger`] makes, kept free so it is testable
+/// against a real engine with no surface in the loop.
+fn resident_pages(engine: &frust_engine::EngineRenderer, frame: u64) -> ResidentPages {
     ResidentPages {
         pages: engine
             .retained_ledger()
@@ -448,8 +472,16 @@ fn resident_pages(engine: &frust_engine::EngineRenderer) -> ResidentPages {
                 scale: entry.scale,
             })
             .collect(),
-        frame: engine.retained_frame(),
+        frame,
     }
+}
+
+/// Whether `scene` records a retained page (opens a `PushRetained` bracket).
+fn scene_records_retained(scene: &frust_scene::Scene) -> bool {
+    scene
+        .commands()
+        .iter()
+        .any(|command| matches!(command, frust_scene::Command::PushRetained { .. }))
 }
 
 /// Where the first rendered frame's `submit` time went.
@@ -557,6 +589,10 @@ impl SurfaceRenderer {
             #[cfg(feature = "perf-trace")]
             first_submit_seen: false,
             retained_published: None,
+            scene_serial: 0,
+            pending_serial: None,
+            committed_serial: 0,
+            recording_committed: false,
             device_scale: None,
             partial_repaint: false,
             owed_damage: OwedDamage::Unstated,
@@ -628,7 +664,7 @@ impl SurfaceRenderer {
     }
 
     /// Drops the in-flight frame's cross-call stash: the engine arm's
-    /// `base_color`.
+    /// `base_color` and the encoded scene's serial.
     ///
     /// It describes one frame of one surface, so any event that ends a
     /// surface's life (`on_surface_destroyed`) or replaces it
@@ -636,6 +672,7 @@ impl SurfaceRenderer {
     /// consume a stale colour. Idempotent.
     fn clear_pending_frame(&mut self) {
         self.pending_base_color = None;
+        self.pending_serial = None;
     }
 
     /// Adopt `state` and reset everything else scoped to ONE surface: the
@@ -730,33 +767,53 @@ impl SurfaceRenderer {
     /// store is empty.
     pub fn retained_ledger(&self) -> ResidentPages {
         let SurfaceState::Ready(ready) = &self.state else {
-            return ResidentPages::default();
+            return ResidentPages {
+                pages: Vec::new(),
+                frame: self.committed_serial,
+            };
         };
         let TierBackend::Engine { engine, .. } = &ready.backend;
-        resident_pages(engine)
+        resident_pages(engine, self.committed_serial)
     }
 
     /// [`Self::retained_ledger`], but only when it changed since the last call
     /// — a page added, evicted or re-rendered at another extent, the store
     /// cleared, or the surface created, recreated or destroyed (each of which
     /// starts the next call over, so a fresh or torn-down surface always
-    /// publishes its empty ledger). `None` when nothing changed.
+    /// publishes its empty ledger) — or when a committed scene recorded a page
+    /// while the store holds any: the UI draws a page only once a ledger
+    /// covers the scene that recorded it, and a page re-recorded at the same
+    /// extent changes nothing else. `None` when neither happened.
     ///
     /// What a shell calls after each frame's submit to publish the ledger
     /// without re-publishing an unchanged one every frame.
     pub fn take_retained_ledger(&mut self) -> Option<ResidentPages> {
-        let generation = match &self.state {
+        let (generation, holds_pages) = match &self.state {
             SurfaceState::Ready(ready) => {
                 let TierBackend::Engine { engine, .. } = &ready.backend;
-                Some(engine.retained_generation())
+                (
+                    Some(engine.retained_generation()),
+                    engine.retained_ledger().next().is_some(),
+                )
             }
-            SurfaceState::NoSurface | SurfaceState::Lost => None,
+            SurfaceState::NoSurface | SurfaceState::Lost => (None, false),
         };
-        if self.retained_published == Some(generation) {
+        let recorded = std::mem::take(&mut self.recording_committed) && holds_pages;
+        if self.retained_published == Some(generation) && !recorded {
             return None;
         }
         self.retained_published = Some(generation);
         Some(self.retained_ledger())
+    }
+
+    /// Name the paint serial (`frust_core::PaintOutcome::paint_serial`) of the
+    /// scene the next [`Self::encode`] takes. A shell calls it before every
+    /// encode, on whichever thread renders, with the serial that travelled
+    /// with the scene; once that scene's frame is committed, every ledger this
+    /// renderer publishes carries the serial as its [`ResidentPages::frame`].
+    /// A shell that never calls it publishes ledgers stamped `0`.
+    pub fn note_scene_serial(&mut self, serial: u64) {
+        self.scene_serial = serial;
     }
 
     /// Whether a frame was refused since the last call because a
@@ -1342,6 +1399,8 @@ impl SurfaceRenderer {
         engine_scene.clone_from(scene);
         // Carried to `submit`, where the render that consumes it runs.
         *pending_base_color = Some(base_color);
+        // The scene's serial, committed by the `submit` that renders it.
+        self.pending_serial = Some((self.scene_serial, scene_records_retained(scene)));
 
         Ok(EncodeOutcome::Encoded)
     }
@@ -2008,6 +2067,12 @@ impl SurfaceRenderer {
             self.first_submit_seen = true;
             self.first_submit = Some(probe.breakdown);
         }
+        // The frame's retained-store commit completed: from here on the
+        // ledger describes the store after this scene (see `committed_serial`).
+        if let Some((serial, records)) = self.pending_serial.take() {
+            self.committed_serial = serial;
+            self.recording_committed |= records;
+        }
         Ok((FrameOutcome::Rendered, Some(surface_texture)))
     }
 }
@@ -2545,6 +2610,54 @@ mod tests {
         assert_eq!(renderer.take_retained_ledger(), None);
     }
 
+    /// The serial a shell names is committed only by a frame that rendered: a
+    /// frame skipped for want of a surface leaves the ledger's serial where it
+    /// was, an episode ending drops the in-flight one, and the empty ledger a
+    /// destroy publishes still carries the last committed serial.
+    #[test]
+    fn only_a_rendered_frame_commits_its_scene_serial() {
+        let mut renderer = SurfaceRenderer::new();
+        let ctx = RenderContext::new();
+        renderer.note_scene_serial(9);
+        let outcome = renderer
+            .encode(&ctx, &frust_scene::Scene::new(), peniko::Color::BLACK)
+            .expect("no surface is not an error");
+        assert_eq!(outcome, EncodeOutcome::Skipped);
+        assert_eq!(renderer.pending_serial, None, "nothing was encoded");
+        assert_eq!(renderer.take_retained_ledger().map(|l| l.frame), Some(0));
+
+        // As if scene 4 had been committed and scene 5 was in flight.
+        renderer.committed_serial = 4;
+        renderer.pending_serial = Some((5, true));
+        renderer.on_surface_destroyed();
+        assert_eq!(renderer.pending_serial, None, "the in-flight scene is gone");
+        assert_eq!(
+            renderer.take_retained_ledger(),
+            Some(ResidentPages {
+                pages: Vec::new(),
+                frame: 4,
+            }),
+            "the empty ledger names the last committed scene"
+        );
+    }
+
+    #[test]
+    fn a_scene_records_a_retained_page_only_through_a_push_retained_bracket() {
+        let rect = kurbo::Rect::new(0.0, 0.0, 4.0, 4.0);
+        let mut scene = frust_scene::Scene::new();
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            builder.draw_retained(3, rect, 1.0, 1.0);
+        }
+        assert!(!scene_records_retained(&scene), "a draw records nothing");
+        {
+            let mut builder = frust_scene::SceneBuilder::new(&mut scene);
+            builder.push_retained(3, rect, 1.0, 1.0);
+            builder.pop_retained();
+        }
+        assert!(scene_records_retained(&scene));
+    }
+
     /// A device-scale change clears the store and owes an EMPTY publish (even
     /// over an already-empty store); the same scale again changes nothing.
     #[test]
@@ -2614,7 +2727,7 @@ mod tests {
             builder.pop_retained();
             builder.pop_transform();
         }
-        assert!(resident_pages(&engine).pages.is_empty());
+        assert!(resident_pages(&engine, 0).pages.is_empty());
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -2639,7 +2752,7 @@ mod tests {
         queue.submit([encoder.finish()]);
         engine.end_frame(&queue);
 
-        let resident = resident_pages(&engine);
+        let resident = resident_pages(&engine, 7);
         assert_eq!(
             resident.pages,
             vec![ResidentPage {
@@ -2649,6 +2762,6 @@ mod tests {
             }],
             "the body's page is reported at its rasterized extent and scale"
         );
-        assert_eq!(resident.frame, engine.retained_frame());
+        assert_eq!(resident.frame, 7, "stamped with the committed serial");
     }
 }

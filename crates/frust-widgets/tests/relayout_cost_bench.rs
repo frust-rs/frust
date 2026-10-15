@@ -121,7 +121,9 @@
 //! There is no engine on the host, so a counting scene plays its part: it
 //! records every `push_retained` and feeds the resident set (key, page extent
 //! as `round(size * scale)` px, scale 1.0) back as the next frame's ledger via
-//! `set_retained_ledger`, answers `current_transform()`, and counts body
+//! `set_retained_ledger` (stamped with that frame's `PaintOutcome::paint_serial`,
+//! as a renderer that kept up would publish it), answers `current_transform()`,
+//! and counts body
 //! commands (fill / rounded fill / stroke / text / glyph run / image / path
 //! calls) separately from `push_retained` and `draw_retained`.
 //!
@@ -421,10 +423,11 @@ impl CountScene {
         }
     }
 
-    /// The ledger the renderer would publish after the frame just painted.
-    fn ledger(&self) -> RetainedLedger {
+    /// The ledger the renderer would publish after committing the frame just
+    /// painted, whose `PaintOutcome::paint_serial` is `committed`.
+    fn ledger(&self, committed: u64) -> RetainedLedger {
         RetainedLedger::from_entries(
-            1,
+            committed,
             self.resident
                 .iter()
                 .map(|(key, (extent, scale))| (*key, *extent, *scale)),
@@ -550,9 +553,9 @@ fn drive_retained<V: View<()>>(
         let layout = t.elapsed().as_secs_f64() * 1_000_000.0;
         scene.counts = Counts::default();
         let t = Instant::now();
-        root.paint(&mut scene, frame_ns(f));
+        let committed = root.paint(&mut scene, frame_ns(f)).paint_serial;
         let paint = t.elapsed().as_secs_f64() * 1_000_000.0;
-        root.set_retained_ledger(&scene.ledger());
+        root.set_retained_ledger(&scene.ledger(committed));
         run.counts.push(scene.counts);
         if measured {
             run.layouts.push(layout);
