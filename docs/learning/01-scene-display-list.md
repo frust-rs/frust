@@ -54,10 +54,16 @@ quad is off-screen), and `note_shader_quad_unrendered` (≈2020) for once-per-
 process warning when the pre-pass never ran or the shader failed to compile.
 A resolved draw is always composited blended, never claimed opaque — see
 [14-engine-paints-images-filters.md](14-engine-paints-images-filters.md) ·
-`PushSnapshot{key, rect, alpha, scale, transform}` — marks the start of a
-cacheable "snapshot" bracket; `alpha`/`scale` are presentation parameters
+`PushRetained{key, rect, alpha, scale, transform}` — marks the start of a
+retainable bracket; `alpha`/`scale` are presentation parameters
 applied to the whole bracketed body, not baked into its own commands ·
-`PopSnapshot` — pop the most recently pushed snapshot bracket ·
+`PopRetained` — pop the most recently pushed retained bracket ·
+`DrawRetained{key, rect, alpha, scale, transform}` — composite the page the
+renderer kept for `key` instead of repainting the body (a renderer that cannot
+serve it refuses the frame) ·
+`PushClipPath{path, transform}` — clip to an arbitrary outline, popped by
+`PopClip` · `BackdropBlur{rect, radius, transform}` — blur what is already
+painted beneath `rect` ·
 `SceneTexture{id, dest, transform}` — draw an externally owned GPU texture,
 scaled to fill `dest`, under a transform; lowers through
 `crates/frust-engine/src/compile/external.rs`. An unregistered `id` draws

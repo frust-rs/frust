@@ -4718,8 +4718,12 @@ act_000001a10d6c24eeK3GHlKbH.
   (checkpoint R2). Residual: a parent on a dirty path still runs its own layout, and there are no
   parent-pointer relayout boundaries; material `NavigationBarWidget::selected_indicator_rect`
   calls `widget_mut()` inside layout and so relays out the selected item every pass (a known cost);
-- no retained layers, no repaint boundaries, no blend/clip-path/backdrop primitives, no partial
-  repaint — Phase 3;
+- ~~no retained layers, no repaint boundaries, no clip-path/backdrop primitives, no partial repaint
+  — Phase 3~~ landed on `feature/render-model-p3` (p3-01..p3-09): retained layers and
+  `repaint_boundary`, `PushClipPath`, `BackdropBlur`; partial repaint was measured NO-GO
+  (`partial-repaint-outcome`). Still open: `BlendMode` on `PushLayer` — the engine's `layer_role`
+  refuses a non-default blend and `blend.wgsl` serves only `COMPOSE_DEST_OUT`; card p3-06b awaits a
+  ruling. Phase 3's device legs (Pixel 5, iPhone SE, S1/S6 kill-switch rows) are owed;
 - no per-slot platform-view interleaving, no in-scene video/camera textures — Phase 4.
 
 **Applies to**: apps whose layout or paint cost scales with the whole tree, or that need layered
@@ -4732,6 +4736,102 @@ phase lands.
 last line is retired.
 
 **Evidence**: research `rsa_000001a13475eca03WGtt6CU`; plan `fplan_000001a1347808dayUwoSOyz`.
+
+---
+
+### `retained-pages-budget-refusals` — a retained page is a budgeted, refusable cache; every refusal paints plain
+
+**Observed**: the retained store (`frust-engine::cache::retained`) keeps page textures within a byte
+budget tiered by adapter family (`FRUST_ENGINE_RETAINED_BUDGET_MB` overrides). A body is refused —
+rendered inline, its key absent from the ledger — when the compiler marked it unretainable (under a
+rounded or path clip mask; it draws a punch, an external texture, a shader quad or a `BackdropBlur`;
+a stray pop cut it; it is not wholly inside the viewport and every scissor), when it is empty, draws
+outside its rect, exceeds the texture ceiling or the whole budget, or reuses a key within a frame. A
+`DrawRetained` the store cannot serve refuses the frame (`EngineError::RetainedKeyMissing`); the
+shell repaints it without pages. Widget-side limits: navigator pages at rest paint plain (only a
+transition's seed frame records the leaving page, and a slide's entering page paints plain); bodies
+using paint side channels (IME, platform view, input shield, overlay, selection toolbar, hero) paint
+every frame and hero pages never draw a page; a page moved by a fractional translation composites up
+to half a pixel off the inline frame (translation rounds to whole device pixels); a boundary inside a
+clipping container cannot see that clip, so it may record a body the engine then refuses to retain.
+
+**Applies to**: apps using `repaint_boundary`, `AnimatedOpacity::cached`, navigator or switcher
+transitions.
+
+**Why accepted**: a refusal degrades to the pre-Phase-3 cost for that frame, never to a wrong
+pixel; the kill switches `FRUST_NO_RETAINED_LAYERS` and `FRUST_ENGINE_NO_LAYERS` revert wholesale.
+
+**Trigger for removal**: a boundary that sees its enclosing clip, and subpixel-exact page placement.
+
+**Evidence**: `docs/RENDER_ARCHITECTURE.md` (`cache::retained`); `crates/frust-widgets/src/repaint_boundary.rs`.
+
+---
+
+### `backdrop-blur-bound` — `BackdropBlur` has five limits
+
+**Observed**: (1) no backdrop inside a translucent (isolated) layer, a retained body or a suppressed
+layer — it is dropped, not blurred; (2) at most `MAX_BACKDROPS_PER_FRAME` (4) per frame, more
+refuses the frame (`EngineError::TooManyBackdrops`); (3) pixels beyond the frame border read as
+transparent, so a blur at the edge fades; (4) a region past the page ceiling is refused; (5) a
+fragment-sampled copy of an sRGB target loses precision. The CPU oracle blurs its own canvas and is
+exact only for device σ <= 2; the `unit-backdrop-blur` golden compares with the clip rim eroded.
+On the direct present arm a frame carrying a backdrop renders via an intermediate and pays one
+present copy (T400: ≈0.239 ms/frame at 1080x2400, ≈0.189 ms at 1920x1080).
+
+**Applies to**: frosted-glass style chrome.
+
+**Why accepted**: the schedule serves one blurred copy per backdrop at the frame's root; nesting inside
+layers needs the general scheduler.
+
+**Trigger for removal**: the general scheduler, or a measured need for more than four backdrops.
+
+**Evidence**: `docs/RENDER_ARCHITECTURE.md` (`schedule::build_frame`); golden `unit-backdrop-blur`
+(cpu and engine-vulkan-nvidia-t400; engine-metal-macos owed).
+
+---
+
+### `partial-repaint-outcome` — partial repaint measured NO-GO; the spike stays in the tree behind `FRUST_PARTIAL_REPAINT`
+
+**Observed**: the mechanism (`PaintDamage`, `RenderRoot::damage_rect()`, `EngineRenderer::set_frame_scissor`,
+`SurfaceRenderer::set_partial_repaint`/`set_frame_damage`, the `PartialRoot` accumulator) is default
+off and byte-identical off. T400, release, `FRUST_NO_RENDER_THREAD`, synthetic busy page, p50 µs,
+two recorded series per row written gpu/frame: 1080x2400 direct 801-807/1443-1541; partial
+full-damage 1038-1061/1777-1874; 50% 808-832/1370-1391; 10% 465-483/972-985; 1% 428-447/940-964.
+1920x1080: direct 813-831/1394-1438; full 1005-1018/1693-1768; 50% 723-744/1284-1289; 10%
+407-430/949-968; 1% 373-394/926-948. Passes: 1 today, 2 partial (+1 texture copy on a confined
+frame). A static idle page presents 0 frames in both arms. Scenarios S1/S2/S6 damage ≈85-100% of the
+surface, above the ~50-60% break-even (≈+0.2 ms GPU/frame); CPU encode is unchanged (~0.93 ms floor);
+tile-based mobile GPUs still load/store every tile (wgpu has no render-area hint) plus the extra
+present pass; the accumulator costs ≈+20.7 MB at 1080x2400. Damage blind spots: a container changing
+in the same pass as a dirty descendant, drawing outside pod bounds, a culled pod's vacated area; one
+union rect per frame. The macOS shell is not wired.
+
+**Applies to**: anyone enabling `FRUST_PARTIAL_REPAINT`.
+
+**Why accepted**: NO-GO on the numbers; the strip-or-keep decision is pending a ruling.
+
+**Trigger for removal**: strip the mechanism, or revisit only with an own-paint-changed dirty bit,
+device evidence that small-damage idle animation matters for power, and wgpu damage-region or
+preserved-swapchain support.
+
+**Evidence**: research artifact `rsa_000001a13e865873mhM1h08v`; ruling `act_000001a13e868758DD8ICdV0`.
+
+---
+
+### `path-clip-mask-rerasterized` — `PushClipPath` is always a coverage mask, re-rasterized per push
+
+**Observed**: `ClipStack::push_path` always takes the mask shape — never a page, never a scissor —
+and there is no mask cache, so a path clip is re-rasterized on every push; a retained body under it
+is never retained. Goldens `unit-clip-path-star`/`-concave` have cpu and engine-vulkan-nvidia-t400
+baselines; engine-metal-macos baselines are owed.
+
+**Applies to**: scenes with many or large path clips per frame.
+
+**Why accepted**: correctness first; clip masks for rounded rects already work this way.
+
+**Trigger for removal**: a measured frame where path-clip rasterization shows up, then a mask cache.
+
+**Evidence**: `docs/RENDER_ARCHITECTURE.md` (`compile::clip`); `crates/frust-engine/src/compile/clip.rs`.
 
 ---
 
@@ -4883,7 +4983,10 @@ classic+10% were not measured on this pass.
 snapshot-layer cache and compositor could not be retired on the hybrid nav number alone — an
 inline (uncached) figure with no full-resolution classic inline number beside it. Resolved since:
 p8-03 deleted the whole mechanism (cache, compositor, `FramePlan`/segment plumbing) once the engine
-became the sole renderer; the nav budget question this paragraph left open no longer applies.
+became the sole renderer; the nav budget question this paragraph left open no longer applies. Phase 3's
+host rows (i5-12600 Linux, 300 frames, `relayout_cost_bench.rs`) show a navigator page at rest paints
+plain and transitions composite retained pages: push/pop paint mean 32.63 µs retained vs 111.52 µs
+plain (−71%). The device number (Pixel 5 push/pop `total_p50` against 7.39 ms) is OWED, not met.
 
 **Two hybrid-arm scope limits**: `vello_hybrid` itself outputs premultiplied alpha, so it is
 correct — and unwarned — on a premultiplied-expecting translucent surface (Android's
