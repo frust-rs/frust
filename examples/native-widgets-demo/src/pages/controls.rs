@@ -62,10 +62,28 @@
 //! its construction-time night-qualified `Context` stays pinned to the
 //! brightness it was created under (a documented approximation); on macOS
 //! every control's `NSAppearance` follows the app theme, not the Mac.
+//!
+//! # Overlay-surface spike (render-model Phase 4)
+//!
+//! The last block's checkbox mounts a SEVENTH slot — a native label standing
+//! in for a text field — with a frust-drawn tooltip painted over its lower
+//! half ([`overlay_spike_field`]). It is off by default, so the at-rest count
+//! above stays six and the header's live readout reads 7 while it is on.
+//! Today's Mode A surface cannot show frust paint over a native view; under
+//! `FRUST_OVERLAY_SPIKE=1` the shell stacks a translucent overlay surface above
+//! the native views and draws everything painted after the first `ClearRect`
+//! onto it. An opaque surface records no platform-view punch, so the field is
+//! followed by a zero-area `ClearRect` ([`OverlayCutMarker`]) — erasing
+//! nothing — as the cut marker. The block is the page's LAST, so the overlay's
+//! range is the tooltip (plus whatever paints after the page) rather than the
+//! rest of the page, whose native rows it would otherwise cover.
 
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, Widget,
+};
 use frust::{
-    AnyView, Brightness, Get, GetUntracked, Image, ImageFit, Set, SizedBox, View, button, checkbox,
-    inflexible, slider, text,
+    AnyView, Brightness, Color, EdgeInsets, Get, GetUntracked, Image, ImageFit, Padding, Set,
+    SizedBox, Stack, View, button, checkbox, container, inflexible, slider, text,
 };
 use frust_glyph::{progress, toggle};
 use frust_native_widgets::{
@@ -93,6 +111,8 @@ local_sig!(drawn_tap_count_sig, u32, 0);
 local_sig!(reject_writeback_sig, bool, false);
 local_sig!(switch_refused_sig, u32, 0);
 local_sig!(slider_refused_sig, u32, 0);
+// The overlay-spike block's toggle — off, so the page rests at six slots.
+local_sig!(overlay_spike_sig, bool, false);
 
 /// Per-control cell heights — the box BOTH columns of a row get, so a pair
 /// reads as one control shown twice. The playground page's heights, kept so
@@ -252,6 +272,79 @@ fn image_drawn() -> impl View<S> {
     SizedBox(Some(PAIR_IMAGE), Some(PAIR_IMAGE)).child(Image(demo_image()).fit(ImageFit::Cover))
 }
 
+// ---------------------------------------------------------------------------
+// Overlay-surface spike
+// ---------------------------------------------------------------------------
+
+/// The spike field's height — a single-line text field's.
+const SPIKE_FIELD_H: f64 = 40.0;
+
+/// A zero-area `ClearRect`: the overlay spike's cut marker on a surface that
+/// records no platform-view punch of its own (module doc's *Overlay-surface
+/// spike*). It erases nothing on any surface and lays out to nothing.
+pub struct OverlayCutMarker;
+
+/// [`OverlayCutMarker`]'s element.
+pub struct OverlayCutMarkerWidget;
+
+impl View<S> for OverlayCutMarker {
+    type Element = OverlayCutMarkerWidget;
+
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> OverlayCutMarkerWidget {
+        OverlayCutMarkerWidget
+    }
+
+    fn rebuild(
+        &self,
+        _prev: &Self,
+        _element: &mut OverlayCutMarkerWidget,
+        _ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        ChangeFlags::NONE
+    }
+}
+
+impl Widget for OverlayCutMarkerWidget {
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        bc.constrain(Size::ZERO)
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        scene.clear_rect(ctx.origin(), Size::ZERO);
+    }
+}
+
+/// The spike's subject: a native label standing in for a text field (the
+/// plugin ships no native text input), the cut marker, and a translucent
+/// frust tooltip overlapping the field's lower half and running past it — so
+/// one capture shows the tooltip over the native view, over frust's own
+/// background, and the alpha of both.
+fn overlay_spike_field() -> impl View<S> {
+    let tooltip = container(Padding(
+        EdgeInsets::symmetric(10.0, 6.0),
+        text("frust tooltip, drawn over the native field")
+            .size(12.0)
+            .color(Color::WHITE),
+    ))
+    .fill(Color::from_rgba8(20, 24, 32, 220))
+    .radius(6.0);
+    Stack((
+        native_label("Native field \u{2014} the tooltip paints over me")
+            .content_description("Native field under a frust tooltip (overlay spike)")
+            .size(2.0 * PAIR_CELL_W, SPIKE_FIELD_H),
+        OverlayCutMarker,
+        Padding(
+            EdgeInsets {
+                left: 24.0,
+                top: SPIKE_FIELD_H / 2.0,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            tooltip,
+        ),
+    ))
+}
+
 /// The page-local brightness toggle: flips the shell's `brightness` signal and
 /// forces the app theme through [`crate::apply_theme`] — the app bar's own
 /// mechanism.
@@ -285,6 +378,7 @@ pub fn page(state: &S) -> AnyView<S> {
     let rejecting = reject_writeback_sig().get();
     let switch_refused = switch_refused_sig().get();
     let slider_refused = slider_refused_sig().get();
+    let overlay_spike = overlay_spike_sig().get();
 
     let intro = block(vec![
         inflexible(caption(
@@ -454,8 +548,34 @@ pub fn page(state: &S) -> AnyView<S> {
         )),
     ]);
 
+    let mut spike_rows = vec![
+        inflexible(label("Overlay-surface spike (FRUST_OVERLAY_SPIKE)")),
+        gap(6.0),
+        inflexible(caption(
+            "Mounts a native field with a frust tooltip over it. On an opaque surface the \
+             native view covers frust paint, so the tooltip hides behind it \u{2014} unless \
+             the app runs with FRUST_OVERLAY_SPIKE=1, where a translucent overlay surface \
+             above the native views draws it. Adds a seventh slot while on.",
+        )),
+        gap(6.0),
+        inflexible(checkbox(
+            overlay_spike,
+            "Native field + frust tooltip",
+            |_: &mut S, on: bool| overlay_spike_sig().set(on),
+        )),
+    ];
+    if overlay_spike {
+        spike_rows.push(gap(8.0));
+        spike_rows.push(inflexible(overlay_spike_field()));
+        // Room for the tooltip's overhang below the field.
+        spike_rows.push(gap(32.0));
+    }
+
     let mut children = vec![page_header(SECTION), intro, theme_block, writeback_block];
     children.extend(pairs);
     children.push(readout_block);
+    // LAST on the page: the overlay's range runs from the marker to the end
+    // of the frame (module doc's *Overlay-surface spike*).
+    children.push(block(spike_rows));
     page_column(children)
 }
