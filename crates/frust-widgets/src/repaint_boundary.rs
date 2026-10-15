@@ -56,9 +56,12 @@
 //! ([`PaintCtx::paint_serial`]) of the last scene the renderer committed — is
 //! what tells them apart, and a boundary keeps a **run**: the serials of the
 //! consecutive paints, starting at `serial`, that each recorded the current
-//! body. Every scene in a run carries the same recording, so a ledger whose
-//! frame falls inside the run proves the page holds it — the page is then
-//! *confirmed* and may be drawn until the body changes.
+//! body at the same origin, size and linear part. Every scene in a run carries
+//! the same recording, so a ledger whose frame falls inside the run proves the
+//! page holds it — the page is then *confirmed* and may be drawn until the body
+//! changes. A recording at another origin starts a new run: a body the parent
+//! moved between two recordings must not be vouched for by a ledger that only
+//! describes the earlier one.
 //!
 //! Until then the page is drawn only when the ledger covers the run's start
 //! **and** the boundary recorded on the immediately previous paint (so no
@@ -103,9 +106,11 @@ struct Recorded {
     linear: [f64; 4],
     /// The bracket rectangle's origin (the body's paint origin).
     origin: Point,
+    /// The bracket rectangle's size.
+    size: Size,
     /// The paint serial the run of recordings of this body started at — the
-    /// first of the consecutive paints that each recorded it (see the
-    /// [module docs](self)).
+    /// first of the consecutive paints that each recorded it at this origin,
+    /// size and linear part (see the [module docs](self)).
     serial: u64,
     /// The paint serial of the latest recording in the run.
     last: u64,
@@ -213,14 +218,20 @@ impl RetainedBoundary {
             .is_none_or(|v| rect_contains(v, Rect::from_origin_size(origin, size)));
         if may_record && visible {
             // A clean body recorded again on the paint right after its last
-            // recording, under the same linear part, continues that run: the
-            // two scenes carry the same page.
+            // recording, under the same linear part, origin and size, continues
+            // that run: the two scenes carry the same page. A recording at
+            // another origin starts a new run, so a ledger can only confirm the
+            // page recorded where the body now paints. Size is compared too:
+            // `can_draw` checks the drawn size against the ledger's extent, but
+            // a run must never mix two recordings of different sizes.
             let run_start = self
                 .recorded
                 .filter(|r| {
                     !r.confirmed
                         && serial != 0
                         && r.last.wrapping_add(1) == serial
+                        && r.origin == origin
+                        && r.size == size
                         && same_linear(r.linear, linear)
                         && ctx.subtree_clean(pod)
                 })
@@ -231,6 +242,7 @@ impl RetainedBoundary {
             self.recorded = Some(Recorded {
                 linear,
                 origin,
+                size,
                 serial: run_start,
                 last: serial,
                 confirmed: false,

@@ -837,6 +837,155 @@ fn a_ledger_one_frame_late_still_confirms_the_run_of_recordings() {
     assert_eq!(scene.draws().len(), 1, "{:?}", scene.ops);
 }
 
+/// Wraps its child and moves it at paint time: the child's origin is `y` below
+/// the wrapper's, set in `paint` the way a navigator slides a clean page under
+/// an edge swipe. Moving the child dirties nothing under it.
+struct Moved<V> {
+    y: f64,
+    child: V,
+}
+
+struct MovedWidget {
+    y: f64,
+    child: ChildPod,
+}
+
+impl<S: 'static, V: View<S>> View<S> for Moved<V> {
+    type Element = MovedWidget;
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> MovedWidget {
+        MovedWidget {
+            y: self.y,
+            child: frust_widgets::authoring::build_child(&self.child, ctx),
+        }
+    }
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut MovedWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        let mut flags = frust_widgets::authoring::rebuild_child(
+            &prev.child,
+            &self.child,
+            &mut element.child,
+            ctx,
+        );
+        if prev.y != self.y {
+            element.y = self.y;
+            flags |= ChangeFlags::PAINT;
+        }
+        flags
+    }
+}
+
+impl Widget for MovedWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.child.layout_child(ctx, bc);
+        self.child.set_origin(Point::ZERO);
+        size
+    }
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.child.set_origin(Point::new(0.0, self.y));
+        self.child.paint_child(ctx, scene);
+    }
+    fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        visitor(&self.child);
+    }
+}
+
+/// A body that paints at a new origin between two recordings of one run does
+/// not continue that run: the page recorded at the first origin is never
+/// confirmed by a ledger that only covers the second run's start, and a page
+/// confirmed at its recorded origin is drawn through a translation to where
+/// the body now sits.
+#[test]
+fn a_moved_origin_starts_a_new_run() {
+    let mut root: RenderRoot<f64, _> = RenderRoot::new();
+    let mut app = |s: &mut f64| Moved {
+        y: *s,
+        child: repaint_boundary(swatch(40.0, 30.0, 0)),
+    };
+    let mut state = 0.0f64;
+    let size = Size::new(40.0, 30.0);
+
+    // Paint 1 records the body at origin A = (0, 0).
+    let mut scene = Rec::new();
+    let first = frame(&mut root, &mut app, &mut state, &mut scene, ms(0));
+    let key = scene.pushes()[0].0;
+    assert_eq!(scene.pushes()[0].1, Point::ZERO, "{:?}", scene.ops);
+
+    // Paint 2: the renderer has not committed scene 1 yet, and the body now
+    // paints at B = (0, 20) while clean. The moved body records a new run.
+    root.set_retained_ledger(&RetainedLedger::from_entries(first - 1, []));
+    state = 20.0;
+    let mut scene = Rec::new();
+    let second = frame(&mut root, &mut app, &mut state, &mut scene, ms(16));
+    assert_eq!(
+        scene.pushes().len(),
+        1,
+        "moved body records: {:?}",
+        scene.ops
+    );
+    assert_eq!(
+        scene.pushes()[0].1,
+        Point::new(0.0, 20.0),
+        "{:?}",
+        scene.ops
+    );
+    assert!(scene.draws().is_empty(), "{:?}", scene.ops);
+
+    // Paint 3: scene 1 (the page at A) is committed. Its ledger covers paint 1,
+    // not the run that started at paint 2, so it must not draw the page at B.
+    root.set_retained_ledger(&ledger(first, key, (40, 30), 1.0));
+    let mut scene = Rec::new();
+    frame(&mut root, &mut app, &mut state, &mut scene, ms(32));
+    assert!(
+        scene.draws().is_empty(),
+        "scene 1's page sits at A, not at B: {:?}",
+        scene.ops
+    );
+    assert_eq!(scene.pushes().len(), 1, "recorded again: {:?}", scene.ops);
+    assert_eq!(
+        scene.pushes()[0].1,
+        Point::new(0.0, 20.0),
+        "{:?}",
+        scene.ops
+    );
+
+    // Paint 4: scene 2 (recorded at B) is committed. Its ledger covers the
+    // run's start, so the page is drawn at the origin it was recorded at.
+    root.set_retained_ledger(&ledger(second, key, (40, 30), 1.0));
+    let mut scene = Rec::new();
+    frame(&mut root, &mut app, &mut state, &mut scene, ms(48));
+    assert_eq!(
+        scene.draws(),
+        vec![(key, Point::new(0.0, 20.0), size, 1.0, 1.0)],
+        "{:?}",
+        scene.ops
+    );
+    assert_eq!(scene.fills(), 0, "{:?}", scene.ops);
+
+    // Paint 5: the confirmed page is moved again, to C = (0, 50), while clean.
+    // It still draws at its recorded origin, translated by the move.
+    state = 50.0;
+    let mut scene = Rec::new();
+    frame(&mut root, &mut app, &mut state, &mut scene, ms(64));
+    assert_eq!(
+        scene.draws(),
+        vec![(key, Point::new(0.0, 20.0), size, 1.0, 1.0)],
+        "{:?}",
+        scene.ops
+    );
+    assert!(
+        scene
+            .ops
+            .contains(&Op::PushTransform(Affine::translate((0.0, 30.0)))),
+        "the move is a translation from B to C: {:?}",
+        scene.ops
+    );
+    assert_eq!(scene.fills(), 0, "{:?}", scene.ops);
+}
+
 /// Wraps its child, painting it only while `shown` — a frame in which the
 /// boundary is not painted at all commits a scene with no recording in it.
 struct Shown<V> {
