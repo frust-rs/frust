@@ -76,6 +76,26 @@ pub enum EngineError {
         key: u64,
     },
 
+    /// A frame records more
+    /// [`Command::BackdropBlur`](frust_scene::Command::BackdropBlur)s than the
+    /// engine serves in one frame
+    /// ([`MAX_BACKDROPS_PER_FRAME`](crate::filters::MAX_BACKDROPS_PER_FRAME)).
+    ///
+    /// Each backdrop costs the frame a cut of its surface pass, a region copy
+    /// and a blur's whole pass sequence, so the count is bounded rather than
+    /// left to grow with a widget tree; a frame past the bound is refused up
+    /// front, before anything is recorded, exactly like a scheduler
+    /// escalation — never rendered with some of its backdrops missing.
+    #[error(
+        "{recorded} backdrop blurs in one frame, more than the {max} the engine serves per frame"
+    )]
+    TooManyBackdrops {
+        /// How many backdrop blurs the frame recorded.
+        recorded: usize,
+        /// The per-frame bound.
+        max: usize,
+    },
+
     #[error("alpha capacity exhausted")]
     AlphaCapacity,
 

@@ -8,6 +8,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- Backdrop blur: `frust_scene::Command::BackdropBlur`, `SceneBuilder::backdrop_blur` and
+  `PaintScene::backdrop_blur(origin, size, radius)` (a no-op by default) blur whatever is already
+  painted beneath a rectangle, masked by any open clip. The engine cuts the frame there, copies the
+  region into a page, blurs it and draws the panel from it; at most four per frame
+  (`EngineError::TooManyBackdrops`), none inside a translucent layer, never retained. A swapchain
+  frame carrying one renders via an intermediate plus one present copy (`CopyPresentPass`).
 - Path clips: `frust_scene::Command::PushClipPath`, `SceneBuilder::push_clip_path` and
   `PaintScene::push_clip_path(origin, path)` clip to an arbitrary outline (nonzero winding), popped
   by the shared `pop_clip`. The engine lowers it to a coverage mask, never a layer page, so a

@@ -121,6 +121,19 @@
 //!    scheduler listed it, with its pages handed back the moment its pass ends.
 //!    It is *not* an own-encoder exception; the atlas replay remains the only
 //!    one of those.
+//!
+//!    A **region-copy round** ([`FramePass::Copy`]) is a backdrop blur's
+//!    first: it reads a region of the frame's own target back into a pooled
+//!    page ([`RegionCopyMode`]) for the blur's filter rounds to run over. It is
+//!    the one page round that *follows* the opening rather than waiting past
+//!    it — it reads the surface, so the clear, the opaque strips and every
+//!    surface round ahead of it in painter order must have landed (the
+//!    scheduler cuts the surface round there; a punch recorded ahead of it is
+//!    erased first) — and, for the same reason, no draw at or past the first
+//!    backdrop's depth is routed into the opaque strips. The backdrop's own
+//!    rectangle is then drawn in the next surface round as strip instances
+//!    reading the blurred page through the composite's layer input, so a clip
+//!    open around it masks it like any fill.
 //! 3. **The hole punch** ([`FramePass::Punch`]), destination-out, when the
 //!    frame recorded a `ClearRect` — see [`crate::compile::clear`] for the
 //!    whole contract this pass implements. It is issued at the punch's own painter-order position,
@@ -270,7 +283,7 @@ use crate::diag::{EngineSpan, FrameTimestamps};
 use crate::error::EngineError;
 use crate::filters::blur::{FilterInstanceData, GpuFilterData, GpuGaussianBlur};
 use crate::filters::drop_shadow::GpuDropShadow;
-use crate::filters::{FilterStep, ServedFilter, served_filter};
+use crate::filters::{Backdrop, FilterStep, ServedFilter, served_filter};
 use crate::gpu::atlas::{
     AtlasPageBuffers, AtlasRenderReport, AtlasRenderer, lower_encoded_image, push_solid_strips,
 };
@@ -280,7 +293,9 @@ use crate::gpu::bindings::{
 use crate::gpu::config::resource_widths_agree;
 use crate::gpu::depth::DepthAttachment;
 use crate::gpu::paint_texture::lower_encoded_paint;
-use crate::gpu::pipelines::{EnginePipeline, EngineShaders, atlas_strip_desc, warm_up_descs_for};
+use crate::gpu::pipelines::{
+    EnginePipeline, EngineShaders, INTERMEDIATE_FORMAT, atlas_strip_desc, warm_up_descs_for,
+};
 use crate::gpu::strips::{
     ClassRun, ClassSet, PaintClass, PaintType, merge_class_runs, pack_paint_descriptor,
 };
@@ -295,6 +310,7 @@ use crate::schedule::{
     RetainedTarget, Round, RoundOp, Schedule,
 };
 use crate::{EngineTarget, OutputAlpha};
+use vello_common::geometry::RectU16;
 use vello_common::geometry::SizeU16;
 use vello_common::record::RecordedLayerKind;
 
@@ -355,6 +371,19 @@ const FILTER_QUAD_VERTICES: u32 = 4;
 const MIN_FILTER_INSTANCE_CAPACITY: u64 = 16;
 
 static INDEXED_PAINT_WARNING: Once = Once::new();
+
+/// Raised the first time a frame's backdrop blurs are drawn as nothing because
+/// its target can be neither copied nor sampled (see [`RegionCopyMode`]), on
+/// the same once-per-process terms as the compiler's skip warnings.
+static BACKDROP_UNREADABLE_WARNING: Once = Once::new();
+
+/// Vertices the region-copy program's one quad draws (`copy.wgsl`'s
+/// `quad_corner`, a triangle strip).
+const COPY_QUAD_VERTICES: u32 = 4;
+
+/// The bytes of one region-copy instance: four `u16` pairs
+/// ([`crate::gpu::pipelines::copy_vertex_layout`]).
+const COPY_INSTANCE_BYTES: u64 = 16;
 
 /// Raised the first time an atlas region is declined, so a renderer whose
 /// budget and array have gone out of agreement says so once rather than every
@@ -846,6 +875,10 @@ pub struct EngineRenderer {
     /// never blurs should own neither a sampler nor a resource texture it will
     /// not read. Created by the first frame that schedules a filter round.
     filters: Option<FilterResources>,
+    /// The instance buffer a frame's fragment region copies are drawn from
+    /// ([`RegionCopyMode::Fragment`]). Lazy for [`Self::filters`]' reason: a
+    /// renderer whose frames never copy a region owns none.
+    region_copies: Option<RegionCopyResources>,
     /// The retained pages `PushRetained` bodies render into and
     /// `DrawRetained`s composite from, kept across frames (see
     /// [`crate::cache::retained`]).
@@ -962,6 +995,7 @@ impl EngineRenderer {
             atlas_lowering: None,
             atlas_report: AtlasRenderReport::default(),
             filters: None,
+            region_copies: None,
             retained: RetainedPages::for_caps(caps),
             retained_layers: RetainedLayers::new(),
             #[cfg(feature = "perf-trace")]
@@ -1472,11 +1506,36 @@ impl EngineRenderer {
             .retained
             .plan(&frame.retained, &mut frame.recorder.layers)?;
         retained_roles(&frame, &retained_plan, &mut self.retained_layers);
-        let rounds = Schedule::build_retained(
+        // Whether the frame's backdrop blurs can be served at all: each one
+        // reads its region of this very target back (see `RegionCopyMode`).
+        // A target that can be neither copied nor sampled serves none — every
+        // backdrop's rectangle is then the transparent draw the compiler
+        // recorded, drawing nothing, and is scheduled as the ordinary layer it
+        // is — rather than refusing a frame it can otherwise draw whole.
+        let copy_mode = RegionCopyMode::of(target.view.texture());
+        let serve_backdrops = copy_mode != RegionCopyMode::Unavailable;
+        if !frame.backdrops.is_empty() && !serve_backdrops {
+            note_backdrop_unreadable(target.view.texture());
+        }
+        let backdrops: &[Backdrop] = if serve_backdrops {
+            &frame.backdrops
+        } else {
+            &[]
+        };
+        // The largest region a texture-mode frame transfers, which the
+        // staging texture is grown to before the first pass is recorded.
+        let staging_extent = backdrops.iter().fold((0_u32, 0_u32), |(w, h), backdrop| {
+            (
+                w.max(u32::from(backdrop.region.width())),
+                h.max(u32::from(backdrop.region.height())),
+            )
+        });
+        let rounds = Schedule::build_frame(
             &frame.recorder,
             &self.caps,
             &self.pages,
             &self.retained_layers,
+            backdrops,
         )?;
         let ceiling = self.targets.max_texture_size();
         for round in &rounds {
@@ -1528,6 +1587,11 @@ impl EngineRenderer {
             depth_view.is_some(),
             punches,
             &self.resources.paint_slots,
+            if serve_backdrops {
+                &frame.backdrops
+            } else {
+                &[]
+            },
         );
         let instances_span = clock.lap();
 
@@ -1636,7 +1700,15 @@ impl EngineRenderer {
         let replay_span = clock.lap();
 
         let format = target.format;
-        let pipelines = self.frame_pipelines(device, format, depth_view.is_some());
+        let pipelines = self.frame_pipelines(device, format, depth_view.is_some(), copy_mode);
+        if pipelines.copy.is_some() {
+            let copies = self
+                .region_copies
+                .get_or_insert_with(|| RegionCopyResources::new(device));
+            if copy_mode == RegionCopyMode::Texture {
+                copies.ensure_staging(device, staging_extent.0, staging_extent.1);
+            }
+        }
 
         // The filter rounds' own resources, created by the first frame that
         // schedules one. Only the parameter blocks are uploaded here: a pass's
@@ -1659,7 +1731,8 @@ impl EngineRenderer {
         let pipelines_span = clock.lap();
 
         self.record_frame(
-            device, queue, encoder, &target, depth_view, base_color, &pipelines, timestamps,
+            device, queue, encoder, &target, depth_view, base_color, &pipelines, copy_mode,
+            timestamps,
         );
 
         // The laps above still run without `perf-trace` — `PhaseClock` reads
@@ -1864,6 +1937,7 @@ impl EngineRenderer {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         depth: bool,
+        copy_mode: RegionCopyMode,
     ) -> FramePipelines {
         let alpha_variant = if depth {
             EnginePipeline::StripDepthAlpha
@@ -1901,6 +1975,7 @@ impl EngineRenderer {
             page: None,
             punch: None,
             filter: None,
+            copy: None,
         };
         if depth && !self.scratch.opaque.is_empty() {
             frame.opaque = Some(self.class_pipelines(
@@ -1943,6 +2018,17 @@ impl EngineRenderer {
             frame.filter = Some(
                 self.pipelines
                     .get_or_create(device, &EnginePipeline::Filter.desc(&self.shaders, format))
+                    .clone(),
+            );
+        }
+
+        if self.scratch.copies > 0 && copy_mode != RegionCopyMode::Unavailable {
+            // Pinned to `INTERMEDIATE_FORMAT` like the filter pipeline — a copy
+            // only ever writes a pooled page — so one serves the renderer for
+            // its whole life whatever the frame's own format.
+            frame.copy = Some(
+                self.pipelines
+                    .get_or_create(device, &EnginePipeline::Copy.desc(&self.shaders, format))
                     .clone(),
             );
         }
@@ -2053,6 +2139,7 @@ impl EngineRenderer {
         depth_view: Option<&wgpu::TextureView>,
         base_color: Color,
         pipelines: &FramePipelines,
+        copy_mode: RegionCopyMode,
         timestamps: FrameTimestamps<'_>,
     ) {
         let merge = self.pass_merge;
@@ -2213,6 +2300,8 @@ impl EngineRenderer {
         // composites (see [`crate::schedule`]).
         let mut live: [Option<PooledTexture>; MAX_LIVE_PAGES] = [const { None }; MAX_LIVE_PAGES];
         let mut page_slot = 0_usize;
+        // The fragment region copies' own instance slots, one per copy round.
+        let mut copy_slot = 0_u32;
 
         for plan in &self.scratch.rounds {
             let own = match plan.page {
@@ -2241,6 +2330,36 @@ impl EngineRenderer {
                     IntermediateTexture::TooLarge { .. } => continue,
                 },
             };
+
+            // A region-copy round seeds its page with a region of the frame's
+            // own target, read back after everything painted before it in
+            // painter order — so the opening, which clears the target and
+            // draws the opaque strips, is recorded first if it is still owed
+            // (the scheduler already cut the surface round ahead of it).
+            if let Some(source) = plan.copy {
+                if let Some((_, pooled)) = own.as_ref() {
+                    record_owed_opening(&mut opening, encoder, timestamps, &mut self.frame_passes);
+                    RegionCopyPass {
+                        mode: copy_mode,
+                        target: target.view,
+                        page: pooled,
+                        source,
+                        pipeline: pipelines.copy.as_ref(),
+                        resources: self.region_copies.as_ref(),
+                        slot: copy_slot,
+                    }
+                    .record(
+                        device,
+                        queue,
+                        encoder,
+                        timestamps.writes(EngineSpan::Composite),
+                    );
+                    copy_slot = copy_slot.saturating_add(1);
+                    self.frame_passes.push(FramePass::Copy);
+                }
+                settle_pages(&mut self.targets, &mut live, plan.released, own);
+                continue;
+            }
 
             // A filter round is only a filter pass: no strip instance, no
             // composite, no viewport uniform of its own — the pass maps NDC
@@ -2378,6 +2497,23 @@ impl EngineRenderer {
                 .unwrap_or(&[]);
             let mut composites: Vec<wgpu::BindGroup> = Vec::new();
             for segment in segments {
+                // A backdrop's draws sample the page holding its blurred
+                // region through the same group-0 layer input a composite
+                // reads, so its group is built here, in segment order, beside
+                // the composites' own.
+                if let Segment::Backdrop(_, _, parity) = *segment {
+                    let view = live[parity.index()].as_ref().map_or(
+                        &self.resources.placeholders.layer_input,
+                        PooledTexture::view,
+                    );
+                    composites.push(resources_bind_group(
+                        device,
+                        pipeline,
+                        &self.resources.alphas.view,
+                        config,
+                        view,
+                    ));
+                }
                 if let Segment::Composite(_, source) = *segment {
                     // A group with no live page — or a retained bracket with no
                     // page bound — samples the transparent placeholder, which
@@ -2576,6 +2712,12 @@ pub enum FramePass {
     Page,
     /// One pass of a filter's sequence, between two pooled pages.
     Filter,
+    /// A region copy: a region of the frame's own target read back into a
+    /// pooled page by one pass that clears the page and draws the region into
+    /// it — preceded, on a target that can only be copied, by a transfer into
+    /// the renderer's staging texture (see [`RegionCopyMode`]) — ahead of a
+    /// backdrop blur's filter passes.
+    Copy,
     /// The destination-out hole punch, at a cut or after the last round.
     Punch,
 }
@@ -2591,6 +2733,7 @@ impl FramePass {
             FramePass::Surface => "frust-engine alpha strips",
             FramePass::Page => PAGE_LABEL,
             FramePass::Filter => FILTER_LABEL,
+            FramePass::Copy => "frust-engine region copy",
             FramePass::Punch => "frust-engine hole punch",
         }
     }
@@ -2599,7 +2742,7 @@ impl FramePass {
     /// a pooled page.
     #[must_use]
     pub const fn targets_surface(self) -> bool {
-        !matches!(self, FramePass::Page | FramePass::Filter)
+        !matches!(self, FramePass::Page | FramePass::Filter | FramePass::Copy)
     }
 }
 
@@ -2639,6 +2782,9 @@ struct FramePipelines {
     punch: Option<(EnginePipeline, ClassPipelines)>,
     /// The pass one filter round runs through, when the frame filters a layer.
     filter: Option<wgpu::RenderPipeline>,
+    /// The pass a fragment region copy runs through, when the frame copies a
+    /// region of a target it can only sample ([`RegionCopyMode::Fragment`]).
+    copy: Option<wgpu::RenderPipeline>,
 }
 
 /// How a renderer cuts its passes into paint-class runs.
@@ -2859,7 +3005,7 @@ fn draw_segments(pass: &mut wgpu::RenderPass<'_>, plan: &PassPlan<'_>) {
         // missing still consumes its own group and the next one pairs up.
         let class = plan.state.fold_class(match *segment {
             Segment::Strips(_, _, class) | Segment::External(_, _, _, class) => class,
-            Segment::Composite(..) => plan.composite_class,
+            Segment::Composite(..) | Segment::Backdrop(..) => plan.composite_class,
         });
         let (group, images, range) = match *segment {
             Segment::Strips(first, count, _) => {
@@ -2898,6 +3044,22 @@ fn draw_segments(pass: &mut wgpu::RenderPass<'_>, plan: &PassPlan<'_>) {
                     group,
                     None,
                     GpuStrip::instance_range(plan.base.saturating_add(first), 1),
+                )
+            }
+            // Its group is claimed before its count is read, like a
+            // composite's, so the groups after it stay paired.
+            Segment::Backdrop(first, count, _) => {
+                let Some(group) = plan.composites.get(composite) else {
+                    continue;
+                };
+                composite = composite.saturating_add(1);
+                if count == 0 {
+                    continue;
+                }
+                (
+                    group,
+                    None,
+                    GpuStrip::instance_range(plan.base.saturating_add(first), count),
                 )
             }
         };
@@ -3107,10 +3269,11 @@ fn settle_pages(
 /// Public because this *is* executing a filter pass — the renderer holds one
 /// and drives it over the pages the scheduler named, and `tests/filters.rs`
 /// drives the same type over pages of its own on real hardware. That second
-/// caller is not a convenience: `frust_scene` carries no filter command yet
-/// (the scene seam is a later plan), so a filter layer cannot reach
-/// [`EngineRenderer::encode`] through a `Scene` at all, and driving this type
-/// directly is the only way the ported WGSL is exercised on a device.
+/// caller is not a convenience: `frust_scene` carries no *layer*-filter
+/// command, so a filter layer cannot reach [`EngineRenderer::encode`] through a
+/// `Scene` at all, and driving this type directly is how the drop shadow's
+/// WGSL is exercised on a device. The blur's is also reached through `encode`
+/// itself, by a backdrop blur's pass rounds.
 #[derive(Debug)]
 pub struct FilterResources {
     /// Every filter in the frame's parameter block, back to back.
@@ -3452,6 +3615,11 @@ enum Segment {
     External(u32, u32, u32, PaintClass),
     /// One composite quad at `first`, sampling the finished page it names.
     Composite(u32, CompositeSource),
+    /// A backdrop blur's own strip instances, as `(first, count, parity)`:
+    /// its rectangle's coverage, each instance sampling the blurred page in
+    /// `parity`'s group at its own position — drawn through the composite
+    /// class with that page bound as group 0's layer input.
+    Backdrop(u32, u32, PageParity),
 }
 
 /// The page a [`Segment::Composite`] samples.
@@ -3496,6 +3664,9 @@ struct RoundPlan {
     /// The filter pass this round runs, on a filter round — which draws no
     /// strip and composites nothing, so its `segments` range is empty.
     filter: Option<FilterPlan>,
+    /// The region of the frame's own target this round copies into its page,
+    /// on a region-copy round — which, like a filter round, draws no strip.
+    copy: Option<RectU16>,
     /// The hole punches to erase with once this plan's own pass has been
     /// recorded, as `(first, count)` into the alpha region — the cut this plan
     /// ends at.
@@ -3583,6 +3754,9 @@ struct Scratch {
     /// How many filter passes this frame runs, and so how many instances its
     /// filter instance buffer has to hold.
     filter_passes: u32,
+    /// How many region-copy rounds this frame runs — one per backdrop blur
+    /// the scheduler served.
+    copies: u32,
     /// How segments are cut into paint-class runs this frame — copied in from
     /// the renderer ahead of [`Self::build`].
     routing: ClassRouting,
@@ -3620,6 +3794,15 @@ impl Scratch {
     /// available to re-establish their ordering against the blended ones, *and*
     /// the draw targets the frame's own surface — a page has no depth
     /// attachment, so a page round is a plain painter's-algorithm walk.
+    ///
+    /// `backdrops` is the frame's served backdrop blurs — `frame.backdrops`,
+    /// or none at all on a target no region can be read back from. A draw the
+    /// scheduler placed at a backdrop's own depth is that backdrop's rectangle
+    /// and samples its blurred page instead of its recorded paint; and no draw
+    /// at or past the first backdrop's depth takes the depth-writing pass,
+    /// which is recorded ahead of every surface round — so ahead of the copy
+    /// that reads the target back, which must not see what is painted over the
+    /// backdrop.
     fn build(
         &mut self,
         frame: &CompiledFrame,
@@ -3627,6 +3810,7 @@ impl Scratch {
         depth_active: bool,
         punches: bool,
         paint_slots: &[Option<ResolvedPaint>],
+        backdrops: &[Backdrop],
     ) {
         self.opaque.clear();
         self.alpha.clear();
@@ -3648,6 +3832,7 @@ impl Scratch {
         self.filter_blocks.clear();
         self.filter_layers.clear();
         self.filter_passes = 0;
+        self.copies = 0;
         self.opaque_segments.clear();
         self.alpha_marks.clear();
         self.opaque_marks.clear();
@@ -3664,12 +3849,60 @@ impl Scratch {
         // nothing below ever cuts: a non-punching frame is planned exactly as
         // it always was.
         let mut pending: &[ClearPunch] = if punches { &frame.clears } else { &[] };
+        // Every draw before the first backdrop may take the depth-writing pass;
+        // none from it on. `u32::MAX` on a frame with no backdrop, which is
+        // then routed exactly as it always was.
+        let opaque_limit = backdrops
+            .first()
+            .map_or(u32::MAX, |backdrop| backdrop.depth);
 
         for round in rounds {
             let page = round.page();
             let retained = round.retained();
             let offscreen = page.is_some() || retained.is_some();
-            let filter = self.plan_filter(frame, round);
+
+            // A region-copy round draws nothing: it is planned as its page and
+            // the region it copies. Any punch recorded ahead of the backdrop
+            // it serves is erased first, as a cut of its own, so the copy reads
+            // the target the display list says lies beneath the backdrop.
+            if let Some(copy) = round.region_copy() {
+                if let Some(page) = page {
+                    if !pending.is_empty()
+                        && let Some(backdrop) = backdrops
+                            .iter()
+                            .find(|backdrop| backdrop.layer == page.layer)
+                    {
+                        let mut first_segment = self.segments.len();
+                        let mut run_start = self.alpha.len() as u32;
+                        let mut run_external = None;
+                        self.cut_for_punches(
+                            &mut pending,
+                            strips,
+                            backdrop.depth,
+                            &mut first_segment,
+                            &mut run_start,
+                            &mut run_external,
+                        );
+                    }
+                    self.copies = self.copies.saturating_add(1);
+                    self.rounds.push(RoundPlan {
+                        page: Some(PagePlan {
+                            parity: page.parity,
+                            size: page.size,
+                            continued: false,
+                        }),
+                        retained: None,
+                        segments: self.segments.len()..self.segments.len(),
+                        released: released_groups(&round.released),
+                        filter: None,
+                        copy: Some(copy.source),
+                        punch: (0, 0),
+                    });
+                }
+                continue;
+            }
+
+            let filter = self.plan_filter(frame, round, backdrops);
             // A page holds its layer — or one column band of it — at the page's
             // own origin, so every instance of the round is shifted into that
             // column and clipped to it (see `PageWindow`). A retained page holds
@@ -3717,6 +3950,33 @@ impl Scratch {
                                     &mut run_external,
                                 );
                             }
+                            // A backdrop's rectangle: drawn from the blurred
+                            // page this round samples rather than from the
+                            // transparent paint it was recorded with.
+                            if let Ok(at) = backdrops
+                                .binary_search_by_key(&draw.depth, |backdrop| backdrop.depth)
+                            {
+                                if let Some(backdrop) = backdrops.get(at)
+                                    && let Some(sample) = round
+                                        .samples
+                                        .iter()
+                                        .find(|sample| sample.layer == backdrop.layer)
+                                    && let Some(run) = strips.get(draw.strip_range.clone())
+                                {
+                                    let end = self.alpha.len() as u32;
+                                    self.push_run(run_start, end, run_external);
+                                    run_external = None;
+                                    self.push_backdrop(
+                                        backdrop,
+                                        sample.parity,
+                                        draw.depth,
+                                        run,
+                                        window,
+                                    );
+                                    run_start = self.alpha.len() as u32;
+                                }
+                                continue;
+                            }
                             let Some(paint) = pack_paint(&draw.paint, draw.depth, paint_slots)
                             else {
                                 continue;
@@ -3756,7 +4016,8 @@ impl Scratch {
                                 run_start = end;
                                 run_external = paint.external;
                             }
-                            let to_opaque = paint.opaque && split_opaque;
+                            let to_opaque =
+                                paint.opaque && split_opaque && draw.depth < opaque_limit;
                             let class = paint.class;
                             mark_class(&mut self.alpha_marks, self.alpha.len() as u32, class);
                             if to_opaque {
@@ -3832,12 +4093,7 @@ impl Scratch {
                 *slot = (*slot).max(deepest);
             }
 
-            let mut released = [false; MAX_LIVE_PAGES];
-            for parity in &round.released {
-                if let Some(slot) = released.get_mut(parity.index()) {
-                    *slot = true;
-                }
-            }
+            let released = released_groups(&round.released);
 
             self.rounds.push(RoundPlan {
                 page: page.map(|page| PagePlan {
@@ -3852,6 +4108,7 @@ impl Scratch {
                 segments: first_segment..self.segments.len(),
                 released,
                 filter,
+                copy: None,
                 // The round's last plan draws to its own end; a punch past
                 // every op of the frame is issued after the whole walk instead.
                 punch: (0, 0),
@@ -3944,6 +4201,7 @@ impl Scratch {
             // names.
             released: [false; MAX_LIVE_PAGES],
             filter: None,
+            copy: None,
             punch,
         });
         *first_segment = self.segments.len();
@@ -3986,6 +4244,45 @@ impl Scratch {
                 None => Segment::Strips(at, run.count, run.class),
             });
             self.note_class(run.class);
+        }
+    }
+
+    /// Appends a backdrop blur's rectangle — the strip run `run` of its one
+    /// draw, at painter-order `depth` — as instances sampling the blurred page
+    /// in `parity`'s group, and the [`Segment::Backdrop`] drawing them.
+    ///
+    /// Each instance reads the page at its own position relative to the
+    /// backdrop's region, which the page holds at its origin, so every pixel
+    /// of the rectangle takes the blur of the backdrop under that very pixel;
+    /// the run's own coverage — the rectangle's edges, and any coverage-mask
+    /// clip it was generated under — weights it exactly as it would a fill.
+    /// Never opaque: the blur of a backdrop reaching transparent edges is not.
+    fn push_backdrop(
+        &mut self,
+        backdrop: &Backdrop,
+        parity: PageParity,
+        depth: u32,
+        run: &[Strip],
+        window: PageWindow,
+    ) {
+        let class = self.routing.composite_class();
+        let paint = PackedPaint {
+            payload: PaintPayload::Layer(backdrop.region.x0, backdrop.region.y0),
+            paint: LAYER_PAINT_SOURCE | u32::from(u8::MAX),
+            depth_index: depth,
+            opaque: false,
+            external: None,
+            class,
+            glyph_quad: false,
+        };
+        let first = self.alpha.len() as u32;
+        for pair in run.windows(2) {
+            self.push_span(&pair[0], &pair[1], paint, false, window);
+        }
+        let count = (self.alpha.len() as u32).saturating_sub(first);
+        if count > 0 {
+            self.segments.push(Segment::Backdrop(first, count, parity));
+            self.note_class(class);
         }
     }
 
@@ -4073,11 +4370,26 @@ impl Scratch {
     /// scheduler refuses one before it plans a round). Both answer by leaving
     /// the round's pass unissued — its
     /// page is still cleared — rather than by asserting (E17).
-    fn plan_filter(&mut self, frame: &CompiledFrame, round: &Round) -> Option<FilterPlan> {
+    fn plan_filter(
+        &mut self,
+        frame: &CompiledFrame,
+        round: &Round,
+        backdrops: &[Backdrop],
+    ) -> Option<FilterPlan> {
         let pass = round.filter_pass()?;
         let page = round.page()?;
         let recorded = frame.recorder.layers.get(pass.layer as usize)?;
-        let data_offset = self.filter_block(pass.layer, &recorded.kind)?;
+        // A backdrop's layer is a regular one: its blur is the backdrop
+        // record's, not the recording's.
+        let data_offset = match backdrops
+            .iter()
+            .find(|backdrop| backdrop.layer == pass.layer)
+        {
+            Some(backdrop) => self.pack_filter_block(pass.layer, || {
+                Some(GpuFilterData::from(GpuGaussianBlur::from(&backdrop.blur())))
+            })?,
+            None => self.filter_block(pass.layer, &recorded.kind)?,
+        };
 
         let instance = self.filter_passes;
         self.filter_passes = self.filter_passes.saturating_add(1);
@@ -4098,19 +4410,31 @@ impl Scratch {
     /// allocation-free vector beats a hash map that would have to be cleared
     /// every frame.
     fn filter_block(&mut self, layer: u32, kind: &RecordedLayerKind) -> Option<u32> {
+        // The one dispatch every filter-recognising site in this crate shares
+        // (`schedule::layer_role`/`filter_rounds`), so the block packed here is
+        // for the same filter the scheduler planned the passes of.
+        self.pack_filter_block(layer, || {
+            Some(match served_filter(layer, kind).ok()? {
+                ServedFilter::Blur(blur) => GpuFilterData::from(GpuGaussianBlur::from(&blur)),
+                ServedFilter::DropShadow(shadow) => {
+                    GpuFilterData::from(GpuDropShadow::from(&shadow))
+                }
+            })
+        })
+    }
+
+    /// The texel offset of `layer`'s parameter block, packing the one `make`
+    /// answers on first sight — [`Self::filter_block`]'s bookkeeping, shared
+    /// with a backdrop blur, whose block comes from its own record.
+    fn pack_filter_block(
+        &mut self,
+        layer: u32,
+        make: impl FnOnce() -> Option<GpuFilterData>,
+    ) -> Option<u32> {
         let index = match self.filter_layers.iter().position(|id| *id == layer) {
             Some(index) => index,
             None => {
-                // The one dispatch every filter-recognising site in this crate
-                // shares (`schedule::layer_role`/`filter_rounds`), so the block
-                // packed here is for the same filter the scheduler planned the
-                // passes of.
-                let block = match served_filter(layer, kind).ok()? {
-                    ServedFilter::Blur(blur) => GpuFilterData::from(GpuGaussianBlur::from(&blur)),
-                    ServedFilter::DropShadow(shadow) => {
-                        GpuFilterData::from(GpuDropShadow::from(&shadow))
-                    }
-                };
+                let block = make()?;
                 self.filter_layers.push(layer);
                 self.filter_blocks.push(block);
                 self.filter_layers.len().saturating_sub(1)
@@ -4142,7 +4466,9 @@ impl Scratch {
         self.rounds
             .iter()
             .filter(|plan| {
-                (plan.page.is_some() || plan.retained.is_some()) && plan.filter.is_none()
+                (plan.page.is_some() || plan.retained.is_some())
+                    && plan.filter.is_none()
+                    && plan.copy.is_none()
             })
             .count()
     }
@@ -4174,6 +4500,16 @@ impl Scratch {
 
         let mut owed = shape.merge;
         for plan in &self.rounds {
+            // A copy reads the surface back, so the opening — the clear and
+            // the opaque strips — is recorded ahead of it.
+            if plan.copy.is_some() {
+                if owed {
+                    out.push(FramePass::Opening);
+                    owed = false;
+                }
+                out.push(FramePass::Copy);
+                continue;
+            }
             if plan.filter.is_some() {
                 out.push(FramePass::Filter);
                 continue;
@@ -4551,6 +4887,10 @@ enum PaintPayload {
     Solid(u32),
     /// The instance's own scene-space origin, packed as a `u16` pair.
     Position,
+    /// The page texel under the instance's own origin, for a page holding the
+    /// device region starting at `(x, y)` at its own origin: a backdrop blur's
+    /// rectangle sampling its blurred page.
+    Layer(u16, u16),
 }
 
 /// One draw's paint, resolved to the values its instances repeat.
@@ -4585,6 +4925,9 @@ impl PackedPaint {
         match self.payload {
             PaintPayload::Solid(rgba) => rgba,
             PaintPayload::Position => pack_u16_pair(x, y),
+            PaintPayload::Layer(x0, y0) => {
+                pack_u16_pair(x.saturating_sub(x0), y.saturating_sub(y0))
+            }
         }
     }
 
@@ -5828,6 +6171,282 @@ fn atlas_sampler(device: &wgpu::Device) -> wgpu::Sampler {
 /// one explicit strip layout ([`crate::gpu::bindings::strip_pipeline_layout`]),
 /// so the group binds under every strip state and paint class alike — which is
 /// what lets one pass switch class pipelines between runs without rebinding.
+/// The groups a round's `released` list names, as the per-group flags a
+/// [`RoundPlan`] carries.
+fn released_groups(released: &[PageParity]) -> [bool; MAX_LIVE_PAGES] {
+    let mut groups = [false; MAX_LIVE_PAGES];
+    for parity in released {
+        if let Some(slot) = groups.get_mut(parity.index()) {
+            *slot = true;
+        }
+    }
+    groups
+}
+
+/// How a region of a frame's own target is read back into a pooled page —
+/// the mechanism every effect sampling what the frame has already painted
+/// shares (a backdrop blur today; see [`crate::filters`]' *The backdrop
+/// blur*).
+///
+/// Either way the region reaches the page through one pass of
+/// [`EnginePipeline::Copy`] that clears the page and draws the region at its
+/// origin: a pooled page is a render target and a sampled texture, never a
+/// copy destination, so a texture copy cannot land in one directly. The modes
+/// differ only in what that pass reads.
+///
+/// Decided per frame from the target texture itself, because the caller
+/// decides what it renders into: a swapchain texture is `RENDER_ATTACHMENT`
+/// only on this tier and is never widened, so `frust-render` renders a frame
+/// carrying a backdrop into an intermediate of its own (in the swapchain's own
+/// format, sampled and copyable) and presents it with one copy pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionCopyMode {
+    /// The target is `COPY_SRC` in the pages' own [`INTERMEDIATE_FORMAT`]: a
+    /// `copy_texture_to_texture` lands the region in the renderer's own
+    /// staging texture, unconverted, and the copy pass reads it from there —
+    /// the route a target that cannot be sampled (a headless readback target)
+    /// still has.
+    Texture,
+    /// The target is `TEXTURE_BINDING`: the copy pass reads the region
+    /// straight out of it — any format the target is rendered in, converted on
+    /// the way into the page's own.
+    Fragment,
+    /// The target can be neither copied nor sampled: no region is read back,
+    /// and a backdrop blur draws nothing.
+    Unavailable,
+}
+
+impl RegionCopyMode {
+    /// The mode a frame rendering into `target` reads regions back with.
+    #[must_use]
+    pub fn of(target: &wgpu::Texture) -> Self {
+        Self::for_usage(target.usage(), target.format(), target.sample_count())
+    }
+
+    /// [`Self::of`] over the three facts it reads, so the decision is
+    /// host-testable without a device.
+    ///
+    /// Sampling is preferred whenever the target allows it — it costs the one
+    /// pass alone, where a texture copy costs a transfer as well.
+    #[must_use]
+    pub fn for_usage(
+        usage: wgpu::TextureUsages,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
+        if sample_count != 1 {
+            Self::Unavailable
+        } else if usage.contains(wgpu::TextureUsages::TEXTURE_BINDING) {
+            Self::Fragment
+        } else if format == INTERMEDIATE_FORMAT && usage.contains(wgpu::TextureUsages::COPY_SRC) {
+            Self::Texture
+        } else {
+            Self::Unavailable
+        }
+    }
+}
+
+/// Reports a frame whose backdrop blurs are drawn as nothing because `target`
+/// can be neither copied nor sampled, once per process.
+fn note_backdrop_unreadable(target: &wgpu::Texture) {
+    BACKDROP_UNREADABLE_WARNING.call_once(|| {
+        log::warn!(
+            "backdrop blur drawn as nothing: the frame's target ({:?}, {:?}) is neither \
+             TEXTURE_BINDING nor COPY_SRC in {INTERMEDIATE_FORMAT:?}, so its backdrop cannot be \
+             read back (logged once)",
+            target.format(),
+            target.usage()
+        );
+    });
+}
+
+/// What a frame's region copies are recorded with beyond the copy pipeline:
+/// the instance buffer — one 16-byte slot per copy a frame can run
+/// ([`crate::filters::MAX_BACKDROPS_PER_FRAME`]), written as each copy is
+/// recorded — and, for a [`RegionCopyMode::Texture`] frame, the staging
+/// texture a region is transferred into before the copy pass reads it.
+#[derive(Debug)]
+struct RegionCopyResources {
+    instances: wgpu::Buffer,
+    /// `COPY_DST | TEXTURE_BINDING` in [`INTERMEDIATE_FORMAT`], grown to the
+    /// largest region a frame has copied and kept, like the page pool's
+    /// textures, for the renderer's life. Created by the first texture-mode
+    /// frame.
+    staging: Option<ResourceTexture>,
+}
+
+impl RegionCopyResources {
+    fn new(device: &wgpu::Device) -> Self {
+        let slots = crate::filters::MAX_BACKDROPS_PER_FRAME as u64;
+        Self {
+            instances: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("frust-engine region copy instances"),
+                size: slots.saturating_mul(COPY_INSTANCE_BYTES),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            staging: None,
+        }
+    }
+
+    /// Grows the staging texture to hold a `width` x `height` region, if it
+    /// does not already.
+    fn ensure_staging(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let (held_width, held_height) = self
+            .staging
+            .as_ref()
+            .map_or((0, 0), |staging| (staging.width, staging.height));
+        if held_width >= width && held_height >= height {
+            return;
+        }
+        self.staging = Some(ResourceTexture::new(
+            device,
+            &wgpu::TextureDescriptor {
+                label: Some("frust-engine region copy staging"),
+                size: wgpu::Extent3d {
+                    width: width.max(held_width),
+                    height: height.max(held_height),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: INTERMEDIATE_FORMAT,
+                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        ));
+    }
+}
+
+/// One region copy's full recording state: a region of the frame's own
+/// target, read back into a pooled page at the page's origin.
+struct RegionCopyPass<'a> {
+    mode: RegionCopyMode,
+    /// The frame's own target.
+    target: &'a wgpu::TextureView,
+    /// The page the region lands in.
+    page: &'a PooledTexture,
+    /// The device region copied — inside the target by construction
+    /// ([`crate::filters::backdrop_region`] clamps it).
+    source: RectU16,
+    /// [`EnginePipeline::Copy`], on every frame that copies.
+    pipeline: Option<&'a wgpu::RenderPipeline>,
+    /// The copies' instance buffer and staging texture, on the same frames.
+    resources: Option<&'a RegionCopyResources>,
+    /// This copy's instance slot.
+    slot: u32,
+}
+
+impl RegionCopyPass<'_> {
+    /// Records the copy into `encoder`: on a texture-mode frame the region is
+    /// transferred into the staging texture first, then one pass clears the
+    /// page and draws the region into it at the page's origin.
+    ///
+    /// The page holds the region and transparency around it. A copy whose
+    /// pipeline, instance buffer or staging texture is missing — which cannot
+    /// happen, `encode` resolves all three for every frame that copies — still
+    /// clears the page, and the backdrop blurs nothing into nothing: "draw
+    /// less, never wrong".
+    fn record(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) {
+        let width = self.source.width();
+        let height = self.source.height();
+        // The texture the pass reads, and where in it the region starts.
+        let source = match (self.mode, self.resources) {
+            (RegionCopyMode::Fragment, Some(_)) => {
+                Some((self.target, (self.source.x0, self.source.y0)))
+            }
+            (RegionCopyMode::Texture, Some(resources)) => match resources.staging.as_ref() {
+                Some(staging)
+                    if staging.width >= u32::from(width) && staging.height >= u32::from(height) =>
+                {
+                    encoder.copy_texture_to_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: self.target.texture(),
+                            mip_level: 0,
+                            origin: wgpu::Origin3d {
+                                x: u32::from(self.source.x0),
+                                y: u32::from(self.source.y0),
+                                z: 0,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        staging.copy_target(),
+                        wgpu::Extent3d {
+                            width: u32::from(width),
+                            height: u32::from(height),
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    Some((&staging.view, (0, 0)))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(FramePass::Copy.label()),
+            color_attachments: &[Some(color_attachment(
+                self.page.view(),
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            ))],
+            depth_stencil_attachment: None,
+            timestamp_writes: timestamps,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let (Some((view, origin)), Some(pipeline), Some(resources)) =
+            (source, self.pipeline, self.resources)
+        else {
+            return;
+        };
+        let offset = u64::from(self.slot).saturating_mul(COPY_INSTANCE_BYTES);
+        if offset.saturating_add(COPY_INSTANCE_BYTES) > resources.instances.size() {
+            return;
+        }
+        let (page_width, page_height) = self.page.size();
+        let instance = [
+            pack_u16_pair(0, 0),
+            pack_u16_pair(origin.0, origin.1),
+            pack_u16_pair(width, height),
+            pack_u16_pair(
+                u16::try_from(page_width).unwrap_or(u16::MAX),
+                u16::try_from(page_height).unwrap_or(u16::MAX),
+            ),
+        ];
+        queue.write_buffer(
+            &resources.instances,
+            offset,
+            bytemuck::cast_slice(&instance),
+        );
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frust-engine region copy source"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            }],
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_vertex_buffer(0, resources.instances.slice(..));
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(
+            0..COPY_QUAD_VERTICES,
+            self.slot..self.slot.saturating_add(1),
+        );
+    }
+}
+
 fn resources_bind_group(
     device: &wgpu::Device,
     pipeline: &wgpu::RenderPipeline,
@@ -6167,7 +6786,7 @@ mod tests {
         let mut scratch = Scratch::default();
         // Depth on and punching on: the shape a translucent presentation
         // carrying a platform-view slot is planned under.
-        scratch.build(&frame, &rounds, true, !frame.clears.is_empty(), &[]);
+        scratch.build(&frame, &rounds, true, !frame.clears.is_empty(), &[], &[]);
         (scratch, rounds)
     }
 
@@ -6265,9 +6884,9 @@ mod tests {
             scratch.segments[range]
                 .iter()
                 .map(|segment| match *segment {
-                    Segment::Strips(first, count, _) | Segment::External(first, count, _, _) => {
-                        first + count
-                    }
+                    Segment::Strips(first, count, _)
+                    | Segment::External(first, count, _, _)
+                    | Segment::Backdrop(first, count, _) => first + count,
                     Segment::Composite(first, _) => first + 1,
                 })
                 .max()
@@ -6284,6 +6903,7 @@ mod tests {
                 .all(|segment| match *segment {
                     Segment::Strips(first, _, _)
                     | Segment::External(first, _, _, _)
+                    | Segment::Backdrop(first, _, _)
                     | Segment::Composite(first, _) => first >= punch_first + punch_count,
                 }),
             "and everything recorded after it lands on top of the erase"
@@ -6401,7 +7021,7 @@ mod tests {
         )
         .expect("a scene of solid fills schedules");
         let mut scratch = Scratch::default();
-        scratch.build(&frame, &rounds, false, false, &[]);
+        scratch.build(&frame, &rounds, false, false, &[], &[]);
         assert!(scratch.opaque.is_empty(), "no depth, no opaque strips");
 
         let (merged, apart) = pass_lists(&scratch);
@@ -6552,7 +7172,7 @@ mod tests {
         )
         .expect("a blurred layer under the surface schedules");
         let mut scratch = Scratch::default();
-        scratch.build(&frame, &rounds, true, false, &[]);
+        scratch.build(&frame, &rounds, true, false, &[], &[]);
         assert!(scratch.filter_passes > 0, "the layer is filtered");
 
         let (merged, apart) = pass_lists(&scratch);
@@ -6618,7 +7238,7 @@ mod tests {
         .expect("a layer wider than the ceiling bands rather than refusing");
 
         let mut scratch = Scratch::default();
-        scratch.build(&frame, &rounds, false, false, &[]);
+        scratch.build(&frame, &rounds, false, false, &[], &[]);
         assert_eq!(
             scratch.rounds.len(),
             rounds.len(),
@@ -6662,9 +7282,9 @@ mod tests {
         scratch.segments[plan.segments.clone()]
             .iter()
             .filter_map(|segment| match *segment {
-                Segment::Strips(first, count, _) | Segment::External(first, count, _, _) => {
-                    Some((first as usize, count as usize))
-                }
+                Segment::Strips(first, count, _)
+                | Segment::External(first, count, _, _)
+                | Segment::Backdrop(first, count, _) => Some((first as usize, count as usize)),
                 Segment::Composite(..) => None,
             })
             .flat_map(|(first, count)| scratch.alpha[first..first + count].iter().copied())
@@ -6898,6 +7518,236 @@ mod tests {
                 .iter()
                 .any(|segment| matches!(segment, Segment::Composite(..))),
             "and nothing composites into the plan the punch closes"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Backdrop blurs: the copy round, the sampled page, the opaque limit
+    //
+    // Host-only, over the same plan the frame path records from: a
+    // backdrop's region copy is the one round besides a punch that must
+    // follow the opening, and its rectangle the one strip run that samples
+    // a page rather than a paint.
+    // -----------------------------------------------------------------
+
+    /// The rectangle every backdrop case below blurs behind.
+    const PLAN_PANEL: Rect = Rect::new(8.0, 8.0, 40.0, 36.0);
+
+    /// [`plan_of`] for a frame whose backdrops are served — scheduled through
+    /// [`Schedule::build_frame`] and planned with the frame's own backdrop
+    /// records, as `encode` does on a readable target.
+    fn backdrop_plan_of(scene: &Scene, punches: bool) -> (Scratch, Vec<Round>, CompiledFrame) {
+        let frame = SceneCompiler::new(PLAN_VIEWPORT.0, PLAN_VIEWPORT.1)
+            .compile(scene, Affine::IDENTITY, PLAN_VIEWPORT)
+            .expect("an in-range scene compiles");
+        let rounds = Schedule::build_frame(
+            &frame.recorder,
+            &TierCaps::fake(DownlevelProfile::Full),
+            &PageConfig::default(),
+            &RetainedLayers::new(),
+            &frame.backdrops,
+        )
+        .expect("a backdrop under the surface schedules");
+        let mut scratch = Scratch::default();
+        scratch.build(&frame, &rounds, true, punches, &[], &frame.backdrops);
+        (scratch, rounds, frame)
+    }
+
+    /// An opaque field, the backdrop, and a chip painted over the panel.
+    fn backdrop_scene() -> Scene {
+        plan_scene(|builder| {
+            builder.fill_rect(
+                Rect::new(
+                    0.0,
+                    0.0,
+                    f64::from(PLAN_VIEWPORT.0),
+                    f64::from(PLAN_VIEWPORT.1),
+                ),
+                Brush::Solid(BLUE),
+            );
+            builder.backdrop_blur(PLAN_PANEL, 2.0);
+            builder.fill_rect(Rect::new(12.0, 12.0, 20.0, 20.0), Brush::Solid(RED));
+        })
+    }
+
+    #[test]
+    fn a_backdrop_ends_the_opening_before_its_copy_and_draws_after_its_passes() {
+        let (scratch, _, frame) = backdrop_plan_of(&backdrop_scene(), false);
+        assert_eq!(frame.backdrops.len(), 1);
+        let (merged, apart) = pass_lists(&scratch);
+        // σ 2 convolves directly: one horizontal and one vertical pass.
+        assert_eq!(
+            merged,
+            [
+                FramePass::Opening,
+                FramePass::Copy,
+                FramePass::Filter,
+                FramePass::Filter,
+                FramePass::Surface,
+            ],
+            "the opening — clear, opaque strips and the field — lands before the copy reads \
+             the surface back, and the panel and chip draw after the blur"
+        );
+        assert_eq!(
+            apart,
+            [
+                FramePass::Clear,
+                FramePass::Opaque,
+                FramePass::Surface,
+                FramePass::Copy,
+                FramePass::Filter,
+                FramePass::Filter,
+                FramePass::Surface,
+            ],
+            "unmerged, the same order with the clear and the opaque strips apart"
+        );
+    }
+
+    #[test]
+    fn a_backdrops_rectangle_samples_the_page_its_round_releases() {
+        let (scratch, rounds, frame) = backdrop_plan_of(&backdrop_scene(), false);
+        let backdrop = frame.backdrops[0];
+        let sampling = rounds
+            .iter()
+            .position(|round| !round.samples.is_empty())
+            .expect("one surface round samples the blurred page");
+        let sample = rounds[sampling].samples[0];
+        assert_eq!(sample.layer, backdrop.layer);
+        assert!(
+            rounds[sampling].released.contains(&sample.parity),
+            "the round that samples the page hands it back"
+        );
+
+        let plan = &scratch.rounds[sampling];
+        let segments = &scratch.segments[plan.segments.clone()];
+        let (first, count, parity) = segments
+            .iter()
+            .find_map(|segment| match *segment {
+                Segment::Backdrop(first, count, parity) => Some((first, count, parity)),
+                _ => None,
+            })
+            .expect("the panel is drawn as a backdrop segment");
+        assert_eq!(parity, sample.parity);
+        assert!(count > 0);
+        for instance in &scratch.alpha[first as usize..(first + count) as usize] {
+            assert_eq!(
+                instance.paint_and_rect_flag & !crate::gpu::strips::RECT_STRIP_FLAG,
+                LAYER_PAINT_SOURCE | u32::from(u8::MAX),
+                "every panel instance reads the layer input at full opacity"
+            );
+            let (page_x, page_y) = (instance.payload & 0xffff, instance.payload >> 16);
+            assert_eq!(
+                (page_x, page_y),
+                (
+                    u32::from(instance.x - backdrop.region.x0),
+                    u32::from(instance.y - backdrop.region.y0)
+                ),
+                "and samples the page texel under its own device origin"
+            );
+        }
+    }
+
+    #[test]
+    fn draws_after_a_backdrop_never_take_the_depth_writing_pass() {
+        // The field recorded *after* the backdrop: its opaque interior must
+        // not be drawn in the opening, ahead of the copy that reads the
+        // surface back.
+        let after = plan_scene(|builder| {
+            builder.backdrop_blur(PLAN_PANEL, 2.0);
+            builder.fill_rect(
+                Rect::new(
+                    0.0,
+                    0.0,
+                    f64::from(PLAN_VIEWPORT.0),
+                    f64::from(PLAN_VIEWPORT.1),
+                ),
+                Brush::Solid(BLUE),
+            );
+        });
+        let (scratch, _, _) = backdrop_plan_of(&after, false);
+        assert!(
+            scratch.opaque.is_empty(),
+            "nothing at or past the backdrop's depth is routed opaque"
+        );
+
+        // The same field before the backdrop keeps its opaque spans.
+        let (before, _, _) = backdrop_plan_of(&backdrop_scene(), false);
+        assert!(!before.opaque.is_empty());
+    }
+
+    #[test]
+    fn a_punch_ahead_of_a_backdrop_is_erased_before_the_copy() {
+        let scene = plan_scene(|builder| {
+            builder.fill_rect(PLAN_SLOT, Brush::Solid(BLUE));
+            builder.clear_rect(PLAN_SLOT);
+            builder.backdrop_blur(PLAN_PANEL, 2.0);
+        });
+        let (scratch, _, _) = backdrop_plan_of(&scene, true);
+        let (merged, _) = pass_lists(&scratch);
+        let punch = merged
+            .iter()
+            .position(|pass| *pass == FramePass::Punch)
+            .expect("the punch is recorded");
+        let copy = merged
+            .iter()
+            .position(|pass| *pass == FramePass::Copy)
+            .expect("the copy is recorded");
+        assert!(
+            punch < copy,
+            "the backdrop reads the erased surface, not the field the punch erases: {merged:?}"
+        );
+    }
+
+    #[test]
+    fn a_target_that_cannot_be_read_back_serves_no_backdrop() {
+        // `encode` hands the plan no backdrop records on such a target: the
+        // panel is the transparent draw it was recorded as, scheduled as the
+        // ordinary layer it is — no copy, no filter pass, no sampled page.
+        let (scratch, rounds) = plan_of(&backdrop_scene());
+        assert!(
+            rounds
+                .iter()
+                .all(|round| round.copy.is_none() && round.samples.is_empty())
+        );
+        let (merged, _) = pass_lists(&scratch);
+        assert_eq!(merged, [FramePass::Opening]);
+        assert_eq!(scratch.copies, 0);
+    }
+
+    #[test]
+    fn the_region_copy_mode_prefers_sampling_and_needs_a_single_sample() {
+        use wgpu::TextureFormat::{Bgra8Unorm, Rgba8Unorm, Rgba8UnormSrgb};
+        use wgpu::TextureUsages as U;
+        let attach = U::RENDER_ATTACHMENT;
+        assert_eq!(
+            RegionCopyMode::for_usage(attach | U::COPY_SRC, Rgba8Unorm, 1),
+            RegionCopyMode::Texture,
+            "a headless readback target in the pages' own format is copied"
+        );
+        assert_eq!(
+            RegionCopyMode::for_usage(attach | U::COPY_SRC | U::TEXTURE_BINDING, Rgba8Unorm, 1),
+            RegionCopyMode::Fragment,
+            "sampling costs the one pass alone, so it wins whenever it is allowed"
+        );
+        assert_eq!(
+            RegionCopyMode::for_usage(attach | U::TEXTURE_BINDING, Bgra8Unorm, 1),
+            RegionCopyMode::Fragment,
+            "any format can be sampled across into a page"
+        );
+        assert_eq!(
+            RegionCopyMode::for_usage(attach | U::COPY_SRC, Rgba8UnormSrgb, 1),
+            RegionCopyMode::Unavailable,
+            "a copy would move encoded bytes into a linear page"
+        );
+        assert_eq!(
+            RegionCopyMode::for_usage(attach, Bgra8Unorm, 1),
+            RegionCopyMode::Unavailable,
+            "a swapchain is RENDER_ATTACHMENT only"
+        );
+        assert_eq!(
+            RegionCopyMode::for_usage(attach | U::TEXTURE_BINDING | U::COPY_SRC, Rgba8Unorm, 4),
+            RegionCopyMode::Unavailable,
+            "a multisampled target is neither"
         );
     }
 }

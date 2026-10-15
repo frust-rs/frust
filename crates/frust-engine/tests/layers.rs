@@ -22,7 +22,7 @@
 use core::ops::Range;
 
 use frust_engine::compile::CompiledFrame;
-use frust_engine::schedule::{PageConfig, Round, RoundTarget, Schedule};
+use frust_engine::schedule::{PageConfig, RetainedLayers, Round, RoundOp, RoundTarget, Schedule};
 use frust_engine::{EngineError, RetainedKind, SceneCompiler};
 use frust_gpu::{DownlevelProfile, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
@@ -952,4 +952,133 @@ fn the_blend_module_carries_the_destination_out_composite() {
         !blend.contains("var<storage") && !blend.contains("@compute"),
         "the module stays inside the downlevel design rules"
     );
+}
+
+// ---------------------------------------------------------------------
+// A backdrop blur: never retained, never inside a page
+// ---------------------------------------------------------------------
+
+/// The rectangle every backdrop case below blurs behind, in its own space.
+const PANEL: Rect = Rect::new(4.0, 4.0, 12.0, 12.0);
+
+/// The rounds `frame` schedules as with its backdrop blurs served — the
+/// scheduler entry `EngineRenderer::encode` takes on a readable target.
+fn backdrop_rounds(frame: &CompiledFrame) -> Vec<Round> {
+    Schedule::build_frame(
+        &frame.recorder,
+        &TierCaps::fake(DownlevelProfile::Full),
+        &PageConfig::default(),
+        &RetainedLayers::new(),
+        &frame.backdrops,
+    )
+    .expect("a frame carrying a backdrop schedules")
+}
+
+/// Every draw index a round of `target`'s kind issues.
+fn drawn_in(rounds: &[Round], pages: bool) -> Vec<u32> {
+    rounds
+        .iter()
+        .filter(|round| !round.is_root() == pages)
+        .flat_map(|round| round.ops.iter())
+        .filter_map(|op| match op {
+            RoundOp::Draws(range) => Some(range.clone()),
+            RoundOp::Composite(_) => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// Where the backdrop's own draw — its rectangle's coverage — lands, if
+/// anywhere: `(in a surface round, in a page round, copied)`.
+fn backdrop_placement(frame: &CompiledFrame) -> (bool, bool, bool) {
+    let rounds = backdrop_rounds(frame);
+    let Some(backdrop) = frame.backdrops.first() else {
+        return (false, false, false);
+    };
+    let draw = frame
+        .draws()
+        .iter()
+        .position(|draw| draw.depth == backdrop.depth)
+        .and_then(|index| u32::try_from(index).ok())
+        .expect("a recorded backdrop has its draw");
+    (
+        drawn_in(&rounds, false).contains(&draw),
+        drawn_in(&rounds, true).contains(&draw),
+        rounds.iter().any(|round| round.region_copy().is_some()),
+    )
+}
+
+#[test]
+fn a_retained_body_carrying_a_backdrop_blur_is_marked_unretainable() {
+    let plain = compile_retained(&scene_of(record_retained_body));
+    assert_eq!(retainable(&plain), vec![true], "the control");
+
+    let blurring = compile_retained(&scene_of(|builder| {
+        builder.push_transform(Affine::translate((8.0, 8.0)));
+        builder.push_retained(1, RETAINED_BODY, 1.0, 1.0);
+        builder.fill_rect(RETAINED_BODY, red());
+        builder.backdrop_blur(PANEL, 2.0);
+        builder.pop_retained();
+        builder.pop_transform();
+    }));
+    assert_eq!(
+        blurring.backdrops.len(),
+        1,
+        "the backdrop is still recorded"
+    );
+    assert_eq!(
+        retainable(&blurring),
+        vec![false],
+        "a page is rasterized offscreen, where there is no frame beneath the body to sample, \
+         so a body blurring its backdrop is drawn inline every frame"
+    );
+}
+
+#[test]
+fn a_backdrop_at_the_root_is_copied_and_drawn_in_a_surface_round() {
+    let frame = compile(&scene_of(|builder| {
+        builder.fill_rect(Rect::new(0.0, 0.0, 64.0, 48.0), red());
+        builder.backdrop_blur(PANEL, 2.0);
+    }));
+    assert_eq!(backdrop_placement(&frame), (true, false, true));
+}
+
+#[test]
+fn a_backdrop_never_lands_in_a_page_round() {
+    // Inside a translucent layer: an isolated page, with no frame beneath.
+    let in_layer = compile(&scene_of(|builder| {
+        builder.fill_rect(Rect::new(0.0, 0.0, 64.0, 48.0), red());
+        builder.push_layer(Rect::new(0.0, 0.0, 32.0, 32.0), HALF);
+        builder.fill_rect(Rect::new(2.0, 2.0, 20.0, 20.0), red());
+        builder.backdrop_blur(PANEL, 2.0);
+        builder.pop_layer();
+    }));
+    assert_eq!(in_layer.backdrops.len(), 1);
+    assert_eq!(
+        backdrop_placement(&in_layer),
+        (false, false, false),
+        "dropped: no copy, and its rectangle drawn in no round at all"
+    );
+
+    // Inside a translucent retained body the store did not admit: the
+    // ordinary isolated layer the inline lowering describes.
+    let in_body = compile_retained(&scene_of(|builder| {
+        builder.push_retained(1, Rect::new(0.0, 0.0, 32.0, 32.0), HALF, 1.0);
+        builder.fill_rect(Rect::new(2.0, 2.0, 20.0, 20.0), red());
+        builder.backdrop_blur(PANEL, 2.0);
+        builder.pop_retained();
+    }));
+    assert_eq!(retainable(&in_body), vec![false]);
+    assert_eq!(backdrop_placement(&in_body), (false, false, false));
+
+    // A full-opacity unretainable body inlines into the surface, so its
+    // backdrop is the frame's own and is served there — still never in a
+    // page.
+    let inlined = compile_retained(&scene_of(|builder| {
+        builder.fill_rect(Rect::new(0.0, 0.0, 64.0, 48.0), red());
+        builder.push_retained(1, Rect::new(0.0, 0.0, 32.0, 32.0), 1.0, 1.0);
+        builder.backdrop_blur(PANEL, 2.0);
+        builder.pop_retained();
+    }));
+    assert_eq!(backdrop_placement(&inlined), (true, false, true));
 }

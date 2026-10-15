@@ -3176,6 +3176,30 @@ mod path_clip_reexport {
     }
 }
 
+/// Facade-level check that a frosted-glass backdrop is reachable from app code
+/// through [`authoring::PaintScene`] alone: an app blurring what lies beneath a
+/// panel names no `frust_core`/`frust_scene` path, and the facade's own scene
+/// module sees the command it records.
+#[cfg(test)]
+mod backdrop_blur_reexport {
+    use crate::authoring::scene::{Command, Scene, SceneBuilder};
+    use crate::authoring::{PaintScene, Point, Size};
+
+    #[test]
+    fn backdrop_blur_resolves_through_the_facade() {
+        let mut scene = Scene::new();
+        {
+            let mut builder = SceneBuilder::new(&mut scene);
+            let paint: &mut dyn PaintScene = &mut builder;
+            paint.backdrop_blur(Point::new(4.0, 6.0), Size::new(40.0, 20.0), 8.0);
+        }
+        assert!(matches!(
+            scene.commands()[0],
+            Command::BackdropBlur { radius, .. } if radius == 8.0
+        ));
+    }
+}
+
 #[cfg(test)]
 mod repaint_boundary_reexport {
     use crate::{RepaintBoundaryView, TextView, repaint_boundary, text};

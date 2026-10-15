@@ -25,10 +25,49 @@
 //! without its filter. That refusal is not a placeholder for a fallback: the
 //! engine tier carries no second renderer (see the [`schedule`] module header).
 //!
-//! The scene seam is deliberately absent. `frust_scene` has no filter command
-//! and gains none here — [`push_filter_layer`] is how the engine's own compiler
-//! will open a filtered layer once a later plan gives the display list
-//! something to lower from. This module proves the engine can render one.
+//! The scene seam for a *layer* filter is deliberately absent. `frust_scene`
+//! has no layer-filter command and gains none here — [`push_filter_layer`] is
+//! how the engine's own compiler will open a filtered layer once a later plan
+//! gives the display list something to lower from.
+//!
+//! ## The backdrop blur
+//!
+//! One filter *does* reach the display list: `frust_scene::Command::BackdropBlur`,
+//! a Gaussian blur of whatever the frame has already painted beneath a
+//! rectangle (a frosted-glass panel). It is not a filter layer — there are no
+//! contents of its own to isolate — but it runs the very same pass sequence,
+//! on a page seeded with a region of the frame's own target rather than with
+//! rendered contents. [`Backdrop`] is the compiler's record of one, and the
+//! three halves split like a filter layer's:
+//!
+//! - the compiler ([`crate::compile`]) records the backdrop as a layer holding
+//!   one draw — its rectangle's coverage under whatever clip is open — and
+//!   lists it in `CompiledFrame::backdrops`, with the device [`region`
+//!   ](backdrop_region) the blur reads and the device-space σ;
+//! - the scheduler ([`crate::schedule`]) cuts the frame's surface round at it,
+//!   so everything painted before it has landed, then emits a *region copy*
+//!   round ([`crate::schedule::RegionCopy`]) seeding a pooled page with that
+//!   region of the frame's target, the blur's filter rounds over the page, and
+//!   leaves the result held for the surface round that draws the rectangle;
+//! - the renderer draws the rectangle's own strip coverage sampling the
+//!   blurred page at each pixel's own position, so a rounded or path clip
+//!   masks the blurred region exactly as it masks a fill.
+//!
+//! The region copy is the reusable half: "the frame's target, read back into a
+//! page a later pass samples" is what any effect reading the backdrop needs
+//! (a blend mode composite is the next one), so it is a round kind of the
+//! scheduler and a helper of the renderer rather than a special case of the
+//! blur. It needs the frame's target to be readable — `COPY_SRC` in the
+//! engine's own [`INTERMEDIATE_FORMAT`](crate::gpu::pipelines::INTERMEDIATE_FORMAT),
+//! or `TEXTURE_BINDING` in any format — which a swapchain is not:
+//! `frust-render` renders a frame carrying a backdrop into an intermediate of
+//! its own and presents it with one copy pass. A target that is neither draws
+//! every backdrop as nothing (logged once), the "draw less, never wrong"
+//! answer.
+//!
+//! Bounded at [`MAX_BACKDROPS_PER_FRAME`]: each costs a surface cut, a copy and
+//! a blur's whole sequence, and a frame recording more is refused with
+//! [`EngineError::TooManyBackdrops`].
 //!
 //! ## What is pure, and what is not
 //!
@@ -57,11 +96,94 @@ use vello_common::filter::drop_shadow::DropShadow;
 use vello_common::filter::gaussian_blur::GaussianBlur;
 use vello_common::filter::{FilterData, PreparedFilter};
 use vello_common::filter_effects::{EdgeMode, Filter, FilterPrimitive};
-use vello_common::geometry::SizeU16;
+use vello_common::geometry::{RectU16, SizeU16};
 use vello_common::record::{CommandRecorder, LayerProps, RecordedLayerKind};
 use vello_common::util::extract_scales;
 
 use crate::error::EngineError;
+
+/// The most `Command::BackdropBlur`s one frame is served with; a frame
+/// recording more is refused with [`EngineError::TooManyBackdrops`].
+///
+/// Four covers the glass surfaces a screen layers at once (an app bar, a tab
+/// bar, a sheet and a dialog over it) with room to spare, while keeping a
+/// frame's worst case to four surface cuts, four region copies and four blur
+/// sequences.
+pub const MAX_BACKDROPS_PER_FRAME: usize = 4;
+
+/// One `Command::BackdropBlur` the compiler recorded, as the scheduler and the
+/// renderer read it (see this module's *The backdrop blur*).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Backdrop {
+    /// The recorded layer standing for the backdrop at its painter-order
+    /// position, indexed into
+    /// [`CommandRecorder::layers`](vello_common::record::CommandRecorder::layers).
+    /// It holds exactly one draw: the rectangle's coverage.
+    pub layer: u32,
+    /// The painter-order depth of that one draw — how the renderer tells the
+    /// backdrop's draw apart from every other draw of a surface round.
+    pub depth: u32,
+    /// The device region of the frame's target the blur reads, tile-aligned
+    /// on its near edges and clamped to the target (see [`backdrop_region`]).
+    pub region: RectU16,
+    /// The blur's standard deviation in device space, already clamped to
+    /// [`MAX_BLUR_SIGMA`] and strictly positive.
+    pub sigma: f32,
+}
+
+impl Backdrop {
+    /// The Gaussian blur this backdrop runs, planned exactly as a filter
+    /// layer's own blur is (`vello_common`'s decimation plan, read through
+    /// [`blur::blur_passes`]).
+    #[must_use]
+    pub fn blur(&self) -> GaussianBlur {
+        GaussianBlur::new(self.sigma, SERVED_EDGE_MODE)
+    }
+}
+
+/// The device-space standard deviation a backdrop blur of `radius` runs at
+/// under `transform`, or `None` for one that blurs nothing.
+///
+/// Scaled exactly as a filter layer's σ is ([`device_blur_sigma`]) and clamped
+/// to [`MAX_BLUR_SIGMA`]: past it the region is the whole target anyway, and
+/// the clamp keeps the planner's decimation loop bounded. A radius at or
+/// below zero — or one that is not a number at all, which the compiler's
+/// up-front walk refuses before this is ever asked — blurs nothing.
+#[must_use]
+pub fn backdrop_sigma(radius: f64, transform: Affine) -> Option<f32> {
+    let sigma = device_blur_sigma(radius as f32, transform);
+    (sigma > 0.0).then(|| sigma.min(MAX_BLUR_SIGMA))
+}
+
+/// The device region a backdrop blur over `device` (the rectangle's device
+/// bounding box) at device σ `sigma` reads from a `target`-sized frame, or
+/// `None` when none of it lies on the target.
+///
+/// The bounding box grown by the blur's own reach (3σ, rounded up — the
+/// kernel's radius) so every pixel of the rectangle sees its whole kernel
+/// wherever the frame has content, snapped *outward* to the tile grid on its
+/// near edges and clamped to the target on all four. The near edges are
+/// tile-aligned because a strip instance starts on the tile grid and samples
+/// the blurred page from its own origin: a region starting inside a tile would
+/// leave a strip's first rows reading texels the page does not have.
+#[must_use]
+pub fn backdrop_region(device: kurbo::Rect, sigma: f32, target: (u16, u16)) -> Option<RectU16> {
+    let reach = f64::from((3.0 * sigma).ceil());
+    let grown = device.inflate(reach, reach);
+    let (width, height) = (f64::from(target.0), f64::from(target.1));
+    let x0 = grown.x0.floor().clamp(0.0, width);
+    let y0 = grown.y0.floor().clamp(0.0, height);
+    let x1 = grown.x1.ceil().clamp(0.0, width);
+    let y1 = grown.y1.ceil().clamp(0.0, height);
+    if !(x0 < x1 && y0 < y1) {
+        return None;
+    }
+    let tile_w = f64::from(vello_common::tile::Tile::WIDTH);
+    let tile_h = f64::from(vello_common::tile::Tile::HEIGHT);
+    let x0 = (x0 / tile_w).floor() * tile_w;
+    let y0 = (y0 / tile_h).floor() * tile_h;
+    Some(RectU16::new(x0 as u16, y0 as u16, x1 as u16, y1 as u16))
+}
 
 /// What [`served_filter`] says this engine renders when a recording's
 /// primitive is neither of its two, so a refusal names the whole served set

@@ -91,8 +91,11 @@ pub const CLEAR: &str = concat!(
     include_str!("../../shaders/clear.wgsl")
 );
 
-/// Rectangular region copies between intermediate textures: `vs_main` +
-/// `fs_main`.
+/// Rectangular region copies between textures: `vs_main` + `fs_main`. Drawn
+/// by a backdrop blur's region copy (a region of the frame's own target into a
+/// pooled page — see `crate::renderer::RegionCopyMode`) and, built for a
+/// swapchain's format, by the host's plain present copy
+/// ([`crate::gpu::present::CopyPresentPass`]).
 pub const COPY: &str = concat!(
     include_str!("../../shaders/helpers.wgsl"),
     include_str!("../../shaders/copy.wgsl")

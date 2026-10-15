@@ -1413,8 +1413,13 @@ impl SurfaceRenderer {
         let swapchain_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // Read before the arm is borrowed mutably below (the direct arm's
+        // backdrop root is created lazily, inside the match).
+        let surface_format = surface.config().format;
+        let (surface_width, surface_height) = (surface.config().width, surface.config().height);
+        let engine_format = engine_target_format(&surface.path, surface_format);
 
-        match &surface.path {
+        match &mut surface.path {
             // The engine tier's whole frame: one encoder, one
             // `EngineRenderer::encode` into the acquired swapchain view and
             // the surface's own depth attachment, one submit, then the
@@ -1422,13 +1427,35 @@ impl SurfaceRenderer {
             // encoder and never submits, so every pass of the frame lands in
             // this one command buffer, in order, against the texture about to
             // be presented.
-            RenderPath::EngineDirect { depth } => {
+            //
+            // A frame whose scene carries a backdrop blur is the one exception
+            // to "straight into the swapchain": it reads a region of its own
+            // target back, which a `RENDER_ATTACHMENT`-only swapchain cannot
+            // be read from, so it renders into the surface's backdrop root
+            // (same format, same extent, so the same pipelines and depth
+            // attachment) and one copy pass presents it — the frame's only
+            // extra pass, paid on exactly the frames that blur
+            // (`context::frame_renders_via_intermediate`).
+            RenderPath::EngineDirect { depth, backdrop } => {
                 let TierBackend::Engine {
                     engine,
                     refused_frames,
                     shader_quads,
                     timestamps,
                 } = backend;
+                let root = crate::context::frame_renders_via_intermediate(
+                    crate::context::RenderPathKind::EngineDirect,
+                    crate::context::scene_carries_backdrop(engine_scene),
+                )
+                .then(|| {
+                    backdrop.prepare(
+                        &device_handle.device,
+                        surface_format,
+                        surface_width,
+                        surface_height,
+                    )
+                });
+                let engine_view = root.map_or(&swapchain_view, |(view, _)| view);
                 // Set in `encode`; a well-formed frame always encoded first —
                 // the same fallback every other arm takes.
                 let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
@@ -1477,10 +1504,10 @@ impl SurfaceRenderer {
                     &mut encoder,
                     engine_scene,
                     frust_engine::EngineTarget {
-                        view: &swapchain_view,
-                        format: surface.config().format,
-                        width: surface.config().width,
-                        height: surface.config().height,
+                        view: engine_view,
+                        format: surface_format,
+                        width: surface_width,
+                        height: surface_height,
                         // The surface's own attachment, recreated with the
                         // swapchain (`context::RenderPath::EngineDirect`).
                         // Nothing else writes it, so it is not pre-cleared:
@@ -1507,6 +1534,21 @@ impl SurfaceRenderer {
                 probe.encode_end(engine);
                 match result {
                     Ok(()) => {
+                        // The backdrop root's copy into the swapchain, in the
+                        // frame's own encoder after every engine pass, charged
+                        // to `blit` like the straight-alpha arm's conversion.
+                        if let Some((view, present)) = root {
+                            present.record(
+                                &device_handle.device,
+                                &device_handle.queue,
+                                &mut encoder,
+                                view,
+                                &swapchain_view,
+                                (surface_width, surface_height),
+                                frust_engine::FrameTimestamps::new(timestamps)
+                                    .writes(frust_engine::EngineSpan::Blit),
+                            );
+                        }
                         // Recorded into the frame's own encoder, after every
                         // pass that wrote a query and before the one submit —
                         // a resolve in a second command buffer would race the
@@ -1608,9 +1650,9 @@ impl SurfaceRenderer {
                         // swapchain: what the swapchain receives is the
                         // conversion's output.
                         view: intermediate_view,
-                        format: engine_target_format(&surface.path, surface.config().format),
-                        width: surface.config().width,
-                        height: surface.config().height,
+                        format: engine_format,
+                        width: surface_width,
+                        height: surface_height,
                         depth: Some(depth.view()),
                         // The INTERMEDIATE's own convention, which is
                         // premultiplied like every other engine target — the
