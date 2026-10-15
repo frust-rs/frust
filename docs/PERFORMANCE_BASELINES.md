@@ -208,12 +208,12 @@ reproduces After Phase 1 within 1-4 % and each switch moves only its own span. P
 pacing it; Pixel 4 S1 `upload` / `replay` follow the run cache's quad emission. Parallel-walk tails and the unmeasured power
 cost: `engine-parallel-walk-power-unmeasured` in LIMITATIONS.md.
 
-iPhone SE and OnePlus 9 rows: 2026-10-15 from main 74123842, same protocol, OnePlus 9 pinned at 120 Hz; † iPhone total = CPU work
-(`total − acquire`), and iOS GPU columns stay provisional until the Metal Main-span timestamp fix. The iPhone all-off arm matches
-the 2026-09-06 pass within 0-1 % (S1 work / gpu / enc 5.79 / 4.34 / 4735, S6 5.57 / 1.66 / 4010); every iPhone target misses —
-S1 / S6 enc `total_us` 3732 / 2844 <= 1500, S6 work 5.26 <= 4.3, S2 work 6.00 <= 5.0 (layout 3.29) — and is carried to Phase 3,
-`upload` (832 / 1231) being the dominant span. OnePlus 9 all-off enc S1 / S6 4983 / 3818: S6 falls 59 % (frame 7.90 to 4.96),
-S1 only 13 % with `upload` +101 and `replay` +235 over all-off, the Pixel 4 mechanism.
+iPhone SE / OnePlus 9 rows: 2026-10-15, main 74123842, same protocol, OnePlus 9 at 120 Hz; † iPhone total = CPU work (`total − acquire`);
+iOS GPU columns are provisional until the Metal Main-span timestamp fix. iPhone all-off arm vs the 2026-09-06 pass (RESULTS.md, raw/iphone_se)
+(work / GPU total / enc): S1 5.79 / 4.34 / 4735 vs 5.79 / 4.38 / 4713, S6 5.57 / 1.66 / 4010 vs 5.57 / 1.64 / 3988. Every iPhone target
+in the plan's success criteria misses, carried to Phase 3: S1 / S6 enc `total_us` 3732 / 2844 vs <= 1500, S6 work 5.26 vs <= 4.3, S2 work
+6.00 vs <= 5.0 (layout 3.29); `upload` (832 / 1231) dominates. OnePlus 9 vs its all-off arm: S6 enc 3818 to 1548 (-59 %; frame p50 7.90
+to 4.96, -37 %), S1 enc 4983 to 4355 (-13 %) with `upload` +101 and `replay` +235 us, the Pixel 4 mechanism.
 
 ## Dev loop
 
