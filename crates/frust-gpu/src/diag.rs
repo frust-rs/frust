@@ -35,31 +35,54 @@
 //! blocks: the map is polled, never waited on, and a slot whose map has not
 //! landed simply goes untimed for that frame rather than stalling it.
 //!
+//! # Resolved only once the frame's GPU work has completed
+//!
+//! A slot's queries are resolved by a *later* frame's encoder, once
+//! `wgpu::Queue::on_submitted_work_done` has reported the frame that wrote them
+//! finished — never by the encoder that recorded the passes. On Metal the
+//! resolve is a blit encoder's `resolveCounters`, and a counter sample buffer
+//! is not a hazard-tracked resource, so a blit in the same command buffer can
+//! run while the frame's *last* render pass is still in its fragment stage:
+//! that pass's begin sample is already written, its end-of-fragment sample is
+//! not yet, and the copy reads it unwritten. Observed on an Apple M4: the last
+//! pass's end read `0` at resolve, and the same query slot read a plausible end
+//! one ring lap later. Waiting for completion costs a frame or two of reading
+//! lag and nothing on the frame path — the ring never blocks either way.
+//!
 //! # A pass that draws nothing may measure nothing
 //!
 //! Metal samples a render pass's counters at the vertex/fragment *stage*
-//! boundaries, so a pass that runs neither stage — a pure clear, an empty
-//! pass — can leave its query pair unwritten, and the ring drops the pair
-//! rather than reporting a garbage span (see `span_duration`). This is a
-//! measurement gap, never a correctness one: an untimed pass draws exactly
-//! what it always did. A span made of several passes, which is the shape every
-//! caller here uses, absorbs it — the drawing passes still report.
+//! boundaries (start of vertex, end of fragment), so a pass that runs no
+//! fragment work — a pure clear, an empty pass — can leave its end sample
+//! unwritten for good, and the ring drops the pair rather than reporting a
+//! garbage span (see `span_duration`). This is a measurement gap, never a
+//! correctness one: an untimed pass draws exactly what it always did.
+//!
+//! A span made of several passes absorbs it when another of its passes draws.
+//! A span whose *only* pass draws nothing cannot: `frust-engine`'s merged
+//! surface opening carries the frame's clear on the same pass as its first
+//! drawing surface work, so the clear is measured with that work — but a frame
+//! whose surface draws nothing at all records the opening clear-only, and on
+//! Metal its main span then has no valid pair. [`GpuFrameSpans::is_measured`]
+//! is how a reader tells that "not measured" from a span that really took no
+//! time; [`GpuFrameSpans::span`] reads zero for both.
 //!
 //! One frame's shape, in call order:
 //!
 //! 1. [`TimestampRing::begin_frame`] — advance to the next slot and harvest
-//!    whatever the frame that last used it left mapped.
+//!    whatever an earlier frame that used it left mapped.
 //! 2. [`TimestampRing::pass_writes`] once per timed pass, naming the span the
 //!    pass belongs to. Each call takes a *fresh* query pair, so several passes
 //!    may share one span and their durations add up.
-//! 3. [`TimestampRing::resolve`] into the same encoder the passes were recorded
-//!    into, before the caller submits it.
+//! 3. [`TimestampRing::resolve`] into the frame's encoder, before the caller
+//!    submits it. It records the resolve of every *earlier* frame whose work
+//!    has completed, not this frame's (see above).
 //! 4. [`TimestampRing::end_frame`] after that submit (or
 //!    [`TimestampRing::abandon_frame`] when the frame was refused and nothing
 //!    was submitted).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 
 /// How many frames-in-flight the ring keeps independent slots for.
@@ -74,6 +97,9 @@ pub const RING_FRAMES: usize = 4;
 /// A fixed ceiling rather than a `Vec` so [`GpuFrameSpans`] stays `Copy` and a
 /// caller can carry one through a frame record without allocating.
 pub const MAX_SPANS: usize = 8;
+
+// `GpuFrameSpans::measured` keeps one bit per span in a `u8`.
+const _: () = assert!(MAX_SPANS <= u8::BITS as usize);
 
 /// How many individual passes one frame can time by default.
 ///
@@ -118,6 +144,8 @@ mod map_state {
 pub struct GpuFrameSpans {
     durations: [Duration; MAX_SPANS],
     len: usize,
+    /// One bit per span: set once any valid pass pair was charged to it.
+    measured: u8,
 }
 
 impl Default for GpuFrameSpans {
@@ -125,6 +153,7 @@ impl Default for GpuFrameSpans {
         Self {
             durations: [Duration::ZERO; MAX_SPANS],
             len: 0,
+            measured: 0,
         }
     }
 }
@@ -136,6 +165,7 @@ impl GpuFrameSpans {
         Self {
             durations: [Duration::ZERO; MAX_SPANS],
             len: len.min(MAX_SPANS),
+            measured: 0,
         }
     }
 
@@ -160,6 +190,18 @@ impl GpuFrameSpans {
         self.durations.get(index).copied().unwrap_or(Duration::ZERO)
     }
 
+    /// Whether at least one valid pass measurement was charged to `index`.
+    ///
+    /// `false` both for a span no pass was charged to and for one whose every
+    /// pass left its query pair unwritten (see the module doc's *A pass that
+    /// draws nothing may measure nothing*) — the two cases [`Self::span`]
+    /// cannot tell apart from a span that genuinely took no time, since it
+    /// reads [`Duration::ZERO`] for all three.
+    #[must_use]
+    pub fn is_measured(&self, index: usize) -> bool {
+        index < self.len && self.measured & (1 << index) != 0
+    }
+
     /// Every span in order.
     #[must_use]
     pub fn as_slice(&self) -> &[Duration] {
@@ -182,8 +224,12 @@ impl GpuFrameSpans {
 
     /// Charges `span` with `duration` on top of whatever it already holds.
     fn add(&mut self, span: usize, duration: Duration) {
+        if span >= self.len {
+            return;
+        }
         if let Some(slot) = self.durations.get_mut(span) {
             *slot = slot.saturating_add(duration);
+            self.measured |= 1 << span;
         }
     }
 }
@@ -206,18 +252,34 @@ struct RingFrame {
     cursor: AtomicU32,
     /// Which span each pass pair was charged to, indexed by pair.
     owners: Vec<AtomicU8>,
+    /// Set by the `on_submitted_work_done` callback once the frame that wrote
+    /// this slot's queries has finished on the GPU. Allocated once with the
+    /// slot and re-armed per frame, so the callback costs no `Arc` of its own.
+    done: Arc<AtomicBool>,
+    /// The readback map's [`map_state`], allocated once with the slot.
+    map: Arc<AtomicU8>,
+    /// Set by [`TimestampRing::resolve`] when it recorded this slot's resolve
+    /// into the caller's encoder; consumed by [`TimestampRing::end_frame`]
+    /// (which maps it) or [`TimestampRing::abandon_frame`] (which drops it).
+    /// Atomic because `resolve` takes `&self`.
+    resolve_recorded: AtomicBool,
     state: SlotState,
 }
 
-/// Where one ring slot is in the record → resolve → map → harvest cycle.
+/// Where one ring slot is in the record → complete → resolve → map → harvest
+/// cycle.
 #[derive(Debug)]
 enum SlotState {
     /// Holds nothing; free to record into.
     Idle,
     /// This frame's passes are being recorded into it.
     Recording,
-    /// Submitted and mapping; `used` pass pairs are staged in `readback`.
-    Mapping { used: usize, status: Arc<AtomicU8> },
+    /// Submitted; `used` pass pairs were written, and are resolved by a later
+    /// frame's encoder once `done` is set (see the module doc's *Resolved only
+    /// once the frame's GPU work has completed*).
+    Running { used: usize },
+    /// Resolved and mapping; `used` pass pairs are staged in `readback`.
+    Mapping { used: usize },
 }
 
 /// A ring of per-frame GPU timestamp query sets — see the module header.
@@ -229,6 +291,9 @@ pub struct TimestampRing {
     passes: usize,
     /// Nanoseconds per timestamp tick, from `queue.get_timestamp_period()`.
     period_ns: f32,
+    /// The queue the frames are submitted to — what reports a slot's frame
+    /// complete. `None` when inert.
+    queue: Option<wgpu::Queue>,
     /// Empty when inert — the one thing every method keys off.
     frames: Vec<RingFrame>,
     /// Which slot the frame in progress is recording into.
@@ -310,6 +375,9 @@ impl TimestampRing {
                 }),
                 cursor: AtomicU32::new(0),
                 owners: (0..passes).map(|_| AtomicU8::new(0)).collect(),
+                done: Arc::new(AtomicBool::new(false)),
+                map: Arc::new(AtomicU8::new(map_state::PENDING)),
+                resolve_recorded: AtomicBool::new(false),
                 state: SlotState::Idle,
             })
             .collect();
@@ -318,6 +386,7 @@ impl TimestampRing {
             spans,
             passes,
             period_ns,
+            queue: Some(queue.clone()),
             frames,
             // The first `begin_frame` advances onto slot 0.
             current: RING_FRAMES - 1,
@@ -335,6 +404,7 @@ impl TimestampRing {
             spans: spans.min(MAX_SPANS),
             passes: 0,
             period_ns: 0.0,
+            queue: None,
             frames: Vec::new(),
             current: 0,
             armed: false,
@@ -405,8 +475,15 @@ impl TimestampRing {
             return;
         };
 
-        if let SlotState::Mapping { used, status } = &slot.state {
-            match status.load(Ordering::Acquire) {
+        match &slot.state {
+            // Still waiting on its frame's completion or on its resolve: its
+            // queries are not read yet and must not be overwritten, so this
+            // frame goes untimed.
+            SlotState::Running { .. } => {
+                self.armed = false;
+                return;
+            }
+            SlotState::Mapping { used } => match slot.map.load(Ordering::Acquire) {
                 map_state::PENDING => {
                     // Still in flight: leave the slot exactly as it is (its
                     // readback buffer is mapped-in-progress and must not be
@@ -423,7 +500,8 @@ impl TimestampRing {
                 // A failed map leaves `wgpu`'s own map context marked, so the
                 // slot is unmapped anyway before it is recorded into again.
                 _ => slot.readback.unmap(),
-            }
+            },
+            SlotState::Idle | SlotState::Recording => {}
         }
 
         slot.cursor.store(0, Ordering::Relaxed);
@@ -457,72 +535,108 @@ impl TimestampRing {
         })
     }
 
-    /// Records this frame's query resolve and its copy into the mappable
-    /// readback buffer, into the same encoder the timed passes were recorded
-    /// into. The caller submits that encoder.
+    /// Records, into the caller's encoder, the query resolve and the copy into
+    /// the mappable readback buffer of every *earlier* frame whose GPU work has
+    /// completed. The caller submits that encoder.
+    ///
+    /// Never the frame in progress: its passes have not run yet when this
+    /// encoder is submitted, and a resolve in the same command buffer can read
+    /// the last pass's end sample before the GPU writes it (see the module
+    /// doc's *Resolved only once the frame's GPU work has completed*). Works
+    /// whether or not this frame is itself timed, so a run of untimed frames
+    /// still drains the ring.
     ///
     /// Only the pairs actually taken are resolved: an untouched query resolves
     /// to whatever the driver left there, and reading it back would be
     /// inventing a span rather than measuring one.
     pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder) {
-        if !self.armed {
-            return;
+        for slot in &self.frames {
+            let SlotState::Running { used } = slot.state else {
+                continue;
+            };
+            if !slot.done.load(Ordering::Acquire) || slot.resolve_recorded.load(Ordering::Relaxed) {
+                continue;
+            }
+            let queries = (used * 2) as u32;
+            encoder.resolve_query_set(&slot.queries, 0..queries, &slot.resolve, 0);
+            encoder.copy_buffer_to_buffer(
+                &slot.resolve,
+                0,
+                &slot.readback,
+                0,
+                u64::from(queries) * QUERY_BYTES,
+            );
+            slot.resolve_recorded.store(true, Ordering::Relaxed);
         }
-        let Some(slot) = self.frames.get(self.current) else {
-            return;
-        };
-        let used = self.used_pairs(slot);
-        if used == 0 {
-            return;
-        }
-        let queries = (used * 2) as u32;
-        encoder.resolve_query_set(&slot.queries, 0..queries, &slot.resolve, 0);
-        encoder.copy_buffer_to_buffer(
-            &slot.resolve,
-            0,
-            &slot.readback,
-            0,
-            u64::from(queries) * QUERY_BYTES,
-        );
     }
 
-    /// Requests the map that a later [`Self::begin_frame`] harvests. Call
-    /// after submitting the encoder [`Self::resolve`] was recorded into.
+    /// Call after submitting the encoder [`Self::resolve`] was recorded into.
+    ///
+    /// Requests the map of every slot that encoder resolved — what a later
+    /// [`Self::begin_frame`] harvests — and asks the queue to report when this
+    /// frame's own work completes, which is what lets a later frame resolve
+    /// it.
+    ///
+    /// Allocation per timed frame is unchanged from a same-frame resolve: one
+    /// boxed map callback and one boxed completion callback, each holding a
+    /// clone of an `Arc` the slot allocated once.
     pub fn end_frame(&mut self) {
+        for slot in &mut self.frames {
+            if !slot.resolve_recorded.swap(false, Ordering::Relaxed) {
+                continue;
+            }
+            let SlotState::Running { used } = slot.state else {
+                continue;
+            };
+            slot.map.store(map_state::PENDING, Ordering::Relaxed);
+            let callback = Arc::clone(&slot.map);
+            let bytes = (used * 2) as u64 * QUERY_BYTES;
+            slot.readback
+                .slice(0..bytes)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    let state = if result.is_ok() {
+                        map_state::READY
+                    } else {
+                        map_state::FAILED
+                    };
+                    callback.store(state, Ordering::Release);
+                });
+            slot.state = SlotState::Mapping { used };
+        }
+
         if !self.armed {
             return;
         }
         self.armed = false;
+        let passes = self.passes;
         let Some(slot) = self.frames.get_mut(self.current) else {
             return;
         };
-        let used = (slot.cursor.load(Ordering::Relaxed) as usize).min(self.passes);
-        if used == 0 {
+        let used = (slot.cursor.load(Ordering::Relaxed) as usize).min(passes);
+        let Some(queue) = self.queue.as_ref().filter(|_| used > 0) else {
             slot.state = SlotState::Idle;
             return;
-        }
-        let status = Arc::new(AtomicU8::new(map_state::PENDING));
-        let callback = Arc::clone(&status);
-        let bytes = (used * 2) as u64 * QUERY_BYTES;
-        slot.readback
-            .slice(0..bytes)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let state = if result.is_ok() {
-                    map_state::READY
-                } else {
-                    map_state::FAILED
-                };
-                callback.store(state, Ordering::Release);
-            });
-        slot.state = SlotState::Mapping { used, status };
+        };
+        slot.done.store(false, Ordering::Relaxed);
+        let done = Arc::clone(&slot.done);
+        // "All work submitted so far" — this frame's included, since the
+        // caller submits before calling here.
+        queue.on_submitted_work_done(move || done.store(true, Ordering::Release));
+        slot.state = SlotState::Running { used };
     }
 
     /// Closes a frame that was refused before its encoder was submitted.
     ///
     /// Nothing was recorded and nothing will be, so the slot goes straight
-    /// back to idle without a map — mapping a buffer no copy ever reached
-    /// would harvest the previous frame's ticks as if they were this one's.
+    /// back to idle without waiting on a completion — resolving queries no
+    /// pass ever wrote would harvest an earlier frame's ticks as if they were
+    /// this one's. Any earlier frame's resolve [`Self::resolve`] put into that
+    /// unsubmitted encoder is forgotten too, so the next frame records it
+    /// again.
     pub fn abandon_frame(&mut self) {
+        for slot in &self.frames {
+            slot.resolve_recorded.store(false, Ordering::Relaxed);
+        }
         if !self.armed {
             return;
         }
@@ -531,11 +645,6 @@ impl TimestampRing {
             slot.cursor.store(0, Ordering::Relaxed);
             slot.state = SlotState::Idle;
         }
-    }
-
-    /// How many pass pairs the frame in progress actually took.
-    fn used_pairs(&self, slot: &RingFrame) -> usize {
-        (slot.cursor.load(Ordering::Relaxed) as usize).min(self.passes)
     }
 }
 
@@ -636,6 +745,32 @@ mod tests {
         assert_eq!(reading.span(1), Duration::from_micros(650));
         assert_eq!(reading.span(2), Duration::from_micros(90));
         assert_eq!(reading.total(), Duration::from_micros(740));
+    }
+
+    #[test]
+    fn a_span_is_measured_only_once_a_pass_was_charged_to_it() {
+        let mut reading = GpuFrameSpans::zeroed(3);
+        for index in 0..3 {
+            assert!(!reading.is_measured(index));
+        }
+        reading.add(1, Duration::from_micros(30));
+        // A measured span that really took no time is still measured — the
+        // case `span` alone cannot tell from an unwritten pair.
+        reading.add(2, Duration::ZERO);
+        assert!(!reading.is_measured(0));
+        assert!(reading.is_measured(1));
+        assert!(reading.is_measured(2));
+        assert_eq!(reading.span(2), Duration::ZERO);
+        assert!(!reading.is_measured(3));
+        assert!(!reading.is_measured(usize::MAX));
+    }
+
+    #[test]
+    fn a_charge_past_the_reading_length_is_neither_summed_nor_measured() {
+        let mut reading = GpuFrameSpans::zeroed(2);
+        reading.add(5, Duration::from_micros(10));
+        assert_eq!(reading.total(), Duration::ZERO);
+        assert!(!reading.is_measured(5));
     }
 
     #[test]
