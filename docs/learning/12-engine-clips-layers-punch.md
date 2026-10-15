@@ -1,7 +1,7 @@
-# Lab 12 — Clips, layers, snapshots and the clear punch
+# Lab 12 — Clips, layers, retained brackets and the clear punch
 
 **Concept:** [Lab 11](11-engine-compiler.md) compiled plain fills into strips. The display list also carries *brackets* —
-`PushClip`/`PushClipRounded`, `PushLayer`, `PushSnapshot`, each closed by a `Pop*` — plus one
+`PushClip`/`PushClipRounded`/`PushClipPath`, `PushLayer`, `PushRetained`, each closed by a `Pop*` — plus one
 command that erases rather than paints, `ClearRect`. This lab shows how `SceneCompiler` lowers all
 of them without ever allocating an intermediate texture for a clip: a clip is a rectangle the strip
 run gets cut against or a coverage mask the strip generator already understands; only a translucent
@@ -15,9 +15,9 @@ the frame root. Everything here is GPU-free — the tests compile a `Scene` and 
 | The clip stack, both lowerings | `crates/frust-engine/src/compile/clip.rs` | `ClipStack` (≈106–130), `Entry::{Scissor, Mask}`, `push_rect`, `push_rounded`, `pop`, `clip_run` |
 | Rewriting a strip run under a scissor | same | `Clipped` (≈415–476), `spans` (≈478–519), `emit_split_solid`, `emit_masked` |
 | Shared admission rule (fill fast path = clip scissor path) | `crates/frust-engine/src/compile/mod.rs` | `fast_rect`, `is_pixel_aligned` |
-| One bracket stack; layer lowering; snapshot emulation | `crates/frust-engine/src/compile/layers.rs` | `GroupStack` (≈96–156), `lower_layer`, `LayerLowering`, `layer_props`, `snapshot_correction`, `SnapshotStack` (≈231–325) |
+| One bracket stack; layer lowering; snapshot emulation | `crates/frust-engine/src/compile/layers.rs` | `GroupStack`, `lower_layer`, `LayerLowering`, `layer_props`, `snapshot_correction`, `RetainedStack`, `RetainedBracket` |
 | The hoisted punch | `crates/frust-engine/src/compile/clear.rs` | `ClearPunch` (≈107–130), `StagedPunch` (≈138–144), `punch_rect` (≈155–166), `device_bounds` (≈175–185) |
-| The walk's bracket arms and helpers | `crates/frust-engine/src/compile/mod.rs` | `Command::PushClip` … `Command::PopSnapshot` arms (≈1116–1183), `open_layer`, `close_group`, `close_open_groups`, `generate_punches` |
+| The walk's bracket arms and helpers | `crates/frust-engine/src/compile/mod.rs` | `Command::PushClip` … `Command::PopRetained` arms, `open_layer`, `open_retained`, `close_group`, `close_open_groups`, `generate_punches` |
 | What the frame reports | same | `CompiledFrame::{clears, scissor_clips, mask_clips, clip_mask_strips, draws}` |
 | Up-front refusal | same | `check_geometry` (≈2234) |
 | Tests | `crates/frust-engine/tests/clips.rs` (24) · `crates/frust-engine/tests/layers.rs` (25) | plus unit tests in `clip.rs` (≈584–728), `layers.rs` (≈327–484), `clear.rs` (≈187–241) |
@@ -46,10 +46,10 @@ unpopped push, in one of two shapes.
 an empty stack is ignored (`None => {}`) — an unbalanced widget tree must neither lift a sibling's
 clip nor underflow the mask context, which would panic on the frame path.
 
-## 2. One bracket stack for clips, layers and snapshots
+## 2. One bracket stack for clips, layers and retained brackets
 
 `GroupStack` is deliberately one stack, not three. The walk pushes a `Group` for every
-`PushClip`/`PushClipRounded`/`PushLayer` (and a translucent `PushSnapshot`), and routes `PopClip` and
+`PushClip`/`PushClipRounded`/`PushLayer` (and a `PushRetained`), and routes `PopClip` and
 `PopLayer` to the same `close_group` — so whichever pop arrives closes the innermost open bracket,
 and each `Group` remembers what to undo (`closes_clip`, `closes_layer`). `close_open_groups` shuts
 anything a frame left open at its end.
@@ -61,7 +61,8 @@ also calls `frame.recorder.push_layer(layer_props(alpha), None)`, a recorded lay
 renders into a page and composites (lab 13). Either way the rectangle goes through `ClipStack`, never
 `LayerProps::clip_path` — `layer_props` leaves that `None`.
 
-`SnapshotStack` is the inline emulation of `PushSnapshot` (the engine has no snapshot cache): the
+`RetainedStack` is the inline emulation of `PushRetained` — all a compiler with retention off does,
+and the lowering of a body the retained-page store refuses (see `cache::retained`): the
 outermost bracket installs `snapshot_correction(rect, scale, transform)` as an affine the walk
 composes as `root * correction` ahead of every inner command's own transform, and a sub-unity
 `alpha` opens a nested layer via `open_layer`. Inner brackets' `alpha`/`scale` are ignored; only
@@ -70,6 +71,14 @@ transform.inverse()` — a conjugation: undo the body's transform, scale about t
 body's own space, re-apply the transform — which is why the unit test
 `the_correction_conjugates_by_the_body_transform` (≈401–411) finds the body's centre unmoved under
 `correction * transform`. A singular transform yields the identity rather than infinities.
+
+With retention on, the outermost bracket is also recorded as a `RetainedBracket` (`open_retained`): its
+body becomes a recorded layer at any alpha, which the store either admits (the layer renders into a
+page it keeps across frames, without the alpha) or refuses (the scheduler serves it as the ordinary
+layer above). `open_retained` marks the body unretainable under a mask, and when it is not wholly inside
+the viewport and every scissor; a punch, an external texture, a shader quad, a `BackdropBlur` or a stray
+pop inside it mark it too. A `DrawRetained` becomes an empty recorded layer the store resolves to a
+composite of the resident page. `PushClipPath` takes the mask route of `PushClipRounded`, always.
 
 ## 3. The clear punch is hoisted to the root
 
@@ -90,7 +99,7 @@ the frame exactly as if the clear had never been recorded.
 ## 4. Bracket geometry is refused up front
 
 Before a strip is generated, `compile` walks every command through `check_geometry`: a clip's rect
-(and rounded radii), a layer's rect *and* alpha, a snapshot's rect, alpha *and* scale, and a clear's
+(and rounded radii), a layer's rect *and* alpha, a retained bracket's rect, alpha *and* scale, and a clear's
 rect are checked for finiteness on the same terms as a fill's, because each is lowered (a clip's
 rect decides scissor-vs-mask; an alpha decides isolation; a scale composes a transform). The three
 `Pop*` carry no geometry and pass. The match is exhaustive over `Command`.
@@ -143,7 +152,7 @@ In `layers.rs`, `a_layer_at_full_opacity_is_its_clip_and_nothing_more` asserts
 `layered.recorder.layers.is_empty()`, coverage identical to a `push_clip` scene, and one round.
 At alpha < 1, `three_nested_translucent_layers_take_a_page_each` asserts
 `frame.recorder.layers.len() == 3` and four rounds, innermost first (opacities `[0.75, 0.5, 0.25]`).
-`a_snapshot_body_lowers_like_the_equivalent_transform_and_layer_pair` proves the snapshot emulation.
+`a_snapshot_body_lowers_like_the_equivalent_transform_and_layer_pair` proves the inline emulation.
 Bridge to lab 13: in `schedule.rs`, `a_depth_four_chain_alternates_page_groups_and_ends_at_the_surface`
 counts `rounds.len() == 5` for four nested layers — one page per level, plus the surface.
 

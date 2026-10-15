@@ -19,6 +19,19 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   by the shared `pop_clip`. The engine lowers it to a coverage mask, never a layer page, so a
   retained body under one paints inline; a recorder without its own override clips to the path's
   bounding box.
+- Retained layers. `repaint_boundary(child)` (with `.alpha(f32)`) and `AnimatedOpacity::cached(bool)`
+  keep a subtree's rasterized page across frames and composite it while nothing under it changes;
+  navigator pages and `pattern_switcher` children carry a boundary, so transitions composite
+  retained pages while a page at rest paints plain. The engine owns the pages in a budgeted LRU store
+  outside the intermediate pool (`FRUST_ENGINE_RETAINED_BUDGET_MB=<n>` overrides the tier budget); a
+  page it cannot serve refuses the frame and the shell repaints without pages. Kill switches:
+  `FRUST_NO_RETAINED_LAYERS` (widgets) and `FRUST_ENGINE_NO_LAYERS` (engine, now consulted).
+  `PaintScene::current_transform()` (default `None`) reports the transform a command would record
+  under. Limits are in docs/LIMITATIONS.md (`retained-pages-budget-refusals`).
+- `FRUST_PARTIAL_REPAINT`, a partial-repaint spike (`PaintDamage`, `RenderRoot::damage_rect`,
+  `SurfaceRenderer::set_partial_repaint`), default off and byte-identical off. Measured NO-GO: real
+  scenes damage about 85-100% of the surface, above the roughly 50-60% break-even (see
+  `partial-repaint-outcome` in docs/LIMITATIONS.md).
 - Per-paint-class strip programs: `strip.wgsl` is specialised per `PaintClass` (solid + coverage,
   gradient, image, image-filtered, blurred-rect, layer-composite, and the whole Uber program), the
   variants created lazily against one explicit strip pipeline layout. `FRUST_ENGINE_UBER_PROGRAM=1`
@@ -98,6 +111,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- BREAKING: `frust_scene::Command::PushSnapshot` / `PopSnapshot` are replaced by `PushRetained
+  { key, rect, alpha, scale, transform }` / `PopRetained`, plus the new `Command::DrawRetained`;
+  `PaintScene::push_snapshot` / `pop_snapshot` are removed in favour of `push_retained` /
+  `pop_retained` / `draw_retained` (rename the calls). A renderer that does not retain paints a
+  `PushRetained` body inline exactly as the old snapshot bracket did and treats `DrawRetained` as an
+  error.
+- Host paint cost with retained layers on versus off (release, i5-12600 Linux, 300 frames, mean
+  us; `relayout_cost_bench`): cached opacity 0.11 vs 49.00, navigator push/pop 32.63 vs 111.52,
+  navigator page at rest 48.53 vs 48.54. Device legs (Pixel 5, iPhone SE) are owed. A backdrop
+  frame on the direct present arm pays one present copy, about 0.239 ms at 1080x2400 and 0.189 ms
+  at 1920x1080 (T400).
 - Measured `gpu_main` p50 on the S1 scene, before and after the FAST Phase 1 engine work: Pixel 4a
   32.70 to 12.75 ms, Pixel 4 11.15 to 8.12 ms. Method and the other scenes are in
   [docs/PERFORMANCE_BASELINES.md](docs/PERFORMANCE_BASELINES.md) § After Phase 1.
@@ -121,15 +145,6 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   exactly `Vec::new()`, `Vec::with_capacity(..)` or `vec![]` and later pushed or inserted a direct
   `any(..)` in the same fn, so idiomatic accumulators no longer need a `: Vec<AnyView<_>>`
   annotation for rule U.
-
-### Deprecated
-
-- `PaintScene::push_snapshot` / `pop_snapshot` are deprecated forwards to the new
-  `push_retained` / `pop_retained` (0.7 migration: rename the calls; the behaviour is unchanged).
-  `frust_scene::Command::PushSnapshot` / `PopSnapshot` are replaced by `PushRetained` /
-  `PopRetained`, and `Command::DrawRetained` plus `PaintScene::draw_retained` /
-  `SceneBuilder::draw_retained` are added. A renderer that does not retain paints a `PushRetained`
-  body inline exactly as the old snapshot bracket did and treats `DrawRetained` as an error.
 
 ### Fixed
 
