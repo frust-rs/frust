@@ -4759,11 +4759,42 @@ clipping container cannot see that clip, so it may record a body the engine then
 transitions.
 
 **Why accepted**: a refusal degrades to the pre-Phase-3 cost for that frame, never to a wrong
-pixel; the kill switches `FRUST_NO_RETAINED_LAYERS` and `FRUST_ENGINE_NO_LAYERS` revert wholesale.
+pixel: "key absent from the ledger" also holds for an already-resident key whose re-record was refused,
+nested or unrendered (its page is evicted), and the paint serial stops a dropped scene passing an older
+page off as the latest recording. The one leftover case is a key drawn and refused-on-re-record in the
+same frame, which keeps the drawn page; hover and focus transitions re-record every boundary once; the kill switches `FRUST_NO_RETAINED_LAYERS` and `FRUST_ENGINE_NO_LAYERS` revert wholesale.
 
 **Trigger for removal**: a boundary that sees its enclosing clip, and subpixel-exact page placement.
 
 **Evidence**: `docs/RENDER_ARCHITECTURE.md` (`cache::retained`); `crates/frust-widgets/src/repaint_boundary.rs`.
+
+---
+
+### `retained-ledger-single-renderer` — the retained ledger slot and repaint flag are process-global
+
+**Observed**: the published ledger slot and the repaint-owed flag are process-global. A second renderer in one process (a second desktop window, iOS multi-scene, several web canvases) would publish over the first and is not detected. A `RenderRoot` replaced in-process while the renderer lives restarts its paint serials at 1, a narrow window in which the ledger's `frame` can exceed the new serials.
+
+**Applies to**: multi-window, multi-scene or multi-canvas hosts using retained layers.
+
+**Why accepted**: every shell hosts one renderer today; a wrong page needs both a second renderer and colliding keys.
+
+**Trigger for removal**: a shell hosting a second renderer per process; key the slot and flag per renderer.
+
+**Evidence**: `crates/frust-shell-common/src/render_split.rs`; act_000001a13edd97f1DcPNmR7p.
+
+---
+
+### `retained-stale-ledger-eviction-thrash` — an eviction between a ledger publish and the next scene refuses the frame (DEFERRED)
+
+**Observed**: an eviction, shrink or clear landing between a ledger publish and the UI's next scene makes that `DrawRetained` fail, which refuses the whole frame (the shell paints plain) and clears every page. The mobile budget is 32 MiB, about three full-screen pages, so this can recur; refusals are debug-logged only. Mitigation candidates: the ledger carries a generation the scene echoes; refuse only the offending key.
+
+**Applies to**: mobile apps with several full-screen retained pages near the budget.
+
+**Why accepted**: deferred; the result is a correct but slower frame, never a wrong pixel.
+
+**Trigger for removal**: device evidence of repeated refusal thrash, or either mitigation landing.
+
+**Evidence**: act_000001a13edd925a3lNXnoEE.
 
 ---
 
@@ -4790,29 +4821,25 @@ layers needs the general scheduler.
 
 ---
 
-### `partial-repaint-outcome` — partial repaint measured NO-GO; the spike stays in the tree behind `FRUST_PARTIAL_REPAINT`
+### `partial-repaint-outcome` — partial repaint measured NO-GO; the mechanism was removed
 
-**Observed**: the mechanism (`PaintDamage`, `RenderRoot::damage_rect()`, `EngineRenderer::set_frame_scissor`,
-`SurfaceRenderer::set_partial_repaint`/`set_frame_damage`, the `PartialRoot` accumulator) is default
-off and byte-identical off. T400, release, `FRUST_NO_RENDER_THREAD`, synthetic busy page, p50 µs,
+**Observed**: A spike (branch commit d1d54658, removed by p3-f5) implemented per-frame damage, a scissored surface pass and a persistent accumulator. T400, release, `FRUST_NO_RENDER_THREAD`, synthetic busy page, p50 µs,
 two recorded series per row written gpu/frame: 1080x2400 direct 801-807/1443-1541; partial
 full-damage 1038-1061/1777-1874; 50% 808-832/1370-1391; 10% 465-483/972-985; 1% 428-447/940-964.
 1920x1080: direct 813-831/1394-1438; full 1005-1018/1693-1768; 50% 723-744/1284-1289; 10%
-407-430/949-968; 1% 373-394/926-948. Passes: 1 today, 2 partial (+1 texture copy on a confined
+407-430/949-968; 1% 373-394/926-948. Passes: 1 direct, 2 partial (+1 texture copy on a confined
 frame). A static idle page presents 0 frames in both arms. Scenarios S1/S2/S6 damage ≈85-100% of the
 surface, above the ~50-60% break-even (≈+0.2 ms GPU/frame); CPU encode is unchanged (~0.93 ms floor);
 tile-based mobile GPUs still load/store every tile (wgpu has no render-area hint) plus the extra
 present pass; the accumulator costs ≈+20.7 MB at 1080x2400. Damage blind spots: a container changing
 in the same pass as a dirty descendant, drawing outside pod bounds, a culled pod's vacated area; one
-union rect per frame. The macOS shell is not wired.
+union rect per frame.
 
-**Applies to**: anyone enabling `FRUST_PARTIAL_REPAINT`.
+**Applies to**: anyone proposing partial repaint again.
 
-**Why accepted**: NO-GO on the numbers; the strip-or-keep decision is pending a ruling.
+**Why accepted**: NO-GO on the numbers; Ed ruled on 2026-10-15 to strip it rather than carry a dead knob, a process-wide damage slot and a third shell render path.
 
-**Trigger for removal**: strip the mechanism, or revisit only with an own-paint-changed dirty bit,
-device evidence that small-damage idle animation matters for power, and wgpu damage-region or
-preserved-swapchain support.
+**Trigger for removal**: revisit only with an own-paint-changed dirty bit, device evidence that small-damage idle animation matters for power, and wgpu damage-region or preserved-swapchain support; the design is in the research artifact.
 
 **Evidence**: research artifact `rsa_000001a13e865873mhM1h08v`; ruling `act_000001a13e868758DD8ICdV0`.
 
