@@ -6003,11 +6003,11 @@ mod tests {
     /// to verify the default [`PaintScene::push_retained`]/[`PaintScene::pop_retained`]
     /// implementation emulates the presentation correctly.
     #[derive(Default)]
-    struct MinimalSnapshotRecorder {
+    struct MinimalRetainedRecorder {
         operations: Vec<String>,
     }
 
-    impl PaintScene for MinimalSnapshotRecorder {
+    impl PaintScene for MinimalRetainedRecorder {
         fn fill_rect(&mut self, _origin: Point, _size: Size, _color: Color) {}
         fn draw_text(&mut self, _origin: Point, _text: &str) {}
         fn push_transform(&mut self, _transform: Affine) {
@@ -6030,7 +6030,7 @@ mod tests {
         // ensures recorders that override only the transform/layer methods
         // see a consistent sequence: push_transform, push_layer, paint body,
         // pop_layer, pop_transform — the reverse order matching the push ops.
-        let mut recorder = MinimalSnapshotRecorder::default();
+        let mut recorder = MinimalRetainedRecorder::default();
         let origin = Point::new(10.0, 20.0);
         let size = Size::new(100.0, 50.0);
         let alpha = 0.8;
@@ -6109,7 +6109,7 @@ mod tests {
     #[test]
     fn current_transform_is_the_scene_builders_own_and_none_for_a_recorder() {
         assert_eq!(
-            MinimalSnapshotRecorder::default().current_transform(),
+            MinimalRetainedRecorder::default().current_transform(),
             None,
             "a recorder tracks no transform"
         );
@@ -6130,7 +6130,7 @@ mod tests {
     fn backdrop_blur_is_a_no_op_by_default_and_recorded_by_the_scene_builder() {
         // The default body: a recorder scene that never heard of a backdrop
         // takes the call and records nothing.
-        let mut recorder = MinimalSnapshotRecorder::default();
+        let mut recorder = MinimalRetainedRecorder::default();
         recorder.backdrop_blur(Point::new(1.0, 2.0), Size::new(3.0, 4.0), 5.0);
 
         let mut scene = frust_scene::Scene::new();

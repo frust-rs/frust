@@ -156,14 +156,14 @@ async fn run_clear_probe() {
 /// here is measuring rasterizer subpixel coverage.
 #[test]
 #[ignore = "requires a GPU; run locally with `cargo test -p frust-render -- --ignored`"]
-fn snapshot_bracket_inline_emulation_matches_the_composite_arithmetic() {
-    pollster::block_on(run_snapshot());
+fn retained_bracket_inline_emulation_matches_the_composite_arithmetic() {
+    pollster::block_on(run_retained_bracket());
 }
 
 /// Per-pixel tolerance: an 8-bit rounding step, no more.
-const SNAPSHOT_TOLERANCE: u8 = 3;
+const RETAINED_TOLERANCE: u8 = 3;
 
-async fn run_snapshot() {
+async fn run_retained_bracket() {
     // The bracket: a 20x20 body in local space under a 2x device scale offset
     // by (8, 8) — device (8, 8)..(48, 48) — composited at 75% opacity.
     const ALPHA: f32 = 0.75;
@@ -216,12 +216,12 @@ async fn run_snapshot() {
     //    page would halve again.
     let red = image.pixel(40, 12);
     assert!(
-        red[0].abs_diff(191) <= SNAPSHOT_TOLERANCE,
+        red[0].abs_diff(191) <= RETAINED_TOLERANCE,
         "the bracket's opaque block must composite at its alpha, got {red:?}"
     );
     let green = image.pixel(40, 32);
     assert!(
-        green[1].abs_diff(48) <= SNAPSHOT_TOLERANCE,
+        green[1].abs_diff(48) <= RETAINED_TOLERANCE,
         "the bracket's half-alpha band must composite at 128 * 0.5 * 0.75, got {green:?}"
     );
     assert_eq!(
