@@ -70,7 +70,10 @@ fn downlevel_override_enabled() -> bool {
     })
 }
 
-fn env_flag_enabled(compile_time: Option<&str>, runtime: Option<String>) -> bool {
+/// Whether a process-wide flag knob is on: set to anything but `"0"` in either
+/// its compile-time (`option_env!`) or its runtime (`std::env::var`) half.
+/// Shared by every knob in this crate so they all parse alike.
+pub(crate) fn env_flag_enabled(compile_time: Option<&str>, runtime: Option<String>) -> bool {
     fn is_set_non_zero(value: Option<&str>) -> bool {
         matches!(value, Some(v) if v != "0")
     }
@@ -144,6 +147,19 @@ pub struct TierCaps {
     /// Whether this adapter's usable limits are the full native set or
     /// clamped to the GLES-3.0/WebGL2 downlevel defaults.
     pub downlevel_profile: DownlevelProfile,
+    /// Whether the live device can import an Android `AHardwareBuffer` as a
+    /// texture without a copy ([`crate::import`]'s Android half).
+    ///
+    /// A property of how the *device* was opened, not of the adapter: only a
+    /// Vulkan device `frust-gpu` opened itself with every hardware-buffer
+    /// import extension enabled can import one, and `wgpu`'s own
+    /// `request_device` never enables them. So [`Self::probe`] and
+    /// [`Self::fake`] always report `false`, and the device-open path in
+    /// [`crate::context`] sets it once such a device actually exists. A shell
+    /// installs its hardware-buffer importer only when this is `true`; every
+    /// other device (GLES, a refused or knob-off Vulkan device, every non-Android
+    /// target) keeps CPU frames.
+    pub hwbuffer_import: bool,
 }
 
 impl TierCaps {
@@ -183,6 +199,7 @@ impl TierCaps {
             atlas_format: ATLAS_FORMAT,
             resource_texture_dim: max_texture_dimension_2d.min(MAX_RESOURCE_TEXTURE_DIM),
             downlevel_profile,
+            hwbuffer_import: false,
         }
     }
 
@@ -212,6 +229,7 @@ impl TierCaps {
                 resource_texture_dim: DESKTOP_MAX_TEXTURE_DIMENSION_2D
                     .min(MAX_RESOURCE_TEXTURE_DIM),
                 downlevel_profile: DownlevelProfile::Full,
+                hwbuffer_import: false,
             },
             DownlevelProfile::WebGl2 => Self {
                 downlevel_flags: wgpu::DownlevelFlags::empty(),
@@ -229,6 +247,7 @@ impl TierCaps {
                 atlas_format: ATLAS_FORMAT,
                 resource_texture_dim: WEBGL2_MAX_TEXTURE_DIMENSION_2D.min(MAX_RESOURCE_TEXTURE_DIM),
                 downlevel_profile: DownlevelProfile::WebGl2,
+                hwbuffer_import: false,
             },
         }
     }
@@ -321,6 +340,23 @@ mod tests {
             TierCaps::fake(DownlevelProfile::WebGl2).atlas_format,
             ATLAS_FORMAT
         );
+    }
+
+    #[test]
+    fn no_fake_profile_claims_hardware_buffer_import() {
+        // Import is a property of the opened device, never of an adapter, so
+        // neither synthetic profile may report it: a shell would otherwise
+        // install an importer no device can serve.
+        assert!(!TierCaps::fake(DownlevelProfile::Full).hwbuffer_import);
+        assert!(!TierCaps::fake(DownlevelProfile::WebGl2).hwbuffer_import);
+    }
+
+    #[test]
+    fn a_knob_is_on_for_any_value_but_zero_in_either_half() {
+        assert!(!env_flag_enabled(None, None));
+        assert!(!env_flag_enabled(Some("0"), Some("0".to_string())));
+        assert!(env_flag_enabled(Some("1"), None));
+        assert!(env_flag_enabled(None, Some("1".to_string())));
     }
 
     #[test]
