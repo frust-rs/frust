@@ -48,6 +48,13 @@ use crate::sliver::{SliverConstraints, SliverGeometry, SliverWidget};
 /// compatibility with existing recorder-style test scenes; real text rendering
 /// goes through [`PaintScene::draw_glyph_run`], which carries shaped glyphs from
 /// `frust-text`.
+///
+/// # Retained-page contract
+///
+/// A renderer that does not retain and never publishes a ledger paints every
+/// [`PaintScene::push_retained`] body inline and is never sent
+/// [`PaintScene::draw_retained`]. A renderer that publishes a ledger must serve
+/// every key that ledger lists or refuse the frame.
 pub trait PaintScene {
     /// Emit a filled axis-aligned rectangle at `origin` with `size`, filled with
     /// the solid `color`.
@@ -390,6 +397,11 @@ pub trait PaintScene {
     /// [`Command::DrawRetained`]). Only valid when the resident-key ledger
     /// said `key` is resident; the default is a no-op for recorders with no
     /// retained-layer concept, which never receive such a call.
+    ///
+    /// Contract: a renderer that does not retain and never publishes a ledger
+    /// paints every `push_retained` body inline and is never sent this call; a
+    /// renderer that publishes a ledger must serve every key it lists or refuse
+    /// the frame.
     fn draw_retained(&mut self, _key: u64, _origin: Point, _size: Size, _alpha: f32, _scale: f64) {}
 
     /// The transform the next command would be recorded under — every

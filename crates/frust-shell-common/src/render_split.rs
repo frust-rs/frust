@@ -132,6 +132,20 @@ pub fn publish_retained_ledger(ledger: RetainedLedger) {
     *slot = Some(Arc::new(ledger));
 }
 
+/// Publish the ledger for a renderer's resident retained pages: `frame` is the
+/// last committed paint serial, `pages` its `(key, extent_px, scale)` triples.
+/// Render-agnostic (shell-common stays free of `frust-render`), so each shell
+/// adapts its own `SurfaceRenderer` to this one call.
+///
+/// The slot behind [`publish_retained_ledger`] is process-global, which is
+/// sound only because a process runs ONE renderer: a second surface would
+/// publish over the first's ledger. The publish takes the slot's lock for an
+/// `Arc` swap and nothing else, and the UI thread only ever `try_lock`s it, so
+/// the UI thread never waits on this.
+pub fn publish_resident_pages(frame: u64, pages: impl IntoIterator<Item = (u64, (u32, u32), f32)>) {
+    publish_retained_ledger(RetainedLedger::from_entries(frame, pages));
+}
+
 /// Publish the EMPTY ledger — what a surface destroy or a device-scale change
 /// leaves the renderer holding. A shell calls it (or [`publish_retained_ledger`]
 /// with the renderer's own, equally empty, ledger) before a destroy returns or
