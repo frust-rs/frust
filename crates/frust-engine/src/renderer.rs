@@ -6164,13 +6164,6 @@ fn atlas_sampler(device: &wgpu::Device) -> wgpu::Sampler {
     })
 }
 
-/// Group 0 of a strip pass: the frame's coverage, the pass's own viewport
-/// uniform, and the texture a composite reads its finished page from.
-///
-/// Built against one pipeline's group layout. Every strip pipeline names the
-/// one explicit strip layout ([`crate::gpu::bindings::strip_pipeline_layout`]),
-/// so the group binds under every strip state and paint class alike — which is
-/// what lets one pass switch class pipelines between runs without rebinding.
 /// The groups a round's `released` list names, as the per-group flags a
 /// [`RoundPlan`] carries.
 fn released_groups(released: &[PageParity]) -> [bool; MAX_LIVE_PAGES] {
@@ -6447,6 +6440,13 @@ impl RegionCopyPass<'_> {
     }
 }
 
+/// Group 0 of a strip pass: the frame's coverage, the pass's own viewport
+/// uniform, and the texture a composite reads its finished page from.
+///
+/// Built against one pipeline's group layout. Every strip pipeline names the
+/// one explicit strip layout ([`crate::gpu::bindings::strip_pipeline_layout`]),
+/// so the group binds under every strip state and paint class alike — which is
+/// what lets one pass switch class pipelines between runs without rebinding.
 fn resources_bind_group(
     device: &wgpu::Device,
     pipeline: &wgpu::RenderPipeline,
