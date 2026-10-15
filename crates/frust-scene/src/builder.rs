@@ -29,6 +29,12 @@ impl<'a> SceneBuilder<'a> {
         Self { scene }
     }
 
+    /// How many commands the wrapped [`Scene`] holds so far — the index the
+    /// next recorded command will land at.
+    pub fn command_count(&self) -> usize {
+        self.scene.commands().len()
+    }
+
     /// The transform currently in effect (composition of all pushed transforms).
     pub fn current_transform(&self) -> Affine {
         *self
