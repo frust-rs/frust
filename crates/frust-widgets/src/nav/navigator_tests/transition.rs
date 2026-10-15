@@ -754,7 +754,9 @@ fn pop_stashed_page_paints_through_its_own_boundary() {
         .expect("the popped page is stashed");
 
     let mut scene = PageScene::default();
-    root.paint(&mut scene, ft(1000)); // the pop's own fresh-driver seed frame
+    // The pop's own fresh-driver seed frame; its serial is what the ledger
+    // below must cover for the recorded page to be drawable.
+    let seed = root.paint(&mut scene, ft(1000)).paint_serial;
 
     // At progress 0 the stashed page sits at rest and is recorded; the
     // revealed page starts parallaxed 30dp left, overhanging the navigator,
@@ -769,7 +771,7 @@ fn pop_stashed_page_paints_through_its_own_boundary() {
     // Resident and unchanged: the next frame composites the stashed page as it
     // slides right (IosPush pop: dx = p * w = 0.5 * 100).
     root.set_retained_ledger(&frust_core::RetainedLedger::from_entries(
-        1,
+        seed,
         [(stashed_key, (100, 100), 1.0)],
     ));
     root.rebuild(&mut app, &mut state);
