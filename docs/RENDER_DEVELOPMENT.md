@@ -236,9 +236,9 @@ Drives `EngineRenderer` directly against the Simulator's own real adapter and co
 unit-corpus cases against the embedded `testing/goldens/cpu/` baseline (`include_bytes!`, not a
 filesystem read — the Simulator process has no path back to this checkout); no new golden class.
 Its own device request already uses the same `test_device_limits` derivation the GPU Substrate
-section above describes, as do the `scene_texture`/`shader_quad`/`shared_encoder` seam suites, which
-also run on the Simulator with the same runner (`cargo test --target aarch64-apple-ios-sim -p
-frust-engine --test <suite> -- --include-ignored`; first green 2026-10-15).
+section above describes, as do the seam suites, which also run on the Simulator with the same runner
+(`cargo test --target aarch64-apple-ios-sim -p frust-engine --test scene_texture --test shader_quad`
+plus `--test shared_encoder`, then `-p frust-gpu --test shared_encoder`, each with `-- --include-ignored`).
 Run recipe: [DEVELOPMENT.md](DEVELOPMENT.md)'s Manual/gated tests.
 
 `docs/TESTING.md` is the canonical golden-image/oracle/class runbook; the commands above are the
